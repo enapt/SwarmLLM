@@ -166,6 +166,61 @@ impl SharedState {
     pub fn clear_shard_repair(&self, shard_id: &ShardId) {
         self.models.shards_needing_repair.remove(shard_id);
     }
+
+    /// Our bytes disagree with the hash the swarm reports, and we are keeping
+    /// them — record it where something other than the log can see.
+    ///
+    /// **The single way a dispute is written down.** This is deliberately NOT
+    /// `mark_shard_for_repair`: that set is drained by
+    /// `complete_pending_shard_fetches`, whose first action is to treat a shard
+    /// whose file is on disk as already repaired and clear the mark — and a
+    /// disputed shard is on disk by definition, so marking it fetches nothing
+    /// and only churns the set. The first cut of the 2026-09-13 fix called it
+    /// anyway and claimed a settlement that could not happen.
+    ///
+    /// Nothing here resolves the disagreement; that is open work, and its
+    /// stated precondition is knowing how often this fires in the field
+    /// (`docs/FUTURE_WORK.md` § "A disputed shard is kept but the disagreement
+    /// is never settled"). Until then the job is to make it countable and
+    /// visible rather than to guess at a policy.
+    pub fn note_shard_disputed(&self, shard_id: &ShardId) {
+        if self.models.disputed_shards.insert(shard_id.clone()) {
+            tracing::info!(
+                model = %shard_id.model_id,
+                shard = shard_id.index,
+                "This node is keeping bytes the swarm disagrees with — the \
+                 claim has no origin backing, so it is not evidence enough to \
+                 destroy a copy that may be the last one"
+            );
+        }
+    }
+
+    /// The disagreement is over: this shard's bytes verified against the hash
+    /// we now hold for it, or the file is gone.
+    ///
+    /// Called on **every** successful verification and on every quarantine, not
+    /// only where a dispute is known to exist — `DashSet::remove` on an absent
+    /// key is free, and a clear that has to be predicted is a clear that gets
+    /// forgotten. A quarantined shard is not disputed but repaired: the bytes
+    /// were destroyed against origin-backed evidence and a replacement is
+    /// queued.
+    pub fn clear_shard_dispute(&self, shard_id: &ShardId) {
+        self.models.disputed_shards.remove(shard_id);
+    }
+
+    /// Is this shard one we hold, and disagree with the swarm about?
+    pub fn shard_is_disputed(&self, shard_id: &ShardId) -> bool {
+        self.models.disputed_shards.contains(shard_id)
+    }
+
+    /// How many shards this node holds and disagrees with the swarm about.
+    ///
+    /// The figure the diagnostics report prints, and the one that decides
+    /// whether the settlement designs in `docs/FUTURE_WORK.md` are worth
+    /// building. Zero is a real answer and worth reporting as one.
+    pub fn disputed_shard_count(&self) -> usize {
+        self.models.disputed_shards.len()
+    }
 }
 
 #[cfg(test)]
@@ -234,6 +289,52 @@ mod tests {
             !state.models.shards_needing_repair.contains(&s),
             "repair must not undo a deliberate deletion"
         );
+    }
+
+    /// **A dispute is written down, and deliberately NOT queued for repair.**
+    ///
+    /// `mark_shard_for_repair` is the trap here. It looks like the answer and
+    /// is a no-op for a disputed shard: `complete_pending_shard_fetches` begins
+    /// by treating any shard whose file is on disk as already repaired and
+    /// clearing the mark — and a disputed shard is on disk by definition, since
+    /// keeping it is the whole point. The quarantine path only ever worked
+    /// because it deleted the file first. The first cut of the 2026-09-13 fix
+    /// called it anyway and its commit message claimed a settlement that could
+    /// not happen.
+    #[test]
+    fn a_disputed_shard_is_recorded_and_not_queued_for_a_repair_that_cannot_run() {
+        let state = test_state();
+        let s = sid();
+
+        state.note_shard_disputed(&s);
+        assert!(state.shard_is_disputed(&s));
+        assert_eq!(state.disputed_shard_count(), 1);
+        assert!(
+            !state.models.shards_needing_repair.contains(&s),
+            "the repair set is drained by a loop that clears any mark whose file \
+             is on disk, so queueing a shard we are KEEPING fetches nothing and \
+             only churns the set"
+        );
+
+        // Recording it twice is one dispute, not two — the sweep re-runs and
+        // the count is what decides whether the settlement designs in
+        // FUTURE_WORK are worth building.
+        state.note_shard_disputed(&s);
+        assert_eq!(state.disputed_shard_count(), 1);
+
+        // A later check that passes is what ends it: the hash was corrected,
+        // or the origin's copy arrived.
+        state.clear_shard_dispute(&s);
+        assert!(!state.shard_is_disputed(&s));
+        assert_eq!(state.disputed_shard_count(), 0);
+    }
+
+    /// Zero is a measurement. The whole reason this state exists is that the
+    /// count lived in a local variable inside one startup task, so a field
+    /// report could not say either "it happened" or "it did not".
+    #[test]
+    fn a_node_with_no_disputes_can_say_so() {
+        assert_eq!(test_state().disputed_shard_count(), 0);
     }
 
     /// "Will the fetch actually happen", not "does an origin exist" — the

@@ -52,7 +52,7 @@ Priority is user-visible impact x how many users x whether it fails silently.
 | 51 | Requesting a shard already on its way started a second download of it | **FIXED 2026-09-11**, field-reported the same day. `begin_download` INSERTED the new `AcquisitionStatus`, replacing the model's entry — so the per-shard `Downloading` marks, which are the only thing stopping a duplicate (auto-manage skips any shard carrying one), were erased for every shard the new request did not mention, and the caller was told nothing about the ones it did. Asking for a shard already being fetched therefore put two writers on one `.tmp`: one finished and registered the shard (`missing_shards=0 ready=true`) while the other carried on growing the file and then reported `Shard 0 size mismatch: expected 533753856 bytes but wrote 0 bytes`. It now carries existing marks over and returns the requested shards already in flight, which the admin path filters out. The related cancel-flag bug is fixed too: registering used to REPLACE the model's flag, orphaning the running download's — it keeps its own `Arc` and carries on, so a later cancel reached only the newest registration. One live flag per model is now shared, so a single cancel stops everything being fetched for it; a flag already set is not reused, since handing it to a fresh download would cancel that download the instant it started |
 | 62 | The Network map is blank on a node that has not served across regions | The arcs are drawn from THIS node's `recent_traces`, so a new user — the audience the dashboard is being tuned for — opens the Network tab and sees pins and no traffic. Honest, and the opposite of welcoming. Either seed from the swarm's routes (needs a gossiped route summary, and a privacy decision: it exposes who served whom) or leave it and accept the quiet map. Raised with the user 2026-09-13, not resolved |
 | 63 | The per-model activity ticker still lives inside the expanded model card | A log inside a card. It survived the .178 rebuild because removing it drops a feature nobody asked to drop; it belongs in the Activity panel, filtered by model. Cosmetic, but it is the last thing in that card that is not about the model |
-| 61 | A disputed shard is kept but the disagreement is never settled | Fallout of item 60, and strictly better than what it replaced (data loss). A shard disagreeing with an unbacked hash is kept and served, but nothing resolves which side is right, so the node re-reports it indefinitely. `mark_shard_for_repair` is NOT the answer — `complete_pending_shard_fetches` clears any mark whose file is on disk, which is every shard on this path. Three designs costed in the entry body; **count disputes before building any of them** — the `disputed` counter added with item 60 is the instrument |
+| 61 | A disputed shard is kept but the disagreement is never settled | Fallout of item 60, and strictly better than what it replaced (data loss). A shard disagreeing with an unbacked hash is kept and served, but nothing resolves which side is right. `mark_shard_for_repair` is NOT the answer — `complete_pending_shard_fetches` clears any mark whose file is on disk, which is every shard on this path. **The instrument shipped 2026-09-13** (`state.models.disputed_shards` + a diagnostics section printed even at zero + a dashboard badge + `disputed` in the shard listing), which also fixed two reporting defects: a KEPT shard was announced to its owner as a red "failed its integrity check — re-downloading automatically" (nothing is queued, nothing is wrong, and the advice invites deleting a possibly-last copy), and the startup sweep's summary omitted disputes entirely so a node keeping disagreeing bytes said "Verified 20 shards". **Settling it is still open** — three designs costed in the entry body, none to be built before there is field data |
 | 17 | A long generation with no segment redundancy cannot fail over | **Report #028.** The trigger and the token loss are both fixed. Residual: no standby can be assembled from several nodes covering a range between them. **UNBLOCKED 2026-09-09** — item 18 shape 2 shipped, so a takeover now lands at P = 0.9965 rather than 0.119 and more standbys are worth having. Note the arming condition runs the other way too: retention is kept only where a standby covers the range, so a plan with no standbys retains nothing and gains nothing |
 
 ### Recently closed, kept for the reasoning
@@ -1591,16 +1591,64 @@ Three candidate designs, cheapest first:
    shard download per dispute, triggered by **other people's** gossip, so it
    needs rate limiting and a hard requirement of an `hf_source` (a peer copy is
    useless: it would be checked against the disputed hash).
-3. **Do nothing but report it well.** What ships today. Rate-limit the
-   per-shard warning the way `note_manifest_rejection` does, and surface
-   `disputed` in the dashboard so an operator can act.
+3. **Do nothing but report it well.** **Shipped 2026-09-13** — see below.
 
 Preconditions before building 1 or 2: some idea of how often this actually
 fires in the field. On the node it was found on, six shard quarantines across
 three models in 55 hours of log — but only one of those was *proven* to be a
 good copy, and the others may have been genuinely corrupt. **Count disputes
-first** (the `disputed` counter added with item 60 is the instrument), then
-choose.
+first**, then choose.
+
+### The instrument now exists (2026-09-13)
+
+Option 3 is done, and it had to be before either of the others could be
+justified. `disputed` was a `u32` local to the startup verification task,
+logged once and dropped — so the precondition above ("count disputes first")
+could not be met by anyone, including the people whose nodes were producing
+them.
+
+`state.models.disputed_shards` is now the record, written and cleared only by
+`SharedState::note_shard_disputed` / `clear_shard_dispute` from the two paths
+that re-check bytes already on disk (the startup sweep and the auto-manage
+rescan). Both clear on a later successful verify, which is how a dispute
+actually ends — not by expiry, but by a check against a hash that has since
+been corrected. It surfaces in three places:
+
+- **The diagnostics report**, in its own section, **printed even when the count
+  is zero.** That is the point: a pasted report saying `0` is a measurement,
+  and one that says nothing is not.
+- **The shard row in the dashboard**, as a "Disagrees" badge — orange, not red,
+  because the node is doing the right thing deliberately and colouring it as a
+  fault is what pushes someone into deleting a copy that may be the last one.
+- **`disputed` on each shard in `/api/admin/models`.**
+
+Two reporting defects were fixed on the way, both of the same shape — the log
+knew and the user's screen did not:
+
+- The rescan emitted `shard_verification_failed` with a **red error toast** for
+  a KEPT shard. `kept` was computed one line above and used only in the log.
+  That key's translation reads "A model part failed its integrity check —
+  re-downloading automatically", which on this path is false twice: nothing is
+  queued (marking a repair is the no-op described above) and nothing is wrong
+  with the machine. The user was told to wait for a repair that would never
+  start, about bytes that may be the swarm's last copy, in the colour that says
+  act on this — and the obvious action is to delete the shard, i.e. exactly the
+  destruction `mismatch_policy` exists to prevent. Now a separate
+  `shard_disputed` event, info-level, saying what the node is actually doing.
+- The startup sweep's summary event reported `verified`, `quarantined` and
+  `unchecked` but not `disputed`, so a node keeping disagreeing bytes announced
+  "Verified 20 shards". That is the same mistake the `unchecked` counter exists
+  to prevent, one field later — and the comment inside the sweep spells out why
+  it matters.
+
+Both decisions are now pure functions (`verification_failure_event`,
+`verification_summary`) with their truth tables pinned, because the bug in each
+case was a branch that existed and was not carried through to the message.
+
+**What is still open is the settlement itself** — designs 1 and 2 above. Do not
+build either until there is field data; the instrument is there to produce it,
+and `-- shards kept despite disagreeing --` in a pasted diagnostics report is
+what to look for.
 
 ## Replica counts do not react to holders being unusable (open, 2026-09-07)
 

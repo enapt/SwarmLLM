@@ -797,6 +797,43 @@ pub async fn diagnostics(
         );
     }
 
+    // **Printed even when it is zero**, and that is the point. This node keeps
+    // shards whose bytes disagree with a hash the swarm reports but the model's
+    // origin does not back (`ModelRegistry::mismatch_policy`) — the right call,
+    // since deleting on a stranger's claim is how a last copy is lost. Nothing
+    // then settles the disagreement, and what to build about that turns
+    // entirely on how often it happens on real nodes, which nobody could see:
+    // the count lived in a local variable inside one startup task, logged once.
+    // A report that says `0` is a measurement; a report that says nothing is
+    // not. See `docs/FUTURE_WORK.md` § "A disputed shard is kept but the
+    // disagreement is never settled".
+    {
+        let disputed: Vec<crate::types::ShardId> = ss
+            .models
+            .disputed_shards
+            .iter()
+            .map(|e| e.key().clone())
+            .collect();
+        let _ = writeln!(
+            out,
+            "\n-- shards kept despite disagreeing ({}) --",
+            disputed.len()
+        );
+        if disputed.is_empty() {
+            let _ = writeln!(
+                out,
+                "  none — every checked shard matches its expected hash"
+            );
+        } else {
+            for sid in disputed.iter().take(32) {
+                let _ = writeln!(out, "  {} shard {}", sid.model_id.0, sid.index);
+            }
+            if disputed.len() > 32 {
+                let _ = writeln!(out, "  … and {} more", disputed.len() - 32);
+            }
+        }
+    }
+
     {
         let bal = ss.credits.credit_balance.read().await;
         let _ = writeln!(out, "\n-- credits --\n  balance: {}", bal.balance);

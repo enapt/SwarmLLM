@@ -5428,6 +5428,15 @@ textarea.pool-code-input { min-height: 4.5em; }
   color: rgba(148,163,184,0.95);
   border-color: rgba(148,163,184,0.35);
 }
+/* "Disagrees" — this copy was checked and does not match what the network
+   says, and this device is keeping and still sharing it. Orange, not red: the
+   node is doing the right thing deliberately, and colouring it as a fault is
+   what would push someone into deleting a copy that may be the last one. */
+.shard-row-endpoint[data-kind="disputed"] {
+  background: var(--orange-dim);
+  color: var(--orange-text);
+  border-color: rgba(245,158,11,0.35);
+}
 
 /* Pipeline-pinned endpoint rows: saturated green tint across the whole row,
    matching the PRIVACY panel's pipeline-active state. */

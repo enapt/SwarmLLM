@@ -98,6 +98,60 @@ A forged or replayed frame also arms a repair. That is deliberate and costs
 nothing — connections are authenticated by PeerId at the Noise layer, so only
 that peer can trigger it, and it can always ask for a fresh key anyway.
 
+## A disagreement nobody can read is not an instrument
+
+(2026-09-13.) **`state.models.disputed_shards` is the record of "we checked,
+we disagree, and we are keeping our copy"**, written and cleared only through
+`SharedState::note_shard_disputed` / `clear_shard_dispute`.
+
+**Why it exists.** `mismatch_policy` (the rule above) stops a node destroying
+its own bytes on a hash the model's origin never backed. It does not settle the
+argument, and settling it is open work whose stated precondition is *how often
+this fires in the field*. That precondition could not be met by anyone: the
+count was a `u32` local to the startup verification task, logged once per
+daemon run and dropped. Nothing on the dashboard, nothing in the diagnostics
+report a reporter pastes, nothing in the API. The safety net shipped in
+v0.3.177 was therefore field-unverifiable by construction.
+
+**What a change must keep.**
+
+- **Not `shards_needing_repair`.** `complete_pending_shard_fetches` begins by
+  treating any shard whose file is on disk as already repaired and clearing the
+  mark — and a disputed shard is on disk by definition. Marking one fetches
+  nothing. The quarantine path only ever worked because it deleted the file
+  first, and the first cut of the .177 fix called it anyway and claimed a
+  settlement that could not happen.
+- **Cleared on every successful verify and every quarantine**, not only where a
+  dispute is known to exist. `DashSet::remove` on an absent key is free, and a
+  clear that has to be predicted is a clear that gets forgotten. A quarantined
+  shard is repaired, not disputed.
+- **The diagnostics section prints at zero.** A pasted report saying `0` is a
+  measurement; one that says nothing is not, and the whole point is to find out
+  whether this ever happens.
+- **The two outcomes are two events.** `verification_failure_event` and
+  `verification_summary` are pure so their truth tables are pinned, because in
+  both cases the branch existed in the code and was not carried through to the
+  message the user reads:
+  - The rescan emitted `shard_verification_failed` with a red error toast for a
+    KEPT shard. `kept` was computed one line above and used only in the log.
+    That key translates as "A model part failed its integrity check —
+    re-downloading automatically" — false twice on this path — so the one case
+    where the node deliberately stands by a possibly-last copy was reported as
+    a fault with an automatic repair under way. The obvious action for the
+    reader is to delete the shard, which is the destruction the policy exists
+    to prevent.
+  - The startup sweep's summary carried `verified`, `quarantined` and
+    `unchecked` but not `disputed`, so a node keeping disagreeing bytes
+    announced "Verified 20 shards". Same mistake as the one the `unchecked`
+    counter was added to fix, one field later — a verifier that reports work it
+    did not do reads as assurance.
+- **Orange, not red.** The node is behaving correctly and deliberately;
+  colouring it as a fault is what pushes an operator into the destructive
+  action.
+
+Settlement designs and the decision criteria: `docs/FUTURE_WORK.md` § "A
+disputed shard is kept but the disagreement is never settled".
+
 ## A holder record names a BUILD, not just a shard
 
 **`ModelRegistry::shard_holders` filters out holders that positively claim a

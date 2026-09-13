@@ -68,6 +68,33 @@ pub struct ModelMgmt {
     /// on at least two peers, each of which could have been told the right hash
     /// (gotcha #382).
     pub shards_pending_verification: dashmap::DashSet<crate::types::ShardId>,
+    /// Shards this node HOLDS whose bytes disagree with the hash the swarm
+    /// reports — and which are kept and served anyway, because that hash has
+    /// no origin backing.
+    ///
+    /// The third of the trio, and the one where nothing happens next.
+    /// `shards_needing_repair` says "these bytes are wrong, get new ones";
+    /// `shards_pending_verification` says "re-check these against a hash that
+    /// just changed"; this one says **"we checked, we disagree, and we are
+    /// standing by our copy"** — see `ModelRegistry::mismatch_policy` for why
+    /// destroying it needs better evidence than a stranger's claim.
+    ///
+    /// It exists because the disagreement was otherwise a `u32` local to one
+    /// startup task, logged once and dropped. That made it invisible to the
+    /// dashboard, to the diagnostics report a reporter pastes, and therefore to
+    /// us — while the open question about this whole path is *how often it
+    /// fires in the field* (`docs/FUTURE_WORK.md` § "A disputed shard is kept
+    /// but the disagreement is never settled", whose stated precondition is
+    /// "count disputes first"). An instrument nobody can read is not an
+    /// instrument.
+    ///
+    /// Written and cleared ONLY by `SharedState::note_shard_disputed` /
+    /// `clear_shard_dispute`, from the two paths that re-check bytes already on
+    /// disk: the startup verification sweep and the auto-manage rescan. Both
+    /// clear on a later successful verify, which is how a dispute resolves once
+    /// the origin's hash arrives — no separate expiry, because the only thing
+    /// that can settle it is another check.
+    pub disputed_shards: dashmap::DashSet<crate::types::ShardId>,
     /// Per-shard download backoff. A shard whose download fails (hard HF error,
     /// GGUF-probe failure, P2P give-up with no HF fallback, or stall-
     /// reconciliation in `health/monitor.rs`) records an exponentially-growing
@@ -575,6 +602,7 @@ mod tests {
             shard_p2p_failed: dashmap::DashSet::new(),
             shards_needing_repair: dashmap::DashSet::new(),
             shards_pending_verification: dashmap::DashSet::new(),
+            disputed_shards: dashmap::DashSet::new(),
             shard_download_backoff: DashMap::new(),
             model_request_counts: DashMap::new(),
             resource_schedule: RwLock::new(Default::default()),

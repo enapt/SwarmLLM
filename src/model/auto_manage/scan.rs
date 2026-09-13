@@ -30,6 +30,50 @@ pub struct RescanOutcome {
     pub skipped_outside_shard_range: u32,
 }
 
+/// How a failed re-check of bytes ALREADY ON DISK is reported to the person
+/// running the node — and the two outcomes are two different events.
+///
+/// `kept` is `OnMismatch::KeepBytes`: the hash we disagree with has no origin
+/// backing, so `ModelRegistry::mismatch_policy` refused to destroy our copy and
+/// the node is still serving it. That is the node working correctly and
+/// deliberately.
+///
+/// **Both cases used to emit `shard_verification_failed` with an error toast.**
+/// `kept` was computed at the call site and used only in the log line, so on
+/// screen the two were indistinguishable — and that key's translation reads "A
+/// model part failed its integrity check — re-downloading automatically", which
+/// on the kept path is false twice over: nothing failed in a way that acts, and
+/// no download is queued (marking one is a no-op here, see
+/// `SharedState::note_shard_disputed`). A user was told to wait for a repair
+/// that would never start, about a copy that may be the swarm's last, with a
+/// red toast inviting them to delete it by hand — the exact destruction the
+/// policy exists to prevent.
+///
+/// Pure, so the truth table is pinned by
+/// `a_kept_shard_is_not_reported_as_a_failure_with_a_repair_under_way`.
+fn verification_failure_event(
+    kept: bool,
+    shard_index: u32,
+    model_id: &str,
+) -> (&'static str, String, &'static str) {
+    if kept {
+        (
+            "shard_disputed",
+            format!(
+                "Part {shard_index} of {model_id} does not match what the network says — \
+                 keeping and still sharing this copy"
+            ),
+            "info",
+        )
+    } else {
+        (
+            "shard_verification_failed",
+            format!("Shard {shard_index} of {model_id} failed hash verification"),
+            "error",
+        )
+    }
+}
+
 pub async fn rescan_local_shards(
     shared: &Arc<SharedState>,
     network_tx: Option<&mpsc::Sender<NetworkCommand>>,
@@ -296,23 +340,39 @@ pub async fn rescan_local_shards(
                 // shard is kept but the disagreement is never settled".
                 if !kept {
                     shared.mark_shard_for_repair(&shard_id);
+                    shared.clear_shard_dispute(&shard_id);
+                } else {
+                    shared.note_shard_disputed(&shard_id);
                 }
+                // **The two outcomes are told to the user as two different
+                // things**, because they are. `kept` was computed one line
+                // above and used only in the log: on screen both said "Shard N
+                // of M failed hash verification" with a red error toast, and
+                // the `activity.shard_verification_failed` translation adds
+                // "— re-downloading automatically", which on the kept path is
+                // false. So the one case where the node is deliberately
+                // standing by a copy that may be the swarm's last was reported
+                // to its owner as a failure with an automatic repair under
+                // way — advice to sit tight for a download that will never
+                // start, and an invitation to delete the shard by hand, which
+                // is precisely the destruction the policy exists to prevent.
+                let (kind, message, toast) =
+                    verification_failure_event(kept, shard_info.index, &model_id_str);
                 shared.emit_activity(
-                    crate::daemon::state::ActivityEvent::new(
-                        "auto_manage",
-                        "shard_verification_failed",
-                        format!(
-                            "Shard {} of {} failed hash verification",
-                            shard_info.index, model_id_str
-                        ),
-                    )
-                    .with_model(&model_id_str)
-                    .with_shard_index(shard_info.index)
-                    .with_detail_str(e.to_string())
-                    .with_toast("error", 6000),
+                    crate::daemon::state::ActivityEvent::new("auto_manage", kind, message)
+                        .with_model(&model_id_str)
+                        .with_shard_index(shard_info.index)
+                        .with_detail_str(e.to_string())
+                        .with_toast(toast, 6000),
                 );
                 continue;
             }
+
+            // These bytes agree with the hash we now hold, so any earlier
+            // disagreement about them is settled — which is how a dispute
+            // actually ends: not by expiry, but by a later check against a hash
+            // that has since been corrected.
+            shared.clear_shard_dispute(&shard_id);
 
             // Register as holder. The early-continue above already ensured we're
             // not yet a holder, and nothing between there and here mutates the
@@ -755,5 +815,65 @@ manifest.name, budget.saturating_sub(total_after)
                     .with_detail_str(detail_label.clone()),
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod dispute_report_tests {
+    use super::verification_failure_event;
+
+    /// **A shard the node deliberately KEPT was reported to its owner as a
+    /// failure with a repair under way.** Both outcomes emitted
+    /// `shard_verification_failed` with a red error toast, and that key's
+    /// translation is "A model part failed its integrity check — re-downloading
+    /// automatically". On the kept path nothing is being re-downloaded (marking
+    /// a repair is a no-op for a file still on disk) and nothing is wrong with
+    /// the machine: `mismatch_policy` refused to destroy a copy condemned only
+    /// by a hash the model's publisher never backed, which is the whole point
+    /// of the 2026-09-13 fix.
+    ///
+    /// So the message asked the user to wait for something that would never
+    /// happen, about bytes that may be the swarm's last copy, in the colour
+    /// that says "act on this". The obvious action is to delete the shard.
+    #[test]
+    fn a_kept_shard_is_not_reported_as_a_failure_with_a_repair_under_way() {
+        let (kind, message, toast) = verification_failure_event(true, 3, "some-model");
+
+        assert_eq!(
+            kind, "shard_disputed",
+            "a kept shard needs its OWN event kind — sharing \
+             `shard_verification_failed` is what let one translation describe both"
+        );
+        assert_ne!(
+            toast, "error",
+            "the node is working correctly and deliberately; an error toast \
+             invites the user to delete a copy that may be the last one"
+        );
+        let lower = message.to_lowercase();
+        assert!(
+            !lower.contains("failed"),
+            "nothing failed here in a way that acts: {message}"
+        );
+        assert!(
+            !lower.contains("download") && !lower.contains("re-download"),
+            "no repair is queued on this path, so the message must not promise \
+             one: {message}"
+        );
+        assert!(
+            lower.contains("keeping") && lower.contains("sharing"),
+            "say what the node is actually doing, or the user cannot tell this \
+             from data loss: {message}"
+        );
+    }
+
+    /// The control. A shard that really was quarantined must still be reported
+    /// as a failure with an error toast — without this the test above passes on
+    /// code that softened BOTH paths, which would hide real corruption.
+    #[test]
+    fn a_quarantined_shard_is_still_reported_as_a_failure() {
+        let (kind, message, toast) = verification_failure_event(false, 3, "some-model");
+        assert_eq!(kind, "shard_verification_failed");
+        assert_eq!(toast, "error");
+        assert!(message.to_lowercase().contains("failed"), "{message}");
     }
 }

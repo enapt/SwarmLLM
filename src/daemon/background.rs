@@ -185,6 +185,34 @@ fn sweep_expired_quarantine(models_dir: &std::path::Path) -> (u32, u64) {
     (files, bytes)
 }
 
+/// The one line the verification sweep puts in front of the user.
+///
+/// **A count that is not "verified" must appear here, or the event asserts
+/// something the pass did not find.** The `unchecked` comment inside the sweep
+/// explains why at length — a verifier that reports work it did not do reads as
+/// assurance, and on 2026-08-24 that hid a corrupt shard for hours. `disputed`
+/// was then added as a fourth outcome, counted and logged carefully, and left
+/// out of this event: a node keeping bytes the swarm disagrees with announced
+/// "Verified 20 shards" and nothing else. Same mistake, one field later.
+///
+/// Pure, so the truth table is pinned by
+/// `a_verification_pass_that_found_a_disagreement_does_not_call_itself_clean`.
+fn verification_summary(verified: u32, quarantined: u32, disputed: u32, unchecked: u32) -> String {
+    let mut out = format!("Verified {verified} shards");
+    if quarantined > 0 {
+        out.push_str(&format!(" ({quarantined} quarantined)"));
+    }
+    if disputed > 0 {
+        out.push_str(&format!(
+            " ({disputed} kept despite disagreeing with the network)"
+        ));
+    }
+    if unchecked > 0 {
+        out.push_str(&format!(" ({unchecked} not yet checkable)"));
+    }
+    out
+}
+
 /// BLAKE3 hash check runs after API is up so the dashboard is responsive
 /// immediately. Bad shards are quarantined.
 pub(super) fn spawn_shard_verification(
@@ -263,6 +291,12 @@ pub(super) fn spawn_shard_verification(
                 match result {
                     Ok(Ok(())) => {
                         verified += 1;
+                        // These bytes agree with the hash we now hold, so any
+                        // earlier disagreement about them is over. Cleared on
+                        // EVERY success rather than only where a dispute is
+                        // known — a clear that has to be predicted is a clear
+                        // that gets forgotten.
+                        shared_state.clear_shard_dispute(&sid);
                     }
                     Ok(Err(e)) if policy == crate::model::shard::OnMismatch::KeepBytes => {
                         // Unproven, not corrupt. Keep the bytes AND keep
@@ -287,6 +321,12 @@ pub(super) fn spawn_shard_verification(
                              keeping our bytes, because that hash has no origin backing \
                              and deleting on it is how a last copy is lost"
                         );
+                        // Recorded, not just counted. `disputed` below is a
+                        // local that dies with this task, and the open question
+                        // about this whole path is how often it fires in the
+                        // FIELD — which needs the dashboard and the diagnostics
+                        // report to be able to say so.
+                        shared_state.note_shard_disputed(&sid);
                         disputed += 1;
                     }
                     Ok(Err(e)) => {
@@ -303,6 +343,10 @@ pub(super) fn spawn_shard_verification(
                         // good copy, or the model stays permanently short of a
                         // shard on any node that is not auto-managing.
                         shared_state.mark_shard_for_repair(&sid);
+                        // Quarantined is not disputed: the bytes were destroyed
+                        // against origin-backed evidence and a replacement is
+                        // queued, so there is nothing left to disagree about.
+                        shared_state.clear_shard_dispute(&sid);
                         shared_state.emit_activity(
                             crate::daemon::state::ActivityEvent::new(
                                 "model",
@@ -389,24 +433,17 @@ pub(super) fn spawn_shard_verification(
                 "Background shard verification complete — all shards OK"
             );
         }
+        // The event the USER sees, and it must not round a disagreement up into
+        // "verified". The log line 40 lines above is careful to say these bytes
+        // were checked and did NOT match; this said "Verified 20 shards" over
+        // the same pass, which is the exact failure the `unchecked` comment
+        // further up warns about — a verifier reporting work it did not do
+        // reads as assurance — one field later.
         shared_state.emit_activity(
             crate::daemon::state::ActivityEvent::new(
                 "system",
                 "shard_verified",
-                format!(
-                    "Verified {} shards{}{}",
-                    verified,
-                    if quarantined > 0 {
-                        format!(" ({quarantined} quarantined)")
-                    } else {
-                        String::new()
-                    },
-                    if unchecked > 0 {
-                        format!(" ({unchecked} not yet checkable)")
-                    } else {
-                        String::new()
-                    }
-                ),
+                verification_summary(verified, quarantined, disputed, unchecked),
             )
             .with_detail_num(verified as i64),
         );
@@ -1505,5 +1542,46 @@ mod quarantine_sweep_tests {
             sweep_expired_quarantine(&empty.path().join("does-not-exist")),
             (0, 0)
         );
+    }
+}
+
+#[cfg(test)]
+mod verification_summary_tests {
+    use super::verification_summary;
+
+    /// **A pass that found a disagreement must not announce itself as a clean
+    /// verification.** The sweep counts four outcomes and this event carried
+    /// three: a node keeping bytes the swarm disagrees with told its owner
+    /// "Verified 20 shards" and nothing more.
+    ///
+    /// That is the same mistake the `unchecked` counter exists to prevent, one
+    /// field later — and its comment inside the sweep spells out why it
+    /// matters: on 2026-08-24 this pass twice reported "all shards OK" over a
+    /// set including a corrupt shard it had never hashed.
+    #[test]
+    fn a_verification_pass_that_found_a_disagreement_does_not_call_itself_clean() {
+        let s = verification_summary(20, 0, 2, 0);
+        assert!(
+            s.contains('2') && s.to_lowercase().contains("disagree"),
+            "a dispute must appear in the summary the user reads: {s}"
+        );
+
+        // And it must not be swallowed by the presence of other outcomes.
+        let busy = verification_summary(20, 1, 2, 3);
+        for want in ["quarantined", "disagree", "not yet checkable"] {
+            assert!(
+                busy.to_lowercase().contains(want),
+                "{want:?} missing from {busy}"
+            );
+        }
+    }
+
+    /// The control: a pass that genuinely found nothing wrong still says so
+    /// plainly, with no parenthetical noise. Without this the test above passes
+    /// on code that appends every clause unconditionally.
+    #[test]
+    fn a_clean_verification_pass_stays_clean() {
+        let s = verification_summary(20, 0, 0, 0);
+        assert_eq!(s, "Verified 20 shards");
     }
 }

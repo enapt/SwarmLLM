@@ -212,6 +212,14 @@
     var removedBadge = (s.removed_by_user && !s.local)
       ? '<span class="shard-row-endpoint" data-kind="removed" title="' + U.escapeHtml(I18n.t('shard.removed_by_user_tip')) + '">' + U.escapeHtml(I18n.t('shard.removed_by_user')) + '</span>'
       : '';
+    // This copy was checked and does NOT match what the network says it should
+    // be — and this device is keeping it and still sharing it, because the
+    // network's claim is not backed by the model's own publisher. Shown because
+    // the only other trace was a log line, so a person could not tell a node
+    // that stood its ground from one that never noticed.
+    var disputedBadge = s.disputed
+      ? '<span class="shard-row-endpoint" data-kind="disputed" title="' + U.escapeHtml(I18n.t('shard.disputed_tip')) + '">' + U.escapeHtml(I18n.t('shard.disputed')) + '</span>'
+      : '';
     var sizeText = s.size_bytes ? U.formatBytes(s.size_bytes) : '\u2014';
     var lockCls = s.locked ? ' locked' : '';
     // Pushpin icon = "pin to device" (auto-manage). Reserved 🔒/🔓 for pipeline encryption.
@@ -230,7 +238,7 @@
       ' data-shard-index="' + s.index + '"' +
       ' data-shard-locked="' + (s.locked ? '1' : '0') + '">' +
       '<span class="shard-row-part">' + U.escapeHtml(partLabel) + '</span>' +
-      '<span class="shard-row-role">' + endpointBadge + removedBadge + '</span>' +
+      '<span class="shard-row-role">' + endpointBadge + removedBadge + disputedBadge + '</span>' +
       '<span class="shard-row-where"><span class="avail-seg shard-row-swatch" data-loc="' + loc + '"></span>' +
         U.escapeHtml(whereText) + '</span>' +
       '<span class="shard-row-size">' + sizeText + '</span>' +

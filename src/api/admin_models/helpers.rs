@@ -115,6 +115,15 @@ pub(super) fn build_shard_json(
     // since: auto-manage will not bring it back on its own. Only meaningful
     // while the shard is absent — a local copy means it was asked for again.
     let removed_by_user = !is_local && shared.shard_removed_by_user(&shard_id);
+    // We hold this shard, we checked it, and it does NOT match the hash the
+    // swarm reports — and we are serving it anyway, because that hash has no
+    // origin backing. Only meaningful for a shard we hold; the disagreement is
+    // about OUR bytes. Surfaced because the alternative is a log line the
+    // person running the node will never read, and because how often this
+    // happens in the field is the open question that decides what to build next
+    // (`docs/FUTURE_WORK.md` § "A disputed shard is kept but the disagreement
+    // is never settled").
+    let disputed = is_local && shared.shard_is_disputed(&shard_id);
     let holder_ids: Vec<String> = holders
         .iter()
         .filter(|h| *h != local_node_id)
@@ -130,6 +139,7 @@ pub(super) fn build_shard_json(
         "holder_ids": holder_ids,
         "locked": locked,
         "removed_by_user": removed_by_user,
+        "disputed": disputed,
     });
 
     let mut any_downloading = false;
