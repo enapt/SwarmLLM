@@ -472,6 +472,24 @@
         return;
       }
 
+      // "Show the N parts" — the per-part table is a disclosure inside the
+      // expanded card, not the card's main content. Handled here rather than
+      // with a <details> element so the caret, the label and aria-expanded
+      // stay in step with one toggle.
+      var partsToggle = target.getAttribute('data-parts-toggle');
+      if (partsToggle) {
+        var partsPanel = document.querySelector('[data-shard-detail="' + partsToggle + '"]');
+        if (partsPanel) {
+          var nowOpen = partsPanel.getAttribute('data-parts-open') !== '1';
+          partsPanel.setAttribute('data-parts-open', nowOpen ? '1' : '0');
+          target.setAttribute('aria-expanded', nowOpen ? 'true' : 'false');
+          var caret = target.querySelector('.mce-disclose-caret');
+          if (caret) caret.textContent = nowOpen ? '▾' : '▸';
+        }
+        e.stopPropagation();
+        return;
+      }
+
       // GGUF metadata toggle
       var metaToggle = target.getAttribute('data-meta-toggle');
       if (metaToggle) { App.models.toggleMetadata(metaToggle); return; }
@@ -586,9 +604,6 @@
           if (wasCompact) {
             expandCard.classList.remove('compact');
             App.state._expandedModels[expandModelId] = true;
-            if (App.dashboard && App.dashboard._measurePipelineConnector) {
-              requestAnimationFrame(function() { App.dashboard._measurePipelineConnector(expandCard); });
-            }
           } else {
             expandCard.classList.add('compact');
             delete App.state._expandedModels[expandModelId];

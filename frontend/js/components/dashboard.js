@@ -61,11 +61,10 @@
           var v = btn.getAttribute('data-shard-view');
           if (v === mode) btn.classList.add('active'); else btn.classList.remove('active');
         });
-        // Re-measure pipeline connector since the anchors changed
-        // (rows ↔ columns) with the view switch.
+        // Re-draw the plan overlay — its anchors changed (rows ↔ columns)
+        // with the view switch.
         if (card) {
           requestAnimationFrame(function() {
-            App.dashboard._measurePipelineConnector(card);
             App.dashboard._applyPipelinePlan(card);
           });
         }
@@ -288,68 +287,6 @@
       el.textContent = pct.toFixed(0) + '% ' + memLabel + ' · ' + tierLabel;
     },
 
-    // Measure pinned endpoint shard rows and set CSS vars on .mce-right so
-    // the pipeline-encrypted connector line spans exactly from the first to
-    // the last endpoint tick. Safe to call repeatedly.
-    _measurePipelineConnector: function(card) {
-      if (!card) return;
-      var exp = card.querySelector('.model-card-expanded.pipeline-encrypted');
-      var right = exp && exp.querySelector('.mce-right');
-      if (!right) return;
-      // List view uses shard rows; matrix view anchors to the self row's
-      // first+last cells (where this node holds the pipeline endpoints),
-      // not the column headers (which show density across all peers).
-      var pinned = right.querySelectorAll('.shard-row-pipeline-pinned');
-      var isMatrix = false;
-      if (pinned.length < 1) {
-        pinned = right.querySelectorAll('.smh-self-pipeline-pinned');
-        isMatrix = pinned.length > 0;
-      }
-      right.classList.toggle('pipe-matrix', isMatrix);
-      if (pinned.length < 1) {
-        right.style.removeProperty('--pipe-line-top');
-        right.style.removeProperty('--pipe-line-bottom');
-        right.style.removeProperty('--pipe-tail-x');
-        return;
-      }
-      // Line must span all three connection points: the privacy panel's
-      // stub (at its vertical center) + the first and last pinned rows.
-      // With 2 shards, first == last, so without the stub anchor the line
-      // would collapse to a single row and not reach the privacy panel.
-      var rightRect = right.getBoundingClientRect();
-      var firstRect = pinned[0].getBoundingClientRect();
-      var lastRect  = pinned[pinned.length - 1].getBoundingClientRect();
-      var anchors = [
-        (firstRect.top + firstRect.height / 2) - rightRect.top,
-        (lastRect.top  + lastRect.height  / 2) - rightRect.top,
-      ];
-      var privacy = exp.querySelector('.mce-section-privacy');
-      if (privacy) {
-        // Stub sits at the privacy panel's vertical center (matches CSS).
-        var pRect = privacy.getBoundingClientRect();
-        anchors.push((pRect.top + pRect.height / 2) - rightRect.top);
-      }
-      var topOffset    = Math.min.apply(null, anchors);
-      var bottomOffset = rightRect.height - Math.max.apply(null, anchors);
-      right.style.setProperty('--pipe-line-top', topOffset + 'px');
-      right.style.setProperty('--pipe-line-bottom', bottomOffset + 'px');
-      // Matrix view: add a horizontal tail from the line across to the
-      // first pinned column so the visual connection is obvious.
-      if (isMatrix) {
-        var firstPinnedRect = pinned[0].getBoundingClientRect();
-        var tailTopY = (firstPinnedRect.top + firstPinnedRect.height / 2) - rightRect.top;
-        var tailRightX = rightRect.right - (firstPinnedRect.left + firstPinnedRect.width / 2);
-        right.style.setProperty('--pipe-tail-y', tailTopY + 'px');
-        right.style.setProperty('--pipe-tail-x', tailRightX + 'px');
-      } else {
-        right.style.removeProperty('--pipe-tail-y');
-        right.style.removeProperty('--pipe-tail-x');
-      }
-    },
-    // Fetch the scheduler's pipeline plan for this model and render the
-    // inference path on top of the shard matrix: mark chosen peer+shard
-    // cells and draw an SVG polyline connecting them in segment order.
-    // Unchosen holders are dimmed so the path stands out.
     _applyPipelinePlan: function(card) {
       if (!card) return;
       var modelId = card.getAttribute('data-model-id');
@@ -1095,7 +1032,26 @@
         }
         return sorted;
       }
-      models = _sortModels(models, swarmSort);
+      // WHOSE MODELS ARE THESE — grouping comes before sorting.
+      //
+      // Fifteen identical rows, the three you host at the top because
+      // `loaded` sorts first, and nothing saying where the boundary is: the
+      // page reads as "only the models I have", and the other twelve look
+      // missing. They were never missing. Partition first, sort inside each
+      // group, and put a heading on each so the answer to "where are the
+      // rest?" is on screen rather than inferred from a colour.
+      var modelsMine = [], modelsSwarm = [];
+      models.forEach(function(m) {
+        ((m.local || (m.hosted_shards || 0) > 0) ? modelsMine : modelsSwarm).push(m);
+      });
+      modelsMine = _sortModels(modelsMine, swarmSort);
+      modelsSwarm = _sortModels(modelsSwarm, swarmSort);
+      // Index of the first row of each group, so the headings can be inserted
+      // while the cards are appended.
+      var groupStarts = {};
+      if (modelsMine.length) groupStarts[0] = ['mine', modelsMine.length];
+      if (modelsSwarm.length) groupStarts[modelsMine.length] = ['swarm', modelsSwarm.length];
+      models = modelsMine.concat(modelsSwarm);
 
       // Swarm models section
       var swarmBody;
@@ -1150,7 +1106,21 @@
         }
       }
 
-      models.forEach(function(m) {
+      models.forEach(function(m, modelIndex) {
+        // Group heading, where this row starts a group.
+        var groupHere = groupStarts[modelIndex];
+        if (groupHere && swarmBody) {
+          var gh = document.createElement('div');
+          gh.className = 'models-group-head';
+          gh.innerHTML =
+            '<span class="models-group-title">' +
+              U.escapeHtml(I18n.t(groupHere[0] === 'mine'
+                ? 'dashboard.group_on_this_computer'
+                : 'dashboard.group_on_other_computers')) +
+            '</span>' +
+            '<span class="models-group-count">' + groupHere[1] + '</span>';
+          swarmBody.appendChild(gh);
+        }
         var shards = m.shards || [];
         var shardCount = m.shard_count || shards.length || 0;
         var hostedShards = m.hosted_shards || 0;
@@ -1246,6 +1216,8 @@
         // Swarm health summary badge — shown in the left column of the expanded card.
         // Derived from per-shard holder counts across the network.
         var healthBadgeHtml = '';
+        var healthSentence = '';
+        var healthDetail = '';
         if (shards.length > 0) {
           var totalShards = shards.length;
           var totalHolders = 0;
@@ -1265,16 +1237,35 @@
           else if (fragile > 0) { healthLabel = I18n.t('dashboard.health_fragile'); healthClass = 'health-partial'; }
           else if (avgHolders >= 2) { healthLabel = I18n.t('dashboard.health_healthy'); healthClass = 'health-full'; }
           else { healthLabel = I18n.t('dashboard.health_good'); healthClass = 'health-good'; }
-          var healthDetail = '';
-          if (healthClass === 'health-full') healthDetail = I18n.t('dashboard.health_replicated', { avg: avgHolders.toFixed(1) });
-          else if (healthClass === 'health-good') healthDetail = I18n.t('dashboard.health_distributed', { count: totalShards });
-          else if (fragile > 0) healthDetail = I18n.t('dashboard.health_under_replicated', { count: fragile });
-          else if (networkMissing === totalShards) healthDetail = I18n.t('dashboard.health_no_shards_available');
-          else if (networkMissing > 0) healthDetail = I18n.t('dashboard.health_missing', { count: networkMissing });
+          // WHAT THIS MEANS FOR THE READER, as a sentence.
+          //
+          // The badge used to be followed by a fragment — "2.0× replicated
+          // across the swarm", "3 part(s) under-replicated" — which states a
+          // measurement and leaves the consequence to the reader. What someone
+          // opening a model wants to know is whether it keeps working, and if
+          // not, what would fix it. The counts are the same; only the telling
+          // changed.
+          // `holders` counts THIS node too, so a model nobody else has reads
+          // as fragile rather than missing. That case gets its own sentence:
+          // "one computer" is yours, and saying so is what makes the
+          // consequence land — it is also the state that motivates anyone
+          // else to host a copy.
+          var otherHolders = Math.max(0, (m.peers_hosting || 0));
+          if (networkMissing === totalShards) {
+            healthDetail = I18n.t('dashboard.say_unavailable');
+          } else if (networkMissing > 0) {
+            healthDetail = I18n.t('dashboard.say_incomplete', { count: networkMissing });
+          } else if (hostedShards > 0 && otherHolders === 0) {
+            healthDetail = I18n.t('dashboard.say_only_you');
+          } else if (fragile > 0) {
+            healthDetail = I18n.t('dashboard.say_at_risk', { count: fragile });
+          } else {
+            healthDetail = I18n.t('dashboard.say_safe', { count: otherHolders });
+          }
           healthBadgeHtml = '<div class="mce-health ' + healthClass + '">' +
             '<span class="mce-health-label">' + U.escapeHtml(healthLabel) + '</span>' +
-            '<span class="mce-health-detail">' + U.escapeHtml(healthDetail) + '</span>' +
             '</div>';
+          healthSentence = '<p class="mce-say">' + U.escapeHtml(healthDetail) + '</p>';
         }
 
         // Pipeline encryption status — SwarmLLM requires the user to locally hold
@@ -1325,8 +1316,8 @@
             encState = {
               stateMod: 'mce-section-state-blue', badgeCls: 'cb-downloading',
               icon: '\uD83D\uDD0F', label: I18n.t('enc.available'),
-              detail: I18n.t('enc.ready_detail') + ' ' + I18n.t('enc.cost_detail'),
-              tip: I18n.t('enc.ready_tip'),
+              detail: I18n.t('enc.ready_detail'),
+              tip: I18n.t('enc.ready_tip') + ' ' + I18n.t('enc.cost_detail'),
               action: I18n.t('enc.enable_privacy'),
               recommended: true
             };
@@ -1340,8 +1331,8 @@
             encState = {
               stateMod: 'mce-section-state-amber', badgeCls: 'cb-fragile',
               icon: '\uD83D\uDD13', label: I18n.t('enc.unavailable'),
-              detail: I18n.t('enc.unprotected_detail', { missing: missingText }) + ' ' + I18n.t('enc.cost_detail'),
-              tip: I18n.t('enc.unprotected_tip'),
+              detail: I18n.t('enc.unprotected_detail', { missing: missingText }),
+              tip: I18n.t('enc.unprotected_tip') + ' ' + I18n.t('enc.cost_detail'),
               // Previously a dead end: it told you which pieces you lacked and
               // left you to find and download them yourself.
               action: '',
@@ -1364,19 +1355,16 @@
             ? '<span class="mce-section-action">' + U.escapeHtml(encState.action) +
               (encState.recommended ? ' <span class="enc-recommended-badge">' + U.escapeHtml(I18n.t('enc.recommended')) + '</span>' : '') + '</span>'
             : '';
+          // PRIVACY, as a line rather than a panel. It was the tallest block
+          // in the card — a title, a badge, and a wrapped paragraph — for a
+          // fact that is one sentence and one switch.
           privacySectionHtml =
-            '<div class="mce-section mce-section-privacy ' + encState.stateMod + toggleCls + '"' + toggleAttrs + ' title="' + U.escapeHtml(encState.tip) + '">' +
-              '<div class="mce-section-header">' +
-                '<div class="mce-section-title">' + U.escapeHtml(I18n.t('dashboard.section_privacy')) + '</div>' +
-                actionHtml2 + fetchHtml2 +
-              '</div>' +
-              '<div class="mce-section-body">' +
-                '<span class="composite-badge ' + encState.badgeCls + '">' +
-                  '<span class="mce-section-icon">' + encState.icon + '</span>' +
-                  U.escapeHtml(encState.label) +
-                '</span>' +
-                '<div class="mce-section-detail">' + U.escapeHtml(encState.detail) + '</div>' +
-              '</div>' +
+            '<div class="mce-line mce-line-privacy ' + encState.stateMod + toggleCls + '"' + toggleAttrs + ' title="' + U.escapeHtml(encState.tip) + '">' +
+              '<span class="mce-line-icon">' + encState.icon + '</span>' +
+              '<span class="mce-line-text">' +
+                '<b>' + U.escapeHtml(encState.label) + '</b> — ' + U.escapeHtml(encState.detail) +
+              '</span>' +
+              actionHtml2 + fetchHtml2 +
             '</div>';
         }
 
@@ -1399,17 +1387,11 @@
         // user could not tell why it was slower than the number promised.
         if (!cpuReason && hostedShards > 0 && typeof m.gpu_layers_on_card === 'number' && m.num_layers > 0) {
           placementSectionHtml =
-            '<div class="mce-section mce-section-placement mce-section-state-amber" title="' + U.escapeHtml(I18n.t('placement.tip')) + '">' +
-              '<div class="mce-section-header">' +
-                '<div class="mce-section-title">' + U.escapeHtml(I18n.t('placement.section')) + '</div>' +
-              '</div>' +
-              '<div class="mce-section-body">' +
-                '<span class="composite-badge cb-fragile">' +
-                  '<span class="mce-section-icon">🖥</span>' +
-                  U.escapeHtml(I18n.t('placement.hybrid', { on: m.gpu_layers_on_card, total: m.num_layers })) +
-                '</span>' +
-                '<div class="mce-section-detail">' + U.escapeHtml(I18n.t('placement.hybrid_detail')) + '</div>' +
-              '</div>' +
+            '<div class="mce-line mce-section-state-amber" title="' + U.escapeHtml(I18n.t('placement.tip')) + '">' +
+              '<span class="mce-line-icon">🖥</span>' +
+              '<span class="mce-line-text"><b>' +
+                U.escapeHtml(I18n.t('placement.hybrid', { on: m.gpu_layers_on_card, total: m.num_layers })) +
+              '</b> — ' + U.escapeHtml(I18n.t('placement.hybrid_detail')) + '</span>' +
             '</div>';
         }
         if (cpuReason && hostedShards > 0) {
@@ -1424,17 +1406,10 @@
           var r = reasonKeys[cpuReason];
           if (r) {
             placementSectionHtml =
-              '<div class="mce-section mce-section-placement ' + r.mod + '" title="' + U.escapeHtml(I18n.t('placement.tip')) + '">' +
-                '<div class="mce-section-header">' +
-                  '<div class="mce-section-title">' + U.escapeHtml(I18n.t('placement.section')) + '</div>' +
-                '</div>' +
-                '<div class="mce-section-body">' +
-                  '<span class="composite-badge ' + r.badge + '">' +
-                    '<span class="mce-section-icon">🖥</span>' +
-                    U.escapeHtml(I18n.t('placement.on_cpu')) +
-                  '</span>' +
-                  '<div class="mce-section-detail">' + U.escapeHtml(I18n.t(r.key)) + '</div>' +
-                '</div>' +
+              '<div class="mce-line ' + r.mod + '" title="' + U.escapeHtml(I18n.t('placement.tip')) + '">' +
+                '<span class="mce-line-icon">🖥</span>' +
+                '<span class="mce-line-text"><b>' + U.escapeHtml(I18n.t('placement.on_cpu')) + '</b> — ' +
+                  U.escapeHtml(I18n.t(r.key)) + '</span>' +
               '</div>';
           }
         }
@@ -1496,12 +1471,9 @@
         }).join('');
 
         // Peer count line for STATUS section
-        var peerLineHtml = '';
-        if (m.peers_hosting > 0) {
-          peerLineHtml = '<div class="mce-status-peers"><span class="mce-status-icon">\u2B65</span>' + U.escapeHtml(I18n.t('dashboard.peer_count', { count: m.peers_hosting })) + '</div>';
-        } else if (hostedShards > 0) {
-          peerLineHtml = '<div class="mce-status-peers mce-warn" title="' + U.escapeHtml(I18n.t('dashboard.local_only_tip')) + '"><span class="mce-status-icon">\u26A0</span>' + U.escapeHtml(I18n.t('dashboard.local_only')) + '</div>';
-        }
+        // The peers line is gone: the health sentence says how many other
+        // computers have a copy, in words, and "PEERS HOSTING" said it in the
+        // vocabulary this panel stopped using.
 
         // Missing files warning
         var fileIndicators = '';
@@ -1612,36 +1584,46 @@
             '</div>' +
           '</div>' +
           '<div class="model-card-shards">' +
-            '<div class="model-card-expanded' + (m.encrypted_pipeline ? ' pipeline-encrypted' : '') + '">' +
-              '<div class="mce-left">' +
-                // HOW THIS MODEL IS DOING IN THE SWARM — one line, no section
-                // chrome. It used to be a titled STATUS box restating the
-                // status badge, which the collapsed row now carries in words;
-                // what is left is the part the row cannot say, i.e. how well
-                // replicated it is and how many peers hold it.
-                ((healthBadgeHtml || peerLineHtml)
-                  ? '<div class="mce-headline">' + healthBadgeHtml + peerLineHtml + '</div>'
+            // SUMMARY FIRST, PARTS ON DEMAND.
+            //
+            // The card used to be two columns: five stacked boxes on the left
+            // and a table of every part on the right, with a log under it. It
+            // answered "where is each piece" at full volume and the three
+            // questions someone actually opens a model for — is it safe, is it
+            // private, what can I do — not at all, or in fragments.
+            //
+            // Now it says those three in sentences, and the per-part table is
+            // a disclosure. That is Shneiderman's overview-first applied at the
+            // right level: the table is the detail, not the overview.
+            '<div class="model-card-expanded">' +
+              '<div class="mce-summary">' +
+                // The badge and the sentence share a line. The "3 PEERS
+                // HOSTING" chip that used to sit beside them is gone: it said
+                // the same number the sentence says, in the word the rest of
+                // the panel stopped using.
+                ((healthBadgeHtml || healthSentence)
+                  ? '<div class="mce-headline">' + healthBadgeHtml + healthSentence + '</div>'
                   : '') +
-                // PRIVACY — pipeline encryption (skipped for single-shard models).
-                // Above CONFIG so the connector line lands higher and closer
-                // to the endpoint shard rows on the right.
                 privacySectionHtml +
-                // PLACEMENT — only present when this node runs the model on its
-                // processor, and says which of the three reasons it is.
                 placementSectionHtml +
-                // The spec line — what kind of model this is, in one row of
-                // label/value pairs rather than a titled two-column grid.
-                // Trust badge ("Popular", "Verified") rides at its head.
-                '<div class="mce-spec">' + trustHeaderHtml + configGridHtml + '</div>' +
-                '<div class="mce-actions">' + actionHtml + metaBtnHtml + removeHtml + '</div>' +
                 (fileIndicators ? '<div class="mce-file-warn">' + fileIndicators + '</div>' : '') +
+                '<div class="mce-actions">' + actionHtml + removeHtml + '</div>' +
+                '<div class="mce-spec">' + trustHeaderHtml + configGridHtml + '</div>' +
+                '<div class="mce-more">' +
+                  (shards.length > 0
+                    ? '<button class="mce-disclose" data-parts-toggle="' + safeId + '" aria-expanded="false">' +
+                        '<span class="mce-disclose-caret">▸</span>' +
+                        U.escapeHtml(I18n.t('dashboard.show_the_parts', { count: shards.length })) +
+                      '</button>'
+                    : '') +
+                  metaBtnHtml +
+                '</div>' +
               '</div>' +
-              '<div class="mce-right" data-shard-detail="' + safeId + '">' +
+              '<div class="mce-parts" data-shard-detail="' + safeId + '" data-parts-open="0">' +
                 '<div class="mce-right-head">' +
                   _buildShardViewToggle() +
                 '</div>' +
                 '<div class="mce-right-body">' + _buildShardDetailBody(m, shards, safeId) + '</div>' +
-                // Activity/Network ticker lives under the matrix — fills right-column dead space
                 '<div class="model-ticker model-ticker-embedded" data-model-ticker="' + safeId + '" style="display:none"></div>' +
               '</div>' +
             '</div>' +
@@ -1655,14 +1637,11 @@
           App.dashboard._renderModelTicker(m.id);
         }
 
-        // Measure pinned endpoint rows (first + last) and set CSS custom
-        // properties so the pipeline-encrypted connector line starts at the
-        // first tick and ends at the last tick — not the whole right column.
-        if (m.encrypted_pipeline && !isCompact) {
-          requestAnimationFrame(function() {
-            App.dashboard._measurePipelineConnector(card);
-          });
-        }
+        // The pipeline-encrypted connector line is gone with the two-column
+        // layout it was drawn across: it ran from the privacy panel on the
+        // left to the first and last part rows on the right, and there is no
+        // longer a left and a right. The privacy LINE says the same thing in
+        // words, and the part rows keep their own 1ST / LAST badges.
         if (!isCompact) {
           requestAnimationFrame(function() {
             App.dashboard._applyPipelinePlan(card);

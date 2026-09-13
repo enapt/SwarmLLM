@@ -3139,6 +3139,26 @@ select.swarm-model-sort:focus { border-color: var(--accent); }
 .models-section-body { padding-top: 4px; }
 /* The route strip's colour key, once, above the rows it explains. */
 .models-section-legend { padding: 2px 14px 8px; }
+/* Whose models these are. Without it the list reads as "only the models I
+   have" — the ones you host sort first, and nothing marks where they end. */
+.models-group-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 14px 4px;
+  font-size: var(--fs-2xs);
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+.models-group-head:first-child { padding-top: 2px; }
+.models-group-count {
+  font-weight: 600;
+  letter-spacing: 0;
+  color: var(--text-muted);
+  background: var(--bg-tertiary);
+  border-radius: var(--radius-pill, 9999px);
+  padding: 0 7px;
+}
 
 /* Cloud provider cards */
 .model-card.cloud-model {
@@ -4914,7 +4934,7 @@ textarea.pool-code-input { min-height: 4.5em; }
   display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
   padding: 0; font-size: var(--fs-xs);
 }
-/* Legacy detail-badges is no longer rendered (trust chips moved into .mce-left);
+/* Legacy detail-badges is no longer rendered (trust chips moved into the summary);
    this rule remains only so any orphan instances don't inject extra gutter. */
 
 /* ---- Stat Card Sparklines & Trends ---- */
@@ -5090,21 +5110,70 @@ textarea.pool-code-input { min-height: 4.5em; }
 .model-card .model-card-footer > * { grid-column: 1 / -1; }
 
 /* Expanded content grid inherits the card's 3-column tracks via subgrid. */
+/* ONE column, summary first. It was two: five stacked boxes on the left and
+   the per-part table on the right, which put the detail at the same visual
+   weight as the answer. The table is now a disclosure below the summary. */
 .model-card-expanded {
   display: grid;
   grid-template-columns: subgrid;
   grid-column: 1 / -1;
-  gap: 14px;
+  gap: 10px;
   padding: 10px 14px 12px;
 }
-.model-card-expanded .mce-left  { grid-column: 1; }
-.model-card-expanded .mce-right { grid-column: 2 / -1; }
-@media (max-width: 899px) {
-  .model-card-expanded .mce-left,
-  .model-card-expanded .mce-right { grid-column: 1 / -1; }
+.model-card-expanded .mce-summary,
+.model-card-expanded .mce-parts { grid-column: 1 / -1; }
+
+
+/* The health sentence: what the state means for the reader. */
+.mce-summary .mce-say {
+  margin: 0;
+  font-size: var(--fs-sm);
+  color: var(--text-secondary);
+  max-width: 74ch;
+  line-height: 1.45;
 }
 
-.model-card-expanded .mce-left {
+/* A one-line fact with an icon and an optional action — privacy, placement.
+   Replaced titled panels whose content was a sentence and a switch. */
+.mce-summary .mce-line {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-sm);
+  color: var(--text-secondary);
+  line-height: 1.45;
+}
+.mce-summary .mce-line b { color: var(--text-primary); font-weight: 650; }
+.mce-summary .mce-line-icon { flex: none; opacity: 0.85; }
+.mce-summary .mce-line-text { flex: 1; min-width: 0; }
+.mce-summary .mce-line.mce-section-toggleable { cursor: pointer; }
+.mce-summary .mce-line.mce-section-toggleable:hover { border-color: var(--accent); }
+
+/* The parts table, hidden until asked for. */
+.mce-parts[data-parts-open="0"] { display: none; }
+.mce-more { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.mce-disclose {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: none; border: none; padding: 0;
+  color: var(--accent); font-size: var(--fs-sm); font-family: inherit;
+  cursor: pointer;
+}
+.mce-disclose:hover { text-decoration: underline; }
+.mce-disclose-caret { font-size: var(--fs-2xs); }
+/* "Technical details" is a peer of "Show the N parts", not a button: both
+   reveal detail, so they read the same. */
+.mce-more .btn-action {
+  background: none; border: none; padding: 0;
+  color: var(--accent); font-size: var(--fs-sm); font-family: inherit;
+  cursor: pointer;
+}
+.mce-more .btn-action:hover { text-decoration: underline; }
+
+.model-card-expanded .mce-summary {
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -5113,100 +5182,50 @@ textarea.pool-code-input { min-height: 4.5em; }
 
 /* Section frame — three labeled groups (STATUS/CONFIG/PRIVACY) that share
    a consistent visual rhythm. Each has a small muted title and a padded body. */
-.model-card-expanded .mce-left .mce-section {
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  padding: 8px 10px;
-  background: rgba(255,255,255,0.015);
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-.model-card-expanded .mce-left .mce-section-title {
-  font-size: var(--fs-2xs);
-  color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  font-weight: 600;
-  margin: 0;
-}
-.model-card-expanded .mce-left .mce-section-body {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 6px;
-}
 /* The swarm-health line — health badge + peer count, no section frame.
    It replaced a titled STATUS box whose main content was the status badge
    the collapsed row now states in words. */
-.model-card-expanded .mce-left .mce-headline {
+.model-card-expanded .mce-summary .mce-headline {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 6px 10px;
 }
-.model-card-expanded .mce-left .mce-headline .mce-health {
+.model-card-expanded .mce-summary .mce-headline .mce-health {
   margin: 0;
 }
-.model-card-expanded .mce-left .mce-headline .mce-health-detail {
-  font-size: var(--fs-2xs);
-}
-.model-card-expanded .mce-left .mce-section-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-.model-card-expanded .mce-left .mce-status-peers {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  font-size: var(--fs-2xs);
-  color: var(--text-secondary);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
-.model-card-expanded .mce-left .mce-status-peers.mce-warn {
-  color: var(--orange-text);
-  cursor: help;
-}
-.model-card-expanded .mce-left .mce-status-icon {
-  opacity: 0.75;
-  font-size: var(--fs-md);
-}
-
 /* The spec line — label/value pairs on one wrapping row. It replaced a
    titled <dl> grid of six pairs, two of which (size, parts) the collapsed
    row now states in words. Wraps rather than scrolling: every value here is
    a short token. */
-.model-card-expanded .mce-left .mce-spec {
+.model-card-expanded .mce-summary .mce-spec {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 4px 14px;
   font-size: var(--fs-xs);
 }
-.model-card-expanded .mce-left .mce-spec-item {
+.model-card-expanded .mce-summary .mce-spec-item {
   display: inline-flex;
   align-items: center;
   gap: 5px;
   min-width: 0;
 }
-.model-card-expanded .mce-left .mce-spec-k {
+.model-card-expanded .mce-summary .mce-spec-k {
   color: var(--text-muted);
   font-size: var(--fs-2xs);
   text-transform: uppercase;
   letter-spacing: 0.06em;
   font-weight: 600;
 }
-.model-card-expanded .mce-left .mce-spec-v {
+.model-card-expanded .mce-summary .mce-spec-v {
   color: var(--text-primary);
   display: inline-flex;
   align-items: center;
   gap: 4px;
   min-width: 0;
 }
-.model-card-expanded .mce-left .mce-spec .mce-info-pill {
+.model-card-expanded .mce-summary .mce-spec .mce-info-pill {
   display: inline-block;
   padding: 1px 6px;
   border-radius: var(--radius-pill, 9999px);
@@ -5217,7 +5236,7 @@ textarea.pool-code-input { min-height: 4.5em; }
   color: var(--text-primary);
   letter-spacing: 0.03em;
 }
-.model-card-expanded .mce-left .mce-spec .model-card-detail-badges {
+.model-card-expanded .mce-summary .mce-spec .model-card-detail-badges {
   display: inline-flex;
   padding: 0;
   margin: 0;
@@ -5227,43 +5246,39 @@ textarea.pool-code-input { min-height: 4.5em; }
 /* -------- Section state modifiers (shared by any .mce-section) --------
    Paints the frame + title in a single color family. Inner content inherits
    visual context without needing its own borders or backgrounds. */
-.model-card-expanded .mce-left .mce-section.mce-section-state-green {
+.model-card-expanded .mce-summary .mce-section-state-green {
   border-color: rgba(34,197,94,0.45);
   background: rgba(34,197,94,0.08);
 }
-.model-card-expanded .mce-left .mce-section.mce-section-state-green .mce-section-title { color: var(--green-text); }
-.model-card-expanded .mce-left .mce-section.mce-section-state-blue {
+.model-card-expanded .mce-summary .mce-section-state-blue {
   border-color: rgba(59,130,246,0.35);
   background: var(--accent-glow);
 }
-.model-card-expanded .mce-left .mce-section.mce-section-state-blue .mce-section-title { color: var(--accent); }
-.model-card-expanded .mce-left .mce-section.mce-section-state-amber {
+.model-card-expanded .mce-summary .mce-section-state-amber {
   border-color: rgba(245,158,11,0.35);
   background: rgba(245,158,11,0.08);
 }
-.model-card-expanded .mce-left .mce-section.mce-section-state-amber .mce-section-title { color: var(--orange-text); }
 /* Red is NOT "worse amber": amber means the model works without prompt privacy,
    red means the setting is on, cannot be satisfied, and every request for this
    model is failing right now. Those need to look different at a glance. */
-.model-card-expanded .mce-left .mce-section.mce-section-state-red {
+.model-card-expanded .mce-summary .mce-section-state-red {
   border-color: rgba(239,68,68,0.45);
   background: var(--red-dim);
 }
-.model-card-expanded .mce-left .mce-section.mce-section-state-red .mce-section-title { color: var(--red-text); }
 
 /* Toggleable section (clickable panel — e.g. Privacy enable/disable) */
-.model-card-expanded .mce-left .mce-section.mce-section-toggleable {
+.model-card-expanded .mce-summary .mce-section-toggleable {
   cursor: pointer;
   user-select: none;
   transition: transform 0.12s, box-shadow 0.15s, border-color 0.15s;
 }
-.model-card-expanded .mce-left .mce-section.mce-section-toggleable:hover {
+.model-card-expanded .mce-summary .mce-section-toggleable:hover {
   box-shadow: 0 0 0 2px rgba(255,255,255,0.04), 0 2px 6px rgba(0,0,0,0.15);
 }
-.model-card-expanded .mce-left .mce-section.mce-section-toggleable:active { transform: scale(0.99); }
+.model-card-expanded .mce-summary .mce-section-toggleable:active { transform: scale(0.99); }
 
 /* Section right-aligned action/hint in the header (e.g. "Disable" toggle hint) */
-.model-card-expanded .mce-left .mce-section-action {
+.model-card-expanded .mce-summary .mce-section-action {
   font-size: var(--fs-2xs);
   font-weight: 700;
   text-transform: uppercase;
@@ -5274,26 +5289,16 @@ textarea.pool-code-input { min-height: 4.5em; }
   color: inherit;
   opacity: 0.85;
 }
-.model-card-expanded .mce-left .mce-section.mce-section-state-green .mce-section-action {
+.model-card-expanded .mce-summary .mce-section-state-green .mce-section-action {
   background: rgba(34,197,94,0.22); color: var(--green-text);
 }
-.model-card-expanded .mce-left .mce-section.mce-section-state-blue .mce-section-action {
+.model-card-expanded .mce-summary .mce-section-state-blue .mce-section-action {
   background: rgba(59,130,246,0.2); color: var(--accent);
 }
 
 /* Section detail text (secondary/explanatory copy inside the body) */
-.model-card-expanded .mce-left .mce-section-detail {
-  color: var(--text-muted);
-  font-size: var(--fs-2xs);
-  line-height: 1.35;
-}
-.model-card-expanded .mce-left .mce-section-icon {
-  font-size: var(--fs-sm);
-  line-height: 1;
-}
-
 /* File-missing warning sits below actions as a subtle caution line */
-.model-card-expanded .mce-left .mce-file-warn {
+.model-card-expanded .mce-summary .mce-file-warn {
   font-size: var(--fs-xs);
   color: var(--orange-text);
   padding-top: 2px;
@@ -5316,14 +5321,14 @@ textarea.pool-code-input { min-height: 4.5em; }
 
 /* Health chip shown in STATUS section body — matches composite-badge /
    ph-tag visual language (uppercase, bordered, compact). */
-.model-card-expanded .mce-left .mce-health {
+.model-card-expanded .mce-summary .mce-health {
   display: inline-flex;
   align-items: center;
   gap: 8px;
   font-size: var(--fs-2xs);
   color: var(--text-muted);
 }
-.model-card-expanded .mce-left .mce-health-label {
+.model-card-expanded .mce-summary .mce-health-label {
   display: inline-flex;
   align-items: center;
   font-weight: 700;
@@ -5336,24 +5341,22 @@ textarea.pool-code-input { min-height: 4.5em; }
   line-height: 1.4;
   white-space: nowrap;
 }
-.model-card-expanded .mce-left .mce-health.health-full .mce-health-label {
+.model-card-expanded .mce-summary .mce-health.health-full .mce-health-label {
   color: var(--green-text); background: var(--green-dim);
   border-color: rgba(34,197,94,0.35);
 }
-.model-card-expanded .mce-left .mce-health.health-good .mce-health-label {
+.model-card-expanded .mce-summary .mce-health.health-good .mce-health-label {
   color: var(--accent); background: var(--accent-glow);
   border-color: rgba(59,130,246,0.35);
 }
-.model-card-expanded .mce-left .mce-health.health-partial .mce-health-label {
+.model-card-expanded .mce-summary .mce-health.health-partial .mce-health-label {
   color: var(--orange-text); background: var(--orange-dim);
   border-color: rgba(245,158,11,0.35);
 }
-.model-card-expanded .mce-left .mce-health.health-low .mce-health-label {
+.model-card-expanded .mce-summary .mce-health.health-low .mce-health-label {
   color: var(--red-text); background: var(--red-dim, rgba(239,68,68,0.15));
   border-color: rgba(239,68,68,0.5);
 }
-.model-card-expanded .mce-left .mce-health-detail { color: var(--text-muted); font-size: var(--fs-2xs); }
-
 /* ---- FIRST/LAST endpoint badges + pipeline-pinned (E2E) accent ----
    Endpoint rows (first & last shards) are the pipeline trust anchors — they
    get a stronger visual treatment when the E2E pipeline is active so the
@@ -5407,58 +5410,9 @@ textarea.pool-code-input { min-height: 4.5em; }
   color: var(--green-text);
 }
 
-/* ---- Privacy-panel ↔ endpoint shard connectors ----
-   The mce-right column draws a dashed vertical line in its left gutter when
-   the card's pipeline is active. Endpoints are measured at render time (JS)
-   and written to --pipe-line-top / --pipe-line-bottom so the line runs
-   exactly from the first pinned row's center to the last pinned row's center. */
-.model-card-expanded .mce-right,
-.model-card-expanded .mce-left .mce-section-privacy {
-  position: relative;
-}
-.model-card-expanded.pipeline-encrypted .mce-right::before {
-  content: '';
-  position: absolute;
-  left: -7px;
-  top: var(--pipe-line-top, 44px);
-  bottom: var(--pipe-line-bottom, 50%);
-  width: 2px;
-  background: var(--green);
-  box-shadow: 0 0 6px rgba(34,197,94,0.45);
-  pointer-events: none;
-  border-radius: 1px;
-}
-/* Matrix view: horizontal tail from the vertical line to the first
-   pinned column header, bridging the gap between the left gutter
-   line and the column in the matrix body. */
-.model-card-expanded.pipeline-encrypted .mce-right.pipe-matrix::after {
-  content: '';
-  position: absolute;
-  left: -7px;
-  top: var(--pipe-tail-y, 44px);
-  right: var(--pipe-tail-x, 100%);
-  height: 2px;
-  background: var(--green);
-  box-shadow: 0 0 6px rgba(34,197,94,0.45);
-  transform: translateY(-1px);
-  pointer-events: none;
-  border-radius: 1px;
-}
-/* Short solid stub on the privacy panel's right edge, joining the
-   vertical connector line in the gutter. Centered vertically. */
-.model-card-expanded.pipeline-encrypted .mce-section-privacy::after {
-  content: '';
-  position: absolute;
-  right: -9px;
-  top: 50%;
-  transform: translateY(-50%);
-  width: 9px;
-  height: 2px;
-  background: var(--green);
-  box-shadow: 0 0 6px rgba(34,197,94,0.6);
-  border-radius: 1px;
-  pointer-events: none;
-}
+/* The privacy↔endpoint connector line is gone with the two-column layout it
+   was drawn across. The privacy LINE says it in words; the part rows keep
+   their own 1ST / LAST badges and green tint. */
 /* Small green ticks where the connector joins each endpoint row */
 .shard-row-pipeline-pinned::before {
   content: '';
@@ -5473,7 +5427,7 @@ textarea.pool-code-input { min-height: 4.5em; }
   border-radius: 1px;
 }
 
-.model-card-expanded .mce-left .mce-actions {
+.model-card-expanded .mce-summary .mce-actions {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
@@ -5484,9 +5438,10 @@ textarea.pool-code-input { min-height: 4.5em; }
    .btn-primary-action → primary variant (filled accent).
    .btn-danger          → destructive variant (red tint, stronger on hover).
    .btn-download        → primary-tinted outline.
-   Layout: buttons flex 1 1 calc(50% - 6px) so two buttons split 50/50
-   and a single button stretches the full column width. */
-.model-card-expanded .mce-left .mce-actions .btn-action {
+   Layout: natural width, left-aligned. They used to split the 336px left
+   column 50/50, which in a full-width summary stretched two buttons across
+   the whole card and made "Remove model" a target the size of a banner. */
+.model-card-expanded .mce-summary .mce-actions .btn-action {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -5504,44 +5459,44 @@ textarea.pool-code-input { min-height: 4.5em; }
   box-shadow: 0 1px 2px rgba(0,0,0,0.06);
   transition: background 0.15s, border-color 0.15s, color 0.15s, box-shadow 0.15s;
   white-space: nowrap;
-  flex: 1 1 calc(50% - 6px);
+  flex: 0 0 auto;
   min-width: 0;
 }
-.model-card-expanded .mce-left .mce-actions .btn-action:hover {
+.model-card-expanded .mce-summary .mce-actions .btn-action:hover {
   background: var(--bg-tertiary);
   border-color: var(--border-light);
 }
-.model-card-expanded .mce-left .mce-actions .btn-action:focus-visible {
+.model-card-expanded .mce-summary .mce-actions .btn-action:focus-visible {
   outline: none;
   box-shadow: 0 0 0 2px var(--bg-primary), 0 0 0 4px var(--ring);
 }
-.model-card-expanded .mce-left .mce-actions .btn-action.btn-primary-action {
+.model-card-expanded .mce-summary .mce-actions .btn-action.btn-primary-action {
   background: var(--accent);
   border-color: var(--accent);
   color: var(--accent-ink);
   font-weight: 600;
   box-shadow: 0 1px 2px rgba(0,0,0,0.12);
 }
-.model-card-expanded .mce-left .mce-actions .btn-action.btn-primary-action:hover {
+.model-card-expanded .mce-summary .mce-actions .btn-action.btn-primary-action:hover {
   background: var(--accent-hover, #2563eb);
   border-color: var(--accent-hover, #2563eb);
 }
-.model-card-expanded .mce-left .mce-actions .btn-action.btn-download {
+.model-card-expanded .mce-summary .mce-actions .btn-action.btn-download {
   background: var(--accent-glow);
   border-color: rgba(59,130,246,0.35);
   color: var(--accent);
   font-weight: 600;
 }
-.model-card-expanded .mce-left .mce-actions .btn-action.btn-download:hover {
+.model-card-expanded .mce-summary .mce-actions .btn-action.btn-download:hover {
   background: rgba(59,130,246,0.2);
   border-color: var(--accent);
 }
-.model-card-expanded .mce-left .mce-actions .btn-action.btn-danger {
+.model-card-expanded .mce-summary .mce-actions .btn-action.btn-danger {
   background: transparent;
   border-color: rgba(239,68,68,0.3);
   color: var(--red-text);
 }
-.model-card-expanded .mce-left .mce-actions .btn-action.btn-danger:hover {
+.model-card-expanded .mce-summary .mce-actions .btn-action.btn-danger:hover {
   background: var(--red-dim, rgba(239,68,68,0.12));
   border-color: var(--red);
 }
@@ -5550,20 +5505,6 @@ textarea.pool-code-input { min-height: 4.5em; }
   flex-direction: column;
   gap: 8px;
   min-width: 0;
-}
-.model-card-expanded .mce-right-title {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  margin-bottom: 4px;
-}
-.model-card-expanded .mce-right-title .mce-section-title {
-  font-size: var(--fs-2xs);
-  color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  font-weight: 600;
 }
 .model-card-expanded .mce-right-head {
   display: flex;
