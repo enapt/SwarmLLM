@@ -826,7 +826,35 @@ pub async fn diagnostics(
             );
         } else {
             for sid in disputed.iter().take(32) {
-                let _ = writeln!(out, "  {} shard {}", sid.model_id.0, sid.index);
+                // **Which of the two paths found it matters, and the difference
+                // is invisible otherwise.** The startup sweep only examines
+                // shards this node is already a holder of, and keeps
+                // advertising them — so those are being served, disagreement
+                // and all. The auto-manage rescan examines shards it is about
+                // to ADOPT, and a disagreement makes it skip registration — so
+                // those sit on disk serving nobody, silently, with the storage
+                // still spent.
+                //
+                // The two answers to one question are not reconciled here on
+                // purpose: adopting a shard is a new claim and declining is
+                // recoverable, whereas destroying bytes is not, and there is no
+                // field evidence yet about which case actually occurs. Print
+                // them apart so the evidence can arrive.
+                let serving = ss
+                    .model_registry
+                    .shard_holders(sid)
+                    .contains(ss.identity.node_id());
+                let _ = writeln!(
+                    out,
+                    "  {} shard {} — {}",
+                    sid.model_id.0,
+                    sid.index,
+                    if serving {
+                        "held and still served"
+                    } else {
+                        "on disk, not claimed"
+                    }
+                );
             }
             if disputed.len() > 32 {
                 let _ = writeln!(out, "  … and {} more", disputed.len() - 32);

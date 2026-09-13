@@ -1650,6 +1650,27 @@ build either until there is field data; the instrument is there to produce it,
 and `-- shards kept despite disagreeing --` in a pasted diagnostics report is
 what to look for.
 
+**A second, narrower gap surfaced while wiring the instrument, and is also
+deliberately not fixed.** The two paths that re-check bytes on disk reach
+different outcomes for the same disputed shard:
+
+- The **startup sweep** looks only at shards this node is already a holder of.
+  On a disagreement it keeps them AND keeps advertising them — so they are
+  served, disagreement and all.
+- The **auto-manage rescan** looks at shards it is about to ADOPT. On a
+  disagreement it skips registration, so the file sits on disk serving nobody,
+  with the storage still spent.
+
+Before v0.3.177 the rescan quarantined instead, so this is strictly better and
+not a regression — but the outcome now depends on whether the registry happened
+to remember the shard, which is not a principled distinction. The defensible
+version of the asymmetry is that adopting is a new claim and declining it is
+recoverable, whereas destroying bytes is not; the indefensible version is that
+nobody chose it. There is no evidence yet that the rescan case occurs at all,
+so the diagnostics section distinguishes the two ("held and still served" vs
+"on disk, not claimed") rather than picking a policy for a case that may be
+hypothetical. **If reports show only the first, this needs no fix.**
+
 ## Replica counts do not react to holders being unusable (open, 2026-09-07)
 
 Reported as #024: `geo_target_replicas` (auto_manage/scoring.rs) and
