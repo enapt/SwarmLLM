@@ -196,6 +196,16 @@ Showing a meaningless number is a smaller problem than *acting* on one. So:
   gone.
 - The dashboard no longer presents a balance, a leaderboard, or "earn credits"
   copy as a headline feature.
+- **Nor does the command line.** `swarmllm pool status` went on printing
+  "Total Credits", a CREDITS column per device, and — on joining — "All credits
+  earned by this device will be forwarded to the pool owner", which is a promise
+  of value transfer about a figure nobody reconciles. Fixed 2026-09-13. The
+  cleanup had covered the dashboard, the leaderboard API and the frontend JS:
+  three surfaces, all of them reached through a browser. "Every surface" had
+  quietly come to mean "every surface the browser reaches", which is this
+  codebase's most-repeated defect. `credits_stay_dormant` in
+  `tests/repo_consistency.rs` now scans printed CLI output too, with a
+  planted-violation self-test.
 
 **The accounting itself keeps running.** It is harmless, it costs nothing, and
 the recorded figures are the only real data about what the traffic patterns
@@ -234,6 +244,11 @@ Credits do not become visible or enforcing again until all of these hold:
 - [ ] Migration decision (§5.1) made and implemented.
 - [ ] The dashboard explains what the number means in one sentence a
       non-technical user can act on.
+
+**"Visible" means every surface, and they must be enumerated rather than
+assumed**: the dashboard, the leaderboard, the frontend JS, the CLI, the
+diagnostics report, and any API field a client renders. The 2026-09-13 CLI fix
+exists because only the first three were checked.
 
 ---
 

@@ -2570,6 +2570,127 @@ fn credits_stay_dormant() {
          display it (docs/CREDITS_DESIGN.md § 4).\n{}",
         offenders.join("\n")
     );
+
+    // 5. And no COMMAND-LINE output publishes one either.
+    //
+    //    § 6's exit criteria say credits "do not become visible or enforcing
+    //    again" until a credit provably moves between two machines. That was
+    //    applied to the dashboard, to the leaderboard API and to the frontend
+    //    JS — three surfaces, all reached through a browser — while
+    //    `swarmllm pool status` went on printing "Total Credits", a CREDITS
+    //    column per device, and, on joining, "All credits earned by this device
+    //    will be forwarded to the pool owner": a promise of value transfer
+    //    about a figure nobody reconciles. "Every surface" had quietly been
+    //    read as "every surface the browser reaches", which is this codebase's
+    //    most-repeated defect (`.claude/rules/architecture.md` § "One
+    //    invariant, N paths").
+    //
+    //    Scanned as printed OUTPUT rather than as any mention of the word, so
+    //    the flag names, doc comments and the forwarding mechanism itself —
+    //    which still runs — are untouched.
+    let mut cli_offenders: Vec<String> = Vec::new();
+    // `src/main.rs` carries the top-level clap tree, so it is part of the CLI
+    // surface even though it is not under `src/cli`. **A single FILE in the
+    // stack, which the walk has to handle**: written first as a directory-only
+    // walk, `read_dir` on a file simply errored and the entry was skipped, so
+    // the guard could not fire on main.rs at all. Caught by planting the
+    // violation, which is the only way that shape of hole is ever found
+    // (`.claude/rules/architecture.md` § "A source-scanning guard is only as
+    // good as the spellings it knows").
+    let mut files: Vec<std::path::PathBuf> = Vec::new();
+    let mut stack = vec![root.join("src/cli"), root.join("src/main.rs")];
+    while let Some(entry) = stack.pop() {
+        if entry.is_file() {
+            if entry.extension().is_some_and(|x| x == "rs") {
+                files.push(entry);
+            }
+            continue;
+        }
+        let Ok(rd) = std::fs::read_dir(&entry) else {
+            continue;
+        };
+        for e in rd.filter_map(|e| e.ok()) {
+            stack.push(e.path());
+        }
+    }
+    assert!(
+        files.iter().any(|p| p.ends_with("main.rs")),
+        "the CLI scan must reach src/main.rs — it holds the top-level clap tree"
+    );
+    {
+        for p in &files {
+            let p = p.clone();
+            let Ok(text) = std::fs::read_to_string(&p) else {
+                continue;
+            };
+            for (line, stmt) in statements(&text) {
+                let printing = stmt.contains("println!") || stmt.contains("print!");
+                if printing && stmt.to_lowercase().contains("credit") {
+                    cli_offenders.push(format!(
+                        "{}:{line}: {stmt}",
+                        p.strip_prefix(&root).unwrap_or(&p).display()
+                    ));
+                }
+            }
+            // A `///` in a clap-derive tree is not a note to the next reader —
+            // it is the help text, printed verbatim by `--help`. `statements`
+            // drops comments (rightly, for the scan above), so this is a second
+            // pass. It is what the first version of this guard missed: the CLI
+            // output was cleaned and `swarmllm pool --help` still opened with
+            // "Device pool management (combine credits across your devices)",
+            // describing the command's PURPOSE as the dormant thing.
+            for (i, l) in text.lines().enumerate() {
+                let l = l.trim();
+                if l.starts_with("///") && l.to_lowercase().contains("credit") {
+                    cli_offenders.push(format!(
+                        "{}:{}: {l}  (a doc comment here is printed by --help)",
+                        p.strip_prefix(&root).unwrap_or(&p).display(),
+                        i + 1
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        cli_offenders.is_empty(),
+        "command-line output publishes a credit figure. Credits are dormant and \
+         do not become visible again until the exit criteria in \
+         docs/CREDITS_DESIGN.md § 6 hold — and that applies to every surface, \
+         not only the ones a browser reaches.\n{}",
+        cli_offenders.join("\n")
+    );
+}
+
+/// The CLI half of the guard above must actually be able to fire, on the shape
+/// the real code was written in — a `println!` that rustfmt has wrapped across
+/// several lines, with the word in the format string rather than on the
+/// `println!` line. Planted violation, per `.claude/rules/architecture.md` §
+/// "A source-scanning guard is only as good as the spellings it knows".
+#[test]
+fn the_dormant_credits_guard_sees_a_printed_balance_rustfmt_has_wrapped() {
+    let planted = "fn f() {\n\
+        \x20   println!(\n\
+        \x20       \"Total Credits: {}\",\n\
+        \x20       body.get(\"total_lifetime_credits\").unwrap()\n\
+        \x20   );\n\
+        }\n";
+    assert!(
+        statements(planted).iter().any(|(_, s)| {
+            (s.contains("println!") || s.contains("print!")) && s.to_lowercase().contains("credit")
+        }),
+        "the scanner must see a wrapped println! whose credit mention is on a \
+         later line than the macro itself"
+    );
+
+    // And it must NOT fire on the mechanism, which still runs and is still
+    // named in flags and doc comments.
+    let benign = "/// Forward credits to the pool owner.\nfn forward_credits() {}\n";
+    assert!(
+        !statements(benign).iter().any(|(_, s)| {
+            (s.contains("println!") || s.contains("print!")) && s.to_lowercase().contains("credit")
+        }),
+        "a doc comment naming the mechanism is not a published balance"
+    );
 }
 
 /// Nothing outside `chat.js` may decide "is the user looking at the empty chat

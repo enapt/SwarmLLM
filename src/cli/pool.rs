@@ -19,7 +19,7 @@ pub enum PoolAction {
         /// The invite code (e.g., A3F7K2M9)
         code: String,
     },
-    /// Show pool status, members, and credit summary
+    /// Show pool status and the devices in it
     Status,
     /// Leave the current pool
     Leave,
@@ -120,7 +120,14 @@ pub async fn run_pool_command(
             .await?;
             println!("Join request sent! Your device will be added to the pool");
             println!("once the owner's node processes the request.");
-            println!("\nAll credits earned by this device will be forwarded to the pool owner.");
+            // Deliberately says what the pool DOES rather than what it pays.
+            // This used to promise "all credits earned by this device will be
+            // forwarded to the pool owner" — a claim of value transfer about a
+            // figure that is self-minted and reconciled with nobody, which is
+            // exactly what `docs/CREDITS_DESIGN.md` § 4 switched off. The
+            // dashboard was cleaned; the CLI was never enumerated.
+            println!("\nThis device will serve requests as part of the pool, and the");
+            println!("pool's owner can pin models to it.");
         }
         PoolAction::Status => {
             let resp = client
@@ -141,20 +148,19 @@ pub async fn run_pool_command(
                     "Pool ID: {}",
                     body.get("pool_id").and_then(|v| v.as_str()).unwrap_or("?")
                 );
-                println!(
-                    "Total Credits: {}",
-                    body.get("total_lifetime_credits")
-                        .and_then(|v| v.as_i64())
-                        .unwrap_or(0)
-                );
+                // No credit total, and no CREDITS column below. Credits are
+                // dormant and gate nothing (`MIN_BALANCE_FOR_INFERENCE = 0`,
+                // `calculate_tier` ignores the balance); the exit criteria in
+                // `docs/CREDITS_DESIGN.md` § 6 say they do not become visible
+                // again until a credit provably moves between two machines. The
+                // dashboard and the leaderboard stopped showing a balance; this
+                // did not, because "every surface" was read as "every surface
+                // the browser reaches".
                 println!();
                 if let Some(members) = body.get("members").and_then(|v| v.as_array()) {
-                    let header = format!(
-                        "  {:<20} {:>8} {:>12} {}",
-                        "DEVICE", "CONTRIB", "CREDITS", "JOINED"
-                    );
+                    let header = format!("  {:<20} {:>8} {}", "DEVICE", "CONTRIB", "JOINED");
                     println!("{header}");
-                    println!("{}", "-".repeat(58));
+                    println!("{}", "-".repeat(45));
                     for m in members {
                         let nid = m.get("node_id").and_then(|v| v.as_str()).unwrap_or("?");
                         let short_id = if nid.len() > 12 { &nid[..12] } else { nid };
@@ -166,10 +172,6 @@ pub async fn run_pool_command(
                             .get("contribution_level")
                             .and_then(|v| v.as_u64())
                             .unwrap_or(100);
-                        let credits = m
-                            .get("credits_contributed")
-                            .and_then(|v| v.as_i64())
-                            .unwrap_or(0);
                         let joined = m
                             .get("joined_at")
                             .and_then(|v| v.as_str())
@@ -184,7 +186,7 @@ pub async fn run_pool_command(
                             (true, false) => "[on] ",
                             (false, false) => "[off]",
                         };
-                        println!("{online} {display:<18} {level:>5}% {credits:>12} {joined}");
+                        println!("{online} {display:<18} {level:>5}% {joined}");
                     }
                 }
             } else {
@@ -204,7 +206,7 @@ pub async fn run_pool_command(
                 port,
             )
             .await?;
-            println!("Left the device pool. Credits will no longer be forwarded.");
+            println!("Left the device pool. This device now serves the swarm on its own.");
         }
     }
 

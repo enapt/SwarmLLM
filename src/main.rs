@@ -259,7 +259,7 @@ enum Commands {
         #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
         batched_prefill_forward: bool,
     },
-    /// Device pool management (combine credits across your devices)
+    /// Group your own devices so they serve each other privately
     Pool {
         #[command(subcommand)]
         action: PoolAction,
