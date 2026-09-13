@@ -1,5 +1,60 @@
 # Changelog
 
+## [0.3.178-alpha] — 2026-09-13
+
+A rebuild of the model list and the network view, driven by people using the
+app while it was being changed. Plus one number that had been wrong since the
+feature existed.
+
+### Fixed
+
+- **Models were reporting the wrong quality setting.** Every model is
+  compressed before it is shared, and how much it was compressed decides how
+  good its answers are and how much memory it needs. SwarmLLM read that setting
+  from the file and then looked it up in a table that was wrong — so the most
+  common setting of all, the balanced one nearly everyone uses, was displayed as
+  the most aggressive compression there is. Nothing was actually wrong with
+  anybody's models; the label was. It had been wrong for as long as the panel
+  existed, and it was only noticed because that panel stopped being hidden
+  behind a link this release.
+- **Cancelling a download left the model's parts showing the wrong thing.** The
+  row kept whatever it had said before until the next refresh.
+
+### Changed
+
+- **Every model in the list now says what it is, in words.** A row used to be a
+  name and a coloured bar; whether you were storing it, and how big it was, took
+  a click to find out. Each row now reads "You host all 4 parts · 1.6 GB", or
+  "On 3 other computers · 4.6 GB" for one the network has and you do not — and
+  the rows are grouped under **On this computer** and **On other computers**, so
+  nothing looks missing when it is simply further down.
+- **Opening a model shows everything at once.** It used to be five stacked
+  boxes and a table of every part, with no answer to the questions people
+  actually open it for. It now begins with those answers in plain sentences —
+  whether the model is safe on the network, whether your conversations stay
+  private, and what you can do about either — with the technical details and the
+  parts side by side underneath. No links to expand.
+- **The parts of a model read as sentences.** "Part 1 of 4 · reads your prompt ·
+  On this computer, ready now · also on 4 other computers" instead of a row of
+  symbols. The first part of a model turns your question into numbers and the
+  last one writes the reply, which is also exactly why holding both is what
+  keeps a conversation private — the old labels said "1st" and "last" and left
+  that unsaid.
+- **The map and the leaderboard are one place again.** They were moved into an
+  overflow menu last release; someone who uses SwarmLLM daily pointed out they
+  were the two links they used most. They are now a single **Network** tab, and
+  the map draws the routes recent requests actually took — real arcs between the
+  countries that did the work, not a guess.
+- **The dashboard leads with what your node is doing.** Activity moved up near
+  the top and the model list moved down, because what it is holding changes far
+  less often than what it is doing.
+- **The version number links to its own release notes**, and the top of the
+  window now shows the project's GitHub and a link to the Discord — the fastest
+  way to find people to pool with.
+- Fewer ways to sort the model list (three, from six — three of them answered
+  the same question), and the raw file details moved off every row into the
+  model you opened.
+
 ## [0.3.177-alpha] — 2026-09-13
 
 One important fix underneath, and a pass over the parts of the app you meet in
