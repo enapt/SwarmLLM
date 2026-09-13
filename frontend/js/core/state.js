@@ -83,9 +83,16 @@ window.App = {
   // pruneSchedule, networkCode, networkStatus, pool, swarmTab
 };
 
-// Initialize _swarmModelSort using the constant now that App is defined
+// Initialize _swarmModelSort using the constant now that App is defined.
+// A stored value that is no longer offered falls back to the default rather
+// than through every branch of the sorter to an UNSORTED list — the modes
+// were trimmed from six to three on 2026-09-13, so browsers carry retired
+// ones ('za', 'status', 'shards') indefinitely.
+App.SWARM_SORT_MODES = ['problems', 'az', 'size'];
 try {
-  App.state._swarmModelSort = localStorage.getItem(App.MODEL_SORT_KEY) || 'problems';
+  var storedSort = localStorage.getItem(App.MODEL_SORT_KEY);
+  App.state._swarmModelSort =
+    App.SWARM_SORT_MODES.indexOf(storedSort) !== -1 ? storedSort : 'problems';
   App.state._shardView = localStorage.getItem(App.SHARD_VIEW_KEY) || 'list';
 } catch (e) {}
 

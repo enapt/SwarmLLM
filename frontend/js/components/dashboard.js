@@ -1090,24 +1090,8 @@
             var na = (a.name || a.id).toLowerCase(), nb = (b.name || b.id).toLowerCase();
             return na < nb ? -1 : na > nb ? 1 : 0;
           });
-        } else if (mode === 'za') {
-          sorted.sort(function(a, b) {
-            var na = (a.name || a.id).toLowerCase(), nb = (b.name || b.id).toLowerCase();
-            return na > nb ? -1 : na < nb ? 1 : 0;
-          });
-        } else if (mode === 'status') {
-          var rank = { loaded: 0, ready: 1, downloading: 2, partial: 3, available: 4, network: 5 };
-          sorted.sort(function(a, b) {
-            var ra = rank[a.status] !== undefined ? rank[a.status] : 9;
-            var rb = rank[b.status] !== undefined ? rank[b.status] : 9;
-            if (ra !== rb) return ra - rb;
-            var na = (a.name || a.id).toLowerCase(), nb = (b.name || b.id).toLowerCase();
-            return na < nb ? -1 : na > nb ? 1 : 0;
-          });
         } else if (mode === 'size') {
           sorted.sort(function(a, b) { return (b.total_size_bytes || 0) - (a.total_size_bytes || 0); });
-        } else if (mode === 'shards') {
-          sorted.sort(function(a, b) { return (b.hosted_shards || 0) - (a.hosted_shards || 0); });
         }
         return sorted;
       }
@@ -1129,12 +1113,13 @@
           '<span class="models-section-title">' + U.escapeHtml(I18n.t('dashboard.swarm_models')) + '</span>' +
           '<span class="models-section-count">' + swarmMeta + '</span>' +
           '<select class="swarm-model-sort" id="swarm-model-sort" title="' + U.escapeHtml(I18n.t('dashboard.sort_title')) + '">' +
+            // Three modes, not six. "Z–A" is a way of reading fifteen rows
+            // nobody asks for; "Status" ranked the same six states "Problems
+            // first" already ranks; and "Local shards" sorted by a fact that
+            // was invisible until the row started stating it outright.
             '<option value="problems"' + (swarmSort === 'problems' ? ' selected' : '') + '>' + U.escapeHtml(I18n.t('dashboard.sort_problems')) + '</option>' +
             '<option value="az"' + (swarmSort === 'az' ? ' selected' : '') + '>' + U.escapeHtml(I18n.t('dashboard.sort_az')) + '</option>' +
-            '<option value="za"' + (swarmSort === 'za' ? ' selected' : '') + '>' + U.escapeHtml(I18n.t('dashboard.sort_za')) + '</option>' +
-            '<option value="status"' + (swarmSort === 'status' ? ' selected' : '') + '>' + U.escapeHtml(I18n.t('dashboard.section_status')) + '</option>' +
             '<option value="size"' + (swarmSort === 'size' ? ' selected' : '') + '>' + U.escapeHtml(I18n.t('dashboard.sort_size')) + '</option>' +
-            '<option value="shards"' + (swarmSort === 'shards' ? ' selected' : '') + '>' + U.escapeHtml(I18n.t('dashboard.sort_local_shards')) + '</option>' +
           '</select>' +
           '</summary>';
         swarmBody = document.createElement('div');
@@ -1246,9 +1231,17 @@
           detailBadgesHtml = '<div class="model-card-detail-badges">' + detailParts.join('') + '</div>';
         }
 
-        // Gear + info buttons
+        // Gear stays on the row — it is this model's own settings. The raw
+        // GGUF metadata dump does not: it is the most specialist thing the
+        // card can show, it was a bare ⓘ glyph explained only by hovering
+        // (which NN/g rules out and touch does not have at all), and it was on
+        // all fifteen collapsed rows. It moves into the expanded card beside
+        // the other details, with a name on it.
         var gearHtml = '<button class="model-gear-btn" data-am-gear="' + U.escapeHtml(m.id) + '" title="' + U.escapeHtml(I18n.t('dashboard.gear_title')) + '">&#9881;</button>';
-        var metaBtnHtml = m.has_header ? '<button class="model-meta-btn" data-meta-toggle="' + U.escapeHtml(m.id) + '" title="' + U.escapeHtml(I18n.t('models.metadata_header')) + '">&#9432;</button>' : '';
+        var metaBtnHtml = m.has_header
+          ? '<button class="btn-action" data-meta-toggle="' + U.escapeHtml(m.id) + '">' +
+              U.escapeHtml(I18n.t('models.metadata_header')) + '</button>'
+          : '';
 
         // Swarm health summary badge — shown in the left column of the expanded card.
         // Derived from per-shard holder counts across the network.
@@ -1615,7 +1608,7 @@
             // it did and is no taller for it.
             sublineHtml +
             '<div class="model-card-controls">' +
-              metaBtnHtml + gearHtml + chevronHtml +
+              gearHtml + chevronHtml +
             '</div>' +
           '</div>' +
           '<div class="model-card-shards">' +
@@ -1640,7 +1633,7 @@
                 // label/value pairs rather than a titled two-column grid.
                 // Trust badge ("Popular", "Verified") rides at its head.
                 '<div class="mce-spec">' + trustHeaderHtml + configGridHtml + '</div>' +
-                '<div class="mce-actions">' + actionHtml + removeHtml + '</div>' +
+                '<div class="mce-actions">' + actionHtml + metaBtnHtml + removeHtml + '</div>' +
                 (fileIndicators ? '<div class="mce-file-warn">' + fileIndicators + '</div>' : '') +
               '</div>' +
               '<div class="mce-right" data-shard-detail="' + safeId + '">' +

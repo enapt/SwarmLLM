@@ -2881,12 +2881,14 @@ kbd {
      the strips stop lining up as a column. Names longer than this still
      ellipsize and keep their full text in the tooltip.
      Column 3 carries the row's sentence (state, who holds it, size) and
-     column 4 the controls. The sentence column is FIXED for the same reason
-     the name column is: an `auto` track is measured per card, so every card
-     picked its own width and the strips stopped lining up — measured at six
-     different right edges across fifteen rows. A locale whose sentence is
-     longer than this ellipsizes and keeps the full text in its tooltip. */
-  grid-template-columns: 336px 1fr 250px auto;
+     column 4 the controls. BOTH are fixed for the same reason the name column
+     is: an `auto` track is measured per card, so every card picked its own
+     width and the strips stopped lining up — measured at six different right
+     edges across fifteen rows, two of them from one conditional button. A
+     fixed track means a row with different controls, or a locale with a
+     longer sentence, cannot move the column for everyone else; the sentence
+     ellipsizes and keeps its full text in a tooltip. */
+  grid-template-columns: 336px 1fr 280px 53px;
 }
 .model-card-title {
   display: grid;
@@ -2942,13 +2944,11 @@ kbd {
   min-width: 0;
 }
 .model-card .model-name { font-weight: 700; font-size: var(--fs-xl); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-/* Fixed width, not auto: a model with no GGUF header of its own renders no
-   ⓘ button, and an auto track then made that card's whole grid 29px wider —
-   the same per-card-grid trap the name and sentence columns are fixed for.
-   Right-aligned so the buttons still sit against the card edge. */
+/* The track is fixed in the card grid (see `.model-card`); this only aligns
+   the buttons to its right edge. */
 .model-card-controls {
   display: flex; align-items: center; justify-content: flex-end;
-  gap: 4px; flex-shrink: 0; grid-column: 4; width: 82px;
+  gap: 4px; flex-shrink: 0; grid-column: 4;
 }
 
 /* Shard body — full width to align with health bar in title */
