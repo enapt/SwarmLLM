@@ -223,88 +223,66 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 ## Status
 
-All 20 build phases complete. All subsystems wired — no stubs. **2632 lib (dev,claude-subscription) — re-measured 2026-09-13, full suite green (exit 0)** + 79 integration (31 `integration` + 34 `integration_phase10_11` + 14 `yamux_substream`) + 93 repo-consistency + 1 api_key_side_effects + 36 swarmllm-types tests passing; 12 lib + 1 e2e ignored (env-var or manual). Clippy clean on default, `--no-default-features --features dev,claude-subscription` (that combination is the documented one — plain `--features dev` leaves `embedded` on too and fails on dead code), a `--features llama` check, and `flash-attn --lib`. `cargo audit` reports only advisories already documented and accepted in `SECURITY.md` — at the .165 release, two (`hickory-proto` RUSTSEC-2026-0118/0119, both transitive via libp2p — 0.26.1 is a semver-MAJOR bump pinned by libp2p 0.56, so it is genuinely unreachable without upgrading libp2p; re-checked 2026-09-08, not merely re-accepted) plus the `paste` unmaintained warning.
+All 20 build phases complete. All subsystems wired — no stubs. **2632 lib (dev,claude-subscription) — re-measured 2026-09-13, full suite green (exit 0)** + 79 integration (31 `integration` + 34 `integration_phase10_11` + 14 `yamux_substream`) + 93 repo-consistency + 1 api_key_side_effects + 36 swarmllm-types tests passing; 12 lib + 1 e2e ignored (env-var or manual). Clippy clean on default, `--no-default-features --features dev,claude-subscription` (that combination is the documented one — plain `--features dev` leaves `embedded` on too and fails on dead code), a `--features llama` check, and `flash-attn --lib`. `cargo audit` reports only advisories already documented and accepted in `SECURITY.md` — re-checked at the .177 release 2026-09-13, two (`hickory-proto` RUSTSEC-2026-0118/0119, both transitive via libp2p — 0.26.1 is a semver-MAJOR bump pinned by libp2p 0.56, so it is genuinely unreachable without upgrading libp2p; re-checked 2026-09-08, not merely re-accepted) plus the `paste` unmaintained warning.
 
-**Released and deployed: v0.3.177-alpha (2026-09-13, tag on `2a11564e`).**
-Gate clean job-by-job — CI 14/14, Cache warm 3/3 with the kernels shown
-**restored AND skipped** (better than .176, which rebuilt them),
-`check_ci_gate.sh` 14=14, all ON THE TAGGED COMMIT; release 10/10 first time.
-On the DOWNLOADED artifact **smoke 9/9 + shapes 7/7 + conformance 9 families,
-0 FAIL**, matching a .176 baseline taken FIRST that scored identically
-(including the same two `n/a`, Phi-4-mini and GLM-4). Both nodes deployed and
-verified: local `225e6fe7f2b5cd74` and Proxmox `9684263580c6660f`, ids and
-`identity.key` unchanged, config untouched, 0 ERROR, paired at 81 ms. Rollback
-`~/.local/bin/swarmllm.0.3.176-alpha.bak`.
+**Released and deployed: v0.3.177-alpha (2026-09-13, tag `2a11564e`).** Gate
+clean job-by-job — CI 14/14, Cache warm 3/3 with kernels shown **restored AND
+skipped**, `check_ci_gate.sh` 14=14, all ON THE TAGGED COMMIT; release 10/10
+first time; on the DOWNLOADED artifact **smoke 9/9 + shapes 7/7 + conformance 9
+families 0 FAIL**, matching a .176 baseline taken FIRST that scored identically.
+Both nodes verified: local `225e6fe7f2b5cd74`, Proxmox `9684263580c6660f`, ids
+and `identity.key` unchanged, 0 ERROR, paired at 81 ms. Rollback
+`~/.local/bin/swarmllm.0.3.176-alpha.bak`. Full record:
+`memory/round_log_0913_shard_destruction.md`.
 
-**What .177 carries.** The one that matters: **a peer's gossip could make a node
-DELETE a shard it held correctly** (#581) — found live on this node's own
-restart, 507 MB quarantined, model unservable 11 minutes, replacement
-byte-identical to what was deleted. Six such quarantines across three models in
-55 hours of one log, all six condemned by a hash with no origin backing.
+**What .177 carries.** **#581 — a peer's gossip could make a node DELETE a shard
+it held correctly.** Found live: 507 MB quarantined, model unservable 11 min,
+replacement byte-identical to what was deleted; six such quarantines across
+three models in 55 h, all condemned by a hash with NO origin backing. Gotcha
+#384 recurring — that fix's coverage was only shards fetched FROM THE ORIGIN.
 `ModelRegistry::mismatch_policy` now gates destruction on origin-backed
 evidence, and `OnMismatch` is a REQUIRED parameter of `verify_shard`, which
 flushed out seven call sites including two that deleted files as a side effect
-of asking a question. Plus #582 (every node start warned the traffic metric
-"may have been renamed" — false, and one-shot so never retracted) and the
-first-hour UI pass (seven header icons → three destinations and a menu; the
-chat screen no longer points at a button that does not exist; a visible key for
-the shard bar).
+of asking a question. Plus #582 (every node start falsely warned the traffic
+metric "may have been renamed", one-shot so never retracted) and the first-hour
+UI pass (seven header icons → three destinations + a menu; the chat screen no
+longer points at a button that does not exist; a visible key for the shard bar).
 
-⚠ **The field A/B did NOT exercise the shard fix.** .177 logged
-`verified=65 quarantined=0` where .176 logged `quarantined=1` — but this
-morning's forced origin re-download recorded provenance for exactly the
-vulnerable shards, so the OLDER `register_manifest` guard now refuses those
-claims and the new `KeepBytes` path never ran (21 contradictions arrived, all
-refused by the old guard). Mechanism is proven by unit tests + null controls
-only. **`disputed` in the background-verification line is the instrument** that
-would show it firing. Open follow-up: item #61, the dispute is kept but never
-settled.
+⚠ **The .177 shard fix is UNVERIFIED IN THE FIELD.** The live node went
+`quarantined=1` → `quarantined=0`, but that is NOT evidence: the incident's own
+forced origin re-download gave those shards provenance, so the OLDER
+`register_manifest` guard refuses the claims and the new `KeepBytes` path never
+runs (21 contradictions during the run, all caught by the old guard). Proven by
+unit tests + null controls only. **`disputed` in the "Background shard
+verification complete" line is the instrument.** Follow-up: FUTURE_WORK #61.
 
-**New users first (user direction, 2026-09-12).** Growth is the bottleneck, not
-the depth of the stack — rank work by "would someone hit this in their first
-hour". **`memory/round_log_0912_new_user_sweep.md` is the queue**: what is
-already good and must not be simplified away, the jargon inventory, and the
-remaining items (the seven header icons, two of which duplicate Settings; the
-misleading "What we could run" label; dormant-credit strings). Read it before
-touching the frontend.
-
-**What v0.3.176 carries.** Under the hood: **#46** every tool schema reached
-every model ALPHABETISED (`preserve_order` on serde_json AND minijinja — two
-independent alphabetisers, so fixing either alone changed nothing); **#32** the
-KV cache is RESERVED at the admitted prompt length instead of grown by
-`Tensor::cat` (0 growth steps vs 144 on a 1901-token prompt — the field OOM
-itself is unreproduced here); **a silent peer is barred from the request's
-retry, which now happens by type**; and #569's traffic figure in `swarmllm
-status`. On the surface, the first-hour sweep: the front door opened on the
-OPERATOR CONSOLE and now opens on chat; the header carries three destinations
-plus "More" instead of seven; "Models" opened on models the swarm CANNOT have;
-every peer showed a TRUST score of 50% that was only the starting value; the
-shard-announce feed opens on demand. Round logs:
-`round_log_0912_{new_user_sweep,tool_schema_key_order,kv_reserve_and_silent_peer}.md`.
+**New users first (user direction, 2026-09-12).** Growth is the bottleneck —
+rank work by "would someone hit this in their first hour".
+`memory/round_log_0912_new_user_sweep.md` is the queue (what is already good and
+must NOT be simplified away, plus the jargon inventory); its items 1, 2 and 5
+are DONE. Read it before touching the frontend.
 
 ⚠ **Mobile (400px) is UNVERIFIED** — no tool here can give the page a narrow
 viewport (window resize is a no-op, the dashboard refuses to be framed, popups
 are blocked), so the narrow-width CSS is written to need no verification and
-says so at the rule. The nav change REDUCES narrow-width pressure (seven tabs
-to four), but that is reasoning, not observation.
+says so at the rule.
 
 **Bumping the version LAST is settled practice** — Cargo.toml changes in the
-bump commit, so Cache warm fires ON the tagged commit. Confirmed again at .176.
+bump commit, so Cache warm fires ON the tagged commit. Confirmed again at .177.
 
 **Release-gate cautions** (detail in `memory/open_cautions.md`): conformance is
-NINE families, ~25 minutes on an idle box, part of the gate — run it on the
-DOWNLOADED artifact against a baseline of the PREVIOUS release taken FIRST; it
-has found eight real defects that all pass `release_shapes.sh`. A CPU build
-REFUSES `-m`, so establish which BUILD and PATH a report exercised before
-deciding code is innocent (#552/#555). Branch protection requires 14 contexts —
-verify with `examples/check_ci_gate.sh` against a COMPLETED run only
-(#530/#557).
+NINE families, part of the gate — run it on the DOWNLOADED artifact against a
+baseline of the PREVIOUS release taken FIRST, and **capture that baseline in
+full; never `tail` it** (a truncated one had to be re-taken at .177). It has
+found eight real defects that all pass `release_shapes.sh`. A CPU build REFUSES
+`-m`, so establish which BUILD and PATH a report exercised before deciding code
+is innocent (#552/#555). Branch protection requires 14 contexts — verify with
+`examples/check_ci_gate.sh` against a COMPLETED run only (#530/#557).
 
 ### Earlier rounds — one line each. Detail in `memory/round_log_*.md`, gotcha numbers index `memory/gotchas.md`. **Read the named round log before re-deriving any of these.** Older than .160: `memory/round_history.md`.
 
-- **.176** (09-12, tag `f3daab6b`, gate clean, conformance 9/9 matching a .175 baseline that scored the same, constrained-node 12/12): tool schemas were ALPHABETISED for every model; the KV cache is reserved at the admitted prompt length; a silent peer is barred from the retry; and the first-hour sweep — the front door opened on the operator console, the header carried seven tabs, Models opened on models the swarm cannot have, every peer showed a trust score of 50% nobody measured. `round_log_0912_new_user_sweep.md`.
-- **.175** (09-12, tag `6bc9735d`, gate clean, conformance 9/9 matching a .174 baseline): six field reports — an undecryptable peer after a reconnect, the prefix cache never used on a returned plan, memory never released, Stop in the wrong chat, macOS RAM, live RX/TX. ⚠ THREE self-inflicted regressions caught in review, none by a test (#567-#569). `round_log_0912_six_reports.md`.
-- **.174** (09-11, tag `f4feccd2`, gate clean, conformance 9/9 against a .173 baseline scoring 1 FAIL): nine fixes, five field-reported the same day — `tojson` was minijinja's (every tool schema mangled), a tool call in an invented tag is parsed structurally, auto-manage prune could delete the shard PRIVACY depends on, the cloud catalogue was ERASED not stale, a warm peer credited only for layers it holds. `round_log_0911_field_report_and_privacy.md`.
+- **.177** (09-13, tag `2a11564e`, gate clean, conformance 9 families 0 FAIL matching a .176 baseline that scored identically): a peer's gossip could make a node DELETE a shard it held correctly (#581, gotcha #384 recurring — the origin-provenance guard only ever covered shards fetched from the origin); the traffic metric falsely warned "may have been renamed" at every start (#582); the header/first-hour UI pass. ⚠ Field-UNVERIFIED, and a set written to whose drain discards it (#583). `memory/round_log_0913_shard_destruction.md`.
+- **.174-.176** (09-11→09-12, all gate clean): tool schemas reached every model ALPHABETISED (#46, two independent alphabetisers); the KV cache reserved at the admitted prompt length (#32); six field reports from a 16 GB processor-only Mac incl. an undecryptable peer after a reconnect and the prefix cache never used on a returned plan; `tojson` was minijinja's, mangling every tool schema; auto-prune could delete the shard PRIVACY depends on. ⚠ Three self-inflicted regressions in .175 caught in review, none by a test (#567-#569). `memory/round_history.md`.
 - **.166-.173** (09-09→09-11): eight field-driven releases in three days. **Every Qwen3 request reached the model with the QUESTION MISSING** (.169); templates moved to `minijinja` (.170); **tools were NEVER passed to the template**, unreachable on every request ever served, plus an escrow that MINTED credits (.171); Phi models never stopped generating and **partial RoPE meant Phi-4-mini, GLM-4 and Qwen 3.5 could not serve one request** (.172-.173). Same period: `family_conformance.sh` was written and found two real bugs on its first run; branch protection went to 14 contexts after every PR was permanently BLOCKED (#530). `round_log_0911_*.md`.
 - **.160-.165** (09-06→09-08): #484 a FALSE PRIVACY ASSURANCE; #495 shipped INERT (a transport failure recorded as a perfect delivery); the prompt-trust bar; per-peer GOODPUT closing issue #21's open half. ⚠ Null controls caught THREE tests passing for the wrong reason.
 - **.132-.159** (08-29→09-06): the guards-were-the-defect audit (#413 — five tested by PLANTING the violation, four could not see what they guard); #449 ALL inference broken on every Mac; #472 a content hash recomputed mid-fix.
