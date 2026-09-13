@@ -50,6 +50,8 @@ Priority is user-visible impact x how many users x whether it fails silently.
 | 49 | Auto-prune evicted shards the swarm had no other copy of | **Field-reported 2026-09-11, NOT reproduced, do not fix on this reasoning alone.** A node with `max_storage_mb` set just under what it held (8000 vs 7839) sat in a continuous urgent-pressure prune loop and ended up missing shard 0 of gemma-2-2b-it and 4 of 5 of phi-3.5-mini, on two models it was recorded as the sole replica of; re-acquisition then looped `stalled shard download … stall_secs=30` against two peers. Prune's redundancy check already filters holders to CONNECTED peers (the fix for the offline-holder over-count), so the surviving hypothesis is a holder that is connected but no longer holds the shard — the add-only DHT provider record that outlives the fact by up to 24h, see `docs/invariants/network.md`. ⚠ **The stall does not fit that cleanly**: a peer asked for a shard it lacks answers `ShardResponse::empty()`, and the requester fast-fails on it (`retry_shard_or_fallback`), so a 30s stall means those peers did not answer AT ALL, which is a different mechanism. **The discriminating evidence is one line from the reporter's log** — whether `Peer returned empty shard data` appears before the stalls or nothing from the peer does. Ask before building anything. The asymmetry that makes this worth chasing: for a destructive decision an over-count is unsafe and an under-count merely conservative, and prune currently treats a holder claim as proof of redundancy |
 | 50 | A warm peer's capacity bound exempted weights it had not paid for | **FIXED 2026-09-11.** `max_hostable_layers` charges a warm peer for KV only, on the sound reasoning that the advertised free-memory figure already excludes the weights of whatever is resident. What it cannot know is HOW MUCH is resident: `peer_model_is_warm` answers about the MODEL, not its layers, so every layer under consideration is exempted — including ones the peer holds only on disk. With a short prompt the divisor is then a few hundred KB and the quotient is thousands: reported from the field 2026-09-11, the same peer read **97 layers cold and 14008 warm** for a 32-layer model, i.e. the capacity bound had silently stopped bounding warm peers at all. The answer is now clamped by the model's own layer count, which makes the figure honest and bounds the damage; **it does not fix the exemption.** A peer warm for part of a model and holding the rest on disk can still be credited with weights it has not paid for, and the assignment that follows is real memory it must find. Now fixed properly: `NodeCapability::resident_layers` carries what each node has LOADED (as distinct from `hosted_shards`, which is disk), summed from each live worker's charged segments, and `PeerResidency` gives the consumer three states instead of a flag. A peer that reports a count is exempted for those layers and charged full weight beyond them; its resident layers still pay this prompt's KV, which it has not paid for. ⚠ **A peer that reports nothing keeps the OLD generous pricing** (`WarmAmountUnknown`), because reading silence as cold would charge full weights to every node on an older build and route around the machines best placed to answer — the regression the additive-protocol rule exists to prevent. Same design as Petals, whose servers announce the blocks they are actively serving rather than the ones they could load (<https://arxiv.org/pdf/2209.01188>) |
 | 51 | Requesting a shard already on its way started a second download of it | **FIXED 2026-09-11**, field-reported the same day. `begin_download` INSERTED the new `AcquisitionStatus`, replacing the model's entry — so the per-shard `Downloading` marks, which are the only thing stopping a duplicate (auto-manage skips any shard carrying one), were erased for every shard the new request did not mention, and the caller was told nothing about the ones it did. Asking for a shard already being fetched therefore put two writers on one `.tmp`: one finished and registered the shard (`missing_shards=0 ready=true`) while the other carried on growing the file and then reported `Shard 0 size mismatch: expected 533753856 bytes but wrote 0 bytes`. It now carries existing marks over and returns the requested shards already in flight, which the admin path filters out. The related cancel-flag bug is fixed too: registering used to REPLACE the model's flag, orphaning the running download's — it keeps its own `Arc` and carries on, so a later cancel reached only the newest registration. One live flag per model is now shared, so a single cancel stops everything being fetched for it; a flag already set is not reused, since handing it to a fresh download would cancel that download the instant it started |
+| 62 | The Network map is blank on a node that has not served across regions | The arcs are drawn from THIS node's `recent_traces`, so a new user — the audience the dashboard is being tuned for — opens the Network tab and sees pins and no traffic. Honest, and the opposite of welcoming. Either seed from the swarm's routes (needs a gossiped route summary, and a privacy decision: it exposes who served whom) or leave it and accept the quiet map. Raised with the user 2026-09-13, not resolved |
+| 63 | The per-model activity ticker still lives inside the expanded model card | A log inside a card. It survived the .178 rebuild because removing it drops a feature nobody asked to drop; it belongs in the Activity panel, filtered by model. Cosmetic, but it is the last thing in that card that is not about the model |
 | 61 | A disputed shard is kept but the disagreement is never settled | Fallout of item 60, and strictly better than what it replaced (data loss). A shard disagreeing with an unbacked hash is kept and served, but nothing resolves which side is right, so the node re-reports it indefinitely. `mark_shard_for_repair` is NOT the answer — `complete_pending_shard_fetches` clears any mark whose file is on disk, which is every shard on this path. Three designs costed in the entry body; **count disputes before building any of them** — the `disputed` counter added with item 60 is the instrument |
 | 17 | A long generation with no segment redundancy cannot fail over | **Report #028.** The trigger and the token loss are both fixed. Residual: no standby can be assembled from several nodes covering a range between them. **UNBLOCKED 2026-09-09** — item 18 shape 2 shipped, so a takeover now lands at P = 0.9965 rather than 0.119 and more standbys are worth having. Note the arming condition runs the other way too: retention is kept only where a standby covers the range, so a plan with no standbys retains nothing and gains nothing |
 
@@ -1515,6 +1517,43 @@ Sources: <https://www.lmsys.org/blog/2024-12-04-sglang-v0-4/>,
 **Not to be confused with the LOCAL case, which was measured and works**: a
 ~4200-token system prompt costs 11.94 s cold and 0.12 s on an identical repeat,
 including across turns. This is distributed-only.
+
+## The Network map is blank on a node that has not served across regions (open, 2026-09-13)
+
+v0.3.178 gave the map arcs for the routes requests actually took, built from
+`recent_traces_snapshot()` and capped at `MAX_MAP_ROUTES = 24`. They are real:
+verified end to end on a live request that ran TH → BE.
+
+**The gap is who they belong to.** They are THIS node's routes. A node that has
+served nothing across regions draws nothing — which is every new node, and new
+nodes are the audience the dashboard is currently being tuned for. So the first
+thing a new user sees on the Network tab is a map with pins and no traffic,
+which reads as "nothing is happening here" rather than "nothing has happened
+*to you* yet".
+
+Two ways out, and the choice is not obvious:
+
+- **Seed from the swarm.** Gossip a small route summary (region pair + model,
+  no node ids) so every node's map shows the network's traffic, not its own.
+  Needs a new gossip message — additive, feature-gated, per the protocol rule —
+  and a privacy decision: a region-pair summary still says "someone in BE served
+  someone in TH", which is weaker than naming nodes but is not nothing.
+- **Leave it honest.** A quiet map on a quiet node is true. Pair it with a line
+  saying so, rather than inventing traffic.
+
+Do NOT fake it with sample data: the whole value of the arcs is that they are
+the routes that actually ran, and a map that shows invented traffic is worth
+less than one that shows none.
+
+## The per-model activity ticker still lives inside the expanded model card (open, 2026-09-13)
+
+The .178 card rebuild took it from five stacked boxes to a summary plus two
+reference columns, and the ticker came along because removing it would drop a
+feature nobody had asked to drop. It is still a log inside a card.
+
+It belongs in the Activity panel, filtered to the model — the dashboard already
+has one, and .178 moved Activity near the top precisely because it is what
+someone opens the page for. Small, and blocked on nothing.
 
 ## A disputed shard is kept but the disagreement is never settled (open, 2026-09-13)
 

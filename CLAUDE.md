@@ -238,53 +238,43 @@ verified: local `225e6fe7f2b5cd74`, Proxmox `9684263580c6660f`, ids and
 `~/.local/bin/swarmllm.0.3.177-alpha.bak` (3 kept: .175/.176/.177). Full
 record: `memory/round_log_0913_dashboard_rework.md`.
 
-**What .178 carries.** A rebuild of the model list and the network view, done
-live with the user and two Discord testers. Every model row states itself in
-words and the list is grouped **On this computer / On other computers** (a
-tester thought models were missing; they were not — the sort led with theirs
-and "Problems first" was a lie about what it did). The expanded card is summary
-first, then technical details LEFT and parts RIGHT, **all visible, no
-disclosure links**. Part rows read as sentences, and the endpoints say what
-they DO ("reads your prompt" / "writes the reply") rather than where they sit.
-Map + Leaderboard merged into one primary **Network** tab, and the map draws
-the routes recent requests ACTUALLY took, from `recent_traces`. Header gained
-version→release link, ★ stars and Discord.
+**What .178 carries.** The model list and network view rebuilt live with the
+user and two Discord testers. Rows state themselves in words, grouped **On this
+computer / On other computers**; the expanded card is summary first with
+technical details LEFT and parts RIGHT, **all visible, no disclosure links**;
+part rows read as sentences whose endpoints say what they DO. Map + Leaderboard
+merged into one primary **Network** tab that draws the routes requests ACTUALLY
+took. Header gained version→release link, ★ stars, Discord.
 
 ⚠ **Making a hidden panel visible found a bug it had had forever**:
 `general.file_type`→quantization was wrong from 8 onward, so **every Q4_K_M
-model reported itself as Q2_K** (gotcha #584). Fixed against llama.cpp's
-`include/llama.h`. The lesson is the rule: when you surface something hidden,
-CHECK it rather than just relocating it.
+model reported itself as Q2_K** (gotcha #584). When you surface something
+hidden, CHECK it rather than just relocating it.
 
-**New users first (user direction, 2026-09-12).** Growth is the bottleneck —
-rank work by "would someone hit this in their first hour".
-`memory/round_log_0912_new_user_sweep.md` is the queue (what is already good and
-must NOT be simplified away, plus the jargon inventory); its items 1, 2 and 5
-are DONE. Read it before touching the frontend.
+**New users first (user direction, 2026-09-12, still standing).** Growth is the
+bottleneck — rank work by "would someone hit this in their first hour".
+`memory/round_log_0912_new_user_sweep.md` is the queue and says what is already
+good and must NOT be simplified away; read it before touching the frontend.
 
 ⚠ **Mobile (400px) is UNVERIFIED** — no tool here can give the page a narrow
-viewport (window resize is a no-op, the dashboard refuses to be framed, popups
-are blocked), so the narrow-width CSS is written to need no verification and
-says so at the rule.
+viewport, so the narrow-width CSS is written to need no verification.
 
-**Bumping the version LAST is settled practice** — Cargo.toml changes in the
-bump commit, so Cache warm fires ON the tagged commit. Confirmed again at .177.
+**Bumping the version LAST is settled practice** — the tagged commit is then the
+bump commit, so Cache warm fires on it. Confirmed again at .178, where both CUDA
+jobs showed the kernels *restored* AND *skipped*.
 
-**Release-gate cautions** (detail in `memory/open_cautions.md`): conformance is
-NINE families, part of the gate — run it on the DOWNLOADED artifact against a
-baseline of the PREVIOUS release taken FIRST, and **capture that baseline in
-full; never `tail` it** (a truncated one had to be re-taken at .177). It has
-found eight real defects that all pass `release_shapes.sh`. A CPU build REFUSES
-`-m`, so establish which BUILD and PATH a report exercised before deciding code
-is innocent (#552/#555). Branch protection requires 14 contexts — verify with
-`examples/check_ci_gate.sh` against a COMPLETED run only (#530/#557).
+**Release-gate cautions — the gate itself is in `memory/open_cautions.md`; read
+it before releasing.** The three that bite: conformance is NINE families on the
+DOWNLOADED artifact against a baseline of the PREVIOUS release taken FIRST and
+captured in FULL (never `tail` it); a CPU build REFUSES `-m`, so establish which
+BUILD and PATH a report exercised before calling code innocent (#552/#555); and
+`examples/check_ci_gate.sh` runs against a COMPLETED run only (#530/#557).
 
 ### Earlier rounds — one line each. Detail in `memory/round_log_*.md`, gotcha numbers index `memory/gotchas.md`. **Read the named round log before re-deriving any of these.** Older than .160: `memory/round_history.md`.
 
 - **.178** (09-13, tag `63c5d4c2`, gate clean, conformance 52/0/2 **diff-identical** to the .177 baseline): the model list and network view rebuilt live with the user and two testers — rows that say what they are, On this computer / On other computers grouping, expanded card with everything visible, part rows as sentences, Map+Leaderboard merged into one **Network** tab drawing REAL inference routes, header community links. ⚠ **Every Q4_K_M model had been reporting itself as Q2_K** (#584) — found only by making a hidden panel visible. `memory/round_log_0913_dashboard_rework.md`.
-- **.177** (09-13, tag `2a11564e`, gate clean, conformance 9 families 0 FAIL matching a .176 baseline that scored identically): a peer's gossip could make a node DELETE a shard it held correctly (#581, gotcha #384 recurring — the origin-provenance guard only ever covered shards fetched from the origin); the traffic metric falsely warned "may have been renamed" at every start (#582); the header/first-hour UI pass. ⚠ Field-UNVERIFIED, and a set written to whose drain discards it (#583). `memory/round_log_0913_shard_destruction.md`.
-- **.174-.176** (09-11→09-12, all gate clean): tool schemas reached every model ALPHABETISED (#46, two independent alphabetisers); the KV cache reserved at the admitted prompt length (#32); six field reports from a 16 GB processor-only Mac incl. an undecryptable peer after a reconnect and the prefix cache never used on a returned plan; `tojson` was minijinja's, mangling every tool schema; auto-prune could delete the shard PRIVACY depends on. ⚠ Three self-inflicted regressions in .175 caught in review, none by a test (#567-#569). `memory/round_history.md`.
-- **.166-.173** (09-09→09-11): eight field-driven releases in three days. **Every Qwen3 request reached the model with the QUESTION MISSING** (.169); templates moved to `minijinja` (.170); **tools were NEVER passed to the template**, unreachable on every request ever served, plus an escrow that MINTED credits (.171); Phi models never stopped generating and **partial RoPE meant Phi-4-mini, GLM-4 and Qwen 3.5 could not serve one request** (.172-.173). Same period: `family_conformance.sh` was written and found two real bugs on its first run; branch protection went to 14 contexts after every PR was permanently BLOCKED (#530). `round_log_0911_*.md`.
+- **.177** (09-13, tag `2a11564e`): a peer's gossip could make a node DELETE a shard it held correctly (#581, gotcha #384 recurring); the traffic metric falsely warned at every start (#582); the header/first-hour UI pass. ⚠ Field-UNVERIFIED still — `disputed` in the background-verification line is the instrument. `round_log_0913_shard_destruction.md`.
+- **.166-.176** (09-09→09-12, eleven releases in four days, all gate clean): tool schemas reached every model ALPHABETISED (#46); the KV cache reserved at the admitted prompt length (#32); **every Qwen3 request reached the model with the QUESTION MISSING** (.169); templates moved to `minijinja` (.170); **tools were NEVER passed to the template** plus an escrow that MINTED credits (.171); partial RoPE meant Phi-4-mini, GLM-4 and Qwen 3.5 could not serve one request (.172-.173); six field reports from a 16 GB processor-only Mac. `family_conformance.sh` was written here and found two real bugs on its first run; branch protection went to 14 contexts after every PR was permanently BLOCKED (#530). `memory/round_history.md`.
 - **.160-.165** (09-06→09-08): #484 a FALSE PRIVACY ASSURANCE; #495 shipped INERT (a transport failure recorded as a perfect delivery); the prompt-trust bar; per-peer GOODPUT closing issue #21's open half. ⚠ Null controls caught THREE tests passing for the wrong reason.
 - **.132-.159** (08-29→09-06): the guards-were-the-defect audit (#413 — five tested by PLANTING the violation, four could not see what they guard); #449 ALL inference broken on every Mac; #472 a content hash recomputed mid-fix.
 - **.15-.131** (07-23→08-28): the era that produced most of the rules. A corrupt shard PROVED to spread and the repair QUARANTINED THE GOOD COPY (#382/#384) — **a repair mechanism is a destruction mechanism**; 25.7x from a budget read off the BOOT SNAPSHOT (#281 → `SharedState::cfg()`); credits switched OFF; AVX2 compiled OUT of releases (3.09x). ⚠ **#367 min-of-N is for benchmarks, NOT live measurement.**
