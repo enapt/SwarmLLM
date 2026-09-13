@@ -107,60 +107,21 @@
     return I18n.t('shard.loc.' + loc);
   }
 
-  function shardGlyph(state) {
-    // Filled square (▣), outlined square (▢), half-circle (◐ — peer fetching),
-    // middle dot (·), heavy ballot (✕)
-    return state === 'vram' ? '\u25A0'
-         : state === 'disk' ? '\u25A1'
-         : state === 'gossip' ? '\u25D0'
-         : state === 'peer' ? '\u00B7'
-         : '\u2715';
-  }
-
-  function shardStatusLabel(s, state) {
-    if (state === 'vram') return I18n.t('shard.row.vram_label');
-    if (state === 'disk') return I18n.t('dashboard.disk_label');
-    if (state === 'gossip') {
-      // Peer download in flight (gossip view). Show the leader's progress so
-      // the user can see replication is moving.
-      var lead = s.peer_downloads && s.peer_downloads[0]
-        ? s.peer_downloads[0].progress_pct : 0;
-      return (lead || 0) + '%\u2193';
-    }
-    if (state === 'peer') return I18n.t('shard.row.peer_label');
-    return I18n.t('shard.row.missing_label');
-  }
-
-  // Compact replica indicator — single pill that scales to arbitrary N.
-  // Tier: none=0, low=1-2, good=3-9, high=10+. Same layout irrespective of count.
-  function shardReplicaPips(s) {
-    // `holders` from the backend is the TOTAL count including self. The row
-    // already visualizes the local-vs-remote dimension elsewhere, so this pip
-    // surfaces just the remote replica count and says "Local only" when nobody
-    // else has it.
-    var holders = s.holders || 0;
-    var isLocal = !!s.local;
-    var others = Math.max(0, holders - (isLocal ? 1 : 0));
-    var tier = others === 0 ? (isLocal ? 'local-only' : 'none')
-             : others <= 2 ? 'low' : others <= 9 ? 'good' : 'high';
-    var label, title;
-    if (isLocal && others === 0) {
-      label = '\u25C9'; // local-only glyph (filled circle)
-      title = I18n.t('shard.row.replicas_local_only');
-    } else if (others === 0) {
-      label = '\u2014';
-      title = I18n.t('shard.row.replicas_none');
-    } else {
-      label = (isLocal ? '+' : '') + String(others);
-      title = I18n.t(
-        isLocal ? 'shard.row.replicas_local_plus' : (others === 1 ? 'shard.row.replicas_count_one' : 'shard.row.replicas_count_other'),
-        { n: others }
-      );
-    }
-    return '<span class="shard-row-replicas" data-tier="' + tier + '"' + (isLocal ? ' data-local="1"' : '') + ' title="' + U.escapeHtml(title) + '">' +
-      '<span class="shard-row-replica-dot"></span>' +
-      '<span class="shard-row-replica-count">' + label + '</span>' +
-      '</span>';
+  /**
+   * WHERE ONE PART IS, as the row says it — the single answer, so the builder
+   * and the live patcher cannot drift. The wording is the colour key's own
+   * `shard.loc.*` string; when the part is on this computer it also says how
+   * many OTHER computers have a copy, which is the fact that decides whether
+   * losing this machine loses the model. `holders` counts this node, so the
+   * "also on" figure subtracts it.
+   */
+  function shardWhereText(s, loc) {
+    var where = shardLocalityLabel(s, loc || shardLocality(s));
+    if (!s.local) return where;
+    var others = Math.max(0, (s.holders || 0) - 1);
+    return where + ' · ' + (others > 0
+      ? I18n.t('shard.row.also_on', { count: others })
+      : I18n.t('shard.row.only_here'));
   }
 
   // Torrent-style piece-bar — one colored segment per supplying peer
@@ -204,29 +165,53 @@
     return parts.length ? '<span class="shard-row-actions">' + parts.join('') + '</span>' : '';
   }
 
+  /**
+   * ONE PART OF A MODEL, IN WORDS.
+   *
+   * The row used to be eight columns of symbols and shouted abbreviations \u2014
+   * `\u25aa 1 [1st] LOADED \u25cf+4 509.0 MB \ud83d\udccc \u203a` \u2014 where the only column a reader
+   * could decode was the size. Everything it said was true and none of it was
+   * legible: "1" did not say of how many, "1st" did not say what being first
+   * means, and "\u25cf+4" was a pip whose meaning lived in a hover.
+   *
+   * It now reads left to right as a sentence: which part, what that part does,
+   * where it is, how big. **The "where" is the colour key's own string** \u2014
+   * `shard.loc.*`, the same text the legend above the list shows and the same
+   * text a strip segment says about itself \u2014 so the three cannot drift apart.
+   *
+   * The endpoints say what they DO rather than where they sit in an array:
+   * the first part turns your prompt into numbers and the last one writes the
+   * reply, which is also exactly why holding both is what makes a conversation
+   * private. "1st"/"last" stated the position and hid the reason.
+   */
   function buildShardRow(s, m, safeId) {
     var state = shardState(s);
+    var loc = shardLocality(s);
     var isMmproj = s.index === MMPROJ_SHARD_INDEX;
-    var idxLabel = isMmproj ? '\u2605' : String((s.index || 0) + 1);
     var shardCount = m.shard_count || (m.shards || []).length || 0;
     var isFirst = shardCount > 1 && s.index === 0;
     var isLast  = shardCount > 1 && s.index === shardCount - 1;
     var isEndpoint = isFirst || isLast;
     var isPipelinePinned = isEndpoint && s.local && m.encrypted_pipeline;
+
+    var partLabel = isMmproj
+      ? I18n.t('shard.row.part_vision')
+      : I18n.t('shard.row.part_n_of_m', { n: (s.index || 0) + 1, total: shardCount || 1 });
+
     var endpointBadge = '';
     if (isFirst) {
-      endpointBadge = '<span class="shard-row-endpoint" data-kind="first" title="' + U.escapeHtml(I18n.t('shard.endpoint_first_tip')) + '">' + U.escapeHtml(I18n.t('shard.endpoint_first')) + '</span>';
+      endpointBadge = '<span class="shard-row-endpoint" data-kind="first" title="' + U.escapeHtml(I18n.t('shard.endpoint_first_tip')) + '">' + U.escapeHtml(I18n.t('shard.row.reads_prompt')) + '</span>';
     } else if (isLast) {
-      endpointBadge = '<span class="shard-row-endpoint" data-kind="last" title="' + U.escapeHtml(I18n.t('shard.endpoint_last_tip')) + '">' + U.escapeHtml(I18n.t('shard.endpoint_last')) + '</span>';
+      endpointBadge = '<span class="shard-row-endpoint" data-kind="last" title="' + U.escapeHtml(I18n.t('shard.endpoint_last_tip')) + '">' + U.escapeHtml(I18n.t('shard.row.writes_reply')) + '</span>';
     }
+
+    var whereText = shardWhereText(s, loc);
     // The user deleted this piece from this device and has not asked for it
     // since: auto-manage will not bring it back on its own (external report,
     // 2026-08-21 — a deliberate two-machine split was silently undone).
     var removedBadge = (s.removed_by_user && !s.local)
       ? '<span class="shard-row-endpoint" data-kind="removed" title="' + U.escapeHtml(I18n.t('shard.removed_by_user_tip')) + '">' + U.escapeHtml(I18n.t('shard.removed_by_user')) + '</span>'
       : '';
-    var layerRange = '';
-    var statusLabel = shardStatusLabel(s, state);
     var sizeText = s.size_bytes ? U.formatBytes(s.size_bytes) : '\u2014';
     var lockCls = s.locked ? ' locked' : '';
     // Pushpin icon = "pin to device" (auto-manage). Reserved 🔒/🔓 for pipeline encryption.
@@ -244,11 +229,10 @@
       ' data-shard-model="' + U.escapeHtml(m.id) + '"' +
       ' data-shard-index="' + s.index + '"' +
       ' data-shard-locked="' + (s.locked ? '1' : '0') + '">' +
-      '<span class="shard-row-state-glyph">' + shardGlyph(state) + '</span>' +
-      '<span class="shard-row-index">' + idxLabel + endpointBadge + removedBadge + '</span>' +
-      '<span class="shard-row-layers">' + layerRange + '</span>' +
-      '<span class="shard-row-status">' + U.escapeHtml(statusLabel) + '</span>' +
-      shardReplicaPips(s) +
+      '<span class="shard-row-part">' + U.escapeHtml(partLabel) + '</span>' +
+      '<span class="shard-row-role">' + endpointBadge + removedBadge + '</span>' +
+      '<span class="shard-row-where"><span class="avail-seg shard-row-swatch" data-loc="' + loc + '"></span>' +
+        U.escapeHtml(whereText) + '</span>' +
       '<span class="shard-row-size">' + sizeText + '</span>' +
       '<button class="shard-row-lock' + lockCls + '" data-shard-act="toggle-lock" title="' + U.escapeHtml(lockTitle) + '">' + lockGlyph + '</button>' +
       '<button class="shard-row-more" data-shard-act="expand" title="' + U.escapeHtml(I18n.t('shard.row.expand_tip')) + '">\u203A</button>' +
@@ -491,9 +475,7 @@
     shardLocality: shardLocality,
     shardLocalityLabel: shardLocalityLabel,
     shardState: shardState,
-    shardGlyph: shardGlyph,
-    shardStatusLabel: shardStatusLabel,
-    shardReplicaPips: shardReplicaPips,
+    shardWhereText: shardWhereText,
     buildPieceBar: buildPieceBar,
     buildRowActions: buildRowActions,
     buildShardRow: buildShardRow,

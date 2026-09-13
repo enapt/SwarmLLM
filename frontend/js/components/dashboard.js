@@ -27,7 +27,7 @@
   var MMPROJ_SHARD_INDEX = DS.MMPROJ_SHARD_INDEX;
   var _buildProgressBar    = DS.buildProgressBar;
   var _shardState          = DS.shardState;
-  var _shardGlyph          = DS.shardGlyph;
+  var _shardWhereText      = DS.shardWhereText;
   var _buildPieceBar       = DS.buildPieceBar;
   var _buildShardMatrix    = DS.buildShardMatrix;
   var _buildShardDetailBody = DS.buildShardDetailBody;
@@ -1855,16 +1855,29 @@
       if (!row) return false;
       var oldState = row.getAttribute('data-state');
       var newState = opts.state;
-      var glyphEl = row.querySelector('.shard-row-state-glyph');
-      var statusEl = row.querySelector('.shard-row-status');
+      var whereEl = row.querySelector('.shard-row-where');
+      var swatchEl = row.querySelector('.shard-row-swatch');
       var existing = row.querySelector('.shard-row-piecebar');
       if (oldState !== newState) {
         row.setAttribute('data-state', newState);
         row.classList.add('shard-transitioning');
         setTimeout(function() { row.classList.remove('shard-transitioning'); }, 1500);
-        if (glyphEl) glyphEl.textContent = _shardGlyph(newState);
       }
-      if (statusEl && opts.statusText !== undefined) statusEl.textContent = opts.statusText;
+      // The row says where the part is in words, so a live update rewrites
+      // that sentence and the swatch beside it — it used to poke a glyph and
+      // an abbreviation that no longer exist. `shard` is passed wherever the
+      // caller has it, so the text comes from the SAME function the row was
+      // built with rather than a second rendering of the same states.
+      if (whereEl && opts.shard) {
+        var loc = opts.loc || DS.shardLocality(opts.shard);
+        if (swatchEl) swatchEl.setAttribute('data-loc', loc);
+        var textNode = whereEl.lastChild;
+        if (textNode && textNode.nodeType === 3) textNode.nodeValue = _shardWhereText(opts.shard, loc);
+      } else if (whereEl && opts.whereText !== undefined) {
+        if (swatchEl && opts.loc) swatchEl.setAttribute('data-loc', opts.loc);
+        var tn = whereEl.lastChild;
+        if (tn && tn.nodeType === 3) tn.nodeValue = opts.whereText;
+      }
 
       // Piece-bar: add/update/remove to match current download state
       if (opts.peerDownloads && opts.peerDownloads.length > 0 && newState === 'downloading') {
@@ -1927,7 +1940,8 @@
 
             self._patchShardRow(row, {
               state: newState,
-              statusText: statusText,
+              loc: newState === 'downloading' ? 'moving' : undefined,
+              whereText: statusText,
               peerDownloads: pdIndex[modelId + ':' + sd.index],
               dlPct: dlPct,
             });
@@ -2027,7 +2041,8 @@
               var pct0 = pdIndex[pdKey][0] ? pdIndex[pdKey][0].progress_pct : 0;
               self._patchShardRow(row, {
                 state: 'downloading',
-                statusText: (pct0 || 0) + '%\u2193',
+                loc: 'moving',
+                whereText: I18n.t('shard.loc.moving') + ' — ' + (pct0 || 0) + '%',
                 peerDownloads: pdIndex[pdKey],
                 dlPct: pct0,
               });
@@ -2035,13 +2050,12 @@
             }
 
             var newState;
-            var statusText;
-            if (s.local && s.in_vram) { newState = 'vram'; statusText = I18n.t('shard.row.vram_label'); }
-            else if (s.local) { newState = 'disk'; statusText = I18n.t('dashboard.disk_label'); }
-            else if (s.holders > 0) { newState = 'peer'; statusText = I18n.t('shard.row.peer_label'); }
-            else { newState = 'missing'; statusText = I18n.t('shard.row.missing_label'); }
+            if (s.local && s.in_vram) newState = 'vram';
+            else if (s.local) newState = 'disk';
+            else if (s.holders > 0) newState = 'peer';
+            else newState = 'missing';
 
-            self._patchShardRow(row, { state: newState, statusText: statusText });
+            self._patchShardRow(row, { state: newState, shard: s });
           });
         });
       }
@@ -2058,7 +2072,8 @@
           var pct = pd.progress_pct || 0;
           self._patchShardRow(row, {
             state: 'downloading',
-            statusText: pct + '%\u2193',
+            loc: 'moving',
+            whereText: I18n.t('shard.loc.moving') + ' — ' + pct + '%',
             peerDownloads: pdIndex[pd.model_id + ':' + pd.shard_index] || [pd],
             dlPct: pct,
           });

@@ -5413,9 +5413,6 @@ textarea.pool-code-input { min-height: 4.5em; }
   font-size: var(--fs-2xs);
   line-height: 1;
 }
-.shard-row-pipeline-pinned .shard-row-status {
-  color: var(--green-text);
-}
 
 /* The privacy↔endpoint connector line is gone with the two-column layout it
    was drawn across. The privacy LINE says it in words; the part rows keep
@@ -5561,7 +5558,11 @@ textarea.pool-code-input { min-height: 4.5em; }
 .shard-row {
   position: relative;
   display: grid;
-  grid-template-columns: 18px 40px 64px 64px 1fr auto auto auto;
+  /* part | what it does | where it is (grows) | size | pin | more | actions.
+     It was 18px 40px 64px 64px 1fr auto auto auto — eight columns carrying a
+     glyph, a bare index, a shouted abbreviation and a pip, none of which a
+     reader could decode. */
+  grid-template-columns: auto auto minmax(0, 1fr) auto auto auto auto;
   align-items: center;
   gap: 10px;
   min-height: 28px;
@@ -5574,6 +5575,26 @@ textarea.pool-code-input { min-height: 4.5em; }
   transition: var(--transition);
   cursor: default;
 }
+/* The row, read left to right: which part, what it does, where it is, how
+   big. The swatch is an `.avail-seg`, so it inherits every locality colour
+   from the strip and cannot drift from the key above the list. */
+.shard-row-part {
+  font-weight: 600;
+  white-space: nowrap;
+  color: var(--text-primary);
+}
+.shard-row-role { display: inline-flex; align-items: center; gap: 6px; }
+.shard-row-where {
+  display: inline-flex; align-items: center; gap: 7px;
+  min-width: 0;
+  color: var(--text-secondary);
+  font-size: var(--fs-xs);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.shard-row-swatch {
+  width: 9px; height: 9px; flex: 0 0 auto;
+  border-radius: 2px; display: inline-block; animation: none;
+}
 .shard-row:hover {
   border-color: var(--border-light);
   background: var(--bg-secondary);
@@ -5584,111 +5605,10 @@ textarea.pool-code-input { min-height: 4.5em; }
 .shard-row[data-state="peer"]   { border-left: 2px solid var(--accent); }
 .shard-row[data-state="missing"]{ border-left: 2px solid var(--red); opacity: 0.75; }
 
-.shard-row-state-glyph {
-  width: 14px;
-  height: 14px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  font-family: var(--font-mono, monospace);
-  color: var(--text-primary);
-  flex-shrink: 0;
-}
-.shard-row[data-state="vram"]   .shard-row-state-glyph { color: var(--green-text); }
-.shard-row[data-state="disk"]   .shard-row-state-glyph { color: rgba(34,197,94,0.8); }
-.shard-row[data-state="downloading"] .shard-row-state-glyph { color: var(--cyan-text); animation: shard-row-stripe-pulse 1.4s linear infinite; }
-.shard-row[data-state="peer"]   .shard-row-state-glyph { color: var(--accent); }
-.shard-row[data-state="missing"].shard-row-state-glyph,
-.shard-row[data-state="missing"] .shard-row-state-glyph { color: var(--red-text); }
-
 @keyframes shard-row-stripe-pulse {
   0%   { opacity: 0.55; }
   50%  { opacity: 1; }
   100% { opacity: 0.55; }
-}
-
-.shard-row-index {
-  font-family: var(--font-mono, monospace);
-  color: var(--text-secondary);
-  font-size: var(--fs-xs);
-  text-align: right;
-}
-.shard-row-layers {
-  font-family: var(--font-mono, monospace);
-  color: var(--text-muted);
-  font-size: var(--fs-2xs);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.shard-row-status {
-  font-size: var(--fs-2xs);
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-  color: var(--text-secondary);
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-}
-.shard-row[data-state="vram"]   .shard-row-status { color: var(--green-text); }
-.shard-row[data-state="disk"]   .shard-row-status { color: rgba(34,197,94,0.85); }
-.shard-row[data-state="downloading"] .shard-row-status { color: var(--cyan-text); }
-.shard-row[data-state="peer"]   .shard-row-status { color: var(--accent); }
-.shard-row[data-state="missing"].shard-row-status,
-.shard-row[data-state="missing"] .shard-row-status { color: var(--red-text); }
-
-/* Compact replica pill: one colored dot + tabular number, scales to any N. */
-.shard-row-replicas {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 1px 6px 1px 5px;
-  border-radius: var(--radius-pill, 9999px);
-  font-size: var(--fs-2xs);
-  font-variant-numeric: tabular-nums;
-  min-width: 30px;
-  justify-content: center;
-  justify-self: start;
-}
-.shard-row-replicas .shard-row-replica-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  flex-shrink: 0;
-}
-.shard-row-replicas .shard-row-replica-count { line-height: 1; }
-.shard-row-replicas[data-tier="high"] {
-  background: var(--green-dim);
-  color: var(--green-text);
-}
-.shard-row-replicas[data-tier="high"] .shard-row-replica-dot { background: var(--green); box-shadow: 0 0 4px rgba(34,197,94,0.5); }
-.shard-row-replicas[data-tier="good"] {
-  background: rgba(34,197,94,0.1);
-  color: rgba(34,197,94,0.85);
-}
-.shard-row-replicas[data-tier="good"] .shard-row-replica-dot { background: var(--green); }
-.shard-row-replicas[data-tier="low"] {
-  background: rgba(245,158,11,0.1);
-  color: var(--orange-text);
-}
-.shard-row-replicas[data-tier="low"] .shard-row-replica-dot { background: var(--orange); }
-.shard-row-replicas[data-tier="none"] {
-  background: rgba(239,68,68,0.1);
-  color: var(--red-text);
-}
-.shard-row-replicas[data-tier="none"] .shard-row-replica-dot { background: var(--red); }
-/* Local-only tier: held by this node, no remote replicas — informational,
-   not a warning. Styled neutral-blue to differentiate from the missing/fragile
-   danger states. */
-.shard-row-replicas[data-tier="local-only"] {
-  background: rgba(127,127,127,0.12);
-  color: var(--text-secondary);
-}
-.shard-row-replicas[data-tier="local-only"] .shard-row-replica-dot { background: var(--text-muted); }
-.shard-row-replicas[data-local="1"][data-tier="low"],
-.shard-row-replicas[data-local="1"][data-tier="good"],
-.shard-row-replicas[data-local="1"][data-tier="high"] {
-  /* When held locally AND there are remote peers, badge the "+N" so it's
-     obvious the count excludes self. */
 }
 
 .shard-row-size {
