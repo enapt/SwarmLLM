@@ -1139,6 +1139,16 @@
           '</summary>';
         swarmBody = document.createElement('div');
         swarmBody.className = 'models-section-body';
+        // The colour key sits ONCE above the rows, not inside each expanded
+        // card. Every collapsed row paints a route strip, so the strips that
+        // most needed explaining were the ones a reader saw first and could
+        // only decode by opening a card — and a reader with several cards open
+        // got the same six swatches repeated at them. One key, above the
+        // things it describes.
+        var legendRow = document.createElement('div');
+        legendRow.className = 'models-section-legend';
+        legendRow.innerHTML = _buildShardLegend();
+        swarmBody.appendChild(legendRow);
         swarmSection.appendChild(swarmBody);
         list.appendChild(swarmSection);
 
@@ -1449,14 +1459,16 @@
         var quantMatch = modelId.match(/[._-](q[0-9]+[_-]?k?[_-]?[a-z]*)/i);
         var quantTag = quantMatch ? '<span class="model-tag tag-quant">' + U.escapeHtml(quantMatch[1].toUpperCase().replace(/-/g, '_')) + '</span>' : '';
 
-        // --- Config rows (key/value pairs for the CONFIG section) ---
+        // --- Spec line (label/value pairs, rendered inline) ---
+        //
+        // Size and Parts are deliberately NOT here: the collapsed row states
+        // both in words, and a titled two-column grid repeating them was the
+        // single heaviest block in the card. What remains is what the row
+        // cannot say — what kind of model it is, how it was compressed, and
+        // where on this machine it runs.
         var configRows = [];
         if (archKey)    configRows.push(['dashboard.info_arch',  '<span class="mce-info-pill">' + U.escapeHtml(archKey) + '</span>']);
         if (quantMatch) configRows.push(['dashboard.info_quant', '<span class="mce-info-pill">' + U.escapeHtml(quantMatch[1].toUpperCase().replace(/-/g, '_')) + '</span>']);
-        configRows.push(['dashboard.info_size', U.formatBytes(m.total_size_bytes || 0)]);
-        if (shardCount > 0) {
-          configRows.push(['dashboard.info_shards', String(shardCount)]);
-        }
         // Mode (CPU/GPU) — single word
         configRows.push(['dashboard.info_mode', S._gpuInference ? I18n.t('dashboard.gpu_label') : I18n.t('dashboard.cpu_label')]);
         // VRAM fit — only when GPU mode; in CPU mode the Mode row already conveys this.
@@ -1484,7 +1496,10 @@
         // a grid row — frees a cell and surfaces trust next to "Config".
         var trustHeaderHtml = (detailBadgesHtml && m.trust_level) ? detailBadgesHtml : '';
         var configGridHtml = configRows.map(function(row) {
-          return '<dt>' + U.escapeHtml(I18n.t(row[0])) + '</dt><dd>' + row[1] + '</dd>';
+          return '<span class="mce-spec-item">' +
+            '<span class="mce-spec-k">' + U.escapeHtml(I18n.t(row[0])) + '</span>' +
+            '<span class="mce-spec-v">' + row[1] + '</span>' +
+          '</span>';
         }).join('');
 
         // Peer count line for STATUS section
@@ -1525,6 +1540,44 @@
           removeHtml = '<button class="btn-action btn-danger" data-remove-model="' + U.escapeHtml(m.id) + '">' + U.escapeHtml(I18n.t('dashboard.btn_remove_model')) + '</button>';
         }
 
+        // WHAT THE ROW SAYS IN WORDS.
+        //
+        // Until this existed, a collapsed row carried the model's name, a
+        // colour-coded strip and a coloured left edge — and nothing a reader
+        // could read. "Is this one mine?" and "how big is it?" are the two
+        // questions asked of a model list, and both were answered only by
+        // opening the card. Colour alone carrying a state is the same defect
+        // the route strip's key was added to fix; this is that fix applied to
+        // the row itself.
+        //
+        // Hosting is phrased from the reader's side ("You host all 4 parts"),
+        // never as a ratio, and the peer case reuses the strip's own
+        // `shard.loc.swarm` string so the row and a segment's tooltip cannot
+        // drift apart.
+        var hostingText;
+        if (shardCount > 0 && hostedShards >= shardCount) {
+          hostingText = I18n.t('dashboard.row_host_all', { count: shardCount });
+        } else if (hostedShards > 0) {
+          hostingText = I18n.t('dashboard.row_host_some', { hosted: hostedShards, total: shardCount });
+        } else if (m.peers_hosting > 0) {
+          hostingText = I18n.t('shard.loc.swarm', { n: m.peers_hosting });
+        } else {
+          hostingText = I18n.t('shard.loc.absent');
+        }
+        var sublineParts = [hostingText];
+        if (m.total_size_bytes) sublineParts.push(U.formatBytes(m.total_size_bytes));
+        var sublineText = sublineParts.join(' · ');
+        var sublineHtml =
+          '<div class="model-card-subline">' +
+            compositeBadgeHtml +
+            // The column is a fixed width, so a locale with a longer sentence
+            // truncates — carry the whole thing in the tooltip rather than
+            // losing the end of it.
+            '<span class="model-card-subline-text" title="' + U.escapeHtml(sublineText) + '">' +
+              U.escapeHtml(sublineText) +
+            '</span>' +
+          '</div>';
+
         var name = U.formatModelDisplayName(m.name || m.id);
         var creatorIconHtml = providerIconHtml(modelIconKey(m.id), 20);
         var chevronHtml = '<span class="model-expand-chevron" title="' + U.escapeHtml(I18n.t('dashboard.expand_collapse')) + '">&#9662;</span>';
@@ -1547,7 +1600,6 @@
                       U.escapeHtml(I18n.t('reference.badge_hint')) + '">' +
                       U.escapeHtml(I18n.t('reference.badge')) + '</span>'
                   : '') +
-                compositeBadgeHtml +
               '</div>' +
             '</div>' +
             // Coverage ribbon sits in the title row so it aligns horizontally
@@ -1556,6 +1608,12 @@
             '<div class="model-card-title-health">' +
               (shards.length > 0 ? _buildCoverageRibbon(m, shards, safeId) : '') +
             '</div>' +
+            // The row's sentence gets its own column, between the strip and
+            // the controls. That space was empty at every width the dashboard
+            // is actually read at, and putting the words there rather than
+            // under the name keeps the row ONE line — the panel says more than
+            // it did and is no taller for it.
+            sublineHtml +
             '<div class="model-card-controls">' +
               metaBtnHtml + gearHtml + chevronHtml +
             '</div>' +
@@ -1563,18 +1621,14 @@
           '<div class="model-card-shards">' +
             '<div class="model-card-expanded' + (m.encrypted_pipeline ? ' pipeline-encrypted' : '') + '">' +
               '<div class="mce-left">' +
-                // STATUS — title + status badge inline; peer count on the right.
-                // Health badge (fragile/degraded/etc.) drops into the body row.
-                '<div class="mce-section mce-section-status">' +
-                  '<div class="mce-section-header">' +
-                    '<div class="mce-section-title-row">' +
-                      '<div class="mce-section-title">' + U.escapeHtml(I18n.t('dashboard.section_status')) + '</div>' +
-                      compositeBadgeHtml +
-                    '</div>' +
-                    peerLineHtml +
-                  '</div>' +
-                  (healthBadgeHtml ? '<div class="mce-section-body">' + healthBadgeHtml + '</div>' : '') +
-                '</div>' +
+                // HOW THIS MODEL IS DOING IN THE SWARM — one line, no section
+                // chrome. It used to be a titled STATUS box restating the
+                // status badge, which the collapsed row now carries in words;
+                // what is left is the part the row cannot say, i.e. how well
+                // replicated it is and how many peers hold it.
+                ((healthBadgeHtml || peerLineHtml)
+                  ? '<div class="mce-headline">' + healthBadgeHtml + peerLineHtml + '</div>'
+                  : '') +
                 // PRIVACY — pipeline encryption (skipped for single-shard models).
                 // Above CONFIG so the connector line lands higher and closer
                 // to the endpoint shard rows on the right.
@@ -1582,21 +1636,15 @@
                 // PLACEMENT — only present when this node runs the model on its
                 // processor, and says which of the three reasons it is.
                 placementSectionHtml +
-                // CONFIG — static spec sheet: arch, quant, size, shards, mode, vram.
-                // Trust badge sits in the header top-right.
-                '<div class="mce-section mce-section-config">' +
-                  '<div class="mce-section-header">' +
-                    '<div class="mce-section-title">' + U.escapeHtml(I18n.t('dashboard.section_config')) + '</div>' +
-                    trustHeaderHtml +
-                  '</div>' +
-                  '<dl class="mce-config-grid">' + configGridHtml + '</dl>' +
-                '</div>' +
+                // The spec line — what kind of model this is, in one row of
+                // label/value pairs rather than a titled two-column grid.
+                // Trust badge ("Popular", "Verified") rides at its head.
+                '<div class="mce-spec">' + trustHeaderHtml + configGridHtml + '</div>' +
                 '<div class="mce-actions">' + actionHtml + removeHtml + '</div>' +
                 (fileIndicators ? '<div class="mce-file-warn">' + fileIndicators + '</div>' : '') +
               '</div>' +
               '<div class="mce-right" data-shard-detail="' + safeId + '">' +
                 '<div class="mce-right-head">' +
-                  _buildShardLegend() +
                   _buildShardViewToggle() +
                 '</div>' +
                 '<div class="mce-right-body">' + _buildShardDetailBody(m, shards, safeId) + '</div>' +

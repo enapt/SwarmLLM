@@ -2868,7 +2868,7 @@ kbd {
 .model-card.downloading { border-left: 2px solid rgba(59,130,246,0.5); }
 
 /* Card-level grid so header and content rows share the same column tracks.
-     [ title-main (260px) | ribbon / shard-detail (1fr) | controls (auto) ]
+     [ name (336px) | ribbon / shard-detail (1fr) | sentence | controls ]
    Title and expanded-content both use `grid-template-columns: subgrid`
    to inherit the parent's tracks — guarantees title sections align
    perfectly with content sections below. */
@@ -2879,8 +2879,14 @@ kbd {
      the space was going spare. Fixed rather than max-content because each card
      is its own grid — sizing to content makes every card pick its own width and
      the strips stop lining up as a column. Names longer than this still
-     ellipsize and keep their full text in the tooltip. */
-  grid-template-columns: 336px 1fr auto;
+     ellipsize and keep their full text in the tooltip.
+     Column 3 carries the row's sentence (state, who holds it, size) and
+     column 4 the controls. The sentence column is FIXED for the same reason
+     the name column is: an `auto` track is measured per card, so every card
+     picked its own width and the strips stopped lining up — measured at six
+     different right edges across fifteen rows. A locale whose sentence is
+     longer than this ellipsizes and keeps the full text in its tooltip. */
+  grid-template-columns: 336px 1fr 250px auto;
 }
 .model-card-title {
   display: grid;
@@ -2893,10 +2899,7 @@ kbd {
   min-width: 0;
   transition: background 0.3s;
 }
-.model-card.compact .model-card-title {
-  border-bottom: none;
-  padding-bottom: 8px;
-}
+/* (the compact row's padding is set once, with the collapsed-card rules) */
 .model-card-title-main { min-width: 0; display: flex; align-items: center; grid-column: 1; }
 .model-card-title-health { min-width: 0; display: flex; flex-direction: column; gap: 3px; grid-column: 2; }
 .model-card-title-health:empty { display: block; }
@@ -2904,15 +2907,49 @@ kbd {
    full card width, where eight pieces at 130px each stop reading as a route
    and start reading as a segmented progress bar. */
 .model-card-title-health .availability-bar { margin: 0; width: 100%; max-width: 620px; min-width: 0; }
+/* Narrow: the row stacks — name and controls share a line, the sentence goes
+   under them, the strip under that. The sentence stays LEFT-aligned here
+   because it is no longer opposite anything to align its right edge to. */
 @media (max-width: 899px) {
   .model-card { grid-template-columns: 1fr auto; }
   .model-card-title-main { grid-column: 1; }
+  .model-card-subline { grid-column: 1 / -1; order: 2; justify-content: flex-start; }
   .model-card-title-health { grid-column: 1 / -1; order: 3; }
   .model-card-title-main ~ .model-card-controls { grid-column: 2; }
 }
 .model-card-name-row { display: flex; align-items: center; gap: 0; min-width: 0; flex: 1; }
+/* The row's own sentence: state badge, who holds it, how big it is. It sits
+   in its own column right of the strip rather than under the name — the name
+   column is a fixed 336px that long names already fill, and the space right
+   of the strip was empty at every width this is read at. */
+.model-card-subline {
+  grid-column: 3;
+  display: flex;
+  align-items: center;
+  /* Left-aligned inside an auto-sized column, so the state badges line up as
+     a column down the panel instead of floating to wherever each sentence
+     happens to end. */
+  justify-content: flex-start;
+  gap: 7px;
+  min-width: 0;
+}
+.model-card-subline-text {
+  font-size: var(--fs-2xs);
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
 .model-card .model-name { font-weight: 700; font-size: var(--fs-xl); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.model-card-controls { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
+/* Fixed width, not auto: a model with no GGUF header of its own renders no
+   ⓘ button, and an auto track then made that card's whole grid 29px wider —
+   the same per-card-grid trap the name and sentence columns are fixed for.
+   Right-aligned so the buttons still sit against the card edge. */
+.model-card-controls {
+  display: flex; align-items: center; justify-content: flex-end;
+  gap: 4px; flex-shrink: 0; grid-column: 4; width: 82px;
+}
 
 /* Shard body — full width to align with health bar in title */
 .model-card-shards { padding: 8px 14px 6px; }
@@ -3100,6 +3137,8 @@ select.swarm-model-sort:focus { border-color: var(--accent); }
   color: var(--text-muted); white-space: nowrap;
 }
 .models-section-body { padding-top: 4px; }
+/* The route strip's colour key, once, above the rows it explains. */
+.models-section-legend { padding: 2px 14px 8px; }
 
 /* Cloud provider cards */
 .model-card.cloud-model {
@@ -4667,10 +4706,10 @@ textarea.pool-code-input { min-height: 4.5em; }
 .model-card.compact .model-card-detail-badges {
   display: none;
 }
-/* Active/Ready/etc. badge is surfaced by the left color bar (collapsed)
-   and the STATUS section inside .mce-left (expanded). Hide it in the
-   header row to avoid duplication. */
-.model-card .model-card-name-row .composite-badge { display: none; }
+/* The Active/Ready/etc. badge now rides in `.model-card-subline`, on every
+   row in both states. It used to be rendered in the name row and hidden
+   there by CSS, leaving the collapsed row's state to a coloured left edge
+   and nothing else. */
 .model-card.compact .model-card-footer {
   border-top: none;
   background: none;
@@ -4678,7 +4717,7 @@ textarea.pool-code-input { min-height: 4.5em; }
 }
 .model-card.compact .model-card-title {
   border-bottom: none;
-  padding-bottom: 4px;
+  padding-bottom: 8px;
 }
 .shard-coverage-ribbon { margin: 0; }
 
@@ -4718,21 +4757,6 @@ textarea.pool-code-input { min-height: 4.5em; }
   background: repeating-linear-gradient(45deg,
     color-mix(in srgb, var(--absent) 30%, transparent) 0 3px, transparent 3px 6px);
 }
-
-/* End caps — "ask" enters at the left, "reply" leaves at the right. Compact
-   mode only: expanded mode labels its own endpoints on the shard rows, and
-   keeping the caps out of it leaves the strip's geometry alone beside the
-   matrix. */
-.route-cap {
-  flex: none; display: flex; align-items: center;
-  font-family: var(--font-mono); font-size: var(--fs-2xs); font-weight: 600;
-  letter-spacing: 0.04em; text-transform: lowercase;
-  color: var(--text-secondary); user-select: none;
-  line-height: 1;
-}
-.route-cap-in  { padding-right: 6px; }
-.route-cap-out { padding-left: 6px; justify-content: flex-end; }
-.model-card:not(.compact) .route-cap { display: none; }
 
 /* Light theme separates the two local states the opposite way round, because
    presence reads as MORE ink on white and as MORE light on near-black. Sharing
@@ -5112,17 +5136,19 @@ textarea.pool-code-input { min-height: 4.5em; }
   align-items: flex-start;
   gap: 6px;
 }
-/* STATUS section packs badge + health + peers on one horizontal line. */
-.model-card-expanded .mce-left .mce-section-status .mce-section-body {
-  flex-direction: row;
+/* The swarm-health line — health badge + peer count, no section frame.
+   It replaced a titled STATUS box whose main content was the status badge
+   the collapsed row now states in words. */
+.model-card-expanded .mce-left .mce-headline {
+  display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
+  gap: 6px 10px;
 }
-.model-card-expanded .mce-left .mce-section-status .mce-health {
+.model-card-expanded .mce-left .mce-headline .mce-health {
   margin: 0;
 }
-.model-card-expanded .mce-left .mce-section-status .mce-health-detail {
+.model-card-expanded .mce-left .mce-headline .mce-health-detail {
   font-size: var(--fs-2xs);
 }
 .model-card-expanded .mce-left .mce-section-header {
@@ -5130,14 +5156,6 @@ textarea.pool-code-input { min-height: 4.5em; }
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-}
-/* Title + inline badge grouping (used by STATUS to sit the active-state
-   badge directly next to the section title). */
-.model-card-expanded .mce-left .mce-section-title-row {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
 }
 .model-card-expanded .mce-left .mce-status-peers {
   display: inline-flex;
@@ -5157,38 +5175,38 @@ textarea.pool-code-input { min-height: 4.5em; }
   font-size: var(--fs-md);
 }
 
-/* CONFIG — <dl> key/value grid in 2 pair-columns (4 tracks total). Values
-   are short enough that two pairs fit per row comfortably. Falls back to
-   1 pair-column on narrow widths. */
-.model-card-expanded .mce-left .mce-config-grid {
-  display: grid;
-  grid-template-columns: auto 1fr auto 1fr;
-  gap: 5px 12px;
-  margin: 0;
+/* The spec line — label/value pairs on one wrapping row. It replaced a
+   titled <dl> grid of six pairs, two of which (size, parts) the collapsed
+   row now states in words. Wraps rather than scrolling: every value here is
+   a short token. */
+.model-card-expanded .mce-left .mce-spec {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 14px;
   font-size: var(--fs-xs);
 }
-@media (max-width: 700px) {
-  .model-card-expanded .mce-left .mce-config-grid {
-    grid-template-columns: auto 1fr;
-  }
+.model-card-expanded .mce-left .mce-spec-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
 }
-.model-card-expanded .mce-left .mce-config-grid dt {
+.model-card-expanded .mce-left .mce-spec-k {
   color: var(--text-muted);
   font-size: var(--fs-2xs);
   text-transform: uppercase;
   letter-spacing: 0.06em;
   font-weight: 600;
-  align-self: center;
 }
-.model-card-expanded .mce-left .mce-config-grid dd {
-  margin: 0;
+.model-card-expanded .mce-left .mce-spec-v {
   color: var(--text-primary);
-  display: flex;
+  display: inline-flex;
   align-items: center;
   gap: 4px;
   min-width: 0;
 }
-.model-card-expanded .mce-left .mce-config-grid .mce-info-pill {
+.model-card-expanded .mce-left .mce-spec .mce-info-pill {
   display: inline-block;
   padding: 1px 6px;
   border-radius: var(--radius-pill, 9999px);
@@ -5199,7 +5217,7 @@ textarea.pool-code-input { min-height: 4.5em; }
   color: var(--text-primary);
   letter-spacing: 0.03em;
 }
-.model-card-expanded .mce-left .mce-config-grid .model-card-detail-badges {
+.model-card-expanded .mce-left .mce-spec .model-card-detail-badges {
   display: inline-flex;
   padding: 0;
   margin: 0;
@@ -6337,11 +6355,8 @@ textarea.pool-code-input { min-height: 4.5em; }
 }
 .panel-header .btn-shutdown:hover { color: var(--red, #ef4444); }
 
-/* Shard colour key — expanded model view only. Wraps ahead of the view toggle
-   rather than pushing it off the row, which is what `flex-wrap` on the head is
-   for; the toggle keeps its place at the right on a wide card and drops below
-   on a narrow one. */
-.model-card-expanded .mce-right-head { flex-wrap: wrap; }
+/* Shard colour key — rendered once above the model rows (see
+   `.models-section-legend`), not per expanded card. */
 .shard-legend {
   display: flex;
   flex-wrap: wrap;

@@ -411,10 +411,15 @@
    * which the old 6px bar threw away by painting "yours" and "a stranger's" the
    * same shade of blue.
    *
-   * The `ask`/`reply` end caps appear in compact mode only. Expanded mode
-   * labels its own endpoints on the shard rows (`shard-row-endpoint`), and
-   * keeping the caps out of it leaves the strip's geometry alone next to the
-   * matrix. Segments stay equal-width rather than proportional to bytes: the
+   * It carried `ask` and `reply` end caps until 2026-09-13, removed on the
+   * user's reading of them: they label the strip with a metaphor — a question
+   * travelling through the model — that a reader scanning a model list is not
+   * asking about, and the row now says in plain words what the strip shows
+   * ("You host all 4 parts · 1.6 GB") with the colour key above it. The
+   * left-to-right ORDER is still the order the work happens in; it simply no
+   * longer announces itself twice per row.
+   *
+   * Segments stay equal-width rather than proportional to bytes: the
    * matrix columns below are equal-width, and a strip that disagreed with them
    * would be a worse lie than one that says nothing about size.
    *
@@ -423,23 +428,14 @@
    */
   function buildCoverageRibbon(m, shards, safeId) {
     if (!shards || shards.length === 0) return '';
-    var multi = shards.length > 1;
     var html = '<div class="availability-bar shard-coverage-ribbon route-strip" data-coverage-ribbon="' + safeId +
       '" title="' + U.escapeHtml(I18n.t('shard.view.coverage_tip') || '') + '">';
-    if (multi) {
-      html += '<span class="route-cap route-cap-in" aria-hidden="true">' +
-        U.escapeHtml(I18n.t('shard.route.ask')) + '</span>';
-    }
     shards.forEach(function(s) {
       var loc = shardLocality(s);
       var n = s.index === MMPROJ_SHARD_INDEX ? '★' : (s.index || 0) + 1;
       html += '<div class="avail-seg" data-loc="' + loc + '" title="' +
         U.escapeHtml(n + ' · ' + shardLocalityLabel(s, loc)) + '"></div>';
     });
-    if (multi) {
-      html += '<span class="route-cap route-cap-out" aria-hidden="true">' +
-        U.escapeHtml(I18n.t('shard.route.reply')) + '</span>';
-    }
     html += '</div>';
     return html;
   }
@@ -454,9 +450,12 @@
    * peer-to-peer dashboard's one distinguishing fact is WHOSE machine each
    * piece is on, and it was the fact least available to a reader.
    *
-   * It renders in the expanded view only — details on demand (Shneiderman
-   * 1996), so the collapsed rows keep their density while anyone who opens a
-   * model to look at its pieces gets the key beside them.
+   * It renders ONCE, above the model rows, and not inside each expanded card.
+   * Placing it in the expanded view was details-on-demand applied to the wrong
+   * thing: the strips a reader meets first are the COLLAPSED ones, every row
+   * paints one, and those were exactly the strips the key could not reach —
+   * while two open cards repeated the same six swatches at you. A key belongs
+   * above the things it describes.
    *
    * The labels are the SAME `shard.loc.*` strings the hover titles use, so the
    * key cannot drift from what a segment says about itself. `swarm` is the one
