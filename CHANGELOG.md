@@ -1,5 +1,56 @@
 # Changelog
 
+## [0.3.177-alpha] — 2026-09-13
+
+One important fix underneath, and a pass over the parts of the app you meet in
+your first few minutes.
+
+### Fixed
+
+- **Your computer could throw away a piece of a model it had downloaded
+  perfectly.** Models are stored in pieces, and each piece has a fingerprint so
+  a node can check it has not been damaged. The catch is that several versions
+  of the same model exist — different people convert them, and the results are
+  all valid but not identical, so their fingerprints differ. Another computer
+  on the network could mention its version's fingerprint, your computer would
+  take that as the answer, notice its own piece did not match, and delete a file
+  that was never damaged. It then spent several minutes unable to use that model
+  while it downloaded the piece again — and the piece that came back was
+  identical, byte for byte, to the one it had just deleted. On the machine where
+  this was found it was happening about once every nine hours, roughly half a
+  gigabyte each time. A piece is now only deleted when it fails against a
+  fingerprint taken from the model's original source, which is the only one that
+  can actually settle the question. When there is no such fingerprint the file
+  is kept and shared as before, and the disagreement is simply reported. If your
+  node is on a small network and holds the only copy of something, this is the
+  fix that stops it disappearing.
+- **A warning appeared at every startup saying network traffic could not be
+  measured.** It was not true. The counter genuinely has nothing to report for
+  the first half-minute, because nothing has been sent yet, and the message
+  confused that with the feature being broken. It now says nothing unless
+  something is actually wrong.
+
+### Changed
+
+- **The row of icons along the top is now three places and a menu.** There were
+  seven small buttons up there whose only explanation was the label that appears
+  if you hover, which does not exist on a touchscreen and is easy to miss
+  anywhere else. Two of them did the same thing as Settings. Everything to do
+  with running your node — its name, the stop button, connecting another
+  machine, the automatic download status — now lives on the dashboard beside the
+  thing it describes, and choosing your language or a light or dark theme lives
+  in Settings, where people were already looking for it.
+- **The first screen no longer tells you to press a button that is not there.**
+  It suggested turning on private mode using a control in a bar above it. There
+  is no such bar until a conversation has started, the button is called
+  something else, and it only appears at all if your computer holds both ends of
+  the model. It now describes what is actually in front of you.
+- **The coloured bar showing which parts of a model you have is explained.**
+  Every colour meant something and the only way to find out was to hover over
+  it. There is now a key.
+- Plainer wording in a few more places, and the setup guide no longer uses two
+  different words for the same thing on adjacent lines.
+
 ## [0.3.176-alpha] — 2026-09-12
 
 Mostly about the first hour: what you see when you open SwarmLLM, and what the
