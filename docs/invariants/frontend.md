@@ -84,6 +84,37 @@ Four things a change here must keep.
   for the same reason, and `null` survives into the stored history entry so a
   restored card says what the live one said.
 
+## Frequency decides the nav — and frequency is a question about real users
+
+The nav went from seven tabs to three plus a "More" menu on 2026-09-12, on the
+principle that a destination earns a permanent seat by how OFTEN it is wanted,
+never by how expert you must be to want it. That principle is right and stands.
+**The frequency judgement inside it was wrong**, and only a user could say so:
+
+> "the 2 link i use the most is ranking and the map to see what happening,
+> who's there, and now there are burried."
+
+Both had gone into the overflow. The trap is that the ranking was made for a
+NEW user's first hour — the audience the round was explicitly optimising for —
+and then applied to everybody, including the people who keep a node running and
+are the reason the swarm has capacity at all. Two real audiences, one ordering.
+
+**What fixed it was merging rather than promoting.** The map and the
+leaderboard are one question asked twice — who is on this network, and what are
+they contributing — so they became one primary destination ("Network") instead
+of two competing for a slot. The nav is four wide, not five, and nothing went
+back into a menu.
+
+Rules that follow:
+
+- **A destination removed from the nav keeps its URL.** `/admin/leaderboard`
+  resolves to the Network view; it is in people's bookmarks and history, and
+  landing on the dashboard instead reads as "the page was deleted".
+- **Before promoting two things, ask whether they are one thing.** A nav slot
+  is the scarcest surface in the product; merging costs none.
+- **A frequency claim about users is checkable by asking them.** This one was
+  wrong for four days and cost a daily user their two most-used links.
+
 ## A control in persistent chrome earns its seat, and says its own name
 
 The header carried seven icon-only buttons — share peer address, auto-manage

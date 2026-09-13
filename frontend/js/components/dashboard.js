@@ -1959,17 +1959,25 @@
             var row = _findRow(rowId);
             if (!row) return;
 
+            // Same vocabulary the row was built with: a live update must not
+            // flip "On this computer, ready now · also on 4 other computers"
+            // into "MISSING". The download states resolve to the key's
+            // `moving` wording plus the percentage.
             var dlPct = sd.progress_pct || 0;
             var newState = 'missing';
-            var statusText = I18n.t('shard.row.missing_label');
-            if (sd.state === 'complete') { newState = 'disk'; statusText = I18n.t('dashboard.disk_label'); }
-            else if (sd.state === 'verifying') { newState = 'downloading'; statusText = dlPct + '%\u2193'; }
-            else if (sd.state === 'downloading') { newState = 'downloading'; statusText = dlPct + '%\u2193'; }
-            else if (sd.state === 'pending') { newState = 'downloading'; statusText = '\u2022'; }
+            var newLoc = 'absent';
+            var statusText = I18n.t('shard.loc.absent');
+            if (sd.state === 'complete') {
+              newState = 'disk'; newLoc = 'disk';
+              statusText = I18n.t('shard.loc.disk');
+            } else if (sd.state === 'verifying' || sd.state === 'downloading' || sd.state === 'pending') {
+              newState = 'downloading'; newLoc = 'moving';
+              statusText = I18n.t('shard.loc.moving') + (sd.state === 'pending' ? '' : ' \u2014 ' + dlPct + '%');
+            }
 
             self._patchShardRow(row, {
               state: newState,
-              loc: newState === 'downloading' ? 'moving' : undefined,
+              loc: newLoc,
               whereText: statusText,
               peerDownloads: pdIndex[modelId + ':' + sd.index],
               dlPct: dlPct,

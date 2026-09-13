@@ -358,10 +358,15 @@
               row.setAttribute('data-state', 'missing');
               var pb = row.querySelector('.shard-row-piecebar');
               if (pb) pb.remove();
-              var status = row.querySelector('.shard-row-status');
-              if (status) status.textContent = I18n.t('shard.row.missing_label');
-              var glyph = row.querySelector('.shard-row-state-glyph');
-              if (glyph) glyph.textContent = '\u2715';
+              // The row says where the part is in words; cancelling a
+              // download leaves it nowhere until the refresh below replaces
+              // the text with the truth.
+              var swatch = row.querySelector('.shard-row-swatch');
+              if (swatch) swatch.setAttribute('data-loc', 'absent');
+              var where = row.querySelector('.shard-row-where');
+              if (where && where.lastChild && where.lastChild.nodeType === 3) {
+                where.lastChild.nodeValue = I18n.t('shard.loc.absent');
+              }
             });
           }
           delete S.activeAcquisitions[modelId];

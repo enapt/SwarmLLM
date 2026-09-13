@@ -77,6 +77,17 @@ loading, a model being picked, and entering the Chat tab.
 
 → `docs/invariants/frontend.md`
 
+## Frequency decides the nav, and a frequency claim is checkable by asking
+
+A destination earns a permanent seat by how OFTEN it is wanted, never by how
+expert you must be to want it. The ranking made for a new user's first hour was
+applied to everybody and buried the two links a daily node operator used most.
+Fixed by MERGING rather than promoting — the map and the leaderboard are one
+question asked twice, so they are one destination. A destination removed from
+the nav keeps its URL.
+
+→ `docs/invariants/frontend.md`
+
 ## A control in persistent chrome earns its seat, and says its own name
 
 Anything that sits in the header is on EVERY page. Node operation (node id,

@@ -2128,10 +2128,13 @@ Routes Claude model requests through a locally-authenticated `claude` CLI subpro
 - `GET    /api/admin/provider-models` — List models available from cloud providers
 - `GET    /api/admin/provider-health` — Probe cloud provider availability
 - `POST   /api/admin/provider-model-status` — Check specific model availability on provider
-- `GET    /api/admin/version` — Version info (binary version, git hash, build features), plus `restart_required`: set when a NEWER version is installed on disk than the one running, i.e. the restart into it did not take effect. `null` when they agree or nothing has been installed. Exists because an in-place update `exec`s and therefore keeps the process id AND the kernel's start time, so `ps` cannot distinguish "updated" from "never restarted" (gotcha #277/#287) — an operator concluded twice from exactly that evidence that their node had missed eight releases, and nothing could contradict it. The node knows what it installed and what it runs; this is the comparison. A deliberate rollback (running newer than the record) is not flagged.
+- `GET    /api/admin/version` — Version info (binary version, git hash, build features), plus `restart_required`: set when a NEWER version is installed on disk than the one running, i.e. the restart into it did not take effect. `null` when they agree or nothing has been installed. Exists because an in-place update `exec`s and therefore keeps the process id AND the kernel's start time, so `ps` cannot distinguish "updated" from "never restarted" (gotcha #277/#287) — an operator concluded twice from exactly that evidence that their node had missed eight releases, and nothing could contradict it. The node knows what it installed and what it runs; this is the comparison. A deliberate rollback (running newer than the record) is not flagged. Also carries `repo_url`, `discord_url` and `github_stars` — the header's project cluster reads them from here, once, rather than from the stats tick (there are two stats builders and neither should have to carry a value that moves hourly). `github_stars` is refreshed by `UpdateChecker` on the same pass, host and gate as the release check, so a node with updates Off makes no GitHub request; a failed refresh keeps the last value.
 - `POST   /api/admin/update/check` — Check for new SwarmLLM releases
 - `POST   /api/admin/update/apply` — Download and apply update
-- `GET    /api/admin/network-map` — Network topology heatmap data
+- `GET    /api/admin/network-map` — Network topology heatmap data, plus
+  `recent_routes` (up to 24, newest first): the regions each recent request
+  actually passed through, projected from `recent_traces`. The Network view
+  draws them as arcs.
 - `GET    /api/admin/models/{id}/metadata` — GGUF metadata (context length, quantization, layers)
 - `GET/PUT /api/admin/models/{id}/encrypted-pipeline` — Per-model encrypted pipeline policy
 - `POST   /api/admin/rescan-shards` — Hot-reload shard files from disk without restart
@@ -2167,7 +2170,9 @@ Routes Claude model requests through a locally-authenticated `claude` CLI subpro
   - `frontend/js/components/downloads.js` — download queue, prune history, resource schedule
   - `frontend/js/components/notifications.js` — unified event handler, toasts, WebSocket, REST polling, provider health
   - `frontend/js/components/identity.js` — network invite code, nickname, leaderboard
-  - `frontend/js/components/network-map.js` — regional network map visualization
+  - `frontend/js/components/network-map.js` — regional network map, the
+    scheduler's planned path, and the arcs for routes that actually ran
+    (`renderRecentRoutes`, sharing `regionCenter`/`arcPath` with the plan)
   - `frontend/js/components/compare.js` — multi-model comparison tool; streams `/v1/messages` and re-assembles the SSE into the same non-streaming shape the card renderer and the history entry read
   - `frontend/js/components/responses.js` — `/v1/responses` dashboard panel: retrieve-by-id, status-filtered list, cancel/delete/view per row, 5-second polling refresh while visible
   - `frontend/js/components/pool.js` — device pool management (create, join, members, contribution)
