@@ -177,7 +177,17 @@ impl BandwidthMeter {
             }
         }
         let totals = parse_bandwidth_totals(&text);
-        if totals.is_none() && !self.warned_absent.swap(true, Ordering::Relaxed) {
+        // Absent has two causes and only one of them is a fault. Every node
+        // starts in the other one: the health monitor's first tick runs before
+        // any byte has crossed the transport, so the family has no rows yet.
+        // Warning there fired on EVERY start, 51 ms in, announcing that the
+        // figure "will be absent" about a figure that appears 30-60 s later —
+        // and `warned_absent` is a one-shot, so nothing ever retracted it.
+        // `metric_is_registered` is the discriminator; see its doc comment.
+        if totals.is_none()
+            && !metric_is_registered(&text)
+            && !self.warned_absent.swap(true, Ordering::Relaxed)
+        {
             tracing::warn!(
                 "network traffic counters are armed but report nothing — the metric \
                  libp2p registers may have been renamed; the traffic figure will be absent"
@@ -195,6 +205,28 @@ impl BandwidthMeter {
 /// choice, so this constant is a contract with a specific version of libp2p and
 /// `the_totals_are_read_out_of_the_shape_libp2p_writes` pins it.
 const BANDWIDTH_METRIC: &str = "libp2p_bandwidth_bytes_total";
+
+/// The same metric without the counter's `_total` suffix, which is the name
+/// OpenMetrics writes the `# HELP` / `# TYPE` / `# UNIT` metadata under.
+///
+/// Those lines appear as soon as the family is REGISTERED. The data rows do
+/// not: `prometheus_client`'s `Family` encodes one row per label set, and
+/// libp2p creates the first label set on the first byte that actually moves.
+/// So an armed node that has not yet sent anything encodes metadata and
+/// nothing else — which is what separates "registered and silent" from
+/// "renamed", the only two ways the totals can come back absent.
+const BANDWIDTH_METRIC_BASE: &str = "libp2p_bandwidth_bytes";
+
+/// Is the metric registered under the name we expect, whether or not it has
+/// recorded anything yet?
+fn metric_is_registered(text: &str) -> bool {
+    text.lines().any(|line| {
+        ["# HELP ", "# TYPE ", "# UNIT "].iter().any(|prefix| {
+            line.strip_prefix(prefix)
+                .is_some_and(|rest| rest.starts_with(BANDWIDTH_METRIC_BASE))
+        })
+    })
+}
 
 /// Sum the per-protocol counters by direction.
 ///
@@ -301,5 +333,68 @@ libp2p_bandwidth_bytes_total{protocols=\"/ip4/udp/quic-v1\",direction=\"Outbound
         // arming is recorded and reading does not fail.
         let _ = meter.totals();
         assert!(meter.armed.load(Ordering::Relaxed));
+    }
+
+    /// The first read of every node's life finds the family registered and
+    /// empty, and that must not be reported as upstream having renamed the
+    /// metric. Asserted on the MECHANISM — the one-shot warning flag — because
+    /// the return value is `None` either way, so a test on the totals alone
+    /// cannot tell the two apart.
+    #[test]
+    fn an_armed_but_silent_meter_is_not_mistaken_for_a_rename() {
+        let meter = BandwidthMeter::new();
+        meter.arm(|registry| {
+            let _ = libp2p::metrics::BandwidthTransport::new(
+                libp2p::core::transport::MemoryTransport::default(),
+                registry,
+            );
+        });
+        // Nothing has been sent, so there are no rows to read.
+        assert_eq!(
+            meter.totals(),
+            None,
+            "a family with no label set yet has nothing to total"
+        );
+        assert!(
+            !meter.warned_absent.load(Ordering::Relaxed),
+            "a registered-but-silent metric is the normal first-seconds state, \
+             not a rename — warning about it fires on every node start"
+        );
+    }
+
+    /// The warning still has to fire for the case it exists for: the metric
+    /// genuinely absent from the registry under the name we read.
+    #[test]
+    fn a_metric_that_is_not_there_is_still_reported() {
+        assert!(
+            !metric_is_registered("# HELP libp2p_traffic_bytes Renamed upstream.\n# EOF\n"),
+            "a different name must not satisfy the registration check"
+        );
+        assert!(
+            !metric_is_registered(""),
+            "an empty registry registers nothing"
+        );
+        // Present with no rows — the shape the real encoder produces before any
+        // traffic has moved.
+        assert!(metric_is_registered(
+            "# HELP libp2p_bandwidth_bytes Bandwidth usage by direction and transport protocols.\n\
+             # TYPE libp2p_bandwidth_bytes counter\n\
+             # UNIT libp2p_bandwidth_bytes bytes\n\
+             # EOF\n"
+        ));
+        // A reporting metric is never mistaken for a missing one either.
+        assert!(metric_is_registered(UPSTREAM_SHAPE));
+    }
+
+    /// The two constants describe one metric: OpenMetrics suffixes a counter's
+    /// SAMPLES with `_total` and leaves its metadata on the base name. If they
+    /// drift apart the registration check silently stops matching.
+    #[test]
+    fn the_sample_name_is_the_metadata_name_plus_the_counter_suffix() {
+        assert_eq!(
+            BANDWIDTH_METRIC,
+            format!("{BANDWIDTH_METRIC_BASE}_total"),
+            "the row name is the metadata name plus OpenMetrics' counter suffix"
+        );
     }
 }
