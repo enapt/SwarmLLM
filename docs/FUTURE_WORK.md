@@ -41,7 +41,7 @@ Priority is user-visible impact x how many users x whether it fails silently.
 
 | # | Bug | Why it ranks here |
 |---|---|---|
-| 10 | A conversation's later turns do not seek out the peer holding its prefix | Throughput, not correctness — the largest single inter-node win still on the table |
+| 10 | A conversation's later turns do not seek out the peer holding its prefix | Throughput, not correctness — the largest single inter-node win still on the table  ⚠ **Grounded against the router 2026-09-13 and it is bigger than it reads**: the router uses ONE id per request for both lookup and registration, and skips registering on a hit, so the id is a conversation IDENTITY constant across turns — a lookup-key≠registration-key design needs a re-key operation on `KvCacheManager`, not just a derived key. The Anthropic surface also cannot reach it without a signature change through four handlers. Read the entry body |
 | 11 | `#440` residual: the KV store's `allocated_bytes` wanders ~1 GB across identical requests | **Most likely never a wander** (2026-09-09): the refused figure is STORE-WIDE and was read as one request's; the `entries` count that says so was on a different line at `debug`. The refusal now carries `live_bytes`/`external_bytes`/`entries` and prints them. ⚠ Explanation, not a reproduction — `live_entries=1` with a total above that request's cache would reopen it |
 | 36 | Qwen3-8B with `tools` emits `<\|start\|>`/`<\|end\|>` garbage — Harmony tokens, not Qwen's | **Field-reported 2026-09-10, NOT reproduced here.** Item 35 fixed the framing this most likely stems from — the model was being handed an instruction it was never trained on — and the reporter should re-test before this is chased further. Qwen3-1.7B at 1480 prompt tokens produced coherent output on the old code, so if it survives item 35 it is size- or setup-specific and needs their machine. **We inject no Harmony tokens anywhere**: `grep -F '<\|start\|>' src/` finds nothing, so the model is generating them |
 | 64 | A reasoning model's whole scratchpad streamed to the user when the reply opened with whitespace | **FIXED 2026-09-13** (report #031, gotcha #588). `StreamingToolText::withholding_reasoning` asked "can this still become `<think>`?" as `THINK_OPEN.starts_with(rest) && !rest.is_empty()`. An empty `rest` means every token so far trimmed to nothing — i.e. **nothing decisive has been seen**, the weakest evidence there is — and the `!is_empty()` clause treated exactly that as proof there was no scratchpad. `Reasoning::Absent` latched on zero characters and short-circuits every later call, so the complete `<think>` block streamed as the answer. A lone leading space as its own chunk is ordinary: a BPE tokenizer decodes its word-boundary marker to one. Confirmed in the field on qwen3-1.7b via the dashboard chat; streaming surfaces only — the non-streaming sibling runs once over the complete text and never has to decide what "only whitespace so far" means. All seven existing tests started their stream with the literal `"<think>"`, the one case that worked. Fixed by dropping the clause (`pending_all` already releases a whitespace-only reply at the end of the stream, on both surfaces), and the property now asserted is that the two paths **agree** rather than that each is right |
@@ -1511,6 +1511,60 @@ and both need doing:
 Cross-user collision is already handled and needs no new thought:
 `validate_chat_request` prefixes every session id with
 `blake3(api_key)[..16]`, so a derived key inherits that namespacing.
+
+### Grounded against the router, 2026-09-13 — piece (1) is not a helper, it is a change to the session-identity model
+
+Read this before estimating the work. **The router uses ONE id per request for
+both the lookup and the registration**, so a "lookup key ≠ registration key"
+design — which is what "hash the conversation as it stood when the previous turn
+finished" is — does not fit as written:
+
+- `dispatch_single` calls `check_multi_turn_reuse(session_id, …)` and then, only
+  when that MISSED, `register_multi_turn(session_id, …)` under the same string.
+  A hit deliberately does not re-register (`if cache_start_pos.is_none()`).
+- `multi_turn_sessions` is `HashMap<String, SessionId>` — an exact match, not a
+  longest-prefix one.
+- The stored prompt is what grows: `RouterCommand::UpdateCacheTokens` calls
+  `update_cached_prompt` at completion, and `check_multi_turn_reuse` does
+  `new_prompt.starts_with(stored)`.
+
+So the id is a **conversation identity, constant across every turn**, and the
+prefix check does all the per-turn work. A derived id therefore has to be
+constant across turns too — and the only thing available on every turn that is
+constant is the conversation HEAD, which is exactly the SGLang trap above and is
+worse than nothing here.
+
+Making the entry's design work means all of:
+
+1. A lookup key (the conversation before this turn's new messages) and a
+   registration key (the conversation including them), computed separately.
+2. **Re-keying the `multi_turn_sessions` entry on every HIT**, from the lookup
+   key to the registration key — a new `KvCacheManager` operation, and the point
+   where the eviction and orphan-cleanup logic in `register_multi_turn` has to
+   be re-thought rather than reused.
+3. The two prerequisites already listed above (record the generated reply; a
+   `chat_template` variant that renders without the trailing generation
+   prompt).
+
+**One thing that DOES fall out cleanly and is worth keeping** — the prefix
+property a derived key needs is provable rather than hopeful. If two message
+lists hash equal then they are equal, and `chatml_fallback(longer)` is
+guaranteed to start with `chatml_fallback(shorter)` whenever the shorter list is
+a prefix of the longer one: `chatml_fallback(X) = render(X) + "<|im_start|>
+assistant\n"`, and the next message in the longer list is the assistant reply,
+which renders starting with exactly that generation prompt. So a collision
+between two conversations can only happen when their prefixes really are
+identical, in which case sharing the cache is correct and
+`check_multi_turn_reuse` cannot invalidate anything. That removes the "worse
+than nothing" risk from the key itself and leaves the work entirely in (1)-(3).
+
+**Also narrower than the entry says**: `InferenceRequest::local` is the one
+constructor every local surface uses, and only the OpenAI path ever passes a
+non-`None` `session_id` (from `validate_chat_request`, the single place the
+api-key namespacing happens). The Anthropic handlers pass `None` unconditionally
+and do not carry the api key down — `anthropic_non_stream` and its three
+siblings take already-extracted pieces — so covering that surface needs a
+signature change through four functions, not a call to a helper.
 
 Sources: <https://www.lmsys.org/blog/2024-12-04-sglang-v0-4/>,
 <https://github.com/sgl-project/sglang/issues/26263>.
