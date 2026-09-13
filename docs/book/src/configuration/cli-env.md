@@ -53,7 +53,7 @@ Link your personal devices so credits are combined on one main machine.
 | `pool create --name "My Devices"` | Create a device group (this machine becomes the main device) |
 | `pool invite-code` | Generate an 8-character invite code to share |
 | `pool join <CODE>` | Link this device using a code from your main machine |
-| `pool status` | Show linked devices, credits, and online status |
+| `pool status` | Show linked devices, their contribution level and online status |
 | `pool leave` | Unlink this device from the group |
 
 **Example flow:**

@@ -12,14 +12,14 @@ Set a nickname. Body: `{"nickname": "my-node"}`
 Clear the nickname.
 
 ### GET /api/identity/leaderboard
-Network-wide credit leaderboard.
+Network-wide leaderboard. Ranks by shards hosted, **not** by credits — the credit economy is dormant and no surface publishes a balance (`docs/CREDITS_DESIGN.md`).
 
 ### GET /api/identity/peers
 Peer identity directory (nicknames, regions, tiers).
 
 ## Device Pools ("My Devices")
 
-Link multiple devices owned by the same user. Credits earned by all linked devices are combined into one balance on the main (owner) device.
+Link multiple devices owned by the same user, so they serve each other privately and the owner can pin models to them. Credit forwarding to the owner's balance still runs underneath, but credits are dormant and nothing shows a balance (`docs/CREDITS_DESIGN.md`).
 
 > **Terminology**: "Linked Devices" in the UI. This is different from connecting to the SwarmLLM network — linking devices groups your own hardware, while the network connects you with other people.
 

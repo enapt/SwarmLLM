@@ -1,5 +1,74 @@
 # Changelog
 
+## [0.3.179-alpha] — 2026-09-13
+
+Three problems reported from people's own machines, and what looking into them
+turned up. One of them let a computer quietly fill its memory; one showed a
+model's private working-out to the person who asked the question.
+
+### Fixed
+
+- **A computer with no graphics card could quietly fill its memory and start
+  swapping.** SwarmLLM has a check that refuses a model which will not fit, and
+  it works — but it only ran the first time a model was loaded. A model already
+  running is regularly asked to take on more of itself as work is rescheduled,
+  and none of that was weighed. Reported from a 16 GB Mac mini: the first load
+  was measured honestly against 8.4 GB of headroom, and the next four times it
+  grew — about 11.5 GB in all — went through unchecked. Every machine without a
+  graphics card was affected.
+- **A reasoning model's private notes could appear as the answer.** Some models
+  work a problem out in a scratchpad before replying, and that scratchpad is
+  meant to be removed. It was kept whenever the reply happened to begin with a
+  space or a line break — which is simply how many models start. Affects
+  anything reading replies as they stream, including the built-in chat.
+- **Cancelling out of the "Search HuggingFace" tab could leave it permanently
+  empty.** The strip of trending models is fetched once per page; if the
+  computer was still starting up and refused, nothing tried again until the
+  page was reloaded.
+- **A panel claimed a working feature was still being built.** The view showing
+  what the network could run with more contributors shipped some time ago, but
+  its old placeholder was still underneath, and it stayed on screen whenever the
+  figures failed to load.
+
+### Changed
+
+- **When this computer keeps a copy of a model part that others disagree
+  with, it now says so.** Since v0.3.177 it keeps such a copy rather than
+  deleting it — the right call, because the disagreement is not backed by the
+  model's publisher and throwing away what might be the last copy is worse. But
+  nothing recorded that it had happened, so nobody could tell us how often it
+  does. It now shows on the part itself, in the diagnostics report (even when
+  the answer is none, because none is an answer), and in the API.
+- **A part being kept is no longer reported as a failure.** It was shown in red
+  as "failed its integrity check — re-downloading automatically". Nothing was
+  being re-downloaded and nothing was wrong, and the obvious response to that
+  message is to delete the file — which is exactly what the change exists to
+  prevent.
+- **The command line no longer shows credit balances.** Credits have been
+  switched off since August and affect nothing; the dashboard stopped showing
+  them then and the command line did not. `swarmllm pool` now describes what a
+  pool is actually for: your own devices grouped so they serve each other
+  privately.
+- **The Performance tab reads in tokens per second**, matching the table three
+  sections below it that already did. It said "words per second", which was
+  both a second unit for one measurement and wrong — a token is about
+  three-quarters of a word.
+- **A model's recent activity moved out of its card and into the Activity
+  panel**, which can now be narrowed to one model. It was a second copy of what
+  the panel already held.
+- **The network map explains its lines**, which it had never done in either
+  colour, and a computer that has not yet sent or served a request across
+  regions now says so instead of showing an empty map.
+
+### Documentation
+
+- The Credit System pages said the economy rewards contributors and refuses
+  free-riders. It has been switched off since August. They now say so at the
+  top, and the sections describing enforcement and priority tiers are marked as
+  describing the design rather than your node.
+- The troubleshooting guide no longer suggests earning credits to raise a limit
+  that credits do not affect.
+
 ## [0.3.178-alpha] — 2026-09-13
 
 A rebuild of the model list and the network view, driven by people using the

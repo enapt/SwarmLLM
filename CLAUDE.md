@@ -226,30 +226,42 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 All 20 build phases complete. All subsystems wired — no stubs. **2645 lib (dev,claude-subscription) — re-measured 2026-09-13, full suite green (exit 0)** + 79 integration (31 `integration` + 34 `integration_phase10_11` + 14 `yamux_substream`) + 96 repo-consistency + 1 api_key_side_effects + 36 swarmllm-types tests passing; 12 lib + 1 e2e ignored (env-var or manual). Clippy clean on default, `--no-default-features --features dev,claude-subscription` (that combination is the documented one — plain `--features dev` leaves `embedded` on too and fails on dead code), a `--features llama` check, and `flash-attn --lib`. `cargo audit` reports only advisories already documented and accepted in `SECURITY.md` — re-checked at the .177 release 2026-09-13, two (`hickory-proto` RUSTSEC-2026-0118/0119, both transitive via libp2p — 0.26.1 is a semver-MAJOR bump pinned by libp2p 0.56, so it is genuinely unreachable without upgrading libp2p; re-checked 2026-09-08, not merely re-accepted) plus the `paste` unmaintained warning.
 
-**Released and deployed: v0.3.178-alpha (2026-09-13, tag `63c5d4c2`).** Gate
-clean job-by-job — CI 14/14, Cache warm 3/3 with kernels shown **restored AND
-skipped** (both CUDA jobs), `check_ci_gate.sh` 14=14 against a COMPLETED run,
-all ON THE TAGGED COMMIT; release 10/10 first time; on the DOWNLOADED artifact
-**smoke 9/9 + shapes 7/7 (first run) + conformance 9 families 52 OK / 0 FAIL /
-2 n/a**, which `diff`s IDENTICAL against a .177 baseline taken FIRST. Both nodes
-verified: local `225e6fe7f2b5cd74`, Proxmox `9684263580c6660f`, ids and
-`identity.key` md5 unchanged, deb hash re-checked AFTER transfer, no
-`.dpkg-old`, 0 ERROR on both. Rollback
-`~/.local/bin/swarmllm.0.3.177-alpha.bak` (3 kept: .175/.176/.177). Full
-record: `memory/round_log_0913_dashboard_rework.md`.
+**Released and deployed: v0.3.179-alpha (2026-09-13).** Gate record in
+`memory/round_log_0913_dispute_visibility_and_credits.md` § Release. Rollback
+`~/.local/bin/swarmllm.0.3.178-alpha.bak` (3 kept: .176/.177/.178).
 
-**What .178 carries.** The model list and network view rebuilt live with the
-user and two Discord testers. Rows state themselves in words, grouped **On this
-computer / On other computers**; the expanded card is summary first with
-technical details LEFT and parts RIGHT, **all visible, no disclosure links**;
-part rows read as sentences whose endpoints say what they DO. Map + Leaderboard
-merged into one primary **Network** tab that draws the routes requests ACTUALLY
-took. Header gained version→release link, ★ stars, Discord.
+**What .179 carries — three field reports and their fallout.** **#030**: on a
+computer with NO graphics card the anti-swap gate ran once per model and never
+again — `charge_additional_segment` re-derived placement from
+`placed_on_cpu_because`, which reads `None` on a card-less machine exactly as it
+does for a worker holding a card, so every later layer-range GROWTH went to the
+graphics gate, which has no ceiling when `vram_budget_mb` is 0. A 16 GB Mac
+weighed 470 MB honestly at spawn, waved ~11.5 GB through, and swapped. **Growth
+is the COMMON case on a swarm node** (`WorkerHandle::holds_gpu_memory`, #586).
+**#031**: a reasoning model's whole `<think>` scratchpad streamed to the user
+whenever the reply opened with whitespace — an empty remainder read as proof
+there was no scratchpad, when it is the weakest evidence there is (#588); the
+property now asserted is that streaming and non-streaming **agree**. **And the
+.177 shard fix became measurable**: `disputed` was a `u32` local to one startup
+task, so that fix was field-unverifiable BY CONSTRUCTION — now
+`state.models.disputed_shards`, in the diagnostics report (printed even at
+zero), a dashboard badge and the models API. Two worse reporting bugs fell out
+of it: a KEPT shard shown as a red "failed its integrity check — re-downloading
+automatically", and a sweep summary that omitted disputes so a disputing node
+said "Verified 20 shards".
 
-⚠ **Making a hidden panel visible found a bug it had had forever**:
-`general.file_type`→quantization was wrong from 8 onward, so **every Q4_K_M
-model reported itself as Q2_K** (gotcha #584). When you surface something
-hidden, CHECK it rather than just relocating it.
+Also: the CLI still printed dormant credits (the August cleanup covered three
+surfaces, all BROWSER surfaces — #587); Performance reads in **tok/s**, not
+"words per second", which disagreed with its own table; the per-model ticker
+moved into a now-filterable Activity panel; the map's arcs got a key (they had
+none, in two colours) plus an honest empty state; and a "being prepared in a
+follow-up update" placeholder outlived its feature by releases.
+
+⚠ **Three of those were one sentence — two ways to fail, one watched** (#590).
+Grep `r.ok ? r.json() : null` and `try_send(..).is_ok()`.
+⚠ **Planting the violation contradicted the code's own claim twice** (#591) — a
+guard that could not READ one of its inputs, and a comment claiming a check
+catches something it lets through.
 
 **New users first (user direction, 2026-09-12, still standing).** Growth is the
 bottleneck — rank work by "would someone hit this in their first hour".
@@ -260,8 +272,7 @@ good and must NOT be simplified away; read it before touching the frontend.
 viewport, so the narrow-width CSS is written to need no verification.
 
 **Bumping the version LAST is settled practice** — the tagged commit is then the
-bump commit, so Cache warm fires on it. Confirmed again at .178, where both CUDA
-jobs showed the kernels *restored* AND *skipped*.
+bump commit, so Cache warm fires on it. Confirmed at .178 and .179.
 
 **Release-gate cautions — the gate itself is in `memory/open_cautions.md`; read
 it before releasing.** The three that bite: conformance is NINE families on the
@@ -272,8 +283,8 @@ BUILD and PATH a report exercised before calling code innocent (#552/#555); and
 
 ### Earlier rounds — one line each. Detail in `memory/round_log_*.md`, gotcha numbers index `memory/gotchas.md`. **Read the named round log before re-deriving any of these.** Older than .160: `memory/round_history.md`.
 
-- **.178** (09-13, tag `63c5d4c2`, gate clean, conformance 52/0/2 **diff-identical** to the .177 baseline): the model list and network view rebuilt live with the user and two testers — rows that say what they are, On this computer / On other computers grouping, expanded card with everything visible, part rows as sentences, Map+Leaderboard merged into one **Network** tab drawing REAL inference routes, header community links. ⚠ **Every Q4_K_M model had been reporting itself as Q2_K** (#584) — found only by making a hidden panel visible. `memory/round_log_0913_dashboard_rework.md`.
-- **.177** (09-13, tag `2a11564e`): a peer's gossip could make a node DELETE a shard it held correctly (#581, gotcha #384 recurring); the traffic metric falsely warned at every start (#582); the header/first-hour UI pass. ⚠ Field-UNVERIFIED still — `disputed` in the background-verification line is the instrument. `round_log_0913_shard_destruction.md`.
+- **.179** (09-13, gate clean): three field reports — **#030** the anti-swap gate ran ONCE per model on a card-less computer and it swapped (#586), **#031** a reasoning model's whole scratchpad streamed as the answer when the reply opened with whitespace (#588), and the **.177 shard fix made measurable** (`disputed_shards` in the diagnostics report, printed even at zero, because the count had lived in one startup task's local variable). Plus the CLI still printing dormant credits (#587), tok/s in Performance, the ticker moved to a filterable Activity panel, a key for the map's arcs, and a placeholder that outlived its feature. ⚠ **Three were the same sentence: two ways to fail, one watched** (#590). `memory/round_log_0913_dispute_visibility_and_credits.md`.
+- **.177-.178** (09-13, both gate clean): a peer's gossip could make a node DELETE a shard it held correctly (#581, gotcha #384 recurring — **a repair mechanism is a destruction mechanism**); then the model list and network view rebuilt live with the user and two testers (rows in words, On this computer / On other computers, everything visible in the expanded card, Map+Leaderboard merged into one **Network** tab drawing REAL routes). ⚠ **Every Q4_K_M model had been reporting itself as Q2_K** (#584) — found only by making a hidden panel visible. `round_log_0913_shard_destruction.md`, `round_log_0913_dashboard_rework.md`.
 - **.166-.176** (09-09→09-12, eleven releases in four days, all gate clean): tool schemas reached every model ALPHABETISED (#46); the KV cache reserved at the admitted prompt length (#32); **every Qwen3 request reached the model with the QUESTION MISSING** (.169); templates moved to `minijinja` (.170); **tools were NEVER passed to the template** plus an escrow that MINTED credits (.171); partial RoPE meant Phi-4-mini, GLM-4 and Qwen 3.5 could not serve one request (.172-.173); six field reports from a 16 GB processor-only Mac. `family_conformance.sh` was written here and found two real bugs on its first run; branch protection went to 14 contexts after every PR was permanently BLOCKED (#530). `memory/round_history.md`.
 - **.160-.165** (09-06→09-08): #484 a FALSE PRIVACY ASSURANCE; #495 shipped INERT (a transport failure recorded as a perfect delivery); the prompt-trust bar; per-peer GOODPUT closing issue #21's open half. ⚠ Null controls caught THREE tests passing for the wrong reason.
 - **.132-.159** (08-29→09-06): the guards-were-the-defect audit (#413 — five tested by PLANTING the violation, four could not see what they guard); #449 ALL inference broken on every Mac; #472 a content hash recomputed mid-fix.

@@ -18,7 +18,7 @@ DIAG: request complete request_id=1ddd2912-… route=distributed segments=2
 
 | What you see | What it means |
 |---|---|
-| `queue_ms` large | this node is saturated — raise `max_concurrent_requests`, or your credit tier is capping you |
+| `queue_ms` large | this node is saturated — raise `max_concurrent_requests` |
 | `sched_ms` large | the scheduler is struggling to find holders — check the peer table below |
 | `ttft_ms` large, `decode_ms` small | prefill or a cold model load. Not the network |
 | `decode_ms` large | per-token cost — find the slow hop in the `segN_ms` values |
@@ -249,10 +249,13 @@ its GPU memory) whenever the daemon unloads it by either path above.
   the logs to confirm the fast-fail path engaged.
 
 **Concurrent requests stall when only some get dispatched:**
-- Per-tier concurrency caps come from `inference.max_concurrent_requests`
-  (default 10): Bronze=2, Silver=5, Gold=10, Platinum=20. Excess
-  requests queue until prior ones complete. To raise: bump the config
-  knob or earn credits to climb tiers.
+- Concurrency is capped from `inference.max_concurrent_requests` (default
+  10). **Every requester gets the same tier** — `calculate_tier` ignores the
+  balance while credits are dormant, so the cap is Silver's for everyone and
+  the only way to raise it is the config knob. Excess requests queue until
+  prior ones complete. (The tiered caps Bronze=2 / Silver=5 / Gold=10 /
+  Platinum=20 still exist in the code and are what a re-enabled economy would
+  restore; see `docs/CREDITS_DESIGN.md`.)
 - If queued requests don't dispatch even after others complete,
   check for a missed `queue_notify.notify_one()` after
   `active_count.fetch_sub(1)` (should never happen on `main`; was a

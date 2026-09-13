@@ -1,6 +1,32 @@
 # Credit System
 
-Credits are SwarmLLM's fairness mechanism — no blockchain, no token, just local accounting with dual-signed transactions. The system ensures contributors are rewarded and free-riders are deprioritized.
+> ## ⚠ Credits are switched off, and gate nothing
+>
+> Since 2026-08-17 the credit economy is **dormant**. `MIN_BALANCE_FOR_INFERENCE`
+> is `0` and `calculate_tier` returns the same tier whatever balance it is
+> given, so **no balance affects who is served, how fast, or what any surface
+> shows**. Nothing displays a balance either — not the dashboard, not the
+> leaderboard, not the command line.
+>
+> The reason is simple and worth stating: credit has never moved between two
+> machines as payment for work. Each node mints its own figure, and the one real
+> transfer — pool forwarding — just concentrates self-minted numbers. Showing
+> someone a number like that as earnings is a claim the project cannot stand
+> behind; acting on it is worse.
+>
+> **The accounting below still runs and the rates below are real** — it costs
+> nothing and the recorded figures are the only honest data about what traffic
+> actually looks like, which is what a re-enabled economy would have to be
+> designed from. But read every "ensures", "enforced" and "deprioritized" on
+> this page as *what the design does when switched on*, not as what your node
+> does today.
+>
+> The full picture — what is actually true now, why the obvious fix is wrong,
+> the bilateral-settlement design, and the exit criteria that must hold before
+> any of it comes back — is in
+> [`docs/CREDITS_DESIGN.md`](https://github.com/enapt/SwarmLLM/blob/main/docs/CREDITS_DESIGN.md).
+
+Credits are SwarmLLM's fairness mechanism — no blockchain, no token, just local accounting with dual-signed transactions. The design rewards contributors and deprioritizes free-riders.
 
 ## Earning & Spending
 
@@ -17,15 +43,28 @@ Credits are SwarmLLM's fairness mechanism — no blockchain, no token, just loca
 
 All rates are configurable per pool via `[pool.credit_rates]` in config.
 
-## Minimum Balance Enforcement
+## Minimum Balance Enforcement (switched OFF)
 
-Nodes with balance below **-1000 credits** have remote inference requests rejected. They receive a clear error message telling them to contribute (host shards, serve inference, seed data).
+**`MIN_BALANCE_FOR_INFERENCE` is `0`, which the enforcement check reads as "no
+floor". No requester is refused over credits today.** It was `-1000`, and the
+paragraph below describes what that did. It was switched off because refusing
+somebody service over a self-minted figure is not a small inaccuracy — it is
+denying them the product on the strength of a number nobody reconciled, and a
+node driven negative by a bug stayed refused with no recovery path.
+
+Nodes with balance below **-1000 credits** had remote inference requests rejected. They receive a clear error message telling them to contribute (host shards, serve inference, seed data).
 
 - Local API requests (from localhost) are always allowed regardless of balance
 - This prevents free-riders from endlessly consuming without contributing
 - The floor is configurable via `MIN_BALANCE_FOR_INFERENCE` constant
 
-## Priority Tiers
+## Priority Tiers (switched OFF)
+
+**`calculate_tier` returns the same tier for everyone whatever balance it is
+given**, so the table below is what the design does when switched on, not what
+your node does. Per-requester concurrency isolation is preserved — one peer
+still cannot monopolise the queue — while the *advantage* from a minted number
+is gone.
 
 Tiers are calculated from your credit balance relative to the network:
 
