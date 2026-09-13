@@ -478,23 +478,42 @@ impl AutoShardManager {
             }
             let mid = sid.model_id.clone();
             let dir = data_dir.clone();
+            // This pass exists BECAUSE the swarm's hash for a shard we hold
+            // changed, so the hash in front of us is the most likely of all to
+            // be a peer's claim about a different build. Destroy nothing
+            // unless it has origin backing.
+            let policy = self
+                .shared_state
+                .model_registry
+                .mismatch_policy(&sid, &info.hash);
             let result = tokio::task::spawn_blocking(move || {
-                crate::model::shard::ShardStore::new(&dir).verify_shard(&mid, &info)
+                crate::model::shard::ShardStore::new(&dir).verify_shard(&mid, &info, policy)
             })
             .await;
             if let Ok(Err(e)) = result {
-                // `verify_shard` has already quarantined the bad bytes. Stop
-                // advertising them, then get a good copy.
-                tracing::warn!(
-                    model = %sid.model_id,
-                    shard = sid.index,
-                    error = %e,
-                    "A shard we were serving does not match the hash the swarm \
-                     reports — quarantined, fetching a fresh copy"
-                );
-                self.shared_state
-                    .model_registry
-                    .remove_shard_holder(&sid, self.shared_state.identity.node_id());
+                if policy == crate::model::shard::OnMismatch::KeepBytes {
+                    tracing::warn!(
+                        model = %sid.model_id,
+                        shard = sid.index,
+                        error = %e,
+                        "A shard we are serving disagrees with the hash the swarm \
+                         reports — kept, because that hash has no origin backing; \
+                         asking the model's origin to settle it"
+                    );
+                } else {
+                    // `verify_shard` has already quarantined the bad bytes. Stop
+                    // advertising them, then get a good copy.
+                    tracing::warn!(
+                        model = %sid.model_id,
+                        shard = sid.index,
+                        error = %e,
+                        "A shard we were serving does not match the hash the swarm \
+                         reports — quarantined, fetching a fresh copy"
+                    );
+                    self.shared_state
+                        .model_registry
+                        .remove_shard_holder(&sid, self.shared_state.identity.node_id());
+                }
                 self.shared_state.mark_shard_for_repair(&sid);
             }
         }

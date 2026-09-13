@@ -183,6 +183,50 @@ impl ModelRegistry {
         self.origin_verified.get(shard_id).map(|h| *h)
     }
 
+    /// May this node DESTROY its own copy of a shard whose bytes disagree with
+    /// `expected`?
+    ///
+    /// Only when `expected` is the hash we took from the model's ORIGIN. This
+    /// is the single answer for every path that re-checks bytes already on
+    /// disk, and it exists because the alternative has now been observed doing
+    /// real damage on a live node (2026-09-13).
+    ///
+    /// What happened: a peer gossiped a manifest for a DIFFERENT build of
+    /// llama-3.2-3b. `origin_verified` held nothing for shard 0 — this node had
+    /// acquired it over P2P, and only an origin download records provenance —
+    /// so the guard in `register_manifest` had nothing to refuse with and the
+    /// peer's hash was adopted. Fifteen seconds later the background verifier
+    /// hashed our file, found it disagreed with the hash it had just been
+    /// handed, and quarantined 507 MB of perfectly good bytes. The model went
+    /// unservable for eleven minutes, the P2P refetch failed, and the fallback
+    /// origin download returned a file BYTE-IDENTICAL to the one deleted — and
+    /// only then recorded the provenance that would have prevented all of it.
+    ///
+    /// So the asymmetry is what decides this, not the likelihood:
+    ///
+    /// - Keeping bytes that are genuinely bad is bounded. Whoever downloads
+    ///   them hashes them against their own manifest and rejects them, and
+    ///   `shard_holders` already filters holders by build tag.
+    /// - Deleting bytes that are genuinely good is not. On a small swarm this
+    ///   is how the last copy of a shard disappears, and the same gossip that
+    ///   caused it is still there to judge the replacement — gotcha #384
+    ///   describes exactly this loop, and its `origin_verified` fix only ever
+    ///   covered shards this node had itself fetched from the origin.
+    ///
+    /// A disagreement is still worth settling; it is settled by ASKING THE
+    /// ORIGIN, which records provenance and ends the dispute permanently,
+    /// rather than by destroying the evidence first.
+    pub fn mismatch_policy(
+        &self,
+        shard_id: &ShardId,
+        expected: &crate::types::Blake3Hash,
+    ) -> crate::model::shard::OnMismatch {
+        match self.origin_verified_hash(shard_id) {
+            Some(origin) if &origin == expected => crate::model::shard::OnMismatch::Quarantine,
+            _ => crate::model::shard::OnMismatch::KeepBytes,
+        }
+    }
+
     /// Did THIS node fetch any part of this model from its origin?
     ///
     /// The adjudicator for a disagreement about what the model *is*. Our own
@@ -1437,6 +1481,79 @@ mod tests {
             "a peer's self-certified hash must not displace one taken from the \
              origin — that is how a good shard gets quarantined and replaced \
              with a bad one"
+        );
+    }
+
+    /// The gap the test above does NOT cover, and the one that bit a live node
+    /// on 2026-09-13: the same peer, the same contradicting claim, but no
+    /// origin record to refuse it with — because this node acquired the shard
+    /// over P2P, and only an ORIGIN download records provenance.
+    ///
+    /// The peer's hash wins here; nothing can stop that, and this test asserts
+    /// it rather than wishing otherwise. What must NOT follow is destruction:
+    /// asked whether our bytes may be quarantined for disagreeing with that
+    /// hash, the answer has to be no. On the live node it was yes, and 507 MB
+    /// of good shard were deleted, the model went unservable for eleven
+    /// minutes, and the origin fetch that followed returned the same bytes.
+    #[test]
+    fn a_peers_hash_for_a_shard_we_never_fetched_is_not_grounds_to_destroy_it() {
+        let me = NodeId([1u8; 32]);
+        let registry = ModelRegistry::with_local_node(me.clone());
+        let sid = ShardId {
+            model_id: ModelId("m".into()),
+            index: 0,
+        };
+        let ours = [0x59u8; 32];
+        let theirs = [0xabu8; 32];
+
+        // Deliberately NO record_origin_verified_hash: this is a shard we hold
+        // but never fetched from the origin.
+        let mut from_peer = test_manifest("m", "M");
+        from_peer.shards = vec![test_shard(0, theirs)];
+        registry.register_manifest(from_peer);
+
+        let stored = registry.get_manifest(&ModelId("m".into())).unwrap();
+        assert_eq!(
+            stored.shards[0].hash, theirs,
+            "with no origin knowledge there is nothing to refuse the claim with"
+        );
+        assert_eq!(
+            registry.mismatch_policy(&sid, &stored.shards[0].hash),
+            crate::model::shard::OnMismatch::KeepBytes,
+            "a hash we cannot trace to the origin may not destroy our only copy"
+        );
+        // And our own bytes disagreeing with it changes nothing about that.
+        assert_eq!(
+            registry.mismatch_policy(&sid, &ours),
+            crate::model::shard::OnMismatch::KeepBytes
+        );
+    }
+
+    /// The permission is not withheld from the case it was built for: bytes
+    /// checked against the hash we took from the origin ourselves.
+    #[test]
+    fn an_origin_backed_hash_may_still_destroy_bytes_that_disagree_with_it() {
+        let me = NodeId([1u8; 32]);
+        let registry = ModelRegistry::with_local_node(me.clone());
+        let sid = ShardId {
+            model_id: ModelId("m".into()),
+            index: 0,
+        };
+        let origin = [0x59u8; 32];
+        registry.record_origin_verified_hash(sid.clone(), origin);
+
+        assert_eq!(
+            registry.mismatch_policy(&sid, &origin),
+            crate::model::shard::OnMismatch::Quarantine,
+            "our own download of the origin's bytes is evidence, and bytes that \
+             disagree with it are worth discarding"
+        );
+        // But only for THAT hash. An origin record for the shard does not
+        // license destroying bytes against some other hash that happens to be
+        // in the manifest — which is precisely the substitution being guarded.
+        assert_eq!(
+            registry.mismatch_policy(&sid, &[0xabu8; 32]),
+            crate::model::shard::OnMismatch::KeepBytes
         );
     }
 

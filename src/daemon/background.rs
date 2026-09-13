@@ -203,6 +203,11 @@ pub(super) fn spawn_shard_verification(
         let mut verified = 0u32;
         let mut quarantined = 0u32;
         let mut unchecked = 0u32;
+        // Held bytes that disagree with an unbacked hash. Counted apart from
+        // `quarantined` because nothing was destroyed and apart from
+        // `unchecked` because the check DID run — reporting either would
+        // describe work that did not happen.
+        let mut disputed = 0u32;
         for manifest in shared_state.model_registry.models() {
             for shard_info in &manifest.shards {
                 // Only verify shards we registered (i.e., we are a holder)
@@ -242,15 +247,40 @@ pub(super) fn spawn_shard_verification(
                     unchecked += 1;
                     continue;
                 }
+                // These are bytes we ALREADY HOLD, so a mismatch is only
+                // grounds to destroy them when the hash we checked against came
+                // from the model's origin — see `ModelRegistry::mismatch_policy`.
+                let policy = shared_state
+                    .model_registry
+                    .mismatch_policy(&sid, &shard_info.hash);
                 // Run BLAKE3 verification in a blocking thread
                 let mid = manifest.id.clone();
                 let si = shard_info.clone();
                 let store = crate::model::shard::ShardStore::new(&data_dir);
                 let result =
-                    tokio::task::spawn_blocking(move || store.verify_shard(&mid, &si)).await;
+                    tokio::task::spawn_blocking(move || store.verify_shard(&mid, &si, policy))
+                        .await;
                 match result {
                     Ok(Ok(())) => {
                         verified += 1;
+                    }
+                    Ok(Err(e)) if policy == crate::model::shard::OnMismatch::KeepBytes => {
+                        // Unproven, not corrupt. Keep the bytes AND keep
+                        // advertising them: de-advertising on a stranger's
+                        // claim is the same mistake as deleting on it, and a
+                        // peer that downloads from us hashes what it gets.
+                        // Asking the origin is what settles the disagreement,
+                        // and recording its answer stops it recurring.
+                        tracing::warn!(
+                            model = %manifest.id,
+                            shard = shard_info.index,
+                            error = %e,
+                            "A shard we hold disagrees with the hash the swarm reports — \
+                             kept, because that hash has no origin backing; asking the \
+                             model's origin to settle it"
+                        );
+                        shared_state.mark_shard_for_repair(&sid);
+                        disputed += 1;
                     }
                     Ok(Err(e)) => {
                         tracing::warn!(
@@ -321,7 +351,20 @@ pub(super) fn spawn_shard_verification(
                 verified,
                 quarantined,
                 unchecked,
+                disputed,
                 "Background shard verification complete — some shards quarantined"
+            );
+        } else if disputed > 0 {
+            // Said out loud rather than folded into either neighbouring case:
+            // these bytes were checked and did NOT match, so calling them
+            // verified would be a false assurance — and they are still here,
+            // so calling them quarantined would be a false alarm.
+            tracing::warn!(
+                verified,
+                disputed,
+                unchecked,
+                "Background shard verification complete — some shards disagree with \
+                 an unbacked hash and were kept; the model's origin will settle it"
             );
         } else if unchecked > 0 {
             // Deliberately NOT "all shards OK": some were never hashed. Said

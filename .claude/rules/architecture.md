@@ -576,6 +576,24 @@ read the pair as a contradiction and lost an hour to it. The plan now names
 `standbys_covering_this_segment` next to the total. When a summary count cannot
 answer the question a reader will ask of it, print the answer, not the count.
 
+## Destroying a shard we hold needs better evidence than a stranger's claim
+
+**`ModelRegistry::mismatch_policy` is the single answer to "may this node
+quarantine its own copy of a shard whose bytes disagree with `expected`?"** —
+yes only when `expected` is the hash we took from the model's ORIGIN.
+`ShardStore::verify_shard` takes `OnMismatch` as a REQUIRED parameter, so the
+four paths that re-check or merely QUERY bytes already on disk can no longer
+inherit the accept-gate's behaviour by omission.
+
+A gossiped hash is a claim about the claimant's build, not evidence about our
+file. The asymmetry decides it: keeping bad bytes is bounded (the downloader
+hashes what it gets, and `shard_holders` filters by build tag), while deleting
+good bytes can take the swarm's last copy — and the same gossip is still there
+to judge the replacement. A disagreement is settled by ASKING THE ORIGIN, which
+records the provenance that ends it permanently.
+
+→ `docs/invariants/network.md`
+
 ## A holder record names a BUILD, not just a shard
 
 **`ModelRegistry::shard_holders` filters out holders that positively claim a

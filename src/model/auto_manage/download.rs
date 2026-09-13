@@ -113,9 +113,20 @@ impl AutoShardManager {
                     .find(|s| s.index == candidate.shard_index)
                 {
                     if shard_info.hash != [0u8; 32] {
-                        // Hash available -- verify properly
+                        // Hash available -- verify properly.
+                        //
+                        // KeepBytes: this asks whether the file already on disk
+                        // is good enough to SKIP a download, and a "no" is
+                        // answered by downloading over it. Quarantining here
+                        // deleted the file as a side effect of the question,
+                        // which turns a skipped download into a mandatory one
+                        // and loses the bytes in between.
                         shard_store
-                            .verify_shard(&candidate.model_id, shard_info)
+                            .verify_shard(
+                                &candidate.model_id,
+                                shard_info,
+                                crate::model::shard::OnMismatch::KeepBytes,
+                            )
                             .is_ok()
                     } else {
                         // Zero-hash placeholder -- exact size match required.

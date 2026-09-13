@@ -177,6 +177,31 @@ pub fn quarantine_shard_if_size_mismatch(
     }
 }
 
+/// What to do with bytes that do not match the hash they were checked against.
+///
+/// A required parameter rather than a default, because the two situations look
+/// identical at the call site and want opposite handling — and the wrong one is
+/// silently destructive. `verify_shard` used to quarantine unconditionally, so
+/// every caller inherited the accept-gate's behaviour, including the three that
+/// re-check bytes this node ALREADY HOLDS and the one that only asks whether a
+/// shard still needs downloading.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OnMismatch {
+    /// Move the file aside. Correct for bytes just accepted from a peer or an
+    /// origin: if they are not what was asked for they are worth nothing, and
+    /// no other copy is lost by discarding them.
+    Quarantine,
+    /// Leave the bytes alone and only report the mismatch.
+    ///
+    /// Correct whenever the expected hash is not ORIGIN-BACKED. A hash that
+    /// reached us by gossip is a claim about the claimant's build, not evidence
+    /// about our file, and `slugify_model_name` collapses every independent
+    /// build of a model into one id — so a peer holding a different Q4_K_M of
+    /// the same model contradicts us as a matter of course. Destroying a shard
+    /// on that is how a node loses a copy the swarm may have no other of.
+    KeepBytes,
+}
+
 impl ShardStore {
     pub fn new(data_dir: &Path) -> Self {
         Self {
@@ -265,7 +290,12 @@ impl ShardStore {
     /// Verify a shard's BLAKE3 hash matches the expected value.
     /// Network-received and on-disk shards must always have a real (non-zero) hash
     /// in the manifest; zero-hash manifests are rejected as placeholders.
-    pub fn verify_shard(&self, model_id: &ModelId, info: &ShardInfo) -> Result<(), SwarmError> {
+    pub fn verify_shard(
+        &self,
+        model_id: &ModelId,
+        info: &ShardInfo,
+        on_mismatch: OnMismatch,
+    ) -> Result<(), SwarmError> {
         let path = self.shard_path(model_id, info.index);
         if !path.exists() {
             return Err(SwarmError::ShardNotFound(crate::types::ShardId {
@@ -322,22 +352,34 @@ impl ShardStore {
                 shard = info.index,
                 "DIAG: verify_shard FAILED — hash mismatch"
             );
-            // Quarantine the bad shard
-            let quarantine_path = path.with_extension("bin.quarantine");
-            if let Err(e) = std::fs::rename(&path, &quarantine_path) {
-                tracing::warn!(
-                    model = %model_id,
-                    shard = info.index,
-                    error = %e,
-                    "Failed to quarantine shard, attempting deletion"
-                );
-                let _ = std::fs::remove_file(&path);
+            match on_mismatch {
+                OnMismatch::Quarantine => {
+                    let quarantine_path = path.with_extension("bin.quarantine");
+                    if let Err(e) = std::fs::rename(&path, &quarantine_path) {
+                        tracing::warn!(
+                            model = %model_id,
+                            shard = info.index,
+                            error = %e,
+                            "Failed to quarantine shard, attempting deletion"
+                        );
+                        let _ = std::fs::remove_file(&path);
+                    }
+                    tracing::warn!(
+                        model = %model_id,
+                        shard = info.index,
+                        "Shard failed verification, quarantined"
+                    );
+                }
+                OnMismatch::KeepBytes => {
+                    tracing::warn!(
+                        model = %model_id,
+                        shard = info.index,
+                        "Our copy of this shard disagrees with the hash the swarm \
+                         reports, and that hash has no origin backing — keeping our \
+                         bytes and asking the model's origin to settle it"
+                    );
+                }
             }
-            tracing::warn!(
-                model = %model_id,
-                shard = info.index,
-                "Shard failed verification, quarantined"
-            );
 
             return Err(SwarmError::ShardIntegrity {
                 expected: hex::encode(info.hash),
@@ -679,7 +721,9 @@ mod tests {
         };
 
         // Verify should succeed
-        assert!(store.verify_shard(&model_id, &info).is_ok());
+        assert!(store
+            .verify_shard(&model_id, &info, OnMismatch::Quarantine)
+            .is_ok());
     }
 
     #[test]
@@ -700,13 +744,65 @@ mod tests {
             tensors: vec![],
         };
 
-        assert!(store.verify_shard(&model_id, &info).is_err());
+        assert!(store
+            .verify_shard(&model_id, &info, OnMismatch::Quarantine)
+            .is_err());
 
         // Verify file was quarantined
         let quarantine = store
             .shard_path(&model_id, 0)
             .with_extension("bin.quarantine");
         assert!(quarantine.exists());
+    }
+
+    /// The same mismatch, with the bytes KEPT: still an error, still reported,
+    /// but the file is exactly where it was and nothing was moved aside.
+    ///
+    /// This is the half that was missing. A hash reaching us by gossip is a
+    /// claim about the claimant's build — `slugify_model_name` collapses every
+    /// independent build of a model into one id, so a peer holding a different
+    /// quantisation contradicts us as a matter of course — and quarantining on
+    /// it deleted 507 MB of good bytes on a live node, which the subsequent
+    /// origin fetch then returned byte-identical.
+    #[test]
+    fn keeping_the_bytes_leaves_the_file_exactly_where_it_was() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ShardStore::new(dir.path());
+        let model_id = ModelId("test".into());
+        let data = b"test shard data";
+
+        store.write_chunk(&model_id, 0, 0, data).unwrap();
+        store.finalize_shard(&model_id, 0).unwrap();
+
+        let info = ShardInfo {
+            index: 0,
+            layer_range: (0, 1),
+            size_bytes: data.len() as u64,
+            hash: [0xFF; 32], // a hash this node has no origin backing for
+            tensors: vec![],
+        };
+
+        // The disagreement is still reported — keeping the bytes is not the
+        // same as pretending they matched.
+        assert!(matches!(
+            store.verify_shard(&model_id, &info, OnMismatch::KeepBytes),
+            Err(SwarmError::ShardIntegrity { .. })
+        ));
+
+        let shard = store.shard_path(&model_id, 0);
+        assert!(
+            shard.exists(),
+            "the bytes must survive a mismatch against an unbacked hash"
+        );
+        assert_eq!(
+            std::fs::read(&shard).unwrap(),
+            data,
+            "and be untouched, not merely present"
+        );
+        assert!(
+            !shard.with_extension("bin.quarantine").exists(),
+            "nothing may be moved aside"
+        );
     }
 
     #[test]
@@ -838,7 +934,7 @@ mod tests {
             hash: wrong_hash,
             tensors: vec![],
         };
-        match store.verify_shard(&model_id, &info) {
+        match store.verify_shard(&model_id, &info, OnMismatch::Quarantine) {
             Err(SwarmError::ShardIntegrity { .. }) => {}
             other => panic!("expected ShardIntegrity, got {other:?}"),
         }
@@ -864,7 +960,7 @@ mod tests {
             hash: blake3::hash(b"whatever the full content would be").into(),
             tensors: vec![],
         };
-        match store.verify_shard(&model_id, &info) {
+        match store.verify_shard(&model_id, &info, OnMismatch::Quarantine) {
             Err(SwarmError::ShardIncomplete {
                 expected_bytes,
                 actual_bytes,
@@ -895,7 +991,9 @@ mod tests {
             tensors: vec![],
         };
         assert!(
-            store.verify_shard(&model_id, &info).is_ok(),
+            store
+                .verify_shard(&model_id, &info, OnMismatch::Quarantine)
+                .is_ok(),
             "a zero declared size must fall through to the hash check"
         );
     }

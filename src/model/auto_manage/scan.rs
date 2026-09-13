@@ -263,18 +263,28 @@ pub async fn rescan_local_shards(
                     hash = %hex::encode(&new_hash[..8]),
                     "Rescan: auto-computed BLAKE3 hash for zero-hash shard"
                 );
-            } else if let Err(e) = shard_store.verify_shard(&model_id, shard_info) {
+            } else if let Err(e) = {
+                // Bytes already on this node's disk, so a mismatch only
+                // justifies destroying them against an ORIGIN-backed hash —
+                // `ModelRegistry::mismatch_policy` carries the reasoning.
+                let policy = shared
+                    .model_registry
+                    .mismatch_policy(&shard_id, &shard_info.hash);
+                shard_store.verify_shard(&model_id, shard_info, policy)
+            } {
                 tracing::warn!(
                     model = %model_id_str,
                     shard = shard_info.index,
                     error = %e,
-                    "Rescan: shard verification failed — quarantined, fetching a fresh copy"
+                    "Rescan: shard verification failed — fetching a fresh copy"
                 );
-                // `verify_shard` has already quarantined the bad file. Asking
-                // for a replacement is the half that used to be missing: this
-                // arm simply skipped, so the same bad bytes were re-hashed on
-                // every rescan, to the same conclusion, forever, and the model
-                // stayed a shard short.
+                // Whether or not the bytes were quarantined, asking for a
+                // replacement is the half that used to be missing: this arm
+                // simply skipped, so the same bytes were re-hashed on every
+                // rescan, to the same conclusion, forever, and the model stayed
+                // a shard short. When they were KEPT, the origin fetch is also
+                // what settles the disagreement and records the provenance that
+                // stops it recurring.
                 shared.mark_shard_for_repair(&shard_id);
                 shared.emit_activity(
                     crate::daemon::state::ActivityEvent::new(

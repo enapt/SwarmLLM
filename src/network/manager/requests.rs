@@ -937,8 +937,15 @@ impl NetworkManager {
                             );
                         }
                         if let Some(info) = shard_info.filter(|_| manifest_has_hash) {
-                            if let Err(e) = self.shard_store.verify_shard(&shard_id.model_id, &info)
-                            {
+                            // The accept gate for untrusted bytes: these have
+                            // just arrived from a peer and nothing else holds
+                            // them, so bytes that are not what was asked for
+                            // are discarded rather than kept.
+                            if let Err(e) = self.shard_store.verify_shard(
+                                &shard_id.model_id,
+                                &info,
+                                crate::model::shard::OnMismatch::Quarantine,
+                            ) {
                                 // An INCOMPLETE transfer is not evidence about
                                 // the sender: the bytes that did arrive may be
                                 // perfectly good and the connection simply

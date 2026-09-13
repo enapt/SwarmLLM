@@ -798,3 +798,82 @@ matched against the LAST dotted segment only, so a legit id carrying
 dots from its source filename (`tinyllama-1.1b-chat-v1.0.q4-k-m`) is
 never caught. The v0.3.10 disk-scan-only guard was insufficient because
 a peer on an older build re-gossips the name straight back in.
+
+## Destroying a shard we hold needs better evidence than a stranger's claim
+
+**Rule:** `.claude/rules/architecture.md` § "Destroying a shard we hold needs
+better evidence than a stranger's claim".
+
+### What happened (observed live, 2026-09-13)
+
+A node restart, and eleven minutes later 507 MB of a perfectly good shard had
+been deleted and re-downloaded byte-identical. The full chain, from one log:
+
+| time (UTC) | event |
+|---|---|
+| 01:39:05 | `Registered manifest from local shard directory model=llama-3.2-3b-instruct-q4-k-m shards=4` — our own, from disk |
+| 01:39:06 | our `expected_build` for shard 0 is still `c8e0f58e…`, the hash our file actually has |
+| 01:39:07 | peer `e561df35` gossips a manifest for a different build. Shard **1**'s claim is refused — `Ignoring a shard hash that contradicts the one we took from the model's origin`. Shard **0**'s is **not**, and is adopted |
+| 01:39:22 | background verification hashes shard 0, finds `c8e0f58e…` where the (now peer-supplied) manifest says `0c7f5223…`, and **quarantines the file** |
+| 01:42-01:47 | `No reachable node holds layers 0-2 of llama-3.2-3b-instruct-q4-k-m`; P2P refetch dies at 150 MB, `Reconciled stalled acquisition → Failed` |
+| 01:49:47 | `Fetching from the model's origin — no peer copy could be verified` |
+| 01:50:06 | origin download records provenance; the guard **now** fires for shard 0 |
+| — | the file that arrived hashes `c8e0f58e…` — **identical to the one deleted** |
+
+Shard 1 survived and shard 0 did not because `origin_verified` only ever holds
+shards this node itself fetched from the ORIGIN (`record_origin_downloaded_shard`,
+and the repair path). Shard 0 had been acquired over P2P, so there was no record,
+so `register_manifest` had nothing to refuse the claim with.
+
+### Why this is gotcha #384 again, not a new class
+
+`daemon/state/repair.rs` already states the loop exactly: *"the wrong hash
+displaces the right one and the re-check quarantines our GOOD copy, refetches,
+and judges the replacement against the same wrong reference, forever."*
+#384's fix — persist origin hashes, load them before any manifest — is correct
+and was not enough: **its coverage is "shards we fetched from origin", and every
+other held shard is still exposed.** A defence that only protects the shards
+that were never at risk is the shape to watch for.
+
+### Why the fix raises the bar for DESTRUCTION rather than widening coverage
+
+Recording "our disk copy looks self-consistent" as origin-verified would make
+that field mean something it does not say, and would lock in a genuinely bad
+copy. Instead the *destructive* action now requires the evidence:
+
+- Keeping bytes that are genuinely bad is **bounded** — whoever downloads them
+  hashes them against their own manifest, and `shard_holders` already filters
+  holders by build tag, so a peer on a different build never routes to us.
+- Deleting bytes that are genuinely good is **not** — on a small swarm it takes
+  the last copy, and the gossip that caused it is still there to judge the
+  replacement.
+
+A disagreement is still worth settling, and is settled by `mark_shard_for_repair`
+→ an origin fetch, which records provenance and ends the dispute permanently.
+The loop converges either way in one fetch.
+
+### What a change here must keep
+
+- `verify_shard`'s `OnMismatch` stays a **required** parameter. It is what
+  surfaced the seventh call site (`network/manager/requests.rs`) and the one in
+  `model/acquisition.rs` that quarantined as a side effect of asking *"is this
+  shard still missing?"* — a destructive answer to a read-only question.
+- The three re-verification passes (`daemon/background.rs`,
+  `model/auto_manage/scan.rs`, `model/auto_manage/manager.rs`) ask
+  `mismatch_policy`; the two accept gates (`network/manager/requests.rs`,
+  `model/acquisition.rs` post-download) pass `Quarantine` unconditionally.
+- On `KeepBytes` the node also **keeps advertising** the shard. De-advertising on
+  an unproven claim is the same mistake as deleting on it.
+- The background pass counts `disputed` separately from `quarantined` and
+  `unchecked`. Folding it into either would report work that did not happen —
+  the same principle that made `unchecked` its own counter.
+
+### Candidate explanation for a field report
+
+Open item #49 ("auto-prune evicted shards the swarm had no other copy of")
+reports a node that ended up missing **shard 0 of gemma-2-2b-it** and 4 of 5 of
+phi-3.5-mini, with re-acquisition then looping `stalled shard download …
+stall_secs=30`. That is the same shape as the run above — shard 0, a failed
+refetch, a stall — reached without prune being involved at all. **This is a
+hypothesis, not an attribution**: #49 is still blocked on the one log line
+already requested from the reporter, and that line discriminates both stories.

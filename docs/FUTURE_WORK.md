@@ -56,6 +56,8 @@ Priority is user-visible impact x how many users x whether it fails silently.
 
 | # | Bug | Outcome |
 |---|---|---|
+| 60 | A peer's gossip could make this node delete a shard it held correctly | **FIXED 2026-09-13**, observed live on this node's own restart. A peer gossiped a manifest for a different build of llama-3.2-3b; `origin_verified` held nothing for shard 0 (it is written only when a shard is fetched FROM THE ORIGIN, and that shard came over P2P), so `register_manifest` had nothing to refuse the claim with and adopted the peer's hash. Fifteen seconds later the background verifier hashed our file, found it disagreed with the hash it had just been handed, and **quarantined 507 MB of good bytes**. Model unservable for 11 minutes; P2P refetch failed; the origin fetch that followed returned a file **byte-identical to the one deleted**, and only then recorded the provenance that would have prevented all of it. Shard 1 of the same model survived the same gossip in the same second, because it *did* have an origin record. This is gotcha #384 recurring: its fix is correct and its **coverage is only the shards that were never at risk**. Fixed by raising the bar on the DESTRUCTIVE action rather than widening what counts as provenance — `ModelRegistry::mismatch_policy` is the one answer to "may we quarantine our own copy?", yes only against an origin-backed hash, and `ShardStore::verify_shard` takes `OnMismatch` as a REQUIRED parameter. That flushed out **seven** call sites, not the two the symptom implied — including one in `model/acquisition.rs` that quarantined as a side effect of asking *"is this shard still missing?"*. On `KeepBytes` the node keeps the bytes AND keeps advertising them, and marks the shard for an origin fetch, which settles the disagreement and records provenance so it cannot recur. Asymmetry that decides it: keeping bad bytes is bounded (the downloader hashes what it gets; `shard_holders` filters by build tag), deleting good bytes can take the swarm's last copy. ⚠ **Candidate explanation for open item #49** — same shape (shard 0 missing, failed refetch, 30 s stalls) reached with no prune involved; still a hypothesis, and the log line already requested from that reporter discriminates both. Evidence: `docs/invariants/network.md` § "Destroying a shard we hold needs better evidence than a stranger's claim" |
+| 59 | Every node start warned that the traffic metric may have been renamed | **FIXED 2026-09-13.** `BandwidthMeter::totals()` read `None` for two different reasons and blamed the rarer one. `prometheus_client` writes a `Family`'s metadata as soon as it is registered and its ROWS only once a label set exists — which libp2p creates on the first byte that moves — so the health monitor's t=0 tick encodes metadata and nothing else on every node ever started. The warning fired 51 ms in, said the figure "will be absent" about a figure that appears 30-60 s later, and `warned_absent` is a one-shot so nothing retracted it. The discriminator was in the same string: `metric_is_registered` checks for the `# HELP`/`# TYPE`/`# UNIT` lines under the expected base name, so a rename is still reported and a silent start is not. Confirmed by encoding a real `BandwidthTransport` registry and reading the output, and the regression test asserts the WARNING FLAG rather than the return value — `None` either way, so a test on the totals cannot tell the two apart |
 | 58 | The traffic figure reached two status payloads out of three | **FIXED 2026-09-12, NOT in v0.3.175-alpha — lands in the next release.** `network_traffic_json` was written as the single builder and called from `/api/admin/stats` and the WebSocket tick; `/v1/status`, which `swarmllm status` reads, was missed, so the CLI printed no Traffic line on the released artifact while the API served the numbers. `describe_traffic` was unit-tested against a hand-made JSON object, so the wiring was never exercised. **One builder is not one surface** — found by deploying and running the command a user would run (gotcha #569). `every_stats_surface_carries_the_traffic_figure` now names all three. The drafted reply to the bandwidth reporter says the dashboard and `/metrics` carry it today |
 | 52 | A peer that reconnected mid-request became permanently undecryptable | **FIXED 2026-09-12, shipped in v0.3.175-alpha**, field-reported on v0.3.174 (report #016): 29 forwards to one peer, 29 `Could not decrypt forward`, zero successes, every request routed through it dead for the rest of the log. The two ends stopped agreeing on a key. `handle_connection_closed` exempted a peer from `remove_session` when it appeared in `active_pipelines` — but that map is the COORDINATOR's, so the SERVING node retires its own session on the same disconnect and returns on a fresh static key, while the coordinator keeps whatever it had. An ephemeral key from a rotation then opens for nobody. The exemption was written in April 2026, when `establish_session` reinstalled on every Identify and "reconnection will refresh it" was true; it stopped being true when that became idempotent, and the comment asserting it is how the contradiction survived. **The same asymmetry is already documented on `SessionManager::retired` (gotcha #194, report #028) — as the reason a key must not be DESTROYED. This is the mirror image: a key that must not be KEPT.** The exemption is gone (an in-flight result still opens under the retired key, and a peer we are not connected to could not have been sent to anyway), and a failed `open` now asks that peer for one fresh exchange, rate-limited, so any other way the two ends can diverge repairs itself in a round trip instead of waiting out the ten-minute eviction |
 | 53 | A finished conversation's memory was never released, and running out ended the request | **FIXED 2026-09-12, shipped in v0.3.175-alpha**, field-reported on v0.3.174 (report #019) from a 16 GB processor-only Mac: a conversation ended, a message in a NEW conversation was refused for memory, and continuing the FINISHED one was refused with the identical numbers. Two faults. (a) The `Generate` handlers clear their own KV on the way out; the FORWARD path — which is also the path a request routed back to this node took, see item 54 — cleared nothing, so a finished segment's cache stayed charged against the shared budget until the ten-minute idle sweep. The daemon's `cleanup_request_id` looks correct and is a different process's store. Released now via `DaemonMsg::ReleaseRequestKv` at the one place a request finishes; unconditional because the worker keys by REQUEST id (`session_id` rides on the IPC message and nothing reads it), so the next turn arrives under a new id and could never find it — multi-turn reuse is the prefix cache's job and its snapshot is taken first. (b) The refusal was a plain `ServiceUnavailable`, so `should_retry_after` treated it as final — while the scheduler had priced a five-segment route across peers one line earlier in the same pass. It is now `LocalMemoryUnavailable`, the one local failure the router re-plans, carried across the IPC boundary as a typed flag because the wire WORDING is deliberately identical to a peer's memory refusal |
@@ -1458,6 +1460,56 @@ Two separable pieces of work, in order of value:
 strictly stronger than a tie-break when it applies, and measuring a tie-break
 while the stronger path never engages would attribute its win to the wrong
 thing.
+
+### Research, 2026-09-13 — read before implementing (1)
+
+Nobody else keys this on a session id. SGLang's router (v0.4, Dec 2024) keeps an
+approximate radix tree of each worker's cache and routes on the **prompt prefix
+itself**: match rate above `cache_threshold` (0.5) → the highest-match worker,
+below it → the least-loaded one, with an imbalance override
+(`balance_abs_threshold` 32, `balance_rel_threshold` 1.0001) and an eviction
+interval plus `max_tree_size` to bound the tree. Reported up to 1.9x throughput
+and 3.8x hit rate. That is piece (2) of this entry, already designed the same
+way, and it confirms the shape — including that the affinity term must be
+overridable by load.
+
+**The trap they hit, which our option (1) invites.** sgl-project/sglang#26263:
+their chat-completions path built the routing key from `body.messages.first()`,
+i.e. usually just the system prompt — so unrelated conversations sharing a
+system prompt looked identical while consecutive turns of one conversation, the
+strongest reuse signal there is, looked unrelated. The stated fix is "a
+deterministic representation of the full chat prefill input", tools and
+template-affecting fields included.
+
+**And a failure mode specific to OUR code, found while grounding this.** Our
+lookup is an exact match on a session-id STRING (`multi_turn_sessions:
+HashMap<String, SessionId>`), not a longest-prefix match, so a derived key has
+to be stable across a conversation's turns. The obvious stable choice — hash the
+conversation HEAD (system + first user message) — is **worse than doing
+nothing** for a plausible client: `check_multi_turn_reuse` *invalidates the
+session* on a prefix mismatch (`kv_cache.rs`, the `!new_prompt.starts_with(...)`
+arm). Two conversations from one API key that open identically — an agent loop
+with a fixed opening prompt, a benchmark harness — would then collide on one key
+and destroy each other's sessions on every turn. Today they simply have no
+session and lose nothing.
+
+The collision-free key is "the conversation as it stood when the previous turn
+finished", i.e. hash(messages + the reply we generated), registered at
+completion and looked up next turn. Two things make that more than a one-liner,
+and both need doing:
+
+- The completion path records `chatml_fallback(&request.messages)` only — the
+  generated reply is not in it (`router/mod.rs`, `RouterCommand::UpdateCacheTokens`).
+- Reconstructing the same string at lookup means rendering all messages except
+  the final user turn **without** the trailing generation prompt, which
+  `chatml_fallback` always appends. That needs a variant in `chat_template`.
+
+Cross-user collision is already handled and needs no new thought:
+`validate_chat_request` prefixes every session id with
+`blake3(api_key)[..16]`, so a derived key inherits that namespacing.
+
+Sources: <https://www.lmsys.org/blog/2024-12-04-sglang-v0-4/>,
+<https://github.com/sgl-project/sglang/issues/26263>.
 
 **Not to be confused with the LOCAL case, which was measured and works**: a
 ~4200-token system prompt costs 11.94 s cold and 0.12 s on an identical repeat,

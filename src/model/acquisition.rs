@@ -376,10 +376,24 @@ impl AcquisitionManager {
                 if !path.exists() {
                     return true;
                 }
-                // If file exists, verify it against manifest
+                // If file exists, verify it against manifest.
+                //
+                // KeepBytes because this is a QUESTION — "is this shard still
+                // missing?" — not a verdict. It ran with the accept-gate's
+                // behaviour and so quarantined as a side effect of being
+                // asked, which is a destructive answer to a read-only
+                // question. What it needs is the boolean; the decision about
+                // the bytes belongs to the passes that own it.
                 let shard_info = manifest.shards.iter().find(|s| s.index == sid.index);
                 match shard_info {
-                    Some(info) => self.shard_store.verify_shard(&sid.model_id, info).is_err(),
+                    Some(info) => self
+                        .shard_store
+                        .verify_shard(
+                            &sid.model_id,
+                            info,
+                            crate::model::shard::OnMismatch::KeepBytes,
+                        )
+                        .is_err(),
                     None => true,
                 }
             })
@@ -725,7 +739,14 @@ impl AcquisitionManager {
                     ));
                     progress_map.insert(model_id.clone(), job.status.clone());
 
-                    match self.shard_store.verify_shard(&model_id, &info) {
+                    // Bytes just written by a download: if they are not what
+                    // was asked for they are worth nothing and no other copy is
+                    // lost by discarding them.
+                    match self.shard_store.verify_shard(
+                        &model_id,
+                        &info,
+                        crate::model::shard::OnMismatch::Quarantine,
+                    ) {
                         Ok(()) => {
                             job.status.downloaded_shards += 1;
                             job.status.verified_shards += 1;
