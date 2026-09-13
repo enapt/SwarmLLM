@@ -174,6 +174,13 @@ pub async fn rescan_local_shards(
             // Without this, a node that hosts a manually-placed shard
             // announces holder presence to the network using only a size
             // check — peers would download corrupted content from us.
+            // May a mismatch destroy these bytes? Answered once, here, because
+            // the verification arm below is the condition of an `else if let`
+            // and cannot introduce a binding its own body needs. One DashMap
+            // lookup; the zero-hash branch simply ignores it.
+            let policy = shared
+                .model_registry
+                .mismatch_policy(&shard_id, &shard_info.hash);
             if shard_info.hash == [0u8; 32] {
                 // Nothing to check these bytes against. Computing their own
                 // hash and calling that the answer does not verify anything —
@@ -263,29 +270,33 @@ pub async fn rescan_local_shards(
                     hash = %hex::encode(&new_hash[..8]),
                     "Rescan: auto-computed BLAKE3 hash for zero-hash shard"
                 );
-            } else if let Err(e) = {
-                // Bytes already on this node's disk, so a mismatch only
-                // justifies destroying them against an ORIGIN-backed hash —
-                // `ModelRegistry::mismatch_policy` carries the reasoning.
-                let policy = shared
-                    .model_registry
-                    .mismatch_policy(&shard_id, &shard_info.hash);
-                shard_store.verify_shard(&model_id, shard_info, policy)
-            } {
+            // Bytes already on this node's disk, so a mismatch only justifies
+            // destroying them against an ORIGIN-backed hash — see
+            // `ModelRegistry::mismatch_policy`.
+            } else if let Err(e) = shard_store.verify_shard(&model_id, shard_info, policy) {
+                let kept = policy == crate::model::shard::OnMismatch::KeepBytes;
                 tracing::warn!(
                     model = %model_id_str,
                     shard = shard_info.index,
                     error = %e,
-                    "Rescan: shard verification failed — fetching a fresh copy"
+                    kept,
+                    "Rescan: shard verification failed"
                 );
-                // Whether or not the bytes were quarantined, asking for a
-                // replacement is the half that used to be missing: this arm
-                // simply skipped, so the same bytes were re-hashed on every
-                // rescan, to the same conclusion, forever, and the model stayed
-                // a shard short. When they were KEPT, the origin fetch is also
-                // what settles the disagreement and records the provenance that
-                // stops it recurring.
-                shared.mark_shard_for_repair(&shard_id);
+                // Asking for a replacement is the half that used to be missing:
+                // this arm simply skipped, so the same bytes were re-hashed on
+                // every rescan, to the same conclusion, forever, and the model
+                // stayed a shard short.
+                //
+                // Only when the bytes were actually quarantined, though. The
+                // set is drained by `complete_pending_shard_fetches`, which
+                // treats a shard whose file is on disk as already repaired and
+                // clears the mark — so marking a shard we deliberately KEPT
+                // fetches nothing. Settling that disagreement is real work and
+                // is not done here; see `docs/FUTURE_WORK.md` § "A disputed
+                // shard is kept but the disagreement is never settled".
+                if !kept {
+                    shared.mark_shard_for_repair(&shard_id);
+                }
                 shared.emit_activity(
                     crate::daemon::state::ActivityEvent::new(
                         "auto_manage",

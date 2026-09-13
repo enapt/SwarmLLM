@@ -825,6 +825,35 @@ shards this node itself fetched from the ORIGIN (`record_origin_downloaded_shard
 and the repair path). Shard 0 had been acquired over P2P, so there was no record,
 so `register_manifest` had nothing to refuse the claim with.
 
+### How often — six for six, on one node, in 55 hours
+
+The log that caught this held six shard quarantines across three models. Every
+one shows the same signature: the quarantine happens FIRST, and the
+"contradicts the one we took from the model's origin" warning for that same
+shard appears **4-11 minutes later**, i.e. the origin knowledge arrived only via
+the re-download the quarantine forced.
+
+| model / shard | quarantined | first origin-contradiction warning |
+|---|---|---|
+| phi-3.5-mini / 2 | 18:38:17 | 18:42:57 |
+| meta-llama-3.1-8b / 0 | 22:19:31 | 22:24:46 |
+| meta-llama-3.1-8b / 1 | 15:09:01 | 15:19:04 |
+| meta-llama-3.1-8b / 4 | 16:08:38 | 16:14:07 |
+| llama-3.2-3b / 1 | 17:03:38 | 17:09:37 |
+| llama-3.2-3b / 0 | 01:39:22 | 01:50:06 |
+
+**Be precise about what that proves.** For all six, the hash that condemned the
+file had **no origin backing at the time** — the rejection warning is emitted on
+first sight of a given (model, shard, claimed hash), so an earlier one would
+have appeared. So all six were destroyed on evidence that did not meet the bar,
+and all six would be prevented now. For exactly ONE — 2026-09-13, shard 0 — the
+deleted bytes are also *proven* to have been good, because the replacement
+hashed identically. The other five may have been genuinely corrupt; their
+pre-deletion bytes are gone and the question cannot be reopened.
+
+Roughly one every nine hours, each costing a ~500 MB transfer and several
+minutes of that model being unservable.
+
 ### Why this is gotcha #384 again, not a new class
 
 `daemon/state/repair.rs` already states the loop exactly: *"the wrong hash
@@ -848,9 +877,18 @@ copy. Instead the *destructive* action now requires the evidence:
   the last copy, and the gossip that caused it is still there to judge the
   replacement.
 
-A disagreement is still worth settling, and is settled by `mark_shard_for_repair`
-→ an origin fetch, which records provenance and ends the dispute permanently.
-The loop converges either way in one fetch.
+A disagreement is still worth settling — but **this change does not settle it**,
+and an earlier version of this file and of the commit message said it did. That
+claim was wrong and was caught by tracing the consumer rather than the producer:
+`complete_pending_shard_fetches` begins by treating any shard whose file is on
+disk as already repaired and clearing its mark, so marking a shard we are
+keeping by definition fetches nothing. The quarantine path worked only because
+it had removed the file first. The marking is therefore not done on the kept
+path, and settling is tracked as open work in `docs/FUTURE_WORK.md` § "A
+disputed shard is kept but the disagreement is never settled".
+
+What the change does deliver is the half that was destroying data: the bytes
+survive, and the node keeps serving them.
 
 ### What a change here must keep
 

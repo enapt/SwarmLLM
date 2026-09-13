@@ -492,13 +492,17 @@ impl AutoShardManager {
             .await;
             if let Ok(Err(e)) = result {
                 if policy == crate::model::shard::OnMismatch::KeepBytes {
+                    // Kept, and deliberately NOT marked for repair — see the
+                    // matching arm in `daemon::background`: that set's drain
+                    // clears any shard whose file is on disk, which is every
+                    // shard on this path.
                     tracing::warn!(
                         model = %sid.model_id,
                         shard = sid.index,
                         error = %e,
                         "A shard we are serving disagrees with the hash the swarm \
-                         reports — kept, because that hash has no origin backing; \
-                         asking the model's origin to settle it"
+                         reports — keeping our bytes, because that hash has no origin \
+                         backing and deleting on it is how a last copy is lost"
                     );
                 } else {
                     // `verify_shard` has already quarantined the bad bytes. Stop
@@ -513,8 +517,8 @@ impl AutoShardManager {
                     self.shared_state
                         .model_registry
                         .remove_shard_holder(&sid, self.shared_state.identity.node_id());
+                    self.shared_state.mark_shard_for_repair(&sid);
                 }
-                self.shared_state.mark_shard_for_repair(&sid);
             }
         }
     }

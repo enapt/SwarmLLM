@@ -589,8 +589,14 @@ A gossiped hash is a claim about the claimant's build, not evidence about our
 file. The asymmetry decides it: keeping bad bytes is bounded (the downloader
 hashes what it gets, and `shard_holders` filters by build tag), while deleting
 good bytes can take the swarm's last copy — and the same gossip is still there
-to judge the replacement. A disagreement is settled by ASKING THE ORIGIN, which
-records the provenance that ends it permanently.
+to judge the replacement.
+
+**The disagreement is NOT settled automatically** — the bytes are kept, the node
+keeps serving and advertising them, and that is all. Marking such a shard for
+repair does nothing (`complete_pending_shard_fetches` clears any mark whose file
+is on disk), so it is deliberately not done. Settling it is open work:
+`docs/FUTURE_WORK.md` § "A disputed shard is kept but the disagreement is never
+settled".
 
 → `docs/invariants/network.md`
 

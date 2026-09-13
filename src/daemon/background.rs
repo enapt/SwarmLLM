@@ -269,17 +269,24 @@ pub(super) fn spawn_shard_verification(
                         // advertising them: de-advertising on a stranger's
                         // claim is the same mistake as deleting on it, and a
                         // peer that downloads from us hashes what it gets.
-                        // Asking the origin is what settles the disagreement,
-                        // and recording its answer stops it recurring.
+                        //
+                        // Deliberately NOT `mark_shard_for_repair`. That set is
+                        // drained by `complete_pending_shard_fetches`, whose
+                        // FIRST action is to treat a shard whose file is on
+                        // disk as already repaired and clear the mark — so for
+                        // a shard we are keeping by definition, marking it
+                        // fetches nothing and only churns the set. Settling the
+                        // disagreement automatically is real work and is not
+                        // done here; see `docs/FUTURE_WORK.md` § "A disputed
+                        // shard is kept but the disagreement is never settled".
                         tracing::warn!(
                             model = %manifest.id,
                             shard = shard_info.index,
                             error = %e,
                             "A shard we hold disagrees with the hash the swarm reports — \
-                             kept, because that hash has no origin backing; asking the \
-                             model's origin to settle it"
+                             keeping our bytes, because that hash has no origin backing \
+                             and deleting on it is how a last copy is lost"
                         );
-                        shared_state.mark_shard_for_repair(&sid);
                         disputed += 1;
                     }
                     Ok(Err(e)) => {
