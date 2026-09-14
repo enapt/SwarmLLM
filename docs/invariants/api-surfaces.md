@@ -833,3 +833,51 @@ not have caught this. **A test that exercises a helper cannot tell you the
 helper is called.**
 
 → gotcha #601
+
+## The pre-token window is reported, and reported from evidence
+
+**Rule:** `.claude/rules/architecture.md` § "A ticker merged into a response
+stream is a termination condition".
+
+### What this replaced
+
+The chat tab displayed a fixed `Thinking...` from the moment a question was sent
+until the first token. On a cold request that window is model loading plus
+prefill — prefill alone is linear in prompt length and ~99% of a long request —
+so on a modest machine the label sat there for minutes, saying the same thing
+whether the node was working, waiting on a peer, or wedged. It was also simply
+wrong for the many models that do no "thinking" at all.
+
+The information existed the whole time. `progress_ticker` had been interleaving
+`format_progress_comment` — phase, percent, tokens done, and an ETA measured
+from that request's own rate — into every streamed response. It reached the
+browser and `utils.js::readSseStream` dropped it on its first line, which
+skipped everything that was not `data:` (gotcha #605).
+
+### What a change must keep
+
+- **Comments, not frames.** This rides an OpenAI-compatible stream. A `data:`
+  frame carrying a non-chat-completion object breaks clients that deserialise
+  every frame strictly; an `event:` name is invisible to anything not using
+  `EventSource`. A `:` line is dropped by every conforming reader, so the
+  feature costs nothing to anyone who does not want it. `STATUS_COMMENT_PREFIX`
+  is the marker that separates the machine half from the prose half; it is a
+  wire contract, not a private handshake.
+- **Both halves.** The prose line is for a person watching `curl` and was the
+  original reason the ticker existed. Do not replace it with JSON.
+- **Derived, never cycled.** `LiveStatus.phase` comes from which marks the trace
+  carries. There is no timer walking through stages. This is the difference
+  between a status line and decoration: a label that moves regardless of what
+  the node is doing is indistinguishable from a hang, which is precisely the
+  complaint being answered.
+- **An unknown phase must not blank the line.** A newer worker naming a phase
+  this build does not know maps to `Working`, and the frontend falls back to the
+  generic label when a key is missing. A mixed-version swarm is ordinary.
+- **Tokens outrank the status.** `_onStatus` returns early once `live.cleared`
+  is set, so a late keep-alive cannot repaint over an answer being written.
+- **Node-level detail is opt-in** (`App.NODE_DETAIL_KEY`, off by default). The
+  default line answers "is it working, and how long"; which computer holds which
+  layers is a node operator's question, and putting it in everyone's chat bubble
+  is how a chat box starts reading like a log. It is a browser preference, not
+  node config — it changes only what is drawn, so it must not depend on the
+  daemon being reachable, and it must not ride the Settings panel's config save.

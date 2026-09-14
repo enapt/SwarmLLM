@@ -554,7 +554,7 @@
       var assistantEl = U.appendMessageToDOM('assistant', '', false, { encrypted: msgEncrypted, model: model });
       var assistantAvatarEl = assistantEl ? assistantEl.querySelector('.msg-avatar') : null;
       var contentEl = assistantEl.querySelector('.msg-content');
-      contentEl.innerHTML = '<span class="typing-indicator">' + U.escapeHtml(I18n.t('chat.thinking')) + '</span>';
+      contentEl.innerHTML = App.chat._waitingHtml(null);
       if (assistantAvatarEl) assistantAvatarEl.classList.add('avatar-thinking');
 
       // Everything this reply writes into goes through `live`, so switching
@@ -693,6 +693,15 @@
         }
 
 
+        // The daemon interleaves a progress keep-alive with the token stream.
+        // It is an SSE comment, so it costs nothing to anything that does not
+        // want it — and it is the only thing that knows what is happening
+        // during the long silence before the first token.
+        var onComment = function(comment) {
+          var status = U.parseStatusComment(comment);
+          if (status) App.chat._onStatus(live, status);
+        };
+
         var onChunk = function(chunk) {
           if (chunk.usage) streamUsage = chunk.usage;
           if (chunk.choices && chunk.choices[0] && chunk.choices[0].delta) {
@@ -733,7 +742,7 @@
           }
         };
 
-        await U.readSseStream(resp.body.getReader(), onChunk);
+        await U.readSseStream(resp.body.getReader(), onChunk, onComment);
 
         // Nothing came back at all. By far the most common cause is a model
         // that wasn't loaded yet: the first message after switching models
@@ -760,7 +769,7 @@
               // The retry is the request that actually produced the answer, so
               // its route is the one to report.
               routeInfo = U.readRouteHeaders(retryResp);
-              await U.readSseStream(retryResp.body.getReader(), onChunk);
+              await U.readSseStream(retryResp.body.getReader(), onChunk, onComment);
             }
           } catch (retryErr) {
             // Fall through to the error message below.
@@ -903,6 +912,9 @@
         reasoning: '',
         // Has the "thinking" placeholder been replaced by real output yet?
         cleared: false,
+        // Latest live status from the daemon's keep-alives, or null before the
+        // first one lands.
+        status: null,
       };
       S.streaming[sessionId] = live;
       App.chat._refreshStreamingUI();
@@ -929,6 +941,100 @@
       var stop = document.getElementById('stop-btn');
       if (send) { send.disabled = on; send.hidden = on; }
       if (stop) stop.hidden = !on;
+    },
+
+    /// Build the line shown while a reply is still being worked on.
+    ///
+    /// **One renderer, because there are two placeholder sites** — the initial
+    /// send and `_reattachLiveReply` after a session is re-rendered — and a
+    /// status that reached one but not the other would simply stop updating
+    /// when you switched tabs and came back.
+    ///
+    /// Everything here is read from what the daemon reported. There is no timer
+    /// cycling through plausible-sounding stages: a status line that moves
+    /// whether or not anything is happening looks like information and is not,
+    /// and it would be indistinguishable from a hang — which is the exact
+    /// problem this replaces.
+    _waitingHtml: function(live) {
+      var st = live && live.status;
+      if (!st) {
+        // Nothing reported yet. The first keep-alive is a couple of seconds
+        // out, so this is what a short reply shows for its whole life.
+        return '<span class="typing-indicator">' + U.escapeHtml(I18n.t('chat.thinking')) + '</span>';
+      }
+
+      var label;
+      if (st.phase === 'reading_prompt' && typeof st.percent === 'number') {
+        label = I18n.t('chat.status.reading_prompt_pct', { percent: st.percent });
+      } else {
+        // An unknown phase from a newer node must not blank the line.
+        var key = 'chat.status.' + st.phase;
+        label = I18n.t(key);
+        if (!label || label === key) label = I18n.t('chat.thinking');
+      }
+
+      var parts = [label];
+      if (typeof st.eta_ms === 'number' && st.eta_ms >= 1000) {
+        parts.push(I18n.t('chat.status.eta_seconds', { seconds: Math.round(st.eta_ms / 1000) }));
+      }
+      if (st.attempt > 1) {
+        parts.push(I18n.t('chat.status.retrying', { attempt: st.attempt }));
+      }
+
+      // `has-status` suppresses the animated trailing dots. They exist to show
+      // a page that cannot say anything is still alive — and a line that names
+      // a phase, a percentage and a countdown says it far better, while the
+      // dots would simply pile up behind an ellipsis the string already ends
+      // with ("Contacting the other computers….."). The fallback above keeps
+      // them, because there it is the only motion there is.
+      var html = '<span class="typing-indicator has-status">' + U.escapeHtml(parts.join(' · ')) + '</span>';
+      if (App.chat._nodeDetailOn() && st.nodes && st.nodes.length) {
+        html += App.chat._nodeDetailHtml(st);
+      }
+      return html;
+    },
+
+    /// Is the advanced, per-computer view switched on?
+    ///
+    /// Off by default and deliberately so: the default line answers "is it
+    /// working and how long", which is what someone asking a question wants.
+    /// Which computer holds which layers is a node operator's question, and
+    /// showing it to everyone is how a chat box starts reading like a log.
+    _nodeDetailOn: function() {
+      try {
+        return localStorage.getItem(App.NODE_DETAIL_KEY) === '1';
+      } catch (e) {
+        return false;
+      }
+    },
+
+    /// The per-computer breakdown, for the advanced view.
+    _nodeDetailHtml: function(st) {
+      var rows = st.nodes.map(function(n) {
+        var who = n.local
+          ? I18n.t('chat.status.on_this_computer')
+          : I18n.t('chat.status.on_node', { node: n.node });
+        var what = I18n.t('chat.status.node_layers', { start: n.layer_start, end: n.layer_end });
+        // A unit symbol, not prose — same reasoning as the byte sizes the
+        // dashboard prints unlocalised, and one fewer string to translate 21
+        // times for no gain in comprehension.
+        var timing = typeof n.elapsed_ms === 'number' ? ' · ' + n.elapsed_ms + ' ms' : '';
+        return '<li><span class="node-dot" style="background:' + U.escapeHtml(U.peerColor(n.node)) + '"></span>' +
+          U.escapeHtml(who) + ' · ' + U.escapeHtml(what) + timing + '</li>';
+      });
+      return '<ul class="reply-node-detail">' +
+        '<li class="reply-node-route">' + U.escapeHtml(I18n.t('chat.status.route_' + st.route)) + '</li>' +
+        rows.join('') + '</ul>';
+    },
+
+    /// A status report arrived for the reply streaming in `live`.
+    ///
+    /// Ignored once real output has started: the tokens on screen are better
+    /// evidence than any label, and repainting over them would be a bug.
+    _onStatus: function(live, status) {
+      if (!live || live.cleared || !status) return;
+      live.status = status;
+      if (live.contentEl) live.contentEl.innerHTML = App.chat._waitingHtml(live);
     },
 
     /// Replace the typing indicator with real output, once.
@@ -969,8 +1075,9 @@
       live.avatarEl = el.querySelector('.msg-avatar');
       live.contentEl = el.querySelector('.msg-content');
       if (!live.cleared) {
-        live.contentEl.innerHTML = '<span class="typing-indicator">' +
-          U.escapeHtml(I18n.t('chat.thinking')) + '</span>';
+        // Carries the latest status across the re-render, so coming back to a
+        // tab does not reset a reply's progress line to "Thinking…".
+        live.contentEl.innerHTML = App.chat._waitingHtml(live);
         if (live.avatarEl) live.avatarEl.classList.add('avatar-thinking');
         return;
       }

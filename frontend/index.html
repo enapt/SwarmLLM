@@ -373,6 +373,21 @@
         </select>
         <span class="text-muted field-hint" data-i18n="settings.theme_hint">Changes apply straight away.</span>
       </div>
+      <!-- Purely a display preference, stored in this browser: it changes what
+           the chat shows while a reply is being worked on, and nothing about
+           how the node behaves. Kept out of the node's config for that reason,
+           and off by default so an ordinary question does not come with a
+           routing table attached. -->
+      <div class="form-group">
+        <div class="flex-center gap-1">
+          <label class="toggle-switch" style="margin-right:4px">
+            <input type="checkbox" id="settings-node-detail">
+            <span class="toggle-slider"></span>
+          </label>
+          <span data-i18n="settings.node_detail">Show which computers are answering</span>
+        </div>
+        <span class="text-muted field-hint" data-i18n="settings.node_detail_desc">While a reply is being prepared, list the computers working on it and which part of the model each one is running. Useful when testing a swarm; most people will not need it.</span>
+      </div>
       </section>
 
       <section class="settings-section">

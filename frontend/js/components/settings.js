@@ -231,6 +231,21 @@
         });
       }
 
+      // Show which computers are answering. A browser preference like the two
+      // above, applied immediately, and deliberately NOT part of the config
+      // this panel saves: it changes only what the chat draws, so routing it
+      // through the daemon would put a display choice in a node's config file
+      // and make it fail when the node is unreachable.
+      var nodeDetail = document.getElementById('settings-node-detail');
+      if (nodeDetail) {
+        try { nodeDetail.checked = localStorage.getItem(App.NODE_DETAIL_KEY) === '1'; } catch (e) {}
+        nodeDetail.addEventListener('change', function() {
+          try {
+            localStorage.setItem(App.NODE_DETAIL_KEY, this.checked ? '1' : '0');
+          } catch (e) {}
+        });
+      }
+
       // Claude subscription toggle
       var csToggle = document.getElementById('claude-subscription-toggle');
       if (csToggle) {

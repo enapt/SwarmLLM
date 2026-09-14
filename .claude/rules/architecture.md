@@ -818,6 +818,22 @@ encoders. Its wait is cancellable — `tokio::select!` on the interval versus a
 `tokio::sync::watch` finish signal, which is why the signal is a `watch` and not
 an `AtomicBool`: the ticker has to *wait* on it, not merely read it.
 
+It carries TWO comment lines, built by `api::sse::keep_alive_lines`: prose for a
+person watching a terminal, and `swarmllm-status ` + JSON
+(`inference::trace::LiveStatus`) for a client that can show what is happening.
+**Comments, because this rides `/v1/chat/completions`** — every conforming SSE
+reader drops a `:` line, while a `data:` frame carrying a non-chat-completion
+object is not safe and an `event:` name is invisible outside `EventSource`.
+
+**A status is DERIVED from what the trace recorded, never cycled on a timer.**
+`RequestTrace::live_status` reads the marks — `mark_dequeued`, `mark_assembled`,
+`set_progress`, `mark_first_token` — so queued, planning and contacting-nodes
+are facts, not plausible-sounding filler. A label that advances whether or not
+anything is happening looks like information and cannot be told from a hang,
+which is the problem it would be there to solve.
+
+→ `docs/invariants/api-surfaces.md`
+
 → `docs/invariants/api-surfaces.md`
 
 ## Event System

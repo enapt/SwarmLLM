@@ -19,6 +19,22 @@
   version is also kept beside the new one under a name you can run, so there is
   always a way back.
 
+### Added
+
+- **The chat now says what it is actually doing while you wait.** It used to
+  show "Thinking…" from the moment you pressed send until the first word
+  arrived — the same label whether the model was being loaded, your message was
+  being read, or another computer was being contacted, and shown even for models
+  that do no thinking at all. On a slower computer that is most of the wait. It
+  now says which of those is happening, how far through reading your message it
+  is, and roughly how long is left. None of it is invented: the node already
+  worked all of this out and sent it with every reply, and the page was throwing
+  it away.
+- **Optionally, which computers are answering.** A new setting under Appearance
+  lists the computers working on a reply and which part of the model each is
+  running. Off by default — the ordinary status line is enough for most people —
+  and useful if you are testing a swarm.
+
 ## [0.3.180-alpha] — 2026-09-14
 
 Two problems reported from people's own machines, and what auditing around them

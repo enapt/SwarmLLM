@@ -876,8 +876,17 @@
   // Handles the standard SSE boilerplate: UTF-8 decode, line buffering, `data:` prefix
   // stripping, `[DONE]` sentinel skip, and per-line JSON parse with silent failure
   // (matching the fault-tolerant behavior expected by our chat streams).
-  // Usage: await U.readSseStream(resp.body.getReader(), function(chunk) { ... });
-  async function readSseStream(reader, onChunk) {
+  // Usage: await U.readSseStream(resp.body.getReader(), onChunk[, onComment]);
+  //
+  // `onComment` receives each SSE comment line (the `:`-prefixed ones), with
+  // the marker stripped. They were dropped here for as long as this function
+  // has existed, which is how the daemon came to compute a full progress
+  // snapshot for every streamed request — phase, percent, ETA — put it on the
+  // wire, and have the one client that could show it throw it away while
+  // displaying a fixed "Thinking…". Comments are exactly the right carrier for
+  // this: every conforming SSE reader ignores them, so nothing on
+  // /v1/chat/completions is affected by their presence.
+  async function readSseStream(reader, onChunk, onComment) {
     var decoder = new TextDecoder();
     var buffer = '';
     while (true) {
@@ -888,6 +897,13 @@
       buffer = lines.pop() || '';
       for (var i = 0; i < lines.length; i++) {
         var line = lines[i].trim();
+        if (line.startsWith(':')) {
+          if (onComment) {
+            // A bad comment must never take down the reply it is annotating.
+            try { onComment(line.substring(1).trim()); } catch (e) {}
+          }
+          continue;
+        }
         if (!line.startsWith('data:')) continue;
         var payload = line.substring(5).trim();
         if (payload === '[DONE]') continue;
@@ -895,6 +911,22 @@
           onChunk(JSON.parse(payload));
         } catch (e) {}
       }
+    }
+  }
+
+  // The marker the daemon puts on the machine-readable half of a keep-alive
+  // (`api::sse::STATUS_COMMENT_PREFIX`). Kept here so the one place that knows
+  // the wire contract is the one place that parses it.
+  var STATUS_COMMENT_PREFIX = 'swarmllm-status ';
+
+  // Parse one SSE comment into a live status, or null if it is the prose half
+  // (or anything else we do not recognise).
+  function parseStatusComment(comment) {
+    if (!comment || comment.indexOf(STATUS_COMMENT_PREFIX) !== 0) return null;
+    try {
+      return JSON.parse(comment.substring(STATUS_COMMENT_PREFIX.length));
+    } catch (e) {
+      return null;
     }
   }
 
@@ -1227,6 +1259,7 @@
     submitCodeForm: submitCodeForm,
     copyToClipboard: copyToClipboard,
     readSseStream: readSseStream,
+    parseStatusComment: parseStatusComment,
     getApiErrorMessage: getApiErrorMessage,
     peerColor: peerColor,
     renderMarkdown: renderMarkdown,

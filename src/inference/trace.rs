@@ -183,6 +183,88 @@ pub struct ProgressSnapshot {
     pub elapsed_ms: u64,
 }
 
+/// Which of a request's stages it is in, before it starts answering.
+///
+/// Serialised as a stable lowercase string and translated by the dashboard —
+/// the daemon never sends a sentence a client would have to show verbatim,
+/// because it would then be English on every one of 21 locales.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LivePhase {
+    /// Admitted, not yet started: this node is busy with other work.
+    Queued,
+    /// Working out which computers will run the model.
+    Planning,
+    /// A plan exists and involves other computers, none of which has reported.
+    ContactingNodes,
+    /// A plan exists, all of it here, and the worker has not reported yet.
+    Starting,
+    /// Weights are being read into memory.
+    LoadingModel,
+    /// The prompt is being read. Linear in prompt length and ~99% of a long
+    /// request, so this is the phase most waiting actually happens in.
+    ReadingPrompt,
+    /// A phase the worker named that this build does not know. Forward
+    /// compatibility: a newer worker must not make the line go blank.
+    Working,
+    /// Tokens are arriving.
+    Writing,
+}
+
+impl LivePhase {
+    /// Key the dashboard translates. Stable — it is a wire value.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LivePhase::Queued => "queued",
+            LivePhase::Planning => "planning",
+            LivePhase::ContactingNodes => "contacting_nodes",
+            LivePhase::Starting => "starting",
+            LivePhase::LoadingModel => "loading_model",
+            LivePhase::ReadingPrompt => "reading_prompt",
+            LivePhase::Working => "working",
+            LivePhase::Writing => "writing",
+        }
+    }
+}
+
+/// One computer's part of the plan, as the person who asked sees it.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LiveNode {
+    /// Short id, matching what the peer list and the network map already show.
+    pub node: String,
+    pub local: bool,
+    pub layer_start: u32,
+    pub layer_end: u32,
+    pub transport: Transport,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub elapsed_ms: Option<u32>,
+}
+
+/// What a request is doing, for the client waiting on it.
+///
+/// Rides the response's own stream as an SSE comment, so it needs no second
+/// connection, no polling, and no correlation by request id — it is already on
+/// the only channel that is per-request by construction.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LiveStatus {
+    pub phase: LivePhase,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub percent: Option<u8>,
+    pub done: u32,
+    pub total: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub eta_ms: Option<u64>,
+    /// Since admission — the whole wait, not just the current phase. This is
+    /// the number the person is actually experiencing.
+    pub elapsed_ms: u64,
+    pub route: Route,
+    /// How many times a pipeline has been assembled. >1 means the request hit
+    /// something and re-planned, which is worth showing rather than hiding
+    /// behind an unchanged status line.
+    pub attempt: u32,
+    pub nodes: Vec<LiveNode>,
+}
+
 /// The per-request record. Cheap to clone behind an `Arc`.
 pub struct RequestTrace {
     pub request_id: uuid::Uuid,
@@ -277,6 +359,76 @@ impl RequestTrace {
             snap.elapsed_ms = started.elapsed().as_millis() as u64;
         }
         Some(snap)
+    }
+
+    /// What this request is doing RIGHT NOW, for a client that has asked a
+    /// question and is looking at an empty box.
+    ///
+    /// **Every field is read off state the trace already records.** Nothing here
+    /// is invented to fill the silence: the phase is derived from which marks
+    /// have been made (`mark_dequeued`, `mark_assembled`, `set_progress`,
+    /// `mark_first_token`), and the node list is the assembled pipeline. A
+    /// status line that cycles through plausible-sounding stages regardless of
+    /// what the node is doing is worse than "Thinking…", because it looks like
+    /// information.
+    ///
+    /// The gap this closes is the one nobody could see: the worker reports
+    /// `loading_model` and `prefill`, and those are the long phases, but they
+    /// only begin once a plan exists and a worker has the request. Before that
+    /// — queued, and the pipeline being assembled, which on a cold swarm means
+    /// waiting on DHT lookups — the trace knew exactly what was happening and
+    /// nothing asked it.
+    pub fn live_status(&self) -> LiveStatus {
+        let ttft = self.ttft_us.load(Ordering::Relaxed) != 0;
+        let inner = self.lock();
+
+        let progress = inner.progress.clone();
+        let phase = if ttft {
+            // Tokens are flowing; the client has better evidence than this.
+            LivePhase::Writing
+        } else if let Some(p) = progress.as_ref() {
+            match p.phase {
+                "loading_model" => LivePhase::LoadingModel,
+                "prefill" => LivePhase::ReadingPrompt,
+                _ => LivePhase::Working,
+            }
+        } else if inner.segments.is_empty() {
+            // No plan yet. Which side of the queue it is on is the difference
+            // between "this node is busy" and "this node is looking for
+            // somewhere to run it", and those are not the same wait.
+            match inner.t_dequeued {
+                None => LivePhase::Queued,
+                Some(_) => LivePhase::Planning,
+            }
+        } else if inner.segments.iter().any(|seg| !seg.is_local) {
+            // A plan naming another computer, but no worker has reported yet.
+            LivePhase::ContactingNodes
+        } else {
+            LivePhase::Starting
+        };
+
+        LiveStatus {
+            phase,
+            percent: progress.as_ref().and_then(|p| p.percent),
+            done: progress.as_ref().map(|p| p.done).unwrap_or(0),
+            total: progress.as_ref().map(|p| p.total).unwrap_or(0),
+            eta_ms: progress.as_ref().and_then(|p| p.eta_ms),
+            elapsed_ms: self.t_admitted.elapsed().as_millis() as u64,
+            route: inner.route,
+            attempt: inner.assemblies,
+            nodes: inner
+                .segments
+                .iter()
+                .map(|seg| LiveNode {
+                    node: seg.short_node().to_string(),
+                    local: seg.is_local,
+                    layer_start: seg.layer_start,
+                    layer_end: seg.layer_end,
+                    transport: seg.transport,
+                    elapsed_ms: seg.elapsed_ms,
+                })
+                .collect(),
+        }
     }
 
     /// Drop progress once the request is actually producing output. Called from
@@ -805,6 +957,136 @@ mod tests {
             second > first,
             "elapsed must advance without a new update ({first} -> {second})"
         );
+    }
+
+    /// The whole point of `live_status`: the phases BEFORE a worker reports
+    /// anything are the ones a static label used to cover, and each is a
+    /// different answer to "why am I waiting?".
+    ///
+    /// Queued means this node is busy with other work. Planning means it is
+    /// deciding where to run the model — on a cold swarm that is DHT lookups.
+    /// Telling them apart is the difference between "be patient" and "something
+    /// is looking for a peer that may not exist".
+    #[test]
+    fn the_phases_before_a_worker_reports_are_told_apart() {
+        let t = RequestTrace::new(uuid::Uuid::new_v4(), "m", "chat");
+        assert_eq!(
+            t.live_status().phase,
+            LivePhase::Queued,
+            "not yet dequeued means this node is busy, not that it is planning"
+        );
+
+        t.mark_dequeued();
+        assert_eq!(t.live_status().phase, LivePhase::Planning);
+
+        t.mark_assembled(Route::Local, local_segment(&NodeId([7u8; 32]), (0, 32)), 3);
+        assert_eq!(
+            t.live_status().phase,
+            LivePhase::Starting,
+            "a plan that is entirely local is not 'contacting other computers'"
+        );
+    }
+
+    /// A plan naming another computer says so, because that is a wait the user
+    /// can act on — it is the one that depends on somebody else's machine.
+    #[test]
+    fn a_plan_that_needs_another_computer_says_so() {
+        let t = RequestTrace::new(uuid::Uuid::new_v4(), "m", "chat");
+        t.mark_dequeued();
+        t.mark_assembled(
+            Route::Distributed,
+            vec![
+                SegmentTrace {
+                    index: 0,
+                    node_id: "aaaaaaaabbbb".to_string(),
+                    is_local: true,
+                    region: None,
+                    layer_start: 0,
+                    layer_end: 15,
+                    shard_indices: vec![0],
+                    transport: Transport::Local,
+                    elapsed_ms: None,
+                    activation_bytes: None,
+                },
+                SegmentTrace {
+                    index: 1,
+                    node_id: "ccccccccdddd".to_string(),
+                    is_local: false,
+                    region: None,
+                    layer_start: 16,
+                    layer_end: 31,
+                    shard_indices: vec![1],
+                    transport: Transport::Direct,
+                    elapsed_ms: None,
+                    activation_bytes: None,
+                },
+            ],
+            4,
+        );
+
+        let live = t.live_status();
+        assert_eq!(live.phase, LivePhase::ContactingNodes);
+        assert_eq!(live.route, Route::Distributed);
+        assert_eq!(live.nodes.len(), 2);
+        assert_eq!(
+            live.nodes[1].node, "cccccccc",
+            "nodes are named the short way the peer list and map already name them"
+        );
+        assert!(!live.nodes[1].local);
+    }
+
+    /// Worker phases outrank the derived ones — once the model is actually
+    /// loading, "contacting other computers" is stale even though the plan
+    /// still names a peer.
+    #[test]
+    fn a_worker_report_outranks_the_derived_phase() {
+        let t = RequestTrace::new(uuid::Uuid::new_v4(), "m", "chat");
+        t.mark_dequeued();
+        t.mark_assembled(Route::Local, local_segment(&NodeId([1u8; 32]), (0, 8)), 1);
+        t.set_progress("loading_model", 0, 0);
+        assert_eq!(t.live_status().phase, LivePhase::LoadingModel);
+
+        t.set_progress("prefill", 128, 1024);
+        let live = t.live_status();
+        assert_eq!(live.phase, LivePhase::ReadingPrompt);
+        assert_eq!(live.percent, Some(12));
+        assert_eq!(live.total, 1024);
+    }
+
+    /// A phase name this build does not know must not blank the line. A newer
+    /// worker naming a new phase is an ordinary mixed-version swarm, and the
+    /// honest fallback is "working", not silence.
+    #[test]
+    fn an_unknown_worker_phase_still_reports_something() {
+        let t = RequestTrace::new(uuid::Uuid::new_v4(), "m", "chat");
+        t.mark_dequeued();
+        t.set_progress("quantising_the_flux_capacitor", 1, 2);
+        assert_eq!(t.live_status().phase, LivePhase::Working);
+    }
+
+    /// Once tokens are arriving the client can see them, and the status must
+    /// stand down rather than keep describing a phase that has ended.
+    #[test]
+    fn the_status_stands_down_when_tokens_arrive() {
+        let t = RequestTrace::new(uuid::Uuid::new_v4(), "m", "chat");
+        t.mark_dequeued();
+        t.set_progress("prefill", 512, 512);
+        t.mark_first_token();
+        assert_eq!(t.live_status().phase, LivePhase::Writing);
+    }
+
+    /// A re-plan is visible. A request that hit something and routed again
+    /// looks identical from outside to one that is merely slow, and the
+    /// difference is worth showing to whoever is watching it.
+    #[test]
+    fn a_re_planned_request_reports_which_attempt_it_is_on() {
+        let t = RequestTrace::new(uuid::Uuid::new_v4(), "m", "chat");
+        t.mark_dequeued();
+        let seg = || local_segment(&NodeId([2u8; 32]), (0, 8));
+        t.mark_assembled(Route::Local, seg(), 2);
+        assert_eq!(t.live_status().attempt, 1);
+        t.mark_assembled(Route::Local, seg(), 2);
+        assert_eq!(t.live_status().attempt, 2);
     }
 
     #[test]

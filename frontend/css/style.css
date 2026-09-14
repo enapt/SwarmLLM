@@ -2755,11 +2755,42 @@ kbd {
   content: '';
   animation: typing-dots 1.4s infinite;
 }
+/* A status line that names a phase and a percentage already shows it is
+   alive, and the animated dots would land behind the ellipsis the label ends
+   with. See `chat.js::_waitingHtml`. */
+.typing-indicator.has-status::after { content: none; animation: none; }
 @keyframes typing-dots {
   0% { content: ''; }
   25% { content: '.'; }
   50% { content: '..'; }
   75% { content: '...'; }
+}
+
+/* The per-computer breakdown shown while a reply is being worked on, when
+   "Show which computers are answering" is on. Sized down and muted: it sits
+   inside a chat bubble and must read as an annotation on the status line above
+   it, never as the reply. */
+.reply-node-detail {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  font-size: 0.82em;
+  color: var(--text-muted);
+}
+.reply-node-detail li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 1px 0;
+  /* A long node line must wrap rather than widen the bubble on a phone. */
+  flex-wrap: wrap;
+}
+.reply-node-route { font-style: italic; opacity: 0.85; }
+.reply-node-detail .node-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: 0 0 auto;
 }
 
 /* ---- Sparkline ---- */

@@ -66,6 +66,10 @@ window.App = {
   SETUP_SKIPPED_KEY: 'swarmllm_setup_skipped',
   SETUP_CHIP_DISMISSED_KEY: 'swarmllm_setup_chip_dismissed',
   WELCOME_SEEN_KEY: 'swarmllm_welcome_seen',
+  // Show the per-computer breakdown while a reply is being worked on. Off by
+  // default: the plain status line answers "is it working and how long", and
+  // which node holds which layers is a node operator's question.
+  NODE_DETAIL_KEY: 'swarmllm_node_detail',
   HEALTH_INTERVAL_KEY: 'swarmllm_health_interval',
   THEME_KEY: 'swarmllm_theme',
   MODEL_SORT_KEY: 'swarmllm_model_sort',

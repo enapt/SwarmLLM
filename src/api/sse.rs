@@ -127,6 +127,63 @@ pub fn format_progress_comment(s: &crate::inference::trace::ProgressSnapshot) ->
     }
 }
 
+/// Marks the machine-readable half of a progress keep-alive.
+///
+/// SSE comments are the only thing that can ride a `/v1/chat/completions`
+/// stream with no risk to the clients already on it: every conforming reader
+/// drops a line beginning with `:`, so an OpenAI SDK sees exactly what it saw
+/// before. A `data:` frame carrying a non-chat-completion object would not be —
+/// some clients deserialise every frame strictly — and an `event:` name is
+/// invisible to anything not using `EventSource`. So the status goes out as a
+/// comment, with this prefix so a reader that DOES want it can pick it out from
+/// the prose.
+///
+/// The prefix is part of the wire contract with the dashboard. It is not a
+/// private handshake: anything may read it, and nothing has to.
+pub const STATUS_COMMENT_PREFIX: &str = "swarmllm-status ";
+
+/// The machine-readable progress line.
+///
+/// `to_string` never emits a raw newline — the SSE encoder ASSERTS on one, and
+/// a panic inside the ticker would take the whole response down.
+pub fn format_status_comment(status: &crate::inference::trace::LiveStatus) -> Option<String> {
+    serde_json::to_string(status)
+        .ok()
+        .map(|json| format!("{STATUS_COMMENT_PREFIX}{json}"))
+}
+
+/// The comment lines one keep-alive tick carries.
+///
+/// Two of them, for different readers:
+///
+/// 1. **Prose**, for a person watching the stream in a terminal. Always
+///    present — an empty comment is still a valid keep-alive, which is what a
+///    request with nothing to report emits.
+/// 2. **Structured**, for a client that can show what is happening. Emitted
+///    whenever there is a trace at all, which crucially includes the phases
+///    BEFORE any worker has reported: queued, planning, contacting other
+///    computers. That window is exactly the one a fixed "Thinking…" used to
+///    cover, and the daemon has always known what was in it.
+///
+/// Separated from the ticker so the lines can be asserted without driving a
+/// stream, and folded back into ONE event by the ticker so there is still only
+/// one keep-alive on the wire.
+fn keep_alive_lines(trace: Option<&crate::inference::trace::RequestTrace>) -> Vec<String> {
+    let prose = trace
+        .and_then(|t| t.progress())
+        .map(|s| format_progress_comment(&s))
+        .unwrap_or_default();
+
+    let mut lines = vec![prose];
+    if let Some(line) = trace
+        .map(|t| t.live_status())
+        .and_then(|s| format_status_comment(&s))
+    {
+        lines.push(line);
+    }
+    lines
+}
+
 // ---- Keep-alive / progress ticker ----
 
 /// Interleaved keep-alive comments carrying the request's progress, for merging
@@ -173,17 +230,17 @@ pub(crate) fn progress_ticker(
         if *finished.borrow() {
             return None;
         }
-        let text = p
+        let trace = p
             .as_ref()
-            .and_then(|(state, rid)| state.active_traces.get(rid).and_then(|t| t.progress()))
-            .map(|s| format_progress_comment(&s))
-            // No snapshot yet, or already streaming: an empty comment is a
-            // valid keep-alive, which is what this subsumes.
-            .unwrap_or_default();
-        Some((
-            Ok(axum::response::sse::Event::default().comment(text)),
-            (p, finished),
-        ))
+            .and_then(|(state, rid)| state.active_traces.get(rid).map(|t| t.clone()));
+
+        let event = keep_alive_lines(trace.as_deref())
+            .into_iter()
+            .fold(axum::response::sse::Event::default(), |e, line| {
+                e.comment(line)
+            });
+
+        Some((Ok(event), (p, finished)))
     })
 }
 
@@ -194,6 +251,103 @@ mod ticker_tests {
     use std::time::Duration;
 
     /// The defect this exists for: a response whose tokens are done must not be
+    /// Both halves of a tick, and what each is for.
+    #[test]
+    fn a_keep_alive_carries_prose_for_a_person_and_json_for_a_client() {
+        use crate::inference::trace::RequestTrace;
+        let trace = RequestTrace::new(uuid::Uuid::new_v4(), "m", "chat");
+        trace.mark_dequeued();
+        trace.set_progress("prefill", 256, 1024);
+
+        let lines = super::keep_alive_lines(Some(&trace));
+        assert_eq!(lines.len(), 2);
+        assert!(
+            lines[0].contains("reading prompt 25%"),
+            "the prose half is for someone watching a terminal, got: {}",
+            lines[0]
+        );
+        let status = lines[1]
+            .strip_prefix(super::STATUS_COMMENT_PREFIX)
+            .expect("the structured half carries the marker a client looks for");
+        let parsed: serde_json::Value = serde_json::from_str(status).expect("valid JSON");
+        assert_eq!(parsed["phase"], "reading_prompt");
+        assert_eq!(parsed["percent"], 25);
+    }
+
+    /// The window the whole thing exists for: a request that has been admitted
+    /// and has no worker report yet still says what it is doing. Before this,
+    /// the only thing on the wire for that window was an empty comment.
+    #[test]
+    fn a_request_with_nothing_to_report_yet_still_says_what_it_is_doing() {
+        use crate::inference::trace::RequestTrace;
+        let trace = RequestTrace::new(uuid::Uuid::new_v4(), "m", "chat");
+
+        let lines = super::keep_alive_lines(Some(&trace));
+        assert_eq!(lines[0], "", "there is no prose to write yet");
+        assert!(
+            lines[1].contains("\"phase\":\"queued\""),
+            "the structured half covers the phases prose never had, got: {}",
+            lines[1]
+        );
+    }
+
+    /// No trace at all — a surface that did not pass one — must still keep the
+    /// connection alive, and must not invent a status for a request it cannot
+    /// see.
+    #[test]
+    fn no_trace_means_a_bare_keep_alive_and_no_invented_status() {
+        let lines = super::keep_alive_lines(None);
+        assert_eq!(lines, vec![String::new()]);
+    }
+
+    /// The wiring, not the helper. A correct `keep_alive_lines` the ticker does
+    /// not call is the shape of gotcha #601 — a fix written, tested and never
+    /// reached — so this drives the real ticker over a real trace held in a
+    /// real `active_traces` and reads what came out on the wire.
+    #[tokio::test]
+    async fn the_ticker_really_puts_the_status_on_the_wire() {
+        use crate::identity::Identity;
+        use crate::inference::executor::ModelExecutor;
+        use crate::inference::trace::RequestTrace;
+        use crate::storage::db::Database;
+
+        let temp = tempfile::tempdir().unwrap();
+        let db = Database::open(temp.path()).unwrap();
+        let executor = std::sync::Arc::new(tokio::sync::Mutex::new(ModelExecutor::new()));
+        let (state, _a, _b) = crate::daemon::SharedState::new(
+            crate::config::Config::default(),
+            Identity::generate(),
+            db,
+            executor,
+            None,
+        );
+
+        let rid = uuid::Uuid::new_v4();
+        let trace = std::sync::Arc::new(RequestTrace::new(rid, "m", "chat"));
+        trace.mark_dequeued();
+        state.active_traces.insert(rid, trace);
+
+        let (_tx, rx) = tokio::sync::watch::channel(false);
+        let ticker = progress_ticker(Some((state, rid)), rx, Duration::from_millis(5));
+        futures::pin_mut!(ticker);
+        let event = tokio::time::timeout(Duration::from_secs(5), ticker.next())
+            .await
+            .expect("a live request must get keep-alives")
+            .expect("stream must yield")
+            .expect("infallible");
+
+        // `Event` keeps its wire bytes in a `BytesMut` that it prints in full.
+        let on_the_wire = format!("{event:?}");
+        assert!(
+            on_the_wire.contains("swarmllm-status"),
+            "the ticker must EMIT the status line, not merely be able to: {on_the_wire}"
+        );
+        assert!(
+            on_the_wire.contains("planning"),
+            "and it must carry the phase the trace is actually in: {on_the_wire}"
+        );
+    }
+
     /// held open for the rest of the keep-alive interval.
     ///
     /// Measured on the live node before the fix — an 8-token reply delivered in
