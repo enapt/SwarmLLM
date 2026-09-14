@@ -967,6 +967,26 @@ free:
   **Designed and costed 2026-09-09; deliberately not built. Read this before
   starting, it is most of the work.**
 
+  ⚠ **Re-verified against the code 2026-09-14, and one of the three items below
+  is now STALE — in the direction that makes this smaller.** Point 2's stated
+  prerequisite, *"Re-key retention by `layer_range` first"*, **is done**:
+  `RetainedActivations` keys its per-segment histories by `(u32, u32)` layer
+  range, and `a_history_belongs_to_a_layer_range_not_to_a_position` says in as
+  many words that the re-key was made for "covering a failed range with several
+  nodes", i.e. for this. Splicing no longer misattributes a replay.
+
+  The other two are unchanged and were checked line by line:
+
+  - **Point 1 stands.** `find_standbys` (`scheduler/mod.rs`) still records only
+    a candidate whose `available_ranges` covers the segment entirely
+    (`r.0 <= segment.layer_range.0 && r.1 >= segment.layer_range.1`), so
+    `assignment.standbys` still cannot express a cover.
+  - **The splice blocker in point 2 stands.** `distributed.rs` still caches
+    `num_segments` before the forward loop and derives both `is_last` and
+    `run_is_last` from it. That is the half that makes splicing dangerous —
+    `is_last` decides WHICH SEGMENT SAMPLES — so the side map remains the
+    safer of the two options, and is now the only one carrying a live blocker.
+
   *Prior art.* Petals' `replace_failed_server` does exactly this and the loop is
   three lines: `outputs = streams[s].send(inputs); replacements.append(s);
   cache[s] = inputs; inputs = outputs` (arXiv 2312.08361, Algorithm 3). Note the
