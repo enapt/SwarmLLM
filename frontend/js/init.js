@@ -217,14 +217,23 @@
     var keySourceSel = document.getElementById('provider-key-source');
     if (keySourceSel) {
       keySourceSel.addEventListener('change', function() {
-        App.authFetch('/api/admin/providers', {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ key_source: this.value })
-        }).then(function() {
-          App.ui.showBanner('success', I18n.t('init.key_source_updated', { source: keySourceSel.value }));
-          App.settings.loadProviders();
-        });
+        // `.then` ran for a 401 and a 500 too, so the banner said the source
+        // had changed whatever the daemon answered — and the dropdown then sat
+        // showing a setting the node had never accepted. On failure, reload
+        // from the daemon so the control shows what is actually in force.
+        var wanted = keySourceSel.value;
+        U.apiAction(
+          '/api/admin/providers',
+          {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ key_source: wanted })
+          },
+          function() {
+            App.ui.showBanner('success', I18n.t('init.key_source_updated', { source: wanted }));
+          },
+          { fallback: I18n.t('settings.providers_save_failed') }
+        ).then(function() { App.settings.loadProviders(); });
       });
     }
 

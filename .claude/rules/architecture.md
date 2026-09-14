@@ -129,6 +129,29 @@ discarded every settings change not saved within thirty seconds.
 
 → `docs/invariants/frontend.md`
 
+## A write whose response is never read reports failure as success
+
+**`U.apiAction(url, opts, onSuccess, { fallback })`** is how the dashboard
+performs a write. `App.authFetch` resolves for a 401 and a 500 exactly as for a
+200 — `fetch` rejects only on a network failure — so `await authFetch(...)`
+followed by a success banner announces every refusal as a success. Five paths
+did it, including one that cleared the API-key input the daemon had just
+rejected. A control that stays where the user put it is a claim the node agreed:
+revert it, or reload it, when the write fails.
+
+→ `docs/invariants/frontend.md`
+
+## Text that sits next to a control goes in a span, never on its wrapper
+
+`I18n.translatePage` sets `textContent` on every `[data-i18n]` element, which
+deletes whatever that element contains. A translated element wrapping a control
+removes it on every page load, in every language — that is how the "Key source"
+setting came to exist in the markup and in 21 locales but in no user's DOM.
+`a_translated_element_never_wraps_a_control_it_would_delete` in
+`tests/repo_consistency.rs` fails the build on one.
+
+→ `docs/invariants/frontend.md`
+
 ## Advice on an empty state must be advice the reader can take
 
 An instruction naming a control asserts three things that can each be false on

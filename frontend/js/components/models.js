@@ -561,12 +561,19 @@
 
     shutdown: async function() {
       if (!confirm(I18n.t('models.confirm_shutdown'))) return;
-      try {
-        await App.authFetch('/api/admin/shutdown', { method: 'POST' });
-        document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100vh;color:var(--text-muted);font-size:1.2rem">' + U.escapeHtml(I18n.t('models.shutdown_message')) + '</div>';
-      } catch (e) {
-        App.ui.showBanner('error', I18n.t('models.shutdown_error', { error: e.message }));
-      }
+      // The endpoint is loopback-only and answers a remote admin with 403
+      // `LocalOnly`, whose message says which machine the command has to be run
+      // from. Awaiting the response without reading it threw that advice away
+      // and replaced the whole page with "shutting down" — leaving a running
+      // node behind a dashboard that had turned itself into a dead end.
+      await U.apiAction(
+        '/api/admin/shutdown',
+        { method: 'POST' },
+        function() {
+          document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100vh;color:var(--text-muted);font-size:1.2rem">' + U.escapeHtml(I18n.t('models.shutdown_message')) + '</div>';
+        },
+        { fallback: I18n.t('models.shutdown_error', { error: I18n.t('common.request_failed') }) }
+      );
     },
 
     initMobileSync: function() {

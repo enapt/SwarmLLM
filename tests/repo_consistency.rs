@@ -6338,3 +6338,142 @@ fn a_cancelled_download_is_not_recorded_as_a_failed_one() {
         offenders.join("\n  ")
     );
 }
+
+/// `I18n.translatePage` does `el.textContent = t(key)` for every `[data-i18n]`
+/// element. Setting `textContent` REPLACES everything inside the element — so
+/// a translated element that WRAPS a control deletes that control on every page
+/// load, in every language, including English.
+///
+/// This is not hypothetical. `<label data-i18n="settings.key_source_label">`
+/// wrapped the `provider-key-source` `<select>`, so the Cloud Providers "Key
+/// source" setting did not exist in the DOM for any user: `init.js` bound its
+/// change handler to `null`, `settings.js` guarded its write with `if (sel)`,
+/// and three translated options in 21 locales were strings nobody could ever
+/// see. Nothing went red — the markup is valid, the translation is correct, and
+/// the control simply is not there.
+///
+/// The failure is invisible by construction, which is exactly what a scan is
+/// for. Text that must sit next to a control goes in a `<span data-i18n=…>`
+/// beside it, never on the element that contains it.
+#[test]
+fn a_translated_element_never_wraps_a_control_it_would_delete() {
+    let html = std::fs::read_to_string(repo_root().join("frontend/index.html"))
+        .expect("cannot read frontend/index.html");
+
+    let offenders = translated_elements_wrapping_a_control(&html);
+    assert!(
+        offenders.is_empty(),
+        "these elements carry data-i18n AND contain a control, which \
+         `translatePage`'s `textContent` write deletes on every page load:\n  {}\n\
+         Move the text into a <span data-i18n=\"…\"> beside the control instead.",
+        offenders.join("\n  ")
+    );
+}
+
+/// Returns `tag@line -> contained control` for every element that carries
+/// `data-i18n` and contains an interactive descendant.
+///
+/// Deliberately scans the WHOLE element body rather than a character window,
+/// and reports the line so the offender is findable (see
+/// `.claude/rules/architecture.md` § "A source-scanning guard is only as good
+/// as the spellings it knows").
+fn translated_elements_wrapping_a_control(html: &str) -> Vec<String> {
+    const CONTAINERS: [&str; 6] = ["label", "span", "div", "p", "button", "summary"];
+    const CONTROLS: [&str; 4] = ["<input", "<select", "<textarea", "<button"];
+
+    let mut offenders = Vec::new();
+    for tag in CONTAINERS {
+        let open = format!("<{tag}");
+        let close = format!("</{tag}>");
+        let mut from = 0usize;
+        while let Some(rel) = html[from..].find(&open) {
+            let start = from + rel;
+            from = start + open.len();
+            // The opening tag's own attributes, up to its '>'.
+            let Some(gt) = html[start..].find('>') else {
+                break;
+            };
+            let attrs = &html[start..start + gt];
+            if !attrs.contains("data-i18n=") {
+                continue;
+            }
+            // Body from after '>' to the matching close, honouring nesting.
+            let body_start = start + gt + 1;
+            let mut depth = 1usize;
+            let mut cursor = body_start;
+            let body_end = loop {
+                let next_open = html[cursor..].find(&open).map(|i| cursor + i);
+                let next_close = html[cursor..].find(&close).map(|i| cursor + i);
+                match (next_open, next_close) {
+                    (_, None) => break html.len(),
+                    (Some(o), Some(c)) if o < c => {
+                        depth += 1;
+                        cursor = o + open.len();
+                    }
+                    (_, Some(c)) => {
+                        depth -= 1;
+                        if depth == 0 {
+                            break c;
+                        }
+                        cursor = c + close.len();
+                    }
+                }
+            };
+            let body = &html[body_start..body_end.min(html.len())];
+            let found: Vec<&str> = CONTROLS
+                .iter()
+                .copied()
+                .filter(|c| body.contains(c))
+                .collect();
+            if !found.is_empty() {
+                let line = html[..start].matches('\n').count() + 1;
+                let key = attrs
+                    .split("data-i18n=\"")
+                    .nth(1)
+                    .and_then(|s| s.split('"').next())
+                    .unwrap_or("?");
+                offenders.push(format!(
+                    "frontend/index.html:{line} <{tag} data-i18n=\"{key}\"> contains {}",
+                    found.join(", ")
+                ));
+            }
+        }
+    }
+    offenders
+}
+
+/// The scan above finds nothing today, and a scan that finds nothing is
+/// indistinguishable from one that CANNOT find anything. Plant the exact defect
+/// it exists to catch and require it to fire.
+#[test]
+fn the_translated_wrapper_scan_catches_the_defect_it_is_for() {
+    let planted = r#"
+        <div class="row">
+          <label class="text-sm" data-i18n="settings.key_source_label">Key source:
+            <select id="provider-key-source"><option value="auto">Auto</option></select>
+          </label>
+        </div>
+    "#;
+    let hits = translated_elements_wrapping_a_control(planted);
+    assert_eq!(
+        hits.len(),
+        1,
+        "the scan missed a planted <label data-i18n> wrapping a <select>: {hits:?}"
+    );
+    assert!(
+        hits[0].contains("<select"),
+        "wrong control reported: {hits:?}"
+    );
+
+    // And the corrected shape must NOT trip it, or the guard is unusable.
+    let fixed = r#"
+        <label class="text-sm">
+          <span data-i18n="settings.key_source_label">Key source:</span>
+          <select id="provider-key-source"><option value="auto">Auto</option></select>
+        </label>
+    "#;
+    assert!(
+        translated_elements_wrapping_a_control(fixed).is_empty(),
+        "the guard fires on the correct markup"
+    );
+}

@@ -29,9 +29,14 @@
       var nickname = nickEl.value.trim();
 
       if (!nickname) {
-        try {
-          await App.authFetch('/api/identity/nickname', { method: 'DELETE' });
-        } catch (e) {}
+        // Clearing a nickname is "stop publishing my name to the swarm". A
+        // silent failure leaves it published and tells the user it is gone.
+        await U.apiAction(
+          '/api/identity/nickname',
+          { method: 'DELETE' },
+          null,
+          { fallback: I18n.t('identity.nickname_failed') }
+        );
         return;
       }
 

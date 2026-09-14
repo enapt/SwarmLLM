@@ -449,13 +449,19 @@
       }
       var nick = (document.getElementById('setup-nickname').value || '').trim();
       if (nick) {
-        try {
-          await App.authFetch('/api/identity/nickname', {
+        // Swallowing this left a first-run user believing they had named their
+        // node when the daemon had refused the name — and the first-run screen
+        // is the one place they have no other way to find out.
+        await U.apiAction(
+          '/api/identity/nickname',
+          {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ nickname: nick, visibility: 'nickname' }),
-          });
-        } catch (e) {}
+          },
+          null,
+          { fallback: I18n.t('identity.nickname_failed') }
+        );
       }
       // Opt-in test model. Fire-and-forget after setup is marked done, and
       // fair-share rather than the whole model — a first-run user should not

@@ -290,3 +290,55 @@ costs nothing; repainting an input discards what the user was in the middle of
 doing, and leaves no trace.
 
 → gotcha #596
+
+## A write whose response is never read reports failure as success
+
+`U.apiAction(url, opts, onSuccess, { fallback })` is how the dashboard performs
+a write. It checks `resp.ok`, shows the daemon's own reason through
+`getApiErrorMessage`, and returns a boolean the caller can act on.
+
+**What this replaced.** `App.authFetch` resolves for a 401 and a 500 exactly as
+it does for a 200 — `fetch` rejects only on a network-level failure — so
+`await authFetch(...)` followed by a success banner announced every refusal as a
+success. Five paths did it: provider API keys (which also **cleared the input**,
+leaving nothing to retry with), the provider key-source dropdown, the Claude
+subscription toggle, the first-run nickname (swallowed entirely), and Shut Down
+— which replaced the whole page with "shutting down…" against a 403 from a
+still-running node, turning the dashboard into a dead end. That last one is the
+`LocalOnly` split of gotcha #309 seen from the other side: the variant exists so
+the message can name the machine the command must be run from, and the frontend
+discarded it by never reading the body.
+
+**What a change must keep.** A control that stays where the user put it is a
+claim the node agreed: on failure the subscription toggle reverts and the
+key-source dropdown reloads from the daemon, so neither shows a state the node
+is not in. To find a regression of this class, grep for
+`method: '(PUT|POST|DELETE|PATCH)'` with no `.ok`, `apiAction`,
+`getApiErrorMessage` or `throw` within about fourteen lines.
+
+→ gotcha #597
+
+## Text that sits next to a control goes in a span, never on its wrapper
+
+`I18n.translatePage` does `el.textContent = t(key)` for every `[data-i18n]`
+element, and `textContent` replaces everything inside that element. So a
+translated element that CONTAINS a control deletes the control on every page
+load, in every language including English.
+`a_translated_element_never_wraps_a_control_it_would_delete` in
+`tests/repo_consistency.rs` fails the build on one.
+
+**What this replaced.** `<label data-i18n="settings.key_source_label">` wrapped
+the `provider-key-source` `<select>`, so the Cloud Providers "Key source"
+setting (Auto / .env only / Dashboard only) was not in the DOM for any user:
+`init.js` bound its change handler to `null`, `settings.js` wrote its value
+behind an `if (sel)` that was never true, and three translated options across 21
+locales were strings nobody could see. The markup was valid and the translations
+correct; the control was simply absent, and no test that asks whether a feature
+*works* can see a feature that is not *there*. The whole-file scan found exactly
+one instance, which is why it survived so long.
+
+**What a change must keep.** The scan's self-test plants the defect and requires
+it to fire, and also asserts the corrected shape does not — a guard that goes
+off on correct markup is one somebody will delete rather than satisfy.
+
+→ gotcha #598

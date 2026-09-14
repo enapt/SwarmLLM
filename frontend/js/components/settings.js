@@ -235,17 +235,24 @@
       var csToggle = document.getElementById('claude-subscription-toggle');
       if (csToggle) {
         csToggle.addEventListener('change', async function() {
-          try {
-            await App.authFetch('/api/admin/providers', {
+          // A toggle that stays where the user put it is a claim the node
+          // agreed. Put it back if it did not, so the switch never shows a
+          // state the daemon is not in.
+          var wanted = csToggle.checked;
+          var ok = await U.apiAction(
+            '/api/admin/providers',
+            {
               method: 'PUT',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ claude_subscription_enabled: csToggle.checked }),
-            });
-            App.settings.loadProviders();
-            App.ui.showBanner('success', I18n.t('settings.claude_subscription_toggled'));
-          } catch (e) {
-            App.ui.showBanner('error', I18n.t('common.request_failed'));
-          }
+              body: JSON.stringify({ claude_subscription_enabled: wanted }),
+            },
+            function() {
+              App.settings.loadProviders();
+              App.ui.showBanner('success', I18n.t('settings.claude_subscription_toggled'));
+            },
+            { fallback: I18n.t('common.request_failed') }
+          );
+          if (!ok) csToggle.checked = !wanted;
         });
       }
 
@@ -815,24 +822,32 @@
         }
       });
       if (Object.keys(keys).length === 0) return;
-      try {
-        await App.authFetch('/api/admin/providers', {
+      // `authFetch` resolves for a 401 or a 500 exactly as it does for a 200 —
+      // `fetch` does not reject on an HTTP error status. Awaiting it and then
+      // announcing success meant a key the daemon REFUSED was reported as
+      // saved, the input was cleared so the user had nothing to retry with,
+      // and their cloud provider then simply did not work. `apiAction` is the
+      // helper that checks the response and shows the daemon's own reason.
+      await U.apiAction(
+        '/api/admin/providers',
+        {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(keys),
-        });
-        providerNames.forEach(function(name) {
-          var input = document.getElementById('provider-key-' + name);
-          if (input) input.value = '';
-        });
-        App.settings.loadProviders();
-        App.models.load();
-        App.networkStatus.load();
-        App.providerHealth.startHealthPolling();
-        App.ui.showBanner('success', I18n.t('settings.providers_saved'));
-      } catch (e) {
-        App.ui.showBanner('error', I18n.t('settings.providers_save_failed') + ': ' + (e.message || I18n.t('common.request_failed')));
-      }
+        },
+        function() {
+          providerNames.forEach(function(name) {
+            var input = document.getElementById('provider-key-' + name);
+            if (input) input.value = '';
+          });
+          App.settings.loadProviders();
+          App.models.load();
+          App.networkStatus.load();
+          App.providerHealth.startHealthPolling();
+          App.ui.showBanner('success', I18n.t('settings.providers_saved'));
+        },
+        { fallback: I18n.t('settings.providers_save_failed') }
+      );
     },
 
     testProvider: async function(name) {
