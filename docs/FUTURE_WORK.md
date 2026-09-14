@@ -81,6 +81,48 @@ and in the two "2026-09-14" headings below; read the row, not just the number.
 
 | 84 | **Your activity list was 89% other computers announcing themselves** | FIXED 2026-09-14, found while measuring something else. `emit_activity` caps `activity_history` at **100**, and that ring is not only the Activity panel: it is the **replay a dashboard receives when it opens** and the **"recent activity" section of the pasteable diagnostics report**. Measured on the deployed .181 binary: **102 of its 114 entries were `model/shard_announced`**, so both surfaces showed almost nothing the user had done. Nothing raised a toast, so it was never visible as noise, only as things quietly missing — and the live node's own diagnostics, pulled cold, showed exactly that. ⚠ **The first measurement of this was WRONG and the correction is the interesting part.** It read 112 events in 60 s and was recorded as a 1.9/s flood; re-measuring with the first 3 s discarded showed **114 in the replay burst and ZERO live in the following 87 s**. The whole figure had been the history replay a new client receives, counted as though it were live traffic. The cause is a BURST, not a rate: a disconnect calls `remove_peer_from_all_shards`, so every reconnect re-records every shard and fired one event **per model** — 8-16 for these peers, times ~15 reconnects in 90 minutes. **That also falsified the first fix.** "Emit only on a state change" was written on the assumption that peers re-announce on a timer; they do (`health::monitor`, every 10th cycle) but it is already delta-compressed, and a reconnect is a genuine change for every shard, so the gate passed the entire burst. It is kept because reporting protocol housekeeping as user activity is wrong regardless, but what actually bounds the ring is collapsing a multi-model announcement into ONE entry ("X announced N parts across M models"); a single-model announcement keeps its specific wording and its `with_model`, so the per-model activity filter still works. The per-announce `DIAG: shard announce ingested` is untouched — its own comment says it exists because the ring cannot be the durable record. Lesson, and it is diagnosis rule 4 exactly: **a WebSocket that replays history on connect means your first N messages are the past. Discard the burst before calling anything a rate.** Test: `a_re_announcement_of_a_known_holder_reports_no_change` |
 
+### The storage budget cannot see about 5% of what the node puts on disk (2026-09-15)
+
+**Found while exercising the download/cancel path, NOT fixed** — the fix touches
+prune, the settings storage bar and the budget together, which is not something
+to widen into the night before a release. Recorded with the measurement so the
+next round starts from data.
+
+`model::auto_manage::held_shard_bytes` — the one answer to "how much does this
+node hold?" — sums `size_bytes` from the MANIFEST for each registered shard. It
+therefore cannot see anything that is not a `shard_NNN.bin`:
+
+- `gguf_header.bin` (one per model; 5.9 MB for coder-7b, 7.8 MB for a 1B)
+- `tied_output_weight.bin` (**279 MB for a 1.3 GB model — 21% of it**)
+- `mmproj.gguf` for a VLM (595 MB for LLaVA-7B)
+- quarantined bytes, and `.tmp` left by a download that died
+
+**Measured on the live node 2026-09-14: 33062 MB actually on disk against
+31423 MB counted — a 1637 MB gap, ~5%.** Thirteen headers, four tied-weight
+files. So a user who sets a disk limit gets a node that uses about 5% more than
+it believes, silently.
+
+⚠ **The sharp edge is a cancelled or failed download**, and it is worth stating
+separately because the percentage understates it. Exercised end to end on an
+isolated node: start `llama-3.2-1b-instruct-q8-0`, cancel mid-flight. The cancel
+itself is CLEAN — no `shard_NNN.bin` registered, no `.tmp` or `.tmp.layout` left,
+`{"status":"cancelled"}` returned — but `gguf_header.bin` and
+`tied_output_weight.bin` stay, **287 MB for a model that now counts as zero
+shards and therefore zero bytes.** Nothing sweeps them, so repeated cancels
+accumulate disk the budget cannot see at all.
+
+Not obviously a bug on its own: keeping the header means a retry does not
+re-fetch it, and a header is needed to serve shards acquired later over P2P. The
+defect is that the accounting does not know about it either way.
+
+**Fix shape, when someone takes it**: measure the DIRECTORY rather than the
+manifest. `held_shard_bytes` returns `(bytes, count)` and the count is
+shard-keyed and used by prune, so the two answers want separating — a shard
+count for prune decisions, a byte total for the budget — rather than changing
+what the existing function means. Check `storage_budget_now`'s five consumers
+(download pass, prune disk pressure, settings storage bar, pool page,
+diagnostics) before changing the figure any of them shows.
+
 ### Known and deliberately left: a reply that is ONLY a scratchpad (2026-09-14)
 
 Measured while fixing item 80, and **pre-existing — identical before and after
