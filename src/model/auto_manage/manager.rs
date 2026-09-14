@@ -690,8 +690,13 @@ impl AutoShardManager {
                     "auto_manage",
                     "cycle_complete",
                     format!(
-                        "Auto-manage cycle: {} models, {} parts hosted ({:+}), {} download(s) started",
-                        models_hosted, hosted_after, delta, new_downloads
+                        "Auto-manage cycle: {} model{}, {} part{} hosted ({:+}), {} download(s) started",
+                        models_hosted,
+                        if models_hosted == 1 { "" } else { "s" },
+                        hosted_after,
+                        if hosted_after == 1 { "" } else { "s" },
+                        delta,
+                        new_downloads
                     ),
                 )
                 .with_detail_num(hosted_after as i64),

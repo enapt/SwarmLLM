@@ -1992,6 +1992,62 @@ mod tests {
         assert!(registry.conflicting_build_holders(&sid).is_empty());
     }
 
+    /// Every holder is in exactly one of the two sets.
+    ///
+    /// The model listing reports `peers_hosting` from `shard_holders` and
+    /// `peers_other_build` from `conflicting_build_holders`, side by side, so a
+    /// reader can see WHY a count is smaller than the announcements suggested.
+    /// That only tells the truth if the two partition the holder set: a peer in
+    /// neither vanishes from the page with no explanation, which is the defect
+    /// the second number exists to prevent, and a peer in both is counted twice.
+    #[test]
+    fn the_two_holder_views_partition_every_holder() {
+        let me = NodeId([1u8; 32]);
+        let registry = ModelRegistry::with_local_node(me);
+        let mut manifest = test_manifest("m", "M");
+        manifest.shards = vec![test_shard(0, [7u8; 32])];
+        registry.register_manifest(manifest);
+
+        let sid = ShardId {
+            model_id: ModelId("m".into()),
+            index: 0,
+        };
+        let same_build = NodeId([2u8; 32]);
+        let other_build = NodeId([3u8; 32]);
+        let untagged = NodeId([4u8; 32]);
+
+        registry.record_shard_holder_with_build(
+            sid.clone(),
+            same_build.clone(),
+            swarmllm_types::build_tag_from_hash(&[7u8; 32]),
+        );
+        registry.record_shard_holder_with_build(
+            sid.clone(),
+            other_build.clone(),
+            swarmllm_types::build_tag_from_hash(&[9u8; 32]),
+        );
+        registry.record_shard_holder(sid.clone(), untagged.clone());
+
+        let servable = registry.shard_holders(&sid);
+        let conflicting = registry.conflicting_build_holders(&sid);
+
+        assert!(servable.contains(&same_build));
+        assert!(servable.contains(&untagged), "unknown is not a conflict");
+        assert!(!servable.contains(&other_build));
+        assert_eq!(conflicting, vec![other_build.clone()]);
+
+        // The partition itself: disjoint, and together the whole set.
+        assert!(
+            !servable.iter().any(|n| conflicting.contains(n)),
+            "a holder counted as both would be reported twice on the model card"
+        );
+        assert_eq!(
+            servable.len() + conflicting.len(),
+            3,
+            "a holder in neither set disappears from the page with no explanation"
+        );
+    }
+
     /// With no hash of our own there is nothing to compare against, and
     /// refusing every holder would make the model unroutable rather than
     /// merely mis-routed. A partial holder writes zeros for shards it does not

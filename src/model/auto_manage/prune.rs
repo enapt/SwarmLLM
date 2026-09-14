@@ -1491,10 +1491,11 @@ impl AutoShardManager {
                             "auto_manage",
                             "vram_soft_unload",
                             format!(
-                                "VRAM pressure: narrowed {} to {} of {} parts",
+                                "VRAM pressure: narrowed {} to {} of {} part{}",
                                 mname,
                                 w.len(),
-                                manifest.shard_count
+                                manifest.shard_count,
+                                if manifest.shard_count == 1 { "" } else { "s" }
                             ),
                         )
                         .with_model(&model_id.0)

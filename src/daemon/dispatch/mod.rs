@@ -1205,8 +1205,12 @@ pub(crate) async fn dispatch_network_messages(
                                                         "model",
                                                         "model_discovered",
                                                         format!(
-        "Discovered new model on network: {} — {:?} arch, {} layers, {} parts",
-        manifest.name, manifest.architecture, manifest.num_layers, manifest.shard_count
+        "Discovered new model on network: {} — {:?} arch, {} layers, {} part{}",
+        manifest.name,
+        manifest.architecture,
+        manifest.num_layers,
+        manifest.shard_count,
+        if manifest.shard_count == 1 { "" } else { "s" }
         ),
                                                     )
                                                     .with_model(manifest.id.0.clone())
