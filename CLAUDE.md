@@ -228,40 +228,47 @@ All 20 build phases complete. All subsystems wired — no stubs. **2683 lib (dev
 
 **Released and deployed: v0.3.179-alpha (2026-09-13).** Gate record in
 `memory/round_log_0913_dispute_visibility_and_credits.md` § Release. Rollback
-`~/.local/bin/swarmllm.0.3.178-alpha.bak` (3 kept: .176/.177/.178).
+`~/.local/bin/swarmllm.0.3.178-alpha.bak` (3 kept: .176/.177/.178). What .179
+carries is the one-liner in the round history below.
 
-**What .179 carries — three field reports and their fallout.** **#030**: on a
-computer with NO graphics card the anti-swap gate ran once per model and never
-again — `charge_additional_segment` re-derived placement from
-`placed_on_cpu_because`, which reads `None` on a card-less machine exactly as it
-does for a worker holding a card, so every later layer-range GROWTH went to the
-graphics gate, which has no ceiling when `vram_budget_mb` is 0. A 16 GB Mac
-weighed 470 MB honestly at spawn, waved ~11.5 GB through, and swapped. **Growth
-is the COMMON case on a swarm node** (`WorkerHandle::holds_gpu_memory`, #586).
-**#031**: a reasoning model's whole `<think>` scratchpad streamed to the user
-whenever the reply opened with whitespace — an empty remainder read as proof
-there was no scratchpad, when it is the weakest evidence there is (#588); the
-property now asserted is that streaming and non-streaming **agree**. **And the
-.177 shard fix became measurable**: `disputed` was a `u32` local to one startup
-task, so that fix was field-unverifiable BY CONSTRUCTION — now
-`state.models.disputed_shards`, in the diagnostics report (printed even at
-zero), a dashboard badge and the models API. Two worse reporting bugs fell out
-of it: a KEPT shard shown as a red "failed its integrity check — re-downloading
-automatically", and a sweep summary that omitted disputes so a disputing node
-said "Verified 20 shards".
+**⚠ `main` carries 16 UNRELEASED commits (`4b96d5e6`..`46d99b2e`, 2026-09-14).**
+CI 14/14 green on the head, `check_ci_gate.sh` 14=14 against a COMPLETED run.
+Full detail: `memory/round_log_0914_shard_download_restart_loop.md`. Headlines:
 
-Also: the CLI still printed dormant credits (the August cleanup covered three
-surfaces, all BROWSER surfaces — #587); Performance reads in **tok/s**, not
-"words per second", which disagreed with its own table; the per-model ticker
-moved into a now-filterable Activity panel; the map's arcs got a key (they had
-none, in two colours) plus an honest empty state; and a "being prepared in a
-follow-up update" placeholder outlived its feature by releases.
+- **A field report (#032): an HF shard re-downloaded from byte zero every ~5
+  min for hours and never landed**, on two machines. `acquisition_progress` was
+  doing two jobs — a progress bar AND the guard stopping two writers on one
+  `shard_NNN.bin.tmp` — and a 5 s timer deleted it, so the first of three
+  concurrent shards to finish un-guarded the rest. Fixed at the choke point AND
+  structurally (RAII `shard_download_claims`). It needs a shard download to
+  outlive the auto-manage tick, which is why no dev box ever saw it.
+- **Cancel reported success and stopped nothing**, and deleted live writers'
+  files. **Two watchdogs wrote one file** — confirmed in this node's own log.
+- **SECURITY: the `tp_meta` trailer (0x02) rode the wire UNAUTHENTICATED**
+  while every other trailer is in the Poly1305 AAD. It decides WHICH SLICE a
+  tensor-parallel receiver computes, and a relay sees those bytes by design →
+  a silently WRONG AllReduce, not a rejected request.
+- **Three resources released by a statement after an `.await`** — skipped by
+  `unless_cancelled`'s drop and by `abort()`. Includes a confirmed regression of
+  gotcha #459, and a per-peer counter whose sweep could not repair a stuck count
+  (4 aborts wedged a peer until restart).
+- **R134.7's prune protection never fired on a single-node install** —
+  `last_request_at` has ONE writer (the router) and the local fast path skips it.
+- Manifest saves stage under their own name (a shared one could promote a MIX of
+  two JSON documents = model skipped at startup); the frontend no longer reads a
+  failed fetch as "nothing here" (a 401 DISABLED CHAT; the first-run screen
+  reported 0 RAM / 0 disk); the config save is atomic (the daemon REFUSES TO
+  START on an unparseable config); a cancelled download is no longer recorded as
+  a failed one, in three places.
 
-⚠ **Three of those were one sentence — two ways to fail, one watched** (#590).
-Grep `r.ok ? r.json() : null` and `try_send(..).is_ok()`.
-⚠ **Planting the violation contradicted the code's own claim twice** (#591) — a
-guard that could not READ one of its inputs, and a comment claiming a check
-catches something it lets through.
+⚠ **The through-line, three separate instances: a rule that lives only in a
+comment gets re-broken by the next file.** Each time the correct fix already
+existed on a sibling path.
+⚠ **TWO audit findings were CORRECTED DOWN** after reading the code they came
+from — in both cases the suggested fix would have made things worse. **An
+audit's severity is a hypothesis.**
+⚠ **#594: three greps returned 0 against a 404 page.** Check the response SIZE
+before trusting a grep.
 
 **New users first (user direction, 2026-09-12, still standing).** Growth is the
 bottleneck — rank work by "would someone hit this in their first hour".
@@ -283,6 +290,7 @@ BUILD and PATH a report exercised before calling code innocent (#552/#555); and
 
 ### Earlier rounds — one line each. Detail in `memory/round_log_*.md`, gotcha numbers index `memory/gotchas.md`. **Read the named round log before re-deriving any of these.** Older than .160: `memory/round_history.md`.
 
+- **2026-09-14 — UNRELEASED, 16 commits** (`4b96d5e6`..`46d99b2e`): one field report (#032, a shard re-downloading from zero for ever) opened a round that ran five parallel audits. Landed: #592 a progress map doubling as the concurrency guard; Cancel that stopped nothing; two watchdogs on one file; **#593 three resources released after an `.await`** (incl. a confirmed regression of #459); a stall clock measuring START not progress; **a SECURITY gap — the `tp_meta` trailer unauthenticated**; R134.7's prune protection never firing on a single node; manifest saves colliding; the frontend reading a failed fetch as "nothing here". ⚠ **8 audit findings acted on, 2 CORRECTED DOWN.** ⚠ **#594 check the response SIZE before trusting a grep.** `memory/round_log_0914_shard_download_restart_loop.md`.
 - **.179** (09-13, gate clean): three field reports — **#030** the anti-swap gate ran ONCE per model on a card-less computer and it swapped (#586), **#031** a reasoning model's whole scratchpad streamed as the answer when the reply opened with whitespace (#588), and the **.177 shard fix made measurable** (`disputed_shards` in the diagnostics report, printed even at zero, because the count had lived in one startup task's local variable). Plus the CLI still printing dormant credits (#587), tok/s in Performance, the ticker moved to a filterable Activity panel, a key for the map's arcs, and a placeholder that outlived its feature. ⚠ **Three were the same sentence: two ways to fail, one watched** (#590). `memory/round_log_0913_dispute_visibility_and_credits.md`.
 - **.177-.178** (09-13, both gate clean): a peer's gossip could make a node DELETE a shard it held correctly (#581, gotcha #384 recurring — **a repair mechanism is a destruction mechanism**); then the model list and network view rebuilt live with the user and two testers (rows in words, On this computer / On other computers, everything visible in the expanded card, Map+Leaderboard merged into one **Network** tab drawing REAL routes). ⚠ **Every Q4_K_M model had been reporting itself as Q2_K** (#584) — found only by making a hidden panel visible. `round_log_0913_shard_destruction.md`, `round_log_0913_dashboard_rework.md`.
 - **.166-.176** (09-09→09-12, eleven releases in four days, all gate clean): tool schemas reached every model ALPHABETISED (#46); the KV cache reserved at the admitted prompt length (#32); **every Qwen3 request reached the model with the QUESTION MISSING** (.169); templates moved to `minijinja` (.170); **tools were NEVER passed to the template** plus an escrow that MINTED credits (.171); partial RoPE meant Phi-4-mini, GLM-4 and Qwen 3.5 could not serve one request (.172-.173); six field reports from a 16 GB processor-only Mac. `family_conformance.sh` was written here and found two real bugs on its first run; branch protection went to 14 contexts after every PR was permanently BLOCKED (#530). `memory/round_history.md`.
