@@ -152,6 +152,22 @@
     detectHardware: async function() {
       try {
         var result = await App.data.loadStats();
+        // A request that FAILED is not a machine with nothing in it.
+        //
+        // `loadStats` returns `{stats: null}` for a 401, a 500 or a dropped
+        // connection just as it would for a node with nothing to report, and
+        // `data.hardware || {}` then zeroes every field. On the FIRST SCREEN a
+        // new user sees, that reported "Processor only", "0 MB RAM", "0 MB
+        // disk" and recommended the smallest models — a confident, wrong
+        // description of their computer, on the one screen that sets their
+        // expectations. The comment below already records this area getting a
+        // capability claim wrong once (report #019).
+        //
+        // The `catch` at the bottom was written for exactly this and could
+        // never run, because `loadStats` does not throw. Take its path.
+        if (App.data.loadReachedDaemon && !App.data.loadReachedDaemon('stats')) {
+          throw new Error('stats request did not reach the daemon');
+        }
         var data = (result && result.stats) ? result.stats : {};
         App.setup.hwData = data.hardware || {};
         var gpuName = App.setup.hwData.gpu_name;
@@ -200,7 +216,21 @@
           }
         }
       } catch (e) {
+        // Say it once and leave the rest blank. Filling the other fields with
+        // zeros is what made a failed request look like a description of the
+        // machine; a dash is visibly "not known".
         document.getElementById('hw-gpu').textContent = I18n.t('setup.hw_detection_failed');
+        ['hw-vram', 'hw-ram', 'hw-disk'].forEach(function(id) {
+          var el = document.getElementById(id);
+          if (el) el.textContent = '\u2014';
+        });
+        // And no capability badge: it is a promise about what will run, and
+        // there is nothing to base one on.
+        var recEl = document.getElementById('hw-recommendation');
+        if (recEl) {
+          recEl.textContent = '';
+          recEl.className = 'setup-hw-card-badge';
+        }
         App.setup.hwData = {};
       }
       document.getElementById('hw-loading').classList.add('hidden');

@@ -9,6 +9,10 @@ use super::TENSOR_TAG_ENCRYPTED;
 /// `request_id(16) | sequence_num(4 LE) | index_pos(4 LE) | fmt(1)
 /// | layer_start(4 LE) | layer_end(4 LE) | model_id_len(2 LE) | model_id`.
 ///
+/// Layout (tensor-parallel trailer — present iff `tp_meta.is_some()`):
+/// `0x02 marker(1) | tp_rank(1) | tp_size(1) | single_layer(4 LE) | phase(1)
+/// | pre_embedded(1)`.
+///
 /// Layout (spec trailer — present iff `!draft_tokens.is_empty() ||
 /// spec_logits_requested`):
 /// `0x03 marker(1) | spec_flags(1) | num_drafts(2 LE) | drafts(num_drafts × 4 LE)`.
@@ -29,10 +33,17 @@ use super::TENSOR_TAG_ENCRYPTED;
 /// contract.
 ///
 /// **Wire compatibility:** extending the AAD layout is a protocol bump for
-/// encrypted mode. Old↔new mixed clusters running `enable_encryption=true`
-/// will fail decrypt with auth-error. Plaintext mode (`enable_encryption=false`)
-/// is unaffected. Encrypted mode is opt-in and alpha; this trade-off is
-/// documented in `docs/ARCHITECTURE.md`.
+/// encrypted mode, and only for forwards that actually CARRY the trailer being
+/// added — a forward without one produces byte-identical AAD across versions.
+/// Plaintext mode (`enable_encryption=false`) is unaffected.
+///
+/// `enable_encryption` **defaults to true**, so "encrypted mode is opt-in" —
+/// which this note used to say — is wrong and made every past bump here look
+/// cheaper than it was. What actually bounds the 2026-09-14 tp_meta addition is
+/// the other side: `inference.tensor_parallel` defaults to FALSE and is
+/// documented as "turn this on only for a genuinely large model on a
+/// low-latency LAN, after measuring", so the forwards affected are confined to
+/// clusters an operator deliberately configured and controls both ends of.
 pub fn build_layer_forward_aad(forward: &LayerForward) -> Vec<u8> {
     let model_id_bytes = forward.model_id.0.as_bytes();
     let mut aad = Vec::with_capacity(35 + model_id_bytes.len());
@@ -50,6 +61,36 @@ pub fn build_layer_forward_aad(forward: &LayerForward) -> Vec<u8> {
     aad.extend_from_slice(&layer_end.to_le_bytes());
     aad.extend_from_slice(&(model_id_bytes.len() as u16).to_le_bytes());
     aad.extend_from_slice(model_id_bytes);
+
+    // Tensor-parallel trailer (mirror the 0x02 emission gate in
+    // `encode_layer_forward_encrypted`). These bytes decide WHICH SLICE of a
+    // tensor-parallel layer the receiver computes: `tp_rank`/`tp_size` key the
+    // worker's SplitModel cache and drive `pre_split_for_tp`, and
+    // `pre_embedded` says whether the payload has already been through the
+    // embedding. Left unauthenticated they could be flipped by anything that
+    // sees the wire bytes — which on this network includes a RELAY node, a
+    // legitimate endpoint of its own transport session that forwards tensor
+    // payloads for others (`features::TENSOR_RELAY`). The result is not a
+    // failed request but a silently WRONG one: the wrong slice contributes to
+    // the AllReduce, or the shapes disagree.
+    //
+    // This is the one optional trailer that was added to the wire without the
+    // hardening pass every other one got (0x03/0x04 in R100, 0x05 with
+    // chunking, 0x06/0x07 with chaining). Found by audit 2026-09-14.
+    if let Some(ref tp) = forward.tp_meta {
+        aad.push(0x02);
+        aad.push(tp.tp_rank);
+        aad.push(tp.tp_size);
+        aad.extend_from_slice(&tp.single_layer.to_le_bytes());
+        let phase_byte: u8 = match tp.phase {
+            crate::types::TpPhase::Full => 0,
+            crate::types::TpPhase::AttnOnly => 1,
+            crate::types::TpPhase::FfnOnly => 2,
+            crate::types::TpPhase::EmbedOnly => 3,
+        };
+        aad.push(phase_byte);
+        aad.push(if forward.pre_embedded { 1 } else { 0 });
+    }
 
     // Spec trailer fields (mirror `encode_layer_forward[_encrypted]`'s 0x03
     // emission gate exactly — see `protocol/layer_forward.rs`).
@@ -455,7 +496,7 @@ mod tests {
     use super::*;
     use crate::types::{LayerForward, ModelId, TensorFormat, TensorParallelMeta, TpPhase};
 
-    fn base_forward() -> LayerForward {
+    pub(super) fn base_forward() -> LayerForward {
         LayerForward {
             request_id: uuid::Uuid::from_u128(0xDEAD_BEEF_CAFE_F00D_1122_3344_5566_7788),
             sequence_num: 5,
@@ -852,3 +893,116 @@ mod tests {
 
 // Serde impls for SwarmRequest/SwarmResponse
 // Note: TensorPayload variants are never JSON-serialized (handled by binary codec path),
+
+#[cfg(test)]
+mod tp_meta_authentication_tests {
+    use super::*;
+    use crate::types::{LayerForward, TensorParallelMeta, TpPhase};
+
+    fn tp_forward(tp_rank: u8, tp_size: u8, pre_embedded: bool) -> LayerForward {
+        let mut f = super::tests::base_forward();
+        f.tp_meta = Some(TensorParallelMeta {
+            tp_rank,
+            tp_size,
+            single_layer: 7,
+            phase: TpPhase::AttnOnly,
+        });
+        f.pre_embedded = pre_embedded;
+        f
+    }
+
+    /// These bytes decide which SLICE of a tensor-parallel layer the receiver
+    /// computes — `tp_rank`/`tp_size` key the worker's SplitModel cache and
+    /// drive `pre_split_for_tp`. They ride the wire in CLEARTEXT after the
+    /// sealed payload, so if they are not in the AAD, anything that sees the
+    /// bytes can flip them undetected. On this network that includes a relay
+    /// node, which is a legitimate endpoint of its own transport session and
+    /// forwards tensor payloads for others (`features::TENSOR_RELAY`).
+    ///
+    /// The failure is not a rejected request but a silently wrong one: the
+    /// wrong slice contributes to the AllReduce.
+    ///
+    /// Every other optional trailer got this treatment — 0x03/0x04 in R100,
+    /// 0x05 with chunking, 0x06/0x07 with chaining. 0x02 was added to the wire
+    /// without it.
+    #[test]
+    fn flipping_any_tp_field_changes_the_authenticated_bytes() {
+        let base = build_layer_forward_aad(&tp_forward(0, 4, false));
+
+        for (name, other) in [
+            ("tp_rank", tp_forward(1, 4, false)),
+            ("tp_size", tp_forward(0, 8, false)),
+            ("pre_embedded", tp_forward(0, 4, true)),
+        ] {
+            assert_ne!(
+                base,
+                build_layer_forward_aad(&other),
+                "{name} is not bound into the AAD — it can be flipped on the wire \
+                 without invalidating Poly1305"
+            );
+        }
+
+        // `single_layer` and `phase` too — both steer the computation.
+        let mut layer = tp_forward(0, 4, false);
+        if let Some(ref mut tp) = layer.tp_meta {
+            tp.single_layer = 9;
+        }
+        assert_ne!(base, build_layer_forward_aad(&layer), "single_layer");
+
+        let mut phase = tp_forward(0, 4, false);
+        if let Some(ref mut tp) = phase.tp_meta {
+            tp.phase = TpPhase::FfnOnly;
+        }
+        assert_ne!(base, build_layer_forward_aad(&phase), "phase");
+    }
+
+    /// A forward WITHOUT tp_meta must produce byte-identical AAD to before, or
+    /// this change breaks every ordinary encrypted forward rather than only the
+    /// tensor-parallel ones. That is the whole compatibility argument.
+    #[test]
+    fn a_forward_without_tp_meta_is_unaffected() {
+        let plain = super::tests::base_forward();
+        assert!(plain.tp_meta.is_none());
+        let aad = build_layer_forward_aad(&plain);
+        assert!(
+            !aad.contains(&0x02) || {
+                // 0x02 may appear incidentally inside the header bytes; what
+                // must not happen is a trailer being appended for it.
+                let with_tp = build_layer_forward_aad(&tp_forward(0, 4, false));
+                with_tp.len() == aad.len() + 9
+            },
+            "a tp_meta-free forward must not gain a trailer"
+        );
+        let with_tp = build_layer_forward_aad(&tp_forward(0, 4, false));
+        assert_eq!(
+            with_tp.len(),
+            aad.len() + 9,
+            "the trailer is exactly the 9 bytes the encoder writes"
+        );
+        assert_eq!(
+            &with_tp[..aad.len()],
+            &aad[..],
+            "the trailer is appended; it must not disturb the bytes before it"
+        );
+    }
+
+    /// The encoder and the AAD builder must agree about WHEN the trailer
+    /// exists, or encrypt and decrypt compute different AAD and every
+    /// tensor-parallel forward fails to open.
+    #[test]
+    fn the_aad_trailer_appears_exactly_when_the_wire_trailer_does() {
+        for forward in [super::tests::base_forward(), tp_forward(2, 4, true)] {
+            let expect_trailer = forward.tp_meta.is_some();
+            let wire = encode_layer_forward_encrypted(&forward, vec![0u8; 32]).unwrap();
+            let (decoded, _sealed, aad_from_decode) =
+                decode_layer_forward_encrypted(&wire).unwrap();
+            assert_eq!(decoded.tp_meta.is_some(), expect_trailer);
+            assert_eq!(
+                aad_from_decode,
+                build_layer_forward_aad(&forward),
+                "the decoder's reconstructed AAD must match the sender's, or \
+                 nothing opens"
+            );
+        }
+    }
+}

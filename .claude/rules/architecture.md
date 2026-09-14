@@ -1406,7 +1406,15 @@ silently break at the wire if duplicated:
   (`network/manager/tensors.rs`, `network/pipeline_stream.rs`) and
   decrypt (`decode_layer_forward_encrypted`) MUST go through it.
   Adding a new authenticated field to `LayerForward` means extending
-  this helper, not appending bytes on the encrypt side. Post-R100,
+  this helper, not appending bytes on the encrypt side. **Every optional
+  trailer the wire carries must be bound here**, and `tp_meta` (0x02) was not
+  until 2026-09-14 — it decides which SLICE of a tensor-parallel layer the
+  receiver computes (`tp_rank`/`tp_size` key the worker's SplitModel cache and
+  drive `pre_split_for_tp`), rides in cleartext after the sealed payload, and a
+  RELAY node forwarding tensor payloads for others is a legitimate endpoint that
+  can flip it. The failure is a silently WRONG AllReduce contribution, not a
+  rejected request. Extending the AAD only affects forwards that carry the
+  trailer, which is the compatibility argument each bump rests on. Post-R100,
   the helper covers the cleartext header AND the spec/kv-truncate
   trailer fields; the decoder reconstructs AAD via the helper after
   parsing trailers (since trailer bytes don't appear contiguously
