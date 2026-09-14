@@ -226,42 +226,58 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 All 20 build phases complete. All subsystems wired — no stubs. **2685 lib (dev,claude-subscription) — re-measured 2026-09-14, full suite green (exit 0)** + 79 integration (31 `integration` + 34 `integration_phase10_11` + 14 `yamux_substream`) + 104 repo-consistency + 1 api_key_side_effects + 36 swarmllm-types tests passing; 12 lib + 1 e2e ignored (env-var or manual). Clippy clean on default, `--no-default-features --features dev,claude-subscription` (that combination is the documented one — plain `--features dev` leaves `embedded` on too and fails on dead code), a `--features llama` check, and `flash-attn --lib`. `cargo audit` reports only advisories already documented and accepted in `SECURITY.md` — re-checked at the .177 release 2026-09-13, two (`hickory-proto` RUSTSEC-2026-0118/0119, both transitive via libp2p — 0.26.1 is a semver-MAJOR bump pinned by libp2p 0.56, so it is genuinely unreachable without upgrading libp2p; re-checked 2026-09-08, not merely re-accepted) plus the `paste` unmaintained warning.
 
-**Released and deployed: v0.3.179-alpha (2026-09-13).** Gate record in
-`memory/round_log_0913_dispute_visibility_and_credits.md` § Release. Rollback
-`~/.local/bin/swarmllm.0.3.178-alpha.bak` (3 kept: .176/.177/.178). What .179
-carries is the one-liner in the round history below.
+**Released and deployed: v0.3.180-alpha (2026-09-14).** Gate record in
+`memory/round_log_0914_settings_write_paths.md` § Release. Rollback
+`~/.local/bin/swarmllm.0.3.179-alpha.bak` (3 kept: .177/.178/.179).
 
-**⚠ Everything since the `0065bcfc` (v0.3.179) tag is UNRELEASED — `git log 0065bcfc..main`, all 2026-09-14.**
-CI 14/14 green on the head, `check_ci_gate.sh` 14=14 against a COMPLETED run.
-Full detail: `memory/round_log_0914_shard_download_restart_loop.md`. Headlines:
+**v0.3.180 — 24 commits over `0065bcfc..`, all 2026-09-14.** Two field reports
+and five parallel audits. ⚠ **The reporter numbered TWO reports #032** — they
+are referred to here as **#032-download** and **#032-streaming**. Full detail:
+`memory/round_log_0914_shard_download_restart_loop.md` and
+`memory/round_log_0914_settings_write_paths.md`. Headlines:
 
-- **A field report (#032): an HF shard re-downloaded from byte zero every ~5
-  min for hours and never landed**, on two machines. `acquisition_progress` was
-  doing two jobs — a progress bar AND the guard stopping two writers on one
-  `shard_NNN.bin.tmp` — and a 5 s timer deleted it, so the first of three
-  concurrent shards to finish un-guarded the rest. Fixed at the choke point AND
-  structurally (RAII `shard_download_claims`). It needs a shard download to
-  outlive the auto-manage tick, which is why no dev box ever saw it.
+- **#032-streaming: a reasoning model's whole `<think>` scratchpad still
+  streamed to the user on .179 — the release that shipped the fix for it.**
+  `StreamingToolText` does two jobs behind one buffer (hold back a possible tool
+  call; withhold a reasoning preamble), and all four streaming surfaces wrapped
+  `push` in `if tools_requested` — so an ordinary chat message, which carries no
+  tools, never reached the filter. Fixed at the choke point:
+  `StreamingToolText::new(detect_tools)` with **`Default` removed**, so the
+  compiler finds every caller. ⚠ **A shared helper that gains a SECOND
+  responsibility is still called under the FIRST one's precondition** (#601),
+  and **a test that exercises a helper cannot tell you the helper is called** —
+  every #031 test called `push` directly, on the branch production did not take.
+- **#032-download: an HF shard re-downloaded from byte zero every ~5 min for
+  hours and never landed**, on two machines. `acquisition_progress` was doing
+  two jobs — a progress bar AND the guard stopping two writers on one
+  `shard_NNN.bin.tmp` — and a 5 s timer deleted it. Fixed at the choke point AND
+  structurally (RAII `shard_download_claims`).
 - **Cancel reported success and stopped nothing**, and deleted live writers'
-  files. **Two watchdogs wrote one file** — confirmed in this node's own log.
+  files. **Two watchdogs wrote one file.**
 - **SECURITY: the `tp_meta` trailer (0x02) rode the wire UNAUTHENTICATED**
   while every other trailer is in the Poly1305 AAD. It decides WHICH SLICE a
   tensor-parallel receiver computes, and a relay sees those bytes by design →
-  a silently WRONG AllReduce, not a rejected request.
+  a silently WRONG AllReduce, not a rejected request. ⚠ **A wire change for
+  tensor-parallel forwards only** (`inference.tensor_parallel` defaults FALSE);
+  such clusters must update both ends together. Ordinary forwards are
+  byte-identical.
 - **Three resources released by a statement after an `.await`** — skipped by
   `unless_cancelled`'s drop and by `abort()`. Includes a confirmed regression of
-  gotcha #459, and a per-peer counter whose sweep could not repair a stuck count
-  (4 aborts wedged a peer until restart).
-- **R134.7's prune protection never fired on a single-node install** —
-  `last_request_at` has ONE writer (the router) and the local fast path skips it.
-- Manifest saves stage under their own name (a shared one could promote a MIX of
-  two JSON documents = model skipped at startup); the frontend no longer reads a
-  failed fetch as "nothing here" (a 401 DISABLED CHAT; the first-run screen
-  reported 0 RAM / 0 disk); the config save is atomic (the daemon REFUSES TO
-  START on an unparseable config); a cancelled download is no longer recorded as
-  a failed one, in three places.
+  gotcha #459.
+- **The Settings panel wrote its markup defaults over your configuration** when
+  it could not read them, and a **30-second dashboard poll discarded any
+  settings edit** not saved within it. **Five dashboard writes reported a
+  refusal as success**, one of them clearing the API-key input the daemon had
+  just rejected. **The "Key source" control existed in no user's DOM** — a
+  `[data-i18n]` label deleted the `<select>` it wrapped, in every language.
+- **A finished download silently dropped "also on N other computers"** from its
+  row, and never got it back on a quiet swarm.
+- R134.7's prune protection never fired on a single-node install; manifest saves
+  could promote a MIX of two JSON documents; the config save is atomic (the
+  daemon REFUSES TO START on an unparseable config); a cancelled download is no
+  longer recorded as a failed one.
 
-⚠ **The through-line, three separate instances: a rule that lives only in a
+⚠ **The through-line, four separate instances: a rule that lives only in a
 comment gets re-broken by the next file.** Each time the correct fix already
 existed on a sibling path.
 ⚠ **TWO audit findings were CORRECTED DOWN** after reading the code they came
@@ -269,24 +285,6 @@ from — in both cases the suggested fix would have made things worse. **An
 audit's severity is a hypothesis.**
 ⚠ **#594: three greps returned 0 against a 404 page.** Check the response SIZE
 before trusting a grep.
-
-**New users first (user direction, 2026-09-12, still standing).** Growth is the
-bottleneck — rank work by "would someone hit this in their first hour".
-`memory/round_log_0912_new_user_sweep.md` is the queue and says what is already
-good and must NOT be simplified away; read it before touching the frontend.
-
-⚠ **Mobile (400px) is UNVERIFIED** — no tool here can give the page a narrow
-viewport, so the narrow-width CSS is written to need no verification.
-
-**Bumping the version LAST is settled practice** — the tagged commit is then the
-bump commit, so Cache warm fires on it. Confirmed at .178 and .179.
-
-**Release-gate cautions — the gate itself is in `memory/open_cautions.md`; read
-it before releasing.** The three that bite: conformance is NINE families on the
-DOWNLOADED artifact against a baseline of the PREVIOUS release taken FIRST and
-captured in FULL (never `tail` it); a CPU build REFUSES `-m`, so establish which
-BUILD and PATH a report exercised before calling code innocent (#552/#555); and
-`examples/check_ci_gate.sh` runs against a COMPLETED run only (#530/#557).
 
 ### Earlier rounds — one line each. Detail in `memory/round_log_*.md`, gotcha numbers index `memory/gotchas.md`. **Read the named round log before re-deriving any of these.** Older than .160: `memory/round_history.md`.
 
