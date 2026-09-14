@@ -2,7 +2,7 @@
 
 Captures items deliberately deferred from the model-management redesign and from prior sweeps. Each entry has enough context that a future implementer (or a future me) can pick it up without re-deriving the rationale.
 
-## Open bugs — triage index (2026-09-12)
+## Open bugs — triage index (re-verified 2026-09-14, after v0.3.180-alpha)
 
 **This file is 13k lines and mixes live defects with deferred design work and measured
 dead ends. This index is the list of things that are WRONG and still open.** Perf
@@ -19,6 +19,10 @@ The audit also found sections that call themselves open and are not indexed at
 all; they are listed below.
 
 Priority is user-visible impact x how many users x whether it fails silently.
+
+**Everything numbered 66-80 was found on 2026-09-14 and all of it except 67, 68
+and 69's residual SHIPPED in v0.3.180-alpha.** The rows sit in the P-sections
+and in the two "2026-09-14" headings below; read the row, not just the number.
 
 ### P1 — a whole platform, or every request of a kind
 
@@ -107,7 +111,7 @@ failed arc is actually on the map). Item 79 above was found on the way.
 from the live JSON but present in `src/` looks exactly like a frontend bug**;
 check the serializer before concluding. Gotcha #600.
 
-### Fixed in the 2026-09-14 audit round
+### Fixed in the 2026-09-14 rounds — ALL SHIPPED in v0.3.180-alpha
 
 | # | Bug | What it cost |
 |---|---|---|
@@ -117,7 +121,7 @@ check the serializer before concluding. Gotcha #600.
 | 72 | **The tensor-parallel trailer rode the wire unauthenticated** | FIXED 2026-09-14, found by audit. Every optional `LayerForward` trailer is bound into the Poly1305 AAD by `build_layer_forward_aad` specifically so "an active MITM cannot flip it without invalidating Poly1305" — 0x03/0x04 in R100, 0x05 with chunking, 0x06/0x07 with chaining. **0x02 (`tp_meta`) was added to the wire format without that pass**: marker + `tp_rank` + `tp_size` + `single_layer` + `phase` + `pre_embedded`, emitted in cleartext after the sealed payload and parsed straight off the raw bytes. Those values decide **which slice of a tensor-parallel layer the receiver computes** — they key the worker's SplitModel cache and drive `pre_split_for_tp` — so flipping them yields a silently WRONG AllReduce contribution or a shape mismatch, not a rejected request. The attacker does not need to break the transport: this network relays tensor forwards through third nodes (`features::TENSOR_RELAY`), and a relay is a legitimate endpoint of its own transport session that sees these bytes. **Compatibility**: the AAD changes only for forwards that CARRY the trailer, and `inference.tensor_parallel` defaults to FALSE and is documented as LAN-only after measuring — so the affected forwards are confined to clusters an operator deliberately configured and controls both ends of. ⚠ The header's compatibility note claimed "encrypted mode is opt-in", which is **wrong** — `enable_encryption` defaults to true — and made every past bump here look cheaper than it was; corrected in the same commit |
 | 70 | **A model's size read as zero when a shard could not be stat'ed** | FIXED. `ProcessPool::footprint_inputs` summed shard bytes with `.filter_map(\|e\| e.metadata().ok().map(\|m\| m.len()))`, so a `stat()` failure contributed 0 — identical to "this shard is not there". That sum feeds `estimate_worker_vram_mb`/`estimate_worker_ram_mb`, i.e. the GPU-vs-CPU placement decision AND the budget charge recorded for a spawn, so an undercount admits a model bigger than believed: **#586's failure shape from a different feed**. The distinction the fix turns on is one the audit that found it had missed — a shard PRUNED between the listing and the stat is genuinely gone and 0 is the honest answer (auto-manage prunes and downloads in the same directory, so this is the everyday case), while a shard that cannot be READ is unknown. `NotFound` now contributes 0 and anything else answers `None`, which the callers already treat as "do not judge" — the same footing as an unreadable header, which the code ~50 lines above documents as deliberate. The twin in `daemon/dispatch::estimate_vram_from_shard_dir` returns a bare `u64` and cannot say "unknown" without a signature change; it now warns instead of silently understating |
 
-### Found by the 2026-09-14 audit round, verified but NOT fixed
+### Found by the 2026-09-14 audits, verified but NOT fixed — still open
 
 Each was re-verified against the code before being recorded. They are here
 rather than fixed because each needs its own round, or a decision.
@@ -135,7 +139,7 @@ rather than fixed because each needs its own round, or a decision.
 |---|---|---|
 | 60 | A peer's gossip could make this node delete a shard it held correctly | **FIXED 2026-09-13**, observed live on this node's own restart. A peer gossiped a manifest for a different build of llama-3.2-3b; `origin_verified` held nothing for shard 0 (it is written only when a shard is fetched FROM THE ORIGIN, and that shard came over P2P), so `register_manifest` had nothing to refuse the claim with and adopted the peer's hash. Fifteen seconds later the background verifier hashed our file, found it disagreed with the hash it had just been handed, and **quarantined 507 MB of good bytes**. Model unservable for 11 minutes; P2P refetch failed; the origin fetch that followed returned a file **byte-identical to the one deleted**, and only then recorded the provenance that would have prevented all of it. Shard 1 of the same model survived the same gossip in the same second, because it *did* have an origin record. **Not a one-off: the same log held SIX quarantines across three models in 55 hours, and all six show the identical signature** — the origin-contradiction warning appears 4-11 minutes AFTER the quarantine, i.e. the provenance arrived only via the re-download the quarantine forced, so in every case the condemning hash had no origin backing at the time. Only the 09-13 one is *proven* to have destroyed good bytes (the replacement hashed identically); the other five cannot be reopened. Roughly one every nine hours, each a ~500 MB transfer plus minutes of that model being unservable. This is gotcha #384 recurring: its fix is correct and its **coverage is only the shards that were never at risk**. Fixed by raising the bar on the DESTRUCTIVE action rather than widening what counts as provenance — `ModelRegistry::mismatch_policy` is the one answer to "may we quarantine our own copy?", yes only against an origin-backed hash, and `ShardStore::verify_shard` takes `OnMismatch` as a REQUIRED parameter. That flushed out **seven** call sites, not the two the symptom implied — including one in `model/acquisition.rs` that quarantined as a side effect of asking *"is this shard still missing?"*. On `KeepBytes` the node keeps the bytes AND keeps advertising them. ⚠ **It does NOT settle the disagreement, and the first version of this fix claimed it did** — marking such a shard for repair is a no-op, because `complete_pending_shard_fetches` clears any mark whose file is on disk (the quarantine path only worked because it had deleted the file first). Corrected same day; settling is open, see § "A disputed shard is kept but the disagreement is never settled". Asymmetry that decides it: keeping bad bytes is bounded (the downloader hashes what it gets; `shard_holders` filters by build tag), deleting good bytes can take the swarm's last copy. ⚠ **Candidate explanation for open item #49** — same shape (shard 0 missing, failed refetch, 30 s stalls) reached with no prune involved; still a hypothesis, and the log line already requested from that reporter discriminates both. Evidence: `docs/invariants/network.md` § "Destroying a shard we hold needs better evidence than a stranger's claim" |
 | 59 | Every node start warned that the traffic metric may have been renamed | **FIXED 2026-09-13.** `BandwidthMeter::totals()` read `None` for two different reasons and blamed the rarer one. `prometheus_client` writes a `Family`'s metadata as soon as it is registered and its ROWS only once a label set exists — which libp2p creates on the first byte that moves — so the health monitor's t=0 tick encodes metadata and nothing else on every node ever started. The warning fired 51 ms in, said the figure "will be absent" about a figure that appears 30-60 s later, and `warned_absent` is a one-shot so nothing retracted it. The discriminator was in the same string: `metric_is_registered` checks for the `# HELP`/`# TYPE`/`# UNIT` lines under the expected base name, so a rename is still reported and a silent start is not. Confirmed by encoding a real `BandwidthTransport` registry and reading the output, and the regression test asserts the WARNING FLAG rather than the return value — `None` either way, so a test on the totals cannot tell the two apart |
-| 58 | The traffic figure reached two status payloads out of three | **FIXED 2026-09-12, NOT in v0.3.175-alpha — lands in the next release.** `network_traffic_json` was written as the single builder and called from `/api/admin/stats` and the WebSocket tick; `/v1/status`, which `swarmllm status` reads, was missed, so the CLI printed no Traffic line on the released artifact while the API served the numbers. `describe_traffic` was unit-tested against a hand-made JSON object, so the wiring was never exercised. **One builder is not one surface** — found by deploying and running the command a user would run (gotcha #569). `every_stats_surface_carries_the_traffic_figure` now names all three. The drafted reply to the bandwidth reporter says the dashboard and `/metrics` carry it today |
+| 58 | The traffic figure reached two status payloads out of three | **FIXED 2026-09-12, shipped in v0.3.176-alpha.** `network_traffic_json` was written as the single builder and called from `/api/admin/stats` and the WebSocket tick; `/v1/status`, which `swarmllm status` reads, was missed, so the CLI printed no Traffic line on the released artifact while the API served the numbers. `describe_traffic` was unit-tested against a hand-made JSON object, so the wiring was never exercised. **One builder is not one surface** — found by deploying and running the command a user would run (gotcha #569). `every_stats_surface_carries_the_traffic_figure` now names all three. The drafted reply to the bandwidth reporter says the dashboard and `/metrics` carry it today |
 | 52 | A peer that reconnected mid-request became permanently undecryptable | **FIXED 2026-09-12, shipped in v0.3.175-alpha**, field-reported on v0.3.174 (report #016): 29 forwards to one peer, 29 `Could not decrypt forward`, zero successes, every request routed through it dead for the rest of the log. The two ends stopped agreeing on a key. `handle_connection_closed` exempted a peer from `remove_session` when it appeared in `active_pipelines` — but that map is the COORDINATOR's, so the SERVING node retires its own session on the same disconnect and returns on a fresh static key, while the coordinator keeps whatever it had. An ephemeral key from a rotation then opens for nobody. The exemption was written in April 2026, when `establish_session` reinstalled on every Identify and "reconnection will refresh it" was true; it stopped being true when that became idempotent, and the comment asserting it is how the contradiction survived. **The same asymmetry is already documented on `SessionManager::retired` (gotcha #194, report #028) — as the reason a key must not be DESTROYED. This is the mirror image: a key that must not be KEPT.** The exemption is gone (an in-flight result still opens under the retired key, and a peer we are not connected to could not have been sent to anyway), and a failed `open` now asks that peer for one fresh exchange, rate-limited, so any other way the two ends can diverge repairs itself in a round trip instead of waiting out the ten-minute eviction |
 | 53 | A finished conversation's memory was never released, and running out ended the request | **FIXED 2026-09-12, shipped in v0.3.175-alpha**, field-reported on v0.3.174 (report #019) from a 16 GB processor-only Mac: a conversation ended, a message in a NEW conversation was refused for memory, and continuing the FINISHED one was refused with the identical numbers. Two faults. (a) The `Generate` handlers clear their own KV on the way out; the FORWARD path — which is also the path a request routed back to this node took, see item 54 — cleared nothing, so a finished segment's cache stayed charged against the shared budget until the ten-minute idle sweep. The daemon's `cleanup_request_id` looks correct and is a different process's store. Released now via `DaemonMsg::ReleaseRequestKv` at the one place a request finishes; unconditional because the worker keys by REQUEST id (`session_id` rides on the IPC message and nothing reads it), so the next turn arrives under a new id and could never find it — multi-turn reuse is the prefix cache's job and its snapshot is taken first. (b) The refusal was a plain `ServiceUnavailable`, so `should_retry_after` treated it as final — while the scheduler had priced a five-segment route across peers one line earlier in the same pass. It is now `LocalMemoryUnavailable`, the one local failure the router re-plans, carried across the IPC boundary as a typed flag because the wire WORDING is deliberately identical to a peer's memory refusal |
 | 54 | A request routed back to this node never used the prefix cache | **FIXED 2026-09-12, shipped in v0.3.175-alpha**, field-reported on v0.3.174 (report #018): `prefix-cache HIT` appears zero times in a week of logs across several models, on a node holding a complete 14B. A node that would run a model on its PROCESSOR and has peers stands its API fast path aside so the scheduler can consider delegating — deliberate, and `local_fast_path_for` says the cost when nobody better is found is "only a scheduling pass". It was not: the plan came back naming this node, and the pipeline then ran it as a `LayerForward` per token into our own worker, which is the ONE execution path never wired to the prefix cache. Continuous batching, slot admission and n-gram speculation live on the same path and were lost with it. A single-segment plan naming this node is now run as the local generation it is (`try_local_generate_fastpath`), which is what `remote_generate::eligible` has assumed since it was written — it excludes the local node with "local inference is handled by `execute_local`", true only of requests that never reached the router. The span is checked, not assumed: a segment short of either end produces hidden states, not tokens |
@@ -7890,7 +7894,7 @@ by default**, having been exercised end to end: against a 3000 MB budget and a
 5232 MB model it chose 13 of 28 layers unprompted and the worker settled at
 **2613 MB**, inside the budget. `SWARMLLM_HYBRID_OFFLOAD=0` disables it.
 
-**The split is now VISIBLE (2026-09-03 evening, unreleased).** It was decided in
+**The split is now VISIBLE (built 2026-09-03; shipped since — v0.3.132+).** It was decided in
 `get_or_spawn`, sent as `--gpu-layers`, logged once at spawn, and then existed
 nowhere a person could read — the models page said `fits_on_gpu: true` for a
 model running 13 of its 28 layers on the card. `WorkerHandle::gpu_layers_on_card`
@@ -9038,14 +9042,14 @@ completion.
 
 The removed text is the diagnostic: a leaked marker points at the chat template,
 a stop matching at position 0 points at the prompt. **The counter is DONE
-(2026-09-03, unreleased)**: `swarmllm_empty_replies_total` on `/metrics`,
+(built 2026-09-03; shipped since — v0.3.132+)**: `swarmllm_empty_replies_total` on `/metrics`,
 incremented beside the warning (`inference::EMPTY_REPLIES_TOTAL`), so the rate
 is a graph rather than a grep. **Still open**: whether to fail the request
 outright so retry-capable clients re-route. Failing it is the invasive one — an empty
 reply can be legitimate (a model answering an empty prompt), so that needs the
 counter first to show how often it happens in practice.
 
-## Peer-gossiped versions could shorten the update-detection window — BUILT 2026-09-03 (unreleased)
+## Peer-gossiped versions could shorten the update-detection window — BUILT 2026-09-03, shipped since (v0.3.132+)
 
 **Built as specified below**, with every guard the note asked for.
 `update::PeerVersionWatch` (held on `state.events.peer_versions`) records the
@@ -12943,7 +12947,7 @@ auto-manage OFF holding gemma whole, WSL holding shards 0-1; both prompts.
 The processor-route comparison itself (#444) is therefore **still unmeasured
 on the live pair**: in this topology the hand-off gate fires first.
 
-**Two of the three BUILT 2026-09-03 evening (unreleased):**
+**Two of the three BUILT 2026-09-03 evening, shipped since (v0.3.132+):**
 
 - **The capacity bound now charges the prompt's KV cache.**
   `scheduler::max_hostable_layers` takes `prompt_kv_bytes_per_layer` — positions
@@ -15289,7 +15293,7 @@ hardware ceiling, so the best observation is the least contaminated one — the
 same argument min-of-N already makes within a single measurement), or measure
 lazily on an idle tick rather than at startup. Not yet a demonstrated defect.
 
-**Taken, 2026-09-03 evening (unreleased): re-measure and keep the maximum.**
+**Taken, 2026-09-03 evening; shipped since (v0.3.132+): re-measure and keep the maximum.**
 `mem_bandwidth::remeasure_keeping_the_best` measures again and records the
 higher figure (`best_of`: an unmeasurable pass is no information, never zero);
 the health monitor calls it on a blocking thread at ten minutes and then
