@@ -7141,3 +7141,43 @@ fn the_dispute_recording_guard_catches_a_path_that_stays_silent() {
         "passing KeepBytes as a constant is a question, not an acceptance"
     );
 }
+
+/// A peer-connected entry in the user's activity list marks a TRANSITION.
+///
+/// libp2p re-pushes Identify constantly — `handle_identify_received` says so in
+/// as many words at the top, where the foreign-peer INFO is gated on a set
+/// insert for exactly that reason, and again 350 lines later where the "Peer
+/// connected" log is gated on `connected_node_ids.insert`. The activity event
+/// used to sit BETWEEN those two gates, ungated, so a peer that stayed
+/// connected re-announced itself into the activity list indefinitely: three
+/// consecutive identical "Computer connected: …" entries for one computer was
+/// an ordinary sight, in a 100-entry ring that is also the replay a dashboard
+/// opens on and the "recent activity" of the pasteable report.
+///
+/// This is the third time the same lesson has been learned for a log and not
+/// carried to the surface a person reads (see `note_build_tag` and the shard
+/// announcement feed, both 2026-09-14). The check is positional because that is
+/// what the fix is: the emit must live INSIDE the transition gate.
+#[test]
+fn a_peer_connected_activity_entry_is_emitted_only_on_the_transition() {
+    let src = std::fs::read_to_string("src/network/manager/identify.rs")
+        .expect("identify.rs must be readable");
+    let body = fn_body(&src, "pub(super) fn handle_identify_received(")
+        .expect("handle_identify_received signature not found");
+    let stmts = statements(body);
+    let gate = stmts
+        .iter()
+        .position(|(_, s)| s.contains("connected_node_ids.insert("))
+        .expect("the connected_node_ids transition gate must exist");
+    let emit = stmts
+        .iter()
+        .position(|(_, s)| s.contains("\"peer_connected\""))
+        .expect("the peer_connected activity event must exist");
+    assert!(
+        emit > gate,
+        "src/network/manager/identify.rs: the `peer_connected` activity event is emitted \
+         before the `connected_node_ids.insert` transition gate, so it fires on every \
+         Identify rather than once per connection. Identify re-pushes constantly — see \
+         docs/invariants/network.md."
+    );
+}

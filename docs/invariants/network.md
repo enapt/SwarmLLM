@@ -163,6 +163,52 @@ v0.3.177 was therefore field-unverifiable by construction.
 Settlement designs and the decision criteria: `docs/FUTURE_WORK.md` § "A
 disputed shard is kept but the disagreement is never settled".
 
+## The activity list reports a TRANSITION; the log may report every message
+
+Three defects on 2026-09-14, all the same shape: a repetition lesson learned for
+a **log line** and not carried to the **activity list**, which is the surface a
+person actually reads.
+
+The list is a 100-entry ring (`emit_activity`), and it is not only the Activity
+panel — it is the replay a dashboard receives when it opens, and the "recent
+activity" section of the pasteable diagnostics report. Anything emitted per
+protocol message therefore does not merely add noise; it empties the ring of
+everything the user did. Measured on the deployed .181 binary: **102 of 114
+entries** were peers announcing parts.
+
+The three, and what each already knew:
+
+- **`shard_announced`** fired once per MODEL on every announcement.
+  `note_build_tag`, one function below the holder code, had logged "ONCE per
+  transition rather than once per announcement… a peer repeats itself
+  indefinitely" since the build filter was written. Fixed by collapsing a
+  multi-model announcement into one entry AND gating on a real change; the
+  collapse is what bounds it, because a disconnect clears holder records so
+  every reconnect is a genuine change for every shard.
+- **`peer_connected`** fired on every Identify. `handle_identify_received`
+  states at the top that "Identify re-pushes constantly" and gates its
+  foreign-peer INFO on a set insert for that reason, then gates its "Peer
+  connected" INFO on `connected_node_ids.insert` 350 lines later — and the
+  activity event sat between the two, ungated. Three consecutive identical
+  "Computer connected: …" entries for one computer was an ordinary sight. Fixed
+  by moving the emit INSIDE the same transition gate as the log.
+  Guard: `a_peer_connected_activity_entry_is_emitted_only_on_the_transition`,
+  positional because that is exactly what the fix is.
+- **The dispute count** is the inverse failure — see the section below.
+
+**The rule for a new ActivityEvent:** ask what makes it fire. If the answer is
+"a message a peer sends on a timer" or "a handler libp2p re-runs", gate it on a
+state change, and prefer one entry per event over one per item inside the event.
+The DIAG log beside it is the durable per-message record and is deliberately
+untouched — `daemon::dispatch`'s shard-announce DIAG says so in its own comment.
+
+⚠ **Measure this correctly.** A subscription that replays history on connect
+makes the first ~100 messages look like live traffic; the first attempt here
+recorded "1.9 events/second" for a node emitting **zero** live in 87 seconds,
+and the wrong figure reached a commit message. Discard the connect burst before
+calling anything a rate — and note that a rate and a burst want different fixes
+(gotcha #613).
+
 ## A count that reads zero while the thing happens is worse than no count
 
 **`disputed_shards` exists so that "this node is serving bytes the swarm

@@ -1,5 +1,53 @@
 # Changelog
 
+## [0.3.182-alpha] — unreleased
+
+Four things found by reading what a running node actually reports, rather than
+from a bug report. Three of them were numbers on screen that were wrong, and one
+was a number that read zero while the thing it counts was happening.
+
+### Fixed
+
+- **A model card counted computers that could never send you the file.** Two
+  computers can have the same model under the same name and yet have different
+  copies of it — different people package the same model, and the pieces do not
+  interchange. SwarmLLM has known that for a while and quietly leaves those
+  computers out when deciding where to fetch a part from. The model card did not:
+  it counted them. So a card could say three other computers had a copy when only
+  one of them could actually share it. That number is not decoration — it picks
+  the sentence telling you whether the model keeps working if a computer goes
+  offline, it writes the "on N other computers" line, and it decides whether a
+  model is listed at all. Measured on a real node: 36 of 97 parts were counted
+  wrongly, and the same part could read 1 or 4 depending on whether the page had
+  just loaded or just updated.
+- **And it now says why.** Rather than the number quietly being smaller, the card
+  tells you how many other computers have a different version of the model, in
+  all 21 languages. A count that shrinks without explanation is worse than one
+  that is too high.
+- **Your activity list shows what happened, not other computers introducing
+  themselves.** The list holds the last 100 things, and on a normal node 102 of
+  114 of them were other computers announcing which parts they hold — so the
+  list, the view you get when you open the dashboard, and the report you paste
+  when asking for help all contained almost nothing you had done. Losing a
+  computer and getting it back made it announce everything again, one entry per
+  model, a dozen or more at a time. It is now one entry per computer, and only
+  when it tells us something new.
+- **A computer keeping parts the swarm disagrees about now says so.** When a
+  part disagrees with the version the swarm reports, and that claim has nothing
+  backing it, SwarmLLM keeps its own copy and carries on serving it — deleting on
+  an unproven claim is how a last copy gets lost. It is meant to be counted so
+  the report you paste can show it. Three places make that decision and only two
+  were counting; the missing one is the one a computer that got its parts from
+  other computers actually reaches. A node was observed logging "keeping our
+  bytes" twice while its own report said everything matched.
+- **A computer that stays connected no longer keeps re-introducing itself.**
+  "Computer connected: …" was added to your activity list every time the network
+  layer re-checked a computer it was already talking to, which it does
+  constantly — three identical entries in a row for one computer was an ordinary
+  sight. It is now added once, when the computer actually arrives. The detailed
+  log was already doing this correctly, twice, in the same function.
+- **"1 part", not "1 parts"** — in four messages you can see on screen.
+
 ## [0.3.181-alpha] — 2026-09-14
 
 Two problems reported from people's own machines, and the interface finally

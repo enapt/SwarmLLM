@@ -804,6 +804,19 @@ had been left on the broken signal 400 lines below the fix.
 
 → `docs/invariants/memory.md`
 
+## The activity list reports a TRANSITION; the log may report every message
+
+`emit_activity`'s ring is 100 entries, and it is also the replay a dashboard
+opens on and the "recent activity" of the pasteable report. An event emitted per
+protocol message empties it of everything the user did — measured at 102 of 114
+entries. Before adding an ActivityEvent, ask what makes it fire: if that is a
+peer's timer or a handler libp2p re-runs, gate it on a state CHANGE and prefer
+one entry per event over one per item inside it. Three sites had this wrong at
+once, each with the identical lesson already written down for the log line
+beside it. The per-message DIAG log is the durable record and stays.
+
+→ `docs/invariants/network.md`
+
 ## A holder record names a BUILD, not just a shard
 
 **`ModelRegistry::shard_holders` filters out holders that positively claim a

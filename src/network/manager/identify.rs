@@ -329,36 +329,6 @@ impl NetworkManager {
         self.shared_state
             .signal_dashboard(crate::daemon::state::DashboardSignal::PeersChanged);
 
-        // Emit activity event for peer connection
-        {
-            let label = crate::identity::nickname::short_display_name(
-                &node_id,
-                &self.shared_state.nickname_registry,
-            );
-            let gpu_name = self.shared_state.peer_registry.get(&node_id).and_then(|p| {
-                p.capability
-                    .as_ref()
-                    .and_then(|c| c.gpu.as_ref().map(|g| g.name.clone()))
-            });
-            let detail = if is_lan { "LAN" } else { "WAN" };
-            self.shared_state.emit_activity(
-                crate::daemon::state::ActivityEvent::new(
-                    "network",
-                    "peer_connected",
-                    format!(
-                        "Computer connected: {}{}",
-                        label,
-                        gpu_name
-                            .as_ref()
-                            .map(|g| format!(" ({})", g))
-                            .unwrap_or_default()
-                    ),
-                )
-                .with_node(format!("{}", node_id))
-                .with_detail_str(detail.to_string()),
-            );
-        }
-
         // S3: Cap peer_registry to prevent unbounded growth at 10K+ nodes.
         // Evict highest-latency non-LAN non-pipeline peer when over limit.
         const MAX_PEER_REGISTRY: usize = 200;
@@ -433,6 +403,42 @@ impl NetworkManager {
                 node = %node_id,
                 peers = self.shared_state.connected_node_ids.len(),
                 "Peer connected"
+            );
+
+            // The activity event belongs to the same TRANSITION as the line
+            // above, and used to sit 90 lines earlier where it fired on every
+            // Identify. Identify re-pushes constantly — the foreign-peer branch
+            // at the top of this function says so in as many words, and gates
+            // its own INFO on a set insert for exactly that reason — so a
+            // connected peer re-announced itself into the user's activity list
+            // indefinitely, three consecutive identical entries for one
+            // computer being an ordinary sight. Both logs next to it were
+            // gated; the one surface a person actually reads was not.
+            let label = crate::identity::nickname::short_display_name(
+                &node_id,
+                &self.shared_state.nickname_registry,
+            );
+            let gpu_name = self.shared_state.peer_registry.get(&node_id).and_then(|p| {
+                p.capability
+                    .as_ref()
+                    .and_then(|c| c.gpu.as_ref().map(|g| g.name.clone()))
+            });
+            let detail = if is_lan { "LAN" } else { "WAN" };
+            self.shared_state.emit_activity(
+                crate::daemon::state::ActivityEvent::new(
+                    "network",
+                    "peer_connected",
+                    format!(
+                        "Computer connected: {}{}",
+                        label,
+                        gpu_name
+                            .as_ref()
+                            .map(|g| format!(" ({})", g))
+                            .unwrap_or_default()
+                    ),
+                )
+                .with_node(format!("{}", node_id))
+                .with_detail_str(detail.to_string()),
             );
         }
         // R110: refresh swarm-capacity snapshot so the dashboard banner
