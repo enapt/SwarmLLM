@@ -152,6 +152,20 @@ setting came to exist in the markup and in 21 locales but in no user's DOM.
 
 → `docs/invariants/frontend.md`
 
+## A partial writer writes its part, never a shorter whole
+
+`shardWhereText` composes a shard row's "where" sentence — locality plus, for a
+part this computer holds, how many others have a copy. `_patchShardRow` renders
+through it when given the shard object, sets the swatch from `loc`
+independently of the text, and leaves the sentence alone when given neither.
+The acquisitions branch of `updateShardsLive` knows the locality but not the
+replica count, so it writes no sentence on completion rather than a truncated
+one — it had been dropping "· also on N other computers" permanently on a quiet
+swarm. The tell is a caller passing a pre-rendered string where a sibling passes
+the object.
+
+→ `docs/invariants/frontend.md`
+
 ## Advice on an empty state must be advice the reader can take
 
 An instruction naming a control asserts three things that can each be false on

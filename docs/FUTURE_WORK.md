@@ -63,6 +63,24 @@ Priority is user-visible impact x how many users x whether it fails silently.
 | 77 | **Five dashboard writes announced success when the daemon had refused them** | FIXED 2026-09-14. `App.authFetch` resolves for a 401 or a 500 exactly as for a 200 — `fetch` rejects only on a network failure — so `await authFetch(...)` followed by a success banner reported every refusal as a success. Affected: **provider API keys** (told "Provider keys saved" and the input CLEARED, so the user had nothing to retry with and their cloud provider simply did not work), the provider **key-source** dropdown, the **Claude subscription** toggle, the **first-run nickname** (swallowed by `catch (e) {}` on the one screen with no other feedback), and **Shut Down** — which replaced the entire page with "shutting down…" against a 403 from a still-running node, since the endpoint is loopback-only. That last is gotcha #309's `LocalOnly` split seen from the other side: the variant exists so the message can name the machine to run the command from, and the frontend discarded it by never reading the body. `U.apiAction` already did all of this correctly and one of six callers used it. Controls that lie are now reverted (toggle) or reloaded from the daemon (dropdown). Gotcha #597 |
 | 78 | **The "Key source" setting existed in the markup and in 21 locales, but in no user's DOM** | FIXED 2026-09-14. `I18n.translatePage` does `el.textContent = t(key)` for every `[data-i18n]`, and `textContent` replaces everything inside the element — so `<label data-i18n="settings.key_source_label">` **deleted the `<select>` nested inside it** on every page load, in every language including English. `init.js` bound its change handler to `null`, `settings.js` wrote its value behind an `if (sel)` that was never true, and three translated options were unreachable strings. Valid markup, correct translations, absent control — and no test that asks whether a feature WORKS can see a feature that is not THERE. The text now lives in a `<span>` beside the control; verified in ja/ar/de that the select survives and a change reaches the daemon. Guarded by `a_translated_element_never_wraps_a_control_it_would_delete`, whose self-test plants the defect and requires the scan to fire. A whole-file scan found exactly one instance, which is why it survived so long. Gotcha #598 |
 
+| 79 | **A finished download silently dropped "also on N other computers" from its row, for good** | FIXED 2026-09-14, found while giving three never-seen UI features their first look in a browser. `updateShardsLive` has two patch sources: the shardRegistry branch passes the shard object and renders through `shardWhereText`; the acquisitions branch open-coded `whereText: I18n.t('shard.loc.disk')` on completion — but `shard_details` carries index/state/progress/bytes and **no `holders`**, so it could not know the replica count and wrote the sentence without it. The registry branch repairs that on the same tick, EXCEPT when the registry has not changed (`regStr === _lastShardRegistryStr` → skipped) while the acquisition keeps reporting `complete`. Measured on controlled input: tick N "· also on 4 other computers", tick N+1 dropped, tick N+2 still dropped. On a quiet swarm it never comes back — losing exactly the fact `shardWhereText`'s own docstring calls "the fact that decides whether losing this machine loses the model". The branch now writes the sentence only for states it can describe in full, still sets the state (leaving the row on `downloading` is what makes the registry branch skip it), and the swatch is set from `loc` independently of the text. Gotcha #599 |
+
+### Verified in a browser for the first time (2026-09-14) — no defect found
+
+`.178`/`.179` shipped three UI features that had never been seen rendered,
+each because "it needs state a fresh node lacks". All three were verified in
+about twenty minutes by intercepting `window.fetch` per URL with payloads built
+from the **Rust serializers** rather than invented: the **Performance strip**
+(`PeerPerformanceRow`; renders, and the backend's slowest-first sort is what
+the frontend faithfully shows), the **"Disagrees" shard badge**
+(`admin_models/helpers.rs`; renders amber with a tooltip that reads well), and
+the **map route key + arcs** (`network_map`'s `recent_routes`; renders, no group
+accumulation across refreshes, and the "failed" key entry appears only when a
+failed arc is actually on the map). Item 79 above was found on the way.
+⚠ The dev binary was .177 and did not emit `disputed` at all — **a field absent
+from the live JSON but present in `src/` looks exactly like a frontend bug**;
+check the serializer before concluding. Gotcha #600.
+
 ### Fixed in the 2026-09-14 audit round
 
 | # | Bug | What it cost |

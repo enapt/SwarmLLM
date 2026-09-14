@@ -1828,16 +1828,29 @@
       // an abbreviation that no longer exist. `shard` is passed wherever the
       // caller has it, so the text comes from the SAME function the row was
       // built with rather than a second rendering of the same states.
-      if (whereEl && opts.shard) {
-        var loc = opts.loc || DS.shardLocality(opts.shard);
-        if (swatchEl) swatchEl.setAttribute('data-loc', loc);
+      //
+      // The swatch is the LOCALITY and the sentence is locality PLUS the
+      // replica count, so they are set independently: a caller can know where
+      // a part is without knowing how many other computers have a copy. When
+      // it does not, it passes neither `shard` nor `whereText` and the
+      // sentence is left alone rather than replaced by a shorter one.
+      var loc = opts.loc || (opts.shard ? DS.shardLocality(opts.shard) : null);
+      if (swatchEl && loc) swatchEl.setAttribute('data-loc', loc);
+      if (whereEl) {
         var textNode = whereEl.lastChild;
-        if (textNode && textNode.nodeType === 3) textNode.nodeValue = _shardWhereText(opts.shard, loc);
-      } else if (whereEl && opts.whereText !== undefined) {
-        if (swatchEl && opts.loc) swatchEl.setAttribute('data-loc', opts.loc);
-        var tn = whereEl.lastChild;
-        if (tn && tn.nodeType === 3) tn.nodeValue = opts.whereText;
+        if (textNode && textNode.nodeType === 3) {
+          if (opts.shard) textNode.nodeValue = _shardWhereText(opts.shard, loc);
+          else if (opts.whereText !== undefined) textNode.nodeValue = opts.whereText;
+        }
       }
+
+      // The role badges — "Reads your prompt", "Removed", "Disagrees" — are
+      // BUILD-TIME only. Nothing here refreshes them, and the live tick's
+      // source (the stats shard registry) does not carry `disputed` or
+      // `removed_by_user` to refresh them from. A badge can therefore outlive
+      // its fact until the next full card rebuild: delete a disputed part and
+      // the row keeps saying "Disagrees" for one refresh cycle. Narrow enough
+      // to leave, documented so the next reader does not assume otherwise.
 
       // Piece-bar: add/update/remove to match current download state
       if (opts.peerDownloads && opts.peerDownloads.length > 0 && newState === 'downloading') {
@@ -1897,10 +1910,25 @@
             var dlPct = sd.progress_pct || 0;
             var newState = 'missing';
             var newLoc = 'absent';
+            // `shard_details` carries index/state/progress only — it does NOT
+            // know how many other computers hold this part. So this branch
+            // writes the sentence only for the states it can describe in full.
+            //
+            // On `complete` it deliberately writes none: the finished row's
+            // sentence is "On this computer, on disk · also on N other
+            // computers", and only the shard registry knows N. Writing the
+            // locality alone truncated it, and because the registry patch
+            // below is SKIPPED on a tick where the registry has not changed,
+            // the short version then stuck. Measured on a dev node: the tick
+            // that completed the download said "· also on 4 other computers",
+            // the very next tick dropped it, and it never came back — losing
+            // exactly the fact that says whether losing this machine loses the
+            // model. The state is still set, because leaving the row on
+            // `downloading` is what makes the registry patch skip it.
             var statusText = I18n.t('shard.loc.absent');
             if (sd.state === 'complete') {
               newState = 'disk'; newLoc = 'disk';
-              statusText = I18n.t('shard.loc.disk');
+              statusText = undefined;
             } else if (sd.state === 'verifying' || sd.state === 'downloading' || sd.state === 'pending') {
               newState = 'downloading'; newLoc = 'moving';
               statusText = I18n.t('shard.loc.moving') + (sd.state === 'pending' ? '' : ' \u2014 ' + dlPct + '%');

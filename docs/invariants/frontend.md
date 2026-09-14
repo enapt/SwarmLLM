@@ -342,3 +342,38 @@ it to fire, and also asserts the corrected shape does not — a guard that goes
 off on correct markup is one somebody will delete rather than satisfy.
 
 → gotcha #598
+
+## A partial writer writes its part, never a shorter whole
+
+`shardWhereText` is the one place a shard row's "where" sentence is composed —
+locality plus, for a part this computer holds, how many others have a copy.
+`_patchShardRow` renders through it whenever the caller passes the shard object,
+sets the swatch from `loc` independently of the text (the swatch is the locality;
+the sentence is locality *plus* replica count), and **leaves the sentence alone
+when the caller passes neither** — which is how a caller says "I know where this
+part is, but not how many copies exist".
+
+**What this replaced.** `updateShardsLive` has two patch sources. The
+shardRegistry branch passed the shard object and was correct. The acquisitions
+branch open-coded `whereText: I18n.t('shard.loc.disk')` on completion — but
+`shard_details` carries index, state, progress and bytes and **no `holders`**, so
+it could not know the replica count and wrote the sentence without it. The
+registry branch normally repaired that on the same tick, except it is skipped
+when the registry has not changed, while the acquisition keeps reporting
+`complete`. Measured: the tick that completed a download said "· also on 4 other
+computers", the next tick dropped it, and on a quiet swarm it never came back —
+losing precisely the fact the docstring calls "the fact that decides whether
+losing this machine loses the model".
+
+**What a change must keep.** The acquisitions branch still sets the row STATE on
+completion: leaving the row on `downloading` is what makes the registry branch
+skip it entirely (`if (current === 'downloading') return;`). The tell for this
+class of bug is a caller passing a pre-rendered string where a sibling passes the
+object — that caller has less information and is about to flatten it.
+
+**Known and left:** the role badges ("Reads your prompt", "Removed",
+"Disagrees") are build-time only. The live tick's source does not carry
+`disputed` or `removed_by_user`, so a badge can outlive its fact for one refresh
+cycle.
+
+→ gotcha #599
