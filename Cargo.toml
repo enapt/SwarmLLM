@@ -306,6 +306,9 @@ claude-subscription = []
 
 [dev-dependencies]
 tempfile = "3"
+# `test-util` (not part of tokio's `full`) gives tests a paused clock, so a
+# deferred action can be asserted without sleeping for its real delay.
+tokio = { version = "1", features = ["test-util"] }
 
 # Prices the CUDA attention path's per-token reshape/cast. Needs the GPU
 # feature to compile at all, so it must be gated — `cargo clippy --all-targets`

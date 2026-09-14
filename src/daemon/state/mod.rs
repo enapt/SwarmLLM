@@ -40,7 +40,9 @@ pub use credits::CreditPool;
 pub use events::EventBus;
 pub use hf::{HfProbeInfo, HfSource};
 pub use metrics::{ChannelCounters, ChannelMetricsSet, MetricsProviders};
-pub use models::{ModelMgmt, FOREIGN_WISHLIST_MAX_AGE_MS, MAX_FOREIGN_WISHLIST_ENTRIES};
+pub use models::{
+    ModelMgmt, ShardDownloadClaim, FOREIGN_WISHLIST_MAX_AGE_MS, MAX_FOREIGN_WISHLIST_ENTRIES,
+};
 pub use peer_speed::{PeerSpeed, WorkKind};
 pub use relay::{PeerServe, RelayForwardCounter, RelayProvenFeatures, RelayRoute, ServeKind};
 pub use tp_allreduce::TpAllReduceCollector;
@@ -55,6 +57,12 @@ pub const MAX_RECENT_FAILURES: usize = 20;
 /// failure ring because successful requests are the baseline you compare a
 /// slow one against, and they are cheap (no strings beyond node ids).
 pub const MAX_RECENT_TRACES: usize = 50;
+
+/// How long a finished acquisition's progress entry is kept before it is
+/// removed, so the dashboard renders the final state before it disappears.
+/// Only the delay is unconditional — see
+/// [`SharedState::remove_acquisition_if_idle`] for what decides the removal.
+pub const ACQUISITION_CLEANUP_DELAY: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Where the "a remote machine has successfully dialled us" observation is kept
 /// so it survives a restart. See [`SharedState::observed_inbound_connection`]
@@ -1016,6 +1024,7 @@ impl SharedState {
                 cross_node_prefix_index: DashMap::new(),
                 peer_prefix_blocks: DashMap::new(),
                 p2p_download_permits: DashMap::new(),
+                shard_download_claims: Arc::new(dashmap::DashSet::new()),
                 wishlist: arc_swap::ArcSwap::from_pointee(
                     crate::model::auto_manage::wishlist::Wishlist::default(),
                 ),
@@ -3079,13 +3088,54 @@ impl SharedState {
             .or_else(|| permitted.first().map(|nid| (*nid).clone()))
     }
 
-    /// Schedule deferred removal of an acquisition_progress entry after 5 seconds.
+    /// Schedule deferred removal of a model's `acquisition_progress` entry.
+    ///
+    /// The delay exists so the frontend renders the final state before the
+    /// entry disappears. The removal is CONDITIONAL — see
+    /// `remove_acquisition_if_idle` for why it has to be.
     pub fn schedule_acquisition_cleanup(self: &std::sync::Arc<Self>, mid: crate::types::ModelId) {
         let shared = self.clone();
         tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-            shared.models.acquisition_progress.remove(&mid);
+            tokio::time::sleep(ACQUISITION_CLEANUP_DELAY).await;
+            shared.remove_acquisition_if_idle(&mid);
         });
+    }
+
+    /// Remove a model's acquisition entry, but only while nothing is still
+    /// being fetched for it. Returns whether it was removed.
+    ///
+    /// That entry is not just a progress bar: its per-shard `Downloading` marks
+    /// are how `is_shard_in_progress` identifies a shard that already has a
+    /// download running, which is the only thing stopping a second task
+    /// appending to the same `shard_NNN.bin.tmp`. Removing it is therefore a
+    /// statement that nothing is in flight, and it was being made by EVERY
+    /// caller unconditionally — including the per-shard completion paths, which
+    /// know only about their own shard.
+    ///
+    /// The consequence, reported from the field on 2026-09-13: a model being
+    /// auto-replicated downloads up to `max_concurrent_downloads` (3) shards at
+    /// once, the first to finish deletes the whole entry five seconds later, and
+    /// the next auto-manage tick sees the two still-running shards as unclaimed
+    /// and starts duplicates of them. Each duplicate discards the partial `.tmp`
+    /// it finds (the layout sidecar no longer lines up, or an older duplicate
+    /// deletes both on its own size-mismatch cleanup) and restarts from byte
+    /// zero, so the same ~512 MB shard re-downloaded every five minutes for
+    /// hours and never landed — on two machines, for the same model.
+    ///
+    /// `network/manager/requests.rs` already had this exactly right, with the
+    /// rule written above its call: "Remove the acquisition entry after a delay
+    /// only when the entire model is done — not after each individual shard."
+    /// It is enforced here rather than restated at the call sites so a new
+    /// caller inherits it instead of having to remember it.
+    pub fn remove_acquisition_if_idle(&self, mid: &crate::types::ModelId) -> bool {
+        if self.models.model_has_live_shard_download(mid) {
+            tracing::debug!(
+                model = %mid,
+                "Keeping acquisition progress — shards of this model are still downloading"
+            );
+            return false;
+        }
+        self.models.acquisition_progress.remove(mid).is_some()
     }
 
     /// Reverse lookup: PeerId → NodeId, via `peer_id_map`. O(N_peers) scan, but
@@ -4147,5 +4197,185 @@ mod fast_path_laziness_tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod acquisition_cleanup_tests {
+    use crate::model::acquisition::{AcquisitionState, AcquisitionStatus, ShardProgress};
+    use crate::types::{ModelId, ShardId};
+
+    fn test_state() -> std::sync::Arc<crate::daemon::SharedState> {
+        use crate::identity::Identity;
+        use crate::inference::executor::ModelExecutor;
+        use crate::storage::db::Database;
+        use tokio::sync::Mutex;
+
+        let identity = Identity::generate();
+        let temp = tempfile::tempdir().unwrap();
+        let db = Database::open(temp.path()).unwrap();
+        let executor = std::sync::Arc::new(Mutex::new(ModelExecutor::new()));
+        let (state, _, _) = crate::daemon::SharedState::new(
+            crate::config::Config::default(),
+            identity,
+            db,
+            executor,
+            None,
+        );
+        state
+    }
+
+    /// An eleven-shard model downloads three shards at once
+    /// (`max_concurrent_downloads`). The progress entry is shared by all three,
+    /// and its per-shard marks are what stops a later cycle starting a second
+    /// download of a shard already being written.
+    ///
+    /// Reported from the field on 2026-09-13: the first shard to finish removed
+    /// the whole entry, the next auto-manage tick saw the two still-running
+    /// shards as unclaimed and started duplicates, and each duplicate threw away
+    /// the partial `.tmp` it found and restarted from byte zero — the same
+    /// ~512 MB shard re-downloading every five minutes for hours, on two
+    /// machines, never landing.
+    #[test]
+    fn one_shard_finishing_does_not_delete_the_progress_of_shards_still_downloading() {
+        let state = test_state();
+        let mid = ModelId("glm-4-9b".to_string());
+
+        let mut status = AcquisitionStatus::new_downloading(
+            mid.clone(),
+            11,
+            11 * 512,
+            "huggingface",
+            "auto_manage",
+            "test".to_string(),
+        );
+        status.state = AcquisitionState::Downloading;
+        for idx in [3u32, 7, 8] {
+            status
+                .shard_progress
+                .insert(idx, ShardProgress::new_downloading(idx, 512));
+        }
+        state
+            .models
+            .acquisition_progress
+            .insert(mid.clone(), status);
+
+        // Two of the three are still being written.
+        let _seven = state
+            .models
+            .claim_shard_download(&ShardId {
+                model_id: mid.clone(),
+                index: 7,
+            })
+            .unwrap();
+        let eight = state
+            .models
+            .claim_shard_download(&ShardId {
+                model_id: mid.clone(),
+                index: 8,
+            })
+            .unwrap();
+
+        // Shard 3 finishes and asks for the entry to be tidied away.
+        assert!(
+            !state.remove_acquisition_if_idle(&mid),
+            "the entry must survive while sibling shards are still downloading"
+        );
+        assert!(
+            state.models.acquisition_progress.contains_key(&mid),
+            "removing it un-guards the shards it still describes"
+        );
+        assert!(
+            state.models.is_shard_in_progress(&mid, 7),
+            "shard 7 must still read as in progress, so no second download starts"
+        );
+
+        // Shard 8 finishes too; shard 7 is still going.
+        drop(eight);
+        assert!(!state.remove_acquisition_if_idle(&mid));
+    }
+
+    #[test]
+    fn the_progress_entry_is_removed_once_the_last_download_finishes() {
+        let state = test_state();
+        let mid = ModelId("glm-4-9b".to_string());
+        state.models.acquisition_progress.insert(
+            mid.clone(),
+            AcquisitionStatus::new_downloading(
+                mid.clone(),
+                1,
+                512,
+                "huggingface",
+                "auto_manage",
+                "test".to_string(),
+            ),
+        );
+        let claim = state
+            .models
+            .claim_shard_download(&ShardId {
+                model_id: mid.clone(),
+                index: 0,
+            })
+            .unwrap();
+
+        assert!(!state.remove_acquisition_if_idle(&mid));
+        drop(claim);
+        assert!(
+            state.remove_acquisition_if_idle(&mid),
+            "nothing is writing any more, so the finished entry is tidied away"
+        );
+        assert!(!state.models.acquisition_progress.contains_key(&mid));
+    }
+
+    /// The deferred path is what every caller actually uses.
+    #[tokio::test(start_paused = true)]
+    async fn the_deferred_cleanup_also_spares_a_live_download() {
+        let state = test_state();
+        let mid = ModelId("glm-4-9b".to_string());
+        state.models.acquisition_progress.insert(
+            mid.clone(),
+            AcquisitionStatus::new_downloading(
+                mid.clone(),
+                2,
+                1024,
+                "huggingface",
+                "auto_manage",
+                "test".to_string(),
+            ),
+        );
+        let claim = state
+            .models
+            .claim_shard_download(&ShardId {
+                model_id: mid.clone(),
+                index: 1,
+            })
+            .unwrap();
+
+        // The spawned task has to be polled once to arm its sleep, then polled
+        // again after the clock moves for the removal to actually happen.
+        // Without both, this test passes whether or not the entry would have
+        // been removed — it would only be observing a task that never ran.
+        async fn let_the_cleanup_task_run() {
+            tokio::task::yield_now().await;
+            tokio::time::advance(super::ACQUISITION_CLEANUP_DELAY * 2).await;
+            for _ in 0..8 {
+                tokio::task::yield_now().await;
+            }
+        }
+
+        state.schedule_acquisition_cleanup(mid.clone());
+        let_the_cleanup_task_run().await;
+        assert!(
+            state.models.acquisition_progress.contains_key(&mid),
+            "the timer fired while shard 1 was still downloading"
+        );
+
+        drop(claim);
+        state.schedule_acquisition_cleanup(mid.clone());
+        let_the_cleanup_task_run().await;
+        assert!(
+            !state.models.acquisition_progress.contains_key(&mid),
+            "and is tidied away by the next caller once nothing is writing"
+        );
     }
 }

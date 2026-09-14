@@ -980,3 +980,123 @@ stall_secs=30`. That is the same shape as the run above — shard 0, a failed
 refetch, a stall — reached without prune being involved at all. **This is a
 hypothesis, not an attribution**: #49 is still blocked on the one log line
 already requested from the reporter, and that line discriminates both stories.
+
+## One writer per shard file, and finishing one shard says nothing about the others
+
+*Rule: `.claude/rules/architecture.md` § "One writer per shard file, and
+finishing one shard says nothing about the others". Field report, v0.3.178,
+2026-09-13.*
+
+### What was reported
+
+A node auto-replicating an 11-shard, ~5.6 GB model saw its home connection
+pegged at 10-15 Mbps with no inference running at all. Four shards landed; two
+never did. The log showed, on a clean ~5-minute cadence matching
+`auto_manage.interval_minutes`, for over two and a half hours:
+
+```
+HF layout drift detected (or sidecar missing) — discarding .tmp and restarting
+shard=3 existing_bytes=33554432 sidecar_present=false
+```
+
+15+ full-shard attempts for the same 2-3 shards, each restarting from byte zero.
+Reproduced independently on a second machine with a different config, against
+the same model, failing on shards 3, 7 and 8. The reporter disabled
+`auto_manage` on both nodes to stop it — which also cost them auto-pruning,
+since it is the same switch.
+
+### The mechanism
+
+`max_concurrent_downloads` defaults to **3**, which is why 2-3 shards were
+affected per machine and not one.
+
+1. Three shards of the model download concurrently. They share ONE
+   `acquisition_progress` entry, and its per-shard `Downloading` marks are what
+   `is_shard_in_progress` reads.
+2. The first shard finishes and calls `schedule_acquisition_cleanup`, which
+   removed the whole model's entry five seconds later — unconditionally.
+3. `is_shard_in_progress` now answers false for the two shards still being
+   written. The next auto-manage tick re-selects them and spawns duplicates.
+4. The duplicate finds a partial `.tmp` that does not sit on a coalesced-range
+   boundary, so it deletes the `.tmp` AND its layout sidecar and starts a fresh
+   one — while the original task keeps writing into the now-unlinked inode.
+5. The original finishes its ranges, stats the `.tmp` *path* (now the
+   duplicate's file), sees a size mismatch, and deletes that file and its
+   sidecar as its own cleanup. Whichever ordering the two land in, one of them
+   leaves a `.tmp` with no sidecar beside it — which is the `sidecar_present=false`
+   in the report, logged for a sidecar the reporter could see on disk moments
+   later, written by the next attempt.
+
+Nothing here is specific to a shard index or a range count: shard 3 had
+`ranges=2` and shard 7 `ranges=1`. It is specific to being still in flight when
+a sibling finished.
+
+### Why the guard was the wrong shape
+
+`network/manager/requests.rs` already had the rule right, in a comment above its
+own call: *"Remove the acquisition entry after a delay only when the entire
+model is done — not after each individual shard."* Twelve other call sites did
+not, which is this codebase's most-repeated defect — a shared invariant
+implemented per path.
+
+Deeper than that: exclusion between writers rested entirely on
+`acquisition_progress`. That map is a PROGRESS structure — several subsystems
+write it, the health monitor rewrites it, and a timer deletes from it. Using it
+as a concurrency guard has now failed in the field twice: 2026-09-11 (a second
+download request erased the marks of shards already in flight, fixed in
+`begin_download`) and this one. The second fix is therefore not another patch to
+the map but a claim that does not depend on it —
+`ModelMgmt::shard_download_claims`, an RAII set written only by
+`claim_shard_download` and cleared only by `Drop`, so a task that returns,
+errors, panics or is aborted releases it with no cleanup call to forget.
+
+`trigger_download` now *claims* where it used to *ask*, in one atomic step,
+which also closes the window it had between asking and spawning.
+
+### Two facts the P2P path adds
+
+- **The `.tmp` is shared between transports.** HF writes packed tensor bytes and
+  pins them with a `.tmp.layout` sidecar; P2P writes raw shard bytes at a chunk
+  offset and resumes from `ShardStore::tmp_size`. An HF sidecar left beside
+  P2P-written bytes describes a layout those bytes were not fetched against.
+  Only the claim separates them.
+- **The P2P claim is parked in `p2p_download_permits` beside the semaphore
+  permit**, so the three places that release the permit (transfer complete,
+  retry give-up, stall watchdog) release the claim too, by dropping the tuple.
+  No new release site exists to be forgotten.
+
+### What the prior art says
+
+`huggingface_hub` hit the same class on its own `.incomplete` blobs and reached
+a stronger conclusion: PR #4306 (merged 2026-06-05) **deleted cross-process
+resume** and gave every attempt a unique `<etag>.<uuid8>.incomplete` +
+`os.replace()`, because on Lustre/GPFS/NFS `flock` can silently succeed for
+every caller, and *"sharing a partial file across processes is exactly what made
+the corruption possible"*. Their locks now only save bandwidth; correctness does
+not depend on them.
+
+We keep resume deliberately, and the difference is why: their lock could be a
+no-op on the user's filesystem, ours is an in-process set with RAII release in a
+daemon that already owns its data directory exclusively (redb holds it). Keeping
+resume matters here precisely because of the reporter's connection — a 512 MB
+shard is 5-7 minutes at 10-15 Mbps, and losing resume means a dropped connection
+costs the whole shard. If a second process ever shares a data directory, this
+reasoning is void and the unique-name approach is the answer.
+
+aria2's behaviour supplied the other half: it removes a control file whose data
+file has gone (*"Removed the defunct control file… because the download file
+doesn't exist"*). Startup `.tmp` cleanup removed the `.tmp` and left the
+`.tmp.layout` behind, so the pair now move together.
+
+### What a change here must keep
+
+- A claim is released ONLY by dropping it. Never add a `release_claim` call —
+  that is the cleanup path someone forgets, which is the whole bug.
+- `model_has_live_shard_download` reads the claims and NOT the progress marks. A
+  mark left behind by a path that gave up would otherwise pin the entry for
+  ever, and the shard could never be fetched again — trading a tidy-up failure
+  for an unfetchable shard. `is_shard_in_progress` reads both, because refusing
+  to start a second download on stale evidence is the safe direction and
+  deleting state is not.
+- A terminal path must give its OWN shard a terminal progress mark. The HF
+  failure arm did not, and was masked by the entry being deleted anyway.

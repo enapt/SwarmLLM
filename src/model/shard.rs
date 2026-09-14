@@ -606,7 +606,15 @@ impl ShardStore {
         }
     }
 
-    /// Clean up leftover .tmp files in a specific directory.
+    /// Clean up leftover `.tmp` files in a specific directory.
+    ///
+    /// Takes the HuggingFace path's `<shard>.bin.tmp.layout` sidecar with the
+    /// `.tmp` it describes. That sidecar pins a partial download to the tensor
+    /// layout it was fetched against, so it means nothing once the partial is
+    /// gone — aria2 calls this a "defunct control file" and removes it for the
+    /// same reason. Leaving it behind littered the model directory with files
+    /// nothing would ever read again, and made the pair of them look like a
+    /// resumable download to anyone reading the directory.
     pub fn cleanup_tmp_files_in_dir(dir: &std::path::Path) {
         if !dir.exists() {
             return;
@@ -614,8 +622,17 @@ impl ShardStore {
         if let Ok(files) = std::fs::read_dir(dir) {
             for file in files.flatten() {
                 let path = file.path();
-                if path.extension().and_then(|e| e.to_str()) == Some("tmp") {
+                let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                    continue;
+                };
+                if name.ends_with(".tmp") {
                     tracing::info!(path = %path.display(), "Cleaning up leftover .tmp shard file");
+                    let _ = std::fs::remove_file(&path);
+                } else if name.ends_with(".tmp.layout") {
+                    tracing::info!(
+                        path = %path.display(),
+                        "Cleaning up the layout sidecar of a leftover .tmp shard file"
+                    );
                     let _ = std::fs::remove_file(&path);
                 }
             }

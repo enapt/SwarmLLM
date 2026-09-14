@@ -23,6 +23,7 @@ SharedState is organized into 4 sub-structs. Always use the correct accessor:
 - `state.models.hf_trending_cache` — R112. ArcSwap<HfTrendingSnapshot>; written by `HfWatcher` only.
 - `state.models.foreign_wishlist` — R130. `DashMap<(NodeId, ModelId), (score_0_100, received_at_ms)>`; capped at `MAX_FOREIGN_WISHLIST_ENTRIES = 10_000` with oldest-first eviction, 2h freshness window enforced on read. Written by `apply_wishlist_announcement` on inbound `SwarmMessage::WishlistAnnouncement`; read by `compute_wishlist` for the 0..10 cross-pool demand boost.
 - `state.models.quant_recommendations` — R133. `ArcSwap<QuantRecommendations>`; refreshed via `crate::model::auto_manage::quant::refresh_quant_recommendations(state)` on every auto-manage tick AND on every WS stats build. Read by `GET /api/admin/quant-recommendations` and the swarm-tab tips tile.
+- `state.models.shard_download_claims` — the shards a download task is WRITING right now, one RAII `ShardDownloadClaim` each, taken by `claim_shard_download` and released only by dropping it. `is_shard_in_progress` reads it; `shard_marked_in_progress` is the map-only sibling for a caller that already holds the claim. **Exclusion between writers must not rest on `acquisition_progress`** — that is a progress structure with several writers and a timer-driven deleter, and coupling the guard to it has failed in the field twice. → `docs/invariants/network.md`
 - `state.models.shard_download_backoff` — external report 2026-07-23. `DashMap<ShardId, ShardDownloadBackoff { fail_count, retry_after: Instant }>`. Exponential per-shard download cooldown (30→60→120→240→300s cap, via the pure `shard_backoff_delay_secs`). Recorded via `record_shard_download_failure` at every terminal *transient* download-failure site (HF `download_shard` error + GGUF-probe failure in `model/auto_manage/download.rs`, P2P give-up-with-no-HF-source in `network/manager/shard_transfer.rs`, and stall-reconciliation in `health/monitor.rs::cleanup_acquisition_progress`). Checked by `shard_in_backoff` in `scoring.rs::gather_candidates` (skips the shard while cooling down). Cleared via `clear_shard_download_backoff` on success (HF success arm + P2P completion in `requests.rs`). Distinct from `shard_p2p_failed`, which only *forces* the HF path without throttling re-selection — the two solve different problems and a new failure site should touch whichever it needs. Do NOT record backoff on the P2P→HF fallback branch: that path wants an *immediate* HF retry. Entries self-evict from `shard_in_backoff` once idle past `SHARD_BACKOFF_FORGET_SECS` (1h), so the map stays bounded without a dedicated sweep.
 - `state.models.removed_by_user` — 2026-08-21 (gotcha #360). `DashMap<ShardId, bool>`, persisted in DB tree `removed_shards`, loaded in `SharedState::new` like `locked_shards`. A shard the USER deleted (`delete_shard`, `delete_model` — every manifest shard) is an instruction, not a gap: `gather_candidates` skips it unless `in_configured_range || pinned_to_us`; an explicit request clears it (`hf_download_shards` for the named shards, `download_shard`, `pool_add_pin` naming this node). Helpers live in `daemon/state/removed_shards.rs` (`mark_shard_removed_by_user`, `shard_removed_by_user`, `clear_shard_removed_by_user`, `clear_removed_by_user_for_model`); the shard listing emits `removed_by_user` (only when not local) and the dashboard shows a "Removed" badge. Never write the map or the tree directly.
 - `state.models.shards_needing_repair` — see `docs/invariants/state-and-config.md`
@@ -597,6 +598,27 @@ read the pair as a contradiction and lost an hour to it. The plan now names
 `segments_without_standby`, and the failure reports
 `standbys_covering_this_segment` next to the total. When a summary count cannot
 answer the question a reader will ask of it, print the answer, not the count.
+
+## One writer per shard file, and finishing one shard says nothing about the others
+
+Every fetch of shard N writes the same `shard_NNN.bin.tmp`, and the HuggingFace
+and P2P paths write it in different formats. Two writers corrupt it, and the
+cleanup of whichever finishes first deletes the other's `.tmp` and layout
+sidecar out from under it.
+
+**`ModelMgmt::claim_shard_download` is the exclusion**, an RAII claim held for
+the life of the download — moved into the spawned task on the HF path, parked
+beside the semaphore permit in `p2p_download_permits` on the P2P one.
+**`SharedState::remove_acquisition_if_idle` is the one place a progress entry is
+removed for tidiness**, and it refuses while any shard of that model is still
+being written; `a_finished_download_does_not_delete_the_progress_of_one_still_running`
+in `tests/repo_consistency.rs` fails the build on a bare
+`acquisition_progress.remove(`.
+
+A per-shard completion path knows only about its own shard. Every one of them
+was deleting the whole model's entry.
+
+→ `docs/invariants/network.md`
 
 ## Destroying a shard we hold needs better evidence than a stranger's claim
 

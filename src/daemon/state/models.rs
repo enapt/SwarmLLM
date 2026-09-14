@@ -149,8 +149,46 @@ pub struct ModelMgmt {
     /// dispatch loop missed event, peer disconnected before request
     /// landed) parks the permit forever and `max_concurrent_downloads`
     /// silently freezes after enough silent drops.
-    pub p2p_download_permits:
-        DashMap<crate::types::ShardId, (tokio::sync::OwnedSemaphorePermit, std::time::Instant)>,
+    pub p2p_download_permits: DashMap<
+        crate::types::ShardId,
+        (
+            tokio::sync::OwnedSemaphorePermit,
+            ShardDownloadClaim,
+            std::time::Instant,
+        ),
+    >,
+    /// Shards a download task is *actually writing right now*, one entry per
+    /// live writer, held by an RAII `ShardDownloadClaim`.
+    ///
+    /// The thing being protected is a FILE: every fetch of shard N writes
+    /// `shard_NNN.bin.tmp` in the model directory, and the HuggingFace path and
+    /// the P2P path write it in different formats (HF packs tensor bytes and
+    /// pins the layout with a `.tmp.layout` sidecar; P2P writes raw shard bytes
+    /// at a chunk offset and resumes from `tmp_size`). Two writers on that file
+    /// — two HF attempts, two P2P attempts, or one of each — corrupt it, and the
+    /// coalesced-range cleanup of whichever finishes first deletes the other's
+    /// `.tmp` and sidecar out from under it.
+    ///
+    /// Exclusion used to rest entirely on `acquisition_progress` carrying a
+    /// `Downloading` mark. That map is a PROGRESS structure: several subsystems
+    /// write it, and `schedule_acquisition_cleanup` deletes whole models from it
+    /// on a timer. Coupling a concurrency guard to it has now failed twice in
+    /// the field — 2026-09-11 (a second request erased the marks of shards
+    /// already in flight) and 2026-09-13 (one shard completing deleted the whole
+    /// entry while three others were still downloading, so the next auto-manage
+    /// tick started duplicates and the same ~512 MB shard re-downloaded from
+    /// byte zero every five minutes for hours). This set exists so the answer
+    /// does not depend on that map surviving: it is written only by
+    /// `claim_shard_download` and cleared only by dropping the claim, so a task
+    /// that ends — returns, errors, is aborted, or is dropped mid-await —
+    /// releases it with no cleanup call to forget.
+    ///
+    /// Read through `is_shard_in_progress`, never directly, so the ~4 consumers
+    /// of that predicate cannot disagree about what "in progress" means.
+    /// `huggingface_hub` guards its own `.incomplete` blobs with a per-blob lock
+    /// file for exactly this reason; in-process is enough here because a data
+    /// directory already has a single daemon (redb holds it).
+    pub shard_download_claims: Arc<dashmap::DashSet<crate::types::ShardId>>,
     /// R111: latest computed Wishlist snapshot. ArcSwap so the dashboard +
     /// REST + future HfWatcher all read a lock-free snapshot. Refreshed on
     /// every WS stats build (cheap pass over the model registry) and on
@@ -223,24 +261,139 @@ pub fn shard_backoff_delay_secs(fail_count: u32) -> u64 {
         .min(SHARD_BACKOFF_MAX_SECS)
 }
 
+/// Is this per-shard progress state one where a fetch is still outstanding?
+///
+/// The single expression of it: `is_shard_in_progress` asks it of one shard and
+/// `model_has_shard_in_flight` of every shard of a model, and the two deciding
+/// differently is how a model's progress entry gets deleted while a shard it
+/// still describes is downloading.
+pub(crate) fn shard_state_is_in_flight(state: &crate::model::acquisition::ShardState) -> bool {
+    matches!(
+        state,
+        crate::model::acquisition::ShardState::Downloading
+            | crate::model::acquisition::ShardState::Pending
+            | crate::model::acquisition::ShardState::Verifying
+    )
+}
+
+/// Exclusive right to write one shard's `.tmp` file, released on drop.
+///
+/// Obtained from `ModelMgmt::claim_shard_download`. Hold it for as long as the
+/// download task runs: move it into the spawned task (HuggingFace), or park it
+/// beside the semaphore permit in `p2p_download_permits` (P2P), so it is
+/// released by the same code that releases the permit. Dropping it is the ONLY
+/// way to release the claim — there is no explicit `release`, so an early
+/// return, an error, a panic or an aborted task cannot leave one behind.
+pub struct ShardDownloadClaim {
+    claims: Arc<dashmap::DashSet<crate::types::ShardId>>,
+    shard: crate::types::ShardId,
+}
+
+impl ShardDownloadClaim {
+    /// The shard this claim covers.
+    pub fn shard(&self) -> &crate::types::ShardId {
+        &self.shard
+    }
+}
+
+impl Drop for ShardDownloadClaim {
+    fn drop(&mut self) {
+        self.claims.remove(&self.shard);
+    }
+}
+
+impl std::fmt::Debug for ShardDownloadClaim {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ShardDownloadClaim")
+            .field("shard", &self.shard)
+            .finish()
+    }
+}
+
 impl ModelMgmt {
+    /// Take the exclusive right to write this shard's `.tmp`, or `None` if a
+    /// download of it is already running.
+    ///
+    /// This is a check and a claim in ONE atomic step (`DashSet::insert`
+    /// reports whether the entry is new), which is the point: the callers that
+    /// used to ask `is_shard_in_progress` and then spawn had a window between
+    /// the two, and the map they asked could be cleared inside it.
+    pub fn claim_shard_download(
+        &self,
+        shard: &crate::types::ShardId,
+    ) -> Option<ShardDownloadClaim> {
+        if self.shard_download_claims.insert(shard.clone()) {
+            Some(ShardDownloadClaim {
+                claims: self.shard_download_claims.clone(),
+                shard: shard.clone(),
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Whether a download task is writing this shard's `.tmp` right now.
+    /// Prefer `is_shard_in_progress`, which also covers work that is queued
+    /// but has not reached a writer yet.
+    pub fn shard_download_claimed(&self, shard: &crate::types::ShardId) -> bool {
+        self.shard_download_claims.contains(shard)
+    }
+
+    /// Whether a download task for ANY shard of this model is running right now.
+    ///
+    /// Asked before removing the model's `acquisition_progress` entry, because
+    /// that entry is what a live download's progress is written into and what
+    /// `is_shard_in_progress` reads.
+    ///
+    /// Deliberately reads ONLY the claims, not the per-shard progress marks.
+    /// A claim is exact — it exists for exactly as long as a writer does,
+    /// because only a `Drop` can release it. A progress mark is advisory: a
+    /// path that gives up without clearing its own mark leaves a `Downloading`
+    /// behind, and reading those here would make such a leak permanent (the
+    /// entry could never be collected, so the shard could never be fetched
+    /// again). `is_shard_in_progress` still reads both, because refusing to
+    /// start a second download on stale evidence is the safe direction and
+    /// deleting state is not.
+    pub fn model_has_live_shard_download(&self, model_id: &crate::types::ModelId) -> bool {
+        self.shard_download_claims
+            .iter()
+            .any(|s| &s.model_id == model_id)
+    }
+
     /// Check if a shard is currently being downloaded, pending, or verifying.
     /// Prevents races where multiple subsystems try to download the same shard.
+    ///
+    /// Answers from the live writer claim as well as the progress map, so the
+    /// answer survives the progress entry being cleaned up under a download
+    /// that is still running (see `shard_download_claims`).
     pub fn is_shard_in_progress(&self, model_id: &crate::types::ModelId, shard_index: u32) -> bool {
+        if self.shard_download_claimed(&crate::types::ShardId {
+            model_id: model_id.clone(),
+            index: shard_index,
+        }) {
+            return true;
+        }
+        self.shard_marked_in_progress(model_id, shard_index)
+    }
+
+    /// Whether the progress map marks this shard as outstanding — queued,
+    /// downloading or verifying — ignoring the writer claims.
+    ///
+    /// Use it where you already HOLD the claim for this shard and so cannot ask
+    /// `is_shard_in_progress` without seeing yourself; everywhere else wants
+    /// `is_shard_in_progress`, which covers a live writer as well as the map.
+    pub fn shard_marked_in_progress(
+        &self,
+        model_id: &crate::types::ModelId,
+        shard_index: u32,
+    ) -> bool {
         self.acquisition_progress
             .get(model_id)
             .map(|entry| {
                 entry
                     .shard_progress
                     .get(&shard_index)
-                    .map(|sp| {
-                        matches!(
-                            sp.state,
-                            crate::model::acquisition::ShardState::Downloading
-                                | crate::model::acquisition::ShardState::Pending
-                                | crate::model::acquisition::ShardState::Verifying
-                        )
-                    })
+                    .map(|sp| shard_state_is_in_flight(&sp.state))
                     .unwrap_or(false)
             })
             .unwrap_or(false)
@@ -584,7 +737,7 @@ mod tests {
     use super::*;
     use crate::types::ModelId;
 
-    fn make_mgmt() -> ModelMgmt {
+    pub(super) fn make_mgmt() -> ModelMgmt {
         ModelMgmt {
             acquisition_progress: DashMap::new(),
             hf_sources: DashMap::new(),
@@ -611,6 +764,7 @@ mod tests {
             cross_node_prefix_index: DashMap::new(),
             peer_prefix_blocks: DashMap::new(),
             p2p_download_permits: DashMap::new(),
+            shard_download_claims: Arc::new(dashmap::DashSet::new()),
             wishlist: arc_swap::ArcSwap::from_pointee(
                 crate::model::auto_manage::wishlist::Wishlist::default(),
             ),
@@ -1129,6 +1283,155 @@ mod tests {
                 .get(&mid)
                 .map(|e| e.shard_progress.len()),
             Some(1)
+        );
+    }
+}
+
+#[cfg(test)]
+mod shard_download_claim_tests {
+    use super::*;
+    use crate::model::acquisition::{
+        AcquisitionState, AcquisitionStatus, ShardProgress, ShardState,
+    };
+    use crate::types::{ModelId, ShardId};
+
+    fn mgmt() -> ModelMgmt {
+        super::tests::make_mgmt()
+    }
+
+    fn shard(model: &str, index: u32) -> ShardId {
+        ShardId {
+            model_id: ModelId(model.to_string()),
+            index,
+        }
+    }
+
+    #[test]
+    fn a_claim_is_exclusive_and_is_released_only_by_dropping_it() {
+        let m = mgmt();
+        let sid = shard("glm-4-9b", 3);
+
+        let first = m.claim_shard_download(&sid).expect("first claim is free");
+        assert!(
+            m.claim_shard_download(&sid).is_none(),
+            "a second writer must not be handed the same shard's .tmp"
+        );
+        assert!(m.shard_download_claimed(&sid));
+
+        drop(first);
+        assert!(
+            !m.shard_download_claimed(&sid),
+            "dropping the claim is what releases it — there is no release call"
+        );
+        assert!(
+            m.claim_shard_download(&sid).is_some(),
+            "the shard can be fetched again once nothing is writing it"
+        );
+    }
+
+    #[test]
+    fn claims_are_per_shard_not_per_model() {
+        let m = mgmt();
+        let _three = m.claim_shard_download(&shard("glm-4-9b", 3)).unwrap();
+        assert!(
+            m.claim_shard_download(&shard("glm-4-9b", 7)).is_some(),
+            "a different shard of the same model is a different file"
+        );
+        assert!(
+            m.claim_shard_download(&shard("qwen3-1.7b", 3)).is_some(),
+            "the same index of a different model is a different file"
+        );
+    }
+
+    /// The point of the claim: the guard against a second writer must not
+    /// depend on the progress map, which is cleaned up on a timer.
+    #[test]
+    fn a_live_download_is_in_progress_even_with_no_entry_in_the_progress_map() {
+        let m = mgmt();
+        let sid = shard("glm-4-9b", 3);
+        let _claim = m.claim_shard_download(&sid).unwrap();
+
+        assert!(
+            m.acquisition_progress.get(&sid.model_id).is_none(),
+            "precondition: the progress entry has been cleaned up"
+        );
+        assert!(
+            m.is_shard_in_progress(&sid.model_id, sid.index),
+            "a shard being written right now must read as in progress even \
+             after its progress entry has been removed"
+        );
+    }
+
+    /// `trigger_download` holds the claim itself from the moment it decides to
+    /// act, so it needs a predicate that does not see its own claim.
+    #[test]
+    fn the_map_only_predicate_does_not_see_a_claim() {
+        let m = mgmt();
+        let sid = shard("glm-4-9b", 3);
+        let _claim = m.claim_shard_download(&sid).unwrap();
+
+        assert!(m.is_shard_in_progress(&sid.model_id, sid.index));
+        assert!(
+            !m.shard_marked_in_progress(&sid.model_id, sid.index),
+            "the map-only predicate answers about the progress map alone"
+        );
+    }
+
+    fn downloading_status(model: &str, shards: &[(u32, ShardState)]) -> AcquisitionStatus {
+        let mut status = AcquisitionStatus::new_downloading(
+            ModelId(model.to_string()),
+            shards.len() as u32,
+            1024,
+            "huggingface",
+            "auto_manage",
+            "test".to_string(),
+        );
+        status.state = AcquisitionState::Downloading;
+        for (idx, state) in shards {
+            let mut sp = ShardProgress::new_downloading(*idx, 512);
+            sp.state = state.clone();
+            status.shard_progress.insert(*idx, sp);
+        }
+        status
+    }
+
+    #[test]
+    fn a_model_has_a_live_download_while_any_of_its_shards_is_claimed() {
+        let m = mgmt();
+        let mid = ModelId("glm-4-9b".to_string());
+        assert!(!m.model_has_live_shard_download(&mid));
+
+        let claim = m.claim_shard_download(&shard("glm-4-9b", 7)).unwrap();
+        assert!(m.model_has_live_shard_download(&mid));
+        assert!(
+            !m.model_has_live_shard_download(&ModelId("qwen3-1.7b".to_string())),
+            "another model's download says nothing about this one"
+        );
+
+        drop(claim);
+        assert!(!m.model_has_live_shard_download(&mid));
+    }
+
+    /// A stale `Downloading` mark left by a path that gave up without clearing
+    /// its own progress entry must NOT hold the entry alive for ever — that
+    /// would make the shard unfetchable, which is worse than the tidy-up it is
+    /// protecting. Liveness is answered by the claims, which cannot go stale.
+    #[test]
+    fn a_stale_progress_mark_is_not_mistaken_for_a_live_download() {
+        let m = mgmt();
+        let mid = ModelId("glm-4-9b".to_string());
+        m.acquisition_progress.insert(
+            mid.clone(),
+            downloading_status("glm-4-9b", &[(3, ShardState::Downloading)]),
+        );
+
+        assert!(
+            m.shard_marked_in_progress(&mid, 3),
+            "precondition: the map still carries the mark"
+        );
+        assert!(
+            !m.model_has_live_shard_download(&mid),
+            "no writer holds a claim, so nothing is actually downloading"
         );
     }
 }

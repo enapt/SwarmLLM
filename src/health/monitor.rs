@@ -1605,7 +1605,12 @@ impl HealthMonitor {
                 "Cleaning up stale acquisition progress entries"
             );
             for key in to_remove {
-                self.shared_state.models.acquisition_progress.remove(&key);
+                // Through the shared helper, not a bare remove: a model whose
+                // entry has gone terminal can still have shards downloading —
+                // an eleven-shard model that fails one shard is marked Failed
+                // while the other two slots keep working — and the entry is
+                // what those downloads write their progress into.
+                self.shared_state.remove_acquisition_if_idle(&key);
             }
         }
     }

@@ -6113,3 +6113,134 @@ fn the_growth_accountant_guard_catches_a_re_derived_placement() {
          which is the shape the real code was written in"
     );
 }
+
+/// Name of the function containing a given 1-based line: the nearest `fn` at or
+/// above it. Used to exempt a specific call site rather than a whole file.
+fn enclosing_fn_name(src: &str, line: usize) -> Option<String> {
+    let above: Vec<&str> = src.lines().take(line).collect();
+    for raw in above.iter().rev() {
+        let mut t = raw.trim_start();
+        for prefix in [
+            "pub(crate) ",
+            "pub(super) ",
+            "pub ",
+            "async ",
+            "const ",
+            "unsafe ",
+        ] {
+            t = t.strip_prefix(prefix).unwrap_or(t);
+        }
+        let Some(name) = t.strip_prefix("fn ") else {
+            continue;
+        };
+        let end = name
+            .find(|c: char| !c.is_alphanumeric() && c != '_')
+            .unwrap_or(name.len());
+        if end > 0 {
+            return Some(name[..end].to_string());
+        }
+    }
+    None
+}
+
+#[test]
+fn the_enclosing_fn_helper_names_the_function_a_line_sits_in() {
+    let src = "fn outer() {\n    let a = 1;\n}\n\npub async fn inner_one(&self) {\n    x.remove(&k);\n}\n";
+    assert_eq!(enclosing_fn_name(src, 2).as_deref(), Some("outer"));
+    assert_eq!(enclosing_fn_name(src, 6).as_deref(), Some("inner_one"));
+}
+
+/// A download's progress entry is not a progress bar — it is the state that
+/// identifies a shard already being fetched.
+///
+/// `acquisition_progress` carries the per-shard `Downloading` marks
+/// `is_shard_in_progress` reads, and that predicate is the only thing stopping
+/// a second task appending to the same `shard_NNN.bin.tmp`. Removing a model's
+/// entry is therefore a claim that nothing is in flight for it, and it was
+/// being made unconditionally by every caller — including the per-shard
+/// completion paths, which know only about their own shard.
+///
+/// Field report, 2026-09-13: an eleven-shard model auto-replicating three
+/// shards at a time (`max_concurrent_downloads`) lost the whole entry five
+/// seconds after the first shard landed, so the next auto-manage tick started
+/// duplicate downloads of the two still running. Each duplicate discarded the
+/// partial `.tmp` and restarted from byte zero — the same ~512 MB shard
+/// re-downloading every five minutes for hours, on two machines, never landing.
+///
+/// So: `SharedState::remove_acquisition_if_idle` is the one place an entry is
+/// removed for tidiness, and it asks first. The only sanctioned bare remove is
+/// `delete_model`, where the user has deleted the model outright and there is
+/// nothing left for a download to land in.
+#[test]
+fn a_finished_download_does_not_delete_the_progress_of_one_still_running() {
+    let root = repo_root();
+    let sanctioned: &[(&str, &str)] = &[
+        // The helper itself.
+        ("src/daemon/state/mod.rs", "remove_acquisition_if_idle"),
+        // The user deleted the whole model; the guard above it is the
+        // active-pipeline check, not this one.
+        ("src/api/admin_models/lifecycle.rs", "delete_model"),
+    ];
+
+    let mut offenders: Vec<String> = Vec::new();
+    for path in rust_files_under(&root.join("src")) {
+        let Ok(src) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        if !src.contains("acquisition_progress") {
+            continue;
+        }
+        let rel = path
+            .strip_prefix(&root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        for (line, stmt) in statements(&src) {
+            if !stmt.contains("acquisition_progress.remove(") {
+                continue;
+            }
+            let enclosing = enclosing_fn_name(&src, line);
+            let allowed = sanctioned
+                .iter()
+                .any(|(f, func)| *f == rel && Some(*func) == enclosing.as_deref());
+            if !allowed {
+                offenders.push(format!(
+                    "{rel}:{line} (in {}): {stmt}",
+                    enclosing.as_deref().unwrap_or("?")
+                ));
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "acquisition_progress must be removed through \
+         SharedState::remove_acquisition_if_idle, which refuses while a shard \
+         of the model is still being written. Removing it un-guards those \
+         downloads and a later cycle starts duplicates of them:\n  {}",
+        offenders.join("\n  ")
+    );
+}
+
+/// Null control for the scan above: plant the violation it exists to catch and
+/// confirm the scanner can see it, through the line-wrapping rustfmt produces
+/// at this nesting depth.
+#[test]
+fn the_acquisition_removal_scan_sees_a_chain_rustfmt_has_wrapped() {
+    let planted = r#"
+fn tidy_up(&self) {
+    self.shared_state
+        .models
+        .acquisition_progress
+        .remove(&model_id);
+}
+"#;
+    let found = statements(planted)
+        .into_iter()
+        .any(|(_, s)| s.contains("acquisition_progress.remove("));
+    assert!(
+        found,
+        "the statement scanner must join a wrapped chain back together, or the \
+         guard above passes on code it cannot read"
+    );
+}

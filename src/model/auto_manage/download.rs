@@ -36,15 +36,44 @@ impl AutoShardManager {
         // same .tmp file — producing the right size but corrupted bytes.
         // The .bin-exists path below has its own in-progress check; this one
         // covers the more common partial-.tmp case.
+        //
+        // Asking and claiming are ONE step. Asking `is_shard_in_progress` and
+        // then spawning leaves a window in between, and what the question reads
+        // is a map another task may clear inside it. The claim is held for the
+        // whole download — moved into the spawned task on the HuggingFace path,
+        // parked beside the semaphore permit on the P2P one — and released only
+        // by being dropped.
+        let shard_id_for_claim = ShardId {
+            model_id: candidate.model_id.clone(),
+            index: candidate.shard_index,
+        };
+        let mut claim = match self
+            .shared_state
+            .models
+            .claim_shard_download(&shard_id_for_claim)
+        {
+            Some(c) => Some(c),
+            None => {
+                tracing::debug!(
+                    model = %candidate.model_id,
+                    shard = candidate.shard_index,
+                    "Shard download already in progress, deferring"
+                );
+                return;
+            }
+        };
+        // Queued-but-not-yet-writing work (a P2P request sitting in the
+        // acquisition manager, a verify) has no claim, so the progress map is
+        // still worth asking once we hold ours.
         if self
             .shared_state
             .models
-            .is_shard_in_progress(&candidate.model_id, candidate.shard_index)
+            .shard_marked_in_progress(&candidate.model_id, candidate.shard_index)
         {
             tracing::debug!(
                 model = %candidate.model_id,
                 shard = candidate.shard_index,
-                "Shard download already in progress, deferring"
+                "Shard already marked in progress, deferring"
             );
             return;
         }
@@ -70,7 +99,8 @@ impl AutoShardManager {
         // -- T8: mmproj full-file download (not byte-range) --
         if candidate.shard_index == crate::types::MMPROJ_SHARD_INDEX {
             let mmproj_permit = permit.take().expect("permit present on entry");
-            self.trigger_mmproj_download(candidate, model_dir, mmproj_permit)
+            let mmproj_claim = claim.take().expect("claim present on entry");
+            self.trigger_mmproj_download(candidate, model_dir, mmproj_permit, mmproj_claim)
                 .await;
             return;
         }
@@ -81,11 +111,14 @@ impl AutoShardManager {
         // will exist on disk but be smaller than `shard_size_bytes`.
         let shard_path = model_dir.join(format!("shard_{:03}.bin", candidate.shard_index));
         if shard_path.exists() {
-            // Check if this shard is currently being downloaded (by API handler or another cycle)
+            // Check if this shard is currently being downloaded (by API handler
+            // or another cycle). The map, not `is_shard_in_progress` — we hold
+            // this shard's writer claim ourselves from here on, so asking the
+            // full predicate would only find us.
             let is_downloading = self
                 .shared_state
                 .models
-                .is_shard_in_progress(&candidate.model_id, candidate.shard_index);
+                .shard_marked_in_progress(&candidate.model_id, candidate.shard_index);
 
             if is_downloading {
                 tracing::debug!(
@@ -291,8 +324,13 @@ impl AutoShardManager {
                 // The semaphore permit is moved into the task and dropped on completion,
                 // releasing the slot for the next download.
                 let hf_permit = permit.take().expect("permit present on entry");
+                let hf_claim = claim.take().expect("claim present on entry");
                 tokio::spawn(async move {
                     let _permit = hf_permit; // Hold permit for duration of download
+                                             // Held for the duration too: releasing it is what lets the
+                                             // next cycle fetch this shard, and it must not happen while
+                                             // we are still writing the .tmp.
+                    let _claim = hf_claim;
                     let (ptx, mut prx) = tokio::sync::mpsc::channel::<
                         crate::model::huggingface::DownloadProgress,
                     >(32);
@@ -754,6 +792,19 @@ e
                                 entry.state = crate::model::acquisition::AcquisitionState::Failed {
                                     reason: e,
                                 };
+                                // Give THIS shard a terminal mark, as the
+                                // probe-failure and index-out-of-range arms
+                                // above already do. Without it the shard stays
+                                // `Downloading` in the progress entry forever,
+                                // which now means the entry is never removed
+                                // (`remove_acquisition_if_idle`) and
+                                // `is_shard_in_progress` keeps returning true,
+                                // locking the shard out of every later cycle.
+                                // It used to be masked by the cleanup removing
+                                // the whole entry unconditionally — which is the
+                                // behaviour that caused the duplicate downloads
+                                // in the first place.
+                                entry.shard_progress.remove(&shard_idx);
                                 entry.log_push("HF download failed".into());
                             }
                             shared.schedule_acquisition_cleanup(model_id.clone());
@@ -912,10 +963,15 @@ e
                     // from shard_transfer.rs when retry_shard_or_fallback
                     // gives up, or from the stall watchdog on silent drop.
                     let p2p_permit = permit.take().expect("permit present on entry");
-                    self.shared_state
-                        .models
-                        .p2p_download_permits
-                        .insert(sid.clone(), (p2p_permit, std::time::Instant::now()));
+                    // The writer claim is parked with the permit, so the three
+                    // places that release the permit (success, retry give-up,
+                    // stall watchdog) release the claim too — by dropping the
+                    // tuple, with no release call of their own to forget.
+                    let p2p_claim = claim.take().expect("claim present on entry");
+                    self.shared_state.models.p2p_download_permits.insert(
+                        sid.clone(),
+                        (p2p_permit, p2p_claim, std::time::Instant::now()),
+                    );
                     let cmd = NetworkCommand::SendShardRequest {
                         target_peer_bytes: bytes,
                         request,
@@ -949,6 +1005,7 @@ e
         candidate: &ShardCandidate,
         model_dir: std::path::PathBuf,
         permit: tokio::sync::OwnedSemaphorePermit,
+        claim: crate::daemon::state::ShardDownloadClaim,
     ) {
         let mmproj_path = model_dir.join(crate::model::shard::MMPROJ_FILENAME);
         if mmproj_path.exists() {
@@ -1003,6 +1060,7 @@ e
 
         tokio::spawn(async move {
             let _permit = permit;
+            let _claim = claim;
             match crate::model::huggingface::download_model(&repo_id, &filename, &model_dir, None)
                 .await
             {

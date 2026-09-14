@@ -231,17 +231,41 @@ pub async fn download_shard(
         // this attempt. We refuse to resume unless the sidecar layout
         // hash exists AND matches the current layout. Mismatch or
         // missing sidecar → discard both files and restart.
-        let sidecar = tokio::fs::read(&layout_path).await.ok();
+        // Two very different things can put us on the restart path — the
+        // layout genuinely changed, or the sidecar could not be read — and a
+        // bare `.ok()` reports both as "missing", including a permission or
+        // I/O error that says nothing about the layout at all. Say which,
+        // because this line is the only evidence a field report can carry
+        // about why a shard restarted from zero.
+        let sidecar = match tokio::fs::read(&layout_path).await {
+            Ok(raw) => Some(raw),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => {
+                tracing::warn!(
+                    shard = shard_index,
+                    path = %layout_path.display(),
+                    error = %e,
+                    "Could not read the layout sidecar — treating it as absent, \
+                     so this shard restarts from the beginning"
+                );
+                None
+            }
+        };
         let layout_matches = sidecar
             .as_deref()
             .map(|raw| raw == layout_hash.as_slice())
             .unwrap_or(false);
         if !layout_matches {
+            let why = match sidecar.as_deref() {
+                None => "no layout sidecar alongside the .tmp",
+                Some(_) => "the remote file's tensor layout changed",
+            };
             tracing::info!(
                 shard = shard_index,
                 existing_bytes,
                 sidecar_present = sidecar.is_some(),
-                "HF layout drift detected (or sidecar missing) — discarding .tmp and restarting"
+                why,
+                "Cannot resume this partial shard — discarding .tmp and restarting"
             );
             let _ = tokio::fs::remove_file(&tmp_path).await;
             let _ = tokio::fs::remove_file(&layout_path).await;

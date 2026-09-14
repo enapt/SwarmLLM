@@ -575,6 +575,28 @@ pub async fn hf_download_shards(
         let mut failed = false;
 
         for &shard_idx in &shard_indices {
+            // Claim this shard's `.tmp` before writing a byte of it. The
+            // already-in-flight list from `begin_download` filtered the shards
+            // auto-manage had marked, but that list is a snapshot taken before
+            // this loop started and a download can begin at any point during
+            // it. Dropped at the end of each iteration, so the claim covers
+            // exactly this shard's transfer.
+            let _shard_claim = match download_shared.models.claim_shard_download(
+                &crate::types::ShardId {
+                    model_id: download_mid.clone(),
+                    index: shard_idx,
+                },
+            ) {
+                Some(c) => c,
+                None => {
+                    tracing::info!(
+                        model = %model_id_str,
+                        shard = shard_idx,
+                        "Shard is already being downloaded — leaving it to the download that has it"
+                    );
+                    continue;
+                }
+            };
             // Check cancellation flag and shutdown before each shard download
             if cancel_flag.load(std::sync::atomic::Ordering::Acquire) || *shutdown_rx.borrow() {
                 let reason = if *shutdown_rx.borrow() {
