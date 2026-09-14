@@ -377,3 +377,97 @@ object — that caller has less information and is about to flatten it.
 cycle.
 
 → gotcha #599
+
+## The app shell never page-scrolls, and on iOS that needs both halves
+
+**Rule:** `.claude/rules/architecture.md` § "The app shell never page-scrolls".
+
+### What this replaced
+
+`body` already said `overflow: hidden` and `.app-layout` was sized to the
+viewport, so the design was always "the page does not scroll; each long region
+scrolls inside itself". That held in every desktop browser and nowhere on
+iPad/iPhone Safari, where the whole dashboard scrolled as one block — sidebar,
+chat header and message list drifting together, the input reachable only by
+scrolling past everything above it (report #034, 2026-09-14).
+
+### Why neither half works alone
+
+1. **`overflow: hidden` on `body` is not enough on iOS.** The scrolling element
+   there is the documentElement, so it is set on `html` too — and the height is
+   FIXED rather than a minimum, because a minimum lets content grow the page
+   out from under the lock.
+2. **`100vh` on iOS is the chrome-COLLAPSED viewport**, taller than what is on
+   screen, so the shell rendered larger than the space it had.
+
+And the order is not free: **Safari measures `dvh` against that same larger
+viewport for as long as the page is itself scrollable.** So switching units
+alone changes nothing — the lock is what makes the unit correct. The report that
+found this said the two fixes were both needed; what it did not have is *why*,
+which is also what says the lock is the load-bearing half.
+
+### What a change must keep
+
+- Every `vh` length paired with a `dvh` one, `vh` first so a browser that does
+  not know the unit keeps today's behaviour. Guarded by
+  `every_viewport_height_in_css_has_a_dynamic_fallback_beside_it`, which fails
+  on a new bare `vh` AND on a removed `dvh` sibling.
+- **Check the inner scrollers before locking anything.** `.container`,
+  `.chat-messages` and `.session-list` all scroll internally; locking a page
+  where some long region does not makes it unreachable, which is far worse than
+  the bug being fixed.
+- A `touchmove` guard in JS is the other commonly-cited remedy and is
+  deliberately unused: it is easy to write one that also kills the inner
+  scrolling this layout depends on, and with nothing taller than the viewport
+  there is nowhere left to scroll to.
+
+⚠ **Verified by mechanism, not on the device** — no WebKit engine here, and this
+machine's window manager ignores resize, so narrow-viewport rendering is still
+unverified. The null control reproduces the symptom in Chrome by restoring
+exactly the two conditions and shows it gone with them. FUTURE_WORK #82 is the
+open follow-up: the on-screen keyboard has never been exercised against the
+now-locked shell.
+
+## One word per thing, in the UI, in every language
+
+**Rule:** `.claude/rules/architecture.md` § "One word per thing".
+
+### What this replaced
+
+The interface called a piece of a model a "shard", a "part" AND a "piece", and a
+machine a "peer", a "node", a "computer" AND a "device" — not by area, but
+mixed: `dashboard.info_shards` read "Parts" while the tip beside it read "All
+shards available", and one activity feed carried two spellings two lines apart.
+Every locale had inherited the split, several having added a third word of their
+own (Spanish used *fragmento*, *parte* and *pieza* for one thing).
+
+### The five surfaces
+
+Only the first is findable by searching for the old word, which is why the job
+was repeatedly estimated as smaller than it was:
+
+1. `frontend/i18n/*.json` — 21 locales.
+2. `frontend/index.html` fallback text inside `data-i18n` elements, which had
+   also DRIFTED from `en.json` independently.
+3. Rust `ActivityEvent` messages — shown verbatim when a `kind` has no
+   `activity.*` key.
+4. Labels assembled in a variable and only later interpolated into one of those
+   (`scan.rs`'s `shard_label`, four in `admin_models/shards.rs`).
+5. A helper that RETURNS the word: `ShardId::display_index` → `"part 15"`. This
+   one also explained a defect on screen the whole time and never reported —
+   "P2P: downloading shard shard 15 from peer", two callers writing the noun the
+   helper already supplied.
+
+### What a change must keep
+
+- The guard checks `en.json` only. Translations are prose in another language;
+  pinning their vocabulary from a Rust test would be guessing.
+- Two strings mean units of WORK rather than parts of a model
+  (`perf.served_detail`, `dashboard.stat_forwards_tip`) and keep "pieces"; they
+  are allowlisted by name.
+- **Identifiers, `shard_NNN.bin`, `ShardId`, `hosted_shards` and wire fields are
+  NOT renamed.** This is a change to what the UI says.
+- A **duplicated-word scan** is the detector for the failure a leftover scan
+  cannot see: when two source words map to one target nothing old remains, so
+  "is the old word gone?" answers yes while the sentence reads "computers
+  computers". Exclude grammatical reduplication ("vous vous").

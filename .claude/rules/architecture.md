@@ -70,6 +70,42 @@ When adding new fields to SharedState, put them in the appropriate sub-struct un
 
 → `docs/invariants/state-and-config.md`
 
+## The app shell never page-scrolls, and on iOS that needs both halves
+
+`html` AND `body` are locked (`height: 100dvh` with a `100vh` fallback first,
+`overflow: hidden`), because every long region already scrolls inside itself —
+`.container`, `.chat-messages`, `.session-list`. Two WebKit behaviours defeat
+the lock and they are **entangled**: `overflow: hidden` on `body` alone does not
+stop the page scrolling on iOS, and `100vh` there is the chrome-COLLAPSED
+viewport. Safari measures `dvh` against that larger viewport for as long as the
+page is itself scrollable, so **the lock is what makes the unit correct** — a
+`dvh`-only change does nothing.
+
+Every `vh` length is paired with a `dvh` one, guarded by
+`every_viewport_height_in_css_has_a_dynamic_fallback_beside_it`. Before locking
+a page, check every long region scrolls internally: locking one that does not
+makes it unreachable, which is worse than the bug.
+
+→ `docs/invariants/frontend.md`
+
+## One word per thing, in the UI, in every language
+
+A piece of a model is a **part**; a machine is a **computer**. Not "shard",
+"piece", "peer" or "node" — all four were in use at once, sometimes two in one
+sentence. The pool feature is the single exception and keeps **device**:
+machines you own and link are a different idea from anyone's computer on the
+swarm, and "My Devices" is a nav destination named for the first.
+
+`the_english_ui_uses_one_word_for_a_model_part_and_one_for_a_machine` fails the
+build on either old word in `en.json`. **The vocabulary lives on five surfaces**
+and only the first is findable by searching for the old word: the locale files,
+the markup's `data-i18n` fallback text, Rust `ActivityEvent` messages, labels
+assembled in a variable and only later interpolated into one, and a helper that
+RETURNS the word (`ShardId::display_index`). Identifiers, `shard_NNN.bin` and
+wire fields are deliberately NOT renamed.
+
+→ `docs/invariants/frontend.md`
+
 ## "Is the empty chat state showing?" is a question about the DOM
 
 **`App.chat.refreshEmptyState()`** rebuilds `#chat-empty` in place when that is
