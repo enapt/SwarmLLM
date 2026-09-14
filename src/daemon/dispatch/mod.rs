@@ -1007,37 +1007,62 @@ pub(crate) async fn dispatch_network_messages(
                                             &announce.node_id,
                                             &shared_state.nickname_registry,
                                         );
-                                        // ONLY where the announcement changed what we knew.
+                                        // ONE entry per announcement, and only where it
+                                        // changed what we knew.
                                         //
-                                        // Peers re-announce on a timer and the activity history
-                                        // is a 100-entry ring, so emitting per announcement did
-                                        // not merely add noise — it emptied the ring of
-                                        // everything else. Measured on this node 2026-09-14:
-                                        // 103 of 112 events in sixty seconds were this line, so
-                                        // the whole history — which is also the replay a
-                                        // dashboard receives when it opens, and the "recent
-                                        // activity" section of the pasteable diagnostics report
-                                        // — turned over in under a minute and held nothing the
-                                        // user had done. `note_build_tag` below learned the same
-                                        // lesson from the same peers: report the transition,
-                                        // never the timer. The per-announce DIAG above is
-                                        // deliberately unaffected; it is the durable record its
-                                        // own comment says the ring cannot be.
-                                        for (mid, (_seen, newly)) in &models_announced {
-                                            if *newly == 0 {
-                                                continue;
-                                            }
+                                        // `activity_history` is a 100-entry ring, and it is not
+                                        // only the Activity panel: it is the replay a dashboard
+                                        // receives when it opens, and the "recent activity"
+                                        // section of the pasteable diagnostics report. Measured
+                                        // on the deployed .181 binary, that ring held 102
+                                        // announcements out of 114 entries — 89% — so both
+                                        // surfaces showed almost nothing the user had done.
+                                        //
+                                        // The cause is a BURST, not a rate: an idle node emitted
+                                        // zero of these in 87 seconds, but a disconnect calls
+                                        // `remove_peer_from_all_shards`, so every reconnect
+                                        // re-records every shard and fired one event PER MODEL —
+                                        // 8-16 for the peers here, times ~15 reconnects in 90
+                                        // minutes. Collapsing the burst is what bounds it; the
+                                        // change gate below only catches the sender's every-10th
+                                        // full re-announce, which is already delta-compressed at
+                                        // `health::monitor`.
+                                        //
+                                        // The per-announce DIAG above is deliberately
+                                        // unaffected — its own comment says it exists because
+                                        // the ring cannot be the durable record.
+                                        let changed: Vec<(&String, usize)> = models_announced
+                                            .iter()
+                                            .filter(|(_, (_seen, newly))| *newly > 0)
+                                            .map(|(mid, (_seen, newly))| (mid, *newly))
+                                            .collect();
+                                        if changed.len() == 1 {
+                                            // One model: name it, and keep `with_model` so the
+                                            // per-model activity filter still finds it.
+                                            let (mid, newly) = changed[0];
                                             let mname = shared_state.model_registry
                                                 .get_manifest(&crate::types::ModelId(mid.clone()))
                                                 .map(|m| m.name.clone());
                                             shared_state.emit_activity(crate::daemon::state::ActivityEvent::new(
                                                 "model",
                                                 "shard_announced",
-                                                format!("{} announced {} part{} of {}", peer_label, newly, if *newly != 1 { "s" } else { "" }, mname.as_deref().unwrap_or(mid)),
+                                                format!("{} announced {} part{} of {}", peer_label, newly, if newly != 1 { "s" } else { "" }, mname.as_deref().unwrap_or(mid)),
                                             )
                                             .with_model(mid.clone())
                                             .with_node(format!("{}", announce.node_id))
-                                            .with_detail_num(*newly as i64));
+                                            .with_detail_num(newly as i64));
+                                        } else if changed.len() > 1 {
+                                            // A reconnect, almost always. One line saying so
+                                            // beats sixteen naming models the reader did not ask
+                                            // about; the model card carries the per-model detail.
+                                            let parts: usize = changed.iter().map(|(_, n)| n).sum();
+                                            shared_state.emit_activity(crate::daemon::state::ActivityEvent::new(
+                                                "model",
+                                                "shard_announced",
+                                                format!("{} announced {} parts across {} models", peer_label, parts, changed.len()),
+                                            )
+                                            .with_node(format!("{}", announce.node_id))
+                                            .with_detail_num(parts as i64));
                                         }
                                         // Wake auto-manage so it re-evaluates rarity scores —
                                         // new shard holders change which shards are most needed.
