@@ -771,6 +771,7 @@
   "network.not_devices": "هذا يربطك بشبكة SwarmLLM. لربط أجهزتك الخاصة، استخدم تبويب أجهزتي بدلاً من ذلك.",
   "network.other_peer_address": "عنوان الند لمستخدم آخر",
   "network.peer_address_aria": "عنوان الند",
+  "network.peers_unreachable": "تعذّر الوصول إلى العقدة الآن، لذا قد تكون هذه القائمة قديمة. الأرجح أنه انقطاع مؤقت — ستُحدَّث الصفحة تلقائيًا.",
   "network.route_key_failed": "طلب أخفق",
   "network.route_key_newest": "الأحدث",
   "network.route_key_ran": "مرّ طلب من هنا",

@@ -771,6 +771,7 @@
   "network.not_devices": "Ceci vous connecte au réseau SwarmLLM. Pour lier vos propres appareils, utilisez l'onglet Mes appareils.",
   "network.other_peer_address": "Adresse de pair d'un autre utilisateur",
   "network.peer_address_aria": "Adresse de pair",
+  "network.peers_unreachable": "Impossible de joindre votre nœud à l'instant, cette liste peut donc être obsolète. C'est sans doute passager — la page se rafraîchira d'elle-même.",
   "network.route_key_failed": "Une requête qui a échoué",
   "network.route_key_newest": "La plus récente",
   "network.route_key_ran": "Une requête est passée par ici",

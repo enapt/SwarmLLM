@@ -771,6 +771,7 @@
   "network.not_devices": "Toto vás připojuje k síti SwarmLLM. Pro propojení vlastních zařízení použijte místo toho kartu Moje zařízení.",
   "network.other_peer_address": "Adresa uzlu jiného uživatele",
   "network.peer_address_aria": "Adresa uzlu",
+  "network.peers_unreachable": "Právě se nepodařilo spojit s vaším uzlem, takže tento seznam může být zastaralý. Nejspíš jen výpadek — stránka se obnoví sama.",
   "network.route_key_failed": "Požadavek, který selhal",
   "network.route_key_newest": "Nejnovější",
   "network.route_key_ran": "Tudy prošel požadavek",

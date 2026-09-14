@@ -771,6 +771,7 @@
   "network.not_devices": "Dit verbindt je met het SwarmLLM-netwerk. Om je eigen apparaten te koppelen, gebruik je in plaats hiervan het tabblad Mijn apparaten.",
   "network.other_peer_address": "Peeradres van een andere gebruiker",
   "network.peer_address_aria": "Peeradres",
+  "network.peers_unreachable": "Je node was net niet bereikbaar, dus deze lijst kan verouderd zijn. Waarschijnlijk een hapering — de pagina ververst vanzelf.",
   "network.route_key_failed": "Een mislukt verzoek",
   "network.route_key_newest": "De nieuwste",
   "network.route_key_ran": "Hier liep een verzoek langs",

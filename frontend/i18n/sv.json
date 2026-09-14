@@ -771,6 +771,7 @@
   "network.not_devices": "Detta ansluter dig till SwarmLLM-nätverket. För att länka dina egna enheter, använd fliken Mina enheter istället.",
   "network.other_peer_address": "En annan användares peeradress",
   "network.peer_address_aria": "Peeradress",
+  "network.peers_unreachable": "Kunde inte nå din nod just nu, så listan kan vara inaktuell. Troligen bara en hicka – sidan uppdateras av sig själv.",
   "network.route_key_failed": "En förfrågan som misslyckades",
   "network.route_key_newest": "Den senaste",
   "network.route_key_ran": "En förfrågan gick den här vägen",

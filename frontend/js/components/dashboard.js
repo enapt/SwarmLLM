@@ -2102,7 +2102,14 @@
 
       if (!peers || peers.length === 0) {
         if (summary) summary.textContent = '';
-        list.innerHTML = '<div class="empty-state" style="padding:16px 0"><div class="empty-icon">\u{1F310}</div><p>' + I18n.t('network.no_peers_yet') + '</p></div>';
+        // "No peers yet" is advice — share your address, wait for the swarm. It
+        // is the wrong advice when the empty list came from a request that
+        // FAILED rather than from a node that answered "none": nothing the
+        // reader does about their swarm will help, because the page never
+        // reached their own node.
+        var reached = !App.data.loadReachedDaemon || App.data.loadReachedDaemon('peers');
+        var msg = reached ? I18n.t('network.no_peers_yet') : I18n.t('network.peers_unreachable');
+        list.innerHTML = '<div class="empty-state" style="padding:16px 0"><div class="empty-icon">\u{1F310}</div><p>' + U.escapeHtml(msg) + '</p></div>';
         return;
       }
 
@@ -2238,6 +2245,12 @@
     },
 
     loadNetworkData: async function() {
+      // `loadPeers` does not reject — it records whether it reached the daemon
+      // and returns what it has, so `renderPeers` above picks the right wording
+      // for an empty list. This catch used to be the failure branch and could
+      // never run; worse, it rendered the SAME "no peers yet" advice as
+      // success, so the one place written to handle a failure said nothing
+      // about it. Kept only for a genuine throw from the render itself.
       try {
         var peers = await App.data.loadPeers();
         App.dashboard.renderPeers(peers);
@@ -2245,7 +2258,10 @@
         var list = document.getElementById('peers-list');
         var pLoading2 = document.getElementById('peers-loading');
         if (pLoading2) pLoading2.remove();
-        if (list) list.innerHTML = '<div class="empty-state" style="padding:16px 0"><div class="empty-icon">\u{1F310}</div><p>' + I18n.t('network.no_peers_yet') + '</p></div>';
+        if (list) {
+          list.innerHTML = '<div class="empty-state" style="padding:16px 0"><div class="empty-icon">\u{1F310}</div><p>' +
+            U.escapeHtml(I18n.t('network.peers_unreachable')) + '</p></div>';
+        }
       }
     },
 

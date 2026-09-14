@@ -771,6 +771,7 @@
   "network.not_devices": "Điều này kết nối bạn với mạng SwarmLLM. Để liên kết thiết bị của riêng bạn, hãy dùng tab Thiết bị của tôi.",
   "network.other_peer_address": "Địa chỉ nút của người dùng khác",
   "network.peer_address_aria": "Địa chỉ nút ngang hàng",
+  "network.peers_unreachable": "Hiện không kết nối được tới nút của bạn nên danh sách này có thể đã cũ. Có lẽ chỉ là trục trặc tạm thời — trang sẽ tự làm mới.",
   "network.route_key_failed": "Một yêu cầu thất bại",
   "network.route_key_newest": "Mới nhất",
   "network.route_key_ran": "Một yêu cầu đã đi theo đường này",

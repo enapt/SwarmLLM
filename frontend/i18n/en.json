@@ -771,6 +771,7 @@
   "network.not_devices": "This connects you to the SwarmLLM network. To link your own devices, use the My Devices tab instead.",
   "network.other_peer_address": "Another User's Peer Address",
   "network.peer_address_aria": "Peer address",
+  "network.peers_unreachable": "Couldn't reach your node just now, so this list may be out of date. It's probably a hiccup — the page will refresh on its own.",
   "network.route_key_failed": "A request that failed",
   "network.route_key_newest": "Most recent",
   "network.route_key_ran": "A request ran this way",

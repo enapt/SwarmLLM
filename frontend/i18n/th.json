@@ -771,6 +771,7 @@
   "network.not_devices": "นี่เชื่อมต่อคุณกับเครือข่าย SwarmLLM ในการเชื่อมต่ออุปกรณ์ของคุณเอง ให้ใช้แท็บอุปกรณ์ของฉันแทน",
   "network.other_peer_address": "ที่อยู่เพียร์ของผู้ใช้อื่น",
   "network.peer_address_aria": "ที่อยู่เพียร์",
+  "network.peers_unreachable": "ตอนนี้ติดต่อโหนดของคุณไม่ได้ รายการนี้จึงอาจไม่ใช่ข้อมูลล่าสุด น่าจะเป็นเพียงชั่วคราว — หน้าเว็บจะรีเฟรชเอง",
   "network.route_key_failed": "คำขอที่ล้มเหลว",
   "network.route_key_newest": "ล่าสุด",
   "network.route_key_ran": "มีคำขอวิ่งผ่านเส้นทางนี้",

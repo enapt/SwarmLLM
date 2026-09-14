@@ -771,6 +771,7 @@
   "network.not_devices": "Ini menghubungkan Anda ke jaringan SwarmLLM. Untuk menghubungkan perangkat Anda sendiri, gunakan tab Perangkat Saya.",
   "network.other_peer_address": "Alamat Peer Pengguna Lain",
   "network.peer_address_aria": "Alamat peer",
+  "network.peers_unreachable": "Node Anda tidak dapat dihubungi barusan, jadi daftar ini mungkin sudah usang. Kemungkinan hanya gangguan sesaat — halaman akan menyegarkan sendiri.",
   "network.route_key_failed": "Permintaan yang gagal",
   "network.route_key_newest": "Paling baru",
   "network.route_key_ran": "Sebuah permintaan lewat sini",

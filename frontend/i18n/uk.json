@@ -771,6 +771,7 @@
   "network.not_devices": "Це підключає вас до мережі SwarmLLM. Для об'єднання власних пристроїв використовуйте вкладку Мої пристрої.",
   "network.other_peer_address": "Адреса вузла іншого користувача",
   "network.peer_address_aria": "Адреса піра",
+  "network.peers_unreachable": "Щойно не вдалося зв'язатися з вашим вузлом, тож цей список може бути застарілим. Імовірно, це тимчасово — сторінка оновиться сама.",
   "network.route_key_failed": "Запит, який не вдався",
   "network.route_key_newest": "Найновіший",
   "network.route_key_ran": "Тут пройшов запит",

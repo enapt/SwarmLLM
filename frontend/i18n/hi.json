@@ -771,6 +771,7 @@
   "network.not_devices": "यह आपको SwarmLLM नेटवर्क से जोड़ता है। अपने स्वयं के डिवाइस लिंक करने के लिए, इसके बजाय मेरे डिवाइस टैब का उपयोग करें।",
   "network.other_peer_address": "किसी अन्य उपयोगकर्ता का पीयर पता",
   "network.peer_address_aria": "पीयर पता",
+  "network.peers_unreachable": "अभी आपके नोड से संपर्क नहीं हो सका, इसलिए यह सूची पुरानी हो सकती है। संभवतः यह अस्थायी है — पृष्ठ अपने आप ताज़ा हो जाएगा।",
   "network.route_key_failed": "एक अनुरोध जो विफल रहा",
   "network.route_key_newest": "सबसे नया",
   "network.route_key_ran": "एक अनुरोध यहाँ से गुज़रा",

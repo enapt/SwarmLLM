@@ -771,6 +771,7 @@
   "network.not_devices": "To łączy Cię z siecią SwarmLLM. Aby połączyć własne urządzenia, użyj zamiast tego zakładki Moje urządzenia.",
   "network.other_peer_address": "Adres węzła innego użytkownika",
   "network.peer_address_aria": "Adres węzła",
+  "network.peers_unreachable": "Nie udało się teraz połączyć z Twoim węzłem, więc ta lista może być nieaktualna. To pewnie chwilowa usterka — strona odświeży się sama.",
   "network.route_key_failed": "Żądanie, które się nie powiodło",
   "network.route_key_newest": "Najnowsze",
   "network.route_key_ran": "Tędy przeszło żądanie",

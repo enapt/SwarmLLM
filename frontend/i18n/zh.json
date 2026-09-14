@@ -771,6 +771,7 @@
   "network.not_devices": "此操作将您连接到 SwarmLLM 网络。如需链接您自己的设备，请使用「我的设备」标签页。",
   "network.other_peer_address": "另一位用户的对等地址",
   "network.peer_address_aria": "对等地址",
+  "network.peers_unreachable": "刚才无法连接到你的节点，这份列表可能不是最新的。多半只是短暂中断，页面会自动刷新。",
   "network.route_key_failed": "失败的请求",
   "network.route_key_newest": "最新的一条",
   "network.route_key_ran": "有请求从这里经过",

@@ -771,6 +771,7 @@
   "network.not_devices": "Dies verbindet dich mit dem SwarmLLM-Netzwerk. Um deine eigenen Geräte zu verknüpfen, nutze stattdessen die Registerkarte Meine Geräte.",
   "network.other_peer_address": "Peer-Adresse eines anderen Nutzers",
   "network.peer_address_aria": "Peer-Adresse",
+  "network.peers_unreachable": "Dein Knoten war gerade nicht erreichbar, diese Liste kann also veraltet sein. Wahrscheinlich nur ein Aussetzer – die Seite aktualisiert sich von selbst.",
   "network.route_key_failed": "Eine fehlgeschlagene Anfrage",
   "network.route_key_newest": "Die neueste",
   "network.route_key_ran": "Hier lief eine Anfrage entlang",

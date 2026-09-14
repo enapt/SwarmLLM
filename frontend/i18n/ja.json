@@ -771,6 +771,7 @@
   "network.not_devices": "これはSwarmLLMネットワークへの接続です。自分のデバイスをリンクするには、マイデバイスタブを使用してください。",
   "network.other_peer_address": "他のユーザーのピアアドレス",
   "network.peer_address_aria": "ピアアドレス",
+  "network.peers_unreachable": "たった今ノードに接続できなかったため、この一覧は古い可能性があります。おそらく一時的なもので、ページは自動的に更新されます。",
   "network.route_key_failed": "失敗したリクエスト",
   "network.route_key_newest": "最新のもの",
   "network.route_key_ran": "リクエストがここを通りました",

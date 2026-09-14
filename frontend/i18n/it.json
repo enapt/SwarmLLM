@@ -771,6 +771,7 @@
   "network.not_devices": "Questo ti connette alla rete SwarmLLM. Per collegare i tuoi dispositivi, usa invece la scheda I miei dispositivi.",
   "network.other_peer_address": "Indirizzo peer di un altro utente",
   "network.peer_address_aria": "Indirizzo peer",
+  "network.peers_unreachable": "Non è stato possibile raggiungere il tuo nodo in questo momento, quindi l'elenco potrebbe non essere aggiornato. Probabilmente è temporaneo: la pagina si aggiornerà da sola.",
   "network.route_key_failed": "Una richiesta fallita",
   "network.route_key_newest": "La più recente",
   "network.route_key_ran": "Qui è passata una richiesta",

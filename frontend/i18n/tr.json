@@ -771,6 +771,7 @@
   "network.not_devices": "Bu sizi SwarmLLM ağına bağlar. Kendi cihazlarınızı bağlamak için bunun yerine Cihazlarım sekmesini kullanın.",
   "network.other_peer_address": "Başka Bir Kullanıcının Eş Adresi",
   "network.peer_address_aria": "Eş adresi",
+  "network.peers_unreachable": "Az önce düğümünüze ulaşılamadı, bu yüzden bu liste güncel olmayabilir. Muhtemelen geçici bir aksaklık — sayfa kendiliğinden yenilenecek.",
   "network.route_key_failed": "Başarısız olan bir istek",
   "network.route_key_newest": "En yenisi",
   "network.route_key_ran": "Buradan bir istek geçti",

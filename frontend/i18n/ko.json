@@ -771,6 +771,7 @@
   "network.not_devices": "이것은 SwarmLLM 네트워크에 연결합니다. 자신의 기기를 연결하려면 대신 내 기기 탭을 사용하세요.",
   "network.other_peer_address": "다른 사용자의 피어 주소",
   "network.peer_address_aria": "피어 주소",
+  "network.peers_unreachable": "방금 노드에 연결하지 못해 이 목록이 최신이 아닐 수 있습니다. 일시적인 문제일 가능성이 크며, 페이지는 자동으로 새로고침됩니다.",
   "network.route_key_failed": "실패한 요청",
   "network.route_key_newest": "가장 최근",
   "network.route_key_ran": "요청이 이 경로로 지나갔습니다",
