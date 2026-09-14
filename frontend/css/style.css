@@ -284,15 +284,52 @@
    already found — and shrank every rem in the type scale to 87.5% of its
    stated value, putting body text at 11.4px and the smallest labels at 8.75px.
    Leaving it unset means 1rem is the reader's own preference, 16px by default. */
-html { -webkit-font-smoothing: antialiased; }
+/* The app shell must never page-scroll. Every long region scrolls inside
+   itself — `.container` for each view, `.chat-messages`, `.session-list` — and
+   the header is `position: fixed`. That design was always the intent; it just
+   was not enforced anywhere iOS could see.
+
+   Two WebKit behaviours broke it on iPad/iPhone Safari, and they are entangled,
+   so neither can be fixed alone (report #034, 2026-09-14):
+
+   1. `overflow: hidden` on `body` ALONE does not stop the page scrolling on
+      iOS, because the scrolling element there is the documentElement. So it is
+      set on BOTH, and the height is fixed rather than a minimum — a minimum
+      lets content grow the page out from under the lock.
+   2. `100vh` on iOS means the viewport with the browser chrome COLLAPSED,
+      which is taller than what is actually on screen, so the shell rendered
+      taller than the visible area. `dvh` tracks the real one (Safari 15.4+).
+
+   The order matters: Safari measures `dvh` against the LARGE viewport for as
+   long as the page is itself scrollable, so the lock is what makes the unit
+   correct, not the other way round.
+
+   The `vh` line stays first as the fallback for anything that does not know
+   `dvh`; that is exactly today's behaviour, so nothing regresses by not
+   knowing the unit.
+
+   A `touchmove` guard in JS is the other commonly-cited fix and is
+   deliberately NOT used: it is easy to write one that also kills the inner
+   scrolling this layout depends on, and with nothing taller than the viewport
+   there is no longer anywhere for the page to scroll TO. */
+html {
+  -webkit-font-smoothing: antialiased;
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
+}
 
 body {
   font-family: var(--font-sans);
   background: var(--bg-primary);
   color: var(--text-primary);
   line-height: 1.6;
-  min-height: 100vh;
+  height: 100vh;
+  height: 100dvh;
   overflow: hidden;
+  /* No rubber-banding past the end of an inner scroller — on a locked shell
+     that only ever looks like the page coming unstuck. */
+  overscroll-behavior: none;
 }
 
 a { color: var(--accent); text-decoration: none; transition: color var(--transition); }
@@ -526,6 +563,7 @@ a:hover { color: var(--accent-hover); }
 .app-layout {
   display: flex;
   height: calc(100vh - var(--chrome-top));
+  height: calc(100dvh - var(--chrome-top));
   margin-top: var(--chrome-top);
 }
 
@@ -772,7 +810,11 @@ a:hover { color: var(--accent-hover); }
   padding: 24px 28px;
   width: 90%;
   max-width: 520px;
+  /* Measured against the visible viewport, not the chrome-collapsed one: this
+     sits in a fixed overlay, so anything taller than the screen has its ends
+     cut off with no way to scroll to them. Same reasoning as `html` above. */
   max-height: 85vh;
+  max-height: 85dvh;
   overflow-y: auto;
   box-shadow: var(--shadow-lg);
 }
@@ -1814,7 +1856,9 @@ a:hover { color: var(--accent-hover); }
     width: 100vw;
     max-width: 100vw;
     height: 100vh;
+    height: 100dvh;
     max-height: 100vh;
+    max-height: 100dvh;
     border-radius: 0;
     padding: 16px;
   }
@@ -4301,7 +4345,7 @@ textarea.pool-code-input { min-height: 4.5em; }
   background: var(--yellow, #eab308); color: var(--bg-primary, #0a0e14);
   font-size: var(--fs-lg); font-weight: 500; line-height: 1.4;
   box-shadow: 0 2px 8px rgba(0,0,0,0.3);
-  max-height: 60vh; overflow-y: auto;
+  max-height: 60vh; max-height: 60dvh; overflow-y: auto;
 }
 .remote-dashboard-banner-form { display: flex; gap: 0.4rem; flex-shrink: 0; }
 .remote-dashboard-banner-form input {

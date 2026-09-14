@@ -6658,3 +6658,111 @@ fn the_windows_gpu_update_swaps_one_file_and_the_cuda_pin_still_allows_that() {
          unpacks the zip, this guard and the CUDA pin comment above it are both stale"
     );
 }
+
+/// Every `vh` length in the stylesheets is paired with a `dvh` one.
+///
+/// `100vh` on iOS Safari means the viewport with the browser chrome COLLAPSED,
+/// which is taller than what is on screen. Sizing the app shell from it made
+/// the whole page scroll as one block on iPad — sidebar, chat header and
+/// message list drifting together, with the input reachable only by scrolling
+/// past everything above it (report #034, 2026-09-14). `dvh` tracks the
+/// viewport actually visible.
+///
+/// The pattern is a `vh` declaration immediately followed by its `dvh` sibling:
+/// a browser that does not know `dvh` drops the second and keeps today's
+/// behaviour, and one that does takes the second. Which means a NEW `vh` added
+/// on its own is invisible — it works everywhere the author can test and is
+/// wrong on the one engine they cannot. That is what this catches.
+///
+/// If you are here because this went red: add `<same-property>: <n>dvh;`
+/// directly after the `vh` line, or on the same line for a compact rule.
+#[test]
+fn every_viewport_height_in_css_has_a_dynamic_fallback_beside_it() {
+    // Block comments hold prose about `100vh` and must not be scanned.
+    fn strip_comments(src: &str) -> String {
+        let mut out = String::with_capacity(src.len());
+        let b = src.as_bytes();
+        let mut i = 0;
+        while i < b.len() {
+            if b[i] == b'/' && i + 1 < b.len() && b[i + 1] == b'*' {
+                // Keep newlines so line numbers survive.
+                let mut j = i + 2;
+                while j + 1 < b.len() && !(b[j] == b'*' && b[j + 1] == b'/') {
+                    if b[j] == b'\n' {
+                        out.push('\n');
+                    }
+                    j += 1;
+                }
+                i = (j + 2).min(b.len());
+            } else {
+                out.push(b[i] as char);
+                i += 1;
+            }
+        }
+        out
+    }
+
+    // A `vh` length, but never `dvh`/`svh`/`lvh` (the `\D` guard) and never
+    // `vw`.
+    fn has_bare_vh(line: &str) -> bool {
+        let bytes = line.as_bytes();
+        let mut idx = 0;
+        while let Some(found) = line[idx..].find("vh") {
+            let at = idx + found;
+            let prev = if at == 0 { b' ' } else { bytes[at - 1] };
+            let after_ok = bytes.get(at + 2).is_none_or(|c| !c.is_ascii_alphanumeric());
+            // A digit before `vh` is a length; a letter (d/s/l) is another unit.
+            if prev.is_ascii_digit() && after_ok {
+                return true;
+            }
+            idx = at + 2;
+        }
+        false
+    }
+
+    let dir = repo_root().join("frontend/css");
+    let mut offenders = Vec::new();
+    let mut paired = 0usize;
+
+    for entry in std::fs::read_dir(&dir).expect("read frontend/css") {
+        let path = entry.expect("dir entry").path();
+        if path.extension().is_none_or(|e| e != "css") {
+            continue;
+        }
+        let raw = std::fs::read_to_string(&path).expect("read css");
+        let text = strip_comments(&raw);
+        let lines: Vec<&str> = text.lines().collect();
+        for (i, line) in lines.iter().enumerate() {
+            if !has_bare_vh(line) {
+                continue;
+            }
+            let next = lines.get(i + 1).copied().unwrap_or("");
+            if line.contains("dvh") || next.contains("dvh") {
+                paired += 1;
+                continue;
+            }
+            offenders.push(format!(
+                "{}:{}: {}",
+                path.file_name().unwrap().to_string_lossy(),
+                i + 1,
+                line.trim()
+            ));
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "a `vh` length with no `dvh` beside it sizes the layout from iOS \
+         Safari's chrome-collapsed viewport, which is taller than the screen \
+         (report #034). Add the `dvh` sibling directly after each:\n  {}",
+        offenders.join("\n  ")
+    );
+
+    // The scanner must be able to SEE the pairs, or it passes by finding
+    // nothing — the failure mode of every guard in this file (gotcha #413).
+    assert!(
+        paired >= 6,
+        "expected to find the shell and modal `vh`/`dvh` pairs; found {paired}. \
+         Either they were removed or this scanner stopped matching them."
+    );
+}

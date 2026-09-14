@@ -269,7 +269,9 @@
 .cc-expand-modal {
   background: var(--bg-primary); border: 1px solid var(--border);
   border-radius: var(--radius-lg); width: 92%; max-width: 960px;
-  max-height: 90vh; display: flex; flex-direction: column;
+  /* `dvh`, for the reason given at `html` in style.css: this is inside a fixed
+     overlay, and `vh` on iOS is the chrome-collapsed viewport. */
+  max-height: 90vh; max-height: 90dvh; display: flex; flex-direction: column;
   box-shadow: 0 20px 60px rgba(0,0,0,0.5);
 }
 .cc-expand-header {

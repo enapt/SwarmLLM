@@ -35,6 +35,16 @@
   running. Off by default — the ordinary status line is enough for most people —
   and useful if you are testing a swarm.
 
+### Fixed
+
+- **On an iPad or iPhone, the whole page scrolled instead of just the chat.**
+  The message list, the session list down the side and the chat header all moved
+  together as one long page, so reaching the box you type in meant scrolling
+  past everything above it — and the session list slid out of step with the
+  conversation while you did. Two quirks of Safari on iOS combined to defeat a
+  layout that behaves correctly in every desktop browser; both are now handled.
+  Nothing changes on desktop.
+
 ## [0.3.180-alpha] — 2026-09-14
 
 Two problems reported from people's own machines, and what auditing around them
