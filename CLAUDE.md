@@ -231,7 +231,7 @@ All 20 build phases complete. All subsystems wired — no stubs. **2683 lib (dev
 `~/.local/bin/swarmllm.0.3.178-alpha.bak` (3 kept: .176/.177/.178). What .179
 carries is the one-liner in the round history below.
 
-**⚠ `main` carries 16 UNRELEASED commits (`4b96d5e6`..`46d99b2e`, 2026-09-14).**
+**⚠ `main` carries 17 UNRELEASED commits (`4b96d5e6`..`44552571`, 2026-09-14).**
 CI 14/14 green on the head, `check_ci_gate.sh` 14=14 against a COMPLETED run.
 Full detail: `memory/round_log_0914_shard_download_restart_loop.md`. Headlines:
 
