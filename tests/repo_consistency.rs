@@ -2370,26 +2370,43 @@ fn a_streamed_error_names_the_same_failure_as_its_non_streaming_sibling() {
 ///
 /// The shape this catches: an `Err` arm that, within a few lines, produces the
 /// literal `"stop"`. A failure has `StreamEvent::Error` for exactly this.
+/// **Both streaming surfaces are scanned.** This checked only the OpenAI one
+/// until 2026-09-14, when an audit pointed out the Anthropic sibling was
+/// correct by hand-inspection and unguarded — which is how the OpenAI one got
+/// this way in the first place. The terminal literal differs: OpenAI ends a
+/// natural reply with `finish_reason: "stop"`, Anthropic with
+/// `stop_reason: "end_turn"`. Neither means "something went wrong", and the
+/// Anthropic surface has `AnthropicSseEvent::Error` for that.
 #[test]
 fn a_stream_that_fails_never_pretends_the_model_chose_to_stop() {
     let root = repo_root();
-    let rel = "src/api/openai/streaming.rs";
-    let src = std::fs::read_to_string(root.join(rel)).unwrap_or_else(|e| panic!("read {rel}: {e}"));
-    let lines: Vec<&str> = src.lines().collect();
-    for (i, line) in lines.iter().enumerate() {
-        let trimmed = line.trim_start();
-        let is_err_arm = trimmed.starts_with("Err(") && trimmed.contains("=>");
-        if !is_err_arm {
-            continue;
+    // (file, the literal that means "the model finished normally")
+    let surfaces: &[(&str, &str)] = &[
+        ("src/api/openai/streaming.rs", "\"stop\""),
+        ("src/api/anthropic/sse.rs", "\"end_turn\""),
+        ("src/api/anthropic/handlers.rs", "\"end_turn\""),
+    ];
+    for (rel, natural_end) in surfaces {
+        let src =
+            std::fs::read_to_string(root.join(rel)).unwrap_or_else(|e| panic!("read {rel}: {e}"));
+        let lines: Vec<&str> = src.lines().collect();
+        for (i, line) in lines.iter().enumerate() {
+            let trimmed = line.trim_start();
+            let is_err_arm = trimmed.starts_with("Err(") && trimmed.contains("=>");
+            if !is_err_arm {
+                continue;
+            }
+            let window = lines[i..lines.len().min(i + 10)].join("\n");
+            assert!(
+                !window.contains(natural_end),
+                "{rel}:{} — an Err arm ends the stream with {natural_end}, which means the \
+                 model chose to stop:\n{window}\n\
+                 report the failure as an error event (typed via \
+                 crate::error::classify_error) instead, so a streaming client hears the \
+                 same failure its non-streaming sibling would",
+                i + 1
+            );
         }
-        let window = lines[i..lines.len().min(i + 10)].join("\n");
-        assert!(
-            !window.contains("\"stop\""),
-            "{rel}:{} — an Err arm ends the stream with finish_reason \"stop\":\n{window}\n\
-             send StreamEvent::Error (typed via crate::error::classify_error) instead, so a \
-             streaming client hears the same failure its non-streaming sibling would",
-            i + 1
-        );
     }
 }
 

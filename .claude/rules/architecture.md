@@ -1348,7 +1348,11 @@ OpenAI streaming surface is `StreamEvent::Error`, typed through
 `classify_error`, and no finish delta at all; the Anthropic sibling is
 `AnthropicSseEvent::Error`. `a_stream_that_fails_never_pretends_the_model_chose_to_stop`
 in `tests/repo_consistency.rs` fails the build on an `Err` arm that produces the
-literal `"stop"` within a few lines.
+literal for a natural finish within a few lines — **on BOTH surfaces**:
+`"stop"` in `api/openai/streaming.rs`, `"end_turn"` in `api/anthropic/{sse,
+handlers}.rs`. It scanned only the OpenAI one until 2026-09-14; the Anthropic
+sibling was correct by hand-inspection and unguarded, which is how the OpenAI
+one came to need the guard in the first place.
 
 → `docs/invariants/api-surfaces.md`
 
