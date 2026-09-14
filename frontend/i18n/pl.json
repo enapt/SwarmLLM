@@ -446,6 +446,8 @@
   "dashboard.say_at_risk": "Zagrożony — {count} części jest tylko na jednym komputerze. Gdy się wyłączy, ten model przestanie działać.",
   "dashboard.say_incomplete": "W roju brakuje {count} części. Ten model nie zadziała, dopóki ktoś ich nie udostępni.",
   "dashboard.say_only_you": "Tylko na Twoim komputerze — nikt inny nie ma kopii, więc zniknie z roju, gdy się wyłączysz.",
+  "dashboard.say_other_version_one": "Inny komputer ma inną wersję tego modelu, więc jego części nie pasują do twoich.",
+  "dashboard.say_other_version_other": "{count} innych komputerów ma inną wersję tego modelu, więc ich części nie pasują do twoich.",
   "dashboard.say_safe": "Bezpieczny — kopię ma {count} innych komputerów, więc działa dalej, gdy jeden się wyłączy.",
   "dashboard.say_unavailable": "Obecnie żaden komputer nie ma części tego modelu.",
   "dashboard.schedule_title": "Harmonogram zasobów",

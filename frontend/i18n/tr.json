@@ -446,6 +446,8 @@
   "dashboard.say_at_risk": "Risk altında — parçalarından {count} tanesi yalnızca tek bir bilgisayarda. O bilgisayar kapanırsa bu model çalışmaz.",
   "dashboard.say_incomplete": "Sürüde {count} parça eksik. Biri paylaşana kadar bu model çalışamaz.",
   "dashboard.say_only_you": "Yalnızca sizin bilgisayarınızda — başka kimsede kopyası yok, siz çevrimdışı olursanız sürüden çıkar.",
+  "dashboard.say_other_version_one": "Başka bir bilgisayarda bu modelin farklı bir sürümü var, bu yüzden parçaları sizinkilerle uyuşmuyor.",
+  "dashboard.say_other_version_other": "{count} başka bilgisayarda bu modelin farklı bir sürümü var, bu yüzden parçaları sizinkilerle uyuşmuyor.",
   "dashboard.say_safe": "Güvende — {count} başka bilgisayarda kopyası var, biri kapanırsa da çalışmayı sürdürür.",
   "dashboard.say_unavailable": "Şu anda bu modelin parçalarına sahip bir bilgisayar yok.",
   "dashboard.schedule_title": "Kaynak Zamanlaması",

@@ -446,6 +446,8 @@
   "dashboard.say_at_risk": "At risk — {count} of its parts are on only one computer. If that computer goes offline, this model stops working.",
   "dashboard.say_incomplete": "{count} parts are missing from the swarm. This model can't run until someone shares them.",
   "dashboard.say_only_you": "Only on your computer — no one else has a copy, so it leaves the swarm if you go offline.",
+  "dashboard.say_other_version_one": "1 other computer has a different version of this model, so its parts do not fit yours.",
+  "dashboard.say_other_version_other": "{count} other computers have a different version of this model, so their parts do not fit yours.",
   "dashboard.say_safe": "Safe — {count} other computers have a copy, so it keeps working if one goes offline.",
   "dashboard.say_unavailable": "No computer currently has this model's parts.",
   "dashboard.schedule_title": "Resource Schedule",

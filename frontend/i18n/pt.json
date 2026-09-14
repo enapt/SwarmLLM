@@ -446,6 +446,8 @@
   "dashboard.say_at_risk": "Em risco — {count} das partes estão em apenas um computador. Se ele sair do ar, este modelo para de funcionar.",
   "dashboard.say_incomplete": "Faltam {count} partes no enxame. Este modelo não pode rodar até alguém compartilhá-las.",
   "dashboard.say_only_you": "Só no seu computador — mais ninguém tem uma cópia, então sai do enxame se você ficar offline.",
+  "dashboard.say_other_version_one": "Outro computador tem uma versão diferente deste modelo, então as partes dele não servem para as suas.",
+  "dashboard.say_other_version_other": "Outros {count} computadores têm uma versão diferente deste modelo, então as partes deles não servem para as suas.",
   "dashboard.say_safe": "Seguro — outros {count} computadores têm uma cópia, então continua funcionando se um sair do ar.",
   "dashboard.say_unavailable": "Nenhum computador tem as partes deste modelo no momento.",
   "dashboard.schedule_title": "Programação de Recursos",

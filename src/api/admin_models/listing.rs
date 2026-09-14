@@ -7,19 +7,81 @@ use crate::error::ApiError;
 use super::helpers::*;
 use super::validate_model_id;
 
+/// How many OTHER computers have a model, split by whether their copy is one
+/// this node could actually use.
+///
+/// The two travel together because they come from one lookup and answer one
+/// question between them. `servable` alone is ambiguous in the direction that
+/// misleads: a small number with nothing beside it means almost nobody has the
+/// model, while the same number with `other_build > 0` means plenty of people
+/// have it in a build whose bytes would fail our hash check. Reporting the
+/// first without the second is what let a filtered count read as reassurance.
+#[derive(Clone, Copy, Default)]
+struct ModelPeerCounts {
+    /// Peers whose copy we could fetch and verify.
+    servable: usize,
+    /// Peers that positively claim a different GGUF build of the same model id.
+    other_build: usize,
+}
+
+impl ModelPeerCounts {
+    /// Look both counts up under the SAME key, so the pair cannot be built
+    /// from two different lookups and disagree.
+    fn for_model(
+        key: &str,
+        servable: &std::collections::HashMap<String, std::collections::HashSet<String>>,
+        other_build: &std::collections::HashMap<String, std::collections::HashSet<String>>,
+    ) -> Self {
+        Self {
+            servable: servable.get(key).map_or(0, |s| s.len()),
+            other_build: other_build.get(key).map_or(0, |s| s.len()),
+        }
+    }
+}
+
 pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::Value>> {
     let mut models: Vec<serde_json::Value> = Vec::new();
     let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
     let local_node_id = state.shared_state.identity.node_id().clone();
 
-    // Collect peer info for each model from model_registry shard_holders
+    // Collect peer info for each model from model_registry shard_holders.
+    //
+    // Through `shard_holders`, NOT the raw `all_shard_entries` holder list:
+    // a holder that positively claims a different GGUF build cannot send us
+    // bytes our hash check would accept, so counting it says a model is
+    // replicated when it is not. That count is not decoration — it picks the
+    // health sentence a user reads to decide whether the model keeps working
+    // (`dashboard.say_safe` / `say_at_risk` / `say_only_you`), the row's "on N
+    // other computers", and whether the model is listed at all. Measured on
+    // this node 2026-09-14: two peers announced parts of
+    // `qwen2.5-coder-7b-instruct-q4-k-m`, neither could serve one, and the card
+    // said three computers had it.
+    //
+    // The peers dropped here are counted separately rather than discarded —
+    // see `ModelPeerCounts`.
     let mut model_peers: std::collections::HashMap<String, std::collections::HashSet<String>> =
         std::collections::HashMap::new();
-    for (shard_id, holders) in state.shared_state.model_registry.all_shard_entries() {
+    let mut model_peers_other_build: std::collections::HashMap<
+        String,
+        std::collections::HashSet<String>,
+    > = std::collections::HashMap::new();
+    for (shard_id, _raw_holders) in state.shared_state.model_registry.all_shard_entries() {
         let model_name = shard_id.model_id.0.clone();
-        for holder in &holders {
-            if *holder != local_node_id {
+        for holder in state.shared_state.model_registry.shard_holders(&shard_id) {
+            if holder != local_node_id {
                 model_peers
+                    .entry(model_name.clone())
+                    .or_default()
+                    .insert(format!("{}", holder));
+            }
+        }
+        for holder in state
+            .shared_state
+            .model_registry
+            .conflicting_build_holders(&shard_id)
+        {
+            if holder != local_node_id {
+                model_peers_other_build
                     .entry(model_name.clone())
                     .or_default()
                     .insert(format!("{}", holder));
@@ -32,10 +94,19 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
         let peer = entry.value();
         if let Some(ref cap) = peer.capability {
             for shard in &cap.hosted_shards {
-                model_peers
-                    .entry(shard.model_id.0.clone())
-                    .or_default()
-                    .insert(format!("{}", peer.node_id));
+                let model_name = shard.model_id.0.clone();
+                let peer_id = format!("{}", peer.node_id);
+                // A capability announcement carries no build tag, so it must
+                // not re-admit a peer the per-shard gossip has already told us
+                // is serving a different build — that would undo the filter
+                // above for every peer that announces both ways.
+                if model_peers_other_build
+                    .get(&model_name)
+                    .is_some_and(|s| s.contains(&peer_id))
+                {
+                    continue;
+                }
+                model_peers.entry(model_name).or_default().insert(peer_id);
             }
         }
     }
@@ -134,7 +205,7 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
                             status: &str,
                             mode: &str,
                             source: &str,
-                            peers_hosting: usize,
+                            peers: ModelPeerCounts,
                             shards: Vec<serde_json::Value>|
      -> serde_json::Value {
         let enc_info = encrypted_pipeline_info(id);
@@ -193,7 +264,14 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
                 && state
                     .shared_state
                     .local_fast_path_for(&crate::types::ModelId(id.to_string())),
-            "peers_hosting": peers_hosting,
+            "peers_hosting": peers.servable,
+            // Other computers that have this model in a DIFFERENT build — a
+            // different upload of the same quantisation, which shares not one
+            // shard hash with ours. They are excluded from `peers_hosting`
+            // because they cannot serve us, and reported here because a number
+            // that silently drops is the one thing worse than a number that is
+            // too high: the user is owed the reason.
+            "peers_other_build": peers.other_build,
             "shards": shards,
             "trust_level": trust_level,
             "encrypted_pipeline": enc_info.0,
@@ -304,7 +382,8 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
             // Stale entry — files deleted while running. Skip.
             // The model will still appear from registry/peers if applicable.
         } else {
-            let peer_count = model_peers.get(&info.name).map_or(0, |s| s.len());
+            let peer_count =
+                ModelPeerCounts::for_model(&info.name, &model_peers, &model_peers_other_build);
             seen_ids.insert(info.name.clone());
 
             // Try both the display name and the slugified ID to avoid duplicates.
@@ -385,7 +464,8 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
 
         let (hosted_count, global_available) = count_shard_availability(m, &state);
 
-        let peer_count = model_peers.get(&m.id.0).map_or(0, |s| s.len());
+        let peer_count =
+            ModelPeerCounts::for_model(&m.id.0, &model_peers, &model_peers_other_build);
         let shard_detail = build_shard_detail(m, &state);
 
         let (source, mode) = if hosted_count == m.shard_count as usize {
@@ -553,7 +633,7 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
     // came from somewhere other than its display name (an HF filename carries a
     // quant suffix the name does not), and it is not meant to: those are two
     // genuinely distinct registrations.
-    for (model_name, peers) in &model_peers {
+    for model_name in model_peers.keys() {
         let slug = crate::types::slugify_model_name(model_name);
         if seen_ids.contains(model_name) || seen_ids.contains(&slug) {
             continue;
@@ -569,7 +649,7 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
             "discovered",
             "full",
             "network",
-            peers.len(),
+            ModelPeerCounts::for_model(model_name, &model_peers, &model_peers_other_build),
             vec![],
         ));
     }

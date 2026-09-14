@@ -446,6 +446,8 @@
   "dashboard.say_at_risk": "A rischio — {count} delle sue parti sono su un solo computer. Se quel computer si disconnette, questo modello smette di funzionare.",
   "dashboard.say_incomplete": "Mancano {count} parti nello sciame. Questo modello non può funzionare finché qualcuno non le condivide.",
   "dashboard.say_only_you": "Solo sul tuo computer — nessun altro ne ha una copia, quindi esce dallo sciame se ti disconnetti.",
+  "dashboard.say_other_version_one": "Un altro computer ha una versione diversa di questo modello, quindi le sue parti non combaciano con le tue.",
+  "dashboard.say_other_version_other": "Altri {count} computer hanno una versione diversa di questo modello, quindi le loro parti non combaciano con le tue.",
   "dashboard.say_safe": "Sicuro — altri {count} computer ne hanno una copia, quindi continua a funzionare se uno si disconnette.",
   "dashboard.say_unavailable": "Al momento nessun computer ha le parti di questo modello.",
   "dashboard.schedule_title": "Pianificazione risorse",

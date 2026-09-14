@@ -446,6 +446,8 @@
   "dashboard.say_at_risk": "Gefährdet — {count} seiner Teile liegen nur auf einem Computer. Geht dieser offline, funktioniert das Modell nicht mehr.",
   "dashboard.say_incomplete": "{count} Teile fehlen im Schwarm. Dieses Modell kann erst laufen, wenn jemand sie teilt.",
   "dashboard.say_only_you": "Nur auf Ihrem Computer — niemand sonst hat eine Kopie, es verlässt also den Schwarm, wenn Sie offline gehen.",
+  "dashboard.say_other_version_one": "Ein anderer Computer hat eine andere Version dieses Modells, seine Teile passen also nicht zu Ihren.",
+  "dashboard.say_other_version_other": "{count} andere Computer haben eine andere Version dieses Modells, ihre Teile passen also nicht zu Ihren.",
   "dashboard.say_safe": "Sicher — {count} andere Computer haben eine Kopie, es funktioniert also weiter, wenn einer offline geht.",
   "dashboard.say_unavailable": "Derzeit hat kein Computer die Teile dieses Modells.",
   "dashboard.schedule_title": "Ressourcenplan",

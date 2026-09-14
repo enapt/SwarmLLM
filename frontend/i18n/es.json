@@ -446,6 +446,8 @@
   "dashboard.say_at_risk": "En riesgo: {count} de sus partes están en un solo ordenador. Si ese ordenador se desconecta, este modelo deja de funcionar.",
   "dashboard.say_incomplete": "Faltan {count} partes en el enjambre. Este modelo no puede funcionar hasta que alguien las comparta.",
   "dashboard.say_only_you": "Solo en tu ordenador: nadie más tiene una copia, así que desaparece del enjambre si te desconectas.",
+  "dashboard.say_other_version_one": "Otro ordenador tiene una versión distinta de este modelo, así que sus partes no encajan con las tuyas.",
+  "dashboard.say_other_version_other": "Otros {count} ordenadores tienen una versión distinta de este modelo, así que sus partes no encajan con las tuyas.",
   "dashboard.say_safe": "Seguro: otros {count} ordenadores tienen una copia, así que sigue funcionando si uno se desconecta.",
   "dashboard.say_unavailable": "Ningún ordenador tiene ahora mismo las partes de este modelo.",
   "dashboard.schedule_title": "Programación de Recursos",

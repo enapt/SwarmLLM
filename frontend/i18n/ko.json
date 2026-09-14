@@ -446,6 +446,8 @@
   "dashboard.say_at_risk": "위험 — 조각 {count}개가 컴퓨터 한 대에만 있습니다. 그 컴퓨터가 꺼지면 이 모델은 동작하지 않습니다.",
   "dashboard.say_incomplete": "스웜에 조각 {count}개가 없습니다. 누군가 공유하기 전까지 이 모델은 실행할 수 없습니다.",
   "dashboard.say_only_you": "내 컴퓨터에만 있음 — 사본을 가진 사람이 없어서 내가 오프라인이 되면 스웜에서 사라집니다.",
+  "dashboard.say_other_version_one": "다른 컴퓨터 1대에는 이 모델의 다른 버전이 있어, 그 조각은 여기 조각과 맞지 않습니다.",
+  "dashboard.say_other_version_other": "다른 컴퓨터 {count}대에는 이 모델의 다른 버전이 있어, 그 조각들은 여기 조각과 맞지 않습니다.",
   "dashboard.say_safe": "안전 — 다른 컴퓨터 {count}대에도 사본이 있어 한 대가 꺼져도 계속 동작합니다.",
   "dashboard.say_unavailable": "현재 이 모델의 조각을 가진 컴퓨터가 없습니다.",
   "dashboard.schedule_title": "리소스 일정",

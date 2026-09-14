@@ -446,6 +446,8 @@
   "dashboard.say_at_risk": "I riskzonen — {count} av delarna finns bara på en dator. Om den försvinner slutar modellen fungera.",
   "dashboard.say_incomplete": "Det saknas {count} delar i svärmen. Modellen kan inte köras förrän någon delar dem.",
   "dashboard.say_only_you": "Bara på din dator — ingen annan har en kopia, så den lämnar svärmen om du kopplar ner.",
+  "dashboard.say_other_version_one": "En annan dator har en annan version av den här modellen, så dess delar passar inte ihop med dina.",
+  "dashboard.say_other_version_other": "{count} andra datorer har en annan version av den här modellen, så deras delar passar inte ihop med dina.",
   "dashboard.say_safe": "Säker — {count} andra datorer har en kopia, så den fortsätter fungera om en försvinner.",
   "dashboard.say_unavailable": "Ingen dator har just nu den här modellens delar.",
   "dashboard.schedule_title": "Resursschema",

@@ -446,6 +446,8 @@
   "dashboard.say_at_risk": "Berisiko — {count} bagiannya hanya ada di satu komputer. Kalau komputer itu mati, model ini berhenti bekerja.",
   "dashboard.say_incomplete": "Ada {count} bagian yang hilang dari swarm. Model ini belum bisa jalan sampai ada yang membagikannya.",
   "dashboard.say_only_you": "Hanya di komputer Anda — tidak ada orang lain yang punya salinannya, jadi akan hilang dari swarm kalau Anda offline.",
+  "dashboard.say_other_version_one": "Satu komputer lain punya versi berbeda dari model ini, jadi bagiannya tidak cocok dengan milikmu.",
+  "dashboard.say_other_version_other": "{count} komputer lain punya versi berbeda dari model ini, jadi bagian mereka tidak cocok dengan milikmu.",
   "dashboard.say_safe": "Aman — {count} komputer lain punya salinannya, jadi tetap berjalan kalau satu mati.",
   "dashboard.say_unavailable": "Saat ini tidak ada komputer yang punya bagian model ini.",
   "dashboard.schedule_title": "Jadwal Sumber Daya",

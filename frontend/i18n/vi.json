@@ -446,6 +446,8 @@
   "dashboard.say_at_risk": "Có rủi ro — {count} phần chỉ nằm trên một máy. Nếu máy đó ngừng hoạt động, mô hình này sẽ không chạy được.",
   "dashboard.say_incomplete": "Bầy đang thiếu {count} phần. Mô hình này chưa chạy được cho tới khi có người chia sẻ chúng.",
   "dashboard.say_only_you": "Chỉ có trên máy bạn — không ai khác có bản sao, nên nó sẽ rời bầy khi bạn ngừng hoạt động.",
+  "dashboard.say_other_version_one": "Một máy khác có phiên bản khác của mô hình này, nên các phần của máy đó không khớp với của bạn.",
+  "dashboard.say_other_version_other": "{count} máy khác có phiên bản khác của mô hình này, nên các phần của chúng không khớp với của bạn.",
   "dashboard.say_safe": "An toàn — {count} máy khác cũng có bản sao, nên vẫn chạy được nếu một máy ngừng hoạt động.",
   "dashboard.say_unavailable": "Hiện chưa máy nào có các phần của mô hình này.",
   "dashboard.schedule_title": "Lịch trình tài nguyên",

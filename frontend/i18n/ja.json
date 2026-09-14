@@ -446,6 +446,8 @@
   "dashboard.say_at_risk": "危険 — {count} 個のパーツが 1 台のパソコンにしかありません。そのパソコンが停止すると、このモデルは動かなくなります。",
   "dashboard.say_incomplete": "群に {count} 個のパーツがありません。誰かが共有するまで、このモデルは動きません。",
   "dashboard.say_only_you": "あなたのパソコンだけ — 他に複製を持つ人がいないため、オフラインになると群から消えます。",
+  "dashboard.say_other_version_one": "他の 1 台のパソコンはこのモデルの別バージョンを持っているため、そのパーツはこちらのものと合いません。",
+  "dashboard.say_other_version_other": "他の {count} 台のパソコンはこのモデルの別バージョンを持っているため、それらのパーツはこちらのものと合いません。",
   "dashboard.say_safe": "安全 — 他の {count} 台のパソコンにも複製があるため、1 台が停止しても動き続けます。",
   "dashboard.say_unavailable": "現在このモデルのパーツを持っているパソコンはありません。",
   "dashboard.schedule_title": "リソーススケジュール",

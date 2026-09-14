@@ -446,6 +446,8 @@
   "dashboard.say_at_risk": "有风险 — 其中 {count} 个部分只存在于一台电脑上。那台电脑离线后，这个模型就无法运行。",
   "dashboard.say_incomplete": "群里缺少 {count} 个部分。在有人分享之前，这个模型无法运行。",
   "dashboard.say_only_you": "只在你的电脑上 — 没有别人有副本，你离线后它就会从群里消失。",
+  "dashboard.say_other_version_one": "另有 1 台电脑存有此模型的不同版本，它的部分与你的不匹配。",
+  "dashboard.say_other_version_other": "另有 {count} 台电脑存有此模型的不同版本，它们的部分与你的不匹配。",
   "dashboard.say_safe": "安全 — 另有 {count} 台电脑存有副本，因此其中一台离线也能继续运行。",
   "dashboard.say_unavailable": "目前没有任何电脑存有这个模型的部分。",
   "dashboard.schedule_title": "资源计划",

@@ -1216,6 +1216,18 @@
             '<span class="mce-health-label">' + U.escapeHtml(healthLabel) + '</span>' +
             '</div>';
           healthSentence = '<p class="mce-say">' + U.escapeHtml(healthDetail) + '</p>';
+          // Computers that have this model in a different version are NOT in
+          // `peers_hosting` — their parts would fail our check, so they cannot
+          // share with us. Say so rather than letting the count be quietly
+          // smaller: without this the sentence above reads as "hardly anyone
+          // has this", when in fact plenty of people do and none of their
+          // copies fits ours.
+          var otherBuild = Math.max(0, (m.peers_other_build || 0));
+          if (otherBuild > 0) {
+            healthSentence += '<p class="mce-say mce-say-aside">' +
+              U.escapeHtml(I18n.t('dashboard.say_other_version', { count: otherBuild })) +
+              '</p>';
+          }
         }
 
         // Pipeline encryption status — SwarmLLM requires the user to locally hold

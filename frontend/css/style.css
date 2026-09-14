@@ -5232,6 +5232,15 @@ textarea.pool-code-input { min-height: 4.5em; }
   line-height: 1.45;
 }
 
+/* A second sentence that qualifies the first rather than replacing it —
+   today, why the count of other computers is smaller than it looks. Quieter
+   than the health sentence because it is the reason, not the verdict. */
+.mce-summary .mce-say-aside {
+  margin-top: 4px;
+  color: var(--text-tertiary, var(--text-secondary));
+  opacity: 0.85;
+}
+
 /* A one-line fact with an icon and an optional action — privacy, placement.
    Replaced titled panels whose content was a sentence and a switch. */
 .mce-summary .mce-line {

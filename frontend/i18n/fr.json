@@ -446,6 +446,8 @@
   "dashboard.say_at_risk": "À risque — {count} de ses parties ne sont que sur un seul ordinateur. Si cet ordinateur se déconnecte, ce modèle cesse de fonctionner.",
   "dashboard.say_incomplete": "{count} parties manquent dans l'essaim. Ce modèle ne peut pas fonctionner tant que personne ne les partage.",
   "dashboard.say_only_you": "Seulement sur votre ordinateur — personne d'autre n'en a de copie, il quitte donc l'essaim si vous vous déconnectez.",
+  "dashboard.say_other_version_one": "Un autre ordinateur a une version différente de ce modèle : ses parties ne correspondent pas aux vôtres.",
+  "dashboard.say_other_version_other": "{count} autres ordinateurs ont une version différente de ce modèle : leurs parties ne correspondent pas aux vôtres.",
   "dashboard.say_safe": "Sûr — {count} autres ordinateurs en ont une copie, donc il continue de fonctionner si l'un se déconnecte.",
   "dashboard.say_unavailable": "Aucun ordinateur ne possède actuellement les parties de ce modèle.",
   "dashboard.schedule_title": "Planification des ressources",

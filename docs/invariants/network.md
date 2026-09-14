@@ -206,6 +206,32 @@ Five things a change here must keep:
   anything a peer repeats on a timer will be repeated at you for ever. A peer
   silently absent from every routing decision is otherwise undiagnosable from
   outside the process; `conflicting_build_holders` is the programmatic view.
+- **Every count a person reads is the FILTERED one, and the drop is explained
+  rather than merely applied.** Added 2026-09-14, after the live node showed
+  the gap: `qwen2.5-coder-7b-instruct-q4-k-m` had two peers announcing parts of
+  it, neither able to serve one, and the model card said three computers had a
+  copy. The count came from `all_shard_entries`, which is documented as raw and
+  whose own note allowed a consumer that renders "a count for a human" — but a
+  count rendered to a human is a claim *to* that human, and this one picks the
+  health sentence (`dashboard.say_safe` / `say_at_risk` / `say_only_you`) they
+  read to decide whether the model keeps working. Two writers were wrong in the
+  same way: `api::admin_models::listing` (`peers_hosting`) and
+  `api::websocket::build_stats_message` (the per-shard `holders` in the 2 s
+  `stats_update` tick) — and because both land in the SAME dashboard row, the
+  unfiltered one did not merely overstate, it made the number depend on which
+  writer touched the row last. Guard:
+  `a_holder_count_shown_to_a_person_is_the_count_that_can_serve`, verified to
+  go red on the real pre-fix `websocket.rs`.
+- **A count that silently shrinks is worse than one that is too high**, so the
+  peers dropped are reported next to the ones kept: `peers_other_build` rides
+  beside `peers_hosting` in the model listing, and the card says "N other
+  computers have a different version of this model, so their parts do not fit
+  yours." `ModelPeerCounts` carries the pair precisely so a call site cannot
+  supply one without the other. The one deliberate exception is
+  `api::admin_hf::count_unique_shard_holders`, which answers "how many copies
+  exist in the swarm" for a model the user has not downloaded yet — there a
+  different build is still a real copy, and it is a no-op anyway because an
+  absent local manifest means `BUILD_TAG_UNKNOWN`.
 
 **`model::manifest::shard_announce` is the ONE constructor for
 `ShardAnnounce`**, for the reason the "one invariant, N paths" rule gives: a

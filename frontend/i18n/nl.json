@@ -446,6 +446,8 @@
   "dashboard.say_at_risk": "Risico — {count} van de delen staan op maar één computer. Gaat die offline, dan werkt dit model niet meer.",
   "dashboard.say_incomplete": "Er ontbreken {count} delen in de zwerm. Dit model kan pas draaien als iemand ze deelt.",
   "dashboard.say_only_you": "Alleen op jouw computer — niemand anders heeft een kopie, dus het verdwijnt uit de zwerm als jij offline gaat.",
+  "dashboard.say_other_version_one": "Eén andere computer heeft een andere versie van dit model, dus die delen passen niet bij die van jou.",
+  "dashboard.say_other_version_other": "{count} andere computers hebben een andere versie van dit model, dus hun delen passen niet bij die van jou.",
   "dashboard.say_safe": "Veilig — {count} andere computers hebben een kopie, dus het blijft werken als er één offline gaat.",
   "dashboard.say_unavailable": "Op dit moment heeft geen enkele computer de delen van dit model.",
   "dashboard.schedule_title": "Resourceschema",

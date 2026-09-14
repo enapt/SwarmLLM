@@ -811,6 +811,16 @@ different GGUF build**, against `expected_build_tag` — this node's own manifes
 hash for that shard. It is the single read accessor for the holder map (~60
 consumers), which is why the filter lives there and not at the call sites.
 
+**`all_shard_entries` is the RAW map, and a count rendered to a person is a
+claim to that person.** Anything that shows or decides on a holder count asks
+`shard_holders` per shard; narrowing to `contains(&local_node_id)` is the one
+shape unaffected. Two writers of the same dashboard row had it wrong at once —
+`peers_hosting` and the WebSocket `stats_update` tick — so the number changed
+with whichever wrote last. **And the dropped peers are reported, not silently
+subtracted**: `ModelPeerCounts` carries `servable` and `other_build` together
+so neither can be supplied alone. Guard:
+`a_holder_count_shown_to_a_person_is_the_count_that_can_serve`.
+
 → `docs/invariants/network.md`
 
 ## Additive Protocol Evolution (NETWORKING_PLAN cross-cutting)

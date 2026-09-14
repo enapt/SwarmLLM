@@ -446,6 +446,8 @@
   "dashboard.say_at_risk": "Ohrožené — {count} částí je jen na jednom počítači. Když vypadne, tento model přestane fungovat.",
   "dashboard.say_incomplete": "V roji chybí {count} částí. Tento model nepůjde spustit, dokud je někdo nesdílí.",
   "dashboard.say_only_you": "Jen ve vašem počítači — nikdo jiný kopii nemá, takže z roje zmizí, jakmile se odpojíte.",
+  "dashboard.say_other_version_one": "Jiný počítač má jinou verzi tohoto modelu, takže jeho části k těm vašim nesedí.",
+  "dashboard.say_other_version_other": "{count} dalších počítačů má jinou verzi tohoto modelu, takže jejich části k těm vašim nesedí.",
   "dashboard.say_safe": "Bezpečné — kopii má {count} dalších počítačů, takže funguje dál, i když jeden vypadne.",
   "dashboard.say_unavailable": "Žádný počítač teď nemá části tohoto modelu.",
   "dashboard.schedule_title": "Plán zdrojů",

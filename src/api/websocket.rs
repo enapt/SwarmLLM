@@ -477,14 +477,25 @@ async fn build_stats_message(state: &SharedState) -> String {
     // Build shard registry. Since the stats message is shared across all
     // clients via stats_cache, always include the full registry — per-client
     // diffing is no longer possible without per-client cache state.
+    //
+    // The holder COUNT comes from `shard_holders`, not from the raw list:
+    // holders claiming a different GGUF build cannot serve us, and this count
+    // is written into the very same dashboard row the REST listing builds
+    // through `build_shard_json` — which has always filtered. Two writers, one
+    // row, so an unfiltered count here does not merely overstate, it makes the
+    // number change every time a `stats_update` tick lands on top of a load.
+    // `local` still reads the raw list: our own registration always matches our
+    // own build, and asking the filtered accessor for it would be the same
+    // answer by a longer route.
     let mut per_model: HashMap<String, Vec<(u32, bool, usize)>> = HashMap::new();
     for (shard_id, holders) in state.model_registry.all_shard_entries() {
         let model_id = shard_id.model_id.0.clone();
         let local = holders.contains(&local_node_id);
+        let servable = state.model_registry.shard_holders(&shard_id).len();
         per_model
             .entry(model_id)
             .or_default()
-            .push((shard_id.index, local, holders.len()));
+            .push((shard_id.index, local, servable));
     }
     let shard_registry_val: serde_json::Value = per_model
         .iter()

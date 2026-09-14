@@ -16,6 +16,18 @@ pub use shards::{hf_download_shards, HfShardDownloadRequest};
 pub use source::hf_source;
 
 /// Count unique peers holding shards of the given model IDs.
+///
+/// **Deliberately the RAW holder list, not `shard_holders`.** Everything that
+/// puts a holder count in front of a person goes through the filtered accessor
+/// — a holder on a different GGUF build cannot send us bytes we would accept
+/// (`docs/invariants/network.md` § "A holder record names a BUILD"). This one
+/// answers a different question: how many copies of a model exist in the swarm
+/// at all, for an HF search or probe result the user has NOT downloaded yet.
+/// There a different build is still a real copy, and filtering would report 0
+/// replicas for a model three peers have — less true, not more.
+///
+/// It is also a no-op in the case it is actually used: with no local manifest
+/// the expected build tag is `BUILD_TAG_UNKNOWN`, which never conflicts.
 pub(super) fn count_unique_shard_holders(
     registry: &crate::model::registry::ModelRegistry,
     model_ids: &[crate::types::ModelId],

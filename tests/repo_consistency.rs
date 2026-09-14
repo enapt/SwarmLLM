@@ -6875,3 +6875,147 @@ fn regex_lite_word(haystack: &str, needle: &str) -> bool {
     }
     false
 }
+
+/// A holder count a person reads is the count that could actually serve them.
+///
+/// `ModelRegistry::shard_holders` drops holders that positively claim a
+/// different GGUF build — their bytes would fail our hash — while
+/// `all_shard_entries` hands back the map RAW. Both of the functions scanned
+/// here build a holder count that lands in the SAME dashboard row, so an
+/// unfiltered one does not merely overstate: the number changes depending on
+/// which writer touched the row last.
+///
+/// Measured on the live node 2026-09-14, before the fix: two peers announced
+/// parts of `qwen2.5-coder-7b-instruct-q4-k-m`, neither could serve one, and
+/// the card said three computers had it. That count picks the model health
+/// sentence a non-technical user reads to decide whether the model keeps
+/// working.
+///
+/// Deliberately NOT scanned: `api::admin_hf::count_unique_shard_holders`, which
+/// answers a different question — "how many copies of this exist in the swarm",
+/// for an HF search result the user has not downloaded yet. There the raw count
+/// is the honest one, and for a model this node does not hold the filter is a
+/// no-op anyway (an absent manifest means `BUILD_TAG_UNKNOWN`, which never
+/// conflicts). See the comment at that helper.
+#[test]
+fn a_holder_count_shown_to_a_person_is_the_count_that_can_serve() {
+    let sites = [
+        (
+            "src/api/admin_models/listing.rs",
+            "pub async fn list_models(",
+        ),
+        ("src/api/websocket.rs", "async fn build_stats_message("),
+    ];
+    for (path, signature) in sites {
+        let src = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{path}: {e}"));
+        let body = fn_body(&src, signature)
+            .unwrap_or_else(|| panic!("{path}: signature not found: {signature}"));
+        assert!(
+            counts_holders_through_the_filter(body),
+            "{path}: {signature} builds a holder count from the RAW `all_shard_entries` list. \
+             Ask `shard_holders(&shard_id)` for anything a person will read or a decision \
+             will use — see docs/invariants/network.md § \"A holder record names a BUILD\"."
+        );
+    }
+}
+
+/// Does this function body take its holder count from the filtered accessor?
+///
+/// The shape scanned is the one both defects had: a `for` loop destructuring
+/// `all_shard_entries()` into `(shard_id, holders)` and then counting the raw
+/// `holders` binding. A binding that is deliberately unused (`_raw_holders`)
+/// cannot be counted at all, which is why the fix renames it rather than
+/// merely not calling `.len()` on it.
+///
+/// Statement-joined, so a chain rustfmt has wrapped across lines still reads
+/// back as one expression (the trap that blinded six earlier guards).
+fn counts_holders_through_the_filter(body: &str) -> bool {
+    let stmts = statements(body);
+    let Some(at) = stmts
+        .iter()
+        .position(|(_, s)| s.contains("all_shard_entries()"))
+    else {
+        // No raw iteration at all: nothing to get wrong.
+        return true;
+    };
+    let binding = raw_holder_binding(&stmts[at].1);
+    // The loop bodies here are 4-8 statements; 16 covers them with room and
+    // stops before the next unrelated block.
+    let window = &stmts[at..stmts.len().min(at + 16)];
+    let counts_raw = binding.is_some_and(|name| {
+        window
+            .iter()
+            .any(|(_, s)| s.contains(&format!("{name}.len()")))
+    });
+    let asks_filter = window.iter().any(|(_, s)| s.contains("shard_holders("));
+    !counts_raw && asks_filter
+}
+
+/// The name a `for (.., holders) in .. all_shard_entries()` statement binds the
+/// holder list to, or `None` when it is discarded (`_`, `_raw_holders`).
+fn raw_holder_binding(stmt: &str) -> Option<String> {
+    let open = stmt.find('(')? + 1;
+    let close = stmt[open..].find(')')? + open;
+    let name = stmt[open..close].split(',').nth(1)?.trim();
+    if name.is_empty() || name.starts_with('_') {
+        return None;
+    }
+    Some(name.to_string())
+}
+
+/// The scan above must fire on the real defect, not merely pass on the fix.
+///
+/// A guard that goes green the first time it is written has told you nothing
+/// (gotchas #413/#503/#517), so both shapes of the defect are planted here.
+#[test]
+fn the_holder_count_guard_catches_both_shapes_of_the_defect() {
+    let fixed = "
+        for (shard_id, _raw) in registry.all_shard_entries() {
+            let servable = registry.shard_holders(&shard_id).len();
+            push(servable);
+        }
+    ";
+    assert!(
+        counts_holders_through_the_filter(fixed),
+        "the fixed shape must pass"
+    );
+
+    // Shape 1: the count taken straight off the raw binding.
+    let raw_count = "
+        for (shard_id, holders) in registry.all_shard_entries() {
+            push(holders.len());
+        }
+    ";
+    assert!(
+        !counts_holders_through_the_filter(raw_count),
+        "a count off the raw holder list must fail"
+    );
+
+    // Shape 2: rustfmt has wrapped the chain, which is how six earlier guards
+    // were blinded.
+    let wrapped = "
+        for (shard_id, holders) in registry
+            .all_shard_entries()
+        {
+            push(
+                holders
+                    .len(),
+            );
+        }
+    ";
+    assert!(
+        !counts_holders_through_the_filter(wrapped),
+        "a wrapped chain must not hide the raw count"
+    );
+
+    // Shape 3: raw binding unused but the filtered accessor never asked.
+    let neither = "
+        for (shard_id, _raw) in registry.all_shard_entries() {
+            push(guess());
+        }
+    ";
+    assert!(
+        !counts_holders_through_the_filter(neither),
+        "discarding the raw list is not enough — the filtered count must be asked for"
+    );
+}
