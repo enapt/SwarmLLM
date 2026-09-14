@@ -357,6 +357,20 @@ impl ModelMgmt {
         }
     }
 
+    /// Does a P2P transfer of this shard still own the file it would write?
+    ///
+    /// A transfer owns the file while its slot is parked in
+    /// `p2p_download_permits` — the slot holds the writer claim. If the claim
+    /// is held and the slot is gone, the claim has passed to somebody else
+    /// (in practice the HuggingFace fallback, after the stall sweep released
+    /// this transfer's slot) and the transfer is over.
+    ///
+    /// An unclaimed shard answers `true`: the P2P paths that take no claim at
+    /// all (a user-initiated acquisition) are left exactly as they were.
+    pub fn p2p_transfer_still_owns_the_file(&self, shard: &crate::types::ShardId) -> bool {
+        !self.shard_download_claimed(shard) || self.p2p_download_permits.contains_key(shard)
+    }
+
     /// Whether a download task is writing this shard's `.tmp` right now.
     /// Prefer `is_shard_in_progress`, which also covers work that is queued
     /// but has not reached a writer yet.
@@ -1420,6 +1434,55 @@ mod shard_download_claim_tests {
             m.claim_shard_download(&sid).is_some(),
             "the shard can be fetched again once nothing is writing it"
         );
+    }
+
+    fn park_slot(m: &ModelMgmt, sid: &ShardId, claim: ShardDownloadClaim) {
+        let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+        m.p2p_download_permits.insert(
+            sid.clone(),
+            crate::daemon::state::P2pDownloadSlot {
+                _permit: sem.try_acquire_owned().unwrap(),
+                _claim: claim,
+                cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                started_at: std::time::Instant::now(),
+            },
+        );
+    }
+
+    /// Confirmed on this project's own node 2026-09-12: a stalled P2P transfer
+    /// had its slot swept, the HuggingFace fallback completed the shard, and
+    /// the P2P chain was still asking peers for it a minute later — writing to
+    /// the same file, which `write_chunk` truncates at offset 0.
+    #[test]
+    fn a_p2p_transfer_loses_its_file_when_its_slot_is_swept_and_another_download_claims_it() {
+        let m = mgmt();
+        let sid = shard("llama-3.2-3b", 1);
+
+        let p2p_claim = m.claim_shard_download(&sid).unwrap();
+        park_slot(&m, &sid, p2p_claim);
+        assert!(
+            m.p2p_transfer_still_owns_the_file(&sid),
+            "while its slot is parked the transfer owns the file"
+        );
+
+        // The 180s stall sweep releases the slot, which drops the claim...
+        m.p2p_download_permits.remove(&sid);
+        // ...and the HuggingFace fallback takes it.
+        let _hf_claim = m.claim_shard_download(&sid).unwrap();
+
+        assert!(
+            !m.p2p_transfer_still_owns_the_file(&sid),
+            "the claim has passed to the HF download — the P2P chain must stop"
+        );
+    }
+
+    /// The P2P paths that take no claim at all (a user-initiated acquisition)
+    /// must be left exactly as they were.
+    #[test]
+    fn an_unclaimed_shard_leaves_a_p2p_transfer_alone() {
+        let m = mgmt();
+        let sid = shard("llama-3.2-3b", 1);
+        assert!(m.p2p_transfer_still_owns_the_file(&sid));
     }
 
     #[test]

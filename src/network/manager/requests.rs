@@ -616,6 +616,11 @@ impl NetworkManager {
                     if self.abort_shard_transfer_if_cancelled(&shard_id) {
                         return;
                     }
+                    // …or because the shard is now being fetched another way
+                    // and this transfer no longer owns the file it would write.
+                    if self.abandon_shard_transfer_if_not_ours(&shard_id) {
+                        return;
+                    }
 
                     // NetworkManager is the sole writer for shard chunks (both
                     // user-initiated acquisitions and auto-manage P2P downloads).

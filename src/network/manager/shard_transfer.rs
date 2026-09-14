@@ -10,6 +10,74 @@ use crate::network::protocol::{SwarmRequest, SwarmResponse};
 use super::{NetworkManager, MAX_PENDING_SHARD_REQUESTS};
 
 impl NetworkManager {
+    /// Should this P2P transfer stop because somebody else now owns the
+    /// shard's `.tmp`? Returns the reason, for the log.
+    ///
+    /// Confirmed on this project's own node, 2026-09-12: a P2P transfer of
+    /// llama-3.2-3b shard 1 stalled, the 180 s permit sweep released its slot
+    /// and declared "HF fallback will fire next cycle", the HuggingFace
+    /// download ran and **completed the shard at 17:09:35** — and the P2P chain
+    /// was still asking peers for it at 17:10:26, from offset 0. Two watchdogs
+    /// with no agreement between them: the 30 s one keeps retrying the P2P
+    /// chain, the 180 s one hands the shard to HuggingFace.
+    ///
+    /// Nothing stopped the loser writing. `ShardStore::write_chunk` truncates
+    /// at `offset == 0`, so a peer answering one of those late retries during
+    /// the HuggingFace download would have truncated its partial file to
+    /// nothing mid-transfer — and after the rename it would recreate a `.tmp`
+    /// for a shard already complete on disk. It did not happen only because
+    /// those peers stayed silent, which is why the transfer stalled in the
+    /// first place.
+    ///
+    /// The rule is the one the HuggingFace path already follows: one writer per
+    /// shard file. A transfer owns the file while its slot is parked in
+    /// `p2p_download_permits` (the slot holds the claim); if the claim is held
+    /// and the slot is gone, the claim belongs to somebody else and this
+    /// transfer is over.
+    fn shard_transfer_lost_its_file(
+        &self,
+        shard_id: &crate::types::ShardId,
+    ) -> Option<&'static str> {
+        let claimed = self.shared_state.models.shard_download_claimed(shard_id);
+        if !claimed {
+            return None;
+        }
+        if self
+            .shared_state
+            .models
+            .p2p_download_permits
+            .contains_key(shard_id)
+        {
+            return None;
+        }
+        Some("another download owns this shard's file")
+    }
+
+    /// End a P2P transfer whose file now belongs to somebody else.
+    ///
+    /// Deliberately does NOT remove the `.tmp`: the point is that the file is
+    /// no longer ours. Deleting it is the collision, not the cure.
+    pub(super) fn abandon_shard_transfer_if_not_ours(
+        &mut self,
+        shard_id: &crate::types::ShardId,
+    ) -> bool {
+        let Some(reason) = self.shard_transfer_lost_its_file(shard_id) else {
+            return false;
+        };
+        tracing::info!(
+            model = %shard_id.model_id,
+            shard = shard_id.index,
+            reason,
+            "Stopping a peer transfer — this shard is being fetched another way"
+        );
+        self.shard_download_progress.remove(shard_id);
+        self.shard_last_progress_at.remove(shard_id);
+        self.shard_p2p_retries.remove(shard_id);
+        self.pending_shard_requests
+            .retain(|_, (_, sid)| sid != shard_id);
+        true
+    }
+
     /// Has this model's download been cancelled? If so, stop the transfer and
     /// tidy up; returns whether it did.
     ///
@@ -117,6 +185,12 @@ impl NetworkManager {
         if self.abort_shard_transfer_if_cancelled(&shard_id) {
             // `false` = the download has ended. `true` would tell the caller a
             // retry is on its way to another peer, and there is none.
+            return false;
+        }
+        // Nor may a failure restart a transfer whose shard is now being
+        // fetched another way — that is how a P2P chain outlived the
+        // HuggingFace download that had already completed the shard.
+        if self.abandon_shard_transfer_if_not_ours(&shard_id) {
             return false;
         }
 
