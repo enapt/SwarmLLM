@@ -46,6 +46,11 @@ was a number that read zero while the thing it counts was happening.
   constantly — three identical entries in a row for one computer was an ordinary
   sight. It is now added once, when the computer actually arrives. The detailed
   log was already doing this correctly, twice, in the same function.
+- **Opening the dashboard no longer announces "Claude Code CLI detected" every
+  time.** Asking the node for that status added an entry to your activity list
+  and popped up a notification — on every read, and three parts of the page ask
+  for it. Three requests took the list from one entry to four. Nothing is lost:
+  the panel that asked was already showing you the answer.
 - **"1 part", not "1 parts"** — in four messages you can see on screen.
 
 ## [0.3.181-alpha] — 2026-09-14

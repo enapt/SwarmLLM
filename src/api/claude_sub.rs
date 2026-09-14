@@ -1024,32 +1024,23 @@ pub async fn get_status(
 
     let status = detect_cli(&binary).await;
 
-    // Emit activity event with detection result
-    if status.cli_installed && status.authenticated {
-        let plan = status.subscription_type.as_deref().unwrap_or("unknown");
-        state.shared_state.emit_activity(
-            crate::daemon::state::ActivityEvent::new(
-                "provider",
-                "claude_detected",
-                format!(
-                    "Claude Code CLI detected — {} plan, {}",
-                    plan,
-                    status.cli_version.as_deref().unwrap_or("unknown version")
-                ),
-            )
-            .with_toast("info", 3000),
-        );
-    } else if status.cli_installed {
-        state.shared_state.emit_activity(
-            crate::daemon::state::ActivityEvent::new(
-                "provider",
-                "claude_detected",
-                "Claude Code CLI found but not authenticated — run 'claude login'".to_string(),
-            )
-            .with_toast("warning", 4000),
-        );
-    }
-
+    // Deliberately emits NO ActivityEvent.
+    //
+    // This is a GET, and it used to append to the user's activity list and
+    // raise a toast on EVERY call — measured 2026-09-14 on an isolated node:
+    // three requests took the list from one entry to four. `loadClaudeSubStatus`
+    // is called by the header strip, the dashboard panel and the settings panel,
+    // so opening the dashboard was enough, repeatedly, into a 100-entry ring
+    // that is also the replay a dashboard opens on and the "recent activity" of
+    // the pasteable report.
+    //
+    // Nothing was lost by removing it. All three callers render `status`
+    // themselves from this very response, so the event and the toast restated
+    // what the panel that asked was already about to show; no frontend code
+    // referenced the `claude_detected` kind at all. A read endpoint should not
+    // write to the activity list — and where an event about a detection IS
+    // wanted, it belongs on the transition, not on the read
+    // (`docs/invariants/network.md` § "The activity list reports a TRANSITION").
     Ok(axum::Json(status))
 }
 
