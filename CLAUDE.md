@@ -226,9 +226,22 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 All 20 build phases complete. All subsystems wired — no stubs. **2703 lib (dev,claude-subscription) — re-measured 2026-09-14, full suite green (exit 0)** + 79 integration (31 `integration` + 34 `integration_phase10_11` + 14 `yamux_substream`) + 107 repo-consistency + 1 api_key_side_effects + 36 swarmllm-types tests passing; 12 lib + 1 e2e ignored (env-var or manual). Clippy clean on default, `--no-default-features --features dev,claude-subscription` (that combination is the documented one — plain `--features dev` leaves `embedded` on too and fails on dead code), a `--features llama` check, and `flash-attn --lib`. `cargo audit` reports only advisories already documented and accepted in `SECURITY.md` — re-checked at the .177 release 2026-09-13, two (`hickory-proto` RUSTSEC-2026-0118/0119, both transitive via libp2p — 0.26.1 is a semver-MAJOR bump pinned by libp2p 0.56, so it is genuinely unreachable without upgrading libp2p; re-checked 2026-09-08, not merely re-accepted) plus the `paste` unmaintained warning.
 
-**Released and deployed: v0.3.180-alpha (2026-09-14).** Gate record in
-`memory/round_log_0914_settings_write_paths.md` § Gate result. Rollback
-`~/.local/bin/swarmllm.0.3.179-alpha.bak` (3 kept: .177/.178/.179).
+**Released and deployed: v0.3.181-alpha (2026-09-14).** Gate record in
+`memory/round_log_0914_release_181.md` § Gate result — fully green, and the
+conformance run was **identical line for line** to the .180 baseline. Rollback
+`~/.local/bin/swarmllm.0.3.180-alpha.bak` (3 kept: .178/.179/.180).
+
+**v0.3.181 carries** two field reports and the finished vocabulary rename:
+**#033** Windows had NEVER been able to install an update, in any release — the
+refusal rested on a comment asserting that a running `.exe` cannot be renamed,
+which is false (gotcha #602); **#034** on iOS/iPadOS the whole page scrolled as
+one block, two entangled WebKit behaviours where the lock is what makes `dvh`
+correct (#608); the chat now says what it is waiting on, using a progress
+snapshot the daemon already sent and the client threw away (#605); and the UI
+settled on **one word per thing** — a model piece is a "part", a machine is a
+"computer" — across 21 locales and five surfaces, one of them a helper that
+RETURNED the word (#609, #610, #611). ⚠ The Windows and iOS fixes are verified
+by MECHANISM, not on the devices; neither platform exists here.
 
 **v0.3.180 — 24 commits, all 2026-09-14.** Two field reports and five parallel
 audits. ⚠ **The reporter numbered TWO reports #032** — **#032-download** (a
