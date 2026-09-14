@@ -6767,7 +6767,8 @@ fn every_viewport_height_in_css_has_a_dynamic_fallback_beside_it() {
     );
 }
 
-/// The UI calls a piece of a model a "part", in English, everywhere.
+/// The UI calls a piece of a model a "part" and a machine a "computer",
+/// in English, everywhere.
 ///
 /// It used to call it three things at once — "shard", "part" and "piece" — and
 /// not by area: `dashboard.info_shards` read "Parts" while the tip beside it
@@ -6788,7 +6789,7 @@ fn every_viewport_height_in_css_has_a_dynamic_fallback_beside_it() {
 /// as PLACEHOLDER names are fine and are ignored — they are wire field names,
 /// not words anybody reads.
 #[test]
-fn the_english_ui_calls_a_piece_of_a_model_a_part() {
+fn the_english_ui_uses_one_word_for_a_model_part_and_one_for_a_machine() {
     let path = repo_root().join("frontend/i18n/en.json");
     let raw = std::fs::read_to_string(&path).expect("read en.json");
     let map: serde_json::Map<String, serde_json::Value> =
@@ -6798,8 +6799,17 @@ fn the_english_ui_calls_a_piece_of_a_model_a_part() {
     // WORK, not parts of a model — a different thing that keeps its own word.
     const NOT_ABOUT_MODELS: &[&str] = &["perf.served_detail", "dashboard.stat_forwards_tip"];
 
+    // The machine a model runs on is a "computer", not a peer or a node.
+    //
+    // The pool feature is the ONE exception and keeps "device": machines you
+    // own and manage in a pool are a different thing from anyone's machine on
+    // the swarm, and "My Devices" is a nav destination with its own name. So
+    // this forbids peer/node and deliberately says nothing about "device".
+    const MACHINE_WORDS: &[&str] = &["peer", "peers", "node", "nodes"];
+
     let word = regex_lite_word;
     let mut offenders = Vec::new();
+    let mut machines = Vec::new();
     for (key, value) in &map {
         let Some(text) = value.as_str() else { continue };
         if NOT_ABOUT_MODELS.contains(&key.as_str()) {
@@ -6813,6 +6823,12 @@ fn the_english_ui_calls_a_piece_of_a_model_a_part() {
                 break;
             }
         }
+        for banned in MACHINE_WORDS {
+            if word(&prose, banned) {
+                machines.push(format!("{key}: …{}…", prose.trim()));
+                break;
+            }
+        }
     }
 
     assert!(
@@ -6820,6 +6836,13 @@ fn the_english_ui_calls_a_piece_of_a_model_a_part() {
         "the English UI must call a piece of a model a \"part\" — these say \
          something else:\n  {}",
         offenders.join("\n  ")
+    );
+    assert!(
+        machines.is_empty(),
+        "the English UI must call a machine a \"computer\" — \"peer\" and \"node\" \
+         are the words this replaced. (The pool feature keeps \"device\" and is \
+         not checked here.)\n  {}",
+        machines.join("\n  ")
     );
 
     // The scan must be able to SEE the word it forbids, or it passes by being

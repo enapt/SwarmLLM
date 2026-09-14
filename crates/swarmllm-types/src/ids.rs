@@ -57,7 +57,9 @@ impl ShardId {
         if index == MMPROJ_SHARD_INDEX {
             "mmproj".to_string()
         } else {
-            format!("shard {}", index + 1)
+            // User-facing wording: the UI calls a piece of a model a "part".
+            // See `the_english_ui_uses_one_word_for_a_model_part_and_one_for_a_machine`.
+            format!("part {}", index + 1)
         }
     }
 

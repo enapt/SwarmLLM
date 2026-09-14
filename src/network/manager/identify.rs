@@ -346,7 +346,7 @@ impl NetworkManager {
                     "network",
                     "peer_connected",
                     format!(
-                        "Peer connected: {}{}",
+                        "Computer connected: {}{}",
                         label,
                         gpu_name
                             .as_ref()

@@ -1566,7 +1566,7 @@ pub(crate) async fn dispatch_network_messages(
                                                         "capacity",
                                                         "hf_sources_cap_reached",
                                                         format!(
-                                                            "Discovered model catalogue is full ({MAX_HF_SOURCES} entries). New models from peers are being dropped — remove unused models in Settings to free slots."
+                                                            "Discovered model catalogue is full ({MAX_HF_SOURCES} entries). New models from computers are being dropped — remove unused models in Settings to free slots."
                                                         ),
                                                     )
                                                     .with_detail_num(MAX_HF_SOURCES as i64)

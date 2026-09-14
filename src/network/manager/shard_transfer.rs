@@ -254,7 +254,7 @@ impl NetworkManager {
                             "download",
                             "shard_download_p2p",
                             format!(
-                                "Retrying part {} of {} from another peer ({}, attempt {}/{})",
+                                "Retrying part {} of {} from another computer ({}, attempt {}/{})",
                                 crate::types::ShardId::display_index_short(shard_id.index),
                                 mname.as_deref().unwrap_or(&shard_id.model_id.0),
                                 reason,
@@ -358,7 +358,7 @@ impl NetworkManager {
                     "download",
                     "shard_transfer_failed",
                     format!(
-                        "No peers or HF source for part {} of {} ({})",
+                        "No computers or HF source for part {} of {} ({})",
                         crate::types::ShardId::display_index_short(shard_id.index),
                         mname.as_deref().unwrap_or(&shard_id.model_id.0),
                         reason,

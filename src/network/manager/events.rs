@@ -622,7 +622,7 @@ impl NetworkManager {
                             crate::daemon::state::ActivityEvent::new(
                                 "network",
                                 "upnp_mapped",
-                                format!("Your router opened a public address — this node is now reachable across the internet ({addr})"),
+                                format!("Your router opened a public address — this computer is now reachable across the internet ({addr})"),
                             )
                             .with_detail_str(addr.to_string())
                             .with_toast("success", 6000),

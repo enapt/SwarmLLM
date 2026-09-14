@@ -3918,7 +3918,7 @@ impl ModelProcessPool {
                             "inference",
                             "model_ram_refused",
                             format!(
-                                "{} needs more memory than this node is allowed to use — not loading it",
+                                "{} needs more memory than this computer is allowed to use — not loading it",
                                 model_id.0
                             ),
                         )

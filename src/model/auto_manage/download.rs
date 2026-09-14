@@ -867,7 +867,7 @@ impl AutoShardManager {
                     self.shared_state.emit_activity(crate::daemon::state::ActivityEvent::new(
                         "download",
                         "shard_no_source",
-                        format!("Cannot download {} of {} — no HuggingFace source and no peers hold it", crate::types::ShardId::display_index(candidate.shard_index), mname.as_deref().unwrap_or(&candidate.model_id.0)),
+                        format!("Cannot download {} of {} — no HuggingFace source and no computers hold it", crate::types::ShardId::display_index(candidate.shard_index), mname.as_deref().unwrap_or(&candidate.model_id.0)),
                     )
                     .with_model(candidate.model_id.0.clone())
                     .with_detail_num(candidate.shard_index as i64)
@@ -907,7 +907,7 @@ impl AutoShardManager {
                                 )
                             });
                         entry.log_push(format!(
-                            "P2P: downloading shard {} from peer",
+                            "P2P: downloading {} from another computer",
                             crate::types::ShardId::display_index(candidate.shard_index)
                         ));
                     } else {
@@ -927,7 +927,7 @@ impl AutoShardManager {
                                 "peers",
                                 "auto_manage",
                                 format!(
-                                    "P2P: downloading shard {} from peer",
+                                    "P2P: downloading {} from another computer",
                                     crate::types::ShardId::display_index(candidate.shard_index)
                                 ),
                             );
@@ -970,7 +970,7 @@ impl AutoShardManager {
                                 "download",
                                 "shard_download_p2p",
                                 format!(
-                                    "Requesting part {} of {} from peer {}",
+                                    "Requesting {} of {} from computer {}",
                                     crate::types::ShardId::display_index(candidate.shard_index),
                                     mname.as_deref().unwrap_or(&candidate.model_id.0),
                                     peer_label

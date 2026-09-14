@@ -1761,7 +1761,7 @@ impl PoolManager {
                 crate::daemon::state::ActivityEvent::new(
                     "pool",
                     "invite_lan_only",
-                    "This invite code only works on your local network. To invite someone over the internet, enable UPnP on your router, forward the P2P port, or set up a relay/anchor node (see the networking docs)."
+                    "This invite code only works on your local network. To invite someone over the internet, enable UPnP on your router, forward the P2P port, or set up a relay (see the networking docs)."
                         .to_string(),
                 )
                 .with_toast("warning", 9000),

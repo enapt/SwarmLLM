@@ -55,6 +55,14 @@
   It is now "part" throughout, in all 21 languages, including the messages the
   node itself writes into the activity feed. Nothing on disk or on the wire was
   renamed — this is only what you read.
+- **And one word for a computer.** The same thing was called a "peer", a "node",
+  a "computer" and a "device" depending on where you looked — sometimes two of
+  them in one sentence. It is now "computer" everywhere, in all 21 languages.
+  The one exception is My Devices, which keeps its own name: the machines you
+  own and link together are a different idea from anyone's computer on the
+  swarm. Again nothing on disk or on the wire changed.
+- **"P2P: downloading shard shard 15 from peer"** — a doubled word in the
+  download feed, fixed along the way.
 
 ## [0.3.180-alpha] — 2026-09-14
 

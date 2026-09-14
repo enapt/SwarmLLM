@@ -487,7 +487,7 @@ pub async fn download_shard(
                     "download",
                     "shard_download_p2p",
                     format!(
-                        "Downloading part {} of {} from peer {}",
+                        "Downloading part {} of {} from computer {}",
                         shard_index + 1,
                         display,
                         peer_label

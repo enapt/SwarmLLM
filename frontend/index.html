@@ -164,7 +164,7 @@
           </div>
           <div class="setup-auto-discover-body">
             <strong data-i18n="setup.auto_discover_title">You're already on the swarm</strong>
-            <p class="text-muted text-sm mt-0" data-i18n="setup.auto_discover_lead">Your node joins the public swarm over the internet automatically, and also finds any SwarmLLM nodes on your own network — no setup needed.</p>
+            <p class="text-muted text-sm mt-0" data-i18n="setup.auto_discover_lead">This computer joins the public swarm over the internet automatically, and also finds any SwarmLLM computers on your own network — no setup needed.</p>
           </div>
         </div>
 
@@ -195,8 +195,8 @@
           </summary>
           <div class="setup-advanced-body">
             <div class="mb-2">
-              <label class="field-label" for="setup-invite-code" data-i18n="setup.connect_peer">Connect to a specific peer</label>
-              <p class="text-muted text-sm setup-section-desc" data-i18n="setup.connect_peer_desc">Paste a peer address from someone already running SwarmLLM. This connects you to a specific node — usually only needed if auto-discovery is blocked.</p>
+              <label class="field-label" for="setup-invite-code" data-i18n="setup.connect_peer">Connect to a specific computer</label>
+              <p class="text-muted text-sm setup-section-desc" data-i18n="setup.connect_peer_desc">Paste a swarm address from someone already running SwarmLLM. Usually only needed if auto-discovery is blocked.</p>
               <div class="flex gap-1">
                 <input type="text" id="setup-invite-code" placeholder="swarm://..." class="flex-1 mono">
                 <button class="btn btn-sm" id="setup-invite-join" data-i18n="setup.connect_btn">Connect</button>
@@ -244,7 +244,7 @@
             <span class="setup-summary-value text-muted text-2xs" id="summary-storage-preview">—</span>
           </div>
           <button type="button" id="summary-invite-row" class="setup-summary-row hidden" data-jump-step="2" data-i18n-title="setup.summary_edit_step2" title="Click to change peer">
-            <span class="setup-summary-label" data-i18n="setup.summary_peer">Swarm Peer</span>
+            <span class="setup-summary-label" data-i18n="setup.summary_peer">Swarm Address</span>
             <span class="setup-summary-value" id="summary-invite">---</span>
           </button>
           <button type="button" id="summary-provider-row" class="setup-summary-row hidden" data-jump-step="2" data-i18n-title="setup.summary_edit_step2" title="Click to change provider">
@@ -436,7 +436,7 @@
           <option value="maximum" data-i18n="setup.contrib_maximum">Maximum</option>
         </select>
         <span class="text-muted field-hint" data-i18n="settings.contribution_hint">How much of your computer (CPU in CPU mode, GPU when available) can be used to serve swarm inference.</span>
-        <span class="text-muted field-hint" data-i18n="settings.contribution_restart_note">Takes effect right away. A couple of things — how many peers you connect to, and the processor cores already reserved by a running model — only change when SwarmLLM next starts.</span>
+        <span class="text-muted field-hint" data-i18n="settings.contribution_restart_note">Takes effect right away. Two things only change when SwarmLLM next starts: how many computers you connect to, and the processor cores a running model has already reserved.</span>
       </div>
       <div class="form-group">
         <label for="settings-max-requests">
@@ -506,7 +506,7 @@
         <div id="reference-models-list" class="mt-2"></div>
         <div class="mt-3">
           <button type="button" class="btn btn-sm" id="copy-diagnostics-btn" data-i18n="reference.copy_diagnostics">Copy diagnostics</button>
-          <div class="text-muted field-hint mt-1" data-i18n="reference.copy_diagnostics_hint">Copies a short summary of this node — version, connections, models and recent events — for pasting into a bug report. Safe to share: no keys, no invite codes, and network addresses are replaced with placeholders.</div>
+          <div class="text-muted field-hint mt-1" data-i18n="reference.copy_diagnostics_hint">Copies a short summary of this computer — version, connections, models and recent events — for pasting into a bug report. Safe to share: no keys, no invite codes, and network addresses are replaced with placeholders.</div>
         </div>
       </details>
 
@@ -754,7 +754,7 @@
                  limit on everything this node sends, which it is not: a user
                  set it to 1 Mbps, measured 11 Mbps, and reasonably concluded
                  the setting did nothing (2026-09-11 suggestion). -->
-            <span class="text-muted field-hint" data-i18n="settings.max_bandwidth_help">Caps how fast this node sends model parts to others. It does not limit inference or the background traffic that keeps this node connected — the Network figure on the dashboard shows the total.</span>
+            <span class="text-muted field-hint" data-i18n="settings.max_bandwidth_help">Caps how fast this computer sends model parts to others. It does not limit inference or the background traffic that keeps it connected — the Network figure on the dashboard shows the total.</span>
           </div>
           <div class="form-group">
             <label for="settings-disk">
@@ -772,7 +772,7 @@
           </div>
         </div>
       </details>
-      <p class="info-box info-box-warn hidden" id="settings-unreadable" data-i18n="settings.unreadable">&#9888; We couldn't read this node's current settings, so they can't be changed right now. Close this and reopen Settings in a moment.</p>
+      <p class="info-box info-box-warn hidden" id="settings-unreadable" data-i18n="settings.unreadable">⚠ We couldn't read your current settings, so they can't be changed right now. Close this and reopen Settings in a moment.</p>
       <div class="mt-2 flex-center gap-1">
         <button class="btn btn-primary" id="btn-save-settings" data-i18n="actions.save_settings" disabled>Save Settings</button>
         <button class="btn btn-ghost btn-sm field-hint" id="btn-show-welcome" data-i18n="settings.show_welcome" data-i18n-title="settings.show_welcome_title" title="Re-open the welcome tour" style="margin-left:auto">Show welcome tour</button>
@@ -1016,7 +1016,7 @@
         <div class="dashboard-offline-cover" id="dashboard-offline-cover">
           <div class="cover-spinner"></div>
           <div class="cover-msg" data-i18n="dashboard.connecting">Connecting...</div>
-          <div class="cover-sub" data-i18n="dashboard.connecting_sub">Starting up your SwarmLLM node</div>
+          <div class="cover-sub" data-i18n="dashboard.connecting_sub">Starting up SwarmLLM</div>
         </div>
         <!-- Slave mode persistent top banner — shown on every page when device is linked -->
         <!-- Users can still use the full dashboard; inference charges go to the master -->
@@ -1044,7 +1044,7 @@
               <div class="netstatus-chips" id="netstatus-chips"></div>
             </div>
             <div class="netstatus-row netstatus-row-detail" id="netstatus-detail">
-              <span class="text-muted" data-i18n="netstatus.detail_connecting">Looking for peers — usually 10–30 s on first start.</span>
+              <span class="text-muted" data-i18n="netstatus.detail_connecting">Looking for other computers — usually 10–30 s on first start.</span>
             </div>
             <div class="netstatus-row netstatus-row-models" id="netstatus-models" style="display:none"></div>
             <div class="netstatus-row netstatus-row-resources" id="netstatus-resources" style="display:none"></div>
@@ -1056,7 +1056,7 @@
               <div class="stat-icon blue">&#9901;</div>
               <div class="stat-body">
                 <div><span class="stat-value" id="stat-peers">0</span><span class="stat-trend trend-flat" id="stat-peers-trend"></span></div>
-                <div class="stat-label"><span data-i18n="dashboard.network_title">Peers</span> <span class="stat-help" data-i18n-title="stats.peers_help" title="Other computers running SwarmLLM that you're connected to">?</span> <span class="badge badge-purple lan-badge" id="lan-peer-badge" style="display:none">0 LAN</span></div>
+                <div class="stat-label"><span data-i18n="dashboard.network_title">Computers</span> <span class="stat-help" data-i18n-title="stats.peers_help" title="Other computers running SwarmLLM that you're connected to">?</span> <span class="badge badge-purple lan-badge" id="lan-peer-badge" style="display:none">0 LAN</span></div>
                 <div class="stat-sparkline" id="stat-peers-spark"></div>
               </div>
             </div>
@@ -1109,7 +1109,7 @@
             <!-- Node panel — full-width -->
             <div class="panel node-compact">
               <div class="panel-header">
-                <h2 data-i18n="dashboard.node_title">Node</h2>
+                <h2 data-i18n="dashboard.node_title">Computer</h2>
                 <span class="flex-center gap-1">
                   <span class="hw-mode-wrap" tabindex="0">
                     <span id="node-gpu-badge" class="node-mode-badge node-mode-cpu node-mode-badge-interactive" data-i18n="hw.mode_cpu">CPU mode</span>
@@ -1268,16 +1268,16 @@
                      does. data-collapse is on the header, so this button stops
                      its own click from collapsing the panel underneath it. -->
                 <span class="share-btn-wrap" style="position:relative">
-                  <button class="btn btn-sm" id="btn-share-network" data-i18n-title="nav.share_peer" title="Share your swarm peer address" data-i18n="nav.connect_node">Connect a node</button>
+                  <button class="btn btn-sm" id="btn-share-network" data-i18n-title="nav.share_peer" title="Share your swarm peer address" data-i18n="nav.connect_node">Connect a computer</button>
                   <div class="share-popover" id="share-popover">
-                    <label class="font-semibold mb-1" data-i18n="network.your_peer_address">Your Swarm Peer Address</label>
-                    <div class="text-muted field-hint mb-1" data-i18n="network.share_desc">Share with other SwarmLLM users so your nodes can discover each other on the network</div>
+                    <label class="font-semibold mb-1" data-i18n="network.your_peer_address">Your Swarm Address</label>
+                    <div class="text-muted field-hint mb-1" data-i18n="network.share_desc">Share with other SwarmLLM users so your computers can discover each other on the network</div>
                     <div class="flex gap-1 mb-2">
                       <input type="text" id="my-network-code" readonly class="form-control mono text-2xs flex-1" data-i18n-aria-label="network.my_address_aria" aria-label="Your peer address">
                       <button class="btn btn-sm" id="btn-copy-network-code" data-i18n-title="nav.copy_clipboard" title="Copy to clipboard" data-i18n="actions.copy">Copy</button>
                     </div>
-                    <label class="font-semibold mb-0" data-i18n="network.other_peer_address">Another User's Peer Address</label>
-                    <div class="text-muted field-hint mb-0" data-i18n="network.connect_desc">Paste an address from another user to connect your nodes</div>
+                    <label class="font-semibold mb-0" data-i18n="network.other_peer_address">Another User's Swarm Address</label>
+                    <div class="text-muted field-hint mb-0" data-i18n="network.connect_desc">Paste an address from another user to connect your computers</div>
                     <div class="flex gap-1">
                       <input type="text" id="join-code-input" class="form-control mono text-2xs flex-1" placeholder="swarm://..." data-i18n-aria-label="network.peer_address_aria" aria-label="Peer address">
                       <button class="btn btn-sm btn-primary" id="btn-join-network" data-i18n="setup.connect_btn">Connect</button>
@@ -1423,7 +1423,7 @@
               <div id="world-map"></div>
             </div>
             <div id="map-legend" class="map-legend">
-              <span class="text-muted" style="font-size:0.75rem" data-i18n="dashboard.node_density">Node density:</span>
+              <span class="text-muted" style="font-size:0.75rem" data-i18n="dashboard.node_density">Computer density:</span>
               <div class="legend-gradient">
                 <span class="text-muted" style="font-size:0.7rem">0</span>
                 <div class="legend-bar"></div>
@@ -1488,7 +1488,7 @@
               <thead>
                 <tr>
                   <th scope="col" style="width:60px" data-i18n="leaderboard.rank">#</th>
-                  <th scope="col" data-i18n="leaderboard.node">Node</th>
+                  <th scope="col" data-i18n="leaderboard.node">Computer</th>
                   <th scope="col" data-i18n="leaderboard.rig">Machine</th>
                   <th scope="col" data-i18n="leaderboard.region">Region</th>
                   <th scope="col" data-i18n="leaderboard.speed">Speed</th>
@@ -1755,7 +1755,7 @@
                  on the stats tick: this is the high-cardinality detail that must
                  not be retained, and a panel nobody opens should cost nothing. -->
             <div class="swarm-subview" id="swarm-subview-performance" style="display:none">
-              <div class="text-muted text-sm mb-2" data-i18n="perf.intro">Where your recent answers came from, and how the peers serving them are performing.</div>
+              <div class="text-muted text-sm mb-2" data-i18n="perf.intro">Where your recent answers came from, and how the computers serving them are performing.</div>
               <div id="perf-content">
                 <div class="text-muted" data-i18n="perf.loading">Loading…</div>
               </div>

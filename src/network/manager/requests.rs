@@ -1160,7 +1160,7 @@ impl NetworkManager {
                                 "download",
                                 "shard_p2p_complete",
                                 format!(
-                                    "Part {} of {} downloaded from peer {}",
+                                    "Part {} of {} downloaded from computer {}",
                                     crate::types::ShardId::display_index_short(shard_id.index),
                                     mname.as_deref().unwrap_or(&shard_id.model_id.0),
                                     peer_label

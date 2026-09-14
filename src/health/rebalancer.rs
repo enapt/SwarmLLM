@@ -91,7 +91,7 @@ impl ShardRebalancer {
                         "network",
                         "rebalance_peer_left",
                         format!(
-                            "Rebalancing: peer {} departed",
+                            "Rebalancing: computer {} departed",
                             crate::identity::nickname::short_display_name(
                                 &departed_peer,
                                 &self.shared_state.nickname_registry

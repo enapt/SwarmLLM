@@ -647,7 +647,7 @@ impl AcquisitionManager {
                         "download",
                         "shard_p2p_exhausted",
                         format!(
-                            "No peers served part {} of {} — falling back to HuggingFace",
+                            "No computers served part {} of {} — falling back to HuggingFace",
                             shard_id.index + 1,
                             display
                         ),

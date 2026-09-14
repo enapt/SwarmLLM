@@ -1161,7 +1161,7 @@ impl UpdateChecker {
                 "update",
                 "restart_required",
                 format!(
-                    "v{} is installed but this node is still running v{} — restart to use it",
+                    "v{} is installed but this computer is still running v{} — restart to use it",
                     pending.installed, pending.running
                 ),
             )

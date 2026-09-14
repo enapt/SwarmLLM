@@ -533,7 +533,7 @@ impl NetworkManager {
                         crate::daemon::state::ActivityEvent::new(
                             "network",
                             "peer_disconnected",
-                            format!("Peer disconnected: {}", label),
+                            format!("Computer disconnected: {}", label),
                         )
                         .with_node(format!("{}", node_id)),
                     );
