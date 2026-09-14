@@ -67,7 +67,7 @@ pub(super) async fn read_shard_pins_blocking(state: &SharedState) -> Vec<crate::
 /// the absolute-worst-case slow peer including pessimistic retries, but
 /// a non-technical user staring at a stuck download for 10 minutes is a
 /// product-broken experience. 3 minutes still comfortably covers an
-/// honest 32 MiB chunk over a slow link (~150 KiB/s sustained), and a
+/// honest 8 MiB chunk over a slow link (~50 KiB/s sustained), and a
 /// genuine slow-peer wins the next cycle when the HF fallback kicks in
 /// or a faster holder is selected.
 ///
@@ -91,7 +91,7 @@ pub(super) fn sweep_stalled_p2p_permits(state: &SharedState) {
     let now = std::time::Instant::now();
     let mut stalled: Vec<crate::types::ShardId> = Vec::new();
     for entry in state.models.p2p_download_permits.iter() {
-        if now.duration_since(entry.value().started_at) > cutoff {
+        if now.duration_since(entry.value().last_progress_at) > cutoff {
             stalled.push(entry.key().clone());
         }
     }
@@ -106,7 +106,9 @@ pub(super) fn sweep_stalled_p2p_permits(state: &SharedState) {
         let removed = state
             .models
             .p2p_download_permits
-            .remove_if(&sid, |_, slot| now.duration_since(slot.started_at) > cutoff);
+            .remove_if(&sid, |_, slot| {
+                now.duration_since(slot.last_progress_at) > cutoff
+            });
         if removed.is_none() {
             continue;
         }

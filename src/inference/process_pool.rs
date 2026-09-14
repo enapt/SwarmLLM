@@ -1665,6 +1665,67 @@ fn forward_is_schedulable(f: &crate::types::LayerForward) -> bool {
     true
 }
 
+/// Memory a spawn has charged against the shared budget but not yet handed to a
+/// worker, released on drop.
+///
+/// `get_or_spawn` charges `vram_reserved_mb`/`ram_reserved_mb` and only then
+/// awaits `spawn_worker`, which starts a subprocess and waits for it to connect
+/// (`WORKER_CONNECT_TIMEOUT_SECS` is 30). Release lived in two places, both
+/// reached only by the await RETURNING: the `Err` arm gives the charge back,
+/// the `Ok` arm hands it to the new `WorkerHandle`. If the enclosing future is
+/// dropped or the task aborted while suspended in that await, neither happens —
+/// and no `WorkerHandle` was ever inserted, so nothing later reconciles it. The
+/// `Err` arm's own comment says what that costs: "Leaving the charge would
+/// shrink the budget permanently."
+///
+/// Two ordinary things drop that future mid-spawn:
+///
+/// - `pipeline::local_generate::try_local_generate_fastpath` WRAPS
+///   `pool.generate(..)` in `cancel::unless_cancelled`, which cancels by
+///   dropping. `forward_direct` brackets the same call with
+///   `bail_if_cancelled` instead and its comment explains why — "dropping a
+///   load half-done abandons a spawning subprocess" — but that rule is a
+///   comment, so a file added later did the wrapped version anyway (gotcha
+///   #459, reintroduced).
+/// - `SwarmMessage::CancelInference` calls `abort_handle().abort()` on the task
+///   serving an inbound segment. An external abort drops the future wherever it
+///   is suspended, so no in-band checkpoint can defend against it — bracketing
+///   cannot help here at all.
+///
+/// The budget is keyed by model and accumulates, so each leak compounds until
+/// the node refuses a model it has room for and only a restart clears it.
+struct PendingSpawnCharge<'a> {
+    pool: &'a ModelProcessPool,
+    model_id: ModelId,
+    vram_mb: u64,
+    ram_mb: u64,
+}
+
+impl PendingSpawnCharge<'_> {
+    /// The await returned, so the caller's own `Ok`/`Err` arms own the charge
+    /// from here. Only cancellation should reach this guard's `Drop`.
+    fn handed_back_to_the_caller(mut self) {
+        self.vram_mb = 0;
+        self.ram_mb = 0;
+    }
+}
+
+impl Drop for PendingSpawnCharge<'_> {
+    fn drop(&mut self) {
+        if self.vram_mb == 0 && self.ram_mb == 0 {
+            return;
+        }
+        tracing::warn!(
+            model = %self.model_id,
+            vram_mb = self.vram_mb,
+            ram_mb = self.ram_mb,
+            "A model spawn was abandoned mid-flight — returning the memory it had reserved"
+        );
+        self.pool.release_vram_charge(&self.model_id, self.vram_mb);
+        self.pool.release_ram_charge(&self.model_id, self.ram_mb);
+    }
+}
+
 impl ModelProcessPool {
     pub fn new(data_dir: PathBuf) -> Self {
         Self {
@@ -3875,23 +3936,37 @@ impl ModelProcessPool {
             self.record_cpu_kv_budget(model_id, Some(segment));
         }
 
-        match self
-            .spawn_worker(
-                model_id,
-                placed_on_cpu_because,
-                charge_ram,
-                // Whichever budget this worker is charged against is the one
-                // its release must subtract from.
-                if charge_ram {
-                    charged_ram_mb
-                } else {
-                    charged_vram_mb
-                },
-                estimated,
-                hybrid_layers,
-            )
-            .await
-        {
+        // Armed only across the await, so the `Ok`/`Err` arms below keep owning
+        // the charge exactly as before. It exists for the one thing they cannot
+        // see: the future being dropped or the task aborted while the spawn is
+        // still in flight.
+        let spawn_result = {
+            let charge = PendingSpawnCharge {
+                pool: self,
+                model_id: model_id.clone(),
+                vram_mb: charged_vram_mb,
+                ram_mb: charged_ram_mb,
+            };
+            let r = self
+                .spawn_worker(
+                    model_id,
+                    placed_on_cpu_because,
+                    charge_ram,
+                    // Whichever budget this worker is charged against is the one
+                    // its release must subtract from.
+                    if charge_ram {
+                        charged_ram_mb
+                    } else {
+                        charged_vram_mb
+                    },
+                    estimated,
+                    hybrid_layers,
+                )
+                .await;
+            charge.handed_back_to_the_caller();
+            r
+        };
+        match spawn_result {
             Ok(handle) => {
                 // Reset the failure counter on first success.
                 self.spawn_failures.remove(model_id);
@@ -6096,6 +6171,68 @@ mod tests {
             gpu_estimate_mb: 0,
             gpu_layers_on_card: None,
         })
+    }
+
+    /// A spawn charges the shared memory budget and only then waits for the
+    /// subprocess. If that wait is abandoned — `unless_cancelled` dropping the
+    /// future, or `CancelInference` aborting the task — no `WorkerHandle` was
+    /// ever created, so nothing downstream can give the charge back. The budget
+    /// is keyed by model and accumulates, so each one shrinks this node's
+    /// memory permanently until a restart.
+    #[tokio::test]
+    async fn an_abandoned_spawn_returns_the_memory_it_had_reserved() {
+        let p = test_pool();
+        p.set_ram_budget_mb(8000);
+        let m = ModelId("abandoned".into());
+
+        assert!(
+            p.admit_to_cpu(&m, 5000),
+            "precondition: the budget admits it"
+        );
+        assert_eq!(p.ram_committed_mb(), 5000);
+
+        // The spawn is abandoned while the charge is outstanding.
+        {
+            let _charge = PendingSpawnCharge {
+                pool: &p,
+                model_id: m.clone(),
+                vram_mb: 0,
+                ram_mb: 5000,
+            };
+        }
+
+        assert_eq!(
+            p.ram_committed_mb(),
+            0,
+            "the charge must come back, or the node permanently believes it has \
+             5 GB less RAM than it does"
+        );
+    }
+
+    /// The ordinary path must be untouched: when the spawn returns, its own
+    /// `Ok`/`Err` arms own the charge and the guard must not double-release.
+    #[tokio::test]
+    async fn a_spawn_that_returns_keeps_its_charge_for_the_caller() {
+        let p = test_pool();
+        p.set_ram_budget_mb(8000);
+        let m = ModelId("returned".into());
+        assert!(p.admit_to_cpu(&m, 5000));
+
+        {
+            let charge = PendingSpawnCharge {
+                pool: &p,
+                model_id: m.clone(),
+                vram_mb: 0,
+                ram_mb: 5000,
+            };
+            charge.handed_back_to_the_caller();
+        }
+
+        assert_eq!(
+            p.ram_committed_mb(),
+            5000,
+            "the guard must not release a charge the caller is still holding"
+        );
     }
 
     /// Report #008: a worker that exits any way other than a graceful unload

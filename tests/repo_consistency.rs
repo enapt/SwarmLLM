@@ -2520,6 +2520,26 @@ fn credits_stay_dormant() {
         );
     }
 
+    // 3b. The diagnostics report does not print a balance. It is written to be
+    //     PASTED to somebody, so it is a publishing surface — and
+    //     `docs/CREDITS_DESIGN.md` names it in its own list of surfaces to
+    //     check. The 2026-09-13 CLI pass removed the CLI's own credit printing
+    //     and left the section in the report the CLI prints, which is how a
+    //     released binary still answered `swarmllm diagnostics` with
+    //     "-- credits --  balance: 6397160" (gotcha #569: one builder is not
+    //     one surface).
+    let admin = std::fs::read_to_string(root.join("src/api/admin.rs")).expect("read api/admin");
+    let report = fn_body(&admin, "pub async fn diagnostics(")
+        .expect("the diagnostics report builder must be findable, or this guard checks nothing");
+    for marker in ["-- credits --", "credit_balance.read()"] {
+        assert!(
+            !report.contains(marker),
+            "the diagnostics report mentions {marker} — it is pasted to \
+             strangers, and a self-minted balance that gates nothing must not \
+             be published there (docs/CREDITS_DESIGN.md § 4)"
+        );
+    }
+
     // 4. And no dashboard code reads a credit figure. The backend half of this
     //    was checked and the frontend half was not, so an unreachable
     //    `sortKey === 'credits'` branch survived the cleanup that removed every

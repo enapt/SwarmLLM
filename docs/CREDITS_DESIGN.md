@@ -250,6 +250,28 @@ assumed**: the dashboard, the leaderboard, the frontend JS, the CLI, the
 diagnostics report, and any API field a client renders. The 2026-09-13 CLI fix
 exists because only the first three were checked.
 
+**The 2026-09-14 pass enumerated the rest, by reading a RELEASED binary's output
+rather than the source.** `swarmllm diagnostics` on v0.3.179 answered with
+`-- credits --  balance: 6397160`: the CLI fix had removed the CLI's own credit
+printing and left the section in the report the CLI prints (gotcha #569 — one
+builder is not one surface). That is now removed and pinned by
+`credits_stay_dormant`, verified by planting it back.
+
+Four surfaces still publish a dormant balance, and each needs a decision rather
+than a patch, because they have consumers outside this repo:
+
+| Surface | Where | Note |
+|---|---|---|
+| `GET /v1/status` | `api/admin.rs`, `credit_summary_json` + `tier_name` | The tier is a constant, so it reports the same word to everyone |
+| WebSocket `stats_update` | `api/websocket.rs` | Reaches every dashboard client on a 2 s tick |
+| MCP `node_info` | `api/mcp/tools.rs` | Reports a balance to an LLM agent, which may then reason about it |
+| Python SDK | `python/README.md` documents `credits.balance` / `credits.tier`; its tests assert a `"Gold"` tier | The SDK **advertises** the figure, so removing the field is a breaking change for its users |
+
+None of them gates anything — that is the point of dormancy — but the doc's own
+rule is "any API field a client renders", and the SDK renders it. Removing them
+is a product decision (does the API keep serving a figure nothing acts on?), so
+it is recorded here rather than taken.
+
 ---
 
 ## References

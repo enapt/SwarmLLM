@@ -789,3 +789,64 @@ repairing. And the arithmetic lives in `first_dir_that_fits`, a pure
 function tested against the literal 104: **a platform-dependent length
 limit is invisible to a single-platform suite**, so a test that asks the
 host cannot see the bug that only exists on the other host.
+
+## What a task took, a task gives back by being dropped
+
+*Rule: `.claude/rules/architecture.md` § "What a task took, a task gives back by
+being dropped". Found by audit 2026-09-14, each verified against the code.*
+
+### The shape
+
+A resource acquired, then an `.await`, then a plain statement giving it back.
+That statement runs only if the await RETURNS. Two ordinary things stop it:
+
+- **`cancel::unless_cancelled` cancels by dropping the future.** It is the
+  standard way a client disconnect or Stop reaches running work.
+- **`abort_handle().abort()`** from the `CancelInference` handler. Tokio drops
+  the task's future wherever it is suspended. **No in-band checkpoint can help**
+  — `bail_if_cancelled` bracketing defends against cooperative cancellation and
+  is powerless here.
+
+### The three instances
+
+**`PendingSpawnCharge`** — `get_or_spawn` charges `vram_reserved_mb` /
+`ram_reserved_mb`, then awaits `spawn_worker` (a subprocess spawn plus an IPC
+connect; `WORKER_CONNECT_TIMEOUT_SECS` is 30, so the window is seconds). Release
+lived in the `Err` arm and in the `WorkerHandle` the `Ok` arm creates. Dropped
+mid-await, neither exists — and the `Err` arm's own comment already said what
+that costs: *"Leaving the charge would shrink the budget permanently."* The
+budget is keyed by model and accumulates, so repeated cancellations during cold
+starts shrink the node's usable memory monotonically until a restart, while the
+logs report headroom that is not real.
+
+Two live triggers. `pipeline::local_generate::try_local_generate_fastpath`
+**wraps** `pool.generate(..)` in `unless_cancelled` — the exact pattern
+`forward_direct` rules out in a comment two thousand lines away, so this is
+gotcha #459 reintroduced by a file added later. And `CancelInference` aborts the
+task serving an inbound segment, which no bracketing can survive.
+
+The guard is armed only ACROSS the await and disarmed the moment it returns
+(`handed_back_to_the_caller`), so the `Ok`/`Err` arms keep owning the charge
+exactly as before and cannot double-release.
+
+**`InboundForwardSlot`** — the per-peer concurrency count and the
+abort-registry entry for one inbound `LayerForward`. Both were statements after
+`handle_layer_forward(..).await`, and that function processes untrusted network
+input, so a panic skips them too. The sweep is
+`peer_forward_counts.retain(|_, v| v.load(..) > 0)`: it removes entries that
+have reached ZERO and **cannot repair one stuck above it**.
+`max_forwards_per_peer` is `(max_concurrent_forwards / 2).max(4)`, so **four**
+leaked forwards from one peer refuse every later forward from it with "per-peer
+limit reached" while nothing is in flight. A `NodeId` is cryptographically
+stable, so reconnecting does not clear it; only a restart does.
+
+### What a change here must keep
+
+- Release by `Drop`, never by a statement after an await. If a resource must
+  survive the await's return, disarm the guard at that point rather than moving
+  the release back out.
+- A guard that is armed across an await must not double-release on the normal
+  path — disarm, and test both directions.
+- Do not answer "is this cancellation-safe?" by finding a `bail_if_cancelled`.
+  That defends against cooperative cancellation only; an external `abort()`
+  ignores it entirely.

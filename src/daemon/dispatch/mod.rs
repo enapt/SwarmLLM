@@ -64,6 +64,47 @@ fn max_concurrent_forwards(contribution: &swarmllm_types::ContributionMode) -> u
 fn max_forwards_per_peer(contribution: &swarmllm_types::ContributionMode) -> usize {
     (max_concurrent_forwards(contribution) / 2).max(4)
 }
+/// What one inbound `LayerForward` has taken and must give back: its slot in
+/// the per-peer concurrency count, and its entry in the abort registry.
+///
+/// Released by `Drop`, and that is the whole point. Both used to be plain
+/// statements after `handle_layer_forward(..).await` inside the spawned task,
+/// so both were skipped whenever that task did not return normally — and it has
+/// two ordinary ways not to: `SwarmMessage::CancelInference` calls
+/// `abort_handle().abort()` on it (the standard "the coordinator gave up"
+/// signal, sent on every failover, standby takeover and timeout), and
+/// `handle_layer_forward` processes untrusted network input, so it can panic.
+///
+/// A skipped decrement is permanent. The periodic sweep is
+/// `peer_forward_counts.retain(|_, v| v.load(..) > 0)` — it removes entries
+/// that have reached ZERO and cannot repair one stuck above it — and
+/// `max_forwards_per_peer` floors at 4. So four aborted forwards from one peer
+/// wedge that peer's `NodeId`, which is cryptographically stable, for the rest
+/// of the daemon's uptime: every later forward from it is refused with
+/// "per-peer limit reached" while nothing at all is in flight. Reconnecting
+/// does not clear it; only a restart does.
+struct InboundForwardSlot {
+    counts: Arc<dashmap::DashMap<crate::types::NodeId, std::sync::atomic::AtomicUsize>>,
+    peer: crate::types::NodeId,
+    state: Arc<crate::daemon::SharedState>,
+    request_id: uuid::Uuid,
+    finished: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Drop for InboundForwardSlot {
+    fn drop(&mut self) {
+        self.state
+            .clear_inbound_forward_abort(&self.request_id, &self.finished);
+        if let Some(c) = self.counts.get(&self.peer) {
+            let prev = c.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            drop(c); // release the DashMap ref before removing
+            if prev <= 1 {
+                self.counts.remove(&self.peer);
+            }
+        }
+    }
+}
+
 const MAX_NICKNAME_REGISTRY: usize = 10_000;
 /// Interval for sweeping stale zero-count entries from peer_forward_counts.
 const FORWARD_COUNTS_CLEANUP_SECS: u64 = 60;
@@ -410,22 +451,18 @@ pub(crate) async fn dispatch_network_messages(
                                         let finished_in_task = forward_finished.clone();
                                         let handle = tokio::spawn(async move {
                                             let _permit = permit;
+                                            // Both of these are given back by dropping the slot, so an
+                                            // abort or a panic returns them exactly as a normal finish
+                                            // does. As plain statements after the await they were
+                                            // skipped by both, and a skipped decrement is permanent.
+                                            let _slot = InboundForwardSlot {
+                                                counts: pfc,
+                                                peer: ps,
+                                                state: ss.clone(),
+                                                request_id: forward_request_id,
+                                                finished: finished_in_task,
+                                            };
                                             layer_forward::handle_layer_forward(ss.clone(), ntx, forward).await;
-                                            // Whether it finished or was abandoned, this request is no
-                                            // longer in flight — drop the abort handle so the map does
-                                            // not accumulate one entry per forward ever received.
-                                            ss.clear_inbound_forward_abort(
-                                                &forward_request_id,
-                                                &finished_in_task,
-                                            );
-                                            // Decrement per-peer count; remove entry if zero to prevent unbounded growth
-                                            if let Some(c) = pfc.get(&ps) {
-                                                let prev = c.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-                                                drop(c); // release DashMap ref before remove
-                                                if prev <= 1 {
-                                                    pfc.remove(&ps);
-                                                }
-                                            }
                                         });
                                         // Registered after the spawn because the abort handle does not
                                         // exist until then; the helper withdraws the entry again if the
@@ -2615,5 +2652,111 @@ mod rejected_manifest_tests {
         assert_eq!(note_manifest_rejection(manifest(&a, 9)), Some(0));
         assert_eq!(note_manifest_rejection(manifest(&a, 9)), None);
         assert_eq!(note_manifest_rejection(manifest(&b, 9)), Some(0));
+    }
+}
+
+#[cfg(test)]
+mod inbound_forward_slot_tests {
+    use super::InboundForwardSlot;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    fn test_state() -> Arc<crate::daemon::SharedState> {
+        use crate::identity::Identity;
+        use crate::inference::executor::ModelExecutor;
+        use crate::storage::db::Database;
+        use tokio::sync::Mutex;
+
+        let temp = tempfile::tempdir().unwrap();
+        let db = Database::open(temp.path()).unwrap();
+        let (state, _, _) = crate::daemon::SharedState::new(
+            crate::config::Config::default(),
+            Identity::generate(),
+            db,
+            Arc::new(Mutex::new(ModelExecutor::new())),
+            None,
+        );
+        state
+    }
+
+    fn peer() -> crate::types::NodeId {
+        crate::types::NodeId([7u8; 32])
+    }
+
+    /// `CancelInference` aborts the task serving an inbound segment — the
+    /// ordinary "the coordinator gave up" signal, sent on every failover,
+    /// standby takeover and timeout. The decrement used to be a plain statement
+    /// after the await, so an abort skipped it, and the sweep
+    /// (`retain(|_, v| v.load() > 0)`) removes entries that reach ZERO and
+    /// cannot repair one stuck above it. `max_forwards_per_peer` floors at 4,
+    /// so four aborts from one peer refused everything it sent afterwards for
+    /// the rest of the daemon's uptime — and a NodeId is stable, so
+    /// reconnecting did not clear it.
+    #[tokio::test]
+    async fn an_aborted_forward_gives_back_its_per_peer_slot() {
+        let state = test_state();
+        let counts: Arc<dashmap::DashMap<crate::types::NodeId, AtomicUsize>> =
+            Arc::new(dashmap::DashMap::new());
+        counts.insert(peer(), AtomicUsize::new(1));
+
+        let slot_counts = counts.clone();
+        let slot_state = state.clone();
+        let handle = tokio::spawn(async move {
+            let _slot = InboundForwardSlot {
+                counts: slot_counts,
+                peer: peer(),
+                state: slot_state,
+                request_id: uuid::Uuid::new_v4(),
+                finished: Arc::new(AtomicBool::new(false)),
+            };
+            // Stands in for a forward that never finishes on its own.
+            std::future::pending::<()>().await;
+        });
+
+        tokio::task::yield_now().await;
+        handle.abort();
+        let _ = handle.await;
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+
+        assert!(
+            counts.get(&peer()).is_none(),
+            "an aborted forward must release its slot — four that do not \
+             permanently wedge every later forward from that peer"
+        );
+    }
+
+    /// The ordinary finish must behave the same way, and must not decrement
+    /// somebody else's peer.
+    #[tokio::test]
+    async fn a_finished_forward_releases_only_its_own_peer() {
+        let state = test_state();
+        let counts: Arc<dashmap::DashMap<crate::types::NodeId, AtomicUsize>> =
+            Arc::new(dashmap::DashMap::new());
+        counts.insert(peer(), AtomicUsize::new(2));
+        let other = crate::types::NodeId([9u8; 32]);
+        counts.insert(other.clone(), AtomicUsize::new(1));
+
+        {
+            let _slot = InboundForwardSlot {
+                counts: counts.clone(),
+                peer: peer(),
+                state,
+                request_id: uuid::Uuid::new_v4(),
+                finished: Arc::new(AtomicBool::new(false)),
+            };
+        }
+
+        assert_eq!(
+            counts.get(&peer()).map(|c| c.load(Ordering::Relaxed)),
+            Some(1),
+            "one of this peer's two in-flight forwards finished"
+        );
+        assert_eq!(
+            counts.get(&other).map(|c| c.load(Ordering::Relaxed)),
+            Some(1),
+            "another peer's count must be untouched"
+        );
     }
 }

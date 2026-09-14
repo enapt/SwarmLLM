@@ -632,6 +632,33 @@ up, because the map's entry is replaced when a download starts after a cancel.
 
 → `docs/invariants/network.md`
 
+## What a task took, a task gives back by being dropped — an abort is not a return
+
+Three resources were released by plain statements placed after an `.await`,
+which run only when that await RETURNS. Two ordinary things stop it doing so:
+`cancel::unless_cancelled` cancels by DROPPING the future, and
+`SwarmMessage::CancelInference` calls `abort_handle().abort()` — and **no
+in-band checkpoint can defend against an external abort**, so `bail_if_cancelled`
+bracketing is not a defence either.
+
+- **`PendingSpawnCharge`** (`inference::process_pool`) — memory charged by
+  `admit_to_gpu`/`admit_to_cpu` before `spawn_worker(..).await`. No
+  `WorkerHandle` exists yet, so nothing downstream reconciles it; the budget is
+  keyed by model and ACCUMULATES until a restart.
+- **`InboundForwardSlot`** (`daemon::dispatch`) — the per-peer forward count and
+  the abort-registry entry. The sweep removes entries that reach ZERO and cannot
+  repair one stuck above it, and `max_forwards_per_peer` floors at 4, so four
+  aborts permanently refuse everything that peer sends afterwards.
+- **`ShardDownloadClaim`** — see the rule above.
+
+**`local_generate.rs` WRAPPING `pool.generate(..)` in `unless_cancelled` is how
+this came back**: `forward_direct` brackets the same call instead, and its
+comment says why — "dropping a load half-done abandons a spawning subprocess"
+(gotcha #459). A rule that lives only in a comment gets re-broken by the next
+file.
+
+→ `docs/invariants/memory.md`
+
 ## Destroying a shard we hold needs better evidence than a stranger's claim
 
 **`ModelRegistry::mismatch_policy` is the single answer to "may this node

@@ -1003,7 +1003,7 @@ e
                                 .shared_state
                                 .models
                                 .live_cancel_flag(&candidate.model_id),
-                            started_at: std::time::Instant::now(),
+                            last_progress_at: std::time::Instant::now(),
                         },
                     );
                     let cmd = NetworkCommand::SendShardRequest {

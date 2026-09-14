@@ -290,8 +290,19 @@ pub struct P2pDownloadSlot {
     /// therefore be shown a newer, unset flag belonging to a different download
     /// and sail straight through the cancel that was meant for it.
     pub cancel: Arc<AtomicBool>,
-    /// When the slot was parked, for `sweep_stalled_p2p_permits`.
-    pub started_at: std::time::Instant,
+    /// When this transfer last made progress — refreshed on every chunk that
+    /// arrives, read by `sweep_stalled_p2p_permits`.
+    ///
+    /// **It measures last progress, not start, and the distinction is the
+    /// whole point.** The sweep's own comment describes "180s of no progress",
+    /// but the field it read was stamped once when the transfer began and never
+    /// touched again, so the sweep fired on any transfer whose TOTAL wall clock
+    /// passed 180 s however healthy it was. A 512 MB shard is 64 chunks of
+    /// `SHARD_CHUNK_SIZE` (8 MiB), so any link under roughly 2.8 MB/s — 23
+    /// Mbit/s — had every P2P shard transfer declared stalled and handed to
+    /// HuggingFace while it was progressing perfectly. The report that began
+    /// this round was from a 10-15 Mbit/s connection, squarely inside that.
+    pub last_progress_at: std::time::Instant,
 }
 
 impl P2pDownloadSlot {
@@ -354,6 +365,17 @@ impl ModelMgmt {
             })
         } else {
             None
+        }
+    }
+
+    /// A chunk arrived for this transfer, so it is not stalled.
+    ///
+    /// Called from the chunk-receive path. Without it `last_progress_at` is a
+    /// start time wearing the name of a progress time, and the stall sweep
+    /// measures the wrong quantity.
+    pub fn note_p2p_transfer_progress(&self, shard: &crate::types::ShardId) {
+        if let Some(mut slot) = self.p2p_download_permits.get_mut(shard) {
+            slot.last_progress_at = std::time::Instant::now();
         }
     }
 
@@ -1444,7 +1466,7 @@ mod shard_download_claim_tests {
                 _permit: sem.try_acquire_owned().unwrap(),
                 _claim: claim,
                 cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-                started_at: std::time::Instant::now(),
+                last_progress_at: std::time::Instant::now(),
             },
         );
     }
@@ -1474,6 +1496,40 @@ mod shard_download_claim_tests {
             !m.p2p_transfer_still_owns_the_file(&sid),
             "the claim has passed to the HF download — the P2P chain must stop"
         );
+    }
+
+    /// The stall sweep asks "how long since PROGRESS", and the field must
+    /// answer that question rather than "how long since the transfer started".
+    /// A 512 MB shard is 64 chunks of 8 MiB, so on a 10-15 Mbit/s link — the
+    /// connection the report behind this round came from — an honest transfer
+    /// takes 4-7 minutes and a start-time clock declares it stalled at 3.
+    #[test]
+    fn a_chunk_arriving_keeps_a_slow_transfer_from_reading_as_stalled() {
+        let m = mgmt();
+        let sid = shard("glm-4-9b", 3);
+        let claim = m.claim_shard_download(&sid).unwrap();
+        park_slot(&m, &sid, claim);
+
+        let parked_at = m.p2p_download_permits.get(&sid).unwrap().last_progress_at;
+        std::thread::sleep(std::time::Duration::from_millis(15));
+        m.note_p2p_transfer_progress(&sid);
+        let after_chunk = m.p2p_download_permits.get(&sid).unwrap().last_progress_at;
+
+        assert!(
+            after_chunk > parked_at,
+            "a chunk arriving must move the clock the stall sweep reads, or a \
+             healthy slow download is killed on total elapsed time"
+        );
+    }
+
+    /// A shard with no parked transfer must not be resurrected by a stray
+    /// chunk — the entry is gone because the transfer is over.
+    #[test]
+    fn progress_on_an_unparked_shard_creates_nothing() {
+        let m = mgmt();
+        let sid = shard("glm-4-9b", 3);
+        m.note_p2p_transfer_progress(&sid);
+        assert!(m.p2p_download_permits.is_empty());
     }
 
     /// The P2P paths that take no claim at all (a user-initiated acquisition)

@@ -860,10 +860,17 @@ pub async fn diagnostics(
         }
     }
 
-    {
-        let bal = ss.credits.credit_balance.read().await;
-        let _ = writeln!(out, "\n-- credits --\n  balance: {}", bal.balance);
-    }
+    // No credits section. Credits are DORMANT — `MIN_BALANCE_FOR_INFERENCE` is
+    // 0 and `calculate_tier` returns a constant — so a balance affects nothing
+    // a report is written to diagnose, and each node mints its own figure.
+    // This report exists to be PASTED to somebody, for an audience assumed to
+    // have no engineering background: printing them a seven-figure "balance"
+    // with no context invites exactly the conclusion that it means something.
+    //
+    // `docs/CREDITS_DESIGN.md` names the diagnostics report in its own list of
+    // surfaces to check, and the 2026-09-13 CLI pass missed it — it removed the
+    // CLI's own credit printing while the report the CLI prints kept its
+    // section (gotcha #569: one builder is not one surface).
 
     // Recent events carry the failure that prompted the report. English
     // messages are intentional: a maintainer reading a pasted report should not

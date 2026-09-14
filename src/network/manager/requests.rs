@@ -621,6 +621,13 @@ impl NetworkManager {
                     if self.abandon_shard_transfer_if_not_ours(&shard_id) {
                         return;
                     }
+                    // A chunk arrived, so this transfer is not stalled. The
+                    // auto-manage sweep reads this; without the refresh it is
+                    // measuring time since the transfer STARTED and declares a
+                    // healthy slow download dead at 180 s.
+                    self.shared_state
+                        .models
+                        .note_p2p_transfer_progress(&shard_id);
 
                     // NetworkManager is the sole writer for shard chunks (both
                     // user-initiated acquisitions and auto-manage P2P downloads).
