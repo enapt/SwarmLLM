@@ -7019,3 +7019,125 @@ fn the_holder_count_guard_catches_both_shapes_of_the_defect() {
         "discarding the raw list is not enough — the filtered count must be asked for"
     );
 }
+
+/// A node that KEEPS disagreeing bytes says so, on every path that decides to.
+///
+/// `ModelRegistry::mismatch_policy` answers "may we destroy our own copy?" and
+/// `OnMismatch::KeepBytes` is the answer that means "no — keep serving these
+/// bytes, the hash condemning them has no origin backing". `disputed_shards`
+/// exists solely so that state is countable from OUTSIDE the log, because how
+/// often it happens in the field is the open question that decides what to
+/// build next (`docs/FUTURE_WORK.md` § "A disputed shard is kept but the
+/// disagreement is never settled").
+///
+/// Three paths compute that policy and can land on `KeepBytes`. Until
+/// 2026-09-14 only two recorded it, and the third was reached by exactly the
+/// nodes most likely to be in this state — ones whose manifests came from peers
+/// rather than from an origin. An isolated node logged the warning twice while
+/// its own diagnostics reported "shards kept despite disagreeing (0) — none,
+/// every checked shard matches its expected hash".
+///
+/// A count that reads zero while the thing it counts is happening is worse than
+/// no count: it is read as evidence. The reading taken from the live node
+/// earlier the same day had to be discarded because of this.
+///
+/// Sites that pass `KeepBytes` as a CONSTANT are deliberately not scanned —
+/// `model::acquisition` and `auto_manage::download` use it to ask whether a
+/// file is already there, which is a question, not an acceptance. The scan keys
+/// on computing the policy, which is what distinguishes them.
+#[test]
+fn every_path_that_keeps_disagreeing_bytes_records_the_dispute() {
+    let sites = [
+        (
+            "src/daemon/background.rs",
+            "pub(super) fn spawn_shard_verification(",
+        ),
+        (
+            "src/model/auto_manage/scan.rs",
+            "pub async fn rescan_local_shards(",
+        ),
+        (
+            "src/model/auto_manage/manager.rs",
+            "async fn verify_pending_shards(",
+        ),
+    ];
+    for (path, signature) in sites {
+        let src = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{path}: {e}"));
+        let body = fn_body(&src, signature)
+            .unwrap_or_else(|| panic!("{path}: signature not found: {signature}"));
+        assert!(
+            records_the_dispute_it_keeps(body),
+            "{path}: {signature} decides to KEEP bytes that disagree with the swarm's \
+             hash and never calls `note_shard_disputed`. The diagnostics report then \
+             says zero while it is happening — see docs/invariants/network.md."
+        );
+    }
+}
+
+/// Does a body that can land on `KeepBytes` also record the dispute?
+///
+/// Keyed on COMPUTING the policy (`mismatch_policy(`), not on the enum name:
+/// two call sites pass `KeepBytes` as a constant to ask whether a file is
+/// already present, and recording a dispute there would be wrong.
+fn records_the_dispute_it_keeps(body: &str) -> bool {
+    let stmts = statements(body);
+    let computes = stmts.iter().any(|(_, s)| s.contains("mismatch_policy("));
+    if !computes {
+        return true;
+    }
+    stmts
+        .iter()
+        .any(|(_, s)| s.contains("note_shard_disputed("))
+}
+
+/// The scan must fire on the real shape of the defect, not merely pass on the fix.
+#[test]
+fn the_dispute_recording_guard_catches_a_path_that_stays_silent() {
+    let fixed = "
+        let policy = registry.mismatch_policy(&sid, &info.hash);
+        if policy == OnMismatch::KeepBytes {
+            warn!(\"keeping our bytes\");
+            self.shared_state.note_shard_disputed(&sid);
+        }
+    ";
+    assert!(
+        records_the_dispute_it_keeps(fixed),
+        "the fixed shape must pass"
+    );
+
+    // The real defect: warns, keeps, records nothing.
+    let silent = "
+        let policy = registry.mismatch_policy(&sid, &info.hash);
+        if policy == OnMismatch::KeepBytes {
+            warn!(\"keeping our bytes\");
+        }
+    ";
+    assert!(
+        !records_the_dispute_it_keeps(silent),
+        "a path that keeps disagreeing bytes silently must fail"
+    );
+
+    // rustfmt wraps the call across lines — the trap that blinded six guards.
+    let wrapped = "
+        let policy = registry
+            .mismatch_policy(&sid, &info.hash);
+        if policy == OnMismatch::KeepBytes {
+            self.shared_state
+                .note_shard_disputed(&sid);
+        }
+    ";
+    assert!(
+        records_the_dispute_it_keeps(wrapped),
+        "a wrapped chain must still be seen as recording"
+    );
+
+    // A body that never computes the policy is out of scope, not a violation:
+    // passing KeepBytes as a constant is how two call sites ask a question.
+    let asks_a_question = "
+        let ok = store.verify_shard(&mid, &info, OnMismatch::KeepBytes).is_ok();
+    ";
+    assert!(
+        records_the_dispute_it_keeps(asks_a_question),
+        "passing KeepBytes as a constant is a question, not an acceptance"
+    );
+}

@@ -492,12 +492,30 @@ impl AutoShardManager {
                 crate::model::shard::ShardStore::new(&dir).verify_shard(&mid, &info, policy)
             })
             .await;
+            if let Ok(Ok(())) = result {
+                // Agrees with the hash we now hold, so any earlier disagreement
+                // about these bytes is over. Cleared on EVERY success rather
+                // than only where a dispute is known — a clear that has to be
+                // predicted is a clear that gets forgotten.
+                self.shared_state.clear_shard_dispute(&sid);
+            }
             if let Ok(Err(e)) = result {
                 if policy == crate::model::shard::OnMismatch::KeepBytes {
                     // Kept, and deliberately NOT marked for repair — see the
                     // matching arm in `daemon::background`: that set's drain
                     // clears any shard whose file is on disk, which is every
                     // shard on this path.
+                    //
+                    // But it IS recorded as disputed. This is the third path
+                    // that keeps disagreeing bytes, and until 2026-09-14 it was
+                    // the only one that did not say so — so a node in exactly
+                    // the state the set exists to count reported "shards kept
+                    // despite disagreeing (0) … every checked shard matches its
+                    // expected hash" while logging this warning twice. Observed
+                    // on a node whose manifests came from peers rather than
+                    // from an origin, which is the population most likely to be
+                    // here at all. A count that reads zero while the thing it
+                    // counts is happening is worse than no count.
                     tracing::warn!(
                         model = %sid.model_id,
                         shard = sid.index,
@@ -506,6 +524,7 @@ impl AutoShardManager {
                          reports — keeping our bytes, because that hash has no origin \
                          backing and deleting on it is how a last copy is lost"
                     );
+                    self.shared_state.note_shard_disputed(&sid);
                 } else {
                     // `verify_shard` has already quarantined the bad bytes. Stop
                     // advertising them, then get a good copy.
@@ -520,6 +539,10 @@ impl AutoShardManager {
                         .model_registry
                         .remove_shard_holder(&sid, self.shared_state.identity.node_id());
                     self.shared_state.mark_shard_for_repair(&sid);
+                    // Quarantined is not disputed: the bytes were destroyed
+                    // against origin-backed evidence and a replacement is
+                    // queued, so there is nothing left to disagree about.
+                    self.shared_state.clear_shard_dispute(&sid);
                 }
             }
         }

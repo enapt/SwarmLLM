@@ -163,6 +163,52 @@ v0.3.177 was therefore field-unverifiable by construction.
 Settlement designs and the decision criteria: `docs/FUTURE_WORK.md` § "A
 disputed shard is kept but the disagreement is never settled".
 
+## A count that reads zero while the thing happens is worse than no count
+
+**`disputed_shards` exists so that "this node is serving bytes the swarm
+disagrees with" is countable from outside the log**, because how often it
+happens in the field is the open question that decides whether to build a
+settlement protocol at all (`docs/FUTURE_WORK.md`). The diagnostics report
+prints the section even at zero, deliberately: a pasted report saying `0` is a
+measurement and one that says nothing is not.
+
+That only holds if every path records. **Three compute `mismatch_policy` and can
+land on `KeepBytes`** — `daemon::background::spawn_shard_verification` (startup
+sweep), `auto_manage::scan::rescan_local_shards` (rescan), and
+`auto_manage::manager::verify_pending_shards` (the drain of
+`shards_pending_verification`, i.e. a held shard whose EXPECTED hash changed).
+Until 2026-09-14 the third warned and returned.
+
+**It is the path that matters most.** A node with origin provenance never gets
+there: `register_manifest` refuses a contradicting claim outright, so no dispute
+is created. The nodes that DO reach it are the ones whose manifests came from
+peers — which is most of them, and precisely the population the count was added
+to measure. Observed on an isolated node: two `A shard we are serving disagrees
+with the hash the swarm reports — keeping our bytes` warnings for
+llama-3.2-3b, beside its own report saying "shards kept despite disagreeing (0)
+— none, every checked shard matches its expected hash".
+
+It cost a real measurement. A reading of ZERO taken from the live node earlier
+the same day had been recorded as evidence and had to be withdrawn, because it
+could not be distinguished from "the path that would record it is not reached
+here" (diagnosis rule 2 — absence of evidence from an incomplete source).
+
+Three things a change here must keep:
+
+- **The clear is unconditional on success**, on all three paths. Clearing only
+  where a dispute is known is a clear that has to be predicted, and a predicted
+  clear gets forgotten — the entry then outlives the disagreement.
+- **Passing `KeepBytes` as a CONSTANT records nothing.** `model::acquisition`
+  and `auto_manage::download` use it to ask whether a file is already on disk.
+  That is a question, not an acceptance, and the guard keys on *computing* the
+  policy precisely so those two stay out of scope.
+- **Read through `disputed_shards_now`**, which self-evicts entries whose file
+  has gone: a dispute also ends when the shard is deleted or pruned, and those
+  call sites do not know about the set.
+
+Guard: `every_path_that_keeps_disagreeing_bytes_records_the_dispute`, verified
+to go red on the real pre-fix `manager.rs`.
+
 ## A holder record names a BUILD, not just a shard
 
 **`ModelRegistry::shard_holders` filters out holders that positively claim a
