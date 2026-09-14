@@ -933,7 +933,14 @@ pub(crate) async fn dispatch_network_messages(
                                                 &[]
                                             };
                                         // Group shards by model for activity logging
-                                        let mut models_announced: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+                                        // model id -> (shards in this announce, shards NEWLY recorded).
+                                        // The second is what the user is told about: peers
+                                        // re-announce on a timer, so reporting the first reports
+                                        // the timer.
+                                        let mut models_announced: std::collections::HashMap<
+                                            String,
+                                            (usize, usize),
+                                        > = std::collections::HashMap::new();
                                         for (i, shard_id) in announce.shards.iter().enumerate() {
                                             // Don't record holders for a backup-copy model name —
                                             // it would inflate replica counts for a model that
@@ -945,9 +952,15 @@ pub(crate) async fn dispatch_network_messages(
                                                 .get(i)
                                                 .copied()
                                                 .unwrap_or(swarmllm_types::BUILD_TAG_UNKNOWN);
-                                            shared_state.model_registry
+                                            let newly = shared_state.model_registry
                                                 .record_shard_holder_with_build(shard_id.clone(), announce.node_id.clone(), build);
-                                            *models_announced.entry(shard_id.model_id.0.clone()).or_insert(0) += 1;
+                                            let e = models_announced
+                                                .entry(shard_id.model_id.0.clone())
+                                                .or_insert((0usize, 0usize));
+                                            e.0 += 1;
+                                            if newly {
+                                                e.1 += 1;
+                                            }
                                         }
                                         // Retract whatever this node no longer holds, for the
                                         // models it declared complete. Additive-only handling
@@ -994,18 +1007,37 @@ pub(crate) async fn dispatch_network_messages(
                                             &announce.node_id,
                                             &shared_state.nickname_registry,
                                         );
-                                        for (mid, count) in &models_announced {
+                                        // ONLY where the announcement changed what we knew.
+                                        //
+                                        // Peers re-announce on a timer and the activity history
+                                        // is a 100-entry ring, so emitting per announcement did
+                                        // not merely add noise — it emptied the ring of
+                                        // everything else. Measured on this node 2026-09-14:
+                                        // 103 of 112 events in sixty seconds were this line, so
+                                        // the whole history — which is also the replay a
+                                        // dashboard receives when it opens, and the "recent
+                                        // activity" section of the pasteable diagnostics report
+                                        // — turned over in under a minute and held nothing the
+                                        // user had done. `note_build_tag` below learned the same
+                                        // lesson from the same peers: report the transition,
+                                        // never the timer. The per-announce DIAG above is
+                                        // deliberately unaffected; it is the durable record its
+                                        // own comment says the ring cannot be.
+                                        for (mid, (_seen, newly)) in &models_announced {
+                                            if *newly == 0 {
+                                                continue;
+                                            }
                                             let mname = shared_state.model_registry
                                                 .get_manifest(&crate::types::ModelId(mid.clone()))
                                                 .map(|m| m.name.clone());
                                             shared_state.emit_activity(crate::daemon::state::ActivityEvent::new(
                                                 "model",
                                                 "shard_announced",
-                                                format!("{} announced {} part{} of {}", peer_label, count, if *count != 1 { "s" } else { "" }, mname.as_deref().unwrap_or(mid)),
+                                                format!("{} announced {} part{} of {}", peer_label, newly, if *newly != 1 { "s" } else { "" }, mname.as_deref().unwrap_or(mid)),
                                             )
                                             .with_model(mid.clone())
                                             .with_node(format!("{}", announce.node_id))
-                                            .with_detail_num(*count as i64));
+                                            .with_detail_num(*newly as i64));
                                         }
                                         // Wake auto-manage so it re-evaluates rarity scores —
                                         // new shard holders change which shards are most needed.

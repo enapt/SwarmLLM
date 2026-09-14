@@ -532,8 +532,8 @@ impl ModelRegistry {
     ///
     /// Bounded: if the holder set is at capacity, the oldest non-local holder
     /// is evicted to make room. Maintains reverse index.
-    pub fn record_shard_holder(&self, shard_id: ShardId, node_id: NodeId) {
-        self.record_shard_holder_with_build(shard_id, node_id, swarmllm_types::BUILD_TAG_UNKNOWN);
+    pub fn record_shard_holder(&self, shard_id: ShardId, node_id: NodeId) -> bool {
+        self.record_shard_holder_with_build(shard_id, node_id, swarmllm_types::BUILD_TAG_UNKNOWN)
     }
 
     /// As `record_shard_holder`, but recording which BUILD the holder claims.
@@ -543,7 +543,19 @@ impl ModelRegistry {
     /// provider record carries none, and a local registration does not need
     /// one (our own shards are the reference `shard_holders` filters against),
     /// so both keep `BUILD_TAG_UNKNOWN`.
-    pub fn record_shard_holder_with_build(&self, shard_id: ShardId, node_id: NodeId, build: u64) {
+    ///
+    /// Returns **true only when this is a state CHANGE** — a holder we had not
+    /// recorded for this shard. A peer re-announces on a timer, so the same
+    /// claim arrives indefinitely; a caller that reports every announcement is
+    /// reporting the timer, not the swarm. Same reasoning as `note_build_tag`
+    /// directly below, which has logged once per transition since the build
+    /// filter was written.
+    pub fn record_shard_holder_with_build(
+        &self,
+        shard_id: ShardId,
+        node_id: NodeId,
+        build: u64,
+    ) -> bool {
         // A first-hand claim supersedes any earlier retraction: the node is
         // telling us it has the shard now. Only this path clears it — the DHT
         // merge must not, or a stale provider record would undo a retraction.
@@ -564,8 +576,8 @@ impl ModelRegistry {
                 drop(entry);
                 self.note_build_tag(&shard_id, &node_id, was, build);
             }
-            // Reverse index already has this entry
-            return;
+            // Reverse index already has this entry, so nothing changed.
+            return false;
         }
 
         // At capacity — evict oldest non-local holder
@@ -584,7 +596,7 @@ impl ModelRegistry {
                 }
             } else {
                 // All holders are local (shouldn't happen) — skip insert
-                return;
+                return false;
             }
         }
 
@@ -609,6 +621,7 @@ impl ModelRegistry {
             swarmllm_types::BUILD_TAG_UNKNOWN,
             announced_build,
         );
+        true
     }
 
     /// Report a holder whose claimed build disagrees with ours, ONCE per
@@ -2107,6 +2120,51 @@ mod tests {
 
         let holders = registry.shard_holders(&shard_id);
         assert_eq!(holders.len(), 2);
+    }
+
+    /// A peer re-announcing what we already knew is not news.
+    ///
+    /// The return value is what the activity feed emits on. Peers re-announce
+    /// on a timer, and the activity history is a 100-entry ring: measured on
+    /// the live node 2026-09-14, 103 of 112 events in sixty seconds were
+    /// re-announcements, so the ring — which is also the replay a dashboard
+    /// gets on open, and the "recent activity" of the pasteable diagnostics
+    /// report — turned over in under a minute holding nothing the user did.
+    #[test]
+    fn a_re_announcement_of_a_known_holder_reports_no_change() {
+        let registry = ModelRegistry::new();
+        let shard_id = ShardId {
+            model_id: ModelId("test".into()),
+            index: 0,
+        };
+        let peer = NodeId([7u8; 32]);
+
+        assert!(
+            registry.record_shard_holder(shard_id.clone(), peer.clone()),
+            "the first record of a holder is a change"
+        );
+        for _ in 0..5 {
+            assert!(
+                !registry.record_shard_holder(shard_id.clone(), peer.clone()),
+                "a re-announcement of the same holder must report no change"
+            );
+        }
+
+        // A tag arriving for a holder recorded without one updates the build,
+        // but is still not a new HOLDER — the feed would otherwise fire again
+        // the moment a peer upgraded to a build-tagging release.
+        assert!(
+            !registry.record_shard_holder_with_build(shard_id.clone(), peer.clone(), 42),
+            "learning a build tag is not a new holder"
+        );
+
+        // A peer that genuinely regains a shard after retracting it IS news.
+        let keep: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        registry.retain_node_shards_for_model(&ModelId("test".into()), &peer, &keep);
+        assert!(
+            registry.record_shard_holder(shard_id.clone(), peer.clone()),
+            "a holder that comes back after a retraction is a change again"
+        );
     }
 
     /// The reported failure: a peer deleted shards 0-4 and restarted, but the
