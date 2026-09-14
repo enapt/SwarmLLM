@@ -65,6 +65,14 @@ was a number that read zero while the thing it counts was happening.
   dashboard read from that store: the status strip at the top, the swarm view,
   the map, the model names. They all went to "0 peers, no models" at once. The
   page now keeps the last thing it actually knew until it hears otherwise.
+- **Cancelling a download no longer reports it as a failure.** If the cancel
+  landed while a part was actually transferring — which is most of the time —
+  you got a red "Part 1 download failed" notice, the download was recorded as
+  failed, and an error was written to the node's log. Pressing Cancel is not a
+  failure. It is now recorded as cancelled, which is what the code already did
+  correctly when the cancel happened to land between parts instead of during
+  one. Cleanup was already correct and is unchanged: nothing half-downloaded is
+  left behind.
 - **"1 part", not "1 parts"** — in four messages you can see on screen.
 
 ## [0.3.181-alpha] — 2026-09-14

@@ -573,6 +573,10 @@ pub async fn hf_download_shards(
 
         let mut cumulative_downloaded: u64 = 0;
         let mut failed = false;
+        // A cancel is a third outcome, not a kind of failure. Without it the
+        // post-loop `if failed { .. } else { .. }` would mark a cancelled
+        // download Complete.
+        let mut cancelled = false;
 
         for &shard_idx in &shard_indices {
             // Claim this shard's `.tmp` before writing a byte of it. The
@@ -753,6 +757,35 @@ pub async fn hf_download_shards(
                 }
                 Err(e) => {
                     progress_task.abort();
+                    // A cancel that lands DURING a shard arrives here as an
+                    // ordinary error. The between-shards check ~150 lines above
+                    // already gets this right — INFO, `Cancelled`, and a comment
+                    // saying the state "used to contradict it, which the
+                    // dashboard rendered in red as 'Download failed'" — and this
+                    // sibling path did not, so pressing Cancel produced an ERROR
+                    // line, a red "Part 1 download failed" toast and an
+                    // acquisition recorded as Failed. Asking the flag rather than
+                    // matching the message, because the wording is prose.
+                    if cancel_flag.load(std::sync::atomic::Ordering::Acquire)
+                        || *shutdown_rx.borrow()
+                    {
+                        let reason = if *shutdown_rx.borrow() {
+                            "Cancelled by daemon shutdown"
+                        } else {
+                            "Cancelled by user"
+                        };
+                        tracing::info!(model = %model_id_str, reason, shard_idx, "Download cancelled");
+                        if let Some(mut entry) = download_shared
+                            .models
+                            .acquisition_progress
+                            .get_mut(&download_mid)
+                        {
+                            entry.state = crate::model::acquisition::AcquisitionState::Cancelled;
+                            entry.log_push(reason.to_string());
+                        }
+                        cancelled = true;
+                        break;
+                    }
                     tracing::error!(error = %e, shard_idx, "Shard download failed");
                     if let Some(mut entry) = download_shared
                         .models
@@ -788,7 +821,10 @@ pub async fn hf_download_shards(
             .download_cancel_flags
             .remove(&download_mid);
 
-        if failed {
+        if cancelled {
+            // State was set to `Cancelled` where the cancel was seen. Nothing
+            // further to record: it is neither a failure nor a completion.
+        } else if failed {
             if let Some(mut entry) = download_shared
                 .models
                 .acquisition_progress
