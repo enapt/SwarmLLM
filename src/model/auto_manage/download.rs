@@ -307,7 +307,7 @@ impl AutoShardManager {
                             "download",
                             "shard_download_started",
                             format!(
-                                "Downloading shard {} of {} from HuggingFace",
+                                "Downloading part {} of {} from HuggingFace",
                                 shard_idx + 1,
                                 display
                             ),
@@ -567,10 +567,10 @@ impl AutoShardManager {
                                         "download",
                                         "shard_download_complete",
                                         format!(
-"Downloaded shard {} of {} from HuggingFace — verifying",
-shard_idx + 1,
-display
-),
+                                            "Downloaded part {} of {} from HuggingFace — verifying",
+                                            shard_idx + 1,
+                                            display
+                                        ),
                                     )
                                     .with_model(model_id.0.clone())
                                     .with_detail_num(shard_idx as i64)
@@ -710,7 +710,7 @@ display
                                         "download",
                                         "shard_verified",
                                         format!(
-                                            "Shard {} of {} verified and registered",
+                                            "Part {} of {} verified and registered",
                                             shard_idx + 1,
                                             display
                                         ),
@@ -734,9 +734,9 @@ display
                                         "download",
                                         "model_download_complete",
                                         format!(
-"All shards of {} downloaded and verified — model ready",
-display
-),
+                                            "All parts of {} downloaded and verified — model ready",
+                                            display
+                                        ),
                                     )
                                     .with_model(model_id.0.clone())
                                     .with_detail_str("huggingface".to_string())
@@ -800,11 +800,11 @@ display
                                         "download",
                                         "shard_download_failed",
                                         format!(
-"Failed to download shard {} of {} from HuggingFace: {}",
-shard_idx + 1,
-mname.as_deref().unwrap_or(&model_id.0),
-e
-),
+                                            "Failed to download part {} of {} from HuggingFace: {}",
+                                            shard_idx + 1,
+                                            mname.as_deref().unwrap_or(&model_id.0),
+                                            e
+                                        ),
                                     )
                                     .with_model(model_id.0.clone())
                                     .with_detail_num(shard_idx as i64)
@@ -970,7 +970,7 @@ e
                                 "download",
                                 "shard_download_p2p",
                                 format!(
-                                    "Requesting shard {} of {} from peer {}",
+                                    "Requesting part {} of {} from peer {}",
                                     crate::types::ShardId::display_index(candidate.shard_index),
                                     mname.as_deref().unwrap_or(&candidate.model_id.0),
                                     peer_label

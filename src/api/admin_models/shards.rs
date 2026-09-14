@@ -34,14 +34,14 @@ pub async fn unload_shard(
             "model fully unloaded".to_string()
         } else {
             let nums: Vec<_> = new_window.iter().map(|i| (i + 1).to_string()).collect();
-            format!("shards {} remain", nums.join(", "))
+            format!("parts {} remain", nums.join(", "))
         };
         shared.emit_activity(
             crate::daemon::state::ActivityEvent::new(
                 "model",
                 "shard_unloaded_memory",
                 format!(
-                    "Unloaded shard {} of {} from {} — {}",
+                    "Unloaded part {} of {} from {} — {}",
                     shard_index + 1,
                     display,
                     shared.memory_type_label(),
@@ -98,10 +98,10 @@ pub async fn load_shard(
     {
         let display = shared.model_registry.display_name(&mid);
         let window_label = if new_window.len() == 1 {
-            format!("shard {}", new_window[0] + 1)
+            format!("part {}", new_window[0] + 1)
         } else {
             let nums: Vec<_> = new_window.iter().map(|i| (i + 1).to_string()).collect();
-            format!("shards {}", nums.join(", "))
+            format!("parts {}", nums.join(", "))
         };
         shared.emit_activity(
             crate::daemon::state::ActivityEvent::new(
@@ -335,14 +335,14 @@ pub async fn delete_shard(
             "model fully removed".to_string()
         } else {
             let nums: Vec<_> = remaining_local.iter().map(|i| i.to_string()).collect();
-            format!("shards {} remain on disk", nums.join(", "))
+            format!("parts {} remain on disk", nums.join(", "))
         };
         shared.emit_activity(
             crate::daemon::state::ActivityEvent::new(
                 "model",
                 "shard_deleted",
                 format!(
-                    "Deleted shard {} of {} — inference unloaded, {}",
+                    "Deleted part {} of {} — inference unloaded, {}",
                     shard_index + 1,
                     display,
                     status
@@ -487,7 +487,7 @@ pub async fn download_shard(
                     "download",
                     "shard_download_p2p",
                     format!(
-                        "Downloading shard {} of {} from peer {}",
+                        "Downloading part {} of {} from peer {}",
                         shard_index + 1,
                         display,
                         peer_label

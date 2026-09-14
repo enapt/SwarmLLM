@@ -690,7 +690,7 @@ impl AutoShardManager {
                     "auto_manage",
                     "cycle_complete",
                     format!(
-                        "Auto-manage cycle: {} models, {} shards hosted ({:+}), {} download(s) started",
+                        "Auto-manage cycle: {} models, {} parts hosted ({:+}), {} download(s) started",
                         models_hosted, hosted_after, delta, new_downloads
                     ),
                 )

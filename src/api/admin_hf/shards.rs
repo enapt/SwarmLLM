@@ -475,7 +475,7 @@ pub async fn hf_download_shards(
                     "download",
                     "manifest_gen_failed",
                     format!(
-                        "Early manifest generation failed for {} — will retry after shards download: {}",
+                        "Early manifest generation failed for {} — will retry after parts download: {}",
                         display, e
                     ),
                 )
@@ -766,7 +766,7 @@ pub async fn hf_download_shards(
                         crate::daemon::state::ActivityEvent::new(
                             "download",
                             "shard_download_failed",
-                            format!("Shard {} download failed: {}", shard_idx + 1, e),
+                            format!("Part {} download failed: {}", shard_idx + 1, e),
                         )
                         .with_model(download_mid.0.clone())
                         .with_detail_num(shard_idx as i64)

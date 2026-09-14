@@ -1001,7 +1001,7 @@ pub(crate) async fn dispatch_network_messages(
                                             shared_state.emit_activity(crate::daemon::state::ActivityEvent::new(
                                                 "model",
                                                 "shard_announced",
-                                                format!("{} announced {} shard{} of {}", peer_label, count, if *count != 1 { "s" } else { "" }, mname.as_deref().unwrap_or(mid)),
+                                                format!("{} announced {} part{} of {}", peer_label, count, if *count != 1 { "s" } else { "" }, mname.as_deref().unwrap_or(mid)),
                                             )
                                             .with_model(mid.clone())
                                             .with_node(format!("{}", announce.node_id))
@@ -1090,7 +1090,7 @@ pub(crate) async fn dispatch_network_messages(
                                                         "security",
                                                         "manifest_rejected",
                                                         format!(
-                                                            "Rejected manifest from {}: {} shards exceeds cap of {}",
+                                                            "Rejected manifest from {}: {} parts exceeds cap of {}",
                                                             sender, manifest.shards.len(), MAX_SHARDS_PER_MANIFEST
                                                         ),
                                                     )
@@ -1120,7 +1120,7 @@ pub(crate) async fn dispatch_network_messages(
                                                         "security",
                                                         "manifest_rejected",
                                                         format!(
-                                                            "Rejected manifest from {}: {} tensors in a shard exceeds cap of {}",
+                                                            "Rejected manifest from {}: {} tensors in a part exceeds cap of {}",
                                                             sender, n, MAX_TENSORS_PER_SHARD
                                                         ),
                                                     )
@@ -1148,7 +1148,7 @@ pub(crate) async fn dispatch_network_messages(
                                                         "model",
                                                         "model_discovered",
                                                         format!(
-        "Discovered new model on network: {} — {:?} arch, {} layers, {} shards",
+        "Discovered new model on network: {} — {:?} arch, {} layers, {} parts",
         manifest.name, manifest.architecture, manifest.num_layers, manifest.shard_count
         ),
                                                     )

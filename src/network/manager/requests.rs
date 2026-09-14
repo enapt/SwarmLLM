@@ -659,7 +659,7 @@ impl NetworkManager {
                                 "download",
                                 "shard_write_failed",
                                 format!(
-                                    "Failed to write shard {} of {} to disk: {}",
+                                    "Failed to write part {} of {} to disk: {}",
                                     crate::types::ShardId::display_index_short(shard_id.index),
                                     shard_id.model_id,
                                     e
@@ -783,7 +783,7 @@ impl NetworkManager {
                                     "download",
                                     "shard_finalize_failed",
                                     format!(
-                                        "Failed to finalize shard {} of {}: {}",
+                                        "Failed to finalize part {} of {}: {}",
                                         crate::types::ShardId::display_index_short(shard_id.index),
                                         shard_id.model_id,
                                         e
@@ -1033,7 +1033,7 @@ impl NetworkManager {
                                         "download",
                                         "shard_verification_failed",
                                         format!(
-                                            "Shard {} of {} did not arrive intact and will be fetched again",
+                                            "Part {} of {} did not arrive intact and will be fetched again",
                                             crate::types::ShardId::display_index_short(
                                                 shard_id.index
                                             ),
@@ -1160,7 +1160,7 @@ impl NetworkManager {
                                 "download",
                                 "shard_p2p_complete",
                                 format!(
-                                    "Shard {} of {} downloaded from peer {}",
+                                    "Part {} of {} downloaded from peer {}",
                                     crate::types::ShardId::display_index_short(shard_id.index),
                                     mname.as_deref().unwrap_or(&shard_id.model_id.0),
                                     peer_label

@@ -197,7 +197,7 @@ pub async fn rescan_local_shards(
                             "models",
                             "shard_size_mismatch",
                             format!(
-                                "Shard {} of {} was {} MB but should be {} MB — set aside, it will be downloaded again",
+                                "Part {} of {} was {} MB but should be {} MB — set aside, it will be downloaded again",
                                 shard_info.index,
                                 model_id,
                                 actual / (1024 * 1024),
@@ -404,7 +404,7 @@ pub async fn rescan_local_shards(
                     "model",
                     "shard_scan_found",
                     format!(
-                        "Found {} new shard{} of {} on disk",
+                        "Found {} new part{} of {} on disk",
                         new_shards,
                         if new_shards != 1 { "s" } else { "" },
                         mname.as_deref().unwrap_or(&model_id_str)
@@ -776,13 +776,17 @@ manifest.name, budget.saturating_sub(total_after)
             .filter(|s| s.index != crate::types::MMPROJ_SHARD_INDEX)
             .map(|s| s.index + 1)
             .collect();
+        // User-facing text, so it says "part" like the rest of the UI — this
+        // label is assembled here and only then handed to `ActivityEvent`,
+        // which is how it survived the vocabulary pass that caught the
+        // messages written inline at their emit site.
         let shard_label = if covering_shards.len() == manifest.shard_count as usize {
-            "all shards".to_string()
+            "all parts".to_string()
         } else if covering_shards.len() == 1 {
-            format!("shard {}", covering_shards[0])
+            format!("part {}", covering_shards[0])
         } else {
             format!(
-                "shards {}-{}",
+                "parts {}-{}",
                 covering_shards[0],
                 covering_shards.last().unwrap()
             )

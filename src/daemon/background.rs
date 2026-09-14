@@ -352,7 +352,7 @@ pub(super) fn spawn_shard_verification(
                                 "model",
                                 "shard_verify_failed",
                                 format!(
-                                    "Shard {} of {} failed verification — quarantined",
+                                    "Part {} of {} failed verification — quarantined",
                                     crate::types::ShardId::display_index_short(shard_info.index),
                                     manifest.name
                                 ),
@@ -391,7 +391,7 @@ pub(super) fn spawn_shard_verification(
                 crate::daemon::state::ActivityEvent::new(
                     "system",
                     "quarantine_reclaimed",
-                    format!("Recovered {mb} MB from {swept_files} quarantined shard files"),
+                    format!("Recovered {mb} MB from {swept_files} quarantined part files"),
                 )
                 .with_detail_num(mb as i64),
             );

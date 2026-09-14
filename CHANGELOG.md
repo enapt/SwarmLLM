@@ -45,6 +45,17 @@
   layout that behaves correctly in every desktop browser; both are now handled.
   Nothing changes on desktop.
 
+### Changed
+
+- **One word for a piece of a model, everywhere.** The interface called the same
+  thing a "shard", a "part" and a "piece", and not by area — one panel said
+  "Parts" in its heading and "All shards available" in the tip beside it, and a
+  single activity feed could contain two spellings two lines apart. Every
+  language had inherited the same split, several with a third word of their own.
+  It is now "part" throughout, in all 21 languages, including the messages the
+  node itself writes into the activity feed. Nothing on disk or on the wire was
+  renamed — this is only what you read.
+
 ## [0.3.180-alpha] — 2026-09-14
 
 Two problems reported from people's own machines, and what auditing around them

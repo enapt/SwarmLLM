@@ -254,7 +254,7 @@ impl NetworkManager {
                             "download",
                             "shard_download_p2p",
                             format!(
-                                "Retrying shard {} of {} from another peer ({}, attempt {}/{})",
+                                "Retrying part {} of {} from another peer ({}, attempt {}/{})",
                                 crate::types::ShardId::display_index_short(shard_id.index),
                                 mname.as_deref().unwrap_or(&shard_id.model_id.0),
                                 reason,
@@ -324,7 +324,7 @@ impl NetworkManager {
                     "download",
                     "shard_download_started",
                     format!(
-                        "P2P failed after {} attempts ({}) — falling back to HuggingFace for shard {} of {}",
+                        "P2P failed after {} attempts ({}) — falling back to HuggingFace for part {} of {}",
                         retry_num,
                         reason,
                         crate::types::ShardId::display_index_short(shard_id.index),
@@ -358,7 +358,7 @@ impl NetworkManager {
                     "download",
                     "shard_transfer_failed",
                     format!(
-                        "No peers or HF source for shard {} of {} ({})",
+                        "No peers or HF source for part {} of {} ({})",
                         crate::types::ShardId::display_index_short(shard_id.index),
                         mname.as_deref().unwrap_or(&shard_id.model_id.0),
                         reason,

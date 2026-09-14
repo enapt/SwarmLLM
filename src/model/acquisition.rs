@@ -647,7 +647,7 @@ impl AcquisitionManager {
                         "download",
                         "shard_p2p_exhausted",
                         format!(
-                            "No peers served shard {} of {} — falling back to HuggingFace",
+                            "No peers served part {} of {} — falling back to HuggingFace",
                             shard_id.index + 1,
                             display
                         ),
@@ -798,7 +798,7 @@ impl AcquisitionManager {
                                     "download",
                                     "shard_verify_failed",
                                     format!(
-                                        "Shard {} of {} failed BLAKE3 verification: {}",
+                                        "Part {} of {} failed BLAKE3 verification: {}",
                                         shard_index + 1,
                                         display,
                                         e
@@ -862,7 +862,7 @@ impl AcquisitionManager {
                             "download",
                             "model_download_complete",
                             format!(
-                                "All shards of {} downloaded and verified — model ready",
+                                "All parts of {} downloaded and verified — model ready",
                                 display
                             ),
                         )

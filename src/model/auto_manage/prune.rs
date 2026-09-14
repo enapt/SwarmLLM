@@ -964,7 +964,7 @@ impl AutoShardManager {
                         "auto_manage",
                         "model_unloaded",
                         format!(
-                            "Unloaded {} worker (no local shards remain after pruning)",
+                            "Unloaded {} worker (no local parts remain after pruning)",
                             candidate.model_name
                         ),
                     )
@@ -1491,7 +1491,7 @@ impl AutoShardManager {
                             "auto_manage",
                             "vram_soft_unload",
                             format!(
-                                "VRAM pressure: narrowed {} to {} of {} shards",
+                                "VRAM pressure: narrowed {} to {} of {} parts",
                                 mname,
                                 w.len(),
                                 manifest.shard_count

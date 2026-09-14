@@ -387,7 +387,7 @@ impl super::SharedState {
                 "network",
                 "shard_holder_retracted",
                 format!(
-                    "{} no longer has shard {} of {} — re-routing",
+                    "{} no longer has part {} of {} — re-routing",
                     &holder.to_string()[..8.min(holder.to_string().len())],
                     shard_id.index,
                     self.model_registry.display_name(&shard_id.model_id),

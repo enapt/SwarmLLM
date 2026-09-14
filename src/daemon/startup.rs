@@ -420,7 +420,7 @@ pub(super) async fn restore_persistent_state(
                     crate::daemon::state::ActivityEvent::new(
                         "model",
                         "shards_loaded",
-                        format!("Loaded {} shards for {}", count, name),
+                        format!("Loaded {} parts for {}", count, name),
                     )
                     .with_model(mid.0.clone()),
                 );

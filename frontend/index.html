@@ -132,7 +132,7 @@
             <option value="auto" selected data-i18n="settings.contribution_mode_auto">Auto</option>
             <option value="manual" data-i18n="settings.contribution_mode_manual">Manual</option>
           </select>
-          <span class="text-muted field-hint" data-i18n="settings.contribution_mode_hint_auto">Auto sheds redundant shards when the swarm has plenty of copies. Manual pins your contribution at the level above.</span>
+          <span class="text-muted field-hint" data-i18n="settings.contribution_mode_hint_auto">Auto: SwarmLLM adjusts automatically — hosting more model parts when needed, less when others have it covered. Stays within the cap below.</span>
         </div>
 
         <!-- Auto-download toggle (modernized as toggle row) -->
@@ -140,8 +140,8 @@
           <label class="setup-toggle-label">
             <input type="checkbox" id="setup-auto-manage" checked>
             <span class="setup-toggle-content">
-              <span class="setup-toggle-title" data-i18n="setup.auto_download_label">Auto-host model shards</span>
-              <span class="setup-toggle-desc" data-i18n="setup.auto_download_desc">SwarmLLM will automatically store and share pieces of popular AI models so your neighbours can use them. Uses some disk space and bandwidth — you can set limits in Settings.</span>
+              <span class="setup-toggle-title" data-i18n="setup.auto_download_label">Help the network (recommended)</span>
+              <span class="setup-toggle-desc" data-i18n="setup.auto_download_desc">SwarmLLM will automatically store and share parts of popular AI models so your neighbours can use them. Uses some disk space and bandwidth — you can set limits in Settings.</span>
             </span>
           </label>
         </div>
@@ -412,7 +412,7 @@
           <option value="auto" selected data-i18n="settings.contribution_mode_auto">Auto</option>
           <option value="manual" data-i18n="settings.contribution_mode_manual">Manual</option>
         </select>
-        <span class="text-muted field-hint" id="settings-contribution-mode-hint" data-i18n="settings.contribution_mode_hint_auto">Auto sheds redundant shards when the swarm has plenty of copies. Manual pins your contribution at the level below.</span>
+        <span class="text-muted field-hint" id="settings-contribution-mode-hint" data-i18n="settings.contribution_mode_hint_auto">Auto: SwarmLLM adjusts automatically — hosting more model parts when needed, less when others have it covered. Stays within the cap below.</span>
       </div>
       <div class="form-group">
         <label for="settings-contribution" id="settings-contribution-label" data-i18n="settings.contribution_label_cap">Upper Cap</label>
@@ -449,9 +449,9 @@
         <label for="settings-auto-shards" data-i18n="settings.auto_download">Auto-Download Models</label>
         <select id="settings-auto-shards">
           <option value="off" data-i18n="settings.auto_off">Off</option>
-          <option value="on" data-i18n="settings.auto_on">On — automatically host popular model shards</option>
+          <option value="on" data-i18n="settings.auto_on">On — automatically store and share popular AI models</option>
         </select>
-        <span class="text-muted field-hint" data-i18n="settings.auto_download_hint">Downloads pieces of AI models so the network can run them. Uses disk space.</span>
+        <span class="text-muted field-hint" data-i18n="settings.auto_download_hint">Downloads parts of AI models so the network can run them. Uses disk space.</span>
       </div>
       <div id="settings-storage-info" class="hidden card mb-2">
         <div class="flex-between mb-1 text-base">
@@ -754,7 +754,7 @@
                  limit on everything this node sends, which it is not: a user
                  set it to 1 Mbps, measured 11 Mbps, and reasonably concluded
                  the setting did nothing (2026-09-11 suggestion). -->
-            <span class="text-muted field-hint" data-i18n="settings.max_bandwidth_help">Caps how fast this node sends model pieces to others. It does not limit inference or the background traffic that keeps this node connected — the Network figure on the dashboard shows the total.</span>
+            <span class="text-muted field-hint" data-i18n="settings.max_bandwidth_help">Caps how fast this node sends model parts to others. It does not limit inference or the background traffic that keeps this node connected — the Network figure on the dashboard shows the total.</span>
           </div>
           <div class="form-group">
             <label for="settings-disk">
@@ -1492,7 +1492,7 @@
                   <th scope="col" data-i18n="leaderboard.rig">Machine</th>
                   <th scope="col" data-i18n="leaderboard.region">Region</th>
                   <th scope="col" data-i18n="leaderboard.speed">Speed</th>
-                  <th scope="col" data-i18n="leaderboard.shards">Shards</th>
+                  <th scope="col" data-i18n="leaderboard.shards">Parts</th>
                 </tr>
               </thead>
               <tbody id="leaderboard-body">

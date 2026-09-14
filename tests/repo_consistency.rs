@@ -6766,3 +6766,89 @@ fn every_viewport_height_in_css_has_a_dynamic_fallback_beside_it() {
          Either they were removed or this scanner stopped matching them."
     );
 }
+
+/// The UI calls a piece of a model a "part", in English, everywhere.
+///
+/// It used to call it three things at once — "shard", "part" and "piece" — and
+/// not by area: `dashboard.info_shards` read "Parts" while the tip beside it
+/// read "All shards available", and one activity feed contained both spellings
+/// two lines apart. Every locale had inherited the same split, several with a
+/// third word of their own. That is the kind of thing a reader does not report
+/// as a bug; they just quietly conclude the thing is for someone else.
+///
+/// The rename is only worth anything if it stays done, and a new string using
+/// the old word is invisible — it reads fine on its own, and nothing compares
+/// it with its neighbours. Hence this.
+///
+/// Scope is deliberately the ENGLISH source only. The translations were brought
+/// in line in the same change, but a locale is prose in another language and
+/// pinning its vocabulary from here would be guessing.
+///
+/// If you are here because this went red: say "part". `{shard}` and `{shards}`
+/// as PLACEHOLDER names are fine and are ignored — they are wire field names,
+/// not words anybody reads.
+#[test]
+fn the_english_ui_calls_a_piece_of_a_model_a_part() {
+    let path = repo_root().join("frontend/i18n/en.json");
+    let raw = std::fs::read_to_string(&path).expect("read en.json");
+    let map: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_str(&raw).expect("en.json is an object");
+
+    // "pieces of work" and "pieces of other people's requests" are units of
+    // WORK, not parts of a model — a different thing that keeps its own word.
+    const NOT_ABOUT_MODELS: &[&str] = &["perf.served_detail", "dashboard.stat_forwards_tip"];
+
+    let word = regex_lite_word;
+    let mut offenders = Vec::new();
+    for (key, value) in &map {
+        let Some(text) = value.as_str() else { continue };
+        if NOT_ABOUT_MODELS.contains(&key.as_str()) {
+            continue;
+        }
+        // Placeholder names are wire identifiers, not prose.
+        let prose = strip_placeholders(text);
+        for banned in ["shard", "shards", "piece", "pieces"] {
+            if word(&prose, banned) {
+                offenders.push(format!("{key}: …{}…", prose.trim()));
+                break;
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "the English UI must call a piece of a model a \"part\" — these say \
+         something else:\n  {}",
+        offenders.join("\n  ")
+    );
+
+    // The scan must be able to SEE the word it forbids, or it passes by being
+    // blind (gotcha #413).
+    assert!(
+        regex_lite_word("a shard of the model", "shard"),
+        "the word scanner stopped matching; it would pass on anything"
+    );
+    assert!(
+        !regex_lite_word("shard_progress_label", "shard"),
+        "must not match inside an identifier"
+    );
+}
+
+/// Whole-word match without pulling in a regex engine: the surrounding bytes
+/// must not be alphanumeric, so `shard` does not match inside `shard_label`.
+fn regex_lite_word(haystack: &str, needle: &str) -> bool {
+    let lower = haystack.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    let mut from = 0;
+    while let Some(at) = lower[from..].find(needle).map(|i| i + from) {
+        let before_ok = at == 0 || !bytes[at - 1].is_ascii_alphanumeric() && bytes[at - 1] != b'_';
+        let end = at + needle.len();
+        let after_ok =
+            end >= bytes.len() || (!bytes[end].is_ascii_alphanumeric() && bytes[end] != b'_');
+        if before_ok && after_ok {
+            return true;
+        }
+        from = at + 1;
+    }
+    false
+}
