@@ -67,6 +67,30 @@ Priority is user-visible impact x how many users x whether it fails silently.
 
 | 80 | **A reasoning model's whole `<think>` scratchpad still streamed to the user — the #031 filter only ran for requests carrying `tools`** | FIXED 2026-09-14, field report #032 against **v0.3.179, the release that shipped the #031 fix**. `StreamingToolText` does two jobs behind one buffer: hold text back while it could still be a tool call, and withhold a reasoning preamble. The second was added later, and all four streaming surfaces wrapped `push` in `if tools_requested` — so on an ordinary chat message, which carries no tools and is nearly all real traffic, the filter was never called and the raw text went out. **Reproduced and controlled on the released binary**: same model (qwen3-1.7b), same prompt, one field different — without `tools` the first delta was `{"content":"<think>"}` and the whole scratchpad streamed; with them the reply was `"C" "iao" "!"`. Non-streaming was never affected (`finalize_reply_text` is called unconditionally at all three text sources). Fixed at the choke point: `StreamingToolText::new(detect_tools)` with **`Default` removed**, so no call site can avoid stating which kind of reply it reads and the compiler finds them all; `push` always filters, `releasable_len` withholds for tool detection only when asked (ordinary chat still streams token by token); both flush helpers return early with `pending_all()` when `!detects_tools()` so prose is never parsed into a false `finish_reason: "tool_calls"`; both end-of-stream flushes unconditional. ⚠ **The #031 tests could not have caught this** — every one called `push` directly, which is what production did *only on the branch not taken*. The equivalence test now runs `detect_tools` both ways, and a null control confirms both new assertions go red without the fix while all nine pre-existing ones stay green. Gotcha #601 |
 
+### Known and deliberately left: a reply that is ONLY a scratchpad (2026-09-14)
+
+Measured while fixing item 80, and **pre-existing — identical before and after
+that change**, so it is not a regression and was deliberately not touched during
+a release cut.
+
+```
+reply     <think>only thinking</think>      (a terminated block, no answer after it)
+streamed  "<think>only thinking</think>"    ← the flush releases everything
+non-str.  ""                                ← take_leading_reasoning_block strips it
+```
+
+`StreamingToolText::pending_all` is documented as the escape hatch that stops a
+reply cut off mid-reasoning from vanishing, and for the common shape of this
+case — a model that hit `max_tokens` mid-thought, leaving the block
+UNTERMINATED — releasing it is the right answer. The terminated-with-no-answer
+shape is the rare one, and there the two surfaces disagree: streaming shows the
+scratchpad, non-streaming shows nothing at all.
+
+Neither is obviously right (an empty reply is arguably worse than a visible
+scratchpad), there is no field report, and the fix would have to decide what a
+reasoning model producing no answer should show a user. Left until there is
+evidence of it happening. LOW.
+
 ### Verified in a browser for the first time (2026-09-14) — no defect found
 
 `.178`/`.179` shipped three UI features that had never been seen rendered,
