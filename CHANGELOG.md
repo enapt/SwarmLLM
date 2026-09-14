@@ -6,6 +6,14 @@ Four things found by reading what a running node actually reports, rather than
 from a bug report. Three of them were numbers on screen that were wrong, and one
 was a number that read zero while the thing it counts was happening.
 
+### Security
+
+- **Updated the TLS library used by the peer-to-peer QUIC transport** (rustls
+  0.23.43 → 0.23.45, RUSTSEC-2026-0285, rated medium). The flaw let certain TLS
+  1.3 handshake messages be accepted at the wrong stage of a handshake. It is a
+  patch-level dependency update with no configuration or protocol change, and
+  nodes do not need to update together.
+
 ### Fixed
 
 - **A model card counted computers that could never send you the file.** Two
