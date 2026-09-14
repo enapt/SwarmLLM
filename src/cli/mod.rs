@@ -22,9 +22,26 @@ pub mod update;
 /// that talk to a running daemon over HTTP.
 pub(crate) fn read_api_key(data_dir: &std::path::Path) -> Option<String> {
     let key_path = data_dir.join("api_key");
-    std::fs::read_to_string(key_path)
-        .ok()
-        .map(|s| s.trim().to_string())
+    match std::fs::read_to_string(&key_path) {
+        Ok(s) => Some(s.trim().to_string()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => {
+            // The file is THERE and we cannot read it. Folding that into the
+            // same `None` as "no file" sends the caller down
+            // `bail_if_no_api_key`, which says the daemon is not running and
+            // tells them to start it — advice that cannot work and that they
+            // will follow, because the daemon IS running. The usual cause is
+            // running the CLI as a different user from the daemon.
+            eprintln!(
+                "Error: cannot read {} ({e}).\n  \
+                 The file is there but this user cannot open it — SwarmLLM is \
+                 probably running as a different user.\n  \
+                 Check its owner and permissions, or run the command as that user.",
+                key_path.display()
+            );
+            std::process::exit(1);
+        }
+    }
 }
 
 /// Bail with the canonical "daemon not running (no API key)" message.

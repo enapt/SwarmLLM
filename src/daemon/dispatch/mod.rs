@@ -270,10 +270,26 @@ pub fn estimate_vram_from_shard_dir(
             let entry = entry.ok()?;
             let name = entry.file_name();
             let name = name.to_str()?;
-            if name.starts_with("shard_") && name.ends_with(".bin") {
-                entry.metadata().ok().map(|m| m.len())
-            } else {
-                None
+            if !name.starts_with("shard_") || !name.ends_with(".bin") {
+                return None;
+            }
+            match entry.metadata() {
+                Ok(m) => Some(m.len()),
+                // Pruned between the listing and the stat — genuinely absent.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                Err(e) => {
+                    // Contributing nothing UNDERSTATES the model, and this
+                    // figure describes memory. It cannot answer "unknown"
+                    // without changing its type, so at least say so rather
+                    // than returning a quietly wrong number.
+                    tracing::warn!(
+                        path = %entry.path().display(),
+                        error = %e,
+                        "Cannot read a shard's size — this model's memory estimate is \
+                         lower than the truth"
+                    );
+                    None
+                }
             }
         })
         .sum();

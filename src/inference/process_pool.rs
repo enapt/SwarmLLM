@@ -2297,18 +2297,51 @@ impl ModelProcessPool {
         });
 
         // Only the shards actually on disk will be mapped.
-        let shard_bytes: u64 = std::fs::read_dir(&model_dir)
-            .map(|rd| {
-                rd.filter_map(Result::ok)
-                    .filter(|e| {
-                        e.file_name()
-                            .to_str()
-                            .is_some_and(|n| n.starts_with("shard_") && n.ends_with(".bin"))
-                    })
-                    .filter_map(|e| e.metadata().ok().map(|m| m.len()))
-                    .sum()
-            })
-            .unwrap_or(0);
+        // A shard that has GONE contributes nothing — that is the honest
+        // answer, and the everyday one: auto-manage prunes and downloads in the
+        // same directory, so a file can disappear between the listing and the
+        // stat. A shard we merely cannot READ is a different fact, and summing
+        // it as zero understates the model's size — which is a memory figure a
+        // placement decision and a budget charge are made from, so it admits a
+        // model bigger than believed. That is #586's failure shape from a
+        // different feed.
+        //
+        // Unknown is not zero: answering `None` puts this on the same footing
+        // as an unreadable header, which the callers already treat as "do not
+        // judge" rather than as "it costs nothing".
+        let mut shard_bytes: u64 = 0;
+        let Ok(entries) = std::fs::read_dir(&model_dir) else {
+            tracing::warn!(
+                model = %model_id,
+                dir = %model_dir.display(),
+                "Cannot list this model's directory — its size is unknown, not zero"
+            );
+            return None;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let is_shard = entry
+                .file_name()
+                .to_str()
+                .is_some_and(|n| n.starts_with("shard_") && n.ends_with(".bin"));
+            if !is_shard {
+                continue;
+            }
+            match entry.metadata() {
+                Ok(m) => shard_bytes += m.len(),
+                // Pruned or deleted between the listing and the stat.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    tracing::warn!(
+                        model = %model_id,
+                        path = %entry.path().display(),
+                        error = %e,
+                        "Cannot read a shard's size — this model's memory footprint is \
+                         unknown, not zero"
+                    );
+                    return None;
+                }
+            }
+        }
 
         // Is this an UNQUANTIZED checkpoint? Read it off the largest tensor,
         // which on any architecture is one of the big linear weights: in a
