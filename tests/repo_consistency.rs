@@ -6281,3 +6281,60 @@ fn tidy_up(&self) {
          guard above passes on code it cannot read"
     );
 }
+
+/// Stopping something is not the same as it breaking.
+///
+/// A download the user cancelled, or one the daemon stopped on its way down,
+/// was recorded as `AcquisitionState::Failed { reason: "Cancelled by …" }` —
+/// in three separate places, one of which logged "Download cancelled" on the
+/// line directly above. `downloads.js` renders any `failed` state in red as
+/// "Download failed — check Activity log for details", so somebody who pressed
+/// Cancel was told something had gone wrong with the thing they had just
+/// deliberately done, and sent to a log with nothing in it.
+///
+/// `AcquisitionState::Cancelled` exists for this. The reason (user vs
+/// shutdown) still goes in the acquisition log, which is where the detail
+/// belongs; the STATE must stop claiming failure.
+///
+/// Found by cancelling a real download and reading the screen, after the unit
+/// tests for the same commit had all passed.
+#[test]
+fn a_cancelled_download_is_not_recorded_as_a_failed_one() {
+    let root = repo_root();
+    let mut offenders: Vec<String> = Vec::new();
+    for path in rust_files_under(&root.join("src")) {
+        let Ok(src) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        if !src.contains("AcquisitionState::Failed") {
+            continue;
+        }
+        let rel = path
+            .strip_prefix(&root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let lines: Vec<&str> = src.lines().collect();
+        for (i, line) in lines.iter().enumerate() {
+            if !line.contains("AcquisitionState::Failed") {
+                continue;
+            }
+            // The reason literal may sit a line or two below the variant.
+            let window = lines[i..lines.len().min(i + 4)].join("\n").to_lowercase();
+            // Only a CONSTRUCTION carries a `reason:`. A match arm reads
+            // `Failed { .. }` and may legitimately sit next to a `Cancelled`
+            // arm — which is exactly what the first version of this guard
+            // flagged, in the health monitor's cleanup.
+            if window.contains("cancel") && window.contains("reason:") {
+                offenders.push(format!("{rel}:{}: {}", i + 1, line.trim()));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "a cancellation is recorded as a failure — use \
+         `AcquisitionState::Cancelled`, which the dashboard renders neutrally, \
+         and keep the reason in the acquisition log:\n  {}",
+        offenders.join("\n  ")
+    );
+}

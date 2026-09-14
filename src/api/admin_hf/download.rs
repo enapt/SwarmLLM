@@ -65,9 +65,8 @@ pub async fn hf_download(
             _ = shutdown_rx.wait_for(|v| *v) => {
                 tracing::info!(model = %download_mid, "Download cancelled by shutdown");
                 download_shared.models.update_acquisition(&download_mid, |s| {
-                    s.state = crate::model::acquisition::AcquisitionState::Failed {
-                        reason: "Cancelled by daemon shutdown".into(),
-                    };
+                    // Shutting the node down did not break the download.
+                    s.state = crate::model::acquisition::AcquisitionState::Cancelled;
                     s.log_push("Cancelled by daemon shutdown".into());
                 });
                 None

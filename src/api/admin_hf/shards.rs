@@ -610,9 +610,12 @@ pub async fn hf_download_shards(
                     .acquisition_progress
                     .get_mut(&download_mid)
                 {
-                    entry.state = crate::model::acquisition::AcquisitionState::Failed {
-                        reason: reason.to_string(),
-                    };
+                    // `Cancelled`, not `Failed` — the line logged directly above
+                    // says "Download cancelled" and the state used to contradict
+                    // it, which the dashboard rendered in red as "Download
+                    // failed". Whether it was the user or a shutdown stays in
+                    // the log entry below; neither is a failure.
+                    entry.state = crate::model::acquisition::AcquisitionState::Cancelled;
                     entry.log_push(reason.to_string());
                 }
                 // Clean up cancel flag
