@@ -330,11 +330,71 @@
       if (toggle) setStep('claude-sub-step4-icon', 4, toggle.checked);
     },
 
+    // What `load` actually put into the form, so `save` can send the fields
+    // the user CHANGED rather than re-asserting all of them.
+    //
+    // `PUT /api/admin/config` applies only the fields a request names (it
+    // builds on the live config — see `api/admin.rs::update_config`), so a
+    // partial body is the shape the backend was written for. The panel was
+    // sending every field unconditionally, read straight out of the DOM, which
+    // turned two ordinary situations into silent config loss:
+    //
+    //   * `load` could not read the config (a 401 from a rotated key, a 503
+    //     from a node still starting) and returned early, leaving the form at
+    //     its static HTML defaults — 10 requests, unlimited bandwidth, 50 GB
+    //     of disk. Pressing Save then wrote those defaults over whatever the
+    //     user actually had.
+    //   * a setting changed elsewhere while the modal was open was reverted to
+    //     the value the modal had loaded.
+    //
+    // `null` means the form was never populated from a real config, and Save
+    // is refused outright rather than sending a guess.
+    _loadedConfig: null,
+
+    // Save is only offered when the form is showing settings we actually read.
+    // Three states, because "we have not asked yet" and "we asked and could not
+    // read them" need the same disabled button and very different wording: the
+    // notice is an explanation, and there is nothing to explain while a load is
+    // still in flight. The button starts disabled in the markup so the moment
+    // between opening the panel and the config arriving is not a window in
+    // which Save can be pressed.
+    _setSaveable: function(state) {
+      var btn = document.getElementById('btn-save-settings');
+      if (btn) btn.disabled = state !== 'ok';
+      var notice = document.getElementById('settings-unreadable');
+      if (notice) notice.classList.toggle('hidden', state !== 'unreadable');
+    },
+
+    // The form's own reading of itself — the baseline `save` diffs against, and
+    // the exact same expressions `save` uses, so a field cannot be read one way
+    // here and another way there.
+    _readForm: function() {
+      var val = function(id) { var el = document.getElementById(id); return el ? el.value : undefined; };
+      return {
+        contribution: val('settings-contribution'),
+        contribution_auto: val('settings-contribution-mode') === 'auto',
+        max_concurrent_requests: parseInt(val('settings-max-requests'), 10),
+        max_bandwidth_mbps: parseInt(val('settings-bandwidth'), 10),
+        max_disk_mb: parseInt(val('settings-disk'), 10),
+        auto_manage_shards: val('settings-auto-shards') === 'on',
+        dashboard_trust_lan: !!(document.getElementById('settings-trust-lan') || {}).checked,
+        update_mode: val('settings-update-mode') || undefined,
+      };
+    },
+
     load: async function() {
+      App.settings._setSaveable('loading');
       try {
         var result = await App.data.loadStats();
         var data = result && result.config;
-        if (!data) return;
+        if (!data) {
+          // Showing the form's defaults as though they were this node's
+          // settings is the part that costs the user their configuration, so
+          // say what happened and take Save away until we can read them.
+          App.settings._loadedConfig = null;
+          App.settings._setSaveable('unreadable');
+          return;
+        }
         document.getElementById('settings-contribution').value = data.contribution || 'minimal';
         // contribution_auto defaults to true — Auto is the recommended mode
         // because an idle node holds redundant shards at swarm scale.
@@ -358,7 +418,13 @@
         document.querySelectorAll('input.slider[data-slider-format]').forEach(function(el) { if (el._sliderUpdate) el._sliderUpdate(); });
         document.querySelectorAll('.segmented[data-bound-select]').forEach(function(seg) { if (seg._segSync) seg._segSync(); });
         App.settings._applyHwMode(result && result.hardware);
+        // Read the baseline back out of the form rather than off `data`: what
+        // the user is looking at is what an unchanged field means.
+        App.settings._loadedConfig = App.settings._readForm();
+        App.settings._setSaveable('ok');
       } catch (e) {
+        App.settings._loadedConfig = null;
+        App.settings._setSaveable('unreadable');
         App.ui.showBanner('error', I18n.t('settings.load_failed') + ': ' + (e.message || I18n.t('common.request_failed')));
       }
       App.settings.ensureApiKey();
@@ -803,26 +869,42 @@
     },
 
     save: async function() {
+      var baseline = App.settings._loadedConfig;
+      if (!baseline) {
+        // Nothing was ever read into this form, so every value in it is a
+        // default the user did not choose. Sending them would overwrite their
+        // real settings with those defaults.
+        App.settings._setSaveable('unreadable');
+        App.ui.showBanner('error', I18n.t('settings.unreadable'));
+        return;
+      }
+
       var saveBtn = document.getElementById('btn-save-settings');
       if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = I18n.t('actions.saving'); }
 
-      var autoManageOn = document.getElementById('settings-auto-shards').value === 'on';
-      var modeAuto = document.getElementById('settings-contribution-mode').value === 'auto';
-      var config = {
-        contribution: document.getElementById('settings-contribution').value,
-        contribution_auto: modeAuto,
-        max_concurrent_requests: parseInt(document.getElementById('settings-max-requests').value, 10),
-        max_bandwidth_mbps: parseInt(document.getElementById('settings-bandwidth').value, 10),
-        max_disk_mb: parseInt(document.getElementById('settings-disk').value, 10),
-        auto_manage_shards: autoManageOn,
-        dashboard_trust_lan: !!(document.getElementById('settings-trust-lan') || {}).checked,
-        update_mode: (document.getElementById('settings-update-mode') || {}).value || undefined,
-        // R110 removed the standalone max-storage slider — the auto-manage budget
-        // is derived from Max Disk + contribution mode, so this field is no longer
-        // sent (omitting it leaves the derived value untouched server-side). The
-        // dead `settings-auto-manage-storage` read here was throwing a TypeError
-        // whenever auto-manage was on, silently killing the entire settings save.
-      };
+      var current = App.settings._readForm();
+      var autoManageOn = current.auto_manage_shards;
+
+      // Send only what changed. The handler builds on the LIVE config and
+      // applies each field it is given, so an omitted field is left alone —
+      // which is what stops this panel reverting a setting somebody changed
+      // through another endpoint while the modal sat open.
+      //
+      // R110 removed the standalone max-storage slider — the auto-manage budget
+      // is derived from Max Disk + contribution mode, so that field is not sent
+      // at all. The dead `settings-auto-manage-storage` read here was throwing a
+      // TypeError whenever auto-manage was on, silently killing the entire save.
+      var config = {};
+      Object.keys(current).forEach(function(k) {
+        if (current[k] === undefined) return;
+        // NaN from an empty or non-numeric slider is not a value to send.
+        if (typeof current[k] === 'number' && isNaN(current[k])) return;
+        if (current[k] !== baseline[k]) config[k] = current[k];
+      });
+
+      // An empty body is a legitimate save: the node's own settings are
+      // unchanged, but the nickname, providers and health interval below are
+      // still the user's to write.
 
       try {
         var resp = await App.authFetch('/api/admin/config', {
@@ -831,6 +913,9 @@
           body: JSON.stringify(config),
         });
         if (resp.ok) {
+          // The form is now what the node holds, so the next Save diffs
+          // against this rather than against what was loaded on open.
+          App.settings._loadedConfig = current;
           if (App.autoManageStatus) App.autoManageStatus.setEnabled(autoManageOn);
           // Save ancillary settings only if main config save succeeded
           var healthIntervalEl = document.getElementById('settings-health-interval');

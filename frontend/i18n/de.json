@@ -1108,6 +1108,7 @@
   "settings.toggle_password_aria": "Passwortsichtbarkeit umschalten",
   "settings.trust_lan": "Zugriff aus meinem lokalen Netzwerk erlauben",
   "settings.trust_lan_desc": "Erlaubt Geräten in deinem lokalen Netzwerk, dieses Dashboard ohne eingefügten Schlüssel zu öffnen. Aktiviere dies, wenn du SwarmLLM über einen Tailscale-Subnetz-Router oder einen Container erreichst, bei denen Anfragen von der Adresse des Routers statt von deiner eigenen eintreffen.",
+  "settings.unreadable": "⚠ Deine aktuellen Einstellungen konnten nicht gelesen werden, deshalb lassen sie sich gerade nicht ändern. Schließe dieses Fenster und öffne die Einstellungen gleich noch einmal.",
   "settings.update_mode": "Software-Updates",
   "settings.update_mode_desc": "Updates werden von GitHub geladen und gegen eine veröffentlichte Prüfsumme verifiziert. Die automatische Installation wartet, bis dieser Rechner seine laufende Arbeit beendet hat, und startet dann neu.",
   "settings.update_mode_download": "Im Hintergrund herunterladen, ich installiere selbst",

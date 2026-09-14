@@ -1108,6 +1108,7 @@
   "settings.toggle_password_aria": "Přepnout viditelnost hesla",
   "settings.trust_lan": "Povolit přístup z mé místní sítě",
   "settings.trust_lan_desc": "Umožní zařízením ve vaší místní síti otevřít tento panel bez vkládání klíče. Zapněte, pokud se ke SwarmLLM připojujete přes směrovač podsítě Tailscale nebo přes kontejner, kde požadavky přicházejí z adresy směrovače místo z vaší.",
+  "settings.unreadable": "⚠ Vaše současná nastavení se nepodařilo načíst, takže je teď nelze změnit. Zavřete toto okno a za chvíli Nastavení otevřete znovu.",
   "settings.update_mode": "Aktualizace softwaru",
   "settings.update_mode_desc": "Aktualizace se stahují z GitHubu a ověřují se proti zveřejněnému kontrolnímu součtu. Automatická instalace počká, až tento počítač dokončí práci, a poté se restartuje.",
   "settings.update_mode_download": "Stahovat na pozadí, nainstaluji sám",

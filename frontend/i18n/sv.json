@@ -1108,6 +1108,7 @@
   "settings.toggle_password_aria": "Växla lösenordssynlighet",
   "settings.trust_lan": "Tillåt åtkomst från mitt lokala nätverk",
   "settings.trust_lan_desc": "Låter enheter i ditt lokala nätverk öppna den här panelen utan att klistra in en nyckel. Slå på detta om du når SwarmLLM via en Tailscale-subnätsrouter eller en container, där förfrågningar kommer från routerns adress i stället för din egen.",
+  "settings.unreadable": "⚠ Dina nuvarande inställningar kunde inte läsas, så de går inte att ändra just nu. Stäng det här fönstret och öppna Inställningar igen om en stund.",
   "settings.update_mode": "Programuppdateringar",
   "settings.update_mode_desc": "Uppdateringar hämtas från GitHub och kontrolleras mot en publicerad kontrollsumma. Automatisk installation väntar tills datorn är klar med sitt arbete och startar sedan om.",
   "settings.update_mode_download": "Ladda ner i bakgrunden, jag installerar själv",

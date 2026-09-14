@@ -1108,6 +1108,7 @@
   "settings.toggle_password_aria": "Przełącz widoczność hasła",
   "settings.trust_lan": "Zezwalaj na dostęp z mojej sieci lokalnej",
   "settings.trust_lan_desc": "Pozwala urządzeniom w sieci lokalnej otwierać ten panel bez wklejania klucza. Włącz to, jeśli łączysz się ze SwarmLLM przez router podsieci Tailscale lub kontener, gdzie żądania przychodzą z adresu routera zamiast z twojego.",
+  "settings.unreadable": "⚠ Nie udało się odczytać Twoich obecnych ustawień, więc na razie nie można ich zmienić. Zamknij to okno i za chwilę otwórz Ustawienia ponownie.",
   "settings.update_mode": "Aktualizacje oprogramowania",
   "settings.update_mode_desc": "Aktualizacje są pobierane z GitHuba i weryfikowane opublikowaną sumą kontrolną. Automatyczna instalacja czeka, aż komputer skończy bieżącą pracę, po czym uruchamia się ponownie.",
   "settings.update_mode_download": "Pobieraj w tle, zainstaluję sam",

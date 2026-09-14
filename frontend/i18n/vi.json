@@ -1108,6 +1108,7 @@
   "settings.toggle_password_aria": "Chuyển đổi hiển thị mật khẩu",
   "settings.trust_lan": "Cho phép truy cập từ mạng nội bộ của tôi",
   "settings.trust_lan_desc": "Cho phép các thiết bị trong mạng nội bộ mở bảng điều khiển này mà không cần dán khóa. Hãy bật tùy chọn này nếu bạn truy cập SwarmLLM qua bộ định tuyến mạng con Tailscale hoặc qua một container, khi các yêu cầu đến từ địa chỉ của bộ định tuyến thay vì của bạn.",
+  "settings.unreadable": "⚠ Không đọc được cài đặt hiện tại của bạn nên bây giờ chưa thể thay đổi. Hãy đóng cửa sổ này và mở lại Cài đặt sau giây lát.",
   "settings.update_mode": "Cập nhật phần mềm",
   "settings.update_mode_desc": "Bản cập nhật được tải từ GitHub và đối chiếu với mã kiểm tra đã công bố. Việc tự động cài sẽ đợi máy này hoàn tất công việc rồi mới khởi động lại.",
   "settings.update_mode_download": "Tải nền, tôi sẽ tự cài",

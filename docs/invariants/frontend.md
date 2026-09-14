@@ -238,3 +238,55 @@ next to the words "No computer has this".
 The key renders in the EXPANDED view only. Details on demand (Shneiderman
 1996): collapsed rows keep their density, and anyone who opens a model to look
 at its pieces gets the key beside them.
+
+## A panel that could not READ its settings must not be able to WRITE them
+
+`App.settings._loadedConfig` is the baseline `save` diffs against, and `null`
+means the form was never populated from a real config. Three states, set by
+`_setSaveable`: `'loading'` (disabled, nothing said), `'ok'` (enabled), and
+`'unreadable'` (disabled, `settings.unreadable` shown beside the button). The
+Save button carries `disabled` in the markup so the gap between opening the
+panel and the config arriving is not a window in which it can be pressed.
+
+**What this replaced.** `load` did `if (!data) return;` — on a 401 from a
+rotated key or a 503 from a node still starting, the panel was left showing its
+static HTML defaults (10 concurrent requests, unlimited bandwidth, 50 GB of
+disk) and `save` read all eight fields out of the DOM and PUT every one. Change
+one setting during a hiccup and the other seven were overwritten with values the
+user never chose, under a toast saying "Settings saved". Measured on an isolated
+dev node: the node held `max_disk_mb = 120000`, and the old save would have
+written `50000`.
+
+**What a change must keep.** `save` sends only fields that DIFFER from the
+baseline. This is not an optimisation — `api/admin.rs::update_config` builds on
+the live config and applies only the fields a request names, so an omitted field
+is deliberately left alone. That is what stops this panel reverting a setting
+changed through another endpoint while the modal sat open, and it is the
+handler's own design: its comment records that building from the boot snapshot
+instead made two sequential saves undo each other. A client that always sends a
+full document throws that away. `_readForm` is shared by the baseline and the
+send so a field cannot be read one way in one and another way in the other.
+
+→ gotcha #595
+
+## A periodic refresher may repaint a display; it may not repaint an input
+
+`dashboard.js::loadInitial` does NOT populate the Settings form.
+`App.settings.load()` owns those fields and runs on every open.
+
+**What this replaced.** `loadInitial` wrote four settings fields, and
+`notifications.js` runs it on a **30-second poll** — so it fired while the panel
+was open and in use, reverting the fields to the node's stored values. Measured:
+drag Max Disk from 120 GB to 300 GB, wait one poll, and the slider reads 120 GB
+again with nothing said. Every settings change not saved within thirty seconds
+was silently discarded, which reads to the user as a setting that will not
+stick. The dashboard copy was pure redundancy — there were no readers of those
+elements outside `settings.js`, and the panel still opens showing the node's
+real values without it.
+
+**What a change must keep.** Before adding a poll or a live updater that touches
+the DOM, ask which of the elements it writes are INPUTS. Repainting a display
+costs nothing; repainting an input discards what the user was in the middle of
+doing, and leaves no trace.
+
+→ gotcha #596

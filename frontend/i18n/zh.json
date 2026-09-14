@@ -1108,6 +1108,7 @@
   "settings.toggle_password_aria": "切换密码可见性",
   "settings.trust_lan": "允许来自本地网络的访问",
   "settings.trust_lan_desc": "允许本地网络中的设备无需粘贴密钥即可打开此仪表板。如果您通过 Tailscale 子网路由器或容器访问 SwarmLLM（此时请求来自路由器地址而非您自己的地址），请启用此选项。",
+  "settings.unreadable": "⚠ 无法读取你当前的设置，所以现在无法修改。请关闭此窗口，稍后重新打开“设置”。",
   "settings.update_mode": "软件更新",
   "settings.update_mode_desc": "更新从 GitHub 下载，并使用已公布的校验和进行验证。自动安装会等待本机完成当前工作后再重启。",
   "settings.update_mode_download": "后台下载，由我安装",

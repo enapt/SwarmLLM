@@ -432,13 +432,14 @@
         App.ui.showBanner('error', I18n.t('errors.server_unreachable'));
       }
 
-      if (statsResult.config) {
-        var cfg = statsResult.config;
-        if (cfg.contribution) document.getElementById('settings-contribution').value = cfg.contribution;
-        if (cfg.max_concurrent_requests) document.getElementById('settings-max-requests').value = cfg.max_concurrent_requests;
-        if (cfg.max_bandwidth_mbps !== undefined) document.getElementById('settings-bandwidth').value = cfg.max_bandwidth_mbps;
-        if (cfg.max_disk_mb) document.getElementById('settings-disk').value = cfg.max_disk_mb;
-      }
+      // The Settings form is NOT populated from here. `App.settings.load()`
+      // owns it and runs on every open, so this was a second writer of the
+      // same four fields — and `loadInitial` is on a 30-second poll
+      // (notifications.js), so it ran while the panel was open and in use.
+      // Measured on a dev node: drag Max Disk from 120 GB to 300 GB, wait for
+      // one poll, and the slider is back at 120 GB with nothing said. Every
+      // settings change not saved within thirty seconds was silently thrown
+      // away, which reads to the user as a setting that will not stick.
 
       App.downloads.load();
       App.dashboard.loadNetworkData();

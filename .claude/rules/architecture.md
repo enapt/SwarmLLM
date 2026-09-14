@@ -108,6 +108,27 @@ closes it immediately.
 
 → `docs/invariants/frontend.md`
 
+## A panel that could not READ its settings must not be able to WRITE them
+
+`App.settings._loadedConfig` is the baseline `save` diffs against; `null` means
+the form was never populated from a real config and Save is refused. Three
+states via `_setSaveable`: `'loading'`, `'ok'`, `'unreadable'`. The Save button
+carries `disabled` in the markup, so the gap before the config arrives is not a
+window in which it can be pressed.
+
+**`save` sends only the fields that CHANGED.** `api/admin.rs::update_config`
+builds on the live config and applies only the fields a request names — an
+omitted field is deliberately left alone. A client that always sends a full
+document throws that away, and turns a failed read into a write of the markup's
+defaults over the user's real settings.
+
+**And a periodic refresher may repaint a display, never an input.**
+`dashboard.js::loadInitial` does not populate the Settings form;
+`App.settings.load()` owns it. `loadInitial` is on a 30-second poll, so its copy
+discarded every settings change not saved within thirty seconds.
+
+→ `docs/invariants/frontend.md`
+
 ## Advice on an empty state must be advice the reader can take
 
 An instruction naming a control asserts three things that can each be false on

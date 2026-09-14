@@ -1108,6 +1108,7 @@
   "settings.toggle_password_aria": "パスワードの表示切り替え",
   "settings.trust_lan": "ローカルネットワークからのアクセスを許可",
   "settings.trust_lan_desc": "ローカルネットワーク上の端末が、キーを貼り付けずにこのダッシュボードを開けるようにします。Tailscale のサブネットルーターやコンテナ経由で SwarmLLM に接続していて、リクエストが自分ではなくルーターのアドレスから届く場合に有効にしてください。",
+  "settings.unreadable": "⚠ 現在の設定を読み込めなかったため、今は変更できません。このウィンドウを閉じて、しばらくしてから設定を開き直してください。",
   "settings.update_mode": "ソフトウェアの更新",
   "settings.update_mode_desc": "更新は GitHub からダウンロードし、公開されたチェックサムで検証します。自動インストールは、このマシンが処理を終えるまで待ってから再起動します。",
   "settings.update_mode_download": "バックグラウンドでダウンロード（インストールは自分で）",

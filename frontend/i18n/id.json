@@ -1108,6 +1108,7 @@
   "settings.toggle_password_aria": "Tampilkan/sembunyikan kata sandi",
   "settings.trust_lan": "Izinkan akses dari jaringan lokal saya",
   "settings.trust_lan_desc": "Memungkinkan perangkat di jaringan lokal Anda membuka dasbor ini tanpa menempelkan kunci. Aktifkan jika Anda mengakses SwarmLLM melalui router subnet Tailscale atau sebuah kontainer, di mana permintaan datang dari alamat router alih-alih alamat Anda sendiri.",
+  "settings.unreadable": "⚠ Pengaturan Anda saat ini tidak dapat dibaca, jadi belum bisa diubah sekarang. Tutup jendela ini dan buka lagi Pengaturan sebentar lagi.",
   "settings.update_mode": "Pembaruan perangkat lunak",
   "settings.update_mode_desc": "Pembaruan diunduh dari GitHub dan diperiksa terhadap checksum yang dipublikasikan. Pemasangan otomatis menunggu mesin ini menyelesaikan pekerjaannya, lalu memulai ulang.",
   "settings.update_mode_download": "Unduh di latar belakang, saya yang memasang",

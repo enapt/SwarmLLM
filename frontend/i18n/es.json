@@ -1108,6 +1108,7 @@
   "settings.toggle_password_aria": "Mostrar/ocultar contraseña",
   "settings.trust_lan": "Permitir el acceso desde mi red local",
   "settings.trust_lan_desc": "Permite que los dispositivos de tu red local abran este panel sin pegar una clave. Actívalo si accedes a SwarmLLM a través de un enrutador de subred de Tailscale o de un contenedor, donde las solicitudes llegan desde la dirección del enrutador en lugar de la tuya.",
+  "settings.unreadable": "⚠ No se pudo leer tu configuración actual, así que ahora mismo no se puede cambiar. Cierra esta ventana y vuelve a abrir Ajustes en un momento.",
   "settings.update_mode": "Actualizaciones del software",
   "settings.update_mode_desc": "Las actualizaciones se descargan desde GitHub y se verifican con una suma de comprobación publicada. La instalación automática espera a que este equipo termine el trabajo en curso y luego se reinicia.",
   "settings.update_mode_download": "Descargar en segundo plano; yo la instalo",
