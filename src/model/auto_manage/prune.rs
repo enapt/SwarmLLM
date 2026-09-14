@@ -11,6 +11,34 @@ use super::vram::query_gpu_vram_used;
 /// gets a scoring penalty so it's not pruned immediately after download.
 const SHARD_RECENTLY_ACQUIRED_SECS: u64 = 1800;
 
+/// Does this shard still deserve its anti-thrash protection, given what its
+/// modification time turned out to be?
+///
+/// **Not knowing how old a shard is must not read as "it is old".** This score
+/// decides DELETION, and the asymmetry that governs every destructive decision
+/// in this file applies: treating an unknown as old withdraws the protection
+/// meant to stop a shard being pruned minutes after it arrived, while treating
+/// it as recent only delays a prune by one cycle.
+///
+/// `.ok().and_then(|t| t.elapsed().ok()).unwrap_or(false)` took the unsafe
+/// direction for both ways this fails — an unreadable mtime, and `elapsed()`
+/// refusing a timestamp in the FUTURE, which is exactly what clock skew or a
+/// copied file produces.
+///
+/// A file that is NOT THERE is the one case where `false` is right, and it is
+/// moot anyway: there is nothing left to prune.
+fn recently_acquired_from(modified: std::io::Result<std::time::SystemTime>) -> bool {
+    let modified = match modified {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return false,
+        Err(_) => return true,
+    };
+    match modified.elapsed() {
+        Ok(age) => age < Duration::from_secs(SHARD_RECENTLY_ACQUIRED_SECS),
+        Err(_) => true,
+    }
+}
+
 /// Resource pressure thresholds for pruning decisions.
 /// Relaxed: add a spare replica. Normal: no change. Eager: shed 1. Urgent: shed 2.
 const PRESSURE_RELAXED: f64 = 0.5;
@@ -493,16 +521,26 @@ impl AutoShardManager {
                 // Use file modified time as proxy
                 let shard_path = shard_store.shard_path(&manifest.id, shard.index);
                 let sp = shard_path.clone();
+                // Not knowing how old a shard is must not read as "it is old".
+                //
+                // This score decides DELETION, and the asymmetry that governs
+                // every destructive decision here applies: treating an unknown
+                // as old withdraws the protection meant to stop a shard being
+                // pruned minutes after it arrived, while treating it as recent
+                // only delays a prune by one cycle. `unwrap_or(false)` chose
+                // the unsafe direction for all three of the ways this can fail
+                // at once — an unreadable mtime, and `elapsed()` refusing a
+                // timestamp in the FUTURE, which is what clock skew or a copied
+                // file produces.
+                //
+                // A file that is NOT THERE is the one case where `false` is
+                // right, and it is moot: there is nothing to prune.
                 let recently_acquired = tokio::task::spawn_blocking(move || {
-                    std::fs::metadata(&sp)
-                        .and_then(|m| m.modified())
-                        .ok()
-                        .and_then(|t| t.elapsed().ok())
-                        .map(|age| age < Duration::from_secs(SHARD_RECENTLY_ACQUIRED_SECS))
-                        .unwrap_or(false)
+                    recently_acquired_from(std::fs::metadata(&sp).and_then(|m| m.modified()))
                 })
                 .await
-                .unwrap_or(false);
+                // The task itself failing tells us nothing about the shard.
+                .unwrap_or(true);
                 if recently_acquired {
                     score -= 0.2;
                 }
@@ -2080,5 +2118,52 @@ mod idle_hard_unload_tests {
     fn absurd_windows_do_not_overflow() {
         assert_eq!(idle_hard_unload_secs(0), 0);
         assert_eq!(idle_hard_unload_secs(u64::MAX), i64::MAX);
+    }
+}
+
+#[cfg(test)]
+mod recently_acquired_tests {
+    use super::{recently_acquired_from, SHARD_RECENTLY_ACQUIRED_SECS};
+    use std::io::{Error, ErrorKind};
+    use std::time::{Duration, SystemTime};
+
+    #[test]
+    fn a_shard_that_just_arrived_keeps_its_protection() {
+        assert!(recently_acquired_from(Ok(SystemTime::now())));
+    }
+
+    #[test]
+    fn a_shard_older_than_the_window_does_not() {
+        let old = SystemTime::now() - Duration::from_secs(SHARD_RECENTLY_ACQUIRED_SECS + 60);
+        assert!(!recently_acquired_from(Ok(old)));
+    }
+
+    /// The three unknowns. Each used to read as "old", withdrawing the
+    /// protection from a shard nobody could date — on a decision that deletes.
+    #[test]
+    fn an_unknown_age_keeps_the_protection() {
+        assert!(
+            recently_acquired_from(Err(Error::new(ErrorKind::PermissionDenied, "x"))),
+            "an unreadable mtime is not evidence the shard is old"
+        );
+        assert!(
+            recently_acquired_from(Err(Error::other("I/O error"))),
+            "nor is any other read failure"
+        );
+        assert!(
+            recently_acquired_from(Ok(SystemTime::now() + Duration::from_secs(3600))),
+            "a timestamp in the future makes `elapsed()` fail — clock skew, or a \
+             copied file — and says nothing about the shard's age"
+        );
+    }
+
+    /// The one case where "not recent" is right, and it is moot: there is
+    /// nothing left to prune.
+    #[test]
+    fn a_shard_that_is_gone_is_not_protected() {
+        assert!(!recently_acquired_from(Err(Error::new(
+            ErrorKind::NotFound,
+            "no such file"
+        ))));
     }
 }
