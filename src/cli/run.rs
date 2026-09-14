@@ -24,6 +24,12 @@ pub struct DaemonArgs {
 pub async fn run_daemon(args: DaemonArgs) -> anyhow::Result<()> {
     tracing::debug!(version = env!("CARGO_PKG_VERSION"), "DIAG: daemon starting");
 
+    // If an update started this process, the build it replaced may still be
+    // holding the API port and the database. Neither is retried once claimed,
+    // so a lost race leaves the node down with nothing to restart it. Returns
+    // immediately on every ordinary start.
+    swarmllm::update_restart::await_predecessor_exit();
+
     // Load config
     let mut config = Config::load_or_create(
         args.config.as_deref(),

@@ -6596,3 +6596,65 @@ fn the_tools_gate_scan_catches_the_defect_it_is_for() {
         "the guard fires on the corrected shape"
     );
 }
+
+/// A Windows GPU node updates itself by swapping the bare `.exe`, which leaves
+/// the CUDA redist DLLs beside it at whatever version the user's original zip
+/// install shipped (gotcha #162). That is safe for as long as the toolkit stays
+/// within CUDA 12: `cudart64_12.dll` serves every 12.x. It is silently fatal
+/// across a major bump — the new binary would `LoadLibraryW("cudart64_13.dll")`
+/// against a folder holding only `cudart64_12.dll`, and every auto-updated
+/// Windows GPU node would die at CUDA init with no fallback.
+///
+/// This never mattered before 2026-09-14, because `apply_update_with_version`
+/// refused to install anything on Windows at all — the hazard had two locks on
+/// it and one was load-bearing by accident. Now that Windows installs updates
+/// like everywhere else, the pin is the only lock left, so it gets a guard
+/// rather than a paragraph in a gotchas file.
+///
+/// If you are here because this test went red: bumping the Windows CUDA toolkit
+/// means teaching `update.rs` to fetch the `-gpu` **zip** (which carries the
+/// DLLs) instead of the bare exe, or gating the release so those users are sent
+/// a fresh installer. `docs/FUTURE_WORK.md` § "Windows-GPU auto-update carries
+/// stale CUDA redist DLLs" has the detail.
+#[test]
+fn the_windows_gpu_update_swaps_one_file_and_the_cuda_pin_still_allows_that() {
+    let path = repo_root().join(".github/actions/gpu-build-env/action.yml");
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+
+    // The `default:` on the line after the `cuda-windows-version:` block.
+    let block = text
+        .split_once("cuda-windows-version:")
+        .unwrap_or_else(|| panic!("{} no longer declares cuda-windows-version", path.display()))
+        .1;
+    let default_line = block
+        .lines()
+        .find(|l| l.trim_start().starts_with("default:"))
+        .unwrap_or_else(|| panic!("cuda-windows-version has no default in {}", path.display()));
+    let pinned = default_line
+        .trim()
+        .trim_start_matches("default:")
+        .trim()
+        .trim_matches('\'')
+        .trim_matches('"')
+        .to_string();
+
+    assert!(
+        pinned.starts_with("12."),
+        "the Windows CUDA toolkit is pinned to {pinned}, but the Windows updater still installs \
+         the bare .exe and never refreshes the CUDA redist DLLs beside it. Crossing a CUDA major \
+         strands every auto-updated Windows GPU node at CUDA init. Ship the -gpu zip from \
+         update.rs, or gate the release, before changing this pin."
+    );
+
+    // The other half of the claim: that the updater really does swap a single
+    // file. A guard that derives the state it checks from one side only would
+    // keep passing if the swap grew to carry the DLLs and the pin then moved.
+    let update =
+        std::fs::read_to_string(repo_root().join("src/update.rs")).expect("read update.rs");
+    assert!(
+        update.contains("swap_by_moving_aside"),
+        "src/update.rs no longer installs by swapping a single binary — if the -gpu path now \
+         unpacks the zip, this guard and the CUDA pin comment above it are both stale"
+    );
+}

@@ -1043,59 +1043,31 @@ impl UpdateChecker {
             }
         }
 
-        // Windows locks the running .exe — rename fails with ACCESS_DENIED.
-        // Reject early with a clear message instead of a confusing I/O error.
-        #[cfg(target_os = "windows")]
-        {
-            Err(SwarmError::Validation(
-                "Auto-update apply is not supported on Windows. Download the new version manually and replace the binary after stopping the daemon.".to_string(),
-            ))
+        // Put the new build at the canonical path, keeping the one it replaces
+        // beside it. Which order that happens in is the only thing that differs
+        // by platform, and it is settled inside `install_staged_binary`.
+        let backup_path = install_staged_binary(tmp_path, &self.binary_path)?;
+
+        tracing::info!(
+            new = %self.binary_path.display(),
+            backup = %backup_path.display(),
+            version = %latest_version,
+            "Update applied — restart required to use new version"
+        );
+        // Remember what we installed. If the restart does not take effect,
+        // the next start compares this against the version compiled into
+        // the running image and says so, instead of leaving an operator to
+        // deduce it from process ids.
+        if let Some(shared) = self.shared.as_ref() {
+            if let Err(e) = shared
+                .db
+                .put_json(TREE_UPDATE, KEY_INSTALLED_VERSION, &latest_version)
+            {
+                tracing::warn!(error = %e, "Could not record the installed version");
+            }
         }
 
-        #[cfg(not(target_os = "windows"))]
-        {
-            let backup_path = self.binary_path.with_extension("old");
-
-            // Keep a rollback copy WITHOUT moving the original out of the way,
-            // then replace the binary in a single atomic step. See
-            // `preserve_current_binary` for why the order matters.
-            if self.binary_path.exists() {
-                preserve_current_binary(&self.binary_path, &backup_path).map_err(|e| {
-                    SwarmError::ServiceUnavailable(format!("Failed to back up current binary: {e}"))
-                })?;
-            }
-
-            if let Err(e) = swap_binary_into_place(tmp_path, &self.binary_path) {
-                // Nothing to roll back: the binary was never moved. It is still
-                // the old version, which is exactly what a failed update should
-                // leave behind.
-                return Err(SwarmError::ServiceUnavailable(format!(
-                    "Failed to install update (binary left untouched): {e}"
-                )));
-            }
-
-            tracing::info!(
-                new = %self.binary_path.display(),
-                backup = %backup_path.display(),
-                version = %latest_version,
-                "Update applied — restart required to use new version"
-            );
-            // Remember what we installed. If the restart does not take effect,
-            // the next start compares this against the version compiled into
-            // the running image and says so, instead of leaving an operator to
-            // deduce it from process ids.
-            if let Some(shared) = self.shared.as_ref() {
-                if let Err(e) =
-                    shared
-                        .db
-                        .put_json(TREE_UPDATE, KEY_INSTALLED_VERSION, &latest_version)
-                {
-                    tracing::warn!(error = %e, "Could not record the installed version");
-                }
-            }
-
-            Ok(())
-        }
+        Ok(())
     }
 
     /// Wait for the node to go quiet, swap the binary, and restart into it.
@@ -1461,6 +1433,176 @@ fn platform_strings() -> (&'static str, &'static str) {
     };
 
     (os, arch)
+}
+
+/// Put `staged` at `binary`, keeping the build it replaces beside it, and
+/// answer with the path that older build now lives at.
+///
+/// The platforms differ in exactly one respect — whether the destination can be
+/// replaced while a process is running it — and that difference is confined to
+/// this function, so everything around it (verifying the download, logging what
+/// happened, recording what was installed) has one implementation.
+fn install_staged_binary(
+    staged: &std::path::Path,
+    binary: &std::path::Path,
+) -> Result<PathBuf, SwarmError> {
+    #[cfg(not(target_os = "windows"))]
+    {
+        let backup = binary.with_extension("old");
+
+        // Keep a rollback copy WITHOUT moving the original out of the way, then
+        // replace the binary in a single atomic step. See
+        // `preserve_current_binary` for why the order matters.
+        if binary.exists() {
+            preserve_current_binary(binary, &backup).map_err(|e| {
+                SwarmError::ServiceUnavailable(format!("Failed to back up current binary: {e}"))
+            })?;
+        }
+
+        // Nothing to roll back on failure: the binary was never moved. It is
+        // still the old version, which is exactly what a failed update should
+        // leave behind.
+        swap_binary_into_place(staged, binary).map_err(|e| {
+            SwarmError::ServiceUnavailable(format!(
+                "Failed to install update (binary left untouched): {e}"
+            ))
+        })?;
+
+        Ok(backup)
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        // `.old.exe` rather than `.old`: if the machine dies between the two
+        // renames, this file is the only build left on disk, and a name Windows
+        // will still run is the difference between "rename one file" and
+        // "work out what happened and download the release again" for the
+        // person it happens to.
+        let backup = binary.with_extension("old.exe");
+        swap_by_moving_aside(staged, binary, &backup)
+            .map_err(|e| SwarmError::ServiceUnavailable(format!("Failed to install update: {e}")))
+    }
+}
+
+/// Replace a binary that is running, by moving it out of the way first.
+///
+/// **Windows does allow the image of a running process to be renamed.** It
+/// refuses to WRITE to that image or DELETE it — which is what makes the Unix
+/// swap below impossible there — but a rename only rewrites the directory
+/// entry, and the loader holds the file with `FILE_SHARE_DELETE`, so moving the
+/// running `.exe` aside succeeds and frees its path for the replacement. This
+/// is the mechanism Windows self-updaters use; `self-replace` is the reference
+/// implementation, and is this same pair of renames:
+/// <https://github.com/mitsuhiko/self-replace/blob/main/src/windows.rs>.
+///
+/// Until 2026-09-14 this was an unconditional refusal whose comment asserted
+/// the opposite — *"Windows locks the running .exe — rename fails with
+/// ACCESS_DENIED"* — so no Windows node had ever installed an update, by the
+/// daemon's own setting or by `swarmllm update`, in any release (report #033).
+/// The claim was never measured: it is true of *overwriting* a running image,
+/// which is a different operation, and the two were conflated.
+///
+/// **The order here is forced, and it is the dangerous one.** Unix keeps a
+/// rollback copy and then replaces the binary with a single atomic rename, so
+/// the canonical path is never empty — `preserve_current_binary` records the
+/// two-day outage that bought that rule. Windows cannot do it in that order:
+/// the destination has to be vacated before anything can be put there. The
+/// window is two directory updates wide and cannot be closed, so it is made
+/// survivable instead — the rename back below for the failure we can see, and a
+/// backup a person can double-click for the one we cannot.
+///
+/// Answers with the path the previous build now lives at.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn swap_by_moving_aside(
+    staged: &std::path::Path,
+    binary: &std::path::Path,
+    backup: &std::path::Path,
+) -> std::io::Result<PathBuf> {
+    // Reclaim what the last update left. On Unix the backup is a hard link and
+    // costs nothing; here it is a whole second copy of the program, so leaving
+    // them to accumulate costs the user a release per update. Best-effort, because
+    // a previous build that a process is still RUNNING cannot be removed — and
+    // that is precisely the case the numbered fallback covers.
+    let _ = std::fs::remove_file(backup);
+
+    let moved_to = rename_to_first_free(binary, backup)?;
+
+    match std::fs::rename(staged, binary) {
+        Ok(()) => Ok(moved_to),
+        Err(swap_err) => match std::fs::rename(&moved_to, binary) {
+            // Put it back. Without this the node has no program at the path
+            // that starts it, which is the same brick the Unix ordering exists
+            // to avoid — reached here by a failure we can both see and undo.
+            Ok(()) => Err(std::io::Error::new(
+                swap_err.kind(),
+                format!(
+                    "could not put the new version at {} ({swap_err}) — the previous version was \
+                     put back, and this node is unchanged",
+                    binary.display()
+                ),
+            )),
+            Err(rollback_err) => Err(std::io::Error::new(
+                swap_err.kind(),
+                format!(
+                    "could not put the new version at {} ({swap_err}), and could not put the \
+                     previous one back either ({rollback_err}). This node's program is now the \
+                     file at {} — rename it to {} to start it again",
+                    binary.display(),
+                    moved_to.display(),
+                    binary.display()
+                ),
+            )),
+        },
+    }
+}
+
+/// Rename `from` to `preferred`, falling back to `preferred` numbered `.1`,
+/// `.2`, … when that name is held by something that will not move.
+///
+/// The name is held when a previous update's binary is still being RUN — a node
+/// that updated twice without being restarted in between. Windows will not let
+/// that file be replaced while a process has it open, and failing a whole
+/// update over the choice of a name is a poor trade when the folder has room
+/// for another one.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn rename_to_first_free(
+    from: &std::path::Path,
+    preferred: &std::path::Path,
+) -> std::io::Result<PathBuf> {
+    // The FIRST error is the one worth reporting: it describes the name the
+    // caller asked for, and the numbered attempts after it are this function's
+    // own business.
+    let first_err = match std::fs::rename(from, preferred) {
+        Ok(()) => return Ok(preferred.to_path_buf()),
+        Err(e) => e,
+    };
+    for n in 1..=9u32 {
+        let alt = numbered_sibling(preferred, n);
+        if alt.exists() {
+            continue;
+        }
+        if std::fs::rename(from, &alt).is_ok() {
+            return Ok(alt);
+        }
+    }
+    Err(first_err)
+}
+
+/// `swarmllm.old.exe` + 2 → `swarmllm.old.2.exe`.
+///
+/// The number lands BEFORE the extension so the result is still a file Windows
+/// will run — the whole reason the backup is named `.exe` in the first place.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn numbered_sibling(path: &std::path::Path, n: u32) -> PathBuf {
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let name = match path.extension() {
+        Some(ext) => format!("{stem}.{n}.{}", ext.to_string_lossy()),
+        None => format!("{stem}.{n}"),
+    };
+    path.with_file_name(name)
 }
 
 /// Keep a rollback copy of the running binary at `backup`, **without removing
@@ -2168,6 +2310,150 @@ mod staged_reuse_tests {
             b"pretend binary",
             "the staged binary must survive — the writability probe truncates, \
              so the reuse check has to run before it"
+        );
+    }
+}
+
+/// The move-aside swap Windows installs updates with.
+///
+/// Deliberately NOT gated on the platform, unlike its sibling below: the
+/// functions under test are compiled everywhere so that the machines running
+/// this suite actually run them, and so the Windows job exercises them too.
+#[cfg(test)]
+mod move_aside_tests {
+    use super::{numbered_sibling, swap_by_moving_aside};
+
+    /// The Windows swap, exercised on whatever platform is running the suite.
+    ///
+    /// `swap_by_moving_aside` is compiled everywhere and called only on Windows
+    /// precisely so it can be tested here: renaming a file out of the way and
+    /// another into its place is the same filesystem operation on Linux, and a
+    /// Windows-gated implementation would be code no local build ever compiles,
+    /// let alone runs (gotcha #264).
+    #[test]
+    fn moving_the_running_binary_aside_installs_the_new_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let binary = dir.path().join("swarmllm.exe");
+        let backup = dir.path().join("swarmllm.old.exe");
+        let staged = dir.path().join("swarmllm.update.tmp");
+        std::fs::write(&binary, b"old version 0.3.180").unwrap();
+        std::fs::write(&staged, b"new version 0.3.181").unwrap();
+
+        let moved_to = swap_by_moving_aside(&staged, &binary, &backup).unwrap();
+
+        assert_eq!(moved_to, backup);
+        assert_eq!(std::fs::read(&binary).unwrap(), b"new version 0.3.181");
+        assert_eq!(
+            std::fs::read(&backup).unwrap(),
+            b"old version 0.3.180",
+            "the previous build must survive as a rollback target"
+        );
+        assert!(
+            !staged.exists(),
+            "the staged file is consumed by the rename"
+        );
+    }
+
+    /// The half that the Unix ordering never has to do, and that `self-replace`
+    /// does not do either: when the second rename fails, the first one is
+    /// undone. Without it the node is left with NO program at the path that
+    /// starts it — the 0.3.57 brick, reached on purpose.
+    ///
+    /// A staged file that has gone is the portable way to fail the second
+    /// rename, and a real one: the download is verified and then renamed as two
+    /// separate steps, so anything that removes it in between lands here.
+    ///
+    /// A directory in the destination — the first thing tried — is NOT a
+    /// failure: the path has just been vacated, and renaming a directory onto a
+    /// free name succeeds.
+    #[test]
+    fn a_failed_windows_swap_puts_the_previous_version_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let binary = dir.path().join("swarmllm.exe");
+        let backup = dir.path().join("swarmllm.old.exe");
+        let staged = dir.path().join("swarmllm.update.tmp");
+        std::fs::write(&binary, b"old version").unwrap();
+
+        let err = swap_by_moving_aside(&staged, &binary, &backup).unwrap_err();
+
+        assert!(
+            binary.exists(),
+            "a node that fails to update must still have a program to run"
+        );
+        assert_eq!(std::fs::read(&binary).unwrap(), b"old version");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("put back") && msg.contains("unchanged"),
+            "the message must say the node was left as it was, got: {msg}"
+        );
+    }
+
+    /// A node that updated twice without restarting still has a process running
+    /// the previous backup, so that name cannot be reused. Windows refuses the
+    /// rename; the update must take the next name rather than fail.
+    ///
+    /// Stood up here with a directory again, since a locked file is not
+    /// something a portable test can arrange.
+    #[test]
+    fn a_backup_name_that_will_not_move_does_not_fail_the_update() {
+        let dir = tempfile::tempdir().unwrap();
+        let binary = dir.path().join("swarmllm.exe");
+        let backup = dir.path().join("swarmllm.old.exe");
+        let staged = dir.path().join("swarmllm.update.tmp");
+        std::fs::write(&binary, b"current").unwrap();
+        std::fs::write(&staged, b"next").unwrap();
+        std::fs::create_dir(&backup).unwrap();
+        std::fs::write(backup.join("held"), b"x").unwrap();
+
+        let moved_to = swap_by_moving_aside(&staged, &binary, &backup).unwrap();
+
+        assert_eq!(
+            moved_to,
+            dir.path().join("swarmllm.old.1.exe"),
+            "the number lands before the extension, so the backup is still runnable"
+        );
+        assert_eq!(std::fs::read(&moved_to).unwrap(), b"current");
+        assert_eq!(std::fs::read(&binary).unwrap(), b"next");
+    }
+
+    /// The previous update's backup is reclaimed rather than left to pile up.
+    /// Unix hard-links its backup and pays nothing for it; a Windows backup is
+    /// a second full copy of the program.
+    #[test]
+    fn the_previous_backup_is_reclaimed_by_the_next_update() {
+        let dir = tempfile::tempdir().unwrap();
+        let binary = dir.path().join("swarmllm.exe");
+        let backup = dir.path().join("swarmllm.old.exe");
+        let staged = dir.path().join("swarmllm.update.tmp");
+        std::fs::write(&binary, b"current").unwrap();
+        std::fs::write(&staged, b"next").unwrap();
+        std::fs::write(&backup, b"ancient").unwrap();
+
+        let moved_to = swap_by_moving_aside(&staged, &binary, &backup).unwrap();
+
+        assert_eq!(moved_to, backup);
+        assert_eq!(std::fs::read(&backup).unwrap(), b"current");
+        assert!(
+            !dir.path().join("swarmllm.old.1.exe").exists(),
+            "a reclaimable backup must be reused, not add a numbered sibling"
+        );
+    }
+
+    /// The number goes before the extension. `swarmllm.old.exe.1` is not
+    /// something Windows will run, which defeats the reason the backup carries
+    /// an extension at all.
+    #[test]
+    fn a_numbered_backup_is_still_an_executable_name() {
+        use std::path::Path;
+        assert_eq!(
+            numbered_sibling(Path::new("/x/swarmllm.old.exe"), 2),
+            Path::new("/x/swarmllm.old.2.exe")
+        );
+        // No `.exe` to protect (the Unix backup name): the number still lands
+        // before the last dot, so the `.old` marker survives too.
+        assert_eq!(
+            numbered_sibling(Path::new("/x/swarmllm.old"), 3),
+            Path::new("/x/swarmllm.3.old")
         );
     }
 }

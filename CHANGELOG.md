@@ -1,5 +1,24 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- **Windows can update itself.** It never could — not by the "install
+  automatically" setting, and not by running `swarmllm update` either. Both
+  downloaded the new version and then refused at the last step, on every release
+  there has ever been, whatever folder the program was in and whatever
+  permissions it had. Windows nodes had to be updated by hand. The refusal was
+  based on a mistaken belief about Windows: that a program cannot be renamed
+  while it is running. It can — that is how other Windows software updates
+  itself — and SwarmLLM now does the same, moving the running version aside and
+  putting the new one in its place. Reported against v0.3.171; macOS and Linux
+  were never affected.
+- **A Windows update that cannot be completed now puts things back as they
+  were,** rather than leaving the node with no program to start. The previous
+  version is also kept beside the new one under a name you can run, so there is
+  always a way back.
+
 ## [0.3.180-alpha] — 2026-09-14
 
 Two problems reported from people's own machines, and what auditing around them
