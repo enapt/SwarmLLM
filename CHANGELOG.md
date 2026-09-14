@@ -1,5 +1,80 @@
 # Changelog
 
+## [0.3.180-alpha] — 2026-09-14
+
+Two problems reported from people's own machines, and what auditing around them
+turned up. One had been reported before and announced fixed — the fix was
+written and tested, and never actually ran. Another could quietly replace your
+settings with values you never chose.
+
+### Fixed
+
+- **A reasoning model's private working-out still appeared as the answer.**
+  Reported again against v0.3.179, the release that was meant to have fixed it.
+  The filter that removes that scratchpad lives in the same place that watches
+  for tool calls, and every streaming path only asked it to do anything when the
+  request came with tools attached — which an ordinary chat message never does.
+  Requests that did carry tools were clean, which is how it survived a release.
+  Every streamed reply now goes through the filter; replies still arrive word by
+  word.
+- **A part of a model could download from the beginning over and over and never
+  finish.** Seen on two computers: the same piece restarting from zero every few
+  minutes for hours. One structure was doing two jobs — showing progress, and
+  stopping two downloads writing to the same file — and a timer cleared it, so
+  the first piece to finish unguarded the rest. Only happens when a download
+  takes longer than a few minutes, which is why it was never seen here.
+- **Stopping a download said it had stopped and did not.** It also deleted files
+  a different, still-running download was writing. Two separate watchdogs could
+  delete the same partly-downloaded file.
+- **Changing one setting could silently replace all the others.** If the
+  Settings panel could not read your current settings — a brief hiccup, a
+  restarting computer — it quietly showed its built-in defaults instead. Saving
+  then wrote those defaults over everything you had, under a message saying your
+  settings were saved.
+- **A settings change you did not save within thirty seconds was thrown away.**
+  The dashboard refreshes itself every half minute and was writing your current
+  settings back into the open panel, so a slider you had just moved snapped back
+  while you were still reading.
+- **Five things in the dashboard said they had worked when they had not** —
+  saving a cloud API key (which also cleared the box, leaving nothing to try
+  again with), the key-source setting, the Claude subscription switch, your
+  computer's name on the first-run screen, and Shut Down, which blanked the page
+  against a computer that was still running.
+- **The "Key source" setting was invisible to everyone**, in every language
+  including English. It has been in the dashboard, and translated into all 21
+  languages, without anyone being able to see it.
+- **A finished download stopped saying how many other computers had a copy** —
+  the one detail that tells you whether losing this machine loses the model.
+- **A computer would not start again after a settings save was interrupted.**
+  The file was written in place, so a crash or a full disk mid-save left it
+  half-written, and an unreadable settings file stops the program starting.
+- **A model could be skipped at startup** when two of its parts finished
+  downloading at the same moment and their records were written over each other.
+- **A download you cancelled was recorded as one that had failed**, which made
+  the computer wait before trying again.
+- **A part of a model nobody could date lost its protection** from being removed
+  minutes after arriving, and a model's size read as zero if one of its files
+  could not be measured — making it look free to keep.
+
+### Security
+
+- **One part of a message between computers was not protected against
+  tampering.** It tells the computer on the other end which slice of the work to
+  do, and a relay passing the message on can see it by design. Changing it would
+  not have been rejected — the answer would simply have been wrong, quietly.
+  This only affects setups where tensor parallelism has been deliberately turned
+  on; it is off by default. **Those setups must update every machine together.**
+  Ordinary work between computers is unchanged byte for byte.
+
+### Changed
+
+- Long waits between computers no longer hold on to memory, connection slots or
+  download reservations after the work they belonged to has been cancelled.
+- A stalled download is now judged on whether it is still making progress rather
+  than on when it started.
+- Protection against removing a model you have just used now works on a computer
+  running on its own, which it did not before.
+
 ## [0.3.179-alpha] — 2026-09-13
 
 Three problems reported from people's own machines, and what looking into them
