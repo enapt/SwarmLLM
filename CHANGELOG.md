@@ -1,6 +1,11 @@
 # Changelog
 
-## [Unreleased]
+## [0.3.181-alpha] — 2026-09-14
+
+Two problems reported from people's own machines, and the interface finally
+settling on one word for the things it talks about. One of the two had never
+worked on its platform in any release; the other made the dashboard unusable on
+an iPad.
 
 ### Fixed
 
