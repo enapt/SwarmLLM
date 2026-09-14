@@ -897,6 +897,14 @@
       models = models.filter(function(m) {
         if (m.local || m.hosted_shards > 0) return true;
         if (m.peers_hosting > 0) return true;
+        // A model everyone else has in a DIFFERENT version still exists, and
+        // the card now says so. `peers_hosting` counts only computers we could
+        // fetch from, so without this line a model we hold a manifest for but
+        // no parts of — where every holder is on another build — would vanish
+        // from the list rather than appear with its explanation. Narrow, but it
+        // is a case this filter's own purpose (hide models that are nowhere)
+        // gets wrong: this one is somewhere.
+        if (m.peers_other_build > 0) return true;
         if (m.acquisition === 'downloading') return true;
         var anyHolder = (m.shards || []).some(function(s) { return s.holders > 0; });
         return anyHolder;
