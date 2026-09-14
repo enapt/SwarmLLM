@@ -1437,7 +1437,23 @@ pub async fn update_config(
         if let Some(parent) = cp.parent() {
             std::fs::create_dir_all(parent).ok();
         }
-        std::fs::write(&cp, toml_str)
+        // Staged and renamed, not written in place. `load_or_create` returns
+        // `SwarmError::Config` on a file it cannot parse — correctly, since a
+        // half-understood config is worse than none — so the daemon REFUSES TO
+        // START on a truncated one. A bare `fs::write` truncates first and
+        // fills after, which makes a crash, a kill, or a full disk during a
+        // settings save leave exactly that file, and a non-technical user with
+        // a node that will not come back up and no idea why.
+        //
+        // The staging name carries this process's id so two writers cannot
+        // share one, as `ModelManifestExt::save_to_dir` also does.
+        let tmp = cp.with_extension(format!("toml.{}.tmp", std::process::id()));
+        std::fs::write(&tmp, toml_str)?;
+        if let Err(e) = std::fs::rename(&tmp, &cp) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e);
+        }
+        Ok(())
     })
     .await
     .map_err(|e| {
