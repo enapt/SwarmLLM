@@ -682,6 +682,14 @@ pub fn cleanup_tmp_files_no_one_is_writing(
         if !name.ends_with(".tmp") && !name.ends_with(".tmp.layout") {
             continue;
         }
+        // A manifest save stages under its own name and renames within
+        // microseconds; it is not a download partial and nothing here can tell
+        // a live one from a stale one. Deleting it mid-write turns an atomic
+        // save into a failure — and the startup sweep, which runs when no
+        // writer exists, is where a genuinely stale one is cleared.
+        if name.starts_with(MANIFEST_FILENAME) {
+            continue;
+        }
         // `shard_007.bin.tmp` and `shard_007.bin.tmp.layout` both belong to
         // shard 7. A name we cannot read an index out of (the mmproj or header
         // staging file) has no claim to check, so it is swept as before.
@@ -1304,6 +1312,23 @@ mod cancel_cleanup_tests {
     }
 
     /// A claim on ANOTHER model's shard 7 says nothing about this model's.
+    /// A manifest save stages under its own name and renames in microseconds.
+    /// The cancel sweep cannot tell a live one from a stale one, and deleting
+    /// it mid-write turns an atomic save into a failure.
+    #[test]
+    fn cancel_does_not_delete_a_manifest_being_saved() {
+        let dir = tempfile::tempdir().unwrap();
+        let mid = ModelId("glm-4-9b".to_string());
+        let claims: dashmap::DashSet<ShardId> = dashmap::DashSet::new();
+
+        touch(dir.path(), "manifest.json.4242.7.tmp");
+        touch(dir.path(), "shard_003.bin.tmp");
+
+        let removed = cleanup_tmp_files_no_one_is_writing(dir.path(), &mid, &claims);
+        assert_eq!(removed, 1, "only the shard partial should have gone");
+        assert!(dir.path().join("manifest.json.4242.7.tmp").exists());
+    }
+
     #[test]
     fn a_claim_on_another_models_shard_does_not_protect_this_one() {
         let dir = tempfile::tempdir().unwrap();

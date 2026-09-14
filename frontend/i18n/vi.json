@@ -1064,6 +1064,7 @@
   "settings.no_models": "Chưa có mô hình đăng ký",
   "settings.paste_key_placeholder": "Dán khóa truy cập của bạn",
   "settings.paste_key_rejected": "Khóa đó không được chấp nhận",
+  "settings.paste_key_uncheckable": "Không kiểm tra được khoá đó — nút của bạn không phản hồi. Khoá có thể vẫn đúng; hãy thử lại sau giây lát.",
   "settings.plan": "Gói",
   "settings.providers_load_failed": "Tải trạng thái nhà cung cấp thất bại",
   "settings.providers_save_failed": "Lưu khóa nhà cung cấp thất bại",

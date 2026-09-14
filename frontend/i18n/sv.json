@@ -1064,6 +1064,7 @@
   "settings.no_models": "Inga modeller registrerade",
   "settings.paste_key_placeholder": "Klistra in din åtkomstnyckel",
   "settings.paste_key_rejected": "Nyckeln godtogs inte",
+  "settings.paste_key_uncheckable": "Kunde inte kontrollera nyckeln – din nod svarade inte. Den kan mycket väl vara rätt; försök igen om en stund.",
   "settings.plan": "Plan",
   "settings.providers_load_failed": "Kunde inte ladda leverantörsstatus",
   "settings.providers_save_failed": "Kunde inte spara leverantörsnycklar",

@@ -1064,6 +1064,7 @@
   "settings.no_models": "No hay modelos registrados",
   "settings.paste_key_placeholder": "Pega tu clave de acceso",
   "settings.paste_key_rejected": "Esa clave no se aceptó",
+  "settings.paste_key_uncheckable": "No se pudo comprobar esa clave: tu nodo no respondió. Puede que sea correcta; inténtalo de nuevo en un momento.",
   "settings.plan": "Plan",
   "settings.providers_load_failed": "Error al cargar estado de proveedores",
   "settings.providers_save_failed": "Error al guardar claves de proveedor",

@@ -49,6 +49,24 @@
         var adminModels = result.models;
         var providerModels = result.cloudModels;
 
+        // An empty list because we could not ASK is not an empty list.
+        //
+        // `fetch` does not reject on an HTTP error status, so a 401 from a
+        // rotated API key, a 500 or a 503 used to arrive here indistinguishable
+        // from "this node has no models" — and everything below acts on that:
+        // the dashboard list is replaced with the first-run empty state, and
+        // `updateChatAvailability(hasAny)` DISABLES the chat box on a
+        // fully-configured node.
+        //
+        // So when nothing came back AND we could not reach the daemon, leave
+        // the page as it is. A model list one refresh out of date is a far
+        // smaller lie than "you have no models", and the next tick fixes it.
+        var reachedDaemon = App.data.loadReachedDaemon('models') &&
+          App.data.loadReachedDaemon('cloudModels');
+        if (!reachedDaemon && adminModels.length === 0 && providerModels.length === 0) {
+          return;
+        }
+
         App.dashboard.renderModels(adminModels, providerModels);
 
         var readySet = {};

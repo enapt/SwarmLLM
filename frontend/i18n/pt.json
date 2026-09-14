@@ -1064,6 +1064,7 @@
   "settings.no_models": "Nenhum modelo registrado",
   "settings.paste_key_placeholder": "Cole a sua chave de acesso",
   "settings.paste_key_rejected": "Essa chave não foi aceite",
+  "settings.paste_key_uncheckable": "Não foi possível verificar essa chave — o seu nó não respondeu. Pode muito bem estar certa; tente novamente daqui a pouco.",
   "settings.plan": "Plano",
   "settings.providers_load_failed": "Falha ao carregar status dos provedores",
   "settings.providers_save_failed": "Falha ao salvar chaves de provedor",

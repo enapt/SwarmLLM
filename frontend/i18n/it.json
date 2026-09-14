@@ -1064,6 +1064,7 @@
   "settings.no_models": "Nessun modello registrato",
   "settings.paste_key_placeholder": "Incolla la tua chiave di accesso",
   "settings.paste_key_rejected": "Questa chiave non è stata accettata",
+  "settings.paste_key_uncheckable": "Impossibile verificare la chiave: il tuo nodo non ha risposto. Potrebbe essere corretta; riprova tra un momento.",
   "settings.plan": "Piano",
   "settings.providers_load_failed": "Caricamento stato provider fallito",
   "settings.providers_save_failed": "Salvataggio chiavi provider fallito",

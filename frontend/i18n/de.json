@@ -1064,6 +1064,7 @@
   "settings.no_models": "Keine Modelle registriert",
   "settings.paste_key_placeholder": "Zugriffsschlüssel einfügen",
   "settings.paste_key_rejected": "Dieser Schlüssel wurde nicht akzeptiert",
+  "settings.paste_key_uncheckable": "Der Schlüssel konnte nicht geprüft werden – dein Knoten hat nicht geantwortet. Er kann durchaus richtig sein; versuche es gleich noch einmal.",
   "settings.plan": "Plan",
   "settings.providers_load_failed": "Anbieterstatus konnte nicht geladen werden",
   "settings.providers_save_failed": "Anbieterschlüssel konnten nicht gespeichert werden",

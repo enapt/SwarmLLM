@@ -1064,6 +1064,7 @@
   "settings.no_models": "登録されているモデルがありません",
   "settings.paste_key_placeholder": "アクセスキーを貼り付け",
   "settings.paste_key_rejected": "そのキーは受け付けられませんでした",
+  "settings.paste_key_uncheckable": "キーを確認できませんでした。ノードから応答がありません。キー自体は正しい可能性があります。少し待って再試行してください。",
   "settings.plan": "プラン",
   "settings.providers_load_failed": "プロバイダー状態の読み込みに失敗",
   "settings.providers_save_failed": "プロバイダーキーの保存に失敗",

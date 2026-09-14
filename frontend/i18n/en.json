@@ -1064,6 +1064,7 @@
   "settings.no_models": "No models registered",
   "settings.paste_key_placeholder": "Paste your access key",
   "settings.paste_key_rejected": "That key wasn't accepted",
+  "settings.paste_key_uncheckable": "Couldn't check that key — your node didn't answer. It may well be right; try again in a moment.",
   "settings.plan": "Plan",
   "settings.providers_load_failed": "Failed to load provider status",
   "settings.providers_save_failed": "Failed to save provider keys",

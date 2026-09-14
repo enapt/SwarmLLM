@@ -1064,6 +1064,7 @@
   "settings.no_models": "Tidak ada model terdaftar",
   "settings.paste_key_placeholder": "Tempel kunci akses Anda",
   "settings.paste_key_rejected": "Kunci itu tidak diterima",
+  "settings.paste_key_uncheckable": "Tidak dapat memeriksa kunci itu — node Anda tidak merespons. Bisa jadi kuncinya benar; coba lagi sebentar lagi.",
   "settings.plan": "Paket",
   "settings.providers_load_failed": "Gagal memuat status penyedia",
   "settings.providers_save_failed": "Gagal menyimpan kunci penyedia",

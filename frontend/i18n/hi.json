@@ -1064,6 +1064,7 @@
   "settings.no_models": "कोई मॉडल पंजीकृत नहीं",
   "settings.paste_key_placeholder": "अपनी एक्सेस कुंजी चिपकाएँ",
   "settings.paste_key_rejected": "वह कुंजी स्वीकार नहीं की गई",
+  "settings.paste_key_uncheckable": "यह कुंजी जाँची नहीं जा सकी — आपके नोड ने उत्तर नहीं दिया। हो सकता है यह सही ही हो; थोड़ी देर बाद फिर आज़माएँ।",
   "settings.plan": "योजना",
   "settings.providers_load_failed": "प्रदाता स्थिति लोड करने में विफल",
   "settings.providers_save_failed": "प्रदाता कुंजियाँ सहेजने में विफल",

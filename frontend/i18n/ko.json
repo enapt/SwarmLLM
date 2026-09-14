@@ -1064,6 +1064,7 @@
   "settings.no_models": "등록된 모델이 없습니다",
   "settings.paste_key_placeholder": "액세스 키를 붙여넣으세요",
   "settings.paste_key_rejected": "해당 키가 거부되었습니다",
+  "settings.paste_key_uncheckable": "키를 확인할 수 없습니다 — 노드가 응답하지 않았습니다. 키가 맞을 수도 있으니 잠시 후 다시 시도하세요.",
   "settings.plan": "플랜",
   "settings.providers_load_failed": "공급자 상태 로드 실패",
   "settings.providers_save_failed": "공급자 키 저장 실패",

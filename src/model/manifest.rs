@@ -238,14 +238,66 @@ impl ModelManifestExt for ModelManifest {
     }
 
     /// Save the manifest to a model directory as `manifest.json`.
+    ///
+    /// **Each save stages to its own file.** The staging name used to be a
+    /// fixed `manifest.json.tmp`, shared by every caller — and there are more
+    /// than ten, several of which run concurrently for the SAME model by
+    /// design: each completed HuggingFace shard updates its own hash from its
+    /// own `tokio::spawn`, and `auto_manage/download.rs` says so in a comment
+    /// ("Multiple shards of the same model may be downloading concurrently").
+    /// Two of those landing together both `fs::write` the same path with
+    /// `O_TRUNC` and then both rename it, so the file promoted to
+    /// `manifest.json` could be a mix of two JSON documents — and a manifest
+    /// that will not parse means the model is skipped entirely at startup. The
+    /// loser's rename also fails with `ENOENT`, which surfaces as the
+    /// "failed to persist manifest" warning rather than as the corruption it
+    /// signals.
+    ///
+    /// The lock serialises the writers inside this process, which is where the
+    /// race is. The unique name is what makes it safe anyway if one ever gets
+    /// past the lock — a second process, or a future path that does not take
+    /// it. That is the order `huggingface_hub` settled on after the same class
+    /// of bug (PR #4306): correctness comes from not sharing the partial file,
+    /// and the lock only saves duplicated work.
+    ///
+    /// **This does NOT fix the lost UPDATE.** Callers snapshot the manifest,
+    /// change one field and save, so a caller holding a stale snapshot still
+    /// writes a version missing a sibling's field. In memory that is covered —
+    /// `register_manifest` runs `merge_known_shard_hashes`, and a hash may go
+    /// from unknown to known but never back — and on disk the startup load
+    /// merges against what redb holds, which the persist hook keeps current.
+    /// Closing it properly means saving what the registry holds AFTER
+    /// registering rather than the caller's copy; see `docs/FUTURE_WORK.md`
+    /// § 66.
     fn save_to_dir(&self, dir: &Path) -> Result<(), SwarmError> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static MANIFEST_SAVE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        static STAGE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
         std::fs::create_dir_all(dir).map_err(SwarmError::Io)?;
         let json = serde_json::to_string_pretty(self).map_err(SwarmError::Serialization)?;
-        // Atomic write: write to temp file then rename to prevent corruption on kill/crash
-        let tmp_path = dir.join(format!("{}.tmp", crate::model::shard::MANIFEST_FILENAME));
+
+        // A poisoned lock means some other save panicked mid-write. That tells
+        // us nothing about this one, and refusing to save would turn one
+        // panic into a permanent inability to record a shard hash.
+        let _serialised = MANIFEST_SAVE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let tmp_path = dir.join(format!(
+            "{}.{}.{}.tmp",
+            crate::model::shard::MANIFEST_FILENAME,
+            std::process::id(),
+            STAGE_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
         std::fs::write(&tmp_path, json).map_err(SwarmError::Io)?;
-        std::fs::rename(&tmp_path, dir.join(crate::model::shard::MANIFEST_FILENAME))
-            .map_err(SwarmError::Io)?;
+        if let Err(e) = std::fs::rename(&tmp_path, dir.join(crate::model::shard::MANIFEST_FILENAME))
+        {
+            // Take our own staging file with us; it is named after this
+            // process and nothing else will ever pick it up.
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(SwarmError::Io(e));
+        }
         Ok(())
     }
 }
@@ -862,5 +914,64 @@ mod wire_roundtrip_tests {
         );
         back.verify_hash_strict()
             .expect("a manifest that crossed the wire must still verify");
+    }
+}
+
+#[cfg(test)]
+mod concurrent_save_tests {
+    use super::*;
+    use crate::types::ModelManifest;
+
+    /// Ten shards of one model finishing at once is the everyday case — each
+    /// completed HuggingFace download updates its own hash from its own task,
+    /// and `auto_manage/download.rs` says so in a comment. They all staged to
+    /// one `manifest.json.tmp`, so two `fs::write`s with `O_TRUNC` could
+    /// interleave into it and then both rename, promoting a mix of two JSON
+    /// documents. A manifest that will not parse means the model is skipped
+    /// entirely at startup.
+    ///
+    /// The assertion is on the property that matters: whatever ends up at
+    /// `manifest.json` parses, every time.
+    #[test]
+    fn concurrent_saves_never_leave_an_unparseable_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = super::tests::test_manifest();
+
+        std::thread::scope(|scope| {
+            for n in 0..10u32 {
+                let dir = dir.path();
+                let mut m = base.clone();
+                // Make each writer's document a different length, so an
+                // interleaved write is far more likely to be caught.
+                m.name = format!("{}{}", base.name, "x".repeat(n as usize * 64));
+                scope.spawn(move || {
+                    for _ in 0..20 {
+                        m.save_to_dir(dir).expect("save");
+                        // Read back from under the other writers.
+                        ModelManifest::load_from_dir(dir).expect("manifest.json must always parse");
+                    }
+                });
+            }
+        });
+
+        ModelManifest::load_from_dir(dir.path()).expect("the final manifest must parse");
+    }
+
+    /// Every save stages under its own name, and takes that name with it —
+    /// a model directory must not fill up with abandoned staging files.
+    #[test]
+    fn saving_leaves_no_staging_files_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = super::tests::test_manifest();
+        for _ in 0..5 {
+            m.save_to_dir(dir.path()).expect("save");
+        }
+        let strays: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect();
+        assert!(strays.is_empty(), "staging files left behind: {strays:?}");
     }
 }

@@ -1064,6 +1064,7 @@
   "settings.no_models": "Моделей не зареєстровано",
   "settings.paste_key_placeholder": "Вставте ключ доступу",
   "settings.paste_key_rejected": "Цей ключ не прийнято",
+  "settings.paste_key_uncheckable": "Не вдалося перевірити цей ключ — ваш вузол не відповів. Можливо, він правильний; спробуйте ще раз за хвилину.",
   "settings.plan": "План",
   "settings.providers_load_failed": "Не вдалося завантажити статус провайдерів",
   "settings.providers_save_failed": "Не вдалося зберегти ключі провайдерів",

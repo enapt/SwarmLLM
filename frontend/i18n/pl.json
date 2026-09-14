@@ -1064,6 +1064,7 @@
   "settings.no_models": "Brak zarejestrowanych modeli",
   "settings.paste_key_placeholder": "Wklej swój klucz dostępu",
   "settings.paste_key_rejected": "Ten klucz nie został zaakceptowany",
+  "settings.paste_key_uncheckable": "Nie udało się sprawdzić tego klucza — Twój węzeł nie odpowiedział. Może być poprawny; spróbuj ponownie za chwilę.",
   "settings.plan": "Plan",
   "settings.providers_load_failed": "Nie udało się załadować statusu dostawców",
   "settings.providers_save_failed": "Nie udało się zapisać kluczy dostawców",

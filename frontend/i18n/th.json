@@ -1064,6 +1064,7 @@
   "settings.no_models": "ไม่มีโมเดลที่ลงทะเบียน",
   "settings.paste_key_placeholder": "วางคีย์การเข้าถึงของคุณ",
   "settings.paste_key_rejected": "คีย์นี้ไม่ได้รับการยอมรับ",
+  "settings.paste_key_uncheckable": "ตรวจสอบคีย์นี้ไม่ได้ — โหนดของคุณไม่ตอบกลับ คีย์อาจถูกต้องอยู่แล้ว ลองอีกครั้งในอีกสักครู่",
   "settings.plan": "แผน",
   "settings.providers_load_failed": "โหลดสถานะผู้ให้บริการไม่สำเร็จ",
   "settings.providers_save_failed": "บันทึกคีย์ผู้ให้บริการไม่สำเร็จ",

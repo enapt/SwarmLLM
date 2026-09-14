@@ -439,16 +439,26 @@
     // Verify before storing. A key that doesn't work must fail here, while the
     // user is looking at the box they typed it into — not silently later as a
     // generic failure on some unrelated panel.
+    // Answers 'ok', 'rejected', or 'unreachable' — not a boolean.
+    //
+    // A boolean merged "this key is wrong" with "the node did not answer", and
+    // the caller told the user their key was rejected for both. A correct key
+    // pasted while the node was restarting, or during any 500/503, was
+    // reported as wrong — sending someone hunting for a key that was never the
+    // problem, on the one screen they reach before anything else works.
     saveManualKey: async function(key) {
       key = (key || '').trim();
-      if (!key) return false;
+      if (!key) return 'rejected';
       var resp;
       try {
         resp = await fetch('/api/admin/stats', { headers: { 'Authorization': 'Bearer ' + key } });
       } catch (e) {
-        return false;
+        return 'unreachable';
       }
-      if (!resp.ok) return false;
+      // Only the node saying "not you" is a rejection. Everything else is the
+      // node failing to answer the question.
+      if (resp.status === 401 || resp.status === 403) return 'rejected';
+      if (!resp.ok) return 'unreachable';
       try {
         localStorage.setItem(App.settings._manualKeyName(), key);
       } catch (e) {
@@ -457,7 +467,7 @@
       }
       App.settings._apiKeyFull = key;
       App.settings._apiKeyDenied = false;
-      return true;
+      return 'ok';
     },
 
     forgetManualKey: function() {
@@ -509,13 +519,18 @@
       form.addEventListener('submit', async function(ev) {
         ev.preventDefault();
         submit.disabled = true;
-        var ok = await App.settings.saveManualKey(input.value);
+        var verdict = await App.settings.saveManualKey(input.value);
         submit.disabled = false;
-        if (ok) {
+        if (verdict === 'ok') {
           banner.remove();
           // Everything on the page loaded without a key, so re-fetch rather
           // than leaving a dashboard full of empty panels behind the banner.
           location.reload();
+        } else if (verdict === 'unreachable') {
+          // Keep what they typed. It may well be right, and asking someone to
+          // paste a long key again for a problem that was not theirs is the
+          // worst part of getting this wrong.
+          App.notifications.showToast(I18n.t('settings.paste_key_uncheckable'), 'warning');
         } else {
           input.value = '';
           input.placeholder = I18n.t('settings.paste_key_rejected');

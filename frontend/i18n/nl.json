@@ -1064,6 +1064,7 @@
   "settings.no_models": "Geen modellen geregistreerd",
   "settings.paste_key_placeholder": "Plak je toegangssleutel",
   "settings.paste_key_rejected": "Die sleutel is niet geaccepteerd",
+  "settings.paste_key_uncheckable": "Kon die sleutel niet controleren — je node gaf geen antwoord. Hij kan best kloppen; probeer het zo nog eens.",
   "settings.plan": "Abonnement",
   "settings.providers_load_failed": "Providerstatus laden mislukt",
   "settings.providers_save_failed": "Providersleutels opslaan mislukt",

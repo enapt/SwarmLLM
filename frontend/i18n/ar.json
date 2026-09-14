@@ -1064,6 +1064,7 @@
   "settings.no_models": "لم يتم تسجيل أي نماذج",
   "settings.paste_key_placeholder": "الصق مفتاح الوصول",
   "settings.paste_key_rejected": "لم يتم قبول هذا المفتاح",
+  "settings.paste_key_uncheckable": "تعذّر التحقق من هذا المفتاح — لم تستجب العقدة. قد يكون صحيحًا؛ أعد المحاولة بعد قليل.",
   "settings.plan": "الخطة",
   "settings.providers_load_failed": "فشل في تحميل حالة المزودين",
   "settings.providers_save_failed": "فشل في حفظ مفاتيح المزودين",

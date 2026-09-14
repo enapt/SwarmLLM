@@ -1064,6 +1064,7 @@
   "settings.no_models": "Žádné registrované modely",
   "settings.paste_key_placeholder": "Vložte svůj přístupový klíč",
   "settings.paste_key_rejected": "Tento klíč nebyl přijat",
+  "settings.paste_key_uncheckable": "Klíč se nepodařilo ověřit — váš uzel neodpověděl. Nejspíš je správný; zkuste to za chvíli znovu.",
   "settings.plan": "Plán",
   "settings.providers_load_failed": "Načtení stavu poskytovatelů selhalo",
   "settings.providers_save_failed": "Uložení klíčů poskytovatelů selhalo",

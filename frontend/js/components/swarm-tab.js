@@ -588,7 +588,15 @@
       url += '&tasks=' + encodeURIComponent(_browseState.tasks.join(','));
     }
     App.authFetch(url).then(function (r) {
-      return r.ok ? r.json() : [];
+      // A refused request is not an empty result. `fetch` does not reject on
+      // an HTTP error status, so a 502 (HuggingFace down or rate-limiting us)
+      // or a 400 used to render as "no models match your search" — telling the
+      // user to try different words for a problem no wording fixes. Throwing
+      // hands it to the `.catch` below, which already says the right thing.
+      // `_browseEnsureTrending` directly above got this same fix; it was not
+      // carried the few lines down to here.
+      if (!r.ok) throw new Error('search request failed: ' + r.status);
+      return r.json();
     }).then(function (data) {
       if (loading) loading.style.display = 'none';
       _renderBrowseResults(data);

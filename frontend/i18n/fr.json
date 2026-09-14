@@ -1064,6 +1064,7 @@
   "settings.no_models": "Aucun modèle enregistré",
   "settings.paste_key_placeholder": "Collez votre clé d'accès",
   "settings.paste_key_rejected": "Cette clé n'a pas été acceptée",
+  "settings.paste_key_uncheckable": "Impossible de vérifier cette clé : votre nœud n'a pas répondu. Elle est peut-être correcte ; réessayez dans un instant.",
   "settings.plan": "Plan",
   "settings.providers_load_failed": "Échec du chargement de l'état des fournisseurs",
   "settings.providers_save_failed": "Échec de l'enregistrement des clés",

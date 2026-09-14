@@ -1064,6 +1064,7 @@
   "settings.no_models": "Kayıtlı model yok",
   "settings.paste_key_placeholder": "Erişim anahtarınızı yapıştırın",
   "settings.paste_key_rejected": "Bu anahtar kabul edilmedi",
+  "settings.paste_key_uncheckable": "Bu anahtar doğrulanamadı — düğümünüz yanıt vermedi. Anahtar doğru olabilir; birazdan tekrar deneyin.",
   "settings.plan": "Plan",
   "settings.providers_load_failed": "Sağlayıcı durumu yüklenemedi",
   "settings.providers_save_failed": "Sağlayıcı anahtarları kaydedilemedi",

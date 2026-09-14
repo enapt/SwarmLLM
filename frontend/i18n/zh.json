@@ -1064,6 +1064,7 @@
   "settings.no_models": "未注册模型",
   "settings.paste_key_placeholder": "粘贴您的访问密钥",
   "settings.paste_key_rejected": "该密钥未被接受",
+  "settings.paste_key_uncheckable": "无法验证该密钥 —— 你的节点没有响应。它很可能是正确的，请稍后重试。",
   "settings.plan": "方案",
   "settings.providers_load_failed": "加载提供商状态失败",
   "settings.providers_save_failed": "保存提供商密钥失败",

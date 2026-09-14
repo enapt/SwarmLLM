@@ -64,18 +64,50 @@
     delete _inFlight[key];
   }
 
+  // Did the most recent load of each kind actually reach the daemon?
+  //
+  // Every helper below returned its empty default ([] / null) for BOTH "the
+  // daemon says there is nothing" and "we could not ask the daemon" — and
+  // `fetch` does not throw on an HTTP error status, so a 401 from a rotated
+  // API key, a 500, or a 503 fell straight through the `if (r.ok)` with no
+  // signal at all. Callers then rendered the ordinary empty state: a
+  // fully-configured node was shown the first-run onboarding screen, and
+  // `models.js` called `updateChatAvailability(false)`, which DISABLES chat.
+  //
+  // This is the single data-fetch choke point every component is told to use
+  // (`.claude/rules/architecture.md` § "Frontend Data Fetching"), so recording
+  // it here is what lets any of them tell the difference.
+  // `null` = not attempted yet, `true` = the daemon answered, `false` = it did
+  // not, for whatever reason.
+  var _reached = {};
+
+  function loadReachedDaemon(key) {
+    return _reached[key] !== false;
+  }
+
+  // One fetch, one recorded outcome. Returns the parsed body, or null.
+  async function fetchRecorded(key, url) {
+    try {
+      var r = await authFetch(url);
+      if (r.ok) {
+        _reached[key] = true;
+        return await r.json();
+      }
+      // The request completed and the daemon refused it. This is the case a
+      // bare `if (r.ok)` swallowed silently.
+      _reached[key] = false;
+      return null;
+    } catch (e) {
+      _reached[key] = false;
+      return null;
+    }
+  }
+
   function loadModels() {
     return dedupe('models', async function() {
-      var models = [];
-      var cloudModels = [];
-      try {
-        var r = await authFetch('/api/admin/models');
-        if (r.ok) models = await r.json();
-      } catch (e) {}
-      try {
-        var r2 = await authFetch('/api/admin/provider-models');
-        if (r2.ok) { var d = await r2.json(); cloudModels = d.models || []; }
-      } catch (e) {}
+      var models = await fetchRecorded('models', '/api/admin/models') || [];
+      var d = await fetchRecorded('cloudModels', '/api/admin/provider-models');
+      var cloudModels = (d && d.models) || [];
       cache.models = models;
       cache.cloudModels = cloudModels;
       // models cached in App.data.cache.models
@@ -85,11 +117,7 @@
 
   function loadStats() {
     return dedupe('stats', async function() {
-      var stats = null;
-      try {
-        var r = await authFetch('/api/admin/stats');
-        if (r.ok) stats = await r.json();
-      } catch (e) {}
+      var stats = await fetchRecorded('stats', '/api/admin/stats');
       var config = await loadConfig();
       cache.stats = stats;
       return { stats: stats, config: config };
@@ -98,11 +126,7 @@
 
   function loadPeers() {
     return dedupe('peers', async function() {
-      var peers = [];
-      try {
-        var r = await authFetch('/api/admin/peers');
-        if (r.ok) peers = await r.json();
-      } catch (e) {}
+      var peers = await fetchRecorded('peers', '/api/admin/peers') || [];
       cache.peers = peers;
       return peers;
     });
@@ -110,11 +134,7 @@
 
   function loadConfig() {
     return dedupe('config', async function() {
-      var config = null;
-      try {
-        var r = await authFetch('/api/admin/config');
-        if (r.ok) config = await r.json();
-      } catch (e) {}
+      var config = await fetchRecorded('config', '/api/admin/config');
       cache.config = config;
       return config;
     });
@@ -122,11 +142,7 @@
 
   function loadProviders() {
     return dedupe('providers', async function() {
-      var providers = null;
-      try {
-        var r = await authFetch('/api/admin/providers');
-        if (r.ok) providers = await r.json();
-      } catch (e) {}
+      var providers = await fetchRecorded('providers', '/api/admin/providers');
       cache.providers = providers;
       return providers;
     });
@@ -170,6 +186,7 @@
     loadPipelinePlan: loadPipelinePlan,
     loadClaudeSubStatus: loadClaudeSubStatus,
     invalidateDedup: invalidateDedup,
+    loadReachedDaemon: loadReachedDaemon,
     cache: cache,
   };
 })();
