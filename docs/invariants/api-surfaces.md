@@ -793,3 +793,43 @@ The hand-rolled engine kept `<think>…</think>` in assistant HISTORY where jinj
 strips it. minijinja + pycompat matches jinja2 there. If a future divergence is
 found, pin it explicitly in the test the way that one was, rather than leaving it
 in a comment.
+
+## The scratchpad filter is not a tool-calling feature, and must not be gated like one
+
+`StreamingToolText::new(detect_tools: bool)` is the only constructor — **there is
+no `Default`** — and `push` runs the reasoning filter unconditionally.
+`releasable_len` withholds text for tool detection only when `detect_tools`, so
+an ordinary reply streams token by token exactly as before. The two flush
+helpers (`emit_openai_tool_calls`, `emit_anthropic_tool_blocks`) return early
+with `pending_all()` when `!detects_tools()`, and both end-of-stream flushes run
+unconditionally.
+
+**What this replaced.** The buffer was built for tool detection, and the
+reasoning filter was added to it later as a shared side effect — the rule file
+recorded that approvingly, as "the buffer both encoders already share, so all
+four API paths inherit it". What they inherited was a buffer that only existed
+inside `if tools_requested`:
+
+```rust
+if tools_requested {
+    if let Some(safe) = buffered.push(&event.text) { …send safe… }
+    continue;
+}
+// …otherwise send event.text RAW…
+```
+
+An ordinary chat message carries no `tools`, so `push` — the only thing that runs
+the filter — was never called. Reproduced on the released v0.3.179 with
+qwen3-1.7b, same prompt, one field different: without `tools` the reply opened
+`{"delta":{"content":"<think>"}}` and streamed the whole scratchpad; with them it
+was `"C" "iao" "!"`.
+
+**What a change must keep.** Removing `Default` is what makes the mistake
+unrepresentable — a caller must say which kind of reply it is reading, and the
+compiler finds every site. And the equivalence test runs `detect_tools` both
+ways: the tests shipped with the previous fix all called `push` directly, which
+is what production did *only on the branch that was not taken*, so they could
+not have caught this. **A test that exercises a helper cannot tell you the
+helper is called.**
+
+→ gotcha #601

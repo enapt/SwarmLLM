@@ -145,6 +145,20 @@ async fn emit_anthropic_tool_blocks(
     sse_tx: &tokio::sync::mpsc::Sender<AnthropicSseEvent>,
     buffered: &mut crate::api::tool_parse::StreamingToolText,
 ) -> bool {
+    // A reply that never asked for tools is not searched for one: the buffer
+    // still holds text back (a reasoning preamble it is part-way through), so
+    // this must run — but parsing prose for a call could only ever produce a
+    // false tool block on an ordinary answer.
+    if !buffered.detects_tools() {
+        if let Some(text) = buffered.pending_all() {
+            let _ = crate::api::sse_send_live(
+                sse_tx,
+                AnthropicSseEvent::ContentBlockDelta { index: 0, text },
+            )
+            .await;
+        }
+        return false;
+    }
     let parsed = crate::api::tool_parse::parse_tool_calls(buffered.text());
     // Into block 0, which is still open: the prose before a call, or the whole
     // reply when there is none.
@@ -306,7 +320,7 @@ pub(super) async fn anthropic_stream(
         let mut finish_matched_stop: Option<String> = None;
         // See the split-path sibling: with tools requested, text is withheld
         // until complete because a tool call is only recognisable in full.
-        let mut buffered = crate::api::tool_parse::StreamingToolText::default();
+        let mut buffered = crate::api::tool_parse::StreamingToolText::new(tools_requested);
         loop {
             let event = tokio::select! {
                 biased;
@@ -332,20 +346,15 @@ pub(super) async fn anthropic_stream(
                 got_finish = true;
                 if !event.text.is_empty() {
                     streamed_token_count += 1;
-                    if tools_requested {
-                        if let Some(safe) = buffered.push(&event.text) {
-                            let _ = sse_tx
-                                .send(AnthropicSseEvent::ContentBlockDelta {
-                                    index: 0,
-                                    text: safe,
-                                })
-                                .await;
-                        }
-                    } else {
+                    // Through the buffer whether or not tools were asked
+                    // for: it is also the only thing that removes a reasoning
+                    // model's `<think>` preamble from a streamed reply
+                    // (report #032).
+                    if let Some(safe) = buffered.push(&event.text) {
                         let _ = sse_tx
                             .send(AnthropicSseEvent::ContentBlockDelta {
                                 index: 0,
-                                text: event.text,
+                                text: safe,
                             })
                             .await;
                     }
@@ -360,31 +369,18 @@ pub(super) async fn anthropic_stream(
             }
             if !event.text.is_empty() {
                 streamed_token_count += 1;
-                if tools_requested {
-                    // Only what could still BE a call is held back.
-                    if let Some(safe) = buffered.push(&event.text) {
-                        if !crate::api::sse_send_live(
-                            &sse_tx,
-                            AnthropicSseEvent::ContentBlockDelta {
-                                index: 0,
-                                text: safe,
-                            },
-                        )
-                        .await
-                        {
-                            tracing::warn!("DIAG: Anthropic SSE consumer gone mid-stream");
-                            client_disconnected = true;
-                            break;
-                        }
-                    }
+                // With tools in play only what could still BE a call is held
+                // back; without them, only a reasoning preamble. Either way
+                // every token goes through the buffer — see report #032.
+                let Some(safe) = buffered.push(&event.text) else {
                     continue;
-                }
+                };
                 // Closed OR stalled (non-reading) consumer → cancel the pipeline.
                 if !crate::api::sse_send_live(
                     &sse_tx,
                     AnthropicSseEvent::ContentBlockDelta {
                         index: 0,
-                        text: event.text,
+                        text: safe,
                     },
                 )
                 .await
@@ -419,10 +415,8 @@ pub(super) async fn anthropic_stream(
             let matched = finish_matched_stop.or(matched_from_result);
             let mut finish_stop_reason = finish_stop_reason;
             let mut text_block = TextBlock::Open;
-            if tools_requested
-                && !buffered.is_empty()
-                && emit_anthropic_tool_blocks(&sse_tx, &mut buffered).await
-            {
+            // Unconditional — see the sibling flush above.
+            if !buffered.is_empty() && emit_anthropic_tool_blocks(&sse_tx, &mut buffered).await {
                 finish_stop_reason = "tool_use".to_string();
                 text_block = TextBlock::AlreadyClosed;
             }
@@ -620,7 +614,7 @@ pub(super) async fn anthropic_split_stream(
         let mut stop_reason = "max_tokens".to_string();
         let mut text_block = TextBlock::Open;
         let mut matched_stop_sequence: Option<String> = None;
-        let mut buffered = crate::api::tool_parse::StreamingToolText::default();
+        let mut buffered = crate::api::tool_parse::StreamingToolText::new(tools_requested);
 
         loop {
             let event = tokio::select! {
@@ -660,25 +654,12 @@ pub(super) async fn anthropic_split_stream(
                 break;
             }
             total_output_tokens += 1;
-            if tools_requested {
-                // Only what could still BE a call is withheld; the rest goes
-                // out now (see the OpenAI sibling).
-                if let Some(safe) = buffered.push(&event.text) {
-                    if !crate::api::sse_send_live(
-                        &sse_tx,
-                        AnthropicSseEvent::ContentBlockDelta {
-                            index: 0,
-                            text: safe,
-                        },
-                    )
-                    .await
-                    {
-                        tracing::warn!("DIAG: Anthropic split-stream consumer gone");
-                        return;
-                    }
-                }
+            // With tools in play only what could still BE a call is withheld;
+            // without them, only a reasoning preamble. Either way every token
+            // goes through the buffer (see the OpenAI sibling, report #032).
+            let Some(safe) = buffered.push(&event.text) else {
                 continue;
-            }
+            };
             // Stop on a closed OR stalled (non-reading) consumer — returning
             // drops the token receiver, cancelling the worker instead of
             // generating into a buffer nobody drains (Finding 2).
@@ -686,7 +667,7 @@ pub(super) async fn anthropic_split_stream(
                 &sse_tx,
                 AnthropicSseEvent::ContentBlockDelta {
                     index: 0,
-                    text: event.text,
+                    text: safe,
                 },
             )
             .await
@@ -703,10 +684,8 @@ pub(super) async fn anthropic_split_stream(
         // shape: open a tool_use block, stream its arguments as one
         // input_json_delta, close it. A client concatenating input_json_delta
         // fragments handles a single complete fragment correctly.
-        if tools_requested
-            && !buffered.is_empty()
-            && emit_anthropic_tool_blocks(&sse_tx, &mut buffered).await
-        {
+        // Unconditional — see the sibling flush above.
+        if !buffered.is_empty() && emit_anthropic_tool_blocks(&sse_tx, &mut buffered).await {
             stop_reason = "tool_use".to_string();
             text_block = TextBlock::AlreadyClosed;
         }

@@ -6477,3 +6477,122 @@ fn the_translated_wrapper_scan_catches_the_defect_it_is_for() {
         "the guard fires on the correct markup"
     );
 }
+
+/// A reasoning model's scratchpad is removed by `StreamingToolText::push`, and
+/// whether a reply has one has nothing to do with whether the caller passed
+/// `tools`. All four streaming surfaces nevertheless wrapped that call in
+/// `if tools_requested { … } else { send the raw token }`, so an ordinary chat
+/// message — no tools, which is nearly all real traffic — never reached the
+/// filter and streamed the model's whole `<think>` block to the user as the
+/// answer. Reproduced on v0.3.179 against qwen3-1.7b (report #032).
+///
+/// The type-level half of the fix is that `StreamingToolText` has no `Default`,
+/// so a caller must state which kind of reply it is reading — the compiler
+/// enforces that. This is the other half: the mode belongs in the CONSTRUCTOR,
+/// never as a condition around `push`.
+#[test]
+fn the_scratchpad_filter_is_never_gated_on_whether_tools_were_requested() {
+    let mut offenders = Vec::new();
+    for rel in [
+        "src/api/openai/streaming.rs",
+        "src/api/anthropic/handlers.rs",
+    ] {
+        let src = std::fs::read_to_string(repo_root().join(rel))
+            .unwrap_or_else(|e| panic!("cannot read {rel}: {e}"));
+        for (line, body) in blocks_guarded_by(&src, "tools_requested") {
+            if body.contains("buffered.push(") || body.contains(".push(&event.text)") {
+                offenders.push(format!("{rel}:{line}"));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "a streamed token reaches `StreamingToolText::push` only when tools were \
+         requested, at:\n  {}\n\
+         The buffer also strips a reasoning model's `<think>` preamble, so gating \
+         it this way leaks the whole scratchpad on an ordinary chat message \
+         (report #032). Pass the mode to `StreamingToolText::new` instead.",
+        offenders.join("\n  ")
+    );
+}
+
+/// Bodies of every `if <cond> {` block in `src`, as `(1-indexed line, body)`.
+///
+/// Brace-matched over the whole block, not a character window — a guard pinned
+/// to a fixed lookahead goes blind the moment the block grows (see
+/// `.claude/rules/architecture.md` § "A source-scanning guard is only as good as
+/// the spellings it knows").
+fn blocks_guarded_by(src: &str, cond: &str) -> Vec<(usize, String)> {
+    let needle = format!("if {cond}");
+    let bytes: Vec<char> = src.chars().collect();
+    let mut out = Vec::new();
+    let mut from = 0usize;
+    while let Some(rel) = src[from..].find(&needle) {
+        let at = from + rel;
+        from = at + needle.len();
+        // Char index of the match, and the `{` that opens its block.
+        let start_chars = src[..at].chars().count();
+        let Some(open_rel) = bytes[start_chars..].iter().position(|c| *c == '{') else {
+            continue;
+        };
+        // A `{` further away than the condition itself is a different construct.
+        if open_rel > 120 {
+            continue;
+        }
+        let open = start_chars + open_rel;
+        let mut depth = 0usize;
+        let mut end = open;
+        for (i, c) in bytes.iter().enumerate().skip(open) {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = i;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let line = src[..at].matches('\n').count() + 1;
+        out.push((line, bytes[open..=end].iter().collect::<String>()));
+    }
+    out
+}
+
+/// The scan finds nothing today, so pin its reach by planting the exact defect —
+/// and require the corrected shape not to trip it.
+#[test]
+fn the_tools_gate_scan_catches_the_defect_it_is_for() {
+    let planted = r#"
+        fn stream() {
+            let mut buffered = StreamingToolText::default();
+            if tools_requested {
+                if let Some(safe) = buffered.push(&event.text) { send(safe); }
+                continue;
+            }
+            send(event.text);
+        }
+    "#;
+    let hits = blocks_guarded_by(planted, "tools_requested");
+    assert_eq!(hits.len(), 1, "the scan did not find the planted block");
+    assert!(
+        hits[0].1.contains("buffered.push("),
+        "the scan took the wrong block body: {:?}",
+        hits[0].1
+    );
+
+    let fixed = r#"
+        fn stream() {
+            let mut buffered = StreamingToolText::new(tools_requested);
+            if let Some(safe) = buffered.push(&event.text) { send(safe); }
+        }
+    "#;
+    assert!(
+        blocks_guarded_by(fixed, "tools_requested")
+            .iter()
+            .all(|(_, body)| !body.contains("buffered.push(")),
+        "the guard fires on the corrected shape"
+    );
+}

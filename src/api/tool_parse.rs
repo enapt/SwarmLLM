@@ -381,11 +381,15 @@ enum Reasoning {
     Absent,
 }
 
-#[derive(Default)]
 pub struct StreamingToolText {
     text: String,
     emitted: usize,
     reasoning: Reasoning,
+    /// Is this reply being inspected for tool calls?
+    ///
+    /// Deliberately a field rather than a condition at the call site, and
+    /// deliberately NOT defaulted — see [`StreamingToolText::new`].
+    detect_tools: bool,
 }
 
 /// Opening and closing markers of a reasoning preamble.
@@ -393,6 +397,57 @@ const THINK_OPEN: &str = "<think>";
 const THINK_CLOSE: &str = "</think>";
 
 impl StreamingToolText {
+    /// A buffer for one streamed reply.
+    ///
+    /// `detect_tools` says whether this request asked for tools, and so whether
+    /// text must be held back until it is clear it is not the beginning of a
+    /// tool call. It does NOT gate the reasoning-block filter, which applies to
+    /// every reply — that distinction is the whole reason this is a
+    /// constructor parameter instead of an `if` around `push`.
+    ///
+    /// **There is no `Default`, on purpose.** All four streaming surfaces built
+    /// one with `::default()` and then wrapped every `push` in
+    /// `if tools_requested { … } else { send the raw token }`. The buffer is
+    /// also the only thing that removes a reasoning model's `<think>` preamble
+    /// from a streamed reply, so on an ordinary chat message — no tools, which
+    /// is nearly all real traffic — the filter was never reached and the whole
+    /// scratchpad streamed to the user as the answer. Reproduced on v0.3.179
+    /// against qwen3-1.7b: the same prompt, streamed, leaked `<think>` without
+    /// `tools` and was clean with them (report #032).
+    ///
+    /// Requiring the answer here is what makes the mistake unrepresentable: a
+    /// caller must say which kind of reply it is reading, and cannot express
+    /// "do not use the buffer at all".
+    pub fn new(detect_tools: bool) -> Self {
+        Self {
+            text: String::new(),
+            emitted: 0,
+            reasoning: Reasoning::default(),
+            detect_tools,
+        }
+    }
+
+    /// Is this buffer inspecting the reply for tool calls? Read by the flush
+    /// helpers, which must not try to parse a call out of a reply that never
+    /// asked for one.
+    pub fn detects_tools(&self) -> bool {
+        self.detect_tools
+    }
+
+    /// How much of the buffer is safe to release now.
+    ///
+    /// With tool detection on, that is the part that cannot still be the start
+    /// of a tool call. With it off there is nothing to hold back for, so a
+    /// token is released as soon as the reasoning filter is done with it —
+    /// ordinary chat keeps streaming at exactly the rate it always did.
+    fn releasable_len(&self) -> usize {
+        if self.detect_tools {
+            content_prefix_len(&self.text).max(self.emitted)
+        } else {
+            self.text.len()
+        }
+    }
+
     /// Advance the reasoning state, consuming a completed preamble.
     ///
     /// Returns `true` while content must be withheld — either because the reply
@@ -491,7 +546,7 @@ impl StreamingToolText {
         // the start of a marker, because a possible marker prefix is exactly
         // what was withheld. `max` is belt and braces against a future marker
         // set that breaks that.
-        let safe = content_prefix_len(&self.text).max(self.emitted);
+        let safe = self.releasable_len();
         (safe > self.emitted).then(|| {
             let out = self.text[self.emitted..safe].to_string();
             self.emitted = safe;
@@ -505,7 +560,7 @@ impl StreamingToolText {
         if self.withholding_reasoning() {
             return None;
         }
-        let safe = content_prefix_len(&self.text).max(self.emitted);
+        let safe = self.releasable_len();
         (safe > self.emitted).then(|| {
             let out = self.text[self.emitted..safe].to_string();
             self.emitted = safe;
@@ -1138,7 +1193,7 @@ mod tests {
     /// llama-3.2-3b, identical prompt, 120 content deltas without `tools` and
     /// **1** with them.
     fn deltas_for(reply: &str, token_len: usize) -> (Vec<String>, super::StreamingToolText) {
-        let mut buf = super::StreamingToolText::default();
+        let mut buf = super::StreamingToolText::new(true);
         let mut out = Vec::new();
         let chars: Vec<char> = reply.chars().collect();
         for chunk in chars.chunks(token_len) {
@@ -2063,8 +2118,22 @@ mod tool_choice_tests {
 mod streaming_reasoning_tests {
     use super::StreamingToolText;
 
+    /// Run a reply through the buffer with tool detection ON — the shape these
+    /// tests have always used.
     fn stream(chunks: &[&str]) -> (String, StreamingToolText) {
-        let mut b = StreamingToolText::default();
+        stream_with(chunks, true)
+    }
+
+    /// Run a reply through the buffer with tool detection either way.
+    ///
+    /// **`detect_tools` must not change what the reasoning filter does.** That
+    /// is the whole point of report #032: the four streaming surfaces called
+    /// `push` only when the request carried `tools`, so an ordinary chat
+    /// message — nearly all real traffic — never reached the filter at all and
+    /// streamed the model's `<think>` scratchpad to the user as the answer.
+    /// Every test below runs both ways.
+    fn stream_with(chunks: &[&str], detect_tools: bool) -> (String, StreamingToolText) {
+        let mut b = StreamingToolText::new(detect_tools);
         let mut out = String::new();
         for c in chunks {
             if let Some(s) = b.push(c) {
@@ -2072,6 +2141,13 @@ mod streaming_reasoning_tests {
             }
         }
         (out, b)
+    }
+
+    /// The whole reply as the client would receive it: the deltas, plus the
+    /// end-of-stream flush every streaming surface runs.
+    fn streamed_reply(chunks: &[&str], detect_tools: bool) -> String {
+        let (out, mut b) = stream_with(chunks, detect_tools);
+        out + &b.pending_all().unwrap_or_default()
     }
 
     /// **Report #031: one whitespace-only first chunk disabled the filter for
@@ -2133,17 +2209,68 @@ mod streaming_reasoning_tests {
             &["<think>", "never closed"],
         ];
         for chunks in replies {
-            let (out, mut b) = stream(chunks);
-            let streamed = out + &b.pending_all().unwrap_or_default();
-
             let mut whole: String = chunks.concat();
             crate::inference::take_leading_reasoning_block(&mut whole);
 
-            assert_eq!(
-                streamed, whole,
-                "streaming and non-streaming disagree on {chunks:?}"
-            );
+            // BOTH ways round. A reply's content must not depend on whether the
+            // caller asked to stream it, and it must not depend on whether the
+            // caller happened to pass `tools` either — the second half is
+            // report #032, where it did.
+            for detect_tools in [true, false] {
+                assert_eq!(
+                    streamed_reply(chunks, detect_tools),
+                    whole,
+                    "streamed (detect_tools={detect_tools}) and non-streamed \
+                     disagree on {chunks:?}"
+                );
+            }
         }
+    }
+
+    /// **Report #032: the reasoning filter only ran for requests carrying
+    /// `tools`.** All four streaming surfaces wrapped `push` in
+    /// `if tools_requested`, so a plain chat message went out raw. Reproduced
+    /// on v0.3.179 against qwen3-1.7b: the same prompt leaked `<think>` without
+    /// `tools` and was clean with them.
+    ///
+    /// The tests that shipped with the #031 fix could not have caught it —
+    /// every one of them called `push` directly, which is exactly what
+    /// production did *only* on the branch that was not taken.
+    #[test]
+    fn the_scratchpad_is_stripped_whether_or_not_tools_were_requested() {
+        let chunks = &[
+            "<think>",
+            "\nOkay, the user said ciao.\n",
+            "</think>",
+            "\n\n",
+            "Ciao!",
+        ];
+        assert_eq!(streamed_reply(chunks, true), "Ciao!");
+        assert_eq!(
+            streamed_reply(chunks, false),
+            "Ciao!",
+            "a request with no tools must still lose the scratchpad"
+        );
+    }
+
+    /// The other half of the same change: without tools there is nothing to
+    /// hold text back FOR, so ordinary prose must still arrive token by token
+    /// rather than in one lump at the end. A filter that fixed #032 by
+    /// buffering the whole reply would pass the test above and destroy
+    /// streaming.
+    #[test]
+    fn an_ordinary_reply_without_tools_still_streams_token_by_token() {
+        let (deltas, mut b) = stream_with(&["Ciao", "! ", "Come", " stai", "?"], false);
+        assert_eq!(deltas, "Ciao! Come stai?", "nothing may be withheld");
+        assert!(
+            b.pending_all().is_none(),
+            "nothing may be left for the flush"
+        );
+
+        // And text that merely LOOKS like the start of a call is not withheld
+        // when no tools were asked for.
+        let (deltas, _) = stream_with(&["{\"name\"", ": \"x\"}"], false);
+        assert_eq!(deltas, "{\"name\": \"x\"}");
     }
 
     /// The control: whitespace that is NOT followed by a preamble must still
@@ -2175,7 +2302,7 @@ mod streaming_reasoning_tests {
     /// the end.
     #[test]
     fn the_answer_still_streams_token_by_token() {
-        let mut b = StreamingToolText::default();
+        let mut b = StreamingToolText::new(true);
         for c in ["<think>", "hmm", "</think>", "\n\n"] {
             assert_eq!(b.push(c), None, "nothing escapes while reasoning");
         }
@@ -2187,7 +2314,7 @@ mod streaming_reasoning_tests {
     /// content back waiting for a block that never comes.
     #[test]
     fn an_ordinary_reply_is_not_delayed() {
-        let mut b = StreamingToolText::default();
+        let mut b = StreamingToolText::new(true);
         assert_eq!(b.push("Hello").as_deref(), Some("Hello"));
         assert_eq!(b.push(" there").as_deref(), Some(" there"));
     }

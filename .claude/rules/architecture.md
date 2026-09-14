@@ -195,10 +195,21 @@ in `finalize_reply_text` (the non-streaming choke point), and
 `tool_parse::StreamingToolText` withholds the same block while streaming — the
 buffer both encoders already share, so all four API paths inherit it.
 
+**`StreamingToolText` has no `Default`, and that is load-bearing.** The buffer
+does two jobs — hold text back while it could still be a tool call, AND withhold
+the reasoning preamble — and all four streaming surfaces wrapped `push` in
+`if tools_requested`, so on an ordinary chat message the filter was never
+reached and the whole scratchpad streamed to the user as the answer. The mode is
+a REQUIRED constructor argument (`new(detect_tools)`) so no caller can express
+"skip the buffer"; `push` always runs the filter and only withholds for tool
+detection when asked. The two flush helpers return early with `pending_all()`
+when `!detects_tools()` — they must still run, but must not find a call in prose.
+
 **Two implementations of one rule, so the property asserted is that they
-AGREE** (`streamed_and_unstreamed_replies_strip_the_same_scratchpad`). While
-each was tested only against itself they diverged on the input neither used: a
-first chunk that is pure whitespace. In the streaming decision an empty
+AGREE** (`streamed_and_unstreamed_replies_strip_the_same_scratchpad`), **and it
+is asserted with `detect_tools` both ways** — the axis the production gate
+actually varied. While each was tested only against itself they diverged on the
+input neither used: a first chunk that is pure whitespace. In the streaming decision an empty
 remainder is the WEAKEST evidence about a `<think>` block, not the strongest —
 nothing decisive has been seen yet — and treating it as decisive latched
 "no scratchpad here" on zero characters and streamed the whole thing to the

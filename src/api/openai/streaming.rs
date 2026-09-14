@@ -579,6 +579,24 @@ async fn emit_openai_tool_calls(
     tx: &tokio::sync::mpsc::Sender<StreamEvent>,
     buffered: &mut crate::api::tool_parse::StreamingToolText,
 ) -> bool {
+    // A reply that never asked for tools is not searched for one: the buffer
+    // still holds text back (a reasoning preamble it is part-way through), so
+    // this must run — but parsing prose for a call could only ever produce a
+    // false `finish_reason: "tool_calls"` on an ordinary answer.
+    if !buffered.detects_tools() {
+        if let Some(text) = buffered.pending_all() {
+            let _ = crate::api::sse_send_live(
+                tx,
+                StreamEvent::Delta {
+                    content: Some(text),
+                    role: None,
+                    finish_reason: None,
+                },
+            )
+            .await;
+        }
+        return false;
+    }
     let parsed = crate::api::tool_parse::parse_tool_calls(buffered.text());
     // Whatever is left over: the prose before a call, or the whole reply when
     // there is none.
@@ -690,7 +708,7 @@ async fn router_inference_stream(
         let mut got_finish = false;
         // Text held back for tool inspection — but only the part that could
         // still BE a tool call. See `tool_parse::content_prefix_len`.
-        let mut buffered = crate::api::tool_parse::StreamingToolText::default();
+        let mut buffered = crate::api::tool_parse::StreamingToolText::new(tools_requested);
         let mut client_disconnected = false;
         loop {
             let event = tokio::select! {
@@ -720,40 +738,35 @@ async fn router_inference_stream(
                 got_finish = true;
                 if !event.text.is_empty() {
                     token_count += 1;
-                    if tools_requested {
-                        if let Some(safe) = buffered.push(&event.text) {
-                            let _ = crate::api::sse_send_live(
-                                &sse_tx,
-                                StreamEvent::Delta {
-                                    content: Some(safe),
-                                    role: None,
-                                    finish_reason: None,
-                                },
-                            )
-                            .await;
-                        }
-                    } else if sse_tx
-                        .send(StreamEvent::Delta {
-                            content: Some(event.text),
-                            role: None,
-                            finish_reason: None,
-                        })
+                    // Through the buffer whether or not tools were asked
+                    // for: it is also the only thing that removes a reasoning
+                    // model's `<think>` preamble from a streamed reply
+                    // (report #032).
+                    if let Some(safe) = buffered.push(&event.text) {
+                        if !crate::api::sse_send_live(
+                            &sse_tx,
+                            StreamEvent::Delta {
+                                content: Some(safe),
+                                role: None,
+                                finish_reason: None,
+                            },
+                        )
                         .await
-                        .is_err()
-                    {
-                        tracing::warn!(
-                            token_count,
-                            "DIAG: SSE final text delta send failed — client disconnected"
-                        );
+                        {
+                            tracing::warn!(
+                                token_count,
+                                "DIAG: SSE final text delta send failed — client disconnected"
+                            );
+                        }
                     }
                 }
                 // Flush what tool inspection withheld before the finish delta,
                 // so finish_reason can reflect a tool call.
                 let mut reason = reason.clone();
-                if tools_requested
-                    && !buffered.is_empty()
-                    && emit_openai_tool_calls(&sse_tx, &mut buffered).await
-                {
+                // Unconditional: the buffer withholds text whether or not
+                // tools were asked for, and the flush helper declines to look
+                // for a call when they were not.
+                if !buffered.is_empty() && emit_openai_tool_calls(&sse_tx, &mut buffered).await {
                     reason = "tool_calls".to_string();
                 }
                 if sse_tx
@@ -771,46 +784,28 @@ async fn router_inference_stream(
             }
             if !event.text.is_empty() {
                 token_count += 1;
-                if tools_requested {
-                    if let Some(safe) = buffered.push(&event.text) {
-                        if !crate::api::sse_send_live(
-                            &sse_tx,
-                            StreamEvent::Delta {
-                                content: Some(safe),
-                                role: None,
-                                finish_reason: None,
-                            },
-                        )
-                        .await
-                        {
-                            tracing::warn!(
-                                token_count,
-                                "DIAG: SSE consumer gone mid-stream — cancelling pipeline"
-                            );
-                            client_disconnected = true;
-                            break;
-                        }
+                // Through the buffer whether or not tools were asked for —
+                // see the finish branch above (report #032).
+                if let Some(safe) = buffered.push(&event.text) {
+                    // Closed OR stalled (non-reading) consumer → cancel the pipeline.
+                    if !crate::api::sse_send_live(
+                        &sse_tx,
+                        StreamEvent::Delta {
+                            content: Some(safe),
+                            role: None,
+                            finish_reason: None,
+                        },
+                    )
+                    .await
+                    {
+                        tracing::warn!(
+                            token_count,
+                            elapsed_ms = stream_start.elapsed().as_millis() as u64,
+                            "DIAG: SSE consumer gone mid-stream (closed or not reading) — cancelling pipeline"
+                        );
+                        client_disconnected = true;
+                        break;
                     }
-                    continue;
-                }
-                // Closed OR stalled (non-reading) consumer → cancel the pipeline.
-                if !crate::api::sse_send_live(
-                    &sse_tx,
-                    StreamEvent::Delta {
-                        content: Some(event.text),
-                        role: None,
-                        finish_reason: None,
-                    },
-                )
-                .await
-                {
-                    tracing::warn!(
-                        token_count,
-                        elapsed_ms = stream_start.elapsed().as_millis() as u64,
-                        "DIAG: SSE consumer gone mid-stream (closed or not reading) — cancelling pipeline"
-                    );
-                    client_disconnected = true;
-                    break;
                 }
             }
         }
@@ -1102,7 +1097,7 @@ pub(super) async fn split_stream_response(
         // streamed the raw JSON we could not retract it. So buffer, then emit
         // either tool_calls or the text at the end. Matches OpenAI, which does
         // not stream partial text for a tool call either.
-        let mut buffered = crate::api::tool_parse::StreamingToolText::default();
+        let mut buffered = crate::api::tool_parse::StreamingToolText::new(tools_requested);
         loop {
             let event = tokio::select! {
                 biased;
@@ -1142,29 +1137,14 @@ pub(super) async fn split_stream_response(
                 break;
             }
             token_count += 1;
-            if tools_requested {
-                // Hold back only what could still BE a tool call; everything
-                // before it goes out now.
-                if let Some(safe) = buffered.push(&event.text) {
-                    if !crate::api::sse_send_live(
-                        &tx,
-                        StreamEvent::Delta {
-                            content: Some(safe),
-                            role: None,
-                            finish_reason: None,
-                        },
-                    )
-                    .await
-                    {
-                        tracing::warn!(
-                            token_count,
-                            "DIAG: split stream consumer gone (closed or not reading) — cancelling decode"
-                        );
-                        return;
-                    }
-                }
+            // With tools in play the buffer holds back only what could still
+            // BE a tool call; without them, only a reasoning preamble. Either
+            // way every token goes through it — this gate used to skip the
+            // buffer entirely, so an ordinary chat message streamed the model's
+            // whole `<think>` scratchpad to the user (report #032).
+            let Some(safe) = buffered.push(&event.text) else {
                 continue;
-            }
+            };
             // Stop the instant the consumer closes OR stops reading (a stalled
             // send past SSE_CONSUMER_STALL_TIMEOUT). Returning drops token_rx →
             // cancels the worker, bounding runaway compute for a client that
@@ -1172,7 +1152,7 @@ pub(super) async fn split_stream_response(
             if !crate::api::sse_send_live(
                 &tx,
                 StreamEvent::Delta {
-                    content: Some(event.text),
+                    content: Some(safe),
                     role: None,
                     finish_reason: None,
                 },
@@ -1191,10 +1171,8 @@ pub(super) async fn split_stream_response(
         // Flush what we withheld for tool inspection: either structured calls,
         // or the text unchanged if it turned out to be an ordinary answer (a
         // model given tools is free to just reply).
-        if tools_requested
-            && !buffered.is_empty()
-            && emit_openai_tool_calls(&tx, &mut buffered).await
-        {
+        // Unconditional — see the sibling flush in the router path.
+        if !buffered.is_empty() && emit_openai_tool_calls(&tx, &mut buffered).await {
             finish = "tool_calls".to_string();
         }
 
