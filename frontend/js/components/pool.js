@@ -206,9 +206,6 @@
       var settingsInvite = document.getElementById('pool-settings-invite-section');
       if (headerInvite) headerInvite.style.display = (this._isOwner && !swarmIsMature) ? '' : 'none';
       if (settingsInvite) settingsInvite.style.display = (this._isOwner && swarmIsMature) ? '' : 'none';
-      var splitSection = document.getElementById('pool-split-section');
-      if (splitSection) splitSection.style.display = this._isOwner ? '' : 'none';
-
       // Stats
       var el = function (id) { return document.getElementById(id); };
       if (el('pool-member-count')) el('pool-member-count').textContent = members.length;
