@@ -7181,3 +7181,46 @@ fn a_peer_connected_activity_entry_is_emitted_only_on_the_transition() {
          docs/invariants/network.md."
     );
 }
+
+/// A failed fetch never destroys what the frontend already knew.
+///
+/// `frontend/js/core/data.js` is the single data-fetch choke point every
+/// component is told to use, and `App.data.cache.*` is read DIRECTLY by a dozen
+/// of them — the header status strip, the swarm tab, the network map, the
+/// encryption toggle, the model-name helpers — as their source of truth between
+/// loads. `fetch` does not reject on an HTTP error status, so a 401 from a
+/// rotated key or a 503 during a restart arrives looking exactly like "this node
+/// has nothing", and assigning that to the cache turned one transient failure
+/// into "0 peers, no models" everywhere at once.
+///
+/// `notifications.js` also merges the WebSocket tick INTO `cache.stats`, so a
+/// nulled cache additionally dropped every field that tick does not carry.
+///
+/// The fix is not to hide the failure — the `load*` helpers still RETURN what
+/// the fetch produced, and `loadReachedDaemon` still tells a caller which it
+/// was (item 69). It is that the CACHE holds on to the last thing it actually
+/// knew. This scan pins that: every write to `cache.<field>` in a `load*`
+/// helper is guarded by `loadReachedDaemon`.
+#[test]
+fn a_failed_fetch_never_overwrites_the_frontend_cache() {
+    let src = std::fs::read_to_string("frontend/js/core/data.js")
+        .expect("frontend/js/core/data.js must be readable");
+    let mut unguarded = Vec::new();
+    for (n, line) in src.lines().enumerate() {
+        let t = line.trim();
+        if t.starts_with("//") || !t.starts_with("cache.") || !t.contains(" = ") {
+            continue;
+        }
+        // The guard is written inline on the same statement:
+        //   `if (loadReachedDaemon('stats')) cache.stats = stats;`
+        // so an unguarded write is one whose line does not mention it.
+        unguarded.push(format!("  line {}: {}", n + 1, t));
+    }
+    assert!(
+        unguarded.is_empty(),
+        "frontend/js/core/data.js writes the cache without checking the daemon was \
+         reached, so one transient 401/503 replaces what a dozen components read \
+         with an empty value:\n{}\nGuard each with `loadReachedDaemon('<key>')`.",
+        unguarded.join("\n")
+    );
+}

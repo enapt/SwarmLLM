@@ -59,6 +59,12 @@ was a number that read zero while the thing it counts was happening.
   and popped up a notification — on every read, and three parts of the page ask
   for it. Three requests took the list from one entry to four. Nothing is lost:
   the panel that asked was already showing you the answer.
+- **A moment's connection trouble no longer empties the dashboard.** When a
+  request to your own node failed — an expired key, a restart, a blip — the page
+  stored the empty answer as though it were true, and a dozen parts of the
+  dashboard read from that store: the status strip at the top, the swarm view,
+  the map, the model names. They all went to "0 peers, no models" at once. The
+  page now keeps the last thing it actually knew until it hears otherwise.
 - **"1 part", not "1 parts"** — in four messages you can see on screen.
 
 ## [0.3.181-alpha] — 2026-09-14
