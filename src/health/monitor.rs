@@ -1496,7 +1496,12 @@ impl HealthMonitor {
             seen.insert(key.clone());
 
             match &status.state {
-                AcquisitionState::Complete | AcquisitionState::Failed { .. } => {
+                // `Cancelled` is terminal too — without it here a cancelled
+                // download's entry is never collected and sits in the queue
+                // for the life of the daemon.
+                AcquisitionState::Complete
+                | AcquisitionState::Failed { .. }
+                | AcquisitionState::Cancelled => {
                     if status.started_at.is_none_or(|s| s < cutoff) {
                         to_remove.push(key.clone());
                     }

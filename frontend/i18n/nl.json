@@ -465,6 +465,7 @@
   "dl.shards_verified": "({count} geverifieerd)",
   "dl.source_hf": "HuggingFace",
   "dl.source_network": "Netwerk",
+  "dl.state_cancelled": "Geannuleerd",
   "dl.state_complete": "Voltooid",
   "dl.state_downloading": "Downloaden",
   "dl.state_failed": "Download mislukt — bekijk het activiteitenlog voor details",

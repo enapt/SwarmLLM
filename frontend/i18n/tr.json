@@ -465,6 +465,7 @@
   "dl.shards_verified": "({count} doğrulandı)",
   "dl.source_hf": "HuggingFace",
   "dl.source_network": "Ağ",
+  "dl.state_cancelled": "İptal edildi",
   "dl.state_complete": "Tamamlandı",
   "dl.state_downloading": "İndiriliyor",
   "dl.state_failed": "İndirme başarısız — ayrıntılar için Etkinlik kaydına bakın",

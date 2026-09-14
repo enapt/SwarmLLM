@@ -465,6 +465,7 @@
   "dl.shards_verified": "({count} تم التحقق منها)",
   "dl.source_hf": "HuggingFace",
   "dl.source_network": "الشبكة",
+  "dl.state_cancelled": "أُلغيَ",
   "dl.state_complete": "مكتمل",
   "dl.state_downloading": "جارٍ التنزيل",
   "dl.state_failed": "فشل التنزيل — راجع سجل النشاط لمزيد من التفاصيل",

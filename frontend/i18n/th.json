@@ -465,6 +465,7 @@
   "dl.shards_verified": "({count} ตรวจสอบแล้ว)",
   "dl.source_hf": "HuggingFace",
   "dl.source_network": "เครือข่าย",
+  "dl.state_cancelled": "ยกเลิกแล้ว",
   "dl.state_complete": "เสร็จสิ้น",
   "dl.state_downloading": "กำลังดาวน์โหลด",
   "dl.state_failed": "ดาวน์โหลดล้มเหลว — ดูรายละเอียดในบันทึกกิจกรรม",

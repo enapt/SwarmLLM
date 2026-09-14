@@ -45,9 +45,8 @@ pub async fn cancel_download(
 
     // Mark the acquisition as failed/cancelled
     shared.models.update_acquisition(&mid, |s| {
-        s.state = crate::model::acquisition::AcquisitionState::Failed {
-            reason: "Cancelled by user".to_string(),
-        };
+        // `Cancelled`, not `Failed`. This is the outcome the user asked for.
+        s.state = crate::model::acquisition::AcquisitionState::Cancelled;
         s.log_push("Download cancelled by user".to_string());
     });
 

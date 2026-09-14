@@ -465,6 +465,7 @@
   "dl.shards_verified": "({count} verificato/i)",
   "dl.source_hf": "HuggingFace",
   "dl.source_network": "Rete",
+  "dl.state_cancelled": "Annullato",
   "dl.state_complete": "Completato",
   "dl.state_downloading": "Download in corso",
   "dl.state_failed": "Download fallito — controlla il registro Attività per i dettagli",

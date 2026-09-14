@@ -465,6 +465,7 @@
   "dl.shards_verified": "({count} terverifikasi)",
   "dl.source_hf": "HuggingFace",
   "dl.source_network": "Jaringan",
+  "dl.state_cancelled": "Dibatalkan",
   "dl.state_complete": "Selesai",
   "dl.state_downloading": "Mengunduh",
   "dl.state_failed": "Unduhan gagal — lihat log Aktivitas untuk detailnya",

@@ -465,6 +465,7 @@
   "dl.shards_verified": "({count} ověřeno)",
   "dl.source_hf": "HuggingFace",
   "dl.source_network": "Síť",
+  "dl.state_cancelled": "Zrušeno",
   "dl.state_complete": "Dokončeno",
   "dl.state_downloading": "Stahování",
   "dl.state_failed": "Stahování selhalo — detaily najdete v záznamu Aktivity",

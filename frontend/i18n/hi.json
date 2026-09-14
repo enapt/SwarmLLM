@@ -465,6 +465,7 @@
   "dl.shards_verified": "({count} सत्यापित)",
   "dl.source_hf": "HuggingFace",
   "dl.source_network": "नेटवर्क",
+  "dl.state_cancelled": "रद्द किया गया",
   "dl.state_complete": "पूर्ण",
   "dl.state_downloading": "डाउनलोड हो रहा है",
   "dl.state_failed": "डाउनलोड विफल — विवरण के लिए गतिविधि लॉग देखें",

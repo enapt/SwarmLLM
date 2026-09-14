@@ -465,6 +465,7 @@
   "dl.shards_verified": "（{count}個検証済み）",
   "dl.source_hf": "HuggingFace",
   "dl.source_network": "ネットワーク",
+  "dl.state_cancelled": "キャンセル済み",
   "dl.state_complete": "完了",
   "dl.state_downloading": "ダウンロード中",
   "dl.state_failed": "ダウンロード失敗 — 詳細はアクティビティログを確認してください",

@@ -465,6 +465,7 @@
   "dl.shards_verified": "({count} zweryfikowanych)",
   "dl.source_hf": "HuggingFace",
   "dl.source_network": "Sieć",
+  "dl.state_cancelled": "Anulowano",
   "dl.state_complete": "Gotowe",
   "dl.state_downloading": "Pobieranie",
   "dl.state_failed": "Pobieranie nie powiodło się — szczegóły w dzienniku Aktywności",

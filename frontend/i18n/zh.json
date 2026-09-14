@@ -465,6 +465,7 @@
   "dl.shards_verified": "（已验证 {count} 个）",
   "dl.source_hf": "HuggingFace",
   "dl.source_network": "网络",
+  "dl.state_cancelled": "已取消",
   "dl.state_complete": "完成",
   "dl.state_downloading": "下载中",
   "dl.state_failed": "下载失败 — 详情请查看活动记录",

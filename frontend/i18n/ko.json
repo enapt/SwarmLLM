@@ -465,6 +465,7 @@
   "dl.shards_verified": "({count}개 검증됨)",
   "dl.source_hf": "HuggingFace",
   "dl.source_network": "네트워크",
+  "dl.state_cancelled": "취소됨",
   "dl.state_complete": "완료",
   "dl.state_downloading": "다운로드 중",
   "dl.state_failed": "다운로드 실패 — 자세한 내용은 활동 로그를 확인하세요",

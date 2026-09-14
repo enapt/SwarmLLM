@@ -157,6 +157,15 @@ pub enum AcquisitionState {
     Complete,
     /// Acquisition failed.
     Failed { reason: String },
+    /// The user stopped it.
+    ///
+    /// Distinct from `Failed` because it is not a failure: somebody pressed
+    /// Cancel and got what they asked for. It was reported as
+    /// `Failed { reason: "Cancelled by user" }`, which the dashboard renders in
+    /// red as "Download failed — check Activity log for details", telling a
+    /// non-technical user that something went wrong with the thing they had
+    /// just deliberately done.
+    Cancelled,
 }
 
 /// Command sent to the AcquisitionManager.

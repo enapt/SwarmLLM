@@ -85,6 +85,11 @@
       if (stateName === 'downloading') { stateLabel = I18n.t('dl.state_downloading'); stateClass = 'active'; }
       else if (stateName === 'awaiting_manifest') { stateLabel = I18n.t('dl.state_preparing'); stateClass = 'waiting'; }
       else if (stateName === 'complete') { stateLabel = I18n.t('dl.state_complete'); stateClass = 'done'; }
+      // Not a failure — somebody pressed Cancel and got what they asked for.
+      // This used to arrive as `{failed: {reason: "Cancelled by user"}}` and
+      // rendered in red as "Download failed", which tells a non-technical user
+      // something went wrong with the thing they had just deliberately done.
+      else if (stateName === 'cancelled') { stateLabel = I18n.t('dl.state_cancelled'); stateClass = 'waiting'; }
       else if (stateName.indexOf('failed') >= 0 || typeof dl.state === 'object') {
         stateLabel = I18n.t('dl.state_failed'); stateClass = 'fail';
         if (typeof dl.state === 'object' && dl.state.failed) {

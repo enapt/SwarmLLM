@@ -465,6 +465,7 @@
   "dl.shards_verified": "({count} проверено)",
   "dl.source_hf": "HuggingFace",
   "dl.source_network": "Сеть",
+  "dl.state_cancelled": "Отменено",
   "dl.state_complete": "Завершено",
   "dl.state_downloading": "Загрузка",
   "dl.state_failed": "Загрузка не удалась — подробности в журнале активности",

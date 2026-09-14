@@ -465,6 +465,7 @@
   "dl.shards_verified": "({count} verifierade)",
   "dl.source_hf": "HuggingFace",
   "dl.source_network": "Nätverk",
+  "dl.state_cancelled": "Avbruten",
   "dl.state_complete": "Klar",
   "dl.state_downloading": "Laddar ner",
   "dl.state_failed": "Nedladdning misslyckades — se Aktivitetsloggen för detaljer",

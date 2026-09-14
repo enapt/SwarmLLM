@@ -465,6 +465,7 @@
   "dl.shards_verified": "({count} đã xác minh)",
   "dl.source_hf": "HuggingFace",
   "dl.source_network": "Mạng",
+  "dl.state_cancelled": "Đã huỷ",
   "dl.state_complete": "Hoàn tất",
   "dl.state_downloading": "Đang tải",
   "dl.state_failed": "Tải thất bại — xem nhật ký Hoạt động để biết chi tiết",
