@@ -683,6 +683,22 @@ settled".
 
 → `docs/invariants/network.md`
 
+## "Used recently" has four answers, and one of them is never written locally
+
+`model::auto_manage::prune::effective_idle_secs` combines all of them — a
+request this node routed, one it served for a peer, the worker's own
+`last_used`, and residency as a hard upper bound. **`model_trust.last_request_at`
+alone is not an answer**: `record_request` has one caller
+(`router::distributed_exec`), so the local fast path and peer-served work both
+leave it untouched, and a persisted value from an older build can be stale by
+days.
+
+Both consumers read it through that helper now — the idle-VRAM unload since
+2026-09-02 (gotcha #437), and R134.7's prune protection since 2026-09-14, which
+had been left on the broken signal 400 lines below the fix.
+
+→ `docs/invariants/memory.md`
+
 ## A holder record names a BUILD, not just a shard
 
 **`ModelRegistry::shard_holders` filters out holders that positively claim a

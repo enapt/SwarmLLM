@@ -214,8 +214,21 @@ impl ShardRebalancer {
         // departed peer's node was likely holding — but since we don't know which
         // models, scan all shards and check for under-replication.
         // This is O(all_shards) but only fires on peer departure (rare event).
-        for entry in self.shared_state.model_registry.all_shard_entries() {
-            let (shard_id, holders) = entry;
+        for (shard_id, _unfiltered) in self.shared_state.model_registry.all_shard_entries() {
+            // Count through `shard_holders`, not the raw map.
+            //
+            // `all_shard_entries` returns the holder map unfiltered;
+            // `shard_holders` drops any holder positively claiming a DIFFERENT
+            // GGUF build, because its bytes would fail our hash. Counting the
+            // raw list makes a shard with one real copy and one build-conflict
+            // holder read as replicated twice, so the one thing this function
+            // exists to catch — a shard down to a single usable copy after a
+            // peer left — is exactly what it misses.
+            //
+            // The filtered list is what goes into the result too: the caller
+            // uses it to pick somewhere to fetch from, and a conflicting build
+            // is not somewhere to fetch from.
+            let holders = self.shared_state.model_registry.shard_holders(&shard_id);
             if holders.len() < MIN_REPLICATION {
                 result.push((shard_id, holders));
             }

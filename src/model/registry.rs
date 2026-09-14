@@ -1135,6 +1135,20 @@ impl ModelRegistry {
     }
 
     /// Iterate over all tracked shard entries (shard_id, holders).
+    /// Every shard id with its RAW holder list.
+    ///
+    /// **Unfiltered, unlike `shard_holders`** — which drops holders that
+    /// positively claim a different GGUF build, because their bytes would fail
+    /// our hash. Most consumers here immediately narrow to
+    /// `holders.contains(&local_node_id)`, which is unaffected (a node's own
+    /// registration always matches its own build tag), or render a count for a
+    /// human.
+    ///
+    /// **Anything that makes a DECISION on the count must re-ask
+    /// `shard_holders` per shard.** `health::rebalancer::find_underreplicated_shards`
+    /// did not, so a shard with one real copy plus one build-conflict holder
+    /// read as replicated twice and never triggered re-replication — the single
+    /// case that function exists to catch (audit, 2026-09-14).
     pub fn all_shard_entries(&self) -> Vec<(ShardId, Vec<NodeId>)> {
         self.shard_holders
             .iter()

@@ -189,6 +189,27 @@ impl AutoShardManager {
             .flatten();
 
         // Compute resource pressure
+        // How recently each loaded model was actually used, by the same signals
+        // `try_idle_vram_unload` combines. R134.7's protection below asked only
+        // `model_trust.last_request_at`, which has ONE writer in the whole tree
+        // (`router::distributed_exec`) — so the local fast path, which skips the
+        // router entirely, and peer-served work both leave it untouched. See
+        // `effective_idle_secs`, which was given these four inputs in 2026-09-02
+        // for exactly this reason (gotcha #437); the sibling consumer 400 lines
+        // below it was left reading the broken signal.
+        let worker_idle_secs: std::collections::HashMap<ModelId, u64> = self
+            .shared_state
+            .model_process_pool
+            .model_idle_secs()
+            .into_iter()
+            .collect();
+        let worker_residency_secs: std::collections::HashMap<ModelId, u64> = self
+            .shared_state
+            .model_process_pool
+            .model_residency_secs()
+            .into_iter()
+            .collect();
+
         let resource_pressure = self.compute_resource_pressure(live_vram_used);
         let pressure_urgent = resource_pressure > PRESSURE_URGENT;
         tracing::info!(
@@ -577,19 +598,45 @@ impl AutoShardManager {
                 }
 
                 // R134.7: predictive-eviction time-window. Protect shards
-                // whose model had a real swarm request within the last
-                // `RECENT_REQUEST_PROTECT_SECS`. The user's "I might need
-                // this in the next 30 min" intuition translates directly
-                // to "I used it recently"; rather than build a separate
-                // forecasting subsystem we lean on the existing
-                // `model_trust.last_request_at` signal that's already
-                // updated per request.
-                if let Some(trust) = self.shared_state.models.model_trust.get(&manifest.id) {
-                    if let Some(last_req) = trust.last_request_at {
-                        let age = (chrono::Utc::now() - last_req).num_seconds();
-                        if (0..RECENT_REQUEST_PROTECT_SECS).contains(&age) {
-                            score -= RECENT_REQUEST_PENALTY;
-                        }
+                // whose model was used within the last
+                // `RECENT_REQUEST_PROTECT_SECS` — the user's "I might need this
+                // in the next 30 min" intuition is just "I used it recently".
+                //
+                // **Asked of every way a model gets used, not just one.** This
+                // read `model_trust.last_request_at` alone, with a comment
+                // saying it is "already updated per request". It is not:
+                // `record_request` has exactly one caller in the tree
+                // (`router::distributed_exec`), so a node serving its own
+                // complete local model — which takes `local_fast_path_for` and
+                // skips the router — never writes it, and neither does serving
+                // a peer (the blind spot documented on `serving_models`). On a
+                // single-node install, the shape this project's "new users
+                // first" priority targets, the protection therefore NEVER
+                // fired: a shard that answered a request thirty seconds ago was
+                // scored for pruning exactly like one nobody had touched in
+                // days.
+                //
+                // `effective_idle_secs` was given these four inputs on
+                // 2026-09-02 after a stale `last_request_at` unloaded a model
+                // five seconds after it answered (gotcha #437). That fix landed
+                // on the idle-unload consumer and not on this one.
+                let last_used_secs = effective_idle_secs(
+                    self.shared_state
+                        .models
+                        .model_trust
+                        .get(&manifest.id)
+                        .and_then(|t| t.last_request_at)
+                        .map(|t| (chrono::Utc::now() - t).num_seconds()),
+                    self.shared_state
+                        .serving_models
+                        .get(&manifest.id)
+                        .map(|s| s.last_served_at.elapsed().as_secs().min(i64::MAX as u64) as i64),
+                    worker_idle_secs.get(&manifest.id).copied(),
+                    worker_residency_secs.get(&manifest.id).copied(),
+                );
+                if let Some(age) = last_used_secs {
+                    if (0..RECENT_REQUEST_PROTECT_SECS).contains(&age) {
+                        score -= RECENT_REQUEST_PENALTY;
                     }
                 }
 
@@ -2165,5 +2212,74 @@ mod recently_acquired_tests {
             ErrorKind::NotFound,
             "no such file"
         ))));
+    }
+}
+
+#[cfg(test)]
+mod recent_use_protection_tests {
+    use super::{effective_idle_secs, RECENT_REQUEST_PROTECT_SECS};
+
+    /// R134.7's protection is keyed on "was this model used recently". The
+    /// question has FOUR answers in this codebase and it used to ask only one.
+    ///
+    /// `model_trust.last_request_at` has a single writer in the whole tree —
+    /// `router::distributed_exec` — so a node serving its own complete local
+    /// model (`local_fast_path_for`, which skips the router) never writes it,
+    /// and neither does serving a peer. On a single-node install the protection
+    /// therefore never fired at all.
+    #[test]
+    fn a_locally_served_model_counts_as_recently_used() {
+        // Only the worker knows: no router request, nothing served for a peer.
+        let idle = effective_idle_secs(None, None, Some(30), Some(600))
+            .expect("the worker's own last-use answers it");
+        assert!(
+            (0..RECENT_REQUEST_PROTECT_SECS).contains(&idle),
+            "a model used 30s ago on the local fast path must be protected; \
+             asking only `last_request_at` returns None here and protects nothing"
+        );
+    }
+
+    #[test]
+    fn a_peer_served_model_counts_too() {
+        let idle = effective_idle_secs(None, Some(45), None, Some(600)).unwrap();
+        assert!((0..RECENT_REQUEST_PROTECT_SECS).contains(&idle));
+    }
+
+    /// The signal that used to be the only one still works when it is the one
+    /// that moved.
+    #[test]
+    fn a_router_dispatched_request_still_counts() {
+        let idle = effective_idle_secs(Some(10), None, None, Some(600)).unwrap();
+        assert!((0..RECENT_REQUEST_PROTECT_SECS).contains(&idle));
+    }
+
+    /// A model genuinely untouched for longer than the window gets no
+    /// protection — or the penalty would apply to everything and rank nothing.
+    #[test]
+    fn a_model_nobody_has_used_is_not_protected() {
+        let long_ago = RECENT_REQUEST_PROTECT_SECS + 60;
+        let idle = effective_idle_secs(
+            Some(long_ago),
+            Some(long_ago),
+            Some(long_ago as u64),
+            Some(long_ago as u64 * 2),
+        )
+        .unwrap();
+        assert!(!(0..RECENT_REQUEST_PROTECT_SECS).contains(&idle));
+    }
+
+    /// A stale persisted `last_request_at` must not outrank a worker that has
+    /// been loaded for less time than that — the shape of gotcha #437.
+    #[test]
+    fn residency_still_bounds_a_stale_persisted_timestamp() {
+        let idle = effective_idle_secs(Some(150_432), None, None, Some(215)).unwrap();
+        assert_eq!(
+            idle, 215,
+            "a model cannot have been idle longer than it has existed"
+        );
+        assert!(
+            (0..RECENT_REQUEST_PROTECT_SECS).contains(&idle),
+            "and 215s is inside the protection window"
+        );
     }
 }
