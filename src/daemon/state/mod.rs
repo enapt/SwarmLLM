@@ -41,7 +41,8 @@ pub use events::EventBus;
 pub use hf::{HfProbeInfo, HfSource};
 pub use metrics::{ChannelCounters, ChannelMetricsSet, MetricsProviders};
 pub use models::{
-    ModelMgmt, ShardDownloadClaim, FOREIGN_WISHLIST_MAX_AGE_MS, MAX_FOREIGN_WISHLIST_ENTRIES,
+    ModelMgmt, P2pDownloadSlot, ShardDownloadClaim, FOREIGN_WISHLIST_MAX_AGE_MS,
+    MAX_FOREIGN_WISHLIST_ENTRIES,
 };
 pub use peer_speed::{PeerSpeed, WorkKind};
 pub use relay::{PeerServe, RelayForwardCounter, RelayProvenFeatures, RelayRoute, ServeKind};

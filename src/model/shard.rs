@@ -649,6 +649,70 @@ impl ShardStore {
     }
 }
 
+/// Remove the leftover `.tmp` files of a model's shards that NOTHING is
+/// currently writing, and report how many went.
+///
+/// The exclusion is the point. A directory sweep cannot tell a partial file
+/// abandoned by a previous run from one a download is appending to right now,
+/// and deleting the second kind is how two writers end up fighting over one
+/// path: the live writer carries on into an unlinked inode, then stats a path
+/// that holds somebody else's file, fails its size check, and deletes that one
+/// too. A live download removes its own `.tmp` and layout sidecar together when
+/// it is told to stop, which is the only place that pair can be moved as a unit.
+///
+/// `claims` is `ModelMgmt::shard_download_claims` — a shard with a claim has a
+/// writer, and is left alone.
+pub fn cleanup_tmp_files_no_one_is_writing(
+    dir: &std::path::Path,
+    model_id: &ModelId,
+    claims: &dashmap::DashSet<crate::types::ShardId>,
+) -> usize {
+    if !dir.exists() {
+        return 0;
+    }
+    let Ok(files) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut removed = 0usize;
+    for file in files.flatten() {
+        let path = file.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if !name.ends_with(".tmp") && !name.ends_with(".tmp.layout") {
+            continue;
+        }
+        // `shard_007.bin.tmp` and `shard_007.bin.tmp.layout` both belong to
+        // shard 7. A name we cannot read an index out of (the mmproj or header
+        // staging file) has no claim to check, so it is swept as before.
+        if let Some(index) = shard_index_from_tmp_name(name) {
+            let sid = crate::types::ShardId {
+                model_id: model_id.clone(),
+                index,
+            };
+            if claims.contains(&sid) {
+                tracing::debug!(
+                    path = %path.display(),
+                    "Leaving a partial shard alone — a download is writing it"
+                );
+                continue;
+            }
+        }
+        tracing::info!(path = %path.display(), "Cleaning up leftover .tmp shard file");
+        if std::fs::remove_file(&path).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
+/// Shard index out of a `shard_NNN.bin.tmp` or `shard_NNN.bin.tmp.layout` name.
+fn shard_index_from_tmp_name(name: &str) -> Option<u32> {
+    let digits = name.strip_prefix("shard_")?;
+    let end = digits.find(|c: char| !c.is_ascii_digit())?;
+    digits[..end].parse().ok()
+}
+
 #[cfg(test)]
 mod tests {
     // NOTE: `shard_file_present` tests live here rather than in the health
@@ -1175,5 +1239,83 @@ mod missing_shard_tests {
             .unwrap()
             .explanation()
             .contains("not on disk"));
+    }
+}
+
+#[cfg(test)]
+mod cancel_cleanup_tests {
+    use super::*;
+    use crate::types::{ModelId, ShardId};
+
+    fn touch(dir: &std::path::Path, name: &str) {
+        std::fs::write(dir.join(name), b"partial").unwrap();
+    }
+
+    #[test]
+    fn a_shard_index_is_read_from_either_tmp_name() {
+        assert_eq!(shard_index_from_tmp_name("shard_007.bin.tmp"), Some(7));
+        assert_eq!(
+            shard_index_from_tmp_name("shard_007.bin.tmp.layout"),
+            Some(7)
+        );
+        assert_eq!(shard_index_from_tmp_name("shard_012.bin.tmp"), Some(12));
+        // Not a shard: no index to check a claim against, so it is swept.
+        assert_eq!(shard_index_from_tmp_name("mmproj.gguf.tmp"), None);
+        assert_eq!(shard_index_from_tmp_name("gguf_header.bin.tmp"), None);
+    }
+
+    /// Cancelling a download must not delete the partial file of a download
+    /// that is still writing it. The writer removes its own `.tmp` and layout
+    /// sidecar together when it notices the flag; a directory sweep cannot move
+    /// that pair as a unit, and taking the file from under a live writer is how
+    /// two writers end up fighting over one path.
+    #[test]
+    fn cancel_leaves_alone_the_partial_a_download_is_still_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mid = ModelId("glm-4-9b".to_string());
+        let claims: dashmap::DashSet<ShardId> = dashmap::DashSet::new();
+
+        touch(dir.path(), "shard_003.bin.tmp");
+        touch(dir.path(), "shard_003.bin.tmp.layout");
+        touch(dir.path(), "shard_007.bin.tmp");
+        touch(dir.path(), "shard_007.bin.tmp.layout");
+        touch(dir.path(), "shard_001.bin"); // finished: never swept
+
+        // Shard 7 has a live writer; shard 3 is left over from a previous run.
+        claims.insert(ShardId {
+            model_id: mid.clone(),
+            index: 7,
+        });
+
+        let removed = cleanup_tmp_files_no_one_is_writing(dir.path(), &mid, &claims);
+
+        assert_eq!(removed, 2, "only shard 3's pair should have gone");
+        assert!(!dir.path().join("shard_003.bin.tmp").exists());
+        assert!(!dir.path().join("shard_003.bin.tmp.layout").exists());
+        assert!(
+            dir.path().join("shard_007.bin.tmp").exists(),
+            "a download is writing this — removing it puts two writers on one path"
+        );
+        assert!(
+            dir.path().join("shard_007.bin.tmp.layout").exists(),
+            "and its sidecar goes with it, not separately"
+        );
+        assert!(dir.path().join("shard_001.bin").exists());
+    }
+
+    /// A claim on ANOTHER model's shard 7 says nothing about this model's.
+    #[test]
+    fn a_claim_on_another_models_shard_does_not_protect_this_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let mid = ModelId("glm-4-9b".to_string());
+        let claims: dashmap::DashSet<ShardId> = dashmap::DashSet::new();
+        claims.insert(ShardId {
+            model_id: ModelId("qwen3-1.7b".to_string()),
+            index: 7,
+        });
+
+        touch(dir.path(), "shard_007.bin.tmp");
+        let removed = cleanup_tmp_files_no_one_is_writing(dir.path(), &mid, &claims);
+        assert_eq!(removed, 1);
     }
 }

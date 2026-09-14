@@ -325,6 +325,12 @@ impl AutoShardManager {
                 // releasing the slot for the next download.
                 let hf_permit = permit.take().expect("permit present on entry");
                 let hf_claim = claim.take().expect("claim present on entry");
+                // Watch the model's cancel flag. Auto-manage used to pass
+                // `None` and never register one, so `cancel_download` found
+                // nothing in the map, set nothing, and reported success while
+                // the download carried on — on the connection the user was
+                // trying to free up.
+                let hf_cancel = shared.models.live_cancel_flag(&model_id);
                 tokio::spawn(async move {
                     let _permit = hf_permit; // Hold permit for duration of download
                                              // Held for the duration too: releasing it is what lets the
@@ -543,7 +549,7 @@ impl AutoShardManager {
                         &dest,
                         layout,
                         Some(ptx),
-                        None,
+                        Some(hf_cancel.as_ref()),
                     )
                     .await
                     {
@@ -748,6 +754,26 @@ display
                             shared.schedule_acquisition_cleanup(model_id.clone());
                         }
                         Err(e) => {
+                            // A download the user cancelled is not a download
+                            // that failed. Asked of the FLAG, not of the error
+                            // text: the message is prose and gets rewritten,
+                            // and reporting a cancel as a failure earns the
+                            // shard a backoff and the user a red toast for
+                            // doing exactly what they meant to do.
+                            if hf_cancel.load(std::sync::atomic::Ordering::Acquire) {
+                                tracing::info!(
+                                    model = %model_id,
+                                    shard = shard_idx,
+                                    "AutoShardManager: shard download cancelled"
+                                );
+                                if let Some(mut entry) =
+                                    shared.models.acquisition_progress.get_mut(&model_id)
+                                {
+                                    entry.shard_progress.remove(&shard_idx);
+                                }
+                                shared.schedule_acquisition_cleanup(model_id.clone());
+                                return;
+                            }
                             // Back this shard off before logging so the next
                             // eval cycle skips it and a competing candidate can
                             // take the freed download slot.
@@ -970,7 +996,15 @@ e
                     let p2p_claim = claim.take().expect("claim present on entry");
                     self.shared_state.models.p2p_download_permits.insert(
                         sid.clone(),
-                        (p2p_permit, p2p_claim, std::time::Instant::now()),
+                        crate::daemon::state::P2pDownloadSlot {
+                            _permit: p2p_permit,
+                            _claim: p2p_claim,
+                            cancel: self
+                                .shared_state
+                                .models
+                                .live_cancel_flag(&candidate.model_id),
+                            started_at: std::time::Instant::now(),
+                        },
                     );
                     let cmd = NetworkCommand::SendShardRequest {
                         target_peer_bytes: bytes,

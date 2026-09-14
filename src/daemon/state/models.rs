@@ -149,14 +149,7 @@ pub struct ModelMgmt {
     /// dispatch loop missed event, peer disconnected before request
     /// landed) parks the permit forever and `max_concurrent_downloads`
     /// silently freezes after enough silent drops.
-    pub p2p_download_permits: DashMap<
-        crate::types::ShardId,
-        (
-            tokio::sync::OwnedSemaphorePermit,
-            ShardDownloadClaim,
-            std::time::Instant,
-        ),
-    >,
+    pub p2p_download_permits: DashMap<crate::types::ShardId, P2pDownloadSlot>,
     /// Shards a download task is *actually writing right now*, one entry per
     /// live writer, held by an RAII `ShardDownloadClaim`.
     ///
@@ -274,6 +267,38 @@ pub(crate) fn shard_state_is_in_flight(state: &crate::model::acquisition::ShardS
             | crate::model::acquisition::ShardState::Pending
             | crate::model::acquisition::ShardState::Verifying
     )
+}
+
+/// One in-flight P2P shard transfer's parked state.
+///
+/// A P2P transfer is a chain of request/response hops across the network event
+/// loop rather than a loop on a stack, so everything it holds for its lifetime
+/// is parked here and released together when the entry is removed — on
+/// completion, on give-up, on cancel, or by the stall watchdog. Adding
+/// something a transfer owns means adding a field here, not another map with
+/// its own release sites to keep in step.
+pub struct P2pDownloadSlot {
+    /// Bounds `max_concurrent_downloads`. Released by dropping this slot.
+    pub _permit: tokio::sync::OwnedSemaphorePermit,
+    /// Exclusive right to write this shard's `.tmp`. Released the same way.
+    pub _claim: ShardDownloadClaim,
+    /// The cancel flag this transfer STARTED under, held rather than looked up.
+    ///
+    /// `download_cancel_flags` is keyed by model and its entry is replaced when
+    /// a download starts after a cancel (`live_cancel_flag` refuses to hand out
+    /// a flag that is already set). A transfer that consulted the map could
+    /// therefore be shown a newer, unset flag belonging to a different download
+    /// and sail straight through the cancel that was meant for it.
+    pub cancel: Arc<AtomicBool>,
+    /// When the slot was parked, for `sweep_stalled_p2p_permits`.
+    pub started_at: std::time::Instant,
+}
+
+impl P2pDownloadSlot {
+    /// Has the download this transfer belongs to been cancelled?
+    pub fn is_cancelled(&self) -> bool {
+        self.cancel.load(std::sync::atomic::Ordering::Acquire)
+    }
 }
 
 /// Exclusive right to write one shard's `.tmp` file, released on drop.
@@ -537,25 +562,42 @@ impl ModelMgmt {
             }
         }
         already_in_flight.sort_unstable();
-        // Share the live cancel flag rather than replacing it. Replacing it
-        // orphaned the running download's flag — it keeps its own `Arc` and
-        // still works, so the download carries on, but the map no longer points
-        // at it and a later cancel reached only the newest registration. One
-        // flag per model means one cancel stops everything being fetched for
-        // that model, which is what pressing cancel is asking for.
-        //
-        // A flag that is already SET is not reused: it belongs to a cancel in
-        // progress, and handing it to a fresh download would cancel that
-        // download the instant it started.
-        let flag = self
+        let flag = self.live_cancel_flag(&model_id);
+        self.acquisition_progress.insert(model_id.clone(), status);
+        (flag, already_in_flight)
+    }
+
+    /// The cancel flag every download of this model watches, creating it if
+    /// this is the first.
+    ///
+    /// One flag per model, because one press of Cancel is asking for everything
+    /// being fetched for that model to stop. Replacing it orphaned the running
+    /// download's — it keeps its own `Arc` and carries on, so the map no longer
+    /// points at what is running and a later cancel reached only the newest
+    /// registration.
+    ///
+    /// **A flag that is already SET is not reused**: it belongs to a cancel in
+    /// progress, and handing it to a fresh download would cancel that download
+    /// the instant it started.
+    ///
+    /// Every path that starts a download must take its flag from here. The
+    /// auto-manage path did not take one at all, so it passed `None` to
+    /// `download_shard` and there was nothing in the map for `cancel_download`
+    /// to set: pressing Cancel on an auto-managed download reported success and
+    /// stopped nothing, while the bytes kept arriving.
+    pub fn live_cancel_flag(&self, model_id: &crate::types::ModelId) -> Arc<AtomicBool> {
+        if let Some(existing) = self
             .download_cancel_flags
-            .get(&model_id)
+            .get(model_id)
             .map(|f| f.value().clone())
             .filter(|f| !f.load(std::sync::atomic::Ordering::Acquire))
-            .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
-        self.acquisition_progress.insert(model_id.clone(), status);
-        self.download_cancel_flags.insert(model_id, flag.clone());
-        (flag, already_in_flight)
+        {
+            return existing;
+        }
+        let fresh = Arc::new(AtomicBool::new(false));
+        self.download_cancel_flags
+            .insert(model_id.clone(), fresh.clone());
+        fresh
     }
 
     /// Item 8 Phase 1: replace this peer's known set of prefix-cache block
@@ -1304,6 +1346,57 @@ mod shard_download_claim_tests {
             model_id: ModelId(model.to_string()),
             index,
         }
+    }
+
+    /// Every path that starts a download must find the SAME flag, or pressing
+    /// Cancel reaches some downloads and not others. Auto-manage took none at
+    /// all: `cancel_download` found nothing in the map, set nothing, and
+    /// reported success while the bytes kept arriving.
+    #[test]
+    fn every_download_of_a_model_watches_one_cancel_flag() {
+        let m = mgmt();
+        let mid = ModelId("glm-4-9b".to_string());
+
+        let first = m.live_cancel_flag(&mid);
+        let second = m.live_cancel_flag(&mid);
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "one press of Cancel is asking for everything on this model to stop"
+        );
+
+        // What the cancel endpoint does.
+        m.live_cancel_flag(&mid)
+            .store(true, std::sync::atomic::Ordering::Release);
+        assert!(
+            first.load(std::sync::atomic::Ordering::Acquire),
+            "the flag a running download is watching is the one Cancel sets"
+        );
+    }
+
+    /// A flag that is already set belongs to a cancel in progress. Handing it
+    /// to a fresh download would cancel that download the instant it started.
+    #[test]
+    fn a_download_starting_after_a_cancel_gets_a_clean_flag() {
+        let m = mgmt();
+        let mid = ModelId("glm-4-9b".to_string());
+        let cancelled = m.live_cancel_flag(&mid);
+        cancelled.store(true, std::sync::atomic::Ordering::Release);
+
+        let fresh = m.live_cancel_flag(&mid);
+        assert!(!fresh.load(std::sync::atomic::Ordering::Acquire));
+        assert!(!Arc::ptr_eq(&cancelled, &fresh));
+    }
+
+    #[test]
+    fn cancel_flags_are_per_model() {
+        let m = mgmt();
+        let a = m.live_cancel_flag(&ModelId("glm-4-9b".to_string()));
+        a.store(true, std::sync::atomic::Ordering::Release);
+        assert!(
+            !m.live_cancel_flag(&ModelId("qwen3-1.7b".to_string()))
+                .load(std::sync::atomic::Ordering::Acquire),
+            "cancelling one model must not stop another model's download"
+        );
     }
 
     #[test]

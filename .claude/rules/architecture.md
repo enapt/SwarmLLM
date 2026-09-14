@@ -618,6 +618,18 @@ in `tests/repo_consistency.rs` fails the build on a bare
 A per-shard completion path knows only about its own shard. Every one of them
 was deleting the whole model's entry.
 
+**Nothing but a download itself may delete that download's partial file.**
+`cleanup_tmp_files_no_one_is_writing` skips any shard holding a claim; the
+writer removes its own `.tmp` and layout sidecar together, which a directory
+sweep cannot do. The startup sweep is the one unconditional one, and is correct
+because at startup there are no writers.
+
+**`ModelMgmt::live_cancel_flag` is the one source of a model's cancel flag**,
+and every path that starts a download takes its flag from there — auto-manage
+took none, so Cancel reported success and stopped nothing. A parked P2P
+transfer HOLDS its flag (`P2pDownloadSlot.cancel`) rather than looking the model
+up, because the map's entry is replaced when a download starts after a cancel.
+
 → `docs/invariants/network.md`
 
 ## Destroying a shard we hold needs better evidence than a stranger's claim

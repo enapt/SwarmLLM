@@ -1100,3 +1100,63 @@ doesn't exist"*). Startup `.tmp` cleanup removed the `.tmp` and left the
   deleting state is not.
 - A terminal path must give its OWN shard a terminal progress mark. The HF
   failure arm did not, and was masked by the entry being deleted anyway.
+
+## Cancel means the same thing on both transports, and never takes a file from a live writer
+
+*Rule: `.claude/rules/architecture.md` § "One writer per shard file…". Found
+2026-09-14 while fixing the restart loop above; not field-reported, but the same
+collision reachable from a button.*
+
+### What Cancel did
+
+`POST /api/admin/hf/cancel/:model` (three entry points in the dashboard) did
+three things, and two of them were wrong:
+
+1. **It set a flag nobody was holding.** `download_cancel_flags` was written
+   ONLY by `begin_download`, which only the API download paths call.
+   Auto-manage registered nothing and passed `cancel_flag: None` into
+   `download_shard`. So for an auto-managed download the endpoint's
+   `if let Some(flag)` found nothing, set nothing, and returned
+   `{"status": "cancelled"}` while the bytes kept arriving — on the connection
+   the user was pressing the button to free.
+2. **It deleted every `*.tmp` in the model directory.** The downloads it had
+   just told to stop had not noticed (the flag is read once per chunk), so their
+   partial files were removed from under them. That is exactly the collision
+   that produced the restart loop: the writer continues into an unlinked inode,
+   then stats a path holding somebody else's file, fails its size check, and
+   deletes that one too. Pressing Cancel could start the loop.
+3. It did nothing at all to a P2P transfer, which is a chain of
+   request/response hops rather than a loop with a flag to read.
+
+### The rules now
+
+- **`ModelMgmt::live_cancel_flag` is the one source of a model's cancel flag**,
+  and every path that starts a download takes its flag from there. One flag per
+  model, because one press of Cancel is asking for everything being fetched for
+  that model to stop. A flag that is already SET is never handed out — it
+  belongs to a cancel in progress, and a fresh download given it would cancel
+  itself the instant it started.
+- **A live download cleans up its own `.tmp` and layout sidecar**, together.
+  Nothing else may delete a partial file: `cleanup_tmp_files_no_one_is_writing`
+  skips any shard holding a `ShardDownloadClaim`, so a sweep can only remove
+  what a previous run left behind. The startup sweep
+  (`cleanup_tmp_files_in_dir`) stays unconditional, and is correct to be — at
+  startup there are no writers.
+- **A parked P2P transfer holds its own cancel flag** (`P2pDownloadSlot.cancel`),
+  it does not look the model up in the map. The map's entry is replaced when a
+  download starts after a cancel, so a transfer consulting it could be shown a
+  newer, unset flag belonging to a different download and sail straight through
+  the cancel meant for it.
+- **`P2pDownloadSlot` is where everything a parked transfer owns lives** —
+  permit, writer claim, cancel flag, start time — so the four places that end a
+  transfer release all of it by removing one entry. Adding something a transfer
+  owns means adding a field, not another map with its own release sites.
+- **A cancelled download is not a failed one.** The auto-manage error arm asks
+  the FLAG, not the error text: a cancel recorded as a failure earns the shard
+  an exponential backoff and the user a red toast for doing what they meant to.
+  Asking the text would be gotcha #295 — that prose gets rewritten.
+- **`abort_shard_transfer_if_cancelled` is deliberately NOT
+  `retry_shard_or_fallback`.** The latter exists for a transfer that FAILED and
+  its job is to find the bytes elsewhere, which for a cancel is the opposite of
+  what was asked. It returns `false` (the download has ended) on the cancel
+  path, never `true` (a retry is on its way).

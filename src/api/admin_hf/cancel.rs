@@ -33,10 +33,15 @@ pub async fn cancel_download(
         ))));
     }
 
-    // Set the cancel flag (the download loop checks this)
-    if let Some(flag) = shared.models.download_cancel_flags.get(&mid) {
-        flag.store(true, std::sync::atomic::Ordering::Release);
-    }
+    // Set the cancel flag. `live_cancel_flag` creates one if this model has
+    // none, so the flag exists for the next writer even if the current ones
+    // started before it — a download that begins between here and the next
+    // request sees a flag that is already set and stops immediately, which is
+    // what the user asked for.
+    shared
+        .models
+        .live_cancel_flag(&mid)
+        .store(true, std::sync::atomic::Ordering::Release);
 
     // Mark the acquisition as failed/cancelled
     shared.models.update_acquisition(&mid, |s| {
@@ -46,15 +51,33 @@ pub async fn cancel_download(
         s.log_push("Download cancelled by user".to_string());
     });
 
-    // Clean up partial .tmp files in the model directory
+    // Clean up partial .tmp files — but ONLY the ones nothing is writing.
+    //
+    // This used to delete every `*.tmp` in the model directory unconditionally.
+    // The downloads that had just been told to stop had not noticed yet (the
+    // flag is read once per chunk), so their files were removed out from under
+    // them: each writer carried on into an unlinked inode, then checked the
+    // size at a path that now held somebody else's file, failed, and deleted
+    // that one too. It is the same collision that made a shard re-download
+    // from byte zero for ever, triggered by pressing Cancel.
+    //
+    // A live download cleans up its own `.tmp` and layout sidecar when it sees
+    // the flag — as a unit, which a directory sweep cannot do. So all this has
+    // to remove is what a PREVIOUS run left behind.
     let model_dir = state.model_dir(&model_id);
-    let md = model_dir.clone();
-    let _ = tokio::task::spawn_blocking(move || {
-        crate::model::shard::ShardStore::cleanup_tmp_files_in_dir(&md);
+    let claims = shared.models.shard_download_claims.clone();
+    let cancel_mid = mid.clone();
+    let removed = tokio::task::spawn_blocking(move || {
+        crate::model::shard::cleanup_tmp_files_no_one_is_writing(&model_dir, &cancel_mid, &claims)
     })
-    .await;
+    .await
+    .unwrap_or(0);
 
-    tracing::info!(model = %model_id, "Download cancelled");
+    tracing::info!(
+        model = %model_id,
+        stale_tmp_removed = removed,
+        "Download cancelled"
+    );
 
     Ok(Json(serde_json::json!({
         "status": "cancelled",

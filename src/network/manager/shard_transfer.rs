@@ -10,6 +10,85 @@ use crate::network::protocol::{SwarmRequest, SwarmResponse};
 use super::{NetworkManager, MAX_PENDING_SHARD_REQUESTS};
 
 impl NetworkManager {
+    /// Has this model's download been cancelled? If so, stop the transfer and
+    /// tidy up; returns whether it did.
+    ///
+    /// Asked on every chunk, because a P2P transfer is a chain of
+    /// request/response hops across the network event loop rather than a loop
+    /// with a flag to read — so without this, Cancel reached the HuggingFace
+    /// path and silently did nothing on the P2P one, and the same button meant
+    /// two different things depending on where the shard happened to come from.
+    ///
+    /// Deliberately NOT `retry_shard_or_fallback`: that exists for a transfer
+    /// that FAILED and its job is to find the bytes somewhere else, which for a
+    /// cancel is the opposite of what was asked. This ends the transfer.
+    pub(super) fn abort_shard_transfer_if_cancelled(
+        &mut self,
+        shard_id: &crate::types::ShardId,
+    ) -> bool {
+        // Asked of the flag the TRANSFER holds, not of the model's current
+        // entry in `download_cancel_flags` — that entry is replaced when a
+        // download starts after a cancel, and a transfer reading the map would
+        // then be shown a newer, unset flag and sail through the cancel meant
+        // for it. A transfer with no parked slot has already been released by
+        // something else and has nothing to abort.
+        let cancelled = self
+            .shared_state
+            .models
+            .p2p_download_permits
+            .get(shard_id)
+            .map(|slot| slot.is_cancelled())
+            .unwrap_or(false);
+        if !cancelled {
+            return false;
+        }
+
+        tracing::info!(
+            model = %shard_id.model_id,
+            shard = shard_id.index,
+            "P2P shard transfer cancelled by user — stopping"
+        );
+
+        self.shard_download_progress.remove(shard_id);
+        self.shard_last_progress_at.remove(shard_id);
+        self.shard_p2p_retries.remove(shard_id);
+        self.pending_shard_requests
+            .retain(|_, (_, sid)| sid != shard_id);
+
+        // Remove the partial file, then release the permit and the writer
+        // claim — in that order, so nothing can start writing this shard
+        // between the two and have its file deleted underneath it.
+        if let Err(e) = std::fs::remove_file(
+            self.shard_store
+                .shard_tmp_path(&shard_id.model_id, shard_id.index),
+        ) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(
+                    model = %shard_id.model_id,
+                    shard = shard_id.index,
+                    error = %e,
+                    "Could not remove the partial file of a cancelled transfer"
+                );
+            }
+        }
+        self.shared_state
+            .models
+            .p2p_download_permits
+            .remove(shard_id);
+
+        // Clear the per-shard progress so the dashboard stops showing a bar for
+        // something nobody is fetching.
+        if let Some(mut entry) = self
+            .shared_state
+            .models
+            .acquisition_progress
+            .get_mut(&shard_id.model_id)
+        {
+            entry.shard_progress.remove(&shard_id.index);
+        }
+        true
+    }
+
     /// Retry a failed P2P shard download: try another peer, or if retries are
     /// exhausted, mark the shard as P2P-failed and wake auto-manage to try HF.
     ///
@@ -30,6 +109,16 @@ impl NetworkManager {
             reason,
             "DIAG: retry_shard_or_fallback entered"
         );
+
+        // A cancelled download must not be resurrected by its own failure. The
+        // chunk path already stops on the flag, but a transfer that fails at
+        // the same moment arrives here instead, and this function's whole job
+        // is to go and find the bytes from somebody else.
+        if self.abort_shard_transfer_if_cancelled(&shard_id) {
+            // `false` = the download has ended. `true` would tell the caller a
+            // retry is on its way to another peer, and there is none.
+            return false;
+        }
 
         // Clear any partial progress — restarting from offset 0 with a fresh peer.
         self.shard_download_progress.remove(&shard_id);

@@ -610,6 +610,13 @@ impl NetworkManager {
                         });
                     }
 
+                    // Stop here if the user cancelled this model's download.
+                    // Checked before the write, so a cancel does not first grow
+                    // the file it is about to have deleted.
+                    if self.abort_shard_transfer_if_cancelled(&shard_id) {
+                        return;
+                    }
+
                     // NetworkManager is the sole writer for shard chunks (both
                     // user-initiated acquisitions and auto-manage P2P downloads).
                     // AcquisitionManager only tracks progress + verifies the final

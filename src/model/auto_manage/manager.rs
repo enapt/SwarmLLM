@@ -91,7 +91,7 @@ pub(super) fn sweep_stalled_p2p_permits(state: &SharedState) {
     let now = std::time::Instant::now();
     let mut stalled: Vec<crate::types::ShardId> = Vec::new();
     for entry in state.models.p2p_download_permits.iter() {
-        if now.duration_since(entry.value().2) > cutoff {
+        if now.duration_since(entry.value().started_at) > cutoff {
             stalled.push(entry.key().clone());
         }
     }
@@ -106,7 +106,7 @@ pub(super) fn sweep_stalled_p2p_permits(state: &SharedState) {
         let removed = state
             .models
             .p2p_download_permits
-            .remove_if(&sid, |_, (_, _, ts)| now.duration_since(*ts) > cutoff);
+            .remove_if(&sid, |_, slot| now.duration_since(slot.started_at) > cutoff);
         if removed.is_none() {
             continue;
         }
