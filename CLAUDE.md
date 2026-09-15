@@ -249,41 +249,10 @@ were a repetition lesson learned for a LOG line and never carried to the
 activity list — in each case the correct version was already written down in the
 same file, once 30 lines away.
 
-**v0.3.181 carries** two field reports and the finished vocabulary rename:
-**#033** Windows had NEVER been able to install an update, in any release — the
-refusal rested on a comment asserting that a running `.exe` cannot be renamed,
-which is false (gotcha #602); **#034** on iOS/iPadOS the whole page scrolled as
-one block, two entangled WebKit behaviours where the lock is what makes `dvh`
-correct (#608); the chat now says what it is waiting on, using a progress
-snapshot the daemon already sent and the client threw away (#605); and the UI
-settled on **one word per thing** — a model piece is a "part", a machine is a
-"computer" — across 21 locales and five surfaces, one of them a helper that
-RETURNED the word (#609, #610, #611). ⚠ The Windows and iOS fixes are verified
-by MECHANISM, not on the devices; neither platform exists here.
-
-**v0.3.180 — 24 commits, all 2026-09-14.** Two field reports and five parallel
-audits. ⚠ **The reporter numbered TWO reports #032** — **#032-download** (a
-shard re-downloading from byte zero for ever) and **#032-streaming** (a
-reasoning model's `<think>` scratchpad still reaching the reply on .179, the
-release that shipped the fix for it). Round logs:
-`memory/round_log_0914_shard_download_restart_loop.md` and
-`memory/round_log_0914_settings_write_paths.md`. User-facing summary:
-`CHANGELOG.md`. Also carries a **SECURITY** fix — the `tp_meta` trailer rode the
-wire unauthenticated, deciding which SLICE a tensor-parallel receiver computes,
-so a relay could cause a silently WRONG AllReduce. ⚠ **That is a wire change for
-tensor-parallel clusters only** (`inference.tensor_parallel` defaults FALSE);
-they must update both ends together, ordinary forwards are byte-identical.
-
-⚠ **Four lessons the round paid for**, each already a rule or a gotcha:
-**a rule that lives only in a comment gets re-broken by the next file** (#593);
-**a test that exercises a helper cannot tell you the helper is CALLED** (#601 —
-the #032-streaming fix was written, tested, shipped, and never ran);
-**an audit's severity is a hypothesis** (two findings CORRECTED DOWN after
-reading the code; both suggested fixes would have made things worse); and
-**check the response SIZE before trusting a grep** (#594).
-
 ### Earlier rounds — one line each. Detail in `memory/round_log_*.md`, gotcha numbers index `memory/gotchas.md`. **Read the named round log before re-deriving any of these.** Older than .160: `memory/round_history.md`.
 
+- **.181** (09-14, gate clean): **#033** Windows had NEVER been able to install an update, in any release — the refusal rested on a comment claiming a running `.exe` cannot be RENAMED, which is false (#602); **#034** iOS/iPadOS page-scroll, two entangled WebKit behaviours where the LOCK is what makes `dvh` correct (#608); the chat says what it is waiting on from a snapshot the client was throwing away (#605); and **one word per thing** across 21 locales and FIVE surfaces, one a helper that RETURNED the word (#609-#611). ⚠ Windows and iOS verified by MECHANISM only — neither platform exists here. `memory/round_log_0914_release_181.md`.
+- **.180** (09-14, 24 commits): two field reports and five parallel audits. ⚠ **The reporter numbered TWO reports #032** — **#032-download** (a shard restarting from byte zero for ever) and **#032-streaming** (a `<think>` scratchpad still reaching the reply on .179, the release that shipped the fix for it). Also a **SECURITY** fix: the `tp_meta` trailer rode the wire unauthenticated, so a relay could cause a silently WRONG AllReduce — ⚠ a wire change for **tensor-parallel clusters only** (defaults FALSE), both ends together. ⚠ Four lessons: **a rule that lives only in a comment gets re-broken by the next file** (#593); **a test that exercises a helper cannot tell you the helper is CALLED** (#601); **an audit's severity is a hypothesis**; **check the response SIZE before trusting a grep** (#594). `round_log_0914_shard_download_restart_loop.md`, `round_log_0914_settings_write_paths.md`.
 - **.179** (09-13, gate clean): three field reports — **#030** the anti-swap gate ran ONCE per model on a card-less computer and it swapped (#586), **#031** a reasoning model's whole scratchpad streamed as the answer when the reply opened with whitespace (#588), and the **.177 shard fix made measurable** (`disputed_shards` in the diagnostics report, printed even at zero, because the count had lived in one startup task's local variable). Plus the CLI still printing dormant credits (#587), tok/s in Performance, the ticker moved to a filterable Activity panel, a key for the map's arcs, and a placeholder that outlived its feature. ⚠ **Three were the same sentence: two ways to fail, one watched** (#590). `memory/round_log_0913_dispute_visibility_and_credits.md`.
 - **.177-.178** (09-13, both gate clean): a peer's gossip could make a node DELETE a shard it held correctly (#581, gotcha #384 recurring — **a repair mechanism is a destruction mechanism**); then the model list and network view rebuilt live with the user and two testers (rows in words, On this computer / On other computers, everything visible in the expanded card, Map+Leaderboard merged into one **Network** tab drawing REAL routes). ⚠ **Every Q4_K_M model had been reporting itself as Q2_K** (#584) — found only by making a hidden panel visible. `round_log_0913_shard_destruction.md`, `round_log_0913_dashboard_rework.md`.
 - **.166-.176** (09-09→09-12, eleven releases in four days, all gate clean): tool schemas reached every model ALPHABETISED (#46); the KV cache reserved at the admitted prompt length (#32); **every Qwen3 request reached the model with the QUESTION MISSING** (.169); templates moved to `minijinja` (.170); **tools were NEVER passed to the template** plus an escrow that MINTED credits (.171); partial RoPE meant Phi-4-mini, GLM-4 and Qwen 3.5 could not serve one request (.172-.173); six field reports from a 16 GB processor-only Mac. `family_conformance.sh` was written here and found two real bugs on its first run; branch protection went to 14 contexts after every PR was permanently BLOCKED (#530). `memory/round_history.md`.
