@@ -1,10 +1,15 @@
 # Changelog
 
-## [0.3.182-alpha] — unreleased
+## [0.3.182-alpha] — 2026-09-15
 
-Four things found by reading what a running node actually reports, rather than
-from a bug report. Three of them were numbers on screen that were wrong, and one
-was a number that read zero while the thing it counts was happening.
+Everything here was found by reading what a running node actually reports,
+rather than from a bug report — and it turned out to be one kind of problem
+repeated. Nothing was computing a wrong answer. Eight different places were
+telling you something untrue about what your computer was doing: counts that
+included computers that could not help, a list of recent activity that was
+almost entirely other computers introducing themselves, a number that read zero
+while the thing it counts was happening, and Cancel reported as a failure. Also
+a security update to the library nodes use to talk to each other.
 
 ### Security
 
