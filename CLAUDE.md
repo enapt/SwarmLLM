@@ -226,10 +226,28 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 All 20 build phases complete. All subsystems wired — no stubs. **2705 lib (dev,claude-subscription) — re-measured 2026-09-14, full suite green (exit 0)** + 79 integration (31 `integration` + 34 `integration_phase10_11` + 14 `yamux_substream`) + 113 repo-consistency + 1 api_key_side_effects + 36 swarmllm-types tests passing; 12 lib + 1 e2e ignored (env-var or manual). Clippy clean on default, `--no-default-features --features dev,claude-subscription` (that combination is the documented one — plain `--features dev` leaves `embedded` on too and fails on dead code), a `--features llama` check, and `flash-attn --lib`. `cargo audit` reports only advisories already documented and accepted in `SECURITY.md` — re-checked at the .177 release 2026-09-13, two (`hickory-proto` RUSTSEC-2026-0118/0119, both transitive via libp2p — 0.26.1 is a semver-MAJOR bump pinned by libp2p 0.56, so it is genuinely unreachable without upgrading libp2p; re-checked 2026-09-08, not merely re-accepted) plus the `paste` unmaintained warning.
 
-**Released and deployed: v0.3.181-alpha (2026-09-14).** Gate record in
-`memory/round_log_0914_release_181.md` § Gate result — fully green, and the
-conformance run was **identical line for line** to the .180 baseline. Rollback
-`~/.local/bin/swarmllm.0.3.180-alpha.bak` (3 kept: .178/.179/.180).
+**Released and deployed: v0.3.182-alpha (2026-09-15).** Gate record in
+`memory/round_log_0914_post181_reporting.md` § Gate result — fully green, and
+the conformance run was **identical line for line** to the .181 baseline (75
+lines, 52 OK / 0 FAIL / 2 n/a). Rollback
+`~/.local/bin/swarmllm.0.3.181-alpha.bak` (3 kept: .179/.180/.181).
+
+**v0.3.182 is one kind of bug, found eight times** — a surface telling the user
+something untrue about what the node was doing, every one found by reading a
+running node's own output rather than from a field report. Model cards counted
+computers that could never share the file (**36 of 97 parts** miscounted, and
+the same part read 1 or 4 depending on which writer touched the row last); the
+activity list was **102 of 114** entries of peers announcing themselves, which
+is also what a freshly opened dashboard replays and what the pasteable report
+shows; the disputed-part counter read **zero on the one path a peer-provisioned
+node actually reaches**; `peer_connected` fired per Identify rather than per
+connection; a status **GET** appended to the activity list and raised a toast on
+every read; a failed fetch **destroyed** the frontend cache a dozen components
+read; and Cancel was reported as a download failure. Plus rustls 0.23.45 for
+RUSTSEC-2026-0285 on the QUIC path. ⚠ **The recurring shape:** three of these
+were a repetition lesson learned for a LOG line and never carried to the
+activity list — in each case the correct version was already written down in the
+same file, once 30 lines away.
 
 **v0.3.181 carries** two field reports and the finished vocabulary rename:
 **#033** Windows had NEVER been able to install an update, in any release — the
