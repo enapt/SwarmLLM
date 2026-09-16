@@ -1,5 +1,84 @@
 # Changelog
 
+## [0.3.183-alpha] — 2026-09-16
+
+Five things people reported, and every one of them was a feature that did not
+work at all rather than one that worked badly. The smallest models refused every
+message you sent them. The screen for linking your own computers could not be
+opened. When a reply failed, you were told the wrong reason. On a phone the page
+slid sideways and a button you needed sat off the edge of the screen.
+
+Two of them had been broken for months without anyone realising, because nothing
+about them looked broken — no error, nothing in the logs, just a button that did
+nothing and a message that sounded plausible.
+
+If you run a small model, or you have tried to link your devices, or you have
+ever been told "the model might still be loading" and it never did, this release
+is for you. Nodes do not need to update together.
+
+### Fixed
+
+- **Small models refused every message, however short.** A model's context
+  window is the total room it has for your conversation and its reply together.
+  SwarmLLM was reserving a fixed amount of that room for the reply — the same
+  amount whatever model you picked — and then refusing the request because your
+  message plus that reservation did not fit. On any model whose whole window is
+  that size, nothing fit, ever: a three-word question was turned away. TinyLlama
+  is one of these, and it is both a model we ship as a reference and the obvious
+  first choice on a modest computer, so the smallest models on the weakest
+  machines were the ones that could not hold a single exchange. The advice made
+  it worse — it suggested shortening a message by exactly its own length, which
+  leaves nothing to ask. Now the reply is given whatever room the conversation
+  leaves, and a length you asked for yourself is either honoured exactly or
+  refused with a number you can use.
+- **"Link My Devices" and "Join Existing Group" did nothing.** Clicking either
+  showed no form, no error and nothing in the logs. They are the only way into
+  the device-linking feature for anyone not already in a group, so the whole
+  feature was unreachable. Two more controls turned out to have the same fault
+  and had never worked either: the Claude subscription card in Settings could
+  never appear, and attaching an image to a message showed no preview of it.
+- **A failed reply now says what went wrong.** When a reply failed part-way, the
+  screen showed "No response received. The model might still be loading — wait a
+  moment and try again." The node knew exactly what had happened and had already
+  said so down the same connection; the chat screen only looked for words to
+  display, so the explanation arrived and was discarded. The advice was wrong in
+  every case it appeared: nothing was still loading, the node had given up and
+  refunded the request, and waiting could not help. You now get the real reason,
+  any advice that came with it, and a Retry button. A reply that had already
+  written some text before failing keeps that text.
+- **A refused request is no longer sent again automatically.** The screen quietly
+  re-sent anything that came back empty, which is right when a model is still
+  starting up — but it could not tell that from a request the node had
+  explicitly refused. So every refusal was sent a second time, and the most
+  common refusal is "not enough memory right now", where a second copy is the
+  last thing that machine needs.
+- **The privacy banner in a chat fits on a phone.** Its text was being squeezed
+  into columns one or two words wide, and the button for turning on end-to-end
+  encryption was pushed off the right edge of the screen — so the control the
+  banner exists to offer could not be reached. It is worse in languages with
+  longer words, which is how it was reported.
+- **The page no longer slides sideways on an iPhone.** The row of tabs at the top
+  could not shrink, so on a narrow screen it pushed the whole page wider than the
+  display and everything could be dragged across, cutting off the left edge. The
+  row now scrolls on its own and every destination is still reachable. The "More"
+  menu opens on screen rather than half past the edge.
+- **On an iPad, tapping the message box no longer shifts the page and leaves a
+  gap.** Safari does not tell a page that the on-screen keyboard has covered part
+  of it, so the layout stayed sized for a screen that was no longer fully
+  visible.
+- **A failure reported on a streaming connection now carries the same advice as
+  one reported without streaming.** Both explained what went wrong; only one
+  suggested what to do about it.
+
+### Changed
+
+- **One place to find models, instead of three.** "Find models" has been removed
+  from the top bar, where it appeared on every page for something people do in
+  their first hour rather than every day. Nothing has moved: every route to model
+  search already opened the same screen, and the button inside the Dashboard's
+  Models panel — next to the models it is offering to add — stays, as does the
+  Search HuggingFace tab itself.
+
 ## [0.3.182-alpha] — 2026-09-15
 
 Everything here was found by reading what a running node actually reports,

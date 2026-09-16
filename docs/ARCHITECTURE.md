@@ -75,6 +75,12 @@ swarmllm/
 │   │                          18 bf16 kernels + the FP16_SWITCH bf16 branch dropped — unreachable, 37→19)
 │   ├── candle-paged-attention/ (kernels only — NOTHING references it; PagedAttention was never wired, #257)
 │   └── libp2p-request-response/ (11 tests, `--lib`)
+├── examples/      (runnable checks + harnesses, NOT `cargo test` targets:
+│                 frontend_load_check.js — loads every module in index.html's order;
+│                 research_gate_probe.py — plants one violation per Bash mutation form
+│                 against `.claude/scripts/research-gate.sh` and reports which are caught;
+│                 check_ci_gate.sh — branch protection vs the jobs CI produces;
+│                 smoke_test.sh, release_shapes.sh, family_conformance.sh — the release gate's three)
 └── tests/         (integration tests)
 ```
 
@@ -1835,8 +1841,8 @@ from it, so the same failure cannot be named two things:
 
 | surface | how it consumes the classification |
 |---|---|
-| HTTP envelope | `ApiError::into_response` — status + `error.type`/`code` |
-| OpenAI SSE | `StreamEvent::Error { message, error_type }` |
+| HTTP envelope | `ApiError::into_response` — status + `error.type`/`code`, plus `hint`/`hint_key` |
+| OpenAI SSE | `StreamEvent::from_error` → `Error { message, error_type, hint, hint_key }` |
 | Anthropic SSE | `AnthropicSseEvent::Error`, translated by `anthropic_error_type` |
 | Responses API | `responses::stream::classify_error_code` (both the streaming and background paths) |
 | MCP | `mcp::types::tool_error_code` → JSON-RPC `-32602` / `-32000` / `-32603` |
@@ -1846,6 +1852,17 @@ names a provider failure `upstream_error`, and MCP maps 503 to
 `RESOURCE_UNAVAILABLE`. A refinement names something more precisely than the
 canonical answer; a *divergence* is the same meaning under a different word and
 is a bug.
+
+**The advice travels with the failure, on every surface that reports one.**
+`error_hint_with_key` returns a stable `(key, english)` pair; `hint` is prose any
+client can show and `hint_key` is what the dashboard translates. The OpenAI
+streaming frame carried neither until 2026-09-16, so an identical failure told a
+streaming caller strictly less about what to do than a non-streaming one —
+`StreamEvent::from_error` now fills message, type, hint and key together, from
+the two single sources, so a new call site cannot supply one and forget another.
+The one site that does not use it holds an already-flattened `StreamFailure`
+(message + type, no typed error), and reports `hint: None` rather than guessing
+one from prose — the gotcha #295 trap.
 
 `crate::error::reclassify_flattened_error(&str) -> Option<SwarmError>` recovers a
 class across a boundary that carries no types — `SwarmError` survives neither the
@@ -1960,7 +1977,7 @@ the sidecar holds.
 ## HTTP API Routes
 
 ### OpenAI-Compatible (Bearer auth required)
-- `POST   /v1/chat/completions` — Chat completions (streaming + non-streaming, tool_calls). `logprobs` is refused for a model running locally — every local path pins `token_logprobs: vec![]`, so it is only ever returned by a cloud provider (see Deferred Items).
+- `POST   /v1/chat/completions` — Chat completions (streaming + non-streaming, tool_calls). `logprobs` is refused for a model running locally — every local path pins `token_logprobs: vec![]`, so it is only ever returned by a cloud provider (see Deferred Items). **`max_tokens` is optional, and absent does not mean zero**: the serving node resolves it against the model's real context window (`model_worker::resolve_max_new_tokens`), lowering `DEFAULT_REPLY_BUDGET` to whatever the prompt leaves free but never raising it to fill a large one. A value the caller *did* send is honoured exactly or refused with the budget that would fit — never silently shortened. Resolving it at the edge instead is what refused every non-empty prompt on every 2048-context model (report #001).
 - `POST   /v1/responses` — OpenAI Responses API (gpt-5 / o-series default)
 - `GET    /v1/responses/{id}` — Retrieve a stored response (30-day TTL); pass `?stream=true&starting_after={seq}` to resume a background SSE stream
 - `DELETE /v1/responses/{id}` — Delete a stored response
