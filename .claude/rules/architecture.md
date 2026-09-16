@@ -19,9 +19,18 @@ replaced, what it was measured at, what a change must keep — lives in
 | `src/daemon/state/`, `src/config/`, `src/credit/`, `src/storage/` | `arch-state-and-config.md` | `docs/invariants/state-and-config.md` |
 | `frontend/` | `arch-frontend.md` | `docs/invariants/frontend.md` |
 | `tests/`, `examples/` | `arch-guards-and-tests.md` | — |
+| `frontend/`, `error.rs`, `auto_manage/`, `reference.rs` | `i18n.md` | — |
 
-If you are reasoning about a subsystem **without** opening its files, read its
-rules file directly — it will not have loaded itself.
+**These load on the Read tool ONLY.** Opening a file with `cat`, `sed -n`,
+`head` or `grep` through Bash does NOT trigger them — measured 2026-09-16
+against `.claude/logs/instructions-loaded.jsonl`. A session that reads through
+Bash therefore has NO subsystem rules in context and gets no read-before-edit
+check either, because that one is attached to the Edit tool. `research-gate.sh`
+blocks a mutation whose governing rules never loaded; if you are reasoning about
+a subsystem without opening its files, Read its rules file directly.
+
+**A new user-facing string — from the frontend OR minted in Rust as an i18n key
+— must be translated into all 21 locales. There is no English fallback.**
 
 ## SharedState Sub-Structs
 

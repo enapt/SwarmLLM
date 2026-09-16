@@ -11,6 +11,11 @@ paths:
   - "src/model/distribution.rs"
   - "crates/swarmllm-types/**"
   - "vendor/libp2p-request-response/src/**"
+  - "src/model/huggingface/**"
+  - "src/model/shard.rs"
+  - "src/model/lora.rs"
+  - "src/identity/**"
+  - "src/model/mod.rs"
 ---
 
 # Network protocol, peers, shards and the model registry

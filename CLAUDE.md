@@ -1,8 +1,11 @@
 # SwarmLLM — Claude Code Instructions
 
-> **Quick start**: `docs/ARCHITECTURE.md` is the canonical architecture reference —
-> subsystems, channels, source tree, protocols, security model. Per-subsystem rules
-> load on their own when you open the files they govern (`.claude/rules/arch-*.md`).
+> **Start here**: `docs/ARCHITECTURE.md` — subsystems, source tree, protocols,
+> security model. Per-subsystem rules (`.claude/rules/arch-*.md`, indexed by
+> `architecture.md`) load when you open a file they govern — **on the Read tool
+> ONLY**. `cat` / `sed` / `grep` through Bash do not trigger them, so a session
+> that reads through Bash has none of its subsystem rules in context. Hooks
+> enforce this: `.claude/rules/workflow.md` § "What the hooks enforce".
 
 ## Project Overview
 
@@ -24,12 +27,8 @@ organized into 4 sub-structs — `state.events`, `state.credits`, `state.models`
 (boot snapshot, startup-only decisions) and `live_config`, **read via
 `state.cfg()`** for anything the user can change while the node runs.
 
-All 20 build phases complete; no stubs. Deferred items are in
-`docs/ARCHITECTURE.md` § "Deferred Items", never as a `// TODO`.
-
-**Per-subsystem rules load automatically when you open that subsystem's files**
-(`.claude/rules/arch-*.md`); the index is in `.claude/rules/architecture.md`.
-Source tree, subsystem detail and protocols: `docs/ARCHITECTURE.md`.
+No stubs anywhere. Deferred items belong in `docs/ARCHITECTURE.md` § "Deferred
+Items", never as a `// TODO`.
 
 ## Key Dependencies
 
@@ -50,31 +49,24 @@ Two that carry contracts rather than just versions:
 ### Error Handling
 - Use `thiserror` for defining error types in `src/error.rs` (SwarmError enum)
 - Use `anyhow` only in `main.rs` and integration tests
-- Map SwarmError variants to HTTP status codes via `ApiError` wrapper
-- Variant → status contract (see `.claude/rules/completeness.md`):
-  - `Validation` → 400 (API input)
-  - `ModelNotAvailable` / `ShardNotFound` / `NotFound` → 404
-  - `Config` → startup ONLY
-  - `Internal` → actual bugs (500)
-  - `ProviderError { status, body }` → upstream cloud errors (preserves status)
-  - `LocalMemoryUnavailable` → 503, this node's own memory budget refused the load — the one local failure the router re-plans
-  - `ServiceUnavailable` → THIS server can't serve (503), NOT upstream
+- Map SwarmError variants to HTTP status codes via `ApiError`. **Never choose an
+  error type at a call site** — `classify_error` is the single answer. The full
+  variant → status contract, and the two follow-ups a new variant must not skip,
+  are in `.claude/rules/completeness.md` (always-on).
 - Network errors: retry with exponential backoff (3 attempts)
 - Inference errors: return immediately, never retry silently
 - Shard integrity errors: quarantine shard, re-download, penalize peer trust
 - Credit errors: degrade priority tier, never block
 
 ### Naming
-- Types: `PascalCase` (e.g., `NodeId`, `ModelManifest`, `PipelineSegment`)
-- Functions/methods: `snake_case`
-- Newtype wrappers for type safety: `NodeId([u8; 32])`, `ModelId(String)`, `ShardId { model_id, index }`
-- Short display for NodeId: first 8 bytes hex-encoded
+`PascalCase` types, `snake_case` fns. Newtype wrappers for safety —
+`NodeId([u8; 32])`, `ModelId(String)`, `ShardId { model_id, index }`; NodeId
+displays as its first 8 bytes hex.
 
 ### Serialization
-- HTTP API: `serde_json` (match OpenAI format exactly)
-- Network protocol: Unified codec — `serde_json` for control messages, binary with type-tag byte for tensor payloads
-- Config: TOML via `toml` crate
-- Database values: `serde_json` serialized into redb
+`serde_json` for the HTTP API (match OpenAI exactly) and for redb values; TOML
+for config; the network uses a unified codec — JSON control messages, binary
+with a type-tag byte for tensor payloads.
 
 ### Async Patterns
 - All subsystems communicate via `tokio::sync::mpsc` channels
@@ -83,22 +75,16 @@ Two that carry contracts rather than just versions:
 - Use `tokio::select!` in daemon/mod.rs to wait for shutdown or task exit
 
 ### Logging
-- Use `tracing` with structured spans (include context like peer_count, request_id, model_id)
-- Target format: `swarmllm::module::submodule`
-- Verbosity levels: info (default), debug (-v), debug+libp2p (-vv), trace (-vvv)
-- Key metrics: peers.connected, inference.requests, inference.latency_ms, credits.balance, shards.hosted
+`tracing`, structured spans carrying request_id / model_id / peer_count, target
+`swarmllm::module::submodule`. Verbosity: info, `-v` debug, `-vv` +libp2p,
+`-vvv` trace.
 
 ### Frontend
 - Vanilla HTML/CSS/JS — no framework, no build step; embedded via `include_dir!`.
-  `App` global namespace; 28 JS files (4 `core/` + 19 `components/` + `init.js` + 4
-  standalone); one `index.html` with 11 `<template>`s and 3 modal overlays.
-- Nav is **four** destinations — Chat · Models · Dashboard · Network (the map AND
-  the leaderboard) — plus Compare and My Devices under "More". Rank by how OFTEN
-  a destination is wanted, never by how expert you must be to want it.
-- Storage keys are named constants on `App` (state.js), never raw literals. Fetch
-  model/stats data via `App.data.*`, never a bare `authFetch`.
-- **5** WS message types, all handled by `_handleActivityEvent()`; **2** broadcast
-  channels. Do not add to either set.
+  `App` global namespace. File inventory: `docs/ARCHITECTURE.md` source tree.
+- **5** WS message types, **2** broadcast channels. Do not add to either set.
+- Nav ranking, storage-key constants and `App.data.*` are in
+  `.claude/rules/arch-frontend.md`, which loads when you open `frontend/`.
 - i18n: **1389 translation keys** (**1391 entries per locale** incl. `_lang` +
   `_dir`) × 21 languages, sorted by key. Parity and counts are asserted — **update
   BOTH CLAUDE.md and `docs/ARCHITECTURE.md`**. A new key MUST be translated into
@@ -131,10 +117,9 @@ has put main red twice.
 - **Benches, harnesses and their traps: `docs/DIAGNOSTICS.md` § Benchmarks.** The
   release gate's three (`smoke_test.sh`, `release_shapes.sh`,
   `family_conformance.sh`) all run on the DOWNLOADED artifact.
-- **Measurement discipline**: min-of-N on an IDLE box, for benchmarks only — **not
-  for live measurement** (#367). A/B inside ONE binary via an env switch, never
-  across two builds. **Verify the mechanism fired**, not just that the outcome
-  improved. Pinned models: `docs/REFERENCE_MODELS.md`.
+- **Measurement**: min-of-N on an IDLE box, benchmarks only — **not live** (#367).
+  A/B inside ONE binary via an env switch, never across two builds. **Verify the
+  mechanism fired.** Pinned models: `docs/REFERENCE_MODELS.md`.
 
 ## Key Design Decisions
 
@@ -147,23 +132,15 @@ has put main red twice.
   affects who is served or how fast. `credits_stay_dormant` fails the build if one
   starts gating again. **Read `docs/CREDITS_DESIGN.md` before touching credits** —
   why it is off, what is actually true today, and the exit criteria.
-- KV-cache sessions expire after 10 minutes of inactivity (configurable)
-- Shard verification: BLAKE3 content hash checked on every load
-- Pipeline failover: hot-standby nodes pre-identified per segment
-- **Encryption — two layers, distinct concerns:**
-  - **Layer 1 — `network.enable_encryption` (DEFAULT TRUE)**: ChaCha20-Poly1305
-    sealing of every inter-node activation, per-session X25519 ECDH. AAD via
-    `build_layer_forward_aad` (the single source of truth — every optional wire
-    trailer must be bound there). **No plaintext fallback**: a `seal()` failure
-    drops the forward. Turn it off only for local-loopback debugging.
-  - **Layer 2 — `inference.encrypted_pipeline` ("boomerang", DEFAULT FALSE)**:
-    this node keeps BOTH ends, so no peer sees the prompt or the sampled tokens.
-    ⚠ **Peers DO see intermediate hidden states in plaintext** — a matmul cannot
-    run on ciphertext, and those states are ~81% invertible back to text at the
-    final layer. It is a STRUCTURAL guarantee, not a cryptographic one against
-    the computing node. Costs ~1 RTT/token. Full reasoning, and why FHE/MPC is
-    three orders of magnitude away: `docs/ARCHITECTURE.md` § Pipeline Privacy
-    Model and `docs/FUTURE_WORK.md`.
+- KV-cache sessions expire after 10 min idle; shards are BLAKE3-verified on every
+  load; pipeline failover uses per-segment hot standbys.
+- **Encryption is two layers**: `network.enable_encryption` (DEFAULT TRUE, seals
+  every inter-node activation, no plaintext fallback) and
+  `inference.encrypted_pipeline` ("boomerang", DEFAULT FALSE, this node keeps
+  both ends). ⚠ **Boomerang is a STRUCTURAL guarantee, not a cryptographic one**
+  — peers still see intermediate hidden states in plaintext, ~81% invertible
+  back to text. Never describe it as hiding data from the computing node.
+  → `docs/ARCHITECTURE.md` § Pipeline Privacy Model.
 - **Private mode** restricts YOUR outbound inference to pool/LAN nodes only; the node
   still serves the swarm. `pool::scope::allowed_node_set()` gates everything.
 - **No full model download, ever implicitly.** A node NEVER needs the whole GGUF or
@@ -174,13 +151,11 @@ has put main red twice.
 
 ## Subagent Choices for This Codebase
 
-Override the default that would otherwise pick haiku — this codebase's invariants
-need real reasoning, not pattern-matching. `Task(feature-dev:code-reviewer)`,
-`Task(feature-dev:code-architect)`, `Task(Plan)` and `Task(root-cause)` → **sonnet**.
-**Never delegate production code writing** — the main session writes it.
-`Task(root-cause)` (`.claude/agents/root-cause.md`) returns CAUSED / NOT-CAUSED /
-UNDETERMINED and never a fix; reach for it BEFORE attributing a failure or
-reverting, especially when the suspect is your own recent change.
+Override the default that would pick haiku — these invariants need reasoning, not
+pattern-matching: `code-reviewer`, `code-architect`, `Plan`, `root-cause` →
+**sonnet**. **Never delegate production code writing.** `Task(root-cause)` returns
+CAUSED / NOT-CAUSED / UNDETERMINED and never a fix — reach for it BEFORE blaming
+a change, especially your own.
 
 ## Reference Documents
 
@@ -189,17 +164,18 @@ reverting, especially when the suspect is your own recent change.
 - `.claude/rules/diagnosis.md` — **read before blaming any change for any symptom, and before implementing anything non-trivial.** Rule 0 is research-first; then baseline before blaming, verify the mechanism fired, check the test fails without the fix.
 - `docs/DIAGNOSTICS.md` — `DIAG:` instrumentation, benches and their traps
 - `docs/FUTURE_WORK.md` — deferred items, with enough context to pick up cold
-- `docs/CREDITS_DESIGN.md` — read before touching credits · `docs/book/` — mdBook site
-- `.claude/sweep-log.jsonl` — every `/sweep` finding and its status. **Grep before re-reporting.**
-- `SwarmLLM_Technical_Specification.docx` — **gitignored, absent from a clone.** Never link a contributor to it.
+- `docs/CREDITS_DESIGN.md` (before touching credits) · `docs/book/` — mdBook site
+- `.claude/sweep-log.jsonl` — every `/sweep` finding. **Grep before re-reporting.**
+- `SwarmLLM_Technical_Specification.docx` — **gitignored, absent from a clone.**
 
 ## Status
 
 **v0.3.182-alpha released and deployed (2026-09-15).** Nothing functional is
 unreleased. Release procedure: **`memory/release_gate.md`** — the ordered steps
 and every caution earned at a past gate; do not re-derive it. Per-release
-history: `memory/round_history.md`. Gotchas index: `memory/gotchas.md`
-(next free index 613). Standing cautions: `memory/open_cautions.md` — **read at
+history: `memory/round_history.md`. Gotchas: `memory/gotchas.md` (the next free
+index is tracked in `memory/MEMORY.md`, not here — it drifted for four rounds
+when both claimed it). Standing cautions: `memory/open_cautions.md` — **read at
 session start.** (`memory/` is the auto-memory dir outside the repo:
 `~/.claude/projects/-home-user-SwarmLLM/memory/`.)
 
@@ -207,19 +183,17 @@ session start.** (`memory/` is the auto-memory dir outside the repo:
 
 ## Pushes are public-facing
 
-The repo is public and a webhook relays every commit to the project Discord,
-read by non-technical users deciding whether to run this software. Commit
-subjects must stand alone with no context, lead with user-visible impact before
-mechanism, and never name a person. Get sign-off before a force-push. Full
-guidance: `.claude/rules/workflow.md` § "Pushes are public-facing".
+The repo is public and a webhook relays every commit to the project Discord, read
+by non-technical users deciding whether to run this software. Subjects must stand
+alone, lead with user-visible impact before mechanism, and never name a person.
+Sign-off before a force-push. → `.claude/rules/workflow.md`.
 
 ## Common Commands
 
 ```bash
-cargo build --no-default-features --features dev,claude-subscription  # Dev build (live frontend + Claude Code)
-cargo fmt && cargo clippy --all-targets -- -D warnings  # Lint (MUST pass before push)
-cargo test                           # All tests
-cargo run -- run -p 8800 -v          # Start daemon
+# Always BOTH features: bare `dev` omits the Claude subscription provider.
+cargo build --no-default-features --features dev,claude-subscription
+cargo fmt && cargo clippy --all-targets -- -D warnings   # MUST pass before push
+cargo test                            # counts above are from this + both features
+cargo run -- run -p 8800 -v           # start daemon
 ```
-
-**Note:** Always include `claude-subscription` feature when testing Claude Code integration. Bare `--features dev` omits the Claude subscription provider.

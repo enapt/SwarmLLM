@@ -81,6 +81,26 @@
             "timeout": 5
           }
         ]
+      },
+      {
+        "matcher": "Edit|Write|NotebookEdit|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PROJECT_DIR}/.claude/scripts/research-gate.sh",
+            "timeout": 15
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PROJECT_DIR}/.claude/scripts/commit-gate.sh",
+            "timeout": 180
+          }
+        ]
       }
     ],
     "PostToolUse": [

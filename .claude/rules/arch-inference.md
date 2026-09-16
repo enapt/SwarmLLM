@@ -20,6 +20,11 @@ paths:
   - "src/inference/allreduce.rs"
   - "vendor/candle/**"
   - "vendor/candle-flash-attn/**"
+  - "src/inference/shard_layout.rs"
+  - "src/inference/prof.rs"
+  - "src/inference/local_embedder.rs"
+  - "src/inference/swift.rs"
+  - "src/inference/mod.rs"
 ---
 
 # Inference kernels, caches and the tokenizer

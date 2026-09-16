@@ -8,6 +8,9 @@ paths:
   - "src/inference/dsd_controller.rs"
   - "src/inference/trace.rs"
   - "src/inference/ngram_lookup.rs"
+  - "src/inference/cancel.rs"
+  - "src/inference/prefill_pacer.rs"
+  - "src/inference/thermal.rs"
 ---
 
 # Scheduling, routing and failover

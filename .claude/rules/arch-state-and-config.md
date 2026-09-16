@@ -7,6 +7,15 @@ paths:
   - "src/health/**"
   - "src/lib.rs"
   - "src/types.rs"
+  - "src/daemon/mod.rs"
+  - "src/daemon/startup.rs"
+  - "src/daemon/supervisor.rs"
+  - "src/daemon/background.rs"
+  - "src/daemon/helpers.rs"
+  - "src/daemon/manifest.rs"
+  - "src/main.rs"
+  - "src/update_restart.rs"
+  - "src/bin/launcher.rs"
 ---
 
 # SharedState, live config and credits

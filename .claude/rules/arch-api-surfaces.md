@@ -5,6 +5,7 @@ paths:
   - "src/http.rs"
   - "src/inference/chat_template/**"
   - "src/api/tool_parse.rs"
+  - "src/cli/**"
 ---
 
 # API surfaces, errors and streaming

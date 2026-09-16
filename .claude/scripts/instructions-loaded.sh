@@ -7,8 +7,19 @@
 # Writes one JSONL line per load to .claude/logs/instructions-loaded.jsonl.
 # What loaded this session, newest last:
 #   jq -r '"\(.at)  \(.reason)  \(.lines)L  \(.file)"' .claude/logs/instructions-loaded.jsonl | tail -20
-# Total always-on cost:
-#   jq -s '[.[]|select(.reason=="session_start")]|{files:length,bytes:(map(.bytes)|add)}' .claude/logs/instructions-loaded.jsonl
+# Always-on cost of the most recent session start:
+#   .claude/scripts/instruction-cost.sh
+#
+# ⚠ `lines`/`bytes` came from a `file_content` key that no payload has ever
+# carried, so both were 0 on every record ever written and the cost query in
+# this header reported `bytes: 0`. The size is now measured by STATTING `path`,
+# which the payload does carry and which the first version already logged
+# correctly. Same family as the `path`-vs-`file_path` bug that made
+# pre-edit-check.sh inert: a hook whose exit code is 0 and whose fields are
+# empty looks exactly like a hook that is working (gotcha #614, #617).
+#
+# `session_id` is recorded so a gate can ask "did this rules file load in THIS
+# session" without guessing from timestamps; research-gate.sh depends on it.
 set -uo pipefail
 LOG_DIR="${CLAUDE_PROJECT_DIR:-.}/.claude/logs"
 mkdir -p "$LOG_DIR"
@@ -22,22 +33,36 @@ try:
     d = json.loads(os.environ.get("HOOK_INPUT", ""))
 except Exception:
     raise SystemExit(0)          # not our payload; never fail the hook
-content = d.get("file_content") or ""
+
 path = d.get("file_path", "")
+# Measure the file on disk. `file_content` is not a key any payload has carried;
+# trusting it is what made this log report every instruction file as 0 bytes.
+lines = bytes_ = 0
+try:
+    raw = open(path, "rb").read()
+    bytes_ = len(raw)
+    lines = raw.count(b"\n") + (0 if raw.endswith(b"\n") or not raw else 1)
+except OSError:
+    pass
+
 rec = {
     "at": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
+    "session": d.get("session_id", ""),
     "reason": d.get("load_reason", "?"),
     "file": os.path.basename(path) or path,
     "path": path,
-    "lines": content.count("\n") + (1 if content and not content.endswith("\n") else 0),
-    "bytes": len(content.encode("utf-8")),
+    "lines": lines,
+    "bytes": bytes_,
+    # Recorded so a payload schema change is VISIBLE in the log rather than
+    # silently zeroing a field, which is how the bug above survived.
+    "keys": sorted(d.keys()),
 }
 with open(log, "a") as f:
     f.write(json.dumps(rec) + "\n")
 try:                              # keep the log bounded
-    lines = open(log).readlines()
-    if len(lines) > 2000:
-        open(log, "w").writelines(lines[-2000:])
+    lines_ = open(log).readlines()
+    if len(lines_) > 2000:
+        open(log, "w").writelines(lines_[-2000:])
 except OSError:
     pass
 PY

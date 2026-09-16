@@ -1,6 +1,7 @@
 ---
 paths:
   - "frontend/**"
+  - "crates/swarmllm-frontend/**"
 ---
 
 # Frontend
