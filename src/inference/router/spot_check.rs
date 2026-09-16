@@ -92,7 +92,65 @@ pub(super) fn check_distributed_result(
         }
     }
 
+    // The same failure in the shape it actually arrives in: one repeated TOKEN,
+    // not one repeated character.
+    if ran_to_the_cap(&output.finish_reason) && dominated_by_one_token(text) {
+        return ResultCheck::Malformed("output ran to the token cap repeating one token");
+    }
+
     ResultCheck::WellFormed
+}
+
+/// Did the reply stop because it ran out of budget rather than because the
+/// model chose to stop?
+///
+/// Half of the degeneration test below, and the half that keeps it honest. A
+/// model asked to print a grid of zeros answers with one repeated token and
+/// ends its own turn; a generation loop that has come off the rails runs until
+/// something stops it. Requiring the cap is what separates them.
+fn ran_to_the_cap(finish_reason: &str) -> bool {
+    finish_reason == "length"
+}
+
+/// Is this reply mostly one token repeated?
+///
+/// The first detector named in the text-degeneration literature is "dominated
+/// by a single token" (Holtzman et al., *The Curious Case of Neural Text
+/// Degeneration*, ICLR 2020, for the failure mode; the production detectors
+/// that follow from it also look for high-coverage repeated n-grams and
+/// tail loops). Paired with [`ran_to_the_cap`] this is the conservative form
+/// those sources recommend, because the broad version of the heuristic
+/// "will also penalize legitimate outputs that contain natural repetition".
+///
+/// **Approximated on whitespace, not on real tokens**, because the coordinator
+/// holds a decoded string here and nothing else — this check is deliberately
+/// pure and synchronous (see the module docs). That makes it blind to a
+/// degenerate reply with no spaces in it, CJK among them; the character check
+/// above catches only the single-character case of that. Worth widening only
+/// with a measured example in hand.
+///
+/// Measured on the case this was written for: 56 words, 13 distinct, one token
+/// 39 times — a 70% share against the 50% bar.
+fn dominated_by_one_token(text: &str) -> bool {
+    /// Below this there is not enough reply to judge. A short answer can
+    /// legitimately be mostly one word ("yes yes yes").
+    const MIN_WORDS: usize = 20;
+    /// Share of the reply one token must occupy. Ordinary English peaks around
+    /// 7% on "the"; even heavily structured output rarely passes a third. Half
+    /// is far outside anything a working model produces while ALSO having been
+    /// cut off by the cap.
+    const DOMINANT_SHARE: f32 = 0.5;
+
+    let words: Vec<&str> = text.split_whitespace().collect();
+    if words.len() < MIN_WORDS {
+        return false;
+    }
+    let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for w in &words {
+        *counts.entry(*w).or_insert(0) += 1;
+    }
+    let most = counts.values().copied().max().unwrap_or(0);
+    most as f32 / words.len() as f32 >= DOMINANT_SHARE
 }
 
 /// Apply a verdict to the peers that served the request.
@@ -406,6 +464,126 @@ mod tests {
         assert!(
             (many - one).abs() < f32::EPSILON,
             "three segments on one peer paid {many}, one segment paid {one}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod degeneration_tests {
+    use super::*;
+    use crate::types::{ModelId, PipelineSegment};
+    use swarmllm_types::ShardId;
+
+    fn node(b: u8) -> NodeId {
+        NodeId([b; 32])
+    }
+
+    fn remote_assignment() -> PipelineAssignment {
+        PipelineAssignment {
+            request_id: uuid::Uuid::new_v4(),
+            segments: vec![PipelineSegment {
+                node_id: node(9),
+                shard_id: ShardId {
+                    model_id: ModelId("m".into()),
+                    index: 0,
+                },
+                layer_range: (0, 1),
+            }],
+            standbys: Vec::new(),
+            tp_groups: Vec::new(),
+            supports_speculative: false,
+        }
+    }
+
+    fn reply(content: &str, finish_reason: &str) -> InferenceOutput {
+        InferenceOutput {
+            request_id: uuid::Uuid::new_v4(),
+            content: content.to_string(),
+            prompt_tokens: 34,
+            completion_tokens: 64,
+            finish_reason: finish_reason.into(),
+            session_id: None,
+            token_logprobs: Vec::new(),
+            matched_stop_sequence: None,
+            trace: None,
+        }
+    }
+
+    /// Verbatim from the live swarm, 2026-09-16: `llama-xlam-2-8b-fc-r-q4-k-m`
+    /// served entirely by one peer, returned at HTTP 200 with
+    /// `finish_reason=length`. 56 whitespace words, 13 distinct, one token 39
+    /// times.
+    const DEGENERATE: &str = "yahoo embodied vect vect vect vect\u{62a}\u{647}\u{645}\u{b2c8}\u{ae4c} Corinth Daisyellantellantellantulsive levitra levitra levitra levitramultipart SCC witches jm jm jm jm jm jm jm jm jm jm jm jm jm jm jm jm jm jm jm jm jm jm jm jm jm jm jm jm jm jm jm jm jm jm_objects crc SCC jm jm jm jm jm jm";
+
+    /// The shape a broken segment actually emits is a repeated TOKEN, and the
+    /// only degeneration check here caught a repeated CHARACTER — so this reply
+    /// was judged well-formed and the peer that produced it earned
+    /// `InferenceSuccess`. That is the exact movement this module exists to
+    /// prevent: issue #21 reported a peer returning degenerate output climbing
+    /// the candidate ranking, the sampling was fixed, and the check itself was
+    /// left too narrow to see the common case.
+    #[test]
+    fn a_reply_that_is_one_token_over_and_over_earns_nobody_any_trust() {
+        let verdict =
+            check_distributed_result(&remote_assignment(), &node(1), &reply(DEGENERATE, "length"));
+        assert!(
+            matches!(verdict, ResultCheck::Malformed(_)),
+            "a reply that is 70% one token and hit the cap is not well-formed, got {verdict:?}"
+        );
+    }
+
+    /// The conservative half of the rule. A model asked for repetitive output
+    /// produces it and then ENDS ITS TURN; a generation loop off the rails runs
+    /// until the budget stops it. Without the cap condition this heuristic
+    /// would dock a peer for correctly answering "print a 5x5 grid of zeros" —
+    /// the false positive the degeneration literature warns about.
+    #[test]
+    fn legitimately_repetitive_output_that_finished_on_its_own_is_well_formed() {
+        let zeros = "0 ".repeat(40);
+        assert_eq!(
+            check_distributed_result(&remote_assignment(), &node(1), &reply(&zeros, "stop")),
+            ResultCheck::WellFormed,
+            "the model chose to stop, so this is an answer and not a loop"
+        );
+    }
+
+    /// Ordinary prose that was simply cut off by `max_tokens` must not be
+    /// judged degenerate. This is the common case of `finish_reason: length`
+    /// and by far the most expensive thing to get wrong.
+    #[test]
+    fn an_ordinary_reply_cut_off_by_the_budget_is_well_formed() {
+        let essay = "The sea has shaped human history in ways that are easy to \
+                     overlook from dry land, carrying trade and disease and language \
+                     between continents long before anyone drew an accurate map of it";
+        assert_eq!(
+            check_distributed_result(&remote_assignment(), &node(1), &reply(essay, "length")),
+            ResultCheck::WellFormed
+        );
+    }
+
+    /// Short replies are not judged: "yes yes yes" is a legitimate answer and
+    /// there is not enough of it to tell repetition from degeneration.
+    #[test]
+    fn a_short_reply_is_too_little_evidence_to_call_degenerate() {
+        assert_eq!(
+            check_distributed_result(
+                &remote_assignment(),
+                &node(1),
+                &reply("yes yes yes", "length")
+            ),
+            ResultCheck::WellFormed
+        );
+    }
+
+    /// Every segment was ours, so there is no peer to doubt — checked before
+    /// any content test, and unchanged by this addition.
+    #[test]
+    fn a_purely_local_pipeline_is_still_nobodys_fault() {
+        let mut a = remote_assignment();
+        a.segments[0].node_id = node(1);
+        assert_eq!(
+            check_distributed_result(&a, &node(1), &reply(DEGENERATE, "length")),
+            ResultCheck::NoRemoteSegments
         );
     }
 }
