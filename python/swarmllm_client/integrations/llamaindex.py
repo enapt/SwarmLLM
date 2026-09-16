@@ -42,6 +42,13 @@ except ImportError:
 from swarmllm_client.client import SwarmLLM as SwarmLLMClient
 
 
+# What to tell LlamaIndex a reply might be worth, when we are deliberately NOT
+# telling the server. `max_tokens` now defaults to None so the node sizes the
+# reply against the model's real context window, but LlamaIndex's own prompt
+# arithmetic needs a number for `num_output`, so it keeps the previous constant.
+DEFAULT_NUM_OUTPUT = 2048
+
+
 _ROLE_MAP = {
     MessageRole.SYSTEM: "system",
     MessageRole.USER: "user",
@@ -66,7 +73,7 @@ class SwarmLLM(CustomLLM):
     api_key: Optional[str] = Field(default=None)
     model_name: Optional[str] = Field(default=None)
     temperature: float = Field(default=0.7)
-    max_tokens: int = Field(default=2048)
+    max_tokens: Optional[int] = Field(default=None)
     timeout: float = Field(default=120.0)
     context_window: int = Field(default=4096)
 
@@ -74,7 +81,11 @@ class SwarmLLM(CustomLLM):
     def metadata(self) -> LLMMetadata:
         return LLMMetadata(
             context_window=self.context_window,
-            num_output=self.max_tokens,
+            # LlamaIndex sizes its own prompt maths with this and needs a
+            # number; `max_tokens` is now None by default so the server can pick
+            # against the real context window, so fall back to the previous
+            # constant for the metadata only.
+            num_output=self.max_tokens or DEFAULT_NUM_OUTPUT,
             model_name=self.model_name or "swarmllm",
         )
 

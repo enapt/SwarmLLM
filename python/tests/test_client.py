@@ -102,6 +102,38 @@ class TestChatCompletion:
         "session_id": "sess-abc",
     }
 
+    def test_max_tokens_is_omitted_unless_the_caller_asks_for_one(self):
+        """An unset reply length must not be sent at all.
+
+        The server treats an ABSENT `max_tokens` as "size the reply against
+        this model's context window" and a PRESENT one as a budget the caller
+        chose — which it honours exactly or refuses, never shortens. Sending a
+        fixed 2048 by default therefore refused every message on any model
+        whose whole window is 2048, TinyLlama included (report #001): the SDK
+        was opting its own users out of the fix by always naming a number.
+        """
+        c = SwarmLLM()
+        mock_resp = _mock_response(json_data=self.CHAT_RESPONSE)
+
+        with patch.object(c._session, "post", return_value=mock_resp) as post:
+            c.chat_completion([{"role": "user", "content": "Hi"}], model="m")
+        body = post.call_args.kwargs["json"]
+        assert "max_tokens" not in body, (
+            "an unset reply length must be omitted, not sent as a number or as "
+            f"null: {body!r}"
+        )
+
+        with patch.object(c._session, "post", return_value=mock_resp) as post:
+            c.chat_completion(
+                [{"role": "user", "content": "Hi"}], model="m", max_tokens=64
+            )
+        assert post.call_args.kwargs["json"]["max_tokens"] == 64
+
+        # The convenience wrapper must not reintroduce a default of its own.
+        with patch.object(c._session, "post", return_value=mock_resp) as post:
+            c.chat("Hi", model="m")
+        assert "max_tokens" not in post.call_args.kwargs["json"]
+
     def test_non_streaming(self):
         c = SwarmLLM()
         mock_resp = _mock_response(json_data=self.CHAT_RESPONSE)

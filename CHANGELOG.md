@@ -69,6 +69,12 @@ is for you. Nodes do not need to update together.
 - **A failure reported on a streaming connection now carries the same advice as
   one reported without streaming.** Both explained what went wrong; only one
   suggested what to do about it.
+- **The Python client no longer opts its own users out of the first fix above.**
+  It named a fixed reply length on every request unless you overrode it, which
+  is exactly what the smallest models refuse. Leaving it unset now means the
+  same thing it means everywhere else — let the node size the reply against the
+  model — and naming one still does what it always did. The LangChain and
+  LlamaIndex adapters follow the same rule.
 
 ### Changed
 

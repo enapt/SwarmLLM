@@ -72,7 +72,7 @@ class ChatSwarmLLM(BaseChatModel):
     api_key: Optional[str] = None
     model_name: Optional[str] = None
     temperature: float = 0.7
-    max_tokens: int = 2048
+    max_tokens: Optional[int] = None
     top_p: float = 0.9
     timeout: float = 120.0
 

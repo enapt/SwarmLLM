@@ -114,7 +114,7 @@ class SwarmLLM:
         model: Optional[str] = None,
         *,
         stream: bool = False,
-        max_tokens: int = 2048,
+        max_tokens: Optional[int] = None,
         temperature: float = 0.7,
         top_p: float = 0.9,
         session_id: Optional[str] = None,
@@ -156,13 +156,18 @@ class SwarmLLM:
             "model": model,
             "messages": msg_dicts,
             "stream": stream,
-            "max_tokens": max_tokens,
             "temperature": temperature,
             "top_p": top_p,
             "frequency_penalty": frequency_penalty,
             "presence_penalty": presence_penalty,
             **kwargs,
         }
+        # Omitted entirely when unset, never sent as null: absent means "size
+        # the reply against this model's context window", and a number sent
+        # here is taken as a budget the caller chose and is refused rather than
+        # shortened if it does not fit.
+        if max_tokens is not None:
+            body["max_tokens"] = max_tokens
         if session_id:
             body["session_id"] = session_id
         if tools:
@@ -235,7 +240,7 @@ class SwarmLLM:
         model: Optional[str] = None,
         system: Optional[str] = None,
         stream: bool = False,
-        max_tokens: int = 2048,
+        max_tokens: Optional[int] = None,
         temperature: float = 0.7,
         session_id: Optional[str] = None,
         **kwargs: Any,
