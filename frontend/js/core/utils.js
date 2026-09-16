@@ -1222,6 +1222,60 @@
     measureTopBanners();
   }
 
+  // The software keyboard is the OTHER way the visible viewport shrinks, and
+  // `dvh` does NOT track it. On iOS Safari the layout viewport — and every
+  // viewport unit with it — keeps its full height when the keyboard opens;
+  // only `window.visualViewport` reports what is actually on screen. The shell
+  // is `100dvh` tall, so with a keyboard up it is taller than the screen: the
+  // content slides up and a strip opens at the bottom where the accessory bar
+  // sits (report #036, symptom 2, seen on iPad). Android is unaffected because
+  // it resizes the layout viewport instead.
+  //
+  // Deliberately NARROW, because no iOS device is available here to verify it
+  // on. Two conditions must BOTH hold before the property is set — an editable
+  // element has focus, and the visual viewport is meaningfully shorter than the
+  // layout one — and it is removed the moment either stops holding. A browser
+  // that never shrinks its visual viewport therefore never takes this path at
+  // all, so if the reasoning about iOS is wrong the failure mode is "no
+  // change", never a mis-sized shell for everybody.
+  //
+  // The threshold separates a keyboard (~260-350px, ~150px for an iPad
+  // floating one) from Safari's collapsing address bar (~60-90px), which `dvh`
+  // already handles correctly and which must NOT trigger this.
+  var VV_KEYBOARD_MIN_SHRINK_PX = 120;
+
+  function editableHasFocus() {
+    var el = document.activeElement;
+    if (!el) return false;
+    return el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable === true;
+  }
+
+  function applyVisualViewportHeight() {
+    var vv = window.visualViewport;
+    if (!vv) return;
+    var root = document.documentElement;
+    var shrink = window.innerHeight - vv.height;
+    if (editableHasFocus() && shrink >= VV_KEYBOARD_MIN_SHRINK_PX) {
+      root.style.setProperty('--visual-viewport-height', vv.height + 'px');
+    } else {
+      root.style.removeProperty('--visual-viewport-height');
+      // Safari scrolls the window to reveal the focused input and does not put
+      // it back, which leaves the locked shell offset by whatever it scrolled.
+      if (window.scrollY !== 0) window.scrollTo(0, 0);
+    }
+  }
+
+  function initVisualViewportHeight() {
+    var vv = window.visualViewport;
+    if (!vv) return;
+    vv.addEventListener('resize', applyVisualViewportHeight);
+    vv.addEventListener('scroll', applyVisualViewportHeight);
+    // focus/blur change the first condition without changing the second.
+    document.addEventListener('focusin', applyVisualViewportHeight);
+    document.addEventListener('focusout', applyVisualViewportHeight);
+    applyVisualViewportHeight();
+  }
+
   App.utils = {
     clientAddr: clientAddr,
     clientTrust: clientTrust,
@@ -1267,6 +1321,7 @@
     inlineMarkdown: inlineMarkdown,
     measureTopBanners: measureTopBanners,
     initTopBannerOffset: initTopBannerOffset,
+    initVisualViewportHeight: initVisualViewportHeight,
     modelApiUrl: function(modelId) {
       var parts = Array.prototype.slice.call(arguments, 1);
       var base = '/api/admin/models/' + encodeURIComponent(modelId);
@@ -1277,4 +1332,5 @@
   // Scripts sit at the end of <body>, so the body exists here and a banner
   // shown during startup is covered from the first paint.
   initTopBannerOffset();
+  initVisualViewportHeight();
 })();

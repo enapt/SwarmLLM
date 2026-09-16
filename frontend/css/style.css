@@ -425,6 +425,31 @@ a:hover { color: var(--accent-hover); }
    controls and the nav matter more on a phone. */
 @media (max-width: 899px) {
   .app-header .app-version, .header-link { display: none; }
+
+  /* The nav row must be able to give way, or it is the thing that makes the
+     whole page draggable sideways on iOS (report #036, symptom 1).
+     `flex: 0 0 auto` forbade it outright, so on a screen too narrow for five
+     destinations plus the logo and the node controls, the row simply stayed at
+     its natural width and the header overflowed a `position: fixed` element
+     that has no `overflow-x` — and `body { overflow: hidden }` does not stop
+     iOS Safari dragging the page across that excess (report #034's mechanism,
+     reached here by a different trigger).
+     Measured in English at 390px: ~510px wanted against 390px available, with
+     the "More" tab clipped at the edge — and the reporter's screenshots are
+     Italian, where "Dashboard" is "Pannello" and "Models" is "Lo sciame", so
+     testing this in English UNDERSTATES it. Every destination stays reachable;
+     the strip scrolls within itself instead of moving the page. */
+  .header-center {
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow-x: auto;
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+  .header-center::-webkit-scrollbar { display: none; }
+  /* The More panel needs to escape that scroll container — see the ≤899px
+     block below `.nav-more-panel`, which has to sit AFTER the base rule to
+     beat it on source order. */
 }
 
 /* Tab buttons */
@@ -460,15 +485,43 @@ a:hover { color: var(--accent-hover); }
   display: flex; flex-direction: column; gap: 2px;
 }
 .nav-more-panel .tab-btn { text-align: left; width: 100%; }
+/* Hang the panel off the VIEWPORT, not off its trigger, once the nav strip
+   scrolls (see `.header-center` in the ≤899px block above).
+   Two things break a trigger-anchored panel at this width. It is `position:
+   absolute` inside `.nav-more`, which now lives in a container with
+   `overflow-x: auto` — and a scroll container clips on BOTH axes whatever
+   `overflow-y` says. And `.nav-more` itself can be scrolled out of view, which
+   takes the panel with it: measured at 390px, the trigger's right edge sits at
+   432 and the panel's `right: 8px` put its own right edge at 424, i.e. 34px
+   past a 390px screen — the `right`-hanging rule below cannot help when the
+   thing it hangs from is itself off-screen.
+   `--chrome-top` (header height + any top banner) rather than a literal, so a
+   banner appearing pushes the panel down with the header.
+
+   ⚠ This block MUST stay after the base `.nav-more-panel` rule. Both are one
+   class of specificity, so source order decides, and the first version of this
+   fix sat in the ≤899px block ABOVE it and was silently dead — `position`
+   computed to `absolute` and the panel still ran off-screen. Verified at 390px,
+   not reasoned: the panel now sits below the header, fully on screen, with both
+   of its destinations reachable. */
+@media (max-width: 899px) {
+  .nav-more-panel {
+    position: fixed;
+    top: calc(var(--chrome-top) + 4px);
+    left: auto;
+    right: 8px;
+    margin-top: 0;
+  }
+}
 /* On a narrow screen the trigger sits right of centre — the fourth item in a
    centred row — so a panel hung from its LEFT edge is the half most likely to
    run off the right of the viewport. Hang it from the right instead, where it
-   grows back towards the middle. Reasoned, not observed: no tool available
-   here can give this page a 400px viewport (window resize is a no-op, the
-   dashboard refuses to be framed, popups are blocked), so this is written to
-   need no verification rather than to have had it. */
+   grows back towards the middle. The `8px` matches the gutter that
+   `max-width: calc(100vw - 16px)` above already assumes.
+   Subsumed by the block above at every width it covers; kept because it is the
+   narrower statement of the same intent and costs nothing. */
 @media (max-width: 640px) {
-  .nav-more-panel { left: auto; right: 0; }
+  .nav-more-panel { left: auto; right: 8px; }
 }
 
 /* Model selector in header */
@@ -564,6 +617,13 @@ a:hover { color: var(--accent-hover); }
   display: flex;
   height: calc(100vh - var(--chrome-top));
   height: calc(100dvh - var(--chrome-top));
+  /* `--visual-viewport-height` is set by `utils.js::applyVisualViewportHeight`
+     ONLY while a software keyboard is actually up, and removed otherwise — so
+     this line resolves to the `100dvh` fallback everywhere else, which is
+     exactly the line above it. `dvh` tracks Safari's collapsing address bar but
+     NOT its keyboard: the layout viewport keeps its full height, so the shell
+     stayed taller than the screen and a strip opened at the bottom (#036). */
+  height: calc(var(--visual-viewport-height, 100dvh) - var(--chrome-top));
   margin-top: var(--chrome-top);
 }
 
@@ -2325,8 +2385,17 @@ input[type="range"]::-webkit-slider-thumb {
 .chat-header-lock.active { opacity: 1; color: var(--green-text); }
 
 /* Encryption banner — shown below session header */
+/* `flex-wrap` is load-bearing, not tidying. This row holds up to three items —
+   the warning text, `.enc-overhead`, and (when boomerang is available) the
+   enable button, which is `flex-shrink: 0`. Without wrapping, a viewport too
+   narrow for all three can only compress the two text items, and a text flex
+   item's automatic minimum size is its LONGEST WORD — so they collapsed into
+   one-or-two-word columns while the button was pushed off the right edge of
+   the screen, badge first. Reported on iPhone at v0.3.181 (report #035); it is
+   flex math, not a WebKit quirk, and reproduces in any engine at that width. */
 .chat-enc-banner {
   display: flex; align-items: center; gap: 10px;
+  flex-wrap: wrap; row-gap: 6px;
   padding: 5px 20px;
   font-size: var(--fs-sm);
   font-weight: 500;
@@ -2362,6 +2431,14 @@ input[type="range"]::-webkit-slider-thumb {
   transition: opacity var(--transition), background var(--transition);
 }
 .enc-banner-btn:hover { opacity: 1; background: rgba(255,255,255,0.15); }
+/* Once the row wraps, `margin-left: auto` would strand the button alone on the
+   far right of its own line. On a narrow screen it reads better left-aligned
+   under the text it belongs to, and the tighter padding buys back width that
+   the 20px gutters were spending. */
+@media (max-width: 600px) {
+  .chat-enc-banner { padding: 6px 12px; gap: 6px; }
+  .enc-banner-btn { margin-left: 0; }
+}
 .enc-banner-btn-enable { color: var(--purple-text, #a78bfa); border-color: rgba(167,139,250,0.5); }
 /* Marks prompt privacy as the recommended choice. Without it the machine
    answering you reads your prompt in the clear, which a neutral toggle
