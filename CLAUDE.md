@@ -170,8 +170,8 @@ a change, especially your own.
 
 ## Status
 
-**v0.3.182-alpha released and deployed (2026-09-15).** Nothing functional is
-unreleased. Release procedure: **`memory/release_gate.md`** — the ordered steps
+**v0.3.183-alpha released and deployed to both nodes (2026-09-16).** Nothing
+functional is unreleased. Release procedure: **`memory/release_gate.md`** — the ordered steps
 and every caution earned at a past gate; do not re-derive it. Per-release
 history: `memory/round_history.md`. Gotchas: `memory/gotchas.md` (the next free
 index is tracked in `memory/MEMORY.md`, not here — it drifted for four rounds
