@@ -79,17 +79,61 @@ if tool in ("Edit", "Write", "NotebookEdit"):
     targets = [rel(ti.get("file_path") or ti.get("notebook_path"))]
 elif tool == "Bash":
     cmd = ti.get("command", "") or ""
-    # Conservative: only the mutation forms this repo's sessions actually use.
+    # Only the mutation forms this repo's sessions actually use — but ALL of
+    # them. `examples/research_gate_probe.py` plants one violation per form and
+    # prints which are caught; run it after touching anything below, because a
+    # pattern that silently stops matching reads exactly like a rule nobody
+    # breaks. The first version of this list missed `sed -i -e`, every python
+    # in-place edit (a routine editing method here — see `open_cautions.md` on
+    # multi-edit python scripts), `perl -pi`, `git checkout --`, `git apply`,
+    # `patch <` and `rm`, i.e. most of the Bash path it exists to close.
     pats = [
         r">>?\s*([A-Za-z0-9_./-]+)",          # > file, >> file  (incl. heredocs)
-        r"\bsed\b[^|;&]*?-i[^|;&]*?\s([A-Za-z0-9_./-]+)",
         r"\btee\b\s+(?:-a\s+)?([A-Za-z0-9_./-]+)",
-        r"\b(?:mv|cp)\b\s+\S+\s+([A-Za-z0-9_./-]+)",
+        r"\b(?:mv|cp|install)\b\s+\S+\s+([A-Za-z0-9_./-]+)",
         r"\btruncate\b[^|;&]*\s([A-Za-z0-9_./-]+)",
+        r"\brm\b\s+(?:-[a-zA-Z]+\s+)*([A-Za-z0-9_./-]+)",
+        r"\bpatch\b[^|;&]*?\s([A-Za-z0-9_./-]+)",
+        r"\bgit\s+(?:checkout|restore)\b[^|;&]*?--\s+([A-Za-z0-9_./-]+)",
     ]
+
+    # `sed -i`, `perl -pi` and an in-place python edit all put the path
+    # somewhere a single regex cannot reliably find: the expression may be
+    # quoted or not, `-e` may separate it from the file, and python builds the
+    # path inside a string. Once the command is KNOWN to edit in place, take
+    # every path-like token in it and let the `watched` filter below decide —
+    # a token that is not a governed repo file is dropped there anyway.
+    ANY_PATH = r"([A-Za-z0-9_./-]+\.[A-Za-z0-9]+)"
+    edits_in_place = (
+        re.search(r"\bsed\b[^|;&]*?(?:-i\b|--in-place)", cmd)
+        or re.search(r"\bperl\b\s+-[a-zA-Z]*i[a-zA-Z]*\b", cmd)
+        # A python that WRITES. Reading one must not be gated, so this looks for
+        # the write itself rather than for the interpreter.
+        or re.search(
+            r"""open\s*\([^)]*['"][wa]\+?['"]|\.write_text\s*\(|\.writelines\s*\(|"""
+            r"""\.write\s*\(|os\.replace\s*\(|os\.remove\s*\(|shutil\.(?:copy|move)""",
+            cmd,
+        )
+    )
+    if edits_in_place:
+        pats.append(ANY_PATH)
+
     for pat in pats:
         for m in re.finditer(pat, cmd):
             targets.append(rel(m.group(1)))
+
+    # `git apply` names its targets inside the PATCH, not on the command line.
+    # Read them out of it; an unreadable patch falls through and allows, like
+    # every other unknown here.
+    m = re.search(r"\bgit\s+(?:apply|am)\b[^|;&]*?\s([A-Za-z0-9_./-]+\.[A-Za-z0-9]+)", cmd)
+    if m:
+        try:
+            with open(os.path.join(ROOT, m.group(1))) as fh:
+                for line in fh:
+                    if line.startswith("+++ b/"):
+                        targets.append(rel(line[6:].strip()))
+        except Exception:
+            pass
 
 # Paths this hook must never gate: its own logs, build output, scratch.
 SKIP = (".claude/logs/", "target/", ".git/", "node_modules/")

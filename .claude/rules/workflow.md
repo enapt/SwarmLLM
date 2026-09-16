@@ -66,6 +66,17 @@ were written, looked right, and did nothing until a planted violation proved
 otherwise — `research-gate.sh`'s first version accepted a one-line `grep` of a
 rules file as having loaded it.
 
+**`python3 examples/research_gate_probe.py` is that planted violation, kept.**
+One per Bash mutation form, printing which are caught, plus a null control that
+fails if the gate denies nothing at all. Run it after touching the gate's
+patterns: a regex that silently stops matching reads exactly like a rule nobody
+breaks. Its first run (2026-09-16) found the gate catching redirects, `tee`,
+`cp`/`mv`, `truncate` and quoted `sed -i`, while missing `sed -i -e`, every
+python in-place edit, `perl -pi`, `git checkout --`, `git apply`, `patch <` and
+`rm` — most of the path it exists to close, including the multi-edit python
+script this repo reaches for routinely. All 20 forms are covered now, and the
+six read-only forms stay unblocked.
+
 ## Commit and Push After Each Task
 
 This project requires `git push` after every logical unit of work — don't batch to end of session. Long sessions and compactions can lose uncommitted work.
