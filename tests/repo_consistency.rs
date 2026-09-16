@@ -6489,6 +6489,198 @@ fn the_translated_wrapper_scan_catches_the_defect_it_is_for() {
     );
 }
 
+/// **An element that starts with the `hidden` CLASS can only be revealed by
+/// removing that class.** `.hidden` is `display: none !important`, and no
+/// inline `style.display` can beat an `!important` declaration, whatever value
+/// it is set to.
+///
+/// This was FIVE dead surfaces at once, found from one report (#037): both pool
+/// entry buttons — the only way into the My Devices feature for a node not yet
+/// in a pool — plus the Claude subscription card in Settings and the chat image
+/// preview, none of which could ever appear. The JS ran, threw nothing, and
+/// logged nothing; only the computed style showed it.
+///
+/// It is a MIGRATION hazard, not a coding mistake: the handlers were written
+/// against markup that used an inline `display`, and the elements were later
+/// moved to the `hidden` utility class without the JS being brought along —
+/// `pool-create-form` on 2026-04-07, `pool-join-form` on 2026-05-20, each
+/// breaking its button on a different day. Gotcha #469 is the mirror image, and
+/// its own note says this had "been hit and patched locally twice without
+/// anyone naming the general rule". This is the rule, named.
+#[test]
+fn an_element_hidden_by_class_is_never_revealed_by_an_inline_display() {
+    let html = std::fs::read_to_string(repo_root().join("frontend/index.html"))
+        .expect("cannot read frontend/index.html");
+    let js = read_frontend_js();
+
+    let offenders = hidden_class_elements_driven_by_inline_display(&html, &js);
+    assert!(
+        offenders.is_empty(),
+        "these elements carry the `hidden` class in the markup but are shown or \
+         hidden with `style.display`, which `.hidden`'s `!important` always \
+         beats — so they can never appear:\n  {}\n\
+         Use `classList.add('hidden')` / `classList.remove('hidden')` instead, \
+         as the other show/hide sites in this frontend do.",
+        offenders.join("\n  ")
+    );
+}
+
+/// Every `frontend/js/**/*.js` as `(path, source)`.
+fn read_frontend_js() -> Vec<(String, String)> {
+    fn walk(dir: &std::path::Path, out: &mut Vec<(String, String)>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                walk(&p, out);
+            } else if p.extension().is_some_and(|x| x == "js") {
+                if let Ok(s) = std::fs::read_to_string(&p) {
+                    out.push((p.display().to_string(), s));
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(&repo_root().join("frontend/js"), &mut out);
+    out
+}
+
+/// Returns one entry per element that carries the bare `hidden` class in the
+/// markup AND is reached by a `style.display` write in the frontend JS.
+///
+/// Two shapes are recognised, both taken from the real defects rather than
+/// imagined: the direct chain `getElementById('x').style.display = …`, and the
+/// far commoner `var el = document.getElementById('x'); … el.style.display = …`.
+///
+/// The second needs a proximity window, because a generic variable name (`card`,
+/// `area`, `detail` — all three appeared) is reused across functions and
+/// matching it file-wide would report unrelated code. 40 lines is sized from the
+/// real cases, whose widest gap was 7 (`chat.js` 28 → 35).
+fn hidden_class_elements_driven_by_inline_display(
+    html: &str,
+    js: &[(String, String)],
+) -> Vec<String> {
+    // ids whose markup class list contains `hidden` as a whole token
+    let mut hidden_ids: Vec<String> = Vec::new();
+    for tag in html.split('<') {
+        let Some(gt) = tag.find('>') else { continue };
+        let attrs = &tag[..gt];
+        let Some(class) = attr_value(attrs, "class") else {
+            continue;
+        };
+        if !class.split_whitespace().any(|c| c == "hidden") {
+            continue;
+        }
+        if let Some(id) = attr_value(attrs, "id") {
+            hidden_ids.push(id.to_string());
+        }
+    }
+
+    let mut offenders = Vec::new();
+    for id in &hidden_ids {
+        let needle = format!("getElementById('{id}')");
+        for (path, src) in js {
+            let lines: Vec<&str> = src.lines().collect();
+            for (i, line) in lines.iter().enumerate() {
+                if !line.contains(&needle) {
+                    continue;
+                }
+                // (a) direct chain on this very line
+                if line.contains(".style.display") {
+                    offenders.push(format!("{path}:{} #{id} (direct)", i + 1));
+                    continue;
+                }
+                // (b) captured into a variable, then written to nearby
+                let Some(var) = line
+                    .split('=')
+                    .next()
+                    .and_then(|lhs| lhs.split_whitespace().last())
+                else {
+                    continue;
+                };
+                if var.is_empty() {
+                    continue;
+                }
+                let probe = format!("{var}.style.display");
+                let end = (i + 40).min(lines.len());
+                if let Some(off) = lines[i..end].iter().position(|l| l.contains(&probe)) {
+                    offenders.push(format!("{path}:{} #{id} (via `{var}`)", i + off + 1));
+                }
+            }
+        }
+    }
+    offenders.sort();
+    offenders.dedup();
+    offenders
+}
+
+/// Value of `name="…"` in an opening tag's attribute text.
+fn attr_value<'a>(attrs: &'a str, name: &str) -> Option<&'a str> {
+    let pat = format!("{name}=\"");
+    let at = attrs.find(&pat)? + pat.len();
+    let rest = &attrs[at..];
+    Some(&rest[..rest.find('"')?])
+}
+
+/// The scan above finds nothing today, and a scan that finds nothing is
+/// indistinguishable from one that CANNOT find anything (gotcha #413). Plant
+/// both real shapes and require each to fire — and require the corrected shape
+/// not to.
+#[test]
+fn the_hidden_class_scan_catches_both_shapes_of_the_defect() {
+    let html = r#"
+        <div id="pool-create-form" class="mt-2 hidden mx-auto"></div>
+        <div id="image-preview-area" class="hidden bg-surface"></div>
+        <div id="pool-active" style="display:none"></div>
+    "#;
+
+    let direct = vec![(
+        "pool.js".to_string(),
+        "document.getElementById('pool-create-form').style.display = '';".to_string(),
+    )];
+    let hits = hidden_class_elements_driven_by_inline_display(html, &direct);
+    assert_eq!(hits.len(), 1, "missed the direct-chain shape: {hits:?}");
+    assert!(hits[0].contains("pool-create-form"), "{hits:?}");
+
+    let via_var = vec![(
+        "chat.js".to_string(),
+        "var area = document.getElementById('image-preview-area');\n\
+         if (!area) return;\n\
+         area.innerHTML = '';\n\
+         area.style.display = 'flex';"
+            .to_string(),
+    )];
+    let hits = hidden_class_elements_driven_by_inline_display(html, &via_var);
+    assert_eq!(hits.len(), 1, "missed the via-variable shape: {hits:?}");
+    assert!(hits[0].contains("image-preview-area"), "{hits:?}");
+
+    // An element that does NOT carry the class is not this defect — `pool-active`
+    // uses an inline display deliberately, and reporting it would make the guard
+    // unusable.
+    let inline_ok = vec![(
+        "pool.js".to_string(),
+        "var active = document.getElementById('pool-active');\n\
+         active.style.display = 'none';"
+            .to_string(),
+    )];
+    assert!(
+        hidden_class_elements_driven_by_inline_display(html, &inline_ok).is_empty(),
+        "the guard fires on an element that legitimately uses an inline display"
+    );
+
+    // And the corrected shape must not trip it.
+    let fixed = vec![(
+        "pool.js".to_string(),
+        "document.getElementById('pool-create-form').classList.remove('hidden');".to_string(),
+    )];
+    assert!(
+        hidden_class_elements_driven_by_inline_display(html, &fixed).is_empty(),
+        "the guard fires on the corrected markup"
+    );
+}
+
 /// A reasoning model's scratchpad is removed by `StreamingToolText::push`, and
 /// whether a reply has one has nothing to do with whether the caller passed
 /// `tools`. All four streaming surfaces nevertheless wrapped that call in

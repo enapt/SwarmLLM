@@ -28,13 +28,16 @@
     var area = document.getElementById('image-preview-area');
     if (!area) return;
     if (S.pendingImages.length === 0) {
-      area.style.display = 'none';
+      area.classList.add('hidden');
       area.innerHTML = '';
       return;
     }
-    area.style.display = 'flex';
-    area.style.flexWrap = 'wrap';
-    area.style.gap = '6px';
+    // The area carries the `hidden` class, which is `display: none !important`
+    // — setting `style.display = 'flex'` could never beat it, so an attached
+    // image produced no thumbnail at all (report #037). Toggling the class is
+    // the whole job; the flex layout lives in `#image-preview-area`'s own rule
+    // rather than being re-applied inline on every render.
+    area.classList.remove('hidden');
     area.innerHTML = '';
     S.pendingImages.forEach(function(img, idx) {
       var wrap = document.createElement('div');

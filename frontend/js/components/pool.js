@@ -56,13 +56,19 @@
       var self = this;
       // Wire up static buttons
       var ids = {
+        // Both forms carry the `hidden` CLASS, and `.hidden` is
+        // `display: none !important` — so an inline `style.display` can never
+        // reveal them, whatever it is set to. These two buttons are the only
+        // way into the pool feature for a node that is not in one yet, and
+        // they did nothing at all (report #037). Toggle the class, which is
+        // what the other 44 show/hide sites in this frontend already do.
         'pool-create-btn': function () {
-          document.getElementById('pool-create-form').style.display = '';
-          document.getElementById('pool-join-form').style.display = 'none';
+          document.getElementById('pool-create-form').classList.remove('hidden');
+          document.getElementById('pool-join-form').classList.add('hidden');
         },
         'pool-join-btn': function () {
-          document.getElementById('pool-join-form').style.display = '';
-          document.getElementById('pool-create-form').style.display = 'none';
+          document.getElementById('pool-join-form').classList.remove('hidden');
+          document.getElementById('pool-create-form').classList.add('hidden');
           var input = document.getElementById('pool-join-code');
           if (input) input.focus();
         },
@@ -150,10 +156,13 @@
     renderNoPool: function () {
       var noPool = document.getElementById('pool-no-pool');
       var active = document.getElementById('pool-active');
+      // `pool-no-pool` / `pool-active` carry an inline `display`, not the
+      // class, so `style.display` is right for those two. The forms carry the
+      // class — collapse them back the same way the buttons open them.
       if (noPool) noPool.style.display = '';
       if (active) active.style.display = 'none';
-      document.getElementById('pool-create-form').style.display = 'none';
-      document.getElementById('pool-join-form').style.display = 'none';
+      document.getElementById('pool-create-form').classList.add('hidden');
+      document.getElementById('pool-join-form').classList.add('hidden');
     },
 
     renderActivePool: function (data) {

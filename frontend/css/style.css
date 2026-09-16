@@ -2384,6 +2384,17 @@ input[type="range"]::-webkit-slider-thumb {
 .chat-header-lock:hover { opacity: 0.85; transform: scale(1.15); }
 .chat-header-lock.active { opacity: 1; color: var(--green-text); }
 
+/* Thumbnails of images attached to the next message. The layout lives here
+   rather than being written inline on every render, so the JS only has to
+   toggle `.hidden` — which is the one thing that actually reveals it, since
+   `.hidden` is `display: none !important` and an inline display cannot beat it
+   (report #037). */
+#image-preview-area {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
 /* Encryption banner — shown below session header */
 /* `flex-wrap` is load-bearing, not tidying. This row holds up to three items —
    the warning text, `.enc-overhead`, and (when boomerang is available) the

@@ -276,9 +276,7 @@
       if (csDetect) {
         csDetect.addEventListener('click', async function() {
           var info = document.getElementById('claude-subscription-info');
-          var detail = document.getElementById('claude-sub-status-detail');
           if (info) info.textContent = I18n.t('settings.detecting');
-          if (detail) detail.style.display = 'none';
           csDetect.disabled = true;
           try {
             // User-triggered refresh: clear in-flight dedup so we get fresh data
@@ -808,7 +806,10 @@
         // Claude subscription UI
         if (data.claude_subscription !== undefined) {
           var card = document.getElementById('claude-subscription-card');
-          if (card) card.style.display = '';
+          // Carries the `hidden` class, which is `!important` — an inline
+          // display could never reveal it, so this card has been invisible
+          // since the class was put on it. Same defect as report #037.
+          if (card) card.classList.remove('hidden');
           var toggle = document.getElementById('claude-subscription-toggle');
           if (toggle) toggle.checked = !!(data.claude_subscription && data.claude_subscription.enabled);
           var badge = document.getElementById('claude-subscription-status');
