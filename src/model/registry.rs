@@ -1042,8 +1042,48 @@ impl ModelRegistry {
     /// Callers get `SwarmError::ModelNotAvailable` (mapped to HTTP 404 by the
     /// API layer). The message varies based on whether the registry is empty
     /// to give users a more actionable hint.
+    /// Can a pipeline for this model actually be assembled right now — i.e.
+    /// does every one of its shards have at least one holder somewhere in the
+    /// swarm, and does it declare a usable layer count?
+    ///
+    /// **The single answer to "is this model servable".** No single node needs
+    /// the whole shard set; the scheduler chains holders. `/v1/models` reads it
+    /// through `api::openai::all_shards_available` (which adds a 100 ms cache
+    /// and the per-shard debug lines), and `model_not_found_error` reads it
+    /// directly — the two used to disagree, and the disagreement was handed to
+    /// users: the 404 offered a list built from EVERY manifest, so a caller who
+    /// mistyped a model name was shown four models `/v1/models` deliberately
+    /// withholds, picked one, and got another failure. Measured on the live
+    /// node 2026-09-16 at 19 offered against 15 listed.
+    pub fn model_is_servable(&self, model_id: &ModelId) -> bool {
+        let Some(manifest) = self.get_manifest(model_id) else {
+            return false;
+        };
+        // A model that declares no layers can never be scheduled, whoever holds
+        // its bytes.
+        if manifest.num_layers == 0 {
+            return false;
+        }
+        manifest.shards.iter().all(|shard| {
+            !self
+                .shard_holders(&ShardId {
+                    model_id: model_id.clone(),
+                    index: shard.index,
+                })
+                .is_empty()
+        })
+    }
+
     pub fn model_not_found_error(&self, model_id: &ModelId) -> SwarmError {
-        let available: Vec<String> = self.models().iter().map(|m| m.id.0.clone()).collect();
+        // Only models that could actually answer. Suggesting one that cannot is
+        // worse than suggesting nothing: it reads as a recommendation and costs
+        // the user a second failed request to disprove.
+        let available: Vec<String> = self
+            .models()
+            .iter()
+            .filter(|m| self.model_is_servable(&m.id))
+            .map(|m| m.id.0.clone())
+            .collect();
         let msg = if available.is_empty() {
             format!(
                 "Model '{}' not found. No models are available — download shards first.",
@@ -2619,5 +2659,100 @@ mod tests {
 
         let has_mmproj = entries.iter().any(|(sid, _)| sid.is_mmproj());
         assert!(has_mmproj);
+    }
+}
+
+#[cfg(test)]
+mod servability_tests {
+    use super::*;
+    use swarmllm_types::{ModelArchitecture, Quantization};
+
+    fn manifest(id: &str, shards: u32, layers: u32) -> ModelManifest {
+        ModelManifest {
+            id: ModelId(id.into()),
+            name: id.into(),
+            architecture: ModelArchitecture::Llama,
+            num_layers: layers,
+            num_params_billions: 0.001,
+            quantization: Quantization::Q4KM,
+            total_size_bytes: 1024,
+            shard_count: shards,
+            shards: (0..shards)
+                .map(|i| swarmllm_types::ShardInfo {
+                    index: i,
+                    layer_range: (i, i + 1),
+                    size_bytes: 1,
+                    hash: [0u8; 32],
+                    tensors: Vec::new(),
+                })
+                .collect(),
+            tokenizer_hash: [0u8; 32],
+            manifest_hash: [0u8; 32],
+            publisher: NodeId([0u8; 32]),
+            publish_date: chrono::Utc::now(),
+            license: "MIT".into(),
+            mmproj: None,
+        }
+    }
+
+    /// The 404's "Available models" list and `/v1/models` must answer the same
+    /// question. They did not: the 404 was built from EVERY manifest, so a user
+    /// who mistyped a model name was handed a list including models the node
+    /// deliberately does not offer — measured live at 19 against 15 — and the
+    /// natural next step, picking one off it, fails again.
+    #[test]
+    fn the_not_found_list_offers_only_models_that_could_answer() {
+        let registry = ModelRegistry::new();
+        let holder = NodeId([1u8; 32]);
+
+        // Fully covered: every shard has a holder.
+        registry.register_manifest(manifest("servable", 2, 8));
+        for i in 0..2 {
+            registry.record_shard_holder(
+                ShardId {
+                    model_id: ModelId("servable".into()),
+                    index: i,
+                },
+                holder.clone(),
+            );
+        }
+        // Discovered from gossip, but nobody reachable holds shard 1.
+        registry.register_manifest(manifest("half-held", 2, 8));
+        registry.record_shard_holder(
+            ShardId {
+                model_id: ModelId("half-held".into()),
+                index: 0,
+            },
+            holder.clone(),
+        );
+        // Declares no layers, so it can never be scheduled whoever holds it.
+        registry.register_manifest(manifest("no-layers", 1, 0));
+        registry.record_shard_holder(
+            ShardId {
+                model_id: ModelId("no-layers".into()),
+                index: 0,
+            },
+            holder,
+        );
+
+        assert!(registry.model_is_servable(&ModelId("servable".into())));
+        assert!(!registry.model_is_servable(&ModelId("half-held".into())));
+        assert!(!registry.model_is_servable(&ModelId("no-layers".into())));
+
+        let msg = registry
+            .model_not_found_error(&ModelId("typo".into()))
+            .to_string();
+        assert!(
+            msg.contains("servable"),
+            "the one that works must be offered: {msg}"
+        );
+        assert!(
+            !msg.contains("half-held"),
+            "a model with an uncovered shard must not be suggested: {msg}"
+        );
+        assert!(
+            !msg.contains("no-layers"),
+            "a model with no layer count must not be suggested: {msg}"
+        );
     }
 }

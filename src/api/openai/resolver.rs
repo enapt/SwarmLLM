@@ -79,48 +79,21 @@ pub fn all_shards_available(state: &AppState, model_name: &str) -> bool {
 
 fn all_shards_available_inner(state: &AppState, model_name: &str) -> bool {
     let model_id = ModelId(model_name.to_string());
-
-    let manifest = match state.shared_state.model_registry.get_manifest(&model_id) {
-        Some(m) => m,
-        None => {
-            tracing::debug!(model = %model_name, "all_shards_available: no manifest");
-            return false;
-        }
-    };
-
-    // Need a valid layer count for the scheduler to work
-    if manifest.num_layers == 0 {
-        tracing::debug!(model = %model_name, "all_shards_available: num_layers=0");
-        return false;
+    // `ModelRegistry::model_is_servable` is the predicate; this wrapper adds the
+    // short cache above and the diagnosis line below. Asking the registry rather
+    // than re-deriving it here is what stopped `/v1/models` and the
+    // "Available models" list in a 404 from disagreeing about the same fact.
+    let servable = state
+        .shared_state
+        .model_registry
+        .model_is_servable(&model_id);
+    if !servable {
+        tracing::debug!(
+            model = %model_name,
+            "all_shards_available: no manifest, no layer count, or some shard has no holder"
+        );
     }
-
-    let total = manifest.shards.len();
-    let mut covered = 0;
-    for shard_info in &manifest.shards {
-        let shard_id = crate::types::ShardId {
-            model_id: model_id.clone(),
-            index: shard_info.index,
-        };
-        let holders = state.shared_state.model_registry.shard_holders(&shard_id);
-        if holders.is_empty() {
-            tracing::debug!(
-                model = %model_name,
-                shard = shard_info.index,
-                "all_shards_available: no node in network holds this shard"
-            );
-            return false;
-        }
-        covered += 1;
-    }
-
-    tracing::debug!(
-        model = %model_name,
-        shards = total,
-        covered,
-        num_layers = manifest.num_layers,
-        "all_shards_available: all layers covered across network"
-    );
-    true
+    servable
 }
 
 /// Resolve a model name for inference: handles "auto" alias and display-name → registry-ID mapping.
