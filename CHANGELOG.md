@@ -65,7 +65,13 @@ is for you. Nodes do not need to update together.
 - **On an iPad, tapping the message box no longer shifts the page and leaves a
   gap.** Safari does not tell a page that the on-screen keyboard has covered part
   of it, so the layout stayed sized for a screen that was no longer fully
-  visible.
+  visible. ⚠ **This is the one change here we could not test on the device it is
+  for** — no iPhone or iPad is available to the project. It is deliberately built
+  to do nothing unless a text box has focus *and* the visible screen has actually
+  shrunk by more than a toolbar's worth, so on any browser that does not behave
+  this way — every desktop, and Android, which handles it differently — the new
+  code never runs at all. If the reasoning about Safari is wrong, the result is
+  that nothing changes rather than a broken layout. Please report it either way.
 - **A failure reported on a streaming connection now carries the same advice as
   one reported without streaming.** Both explained what went wrong; only one
   suggested what to do about it.
