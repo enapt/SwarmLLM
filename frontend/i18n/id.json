@@ -736,8 +736,6 @@
   "nav.dashboard": "Dasbor",
   "nav.filter_models": "Filter model...",
   "nav.find_models_aria": "Temukan model",
-  "nav.find_models_btn": "+ Temukan model",
-  "nav.find_models_tip": "Temukan model di HuggingFace untuk diunduh dan di-host.",
   "nav.more": "Lainnya",
   "nav.network": "Jaringan",
   "nav.network_map": "Peta Jaringan",

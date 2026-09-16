@@ -736,8 +736,6 @@
   "nav.dashboard": "ダッシュボード",
   "nav.filter_models": "モデルをフィルター...",
   "nav.find_models_aria": "モデルを探す",
-  "nav.find_models_btn": "+ モデルを探す",
-  "nav.find_models_tip": "HuggingFace でモデルを探してダウンロード・ホストしましょう。",
   "nav.more": "その他",
   "nav.network": "ネットワーク",
   "nav.network_map": "ネットワークマップ",

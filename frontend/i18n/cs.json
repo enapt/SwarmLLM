@@ -736,8 +736,6 @@
   "nav.dashboard": "Přehled",
   "nav.filter_models": "Filtrovat modely...",
   "nav.find_models_aria": "Najít modely",
-  "nav.find_models_btn": "+ Najít model",
-  "nav.find_models_tip": "Najděte modely na HuggingFace ke stažení a hostování.",
   "nav.more": "Více",
   "nav.network": "Síť",
   "nav.network_map": "Mapa sítě",

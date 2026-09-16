@@ -736,8 +736,6 @@
   "nav.dashboard": "Tableau de bord",
   "nav.filter_models": "Filtrer les modèles...",
   "nav.find_models_aria": "Trouver des modèles",
-  "nav.find_models_btn": "+ Trouver un modèle",
-  "nav.find_models_tip": "Trouvez des modèles sur HuggingFace à télécharger et héberger.",
   "nav.more": "Plus",
   "nav.network": "Réseau",
   "nav.network_map": "Carte du réseau",

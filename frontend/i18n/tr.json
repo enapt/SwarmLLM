@@ -736,8 +736,6 @@
   "nav.dashboard": "Panel",
   "nav.filter_models": "Modelleri filtrele...",
   "nav.find_models_aria": "Model bul",
-  "nav.find_models_btn": "+ Model bul",
-  "nav.find_models_tip": "HuggingFace'de indirip barındırmak için modeller bulun.",
   "nav.more": "Daha fazla",
   "nav.network": "Ağ",
   "nav.network_map": "Ağ Haritası",

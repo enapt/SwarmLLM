@@ -736,8 +736,6 @@
   "nav.dashboard": "डैशबोर्ड",
   "nav.filter_models": "मॉडल फ़िल्टर करें...",
   "nav.find_models_aria": "मॉडल खोजें",
-  "nav.find_models_btn": "+ मॉडल खोजें",
-  "nav.find_models_tip": "HuggingFace पर डाउनलोड और होस्ट करने के लिए मॉडल खोजें।",
   "nav.more": "अधिक",
   "nav.network": "नेटवर्क",
   "nav.network_map": "नेटवर्क मैप",

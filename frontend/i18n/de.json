@@ -736,8 +736,6 @@
   "nav.dashboard": "Übersicht",
   "nav.filter_models": "Modelle filtern...",
   "nav.find_models_aria": "Modelle finden",
-  "nav.find_models_btn": "+ Modell finden",
-  "nav.find_models_tip": "Finde Modelle auf HuggingFace zum Herunterladen und Hosten.",
   "nav.more": "Mehr",
   "nav.network": "Netzwerk",
   "nav.network_map": "Netzwerkkarte",

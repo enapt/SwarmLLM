@@ -736,8 +736,6 @@
   "nav.dashboard": "Översikt",
   "nav.filter_models": "Filtrera modeller...",
   "nav.find_models_aria": "Hitta modeller",
-  "nav.find_models_btn": "+ Hitta modell",
-  "nav.find_models_tip": "Hitta modeller på HuggingFace att ladda ner och hosta.",
   "nav.more": "Mer",
   "nav.network": "Nätverk",
   "nav.network_map": "Nätverkskarta",

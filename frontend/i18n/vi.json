@@ -736,8 +736,6 @@
   "nav.dashboard": "Bảng điều khiển",
   "nav.filter_models": "Lọc mô hình...",
   "nav.find_models_aria": "Tìm mô hình",
-  "nav.find_models_btn": "+ Tìm mô hình",
-  "nav.find_models_tip": "Tìm mô hình trên HuggingFace để tải xuống và lưu trữ.",
   "nav.more": "Thêm",
   "nav.network": "Mạng lưới",
   "nav.network_map": "Bản đồ mạng",

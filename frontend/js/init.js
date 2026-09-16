@@ -237,8 +237,9 @@
       });
     }
 
-    // Model browser entry points — all route to the inline Models tab.
-    on('btn-open-model-browser', 'click', function() { App.ui.openModelBrowser(); });
+    // Model browser entry points — all route to the inline Models tab. The
+    // header's own button was removed: a search belongs on the Models screen,
+    // not in chrome that is on every page.
     on('btn-browse-hf', 'click', function() { App.ui.openModelBrowser(); });
 
     // Header

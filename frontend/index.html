@@ -898,7 +898,14 @@
           </div>
         </div>
         <input type="hidden" id="model-select" value="" />
-        <button class="btn btn-sm" id="btn-open-model-browser" data-i18n="nav.find_models_btn" data-i18n-title="nav.find_models_tip" title="Find models on HuggingFace to download and host." data-i18n-aria-label="nav.find_models_aria" aria-label="Find models">+ Find model</button>
+        <!-- "Find models" is NOT here any more. It sat in the persistent
+             header, i.e. on every page, for an action belonging to a node's
+             first hour rather than its daily use — which is what
+             `.claude/rules/arch-frontend.md` § "A control in persistent chrome
+             earns its seat" rules out. Nothing is lost: it was one of six doors
+             onto the SAME destination (`openModelBrowser` → `swarmTab.openSearch`
+             → the Search HuggingFace subtab), and the contextual one inside the
+             Dashboard's Models panel stays, as does the subtab itself. -->
       </div>
       <!-- Shown ONLY while private mode is on. A padlock that is always
            present says nothing about the state it is meant to report, and an

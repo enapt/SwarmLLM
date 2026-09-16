@@ -736,8 +736,6 @@
   "nav.dashboard": "仪表盘",
   "nav.filter_models": "筛选模型...",
   "nav.find_models_aria": "查找模型",
-  "nav.find_models_btn": "+ 查找模型",
-  "nav.find_models_tip": "在 HuggingFace 上查找模型以下载和托管。",
   "nav.more": "更多",
   "nav.network": "网络",
   "nav.network_map": "网络地图",
