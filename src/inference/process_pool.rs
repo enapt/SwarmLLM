@@ -5312,7 +5312,21 @@ impl ModelProcessPool {
         // exactly what the reported case needed: a five-segment route across
         // peers had already been priced when the refusal killed the request.
         if local_memory_refusal {
-            return SwarmError::LocalMemoryUnavailable(message);
+            // Strip the prefix the worker already wrote before re-wrapping.
+            // `LocalMemoryUnavailable`'s own Display is `Service unavailable:
+            // {0}`, and the worker's message begins with exactly that — so
+            // handing it over whole rendered every KV-budget refusal to the
+            // user as "Service unavailable: Service unavailable: Not enough
+            // free memory…". `reclassify_flattened_error` is the one place that
+            // knows how to take a Display prefix back off, and this arm used to
+            // return one line above it. The existing tests pass the prefixed
+            // string in and assert only the VARIANT, never the rendered text,
+            // which is how it stayed invisible.
+            let detail = match crate::error::reclassify_flattened_error(&message) {
+                Some(SwarmError::ServiceUnavailable(d)) => d,
+                _ => message,
+            };
+            return SwarmError::LocalMemoryUnavailable(detail);
         }
         if let Some(recovered) = crate::error::reclassify_flattened_error(&message) {
             return recovered;
@@ -6962,6 +6976,40 @@ mod tests {
         assert!(
             crate::inference::router::local_memory_refused_the_load(&err),
             "and the router's own gate must agree"
+        );
+    }
+
+    /// ...and it says so ONCE.
+    ///
+    /// The worker's message already opens with `Service unavailable: `, and
+    /// `LocalMemoryUnavailable`'s own Display adds the same prefix, so handing
+    /// the message over whole rendered every KV-budget refusal to the user as
+    /// "Service unavailable: Service unavailable: Not enough free memory…".
+    /// Observed on the live node 2026-09-16 against a 4042-token prompt.
+    ///
+    /// The two tests above could not see it: both pass the prefixed string in
+    /// and assert on the VARIANT, which was always right. Assert on what the
+    /// user is shown.
+    #[test]
+    fn a_memory_refusal_names_itself_once_not_twice() {
+        let pool = test_pool();
+        let model = ModelId("m".into());
+        let err = pool.classify_worker_error(
+            &model,
+            "Service unavailable: Not enough free memory on this node for a 4042-token \
+             prompt (0 MB of conversation memory in use, 814 MB available, short by 697 MB)."
+                .into(),
+            false,
+            true,
+        );
+        let shown = err.to_string();
+        assert!(
+            !shown.contains("Service unavailable: Service unavailable:"),
+            "the prefix is doubled in what the user reads: {shown}"
+        );
+        assert!(
+            shown.starts_with("Service unavailable: Not enough free memory"),
+            "and the reason must survive the strip: {shown}"
         );
     }
 
