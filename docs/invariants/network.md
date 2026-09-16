@@ -1,6 +1,6 @@
 # Network protocol, peers and the model registry
 
-The evidence behind the rules in `.claude/rules/architecture.md`: what each
+The evidence behind the rules in `.claude/rules/arch-network.md`: what each
 rule replaced, what it was measured at, and what a change must keep.
 
 Every entry here was paid for. **Read the entry before changing the code it
@@ -984,7 +984,7 @@ a peer on an older build re-gossips the name straight back in.
 
 ## Destroying a shard we hold needs better evidence than a stranger's claim
 
-**Rule:** `.claude/rules/architecture.md` § "Destroying a shard we hold needs
+**Rule:** `.claude/rules/arch-network.md` § "Destroying a shard we hold needs
 better evidence than a stranger's claim".
 
 ### What happened (observed live, 2026-09-13)
@@ -1101,7 +1101,7 @@ already requested from the reporter, and that line discriminates both stories.
 
 ## One writer per shard file, and finishing one shard says nothing about the others
 
-*Rule: `.claude/rules/architecture.md` § "One writer per shard file, and
+*Rule: `.claude/rules/arch-network.md` § "One writer per shard file, and
 finishing one shard says nothing about the others". Field report, v0.3.178,
 2026-09-13.*
 
@@ -1221,7 +1221,7 @@ doesn't exist"*). Startup `.tmp` cleanup removed the `.tmp` and left the
 
 ## Cancel means the same thing on both transports, and never takes a file from a live writer
 
-*Rule: `.claude/rules/architecture.md` § "One writer per shard file…". Found
+*Rule: `.claude/rules/arch-network.md` § "One writer per shard file…". Found
 2026-09-14 while fixing the restart loop above; not field-reported, but the same
 collision reachable from a button.*
 

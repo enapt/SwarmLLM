@@ -1,6 +1,6 @@
 # Inference kernels, caches and the tokenizer
 
-The evidence behind the rules in `.claude/rules/architecture.md`: what each
+The evidence behind the rules in `.claude/rules/arch-inference.md`: what each
 rule replaced, what it was measured at, and what a change must keep.
 
 Every entry here was paid for. **Read the entry before changing the code it
@@ -713,7 +713,7 @@ shard 0 (gotcha #178).
 
 ## A model's turn-ender is found in its vocabulary, not taken from its declared EOS
 
-**Rule:** `.claude/rules/architecture.md` § "A model's turn-ender is found in its
+**Rule:** `.claude/rules/arch-inference.md` § "A model's turn-ender is found in its
 vocabulary, not taken from its declared EOS".
 
 ### What it replaced

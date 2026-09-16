@@ -1,6 +1,6 @@
 # Scheduling, routing and failover
 
-The evidence behind the rules in `.claude/rules/architecture.md`: what each
+The evidence behind the rules in `.claude/rules/arch-scheduling.md`: what each
 rule replaced, what it was measured at, and what a change must keep.
 
 Every entry here was paid for. **Read the entry before changing the code it
@@ -1508,7 +1508,7 @@ ever justify charging a peer.
 
 ## Trust is paid for work that was checked, and the check runs whenever the payment would
 
-**Rule:** `.claude/rules/architecture.md` § "Trust is paid for work that was
+**Rule:** `.claude/rules/arch-scheduling.md` § "Trust is paid for work that was
 checked, and the check runs whenever the payment would".
 
 ### What it replaced

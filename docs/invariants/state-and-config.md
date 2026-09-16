@@ -1,6 +1,6 @@
 # SharedState, live config and credits
 
-The evidence behind the rules in `.claude/rules/architecture.md`: what each
+The evidence behind the rules in `.claude/rules/arch-state-and-config.md`: what each
 rule replaced, what it was measured at, and what a change must keep.
 
 Every entry here was paid for. **Read the entry before changing the code it
@@ -298,7 +298,7 @@ below, in the same file, with a comment explaining it** — "if DB write fails,
 revert status to prevent double-refund on restart" — and each path reads as
 careful in isolation. Nothing about `release_escrow` looks wrong until you ask
 what the *other* two do with the same failure. This is the codebase's
-one-invariant-N-paths defect again (`.claude/rules/architecture.md`), in the one
+one-invariant-N-paths defect again (`.claude/rules/arch-state-and-config.md`), in the one
 shape a reviewer cannot catch by reading the function in front of them.
 
 The direction of the trade-off is fixed and is the one `create_escrow`'s own

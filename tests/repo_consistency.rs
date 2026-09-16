@@ -5329,11 +5329,22 @@ fn the_vendored_request_response_test_count_is_stated_once_and_correctly() {
          guard's assumptions have changed"
     );
 
-    let claude = std::fs::read_to_string(root.join("CLAUDE.md")).expect("CLAUDE.md");
+    // The annotated source tree moved to docs/ARCHITECTURE.md on 2026-09-16 (CLAUDE.md
+    // loads every session). The property this guard exists for is unchanged: the count
+    // is stated INDEPENDENTLY in two documents, so drift between them is caught.
+    //
+    // Both needles are matched against WHITESPACE-COLLAPSED text. These are prose files:
+    // a markdown reflow that moves a line break into the middle of the phrase changes
+    // nothing a reader would notice, and broke this guard the day the tree moved. Same
+    // lesson as `statements()` for Rust — scan the statement, not the line.
+    let squash = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let claude = squash(&std::fs::read_to_string(root.join("CLAUDE.md")).expect("CLAUDE.md"));
+    let arch = squash(
+        &std::fs::read_to_string(root.join("docs/ARCHITECTURE.md")).expect("docs/ARCHITECTURE.md"),
+    );
     let claims: Vec<usize> = [
         // tree line: "libp2p-request-response/ (<n> tests, `--lib`)"
-        claude
-            .split("libp2p-request-response/ (")
+        arch.split("libp2p-request-response/ (")
             .nth(1)
             .and_then(|s| s.split(" tests").next())
             .and_then(|n| n.trim().parse().ok()),
@@ -5353,14 +5364,14 @@ fn the_vendored_request_response_test_count_is_stated_once_and_correctly() {
     assert_eq!(
         claims.len(),
         2,
-        "CLAUDE.md must state the vendored test count in both the repository tree \
-         (`libp2p-request-response/ (<n> tests, ...`) and the Testing section \
+        "The vendored test count must be stated in BOTH docs/ARCHITECTURE.md's source tree \
+         (`libp2p-request-response/ (<n> tests, ...`) and CLAUDE.md's Testing section \
          (`<n> in the vendored request-response patch`). Found: {claims:?}"
     );
     for claimed in &claims {
         assert_eq!(
             *claimed, actual,
-            "CLAUDE.md claims {claimed} tests in the vendored request-response patch; \
+            "The docs claim {claimed} tests in the vendored request-response patch; \
              the crate has {actual}. Both occurrences must match the source. All \
              claims found: {claims:?}"
         );

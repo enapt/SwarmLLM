@@ -1,6 +1,6 @@
 # API surfaces, errors and streaming
 
-The evidence behind the rules in `.claude/rules/architecture.md`: what each
+The evidence behind the rules in `.claude/rules/arch-api-surfaces.md`: what each
 rule replaced, what it was measured at, and what a change must keep.
 
 Every entry here was paid for. **Read the entry before changing the code it
@@ -636,7 +636,7 @@ OpenAI-flavoured and Anthropic clients match on Anthropic's own set (#302).
 
 ## A rendered prompt that lost the question is a FAILED render
 
-**Rule:** `.claude/rules/architecture.md` § "A rendered prompt that lost the
+**Rule:** `.claude/rules/arch-api-surfaces.md` § "A rendered prompt that lost the
 question is a FAILED render".
 
 ### What it replaced
@@ -730,7 +730,7 @@ passed on the fallback it existed to rule out.
 
 ## Chat templates render on minijinja, not on a subset of our own
 
-**Rule:** `.claude/rules/architecture.md` § "A rendered prompt that lost the
+**Rule:** `.claude/rules/arch-api-surfaces.md` § "A rendered prompt that lost the
 question is a FAILED render" — the post-condition above sits on top of this.
 
 ### What it replaced
@@ -836,7 +836,7 @@ helper is called.**
 
 ## The pre-token window is reported, and reported from evidence
 
-**Rule:** `.claude/rules/architecture.md` § "A ticker merged into a response
+**Rule:** `.claude/rules/arch-api-surfaces.md` § "A ticker merged into a response
 stream is a termination condition".
 
 ### What this replaced
@@ -881,3 +881,144 @@ skipped everything that was not `data:` (gotcha #605).
   is how a chat box starts reading like a log. It is a browser preference, not
   node config — it changes only what is drawn, so it must not depend on the
   daemon being reachable, and it must not ride the Settings panel's config save.
+
+
+---
+
+## One invariant, N paths — the full path enumeration
+
+> Rule statement: `.claude/rules/architecture.md` § "One invariant, N paths".
+> This section is the evidence and the complete list of paths.
+
+The single most repeated defect here is a **shared invariant implemented per
+path**, where fixing the path in the bug report leaves the others broken. It
+recurred *seven times* on 2026-07-25/26 alone: stop-string application, tool-call
+buffering (twice), `include_usage` emission (twice), control-token scrubbing, and
+`strip_provider_prefix`. In every case a correct helper already existed and one
+consumer didn't call it.
+
+**Before fixing anything in the request/response path, enumerate the paths.**
+There are more than you expect:
+
+- **Inference text sources (THREE)** — `inference/executor.rs` (in-process),
+  `inference/process_pool.rs` (worker subprocess), `inference/pipeline/
+  distributed.rs` (assembled from remote segments). A reply-content rule belongs
+  at all three. Note the cold-start request takes the *distributed* path while
+  later ones take the split path, so a per-path bug can look fixed five times
+  and leak on the sixth.
+- **OpenAI response paths** — `router_inference` + `split_non_stream_response`
+  (non-streaming), `router_inference_stream` + `split_stream_response`
+  (streaming).
+- **Anthropic response paths** — `anthropic_non_stream` +
+  `anthropic_split_non_stream`, `anthropic_stream` + `anthropic_split_stream`.
+  The `_split_` variants are the local-complete fast path; the others go via the
+  router.
+- **Responses API** — `run_streaming` (foreground) and the background task's own
+  chat request in `responses/background.rs`. They share the event loop but build
+  their chat requests separately, so an opt-in set on one is absent on the other.
+
+**A shared helper is not enough — put it where the caller cannot skip it.**
+This was the standing advice here, and it kept failing: `with_template_stops`,
+`emit_openai_tool_calls`, `emit_anthropic_tool_blocks` and
+`strip_control_token_artifacts` all existed, were documented, and were still
+missed by a sibling path. A helper nobody is *obliged* to call will eventually
+not be called. Three escalating ways to make it obligatory, best first:
+
+1. **Do it at the choke point, not in the callers.** Find the single place the
+   value crosses the boundary and transform it there.
+   `providers::strip_prefix_in_body` now runs inside `try_proxy_openai`,
+   `proxy_to_anthropic` and `proxy_via_subprocess_anthropic` — the three
+   functions that actually send — so a new proxy path is correct with no
+   author action. Same shape for `inference::finalize_reply_text`: the three
+   reply-text sources call one finaliser that owns the whole ordered sequence
+   (scrub → truncate → trim → newline cleanup), instead of each composing those
+   steps itself, which is how they silently diverged.
+2. **Make the wrong call unrepresentable.** If context is needed to be correct,
+   make it a required parameter rather than an `Option` with a convenience
+   wrapper that passes `None` — that wrapper is how `build_prompt` disabled the
+   template fallback on 6 of 7 paths (gotcha #171).
+3. **Assert the property on the shared helper**, not once per path, so a new
+   path inherits the coverage instead of needing its own test.
+
+Only when none of those fit should you fall back to a doc comment saying
+forgetting it is the bug.
+
+**Verify by running the request, not by reading the diff.** Every one of the
+seven passed review. The ones caught early were caught by executing the actual
+path — and where a report names a specific model, that model is part of the
+reproduction (gotcha #168).
+
+**Bad reply content is evidence about the PROMPT first, the output second.**
+The `<|im_end|>` leak was chased across four releases as an output-scrubbing
+problem. It was a prompt problem: `apply_chat_template` returned `None` for
+every official Llama-3.x template, and the fallback chain reached ChatML, so a
+Llama-3 model was asked a ChatML question and answered in ChatML (gotcha #169).
+Before touching `strip_control_token_artifacts` or the stop-string list, check
+`grep "chat template failed" node.log` — that WARN names the real fault and had
+been firing on every request for several releases. `build_prompt_with_model`
+falling back at all is a bug report, not a safety net: the fallbacks
+(gemma/vicuna/llava/ChatML) exist for models that ship no template, and any
+model that DOES ship one should be rendering it.
+
+---
+
+## Timeouts — the five instances that produced the rule
+
+> Rule statement: `.claude/rules/architecture.md` § "Timeouts: bound what actually varies".
+
+A fixed deadline is only correct when the work behind it has a fixed size.
+Where it does not, the constant silently becomes a **minimum-capability
+requirement for the user** that nobody chose deliberately. Five instances were
+found in one night (2026-07-27, gotcha #190):
+
+- `UPDATE_DOWNLOAD_TIMEOUT_SECS = 300` against a ~933 MB GPU build required a
+  sustained ~3.1 MB/s. Anyone slower could **never** complete an update.
+- `HF_DOWNLOAD_TIMEOUT_SECS = 3600` required ~145 KB/s for a 512 MB shard.
+- `INFERENCE_FORWARD_TIMEOUT_SECS = 120` capped a question forwarded to a peer
+  regardless of prompt length.
+- `PROVIDER_PROXY_TIMEOUT_SECS = 300` was documented as being about time to the
+  first token but enforced on the whole exchange, cutting off cloud replies that
+  were still streaming.
+- `REQUEST_TIMEOUT_SECS = 300` capped every HTTP request, generation included —
+  and so silently capped the prompt-scaled first-token budget at 300s no matter
+  what it was raised to.
+
+Rules that follow:
+
+1. **Prefer an inactivity timeout to a total one.** `reqwest`'s `read_timeout`
+   (0.12+) catches a stalled transfer just as fast while leaving a slow healthy
+   one alone, and requires no guess about size or bandwidth. Use it for every
+   download and every streamed proxy response.
+2. **Where inactivity does not apply, scale the budget by the input and cap it** —
+   `pipeline::remote_generate::first_token_timeout(prompt_tokens)` is the shared
+   helper; call it rather than inventing another rule. Prefill is linear in
+   prompt length and is ~99% of a long request.
+3. **Generation gets no blanket deadline.** Routes that can run a model are
+   merged into the router OUTSIDE the `TimeoutLayer` (`generation_routes` in
+   `api/server.rs`). The merge MUST stay before the auth layer or those
+   endpoints answer without a key — pinned by
+   `generation_routes_still_require_a_key`.
+4. **When you change a limit, grep the whole path for other limits.** A budget
+   is only as generous as the tightest ceiling above it, and that ceiling is
+   usually in another file, in middleware, behind a comment that went stale
+   before the code did.
+5. **Read the comment against the code.** In four of the five, the comment
+   reasoned about one quantity ("before the first token") while the constant
+   bounded another (the total). A stale comment asserting an invariant reads as
+   verification and stops anyone re-deriving it.
+6. **The frontend is part of "the whole path".** The five instances above were
+   all in Rust, and the tightest ceiling on a comparison request turned out to
+   be a hardcoded 45 s `AbortController` in `frontend/js/components/compare.js`
+   — on the very requests the daemon deliberately serves outside its own
+   `TimeoutLayer`. It discarded replies the daemon had finished computing
+   (report #009: `execute_ms=44886`, `finish_reason=stop`, aborted a fraction of
+   a second earlier), and the duration was baked into the translated string in
+   all 21 locales, so it was not even greppable as a number. A generation
+   request from the browser gets no client-invented deadline either; where one
+   is unavoidable it is derived from what the daemon permits and says something
+   true when it fires — the node may still be working, and the reply was not
+   necessarily lost.
+   **Streaming is what makes rule 1 available to a browser**: a non-streaming
+   `fetch` has no intermediate bytes, so it cannot have an inactivity timeout.
+   The chat tab streams, which is why its 30 s `authFetch` default bounds only
+   time-to-headers and is harmless there.

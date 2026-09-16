@@ -1,6 +1,8 @@
 # SwarmLLM — Claude Code Instructions
 
-> **Quick start**: Read `docs/ARCHITECTURE.md` for the canonical architecture (subsystems, channels, SharedState sub-struct layout, protocols, security model) before exploring code. Per-developer dependency notes may live in `~/.claude/projects/-home-user-SwarmLLM/memory/` outside the repo.
+> **Quick start**: `docs/ARCHITECTURE.md` is the canonical architecture reference —
+> subsystems, channels, source tree, protocols, security model. Per-subsystem rules
+> load on their own when you open the files they govern (`.claude/rules/arch-*.md`).
 
 ## Project Overview
 
@@ -13,99 +15,35 @@ SwarmLLM is a single Rust binary that functions as a peer-to-peer node in a dece
 
 ## Architecture
 
-The daemon spawns 12 subsystems as Tokio tasks wired together with `mpsc` channels:
+12 Tokio tasks wired with `mpsc` channels — NetworkManager, InferenceRouter,
+MessageDispatcher, CreditLedger, HealthMonitor, ShardRebalancer,
+AcquisitionManager, ApiServer, PoolManager, AutoShardManager, HfWatcher,
+UpdateChecker. Shared state is `Arc<SharedState>` (`DashMap` / `RwLock`),
+organized into 4 sub-structs — `state.events`, `state.credits`, `state.models`,
+`state.metrics` — plus cross-cutting root fields and **two** configs: `config`
+(boot snapshot, startup-only decisions) and `live_config`, **read via
+`state.cfg()`** for anything the user can change while the node runs.
 
-- **NetworkManager** — libp2p swarm: Kademlia DHT + GossipSub + request_response
-- **InferenceRouter** — request queuing, pipeline assembly, execution coordination
-- **MessageDispatcher** — routes inbound network messages to appropriate subsystems
-- **CreditLedger** — local credit balance tracking, transaction signing, gossip
-- **HealthMonitor** — periodic health pings, rebalancing triggers
-- **ShardRebalancer** — shard redistribution on node join/leave events
-- **AcquisitionManager** — BLAKE3-verified model download from network peers
-- **ApiServer** — Axum HTTP: OpenAI + Anthropic APIs + MCP server + admin dashboard + WebSocket
-- **PoolManager** — device pool management, credit forwarding, invitation protocol
-- **AutoShardManager** — VRAM-aware automatic shard acquisition + smart pruning of over-replicated shards
-- **HfWatcher** — R112: hourly HuggingFace trending-GGUF poll, seeds wishlist + auto-promotes models above download/age thresholds to `DemandVerified`
-- **UpdateChecker** — periodic GitHub release polling, SHA256-verified binary download, atomic apply
+All 20 build phases complete; no stubs. Deferred items are in
+`docs/ARCHITECTURE.md` § "Deferred Items", never as a `// TODO`.
 
-Shared state lives in `Arc<SharedState>` with `DashMap` for concurrent access. SharedState is organized into 4 logical sub-structs:
-- `state.events` (`EventBus`) — `activity_tx`, `activity_history`, `dashboard_tx`, `update_state`, `ws_tickets`
-- `state.credits` (`CreditPool`) — `credit_balance`, `pool_state`, `pool_registry`, `pool_tx`, `trust_manager`, `escrow_manager`, `anti_gaming`, `private_mode`, `offline_mode`, etc.
-- `state.models` (`ModelMgmt`) — `acquisition_progress`, `hf_sources`, `auto_manage_*`, `model_trust`, `locked_shards`, `removed_by_user` (user-deleted shard tombstones, 08-21), `prune_history`, `wishlist` (R111), `hf_trending_cache` (R112), `shard_download_backoff` (per-shard exponential download cooldown so one stuck download can't monopolize a slot), `shard_download_claims` (the shards a task is WRITING right now, one RAII claim each — the exclusion between two writers on one `shard_NNN.bin.tmp`, deliberately NOT `acquisition_progress`, which a timer deletes from), `shards_needing_repair` (shards found CORRUPT and awaiting a fresh verified copy — written only via `mark_shard_for_repair`), `shards_pending_verification` (held shards whose EXPECTED hash changed, so their bytes must be re-checked — how a node learns from the swarm that what it serves is wrong), etc.
-- `state.metrics` (`MetricsProviders`) — `node_stats`, `inference_requests_total`, `channel_metrics`, `providers_config`, `swarm_capacity` (R110), `hedge_tracker` (R136 Layer 2), `prefetch_orchestrator` (R136 Layer 3), `peer_speed` + `peer_model_warm_at` (measured per-peer prefill/decode speed — sizes segment timeouts and ranks candidates), `bandwidth` (what this node actually puts on the wire — libp2p's transport counters, read back; **`None`, never 0, when nothing is counting**), etc.
-
-Cross-cutting fields (identity, db, peer_registry, model_registry, executor, split_models, `local_memory_refusals`, `salvaged_replies` (what a failed request had already generated, handed to the caller once its retry has also failed), etc.) remain on the root struct, along with the two configs: `config` (the boot-time snapshot, for startup-only decisions) and `live_config` (the current one — **read it via `state.cfg()`** for anything the user can change while the node runs).
-
-## Build Phases
-
-All 20 phases complete. See `docs/ARCHITECTURE.md` for full phase history. Deferred items documented there.
-
-## Repository Structure
-
-```
-swarmllm/
-├── Cargo.toml / Cargo.lock / build.rs
-├── .env.example                       (env var template for Docker deployments)
-├── config/default.toml, docker-cluster.toml
-├── crates/
-│   ├── swarmllm-frontend/  (embedded + dev-mode frontend asset serving)
-│   └── swarmllm-types/     (shared types crate: NodeId, ModelManifest, SwarmMessage, etc.)
-├── src/
-│   ├── main.rs, lib.rs, error.rs, http.rs, types.rs, update.rs, update_restart.rs
-│   ├── bin/       (launcher.rs — Windows GPU/CPU auto-selecting launcher)
-│   ├── cli/       (mod, run, status, chat, bench, peers, pool, split_test, update, get_model, remove_model, privacy, unload_model (`swarmllm unload` — retire a worker, keep the files), diagnostics (pasteable node report) — R150 `swarmllm get-model` reference-model opt-in)
-│   ├── config/    (mod, providers, credit, network, ops, node, inference)
-│   ├── daemon/    (mod, manifest, shard_loader, gpu_support (CUDA compute-capability floor + pre-Ampere CPU fallback), dispatch/, startup, background, helpers, supervisor)
-│   │   └── state/        (mod, activity, capacity, capacity_plan, credits, events, hf, metrics, models, peer_speed, perf_history, relay, removed_shards, repair, retained_activations (what was sent to each segment, so a stand-in can be replayed it and take over mid-reply), retained_replies (fast-path replies kept for ResendTokens, #438), tp_allreduce)
-│   ├── network/   (manager/{mod,events,requests,tensors,identify,commands,connections,dht,shard_transfer,relay}, behaviour, discovery, protocol, transport, relay, peer_cache, redact (address redaction for the pasteable diagnostics report), bandwidth (what this node actually puts on the wire — libp2p's transport counters, read back), helpers, pipeline_stream)
-│   ├── model/     (manifest, shard, distribution, registry, acquisition, reference (R150 get-model), huggingface/, auto_manage/, lora)
-│   │   ├── auto_manage/  (mod, manager, scoring, download, prune, scan, vram, parallax, wishlist, quant (R133 recommender))
-│   │   └── huggingface/  (mod, download, private_types, probe, search, shards, watcher, tests)
-│   ├── inference/ (executor, sampling, kv_cache, speculative, swift, dsd_controller, quant, tokenizer, tensor_util, shard_layout, model_arch, vision, allreduce, attn_kernel, attn_softmax (fused scale+softcap+mask+softmax CPU kernel), decode_attn (single-position CPU attention straight over the KV cache — +24% decode), fast_math (AVX2 expf + fused SiLU×up), cpu_pools (per-phase rayon pools: prefill wide, decode narrow), local_embedder, mem_bandwidth (measured memory bandwidth — what a CPU node advertises as its speed, replacing a hardcoded 50 GB/s assumption), model_worker, process_pool, slot_table, worker_ipc, ngram_lookup (R136 L1), hedging (R136 L2), prefetch (R136 L3), trace (per-request route + timing record), prof (SWARMLLM_PROFILE=1 per-stage forward-pass profiler), cancel (the one cancellation signal), prefill_pacer, thermal)
-│   │   ├── router/       (mod, types, batch, local_exec, distributed_exec, spot_check, tests)
-│   │   ├── scheduler/    (mod, parallax, parallax_allocator, tests)
-│   │   ├── pipeline/     (mod, distributed, dsd, local, local_generate (a plan that names this node is run as the local generation it is), prompt, remote_generate, speculative, tensor_parallel, vision, hedge_dispatch (R136 L2), ngram_only_spec (R136 L1))
-│   │   ├── split/        (mod, model, loader, executor, kv_cache, kv_budget, entry, gguf_meta, shard_reader, rope, prefix_cache, hybrid (which layers of a segment go on the card — .145, #431), token_embedding, tests/)
-│   │   │   └── tests/    (mod, common, core, gqa, gemma2, moe_mla, llama4_glm4)
-│   │   ├── chat_template/ (mod, fallbacks, tojson (the `transformers` signature, not minijinja's), tests, fixtures/{llama3_official,qwen3_official,qwen3_gguf_shipped,glm4_gguf_shipped}.jinja — rendering is `minijinja` + `minijinja-contrib` pycompat, the engine HF's TGI and SGLang use; the hand-rolled parser/eval subset was retired 2026-09-10)
-│   │   └── layers/       (mod, qwen35)
-│   ├── credit/    (ledger, transaction, priority, anti_gaming, trust, escrow)
-│   ├── identity/  (keypair, nickname)
-│   ├── crypto/    (session, pipeline_seal, gossip_seal, relay_seal, key_rotation, provider_keys)
-│   ├── pool/      (types, crypto, manager/, forward, scope, invite (the `swarmpool://` v2 codec))
-│   ├── api/       (server, sse, tool_parse (local-model tool-call parser), admin, admin_providers, websocket, middleware, dashboard_trust (may this request be handed the API key?), process_memory (the largest memory accounting the platform offers — macOS keeps two), tailscale, identity, pool, metrics, providers, claude_sub*, mod, openai/, anthropic/, mcp/, admin_hf/, admin_models/, claude_session/)
-│   ├── storage/   (db)
-│   └── health/    (monitor, rebalancer)
-├── frontend/      (ONE index.html carrying 11 `<template>` elements, css/, js/{core/4,components/19,init.js,i18n.js,providers.js,neural-bg.js,topojson-client.min.js}, i18n/, fonts/ (IBM Plex woff2, SIL OFL — see LICENSE-THIRD-PARTY.md))
-├── python/        (swarmllm-client SDK)
-├── integrations/openclaw/  (OpenClaw provider plugin, TypeScript — `npm test`; built on OpenClaw's own self-hosted-provider SDK helper; see its README)
-├── monitoring/    (Grafana + Prometheus + docker-compose)
-├── deploy/anchor/ (R143 — hardened bootstrap/relay anchor kit: setup-anchor.sh, systemd unit, config.toml, runbook)
-├── packaging/     (swarmllm.service + aur/, homebrew/, rpm/ + deb/{postinst,prerm} maintainer scripts — prerm acts on $1: an upgrade must never `systemctl disable`, gotcha #313)
-├── docs/          (ARCHITECTURE, CREDITS_DESIGN, FUTURE_WORK, DIAGNOSTICS, REFERENCE_MODELS,
-│                 NETWORKING, NETWORKING_PLAN, TESTING)
-├── docs/invariants/  (the evidence behind .claude/rules/architecture.md — 7 topic files)
-├── docs/plans/    (design notes + benchmarks/, archive/)
-├── docs/book/     (mdBook documentation site)
-├── vendor/        (patched upstream crates, all workspace-`exclude`d; every patch marked `SwarmLLM patch:`)
-│   ├── candle/                (k_quants::matmul tiled + row-blocked + `vec_dot_rows` multi-row AVX2 Q4_K/Q6_K kernels, bit-identical, exactness-asserted by qmatmul_bench; cudarc dynamic-linking hardcode removed;
-│   │                          QTensor::gather_rows — read rows out of a quantized tensor
-│   │                          without dequantizing it whole, CPU slice + CUDA index_select
-│   │                          over a byte view; the embedding table is the caller;
-│   │                          CUDA dequantize_f16 falls back to the host for UNQUANTIZED
-│   │                          F16/BF16/F32 GGUFs like its dequantize sibling already did —
-│   │                          without it a GPU node loaded such a model then failed every
-│   │                          request, gotcha #288)
-│   ├── candle-flash-attn/     (cudart linked STATICALLY so the binary needs only the display driver;
-│   │                          18 bf16 kernels + the FP16_SWITCH bf16 branch dropped — unreachable, 37→19)
-│   ├── candle-paged-attention/ (kernels only — NOTHING references it; PagedAttention was never wired, #257)
-│   └── libp2p-request-response/ (11 tests, `--lib`)
-└── tests/         (integration tests)
-```
+**Per-subsystem rules load automatically when you open that subsystem's files**
+(`.claude/rules/arch-*.md`); the index is in `.claude/rules/architecture.md`.
+Source tree, subsystem detail and protocols: `docs/ARCHITECTURE.md`.
 
 ## Key Dependencies
 
-libp2p 0.56, axum 0.8, candle-core/candle-transformers 0.10 (CUDA), redb 4, ed25519-dalek 2, x25519-dalek 2, chacha20poly1305, blake3, dashmap 6, clap 4, tracing, reqwest, zstd, **minijinja 2.24 + minijinja-contrib (pycompat)** — chat-template rendering, the engine HF's TGI and SGLang use; its `trim_blocks`/`lstrip_blocks`/`keep_trailing_newline`/`pycompat` settings are part of the contract, see `.claude/rules/architecture.md`. See `Cargo.toml` for full list.
+libp2p 0.56, axum 0.8, candle 0.10 (CUDA, **vendored + patched** — see
+`vendor/`), redb 4, ed25519/x25519-dalek 2, chacha20poly1305, blake3, dashmap 6,
+tokio, clap 4, tracing, reqwest, zstd. Full list in `Cargo.toml`.
+
+Two that carry contracts rather than just versions:
+
+- **minijinja 2.24 + minijinja-contrib (pycompat)** renders chat templates — the
+  engine HF's TGI and SGLang use. Its `trim_blocks` / `lstrip_blocks` /
+  `keep_trailing_newline` / `pycompat` settings are part of the contract.
+- **`serde_json` and `minijinja` are both built with `preserve_order`.** Drop
+  either and every tool schema reaches the model alphabetised.
 
 ## Coding Conventions
 
@@ -151,35 +89,52 @@ libp2p 0.56, axum 0.8, candle-core/candle-transformers 0.10 (CUDA), redb 4, ed25
 - Key metrics: peers.connected, inference.requests, inference.latency_ms, credits.balance, shards.hosted
 
 ### Frontend
-- Vanilla HTML/CSS/JS — no framework, no Node.js build step
-- Embedded into binary via `include_dir!` macro at compile time
-- Component architecture: `App` global namespace, 28 JS files (4 core + 19 components + init.js + 4 standalone utilities)
-  - `js/core/` — state.js (namespace + shared state + storage keys), utils.js (format helpers, DOM builders, extractErrorMessage, getApiErrorMessage, apiAction, `renderMarkdown`/`inlineMarkdown` — the ONE markdown renderer — plus `renderReplyInto`, the ONE way a model's reply is rendered (chat and compare both go through it; it keeps the markdown source on `_rawText` so Copy returns what the model wrote), and `initTopBannerOffset`, which keeps `--top-banner-height` in step with the DOM so a fixed top banner never covers the header), data.js (data store + authFetch + dedup), tooltip.js (unified popover replacing native `title=`)
-  - `js/components/` — ui.js, chat.js, claude-code.js, dashboard.js, dashboard-shards.js (pure shard HTML builders exposed as `App.dashboardShards`), models.js, auto-manage-status.js, settings.js, setup.js, welcome.js (R127 — first-run tour modal), downloads.js, notifications.js, identity.js, network-map.js, compare.js, responses.js, pool.js, swarm-tab.js (R111 — wishlist + capacity-plan + performance view), reference-models.js (R148 — shared test-model picker, `App.referenceModels`)
-  - `js/init.js` — event binding, initialization, public API export
-  - `js/i18n.js`, `js/providers.js`, `js/neural-bg.js`, `js/topojson-client.min.js` — standalone utilities (loaded before App)
-- 3 modal overlays (setup, settings, R127 `#welcome-modal` first-run tour) + 11 `<template>` elements for repeating UI structures (session items, chat messages, toasts, model cards, etc.)
-- Primary destinations are **four**: Chat · Models · Dashboard · Network, with Compare and My Devices in a "More" menu. **Network is the map AND the leaderboard** — one destination, because they answer one question between them; `/admin/leaderboard` still resolves to it. Group by how OFTEN a destination is wanted, never by how expert you must be to want it (see `docs/invariants/frontend.md`).
-- All storage keys registered as named constants on `App` (e.g., `App.SESSIONS_KEY`, `App.MODEL_SORT_KEY`, `App.NODE_DETAIL_KEY` — the per-browser "show which computers are answering" toggle, off by default)
-- Dark/light/system appearance (a Settings select, not header chrome), CSS custom properties for theming
-- i18n: 1389 translation keys (1391 entries per locale incl. `_lang` + `_dir`) across 21 languages via `frontend/i18n/{lang}.json`, `I18n.t()` + `data-i18n` attributes. All files sorted by key; parity + these counts are asserted by `tests/repo_consistency.rs` (update the count in BOTH CLAUDE.md and `docs/ARCHITECTURE.md` when adding keys). Every locale carries idiomatic native strings, not English fallback — a new key MUST be translated across all 21 locales (see `.claude/rules/i18n.md`). Per-batch history in `memory/`.
-- Frontend payload: **~1172 KB** (html 141 + css 260 + js 771, re-measured 2026-09-14), plus **one** locale at a time (~90 KB en; Thai is the largest at 167 KB) and **88 KB of bundled fonts** (`frontend/fonts/`, IBM Plex Latin subsets — NOT counted by the payload test, which sums `js|css|html` only) — the other 20 locales are never fetched. Measured byte-accurate and capped by `frontend_payload_stays_within_budget` in `tests/repo_consistency.rs`; the long-standing "< 200KB target" in this file was 5.6x out and nothing checked it. The cap is a regression budget, not a goal: it fails on a step change, not on ordinary growth.
-- Communication: WebSocket for real-time, REST for initial load, SSE for chat streaming
-- WebSocket message types (only 5): `activity_event` (unified event bus — all subsystem events, toasts, prune history), `stats_update` (2s interval — stats, shard registry, acquisitions, **swarm_capacity** (R110), **wishlist** (R111), **hardware** (2026-09-06 — RAM/GPU/disk; read from a CACHE refreshed on a blocking thread at most every 6 s, because measuring it spawns `nvidia-smi` at ~90 ms and this payload is shared by every client), **network_traffic** (2026-09-12 — RX/TX plus the current rate; one of THREE status payloads, see `api::metrics::network_traffic_json`)), `peer_list` (full peer snapshot on change), `models_changed` (shard download/load/prune signals dashboard refresh), `update_available` (new version detected)
-- Broadcast channels (only 2): `activity_tx` (ActivityEvent — 256 capacity) for all events + `dashboard_tx` (DashboardSignal enum — 32 capacity) for PeersChanged/ModelsChanged/UpdateAvailable signals
-- Frontend single entry point: all events flow through `_handleActivityEvent()` in notifications.js — handles routing (activity vs network panel), toast display (via `toast_level` field), prune history, per-model ticker, pool refresh
-- Activity events are i18n-ready: frontend formats via `I18n.t('activity.<kind>', params)` with fallback to backend English message
+- Vanilla HTML/CSS/JS — no framework, no build step; embedded via `include_dir!`.
+  `App` global namespace; 28 JS files (4 `core/` + 19 `components/` + `init.js` + 4
+  standalone); one `index.html` with 11 `<template>`s and 3 modal overlays.
+- Nav is **four** destinations — Chat · Models · Dashboard · Network (the map AND
+  the leaderboard) — plus Compare and My Devices under "More". Rank by how OFTEN
+  a destination is wanted, never by how expert you must be to want it.
+- Storage keys are named constants on `App` (state.js), never raw literals. Fetch
+  model/stats data via `App.data.*`, never a bare `authFetch`.
+- **5** WS message types, all handled by `_handleActivityEvent()`; **2** broadcast
+  channels. Do not add to either set.
+- i18n: **1389 translation keys** (**1391 entries per locale** incl. `_lang` +
+  `_dir`) × 21 languages, sorted by key. Parity and counts are asserted — **update
+  BOTH CLAUDE.md and `docs/ARCHITECTURE.md`**. A new key MUST be translated into
+  all 21; no English fallback (`.claude/rules/i18n.md`).
+- Payload **~1172 KB** (html 141 + css 260 + js 771, 2026-09-14) + one locale
+  (~90 KB en, Thai 167 KB) + 88 KB fonts (not counted). Capped by
+  `frontend_payload_stays_within_budget` — a regression budget, not a goal.
 
 ## Testing
 
-- **Counts** (re-measured 2026-09-14): **2705 lib** + 12 ignored with `--features dev,claude-subscription` — the claude-subscription provider carries its own tests, so **always say which feature set a count came from**. 79 integration (31 api_test + 34 phase10_11 + 14 yamux_substream) + 1 ignored e2e, 113 repo-consistency, 1 `api_key_side_effects`, 36 `swarmllm-types` (**not** covered by a bare `cargo test`; CI runs it explicitly), 11 in the vendored request-response patch (`--manifest-path vendor/libp2p-request-response/Cargo.toml --lib`). Clippy clean.
-- **Benches and harnesses — see `docs/DIAGNOSTICS.md` § Benchmarks for the full list and the traps.** The ones reached for most: `examples/prefill_bench.rs` (drives `SplitModel::forward` directly, no daemon — `SWARM_BENCH_MODEL`, `SWARM_BENCH_PROMPT`, `SWARM_BENCH_DECODE`, `SWARM_BENCH_REPS`, `SWARM_BENCH_DEVICE=cuda`, and `SWARM_BENCH_SPEC_WIDTHS=1,2,4,8` which prices a K-token forward against a 1-token one at the same history depth — the number that decides whether speculation pays; pair with `SWARMLLM_PROFILE=1` for the per-stage breakdown), `examples/qmatmul_bench.rs` (asserts the tiled kernel is bit-identical to upstream), `examples/smoke_test.sh [binary] [port]` (9 checks on an isolated node — run it on the DOWNLOADED release artifact; it now reports checks that COULD NOT RUN separately and never says "all checks passed" over them, and fails fast if the node it started dies — before 2026-08-25 it skipped the three inference checks silently and still claimed success, so "smoke 8/8" had been passing here without ever exercising inference), **`examples/family_conformance.sh`** (does each model FAMILY produce a sane reply, or only bytes? Asserts per-family that the reply answers a checkable question, stops by itself, leaks no control marker, has its tool call parsed into `tool_calls` rather than left as text, and rendered the model's own template — the properties the field-reported bugs of v0.3.169-.173 each broke, **all of which pass `release_shapes.sh`**, which runs ONE family and asserts `>3` tokens came back. Part of the release gate as of 2026-09-11; it has now found six real defects in three runs, and it is the check that showed .172 could not serve Phi-4-mini at all), `examples/constrained_node_test.sh` (a SMALL node reproduced locally — every memory defect since #452 came from one, and none reproduced on a dev box; isolated node + a small `max_ram_mb`, checks the itemised over-budget refusal, then `SIGKILL`s the worker and requires the NEXT request to be served), `examples/soak_test.sh` (`HOURS=` must be a WHOLE number; data dir is per-`PORT`, so two soaks no longer kill each other), `examples/failover_kv_probe.rs` (does a stand-in taking over a segment mid-reply compute the same thing? Two real segments, `SWARM_KV_PROBE_MODEL`/`_SPLIT`/`_DECODE`; **every run carries a control** that holds the history and must reproduce the healthy machine exactly, so the probe can report a null result. Measured 2026-09-09: P(healthy token) 0.997 → 0.119 replacing just 4 of 28 layers), `examples/tokenizer_scaling.rs` (`SWARM_TOK_HEADER` at a model's `gguf_header.bin` — times `encode` against prompt length and prints `tokenizer_model`/`merges`/`scores`, which is what decides WHICH encode path a GGUF takes; a doubling that quadruples the time is the signature. `SWARM_TOK_TEXT` prints the ids for one string, which is how our output gets compared against HuggingFace `tokenizers`. Found #420 and #421).
-- **Measurement discipline** (paid for repeatedly): min-of-N on an IDLE box — the same unchanged code measured 0.42 ms and 0.97 ms across runs here, and a benchmark taken while a build runs is worthless. **min-of-N is for benchmarks, not for live measurement** (#367). A/B inside ONE binary via an env switch (`SWARMLLM_DECODE_CALIBRATE=0`, `SWARMLLM_DECODE_ATTN=standard`, `SWARMLLM_FORCE_STANDARD_ATTN`, `SWARMLLM_FLASH_OFFSET_CAUSAL=0`, `SWARMLLM_GQA_DECODE_FLASH=1`, `SWARMLLM_GROUPED_GQA_DECODE_ONLY=1`), never across two builds. **Verify the mechanism fired**, not just that the outcome improved. Pinned reference models: `docs/REFERENCE_MODELS.md`.
-- Unit tests: in-module `#[cfg(test)]` blocks
-- Integration tests: `tests/integration/` — multi-node simulations with `--test-threads=1`
-- Real-model spawn-and-infer test: set `SWARMLLM_TEST_MODEL_DIR` to a fully-populated model directory (e.g. `~/.local/share/swarmllm/models/tinyllama-1.1b-...`) and run `cargo test --test integration_phase10_11 -- --ignored end_to_end`. No synthetic GGUF fixture is committed; see `docs/ARCHITECTURE.md` § Deferred Items.
-- CI pipeline: `cargo fmt` → `cargo clippy --all-targets -- -D warnings` → `cargo test` → `cargo build --release`, plus **`actionlint` over `.github/workflows/` (job `Workflow lint`, added 2026-09-11)** — it runs `shellcheck` on every `run:` block, which is what guards the retry loops those steps depend on. **CI is 14 jobs**, and all 14 are required by branch protection since 2026-09-11.
-- **`examples/check_ci_gate.sh`** — does branch protection still require the checks CI actually produces? A required check is matched to a job by NAME, so a renamed job leaves the rule naming a job that never reports, and **every PR becomes permanently unmergeable** (gotcha #530). Reading protection needs admin, which `GITHUB_TOKEN` does not have, so this is a script you run rather than a job. Reports drift in both directions — required-but-absent (blocks everything) and produced-but-not-required (gates nothing). **Run it as part of the release gate, and only against a COMPLETED CI run** — a queued one has created only the jobs that have started, so the rest read as required-but-absent and the script then advises deleting a healthy required check (gotcha #557; guarded since 2026-09-11). Verified 2026-09-11 at the .173 release: 14 required = 14 job names, in agreement.
+**Always say which feature set a count came from.** Current, with
+`--features dev,claude-subscription`: **2705 lib** (+12 ignored),
+79 integration (31 `integration` + 34 `integration_phase10_11` + 14 `yamux_substream`),
+113 repo-consistency, 1 `api_key_side_effects`, 36 `swarmllm-types` (**not** run
+by a bare `cargo test` — CI runs it explicitly),
+and 11 in the vendored request-response patch.
+Clippy clean. That last suite is run on its own:
+`cargo test --manifest-path vendor/libp2p-request-response/Cargo.toml --lib`.
+
+⚠ **A count edited after the test run is an untested change.** Counts live in
+`CLAUDE.md` ×2 and `README.md` ×2 and are cross-checked by a guard, so re-run
+`cargo test --test repo_consistency` after editing one, before `git add`. This
+has put main red twice.
+
+- Unit tests in-module `#[cfg(test)]`; integration in `tests/`, `--test-threads=1`.
+  Real-model run: set `SWARMLLM_TEST_MODEL_DIR`, then
+  `cargo test --test integration_phase10_11 -- --ignored end_to_end`.
+- CI is **14 jobs, all 14 required** by branch protection. `examples/check_ci_gate.sh`
+  reports required-vs-produced drift — run it against a **COMPLETED** run only.
+- **Benches, harnesses and their traps: `docs/DIAGNOSTICS.md` § Benchmarks.** The
+  release gate's three (`smoke_test.sh`, `release_shapes.sh`,
+  `family_conformance.sh`) all run on the DOWNLOADED artifact.
+- **Measurement discipline**: min-of-N on an IDLE box, for benchmarks only — **not
+  for live measurement** (#367). A/B inside ONE binary via an env switch, never
+  across two builds. **Verify the mechanism fired**, not just that the outcome
+  improved. Pinned models: `docs/REFERENCE_MODELS.md`.
 
 ## Key Design Decisions
 
@@ -187,89 +142,76 @@ libp2p 0.56, axum 0.8, candle-core/candle-transformers 0.10 (CUDA), redb 4, ed25
 - Data dir: `~/.local/share/swarmllm/` (Linux), `~/Library/Application Support/swarmllm/` (macOS), `%APPDATA%\swarmllm\` (Windows)
 - Port layout: HTTP API on TCP:port, P2P TCP on port+10 (Noise+Yamux), P2P QUIC on UDP:port
 - Credit transactions require dual Ed25519 signatures (serving node + requesting node)
-- **Credits are DORMANT (2026-08-17) — they gate nothing.** `MIN_BALANCE_FOR_INFERENCE = 0` and `calculate_tier` returns a constant, so no balance affects who is served, how fast, or what the dashboard shows. The accounting still runs. Reason: credit has never moved between nodes as payment for work — each node mints its own figure (the one real transfer, pool credit *forwarding*, just concentrates self-minted numbers). Design + exit criteria in `docs/CREDITS_DESIGN.md`; `credits_stay_dormant` in `tests/repo_consistency.rs` fails the build if a balance starts gating again.
+- **Credits are DORMANT (2026-08-17) — they gate nothing.** `MIN_BALANCE_FOR_INFERENCE = 0`
+  and `calculate_tier` returns a constant; the accounting still runs but no balance
+  affects who is served or how fast. `credits_stay_dormant` fails the build if one
+  starts gating again. **Read `docs/CREDITS_DESIGN.md` before touching credits** —
+  why it is off, what is actually true today, and the exit criteria.
 - KV-cache sessions expire after 10 minutes of inactivity (configurable)
 - Shard verification: BLAKE3 content hash checked on every load
 - Pipeline failover: hot-standby nodes pre-identified per segment
 - **Encryption — two layers, distinct concerns:**
-  - **Layer 1 — `network.enable_encryption` (DEFAULT TRUE).** ChaCha20-Poly1305 sealing of activations between hops via per-session X25519 ECDH. Every inter-node tensor forward is encrypted on the wire. AAD covers cleartext header + spec/kv-truncate/chunk-meta trailers (`build_layer_forward_aad` is the single source of truth). On the receiver side, decryption is offloaded from the NetworkManager event loop via `tokio::spawn` (R139 Phase C). Failure is hard: there is NO plaintext fallback on `seal()` failure — the forward is dropped with `LayerResult::error`. Disabling this flag is only sensible for local-loopback debugging.
-  - **Layer 2 — `inference.encrypted_pipeline` ("boomerang", DEFAULT FALSE, per-model override).** Forces the local node to handle BOTH the first segment (embedding) AND the last segment (sampling). No remote node ever sees the plaintext prompt OR the sampled tokens. **It does see the intermediate hidden states in PLAINTEXT** — activations are sealed hop-to-hop by Layer 1, and `network/manager/tensors.rs` calls `session_manager.open(...)` and hands the plaintext to the worker, because a matmul cannot run on ciphertext. This is a STRUCTURAL guarantee (the ends stay here), not a cryptographic one against the computing node, and hidden states are partially invertible back to input text — published recovery is ~81% at the final layer, which is also why a "keep more layers local" dial is not the answer (`docs/FUTURE_WORK.md`). Real encrypted compute means FHE/MPC: BERT-Base at 128 tokens on 4x A100 is ~193 s and ~1.3 GB of inter-device traffic, so it is three orders of magnitude away from usable here. Requires the local node to hold shard 0 + final shard. Adds ~1 RTT/token. This is the strongest privacy mode; Layer 1 alone leaves entry/exit nodes able to read the cleartext at their boundary.
-- **Private mode**: restricts YOUR outbound inference to pool/LAN nodes only. Nodes still serve the swarm. Single `allowed_node_set()` in `src/pool/scope.rs` gates everything. Runtime-toggleable via `AtomicBool`. Shard pinning lets pool owners assign models to devices.
-- **No full model download required**: A node NEVER needs the full GGUF or all shards to participate in inference. Shards are downloaded individually via byte-range requests. Downloading all shards (or a full model) is opt-in only — for users who want offline inference or to seed more shards to the network. Never add code that implicitly downloads a full model or reconstructs a GGUF from shards. All inference loads from shard files + gguf_header.bin.
+  - **Layer 1 — `network.enable_encryption` (DEFAULT TRUE)**: ChaCha20-Poly1305
+    sealing of every inter-node activation, per-session X25519 ECDH. AAD via
+    `build_layer_forward_aad` (the single source of truth — every optional wire
+    trailer must be bound there). **No plaintext fallback**: a `seal()` failure
+    drops the forward. Turn it off only for local-loopback debugging.
+  - **Layer 2 — `inference.encrypted_pipeline` ("boomerang", DEFAULT FALSE)**:
+    this node keeps BOTH ends, so no peer sees the prompt or the sampled tokens.
+    ⚠ **Peers DO see intermediate hidden states in plaintext** — a matmul cannot
+    run on ciphertext, and those states are ~81% invertible back to text at the
+    final layer. It is a STRUCTURAL guarantee, not a cryptographic one against
+    the computing node. Costs ~1 RTT/token. Full reasoning, and why FHE/MPC is
+    three orders of magnitude away: `docs/ARCHITECTURE.md` § Pipeline Privacy
+    Model and `docs/FUTURE_WORK.md`.
+- **Private mode** restricts YOUR outbound inference to pool/LAN nodes only; the node
+  still serves the swarm. `pool::scope::allowed_node_set()` gates everything.
+- **No full model download, ever implicitly.** A node NEVER needs the whole GGUF or
+  every shard to serve. Shards come individually over byte-range requests, and
+  inference loads from shard files + `gguf_header.bin`. Downloading everything is
+  opt-in (offline use, seeding). **Never add code that implicitly downloads a full
+  model or reconstructs a GGUF from shards.**
 
 ## Subagent Choices for This Codebase
 
-When spawning subagents in this repo, use these model picks (overrides defaults that would otherwise pick haiku):
-- `Task(feature-dev:code-reviewer)` → sonnet (this codebase's invariants need real reasoning, not pattern-matching)
-- `Task(feature-dev:code-architect)` → sonnet
-- `Task(Plan)` → sonnet
-- Never delegate production code writing — opus (this main session) writes it
-- `Task(root-cause)` → sonnet. Reach for it BEFORE attributing a failure or reverting. Its verdict is evidence, not opinion: it must have observed the symptom absent when the suspect is absent.
+Override the default that would otherwise pick haiku — this codebase's invariants
+need real reasoning, not pattern-matching. `Task(feature-dev:code-reviewer)`,
+`Task(feature-dev:code-architect)`, `Task(Plan)` and `Task(root-cause)` → **sonnet**.
+**Never delegate production code writing** — the main session writes it.
+`Task(root-cause)` (`.claude/agents/root-cause.md`) returns CAUSED / NOT-CAUSED /
+UNDETERMINED and never a fix; reach for it BEFORE attributing a failure or
+reverting, especially when the suspect is your own recent change.
 
 ## Reference Documents
 
-- `docs/ARCHITECTURE.md` — **Primary reference** — current architecture, subsystems, protocols, security model
-- `docs/book/` — mdBook documentation site (getting started, API reference, architecture, troubleshooting)
-- `docs/DIAGNOSTICS.md` — DIAG: log instrumentation guide for debugging
-- `docs/CREDITS_DESIGN.md` — **read before touching credits.** Why the economy is
-  switched off, what is actually true today, the bilateral-settlement design, and
-  the exit criteria that must hold before any of it is switched back on
-- `docs/FUTURE_WORK.md` — deferred items with enough context to pick up cold
-- `.claude/rules/architecture.md` — the invariants themselves, as statements (SharedState, broadcast channels, scheduler oracle, wire-format helpers). Loaded every session, so it is deliberately short.
-- `docs/invariants/` — the evidence behind each rule: what it replaced, what it was measured at, what a change must keep. Seven topic files (scheduling, memory, network, inference, api-surfaces, state-and-config, frontend). **Read the topic file before changing code a rule names.**
-- `.claude/rules/diagnosis.md` — **read before blaming any change for any symptom, and before implementing anything non-trivial.** Rule 0: look up how the failure mode is solved elsewhere first — WireGuard's per-keypair replay counter and vLLM's Head-Room Admission each changed an implementation the same day. Then: baseline before blaming, verify the mechanism fired, check the test fails without the fix.
-- `.claude/agents/root-cause.md` — `Task(root-cause)` establishes CAUSED / NOT-CAUSED / UNDETERMINED for a suspected cause, and never proposes a fix. Use it before reverting or attributing, especially when the suspect is your own recent change.
-- `.claude/sweep-log.jsonl` — per-finding history of every `/sweep` round (status: fixed / wontfix / deferred). Grep before re-reporting potential issues.
-- `SwarmLLM_Technical_Specification.docx` — high-level technical specification with architecture rationale. **Gitignored and not present in a clone** — it is a local reference only, so do not treat a link to it as something a contributor can follow.
+- `docs/ARCHITECTURE.md` — **primary reference**: subsystems, source tree, protocols, security model
+- `docs/invariants/` — the evidence behind each rule (7 topics). **Read the topic file before changing code a rule names.**
+- `.claude/rules/diagnosis.md` — **read before blaming any change for any symptom, and before implementing anything non-trivial.** Rule 0 is research-first; then baseline before blaming, verify the mechanism fired, check the test fails without the fix.
+- `docs/DIAGNOSTICS.md` — `DIAG:` instrumentation, benches and their traps
+- `docs/FUTURE_WORK.md` — deferred items, with enough context to pick up cold
+- `docs/CREDITS_DESIGN.md` — read before touching credits · `docs/book/` — mdBook site
+- `.claude/sweep-log.jsonl` — every `/sweep` finding and its status. **Grep before re-reporting.**
+- `SwarmLLM_Technical_Specification.docx` — **gitignored, absent from a clone.** Never link a contributor to it.
 
 ## Status
 
-All 20 build phases complete. All subsystems wired — no stubs. **2705 lib (dev,claude-subscription) — re-measured 2026-09-14, full suite green (exit 0)** + 79 integration (31 `integration` + 34 `integration_phase10_11` + 14 `yamux_substream`) + 113 repo-consistency + 1 api_key_side_effects + 36 swarmllm-types tests passing; 12 lib + 1 e2e ignored (env-var or manual). Clippy clean on default, `--no-default-features --features dev,claude-subscription` (that combination is the documented one — plain `--features dev` leaves `embedded` on too and fails on dead code), a `--features llama` check, and `flash-attn --lib`. `cargo audit` reports only advisories already documented and accepted in `SECURITY.md` — re-checked at the .177 release 2026-09-13, two (`hickory-proto` RUSTSEC-2026-0118/0119, both transitive via libp2p — 0.26.1 is a semver-MAJOR bump pinned by libp2p 0.56, so it is genuinely unreachable without upgrading libp2p; re-checked 2026-09-08, not merely re-accepted) plus the `paste` unmaintained warning.
+**v0.3.182-alpha released and deployed (2026-09-15).** Nothing functional is
+unreleased. Release procedure: **`memory/release_gate.md`** — the ordered steps
+and every caution earned at a past gate; do not re-derive it. Per-release
+history: `memory/round_history.md`. Gotchas index: `memory/gotchas.md`
+(next free index 613). Standing cautions: `memory/open_cautions.md` — **read at
+session start.** (`memory/` is the auto-memory dir outside the repo:
+`~/.claude/projects/-home-user-SwarmLLM/memory/`.)
 
-**Released and deployed: v0.3.182-alpha (2026-09-15).** Gate record in
-`memory/round_log_0914_post181_reporting.md` § Gate result — fully green, and
-the conformance run was **identical line for line** to the .181 baseline (75
-lines, 52 OK / 0 FAIL / 2 n/a). Rollback
-`~/.local/bin/swarmllm.0.3.181-alpha.bak` (3 kept: .179/.180/.181).
+`cargo audit` reports only advisories documented and accepted in `SECURITY.md`.
 
-**v0.3.182 is one kind of bug, found eight times** — a surface telling the user
-something untrue about what the node was doing, every one found by reading a
-running node's own output rather than from a field report. Model cards counted
-computers that could never share the file (**36 of 97 parts** miscounted, and
-the same part read 1 or 4 depending on which writer touched the row last); the
-activity list was **102 of 114** entries of peers announcing themselves, which
-is also what a freshly opened dashboard replays and what the pasteable report
-shows; the disputed-part counter read **zero on the one path a peer-provisioned
-node actually reaches**; `peer_connected` fired per Identify rather than per
-connection; a status **GET** appended to the activity list and raised a toast on
-every read; a failed fetch **destroyed** the frontend cache a dozen components
-read; and Cancel was reported as a download failure. Plus rustls 0.23.45 for
-RUSTSEC-2026-0285 on the QUIC path. ⚠ **The recurring shape:** three of these
-were a repetition lesson learned for a LOG line and never carried to the
-activity list — in each case the correct version was already written down in the
-same file, once 30 lines away.
+## Pushes are public-facing
 
-### Earlier rounds — one line each. Detail in `memory/round_log_*.md`, gotcha numbers index `memory/gotchas.md`. **Read the named round log before re-deriving any of these.** Older than .160: `memory/round_history.md`.
-
-- **.181** (09-14, gate clean): **#033** Windows had NEVER been able to install an update, in any release — the refusal rested on a comment claiming a running `.exe` cannot be RENAMED, which is false (#602); **#034** iOS/iPadOS page-scroll, two entangled WebKit behaviours where the LOCK is what makes `dvh` correct (#608); the chat says what it is waiting on from a snapshot the client was throwing away (#605); and **one word per thing** across 21 locales and FIVE surfaces, one a helper that RETURNED the word (#609-#611). ⚠ Windows and iOS verified by MECHANISM only — neither platform exists here. `memory/round_log_0914_release_181.md`.
-- **.180** (09-14, 24 commits): two field reports and five parallel audits. ⚠ **The reporter numbered TWO reports #032** — **#032-download** (a shard restarting from byte zero for ever) and **#032-streaming** (a `<think>` scratchpad still reaching the reply on .179, the release that shipped the fix for it). Also a **SECURITY** fix: the `tp_meta` trailer rode the wire unauthenticated, so a relay could cause a silently WRONG AllReduce — ⚠ a wire change for **tensor-parallel clusters only** (defaults FALSE), both ends together. ⚠ Four lessons: **a rule that lives only in a comment gets re-broken by the next file** (#593); **a test that exercises a helper cannot tell you the helper is CALLED** (#601); **an audit's severity is a hypothesis**; **check the response SIZE before trusting a grep** (#594). `round_log_0914_shard_download_restart_loop.md`, `round_log_0914_settings_write_paths.md`.
-- **.179** (09-13, gate clean): three field reports — **#030** the anti-swap gate ran ONCE per model on a card-less computer and it swapped (#586), **#031** a reasoning model's whole scratchpad streamed as the answer when the reply opened with whitespace (#588), and the **.177 shard fix made measurable** (`disputed_shards` in the diagnostics report, printed even at zero, because the count had lived in one startup task's local variable). Plus the CLI still printing dormant credits (#587), tok/s in Performance, the ticker moved to a filterable Activity panel, a key for the map's arcs, and a placeholder that outlived its feature. ⚠ **Three were the same sentence: two ways to fail, one watched** (#590). `memory/round_log_0913_dispute_visibility_and_credits.md`.
-- **.177-.178** (09-13, both gate clean): a peer's gossip could make a node DELETE a shard it held correctly (#581, gotcha #384 recurring — **a repair mechanism is a destruction mechanism**); then the model list and network view rebuilt live with the user and two testers (rows in words, On this computer / On other computers, everything visible in the expanded card, Map+Leaderboard merged into one **Network** tab drawing REAL routes). ⚠ **Every Q4_K_M model had been reporting itself as Q2_K** (#584) — found only by making a hidden panel visible. `round_log_0913_shard_destruction.md`, `round_log_0913_dashboard_rework.md`.
-- **.166-.176** (09-09→09-12, eleven releases in four days, all gate clean): tool schemas reached every model ALPHABETISED (#46); the KV cache reserved at the admitted prompt length (#32); **every Qwen3 request reached the model with the QUESTION MISSING** (.169); templates moved to `minijinja` (.170); **tools were NEVER passed to the template** plus an escrow that MINTED credits (.171); partial RoPE meant Phi-4-mini, GLM-4 and Qwen 3.5 could not serve one request (.172-.173); six field reports from a 16 GB processor-only Mac. `family_conformance.sh` was written here and found two real bugs on its first run; branch protection went to 14 contexts after every PR was permanently BLOCKED (#530). `memory/round_history.md`.
-- **.160-.165** (09-06→09-08): #484 a FALSE PRIVACY ASSURANCE; #495 shipped INERT (a transport failure recorded as a perfect delivery); the prompt-trust bar; per-peer GOODPUT closing issue #21's open half. ⚠ Null controls caught THREE tests passing for the wrong reason.
-- **.132-.159** (08-29→09-06): the guards-were-the-defect audit (#413 — five tested by PLANTING the violation, four could not see what they guard); #449 ALL inference broken on every Mac; #472 a content hash recomputed mid-fix.
-- **.15-.131** (07-23→08-28): the era that produced most of the rules. A corrupt shard PROVED to spread and the repair QUARANTINED THE GOOD COPY (#382/#384) — **a repair mechanism is a destruction mechanism**; 25.7x from a budget read off the BOOT SNAPSHOT (#281 → `SharedState::cfg()`); credits switched OFF; AVX2 compiled OUT of releases (3.09x). ⚠ **#367 min-of-N is for benchmarks, NOT live measurement.**
-- **R136-R150 + the 20 build phases**: NAT/reachability, SWARM-SPEC cascade, `swarmpool://` v2, cross-pool routing. `docs/ARCHITECTURE.md` § phase history.
-
-## Public-Facing Repo (2026-07-22)
-
-The repo is public and a **GitHub webhook relays activity to the project Discord** —
-every commit and push is broadcast to real users, including non-technical ones
-deciding whether to run this software. Commit subjects must stand alone in a feed
-with no context; lead with user-visible impact before mechanism; never name a person
-or paste private correspondence; get sign-off before force-pushes or history rewrites
-(they surface in the feed and look like something broke). Full guidance in
-`.claude/rules/workflow.md` § "Pushes are public-facing".
+The repo is public and a webhook relays every commit to the project Discord,
+read by non-technical users deciding whether to run this software. Commit
+subjects must stand alone with no context, lead with user-visible impact before
+mechanism, and never name a person. Get sign-off before a force-push. Full
+guidance: `.claude/rules/workflow.md` § "Pushes are public-facing".
 
 ## Common Commands
 

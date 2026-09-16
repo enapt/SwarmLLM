@@ -61,7 +61,9 @@
     "deny": [
       "Bash(cargo publish *)",
       "Read(./.env)",
-      "Read(./.env.*)"
+      "Read(./.env.*)",
+      "Read(./vendor/**/target/**/*)",
+      "Read(./target/**/*)"
     ]
   },
   "includeGitInstructions": false,
@@ -112,6 +114,17 @@
             "type": "command",
             "command": "bash ${CLAUDE_PROJECT_DIR}/.claude/scripts/on-stop-verify.sh",
             "timeout": 30
+          }
+        ]
+      }
+    ],
+    "InstructionsLoaded": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PROJECT_DIR}/.claude/scripts/instructions-loaded.sh",
+            "timeout": 5
           }
         ]
       }

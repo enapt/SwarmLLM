@@ -1,6 +1,6 @@
 # Worker memory: graphics, RAM and the KV cache
 
-The evidence behind the rules in `.claude/rules/architecture.md`: what each
+The evidence behind the rules in `.claude/rules/arch-worker-memory.md`: what each
 rule replaced, what it was measured at, and what a change must keep.
 
 Every entry here was paid for. **Read the entry before changing the code it
@@ -792,7 +792,7 @@ host cannot see the bug that only exists on the other host.
 
 ## What a task took, a task gives back by being dropped
 
-*Rule: `.claude/rules/architecture.md` § "What a task took, a task gives back by
+*Rule: `.claude/rules/arch-worker-memory.md` § "What a task took, a task gives back by
 being dropped". Found by audit 2026-09-14, each verified against the code.*
 
 ### The shape

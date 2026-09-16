@@ -12,6 +12,72 @@ Cargo workspace with three crates:
 
 Extension traits (`ModelManifestExt`, `NicknameRecordExt`, `BlindedPoolInvitationExt`) provide methods for types in `swarmllm-types` that depend on main crate functionality (filesystem, crypto, blake3).
 
+### Annotated source tree
+
+Moved out of `CLAUDE.md` 2026-09-16 (it loaded every session and is derivable
+from the tree itself; the annotations are what is worth keeping).
+
+```
+swarmllm/
+├── Cargo.toml / Cargo.lock / build.rs
+├── .env.example                       (env var template for Docker deployments)
+├── config/default.toml, docker-cluster.toml
+├── crates/
+│   ├── swarmllm-frontend/  (embedded + dev-mode frontend asset serving)
+│   └── swarmllm-types/     (shared types crate: NodeId, ModelManifest, SwarmMessage, etc.)
+├── src/
+│   ├── main.rs, lib.rs, error.rs, http.rs, types.rs, update.rs, update_restart.rs
+│   ├── bin/       (launcher.rs — Windows GPU/CPU auto-selecting launcher)
+│   ├── cli/       (mod, run, status, chat, bench, peers, pool, split_test, update, get_model, remove_model, privacy, unload_model (`swarmllm unload` — retire a worker, keep the files), diagnostics (pasteable node report) — R150 `swarmllm get-model` reference-model opt-in)
+│   ├── config/    (mod, providers, credit, network, ops, node, inference)
+│   ├── daemon/    (mod, manifest, shard_loader, gpu_support (CUDA compute-capability floor + pre-Ampere CPU fallback), dispatch/, startup, background, helpers, supervisor)
+│   │   └── state/        (mod, activity, capacity, capacity_plan, credits, events, hf, metrics, models, peer_speed, perf_history, relay, removed_shards, repair, retained_activations (what was sent to each segment, so a stand-in can be replayed it and take over mid-reply), retained_replies (fast-path replies kept for ResendTokens, #438), tp_allreduce)
+│   ├── network/   (manager/{mod,events,requests,tensors,identify,commands,connections,dht,shard_transfer,relay}, behaviour, discovery, protocol, transport, relay, peer_cache, redact (address redaction for the pasteable diagnostics report), bandwidth (what this node actually puts on the wire — libp2p's transport counters, read back), helpers, pipeline_stream)
+│   ├── model/     (manifest, shard, distribution, registry, acquisition, reference (R150 get-model), huggingface/, auto_manage/, lora)
+│   │   ├── auto_manage/  (mod, manager, scoring, download, prune, scan, vram, parallax, wishlist, quant (R133 recommender))
+│   │   └── huggingface/  (mod, download, private_types, probe, search, shards, watcher, tests)
+│   ├── inference/ (executor, sampling, kv_cache, speculative, swift, dsd_controller, quant, tokenizer, tensor_util, shard_layout, model_arch, vision, allreduce, attn_kernel, attn_softmax (fused scale+softcap+mask+softmax CPU kernel), decode_attn (single-position CPU attention straight over the KV cache — +24% decode), fast_math (AVX2 expf + fused SiLU×up), cpu_pools (per-phase rayon pools: prefill wide, decode narrow), local_embedder, mem_bandwidth (measured memory bandwidth — what a CPU node advertises as its speed, replacing a hardcoded 50 GB/s assumption), model_worker, process_pool, slot_table, worker_ipc, ngram_lookup (R136 L1), hedging (R136 L2), prefetch (R136 L3), trace (per-request route + timing record), prof (SWARMLLM_PROFILE=1 per-stage forward-pass profiler), cancel (the one cancellation signal), prefill_pacer, thermal)
+│   │   ├── router/       (mod, types, batch, local_exec, distributed_exec, spot_check, tests)
+│   │   ├── scheduler/    (mod, parallax, parallax_allocator, tests)
+│   │   ├── pipeline/     (mod, distributed, dsd, local, local_generate (a plan that names this node is run as the local generation it is), prompt, remote_generate, speculative, tensor_parallel, vision, hedge_dispatch (R136 L2), ngram_only_spec (R136 L1))
+│   │   ├── split/        (mod, model, loader, executor, kv_cache, kv_budget, entry, gguf_meta, shard_reader, rope, prefix_cache, hybrid (which layers of a segment go on the card — .145, #431), token_embedding, tests/)
+│   │   │   └── tests/    (mod, common, core, gqa, gemma2, moe_mla, llama4_glm4)
+│   │   ├── chat_template/ (mod, fallbacks, tojson (the `transformers` signature, not minijinja's), tests, fixtures/{llama3_official,qwen3_official,qwen3_gguf_shipped,glm4_gguf_shipped}.jinja — rendering is `minijinja` + `minijinja-contrib` pycompat, the engine HF's TGI and SGLang use; the hand-rolled parser/eval subset was retired 2026-09-10)
+│   │   └── layers/       (mod, qwen35)
+│   ├── credit/    (ledger, transaction, priority, anti_gaming, trust, escrow)
+│   ├── identity/  (keypair, nickname)
+│   ├── crypto/    (session, pipeline_seal, gossip_seal, relay_seal, key_rotation, provider_keys)
+│   ├── pool/      (types, crypto, manager/, forward, scope, invite (the `swarmpool://` v2 codec))
+│   ├── api/       (server, sse, tool_parse (local-model tool-call parser), admin, admin_providers, websocket, middleware, dashboard_trust (may this request be handed the API key?), process_memory (the largest memory accounting the platform offers — macOS keeps two), tailscale, identity, pool, metrics, providers, claude_sub*, mod, openai/, anthropic/, mcp/, admin_hf/, admin_models/, claude_session/)
+│   ├── storage/   (db)
+│   └── health/    (monitor, rebalancer)
+├── frontend/      (ONE index.html carrying 11 `<template>` elements, css/, js/{core/4,components/19,init.js,i18n.js,providers.js,neural-bg.js,topojson-client.min.js}, i18n/, fonts/ (IBM Plex woff2, SIL OFL — see LICENSE-THIRD-PARTY.md))
+├── python/        (swarmllm-client SDK)
+├── integrations/openclaw/  (OpenClaw provider plugin, TypeScript — `npm test`; built on OpenClaw's own self-hosted-provider SDK helper; see its README)
+├── monitoring/    (Grafana + Prometheus + docker-compose)
+├── deploy/anchor/ (R143 — hardened bootstrap/relay anchor kit: setup-anchor.sh, systemd unit, config.toml, runbook)
+├── packaging/     (swarmllm.service + aur/, homebrew/, rpm/ + deb/{postinst,prerm} maintainer scripts — prerm acts on $1: an upgrade must never `systemctl disable`, gotcha #313)
+├── docs/          (ARCHITECTURE, CREDITS_DESIGN, FUTURE_WORK, DIAGNOSTICS, REFERENCE_MODELS,
+│                 NETWORKING, NETWORKING_PLAN, TESTING)
+├── docs/invariants/  (the evidence behind .claude/rules/architecture.md — 7 topic files)
+├── docs/plans/    (design notes + benchmarks/, archive/)
+├── docs/book/     (mdBook documentation site)
+├── vendor/        (patched upstream crates, all workspace-`exclude`d; every patch marked `SwarmLLM patch:`)
+│   ├── candle/                (k_quants::matmul tiled + row-blocked + `vec_dot_rows` multi-row AVX2 Q4_K/Q6_K kernels, bit-identical, exactness-asserted by qmatmul_bench; cudarc dynamic-linking hardcode removed;
+│   │                          QTensor::gather_rows — read rows out of a quantized tensor
+│   │                          without dequantizing it whole, CPU slice + CUDA index_select
+│   │                          over a byte view; the embedding table is the caller;
+│   │                          CUDA dequantize_f16 falls back to the host for UNQUANTIZED
+│   │                          F16/BF16/F32 GGUFs like its dequantize sibling already did —
+│   │                          without it a GPU node loaded such a model then failed every
+│   │                          request, gotcha #288)
+│   ├── candle-flash-attn/     (cudart linked STATICALLY so the binary needs only the display driver;
+│   │                          18 bf16 kernels + the FP16_SWITCH bf16 branch dropped — unreachable, 37→19)
+│   ├── candle-paged-attention/ (kernels only — NOTHING references it; PagedAttention was never wired, #257)
+│   └── libp2p-request-response/ (11 tests, `--lib`)
+└── tests/         (integration tests)
+```
+
 ## System Overview
 
 Single Rust binary, three simultaneous functions:
@@ -1561,6 +1627,15 @@ the two sides silently breaks every encrypted forward (AAD mismatch
 fails AEAD verify; only a `seal/open mismatch` warn surfaces).
 
 ## Pipeline Privacy Model
+
+### The two encryption layers, as stated in CLAUDE.md until 2026-09-16
+
+Moved here because it is ~1.8 KB of detail that loaded every session. The
+one-paragraph summary that replaced it is in `CLAUDE.md` § Key Design Decisions.
+
+- **Layer 1 — `network.enable_encryption` (DEFAULT TRUE).** ChaCha20-Poly1305 sealing of activations between hops via per-session X25519 ECDH. Every inter-node tensor forward is encrypted on the wire. AAD covers cleartext header + spec/kv-truncate/chunk-meta trailers (`build_layer_forward_aad` is the single source of truth). On the receiver side, decryption is offloaded from the NetworkManager event loop via `tokio::spawn` (R139 Phase C). Failure is hard: there is NO plaintext fallback on `seal()` failure — the forward is dropped with `LayerResult::error`. Disabling this flag is only sensible for local-loopback debugging.
+- **Layer 2 — `inference.encrypted_pipeline` ("boomerang", DEFAULT FALSE, per-model override).** Forces the local node to handle BOTH the first segment (embedding) AND the last segment (sampling). No remote node ever sees the plaintext prompt OR the sampled tokens. **It does see the intermediate hidden states in PLAINTEXT** — activations are sealed hop-to-hop by Layer 1, and `network/manager/tensors.rs` calls `session_manager.open(...)` and hands the plaintext to the worker, because a matmul cannot run on ciphertext. This is a STRUCTURAL guarantee (the ends stay here), not a cryptographic one against the computing node, and hidden states are partially invertible back to input text — published recovery is ~81% at the final layer, which is also why a "keep more layers local" dial is not the answer (`docs/FUTURE_WORK.md`). Real encrypted compute means FHE/MPC: BERT-Base at 128 tokens on 4x A100 is ~193 s and ~1.3 GB of inter-device traffic, so it is three orders of magnitude away from usable here. Requires the local node to hold shard 0 + final shard. Adds ~1 RTT/token. This is the strongest privacy mode; Layer 1 alone leaves entry/exit nodes able to read the cleartext at their boundary.
+
 
 What each node sees in a distributed pipeline (Requester → A → B → C):
 

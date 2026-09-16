@@ -1,6 +1,6 @@
 # Frontend
 
-The evidence behind the rules in `.claude/rules/architecture.md`: what each
+The evidence behind the rules in `.claude/rules/arch-frontend.md`: what each
 rule replaced, what it was measured at, and what a change must keep.
 
 Every entry here was paid for. **Read the entry before changing the code it
@@ -380,7 +380,7 @@ cycle.
 
 ## The app shell never page-scrolls, and on iOS that needs both halves
 
-**Rule:** `.claude/rules/architecture.md` § "The app shell never page-scrolls".
+**Rule:** `.claude/rules/arch-frontend.md` § "The app shell never page-scrolls".
 
 ### What this replaced
 
@@ -430,7 +430,7 @@ now-locked shell.
 
 ## One word per thing, in the UI, in every language
 
-**Rule:** `.claude/rules/architecture.md` § "One word per thing".
+**Rule:** `.claude/rules/arch-frontend.md` § "One word per thing".
 
 ### What this replaced
 
