@@ -296,6 +296,13 @@ the call site via `#[track_caller]`:
 grep "DIAG: a holder claim this peer had withdrawn was reinstated" node.log
 ```
 
+⚠ **If every line names `src/model/registry.rs` itself, the probe is broken, not
+the answer.** `Location::caller()` reports the caller of the nearest frame that
+opted into `#[track_caller]`, so `record_shard_holder` and
+`record_shard_holder_with_build` must BOTH carry the attribute — drop it from the
+outer one and every call through it reports the wrapper's own line. Gotcha #170's
+shape: correct in itself, inert in production.
+
 ⚠ **A fresh node does not reproduce it** (zero in 25 minutes), so whatever does
 this needs state a new node lacks — reach for a node that has been running, or
 one restored from an existing `db.redb`. Ruled out by reading, none of which

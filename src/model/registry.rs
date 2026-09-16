@@ -532,6 +532,17 @@ impl ModelRegistry {
     ///
     /// Bounded: if the holder set is at capacity, the oldest non-local holder
     /// is evicted to make room. Maintains reverse index.
+    ///
+    /// **`#[track_caller]` here as well as on the inner function, and the two
+    /// must stay together.** `Location::caller()` reports the caller of the
+    /// nearest frame that opted in, so without this attribute every call
+    /// arriving through this wrapper — which is most of them — would report
+    /// THIS line, and the reinstatement probe inside would name its own
+    /// plumbing on every firing. That is gotcha #170's shape: a change that is
+    /// correct in itself and inert in production because it reads the wrong
+    /// thing. A probe pointing at itself is worse than none, because it looks
+    /// like evidence.
+    #[track_caller]
     pub fn record_shard_holder(&self, shard_id: ShardId, node_id: NodeId) -> bool {
         self.record_shard_holder_with_build(shard_id, node_id, swarmllm_types::BUILD_TAG_UNKNOWN)
     }
