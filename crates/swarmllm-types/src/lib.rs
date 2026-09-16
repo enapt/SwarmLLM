@@ -30,7 +30,7 @@ pub use inference::{
     PipelineAssignment, PipelineSegment, RemoteGenerateRequest, Role, SamplingParams,
     StreamingToken, TensorFormat, TensorParallelGroup, TensorParallelMeta, TokenLogProbEntry,
     TpAllReduceRequest, TpAllReduceResponse, TpPhase, TpRingChunk, VisionEncodeRequest,
-    VisionEncodeResponse,
+    VisionEncodeResponse, DEFAULT_REPLY_BUDGET,
 };
 pub use model::{
     MmprojInfo, ModelArchitecture, ModelManifest, ModelTrustInfo, ModelTrustLevel, Quantization,

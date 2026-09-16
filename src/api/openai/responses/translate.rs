@@ -115,7 +115,11 @@ pub fn request_to_chat(
         messages,
         temperature: req.temperature.unwrap_or(DEFAULT_TEMPERATURE),
         top_p: req.top_p.unwrap_or(DEFAULT_TOP_P),
-        max_tokens: req.max_output_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
+        // Pass the caller's absence THROUGH rather than resolving it to a
+        // constant here: an absent `max_output_tokens` means the same on this
+        // surface as an absent `max_tokens` does on the chat one, and only the
+        // serving node knows the window to resolve it against.
+        max_tokens: req.max_output_tokens,
         // The streaming entry point in `stream.rs` sets stream=true after
         // calling this translator; the non-streaming path in `mod.rs` keeps
         // it false. Both share this builder.
@@ -1415,7 +1419,7 @@ mod tests {
         let chat = request_to_chat(&req, None).unwrap();
         assert_eq!(chat.temperature, 0.3);
         assert_eq!(chat.top_p, 0.5);
-        assert_eq!(chat.max_tokens, 100);
+        assert_eq!(chat.max_tokens, Some(100));
         assert_eq!(chat.frequency_penalty, 0.1);
         assert_eq!(chat.presence_penalty, -0.2);
         match chat.stop {

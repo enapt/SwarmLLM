@@ -148,7 +148,11 @@ pub(crate) fn sse_send_live_blocking<T>(tx: &tokio::sync::mpsc::Sender<T>, ev: T
 /// All fields are pre-clamped to safe ranges:
 /// - temperature: [0.0, 2.0]
 /// - top_p: (EPSILON, 1.0]
-/// - max_tokens: [1, DEFAULT_MAX_TOKENS]
+/// - max_tokens: `None` (caller named no budget) becomes `DEFAULT_REPLY_BUDGET`
+///   with `max_tokens_explicit: false`, which lets the serving node lower it to
+///   whatever the model's real context window leaves free. `Some(n)` is clamped
+///   to [1, DEFAULT_MAX_TOKENS] and marked explicit, so a budget the caller
+///   chose is honoured or refused, never silently shortened.
 /// - frequency/presence penalties: [-2.0, 2.0]
 /// - top_logprobs: [0, 20]
 ///
@@ -158,7 +162,7 @@ pub(crate) fn build_sampling_params(
     temperature: f32,
     top_p: f32,
     top_k: u32,
-    max_tokens: u32,
+    max_tokens: Option<u32>,
     stop: Vec<String>,
     frequency_penalty: f32,
     presence_penalty: f32,
@@ -169,7 +173,10 @@ pub(crate) fn build_sampling_params(
         temperature: temperature.clamp(0.0, 2.0),
         top_p: top_p.clamp(f32::EPSILON, 1.0),
         top_k,
-        max_tokens: max_tokens.clamp(1, DEFAULT_MAX_TOKENS),
+        max_tokens: max_tokens
+            .map(|n| n.clamp(1, DEFAULT_MAX_TOKENS))
+            .unwrap_or(crate::types::DEFAULT_REPLY_BUDGET),
+        max_tokens_explicit: max_tokens.is_some(),
         stop,
         frequency_penalty: frequency_penalty.clamp(-2.0, 2.0),
         presence_penalty: presence_penalty.clamp(-2.0, 2.0),

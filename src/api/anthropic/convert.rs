@@ -118,7 +118,10 @@ pub(super) fn to_sampling_params(req: &MessagesRequest) -> SamplingParams {
         req.temperature.unwrap_or(1.0),
         req.top_p.unwrap_or(0.9),
         req.top_k.unwrap_or(crate::api::DEFAULT_TOP_K),
-        req.max_tokens,
+        // Always explicit: the Messages API makes `max_tokens` a REQUIRED
+        // field, and `anthropic::validate` has already rejected 0 and anything
+        // over MAX_TOKENS_HARD_CAP by the time we get here.
+        Some(req.max_tokens),
         req.stop_sequences.clone().unwrap_or_default(),
         0.0,
         0.0,

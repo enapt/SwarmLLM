@@ -80,11 +80,17 @@ fn validate_chat_request(
     // max_tokens>0 and clients deserve explicit error feedback rather
     // than getting a one-token response. The Anthropic /v1/messages
     // handler enforces the same range — keep the two paths in sync.
-    if req.max_tokens == 0 || req.max_tokens > super::DEFAULT_MAX_TOKENS {
-        return Err(ApiError(crate::error::SwarmError::Validation(format!(
-            "max_tokens must be 1..={}",
-            super::DEFAULT_MAX_TOKENS
-        ))));
+    //
+    // An ABSENT max_tokens is NOT a value to range-check — it means the caller
+    // named no budget, and the serving node picks one against the model's real
+    // context window. Only a value the caller actually sent is validated here.
+    if let Some(n) = req.max_tokens {
+        if n == 0 || n > super::DEFAULT_MAX_TOKENS {
+            return Err(ApiError(crate::error::SwarmError::Validation(format!(
+                "max_tokens must be 1..={}",
+                super::DEFAULT_MAX_TOKENS
+            ))));
+        }
     }
 
     // Say so when an option cannot be honoured, rather than accepting it and
@@ -334,21 +340,34 @@ pub async fn chat_completions(
         // the first ~60 characters of a prompt across tenants on a
         // multi-user node would be a privacy regression. Operational
         // visibility (model + msg count + max_tokens) is sufficient.
-        state.shared_state.emit_activity(
-            crate::daemon::state::ActivityEvent::new(
-                "inference",
-                "inference_request",
-                format!(
+        // An absent max_tokens has no number to report yet — the serving node
+        // picks one from the model's context window. Saying "max 0 tokens", or
+        // attaching a 0 that the dashboard renders as a count, would be a
+        // surface stating something untrue.
+        let mut ev = crate::daemon::state::ActivityEvent::new(
+            "inference",
+            "inference_request",
+            match max_tok {
+                Some(n) => format!(
                     "Inference request on {} — {} message{}, max {} tokens",
                     display,
                     msg_count,
                     if msg_count != 1 { "s" } else { "" },
-                    max_tok,
+                    n,
                 ),
-            )
-            .with_model(req.model.clone())
-            .with_detail_num(max_tok as i64),
-        );
+                None => format!(
+                    "Inference request on {} — {} message{}, reply length left to the model",
+                    display,
+                    msg_count,
+                    if msg_count != 1 { "s" } else { "" },
+                ),
+            },
+        )
+        .with_model(req.model.clone());
+        if let Some(n) = max_tok {
+            ev = ev.with_detail_num(n as i64);
+        }
+        state.shared_state.emit_activity(ev);
     }
 
     // Resolve "auto" alias and display-name → registry-ID mapping.
@@ -1125,7 +1144,7 @@ mod tests {
             messages: vec![],
             temperature: 0.7,
             top_p: 1.0,
-            max_tokens: 16,
+            max_tokens: Some(16),
             stream: false,
             stop: None,
             frequency_penalty: 0.0,
@@ -1462,7 +1481,7 @@ mod tests {
             "max_completion_tokens": 5000
         }"#;
         let req: ChatCompletionRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(req.max_tokens, 5000);
+        assert_eq!(req.max_tokens, Some(5000));
     }
 
     #[test]

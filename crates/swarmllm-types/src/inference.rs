@@ -121,12 +121,45 @@ pub enum Role {
     Tool,
 }
 
+/// How many tokens a reply may use when the caller named no budget of its own.
+///
+/// Deliberately a modest constant rather than "whatever the window leaves":
+/// vLLM defaults a missing `max_tokens` to `max_model_len - prompt_tokens`, and
+/// on a long-context model that reserves enormously more KV than the reply
+/// needs — the preemption storm reported as verl#5504. The serving node lowers
+/// this to fit a small window; it never raises it to fill a large one.
+pub const DEFAULT_REPLY_BUDGET: u32 = 2048;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SamplingParams {
     pub temperature: f32,
     pub top_p: f32,
     pub top_k: u32,
+    /// Upper bound on generated tokens. ALWAYS a concrete number on the wire,
+    /// so a peer that predates `max_tokens_explicit` reads exactly what it
+    /// reads today.
     pub max_tokens: u32,
+    /// Did `max_tokens` come from the CALLER, or is it our own fallback?
+    ///
+    /// The serving node resolves a non-explicit budget against the model's real
+    /// context window (`model_worker::resolve_max_new_tokens`), because the
+    /// effective window is a LOAD-time property — the GGUF's `context_length`
+    /// after `effective_context_length`, `MAX_SEQ_LEN_OVERRIDE` and the memory
+    /// budget have had their say — so no coordinator can know it before
+    /// dispatch. Without the distinction a flat fallback is checked against a
+    /// window it was never chosen for: every model with a 2048-token context
+    /// refused EVERY non-empty prompt, TinyLlama-1.1B included (report #001).
+    ///
+    /// `#[serde(default)]` = `false`, which is deliberate in both directions:
+    /// an older peer omits the field and we read "not explicit", so its request
+    /// is clamped rather than refused — more permissive, never less. Going the
+    /// other way an older peer ignores the unknown field and acts on
+    /// `max_tokens` alone, exactly as it does today. No message becomes
+    /// undecodable either way, so this needs no `features` bit and does NOT
+    /// bump `PROTOCOL_VERSION` — see `.claude/rules/architecture.md`
+    /// § "Additive Protocol Evolution".
+    #[serde(default)]
+    pub max_tokens_explicit: bool,
     #[serde(default)]
     pub stop: Vec<String>,
     pub frequency_penalty: f32,
@@ -145,7 +178,8 @@ impl Default for SamplingParams {
             temperature: 0.7,
             top_p: 0.9,
             top_k: 40,
-            max_tokens: 2048,
+            max_tokens: DEFAULT_REPLY_BUDGET,
+            max_tokens_explicit: false,
             stop: vec![],
             frequency_penalty: 0.0,
             presence_penalty: 0.0,
@@ -844,6 +878,44 @@ mod chunk_assembly_tests {
         state.received[1] = Some(vec![4, 5, 6]);
         state.filled = 3;
         assert_eq!(state.assemble(), vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    }
+
+    /// **A peer that predates `max_tokens_explicit` must still be understood,
+    /// and must still understand us.** This is the additive-protocol contract
+    /// from `.claude/rules/architecture.md`: a new optional field may not make
+    /// any message undecodable in either direction.
+    ///
+    /// Old → new: the field is simply absent, and `#[serde(default)]` reads
+    /// `false` — "not explicit" — so that peer's request is CLAMPED to the
+    /// window rather than refused. More permissive, never less.
+    #[test]
+    fn a_peer_without_the_explicit_flag_is_read_as_not_explicit() {
+        let from_an_older_peer = r#"{
+            "temperature": 0.7, "top_p": 0.9, "top_k": 40,
+            "max_tokens": 2048, "stop": [],
+            "frequency_penalty": 0.0, "presence_penalty": 0.0
+        }"#;
+        let p: SamplingParams = serde_json::from_str(from_an_older_peer).unwrap();
+        assert_eq!(p.max_tokens, 2048);
+        assert!(
+            !p.max_tokens_explicit,
+            "an absent flag means the budget was not the caller's choice"
+        );
+    }
+
+    /// New → old: `max_tokens` stays a plain number on the wire, so a peer that
+    /// has never heard of the flag reads exactly what it reads today and
+    /// ignores the extra field. If this ever serialises `max_tokens` as `null`
+    /// or omits it, every older peer fails to deserialise the whole request.
+    #[test]
+    fn the_wire_still_carries_a_concrete_max_tokens_for_older_peers() {
+        let v = serde_json::to_value(SamplingParams::default()).unwrap();
+        assert!(
+            v.get("max_tokens").and_then(|m| m.as_u64()).is_some(),
+            "max_tokens must stay a concrete number on the wire, got {:?}",
+            v.get("max_tokens")
+        );
+        assert_eq!(v["max_tokens"], DEFAULT_REPLY_BUDGET);
     }
 
     #[test]

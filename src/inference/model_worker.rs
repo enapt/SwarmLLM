@@ -54,7 +54,7 @@ use crate::inference::slot_table::{Slot, SlotTable};
 use crate::inference::split::{self, BatchItem, KvCacheStore, PrefixCache, SplitModel};
 use crate::inference::swift::{SwiftCalibrator, SwiftConfig};
 use crate::inference::worker_ipc::*;
-use crate::types::NetworkFinishReason;
+use crate::types::{NetworkFinishReason, SamplingParams};
 
 /// Configuration for the worker's cross-request prefix KV-cache.
 #[derive(Debug, Clone, Copy)]
@@ -2614,7 +2614,7 @@ async fn handle_generate(
     kv_store: &Arc<KvCacheStore>,
     prefix_cache: &Arc<PrefixCache>,
     data_dir: &std::path::Path,
-    gen: IpcGenerate,
+    mut gen: IpcGenerate,
     shard_window: &Option<Vec<u32>>,
     swift_cfg: &SwiftConfig,
     ngram_cfg: &crate::inference::ngram_lookup::NgramLookupConfig,
@@ -2659,9 +2659,13 @@ async fn handle_generate(
         ));
     }
 
-    prompt_fits_window(
+    // Assign back, so every downstream reader of `gen.sampling.max_tokens` —
+    // the generation loop, the off-by-one guard, the finish-reason check — sees
+    // the budget that was actually granted rather than the one that was asked
+    // for.
+    gen.sampling.max_tokens = resolve_max_new_tokens(
         prompt_tokens,
-        gen.sampling.max_tokens,
+        &gen.sampling,
         model.context_window(),
         gen.model_id.0.as_str(),
     )?;
@@ -3439,7 +3443,7 @@ async fn try_register_generate_slot(
     kv_store: &Arc<KvCacheStore>,
     prefix_cache: &Arc<PrefixCache>,
     data_dir: &std::path::Path,
-    gen: IpcGenerate,
+    mut gen: IpcGenerate,
     shard_window: &Option<Vec<u32>>,
     slot_table: &mut SlotTable,
     pending_fetches: &PrefixFetchWaiterMap,
@@ -3486,11 +3490,13 @@ async fn try_register_generate_slot(
             "empty prompt after tokenization".into(),
         )));
     }
-    // Same check as the non-batched path — and this is the one that runs by
-    // default, since `continuous_batching` is on.
-    prompt_fits_window(
+    // Same resolution as the non-batched path — and this is the one that runs
+    // by default, since `continuous_batching` is on. The slot copies
+    // `gen.sampling.max_tokens` into `slot.max_tokens` below, so the assignment
+    // has to happen before that, not after.
+    gen.sampling.max_tokens = resolve_max_new_tokens(
         prompt_tokens,
-        gen.sampling.max_tokens,
+        &gen.sampling,
         model.context_window(),
         gen.model_id.0.as_str(),
     )
@@ -4420,37 +4426,73 @@ fn take_complete_utf8(carry: &mut Vec<u8>) -> String {
     }
 }
 
-/// Reject a prompt that cannot fit the model's context window, with numbers the
-/// caller can act on.
+/// Decide how many tokens this reply may actually use, against the model's real
+/// context window — or refuse, with numbers the caller can act on.
 ///
-/// **Both tokenization sites must call this.** Chunked prefill discovers the
-/// overflow one 128-token chunk at a time, so the executor's own guard can only
-/// report `index_pos + chunk_len` — a value just past the limit whatever the
-/// prompt actually was. Every over-long prompt therefore got the SAME number: a
-/// 600-word and a 1500-word prompt were both told "Sequence length (4224)
-/// exceeds model context window (4096)", so "reduce your prompt" gave no hint
-/// whether to cut a little or three quarters of it (measured 2026-08-05). It
-/// also burned a full prefill before failing.
+/// **Both tokenization sites must call this**, and must use what it returns.
+/// Chunked prefill discovers an overflow one 128-token chunk at a time, so the
+/// executor's own guard can only report `index_pos + chunk_len` — a value just
+/// past the limit whatever the prompt actually was. Every over-long prompt
+/// therefore got the SAME number: a 600-word and a 1500-word prompt were both
+/// told "Sequence length (4224) exceeds model context window (4096)", so
+/// "reduce your prompt" gave no hint whether to cut a little or three quarters
+/// of it (measured 2026-08-05). It also burned a full prefill before failing.
 ///
 /// The executor guard stays as the backstop for paths that do not come through
 /// here; this exists to make the message actionable.
-fn prompt_fits_window(
+///
+/// # A budget the caller did not choose is a ceiling, not a demand
+///
+/// This used to check `params.max_tokens` and refuse whenever the sum did not
+/// fit, with no regard for where that number came from. For an ABSENT
+/// `max_tokens` the number was our own flat fallback, chosen with no knowledge
+/// of the model — so on any model whose context window is the fallback (2048:
+/// TinyLlama-1.1B-Chat, a shipped reference model) every non-empty prompt
+/// whatsoever was refused, a 34-token one included. The advice compounded it:
+/// "shorten it by about 34 tokens" was the whole prompt, so following it left
+/// nothing to ask (report #001, reproduced on v0.3.182-alpha).
+///
+/// The llama.cpp executor already had this right —
+/// `params.max_tokens.min(n_ctx.saturating_sub(prompt_tokens))` at
+/// `executor.rs:571` — so this was one invariant implemented twice, and only
+/// the candle path refused. Same rule, one helper, both paths.
+fn resolve_max_new_tokens(
     prompt_tokens: usize,
-    max_new_tokens: u32,
+    params: &SamplingParams,
     window: usize,
     model_id: &str,
-) -> Result<(), SwarmError> {
-    let needed = prompt_tokens.saturating_add(max_new_tokens as usize);
-    if needed <= window {
-        return Ok(());
+) -> Result<u32, SwarmError> {
+    // The prompt alone leaves no room to answer. Nothing to negotiate: this is
+    // a genuine "too long", whoever picked the reply budget.
+    let room = window.saturating_sub(prompt_tokens);
+    if room == 0 {
+        let over = prompt_tokens.saturating_sub(window).max(1);
+        return Err(SwarmError::Validation(format!(
+            "This conversation is too long for {model_id}: {prompt_tokens} tokens of prompt \
+             against a limit of {window}, which leaves no room for a reply. Shorten it by at \
+             least {over} tokens (roughly {words} words), or start a new conversation.",
+            words = (over * 3) / 4,
+        )));
     }
-    let over = needed - window;
+
+    let asked = params.max_tokens;
+    if !params.max_tokens_explicit {
+        // Our own default. Lower it to what the window leaves — never raise it,
+        // so a long-context model does not start generating to the horizon.
+        return Ok(asked.min(room as u32));
+    }
+
+    // The caller named this budget. Honour it or say why not; silently serving
+    // a quarter of what was asked for is the failure mode that cannot be
+    // debugged from the outside.
+    let needed = prompt_tokens.saturating_add(asked as usize);
+    if needed <= window {
+        return Ok(asked);
+    }
     Err(SwarmError::Validation(format!(
-        "This conversation is too long for {model_id}: {prompt_tokens} tokens of prompt \
-         plus {max_new_tokens} reserved for the reply is {needed}, and the model's limit \
-         is {window}. Shorten it by about {over} tokens (roughly {words} words), or ask \
-         for a shorter reply.",
-        words = (over * 3) / 4,
+        "This conversation is too long for {model_id}: {prompt_tokens} tokens of prompt plus \
+         {asked} you asked to reserve for the reply is {needed}, and the model's limit is \
+         {window}. Ask for at most {room} reply tokens, or shorten the conversation."
     )))
 }
 
@@ -4554,7 +4596,57 @@ mod decode_raw_vocab_tests {
 mod utf8_stream_tests {
     use super::take_complete_utf8;
 
-    use super::prompt_fits_window;
+    use super::resolve_max_new_tokens;
+    use crate::types::SamplingParams;
+
+    fn budget(max_tokens: u32, explicit: bool) -> SamplingParams {
+        SamplingParams {
+            max_tokens,
+            max_tokens_explicit: explicit,
+            ..Default::default()
+        }
+    }
+
+    /// **The regression from report #001.** A 2048-token window with our own
+    /// 2048-token fallback refused EVERY non-empty prompt: 39 + 2048 > 2048.
+    /// TinyLlama-1.1B-Chat is a shipped reference model and has exactly that
+    /// window, so it could not answer a single chat turn at default settings.
+    ///
+    /// Toggle `max_tokens_explicit` to true below and this test goes red —
+    /// which is the check that it is testing the fix and not the weather.
+    #[test]
+    fn a_default_budget_is_lowered_to_fit_rather_than_refused() {
+        let got = resolve_max_new_tokens(39, &budget(2048, false), 2048, "tinyllama")
+            .expect("a 39-token prompt must be answerable on a 2048-token model");
+        assert_eq!(got, 2009, "the reply gets what the prompt leaves free");
+    }
+
+    /// A budget the caller did not choose is a CEILING — lowered to fit, never
+    /// raised to fill. MCP asks for 512 on a 128k model and must still get 512,
+    /// not 128k: vLLM's `max_model_len - prompt_tokens` default is what causes
+    /// the KV over-reservation in verl#5504.
+    #[test]
+    fn a_default_budget_is_never_raised_to_fill_a_large_window() {
+        let got = resolve_max_new_tokens(100, &budget(512, false), 131_072, "qwen").unwrap();
+        assert_eq!(got, 512);
+    }
+
+    /// A budget the caller DID choose is honoured exactly, or refused — never
+    /// silently shortened, which cannot be debugged from the outside.
+    #[test]
+    fn an_explicit_budget_is_honoured_or_refused_but_never_shortened() {
+        assert_eq!(
+            resolve_max_new_tokens(4000, &budget(96, true), 4096, "m").unwrap(),
+            96
+        );
+        let err = resolve_max_new_tokens(4000, &budget(97, true), 4096, "m").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("97"), "must name what was asked for: {msg}");
+        assert!(
+            msg.contains("at most 96"),
+            "must name the budget that WOULD fit — advice the caller can act on: {msg}"
+        );
+    }
 
     /// **The message has to say how much to cut.** Chunked prefill discovers
     /// the overflow one chunk at a time, so the executor could only ever report
@@ -4563,30 +4655,39 @@ mod utf8_stream_tests {
     /// whether to trim a sentence or three quarters of the conversation.
     #[test]
     fn an_overlong_prompt_is_told_its_real_size_and_overage() {
-        let err = prompt_fits_window(9000, 100, 4096, "llama-3.2-3b").unwrap_err();
+        let err =
+            resolve_max_new_tokens(9000, &budget(100, true), 4096, "llama-3.2-3b").unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("9000"),
             "must state the real prompt size: {msg}"
         );
         assert!(msg.contains("4096"), "must state the limit: {msg}");
-        // 9000 + 100 - 4096 = 5004 over.
-        assert!(msg.contains("5004"), "must state how much to cut: {msg}");
     }
 
-    /// The reservation for the reply counts — a prompt that fits alone can
-    /// still not leave room to answer.
+    /// **The advice must be followable.** The old message told a 39-token
+    /// prompt to shorten itself by 39 tokens, which leaves nothing to ask —
+    /// the #295 trap, advice that cannot work. A prompt that genuinely fills
+    /// the window is a real refusal, but it must not quote the whole prompt
+    /// back as the overage.
     #[test]
-    fn the_reply_reservation_is_included() {
-        assert!(prompt_fits_window(4000, 96, 4096, "m").is_ok());
-        assert!(prompt_fits_window(4000, 97, 4096, "m").is_err());
+    fn a_prompt_that_fills_the_window_is_refused_with_advice_that_can_be_followed() {
+        let err = resolve_max_new_tokens(4096, &budget(2048, false), 4096, "m").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("no room for a reply"),
+            "must say why, not just that it is too long: {msg}"
+        );
+        assert!(
+            !msg.contains("ask for a shorter reply"),
+            "there is no shorter reply to ask for at zero room: {msg}"
+        );
     }
 
     /// A prompt that fits is not refused.
     #[test]
     fn a_prompt_that_fits_passes() {
-        assert!(prompt_fits_window(10, 10, 4096, "m").is_ok());
-        assert!(prompt_fits_window(4096, 0, 4096, "m").is_ok());
+        assert!(resolve_max_new_tokens(10, &budget(10, true), 4096, "m").is_ok());
     }
 
     /// **A codepoint can span several tokens.** Emoji and most non-Latin

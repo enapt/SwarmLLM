@@ -17,11 +17,18 @@ pub struct ChatCompletionRequest {
     /// Upper bound on generated tokens. Accept either `max_tokens` (legacy)
     /// or `max_completion_tokens` (the spelling current OpenAI SDKs default to
     /// for o-series / gpt-5 reasoning models). Without this alias, a caller
-    /// targeting a reasoning model through our proxy silently gets the 2048
-    /// default, and reasoning tokens eat the whole budget before any content
-    /// is emitted.
-    #[serde(default = "default_max_tokens", alias = "max_completion_tokens")]
-    pub max_tokens: u32,
+    /// targeting a reasoning model through our proxy silently gets the default
+    /// budget, and reasoning tokens eat the whole of it before any content is
+    /// emitted.
+    ///
+    /// `None` means the caller named no budget — NOT that it asked for zero.
+    /// OpenAI itself treats an absent `max_tokens` as "whatever the context
+    /// allows", so resolving it to a flat constant here and checking that
+    /// constant against the model's window is what refused every non-empty
+    /// prompt on every 2048-context model (report #001). The resolution happens
+    /// on the serving node, which is the only place the real window is known.
+    #[serde(default, alias = "max_completion_tokens")]
+    pub max_tokens: Option<u32>,
     #[serde(default)]
     pub stream: bool,
     #[serde(default)]
@@ -421,10 +428,6 @@ fn default_temperature() -> f32 {
 fn default_top_p() -> f32 {
     0.9
 }
-fn default_max_tokens() -> u32 {
-    2048
-}
-
 // ---- Response types (OpenAI-compatible) ----
 
 #[derive(Debug, Serialize)]

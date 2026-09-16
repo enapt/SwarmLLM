@@ -76,9 +76,8 @@ async fn tool_chat(state: &AppState, id: Option<Value>, args: Value) -> JsonRpcR
         .and_then(|v| v.as_f64())
         .unwrap_or(0.7)
         .clamp(0.0, 2.0) as f32;
-    let max_tokens = args
-        .get("max_tokens")
-        .and_then(|v| v.as_u64())
+    let caller_max_tokens = args.get("max_tokens").and_then(|v| v.as_u64());
+    let max_tokens = caller_max_tokens
         .unwrap_or(512)
         .min(DEFAULT_MAX_TOKENS as u64) as u32;
 
@@ -124,6 +123,10 @@ async fn tool_chat(state: &AppState, id: Option<Value>, args: Value) -> JsonRpcR
             top_p: 0.9,
             top_k: DEFAULT_TOP_K,
             max_tokens,
+            // MCP's own 512 is a surface default, not the caller's choice, so
+            // the serving node may lower it to fit a small context window. It
+            // is never raised — a non-explicit budget is a ceiling.
+            max_tokens_explicit: caller_max_tokens.is_some(),
             stop: vec![],
             frequency_penalty: 0.0,
             presence_penalty: 0.0,
