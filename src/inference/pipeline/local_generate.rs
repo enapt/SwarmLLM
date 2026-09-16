@@ -171,6 +171,7 @@ mod tests {
             lora_adapter: None,
             tools: None,
             cancel: None,
+            route_override: None,
         };
         let (tx, _rx) = tokio::sync::mpsc::channel::<NetworkCommand>(8);
         let assignment = PipelineAssignment {

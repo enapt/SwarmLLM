@@ -163,6 +163,14 @@ fn validate_chat_request(
         }
     }
 
+    // Parsed HERE rather than at the scheduler so a mistyped scenario comes
+    // back as a 400 naming the field, before any model is loaded — the whole
+    // value of this knob is that a harness can tell "the route I asked for" from
+    // "the route I mistyped".
+    if let Some(ref sr) = req.swarm_route {
+        sr.parse().map_err(ApiError)?;
+    }
+
     match &req.stop {
         Some(StopSequence::Multiple(v)) => {
             super::validate_stop_sequences(v)?;
@@ -1156,6 +1164,7 @@ mod tests {
             response_format: None,
             session_id: None,
             lora_adapter: None,
+            swarm_route: None,
             cache_control: None,
             extras: Default::default(),
         };

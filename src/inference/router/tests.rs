@@ -60,6 +60,7 @@ fn make_request(priority: PriorityTier) -> InferenceRequest {
         lora_adapter: None,
         tools: None,
         cancel: None,
+        route_override: None,
     }
 }
 
@@ -81,6 +82,7 @@ fn make_request_with_model(priority: PriorityTier, model: &str) -> InferenceRequ
         lora_adapter: None,
         tools: None,
         cancel: None,
+        route_override: None,
     }
 }
 
@@ -674,4 +676,56 @@ fn salvage(request_id: uuid::Uuid, content: &str) -> super::InferenceOutput {
         matched_stop_sequence: None,
         trace: None,
     }
+}
+
+/// A second re-plan is earned by a peer that refused promptly, and by nothing
+/// else.
+///
+/// Measured on the live node 2026-09-16 (request `9e601e66`, Qwen2.5-14B, of
+/// which this node holds 1 of 16 shards): the first attempt spent 135.6 s on a
+/// peer that took the work and went silent, the re-plan was handed to a peer
+/// that refused the whole model for memory in 1.6 s, and the request then had
+/// no attempt left. The scheduler rung that produced that second plan logs
+/// "a peer may refuse and the request will re-plan" — a promise nothing kept.
+///
+/// The three terms are asserted separately because each rules out a different
+/// way this could go wrong: retrying our own worker's identical wording,
+/// looping on a peer that was never barred, and turning "one wasted timeout"
+/// into two.
+#[test]
+fn only_a_prompt_peer_refusal_earns_a_second_replan() {
+    use crate::error::SwarmError;
+    use std::time::Duration;
+
+    let refused = SwarmError::ServiceUnavailable(
+        "qwen2.5-14b-instruct-q4-k-m needs about 10362 MB of memory".into(),
+    );
+    let quick = Duration::from_millis(1636);
+
+    // The measured case: a remote segment, an explicit refusal, one round trip.
+    assert!(super::a_further_replan_is_earned(&refused, true, quick));
+
+    // The same wording from OUR OWN worker, with no remote segment in the
+    // attempt. `remote_peer_could_not_serve`'s own doc requires this pairing —
+    // without it a local memory refusal would re-plan into itself.
+    assert!(!super::a_further_replan_is_earned(&refused, false, quick));
+
+    // A refusal is only cheap if it actually was. This is the term that stops
+    // "one wasted timeout" becoming "N wasted timeouts" — the risk
+    // `docs/FUTURE_WORK.md` § "Per-request holder blacklist on retry" names as
+    // the cost of going past a single retry.
+    assert!(!super::a_further_replan_is_earned(
+        &refused,
+        true,
+        Duration::from_secs(135)
+    ));
+
+    // A peer that went silent is retryable ONCE, by `should_retry_after`, but
+    // never earns the extra attempt: waiting out a second deadline is exactly
+    // what the budget exists to prevent.
+    let silent = SwarmError::PeerUnresponsive(
+        "remote-generate timed out waiting for token (first=true)".into(),
+    );
+    assert!(super::should_retry_after(&silent, true, false, false));
+    assert!(!super::a_further_replan_is_earned(&silent, true, quick));
 }

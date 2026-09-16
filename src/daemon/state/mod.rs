@@ -607,6 +607,27 @@ pub struct SharedState {
     /// may take the whole model; released by
     /// [`SharedState::release_request_state`] with every other per-request map.
     pub local_memory_refusals: dashmap::DashSet<uuid::Uuid>,
+
+    /// Per-request instructions to plan as if this node held less, or as if
+    /// some peers were not there.
+    ///
+    /// A TESTING instrument, not a routing feature: it exists so the
+    /// distributed path can be exercised deliberately on a swarm whose nodes
+    /// have converged on holding whole models, which is what auto-manage's
+    /// replication makes them do. It only ever narrows this node's own
+    /// candidate set, never leaves this machine, and no peer is told the
+    /// coordinator was pretending — see
+    /// [`crate::inference::route_override`] for what it deliberately cannot do.
+    ///
+    /// On the ROOT SharedState rather than a sub-struct for the same reason as
+    /// `local_memory_refusals`: it is written at the API surface and read in
+    /// the scheduler, so it cross-cuts. Written only by
+    /// [`SharedState::note_route_plan_override`], read only by
+    /// [`SharedState::route_plan_override`], and released by
+    /// [`SharedState::release_request_state`] with every other per-request map.
+    pub route_plan_overrides:
+        DashMap<uuid::Uuid, crate::inference::route_override::RoutePlanOverride>,
+
     /// What a failed request had already generated, kept so the caller can be
     /// handed it instead of nothing.
     ///
@@ -1110,6 +1131,7 @@ impl SharedState {
             perf_history: perf_history::PerfHistory::load(&db),
             request_holder_blacklist: DashMap::new(),
             local_memory_refusals: dashmap::DashSet::new(),
+            route_plan_overrides: DashMap::new(),
             salvaged_replies: DashMap::new(),
             peer_vram_commitments: DashMap::new(),
             vision_modules: DashMap::new(),
@@ -1738,11 +1760,32 @@ impl SharedState {
     /// first and last pipeline segments to run locally so no peer ever sees the
     /// prompt or the sampled tokens.
     pub fn holds_both_model_ends(&self, model_id: &crate::types::ModelId) -> bool {
+        self.holds_both_model_ends_under(model_id, None)
+    }
+
+    /// [`Self::holds_both_model_ends`], answered as a `swarm_route` override
+    /// would have it.
+    ///
+    /// A testing override that releases this node's shards has to be visible
+    /// here, because "do we hold both ends" is the ONLY thing standing behind
+    /// the automatic prompt-privacy default. Without this the two facts
+    /// contradict each other: the plan is told to put every layer on peers while
+    /// privacy insists the first and last segments stay home, and the request
+    /// dies on "this node does not hold shard 0" — an accurate sentence about a
+    /// situation the caller created and cannot act on.
+    fn holds_both_model_ends_under(
+        &self,
+        model_id: &crate::types::ModelId,
+        over: Option<&crate::inference::route_override::RoutePlanOverride>,
+    ) -> bool {
         let Some(manifest) = self.model_registry.get_manifest(model_id) else {
             return false;
         };
         let me = self.identity.node_id();
         let holds = |index: u32| {
+            if over.is_some_and(|o| !o.local_holds(index)) {
+                return false;
+            }
             self.model_registry
                 .shard_holders(&crate::types::ShardId {
                     model_id: model_id.clone(),
@@ -1772,6 +1815,37 @@ impl SharedState {
     /// The scheduler and the admin API both read it here; computing it separately
     /// is how they would drift.
     pub fn encrypted_pipeline_for(&self, model_id: &crate::types::ModelId) -> bool {
+        self.encrypted_pipeline_resolved(model_id, None)
+    }
+
+    /// [`Self::encrypted_pipeline_for`], for a request that may carry a
+    /// `swarm_route` override.
+    ///
+    /// Same rule, same resolver, one different INPUT: whether this node holds
+    /// both ends. That is the only thing the override may touch, and the
+    /// distinction is the one `privacy_explicitly_enabled_for` already draws —
+    /// a choice the USER made is honoured more strongly than one the node made
+    /// for them. So an explicit per-model setting, or an explicit global
+    /// `encrypted_pipeline = true`, still applies and still refuses a route that
+    /// cannot satisfy it; only the AUTOMATIC default steps aside, because the
+    /// fact it rests on is precisely the fact the caller asked us to set aside.
+    pub fn encrypted_pipeline_for_request(
+        &self,
+        model_id: &crate::types::ModelId,
+        request_id: uuid::Uuid,
+    ) -> bool {
+        match self.route_plan_override(request_id) {
+            Some(o) => self.encrypted_pipeline_resolved(model_id, Some(&o)),
+            None => self.encrypted_pipeline_for(model_id),
+        }
+    }
+
+    /// The one resolution both public forms go through, so they cannot drift.
+    fn encrypted_pipeline_resolved(
+        &self,
+        model_id: &crate::types::ModelId,
+        over: Option<&crate::inference::route_override::RoutePlanOverride>,
+    ) -> bool {
         Self::resolve_encrypted_pipeline_inner(
             self.encrypted_pipeline_models
                 .get(model_id)
@@ -1780,7 +1854,7 @@ impl SharedState {
             self.config.inference.encrypted_pipeline_auto,
             // Only consulted when nothing explicit decides it, so the registry
             // lookup is skipped in the common explicit cases.
-            || self.holds_both_model_ends(model_id),
+            || self.holds_both_model_ends_under(model_id, over),
         )
     }
 

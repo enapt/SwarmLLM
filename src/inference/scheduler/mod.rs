@@ -1807,8 +1807,12 @@ impl PipelineScheduler {
         let start = std::time::Instant::now();
 
         // Per-model choice, then explicit global, then on automatically when this
-        // node holds both ends — see `encrypted_pipeline_for`.
-        let encrypted = self.shared_state.encrypted_pipeline_for(model_id);
+        // node holds both ends — see `encrypted_pipeline_for`. Asked per REQUEST
+        // because a `swarm_route` override can release the very ends the
+        // automatic default rests on.
+        let encrypted = self
+            .shared_state
+            .encrypted_pipeline_for_request(model_id, request_id);
         if encrypted {
             tracing::info!(
                 model = %model_id,
@@ -2801,6 +2805,25 @@ impl PipelineScheduler {
             }
         };
 
+        // A `swarm_route` block on the request, asking us to plan as though the
+        // holdings were different. Absent on every ordinary request, so the
+        // lookup is one miss and the filters below are skipped entirely.
+        //
+        // Applied HERE, beside the per-request holder blacklist, because this is
+        // the one place a candidate is admitted — filtering anywhere downstream
+        // would leave the DP, the capacity rungs and the standby search each
+        // working from a different idea of who was available.
+        let route_override = self.shared_state.route_plan_override(request_id);
+        if let Some(ref o) = route_override {
+            tracing::info!(
+                model = %manifest.id,
+                %request_id,
+                pretend_local_holds = ?o.pretend_local_holds,
+                excluded_peers = o.exclude_node_prefixes.len(),
+                "DIAG: planning this request under a swarm_route override"
+            );
+        }
+
         // First, collect which shard indices each node holds
         let mut node_shards: std::collections::HashMap<NodeId, Vec<u32>> =
             std::collections::HashMap::new();
@@ -2839,6 +2862,19 @@ impl PipelineScheduler {
                 // via a latency penalty in `get_peer_metrics`, so direct is
                 // always preferred when both are available.
                 let is_local = node_id == *local_node_id;
+                // A `swarm_route` override, if the caller sent one. Local and
+                // remote are separate questions on purpose: releasing our own
+                // shards changes what this node would RUN, excluding a peer
+                // changes who we would ASK.
+                if let Some(ref o) = route_override {
+                    if is_local {
+                        if !o.local_holds(shard.index) {
+                            continue;
+                        }
+                    } else if o.excludes_peer(&node_id) {
+                        continue;
+                    }
+                }
                 // Already failed us on this request with "I don't have that
                 // data" — skip regardless of what the registry or DHT says.
                 if !is_local

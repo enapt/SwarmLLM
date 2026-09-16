@@ -374,6 +374,10 @@ pub async fn submit_stream_to_router(
     lora_adapter: Option<String>,
     cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     tools: Option<Vec<serde_json::Value>>,
+    // A caller's `swarm_route` block, already validated by the handler. Taken
+    // as a parameter rather than re-derived here because this helper is shared
+    // with the Anthropic surface, which has no such field and passes `None`.
+    route_override: Option<crate::inference::route_override::RoutePlanOverride>,
 ) -> Result<
     (
         tokio::sync::oneshot::Receiver<
@@ -401,6 +405,7 @@ pub async fn submit_stream_to_router(
         tools,
     );
     inference_req.cancel = cancel;
+    inference_req.route_override = route_override;
     let traced_id = inference_req.id;
 
     router_tx
@@ -533,6 +538,7 @@ pub(super) async fn router_inference(
         req.tool_definitions(),
     );
     inference_req.cancel = cancel;
+    inference_req.route_override = req.route_plan_override();
 
     let output = crate::api::submit_to_router(&router_tx, inference_req).await?;
     let trace = output.trace.clone();
@@ -664,6 +670,7 @@ async fn router_inference_stream(
         req.lora_adapter.clone(),
         Some(cancel.clone()),
         req.tool_definitions(),
+        req.route_plan_override(),
     )
     .await?;
 

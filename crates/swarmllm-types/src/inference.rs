@@ -47,6 +47,15 @@ pub struct InferenceRequest {
     /// the originating node observes it.
     #[serde(skip)]
     pub cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// A caller's instruction to plan this request as though the swarm's
+    /// holdings were different — see [`RoutePlanOverride`].
+    ///
+    /// Skipped over the wire for the same reason as `cancel`: it is an
+    /// instruction to THIS node's scheduler about its own candidate set, and a
+    /// peer that received it would have nothing to do with it. Being
+    /// `#[serde(skip)]` it is not a protocol change and needs no feature bit.
+    #[serde(skip)]
+    pub route_override: Option<RoutePlanOverride>,
 }
 
 impl InferenceRequest {
@@ -79,6 +88,7 @@ impl InferenceRequest {
             lora_adapter,
             tools,
             cancel: None,
+            route_override: None,
         }
     }
 
@@ -934,5 +944,76 @@ mod chunk_assembly_tests {
         assert_eq!(asm[4095], 0xBB);
         assert_eq!(asm[4096], 0xCC);
         assert_eq!(asm[4999], 0xCC);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Per-request routing override
+//
+// A LOCAL planning instruction that rides on `InferenceRequest` and is skipped
+// by every codec, exactly like `cancel`: no peer is ever told the coordinator
+// was pretending, so this is not a protocol change and needs no feature bit.
+// The API shape it is parsed from, and the reasoning for what it deliberately
+// cannot do, live in `swarmllm::inference::route_override`.
+// ---------------------------------------------------------------------------
+
+/// How much of a model this node should be treated as holding while planning.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PretendLocalHolds {
+    /// Plan against what this node really holds. The default.
+    Everything,
+    /// Plan as though this node held none of it, forcing every layer onto peers.
+    Nothing,
+    /// Plan as though this node held only these shard indices, inclusive at both
+    /// ends — the same spelling as `inference.shard_range`, so a scenario
+    /// written here can be transplanted into a config without re-learning it.
+    Shards(u32, u32),
+}
+
+/// The parsed `swarm_route` block of a request.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoutePlanOverride {
+    /// `None` when the caller said nothing about local holdings.
+    pub pretend_local_holds: Option<PretendLocalHolds>,
+    /// Node ids to leave out of the candidate set, as lowercase hex prefixes —
+    /// the same short form the logs, the diagnostics report and the peer list
+    /// all print, so a node can be excluded by copying it off a screen.
+    pub exclude_node_prefixes: Vec<String>,
+}
+
+impl RoutePlanOverride {
+    /// Nothing was asked for, so planning is untouched.
+    ///
+    /// Checked before the map is consulted at all, so an override that parsed to
+    /// no instruction costs the scheduler nothing.
+    pub fn is_noop(&self) -> bool {
+        self.pretend_local_holds.is_none() && self.exclude_node_prefixes.is_empty()
+    }
+
+    /// Should this node be treated as holding `shard_index` of the model?
+    ///
+    /// Answers for the LOCAL node only — `excludes_peer` is the question for
+    /// everyone else, and the two are deliberately separate because pretending
+    /// about ourselves and pretending about a peer mean different things: one
+    /// changes what we would run, the other what we would ask for.
+    pub fn local_holds(&self, shard_index: u32) -> bool {
+        match self.pretend_local_holds {
+            None | Some(PretendLocalHolds::Everything) => true,
+            Some(PretendLocalHolds::Nothing) => false,
+            Some(PretendLocalHolds::Shards(start, end)) => {
+                shard_index >= start && shard_index <= end
+            }
+        }
+    }
+
+    /// Has the caller asked for this peer to be left out?
+    pub fn excludes_peer(&self, node_id: &NodeId) -> bool {
+        if self.exclude_node_prefixes.is_empty() {
+            return false;
+        }
+        let hex = hex::encode(node_id.0);
+        self.exclude_node_prefixes
+            .iter()
+            .any(|p| hex.starts_with(p.as_str()))
     }
 }

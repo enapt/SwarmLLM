@@ -211,6 +211,69 @@ fn should_retry_after(
                 || peer_went_silent(err)))
 }
 
+/// How many times one request may be re-planned onto a different route.
+///
+/// The first re-plan has been unconditional for as long as the retry has
+/// existed. The second is here for a shape measured on the live node
+/// (2026-09-16, request `9e601e66`, Qwen2.5-14B — a model this node holds 1 of
+/// 16 shards of, so every route for it is somebody else's):
+///
+/// - attempt 1 waited **135.6 s** on a peer that took the work and went silent;
+/// - the re-plan hit the scheduler's last capacity rung, which deliberately
+///   routes past what the peers advertised and says so — *"a peer may refuse and
+///   the request will re-plan"* — and handed one peer all 48 layers;
+/// - that peer refused it for memory in **1.6 s**;
+/// - there was no attempt 3, so the promise in that log line was empty and the
+///   user got a 137 s 503 quoting a memory shortfall, having never been told the
+///   real problem was that nobody free was holding the weights.
+///
+/// Three attempts, not more: the point is to honour a re-plan the scheduler
+/// already decided was warranted, not to keep dialling.
+const MAX_REPLANS: u32 = 2;
+
+/// A refusal that arrives this fast cost a round trip, not a deadline.
+///
+/// Peer round-trips on this swarm run 0.6–1.7 s and the measured refusal took
+/// 1.6 s, while every way of waiting for a peer that says nothing is an order of
+/// magnitude above it — the ACK fast-fail is 10–90 s and the first-token wait
+/// starts at two minutes. So this separates "the peer answered promptly, with a
+/// reason" from "the peer went quiet", which is what the extra attempt turns on.
+const A_REFUSAL_THIS_FAST_COSTS_NOTHING_TO_RETRY: std::time::Duration =
+    std::time::Duration::from_secs(5);
+
+/// May a request that has already been re-planned once be re-planned again?
+///
+/// [`should_retry_after`] has already said the failure is retryable at all; this
+/// asks the narrower question of whether ANOTHER attempt is worth the user's
+/// time. Pure, so the rule is testable without building a router.
+///
+/// Three conditions, all load-bearing:
+///
+/// 1. **A remote segment was involved.** `remote_peer_could_not_serve` matches
+///    `ServiceUnavailable`, and our OWN worker raises that wording too — the
+///    predicate's own doc says it must be paired with this evidence or a local
+///    failure retries pointlessly.
+/// 2. **The peer said so, explicitly.** An outright refusal means we learned a
+///    fact, and every site that produces one bars that peer from this request
+///    first (`blacklist_holder_for_request` in `pipeline/remote_generate.rs`), so
+///    the next plan cannot come straight back to it. Without that pairing this
+///    would loop. `docs/FUTURE_WORK.md` § "Per-request holder blacklist on
+///    retry" named exactly that blacklist as the precondition for going past one
+///    retry; it exists now, which is what makes this safe.
+/// 3. **It said so cheaply.** The same entry's warning about going past one
+///    retry is that "one wasted timeout" becomes "N wasted timeouts". So a slow
+///    failure earns nothing: the extra attempt is paid for out of the previous
+///    one having cost almost nothing.
+fn a_further_replan_is_earned(
+    err: &SwarmError,
+    used_remote_segment: bool,
+    attempt_took: std::time::Duration,
+) -> bool {
+    used_remote_segment
+        && remote_peer_could_not_serve(err)
+        && attempt_took < A_REFUSAL_THIS_FAST_COSTS_NOTHING_TO_RETRY
+}
+
 /// Hand back the work a definitively-failed request had already done.
 ///
 /// Called at the one point per dispatch path where the attempt is over — after
@@ -1090,6 +1153,14 @@ impl InferenceRouter {
             };
 
             let request_start = std::time::Instant::now();
+            // Publish the caller's `swarm_route` instruction BEFORE the first
+            // plan is assembled. The scheduler reads it by request id, like the
+            // holder blacklist and the local-memory refusal beside it, because
+            // `assemble_pipeline_for` is handed an id rather than the request.
+            // Released with the rest of the per-request state.
+            if let Some(ref o) = request.route_override {
+                shared_state.note_route_plan_override(request.id, o.clone());
+            }
             tracing::info!(
                 request_id = %request.id,
                 model = %request.model_id,
@@ -1138,70 +1209,108 @@ impl InferenceRouter {
                 None
             };
 
-            // Retry once on transient remote failures (silent rr drops or
+            // Re-plan on transient remote failures (silent rr drops or
             // mid-flight peer disconnects). We reset `preferred_pipeline`
-            // to None so the second attempt re-runs the scheduler — which
+            // to None so each further attempt re-runs the scheduler — which
             // filters out the dead/dropped peer via `connected_node_ids`
             // and picks a different holder.
-            let mut output = execute_request(
-                shared_state.clone(),
-                network_tx.clone(),
-                scheduler.clone(),
-                request.clone(),
-                token_tx.clone(),
-                preferred_pipeline,
-                trace.clone(),
-            )
-            .await;
-            // A peer reporting it cannot serve is retryable too, but only when
-            // a remote segment was actually part of this attempt — otherwise the
-            // identical message from our own worker would retry pointlessly.
-            let snapshot = trace.snapshot();
-            if matches!(&output, Err(e) if should_retry_after(
-                e,
-                snapshot.remote_segments() > 0,
-                request.is_cancelled(),
-                snapshot.ttft_ms.is_some(),
-            )) {
-                tracing::warn!(
-                    request_id = %request.id,
-                    error = %output.as_ref().err().unwrap(),
-                    "DIAG: inference transient failure — retrying with fresh pipeline"
-                );
+            //
+            // The first re-plan is unconditional, as it has always been. A
+            // second is earned only by `a_further_replan_is_earned` — a peer
+            // that answered "I cannot serve this" in about a round trip — so a
+            // request can never spend two deadlines waiting on silence.
+            let mut attempt_took;
+            let mut output = {
+                let started = std::time::Instant::now();
+                let out = execute_request(
+                    shared_state.clone(),
+                    network_tx.clone(),
+                    scheduler.clone(),
+                    request.clone(),
+                    token_tx.clone(),
+                    preferred_pipeline,
+                    trace.clone(),
+                )
+                .await;
+                attempt_took = started.elapsed();
+                out
+            };
+            // Our own loader's memory shortfall, kept from the FIRST time it is
+            // seen so a re-plan that finds nothing better can report the number
+            // the user can act on — it names the model's footprint, the budget
+            // and what to raise — rather than the re-plan's "no route", which is
+            // a true statement about a search the user never asked for and can
+            // do nothing with.
+            let mut memory_shortfall: Option<SwarmError> = None;
+            let mut replans = 0;
+            while replans < MAX_REPLANS {
+                // A peer reporting it cannot serve is retryable, but only when a
+                // remote segment was actually part of this attempt — otherwise
+                // the identical message from our own worker would retry
+                // pointlessly.
+                let snapshot = trace.snapshot();
+                let used_remote_segment = snapshot.remote_segments() > 0;
+                let (retry, local_memory) = match &output {
+                    Err(err) => {
+                        let retryable = should_retry_after(
+                            err,
+                            used_remote_segment,
+                            request.is_cancelled(),
+                            snapshot.ttft_ms.is_some(),
+                        );
+                        let earned = replans == 0
+                            || a_further_replan_is_earned(err, used_remote_segment, attempt_took);
+                        if retryable && earned {
+                            tracing::warn!(
+                                request_id = %request.id,
+                                error = %err,
+                                replan = replans + 1,
+                                attempt_ms = attempt_took.as_millis() as u64,
+                                "DIAG: inference transient failure — retrying with fresh pipeline"
+                            );
+                        }
+                        (retryable && earned, local_memory_refused_the_load(err))
+                    }
+                    Ok(_) => (false, false),
+                };
+                if !retry {
+                    break;
+                }
                 // Bar this node from taking the whole model on the re-plan.
                 // Without it the second plan is the first plan — admission
                 // refused before allocating anything, so every live figure it
                 // reads is unchanged — and the "retry" re-attempts the load
                 // that just failed. Released with the rest of the per-request
                 // state when the request ends.
-                let local_memory = matches!(&output, Err(e) if local_memory_refused_the_load(e));
                 if local_memory {
                     shared_state.note_local_memory_refusal(request.id);
+                    if memory_shortfall.is_none() {
+                        memory_shortfall = output.err();
+                    }
                 }
-                let first_error = if local_memory { output.err() } else { None };
+                replans += 1;
+                let started = std::time::Instant::now();
                 output = execute_request(
                     shared_state.clone(),
-                    network_tx,
-                    scheduler,
+                    network_tx.clone(),
+                    scheduler.clone(),
                     request.clone(),
-                    token_tx,
+                    token_tx.clone(),
                     None,
                     trace.clone(),
                 )
                 .await;
-                // Nowhere else could serve it either. Report the memory
-                // shortfall that actually stopped the request — it names the
-                // model's footprint, the budget and what to raise — rather than
-                // the re-plan's "no route", which is a true statement about a
-                // search the user never asked for and can do nothing with.
-                if let (Some(first), Err(_)) = (first_error, &output) {
-                    tracing::info!(
-                        request_id = %request.id,
-                        "DIAG: re-plan after a local memory refusal found no other route \
-                         — reporting the original shortfall"
-                    );
-                    output = Err(first);
-                }
+                attempt_took = started.elapsed();
+            }
+            // Nowhere else could serve it either — report the shortfall that
+            // actually stopped the request.
+            if let (Some(first), Err(_)) = (memory_shortfall, &output) {
+                tracing::info!(
+                    request_id = %request.id,
+                    "DIAG: re-plan after a local memory refusal found no other route \
+                     — reporting the original shortfall"
+                );
+                output = Err(first);
             }
 
             // The attempt is over — the retry above has either not applied or

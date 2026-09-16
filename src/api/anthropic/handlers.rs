@@ -300,6 +300,9 @@ pub(super) async fn anthropic_stream(
         None,
         Some(cancel.clone()),
         tools,
+        // `swarm_route` is a testing knob on the chat-completions surface and is
+        // deliberately not part of Anthropic's `/v1/messages` contract.
+        None,
     )
     .await?;
     let progress_handle = Some((state.shared_state.clone(), traced_id));

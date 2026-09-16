@@ -1978,6 +1978,42 @@ the sidecar holds.
 
 ### OpenAI-Compatible (Bearer auth required)
 - `POST   /v1/chat/completions` — Chat completions (streaming + non-streaming, tool_calls). `logprobs` is refused for a model running locally — every local path pins `token_logprobs: vec![]`, so it is only ever returned by a cloud provider (see Deferred Items). **`max_tokens` is optional, and absent does not mean zero**: the serving node resolves it against the model's real context window (`model_worker::resolve_max_new_tokens`), lowering `DEFAULT_REPLY_BUDGET` to whatever the prompt leaves free but never raising it to fill a large one. A value the caller *did* send is honoured exactly or refused with the budget that would fit — never silently shortened. Resolving it at the edge instead is what refused every non-empty prompt on every 2048-context model (report #001).
+
+  **`swarm_route` (SwarmLLM extension, testing instrument).** Plans ONE request
+  as though the swarm's holdings were different, so the distributed path can be
+  exercised on a swarm whose nodes have converged on holding whole models —
+  which is what auto-manage's replication makes them do, and why the multi-hop
+  route that matters stops being taken on a development swarm.
+
+  ```json
+  "swarm_route": {
+    "pretend_local_holds": "none",      // "all" (default) | "none" | "0-3" | "2"
+    "exclude_nodes": ["bf7b3263"]       // node-id hex prefixes, as the peer list prints them
+  }
+  ```
+
+  It only ever makes this node's candidate set SMALLER: it cannot invent a
+  holder, cannot make a peer accept work it would otherwise refuse, and never
+  leaves this machine (`InferenceRequest::route_override` is `#[serde(skip)]`,
+  so it is not a protocol change and needs no feature bit). The worst a caller
+  can do with it is make their own request slower or fail, which is why it needs
+  no permission beyond the API key every request already carries.
+
+  Releasing the local ends also stands down the AUTOMATIC prompt-privacy default
+  — that default exists precisely because the node holds both ends, and the
+  override removes the fact it rests on. An EXPLICIT `encrypted_pipeline`, per
+  model or global, still applies and still refuses a route that cannot satisfy
+  it (`SharedState::encrypted_pipeline_for_request`).
+
+  There is deliberately **no "give me N segments" knob**: how many segments a
+  route has is decided by the priced search over the candidates, so asking for a
+  count would override the search's answer rather than its input, and a plan the
+  router did not actually choose is not evidence about routing. Excluding the
+  peers that hold the whole model is the honest way to get a multi-hop route.
+  Verified live 2026-09-16: the same model and prompt ran `route=local` with no
+  override, `route=distributed nodes=225e6fe7 regions=TH` with
+  `pretend_local_holds: "none"`, and `route=distributed nodes=7c10ea04
+  regions=BE` when that peer was also excluded.
 - `POST   /v1/responses` — OpenAI Responses API (gpt-5 / o-series default)
 - `GET    /v1/responses/{id}` — Retrieve a stored response (30-day TTL); pass `?stream=true&starting_after={seq}` to resume a background SSE stream
 - `DELETE /v1/responses/{id}` — Delete a stored response

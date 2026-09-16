@@ -925,6 +925,7 @@ mod tests {
             lora_adapter: None,
             tools: None,
             cancel: None,
+            route_override: None,
         }
     }
 

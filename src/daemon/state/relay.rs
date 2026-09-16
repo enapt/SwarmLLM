@@ -103,6 +103,7 @@ impl super::SharedState {
         self.request_holder_blacklist.remove(request_id);
         self.peer_vram_commitments.remove(request_id);
         self.local_memory_refusals.remove(request_id);
+        self.route_plan_overrides.remove(request_id);
         self.salvaged_replies.remove(request_id);
         self.retained_activations.release(*request_id);
     }
@@ -312,6 +313,36 @@ impl super::SharedState {
         self.request_holder_blacklist
             .get(&request_id)
             .is_some_and(|s| s.contains(holder))
+    }
+
+    /// Record a caller's `swarm_route` instruction for this request.
+    ///
+    /// An override that asks for nothing is not stored, so the scheduler's
+    /// lookup stays a miss on every ordinary request and the mechanism costs
+    /// nothing when unused.
+    pub fn note_route_plan_override(
+        &self,
+        request_id: uuid::Uuid,
+        override_: crate::inference::route_override::RoutePlanOverride,
+    ) {
+        if override_.is_noop() {
+            return;
+        }
+        self.route_plan_overrides.insert(request_id, override_);
+    }
+
+    /// The `swarm_route` instruction this request carried, if any.
+    ///
+    /// **The only read.** The scheduler asks once per candidate gather; a second
+    /// reader deriving its own answer from the map is the shape
+    /// `.claude/rules/architecture.md` § "One invariant, N paths" is about.
+    pub fn route_plan_override(
+        &self,
+        request_id: uuid::Uuid,
+    ) -> Option<crate::inference::route_override::RoutePlanOverride> {
+        self.route_plan_overrides
+            .get(&request_id)
+            .map(|v| v.value().clone())
     }
 
     /// Retract a holder's claims over the layer span it was asked to serve.

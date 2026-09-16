@@ -60,6 +60,19 @@ pub struct ChatCompletionRequest {
     /// Optional LoRA adapter ID for per-request fine-tuned inference (SwarmLLM extension).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lora_adapter: Option<String>,
+    /// Plan this one request as though the swarm's holdings were different
+    /// (SwarmLLM extension, for testing the distributed path).
+    ///
+    /// ```json
+    /// "swarm_route": { "pretend_local_holds": "none", "exclude_nodes": ["bf7b3263"] }
+    /// ```
+    ///
+    /// It only ever narrows this node's own candidate set and never leaves this
+    /// machine, so the worst it can do is make the caller's own request slower
+    /// or fail — see [`crate::inference::route_override`] for the full scope and
+    /// for why there is deliberately no "give me N segments" knob.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub swarm_route: Option<crate::inference::route_override::SwarmRouteRequest>,
     /// Optional cache control hints for prefix caching (Anthropic-compatible).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_control: Option<CacheControl>,
@@ -337,6 +350,22 @@ impl ChatCompletionRequest {
                 .filter_map(|t| serde_json::to_value(t).ok())
                 .collect(),
         )
+    }
+
+    /// The parsed `swarm_route` block, for attaching to the `InferenceRequest`.
+    ///
+    /// The single conversion from the wire shape to the planner's, so the two
+    /// dispatch paths — streaming and not — cannot come to different
+    /// conclusions about the same request body.
+    ///
+    /// A parse failure answers `None` rather than propagating, and that is safe
+    /// for one reason only: `chat_completions` parses the same field first and
+    /// returns 400 on anything invalid, so a bad block never reaches here. If
+    /// that validation is ever moved, this must stop swallowing the error.
+    pub(super) fn route_plan_override(
+        &self,
+    ) -> Option<crate::inference::route_override::RoutePlanOverride> {
+        self.swarm_route.as_ref()?.parse().ok()
     }
 
     pub(super) fn to_sampling_params(&self) -> SamplingParams {

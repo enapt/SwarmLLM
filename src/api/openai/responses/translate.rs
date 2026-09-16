@@ -134,6 +134,10 @@ pub fn request_to_chat(
         response_format: None,
         session_id: None,
         lora_adapter: None,
+        // The Responses surface has no routing-override field of its own; the
+        // knob is a testing instrument on the chat surface, not part of
+        // OpenAI's Responses contract.
+        swarm_route: None,
         cache_control: None,
         extras,
     })
