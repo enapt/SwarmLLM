@@ -8,6 +8,79 @@ names** — the rule statement in `architecture.md` is the summary, this is the
 reasoning, and several of these describe a fix that looked obviously correct
 and was not.
 
+## A reply budget the caller did not choose is a ceiling, not a demand
+
+**`inference::model_worker::resolve_max_new_tokens` is the single answer to "how
+many tokens may this reply use?"**, called from both tokenization sites, and
+both must USE what it returns — they assign it back to
+`gen.sampling.max_tokens` so the generation loop, the off-by-one guard and the
+finish-reason check all see the budget that was granted rather than the one that
+was asked for.
+
+**What it replaced.** `prompt_fits_window` only ever refused. It compared
+`params.max_tokens` against the window with no regard for where that number came
+from, and for an absent `max_tokens` that number was a flat serde default of
+2048 — chosen with no knowledge of any model. On every model whose context
+window is also 2048, `prompt_tokens + 2048 > 2048` for any non-empty prompt
+whatsoever, so **every chat turn was refused**, a 34-token one included.
+TinyLlama-1.1B-Chat has exactly that window and is a shipped reference model,
+i.e. the obvious first pick on a weak machine. Reported as #001 against
+v0.3.181-alpha, reproduced on v0.3.182-alpha's released binary 2026-09-16 with
+the discriminating control: the same prompt and model with an explicit
+`max_tokens: 32` was served.
+
+The advice compounded it and is its own lesson (the gotcha #295 family): the
+message told a 39-token prompt to shorten itself "by about 39 tokens", which is
+the whole prompt. **Advice that cannot be followed is worse than no advice**, so
+the zero-room case now names the real overage and says to start a new
+conversation, and the too-large case names the budget that WOULD fit.
+
+**One invariant, two paths — and the other path was already right.** The
+llama.cpp executor had `params.max_tokens.min(n_ctx.saturating_sub(prompt_tokens))`
+(`executor.rs:571`, and again at 891) since long before. Only the candle path
+refused rather than clamping. Same rule, one helper now.
+
+**Why the distinction between absent and explicit is carried on the WIRE.**
+`SamplingParams.max_tokens_explicit` exists because the effective context window
+is a LOAD-time property — the GGUF's `context_length` after
+`effective_context_length`, `MAX_SEQ_LEN_OVERRIDE` and the memory budget have
+each had a say — so no coordinator can resolve the default before dispatch. Only
+the node that loaded the model knows.
+
+**It is a bool beside the existing `u32`, NOT `Option<u32>`, and that is the
+compatibility argument.** An `Option` serialises `null` when absent, which an
+older peer cannot deserialise into `u32` — it would fail the whole request, in
+the new→old direction, which `.claude/rules/architecture.md` § "Additive
+Protocol Evolution" forbids. `max_tokens` therefore stays a concrete number on
+the wire and the flag rides beside it with `#[serde(default)]`:
+
+- old → new: field absent, reads `false`, so that peer's request is CLAMPED
+  rather than refused — more permissive, never less.
+- new → old: the extra field is ignored and `max_tokens` is read exactly as
+  today.
+
+No message becomes undecodable either way, so this needs no `features` bit and
+does **not** bump `PROTOCOL_VERSION`. Pinned by
+`a_peer_without_the_explicit_flag_is_read_as_not_explicit` and
+`the_wire_still_carries_a_concrete_max_tokens_for_older_peers`.
+
+**Lowered to fit, never raised to fill.** vLLM defaults a missing `max_tokens`
+to `max_model_len - prompt_tokens`; on a long-context model that reserves far
+more KV than the reply needs, which is the preemption storm reported as
+verl#5504. `DEFAULT_REPLY_BUDGET` (2048) is therefore a ceiling the serving node
+may only lower. This also preserves each surface's own default — MCP asks for
+512 and still gets 512 on a 128k model.
+
+**An explicit budget is honoured or refused, never shortened.** Serving a
+quarter of what was asked for cannot be diagnosed from outside the server.
+
+⚠ **The check is not on every path.** It lives in the worker, so it covers local
+generation and the `remote_generate` fast path (that peer is a worker too, and
+the flag reaches it). `pipeline/distributed.rs` runs its own loop over
+`sampling_params.max_tokens` and never consults a window — see
+`docs/FUTURE_WORK.md` #85. That is pre-existing, not a regression, and is
+recorded as observed rather than reproduced.
+
 ## Every status payload reports traffic the same way, and there are THREE
 
 **`api::metrics::network_traffic_json`** builds the figure; three surfaces serve

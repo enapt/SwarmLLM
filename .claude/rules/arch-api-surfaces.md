@@ -47,6 +47,30 @@ tokenizer decodes its word-boundary marker to one.
 
 → `docs/invariants/api-surfaces.md`
 
+## A reply budget the caller did not choose is a ceiling, not a demand
+
+**`model_worker::resolve_max_new_tokens`** is the single answer to "how many
+tokens may this reply use", called from both tokenization sites, and both
+**assign what it returns back to `gen.sampling.max_tokens`** so every downstream
+reader sees the budget granted, not the one asked for.
+
+An absent `max_tokens` is NOT a value to check against the window — it is our
+own fallback, and checking it refused every non-empty prompt on every
+2048-context model, TinyLlama included (report #001). Non-explicit is **lowered
+to fit, never raised to fill** (vLLM's `max_model_len - prompt_len` is the
+verl#5504 over-reservation trap, and raising it would also override MCP's
+deliberate 512). An **explicit** budget is honoured exactly or refused with the
+number that would fit — never silently shortened.
+
+`SamplingParams.max_tokens_explicit` is a `#[serde(default)]` **bool beside the
+existing `u32`, deliberately not `Option<u32>`** — an `Option` serialises `null`,
+which an older peer cannot deserialise. No `PROTOCOL_VERSION` bump; compatible
+both directions, pinned by two tests.
+
+⚠ `pipeline/distributed.rs` consults no window at all — `docs/FUTURE_WORK.md` #85.
+
+→ `docs/invariants/api-surfaces.md`
+
 ## A rendered prompt that lost the question is a FAILED render
 
 `chat_template::render_kept_the_last_question` is a post-condition on
@@ -283,6 +307,7 @@ Full evidence: `docs/invariants/api-surfaces.md`
 - **`api::metrics::network_traffic_json` — every status payload reports traffic the same way, and there are THREE.** `/api/admin/stats`, the WebSocket `stats_update` tick, and `/v1/status` (which `swarmllm status` reads). One builder is not one surface: the figure reached two of them and the CLI printed nothing, while its formatter passed against a hand-made object (gotcha #569). `every_stats_surface_carries_the_traffic_figure` in `tests/repo_consistency.rs` names all three.
 
 - **`api::mcp::dispatch::spawn_model_call_task`** — the single place that decides whether a fan-out model call actually **answered**, as opposed to merely not erroring.
+- **`inference::model_worker::resolve_max_new_tokens`** — the single answer to "how many tokens may this reply use", against the model's real context window. Both tokenization sites call it AND use what it returns. A budget the caller did not name is a ceiling to lower, never a value to check and refuse.
 - **`crate::error::reclassify_flattened_error`** — recovers an error's CLASS from a message that crossed a boundary carrying no types.
 - **`crate::error::classify_error`** — the single answer to "what is this failure, to a caller": `(StatusCode, client-safe message, error type)`.
 - **`crate::error::failure_log_level` + the `log_failure!` macro** — the single answer to "how loudly should this failure be recorded in THIS node's log".
