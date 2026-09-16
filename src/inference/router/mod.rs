@@ -1248,6 +1248,17 @@ impl InferenceRouter {
                 // remote segment was actually part of this attempt — otherwise
                 // the identical message from our own worker would retry
                 // pointlessly.
+                //
+                // The snapshot ACCUMULATES across attempts, and both readings of
+                // it want that. `ttft_ms` must mean "anything has reached the
+                // client on this request, ever", or a retry would restart a
+                // reply the reader has already seen begin. `remote_segments` is
+                // deliberately the same: a later purely-local attempt can
+                // therefore still read true, which at worst grants one more
+                // re-plan to a local memory refusal — and that re-plan has been
+                // handed `note_local_memory_refusal`, so it cannot hand this
+                // node the whole model again. Reading either per-attempt would
+                // be the change that needs justifying, not this.
                 let snapshot = trace.snapshot();
                 let used_remote_segment = snapshot.remote_segments() > 0;
                 let (retry, local_memory) = match &output {
