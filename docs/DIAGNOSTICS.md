@@ -270,6 +270,45 @@ to use and one the node can satisfy. If you are reading an older log, those
 ERROR lines are noise — check whether a `Loaded split model segment` line
 follows.
 
+## "A peer keeps retracting the same part" — who reinstates a withdrawn claim
+
+A peer announces its holdings every few minutes. When that announcement omits a
+shard we had recorded for it, `retain_node_shards_for_model` drops the claim and
+remembers the retraction, so a stale DHT provider record cannot put it back
+(gotcha #364). That should happen **once**.
+
+Measured on the live node 2026-09-16, it happens repeatedly — 3039 events in one
+log, one peer having the same GLM-4 shard retracted **344 times** over five days
+at a median gap of 330 s (the announce cadence), across only 21 restarts. Since
+`retain_node_shards_for_model` returns what it actually REMOVED, every one of
+those is a genuine reinstatement in between:
+
+```
+grep "Peer retracted shards it no longer hosts" node.log \
+  | sed -E 's/.*node_id=([0-9a-f]+) model=([^ ]+).*/\1 \2/' | sort | uniq -c | sort -rn
+```
+
+More than one line per (peer, model) is the symptom. To find what puts the claim
+back, grep the line that fires at the moment a retraction is undone — it names
+the call site via `#[track_caller]`:
+
+```
+grep "DIAG: a holder claim this peer had withdrawn was reinstated" node.log
+```
+
+⚠ **A fresh node does not reproduce it** (zero in 25 minutes), so whatever does
+this needs state a new node lacks — reach for a node that has been running, or
+one restored from an existing `db.redb`. Ruled out by reading, none of which
+explains it: `merge_dht_providers` (correctly gated, and the only DHT path), the
+incremental single-shard announces (3318 in that log, all passing an empty
+`complete_for_models`), the three full-announce producers, manifest registration
+(records the LOCAL node) and shard-download progress (no such messages at all).
+
+Why it matters beyond tidiness: a claim that is back in the registry is a
+routing candidate, so the scheduler can hand a segment to a peer that does not
+hold those weights — which is one way a request comes to spend its first-token
+deadline waiting on a peer that was never going to answer.
+
 ## "Why is this node talking to a stranger?"
 
 ```

@@ -550,6 +550,7 @@ impl ModelRegistry {
     /// reporting the timer, not the swarm. Same reasoning as `note_build_tag`
     /// directly below, which has logged once per transition since the build
     /// filter was written.
+    #[track_caller]
     pub fn record_shard_holder_with_build(
         &self,
         shard_id: ShardId,
@@ -559,8 +560,40 @@ impl ModelRegistry {
         // A first-hand claim supersedes any earlier retraction: the node is
         // telling us it has the shard now. Only this path clears it — the DHT
         // merge must not, or a stale provider record would undo a retraction.
-        self.retracted_claims
-            .remove(&(shard_id.clone(), node_id.clone()));
+        let undid_a_retraction = self
+            .retracted_claims
+            .remove(&(shard_id.clone(), node_id.clone()))
+            .is_some();
+        // Name the CALL SITE when that happens, because it is the one fact an
+        // investigation on 2026-09-16 could not get by reading.
+        //
+        // Measured on the live node: one peer had the same shard of GLM-4
+        // retracted **344 times** over five days — median gap 330 s, i.e. the
+        // announce cadence, across only 21 restarts — reporting `retained=6`
+        // every time. `retain_node_shards_for_model` returns what it actually
+        // REMOVED, so each is a genuine reinstatement between two
+        // announcements, not a recount. 3039 such events in one log.
+        //
+        // Ruled out by reading, and none of them explains it: `merge_dht_providers`
+        // (correctly gated on `claim_was_retracted` — the gotcha #364 fix is
+        // intact — and the only DHT path), the incremental single-shard
+        // announces (3318 in the log, all passing an empty `complete_for_models`
+        // through the one builder), the three full-announce producers, manifest
+        // registration (records the LOCAL node), and shard-download progress
+        // (no such messages at all). A fresh node reproduced it zero times in
+        // 25 minutes, so whatever does it needs state a new node lacks.
+        //
+        // `#[track_caller]` rather than a backtrace, so this costs nothing
+        // until it fires. **Delete this once the site is named and fixed.**
+        if undid_a_retraction && Some(&node_id) != self.local_node_id.as_ref() {
+            tracing::info!(
+                model = %shard_id.model_id,
+                shard = shard_id.index,
+                node = %node_id,
+                site = %std::panic::Location::caller(),
+                "DIAG: a holder claim this peer had withdrawn was reinstated"
+            );
+        }
         let mut entry = self.shard_holders.entry(shard_id.clone()).or_default();
         let holders = entry.value_mut();
 
@@ -2659,6 +2692,58 @@ mod tests {
 
         let has_mmproj = entries.iter().any(|(sid, _)| sid.is_mmproj());
         assert!(has_mmproj);
+    }
+}
+
+#[cfg(test)]
+mod reinstatement_probe_tests {
+    use super::*;
+
+    /// The reinstatement probe must be REACHABLE, and must not fire for us.
+    ///
+    /// The `DIAG: a holder claim this peer had withdrawn was reinstated` line is
+    /// the whole instrument for an open investigation (3039 flap events on the
+    /// live node, cause not yet named). A probe that cannot fire reads exactly
+    /// like a bug that never happens — #614's lesson, and #502's: a null control
+    /// that does not fire is itself a finding.
+    ///
+    /// This asserts the CONDITION the probe is gated on, in both directions,
+    /// since the log line itself is not observable from a unit test.
+    #[test]
+    fn the_reinstatement_probe_can_fire_for_a_peer_and_never_for_us() {
+        let me = NodeId([1u8; 32]);
+        let peer = NodeId([2u8; 32]);
+        let registry = ModelRegistry::with_local_node(me.clone());
+        let shard = ShardId {
+            model_id: ModelId("m".into()),
+            index: 3,
+        };
+
+        // A peer claims it, then withdraws it.
+        registry.record_shard_holder(shard.clone(), peer.clone());
+        registry.retract_shard_holder(&shard, &peer);
+        assert!(
+            registry.claim_was_retracted(&shard, &peer),
+            "the retraction must be remembered, or there is nothing to reinstate"
+        );
+
+        // Claiming it again is exactly the event the probe reports.
+        registry.record_shard_holder(shard.clone(), peer.clone());
+        assert!(
+            !registry.claim_was_retracted(&shard, &peer),
+            "re-recording must clear the retraction — this is the branch the probe logs"
+        );
+
+        // Our OWN registrations are routine and must never reach it, or the
+        // instrument drowns in our own bookkeeping.
+        registry.record_shard_holder(shard.clone(), me.clone());
+        registry.retract_shard_holder(&shard, &me);
+        assert!(registry.claim_was_retracted(&shard, &me));
+        assert_eq!(
+            registry.local_node_id.as_ref(),
+            Some(&me),
+            "the probe's exclusion is keyed on this being set"
+        );
     }
 }
 
