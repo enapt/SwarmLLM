@@ -6489,6 +6489,54 @@ fn the_translated_wrapper_scan_catches_the_defect_it_is_for() {
     );
 }
 
+/// **A streamed failure the daemon NAMED must reach the user, and must not be
+/// retried.**
+///
+/// The daemon already sends `{"error": {message, type}}` as an ordinary SSE
+/// frame — the same shape the non-streaming path parses — but `onChunk` read
+/// only `chunk.choices` and `chunk.usage`, so the frame matched no branch and
+/// was dropped. The user was then shown "the model might still be loading"
+/// for a request the daemon had explicitly refused, closed and refunded
+/// (report #002). Gotcha #300 is the same defect one layer down, and its own
+/// lesson was that the fix "landed where the report came from and nowhere
+/// else": the backend learned to send a proper error frame, and the dashboard
+/// was never taught to read it.
+///
+/// Two terms are load-bearing and pinned here:
+///   * `onChunk` must look at `chunk.error` at all;
+///   * the silent retry must be gated on NOT having one — the commonest such
+///     refusal is "not enough memory right now", where re-sending is the last
+///     thing the node needs.
+#[test]
+fn a_streamed_failure_is_shown_to_the_user_and_never_silently_retried() {
+    let src = std::fs::read_to_string(repo_root().join("frontend/js/components/chat.js"))
+        .expect("cannot read chat.js");
+
+    assert!(
+        src.contains("chunk.error"),
+        "chat.js's stream handler never inspects `chunk.error`, so a terminal \
+         failure frame from the daemon is dropped and reported to the user as \
+         \"the model might still be loading\" (report #002)."
+    );
+
+    let retry_gate = src
+        .lines()
+        .find(|l| {
+            l.contains("!fullContent") && l.contains("!reasoningContent") && l.contains("if ")
+        })
+        .unwrap_or_else(|| {
+            panic!("could not find chat.js's silent-retry condition — if it moved, move this guard")
+        });
+    assert!(
+        retry_gate.contains("!streamError"),
+        "chat.js retries a request silently without excluding one the daemon \
+         already refused:\n  {}\n\
+         A terminal error frame is a final answer; re-sending it doubles the \
+         load on a node that has just said it has none to spare.",
+        retry_gate.trim()
+    );
+}
+
 /// **An element that starts with the `hidden` CLASS can only be revealed by
 /// removing that class.** `.hidden` is `display: none !important`, and no
 /// inline `style.display` can beat an `!important` declaration, whatever value

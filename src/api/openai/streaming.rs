@@ -863,14 +863,7 @@ async fn router_inference_stream(
                 }
                 Ok(Err(e)) => {
                     tracing::debug!(error = %e, "DIAG: SSE fallback got pipeline error");
-                    if sse_tx
-                        .send(StreamEvent::Error {
-                            message: format!("{e}"),
-                            error_type: crate::error::classify_error(&e).2,
-                        })
-                        .await
-                        .is_err()
-                    {
+                    if sse_tx.send(StreamEvent::from_error(&e)).await.is_err() {
                         tracing::debug!("DIAG: SSE error event send failed — client disconnected");
                     }
                 }
@@ -885,14 +878,7 @@ async fn router_inference_stream(
                     tracing::warn!(
                         "DIAG: SSE result_rx channel dropped — pipeline task died without sending result"
                     );
-                    if sse_tx
-                        .send(StreamEvent::Error {
-                            message: died.to_string(),
-                            error_type: crate::error::classify_error(&died).2,
-                        })
-                        .await
-                        .is_err()
-                    {
+                    if sse_tx.send(StreamEvent::from_error(&died)).await.is_err() {
                         tracing::debug!("DIAG: SSE channel-drop error send also failed");
                     }
                 }
@@ -1187,9 +1173,15 @@ pub(super) async fn split_stream_response(
                 // reply with that string.
                 let _ = crate::api::sse_send_live(
                     &tx,
+                    // No hint: this failure arrived already flattened to
+                    // message+type (a peer's, or one recorded earlier), so
+                    // there is no `SwarmError` to ask for advice about. Better
+                    // an honest absence than a guess from prose.
                     StreamEvent::Error {
                         message: reason.message,
                         error_type: reason.error_type,
+                        hint: None,
+                        hint_key: None,
                     },
                 )
                 .await;
@@ -1342,14 +1334,7 @@ pub(super) async fn stream_response(
             }
             Err(ref e) => {
                 crate::log_failure!(e, error = %e, "DIAG: local stream generate_stream error");
-                if tx
-                    .send(StreamEvent::Error {
-                        message: e.to_string(),
-                        error_type: crate::error::classify_error(e).2,
-                    })
-                    .await
-                    .is_err()
-                {
+                if tx.send(StreamEvent::from_error(e)).await.is_err() {
                     tracing::debug!(token_count, "DIAG: local stream error send failed");
                 }
             }
@@ -1471,13 +1456,25 @@ fn stream_events_to_sse(
         StreamEvent::Error {
             message,
             error_type,
+            hint,
+            hint_key,
         } => {
-            let error_json = serde_json::json!({
-                "error": {
-                    "message": message,
-                    "type": error_type
-                }
+            let mut error_obj = serde_json::json!({
+                "message": message,
+                "type": error_type
             });
+            // Same two additive fields, spelled the same way, as the
+            // non-streaming envelope in `error.rs` — `hint` is English prose
+            // for any client, `hint_key` is what the dashboard looks up to say
+            // it in the reader's own language. Omitted entirely when there is
+            // no advice, rather than sent as null.
+            if let Some(h) = hint {
+                error_obj["hint"] = serde_json::Value::String(h.to_string());
+            }
+            if let Some(k) = hint_key {
+                error_obj["hint_key"] = serde_json::Value::String(k.to_string());
+            }
+            let error_json = serde_json::json!({ "error": error_obj });
             Ok(Event::default().data(serde_json::to_string(&error_json).unwrap_or_default()))
         }
         StreamEvent::Usage {

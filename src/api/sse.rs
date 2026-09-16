@@ -63,9 +63,18 @@ pub enum StreamEvent {
     /// The encoder used to stamp every one of them `server_error`, which told
     /// the caller that this server had broken when in fact their prompt was too
     /// long. Fill it from `crate::error::classify_error`, never by hand.
+    ///
+    /// `hint` / `hint_key` are the ACTIONABLE half, and they were absent here
+    /// while the non-streaming envelope (`error.rs`'s `IntoResponse`) and the
+    /// Anthropic surface both carried them — so the same failure told a
+    /// streaming caller strictly less than a non-streaming one about what to
+    /// do next. Prefer [`StreamEvent::from_error`], which fills all four from
+    /// the single sources and cannot forget one.
     Error {
         message: String,
         error_type: &'static str,
+        hint: Option<&'static str>,
+        hint_key: Option<&'static str>,
     },
     /// A complete set of tool calls recovered from a local model's output.
     ///
@@ -92,6 +101,31 @@ pub enum StreamEvent {
         completion_tokens: u32,
     },
     Done,
+}
+
+impl StreamEvent {
+    /// Turn a `SwarmError` into a streamed failure frame — the ONE way to build
+    /// one from a typed error.
+    ///
+    /// It reads the two single sources together: `classify_error` for the kind,
+    /// `error_hint_with_key` for the advice. Three call sites each rebuilt the
+    /// first by hand and none of them carried the second, so a streaming caller
+    /// got the message and never the hint, while the non-streaming sibling for
+    /// the identical failure got both. A constructor rather than a doc note
+    /// because "remember to add the hint too" is exactly the obligation this
+    /// codebase has repeatedly shown does not survive a new call site.
+    pub fn from_error(err: &crate::error::SwarmError) -> Self {
+        let (hint_key, hint) = match crate::error::error_hint_with_key(err) {
+            Some((key, text)) => (Some(key), Some(text)),
+            None => (None, None),
+        };
+        StreamEvent::Error {
+            message: err.to_string(),
+            error_type: crate::error::classify_error(err).2,
+            hint,
+            hint_key,
+        }
+    }
 }
 
 /// Send the initial `role: "assistant"` delta that opens the streaming response.
@@ -242,6 +276,68 @@ pub(crate) fn progress_ticker(
 
         Some((Ok(event), (p, finished)))
     })
+}
+
+#[cfg(test)]
+mod error_frame_tests {
+    use super::*;
+    use crate::error::SwarmError;
+
+    /// **A streamed failure carries the same advice as its non-streaming
+    /// sibling.** The message alone says what went wrong; the hint says what to
+    /// do about it, and the streaming surface used to drop it — so the same
+    /// failure told a streaming caller strictly less. Asserted against
+    /// `error_hint_with_key`, which is the one source both surfaces read.
+    #[test]
+    fn a_streamed_failure_carries_the_same_hint_as_the_non_streaming_one() {
+        let err = SwarmError::ModelNotAvailable(crate::types::ModelId("llama-3.2-3b".to_string()));
+        let expected =
+            crate::error::error_hint_with_key(&err).expect("this variant has a hint to carry");
+
+        match StreamEvent::from_error(&err) {
+            StreamEvent::Error {
+                message,
+                error_type,
+                hint,
+                hint_key,
+            } => {
+                assert!(
+                    message.contains("llama-3.2-3b"),
+                    "the message must name the failure: {message}"
+                );
+                assert_eq!(error_type, crate::error::classify_error(&err).2);
+                assert_eq!(
+                    hint_key,
+                    Some(expected.0),
+                    "the streamed frame must carry the same hint KEY the \
+                     dashboard translates"
+                );
+                assert_eq!(
+                    hint,
+                    Some(expected.1),
+                    "the streamed frame must carry the same English hint the \
+                     non-streaming envelope sends"
+                );
+            }
+            _ => panic!("from_error must build an Error frame"),
+        }
+    }
+
+    /// A variant with no advice sends no advice — not an empty string, and not
+    /// a guess. The encoder omits the fields entirely in that case.
+    #[test]
+    fn a_failure_with_no_advice_carries_none() {
+        let err = SwarmError::Internal("something we did wrong".into());
+        if crate::error::error_hint_with_key(&err).is_none() {
+            match StreamEvent::from_error(&err) {
+                StreamEvent::Error { hint, hint_key, .. } => {
+                    assert_eq!(hint, None);
+                    assert_eq!(hint_key, None);
+                }
+                _ => panic!("from_error must build an Error frame"),
+            }
+        }
+    }
 }
 
 #[cfg(test)]

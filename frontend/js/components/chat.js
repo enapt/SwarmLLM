@@ -654,6 +654,11 @@
       var streamUsage = null;
       var routeInfo = null;
       var stoppedByUser = false;
+      // A terminal `{"error": …}` frame the daemon sent mid-stream. Held rather
+      // than rendered immediately: the surrounding flow decides what to do once
+      // the stream has finished, and it must also suppress the silent retry
+      // below — the daemon has already given up on this request.
+      var streamError = null;
 
       // Passing our own signal also opts this request out of `authFetch`'s
       // 30s default deadline (it only installs one when the caller supplies
@@ -679,18 +684,9 @@
 
         if (!resp.ok) {
           var errText = await resp.text();
-          var friendlyMsg = errText;
-          var hintHtml = '';
-          try {
-            var errJson = JSON.parse(errText);
-            if (errJson.error) {
-              friendlyMsg = errJson.error.message || errJson.error.detail || errText;
-              if (errJson.error.hint) hintHtml = '<div class="chat-error-hint">' + U.escapeHtml(errJson.error.hint) + '</div>';
-            }
-          } catch (e) {}
-          live.contentEl.innerHTML = U.escapeHtml(friendlyMsg) + hintHtml + '<div class="chat-error-actions"><button class="btn btn-sm" data-retry-chat="1">' + U.escapeHtml(I18n.t('actions.retry')) + '</button></div>';
-          live.contentEl.classList.add('chat-error');
-          App.chat._markAvatar(live, 'avatar-error');
+          var errObj = null;
+          try { errObj = JSON.parse(errText).error || null; } catch (e) {}
+          App.chat._renderErrorInto(live, errObj, errText);
           App.chat._endStreaming(session.id);
           return;
         }
@@ -706,6 +702,16 @@
         };
 
         var onChunk = function(chunk) {
+          // The daemon's own failure frame, the same `{"error": {...}}` shape
+          // the non-streaming path already reads. It is valid JSON, so it
+          // arrives here like any other event and matched no branch below —
+          // which meant a request the daemon had explicitly refused, with the
+          // reason in hand, was shown to the user as "the model might still be
+          // loading" (report #002). It is terminal: keep it and stop.
+          if (chunk.error) {
+            streamError = chunk.error;
+            return;
+          }
           if (chunk.usage) streamUsage = chunk.usage;
           if (chunk.choices && chunk.choices[0] && chunk.choices[0].delta) {
             var delta = chunk.choices[0].delta;
@@ -760,7 +766,13 @@
         // token satisfies every other term here, so without it pressing Stop
         // silently sent the whole request again — the one outcome a Stop
         // button must never have.
-        if (!aborted() && !live.cleared && !fullContent && !reasoningContent) {
+        // `!streamError` is load-bearing for the same reason from the other
+        // side: the daemon sent a TERMINAL failure, so retrying re-sends a
+        // request it has already refused — and the commonest such refusal is
+        // "not enough memory right now", where a second copy is the last thing
+        // the node needs. That is the request storm this comment warns about,
+        // reached by a path the condition did not cover (report #002).
+        if (!aborted() && !live.cleared && !fullContent && !reasoningContent && !streamError) {
           try {
             var retryResp = await App.authFetch('/v1/chat/completions', {
               method: 'POST',
@@ -779,7 +791,15 @@
           }
         }
 
-        if (!aborted() && !live.cleared && !fullContent && !reasoningContent) {
+        // A failure the daemon NAMED outranks the generic placeholder, and it
+        // is shown even if some text had already streamed before the pipeline
+        // gave up — a half-written reply that stops dead is exactly the case
+        // where the reason matters most.
+        if (!aborted() && streamError) {
+          App.chat._renderErrorInto(live, streamError, null);
+        } else if (!aborted() && !live.cleared && !fullContent && !reasoningContent) {
+          // Genuinely nothing came back and nothing said why: the model most
+          // likely had not finished loading.
           live.contentEl.textContent = I18n.t('chat.no_response');
           live.contentEl.classList.add('chat-error');
           App.chat._markAvatar(live, 'avatar-error');
@@ -1049,6 +1069,50 @@
         live.avatarEl.classList.remove('avatar-thinking');
         live.avatarEl.classList.add('avatar-streaming');
       }
+    },
+
+    /// Render a failure into the assistant bubble — the ONE place chat does it.
+    ///
+    /// `err` is the daemon's `{message, type, hint, hint_key}` object, from
+    /// either the ordinary JSON envelope (a request refused before the stream
+    /// opens) or a terminal `error` frame inside the stream. Both carry the
+    /// same shape, and before report #002 only the first was read: a failure
+    /// mid-stream was dropped on the floor and reported to the user as "the
+    /// model might still be loading", while the daemon had already given up
+    /// and refunded the request.
+    ///
+    /// `fallbackText` is what to show when the body was not the envelope at
+    /// all — raw text from a proxy, say.
+    _renderErrorInto: function(live, err, fallbackText) {
+        var msg = (err && (err.message || err.detail)) || fallbackText || I18n.t('chat.no_response');
+        // `hint_key` is the translated form and `hint` the English prose the
+        // daemon always sends; prefer the reader's own language when the key
+        // resolves, exactly as `getApiErrorMessage` does elsewhere.
+        var hint = '';
+        if (err && err.hint_key) {
+          var translated = I18n.t(err.hint_key);
+          hint = (translated && translated !== err.hint_key) ? translated : (err.hint || '');
+        } else if (err && err.hint) {
+          hint = err.hint;
+        }
+        var hintHtml = hint ? '<div class="chat-error-hint">' + U.escapeHtml(hint) + '</div>' : '';
+        var errHtml = U.escapeHtml(msg) + hintHtml +
+          '<div class="chat-error-actions"><button class="btn btn-sm" data-retry-chat="1">' +
+          U.escapeHtml(I18n.t('actions.retry')) + '</button></div>';
+        // A reply that streamed some text and THEN failed keeps that text —
+        // overwriting it would throw away the part the model did produce, and
+        // the user has already watched it arrive. Append the reason under it
+        // instead; only an empty bubble is replaced outright.
+        if (live.contentEl.querySelector('.response-text')) {
+          var box = document.createElement('div');
+          box.className = 'chat-error-trailer';
+          box.innerHTML = errHtml;
+          live.contentEl.appendChild(box);
+        } else {
+          live.contentEl.innerHTML = errHtml;
+        }
+        live.contentEl.classList.add('chat-error');
+        App.chat._markAvatar(live, 'avatar-error');
     },
 
     /// End the avatar's animation, in the one state the caller asks for.

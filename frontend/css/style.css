@@ -4544,6 +4544,13 @@ textarea.pool-code-input { min-height: 4.5em; }
 
 /* #23: Chat error with retry */
 .chat-error-hint { margin-top: 8px; padding: 6px 10px; font-size: var(--fs-sm); color: var(--text-muted); background: rgba(255,255,255,0.04); border-left: 2px solid var(--accent); border-radius: var(--radius-sm); }
+/* The reason a reply stopped, shown UNDER text that had already streamed —
+   separated so it does not read as more of the model's answer. */
+.chat-error-trailer {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
 .chat-error-actions { margin-top: 8px; }
 .chat-error-actions .btn { font-size: var(--fs-sm); padding: 3px 10px; }
 
