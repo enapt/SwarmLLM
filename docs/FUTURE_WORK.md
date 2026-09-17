@@ -15196,6 +15196,34 @@ ACK-timeout sweep exists. A fix probably belongs at the send layer (batching
 several tokens per message, or acknowledging and retrying a dropped one), not in
 `StreamReassembler`, which is doing its job.
 
+**2026-09-17 — two fresh occurrences, and three FAILED attempts at a trigger.**
+Reproduced twice in one five-model sweep over the `swarm_route` override
+(`pretend_local_holds: "none"`, so every layer was forced onto a peer): gemma-2-2b
+lost `21 of 25` tokens after `elapsed_ms=34918`, mistral-7b `28 of 30` after
+`execute_ms=62057`. Both lost the TAIL of the stream. Both were the FIRST request
+for that model on a serving node that runs **one worker at a time**, so each had
+just swapped its resident model — 35 s and 62 s are load times, not network time.
+That is a correlation worth recording and **not** a diagnosis.
+
+Three attempts to turn it into a reliable trigger all came back vacuous, each in a
+different way, and the negative results are the useful part:
+
+1. **Unload-then-ask.** `POST /api/admin/models/{id}/unload` answered `200` with
+   `segments_removed: 0` and the log showed **no** subsequent load, so all four
+   "cold" rounds were served warm. 4/4 passed and proved nothing.
+2. **Alternate two models** to force a swap per request: 6/6 passed, but the
+   serving node's worker was still on a THIRD model, `idle 3m`, and no load event
+   fired — the requests never reached it.
+3. **Same, asserting the server** via `x-swarm-nodes`: 8/8 passed and all eight
+   were served by a remote peer, not the node whose worker state was observable.
+
+So the swap hypothesis is **untested, not refuted**. What a next attempt needs is
+control of WHICH node serves — `exclude_nodes` shrinks the candidate set but does
+not pin one, and holders outside the connected peer list still win. Pin the server
+first (a two-node lab where only one peer holds the model), verify the swap fired
+by its `Model loaded` line, and only then count truncations. Repeating one model
+on a warm worker gives 10/10 clean and is the control.
+
 **Before theorising, reproduce.** The failure did not recur on demand, so the
 first task is a reliable trigger — drive the fast path with concurrent requests
 and count `SendStreamingToken` sends against arrivals on both sides at `-v`.
