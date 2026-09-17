@@ -968,6 +968,30 @@ impl PipelineExecutor {
             }
         }
 
+        // Reply text is finalised in exactly one place — see
+        // `finalize_reply_text` — and this path reached the user without ever
+        // calling it. A whole model served by ONE peer is the commonest
+        // distributed shape there is, so a reasoning model asked over the swarm
+        // answered with its raw `<think>` scratchpad while the identical request
+        // answered locally came back clean. Verified 2026-09-17 against this
+        // node's OWN peer on the same build, which rules out an older peer:
+        // asked directly it stripped the block, asked as a peer it did not.
+        //
+        // Finalising HERE rather than on the serving side is deliberate: the
+        // coordinator is the only place that covers every peer, including ones
+        // running a build that never learned to strip anything. The helper is
+        // documented idempotent, so a peer that already finalised loses nothing.
+        //
+        // Empty stops, and that is the whole point of passing them: the peer
+        // generated the text and already applied both the caller's stop
+        // sequences and its own template's, reporting the result in
+        // `matched_stop_seq`. Re-running that decision against a stop set this
+        // node derived for a model it may not even hold could truncate a reply
+        // the peer correctly kept. What is left — the control-token scrub, the
+        // leading reasoning block, the stranded newlines — is the part no peer
+        // can have done on our behalf.
+        crate::inference::finalize_reply_text(&mut content, &[]);
+
         crate::inference::report_short_reply(
             &request_id,
             completion_tokens,
