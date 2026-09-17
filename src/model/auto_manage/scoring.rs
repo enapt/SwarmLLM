@@ -52,7 +52,14 @@ impl AutoShardManager {
         config: &crate::config::AutoManageConfig,
         local_node_id: &NodeId,
     ) -> BudgetReport {
-        let (held_bytes, held_shards) = super::held_shard_bytes(&self.shared_state, local_node_id);
+        // Bytes from the DISK, count from the registry — the same split
+        // `storage_budget_now` makes. The download pass and prune must refuse
+        // and shed against ONE figure or they wedge exactly where they
+        // disagree (gotcha #448), so this cannot go back to pricing the
+        // manifest while prune measures the directory.
+        let (_manifest_bytes, held_shards) =
+            super::held_shard_bytes(&self.shared_state, local_node_id);
+        let held_bytes = super::held_disk_bytes(&self.shared_state.config.node.data_dir);
         let budget = super::storage_budget(
             config.max_storage_mb,
             self.shared_state.cfg().resources.max_disk_mb,

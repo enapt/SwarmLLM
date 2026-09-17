@@ -17,11 +17,23 @@ pub(super) fn make_test_manager() -> (Arc<SharedState>, AutoShardManager) {
 }
 
 pub(super) fn make_test_manager_with_config(
-    config: Config,
+    mut config: Config,
 ) -> (Arc<SharedState>, AutoShardManager) {
     let identity = Identity::generate();
-    let temp = tempfile::tempdir().unwrap();
-    let db = Database::open(temp.path()).unwrap();
+    // `keep()` rather than holding the guard: the directory has to outlive this
+    // function, and the fixture returns only the state and the manager. A few
+    // empty directories per test run in the OS temp area is the price.
+    //
+    // **`data_dir` MUST point at it.** It did not until 2026-09-17, so
+    // `Config::default()` left every fixture pointing at the developer's REAL
+    // `~/.local/share/swarmllm`. That was harmless only for as long as nothing
+    // in the tested path touched the filesystem; `held_disk_bytes` measures the
+    // models directory, so a unit test asserting on a node "holding 14 GB"
+    // silently read this machine's actual 33 GB instead. A fixture that names a
+    // real directory is a test that depends on the machine it runs on.
+    let temp = tempfile::tempdir().unwrap().keep();
+    let db = Database::open(&temp).unwrap();
+    config.node.data_dir = temp;
     let executor = Arc::new(Mutex::new(ModelExecutor::new()));
     let (state, _, _) = SharedState::new(config, identity, db, executor, None);
     let (net_tx, _net_rx) = mpsc::channel(16);
@@ -37,6 +49,30 @@ pub(super) fn register_manifest_with_shards(
     shard_ranges: &[(u32, u32)],
 ) -> ModelId {
     register_manifest_with_sized_shards(state, model_id, num_layers, shard_ranges, 100_000_000)
+}
+
+/// Put `size_bytes`-long shard files on disk for a model this node holds.
+///
+/// SPARSE — `set_len` sizes the file without writing blocks, so a test can hold
+/// "14 GB" for nothing. `held_disk_bytes` reads `metadata().len()`, which is the
+/// logical length, so this is indistinguishable from real holdings to the code
+/// under test and costs no disk.
+///
+/// Needed because the storage budget measures the DIRECTORY, not the manifest:
+/// registering a shard in the registry no longer makes the node "hold" bytes.
+pub(super) fn write_sparse_shards(
+    state: &Arc<SharedState>,
+    model_id: &ModelId,
+    indices: impl IntoIterator<Item = u32>,
+    size_bytes: u64,
+) {
+    let dir = crate::model::shard::model_dir(&state.config.node.data_dir, &model_id.0);
+    std::fs::create_dir_all(&dir).unwrap();
+    for index in indices {
+        let path = dir.join(crate::model::shard::shard_filename(index));
+        let f = std::fs::File::create(&path).unwrap();
+        f.set_len(size_bytes).unwrap();
+    }
 }
 
 /// Like [`register_manifest_with_shards`], with every shard `size_bytes` long —

@@ -1016,6 +1016,61 @@ impl AutoShardManager {
                 .entry(candidate.model_id.clone())
                 .or_insert(0) += 1;
         }
+
+        // Whatever this cycle emptied — and whatever a cancelled download left
+        // behind earlier — gives its derived files back now.
+        self.reclaim_orphaned_model_files().await;
+    }
+
+    /// Give back the derived files of every model this node no longer holds a
+    /// part of, and report what that freed.
+    ///
+    /// This is the other half of charging for them. `held_disk_bytes` counts
+    /// `gguf_header.bin`, `tied_output_weight.bin` and `mmproj.gguf` because
+    /// they are real disk, and prune only ever deletes `shard_NNN.bin` — so
+    /// without this pass a node near its limit would shed shards forever
+    /// chasing a floor it could never reach, which is the shape of the
+    /// sole-replica prune report (`docs/FUTURE_WORK.md` item 49). Every
+    /// condition that makes a deletion safe lives in
+    /// `shard::cleanup_orphaned_model_files`; this only supplies the holdings.
+    pub(super) async fn reclaim_orphaned_model_files(&self) {
+        let registry = &self.shared_state.model_registry;
+        let local_node_id = self.shared_state.identity.node_id().clone();
+        let data_dir = self.shared_state.config.node.data_dir.clone();
+        let claims = self.shared_state.models.shard_download_claims.clone();
+
+        let held_per_model = {
+            let mut counts: std::collections::HashMap<crate::types::ModelId, usize> =
+                std::collections::HashMap::new();
+            for sid in registry.shards_for_node(&local_node_id) {
+                *counts.entry(sid.model_id).or_insert(0) += 1;
+            }
+            counts
+        };
+
+        let mut total = 0u64;
+        for manifest in registry.models() {
+            let held = held_per_model.get(&manifest.id).copied().unwrap_or(0);
+            if held > 0 {
+                continue;
+            }
+            let dir = crate::model::shard::model_dir(&data_dir, &manifest.id.0);
+            let model_id = manifest.id.clone();
+            let claims = claims.clone();
+            let freed = tokio::task::spawn_blocking(move || {
+                crate::model::shard::cleanup_orphaned_model_files(&dir, &model_id, held, &claims)
+            })
+            .await
+            .unwrap_or(0);
+            total = total.saturating_add(freed);
+        }
+
+        if total > 0 {
+            tracing::info!(
+                freed_mb = total / (1024 * 1024),
+                "Reclaimed derived files of models this node holds no part of"
+            );
+        }
     }
 
     /// Adjust target based on resource pressure.

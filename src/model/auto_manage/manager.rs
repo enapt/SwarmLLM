@@ -1087,7 +1087,9 @@ mod tests {
     /// the settings said 50 GB. With one accountant the two passes agree.
     #[test]
     fn a_node_over_its_budget_is_under_pressure_not_merely_refused() {
-        use super::super::test_support::{make_test_manager, register_manifest_with_sized_shards};
+        use super::super::test_support::{
+            make_test_manager, register_manifest_with_sized_shards, write_sparse_shards,
+        };
         use crate::types::ShardId;
 
         let (state, manager) = make_test_manager();
@@ -1115,6 +1117,9 @@ mod tests {
                 local.clone(),
             );
         }
+        // The budget measures the DIRECTORY, so the bytes have to be there.
+        // Sparse, so this costs no disk.
+        write_sparse_shards(&state, &mid, 0..14, GIB);
 
         let report = manager.remaining_budget(&live.auto_manage, &local);
         assert_eq!(report.held_bytes, 14 * GIB);
@@ -1137,6 +1142,7 @@ mod tests {
 
         // Control: the same node holding 4 GB has room, and is not under
         // pressure — the accountant answers both questions, not only "full".
+        let model_dir = crate::model::shard::model_dir(&state.config.node.data_dir, &mid.0);
         for i in 4..14 {
             state.model_registry.remove_shard_holder(
                 &ShardId {
@@ -1145,6 +1151,10 @@ mod tests {
                 },
                 &local,
             );
+            // Prune unregisters AND deletes; the budget measures the directory,
+            // so a test that only unregisters is describing a node that still
+            // has the files.
+            std::fs::remove_file(model_dir.join(crate::model::shard::shard_filename(i))).unwrap();
         }
         let report = manager.remaining_budget(&live.auto_manage, &local);
         assert_eq!(report.held_bytes, 4 * GIB);

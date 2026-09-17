@@ -649,6 +649,80 @@ impl ShardStore {
     }
 }
 
+/// Remove the derived files a model leaves behind once none of its parts are
+/// held any more, and report the bytes reclaimed.
+///
+/// `gguf_header.bin`, `tied_output_weight.bin` and `mmproj.gguf` are not
+/// shards, so prune never touched them and `held_shard_bytes` never saw them.
+/// A cancelled download therefore left ~287 MB attached to a model counting as
+/// zero shards and zero bytes, and repeated cancels accumulated disk nothing
+/// swept. Now that `held_disk_bytes` CHARGES for them, they have to be
+/// reclaimable: a figure that counts bytes prune cannot free makes a node near
+/// its limit shed shards forever chasing a floor it can never reach.
+///
+/// Losing them is cheap where it is not free. `tied_output_weight.bin` — 95% of
+/// the gap measured on the live node — is extracted from `shard_000.bin` by
+/// `daemon::manifest::extract_tied_output_weight` and re-extracted automatically
+/// at startup, so for any model whose shard 0 comes back it costs nothing; the
+/// header is ~6 MB and re-fetched on the next attempt.
+///
+/// **Three conditions, all required, because this deletes files.** The registry
+/// must record no held shard for the model (`held_shards == 0`, which includes
+/// the `MMPROJ_SHARD_INDEX` sentinel, so a node holding only a vision encoder is
+/// skipped); no `shard_NNN.bin` may remain on disk (a file present but
+/// unregistered means the model is mid-adoption, not gone); and no shard of it
+/// may hold a download claim. `manifest.json` and `hf_source.json` are kept —
+/// they are what the model IS, they are tiny, and deleting them unlists a model
+/// the user may still want.
+pub fn cleanup_orphaned_model_files(
+    dir: &std::path::Path,
+    model_id: &ModelId,
+    held_shards: usize,
+    claims: &dashmap::DashSet<crate::types::ShardId>,
+) -> u64 {
+    if held_shards > 0 || !dir.exists() {
+        return 0;
+    }
+    if claims.iter().any(|c| c.model_id == *model_id) {
+        return 0;
+    }
+    let Ok(files) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut derived = Vec::new();
+    for file in files.flatten() {
+        let path = file.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        // A shard still on disk means this model is not orphaned, whatever the
+        // registry currently says. Give up on the whole directory.
+        if name.starts_with("shard_") && name.ends_with(".bin") {
+            return 0;
+        }
+        if name == HEADER_FILENAME
+            || name == MMPROJ_FILENAME
+            || name == crate::inference::split::TIED_OUTPUT_FILENAME
+        {
+            derived.push(path);
+        }
+    }
+    let mut reclaimed = 0u64;
+    for path in derived {
+        let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        if std::fs::remove_file(&path).is_ok() {
+            reclaimed = reclaimed.saturating_add(size);
+            tracing::info!(
+                model = %model_id,
+                path = %path.display(),
+                bytes = size,
+                "Reclaimed a derived file of a model this node no longer holds any part of"
+            );
+        }
+    }
+    reclaimed
+}
+
 /// Remove the leftover `.tmp` files of a model's shards that NOTHING is
 /// currently writing, and report how many went.
 ///
@@ -719,6 +793,111 @@ fn shard_index_from_tmp_name(name: &str) -> Option<u32> {
     let digits = name.strip_prefix("shard_")?;
     let end = digits.find(|c: char| !c.is_ascii_digit())?;
     digits[..end].parse().ok()
+}
+
+#[cfg(test)]
+mod orphaned_model_file_tests {
+    use super::{cleanup_orphaned_model_files, HEADER_FILENAME, MANIFEST_FILENAME};
+    use crate::inference::split::TIED_OUTPUT_FILENAME;
+    use crate::types::{ModelId, ShardId};
+
+    fn model_id() -> ModelId {
+        ModelId("llama-3.2-1b-instruct-q8-0".into())
+    }
+
+    /// Writes a directory in the shape a cancelled download leaves: the derived
+    /// files, the manifest, and no shard at all.
+    fn orphaned_dir() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(HEADER_FILENAME), vec![7u8; 4096]).unwrap();
+        std::fs::write(dir.path().join(TIED_OUTPUT_FILENAME), vec![7u8; 8192]).unwrap();
+        std::fs::write(dir.path().join(MANIFEST_FILENAME), b"{}").unwrap();
+        dir
+    }
+
+    /// **The leak this exists for.** A cancelled download leaves the header and
+    /// the tied output weight behind — ~287 MB measured — attached to a model
+    /// that now counts as zero shards and therefore zero bytes. Nothing swept
+    /// them, so repeated cancels accumulated disk the budget could not see.
+    #[test]
+    fn a_model_with_no_parts_left_gives_its_derived_files_back() {
+        let dir = orphaned_dir();
+        let claims = dashmap::DashSet::new();
+
+        let freed = cleanup_orphaned_model_files(dir.path(), &model_id(), 0, &claims);
+
+        assert_eq!(freed, 4096 + 8192, "both derived files are reclaimed");
+        assert!(!dir.path().join(HEADER_FILENAME).exists());
+        assert!(!dir.path().join(TIED_OUTPUT_FILENAME).exists());
+        assert!(
+            dir.path().join(MANIFEST_FILENAME).exists(),
+            "the manifest is what the model IS — deleting it unlists a model the user may still want"
+        );
+    }
+
+    /// Guard one: the registry still records a held part. A node holding only a
+    /// vision encoder lands here too, since mmproj registers under the
+    /// `MMPROJ_SHARD_INDEX` sentinel.
+    #[test]
+    fn a_model_still_holding_a_part_keeps_everything() {
+        let dir = orphaned_dir();
+        let claims = dashmap::DashSet::new();
+
+        let freed = cleanup_orphaned_model_files(dir.path(), &model_id(), 1, &claims);
+
+        assert_eq!(freed, 0);
+        assert!(dir.path().join(TIED_OUTPUT_FILENAME).exists());
+    }
+
+    /// Guard two: a shard file on disk means the model is mid-adoption, not
+    /// gone, whatever the registry currently says. The header it would need is
+    /// exactly what must not be deleted underneath it.
+    #[test]
+    fn a_shard_file_on_disk_stops_the_sweep_even_if_the_registry_says_zero() {
+        let dir = orphaned_dir();
+        std::fs::write(dir.path().join("shard_000.bin"), b"bytes").unwrap();
+        let claims = dashmap::DashSet::new();
+
+        let freed = cleanup_orphaned_model_files(dir.path(), &model_id(), 0, &claims);
+
+        assert_eq!(freed, 0);
+        assert!(dir.path().join(HEADER_FILENAME).exists());
+        assert!(dir.path().join(TIED_OUTPUT_FILENAME).exists());
+    }
+
+    /// Guard three: a download is in flight. Taking the header out from under a
+    /// running acquisition is the same class of mistake as sweeping a `.tmp`
+    /// somebody is appending to.
+    #[test]
+    fn a_download_in_flight_stops_the_sweep() {
+        let dir = orphaned_dir();
+        let claims = dashmap::DashSet::new();
+        claims.insert(ShardId {
+            model_id: model_id(),
+            index: 0,
+        });
+
+        let freed = cleanup_orphaned_model_files(dir.path(), &model_id(), 0, &claims);
+
+        assert_eq!(freed, 0);
+        assert!(dir.path().join(HEADER_FILENAME).exists());
+    }
+
+    /// A claim on a DIFFERENT model must not protect this one, or one active
+    /// download would freeze the sweep for the whole node.
+    #[test]
+    fn another_models_download_does_not_protect_this_one() {
+        let dir = orphaned_dir();
+        let claims = dashmap::DashSet::new();
+        claims.insert(ShardId {
+            model_id: ModelId("some-other-model".into()),
+            index: 0,
+        });
+
+        let freed = cleanup_orphaned_model_files(dir.path(), &model_id(), 0, &claims);
+
+        assert_eq!(freed, 4096 + 8192);
+    }
 }
 
 #[cfg(test)]

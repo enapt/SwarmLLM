@@ -255,10 +255,61 @@ pub fn held_shard_bytes(
     (bytes, count)
 }
 
+/// Bytes this node actually occupies under its models directory.
+///
+/// `held_shard_bytes` prices the MANIFEST, so it can only see `shard_NNN.bin`.
+/// A model directory holds more than that, and all of it is real disk:
+/// `gguf_header.bin` (one per model), `tied_output_weight.bin` (**279 MB for a
+/// 1.3 GB model**), `mmproj.gguf` for a vision model (595 MB for LLaVA-7B),
+/// quarantined files, and `.tmp` left behind by a download that died.
+///
+/// Measured on the live node 2026-09-14: **33062 MB on disk against 31423 MB
+/// counted** — a 1637 MB gap, ~5%, of which `tied_output_weight.bin` was 1566 MB.
+/// So a user who set a disk limit got a node that quietly used 5% more than it
+/// believed, and a cancelled download left ~287 MB attached to a model counting
+/// as zero shards and therefore zero bytes, which nothing swept.
+///
+/// A walk of stat calls over a few dozen files, so it is not cached: the
+/// consumers are a timer pass and user-triggered handlers, and a cached
+/// storage figure that lags a prune is its own defect.
+///
+/// **This is only safe to charge because the bytes are RECLAIMABLE.** Prune
+/// deletes `shard_NNN.bin` and nothing else, so charging for files it cannot
+/// remove would leave a node near its limit shedding shards forever chasing a
+/// floor it can never reach — the shape of the sole-replica prune report
+/// (`docs/FUTURE_WORK.md` item 49). `shard::cleanup_orphaned_model_files`,
+/// called from the prune cycle, is the other half and must stay.
+pub fn held_disk_bytes(data_dir: &std::path::Path) -> u64 {
+    let models_dir = data_dir.join("models");
+    let Ok(entries) = std::fs::read_dir(&models_dir) else {
+        return 0;
+    };
+    let mut total = 0u64;
+    for model in entries.flatten() {
+        let Ok(files) = std::fs::read_dir(model.path()) else {
+            continue;
+        };
+        for file in files.flatten() {
+            if let Ok(meta) = file.metadata() {
+                if meta.is_file() {
+                    total = total.saturating_add(meta.len());
+                }
+            }
+        }
+    }
+    total
+}
+
 /// The storage budget for THIS node, right now: live config, live
 /// contribution level, the disk it is actually on, and what it holds.
+///
+/// The byte figure is what is ON DISK (`held_disk_bytes`); the count is the
+/// registry's, because a shard count answers a different question — how many
+/// pieces prune may consider — and pricing it off the directory would count a
+/// header as a shard.
 pub fn storage_budget_now(state: &crate::daemon::SharedState) -> (StorageBudget, u64, u32) {
-    let (held_bytes, held_shards) = held_shard_bytes(state, state.identity.node_id());
+    let (_manifest_bytes, held_shards) = held_shard_bytes(state, state.identity.node_id());
+    let held_bytes = held_disk_bytes(&state.config.node.data_dir);
     let live = state.cfg();
     let budget = storage_budget(
         live.auto_manage.max_storage_mb,
@@ -281,6 +332,51 @@ pub fn free_disk_bytes_for(path: &std::path::Path) -> Option<u64> {
         .filter(|d| path.starts_with(d.mount_point()))
         .max_by_key(|d| d.mount_point().as_os_str().len())
         .map(|d| d.available_space())
+}
+
+#[cfg(test)]
+mod held_disk_bytes_tests {
+    use super::held_disk_bytes;
+
+    /// **The under-count this exists for.** Pricing the manifest sees only
+    /// `shard_NNN.bin`, so the live node measured 33062 MB on disk against
+    /// 31423 MB counted — and 1566 MB of that 1637 MB gap was one file kind,
+    /// `tied_output_weight.bin`. A user who set a disk limit got a node using
+    /// about 5% more than it believed.
+    #[test]
+    fn the_figure_includes_what_is_not_a_shard() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let model = data_dir.path().join("models").join("tinyllama-1.1b");
+        std::fs::create_dir_all(&model).unwrap();
+        std::fs::write(model.join("shard_000.bin"), vec![0u8; 1000]).unwrap();
+        std::fs::write(model.join("gguf_header.bin"), vec![0u8; 200]).unwrap();
+        std::fs::write(model.join("tied_output_weight.bin"), vec![0u8; 500]).unwrap();
+        std::fs::write(model.join("manifest.json"), vec![0u8; 30]).unwrap();
+        // The sharp edge: bytes a failed download left behind.
+        std::fs::write(model.join("shard_001.bin.tmp"), vec![0u8; 70]).unwrap();
+
+        assert_eq!(
+            held_disk_bytes(data_dir.path()),
+            1800,
+            "every file under the models directory is real disk"
+        );
+    }
+
+    /// Several models add up, and a directory that cannot be read is 0 rather
+    /// than a panic — this runs on a timer against a live filesystem.
+    #[test]
+    fn models_sum_and_a_missing_directory_is_zero() {
+        let data_dir = tempfile::tempdir().unwrap();
+        for (name, size) in [("a", 100usize), ("b", 250)] {
+            let model = data_dir.path().join("models").join(name);
+            std::fs::create_dir_all(&model).unwrap();
+            std::fs::write(model.join("shard_000.bin"), vec![0u8; size]).unwrap();
+        }
+        assert_eq!(held_disk_bytes(data_dir.path()), 350);
+
+        let empty = tempfile::tempdir().unwrap();
+        assert_eq!(held_disk_bytes(empty.path()), 0, "no models directory yet");
+    }
 }
 
 #[cfg(test)]
