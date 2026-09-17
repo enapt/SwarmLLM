@@ -958,7 +958,10 @@ mod chunk_assembly_tests {
 // ---------------------------------------------------------------------------
 
 /// How much of a model this node should be treated as holding while planning.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `Copy` because it is two integers at most, and the fast-path gate reads it
+/// out of a borrowed override on a per-request path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PretendLocalHolds {
     /// Plan against what this node really holds. The default.
     Everything,

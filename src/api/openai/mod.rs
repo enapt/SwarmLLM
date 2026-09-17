@@ -563,7 +563,11 @@ pub async fn chat_completions(
     // loaded_model_info.read().await before the split path.
     let requested_mid = crate::types::ModelId(req.model.clone());
     // One predicate for both API surfaces — see `SharedState::local_fast_path_for`.
-    let has_local_split_model = state.shared_state.local_fast_path_for(&requested_mid);
+    // The override rides in because this branch decides whether the request ever
+    // reaches the router, which is the only reader of it.
+    let has_local_split_model = state
+        .shared_state
+        .local_fast_path_for(&requested_mid, req.route_plan_override().as_ref());
 
     if has_local_split_model {
         // Echo the model the client actually requested (`req.model`), NOT the

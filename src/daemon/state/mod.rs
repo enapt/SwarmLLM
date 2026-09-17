@@ -714,6 +714,30 @@ pub(crate) fn local_fast_path_allowed(
     !shedding_load && !(would_run_on_processor && has_peers)
 }
 
+/// Does a `swarm_route` instruction leave the WHOLE model on this node, as a
+/// pure function of the instruction and the model's shard count?
+///
+/// `shard_count` is a closure because the range case is the only one that needs
+/// it, and answering it means a registry lookup on a per-request path.
+///
+/// A range that cannot be sized against a manifest answers `false`: it cannot be
+/// shown to cover the model, and the caller has explicitly asked this node to
+/// hold less, so standing aside and letting the router plan it is the reading
+/// that honours the instruction. See [`SharedState::local_fast_path_for`].
+pub(crate) fn override_keeps_whole_model(
+    pretend_local_holds: Option<crate::inference::route_override::PretendLocalHolds>,
+    shard_count: impl FnOnce() -> Option<u32>,
+) -> bool {
+    use crate::inference::route_override::PretendLocalHolds;
+    match pretend_local_holds {
+        None | Some(PretendLocalHolds::Everything) => true,
+        Some(PretendLocalHolds::Nothing) => false,
+        Some(PretendLocalHolds::Shards(start, end)) => {
+            shard_count().is_some_and(|n| start == 0 && end >= n.saturating_sub(1))
+        }
+    }
+}
+
 impl SharedState {
     /// Record that a remote machine dialled us and it worked — the single way
     /// [`SharedState::observed_inbound_connection`] is ever set.
@@ -1763,6 +1787,39 @@ impl SharedState {
         self.holds_both_model_ends_under(model_id, None)
     }
 
+    /// Does a `swarm_route` override still leave EVERY shard of this model on
+    /// this node?
+    ///
+    /// The local fast path runs the whole model in one process, so it is legal
+    /// only while the whole model is here. An override can only ever release
+    /// shards — never add them — so this is the one question it can change, and
+    /// `exclude_nodes` is deliberately not consulted: leaving a peer out of the
+    /// candidate set says nothing about what WE hold, and the fast path asks no
+    /// peer for anything.
+    ///
+    /// A shard range with no manifest to size it against cannot be shown to
+    /// cover the model, and the caller has explicitly asked this node to hold
+    /// less — so the honest answer is to stand aside and let the router plan it.
+    fn override_keeps_whole_model_local(
+        &self,
+        model_id: &crate::types::ModelId,
+        over: Option<&crate::inference::route_override::RoutePlanOverride>,
+    ) -> bool {
+        let Some(o) = over else {
+            return true;
+        };
+        override_keeps_whole_model(
+            o.pretend_local_holds,
+            // Only consulted for a range, which is the one case that needs to
+            // know how many shards "all of them" is.
+            || {
+                self.model_registry
+                    .get_manifest(model_id)
+                    .map(|m| m.shard_count)
+            },
+        )
+    }
+
     /// [`Self::holds_both_model_ends`], answered as a `swarm_route` override
     /// would have it.
     ///
@@ -2175,8 +2232,25 @@ impl SharedState {
     /// no delegate it assigns the request here anyway, so the only cost is a
     /// scheduling pass. A node with no peers keeps the fast path: there is
     /// nobody to ask.
-    pub fn local_fast_path_for(&self, model_id: &crate::types::ModelId) -> bool {
+    pub fn local_fast_path_for(
+        &self,
+        model_id: &crate::types::ModelId,
+        over: Option<&crate::inference::route_override::RoutePlanOverride>,
+    ) -> bool {
         if !self.has_complete_split_model(model_id) {
+            return false;
+        }
+        // A `swarm_route` override that releases any shard of this model has to
+        // be answered HERE, because this predicate decides whether the request
+        // ever reaches the router — and the router is the only thing that reads
+        // the override at all. Without this the knob is inert on exactly the
+        // nodes it exists for: auto-manage converges a node on holding whole
+        // models, every such model wins the fast path, and a caller asking to
+        // plan as if it held nothing was answered locally with
+        // `route=local segments=1` and no indication the instruction was
+        // dropped. Same shape as gotcha #443 one level up — a feature behind a
+        // gate is only as reachable as the gate's callers.
+        if !self.override_keeps_whole_model_local(model_id, over) {
             return false;
         }
         let shedding_load = self.should_offer_work_to_the_swarm();
@@ -4242,6 +4316,80 @@ mod local_fast_path_tests {
         // Shedding load overrides everything.
         assert!(!local_fast_path_allowed(true, false, false));
         assert!(!local_fast_path_allowed(true, false, true));
+    }
+}
+
+#[cfg(test)]
+mod fast_path_route_override_tests {
+    use super::override_keeps_whole_model;
+    use crate::inference::route_override::PretendLocalHolds;
+
+    /// The local fast path skips the router, and the router is the ONLY reader
+    /// of a `swarm_route` override — so an instruction to hold less has to be
+    /// answered by the fast-path gate or it is inert on every node that holds
+    /// the model in full, which is every node auto-manage has converged.
+    ///
+    /// Measured against the live node before the fix: `pretend_local_holds:
+    /// "none"` answered `x-swarm-route: local`, `x-swarm-peers: 0`,
+    /// byte-identical to the same request without the block.
+    #[test]
+    fn an_instruction_to_hold_less_stands_the_fast_path_aside() {
+        // Nothing asked for: untouched.
+        assert!(override_keeps_whole_model(None, || Some(4)));
+        // Explicitly everything: untouched.
+        assert!(override_keeps_whole_model(
+            Some(PretendLocalHolds::Everything),
+            || Some(4)
+        ));
+        // The case the knob exists for.
+        assert!(!override_keeps_whole_model(
+            Some(PretendLocalHolds::Nothing),
+            || Some(4)
+        ));
+        // A range covering every shard is still the whole model.
+        assert!(override_keeps_whole_model(
+            Some(PretendLocalHolds::Shards(0, 3)),
+            || Some(4)
+        ));
+        // A range wider than the model is too.
+        assert!(override_keeps_whole_model(
+            Some(PretendLocalHolds::Shards(0, 9)),
+            || Some(4)
+        ));
+        // Any shard released — either end — sends it to the router.
+        assert!(!override_keeps_whole_model(
+            Some(PretendLocalHolds::Shards(0, 2)),
+            || Some(4)
+        ));
+        assert!(!override_keeps_whole_model(
+            Some(PretendLocalHolds::Shards(1, 3)),
+            || Some(4)
+        ));
+        // A single-shard model whose one piece is kept.
+        assert!(override_keeps_whole_model(
+            Some(PretendLocalHolds::Shards(0, 0)),
+            || Some(1)
+        ));
+    }
+
+    /// A range with no manifest to size it against cannot be shown to cover the
+    /// model, so it must not win the fast path. The cases that need no manifest
+    /// must not consult one — a per-request registry lookup nobody needs.
+    #[test]
+    fn a_range_with_no_manifest_stands_aside_and_the_others_never_ask() {
+        assert!(!override_keeps_whole_model(
+            Some(PretendLocalHolds::Shards(0, 3)),
+            || None
+        ));
+        for pretend in [None, Some(PretendLocalHolds::Everything)] {
+            assert!(override_keeps_whole_model(pretend, || panic!(
+                "sized the manifest for an instruction that keeps everything"
+            )));
+        }
+        assert!(!override_keeps_whole_model(
+            Some(PretendLocalHolds::Nothing),
+            || panic!("sized the manifest for an instruction that keeps nothing")
+        ));
     }
 }
 

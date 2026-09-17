@@ -263,7 +263,9 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
                 && shard_count > 0
                 && state
                     .shared_state
-                    .local_fast_path_for(&crate::types::ModelId(id.to_string())),
+                    // `None`: a listing answers for the node, not for a request,
+                    // so there is no per-request override to apply.
+                    .local_fast_path_for(&crate::types::ModelId(id.to_string()), None),
             "peers_hosting": peers.servable,
             // Other computers that have this model in a DIFFERENT build — a
             // different upload of the same quantisation, which shares not one
