@@ -228,6 +228,10 @@ pub(super) async fn forward_verify_with_hedge(
         .await
     };
     let mut hedge_fut = Box::pin(hedge_fut);
+    // When the hedge was dispatched. The alt holder's latency is measured from
+    // HERE, not from `start` — `start` includes the whole threshold wait, which
+    // is the primary's story and says nothing about how fast the alt answered.
+    let hedge_started = Instant::now();
 
     // Phase 3: race primary vs hedge.
     let (winner_is_hedge, result) = tokio::select! {
@@ -236,7 +240,35 @@ pub(super) async fn forward_verify_with_hedge(
     };
 
     let elapsed = start.elapsed().as_millis() as f32;
-    state.metrics.hedge_tracker.observe(hedge_key, elapsed);
+    // Credit the latency to the holder that actually produced it.
+    //
+    // This used to record `elapsed` against the PRIMARY's key however the race
+    // went. When the hedge wins, that number is `threshold + the alt's round
+    // trip`, and `threshold` is itself the primary's own `p99 * after_factor` —
+    // so the value fed back exceeds the primary's p99 BY CONSTRUCTION. It
+    // pushed the primary's EWMA up every time a hedge beat it, raising the bar
+    // for hedging that holder again: the feature quietly disabling itself
+    // against exactly the peers it exists to race. And it is not a measurement
+    // of the primary at all, which never finished — it was cancelled below.
+    //
+    // So a holder is observed only when it COMPLETED something, and the alt is
+    // observed under its own key, which is what `HedgeKey::holder` is for.
+    // Nothing is recorded against the loser: "had not finished by T" is a lower
+    // bound, not a latency.
+    if winner_is_hedge {
+        state.metrics.hedge_tracker.observe(
+            HedgeKey {
+                holder: alt_node_id.clone(),
+                ..hedge_key.clone()
+            },
+            hedge_started.elapsed().as_millis() as f32,
+        );
+    } else {
+        state
+            .metrics
+            .hedge_tracker
+            .observe(hedge_key.clone(), elapsed);
+    }
     state
         .metrics
         .hedge_tracker
@@ -312,5 +344,84 @@ mod tests {
         // The gate also blocks multi-segment pipelines.
         let enabled = cfg.enabled && 2 == 1;
         assert!(!enabled);
+    }
+}
+
+#[cfg(test)]
+mod attribution_tests {
+    use crate::inference::hedging::{HedgeKey, HedgeTracker};
+    use crate::types::{ModelId, NodeId};
+
+    fn key(holder: u8) -> HedgeKey {
+        HedgeKey {
+            model_id: ModelId("m".into()),
+            segment_idx: 0,
+            holder: NodeId([holder; 32]),
+        }
+    }
+
+    /// A hedge that WINS must not be recorded against the primary.
+    ///
+    /// The race resolves at `threshold + the alt's round trip`, and `threshold`
+    /// is the primary's own `p99 * after_factor` — so that number exceeds the
+    /// primary's p99 by construction. Feeding it back as if the primary had
+    /// produced it raises the primary's estimate, which raises the bar for
+    /// hedging that holder again: hedging switching itself off against exactly
+    /// the peers it exists to race.
+    ///
+    /// This asserts the DIRECTION rather than an exact figure, because the
+    /// EWMA constants are free to change and the defect is about which holder
+    /// the sample lands on.
+    #[test]
+    fn a_hedge_win_is_credited_to_the_hedge_not_the_primary() {
+        let tracker = HedgeTracker::default();
+        let primary = key(1);
+        let alt = key(2);
+
+        // A primary with an established, fast baseline.
+        for _ in 0..20 {
+            tracker.observe(primary.clone(), 100.0);
+        }
+        let before = tracker.get(&primary).expect("primary has samples");
+
+        // A hedge fires after the threshold and wins quickly. The OLD code
+        // recorded the whole elapsed (threshold + alt RTT) against `primary`.
+        let alt_round_trip = 40.0;
+        tracker.observe(alt.clone(), alt_round_trip);
+
+        let after = tracker.get(&primary).expect("primary still has samples");
+        assert_eq!(
+            after.samples, before.samples,
+            "the primary completed nothing in this race, so it must gain no sample"
+        );
+        assert!(
+            (after.ewma_ms - before.ewma_ms).abs() < f32::EPSILON,
+            "the primary's latency estimate must not move on a race it lost: \
+             {} -> {}",
+            before.ewma_ms,
+            after.ewma_ms
+        );
+
+        let alt_stats = tracker.get(&alt).expect("the alt holder is now tracked");
+        assert_eq!(
+            alt_stats.samples, 1,
+            "the winner is observed under its OWN key"
+        );
+        assert!(
+            (alt_stats.ewma_ms - alt_round_trip).abs() < f32::EPSILON,
+            "and with its own round trip, not the threshold wait: {}",
+            alt_stats.ewma_ms
+        );
+    }
+
+    /// The primary winning outright is still a real measurement of the primary.
+    #[test]
+    fn a_primary_win_is_still_credited_to_the_primary() {
+        let tracker = HedgeTracker::default();
+        let primary = key(1);
+        tracker.observe(primary.clone(), 120.0);
+        let s = tracker.get(&primary).expect("recorded");
+        assert_eq!(s.samples, 1);
+        assert!((s.ewma_ms - 120.0).abs() < f32::EPSILON);
     }
 }
