@@ -1,5 +1,121 @@
 # Changelog
 
+## [0.3.184-alpha] — 2026-09-17
+
+Almost nothing here came from a report. It came from sitting down with a running
+node and asking every model it offered to answer the same question, over every
+way there is to ask, and then reading what the node said about itself
+afterwards — which is where most of these were hiding.
+
+The theme is a model that lives on other people's computers rather than on
+yours. That is the whole point of running this, and it has the least road under
+it. A request could be handed to a computer that had gone quiet, wait two
+minutes, be handed to a second computer that turned it down in a second and a
+half, and then give up — having spent its one retry on the silence. Another
+computer was returning nonsense and being rewarded for it, so it kept getting
+picked. Neither was visible from outside; both showed up within an hour of
+actually looking.
+
+The moving background also got about ten times cheaper, after someone asked
+whether it was costing them anything. It was.
+
+Nodes do not need to update together.
+
+### Fixed
+
+- **A slow computer could cost you the whole request.** When a request is spread
+  across other computers and one takes the work then goes silent, SwarmLLM
+  waits, gives up, and tries a different route. That is right. But it only ever
+  tried once more — so if the second attempt was turned down promptly by a
+  computer that was simply out of memory, there was nothing left to try, and you
+  got a failure quoting a shortage of memory on a machine that was never going
+  to run the model anyway. Measured on a real request: two minutes and seventeen
+  seconds to fail, with working computers available the whole time. A prompt
+  refusal now earns another attempt; a computer that goes silent still earns
+  none, so a request can never spend two long waits on silence.
+
+  The honest trade: a request that was always going to fail can now take longer
+  to say so. Bounding it by a total time limit was considered and rejected — any
+  limit tight enough to prevent the longer wait would also have skipped the extra
+  attempt in exactly the case this was built for.
+
+- **A computer answering with nonsense kept being trusted.** One model served
+  from elsewhere came back reading "yahoo embodied vect vect … jm jm jm" — one
+  short fragment repeated thirty-nine times out of fifty-six words, stopping only
+  when it ran out of room. Nothing marked that as broken, so the computer that
+  produced it earned credit and kept its place in the queue for the next request.
+  The check meant to catch this looked for a reply that is one *character* over
+  and over; what a broken computer actually sends is one *word* over and over.
+  Replies merely cut short by their length limit are unaffected, and so is a
+  model asked for repetitive output — it stops on its own, which is the
+  difference. You still receive the reply either way; this only governs which
+  computers get chosen next time.
+
+- **Getting a model's name wrong suggested models that could not answer.** The
+  "here is what else is available" list was built from every model this computer
+  had ever heard of, including ones no reachable computer holds all the parts of.
+  On a live node it offered nineteen where the real list had fifteen — so the
+  obvious next step, picking one off the suggestions, failed again.
+
+- **An out-of-memory message said "Service unavailable" twice.** The reason was
+  always right; it just introduced itself once too often.
+
+- **A failed download announced that it had started.** Asking for one of the
+  pinned reference models showed a success message even when the request was
+  refused, so you got an error explaining the refusal and a success message
+  contradicting it, at the same time.
+
+- **A reply restored from a saved conversation could lose the model's name**,
+  showing the right provider icon beside a generic "AI" label.
+
+- **When a backup computer wins a race, the slow one is no longer blamed for the
+  wait.** With request racing turned on (off by default), the time a race took
+  was recorded against the *first* computer — including the whole period spent
+  waiting before the second was even asked. That wait is derived from the first
+  computer's own typical speed, so the number fed back was always larger than its
+  usual time, which raised the bar for ever racing it again. The feature was
+  quietly switching itself off against exactly the computers it exists to help
+  with.
+
+### Changed
+
+- **The moving background costs about a tenth of what it did.** Someone asked
+  whether it was using resources, and it was: roughly a tenth of a laptop's
+  frame budget, continuously, for as long as the dashboard was open. It now
+  advances thirty times a second instead of sixty, drops to ten once you have
+  not moved the mouse for a few seconds, and drops further while your computer
+  is actually answering a request — the real work outranks the decoration.
+  Drawing the connecting lines got cheaper too. Measured on a 1280x800 window:
+  2.9% of a processor core while you are moving the mouse, 1.0% when you are
+  not, 0.8% while serving.
+
+  It also now respects the "reduce motion" setting on your device, which it had
+  been ignoring — everything else on the page honoured that already, but this
+  one is drawn rather than styled, so the browser could not apply the preference
+  for it.
+
+- **A part that a computer says it no longer has, and then appears to have
+  again, is now recorded.** Over nine days on one node this happened three
+  thousand times, and reading the code did not explain it. A claim that comes
+  back is a candidate for work again, which is one way a request ends up waiting
+  on a computer that was never going to answer. This release adds no fix for it:
+  it adds the measurement that was missing, so the next one can.
+
+### Added
+
+- **A switch for the moving background**, in Settings beside the other
+  appearance preferences. Turning it off stops the drawing rather than hiding
+  the picture.
+
+- **A way to test inference across specific computers on purpose.** Replication
+  pulls every node towards holding whole models, which is good for reliability
+  and unhelpfully hides the case this project exists for. A single request can
+  now be planned as though this computer held less of a model than it does, or
+  as though a named computer were not there, without moving anything on disk or
+  restarting anything. It only ever narrows the choices available to your own
+  request and never leaves your machine. `examples/peer_path_matrix.sh` sweeps
+  the shapes and reports which computers actually served each.
+
 ## [0.3.183-alpha] — 2026-09-16
 
 Five things people reported, and every one of them was a feature that did not
