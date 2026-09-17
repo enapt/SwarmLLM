@@ -1114,6 +1114,8 @@
   "settings.storage_load_failed": "Gagal memuat info penyimpanan",
   "settings.storage_shards": "{local}/{total} bagian",
   "settings.subscription_plan_label": "Paket {type}",
+  "settings.swarm_anim": "Latar belakang gerombolan beranimasi",
+  "settings.swarm_anim_desc": "Jaringan titik yang melayang di belakang halaman. Ini digambar ulang terus-menerus selama halaman ini terbuka, jadi mematikannya menghemat daya pada laptop atau komputer kecil. Mati secara bawaan jika perangkat Anda disetel untuk mengurangi gerak.",
   "settings.swarm_compute_memory": "Daya komputasi jaringan",
   "settings.swarm_compute_memory_cpu": "Memori GPU Swarm (Anda dalam mode CPU)",
   "settings.swarm_compute_memory_gpu": "Memori GPU Swarm (VRAM)",

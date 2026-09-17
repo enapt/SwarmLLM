@@ -1114,6 +1114,8 @@
   "settings.storage_load_failed": "โหลดข้อมูลพื้นที่เก็บไม่สำเร็จ",
   "settings.storage_shards": "{local}/{total} ส่วน",
   "settings.subscription_plan_label": "แพ็กเกจ {type}",
+  "settings.swarm_anim": "พื้นหลังฝูงแบบเคลื่อนไหว",
+  "settings.swarm_anim_desc": "เครือข่ายจุดที่ลอยอยู่ด้านหลังหน้าเว็บ ระบบจะวาดใหม่ตลอดเวลาที่เปิดหน้านี้อยู่ การปิดจึงช่วยประหยัดพลังงานบนแล็ปท็อปหรือคอมพิวเตอร์เครื่องเล็ก และจะปิดไว้ตั้งแต่แรกหากอุปกรณ์ของคุณตั้งค่าให้ลดการเคลื่อนไหว",
   "settings.swarm_compute_memory": "พลังประมวลผลของเครือข่าย",
   "settings.swarm_compute_memory_cpu": "Swarm GPU memory (คุณอยู่ในโหมด CPU)",
   "settings.swarm_compute_memory_gpu": "หน่วยความจำ GPU ที่แบ่งให้เครือข่าย (VRAM)",

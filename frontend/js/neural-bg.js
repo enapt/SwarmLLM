@@ -15,6 +15,35 @@ var NeuralBg = (function() {
 
   var state = { peers: 0, active: 0, health: 1.0 };
 
+  // Whether the animation may run at all — distinct from `paused`, which is the
+  // hidden-tab state and resumes by itself.
+  var enabled = true;
+  var listenersBound = false;
+
+  // Should the swarm animate on this machine, absent an explicit choice?
+  //
+  // This is a continuous `requestAnimationFrame` loop — ~90 boids with a
+  // neighbour search and canvas drawing every frame, for as long as the page is
+  // visible — so it is the one thing on this page with an ongoing power cost.
+  // CSS animations already honour `prefers-reduced-motion` (style.css), but a
+  // canvas loop is invisible to that media query, so somebody who had already
+  // asked their device for less motion kept getting all of it.
+  //
+  // `App.SWARM_ANIM_KEY` is the explicit choice and always wins; with nothing
+  // stored, follow the device.
+  function shouldAnimate() {
+    try {
+      var stored = localStorage.getItem(App.SWARM_ANIM_KEY);
+      if (stored === '1') return true;
+      if (stored === '0') return false;
+    } catch (e) { /* private mode — fall through to the device preference */ }
+    try {
+      return !window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    } catch (e) {
+      return true;
+    }
+  }
+
   // --- Tuning ---
   var BOID_COUNT = 90;
   var MAX_SPEED = 0.7;
@@ -82,18 +111,44 @@ var NeuralBg = (function() {
     resize();
     seed();
 
-    window.addEventListener('resize', debounceResize);
-    document.addEventListener('mousemove', onMouse);
-    document.addEventListener('mouseleave', function() {
-      mouse.x = -1000; mouse.y = -1000; mouse.active = false;
-      mouse.speed = 0;
-    });
-    document.addEventListener('visibilitychange', function() {
-      if (document.hidden) { paused = true; }
-      else { paused = false; if (!raf) tick(); }
-    });
+    // Bound once. `setEnabled` can be called repeatedly from Settings, and
+    // re-running init would stack a second `mousemove` listener each time.
+    if (!listenersBound) {
+      listenersBound = true;
+      window.addEventListener('resize', debounceResize);
+      document.addEventListener('mousemove', onMouse);
+      document.addEventListener('mouseleave', function() {
+        mouse.x = -1000; mouse.y = -1000; mouse.active = false;
+        mouse.speed = 0;
+      });
+      document.addEventListener('visibilitychange', function() {
+        if (document.hidden) { paused = true; }
+        else { paused = false; if (enabled && !raf) tick(); }
+      });
+    }
 
-    tick();
+    enabled = shouldAnimate();
+    if (enabled) tick();
+    else clear();
+  }
+
+  // Leave no half-drawn frame behind when the loop stops.
+  function clear() {
+    if (ctx) ctx.clearRect(0, 0, W, H);
+  }
+
+  /// Turn the animation on or off for real — cancelling the frame loop, not
+  /// just hiding the canvas. Hiding it would leave the physics and the drawing
+  /// running, which is the entire cost being avoided.
+  function setEnabled(on) {
+    if (!canvas) return;
+    enabled = !!on;
+    if (enabled) {
+      if (!raf && !paused) tick();
+    } else {
+      if (raf) { cancelAnimationFrame(raf); raf = null; }
+      clear();
+    }
   }
 
   var _resizeTimer;
@@ -233,7 +288,7 @@ var NeuralBg = (function() {
   var _now = 0;
 
   function tick() {
-    if (paused) { raf = null; return; }
+    if (paused || !enabled) { raf = null; return; }
     raf = requestAnimationFrame(tick);
     _now += 16;
 
@@ -654,6 +709,9 @@ var NeuralBg = (function() {
     init: init,
     updateState: updateState,
     setHealth: setHealth,
+    setEnabled: setEnabled,
+    isEnabled: function() { return enabled; },
+    shouldAnimate: shouldAnimate,
     resize: function() { resize(); }
   };
 })();

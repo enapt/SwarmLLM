@@ -1114,6 +1114,8 @@
   "settings.storage_load_failed": "Nie udało się załadować informacji o pamięci",
   "settings.storage_shards": "{local}/{total} części",
   "settings.subscription_plan_label": "Plan {type}",
+  "settings.swarm_anim": "Animowane tło roju",
+  "settings.swarm_anim_desc": "Dryfująca sieć punktów za stroną. Jest przerysowywana bez przerwy, dopóki ta strona jest otwarta, więc wyłączenie jej oszczędza energię na laptopie lub małym komputerze. Domyślnie wyłączone, jeśli urządzenie ma ustawione ograniczenie ruchu.",
   "settings.swarm_compute_memory": "Moc obliczeniowa sieci",
   "settings.swarm_compute_memory_cpu": "Pamięć GPU roju (jesteś w trybie CPU)",
   "settings.swarm_compute_memory_gpu": "Pamięć GPU roju (VRAM)",

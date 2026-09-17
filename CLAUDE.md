@@ -85,7 +85,7 @@ with a type-tag byte for tensor payloads.
 - **5** WS message types, **2** broadcast channels. Do not add to either set.
 - Nav ranking, storage-key constants and `App.data.*` are in
   `.claude/rules/arch-frontend.md`, which loads when you open `frontend/`.
-- i18n: **1387 translation keys** (**1389 entries per locale** incl. `_lang` +
+- i18n: **1389 translation keys** (**1391 entries per locale** incl. `_lang` +
   `_dir`) × 21 languages, sorted by key. Parity and counts are asserted — **update
   BOTH CLAUDE.md and `docs/ARCHITECTURE.md`**. A new key MUST be translated into
   all 21; no English fallback (`.claude/rules/i18n.md`).

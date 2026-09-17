@@ -1114,6 +1114,8 @@
   "settings.storage_load_failed": "Falha ao carregar info de armazenamento",
   "settings.storage_shards": "{local}/{total} partes",
   "settings.subscription_plan_label": "Plano {type}",
+  "settings.swarm_anim": "Fundo animado do enxame",
+  "settings.swarm_anim_desc": "A rede de pontos que flutua atrás da página. Ela é redesenhada continuamente enquanto esta página está aberta, por isso desligá-la economiza energia num portátil ou num computador pequeno. Desligada por padrão se o seu dispositivo estiver definido para reduzir o movimento.",
   "settings.swarm_compute_memory": "Poder de computação da rede",
   "settings.swarm_compute_memory_cpu": "Memória GPU da rede (você está em modo CPU)",
   "settings.swarm_compute_memory_gpu": "Memória GPU da rede (VRAM)",

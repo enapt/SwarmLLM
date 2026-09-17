@@ -246,6 +246,26 @@
         });
       }
 
+      // Swarm background animation. A browser preference like the two above,
+      // applied immediately and deliberately NOT part of the saved config —
+      // it changes only what this page draws, and a display choice does not
+      // belong in a node's config file.
+      //
+      // Reported by a user worried about the resource cost, and they were
+      // right: it is a continuous `requestAnimationFrame` loop. The checkbox
+      // shows the EFFECTIVE state, so a device set to reduce motion starts
+      // unticked without anything having been stored.
+      var swarmAnim = document.getElementById('settings-swarm-anim');
+      if (swarmAnim && typeof NeuralBg !== 'undefined') {
+        swarmAnim.checked = NeuralBg.shouldAnimate();
+        swarmAnim.addEventListener('change', function() {
+          try {
+            localStorage.setItem(App.SWARM_ANIM_KEY, this.checked ? '1' : '0');
+          } catch (e) { /* private mode — the choice holds for this page only */ }
+          NeuralBg.setEnabled(this.checked);
+        });
+      }
+
       // Claude subscription toggle
       var csToggle = document.getElementById('claude-subscription-toggle');
       if (csToggle) {

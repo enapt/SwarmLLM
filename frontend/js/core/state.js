@@ -72,6 +72,10 @@ window.App = {
   NODE_DETAIL_KEY: 'swarmllm_node_detail',
   HEALTH_INTERVAL_KEY: 'swarmllm_health_interval',
   THEME_KEY: 'swarmllm_theme',
+  // Swarm background animation. Absent means "follow the device", i.e. off when
+  // `prefers-reduced-motion: reduce` is set — a canvas frame loop is invisible
+  // to the CSS media query that already honours it everywhere else.
+  SWARM_ANIM_KEY: 'swarmllm_swarm_animation',
   MODEL_SORT_KEY: 'swarmllm_model_sort',
   CURRENT_MODEL_KEY: 'swarmllm_current_model',
   COMPARE_HISTORY_KEY: 'swarmllm_compare_history',

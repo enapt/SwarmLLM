@@ -1114,6 +1114,8 @@
   "settings.storage_load_failed": "فشل في تحميل معلومات التخزين",
   "settings.storage_shards": "{local}/{total} أجزاء",
   "settings.subscription_plan_label": "خطة {type}",
+  "settings.swarm_anim": "خلفية السرب المتحركة",
+  "settings.swarm_anim_desc": "شبكة النقاط المنسابة خلف الصفحة. يُعاد رسمها باستمرار ما دامت هذه الصفحة مفتوحة، لذا فإن إيقافها يوفّر الطاقة على الحاسوب المحمول أو الحاسوب الصغير. تكون متوقفة افتراضيًا إذا كان جهازك مضبوطًا على تقليل الحركة.",
   "settings.swarm_compute_memory": "قدرة الحوسبة على الشبكة",
   "settings.swarm_compute_memory_cpu": "ذاكرة GPU للسرب (أنت في وضع CPU)",
   "settings.swarm_compute_memory_gpu": "ذاكرة GPU للسرب (VRAM)",

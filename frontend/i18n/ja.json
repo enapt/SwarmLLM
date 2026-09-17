@@ -1114,6 +1114,8 @@
   "settings.storage_load_failed": "ストレージ情報の読み込みに失敗",
   "settings.storage_shards": "{local}/{total} パーツ",
   "settings.subscription_plan_label": "{type} プラン",
+  "settings.swarm_anim": "スウォームの背景アニメーション",
+  "settings.swarm_anim_desc": "ページの背後を漂う点のネットワークです。このページを開いている間ずっと再描画され続けるため、オフにするとノートパソコンや小型のコンピューターの電力を節約できます。デバイスで視差効果を減らす設定になっている場合は既定でオフになります。",
   "settings.swarm_compute_memory": "ネットワークの計算能力",
   "settings.swarm_compute_memory_cpu": "Swarm GPU メモリ (CPUモード中)",
   "settings.swarm_compute_memory_gpu": "Swarm GPU メモリ (VRAM)",

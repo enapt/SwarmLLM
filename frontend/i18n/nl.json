@@ -1114,6 +1114,8 @@
   "settings.storage_load_failed": "Opslaginformatie laden mislukt",
   "settings.storage_shards": "{local}/{total} delen",
   "settings.subscription_plan_label": "{type}-abonnement",
+  "settings.swarm_anim": "Geanimeerde zwermachtergrond",
+  "settings.swarm_anim_desc": "Het zwevende netwerk van stippen achter de pagina. Het wordt voortdurend opnieuw getekend zolang deze pagina open staat, dus uitschakelen bespaart stroom op een laptop of kleine computer. Standaard uit als je apparaat is ingesteld op minder beweging.",
   "settings.swarm_compute_memory": "Rekenkracht van het netwerk",
   "settings.swarm_compute_memory_cpu": "Swarm GPU geheugen (je bent in CPU-modus)",
   "settings.swarm_compute_memory_gpu": "Swarm GPU geheugen (VRAM)",

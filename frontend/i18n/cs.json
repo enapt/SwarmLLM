@@ -1114,6 +1114,8 @@
   "settings.storage_load_failed": "Načtení informací o úložišti selhalo",
   "settings.storage_shards": "{local}/{total} částí",
   "settings.subscription_plan_label": "Plán {type}",
+  "settings.swarm_anim": "Animované pozadí roje",
+  "settings.swarm_anim_desc": "Síť teček plující za stránkou. Překresluje se nepřetržitě, dokud je tato stránka otevřená, takže vypnutí šetří energii na notebooku nebo malém počítači. Ve výchozím nastavení vypnuto, pokud má vaše zařízení nastaveno omezení pohybu.",
   "settings.swarm_compute_memory": "Výpočetní výkon sítě",
   "settings.swarm_compute_memory_cpu": "Paměť GPU pro swarm (jste v CPU režimu)",
   "settings.swarm_compute_memory_gpu": "Paměť GPU pro swarm (VRAM)",

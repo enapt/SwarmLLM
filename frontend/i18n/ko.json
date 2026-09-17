@@ -1114,6 +1114,8 @@
   "settings.storage_load_failed": "저장소 정보 로드 실패",
   "settings.storage_shards": "{local}/{total} 부분",
   "settings.subscription_plan_label": "{type} 플랜",
+  "settings.swarm_anim": "스웜 배경 애니메이션",
+  "settings.swarm_anim_desc": "페이지 뒤에서 떠다니는 점 네트워크입니다. 이 페이지가 열려 있는 동안 계속 다시 그려지므로, 끄면 노트북이나 소형 컴퓨터의 전력을 절약할 수 있습니다. 기기에서 동작 줄이기가 설정되어 있으면 기본적으로 꺼집니다.",
   "settings.swarm_compute_memory": "네트워크 연산 능력",
   "settings.swarm_compute_memory_cpu": "Swarm GPU 메모리 (CPU 모드임)",
   "settings.swarm_compute_memory_gpu": "Swarm GPU 메모리 (VRAM)",

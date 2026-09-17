@@ -1114,6 +1114,8 @@
   "settings.storage_load_failed": "Depolama bilgisi yüklenemedi",
   "settings.storage_shards": "{local}/{total} parça",
   "settings.subscription_plan_label": "{type} Planı",
+  "settings.swarm_anim": "Animasyonlu sürü arka planı",
+  "settings.swarm_anim_desc": "Sayfanın arkasında süzülen nokta ağı. Bu sayfa açık kaldığı sürece sürekli yeniden çizilir; kapatmak dizüstü veya küçük bir bilgisayarda enerji tasarrufu sağlar. Cihazınız hareketi azaltacak şekilde ayarlanmışsa varsayılan olarak kapalıdır.",
   "settings.swarm_compute_memory": "Ağın işlem gücü",
   "settings.swarm_compute_memory_cpu": "Swarm GPU belleği (CPU modundasınız)",
   "settings.swarm_compute_memory_gpu": "Swarm GPU belleği (VRAM)",

@@ -1114,6 +1114,8 @@
   "settings.storage_load_failed": "加载存储信息失败",
   "settings.storage_shards": "{local}/{total} 个部分",
   "settings.subscription_plan_label": "{type} 套餐",
+  "settings.swarm_anim": "群集动画背景",
+  "settings.swarm_anim_desc": "页面背后缓缓移动的点状网络。只要此页面处于打开状态，它就会持续重绘，因此关闭它可以为笔记本电脑或小型计算机节省电量。如果您的设备已设置为减弱动态效果，则默认关闭。",
   "settings.swarm_compute_memory": "网络算力",
   "settings.swarm_compute_memory_cpu": "Swarm GPU内存（你处于CPU模式）",
   "settings.swarm_compute_memory_gpu": "Swarm GPU内存（VRAM）",

@@ -1114,6 +1114,8 @@
   "settings.storage_load_failed": "स्टोरेज जानकारी लोड करने में विफल",
   "settings.storage_shards": "{local}/{total} भाग",
   "settings.subscription_plan_label": "{type} योजना",
+  "settings.swarm_anim": "एनिमेटेड स्वार्म पृष्ठभूमि",
+  "settings.swarm_anim_desc": "पृष्ठ के पीछे तैरता बिंदुओं का जाल। यह पृष्ठ खुला रहने तक लगातार दोबारा बनता रहता है, इसलिए इसे बंद करने से लैपटॉप या छोटे कंप्यूटर की बिजली बचती है। यदि आपके डिवाइस पर गति कम करने की सेटिंग है तो यह डिफ़ॉल्ट रूप से बंद रहता है।",
   "settings.swarm_compute_memory": "नेटवर्क की कंप्यूटिंग शक्ति",
   "settings.swarm_compute_memory_cpu": "Swarm GPU मेमोरी (आप CPU मोड में हैं)",
   "settings.swarm_compute_memory_gpu": "Swarm GPU मेमोरी (VRAM)",

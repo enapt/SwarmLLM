@@ -1114,6 +1114,8 @@
   "settings.storage_load_failed": "Не вдалося завантажити інформацію про сховище",
   "settings.storage_shards": "{local}/{total} частин",
   "settings.subscription_plan_label": "Тариф {type}",
+  "settings.swarm_anim": "Анімований фон рою",
+  "settings.swarm_anim_desc": "Мережа точок, що дрейфує позаду сторінки. Вона перемальовується безперервно, доки ця сторінка відкрита, тож вимкнення заощаджує енергію на ноутбуці чи невеликому комп'ютері. Типово вимкнено, якщо на вашому пристрої увімкнено зменшення руху.",
   "settings.swarm_compute_memory": "Обчислювальна потужність мережі",
   "settings.swarm_compute_memory_cpu": "Пам'ять GPU мережі (ви в режимі CPU)",
   "settings.swarm_compute_memory_gpu": "Пам'ять GPU мережі (VRAM)",

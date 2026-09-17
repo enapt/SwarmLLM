@@ -1114,6 +1114,8 @@
   "settings.storage_load_failed": "Failed to load storage info",
   "settings.storage_shards": "{local}/{total} parts",
   "settings.subscription_plan_label": "{type} Plan",
+  "settings.swarm_anim": "Animated swarm background",
+  "settings.swarm_anim_desc": "The drifting network of dots behind the page. It redraws continuously while this page is open, so turning it off saves power on a laptop or a small computer. Off by default if your device is set to reduce motion.",
   "settings.swarm_compute_memory": "Network computing power",
   "settings.swarm_compute_memory_cpu": "Swarm GPU memory (you are in CPU mode)",
   "settings.swarm_compute_memory_gpu": "Swarm GPU memory (VRAM)",

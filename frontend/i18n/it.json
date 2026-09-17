@@ -1114,6 +1114,8 @@
   "settings.storage_load_failed": "Caricamento info archiviazione fallito",
   "settings.storage_shards": "{local}/{total} parti",
   "settings.subscription_plan_label": "Piano {type}",
+  "settings.swarm_anim": "Sfondo animato dello sciame",
+  "settings.swarm_anim_desc": "La rete di punti che fluttua dietro la pagina. Viene ridisegnata di continuo finché questa pagina è aperta, quindi disattivarla fa risparmiare energia su un portatile o un computer piccolo. Disattivata per impostazione predefinita se il dispositivo è impostato per ridurre il movimento.",
   "settings.swarm_compute_memory": "Potenza di calcolo della rete",
   "settings.swarm_compute_memory_cpu": "Memoria GPU dello swarm (sei in modalità CPU)",
   "settings.swarm_compute_memory_gpu": "Memoria GPU dello swarm (VRAM)",

@@ -1114,6 +1114,8 @@
   "settings.storage_load_failed": "Error al cargar información de almacenamiento",
   "settings.storage_shards": "{local}/{total} partes",
   "settings.subscription_plan_label": "Plan {type}",
+  "settings.swarm_anim": "Fondo animado del enjambre",
+  "settings.swarm_anim_desc": "La red de puntos que se desplaza detrás de la página. Se redibuja continuamente mientras esta página está abierta, así que desactivarla ahorra energía en un portátil o un ordenador pequeño. Desactivada por defecto si tu dispositivo está configurado para reducir el movimiento.",
   "settings.swarm_compute_memory": "Potencia de la red",
   "settings.swarm_compute_memory_cpu": "Memoria GPU de swarm (estás en modo CPU)",
   "settings.swarm_compute_memory_gpu": "Memoria GPU de swarm (VRAM)",

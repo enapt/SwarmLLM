@@ -1114,6 +1114,8 @@
   "settings.storage_load_failed": "Kunde inte ladda lagringsinformation",
   "settings.storage_shards": "{local}/{total} delar",
   "settings.subscription_plan_label": "{type}-abonnemang",
+  "settings.swarm_anim": "Animerad svärmbakgrund",
+  "settings.swarm_anim_desc": "Nätverket av punkter som driver bakom sidan. Det ritas om kontinuerligt så länge sidan är öppen, så att stänga av det sparar ström på en bärbar eller liten dator. Avstängt som standard om din enhet är inställd på reducerad rörelse.",
   "settings.swarm_compute_memory": "Nätverkets beräkningskraft",
   "settings.swarm_compute_memory_cpu": "Svarm GPU-minne (du är i CPU-läge)",
   "settings.swarm_compute_memory_gpu": "Svarm GPU-minne (VRAM)",

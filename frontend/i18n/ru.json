@@ -1114,6 +1114,8 @@
   "settings.storage_load_failed": "Не удалось загрузить информацию о хранилище",
   "settings.storage_shards": "{local}/{total} частей",
   "settings.subscription_plan_label": "Тариф {type}",
+  "settings.swarm_anim": "Анимированный фон роя",
+  "settings.swarm_anim_desc": "Дрейфующая сеть точек за страницей. Она перерисовывается непрерывно, пока эта страница открыта, поэтому её отключение экономит энергию на ноутбуке или небольшом компьютере. По умолчанию выключено, если на вашем устройстве включено уменьшение движения.",
   "settings.swarm_compute_memory": "Вычислительная мощность сети",
   "settings.swarm_compute_memory_cpu": "Память GPU сети (вы в режиме CPU)",
   "settings.swarm_compute_memory_gpu": "Память GPU сети (VRAM)",

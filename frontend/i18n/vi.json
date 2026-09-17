@@ -1114,6 +1114,8 @@
   "settings.storage_load_failed": "Tải thông tin lưu trữ thất bại",
   "settings.storage_shards": "{local}/{total} phần",
   "settings.subscription_plan_label": "Gói {type}",
+  "settings.swarm_anim": "Nền bầy đàn động",
+  "settings.swarm_anim_desc": "Mạng lưới các chấm trôi phía sau trang. Nó được vẽ lại liên tục khi trang này còn mở, nên tắt đi sẽ tiết kiệm điện trên máy tính xách tay hoặc máy tính nhỏ. Mặc định tắt nếu thiết bị của bạn được đặt để giảm chuyển động.",
   "settings.swarm_compute_memory": "Sức mạnh tính toán của mạng",
   "settings.swarm_compute_memory_cpu": "Bộ nhớ GPU Swarm (bạn ở chế độ CPU)",
   "settings.swarm_compute_memory_gpu": "Bộ nhớ GPU Swarm (VRAM)",

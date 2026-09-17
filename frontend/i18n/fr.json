@@ -1114,6 +1114,8 @@
   "settings.storage_load_failed": "Échec du chargement des infos de stockage",
   "settings.storage_shards": "{local}/{total} parties",
   "settings.subscription_plan_label": "Plan {type}",
+  "settings.swarm_anim": "Arrière-plan animé de l'essaim",
+  "settings.swarm_anim_desc": "Le réseau de points qui dérive derrière la page. Il se redessine en continu tant que cette page est ouverte ; le désactiver économise de l'énergie sur un portable ou un petit ordinateur. Désactivé par défaut si votre appareil est réglé pour réduire les animations.",
   "settings.swarm_compute_memory": "Puissance de calcul du réseau",
   "settings.swarm_compute_memory_cpu": "Mémoire GPU du swarm (vous êtes en mode CPU)",
   "settings.swarm_compute_memory_gpu": "Mémoire GPU du swarm (VRAM)",
