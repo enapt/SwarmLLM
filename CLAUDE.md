@@ -89,7 +89,7 @@ with a type-tag byte for tensor payloads.
   `_dir`) × 21 languages, sorted by key. Parity and counts are asserted — **update
   BOTH CLAUDE.md and `docs/ARCHITECTURE.md`**. A new key MUST be translated into
   all 21; no English fallback (`.claude/rules/i18n.md`).
-- Payload **~1186 KB** (html 141 + css 265 + js 780, 2026-09-16) + one locale
+- Payload **~1196 KB** (html 142 + css 265 + js 789, 2026-09-17) + one locale
   (~90 KB en, Thai 167 KB) + 88 KB fonts (not counted). Capped by
   `frontend_payload_stays_within_budget` — a regression budget, not a goal.
 
