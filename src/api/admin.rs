@@ -1266,6 +1266,38 @@ pub async fn get_config(State(state): State<AppState>) -> Json<serde_json::Value
 }
 
 /// PUT /api/admin/config — Update configuration at runtime.
+/// The config a partial update from the dashboard builds on.
+///
+/// The file when it parses, the live config when it does not. Both callers of
+/// this are one line apart; it is a named function so the rule can be tested
+/// without standing up an `AppState`.
+fn base_for_partial_update(
+    file_text: Option<&str>,
+    live: &crate::config::Config,
+    path_for_log: &std::path::Path,
+) -> crate::config::Config {
+    match file_text {
+        Some(text) => match toml::from_str::<crate::config::Config>(text) {
+            Ok(parsed) => parsed,
+            Err(e) => {
+                // NOT a reason to refuse the save: the operator is mid-edit, or
+                // the file was already broken, and throwing away the change
+                // they just made in the dashboard helps nobody. Say it loudly
+                // enough to explain why a hand edit did not survive.
+                tracing::warn!(
+                    path = %path_for_log.display(),
+                    error = %e,
+                    "config.toml could not be parsed — saving from the running \
+                     configuration instead. Any hand edit in that file is about \
+                     to be overwritten."
+                );
+                live.clone()
+            }
+        },
+        None => live.clone(),
+    }
+}
+
 pub async fn update_config(
     State(state): State<AppState>,
     JsonBody(body): JsonBody<ConfigUpdate>,
@@ -1287,7 +1319,33 @@ pub async fn update_config(
     // is exactly the base a partial update needs. Same lesson as gotcha #281,
     // one level up: that fix taught every READER to use `cfg()` and left the
     // WRITER building from the snapshot.
-    let mut config: crate::config::Config = (**state.shared_state.cfg()).clone();
+    //
+    // ...but the FILE is a better base still, because it is the only place the
+    // two can differ. Editing `config.toml` by hand while the daemon runs is
+    // the documented way to add things the dashboard does not expose
+    // (`bootstrap_peers` is the usual one). The live config does not know about
+    // that edit until a `/api/admin/config/reload`, so building the new file
+    // from `cfg()` rewrote the whole document from a snapshot taken before the
+    // edit and the operator's work was gone — silently, under a "Settings
+    // saved" toast.
+    //
+    // Re-reading is safe because **this handler is the only thing in the daemon
+    // that changes the live config** (`apply_live_config` has exactly one other
+    // production caller, `reload_config`, which reads this same file; the rest
+    // are tests). So there is no runtime state living outside the document that
+    // re-reading could drop — the only way file and live config diverge is an
+    // edit we want to keep.
+    //
+    // A file we cannot parse is NOT a reason to refuse the save: the operator
+    // is mid-edit, or it was already broken, and losing the change they just
+    // made in the dashboard helps nobody. Fall back to the live config, and say
+    // so loudly enough to explain why a hand edit did not survive.
+    let file_text = tokio::fs::read_to_string(&config_path).await.ok();
+    let mut config = base_for_partial_update(
+        file_text.as_deref(),
+        &state.shared_state.cfg(),
+        &config_path,
+    );
 
     if let Some(contribution) = &body.contribution {
         let mode = match contribution.as_str() {
@@ -2736,6 +2794,64 @@ fn truncate_preview(s: &str) -> String {
     }
     out.push('…');
     out
+}
+
+#[cfg(test)]
+mod config_base_tests {
+    use super::base_for_partial_update;
+
+    fn path() -> &'static std::path::Path {
+        std::path::Path::new("/tmp/config.toml")
+    }
+
+    /// **The silent data loss this exists for.** Editing `config.toml` by hand
+    /// while the daemon runs is the documented way to set what the dashboard
+    /// does not expose — `bootstrap_peers` is the usual one. The live config
+    /// does not learn about that edit until a `/api/admin/config/reload`, so a
+    /// save built from `cfg()` rewrote the whole document from a snapshot taken
+    /// before the edit and the operator's work was gone, under a toast saying
+    /// "Settings saved".
+    #[test]
+    fn a_hand_edit_made_while_the_daemon_runs_survives_a_dashboard_save() {
+        let mut live = crate::config::Config::default();
+        live.network.bootstrap_peers.clear();
+
+        let on_disk = r#"
+[network]
+bootstrap_peers = ["/ip4/10.0.0.7/tcp/8810"]
+"#;
+        let base = base_for_partial_update(Some(on_disk), &live, path());
+
+        assert_eq!(
+            base.network.bootstrap_peers,
+            vec!["/ip4/10.0.0.7/tcp/8810".to_string()],
+            "the save must build on the file, not on a snapshot taken before the edit"
+        );
+    }
+
+    /// A file that does not parse must not cost the user the change they just
+    /// made in the dashboard. Fall back to the running config.
+    #[test]
+    fn an_unparseable_file_falls_back_to_the_running_config_rather_than_refusing() {
+        let mut live = crate::config::Config::default();
+        live.resources.max_disk_mb = 123_456;
+
+        let base = base_for_partial_update(Some("this is not toml [[["), &live, path());
+
+        assert_eq!(base.resources.max_disk_mb, 123_456);
+    }
+
+    /// First run, or a node whose file has been removed: there is nothing to
+    /// read and the running config is the only truth there is.
+    #[test]
+    fn a_missing_file_falls_back_to_the_running_config() {
+        let mut live = crate::config::Config::default();
+        live.resources.max_disk_mb = 777;
+
+        let base = base_for_partial_update(None, &live, path());
+
+        assert_eq!(base.resources.max_disk_mb, 777);
+    }
 }
 
 #[cfg(test)]
