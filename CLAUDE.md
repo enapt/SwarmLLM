@@ -170,7 +170,7 @@ a change, especially your own.
 
 ## Status
 
-**v0.3.183-alpha released and deployed to both nodes (2026-09-16).** Nothing
+**v0.3.184-alpha released and deployed locally (2026-09-17).** Nothing
 functional is unreleased. Release procedure: **`memory/release_gate.md`** — the ordered steps
 and every caution earned at a past gate; do not re-derive it. Per-release
 history: `memory/round_history.md`. Gotchas: `memory/gotchas.md` (the next free
