@@ -22,6 +22,24 @@
     _selectedProvider: null,
     _joinedPeer: false,
 
+    // Can this build actually drive the card it can see?
+    //
+    // The single answer for the wizard, because the two screens that describe
+    // this machine were deriving it separately and only one of them did it.
+    // Step 1's card said "Not used by this build"; step 3's review row printed
+    // the card's name alone — so the last screen before "Start SwarmLLM", the
+    // one that exists to confirm what was chosen, told every CPU-build owner
+    // their graphics card was their hardware. That is the population of report
+    // #019 and of every Mac, where nothing drives the card and the machine
+    // looks healthy doing it.
+    //
+    // `undefined` is deliberately usable: an older daemon that does not send
+    // the field is treated as able, which is what the field's absence meant
+    // before it existed.
+    gpuIsUsable: function() {
+      return !App.setup.hwData || App.setup.hwData.gpu_backend_in_build !== false;
+    },
+
     init: function() {
       // First-run gate: only auto-show if neither completed nor skipped.
       var done = localStorage.getItem(App.SETUP_DONE_KEY) === 'true';
@@ -187,7 +205,7 @@
         // its owner "your GPU can run 7B models locally" while every request
         // went to the processor. Same mistake as the dashboard's "None"
         // (report #019), on the first screen anyone sees.
-        var backendCanUseTheGpu = App.setup.hwData.gpu_backend_in_build !== false;
+        var backendCanUseTheGpu = App.setup.gpuIsUsable();
         var usableVramMb = backendCanUseTheGpu ? vramMb : 0;
         if (gpuName && vramMb > 0) {
           gpuEl.textContent = gpuName;
@@ -381,7 +399,14 @@
           gb: autoBudgetGb,
         });
       }
+      // Name the card AND say whether it will be used — see `gpuIsUsable`.
+      // A review row is read as a statement of what was chosen, so the name on
+      // its own is not a shorter version of step 1's card, it is a different
+      // and wrong claim.
       var gpuName = App.setup.hwData && App.setup.hwData.gpu_name ? App.setup.hwData.gpu_name : I18n.t('hw.mode_cpu_only');
+      if (App.setup.hwData && App.setup.hwData.gpu_name && !App.setup.gpuIsUsable()) {
+        gpuName += ' — ' + I18n.t('hw.no_gpu_backend');
+      }
       document.getElementById('summary-gpu').textContent = gpuName;
       var autoManage = document.getElementById('setup-auto-manage').checked;
       document.getElementById('summary-auto-manage').textContent = autoManage ? I18n.t('setup.summary_enabled') : I18n.t('setup.summary_disabled');
