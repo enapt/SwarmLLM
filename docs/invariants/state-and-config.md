@@ -495,3 +495,53 @@ What a change here must keep:
   Its self-test plants the violation in the wrapped shape rustfmt produced,
   which is the form that went unnoticed; the guard was also verified by
   restoring the original prune code and watching it fail.
+
+## A partial config update builds on the FILE, not on what the daemon remembers
+
+**Rule:** `.claude/rules/arch-state-and-config.md` § "A partial config update
+builds on the FILE, not on what the daemon remembers".
+
+### What happened (fixed 2026-09-17)
+
+`PUT /api/admin/config` rewrites the whole `config.toml`, so whatever it builds
+on decides what survives. It built on `state.shared_state.cfg()` — the live
+in-memory config — and never re-read the file.
+
+Editing `config.toml` by hand while the daemon runs is the documented way to set
+what the dashboard does not expose; `bootstrap_peers` is the usual one. The live
+config does not learn about that edit until a
+`POST /api/admin/config/reload`. So an operator who edited the file and then
+changed any setting in the dashboard had the whole document rewritten from a
+snapshot taken before their edit — the hand-written settings silently gone,
+under a toast saying "Settings saved".
+
+### Why this sat open, and why the reason was wrong
+
+It was ranked as "a design question rather than a patch", on the grounds that a
+correct read-modify-write "has to be reconciled with runtime changes made
+through other endpoints".
+
+**There are no other endpoints.** `SharedState::apply_live_config` has exactly
+one production caller besides `reload_config`, and it is this same handler; the
+remaining call sites are tests. So no runtime state lives outside the document,
+the only way file and live config can diverge is a hand edit, and re-reading is
+therefore strictly correct rather than a trade-off.
+
+**The general lesson is the expensive part** (gotcha #631): an entry's stated
+reason for being deferred is a claim to check, not a fact to inherit —
+especially when the claim is "there are other callers", which is a grep.
+
+### What a change must keep
+
+- **A file that does not parse must NOT refuse the save.** The operator may be
+  mid-edit, or it was already broken; losing the change they just made in the
+  dashboard helps nobody. `base_for_partial_update` falls back to the live
+  config and logs loudly enough to explain why a hand edit did not survive.
+- **A second production writer of the live config breaks the argument above.**
+  Adding one means this rule needs revisiting, not extending.
+- **Consequence, and it is intended**: a hand edit now takes effect on the next
+  dashboard save rather than waiting for a reload. Taking effect is strictly
+  better than being destroyed.
+- The staging-and-rename half (a bare `std::fs::write` truncates first, and a
+  crash mid-save left a file the daemon refuses to start on) was fixed earlier
+  and is separate; keep both.

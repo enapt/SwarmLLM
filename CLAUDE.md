@@ -171,20 +171,15 @@ a change, especially your own.
 ## Status
 
 **v0.3.185-alpha released and deployed to both nodes (2026-09-17).** Nothing
-functional is unreleased. ⚠ **One thing is outstanding rather than unfinished**:
-the .184 shard-claim probe ships again in .185 as a discriminator — read
-`grep "DIAG: a holder claim this peer had withdrawn was reinstated" node.log`
-after a few hours of uptime. Silence confirms the fix; a firing line means a
-different cause. Release procedure:
-**`memory/release_gate.md`** — the ordered steps
-and every caution earned at a past gate; do not re-derive it. Per-release
-history: `memory/round_history.md`. Gotchas: `memory/gotchas.md` (the next free
-index is tracked in `memory/MEMORY.md`, not here — it drifted for four rounds
-when both claimed it). Standing cautions: `memory/open_cautions.md` — **read at
-session start.** (`memory/` is the auto-memory dir outside the repo:
+functional is unreleased; `cargo audit` reports only advisories documented in
+`SECURITY.md`. ⚠ **The top item is a READ, not work** — `memory/next_up.md` § A.
+Release procedure: **`memory/release_gate.md`** — the ordered steps and every
+caution earned at a past gate; do not re-derive it. Per-release history:
+`memory/round_history.md`. Gotchas: `memory/gotchas.md` (the next free index is
+tracked in `memory/MEMORY.md`, not here — it drifted for four rounds when both
+claimed it). Standing cautions: `memory/open_cautions.md` — **read at session
+start.** (`memory/` is the auto-memory dir outside the repo:
 `~/.claude/projects/-home-user-SwarmLLM/memory/`.)
-
-`cargo audit` reports only advisories documented and accepted in `SECURITY.md`.
 
 ## Pushes are public-facing
 

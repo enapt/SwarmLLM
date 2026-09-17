@@ -850,3 +850,78 @@ stable, so reconnecting does not clear it; only a restart does.
 - Do not answer "is this cancellation-safe?" by finding a `bail_if_cancelled`.
   That defends against cooperative cancellation only; an external `abort()`
   ignores it entirely.
+
+## A storage budget must count what is on disk, and may only count what can be freed
+
+**Rule:** `.claude/rules/arch-worker-memory.md` § the `storage_budget` /
+`held_disk_bytes` bullet.
+
+### What happened (measured 2026-09-14, fixed 2026-09-17)
+
+`held_shard_bytes` prices the MANIFEST, so it can only see `shard_NNN.bin`. The
+live node held **33062 MB on disk against 31423 MB counted** — a 1637 MB gap,
+~5%, invisible to the setting the user typed. The breakdown matters, because it
+is not evenly spread:
+
+| file | bytes here | note |
+|---|---|---|
+| `tied_output_weight.bin` | **1566 MB** (4 files) | 95% of the gap; 279 MB for one 1.3 GB model |
+| `gguf_header.bin` | 71 MB (13 files) | one per model, ~6 MB |
+| `mmproj.gguf` | 0 here | 595 MB for LLaVA-7B when present |
+| quarantined / dead `.tmp` | varies | nothing sweeps them |
+
+**The sharp edge is a cancelled download.** The parts are cleaned up correctly,
+but the header and tied weight stay — ~287 MB attached to a model that then
+counts as zero shards and therefore zero bytes. Repeated cancels accumulate disk
+the budget cannot see at all.
+
+### Why the accounting fix alone would have been a REGRESSION
+
+Prune deletes `shard_NNN.bin` and nothing else. `compute_resource_pressure`
+divides `held_bytes` by the budget, so counting bytes prune cannot free gives a
+node near its limit a floor it can never get under: it sheds two shards per
+model per cycle, forever, and the redundancy check is the only brake. That is
+exactly the shape of the still-open sole-replica prune report
+(`docs/FUTURE_WORK.md` item 49), which describes a node in a continuous
+urgent-pressure prune loop that ended up missing shards it was the sole replica
+of.
+
+So the fix is a PAIR, and the halves must not be separated:
+
+1. `held_disk_bytes` measures the models directory.
+2. `prune::reclaim_orphaned_model_files` → `shard::cleanup_orphaned_model_files`
+   gives back the derived files of any model this node holds no part of, once
+   per prune cycle.
+
+Convergence is preserved because shedding a model's last shard makes its
+leftovers reclaimable on the next cycle.
+
+### What a change must keep
+
+- **Three guards on the deletion, all required**, each verified by removing it
+  and watching its test go red: the registry records no held part (which
+  includes the `MMPROJ_SHARD_INDEX` sentinel, so a node holding only a vision
+  encoder is skipped); no `shard_NNN.bin` remains on disk (a file present but
+  unregistered means mid-adoption, not gone); no shard of the model holds a
+  download claim. `manifest.json` and `hf_source.json` are kept — they are what
+  the model IS.
+- **Losing the derived files is cheap where it is not free.**
+  `tied_output_weight.bin` is extracted from `shard_000.bin` by
+  `daemon::manifest::extract_tied_output_weight` and re-extracted automatically
+  at startup.
+- **The byte figure and the shard COUNT are different questions.**
+  `storage_budget_now` takes bytes from the directory and the count from the
+  registry; pricing the count off the directory would count a header as a shard.
+- **Not cached.** The consumers are a timer pass and user-triggered handlers; a
+  cached storage figure that lags a prune is its own defect.
+
+### The trap found underneath it
+
+`auto_manage::test_support::make_test_manager` never set
+`config.node.data_dir`, so `Config::default()` pointed every auto-manage unit
+test at the developer's real `~/.local/share/swarmllm`. Harmless only while
+nothing under test touched the filesystem — the moment the budget measured a
+directory, a test asserting a node "holding 14 GB" measured this machine's
+actual 33 GB. **When a pure-logic function starts touching the filesystem, audit
+the fixtures before the code** (gotcha #629). `write_sparse_shards` gives a test
+real multi-gigabyte holdings via `set_len` at no disk cost.
