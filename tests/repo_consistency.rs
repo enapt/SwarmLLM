@@ -803,12 +803,26 @@ fn every_api_route_is_in_the_architecture_doc() {
     let doc = std::fs::read_to_string(repo_root().join("docs/ARCHITECTURE.md"))
         .expect("read docs/ARCHITECTURE.md");
 
-    // Every quoted "/api/..." literal in the router source.
+    // Every path REGISTERED as a route, which is not the same as every
+    // "/api/..." literal in the file — `unknown_route` matches `"/api/"` as a
+    // prefix to decide whether a 404 is a person or a client, and its test
+    // names paths that are deliberately not served. Both read as undocumented
+    // routes to a scan for bare literals, so the extraction keys on the
+    // registration itself. Whitespace is skipped because several routes are
+    // registered across two lines.
     let mut routes: BTreeSet<String> = BTreeSet::new();
-    for (i, _) in server.match_indices("\"/api/") {
-        let rest = &server[i + 1..];
-        if let Some(end) = rest.find('"') {
-            routes.insert(normalise(&rest[..end]));
+    for (i, _) in server.match_indices(".route(") {
+        let rest = &server[i + ".route(".len()..];
+        let Some(open) = rest.find('"') else { continue };
+        // Only a literal that follows the paren directly, so `.route(VAR, ..)`
+        // cannot pick up a string from the handler expression after it.
+        if rest[..open].trim().is_empty() {
+            if let Some(end) = rest[open + 1..].find('"') {
+                let path = &rest[open + 1..open + 1 + end];
+                if path.starts_with("/api/") {
+                    routes.insert(normalise(path));
+                }
+            }
         }
     }
     assert!(

@@ -590,8 +590,47 @@ pub fn build_router(state: AppState) -> Router {
 /// `/v1/completions` is the one that matters in practice: OpenAI deprecated it
 /// but a great deal of older tooling still calls it, and "404, empty" gives no
 /// clue that `/v1/chat/completions` is right there.
-async fn unknown_route(uri: axum::http::Uri) -> impl IntoResponse {
+/// Is this an unrouted path a PERSON navigated to, rather than a client call?
+///
+/// A browser navigating sends `Accept: text/html,…`; every API client this
+/// server serves sends `application/json` or `*/*` (curl's default), so the
+/// discriminator is an explicit preference for HTML on a GET.
+///
+/// API prefixes are deliberately excluded even then. A developer poking at
+/// `/v1/completions` in a browser wants the message naming the endpoint that
+/// replaced it — sending them to the chat page would hide exactly the answer
+/// this handler exists to give.
+fn is_a_person_who_typed_a_url(
+    method: &axum::http::Method,
+    accept: Option<&str>,
+    path: &str,
+) -> bool {
+    method == axum::http::Method::GET
+        && accept.is_some_and(|a| a.contains("text/html"))
+        && !path.starts_with("/v1/")
+        && !path.starts_with("/api/")
+        && !path.starts_with("/mcp")
+}
+
+async fn unknown_route(
+    method: axum::http::Method,
+    headers: axum::http::HeaderMap,
+    uri: axum::http::Uri,
+) -> axum::response::Response {
     let path = uri.path();
+
+    // Someone typed a plausible URL — `/models` and `/dashboard` are the two
+    // to expect, because the nav calls those destinations Models and Dashboard
+    // while the app serves all of them under `/admin`. Handing a person a JSON
+    // error object is the API's answer given to someone who cannot use it; send
+    // them to the app instead, which is where they were trying to go.
+    let accept = headers
+        .get(axum::http::header::ACCEPT)
+        .and_then(|v| v.to_str().ok());
+    if is_a_person_who_typed_a_url(&method, accept, path) {
+        return Redirect::to("/").into_response();
+    }
+
     let message = match path {
         // Name the replacement rather than making them search for it.
         "/v1/completions" => "The legacy completions endpoint is not implemented. Use /v1/chat/completions, which this server does support."
@@ -609,6 +648,7 @@ async fn unknown_route(uri: axum::http::Uri) -> impl IntoResponse {
             }
         })),
     )
+        .into_response()
 }
 
 /// Answer a right-path/wrong-method request with the same envelope, instead of
@@ -808,5 +848,61 @@ mod tests {
         // Issuing a new nonce sweeps expired entries.
         let _fresh = issue_bootstrap_nonce_into(&map, std::time::Duration::from_secs(60));
         assert!(!map.contains_key(&stale));
+    }
+
+    /// A person who typed `/models` gets the app; every client keeps the
+    /// envelope it can actually read.
+    ///
+    /// The two are told apart by an explicit `text/html` preference on a GET,
+    /// because curl's default `*/*` and every SDK's `application/json` must
+    /// keep the JSON. Found on a fresh node: the nav calls a destination
+    /// "Models" while the app serves it under `/admin`, so `/models` is the
+    /// obvious guess and it answered with a raw error object.
+    #[test]
+    fn a_typed_url_reaches_the_app_and_a_client_still_gets_the_envelope() {
+        use axum::http::Method;
+        let html = Some("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
+
+        // A person, on the paths they would actually guess.
+        for path in [
+            "/models",
+            "/dashboard",
+            "/network",
+            "/settings",
+            "/nonsense",
+        ] {
+            assert!(
+                is_a_person_who_typed_a_url(&Method::GET, html, path),
+                "{path} typed into a browser should reach the app"
+            );
+        }
+
+        // Every client shape, on the same path.
+        for accept in [None, Some("*/*"), Some("application/json")] {
+            assert!(
+                !is_a_person_who_typed_a_url(&Method::GET, accept, "/models"),
+                "a client sending {accept:?} must keep the JSON envelope"
+            );
+        }
+
+        // An API prefix keeps the envelope even from a browser — the message
+        // naming the replacement endpoint is the whole point of that arm.
+        for path in [
+            "/v1/completions",
+            "/v1/anything",
+            "/api/admin/nope",
+            "/mcp/x",
+        ] {
+            assert!(
+                !is_a_person_who_typed_a_url(&Method::GET, html, path),
+                "{path} must still answer with the envelope"
+            );
+        }
+
+        // Only GET. A form post or an API call with an HTML Accept is not
+        // someone navigating.
+        for m in [Method::POST, Method::PUT, Method::DELETE] {
+            assert!(!is_a_person_who_typed_a_url(&m, html, "/models"));
+        }
     }
 }
