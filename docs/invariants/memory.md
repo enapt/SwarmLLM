@@ -596,12 +596,33 @@ it. The coordinator-side reservation (`peer_vram_commitments`, #457) makes two
 large prompts reaching one worker rare, not impossible, and the peer's own
 admission is what these rules call the backstop.
 Three things a change must keep. **The claim is drawn down by what that
-request has actually allocated**, so nothing is charged twice — and a claim
-nothing removed contributes zero once its prefill finished, which is what
-bounds a leak. **`clear_request` releases it**, so all eight worker paths that
-end or abandon a request inherited the release unedited and a new one cannot
-forget. And **the TTL sweep covers the case draw-down cannot** — a prompt
-admitted and then never prefilled at all. `promised_mb` appears beside
+request has actually allocated**, so nothing is charged twice. **`clear_request`
+releases it**, so all eight worker paths that end or abandon a request inherited
+the release unedited and a new one cannot forget. And **the TTL sweep covers the case draw-down cannot** — a prompt
+admitted and then never prefilled at all.
+
+⚠ **The draw-down is NOT a leak bound, and this file said it was for two
+releases** (corrected 2026-09-17, gotcha #637). "A claim nothing removed
+contributes zero once its prefill finished" holds only while the request's cache
+entry is in `caches`, because that is where the draw-down reads what was
+allocated. Delete the entry and the subtrahend goes with it: the claim springs
+back from zero to its FULL size. `cleanup_request_id` did exactly that — it
+released `reserved_positions` and the caches and left `admitted_claims` — so
+every request on the SEGMENT path (`DaemonMsg::ReleaseRequestKv`, which is every
+request on a node serving a model it holds, since a single local segment is
+still assembled as a pipeline) left its whole admission owed until the TTL
+sweep. Measured on the live node: a 5101-token prompt left 1848 MB owed against
+a 3042 MB conversation budget, and identical prompts were refused for ten
+minutes with advice ("close other programs") that could not work. The two maps
+are released together by `forget_request_bookkeeping`, which both cleanup paths
+call. **Introduced by the fix for report #019** — before it the forward path
+released nothing, so the entry stayed and the draw-down was correct; freeing the
+memory is what started the phantom charge. Pinned by
+`a_finished_requests_admission_claim_does_not_outlive_its_cache`.
+
+**The general form**: a quantity defined as "X minus what Y has already done"
+becomes plain X the moment Y is deleted. Any offset that reads a second
+structure must be asked what it reads when that structure is gone. `promised_mb` appears beside
 `live_mb` in both DIAG lines, because a refusal caused by an invisible
 reservation is the kind of thing a reader invents a mechanism to explain.
 

@@ -1041,8 +1041,7 @@ impl KvCacheStore {
         // The request is over, so whatever its admission promised is no longer
         // owed. Every worker path that finishes or abandons a request already
         // comes through here.
-        self.admitted_claims.remove(request_id);
-        self.reserved_positions.remove(request_id);
+        self.forget_request_bookkeeping(request_id);
         let key = Self::cache_key(model_key, request_id);
         self.caches.remove(key.as_str());
         // Also clear TP-keyed cache entries for the same request
@@ -1078,9 +1077,28 @@ impl KvCacheStore {
         removed
     }
 
+    /// Release the per-request bookkeeping that dies with a request.
+    ///
+    /// The two maps are recorded together and must be released together. They
+    /// are separated here so that a path which ends a request cannot release
+    /// one and forget the other — which is exactly what `cleanup_request_id`
+    /// did, and it is not a small leak. `outstanding_admission_bytes` draws a
+    /// claim down by what its request has ALLOCATED, read off `caches`; that is
+    /// what was relied on to bound a claim nobody removed. Removing the cache
+    /// entry removes the draw-down with it, so a claim left behind by a
+    /// cleanup springs back from zero to its FULL size and charges the budget
+    /// for memory that same cleanup just freed, until the TTL sweep. A 5101-
+    /// token prompt left 1848 MB owed on a node with 3042 MB for conversations,
+    /// so the next such prompt was refused for ten minutes — and the refusal
+    /// tells the user to close other programs, which cannot help.
+    fn forget_request_bookkeeping(&self, request_id: &str) {
+        self.admitted_claims.remove(request_id);
+        self.reserved_positions.remove(request_id);
+    }
+
     /// Remove all cache entries for a given request_id (across all models).
     pub fn cleanup_request_id(&self, request_id: &str) {
-        self.reserved_positions.remove(request_id);
+        self.forget_request_bookkeeping(request_id);
         let suffix = format!("\0{request_id}");
         self.caches.retain(|key, _| !key.ends_with(&suffix));
     }
