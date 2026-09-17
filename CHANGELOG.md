@@ -1,5 +1,74 @@
 # Changelog
 
+## [0.3.185-alpha] — 2026-09-17
+
+Three things a node believed about itself that were not true: which computers
+have the pieces of a model, how much disk it is using, and what your settings
+say. Each one was quiet — nothing failed, nothing was logged as an error, and
+the node carried on confidently with the wrong answer.
+
+The first was found by the diagnostic the last release shipped instead of a fix.
+It named the responsible line twenty-one minutes after v0.3.184 was deployed,
+having survived a full day of reading the code without being spotted. It is kept
+for one more release, because with this fix in place it can only fire for a
+different reason — so its silence is the confirmation.
+
+Nodes do not need to update together.
+
+### Fixed
+
+- **A computer that never finished downloading a part was still asked to serve
+  it.** When a computer downloads part of a model it tells the swarm how far it
+  has got. The last message says "100%" — but that means the bytes have arrived,
+  not that they passed the integrity check that runs straight afterwards. Every
+  node treated that as "this computer has this part now", so a download that
+  failed its check still left the whole swarm believing the part was there.
+
+  The computer's own next announcement corrected it, its retry reported 100%
+  again, and the claim came back. On the release node this happened 3039 times
+  over nine days. The cost falls on whoever asks for that model: the request is
+  sent to a computer that cannot answer it, and waits out its deadline before
+  trying somewhere else.
+
+  A part now counts as present only when its owner confirms the integrity check
+  passed. And while a download is still running, the figure sent out stops at
+  99% — nodes on v0.3.184 and earlier read 100% as "finished", and will keep
+  doing so until they update, so capping what we send fixes them too rather than
+  only fixing nodes that upgrade.
+
+- **Your disk limit now counts everything the node actually stores.** A node
+  keeping model parts for the swarm also writes a few files that are not parts:
+  a small header per model, a weights file it extracts from the first part, and
+  a vision encoder for models that see images. None were counted against the
+  limit you set, so a node used about 5% more space than it believed. Measured
+  on the release node: 33062 MB on disk against 31423 MB counted.
+
+  Cancelling a download was the sharper edge. The parts were cleaned up
+  correctly, but those extra files stayed — around 287 MB attached to a model
+  that then counted as nothing at all, with nothing to ever sweep them up. Cancel
+  a few downloads and the space simply disappeared.
+
+  The limit now measures what is on disk, and the same change makes those files
+  reclaimable: once a node holds no part of a model, it gives them back. Both
+  halves were needed. Counting space that could never be freed would have left a
+  node close to its limit deleting parts forever, chasing a floor it could not
+  reach. Losing the files costs little — the largest is rebuilt automatically
+  from the model's first part on the next start.
+
+- **Changing a setting in the dashboard no longer wipes edits made to the
+  config file.** Some settings have no dashboard control, so the documented way
+  to set them is to edit `config.toml` by hand while the node runs. The next save
+  from the dashboard rewrote the whole file from what the node held in memory,
+  which knew nothing about that edit — so the hand-written settings were gone,
+  while the dashboard said "Settings saved".
+
+  A save now reads the file, applies the changed setting to what is actually in
+  it, and writes that back. If the file cannot be read as valid config the save
+  still goes through from the running configuration and says why in the log,
+  because a file someone is midway through editing must not cost them the change
+  they just made. One consequence worth knowing: an edit to the file now takes
+  effect on the next dashboard save rather than waiting for a reload.
+
 ## [0.3.184-alpha] — 2026-09-17
 
 Almost nothing here came from a report. It came from sitting down with a running

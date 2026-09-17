@@ -115,6 +115,25 @@ The daemon must write **only values that differ from the compiled default**.
 
 → `docs/invariants/state-and-config.md`
 
+## A partial config update builds on the FILE, not on what the daemon remembers
+
+`PUT /api/admin/config` rewrites the whole document from a base, so the base
+decides what survives. `api::admin::base_for_partial_update` is that choice: the
+parsed `config.toml` when it parses, the live config when it is missing or
+broken — never a refusal, because a file someone is mid-edit must not cost them
+the change they just made in the dashboard.
+
+Building it from `cfg()` destroyed any hand edit made while the daemon ran, which
+is the documented way to set what the dashboard does not expose
+(`bootstrap_peers`). Re-reading is correct rather than a trade-off because
+**`apply_live_config` has exactly one production caller besides `reload_config`,
+and it is this handler** — so no runtime state lives outside the document, and
+the only way file and live config diverge is an edit worth keeping. A second
+production writer would break that argument: add one and this rule needs
+revisiting, not just extending.
+
+→ `docs/invariants/state-and-config.md`
+
 ## Single-source-of-truth helpers — SharedState, live config and credits
 
 Each names the ONE place a decision is made. A second implementation of any of
