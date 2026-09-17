@@ -305,11 +305,37 @@ shape: correct in itself, inert in production.
 
 ⚠ **A fresh node does not reproduce it** (zero in 25 minutes), so whatever does
 this needs state a new node lacks — reach for a node that has been running, or
-one restored from an existing `db.redb`. Ruled out by reading, none of which
-explains it: `merge_dht_providers` (correctly gated, and the only DHT path), the
-incremental single-shard announces (3318 in that log, all passing an empty
-`complete_for_models`), the three full-announce producers, manifest registration
-(records the LOCAL node) and shard-download progress (no such messages at all).
+one restored from an existing `db.redb`.
+
+**ANSWERED 2026-09-17, by the probe, on its first firing.** The site was
+`daemon/dispatch/mod.rs`'s `ShardDownloadProgress` handler, which treated
+`state == Complete || progress_pct >= 100` as completion.
+`acquisition::maybe_broadcast_shard_progress` broadcasts at `pct == 100`
+regardless of its threshold and sends `DownloadState::Downloading` when it does
+— the bytes have landed, the BLAKE3 check has not run. A download that then
+FAILS verification emits that message and never the `Complete` one, so every
+receiver recorded a holder for a shard the peer had just discarded, the peer's
+own next announce retracted it, and the next retry reinstated it. Fixed on both
+sides: `progress_claims_the_peer_holds_it` requires `Complete`, and the sender
+caps an in-flight broadcast at 99 so nodes running ≤ v0.3.184 stop being misled
+too.
+
+⚠ **This is why the earlier read-through ruled the path out and was wrong.** It
+searched for `Complete` messages and found none — correctly, because the
+messages doing the damage say `Downloading`. "Shard-download progress (no such
+messages at all)" was a true observation of the wrong predicate. When a handler
+fires on `A || B`, grepping for A tells you nothing about B.
+
+The remaining producers really are ruled out: `merge_dht_providers` (correctly
+gated, and the only DHT path), the incremental single-shard announces (3318 in
+that log, all passing an empty `complete_for_models`), the three full-announce
+producers, and manifest registration (records the LOCAL node).
+
+**The probe is deliberately KEPT for one release.** With the fix in, only a
+genuine `Complete` can reach that call site, so if the line still fires from
+`dispatch/mod.rs` the cause is a peer whose downloads keep being pruned — a
+different bug — and if it goes quiet, this was it. Delete it once a deployed
+release has been read.
 
 Why it matters beyond tidiness: a claim that is back in the registry is a
 routing candidate, so the scheduler can hand a segment to a peer that does not

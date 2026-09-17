@@ -104,6 +104,27 @@ settled".
 
 → `docs/invariants/network.md`
 
+## A holder claim means VERIFIED, not transferred
+
+Nothing may record a peer — or this node — as holding a shard until its BLAKE3
+check has passed. `daemon::dispatch::progress_claims_the_peer_holds_it` is the
+single reading of an inbound `ShardDownloadProgress` and requires
+`DownloadState::Complete`; a percentage never asserts holding, because
+`acquisition::maybe_broadcast_shard_progress` reaches 100 while the bytes are
+still unverified — it caps its advertised figure at `IN_FLIGHT_MAX_PCT` for
+exactly that reason. `Verifying` and `Failed` are never broadcast, so `Complete`
+is the only wire value that means held.
+
+BitTorrent draws the same line: BEP 3's `have` announces a piece downloaded
+**and verified**, never one that merely finished transferring. This repo has
+paid for it twice before — gotcha #78 (compute the hash before registering as
+holder) and gotcha #184 ("when a validity check exists in several places, find
+the one that writes the claim others read"). A rejected artifact that is still
+advertised is worse than one simply absent: it is a routing candidate that
+cannot serve.
+
+→ `docs/invariants/network.md`
+
 ## The activity list reports a TRANSITION; the log may report every message
 
 `emit_activity`'s ring is 100 entries, and it is also the replay a dashboard

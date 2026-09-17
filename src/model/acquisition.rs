@@ -112,6 +112,23 @@ pub fn shard_pct(downloaded_bytes: u64, total_bytes: u64) -> u32 {
     }
 }
 
+/// The highest percentage an IN-FLIGHT download may advertise to the swarm.
+///
+/// This broadcast reports bytes moved, not a verified shard: the BLAKE3 check
+/// runs after the last byte, and only `auto_manage::download` broadcasts
+/// `DownloadState::Complete` once it passes. Advertising a literal 100 here is
+/// indistinguishable from completion to a receiver that reads the percentage —
+/// which every node released up to and including v0.3.184 does, via
+/// `state == Complete || progress_pct >= 100`. Those nodes recorded the peer as
+/// a HOLDER the moment the bytes landed, kept the claim when the hash check
+/// failed, and only dropped it at the peer's next announce, which the next
+/// retry then undid: 3039 reinstatements over 9 days on the live node.
+///
+/// Capping at 99 means an older peer never sees the value that trips it, so
+/// the fleet is fixed without waiting for every node to update. The receiving
+/// side is fixed properly in `daemon::dispatch::progress_claims_the_peer_holds_it`.
+const IN_FLIGHT_MAX_PCT: u32 = 99;
+
 /// Build and send a shard download progress broadcast to the network.
 /// Returns the new `last_broadcast_pct` if a broadcast was sent.
 pub fn maybe_broadcast_shard_progress(
@@ -129,10 +146,12 @@ pub fn maybe_broadcast_shard_progress(
         crate::types::SwarmMessage::ShardDownloadProgress(crate::types::ShardDownloadProgress {
             node_id: node_id.clone(),
             shard_id: shard_id.clone(),
-            progress_pct: pct,
+            progress_pct: pct.min(IN_FLIGHT_MAX_PCT),
             state: crate::types::DownloadState::Downloading,
         });
     let _ = net_tx.try_send(crate::types::NetworkCommand::Broadcast(msg));
+    // The CADENCE still tracks true progress — only the advertised figure is
+    // capped — so the threshold below behaves exactly as it did before.
     pct
 }
 
@@ -978,5 +997,49 @@ mod tests {
         };
         let json = serde_json::to_string(&failed).unwrap();
         assert!(json.contains("bad hash"));
+    }
+
+    fn broadcast_pct_for(pct: u32) -> u32 {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let shard_id = ShardId {
+            model_id: crate::types::ModelId("tinyllama-1.1b-chat-v1.0.q4-k-m".to_string()),
+            index: 1,
+        };
+        // threshold 0 so every call broadcasts and the cap is what is measured
+        maybe_broadcast_shard_progress(&tx, &NodeId([3u8; 32]), &shard_id, pct, 0, 0);
+        match rx.try_recv().expect("a broadcast should have been sent") {
+            crate::types::NetworkCommand::Broadcast(
+                crate::types::SwarmMessage::ShardDownloadProgress(p),
+            ) => {
+                assert_eq!(
+                    p.state,
+                    crate::types::DownloadState::Downloading,
+                    "an in-flight broadcast never asserts completion"
+                );
+                p.progress_pct
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    /// **An in-flight download must never put 100 on the wire.** Every node up
+    /// to v0.3.184 reads `progress_pct >= 100` as "this peer holds the shard",
+    /// so a literal 100 sent before the BLAKE3 check registers a holder for a
+    /// shard that may fail verification seconds later. Capping at 99 fixes
+    /// those already-deployed nodes too, which is the only reason the cap is on
+    /// the sending side at all.
+    #[test]
+    fn an_unverified_download_never_advertises_one_hundred() {
+        assert_eq!(broadcast_pct_for(100), 99);
+        assert_eq!(broadcast_pct_for(250), 99, "a bogus figure is capped too");
+    }
+
+    /// The cap must not distort ordinary progress, which the peer-download
+    /// display reads straight off these messages.
+    #[test]
+    fn progress_below_the_cap_is_reported_verbatim() {
+        for pct in [0, 1, 37, 99] {
+            assert_eq!(broadcast_pct_for(pct), pct);
+        }
     }
 }

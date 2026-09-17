@@ -191,6 +191,35 @@ fn gossip_timestamp_fresh(ts_ms: u64, now_ms: u64, kind: &'static str) -> bool {
     timestamp_fresh_one_sided(ts_ms, now_ms, GOSSIP_STALENESS_MS, GOSSIP_SKEW_MS, kind)
 }
 
+/// Does this progress message say the peer HOLDS the shard, or only that its
+/// bytes arrived?
+///
+/// The two are not the same and conflating them advertises shards nobody has.
+/// `acquisition::maybe_broadcast_shard_progress` deliberately broadcasts at
+/// `pct == 100` regardless of its own threshold, and it sends
+/// `DownloadState::Downloading` when it does — the bytes are transferred, the
+/// BLAKE3 check has not run yet. Only `auto_manage::download`'s post-verify
+/// broadcast carries `Complete`. So a download whose hash check FAILS emits the
+/// 100% message and never the `Complete` one, and a receiver reading
+/// `pct >= 100` as completion records a holder for a shard the peer just threw
+/// away. Its own next `ShardAnnounce` retracts the claim, the retry re-sends
+/// 100%, and the claim is reinstated — the retraction/reinstatement loop
+/// measured at 3039 events over 9 days, which feeds the scheduler peers that go
+/// silent when asked for that shard.
+///
+/// BitTorrent draws the same line and for the same reason: BEP 3's `have`
+/// announces "a piece that has just been successfully downloaded **and
+/// verified**", never one that merely finished transferring. This repo has
+/// written the rule down twice already — gotcha #78 (compute BLAKE3 *before*
+/// registering as holder) and gotcha #184 ("when a validity check exists in
+/// several places, find the one that writes the claim others read").
+///
+/// `Verifying` and `Failed` exist in the enum but are never broadcast, so
+/// `Complete` is the only wire value that asserts holding.
+fn progress_claims_the_peer_holds_it(progress: &crate::types::ShardDownloadProgress) -> bool {
+    progress.state == crate::types::DownloadState::Complete
+}
+
 /// Pipeline sealing: encrypt the token IDs in a LayerResult for the requester's X25519 key.
 /// If `requester_node_id` is present, seals `token_ids` into `sealed_token_ids` and clears
 /// the plaintext `token_ids`. Falls back silently on crypto errors (result sent unsealed).
@@ -1687,8 +1716,13 @@ pub(crate) async fn dispatch_network_messages(
                                         // Update peer download state in shared state
                                         let local_nid = shared_state.identity.node_id();
                                         if progress.node_id != *local_nid {
-                                            if progress.state == crate::types::DownloadState::Complete || progress.progress_pct >= 100 {
-                                                // Download finished — remove from download tracking
+                                            if progress_claims_the_peer_holds_it(&progress) {
+                                                // Download finished — remove from download tracking.
+                                                // A peer sitting at 100% has NOT finished: it is
+                                                // verifying, and stays visible as a download until
+                                                // it says `Complete`. `cleanup_stale_peer_shard_downloads`
+                                                // in health/monitor.rs sweeps one whose pct stops moving,
+                                                // so a failed verify cannot leave the entry pinned.
                                                 if let Some(mut entry) = shared_state.models.peer_shard_downloads.get_mut(&progress.shard_id) {
                                                     entry.retain(|(nid, _)| *nid != progress.node_id);
                                                 }
@@ -1705,9 +1739,9 @@ pub(crate) async fn dispatch_network_messages(
                                                 // many peers race to download a popular shard — each access
                                                 // of this Vec is linear, so uncapped growth creates an
                                                 // O(n) scan on every gossip message. When full, evict the
-                                                // highest-progress entry: near-complete peers will self-remove
-                                                // via the completion path (is_complete branch above) within
-                                                // seconds, so preemptively evicting them costs little. The
+                                                // highest-progress entry: near-complete peers self-remove
+                                                // via the completion path above as soon as their hash check
+                                                // passes, so preemptively evicting them costs little. The
                                                 // in-progress peers with lower pct carry the more useful
                                                 // operational signal and stay visible.
                                                 const MAX_PEER_DOWNLOADS_PER_SHARD: usize = 64;
@@ -2559,6 +2593,65 @@ pub(crate) async fn dispatch_network_messages(
 pub(crate) mod layer_forward;
 pub(crate) mod remote_generate;
 mod vision;
+
+#[cfg(test)]
+mod shard_download_progress_tests {
+    use super::progress_claims_the_peer_holds_it;
+    use crate::types::{DownloadState, ModelId, NodeId, ShardDownloadProgress, ShardId};
+
+    fn progress(state: DownloadState, pct: u32) -> ShardDownloadProgress {
+        ShardDownloadProgress {
+            node_id: NodeId([7u8; 32]),
+            shard_id: ShardId {
+                model_id: ModelId("tinyllama-1.1b-chat-v1.0.q4-k-m".to_string()),
+                index: 1,
+            },
+            progress_pct: pct,
+            state,
+        }
+    }
+
+    /// **The regression this exists for.** A shard whose bytes have all arrived
+    /// is not a shard the peer holds — the BLAKE3 check has not run. The sender
+    /// broadcasts `Downloading` at `pct == 100` unconditionally, so reading
+    /// 100% as completion records a holder for every download that then fails
+    /// verification, and the peer's own next announce retracts it. That
+    /// reinstatement loop was measured at 3039 events over 9 days on the live
+    /// node and is what hands the scheduler peers that go silent.
+    #[test]
+    fn a_download_at_one_hundred_percent_is_not_yet_a_holder_claim() {
+        assert!(
+            !progress_claims_the_peer_holds_it(&progress(DownloadState::Downloading, 100)),
+            "bytes transferred is not the same as hash verified — BEP 3 sends `have` only after the check"
+        );
+    }
+
+    /// The other half: a genuine post-verify completion MUST still register,
+    /// or nothing this node learns from gossip ever becomes routable promptly.
+    #[test]
+    fn a_verified_completion_is_a_holder_claim() {
+        assert!(progress_claims_the_peer_holds_it(&progress(
+            DownloadState::Complete,
+            100
+        )));
+    }
+
+    /// `Complete` is the assertion, not the percentage. A peer that reports
+    /// completion with a stale counter still holds the shard.
+    #[test]
+    fn completion_is_decided_by_state_not_percentage() {
+        assert!(progress_claims_the_peer_holds_it(&progress(
+            DownloadState::Complete,
+            0
+        )));
+        for pct in [0, 50, 99] {
+            assert!(
+                !progress_claims_the_peer_holds_it(&progress(DownloadState::Downloading, pct)),
+                "an in-flight download at {pct}% must never claim holding"
+            );
+        }
+    }
+}
 
 #[cfg(test)]
 mod contribution_limits_tests {

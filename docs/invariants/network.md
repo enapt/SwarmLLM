@@ -982,6 +982,71 @@ dots from its source filename (`tinyllama-1.1b-chat-v1.0.q4-k-m`) is
 never caught. The v0.3.10 disk-scan-only guard was insufficient because
 a peer on an older build re-gossips the name straight back in.
 
+## A holder claim means VERIFIED, not transferred
+
+**Rule:** `.claude/rules/arch-network.md` § "A holder claim means VERIFIED, not
+transferred".
+
+### What happened (found 2026-09-17, by the probe v0.3.184 shipped)
+
+A peer's withdrawn shard claim kept coming back: **3039 reinstatements over 9
+days** on the live node, one peer having the same GLM-4 shard retracted **344
+times** over five days at a median gap of 330 s, across only 21 restarts.
+Persistent but bursty — present in 106 of ~120 hours, a 4x spike on 09-13, and
+entirely quiet for hours at a time.
+
+The chain:
+
+1. `acquisition::maybe_broadcast_shard_progress` broadcasts the moment a
+   download reaches `pct == 100` — unconditionally, since its threshold check
+   carries an explicit `&& pct != 100` — and sends `DownloadState::Downloading`,
+   because the BLAKE3 check has not run yet.
+2. `auto_manage::download` broadcasts `Complete` only AFTER that check passes.
+   So a download that fails verification emits the first message and never the
+   second.
+3. The receiver read `state == Complete || progress_pct >= 100` as completion
+   and called `record_shard_holder`, which by design clears any retraction —
+   a first-hand claim is supposed to beat a stale DHT record.
+4. The peer's own next `ShardAnnounce` honestly omitted the shard, so
+   `retain_node_shards_for_model` dropped it again. The peer retried on backoff,
+   reached 100% again, and the claim came back. Forever.
+
+**Why it hurts:** a reinstated claim is a routing candidate. The scheduler hands
+a segment to a peer that does not hold those weights, and the request spends its
+first-token deadline waiting on a node that was never going to answer — the
+135 s silent-peer waits seen on the live swarm.
+
+### What a change must keep
+
+- **`Complete` is the only wire value that asserts holding.** `Verifying` and
+  `Failed` exist in `DownloadState` but are never broadcast; a percentage is a
+  statement about bytes.
+- **The sender's cap is for the FLEET, not for us.** Every node released up to
+  and including v0.3.184 reads `progress_pct >= 100` as completion, and they do
+  not all update. `IN_FLIGHT_MAX_PCT = 99` means an older peer never sees the
+  value that trips it. The cadence still tracks true progress — only the
+  advertised figure is capped — so the broadcast threshold is unchanged.
+- **A peer at 100% stays visible as a download** until it says `Complete`;
+  `health::monitor::cleanup_stale_peer_shard_downloads` sweeps one whose
+  percentage stops moving, so a failed verify cannot pin the entry.
+
+### The diagnosis lesson, which cost more than the fix
+
+The path had been **explicitly ruled out by reading** the day before — "shard-
+download progress (no such messages at all)" — and that observation was true.
+It searched for `Complete` messages, and the messages doing the damage say
+`Downloading`. **When a handler fires on `A || B`, grepping for A tells you
+nothing about B** (diagnosis rule 2: absence of evidence is only evidence of
+absence from a complete source).
+
+The measurement the round log had specified as decisive — group the collector's
+`shard announce ingested` lines by node and look for one peer sending two
+different `(seen, total)` pairs — could not have settled it either: the tuple is
+`(shards in this announce, shards NEWLY recorded)`, not `(seen, total)`. Its
+second element drops to 0 on every re-announce **by design**, so running it
+produced 64 "divergent" pairs that were the instrument working correctly. Read
+the emitter before trusting a field name recorded in prose.
+
 ## Destroying a shard we hold needs better evidence than a stranger's claim
 
 **Rule:** `.claude/rules/arch-network.md` § "Destroying a shard we hold needs
