@@ -78,25 +78,33 @@
           for (var j = 0; j < m.shards; j++) body.shards.push(j);
         }
 
-        return App.utils
-          .apiAction('/api/admin/hf/download-shards', {
+        // The success path is `apiAction`'s onSuccess callback, NOT `.then`.
+        // `apiAction` resolves `false` on a refusal — it catches and reports
+        // internally rather than rejecting — so a `.then` ran unconditionally
+        // and announced "download started" beside the error banner it had just
+        // shown. That is the shape `.claude/rules/arch-frontend.md` § "A write
+        // whose response is never read reports failure as success" is about,
+        // and every other caller in the codebase passes onSuccess.
+        //
+        // The `.catch` that used to sit here was dead for the same reason, and
+        // was reading a rejected `Error` with `extractErrorMessage`, which
+        // expects a backend `{error: …}` body.
+        return App.utils.apiAction(
+          '/api/admin/hf/download-shards',
+          {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body),
-          })
-          .then(function () {
+          },
+          function () {
             App.notifications.showToast(
               I18n.t('reference.started', { model: m.model_id }),
               'success'
             );
             App.referenceModels.render();
-          })
-          .catch(function (e) {
-            App.notifications.showToast(
-              I18n.t('reference.failed', { error: U.extractErrorMessage(e) }),
-              'error'
-            );
-          });
+          },
+          { fallback: I18n.t('reference.failed', { error: '' }) }
+        );
       });
     },
 

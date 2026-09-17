@@ -2306,6 +2306,8 @@ Routes Claude model requests through a locally-authenticated `claude` CLI subpro
   - `frontend/js/components/responses.js` — `/v1/responses` dashboard panel: retrieve-by-id, status-filtered list, cancel/delete/view per row, 5-second polling refresh while visible
   - `frontend/js/components/pool.js` — device pool management (create, join, members, contribution)
   - `frontend/js/components/swarm-tab.js` — Swarm tab: wishlist + Capacity Plan view (R111)
+  - `frontend/js/components/reference-models.js` — the pinned reference models (`src/model/reference.rs`) offered as opt-in downloads, plus the diagnostics export. They are pinned so a speed figure from one machine means the same as one from another, and so a node holding nothing still has something guaranteed to exist to fall back on
+  - `frontend/js/components/welcome.js` — the one-time first-run tour of the four header elements that matter; triggered by Setup completing and re-openable from Settings
   - `frontend/js/init.js` — event binding, initialization, public API export (`window.SwarmLLM`)
 - **HTML templates**: 11 `<template id="tmpl-*">` elements for repeating UI structures (session items, chat messages, toasts, compare cards, compare model chips, leaderboard rows, leaderboard podium, download queue items, prune rows, storage model rows, pool member rows). Components clone templates via `template.content.cloneNode(true)` instead of innerHTML string building. (The peer table is built by `dashboard.js renderPeers` via string concatenation, not a `<template>`.)
 - Cross-component calls: `App.componentName.method()`. Shared state: `App.state.*`. Utilities: `App.utils.*`.

@@ -229,16 +229,18 @@ pub struct HfWatcher {
 
 impl HfWatcher {
     pub fn new(shared_state: Arc<SharedState>, shutdown_rx: watch::Receiver<bool>) -> Self {
-        let client = reqwest::Client::builder()
+        // Through `crate::http::build_client`, not a bare `Client::builder()`:
+        // that helper exists so the build-failure fallback and any future shared
+        // default reach every client, and this one is long-lived background
+        // HTTP, i.e. exactly the kind that would silently miss them.
+        let client = crate::http::build_client(|b| {
             // Keep the timeout tight — a stuck HF call shouldn't hold
             // up the watcher's shutdown path.
-            .timeout(Duration::from_secs(30))
-            .user_agent(format!(
+            b.timeout(Duration::from_secs(30)).user_agent(format!(
                 "SwarmLLM/{} (+swarmllm.app)",
                 env!("CARGO_PKG_VERSION")
             ))
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+        });
         Self {
             shared_state,
             shutdown_rx,

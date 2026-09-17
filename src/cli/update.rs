@@ -147,6 +147,12 @@ async fn daemon_is_running() -> bool {
         .ok()
         .and_then(|p| p.parse::<u16>().ok())
         .unwrap_or(8800);
+    // Deliberately NOT `crate::http::build_client`, and a sweep has now asked
+    // twice. That helper falls back to a default client when the builder fails;
+    // here a failure must answer "no daemon", because probing with a fallback
+    // client could report a daemon running when all we established is that TLS
+    // would not initialise. The question is boolean, so the safe answer is the
+    // negative one.
     let client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(2))
         .build()

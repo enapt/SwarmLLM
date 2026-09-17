@@ -236,8 +236,16 @@
     if (role === 'user') {
       roleEl.textContent = I18n.t('chat.role_user');
     } else {
-      // Show model name instead of generic "Assistant"
-      var modelId = (opts && opts.model) || '';
+      // Show model name instead of generic "Assistant".
+      //
+      // Reuses the `modelId` the avatar block above already resolved — it is
+      // the SAME variable, because `var` is function-scoped, and redeclaring it
+      // here as `opts.model` alone threw away that block's session and
+      // current-model fallbacks. A message whose model came from the session
+      // rather than from `opts` — every message restored from a saved
+      // conversation, which is how older ones are stored — then drew the right
+      // provider icon beside a generic "AI" label. `source` a few lines below
+      // is read across the same boundary for the same reason.
       var modelDisplay = modelId ? formatModelDisplayName(modelId) : I18n.t('chat.avatar_ai');
       roleEl.textContent = modelDisplay;
       // Source badge — only for non-obvious sources (skip local + cloud)
