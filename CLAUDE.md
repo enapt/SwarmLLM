@@ -170,10 +170,12 @@ a change, especially your own.
 
 ## Status
 
-**v0.3.184-alpha released and deployed to both nodes (2026-09-17).** ⚠ **Two
-functional fixes are UNRELEASED on main** — the unverified-download holder claim
-(`d10d1410`) and the storage budget measuring the directory (`291302aa`);
-neither has been driven against a live node. Release procedure:
+**v0.3.185-alpha released and deployed to both nodes (2026-09-17).** Nothing
+functional is unreleased. ⚠ **One thing is outstanding rather than unfinished**:
+the .184 shard-claim probe ships again in .185 as a discriminator — read
+`grep "DIAG: a holder claim this peer had withdrawn was reinstated" node.log`
+after a few hours of uptime. Silence confirms the fix; a firing line means a
+different cause. Release procedure:
 **`memory/release_gate.md`** — the ordered steps
 and every caution earned at a past gate; do not re-derive it. Per-release
 history: `memory/round_history.md`. Gotchas: `memory/gotchas.md` (the next free
