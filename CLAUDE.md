@@ -170,16 +170,16 @@ a change, especially your own.
 
 ## Status
 
-**v0.3.185-alpha released and deployed to both nodes (2026-09-17).** Nothing
+**v0.3.186-alpha released and deployed to both nodes (2026-09-17).** Nothing
 functional is unreleased; `cargo audit` reports only advisories documented in
-`SECURITY.md`. ⚠ **The top item is a READ, not work** — `memory/next_up.md` § A.
+`SECURITY.md`. ⚠ **One open item from that gate** (a shapes check that cannot
+run — pre-existing, not a regression): `memory/next_up.md` § A.
 Release procedure: **`memory/release_gate.md`** — the ordered steps and every
 caution earned at a past gate; do not re-derive it. Per-release history:
-`memory/round_history.md`. Gotchas: `memory/gotchas.md` (the next free index is
-tracked in `memory/MEMORY.md`, not here — it drifted for four rounds when both
-claimed it). Standing cautions: `memory/open_cautions.md` — **read at session
-start.** (`memory/` is the auto-memory dir outside the repo:
-`~/.claude/projects/-home-user-SwarmLLM/memory/`.)
+`memory/round_history.md`. Gotchas: `memory/gotchas.md` (next free index lives
+in `memory/MEMORY.md`, not here — it drifted when both claimed it). Standing
+cautions: `memory/open_cautions.md` — **read at session start.** (`memory/` is
+the auto-memory dir outside the repo: `~/.claude/projects/-home-user-SwarmLLM/memory/`.)
 
 ## Pushes are public-facing
 
