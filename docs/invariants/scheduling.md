@@ -34,7 +34,21 @@ it excludes the local node with "local inference is handled by `execute_local`,
 which has its own faster path". True only of requests that never reached the
 router.
 
-Three things a change here must keep.
+Four things a change here must keep.
+
+- **A node that holds the model but has no `split_models` ENTRY is still
+  eligible.** That map has one writer, `auto_manage::scan`, which refuses to
+  register past a ceiling on what the node offers — so absence means "the
+  ceiling was full when we scanned it", not "not ours". Requiring an entry left
+  this path firing ZERO times in a full day's log while the scheduler kept
+  assigning this node single local segments, i.e. #018's loss restored in full
+  on a report that had been closed (gotcha #638, 2026-09-17). The fallback reads
+  the MANIFEST — the same source `scan.rs` derives `is_first`/`is_last` from, so
+  it cannot disagree with the registration it stands in for — and requires this
+  node to hold shard 0 and the LAST shard, because a whole-model range without
+  them loads a model with no `tok_embeddings` and pushes raw token ids into the
+  first block (gotcha #187). A budget on what to OFFER must never decide how
+  work already assigned here is EXECUTED.
 
 - **The span is checked, not assumed from the segment count.**
   `local_whole_model_segment` requires the segment to equal the complete local

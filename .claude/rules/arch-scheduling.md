@@ -36,8 +36,16 @@ the identical plan (gotcha #452).
 plan assigned to this node through `ModelProcessPool::generate`, not as a
 `LayerForward` per token to our own worker — which is the one path the prefix
 cache, continuous batching and n-gram speculation are absent from. The span is
-checked against the complete local split model, never assumed from the segment
-count.
+checked against the complete model, never assumed from the segment count.
+
+**A missing `split_models` entry does not disqualify it.** That map's one writer
+refuses to register past a ceiling on what the node OFFERS, so absence means the
+ceiling was full when it scanned — not "not ours". Reading it as a disqualifier
+made this path fire ZERO times in a full day's log (gotcha #638). The fallback
+reads the MANIFEST, the same source `scan.rs` derives `is_first`/`is_last` from,
+and requires shard 0 and the last shard so the worker is never handed a
+whole-model range with no embedding table (#187). **A budget on what to OFFER
+must not decide how work already assigned here is EXECUTED.**
 
 → `docs/invariants/scheduling.md`
 

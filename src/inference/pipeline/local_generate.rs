@@ -122,9 +122,51 @@ impl PipelineExecutor {
         // satisfies it completely, with no boomerang to build. The remote
         // sibling declines on it because that path puts the raw prompt on the
         // wire.
-        let meta =
-            crate::api::openai::get_split_model_meta(&self.shared_state, &self.request.model_id)?;
-        (meta.layer_range == segment.layer_range).then_some(meta.layer_range)
+        // A registered entry answers directly, and is preferred: `is_complete`
+        // is the strongest form of the question, and the lookup carries the
+        // predicate so the decision and the range acted on cannot disagree
+        // (gotcha #187).
+        if let Some(meta) =
+            crate::api::openai::get_split_model_meta(&self.shared_state, &self.request.model_id)
+        {
+            return (meta.layer_range == segment.layer_range).then_some(meta.layer_range);
+        }
+
+        // **The absence of a registration does not mean this node cannot run
+        // the model.** `split_models` has one writer, `auto_manage::scan`, and
+        // it refuses to register past a budget — a ceiling on what the node
+        // OFFERS, sized as though every registered model were resident at once
+        // even though the entry allocates nothing. On a node holding several
+        // models the later ones therefore never get an entry, and reading that
+        // absence as "not ours" left this fast path firing ZERO times in a full
+        // day's log while the scheduler kept assigning this node single local
+        // segments (report #018, reopened 2026-09-17). What is lost is the
+        // prefix cache, continuous batching, slot admission and n-gram
+        // speculation — exactly what #018 was filed about.
+        //
+        // A ceiling on what to OFFER must not decide how a request already
+        // assigned here is EXECUTED. The pipeline is going to run this very
+        // segment on this very node either way, so this adds no failure mode
+        // the other branch does not already have — only the SPAN has to be
+        // right, and a segment short of either end produces hidden states
+        // rather than tokens.
+        //
+        // Everything below comes from the MANIFEST, which is also where
+        // `scan.rs` derives `is_first`/`is_last`, so the fallback cannot
+        // disagree with the registration it stands in for. Holding shard 0 and
+        // the last shard is what makes the worker's embedding table and output
+        // head present; without them a whole-model range would load a model
+        // with no `tok_embeddings` and push token ids into the first block,
+        // which is gotcha #187's crash.
+        let registry = &self.shared_state.model_registry;
+        let manifest = registry.get_manifest(&self.request.model_id)?;
+        let held = registry.local_shard_indices_in(&manifest, self.shared_state.identity.node_id());
+        let last_shard = manifest.shard_count.saturating_sub(1);
+        if !held.contains(&0) || !held.contains(&last_shard) {
+            return None;
+        }
+        let total_layers = manifest.num_layers;
+        (segment.layer_range == (0, total_layers)).then_some(segment.layer_range)
     }
 }
 
@@ -207,6 +249,98 @@ mod tests {
         let local = state.identity.node_id().clone();
         let exec = executor_for(state, vec![segment(local, (0, 48))]);
         assert_eq!(exec.local_whole_model_segment(), Some((0, 48)));
+    }
+
+    /// Build a manifest for `m` and record this node as holding every shard.
+    fn register_whole_model(
+        state: &Arc<crate::daemon::SharedState>,
+        num_layers: u32,
+        shard_count: u32,
+    ) {
+        let model_id = ModelId("m".into());
+        let shards: Vec<ShardInfo> = (0..shard_count)
+            .map(|index| ShardInfo {
+                index,
+                layer_range: (0, num_layers),
+                size_bytes: 1,
+                hash: [0u8; 32],
+                tensors: vec![],
+            })
+            .collect();
+        state.model_registry.register_manifest(ModelManifest {
+            id: model_id.clone(),
+            name: "Test Model".into(),
+            architecture: ModelArchitecture::Llama,
+            num_layers,
+            num_params_billions: 1.0,
+            quantization: Quantization::Q4KM,
+            total_size_bytes: 1,
+            shard_count,
+            shards,
+            tokenizer_hash: [0u8; 32],
+            manifest_hash: [0u8; 32],
+            publisher: NodeId([0u8; 32]),
+            publish_date: chrono::Utc::now(),
+            license: "MIT".into(),
+            mmproj: None,
+        });
+        for index in 0..shard_count {
+            state.model_registry.record_shard_holder(
+                ShardId {
+                    model_id: model_id.clone(),
+                    index,
+                },
+                state.identity.node_id().clone(),
+            );
+        }
+    }
+
+    /// **A model with no `split_models` entry is still ours to run.**
+    ///
+    /// `split_models` is written only by `auto_manage::scan`, which refuses to
+    /// register past a budget sized as though every registered model were
+    /// resident at once. So on a node holding several models the later ones
+    /// have no entry at all — and requiring one left this fast path firing zero
+    /// times in a full day's log on a node the scheduler kept assigning single
+    /// local segments (report #018, reopened 2026-09-17). Without the fallback
+    /// this returns `None` and the reply is computed a `LayerForward` at a
+    /// time, with no prefix cache, no batching and no speculation.
+    #[tokio::test]
+    async fn an_unregistered_whole_model_is_still_a_local_generate() {
+        let state = crate::inference::pipeline::tests::make_test_state();
+        register_whole_model(&state, 48, 2);
+        assert!(
+            state.split_models.is_empty(),
+            "the point of this test is the ABSENCE of a registration"
+        );
+        let local = state.identity.node_id().clone();
+        let exec = executor_for(state, vec![segment(local, (0, 48))]);
+        assert_eq!(exec.local_whole_model_segment(), Some((0, 48)));
+    }
+
+    /// The fallback must not hand `generate` a model whose ends are missing.
+    ///
+    /// Shard 0 carries `token_embd.weight` and the last shard the output head.
+    /// A worker loading a whole-model range without them has no
+    /// `tok_embeddings`, passes the input through unchanged, and pushes raw
+    /// token ids into the first block's rms-norm — gotcha #187's crash
+    /// (`shape mismatch in rms-norm [1, 128] [3072]`). Declining here is free:
+    /// the pipeline simply runs the segment the way it did before.
+    #[tokio::test]
+    async fn the_fallback_declines_when_an_end_shard_is_missing() {
+        let state = crate::inference::pipeline::tests::make_test_state();
+        register_whole_model(&state, 48, 3);
+        // Drop the LAST shard's holder record: the output head is not here.
+        state.model_registry.remove_shard_holder(
+            &ShardId {
+                model_id: ModelId("m".into()),
+                index: 2,
+            },
+            state.identity.node_id(),
+        );
+        let local = state.identity.node_id().clone();
+        let exec = executor_for(state, vec![segment(local, (0, 48))]);
+        assert_eq!(exec.local_whole_model_segment(), None);
     }
 
     /// A segment that does not reach both ends produces hidden states, not
