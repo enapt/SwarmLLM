@@ -446,6 +446,48 @@ or assigns locally. A feature behind a gate is only as reachable as the
 gate's callers: test it from the API, not from the function.
 
 
+
+### The override half (2026-09-17, gotcha #633)
+
+The predicate now takes the request's `swarm_route` override as a **required**
+argument. `pretend_local_holds: "none"` means "plan as if this node held none of
+this model", and it answered `x-swarm-route: local`, `x-swarm-peers: 0` —
+byte-identical to the same request without the block. The instruction was
+parsed, validated (a mistyped value still returned a 400 naming the field) and
+then dropped, because this predicate decides whether the request ever reaches
+the router and **the router is the only reader of the override**.
+
+Auto-manage converges nodes on holding whole models — that is its job — so the
+knob was inert on precisely the machines it was written for. Its own module doc
+names that convergence as the reason it exists.
+
+**`override_keeps_whole_model(pretend, shard_count)` is the pure decision**, a
+truth table beside `local_fast_path_allowed`: `None`/`Everything` keep the fast
+path, `Nothing` refuses it, and a range keeps it only when it covers every shard
+of the model. A range with **no manifest to size it against refuses**, because
+it cannot be shown to cover the model and the caller explicitly asked this node
+to hold less. `exclude_nodes` is deliberately NOT consulted — leaving a peer out
+of the candidate set says nothing about what WE hold, and the fast path asks no
+peer for anything.
+
+Three callers, each of which must now say what it means: the two dispatch paths
+pass the request's override, and `api::admin_models::listing` passes `None`
+because a listing answers for the node rather than for a request.
+
+**The generalisable half.** This is the third feature this fast path has eaten
+— #187 (a predicate and a getter disagreeing about which split entry),
+#443 (the #442 delegation fix unreachable because the fast path always won on a
+processor-only node), and now this. The section above already ends with the
+sentence that would have caught it: *a feature behind a gate is only as
+reachable as the gate's callers: test it from the API, not from the function.*
+**When adding anything request-scoped, enumerate every early return between the
+API edge and the code that reads it.** Validating the field at the edge proves
+nothing: a 400 on a mistyped value is exactly what a knob that is then discarded
+also produces.
+
+Verified from the API, not the function: on a node holding the model in full,
+unchanged without the block and genuinely answered by another machine with it
+(`route: distributed`, `peers: 1`, a real remote node id).
 ## Prompt privacy is read through one accessor, and the map is not it
 
 (2026-09-11.) `SharedState::encrypted_pipeline_for` resolves three cases in

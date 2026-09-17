@@ -1976,6 +1976,19 @@ the sidecar holds.
 
 ## HTTP API Routes
 
+**An unrouted path answers in the error envelope, except for a person.**
+`unknown_route` returns `{"error": {message, type, param, code}}` with a 404 —
+never a bare empty 404 — and names the replacement where there is one
+(`/v1/completions` → `/v1/chat/completions`). Since 2026-09-17 a **browser
+navigation** to an unrouted path is redirected to `/` instead: the navigation
+menu calls a destination Models while the app serves it under `/admin`, so
+`/models` is an obvious thing for a person to type and a JSON error object is
+the API's answer handed to someone who cannot use it. The discriminator is an
+explicit `text/html` preference on a GET, so `*/*` (curl's default) and
+`application/json` keep the envelope; paths under `/v1/`, `/api/` and `/mcp`
+keep it even from a browser, because a developer looking one up wants the
+message rather than the chat page.
+
 ### OpenAI-Compatible (Bearer auth required)
 - `POST   /v1/chat/completions` — Chat completions (streaming + non-streaming, tool_calls). `logprobs` is refused for a model running locally — every local path pins `token_logprobs: vec![]`, so it is only ever returned by a cloud provider (see Deferred Items). **`max_tokens` is optional, and absent does not mean zero**: the serving node resolves it against the model's real context window (`model_worker::resolve_max_new_tokens`), lowering `DEFAULT_REPLY_BUDGET` to whatever the prompt leaves free but never raising it to fill a large one. A value the caller *did* send is honoured exactly or refused with the budget that would fit — never silently shortened. Resolving it at the edge instead is what refused every non-empty prompt on every 2048-context model (report #001).
 
@@ -2010,10 +2023,28 @@ the sidecar holds.
   count would override the search's answer rather than its input, and a plan the
   router did not actually choose is not evidence about routing. Excluding the
   peers that hold the whole model is the honest way to get a multi-hop route.
+  ⚠ **The local fast path has to answer this, and until 2026-09-17 it did not**
+  (gotcha #633). A request for a model this node holds COMPLETELY is answered
+  without reaching the router, and the router is the only reader of the
+  override — so `pretend_local_holds: "none"` was parsed, validated and then
+  dropped, answering `route=local` with no peers. `local_fast_path_for` now
+  takes the override as a required argument and stands aside when it releases
+  any shard of the model.
+
+  **The 2026-09-16 verification below was real and still missed this**, which is
+  the part worth keeping: it ran on a processor-only node with peers, where the
+  fast path already stands down of its own accord (gotcha #443), so the router
+  ran and the override worked. The defect only appears on a node that holds the
+  model AND would win the fast path — i.e. the converged node this instrument
+  exists for. **Verify it on one of those.**
+
   Verified live 2026-09-16: the same model and prompt ran `route=local` with no
   override, `route=distributed nodes=225e6fe7 regions=TH` with
   `pretend_local_holds: "none"`, and `route=distributed nodes=7c10ea04
-  regions=BE` when that peer was also excluded.
+  regions=BE` when that peer was also excluded. Re-verified 2026-09-17 on a node
+  holding the model in full, which is the case that had never been checked:
+  `route=local peers=0` unchanged without the block, and `route=distributed
+  peers=1 nodes=225e6fe7 regions=TH` with it.
 - `POST   /v1/responses` — OpenAI Responses API (gpt-5 / o-series default)
 - `GET    /v1/responses/{id}` — Retrieve a stored response (30-day TTL); pass `?stream=true&starting_after={seq}` to resume a background SSE stream
 - `DELETE /v1/responses/{id}` — Delete a stored response

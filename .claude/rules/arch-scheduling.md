@@ -356,6 +356,28 @@ a comment on one of them explaining exactly why it mattered.
 
 → `docs/invariants/scheduling.md`
 
+## A reply a PEER generated is finalised here, not taken as it arrives
+
+`inference::finalize_reply_text` is the single place reply text is finalised —
+control-token scrub, leading `<think>` reasoning block, stop truncation, the
+newlines that step strands. Five paths produce a reply; four called it and
+**`pipeline::remote_generate` did not**, which is the path taken whenever ONE
+peer holds the whole model and so the commonest distributed shape there is. A
+reasoning model asked over the swarm answered with its raw scratchpad while the
+same request answered locally came back clean (gotcha #634).
+
+Finalise on the COORDINATOR, never by trusting the serving node: only the
+coordinator covers peers on builds that never learned to strip anything, and the
+helper is documented idempotent. Call it with an **empty stop set** — the peer
+already applied the caller's stops and its own template's and reports what
+matched in `matched_stop_seq`, so re-deciding that here, against stops derived
+for a model this node may not hold, can truncate a reply the peer correctly kept.
+
+An UNCLOSED `<think>` is still shown, and must stay that way: nothing knows
+where an unfinished thought ends.
+
+→ `docs/invariants/api-surfaces.md` § "A reply is finalised on the coordinator"
+
 ## Single-source-of-truth helpers — Scheduling, routing and failover
 
 Each names the ONE place a decision is made. A second implementation of any of

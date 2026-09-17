@@ -8,6 +8,49 @@ names** — the rule statement in `architecture.md` is the summary, this is the
 reasoning, and several of these describe a fix that looked obviously correct
 and was not.
 
+## A reply is finalised on the coordinator, including one a peer generated
+
+(2026-09-17, gotcha #634.)
+
+**`inference::finalize_reply_text` is the single place reply text is finalised**
+— it scrubs control-token artifacts, removes a leading `<think>` reasoning
+block, truncates at a stop sequence and drops the newlines that step strands.
+Five paths produce a reply. Four called it: `router::local_exec`,
+`process_pool`, `executor`, and `pipeline::distributed`. The fifth,
+**`pipeline::remote_generate` — the path taken whenever ONE peer holds the whole
+model, which is the commonest distributed shape there is — called nothing.**
+
+**What it cost.** A reasoning model asked over the swarm answered with its raw
+`<think>...</think>` scratchpad as the reply, while the identical request
+answered locally came back clean. Reproduced 3/3 on qwen3-1.7b at
+`max_tokens: 500`, `finish_reason: stop`, with both tags present in `content`.
+
+**The discriminator that ruled out "an older peer did not strip it."** The
+obvious explanation is a peer on a build that predates the strip. It was ruled
+out by forcing the request onto THIS node's own peer — same binary, known to
+strip — using `swarm_route.exclude_nodes` to eliminate every other candidate.
+Asked directly that node stripped the block; asked as a peer it did not. Same
+node, same model, same build, opposite results: it is the path, not the build.
+
+**Why the coordinator and not the serving node.** The coordinator is the only
+place that covers every peer, including ones running a build that never learned
+to strip anything. Fixing the serving side would leave every already-deployed
+peer leaking. The helper documents itself idempotent, so a peer that already
+finalised loses nothing by it running twice.
+
+**Why an EMPTY stop set, which is the part most likely to be "corrected" later.**
+The peer generated the text and already applied both the caller's stop sequences
+and its own template's, reporting the result in `matched_stop_seq`. Re-running
+that decision here, against stops this node would derive for a model it may not
+even hold, could truncate a reply the peer correctly kept. What remains — the
+control-token scrub, the reasoning block, the stranded newlines — is exactly the
+part no peer can have done on our behalf.
+
+**What a change must keep.** An unclosed `<think>` is still shown, and that is
+correct: `take_leading_reasoning_block` requires the closing tag because without
+one it cannot know where the scratchpad ends. Reproduced at `max_tokens: 30`
+(shown) and clean at 500 (stripped). Do not "fix" this by guessing the end.
+
 ## A reply budget the caller did not choose is a ceiling, not a demand
 
 **`inference::model_worker::resolve_max_new_tokens` is the single answer to "how
