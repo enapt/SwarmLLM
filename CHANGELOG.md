@@ -1,5 +1,65 @@
 # Changelog
 
+## [0.3.186-alpha] — 2026-09-17
+
+Four things the software said that were not true. Three of them were visible to
+anyone using it; the fourth was a testing control that had quietly stopped
+working, which is why the other three went unnoticed for so long.
+
+The pattern in all four is the same and worth naming: a correct answer already
+existed somewhere in the code, and one path did not use it. The reply cleanup
+ran on four routes out of five. The hardware description was right on the first
+setup screen and wrong on the last. Fixing the testing control is what exposed
+the reply one within minutes.
+
+Nodes do not need to update together, and nothing about how computers talk to
+each other has changed.
+
+### Fixed
+
+- **A thinking model answered with its private notes when another computer ran
+  it.** Some models work through a question before answering, in a section that
+  is meant to be removed before you see it. It was removed when your own
+  computer produced the answer, and left in when any other computer did — so the
+  same question gave a clean reply one time and a page of the model talking to
+  itself the next, with no pattern you could see from the outside.
+
+  The cleanup step that strips those notes, trims stray markers and tidies the
+  result is now applied to every answer, including ones that arrive from
+  somewhere else. It is done on your own computer rather than the one that
+  answered, so it also covers computers running an older version.
+
+  A reply that runs out of room mid-thought still shows the section, because
+  nothing can tell where an unfinished thought was going to end.
+
+- **Setup said your graphics card was in use when it was not.** The first screen
+  of setup checks your hardware and says plainly when a graphics card cannot be
+  used — on Apple computers, for instance, where nothing yet drives the card, or
+  on a build made without graphics support. The last screen, the one that lists
+  what you chose so you can confirm it, printed the card's name on its own.
+
+  Both screens now give the same answer. If the card will not be used, the
+  review row says so.
+
+- **Typing a page address that does not exist showed raw data instead of the
+  app.** The menu calls a page Models, but the address it lives at is different,
+  so guessing the obvious one — or following an old link — produced a line of
+  machine-readable error text. A browser is now taken to the app instead.
+  Anything that is not a person reading a page still receives exactly what it
+  did before.
+
+- **The control for testing inference across several computers did nothing on a
+  computer that had the whole model.** A request can ask to be planned as though
+  this computer held none of the model, which is how the shared-inference path
+  gets exercised on purpose rather than by luck. On any computer holding a whole
+  model the instruction was read, checked, and then dropped, and the request was
+  answered locally as if it had never been sent.
+
+  Since the software deliberately encourages computers to hold whole models,
+  this meant the control did nothing on precisely the machines it was written
+  for. It now works, and fixing it is what surfaced the thinking-model problem
+  above on the first attempt.
+
 ## [0.3.185-alpha] — 2026-09-17
 
 Three things a node believed about itself that were not true: which computers
