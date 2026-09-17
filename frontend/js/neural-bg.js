@@ -228,6 +228,7 @@ var NeuralBg = (function() {
     mouse.x = nx;
     mouse.y = ny;
     mouse.active = true;
+    _lastPointerAt = Date.now();
   }
 
   // The spatial grid is a FLAT array of cells, addressed by integer, and the
@@ -243,6 +244,7 @@ var NeuralBg = (function() {
   var GW = 0, GH = 0;
   var _neigh = [];          // scratch, reused
   var _neighCount = 0;
+  var _links = [];          // scratch, reused — see "Collect links" in tick()
 
   // +1 so a boid drifting to -50 still lands in a real cell; clamped so one at
   // W+50 does not run off the end. A clamped boid keeps its true coordinates,
@@ -328,6 +330,9 @@ var NeuralBg = (function() {
 
   var _now = 0;
   var _lastDraw = 0;
+  // Last pointer movement, for the calm tier below. Starts at 0 so a page
+  // nobody touches is calm from the first frame rather than after a delay.
+  var _lastPointerAt = 0;
 
   // How often the swarm actually advances, as opposed to how often the browser
   // offers us a frame.
@@ -350,10 +355,25 @@ var NeuralBg = (function() {
   // makes this cheap, and a `setTimeout` loop would be worse: a backgrounded tab
   // suspends rAF but keeps firing timers, so a timer version would wake a tab
   // that the browser had put to sleep (gotcha, 2026-08-09).
-  var FRAME_MS_IDLE = 33;   // ~30 Hz
-  var FRAME_MS_BUSY = 125;  // ~8 Hz while this node is serving
+  var FRAME_MS_ACTIVE = 33;   // ~30 Hz — pointer is in play, motion must track it
+  var FRAME_MS_CALM = 100;    // ~10 Hz — page open, nobody touching it
+  var FRAME_MS_BUSY = 125;    // ~8 Hz  — this node is serving a request
+  // How long after the last pointer movement the swarm stays at full rate.
+  var CALM_AFTER_MS = 4000;
+
+  // The common case for this page is nobody looking at it: a dashboard left
+  // open in a tab that is visible but idle. It does not need 30 Hz to drift,
+  // and the pointer is the only thing it reacts to quickly, so full rate is
+  // spent only while there IS a pointer to react to. Touching the mouse
+  // restores it on the next frame.
+  //
+  // Slowest applicable rate wins, so a serving node stays slow even if the
+  // pointer is moving — the real work outranks the decoration.
   function frameInterval() {
-    return state.active > 0 ? FRAME_MS_BUSY : FRAME_MS_IDLE;
+    var ms = FRAME_MS_ACTIVE;
+    if (Date.now() - _lastPointerAt > CALM_AFTER_MS) ms = FRAME_MS_CALM;
+    if (state.active > 0 && FRAME_MS_BUSY > ms) ms = FRAME_MS_BUSY;
+    return ms;
   }
 
   function tick() {
@@ -381,7 +401,10 @@ var NeuralBg = (function() {
     var curMaxForce = MAX_FORCE * activityMul;
 
     // --- Collect links for drawing (computed during physics) ---
-    var links = [];
+    // Reused rather than reallocated: this is the last per-frame
+    // allocation in the loop, and it grows to a few hundred entries.
+    var links = _links;
+    links.length = 0;
 
     // --- Physics ---
     for (var i = 0; i < n; i++) {
