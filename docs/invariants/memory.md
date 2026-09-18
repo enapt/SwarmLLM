@@ -946,3 +946,73 @@ directory, a test asserting a node "holding 14 GB" measured this machine's
 actual 33 GB. **When a pure-logic function starts touching the filesystem, audit
 the fixtures before the code** (gotcha #629). `write_sparse_shards` gives a test
 real multi-gigabyte holdings via `set_len` at no disk cost.
+
+## A worker that dies is not a worker that is slow, and the graphics stack can go mid-run
+
+**The rule**: `.claude/rules/arch-worker-memory.md` § "A subprocess you are
+waiting for can die instead, and the graphics stack can go mid-run".
+
+### What it replaced
+
+`spawn_worker` waited on `listener.accept()` with a 30 s
+`WORKER_CONNECT_TIMEOUT_SECS` and nothing else. A worker that died before
+connecting was indistinguishable from one that was merely slow, so:
+
+- every startup failure cost the **full timeout**, per model and per arriving
+  request, on a node that could not serve at all;
+- every startup failure arrived as the same `worker connect timeout`, which
+  names the symptom and nothing an owner can act on;
+- the actual cause was **discarded by being unreadable rather than by being
+  absent**. The worker inherits the daemon's stderr, so on 2026-09-18 the
+  reason was in `node.log` 14 lines above the timeout:
+
+  ```
+  Inconsistency detected by ld.so: dl-setup_hash.c: 36: _dl_setup_hash: Assertion `(bitmask_nwords & (bitmask_nwords - 1)) == 0' failed!
+  ```
+
+  Raw loader output: no timestamp, no level, no module, no request id — so it
+  appears in no level filter and no structured view, and matches none of
+  `libcuda`, `CUDA`, `shared libraries` or `ERROR`. The whole of gotcha #646 was
+  diagnosed believing nothing had been logged.
+
+### Why the probe re-runs the binary instead of reading the error
+
+Classifying that loader text would be guesswork: it names no library and
+carries no error code, and the next libc release may word it differently.
+Re-running the binary is not guesswork. `executable_still_starts` runs
+`--version` — the cheapest thing this binary does, and on a healthy node an
+answer in milliseconds that never touches the GPU. An executable that has
+stopped starting, on a build linked against `libcuda.so.1`, **is** the graphics
+stack failing. The probe runs only on a path that has already failed.
+
+### Why it is a latch, and why it must clear
+
+The NVIDIA driver is a kernel module plus userspace libraries that must agree.
+An update replaces the libraries but cannot replace a module that is loaded and
+in use, so processes that already mapped the old libraries keep working while
+every new process fails. (Under WSL the same shape arrives from the Windows
+host driver behind `/usr/lib/wsl/lib`.) That asymmetry is why the daemon cannot
+detect this by asking about itself — it is the process that still works — and
+why the state is latched rather than re-probed: `exec` resolves the libraries,
+so the node cannot recover without a restart.
+
+It clears on the one observation that disproves it, a worker that starts.
+**Marking a device unhealthy is the easy half; coming back is the half that
+gets forgotten** — NVIDIA's own Kubernetes device plugin is repeatedly
+bug-reported for exactly that (k8s-device-plugin #1014, gpu-operator #1065).
+
+### What a change must keep
+
+- **The happy path must not pay for it.** `accept` wins the race and the
+  `wait` future is dropped; tokio fuses the child, and `wait`'s only side
+  effect is closing a stdin this worker never opened.
+- **The advertised capability must follow.** `health/monitor.rs` withdraws
+  `gpu_info` from the broadcast capability while the latch is set — a node that
+  keeps claiming a GPU keeps being sent segments it will fail, which harms
+  peers, not just itself. It is rebuilt every broadcast, so withdrawal and
+  return both take effect on the next cycle.
+- **The copy must not promise the processor takes over.** It is false here:
+  this binary links `libcuda.so.1`, so a CPU-only worker exits 127 exactly as a
+  GPU one does (verified 2026-09-18 by running `model-worker --help` under a
+  deliberately corrupt `libcuda.so.1`). Guarded by
+  `the_unavailable_message_does_not_promise_the_processor_takes_over`.

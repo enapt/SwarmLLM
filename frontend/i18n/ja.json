@@ -820,6 +820,7 @@
   "perf.ttft_label": "最初のトークン {value}",
   "placement.configured": "このコンピューターはプロセッサーのみを使う設定になっています。",
   "placement.gpu_too_old": "このグラフィックカードはこのビルドが対応するより古いため、プロセッサーを使用します。",
+  "placement.gpu_unavailable": "SwarmLLM がグラフィックカードを使えなくなりました。多くは動作中にドライバーが更新されたためです。SwarmLLM を再起動すると直ります。",
   "placement.hybrid": "{total} 層のうち {on} 層がグラフィックカード上",
   "placement.hybrid_detail": "残りはプロセッサで実行されるため、このモデルはすべてグラフィックカード上にあるモデルより遅くなります。グラフィックメモリを空けると、より多くをそちらへ移せます。",
   "placement.not_enough_vram": "起動時の空きグラフィックメモリーでは足りませんでした。メモリーが空き次第、再びグラフィックカードを使用します。",

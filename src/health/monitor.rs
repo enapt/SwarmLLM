@@ -549,31 +549,45 @@ impl HealthMonitor {
             }
         }
 
-        let gpu_info = self.shared_state.gpu_info.as_ref().map(|g| {
-            let bandwidth = crate::model::auto_manage::vram::gpu_memory_bandwidth_gbps(&g.name);
-            // Ask the card, here, every broadcast.
-            //
-            // `SharedState::gpu_info.vram_free_mb` is set ONCE at startup and
-            // hardcoded to 0 there (`daemon/mod.rs`), so every node in the swarm
-            // advertised zero free VRAM for as long as this field has existed.
-            // Nothing read it, so nothing went wrong — until something did, and
-            // then it silently answered "no room" for every peer, everywhere.
-            //
-            // Free VRAM is the one figure here that is meaningless stale: it is
-            // exactly the quantity that changes as models load and unload. This
-            // capability is rebuilt on every broadcast, so querying it now costs
-            // one `nvidia-smi` per cycle and is the only way the number can be
-            // true. `None` (unreadable) advertises 0, which reads as "no room"
-            // — the safe direction for anyone deciding whether to send us work.
-            let free = crate::model::auto_manage::vram::query_gpu_vram_free_mb().unwrap_or(0);
-            crate::types::GpuInfo {
-                name: g.name.clone(),
-                vram_total_mb: g.vram_total_mb,
-                vram_available_mb: free,
-                compute_capability: None,
-                memory_bandwidth_gbps: bandwidth,
-            }
-        });
+        // A card we can no longer reach is not capacity, and advertising it
+        // does active harm: peers route work here by what we claim, so a node
+        // whose graphics stack has died would keep being sent GPU-sized
+        // segments and would keep failing them. Withdrawing the claim leaves
+        // the node advertising what it can still honour — its processor.
+        //
+        // Done here rather than by clearing `gpu_info` because this capability
+        // is rebuilt on every broadcast, so the withdrawal takes effect on the
+        // next cycle and reverses itself if a worker starts again.
+        let gpu_info = self
+            .shared_state
+            .gpu_info
+            .as_ref()
+            .filter(|_| !crate::daemon::gpu_support::gpu_runtime_has_failed())
+            .map(|g| {
+                let bandwidth = crate::model::auto_manage::vram::gpu_memory_bandwidth_gbps(&g.name);
+                // Ask the card, here, every broadcast.
+                //
+                // `SharedState::gpu_info.vram_free_mb` is set ONCE at startup and
+                // hardcoded to 0 there (`daemon/mod.rs`), so every node in the swarm
+                // advertised zero free VRAM for as long as this field has existed.
+                // Nothing read it, so nothing went wrong — until something did, and
+                // then it silently answered "no room" for every peer, everywhere.
+                //
+                // Free VRAM is the one figure here that is meaningless stale: it is
+                // exactly the quantity that changes as models load and unload. This
+                // capability is rebuilt on every broadcast, so querying it now costs
+                // one `nvidia-smi` per cycle and is the only way the number can be
+                // true. `None` (unreadable) advertises 0, which reads as "no room"
+                // — the safe direction for anyone deciding whether to send us work.
+                let free = crate::model::auto_manage::vram::query_gpu_vram_free_mb().unwrap_or(0);
+                crate::types::GpuInfo {
+                    name: g.name.clone(),
+                    vram_total_mb: g.vram_total_mb,
+                    vram_available_mb: free,
+                    compute_capability: None,
+                    memory_bandwidth_gbps: bandwidth,
+                }
+            });
 
         // Use real uptime so message content changes each broadcast (avoids GossipSub dedup)
         let uptime_seconds = {

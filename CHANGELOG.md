@@ -47,6 +47,23 @@ computer ran something itself instead of sharing the work — so they are
 unchanged for a request you actually made. It is only the dashboard's own
 background questions that are now quiet, and `-v` still shows them.
 
+**And SwarmLLM now notices when your graphics card stops responding.**
+
+Updating a graphics driver — or playing a game that updates one for you — can
+leave SwarmLLM unable to reach your graphics card while it is still running.
+Until now nothing noticed. Every request waited half a minute and then failed
+with a message that named nothing you could act on; the dashboard reported
+every part of the system as healthy; and your computer carried on telling the
+rest of the swarm it had a graphics card to offer, so other people's work kept
+being sent to it and kept failing.
+
+Now the first failed request is enough. You are told what happened and that
+restarting SwarmLLM fixes it, the dashboard says so next to the model instead
+of claiming everything is fine, your computer stops offering a graphics card it
+cannot use so nobody else's work is sent to it, and requests fail in a fraction
+of a second rather than thirty. If the card comes back, so does the offer,
+without anything to do.
+
 Nothing about how computers talk to each other has changed and nodes do not
 need to update together.
 

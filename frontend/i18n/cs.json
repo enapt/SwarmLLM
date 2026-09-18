@@ -820,6 +820,7 @@
   "perf.ttft_label": "první token {value}",
   "placement.configured": "Nastavili jste tento počítač tak, aby používal jen procesor.",
   "placement.gpu_too_old": "Tato grafická karta je starší, než tato verze podporuje, takže se používá procesor.",
+  "placement.gpu_unavailable": "SwarmLLM ztratil přístup ke grafické kartě – obvykle proto, že se ovladač aktualizoval za jeho běhu. Opravíte to restartem SwarmLLM.",
   "placement.hybrid": "{on} z {total} vrstev na grafické kartě",
   "placement.hybrid_detail": "Zbytek běží na procesoru, proto je tento model pomalejší než model celý na kartě. Uvolněte grafickou paměť, aby se tam přesunulo více.",
   "placement.not_enough_vram": "Potřebuje víc grafické paměti, než bylo při startu volné. Jakmile se paměť uvolní, grafická karta se použije znovu.",

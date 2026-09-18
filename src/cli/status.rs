@@ -265,6 +265,9 @@ fn cpu_reason_in_words(tag: &str) -> String {
         "not_enough_vram" => "not enough graphics memory for it".to_string(),
         "configured_cpu_only" => "configured to use the processor".to_string(),
         "gpu_too_old_for_this_build" => "graphics card too old for this build".to_string(),
+        "gpu_stopped_responding" => {
+            "the graphics card stopped responding — restart SwarmLLM".to_string()
+        }
         other => other.to_string(),
     }
 }

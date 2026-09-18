@@ -820,6 +820,7 @@
   "perf.ttft_label": "ilk token {value}",
   "placement.configured": "Bu bilgisayarı yalnızca işlemciyi kullanacak şekilde ayarladınız.",
   "placement.gpu_too_old": "Bu ekran kartı bu sürümün desteklediğinden eski, bu yüzden işlemci kullanılıyor.",
+  "placement.gpu_unavailable": "SwarmLLM ekran kartına erişimini kaybetti; genellikle çalışırken sürücü güncellenmiştir. Düzeltmek için SwarmLLM'i yeniden başlatın.",
   "placement.hybrid": "{total} katmandan {on} tanesi ekran kartında",
   "placement.hybrid_detail": "Geri kalanı işlemcide çalışır; bu yüzden bu model tamamı ekran kartında olan bir modelden daha yavaştır. Daha fazlasını oraya taşımak için grafik belleği boşaltın.",
   "placement.not_enough_vram": "Başlatıldığında boşta olandan daha fazla ekran belleği gerekiyor. Bellek boşaldığında ekran kartı yeniden kullanılacak.",

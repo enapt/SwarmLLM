@@ -1400,12 +1400,14 @@
         }
         if (cpuReason && hostedShards > 0) {
           // `not_enough_vram` is the recoverable one and reads as amber; the
-          // other two are settled facts about this machine until something
-          // changes, so they are plain.
+          // settled facts about this machine read plain or amber.
+          // `gpu_stopped_responding` is the only one the owner can fix right
+          // now, so it is the only one that reads as red.
           var reasonKeys = {
             not_enough_vram:            { key: 'placement.not_enough_vram',  mod: 'mce-section-state-amber', badge: 'cb-fragile' },
             configured_cpu_only:        { key: 'placement.configured',       mod: '',                        badge: 'cb-ready' },
-            gpu_too_old_for_this_build: { key: 'placement.gpu_too_old',      mod: 'mce-section-state-amber', badge: 'cb-fragile' }
+            gpu_too_old_for_this_build: { key: 'placement.gpu_too_old',      mod: 'mce-section-state-amber', badge: 'cb-fragile' },
+            gpu_stopped_responding:     { key: 'placement.gpu_unavailable',  mod: 'mce-section-state-red',   badge: 'cb-unusable' }
           };
           var r = reasonKeys[cpuReason];
           if (r) {

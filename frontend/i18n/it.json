@@ -820,6 +820,7 @@
   "perf.ttft_label": "primo token {value}",
   "placement.configured": "Hai impostato questo computer per usare solo il processore.",
   "placement.gpu_too_old": "Questa scheda grafica è più vecchia di quanto questa versione supporti, quindi viene usato il processore.",
+  "placement.gpu_unavailable": "SwarmLLM ha perso l'accesso alla scheda grafica, di solito perché il driver è stato aggiornato mentre era in funzione. Riavvia SwarmLLM per risolvere.",
   "placement.hybrid": "{on} livelli su {total} sulla scheda grafica",
   "placement.hybrid_detail": "Il resto viene eseguito sul processore: per questo il modello è più lento di uno interamente sulla scheda. Libera memoria grafica per spostarne di più lì.",
   "placement.not_enough_vram": "Richiede più memoria grafica di quanta ne fosse libera all'avvio. Tornerà a usare la scheda grafica non appena si libererà memoria.",

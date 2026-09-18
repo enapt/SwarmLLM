@@ -820,6 +820,7 @@
   "perf.ttft_label": "first token {value}",
   "placement.configured": "You have set this computer to use its processor only.",
   "placement.gpu_too_old": "This graphics card is older than this build supports, so the processor is used instead.",
+  "placement.gpu_unavailable": "SwarmLLM lost access to the graphics card — usually the driver was updated while it was running. Restart SwarmLLM to fix it.",
   "placement.hybrid": "{on} of {total} layers on the graphics card",
   "placement.hybrid_detail": "The rest runs on the processor, which is why this model is slower than one wholly on the card. Free up graphics memory to move more of it there.",
   "placement.not_enough_vram": "It needs more graphics memory than was free when it started. It will use the graphics card again once memory frees up.",

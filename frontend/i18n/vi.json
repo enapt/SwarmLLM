@@ -820,6 +820,7 @@
   "perf.ttft_label": "token đầu {value}",
   "placement.configured": "Bạn đã đặt máy tính này chỉ dùng bộ xử lý.",
   "placement.gpu_too_old": "Card đồ họa này cũ hơn mức bản dựng này hỗ trợ, nên bộ xử lý được dùng thay thế.",
+  "placement.gpu_unavailable": "SwarmLLM không còn dùng được card đồ họa, thường là do trình điều khiển được cập nhật khi đang chạy. Khởi động lại SwarmLLM để khắc phục.",
   "placement.hybrid": "{on} trong {total} lớp chạy trên card đồ họa",
   "placement.hybrid_detail": "Phần còn lại chạy trên bộ xử lý, vì vậy mô hình này chậm hơn mô hình nằm hoàn toàn trên card. Giải phóng bộ nhớ đồ họa để chuyển thêm phần lên đó.",
   "placement.not_enough_vram": "Nó cần nhiều bộ nhớ đồ họa hơn mức còn trống lúc khởi động. Nó sẽ dùng lại card đồ họa ngay khi có bộ nhớ trống.",

@@ -820,6 +820,7 @@
   "perf.ttft_label": "första token {value}",
   "placement.configured": "Du har ställt in den här datorn att bara använda processorn.",
   "placement.gpu_too_old": "Det här grafikkortet är äldre än vad den här versionen stöder, så processorn används i stället.",
+  "placement.gpu_unavailable": "SwarmLLM har förlorat åtkomsten till grafikkortet, oftast för att drivrutinen uppdaterades medan det kördes. Starta om SwarmLLM för att lösa det.",
   "placement.hybrid": "{on} av {total} lager på grafikkortet",
   "placement.hybrid_detail": "Resten körs på processorn, vilket är varför modellen är långsammare än en som ligger helt på kortet. Frigör grafikminne för att flytta mer av den dit.",
   "placement.not_enough_vram": "Den behöver mer grafikminne än vad som var ledigt vid start. Den använder grafikkortet igen så snart minne frigörs.",

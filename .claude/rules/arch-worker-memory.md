@@ -63,6 +63,33 @@ had been left on the broken signal 400 lines below the fix.
 
 → `docs/invariants/memory.md`
 
+## A subprocess you are waiting for can die instead, and the graphics stack can go mid-run
+
+`spawn_worker` races `child.wait()` against `listener.accept()`. Watching the
+socket alone made every startup failure cost the full 30 s
+`WORKER_CONNECT_TIMEOUT_SECS` — per model, per arriving request — and arrive as
+one contentless `worker connect timeout`, while the real cause sat in the log
+as raw untimestamped `ld.so` output matching nothing anyone would grep for
+(#646/#647). **Whenever code waits for a subprocess to do something, handle it
+dying instead.**
+
+**`daemon::gpu_support::gpu_runtime_has_failed` is the single answer to "has the
+graphics stack stopped working since we started?"** — the half of the GPU
+question that is NOT a property of the card, and the half `local_gpu_is_supported`
+originally cached away on the reasoning that the answer "cannot change while the
+process runs". A driver update changes it: the daemon keeps running on libraries
+it already mapped while every worker it `exec`s dies, so only a failed worker
+start reveals it. Set by `diagnose_failed_start` (which re-runs `--version`
+rather than guessing from loader text), cleared by any worker that starts, read
+by `cpu_reason` (`CpuReason::GpuUnavailable`) and by the health monitor, which
+**withdraws the advertised GPU so peers stop routing work this node would fail**.
+
+⚠ **Do not tell the owner the processor takes over.** This binary links
+`libcuda.so.1`, so a bad library stops every new process in the loader and a
+CPU-only worker exits 127 exactly as a GPU one does.
+
+→ `docs/invariants/memory.md`
+
 ## Single-source-of-truth helpers — Worker memory: graphics, RAM and the KV cache
 
 Each names the ONE place a decision is made. A second implementation of any of

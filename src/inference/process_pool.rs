@@ -1440,8 +1440,13 @@ pub enum CpuReason {
     Configured,
     /// This build's CUDA kernels need a newer card than the one present.
     GpuTooOld,
+    /// The graphics stack stopped working while this node was running — almost
+    /// always a driver update underneath us. Distinct from [`Self::GpuTooOld`]
+    /// because the card is fine and the remedy is a restart, and distinct from
+    /// [`Self::NotEnoughVram`] because waiting will never clear it.
+    GpuUnavailable,
     /// The model's estimated footprint exceeds the free VRAM budget. Unlike the
-    /// other two this clears itself once memory frees up.
+    /// others this clears itself once memory frees up.
     NotEnoughVram,
 }
 
@@ -1452,6 +1457,7 @@ impl CpuReason {
         match self {
             CpuReason::Configured => "configured_cpu_only",
             CpuReason::GpuTooOld => "gpu_too_old_for_this_build",
+            CpuReason::GpuUnavailable => "gpu_stopped_responding",
             CpuReason::NotEnoughVram => "not_enough_vram",
         }
     }
@@ -2102,6 +2108,14 @@ impl ModelProcessPool {
         // Placing it on the CPU up front costs speed and keeps the node
         // answering. `local_gpu_is_supported` is cached, so this stays a plain
         // atomic load after the first call.
+        // Asked before the card's age because it is the more specific answer
+        // and the more recent event: a node whose graphics stack died has a
+        // perfectly good card, and telling its owner the card is too old would
+        // send them shopping instead of restarting.
+        #[cfg(feature = "candle-cuda")]
+        if crate::daemon::gpu_support::gpu_runtime_has_failed() {
+            return Some(CpuReason::GpuUnavailable);
+        }
         #[cfg(feature = "candle-cuda")]
         if !crate::daemon::gpu_support::local_gpu_is_supported() {
             return Some(CpuReason::GpuTooOld);
@@ -4080,6 +4094,100 @@ impl ModelProcessPool {
         }
     }
 
+    /// A worker died before it ever connected. Say why, in terms its owner can
+    /// act on, and adapt this node if the cause is the graphics stack.
+    ///
+    /// **Why this re-runs the binary.** The worker inherits our stdio, so
+    /// whatever killed it is already in the log — but for the case that matters
+    /// it arrives as raw, untimestamped loader output carrying no level, no
+    /// module and no request id, sitting above an unrelated-looking timeout.
+    /// The evidence was present for the whole of the 2026-09-18 outage and
+    /// reachable by nobody. Asking the binary whether it still starts turns
+    /// that into an attributed answer, and costs one `--version` on a path that
+    /// has already failed.
+    ///
+    /// Only a build that links CUDA blames the graphics stack: on a CPU-only
+    /// build an executable that will not start is a broken install, and telling
+    /// someone to restart over their graphics driver would be a wrong answer
+    /// delivered confidently.
+    async fn diagnose_failed_start(
+        &self,
+        exe: &std::path::Path,
+        model_id: &ModelId,
+        how: &str,
+    ) -> SwarmError {
+        let probe = crate::daemon::gpu_support::executable_still_starts(exe).await;
+
+        let Err(detail) = probe else {
+            // The binary is fine, so this was about this worker or this model,
+            // not the machine. Report what actually happened rather than the
+            // timeout this used to become.
+            tracing::warn!(
+                model_id = %model_id.0,
+                outcome = %how,
+                "model worker stopped before it finished starting"
+            );
+            return SwarmError::ServiceUnavailable(format!(
+                "the worker for {} {how} before it was ready",
+                model_id.0
+            ));
+        };
+
+        // A fresh process of this binary cannot start at all. Nothing
+        // model-specific can explain that.
+        #[cfg(feature = "candle-cuda")]
+        {
+            let first_time = crate::daemon::gpu_support::note_gpu_runtime_failure();
+            tracing::error!(
+                model_id = %model_id.0,
+                outcome = %how,
+                cause = %detail,
+                "the graphics libraries this node started with are gone — no new worker can start, \
+                 on the graphics card OR the processor, until SwarmLLM is restarted"
+            );
+            if first_time {
+                if let Some(tx) = self.activity_tx.get() {
+                    let _ = tx.send(
+                        crate::daemon::state::ActivityEvent::new(
+                            "system",
+                            "gpu_stopped_responding",
+                            crate::daemon::gpu_support::gpu_became_unavailable_message(),
+                        )
+                        // Deliberately the longest toast in the codebase, and
+                        // an error rather than a warning: this node cannot run
+                        // a model at all until it is restarted, and the message
+                        // asks the owner to do something. It fires once.
+                        //
+                        // NOT 0 for "until dismissed" — the frontend reads
+                        // `data.toast_duration_ms || 5000`, so a zero is falsy
+                        // and would silently become the five-second default,
+                        // i.e. the shortest toast for the most important event.
+                        .with_toast("error", 20000),
+                    );
+                }
+            }
+            // A tail expression, not a `return`: with `candle-cuda` on, this
+            // block IS the function's tail, and `return` there is what
+            // `clippy::needless_return` fires on — under `-D warnings`, in the
+            // one build configuration that cannot be checked from here.
+            SwarmError::ServiceUnavailable(
+                crate::daemon::gpu_support::gpu_became_unavailable_message(),
+            )
+        }
+        #[cfg(not(feature = "candle-cuda"))]
+        {
+            tracing::error!(
+                model_id = %model_id.0,
+                outcome = %how,
+                cause = %detail,
+                "this program can no longer start a new process, so no model can be loaded"
+            );
+            SwarmError::ServiceUnavailable(format!(
+                "SwarmLLM can no longer start its model worker: {detail}"
+            ))
+        }
+    }
+
     /// `placed_on_cpu_because` is the placement `get_or_spawn` DECIDED, not one
     /// re-derived here: it is the only caller, it has just weighed admission,
     /// and its answer is the one the worker must be spawned with.
@@ -4374,18 +4482,48 @@ impl ModelProcessPool {
         if cpu_threads > 0 && std::env::var_os("RAYON_NUM_THREADS").is_none() {
             command.env("RAYON_NUM_THREADS", cpu_threads.to_string());
         }
-        let child = command
+        let mut child = command
             .spawn()
             .map_err(|e| SwarmError::ServiceUnavailable(format!("spawn worker: {e}")))?;
 
-        // Wait for worker to connect
-        let conn = tokio::time::timeout(
+        // Wait for the worker to connect — or for it to die trying.
+        //
+        // **Two ways to fail, and only one was watched** (gotcha #590). This
+        // waited on the socket alone, so every startup failure looked the same
+        // and cost the full `WORKER_CONNECT_TIMEOUT_SECS`. When the graphics
+        // libraries are pulled out from under a running node the worker dies
+        // in the dynamic loader within milliseconds, and this still waited 30 s
+        // — per model, per arriving request — before reporting `worker connect
+        // timeout`, which names the symptom and nothing the owner could act on.
+        //
+        // Watching the child costs nothing on the happy path: `accept` wins the
+        // race and the `wait` future is dropped, which leaves the child intact
+        // (tokio fuses it, and `wait`'s only side effect is closing a stdin we
+        // never opened).
+        let raced = tokio::time::timeout(
             std::time::Duration::from_secs(WORKER_CONNECT_TIMEOUT_SECS),
-            listener.accept(),
+            async {
+                tokio::select! {
+                    accepted = listener.accept() => Ok(accepted),
+                    died = child.wait() => Err(died),
+                }
+            },
         )
         .await
-        .map_err(|_| SwarmError::ServiceUnavailable("worker connect timeout".into()))?
-        .map_err(|e| SwarmError::ServiceUnavailable(format!("accept: {e}")))?;
+        .map_err(|_| SwarmError::ServiceUnavailable("worker connect timeout".into()))?;
+
+        let conn = match raced {
+            Ok(accepted) => {
+                accepted.map_err(|e| SwarmError::ServiceUnavailable(format!("accept: {e}")))?
+            }
+            Err(status) => {
+                let how = match status {
+                    Ok(s) => format!("exited with {s}"),
+                    Err(e) => format!("could not be waited on: {e}"),
+                };
+                return Err(self.diagnose_failed_start(&exe, model_id, &how).await);
+            }
+        };
 
         let (mut read_half, write_half) = conn.split();
 
@@ -4400,6 +4538,21 @@ impl ModelProcessPool {
                     "expected Ready, got {other:?}"
                 )))
             }
+        }
+
+        // A worker that started disproves the latch, whatever set it. Without
+        // this, one unlucky spawn failure would strand the card for the life of
+        // the process — the failure mode the NVIDIA device plugin is repeatedly
+        // bug-reported for (k8s-device-plugin #1014, gpu-operator #1065: "GPU
+        // resources are not recovered even after the XID error is resolved").
+        // Marking unhealthy is the easy half; coming back is the half that gets
+        // forgotten.
+        #[cfg(feature = "candle-cuda")]
+        if crate::daemon::gpu_support::clear_gpu_runtime_failure() {
+            tracing::info!(
+                model_id = %model_id.0,
+                "a model worker started again — the graphics card is back in use"
+            );
         }
 
         tracing::info!(model_id = %model_id.0, "DIAG: model worker subprocess started");
