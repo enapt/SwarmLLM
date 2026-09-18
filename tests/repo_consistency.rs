@@ -8082,3 +8082,104 @@ fn rust_sources_under(dir: &str) -> Vec<PathBuf> {
     out.sort();
     out
 }
+
+/// The dispatcher's liveness marker is written on EVERY path, and read from a
+/// different task.
+///
+/// Both halves are load-bearing and neither is provable by testing the helper:
+/// a test that exercises `note_dispatch` cannot tell anyone it is CALLED.
+///
+/// - **Written before the `match`.** After it, the marker would be missing for
+///   whichever arm someone forgot — and the arm nobody thought about is the one
+///   that wedges.
+/// - **Read by `HealthMonitor`, never by the dispatcher.** A heartbeat emitted
+///   from inside the dispatch loop goes silent for exactly the same reason the
+///   loop is stuck: it never gets back to the top to emit one. That is why
+///   `daemon::supervisor` cannot serve here either — `JoinSet::join_next()`
+///   fires on a panic or a clean exit, and a task parked for ever does neither.
+///   45 minutes of total silence produced not one supervisor line
+///   (`docs/FUTURE_WORK.md` #90).
+#[test]
+fn the_dispatcher_liveness_marker_is_written_before_the_match_and_watched_elsewhere() {
+    let dispatch = std::fs::read_to_string(repo_root().join("src/daemon/dispatch/mod.rs"))
+        .expect("dispatch/mod.rs");
+    let (recv, note, matched) = marker_positions(&dispatch);
+    let recv = recv.expect("the dispatch loop must still receive on network_out_rx");
+    let note = note.expect(
+        "the dispatch loop must record a liveness marker — without it a stalled          dispatcher is silent and the node reports itself healthy",
+    );
+    let matched = matched.expect("the dispatch loop must still match on the message");
+    assert!(
+        recv < note && note < matched,
+        "the marker must be written after the receive and BEFORE the match          (recv line {recv}, marker line {note}, match line {matched}) — written          inside an arm it is missing for every arm nobody remembered"
+    );
+
+    let monitor = std::fs::read_to_string(repo_root().join("src/health/monitor.rs"))
+        .expect("health/monitor.rs");
+    assert!(
+        monitor.contains("report_dispatcher_stall()"),
+        "HealthMonitor must check the marker on its tick — it is the task the          failure cannot reach"
+    );
+    assert!(
+        monitor.contains("dispatch_idle_for()"),
+        "the stall report must read the marker rather than re-derive liveness"
+    );
+    assert!(
+        !dispatch.contains("dispatch_idle_for()"),
+        "the dispatcher must not watch itself — a loop parked in one of its own          arms cannot report that it is parked"
+    );
+}
+
+/// Line numbers of the receive, the liveness marker and the match in the
+/// dispatch loop. Separated so the self-test below can drive it on a source
+/// string that is not on disk.
+fn marker_positions(src: &str) -> (Option<usize>, Option<usize>, Option<usize>) {
+    let find = |needle: &str| src.lines().position(|l| l.contains(needle));
+    (
+        find("network_out_rx.recv()"),
+        find(".note_dispatch("),
+        find("match msg {"),
+    )
+}
+
+/// The planted violation, kept — a scan that finds nothing is
+/// indistinguishable from one that cannot find anything (gotcha #413).
+#[test]
+fn the_liveness_marker_guard_catches_a_marker_moved_inside_the_match() {
+    let planted = r#"
+authed_msg = network_out_rx.recv() => {
+    match msg {
+        SwarmMessage::LayerResult(r) => {
+            shared_state.metrics.note_dispatch(msg.kind_name());
+        }
+    }
+}
+"#;
+    let (recv, note, matched) = marker_positions(planted);
+    assert!(
+        !(recv < note && note < matched),
+        "a marker written inside an arm must not satisfy the ordering"
+    );
+
+    let correct = r#"
+authed_msg = network_out_rx.recv() => {
+    shared_state.metrics.note_dispatch(msg.kind_name());
+    match msg {
+        SwarmMessage::LayerResult(r) => {}
+    }
+}
+"#;
+    let (recv, note, matched) = marker_positions(correct);
+    assert!(recv < note && note < matched, "the correct shape must pass");
+
+    // And a marker deleted altogether is caught, not read as "nothing to check".
+    let absent = r#"
+authed_msg = network_out_rx.recv() => {
+    match msg {}
+}
+"#;
+    assert!(
+        marker_positions(absent).1.is_none(),
+        "a missing marker must be visible as missing"
+    );
+}

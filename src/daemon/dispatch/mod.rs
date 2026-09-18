@@ -375,6 +375,16 @@ pub(crate) async fn dispatch_network_messages(
                     authed_msg = network_out_rx.recv() => {
                         match authed_msg {
                             Some(AuthenticatedMessage { sender: authenticated_sender, message: msg }) => {
+                                // Liveness marker, written BEFORE the match and
+                                // so on every path through it, including the
+                                // `continue`s. `HealthMonitor` — a different
+                                // task, on its own timer — is what notices when
+                                // this stops moving. It cannot be a heartbeat
+                                // emitted from inside this loop: a loop parked
+                                // in one of the arms below never gets back here
+                                // to emit one, which is exactly the 45 minutes
+                                // in `docs/FUTURE_WORK.md` #90.
+                                shared_state.metrics.note_dispatch(msg.kind_name());
                                 match msg {
                                     // LayerResult: route to pending pipeline executor via oneshot channel
                                     SwarmMessage::LayerResult(ref result) => {

@@ -933,6 +933,8 @@ impl SharedState {
                 segment_bytes_out: AtomicU64::new(0),
                 tokens_served: AtomicU64::new(0),
                 channel_metrics: ChannelMetricsSet::new(),
+                last_dispatch_at_ms: std::sync::atomic::AtomicI64::new(0),
+                last_dispatch_kind: parking_lot::Mutex::new("none"),
                 ws_connection_count: std::sync::atomic::AtomicUsize::new(0),
                 providers_config: RwLock::new({
                     let stored = db

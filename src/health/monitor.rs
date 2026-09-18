@@ -273,6 +273,17 @@ impl HealthMonitor {
                 _ = interval.tick() => {
                     nonce = nonce.wrapping_add(1);
 
+                    // Is the message dispatcher still consuming?
+                    //
+                    // FIRST, before anything that can itself wait: this is the
+                    // one check whose whole value is that it runs in a task the
+                    // failure cannot reach. `daemon::supervisor` cannot do it —
+                    // `JoinSet::join_next()` fires on a panic or a clean exit,
+                    // and a task parked for ever inside an `.await` does
+                    // neither, so 45 minutes of total silence produced not one
+                    // supervisor line (`docs/FUTURE_WORK.md` #90).
+                    self.report_dispatcher_stall();
+
                     // Health pings and peer liveness: always run every 30s (critical)
                     self.send_health_ping(nonce).await;
                     self.check_peer_health().await;
@@ -425,6 +436,43 @@ impl HealthMonitor {
         }
 
         Ok(())
+    }
+
+    /// Say so, loudly, when the message dispatcher has stopped consuming.
+    ///
+    /// A stalled dispatcher is a total outage that reports itself as healthy:
+    /// that one channel carries gossip AND every inbound `LayerForward`,
+    /// `LayerResult`, `StreamingToken` and `RemoteGenerateRequest`, so the node
+    /// stops taking part in the swarm entirely while `/health/ready` still
+    /// answers `true` and locally-served requests still work. On 2026-09-18 it
+    /// lasted 45 minutes and ended only because the node was restarted for an
+    /// unrelated deploy.
+    ///
+    /// The threshold is deliberately several ping intervals: a quiet node is
+    /// not a stalled one, and `HealthPing`/`HealthPong` alone keep this moving
+    /// on any node with a peer. Naming the last message's KIND is the point —
+    /// it says which arm to look at, which is the question a recurrence has to
+    /// answer.
+    fn report_dispatcher_stall(&self) {
+        const STALL_AFTER: Duration = Duration::from_secs(300);
+        let Some((idle, kind)) = self.shared_state.metrics.dispatch_idle_for() else {
+            return;
+        };
+        if idle < STALL_AFTER {
+            return;
+        }
+        tracing::error!(
+            target: "swarmllm::health::monitor",
+            idle_secs = idle.as_secs(),
+            last_message = kind,
+            peers = self.shared_state.peer_registry.len(),
+            "The message dispatcher has taken nothing off its channel for \
+             {}s — this node is not receiving from the swarm at all, whatever \
+             its health endpoint says. The kind above is the last message it \
+             accepted, and so the handler to suspect. Restarting the node \
+             clears it; see docs/FUTURE_WORK.md #90.",
+            idle.as_secs()
+        );
     }
 
     async fn send_health_ping(&self, nonce: u64) {

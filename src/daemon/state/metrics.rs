@@ -1,4 +1,4 @@
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicI64, AtomicU64};
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
@@ -91,6 +91,30 @@ pub struct MetricsProviders {
     /// away.
     pub tokens_served: AtomicU64,
     pub channel_metrics: ChannelMetricsSet,
+    /// Message-dispatcher liveness: when it last took a message off
+    /// `network_out`, in epoch millis, and which variant that was.
+    ///
+    /// **Written by the dispatcher, read by a DIFFERENT task**, and that split
+    /// is the whole point. On 2026-09-18 the dispatcher stopped consuming for
+    /// 45 minutes and nothing noticed: `daemon::supervisor` reacts only when
+    /// `JoinSet::join_next()` returns, i.e. to a panic or a clean exit, so a
+    /// task parked for ever inside an `.await` produces no signal at all. A
+    /// heartbeat emitted BY the dispatcher would be just as silent — it never
+    /// gets back to the top of its own loop to emit one. So the dispatcher
+    /// writes a marker the instant a message arrives, before it decides what to
+    /// do with it, and `HealthMonitor` (already ticking on its own timer) is
+    /// what complains. `docs/FUTURE_WORK.md` #90.
+    ///
+    /// `0` means nothing has been dispatched yet.
+    pub last_dispatch_at_ms: AtomicI64,
+    /// The `SwarmMessage` variant behind `last_dispatch_at_ms` — the one thing
+    /// that says WHICH arm to look at. A `Mutex<&'static str>` rather than an
+    /// atomic index into a table: the name comes from
+    /// `SwarmMessage::kind_name`, which the compiler forces to stay exhaustive,
+    /// and a second table to keep in step would be the thing that goes stale.
+    /// Uncontended, never held across an await, ~15 ns on a path that peaks
+    /// around 100 messages a second.
+    pub last_dispatch_kind: parking_lot::Mutex<&'static str>,
     pub ws_connection_count: std::sync::atomic::AtomicUsize,
     pub node_stats: RwLock<NodeStats>,
     pub providers_config: RwLock<crate::config::ProvidersConfig>,
@@ -223,6 +247,36 @@ struct DropReportWindow {
     last_report_ms: Option<u64>,
     /// Drops swallowed since then.
     suppressed: u64,
+}
+
+impl MetricsProviders {
+    /// Record that the message dispatcher has just taken a message off its
+    /// channel. Called BEFORE the message is acted on, at the one point every
+    /// message passes through whatever arm it takes.
+    pub fn note_dispatch(&self, kind: &'static str) {
+        self.last_dispatch_at_ms.store(
+            chrono::Utc::now().timestamp_millis(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        *self.last_dispatch_kind.lock() = kind;
+    }
+
+    /// How long the dispatcher has gone without taking a message, and what the
+    /// last one was. `None` before the first message — a node that has received
+    /// nothing yet is not a stalled one.
+    pub fn dispatch_idle_for(&self) -> Option<(std::time::Duration, &'static str)> {
+        let at = self
+            .last_dispatch_at_ms
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if at == 0 {
+            return None;
+        }
+        let idle_ms = chrono::Utc::now().timestamp_millis().saturating_sub(at);
+        Some((
+            std::time::Duration::from_millis(idle_ms.max(0) as u64),
+            *self.last_dispatch_kind.lock(),
+        ))
+    }
 }
 
 /// Atomic counters for a single mpsc channel.
@@ -460,5 +514,77 @@ mod channel_counter_tests {
             "the clock must run from the last ACCEPTED message, got {}s",
             burst.stalled_secs()
         );
+    }
+}
+
+#[cfg(test)]
+mod dispatch_liveness_tests {
+    fn test_state() -> std::sync::Arc<crate::daemon::SharedState> {
+        use crate::identity::Identity;
+        use crate::inference::executor::ModelExecutor;
+        use crate::storage::db::Database;
+        use tokio::sync::Mutex;
+
+        let temp = tempfile::tempdir().unwrap();
+        let db = Database::open(temp.path()).unwrap();
+        let executor = std::sync::Arc::new(Mutex::new(ModelExecutor::new()));
+        let (state, _, _) = crate::daemon::SharedState::new(
+            crate::config::Config::default(),
+            Identity::generate(),
+            db,
+            executor,
+            None,
+        );
+        state
+    }
+
+    /// A node that has received nothing yet is not a stalled one — reporting a
+    /// stall at boot would train everyone to ignore the line.
+    #[test]
+    fn a_node_that_has_dispatched_nothing_is_not_reported_as_stalled() {
+        let state = test_state();
+        assert!(state.metrics.dispatch_idle_for().is_none());
+    }
+
+    /// And once a message has been taken, the marker carries WHICH one — the
+    /// only thing that says which handler to suspect.
+    #[test]
+    fn the_marker_names_the_last_message_taken() {
+        let state = test_state();
+        state.metrics.note_dispatch("LayerForward");
+        let (idle, kind) = state
+            .metrics
+            .dispatch_idle_for()
+            .expect("a dispatched message must be recorded");
+        assert_eq!(kind, "LayerForward");
+        assert!(
+            idle < std::time::Duration::from_secs(5),
+            "a marker written just now must read as fresh, got {idle:?}"
+        );
+
+        state.metrics.note_dispatch("ShardAnnounce");
+        assert_eq!(
+            state.metrics.dispatch_idle_for().unwrap().1,
+            "ShardAnnounce"
+        );
+    }
+
+    /// The name comes from the message itself, so a new variant cannot reach
+    /// the marker as "unknown" — `kind_name` has no catch-all arm and the
+    /// compiler enforces it.
+    #[test]
+    fn a_messages_kind_name_is_its_variant_name() {
+        use swarmllm_types::SwarmMessage;
+        assert_eq!(
+            SwarmMessage::PeerExchangeRequest.kind_name(),
+            "PeerExchangeRequest"
+        );
+        let ping = SwarmMessage::HealthPing {
+            nonce: 1,
+            timestamp: 0,
+            node_id: None,
+            active_request_count: 0,
+        };
+        assert_eq!(ping.kind_name(), "HealthPing");
     }
 }

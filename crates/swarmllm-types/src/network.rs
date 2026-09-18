@@ -152,6 +152,54 @@ pub enum SwarmMessage {
     ResendTokens(ResendTokens),
 }
 
+impl SwarmMessage {
+    /// The variant's name, for diagnostics.
+    ///
+    /// Deliberately an EXHAUSTIVE match with no `_` arm: this is read when the
+    /// message dispatcher has stopped consuming and the only question worth
+    /// answering is *which message was it handling* (`docs/FUTURE_WORK.md` #90).
+    /// A catch-all would answer "unknown" for precisely the new variant nobody
+    /// has debugged yet, so a new variant must fail the build here instead.
+    pub fn kind_name(&self) -> &'static str {
+        match self {
+            Self::ShardAnnounce(_) => "ShardAnnounce",
+            Self::NodeCapabilityUpdate(_) => "NodeCapabilityUpdate",
+            Self::InferenceRequest(_) => "InferenceRequest",
+            Self::PipelineAssignment(_) => "PipelineAssignment",
+            Self::LayerForward(_) => "LayerForward",
+            Self::LayerResult(_) => "LayerResult",
+            Self::InferenceError(_) => "InferenceError",
+            Self::ModelManifest(_) => "ModelManifest",
+            Self::CreditTransaction(_) => "CreditTransaction",
+            Self::HealthPing { .. } => "HealthPing",
+            Self::HealthPong { .. } => "HealthPong",
+            Self::CreditGossip(_) => "CreditGossip",
+            Self::NicknameGossip(_) => "NicknameGossip",
+            Self::PoolMessage(_) => "PoolMessage",
+            Self::StreamingToken(_) => "StreamingToken",
+            Self::ShardDownloadProgress(_) => "ShardDownloadProgress",
+            Self::HfSourceGossip(_) => "HfSourceGossip",
+            Self::EphemeralKeyExchange(_) => "EphemeralKeyExchange",
+            Self::PeerExchangeRequest => "PeerExchangeRequest",
+            Self::PeerExchangeResponse(_) => "PeerExchangeResponse",
+            Self::VisionEncodeRequest(_) => "VisionEncodeRequest",
+            Self::VisionEncodeResponse(_) => "VisionEncodeResponse",
+            Self::RemoteGenerateRequest(_) => "RemoteGenerateRequest",
+            Self::TpAllReduceRequest(_) => "TpAllReduceRequest",
+            Self::TpAllReduceResponse(_) => "TpAllReduceResponse",
+            Self::TpRingChunk(_) => "TpRingChunk",
+            Self::RegionShardSummary(_) => "RegionShardSummary",
+            Self::ModelDemandGossip(_) => "ModelDemandGossip",
+            Self::PrefixCacheAnnounce(_) => "PrefixCacheAnnounce",
+            Self::CancelInference(_) => "CancelInference",
+            Self::WishlistAnnouncement(_) => "WishlistAnnouncement",
+            Self::PoolModelAvailability(_) => "PoolModelAvailability",
+            Self::RelayedEnvelope(_) => "RelayedEnvelope",
+            Self::ResendTokens(_) => "ResendTokens",
+        }
+    }
+}
+
 /// NETWORKING_PLAN Phase 1 — application-level inference relay envelope.
 ///
 /// Routed through a mutually-reachable relay peer (usually the anchor) when a
