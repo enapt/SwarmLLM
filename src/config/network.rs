@@ -204,6 +204,12 @@ pub fn default_bootstrap_peers() -> Vec<String> {
 }
 
 /// Detect WSL2 by checking /proc/version for "microsoft" or "WSL".
+///
+/// ⚠ **This says the KERNEL is WSL2's, not that we are the WSL2 host.** A
+/// container started by Docker Desktop's WSL2 backend reads the same
+/// `/proc/version`, so this is `true` inside an ordinary Linux container on
+/// Windows. Ask [`running_in_container`] before acting on it — see
+/// [`wsl_network_adaptation`].
 pub(crate) fn is_wsl2() -> bool {
     std::fs::read_to_string("/proc/version")
         .map(|v| {
@@ -211,6 +217,98 @@ pub(crate) fn is_wsl2() -> bool {
             lower.contains("microsoft") || lower.contains("wsl")
         })
         .unwrap_or(false)
+}
+
+/// Does `/proc/1/cgroup` name a container runtime?
+///
+/// Split out as a pure function so the match list is testable: PID 1's cgroup
+/// is the container's own under every runtime here, while on a host PID 1 is
+/// init and reads `0::/init.scope` or `0::/`. Kept deliberately narrow for that
+/// reason — a looser pattern risks the FALSE POSITIVE direction, which is the
+/// costly one (see [`wsl_network_adaptation`]).
+fn cgroup_names_a_container(cgroup: &str) -> bool {
+    let lower = cgroup.to_lowercase();
+    [
+        "/docker",
+        "/containerd",
+        "kubepods",
+        "/lxc",
+        "libpod",
+        "/podman",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+}
+
+/// Are we inside a container rather than on the host?
+///
+/// Several signals, OR'd, because no single one survives every runtime and
+/// cgroup version: `/.dockerenv` is Docker's, `/run/.containerenv` Podman's,
+/// the `container` environment variable is set by Podman and systemd-nspawn,
+/// and the cgroup path covers the rest. cgroup v2 in particular can read a bare
+/// `0::/` inside a container, which is why it is not the only signal.
+///
+/// **Checked against a real WSL2 shell, which is the false-positive case that
+/// would matter**: `/.dockerenv` and `/run/.containerenv` absent, `container`
+/// unset, `/proc/1/cgroup` = `0::/init.scope`. None fire.
+pub(crate) fn running_in_container() -> bool {
+    if std::path::Path::new("/.dockerenv").exists()
+        || std::path::Path::new("/run/.containerenv").exists()
+    {
+        return true;
+    }
+    if std::env::var_os("container").is_some_and(|v| !v.is_empty()) {
+        return true;
+    }
+    std::fs::read_to_string("/proc/1/cgroup")
+        .map(|c| cgroup_names_a_container(&c))
+        .unwrap_or(false)
+}
+
+/// What networking adaptation, if any, this host wants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WslNetworkAdaptation {
+    /// Change nothing — not WSL2, or a container that merely inherited WSL2's
+    /// kernel string.
+    None,
+    /// WSL2 sharing the host's interfaces: a first-class LAN citizen already.
+    Mirrored,
+    /// WSL2 in the default NAT mode, where the safe defaults are wanted.
+    NatSafeDefaults,
+}
+
+/// The whole decision, as a truth table, so it can be asserted rather than
+/// inferred from three separate calls at the use site.
+///
+/// **A container is excluded even though `is_wsl2()` is true for it.** Docker
+/// Desktop's WSL2 backend gives every container the host kernel's version
+/// string without giving it the host's networking, and the mirrored probe
+/// cannot succeed in a container's namespace either — no `wslinfo` binary, and
+/// the interface layout is the container's own. So the pessimistic branch was
+/// taken for EVERY container on Windows, which forced `listen_address` to
+/// `127.0.0.1`. Docker's `-p host:container` mapping cannot reach a listener
+/// bound to loopback INSIDE the container, so the P2P port was published and
+/// unreachable, and QUIC/AutoNAT/DCUtR/UPnP were off as well — exactly the
+/// features a NAT'd peer needs. The only symptom was "fewer peers than my other
+/// node" (report #003, v0.3.182).
+///
+/// The asymmetry decides the detection's strictness: a missed container leaves
+/// today's bug, while a container falsely detected on a real WSL2 shell would
+/// undo gotcha #161's fix. The signals are chosen to be ones a bare WSL2 shell
+/// cannot produce.
+pub(crate) fn wsl_network_adaptation(
+    is_wsl2: bool,
+    in_container: bool,
+    mirrored: impl FnOnce() -> bool,
+) -> WslNetworkAdaptation {
+    if !is_wsl2 || in_container {
+        return WslNetworkAdaptation::None;
+    }
+    if mirrored() {
+        WslNetworkAdaptation::Mirrored
+    } else {
+        WslNetworkAdaptation::NatSafeDefaults
+    }
 }
 
 /// Parse the stdout of `wslinfo --networking-mode`.
@@ -427,6 +525,79 @@ impl<'de> Deserialize<'de> for ExternalAddresses {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A container on a Windows host must NOT get the WSL2 NAT adaptation.
+    ///
+    /// It reads WSL2's kernel string but has none of WSL2's networking, and the
+    /// adaptation binds the peer-to-peer listener to `127.0.0.1` — which a
+    /// published container port cannot reach, so the node is silently
+    /// unreachable and loses exactly the NAT'd peers it needed the disabled
+    /// features for (report #003, v0.3.182).
+    #[test]
+    fn a_container_on_a_wsl2_kernel_gets_no_wsl_adaptation() {
+        assert_eq!(
+            wsl_network_adaptation(true, true, || panic!(
+                "must not probe wslinfo in a container"
+            )),
+            WslNetworkAdaptation::None
+        );
+    }
+
+    /// The false-positive direction, which is the costly one: a real WSL2 shell
+    /// in NAT mode must still get the safe defaults, or gotcha #161's fix is
+    /// undone and the node strands itself on the relay.
+    #[test]
+    fn a_real_wsl2_host_still_gets_its_adaptation() {
+        assert_eq!(
+            wsl_network_adaptation(true, false, || false),
+            WslNetworkAdaptation::NatSafeDefaults
+        );
+        assert_eq!(
+            wsl_network_adaptation(true, false, || true),
+            WslNetworkAdaptation::Mirrored
+        );
+    }
+
+    /// Anything that is not WSL2 is untouched, container or not.
+    #[test]
+    fn a_plain_linux_host_is_never_adapted() {
+        assert_eq!(
+            wsl_network_adaptation(false, false, || unreachable!()),
+            WslNetworkAdaptation::None
+        );
+        assert_eq!(
+            wsl_network_adaptation(false, true, || unreachable!()),
+            WslNetworkAdaptation::None
+        );
+    }
+
+    /// The cgroup matcher must fire on container runtimes and stay silent on a
+    /// host's PID 1 — `0::/init.scope` is what this project's own WSL2 box
+    /// reads, and matching it would disable the adaptation everywhere.
+    #[test]
+    fn the_cgroup_matcher_knows_a_container_from_a_host() {
+        for container in [
+            "12:pids:/docker/3b8f0e2c9a\n11:memory:/docker/3b8f0e2c9a\n",
+            "0::/kubepods.slice/kubepods-besteffort.slice/cri-containerd-abc.scope\n",
+            "11:devices:/lxc/mycontainer\n",
+            "0::/libpod_parent/libpod-1234\n",
+        ] {
+            assert!(
+                cgroup_names_a_container(container),
+                "should read as a container: {container:?}"
+            );
+        }
+        for host in [
+            "0::/init.scope\n",
+            "0::/\n",
+            "0::/user.slice/user-1000.slice\n",
+        ] {
+            assert!(
+                !cgroup_names_a_container(host),
+                "should read as a host: {host:?}"
+            );
+        }
+    }
 
     /// The connection ceiling tightens as the contribution mode drops, and the
     /// default mode (Minimal) is well below the absolute ceiling.

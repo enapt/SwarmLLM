@@ -541,7 +541,24 @@ impl Config {
         // mDNS / UPnP / AutoNAT / DCUtR), so the NAT-mode safe defaults would
         // strand it on the relay. Only overrides values the user didn't
         // explicitly set in config.toml.
-        if network::is_wsl2() && network::wsl_networking_is_mirrored() {
+        // A container on a Windows host reads WSL2's kernel string without
+        // having WSL2's networking, so it is excluded here rather than at each
+        // branch — see `wsl_network_adaptation`.
+        let in_container = network::running_in_container();
+        let adaptation = network::wsl_network_adaptation(
+            network::is_wsl2(),
+            in_container,
+            network::wsl_networking_is_mirrored,
+        );
+        if network::is_wsl2() && in_container {
+            tracing::info!(
+                "Running in a container on a WSL2 host — keeping ordinary network \
+                 defaults. The WSL2 NAT-mode adaptation is for the WSL2 host itself; \
+                 applying it here would bind the peer-to-peer listener to loopback, \
+                 which a published container port cannot reach."
+            );
+        }
+        if adaptation == network::WslNetworkAdaptation::Mirrored {
             tracing::info!(
                 "WSL2 mirrored networking detected — node is a first-class LAN citizen; \
                  keeping full networking (QUIC/mDNS/UPnP/AutoNAT/DCUtR), NAT-mode safe \
@@ -574,7 +591,7 @@ impl Config {
             // opened, which is telling someone to fix a problem they have fixed.
             // `health::monitor` raises it only once inbound has demonstrably
             // failed to arrive; see `maybe_warn_wsl_firewall`.
-        } else if network::is_wsl2() {
+        } else if adaptation == network::WslNetworkAdaptation::NatSafeDefaults {
             // Parse TOML into a Value to check which keys were explicitly set.
             // Raw string search (e.g., config_text.contains("enable_quic")) would
             // match commented-out keys or keys in string values — false positives.
