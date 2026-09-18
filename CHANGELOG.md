@@ -1,5 +1,61 @@
 # Changelog
 
+## [0.3.189-alpha] — UNRELEASED (set this date when cutting the release)
+
+**A long answer that fills up the model's memory now ends properly instead of
+looking like something went wrong.**
+
+Every model can only hold so much of a conversation at once. When an answer
+being assembled across several computers grew until it filled that space, the
+answer had simply finished — it was as long as the model could make it. SwarmLLM
+was reporting it as a failure instead. In a chat window the reply arrived
+normally and was then followed by an error saying your conversation was too long
+and to send a shorter question, even when the question had been a single
+sentence. There was nothing you could have done differently, because the length
+was the model's, not yours.
+
+Now such an answer ends the way any answer that reaches its length limit does,
+and the text is kept. A question that genuinely is too long to start is
+unchanged and still says so — that message was right in the first place.
+
+**Your computer now notices when it has stopped hearing from the swarm.**
+
+A computer taking part in SwarmLLM receives a constant stream of messages from
+the others. If the part that handles them ever stops, that computer goes silent
+to everyone else — it can no longer be sent work, or take part in anyone's
+answer — while its own status page still reports everything as fine and anything
+it can answer by itself keeps working. It happened once for forty-five minutes
+and nothing noticed; it ended only because the computer was restarted for an
+unrelated reason.
+
+Three things changed. It now says so, in the log, naming how long it has been
+silent and what it was last doing — the two pieces of information that make it
+possible to find the cause. It writes one line every thirty seconds instead of
+one per dropped message, which in that incident was two hundred and thirty
+thousand lines burying the one fact that mattered. And one way it could get
+stuck has been closed: cancelling a request used to reach out to each of your
+loaded models with no time limit, so a model that had stopped responding could
+hold the whole thing open indefinitely.
+
+This does not stop the original problem happening again — the cause is still
+being looked for — but the next occurrence will say what it is instead of hiding
+it.
+
+**And your computer no longer changes its mind about a model ten times a
+minute.**
+
+Two other computers can offer the same model while disagreeing about the exact
+file — different builds of the same thing, which is common. Your computer was
+believing whichever one spoke last, then the other, back and forth indefinitely.
+You would not have seen this directly, but it decided which computers your
+machine thought could help with that model, so the list changed depending on
+when you asked; it also filled the log and wrote to disk every time. Your
+computer now keeps what it already had unless the newcomer is genuinely a
+different file, and says once that the two disagree.
+
+Nothing about how computers talk to each other has changed and nodes do not need
+to update together.
+
 ## [0.3.188-alpha] — 2026-09-18
 
 **Answers from the swarm no longer show you the model's private notes, and
