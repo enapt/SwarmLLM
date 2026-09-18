@@ -975,6 +975,31 @@ tokens it generated must be kept", while the three null controls — a streamed
 request, a failure with nothing generated, and a success — stay green, which is
 what says they are controls and not passengers.
 
+**And verified on a real request, against the released binary.** Two throwaway
+nodes with TinyLlama's two shards split one each, a non-streamed 200-token
+request on the n-gram coordinator, and the tail peer **killed 14 s in** — report
+#028's own scenario, with no standby to fail over to:
+
+| | v0.3.187-alpha | fixed |
+|---|---|---|
+| HTTP | **500** | **200** |
+| body | `{"error": {"message": "Inference error: spec verify segment 1: Peer departed…"}}` | 180 characters of the reply |
+| `finish_reason` | — | `error` (`FINISH_REASON_INTERRUPTED`) |
+| "keeping the partial reply" in the log | **0** | 1, then `salvaged_reply_if_lost` after the retry also failed |
+
+The ordering shows in the log and is the part worth keeping: the choke point
+records at 07:13:28, and the router hands it over nine minutes later only after
+`should_retry_after` has had its turn and the second attempt has also died.
+
+⚠ **Reproduction trap**: the n-gram path self-disables after one request —
+`payoff_justifies_the_wire` lets an unknown figure through, this workload scores
+106 against a bar of 130, and the figure is a per-process static. **A probe on
+this path needs a freshly started coordinator**, not just a fresh request. The
+first attempt at this probe silently measured `pipeline/distributed.rs`'s own
+loop, which salvages correctly on .187 — so it read as "already fixed", and only
+the `try_ngram_only_distributed ELIGIBLE` line in the log said otherwise. Assert
+WHICH PATH a probe exercised before believing either result.
+
 ## A peer advertises the memory it will HONOUR, not the memory it has
 
 **`NodeCapability::memory_for_model_layers_mb` is the single answer to "how much

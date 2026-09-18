@@ -7489,3 +7489,335 @@ fn a_failed_fetch_never_overwrites_the_frontend_cache() {
         unguarded.join("\n")
     );
 }
+
+/// The byte span of every `fn` body in `src`. Used to ask "does the function
+/// containing this line also call X?", which a proximity window cannot answer
+/// here: the widest real gap between a `finalize_reply_text` call and the
+/// `InferenceOutput` it finalises is ~30 lines (`pipeline/distributed.rs`),
+/// and a window that generous reaches into neighbouring functions. Taking the
+/// whole body is the rule `arch-guards-and-tests.md` states, for the reason
+/// the VRAM guard proved: a character window is brittle in both directions.
+fn fn_bodies(src: &str) -> Vec<(usize, usize)> {
+    let bytes = src.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while let Some(rel) = src[i..].find("fn ") {
+        let at = i + rel;
+        i = at + 3;
+        // `fn` must begin a token, or `transfn (`-style names would match.
+        if at > 0 && !bytes[at - 1].is_ascii_whitespace() {
+            continue;
+        }
+        // Walk the signature to its opening brace. `;` first means a trait
+        // method or an extern declaration, which has no body.
+        let mut j = at;
+        let mut parens = 0i32;
+        let mut body_start = None;
+        while j < bytes.len() {
+            match bytes[j] {
+                b'(' => parens += 1,
+                b')' => parens -= 1,
+                b'{' if parens <= 0 => {
+                    body_start = Some(j);
+                    break;
+                }
+                b';' if parens <= 0 => break,
+                _ => {}
+            }
+            j += 1;
+        }
+        let Some(start) = body_start else { continue };
+        let mut depth = 0i32;
+        let mut k = start;
+        while k < bytes.len() {
+            match bytes[k] {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        out.push((start, k));
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            k += 1;
+        }
+    }
+    out
+}
+
+/// The byte span of everything behind a `#[cfg(test)]`, whether it guards a
+/// `mod` or a single `fn`. Test fixtures build `InferenceOutput`s freely and
+/// must not be asked to finalise them — and the attribute sits on the
+/// enclosing MODULE, so looking for it inside the function body finds
+/// nothing. Four fixtures were reported as offenders before this existed.
+fn cfg_test_spans(src: &str) -> Vec<(usize, usize)> {
+    let bytes = src.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while let Some(rel) = src[i..].find("#[cfg(test)]") {
+        let at = i + rel;
+        i = at + 12;
+        // First brace after the attribute opens the guarded item's body.
+        let mut j = at;
+        let mut parens = 0i32;
+        let mut start = None;
+        while j < bytes.len() {
+            match bytes[j] {
+                b'(' => parens += 1,
+                b')' => parens -= 1,
+                b'{' if parens <= 0 => {
+                    start = Some(j);
+                    break;
+                }
+                _ => {}
+            }
+            j += 1;
+        }
+        let Some(start) = start else { continue };
+        let mut depth = 0i32;
+        let mut k = start;
+        while k < bytes.len() {
+            match bytes[k] {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        out.push((start, k));
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            k += 1;
+        }
+    }
+    out
+}
+
+/// Every site in `text` that builds an `InferenceOutput` carrying content
+/// without its enclosing function calling `finalize_reply_text`, as 1-indexed
+/// line numbers. Separated from the test so the planted-violation self-test
+/// below can drive it on a source string that is not on disk.
+fn unfinalised_reply_sites(text: &str) -> Vec<usize> {
+    let bodies = fn_bodies(text);
+    let tests = cfg_test_spans(text);
+    let mut out = Vec::new();
+    let mut from = 0usize;
+    while let Some(rel) = text[from..].find("InferenceOutput {") {
+        let at = from + rel;
+        from = at + 1;
+        if tests.iter().any(|(s, e)| *s < at && at < *e) {
+            continue;
+        }
+        // The enclosing function is the SMALLEST body containing this offset.
+        let Some((start, end)) = bodies
+            .iter()
+            .filter(|(s, e)| *s < at && at < *e)
+            .min_by_key(|(s, e)| e - s)
+            .copied()
+        else {
+            continue;
+        };
+        let body = &text[start..end];
+        let literal_end = text[at..end].find('}').map(|o| at + o).unwrap_or(end);
+        let literal = &text[at..literal_end];
+        // A cancellation or a zero-`max_tokens` early return has no text to
+        // finalise; a site with no `content` field at all is a signature or a
+        // return type rather than a construction.
+        if literal.contains("content: String::new()") || !literal.contains("content") {
+            continue;
+        }
+        if !body.contains("finalize_reply_text") {
+            out.push(text[..at].lines().count());
+        }
+    }
+    out
+}
+
+/// **Every source of reply text ends by calling `finalize_reply_text`** — the
+/// control-token scrub, the leading `<think>` reasoning block, stop truncation
+/// and the newlines a removed marker strands. Its own doc comment has said so
+/// since it was written, and saying so was not enough twice:
+///
+/// - `pipeline::remote_generate` never called it, so a reasoning model asked
+///   over the swarm answered with its raw scratchpad while the same request
+///   answered locally came back clean (gotcha #634).
+/// - `finish_speculative` — the finaliser ALL THREE speculative coordinators
+///   share — never called it either. It filtered EOS *ids*, which catches only
+///   the markers a GGUF happened to declare, and applied no stops at all, so a
+///   caller's `stop` was ignored on the DEFAULT distributed path (gotcha #643).
+///
+/// Both times the count in the prose was wrong — "three sources", then "five" —
+/// and a count in a comment goes stale the moment a path is added. So the
+/// property is asserted instead of the census: a function that builds an
+/// `InferenceOutput` carrying content must also finalise it.
+///
+/// Exempt: `content: String::new()` (a cancellation or a zero-`max_tokens`
+/// early return has nothing to finalise) and anything built through
+/// `from_gen_result`, whose producers finalise before returning.
+#[test]
+fn every_reply_source_finalises_its_text() {
+    let root = repo_root();
+    let mut stack = vec![root.join("src")];
+    let mut offenders: Vec<String> = Vec::new();
+    let mut checked = 0usize;
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for e in rd.filter_map(|e| e.ok()) {
+            let path = e.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if !path.extension().is_some_and(|x| x == "rs") {
+                continue;
+            }
+            let rel = path
+                .strip_prefix(&root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            // A `tests.rs` beside its module is fixtures end to end; the
+            // `#[cfg(test)]` span check covers in-file test modules.
+            if rel.ends_with("/tests.rs") || rel.contains("/tests/") {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            if !text.contains("InferenceOutput {") {
+                continue;
+            }
+            checked += text.matches("InferenceOutput {").count();
+            for line in unfinalised_reply_sites(&text) {
+                offenders.push(format!("{rel}:{line}"));
+            }
+        }
+    }
+    assert!(
+        checked >= 5,
+        "only {checked} `InferenceOutput` constructions found anywhere in src/ \
+         — the scan has stopped matching, which reads exactly like a rule \
+         nobody breaks"
+    );
+    assert!(
+        offenders.is_empty(),
+        "these build an InferenceOutput carrying content without their function \
+         finalising it — call crate::inference::finalize_reply_text (see \
+         docs/invariants/api-surfaces.md § \"A reply is finalised on the \
+         coordinator\"): {offenders:?}"
+    );
+}
+
+/// The planted violation, kept. A repo-wide scan that finds nothing is
+/// indistinguishable from one that CANNOT find anything (gotcha #413, where
+/// four of five guards had been reporting success for months), so the
+/// scanner's reach is pinned the way any other behaviour is.
+///
+/// The three shapes are the real ones: gotcha #643's actual pre-fix code, the
+/// two exemptions, and a second construction added to a function that already
+/// finalises elsewhere — which a file-level `contains` would have missed.
+#[test]
+fn the_finalisation_guard_catches_a_reply_source_that_skips_the_finaliser() {
+    // #643's `finish_speculative`, as it actually stood: EOS ids filtered,
+    // decoded, returned.
+    let unfinalised = r#"
+impl PipelineExecutor {
+    fn finish_speculative(&self, generated: Vec<u32>) -> InferenceOutput {
+        let clean: Vec<u32> = generated.into_iter().filter(|t| !eos.contains(t)).collect();
+        let content = decoder.decode_tokens(&clean);
+        InferenceOutput {
+            request_id,
+            content,
+            matched_stop_sequence: None,
+        }
+    }
+}
+"#;
+    assert_eq!(
+        unfinalised_reply_sites(unfinalised).len(),
+        1,
+        "the guard must catch the shape it exists for"
+    );
+
+    // The same function, fixed.
+    let finalised = unfinalised.replace(
+        "let content = decoder.decode_tokens(&clean);",
+        "let mut content = decoder.decode_tokens(&clean);\n        \
+         crate::inference::finalize_reply_text(&mut content, stops);",
+    );
+    assert!(
+        unfinalised_reply_sites(&finalised).is_empty(),
+        "and must accept it once finalised"
+    );
+
+    // Exemption: an early return with no text in it.
+    let empty = r#"
+fn cancelled(&self) -> InferenceOutput {
+    InferenceOutput {
+        request_id,
+        content: String::new(),
+        finish_reason: "stop".to_string(),
+    }
+}
+"#;
+    assert!(
+        unfinalised_reply_sites(empty).is_empty(),
+        "a cancellation has nothing to finalise"
+    );
+
+    // A SECOND construction in a function that finalises for the first one is
+    // still caught, because the check is per site — but a function-wide
+    // `contains` cannot tell them apart, which is the limitation this records
+    // rather than hides: both sites here sit in one body, so one
+    // `finalize_reply_text` covers both. The guard's reach is the FUNCTION.
+    let two_in_one = r#"
+fn two(&self) -> InferenceOutput {
+    crate::inference::finalize_reply_text(&mut a, stops);
+    if x {
+        return InferenceOutput { request_id, content: a };
+    }
+    InferenceOutput { request_id, content: b }
+}
+"#;
+    assert!(
+        unfinalised_reply_sites(two_in_one).is_empty(),
+        "documented reach: one finaliser call covers its whole function — a \
+         new reply source belongs in its own function, which is how both real \
+         instances were shaped"
+    );
+
+    // And the scanner must actually be resolving bodies, not matching the
+    // whole file: an unfinalised construction beside a finalising neighbour
+    // is the case a file-level check gets wrong.
+    let neighbours = format!(
+        "fn ok() -> InferenceOutput {{\n    \
+         crate::inference::finalize_reply_text(&mut c, stops);\n    \
+         InferenceOutput {{ request_id, content: c }}\n}}\n{unfinalised}"
+    );
+    assert_eq!(
+        unfinalised_reply_sites(&neighbours).len(),
+        1,
+        "a finalising function must not vouch for its neighbour"
+    );
+
+    // Test fixtures are exempt, and the attribute sits on the enclosing
+    // MODULE — which is why looking for it inside the function body found
+    // nothing and reported four of them as offenders.
+    let fixture = format!("#[cfg(test)]\nmod t {{\n{unfinalised}\n}}\n");
+    assert!(
+        unfinalised_reply_sites(&fixture).is_empty(),
+        "a #[cfg(test)] module's fixtures must not be asked to finalise"
+    );
+    // …and the exemption must not leak past the module's closing brace.
+    let after = format!("#[cfg(test)]\nmod t {{\n    fn noop() {{}}\n}}\n{unfinalised}");
+    assert_eq!(
+        unfinalised_reply_sites(&after).len(),
+        1,
+        "the test exemption must end with the module"
+    );
+}

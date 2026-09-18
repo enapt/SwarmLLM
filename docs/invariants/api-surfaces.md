@@ -101,11 +101,53 @@ and `a_callers_stop_sequence_truncates_a_speculative_reply` got
 shared finaliser, rather than once per path — so a fourth speculative
 coordinator inherits the coverage.
 
+**And verified on a real request, with the discriminating control.** Two
+throwaway nodes, TinyLlama's two shards split one each, a genuine 2-segment
+route (`x-swarm-route: distributed`, `x-swarm-segments: 2`) confirmed on the
+n-gram coordinator (`try_ngram_only_distributed ELIGIBLE`,
+`num_segments=2`). The same request — `stop: ["5"]`, "count from 1 to 10" —
+against the deployed **v0.3.187-alpha** and against the fixed build:
+
+| | v0.3.187-alpha | fixed |
+|---|---|---|
+| content | `1. One … 5. Five … 16. Sixteen` | `1. One\n2. Two\n3. Three\n4. Four\n` |
+| `finish_reason` | `length` | `stop` |
+
+The released binary ignored the stop outright, ran to `max_tokens` and invented
+numbers past ten. Unit tests cannot reach this: they prove `finish_speculative`
+finalises against whatever `reply_stops` returns, not that `reply_stops` is
+populated from a real header on a real route.
+
+⚠ **Reproduction trap: the n-gram path self-disables after one request.**
+`payoff_justifies_the_wire` lets `seen_x100 == 0` (unknown) through and this
+workload then scores **106** against a bar of **130**, so a second request on
+the same process takes the STANDARD loop instead — and the figure is a
+per-process static. **A probe on this path needs a freshly started
+coordinator**, not merely a fresh request. A first attempt at the salvage probe
+below silently measured `pipeline/distributed.rs` for exactly this reason, and
+only the `ELIGIBLE` line in the log said so.
+
 **What a change must keep.** `remote_generate` remains the one caller passing an
 empty stop set, for the reason above: the PEER ran that decode. A coordinator
 that sampled the tokens itself has no peer to have done it and must pass
 `reply_stops`. The distinction is "who decided which token came next", not
 "is this request distributed".
+
+**And the census is now a guard.** `every_reply_source_finalises_its_text` in
+`tests/repo_consistency.rs` resolves the function enclosing each
+`InferenceOutput` construction (whole body, never a character window — see
+`.claude/rules/arch-guards-and-tests.md`) and fails the build when one carries
+content without its function calling `finalize_reply_text`. Exempt:
+`content: String::new()`, anything inside a `#[cfg(test)]` span, and
+`from_gen_result`, whose producers finalise first. Verified by restoring #643's
+real pre-fix line in `speculative.rs` and watching it name
+`src/inference/pipeline/speculative.rs:603`; its self-test
+`the_finalisation_guard_catches_a_reply_source_that_skips_the_finaliser` keeps
+the planted violation, plus the two exemptions, a neighbour case (a finalising
+function must not vouch for the one after it) and the end of the `#[cfg(test)]`
+span — because the first version of the exemption looked for the attribute
+inside the function body, where it never is, and reported four fixtures as
+offenders.
 
 ## A reply budget the caller did not choose is a ceiling, not a demand
 
