@@ -170,11 +170,11 @@ a change, especially your own.
 
 ## Status
 
-**v0.3.187-alpha released and deployed to both nodes (2026-09-18).** Nothing
+**v0.3.188-alpha released and deployed to both nodes (2026-09-18).** Nothing
 functional is unreleased; `cargo audit` reports only advisories documented in
-`SECURITY.md`. ⚠ **One item open, and it needs a DECISION rather than code** —
-`docs/FUTURE_WORK.md` #55: the registration budget is charged by metadata, not
-residency, so changing it alters what this node offers the swarm.
+`SECURITY.md`. ⚠ **Two open items, BOTH needing a DECISION not code, and each
+alters what this node offers the swarm**: `docs/FUTURE_WORK.md` #55 (budget
+charged by metadata, not residency) and #89 (dead graphics stack still offered).
 Release procedure: **`memory/release_gate.md`** — the ordered steps and every
 caution earned at a past gate; do not re-derive it. Per-release history:
 `memory/round_history.md`. Gotchas: `memory/gotchas.md` (next free index lives
