@@ -587,3 +587,49 @@ especially when the claim is "there are other callers", which is a grep.
 - The staging-and-rename half (a bare `std::fs::write` truncates first, and a
   crash mid-save left a file the daemon refuses to start on) was fixed earlier
   and is separate; keep both.
+
+## A platform predicate answers "what kernel is this", not "where am I running"
+
+(2026-09-17, field report #003 against v0.3.182, gotcha #640.)
+
+`config::network::is_wsl2()` reads `/proc/version` for "microsoft"/"wsl". A
+container started by Docker Desktop's WSL2 backend inherits the host kernel's
+version string **without inheriting the host's networking**, so the predicate is
+true for an ordinary Linux container on Windows.
+
+The mirrored-mode probe cannot rescue it either: inside a container namespace
+there is no `wslinfo` binary and the interface layout is the container's own, so
+`wsl_networking_is_mirrored()` always answers false there. Every containerised
+node on Windows therefore took the pessimistic branch and had `listen_address`
+forced to `127.0.0.1`, with QUIC, AutoNAT, DCUtR, UPnP and mDNS off.
+
+**Why loopback is the damaging part.** Docker's `-p host:container` mapping
+forwards to a listener on a non-loopback interface *inside* the container. Bound
+to `127.0.0.1` the peer-to-peer port is published and unreachable. The node
+dials out fine and looks healthy from the inside; what it loses is precisely the
+NAT'd peers that needed the disabled features. The reporter's only symptom was
+"my Docker node sees fewer peers than my Mac on the same account".
+
+**What a change must keep:**
+
+- **The decision stays a truth table.** `wsl_network_adaptation(is_wsl2,
+  in_container, mirrored)` returns `None` / `Mirrored` / `NatSafeDefaults` and is
+  asserted as one; the previous form asked three questions at the use site and a
+  fourth condition had nowhere to go.
+- **Detection strictness is set by the asymmetry.** A missed container leaves
+  this bug; a container falsely detected on a real WSL2 shell undoes gotcha
+  #161's mirrored-mode fix. So only signals a bare WSL2 shell cannot produce
+  count — verified on this project's own WSL2 box: `/.dockerenv` absent,
+  `/run/.containerenv` absent, `container` unset, `/proc/1/cgroup` =
+  `0::/init.scope`.
+- **Several signals, OR'd.** No single one survives every runtime and cgroup
+  version; cgroup v2 inside a container can read a bare `0::/`, so the cgroup
+  path cannot be the only signal.
+- **`health::monitor::maybe_warn_wsl_firewall` is correct today by accident.**
+  It gates Windows-firewall advice on `is_wsl2() && wsl_networking_is_mirrored()`,
+  and the mirrored probe already fails in a container. If that probe ever learns
+  another signal, that site needs the container exclusion too.
+
+**Generalisable**: a predicate named for a PLATFORM answers "what kernel is
+this", not "what environment am I in". Ask what else inherits the signal before
+letting it choose settings.

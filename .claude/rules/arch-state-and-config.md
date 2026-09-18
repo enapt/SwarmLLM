@@ -107,6 +107,28 @@ itself and the books come out even.
 
 → `docs/invariants/state-and-config.md`
 
+## A platform predicate answers "what kernel is this", not "where am I running"
+
+**`network::wsl_network_adaptation(is_wsl2, in_container, mirrored)` is the one
+decision** about WSL2 network overrides, returning
+`None` / `Mirrored` / `NatSafeDefaults` as a truth table rather than three
+separate calls at the use site.
+
+`is_wsl2()` reads `/proc/version`, so it is **true inside a Docker container on
+Windows**, which inherits the host kernel's string and none of its networking.
+That forced `listen_address = 127.0.0.1` on every containerised node — a
+published container port cannot reach a loopback listener, so the node was
+unreachable while looking healthy (report #003, gotcha #640). **This is the
+SECOND time this predicate proved too broad**; gotcha #161 was the first.
+
+`running_in_container()` ORs several signals because none survives every runtime
+and cgroup version. Keep it strict: a missed container leaves the bug, but a
+false positive on a real WSL2 shell undoes #161's fix. Before letting any
+platform predicate choose settings, ask what else inherits its signal — a
+container, a VM, a chroot, an emulator.
+
+→ `docs/invariants/state-and-config.md`
+
 ## Config defaults must stay live
 
 The daemon must write **only values that differ from the compiled default**.
