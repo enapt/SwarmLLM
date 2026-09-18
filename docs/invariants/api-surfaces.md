@@ -20,6 +20,11 @@ Five paths produce a reply. Four called it: `router::local_exec`,
 **`pipeline::remote_generate` — the path taken whenever ONE peer holds the whole
 model, which is the commonest distributed shape there is — called nothing.**
 
+⚠ **"Five" was wrong too** — there were six, and the sixth is the subsection
+below (2026-09-18). The count is left as it was written because being wrong
+twice in the same paragraph is the lesson: a census in prose is stale as soon
+as a path is added, which is why the guard asserts the property instead.
+
 **What it cost.** A reasoning model asked over the swarm answered with its raw
 `<think>...</think>` scratchpad as the reply, while the identical request
 answered locally came back clean. Reproduced 3/3 on qwen3-1.7b at
