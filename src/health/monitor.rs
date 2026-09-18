@@ -1176,14 +1176,28 @@ impl HealthMonitor {
             // Signal the rebalancer that a peer has left
             if self
                 .rebalance_tx
-                .try_send(RebalanceEvent::PeerLeft(peer_id))
+                .try_send(RebalanceEvent::PeerLeft(peer_id.clone()))
                 .is_err()
             {
-                self.shared_state
+                // Silent until 2026-09-18. A departed peer that the rebalancer
+                // is never told about leaves its shards looking replicated when
+                // they are not, and the INFO line above still claims the
+                // cleanup happened.
+                if let Some(burst) = self
+                    .shared_state
                     .metrics
                     .channel_metrics
                     .rebalance
-                    .record_dropped();
+                    .note_dropped()
+                {
+                    tracing::warn!(
+                        peer = %peer_id,
+                        dropped_since_last = burst.suppressed,
+                        nothing_accepted_for_secs = burst.stalled_secs(),
+                        total_dropped = burst.total,
+                        "Rebalance channel full — the rebalancer was not told this peer left"
+                    );
+                }
             } else {
                 self.shared_state
                     .metrics

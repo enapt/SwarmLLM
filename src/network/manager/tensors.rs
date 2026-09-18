@@ -506,12 +506,21 @@ impl NetworkManager {
                         forward.sender_peer_bytes = Some(peer.to_bytes());
                         let msg = SwarmMessage::LayerForward(forward);
                         if let Err(e) = self.dispatch_authenticated(Some(&peer), msg) {
-                            self.shared_state
+                            if let Some(burst) = self
+                                .shared_state
                                 .metrics
                                 .channel_metrics
                                 .network_out
-                                .record_dropped();
-                            tracing::warn!(error = %e, "Outbound channel full, dropping tensor forward");
+                                .note_dropped()
+                            {
+                                tracing::warn!(
+                                    error = %e,
+                                    dropped_since_last = burst.suppressed,
+                                    nothing_accepted_for_secs = burst.stalled_secs(),
+                                    total_dropped = burst.total,
+                                    "Outbound channel full, dropping tensor forward"
+                                );
+                            }
                             return None;
                         } else {
                             self.shared_state
@@ -548,12 +557,21 @@ impl NetworkManager {
                         if let Err(e) = self
                             .dispatch_authenticated(Some(&peer), SwarmMessage::LayerResult(result))
                         {
-                            self.shared_state
+                            if let Some(burst) = self
+                                .shared_state
                                 .metrics
                                 .channel_metrics
                                 .network_out
-                                .record_dropped();
-                            tracing::warn!(error = %e, "Outbound channel full, dropping tensor result");
+                                .note_dropped()
+                            {
+                                tracing::warn!(
+                                    error = %e,
+                                    dropped_since_last = burst.suppressed,
+                                    nothing_accepted_for_secs = burst.stalled_secs(),
+                                    total_dropped = burst.total,
+                                    "Outbound channel full, dropping tensor result"
+                                );
+                            }
                         } else {
                             self.shared_state
                                 .metrics
@@ -686,16 +704,21 @@ impl NetworkManager {
                         message: SwarmMessage::LayerForward(dispatch_forward),
                     };
                     if let Err(e) = outbound_tx.try_send(msg) {
-                        shared_state
+                        if let Some(burst) = shared_state
                             .metrics
                             .channel_metrics
                             .network_out
-                            .record_dropped();
-                        tracing::warn!(
-                            error = %e,
-                            %request_id,
-                            "Outbound channel full, dropping decrypted tensor"
-                        );
+                            .note_dropped()
+                        {
+                            tracing::warn!(
+                                error = %e,
+                                %request_id,
+                                dropped_since_last = burst.suppressed,
+                                nothing_accepted_for_secs = burst.stalled_secs(),
+                                total_dropped = burst.total,
+                                "Outbound channel full, dropping decrypted tensor"
+                            );
+                        }
                     } else {
                         shared_state
                             .metrics

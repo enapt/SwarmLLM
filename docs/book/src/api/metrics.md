@@ -70,6 +70,18 @@ Internal channel health metrics for monitoring backpressure:
 | `swarmllm_channel_sent_total{channel="..."}` | counter | Messages sent through channel |
 | `swarmllm_channel_dropped_total{channel="..."}` | counter | Messages dropped due to backpressure |
 
+Emitted for the channels whose send paths actually count: `network_out`,
+`acquisition`, `rebalance` and `pool_cmd`. A channel absent from the output is
+one nothing increments, which is deliberate — a perpetual zero cannot be told
+apart from a healthy channel, and an alert on it can never fire.
+
+`swarmllm_channel_dropped_total` rising is worth an alert, but the log is where
+the severity is: a drop line carries `nothing_accepted_for_secs`, and that is
+what separates a momentary burst from a consumer that has stopped. Anything
+above a few seconds on `network_out` means this node is not receiving from the
+swarm at all (`docs/FUTURE_WORK.md` #90). The line is rate-limited to one per
+30 s per channel and reports how many it swallowed.
+
 ### Histogram Buckets
 
 `swarmllm_inference_latency_seconds` uses these bucket boundaries (in seconds):

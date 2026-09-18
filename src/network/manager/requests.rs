@@ -145,12 +145,21 @@ impl NetworkManager {
                         tracing::debug!(%peer, "Handling protocol message request");
                         let is_stream_token = matches!(&*msg, SwarmMessage::StreamingToken(_));
                         if let Err(e) = self.dispatch_authenticated(Some(&peer), *msg) {
-                            self.shared_state
+                            if let Some(burst) = self
+                                .shared_state
                                 .metrics
                                 .channel_metrics
                                 .network_out
-                                .record_dropped();
-                            tracing::warn!(error = %e, "Dispatcher backpressured, dropping request message");
+                                .note_dropped()
+                            {
+                                tracing::warn!(
+                                    error = %e,
+                                    dropped_since_last = burst.suppressed,
+                                    nothing_accepted_for_secs = burst.stalled_secs(),
+                                    total_dropped = burst.total,
+                                    "Dispatcher backpressured, dropping request message"
+                                );
+                            }
                             // An acknowledgement must come from the code that
                             // accepted the message, and nothing did. A peer
                             // that can act on the truth is told it (gotcha
@@ -540,12 +549,22 @@ impl NetworkManager {
                     return;
                 }
                 if let Err(e) = self.dispatch_authenticated(Some(&peer), *msg) {
-                    self.shared_state
+                    if let Some(burst) = self
+                        .shared_state
                         .metrics
                         .channel_metrics
                         .network_out
-                        .record_dropped();
-                    tracing::warn!(%peer, error = %e, "Dispatcher backpressured, dropping response message");
+                        .note_dropped()
+                    {
+                        tracing::warn!(
+                            %peer,
+                            error = %e,
+                            dropped_since_last = burst.suppressed,
+                            nothing_accepted_for_secs = burst.stalled_secs(),
+                            total_dropped = burst.total,
+                            "Dispatcher backpressured, dropping response message"
+                        );
+                    }
                 } else {
                     self.shared_state
                         .metrics

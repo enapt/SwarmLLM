@@ -7942,3 +7942,143 @@ fn gather_candidates(&self, purpose: Purpose) {
 "#;
     assert!(bare_info_in_routing_fns(clean).is_empty());
 }
+
+/// Every dropped message is either reported or deliberately silenced in one
+/// place — never silently discarded at a call site.
+///
+/// The live node wedged its message dispatcher for 45 minutes on 2026-09-18 and
+/// wrote 230,402 identical WARN lines about it — 74% of the whole log — while
+/// the fact that mattered (nothing had been accepted since 11:36) appeared
+/// nowhere. `ChannelCounters::note_dropped` is now the only way to count a drop
+/// and it returns the decision, `#[must_use]`, so a new drop path cannot log
+/// per message and cannot stay silent. Two sites WERE silent —
+/// `health/monitor.rs` and `health/rebalancer.rs` — and their drops had no
+/// symptom at all.
+///
+/// `#[must_use]` covers the bare-statement form; this covers `let _ =`, which
+/// it does not.
+#[test]
+fn a_dropped_message_is_never_discarded_at_the_call_site() {
+    let mut offenders: Vec<String> = Vec::new();
+    let mut sites = 0usize;
+    for path in rust_sources_under("src") {
+        let src = std::fs::read_to_string(&path).expect("read source");
+        let (found, discarded) = drop_decision_sites(&src);
+        sites += found;
+        for line in discarded {
+            offenders.push(format!("{}:{}", path.display(), line));
+        }
+        assert!(
+            !src.contains(".record_dropped()"),
+            "{}: `record_dropped` bumped a counter without being handed the \
+             report/suppress decision — use `note_dropped`",
+            path.display()
+        );
+    }
+    assert!(
+        sites >= 8,
+        "only {sites} `note_dropped` call sites — a drop path has been removed \
+         or is counting some other way"
+    );
+    assert!(
+        offenders.is_empty(),
+        "these sites throw away the decision about whether to report a dropped \
+         message, which is how a stalled channel becomes invisible: {offenders:#?}"
+    );
+}
+
+/// `(number of `note_dropped` call sites, line numbers of those that throw the
+/// decision away)`. Separated from the test so the self-test below can drive it
+/// on a source string that is not on disk.
+fn drop_decision_sites(src: &str) -> (usize, Vec<usize>) {
+    let mut sites = 0usize;
+    let mut discarded = Vec::new();
+    for (line, stmt) in statements(src) {
+        if !stmt.contains(".note_dropped()") {
+            continue;
+        }
+        sites += 1;
+        // `let _ = ...` and `let _name = ...` both silence `#[must_use]`.
+        if stmt.contains("let _") {
+            discarded.push(line);
+        }
+    }
+    (sites, discarded)
+}
+
+/// The planted violation, kept — a scan that finds nothing is
+/// indistinguishable from one that cannot find anything (gotcha #413).
+#[test]
+fn the_drop_reporting_guard_catches_a_discarded_decision() {
+    let planted = r#"
+fn a() {
+    if let Err(e) = tx.try_send(m) {
+        let _ = state.metrics.channel_metrics.network_out.note_dropped();
+    }
+}
+"#;
+    assert_eq!(
+        drop_decision_sites(planted),
+        (1, vec![4]),
+        "the guard must name the discarded decision"
+    );
+
+    // rustfmt wraps this chain in the real code, so the scanner has to see it
+    // rejoined — the failure mode `arch-guards-and-tests.md` documents.
+    let wrapped = r#"
+fn a() {
+    if let Err(e) = tx.try_send(m) {
+        let _ = state
+            .metrics
+            .channel_metrics
+            .network_out
+            .note_dropped();
+    }
+}
+"#;
+    assert_eq!(
+        drop_decision_sites(wrapped).1.len(),
+        1,
+        "a wrapped chain must still be seen"
+    );
+
+    // And the correct shape must not fire.
+    let clean = r#"
+fn a() {
+    if let Err(e) = tx.try_send(m) {
+        if let Some(burst) = state
+            .metrics
+            .channel_metrics
+            .network_out
+            .note_dropped()
+        {
+            tracing::warn!(total_dropped = burst.total, "dropped");
+        }
+    }
+}
+"#;
+    let (sites, discarded) = drop_decision_sites(clean);
+    assert_eq!(sites, 1, "the correct shape is still a call site");
+    assert!(discarded.is_empty(), "the correct shape must not fire");
+}
+
+/// Every `.rs` file under `dir`, relative to the repo root.
+fn rust_sources_under(dir: &str) -> Vec<PathBuf> {
+    fn walk(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.filter_map(|e| e.ok()) {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else if path.extension().is_some_and(|x| x == "rs") {
+                out.push(path);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(&repo_root().join(dir), &mut out);
+    out.sort();
+    out
+}

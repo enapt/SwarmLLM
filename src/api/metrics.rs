@@ -410,16 +410,25 @@ fn write_channel_metrics(buf: &mut String, shared: &crate::daemon::SharedState) 
     use std::sync::atomic::Ordering::Relaxed;
 
     // CORRECTNESS (R105): only emit channels whose `record_sent` /
-    // `record_dropped` are actually instrumented in their send path. The
-    // others (network_cmd, router_cmd, rebalance, pool_cmd) had counter
-    // declarations but no call sites incrementing them, producing a
-    // perpetual zero in Prometheus that misled `swarmllm_channel_dropped_total > 0`
-    // alerts into never firing despite real backpressure. Drop them from
-    // the output until instrumented; operators who alerted on these will
-    // see a clean missing-series rather than fabricated zeros.
+    // `note_dropped` are actually instrumented in their send path. The
+    // others (network_cmd, router_cmd) had counter declarations but no call
+    // sites incrementing them, producing a perpetual zero in Prometheus that
+    // misled `swarmllm_channel_dropped_total > 0` alerts into never firing
+    // despite real backpressure. Drop them from the output until instrumented;
+    // operators who alerted on these will see a clean missing-series rather
+    // than fabricated zeros.
+    //
+    // `rebalance` and `pool_cmd` joined the list on 2026-09-18. `rebalance` had
+    // in fact been instrumented since before this comment was written, so the
+    // exclusion outlived its reason and the alert it was protecting could not
+    // fire; `pool_cmd` was instrumented the same day, when its drops were found
+    // being charged to `network_out`. The rule the list encodes is unchanged:
+    // an entry here is a promise that the channel's send path counts.
     let channels: &[(&str, &crate::daemon::ChannelCounters)] = &[
         ("network_out", &shared.metrics.channel_metrics.network_out),
         ("acquisition", &shared.metrics.channel_metrics.acquisition),
+        ("rebalance", &shared.metrics.channel_metrics.rebalance),
+        ("pool_cmd", &shared.metrics.channel_metrics.pool_cmd),
     ];
 
     let _ = writeln!(

@@ -178,11 +178,26 @@ impl ShardRebalancer {
                         })
                         .is_err()
                     {
-                        self.shared_state
+                        // Silent until 2026-09-18: a rebalance that never reached
+                        // the acquisition manager looked, in the log, exactly
+                        // like one that did — the INFO line below is printed
+                        // either way.
+                        if let Some(burst) = self
+                            .shared_state
                             .metrics
                             .channel_metrics
                             .acquisition
-                            .record_dropped();
+                            .note_dropped()
+                        {
+                            tracing::warn!(
+                                model = %shard_id.model_id,
+                                shard = shard_id.index,
+                                dropped_since_last = burst.suppressed,
+                                nothing_accepted_for_secs = burst.stalled_secs(),
+                                total_dropped = burst.total,
+                                "Acquisition channel full — this rebalance was dropped"
+                            );
+                        }
                     } else {
                         self.shared_state
                             .metrics

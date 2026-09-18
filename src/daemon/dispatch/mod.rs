@@ -1554,18 +1554,32 @@ pub(crate) async fn dispatch_network_messages(
                                                 // other inbound message (LayerResult,
                                                 // CreditTransaction, …). Consistent with the
                                                 // InferenceRequest / StreamingToken paths.
+                                                // Counted against `pool_cmd`, which is the
+                                                // channel that refused it. It was charged to
+                                                // `network_out` until 2026-09-18 — the channel
+                                                // this message had already successfully LEFT —
+                                                // which both overstated that channel's losses
+                                                // and hid the pool channel's entirely.
                                                 if let Err(e) = tx.try_send(cmd) {
-                                                    shared_state
+                                                    if let Some(burst) = shared_state
                                                         .metrics
                                                         .channel_metrics
-                                                        .network_out
-                                                        .record_dropped();
-                                                    tracing::warn!(error = %e, "Failed to route pool message (channel full or closed)");
+                                                        .pool_cmd
+                                                        .note_dropped()
+                                                    {
+                                                        tracing::warn!(
+                                                            error = %e,
+                                                            dropped_since_last = burst.suppressed,
+                                                            nothing_accepted_for_secs = burst.stalled_secs(),
+                                                            total_dropped = burst.total,
+                                                            "Failed to route pool message (channel full or closed)"
+                                                        );
+                                                    }
                                                 } else {
                                                     shared_state
                                                         .metrics
                                                         .channel_metrics
-                                                        .network_out
+                                                        .pool_cmd
                                                         .record_sent();
                                                 }
                                             }

@@ -132,12 +132,21 @@ impl NetworkManager {
                                 message: msg,
                             };
                             if let Err(e) = self.outbound_tx.try_send(authed) {
-                                self.shared_state
+                                if let Some(burst) = self
+                                    .shared_state
                                     .metrics
                                     .channel_metrics
                                     .network_out
-                                    .record_dropped();
-                                tracing::warn!(error = %e, "Dispatcher backpressured, dropping gossipsub message");
+                                    .note_dropped()
+                                {
+                                    tracing::warn!(
+                                        error = %e,
+                                        dropped_since_last = burst.suppressed,
+                                        nothing_accepted_for_secs = burst.stalled_secs(),
+                                        total_dropped = burst.total,
+                                        "Dispatcher backpressured, dropping gossipsub message"
+                                    );
+                                }
                             } else {
                                 self.shared_state
                                     .metrics

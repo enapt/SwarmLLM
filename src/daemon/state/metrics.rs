@@ -181,11 +181,74 @@ pub struct MetricsProviders {
     pub bandwidth: Arc<crate::network::bandwidth::BandwidthMeter>,
 }
 
+/// How long a channel may keep refusing messages before the next drop is
+/// reported again.
+///
+/// 30 s is the shortest interval at which a genuinely stalled consumer is still
+/// obvious in a log read at human speed: a 45-minute stall becomes ~91 lines
+/// instead of 230,402.
+const DROP_REPORT_INTERVAL_MS: u64 = 30_000;
+
+/// Sentinel for `last_sent_ms`: this channel has never accepted a message.
+const NEVER_SENT: u64 = u64::MAX;
+
+/// A drop that is worth a log line, and the context that makes it readable.
+///
+/// The count alone cannot tell a momentary burst from a dead consumer, and that
+/// is the whole question: one is normal under load, the other means this node
+/// has silently stopped taking part. `nothing_accepted_for` is what separates
+/// them.
+pub struct DropBurst {
+    /// Drops on this channel swallowed since the last reported one.
+    pub suppressed: u64,
+    /// How long this channel has gone without accepting ANYTHING — measured
+    /// from its creation when it has never accepted a message, which is the
+    /// honest reading of "nothing has got through".
+    pub nothing_accepted_for: std::time::Duration,
+    /// Lifetime drops on this channel, this one included.
+    pub total: u64,
+}
+
+impl DropBurst {
+    /// `nothing_accepted_for` as whole seconds, for a `tracing` field.
+    pub fn stalled_secs(&self) -> u64 {
+        self.nothing_accepted_for.as_secs()
+    }
+}
+
+/// The "has this burst already been reported recently?" decision.
+#[derive(Default)]
+struct DropReportWindow {
+    /// `created.elapsed()` in ms at the last drop that was reported.
+    last_report_ms: Option<u64>,
+    /// Drops swallowed since then.
+    suppressed: u64,
+}
+
 /// Atomic counters for a single mpsc channel.
+///
+/// `record_sent` is on the hot path and touches only atomics. A drop is by
+/// definition the exceptional path, so it may take a lock to decide whether
+/// this one is worth a log line.
 pub struct ChannelCounters {
     pub capacity: u32,
     pub sent: AtomicU64,
     pub dropped: AtomicU64,
+    /// Base for the millisecond clocks below.
+    created: std::time::Instant,
+    /// `created.elapsed()` in ms at the last message this channel ACCEPTED, or
+    /// `NEVER_SENT`.
+    last_sent_ms: AtomicU64,
+    report: std::sync::Mutex<DropReportWindow>,
+    /// Test-only: added to every clock reading, so a test can reach the far side
+    /// of `DROP_REPORT_INTERVAL_MS` or simulate a 45-minute stall without
+    /// sleeping. The field does not exist in a release build.
+    ///
+    /// The clocks measure time SINCE `created`, so a test cannot move them into
+    /// the past — at `t ≈ 0` there is no past to move into. Advancing "now" is
+    /// the same fiction from the other end, and the one that works.
+    #[cfg(test)]
+    test_clock_advance_ms: AtomicU64,
 }
 
 impl ChannelCounters {
@@ -194,16 +257,85 @@ impl ChannelCounters {
             capacity,
             sent: AtomicU64::new(0),
             dropped: AtomicU64::new(0),
+            created: std::time::Instant::now(),
+            last_sent_ms: AtomicU64::new(NEVER_SENT),
+            report: std::sync::Mutex::new(DropReportWindow::default()),
+            #[cfg(test)]
+            test_clock_advance_ms: AtomicU64::new(0),
         }
+    }
+
+    /// Milliseconds since this counter was created.
+    #[inline]
+    fn now_ms(&self) -> u64 {
+        let elapsed = self.created.elapsed().as_millis() as u64;
+        #[cfg(test)]
+        let elapsed = elapsed
+            + self
+                .test_clock_advance_ms
+                .load(std::sync::atomic::Ordering::Relaxed);
+        elapsed
+    }
+
+    /// Pretend `ms` milliseconds have passed.
+    #[cfg(test)]
+    fn advance_clock_for_test(&self, ms: u64) {
+        self.test_clock_advance_ms
+            .fetch_add(ms, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn record_sent(&self) {
         self.sent.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.last_sent_ms
+            .store(self.now_ms(), std::sync::atomic::Ordering::Relaxed);
     }
 
-    pub fn record_dropped(&self) {
-        self.dropped
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    /// Count a dropped message, and answer whether this one should be logged.
+    ///
+    /// **There is no way to count a drop without being handed this decision**,
+    /// which is deliberate. The `network_out` channel reported every single
+    /// drop unconditionally, and when its consumer wedged for 45 minutes on
+    /// 2026-09-18 the node wrote 230,402 identical WARN lines — 74% of the
+    /// whole log file — burying the one fact that mattered: that nothing had
+    /// been accepted since 11:36 and the node had stopped taking part in the
+    /// swarm. A per-message line is not a smaller version of that signal; it is
+    /// what hides it. Gotcha #648.
+    #[must_use = "a dropped message that is never reported is a silent failure — log the returned burst"]
+    pub fn note_dropped(&self) -> Option<DropBurst> {
+        let total = self
+            .dropped
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
+        let now_ms = self.now_ms();
+        // A poisoned lock here must not cost the report — the guarded state is
+        // two counters used only for rate limiting, and nothing reads them back
+        // for a decision that matters.
+        let mut window = self
+            .report
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let due = match window.last_report_ms {
+            None => true,
+            Some(prev) => now_ms.saturating_sub(prev) >= DROP_REPORT_INTERVAL_MS,
+        };
+        if !due {
+            window.suppressed += 1;
+            return None;
+        }
+        let suppressed = std::mem::take(&mut window.suppressed);
+        window.last_report_ms = Some(now_ms);
+        drop(window);
+        let last_sent = self.last_sent_ms.load(std::sync::atomic::Ordering::Relaxed);
+        let since_ms = if last_sent == NEVER_SENT {
+            now_ms
+        } else {
+            now_ms.saturating_sub(last_sent)
+        };
+        Some(DropBurst {
+            suppressed,
+            nothing_accepted_for: std::time::Duration::from_millis(since_ms),
+            total,
+        })
     }
 }
 
@@ -227,5 +359,106 @@ impl ChannelMetricsSet {
             acquisition: Arc::new(ChannelCounters::new(64)),
             pool_cmd: Arc::new(ChannelCounters::new(64)),
         }
+    }
+}
+
+#[cfg(test)]
+mod channel_counter_tests {
+    use super::*;
+
+    /// The first drop on a channel is always reported — a burst that is never
+    /// announced is exactly the silence this rate limiter exists to avoid.
+    #[test]
+    fn the_first_drop_of_a_burst_is_reported() {
+        let c = ChannelCounters::new(8);
+        let burst = c.note_dropped().expect("first drop must be reported");
+        assert_eq!(burst.suppressed, 0);
+        assert_eq!(burst.total, 1);
+    }
+
+    /// The property the live node needed and did not have: 230,402 drops in one
+    /// stall produced 230,402 log lines. Inside the window, every drop after the
+    /// first is counted and swallowed.
+    #[test]
+    fn a_burst_inside_the_window_is_reported_once() {
+        let c = ChannelCounters::new(8);
+        let reported = (0..5_000).filter(|_| c.note_dropped().is_some()).count();
+        assert_eq!(
+            reported, 1,
+            "5000 drops inside one window must produce exactly one report"
+        );
+        assert_eq!(c.dropped.load(std::sync::atomic::Ordering::Relaxed), 5_000);
+    }
+
+    /// And the swallowed ones are not lost — the next report carries them, so
+    /// the log still says how bad it got.
+    #[test]
+    fn the_next_report_carries_what_was_swallowed() {
+        let c = ChannelCounters::new(8);
+        assert!(c.note_dropped().is_some());
+        for _ in 0..41 {
+            assert!(c.note_dropped().is_none());
+        }
+        c.advance_clock_for_test(DROP_REPORT_INTERVAL_MS + 1);
+        let burst = c.note_dropped().expect("window has elapsed");
+        assert_eq!(burst.suppressed, 41);
+        assert_eq!(burst.total, 43);
+        // And the count starts again rather than accumulating for ever.
+        c.advance_clock_for_test(DROP_REPORT_INTERVAL_MS + 1);
+        let next = c.note_dropped().expect("window has elapsed again");
+        assert_eq!(next.suppressed, 0);
+        assert_eq!(next.total, 44);
+    }
+
+    /// The figure that separates a momentary burst from a dead consumer.
+    #[test]
+    fn a_report_says_how_long_nothing_has_got_through() {
+        let c = ChannelCounters::new(8);
+        c.record_sent();
+        c.advance_clock_for_test(45 * 60 * 1000);
+        let burst = c.note_dropped().expect("first drop");
+        assert!(
+            burst.stalled_secs() >= 45 * 60,
+            "a consumer that has accepted nothing for 45 minutes must say so, got {}s",
+            burst.stalled_secs()
+        );
+    }
+
+    /// A channel that has never accepted anything reports its whole life, not a
+    /// zero that reads like a healthy channel having one bad moment.
+    #[test]
+    fn a_channel_that_never_accepted_anything_does_not_report_zero_stall() {
+        let c = ChannelCounters::new(8);
+        let burst = c.note_dropped().expect("first drop");
+        assert_eq!(
+            burst.nothing_accepted_for,
+            std::time::Duration::from_millis(0),
+            "at creation the stall is genuinely zero"
+        );
+        c.advance_clock_for_test(10_000);
+        c.advance_clock_for_test(DROP_REPORT_INTERVAL_MS + 1);
+        let later = c.note_dropped().expect("window has elapsed");
+        assert!(
+            later.stalled_secs() > 0,
+            "a channel that has still accepted nothing must report the elapsed time"
+        );
+    }
+
+    /// A message that gets through ends the stall, so the next burst is measured
+    /// from the last thing the consumer actually took.
+    #[test]
+    fn an_accepted_message_resets_the_stall_clock() {
+        let c = ChannelCounters::new(8);
+        c.record_sent();
+        c.advance_clock_for_test(60_000);
+        assert!(c.note_dropped().expect("first drop").stalled_secs() >= 60);
+        c.record_sent();
+        c.advance_clock_for_test(DROP_REPORT_INTERVAL_MS + 1);
+        let burst = c.note_dropped().expect("window has elapsed");
+        assert!(
+            burst.stalled_secs() <= DROP_REPORT_INTERVAL_MS / 1000 + 1,
+            "the clock must run from the last ACCEPTED message, got {}s",
+            burst.stalled_secs()
+        );
     }
 }
