@@ -947,6 +947,50 @@ actual 33 GB. **When a pure-logic function starts touching the filesystem, audit
 the fixtures before the code** (gotcha #629). `write_sparse_shards` gives a test
 real multi-gigabyte holdings via `set_len` at no disk cost.
 
+## `ModelProcessPool::notify_every_worker` — a fan-out to every worker is bounded
+
+**The rule.** One fire-and-forget message to every live worker, with both waits
+bounded, running concurrently. `cancel_request` and `release_request_kv` are its
+only callers.
+
+**What it replaced.** Both open-coded the same loop: `worker.writer.lock().await`
+then `send_daemon(..).await`, neither bounded.
+
+**Why it matters.** `cancel_request` is awaited INLINE from the dispatch loop's
+`CancelInference` arm (`daemon/dispatch/mod.rs`). That loop is the single
+consumer of `network_out`, which carries gossip AND every inbound `LayerForward`
+/ `LayerResult` / `StreamingToken` / `RemoteGenerateRequest`. An unbounded wait
+there makes the node a black hole for the swarm while `/health/ready` still
+answers `true` — which is what `docs/FUTURE_WORK.md` #90 records for 45 minutes
+on 2026-09-18. **It is NOT established that this call site caused that
+incident** — the worker had been idle-unloaded two hours earlier, so the fan-out
+would have short-circuited on its `is_empty` guard. It is fixed because it is
+the shape gotcha #74 already forbids, found while eliminating candidates.
+
+It was also the ONLY inline un-spawned `.await` in the 2932-line dispatch file
+besides two `RwLock` reads, and every other site that takes `writer`
+(`process_pool.rs:1857,4808,4991,5176`) scopes the guard and bounds the wait
+*specifically so a stalled worker cannot block the manager*. This fan-out was
+the exception.
+
+**What a change must keep.**
+
+- **Two separate bounds, two different responses.** A lock timeout proves
+  another task is mid-message and nothing has been written — stand down quietly.
+  A send timeout proves the socket will not take a few dozen bytes, and dropping
+  that future can leave a **partial frame** that desynchronises every later
+  message — so mark the worker `dead` (reaped by `reap_dead_workers`, which also
+  returns its memory charge). Collapsing the two into one bound means either
+  condemning a healthy busy worker or leaving a corrupted stream in service.
+- **Concurrent fan-out.** Sequential, N stuck workers cost N timeouts and the
+  dispatch loop pays every one.
+- **A worker that is reading never reaches either bound** — the message is a few
+  dozen bytes into a socket buffer.
+
+**Tests.** `a_cancel_cannot_be_held_up_for_ever_by_a_busy_worker` and
+`the_fan_out_is_bounded_once_not_once_per_worker`. Both verified by removing the
+bound: they do not merely fail, they hang until the harness timeout.
+
 ## A worker that dies is not a worker that is slow, and the graphics stack can go mid-run
 
 **The rule**: `.claude/rules/arch-worker-memory.md` § "A subprocess you are

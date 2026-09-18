@@ -90,6 +90,29 @@ CPU-only worker exits 127 exactly as a GPU one does.
 
 → `docs/invariants/memory.md`
 
+## A fan-out to every worker is bounded, and the two waits mean different things
+
+**`ModelProcessPool::notify_every_worker` is the one place a fire-and-forget
+message goes to every live worker** — `cancel_request` and `release_request_kv`
+both go through it. It matters because `cancel_request` is awaited INLINE from
+the dispatch loop's `CancelInference` arm, and that loop is the network event
+loop's only consumer: an unbounded wait there is not a slow cancel, it is a node
+that stops receiving anything (gotcha #74).
+
+Both waits are bounded **separately**, because the wrong response to either is
+worse than the wait:
+
+- **The writer LOCK timing out** says another task is mid-message. Nothing has
+  been written, so stand down at `debug!` — that task owns the worker's fate.
+- **The SEND timing out** says the socket will not take a few dozen bytes.
+  Dropping that future can leave a PARTIAL FRAME, desynchronising every later
+  message, so the worker is marked `dead` and reaped rather than left in a state
+  no reader could parse.
+
+Sends run concurrently, so the fan-out costs one timeout, not one per worker.
+
+→ `docs/invariants/memory.md`
+
 ## Single-source-of-truth helpers — Worker memory: graphics, RAM and the KV cache
 
 Each names the ONE place a decision is made. A second implementation of any of

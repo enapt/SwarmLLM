@@ -58,6 +58,14 @@ pub struct PrefixProbeEvent {
 
 const WORKER_CONNECT_TIMEOUT_SECS: u64 = 30;
 
+/// How long a best-effort broadcast to one worker may wait, per step.
+///
+/// Matches the bound the worker-reply waits already use. A fire-and-forget
+/// message is a few dozen bytes into a socket buffer, so this is never reached
+/// by a worker that is reading at all — it exists to put a ceiling on one that
+/// has stopped. See [`ModelProcessPool::notify_every_worker`].
+const WORKER_NOTIFY_TIMEOUT_MS: u64 = 2000;
+
 /// Exponential backoff for repeat worker-spawn failures: 1s, 2s, 4s, 8s,
 /// 16s, 32s, capped at 60s. The arriving request gets `ModelNotAvailable`
 /// during the cooldown window, so a permanently-broken model can't drown
@@ -5498,21 +5506,83 @@ impl ModelProcessPool {
     /// Locally-originated cancels don't need this: `ResponseGuard` knows its
     /// own worker and messages it directly on drop.
     pub async fn cancel_request(&self, request_id: Uuid) {
+        self.notify_every_worker(&DaemonMsg::CancelRequest { request_id }, "cancel")
+            .await;
+    }
+
+    /// Send one fire-and-forget message to every live worker, **bounded**.
+    ///
+    /// The single place a fan-out to all workers happens, because the reason it
+    /// has to be bounded is easy to state once and easy to forget per caller.
+    ///
+    /// `cancel_request` is reached INLINE from the message dispatcher's
+    /// `CancelInference` arm — the dispatch loop is the network event loop's
+    /// only consumer, so anything it waits on without a bound can stop the node
+    /// receiving *anything* (gotcha #74, and the 45-minute stall in
+    /// `docs/FUTURE_WORK.md` #90). Both steps below could previously wait for
+    /// ever: `writer.lock()` behind another task mid-send to a worker that is
+    /// not draining, and `send_daemon` itself once the socket buffer is full.
+    /// Every other site that takes `writer` scopes the guard and bounds the
+    /// wait "so a stalled worker can't block the manager"; this fan-out was the
+    /// exception.
+    ///
+    /// **The two waits are bounded separately because they prove different
+    /// things**, and the wrong response to either is worse than the wait:
+    ///
+    /// - Timing out on the LOCK says another task is mid-message. That task
+    ///   owns the worker's fate and has its own error handling; this one is
+    ///   best-effort, so it stands down and says so at `debug!`. Nothing has
+    ///   been written, so nothing can be half-written.
+    /// - Timing out on the SEND says the socket will not take a few dozen
+    ///   bytes, i.e. the worker has stopped reading. Dropping that future can
+    ///   leave a PARTIAL FRAME on the wire, which would desynchronise every
+    ///   later message — so the worker is marked `dead` rather than left in a
+    ///   state no reader could parse. `reap_dead_workers` retires it and gives
+    ///   its memory charge back on the next health tick.
+    ///
+    /// The sends run concurrently, so the whole fan-out is bounded by one
+    /// timeout rather than by the number of workers.
+    async fn notify_every_worker(&self, msg: &DaemonMsg, what: &'static str) {
         // Collect handles before awaiting — never hold a DashMap ref across an
         // await point.
-        let workers: Vec<Arc<WorkerHandle>> = self
+        let workers: Vec<(ModelId, Arc<WorkerHandle>)> = self
             .workers
             .iter()
             .filter(|e| !e.value().dead.load(Ordering::Acquire))
-            .map(|e| e.value().clone())
+            .map(|e| (e.key().clone(), e.value().clone()))
             .collect();
         if workers.is_empty() {
             return;
         }
-        for worker in workers {
-            let mut writer = worker.writer.lock().await;
-            let _ = send_daemon(&mut *writer, &DaemonMsg::CancelRequest { request_id }, &[]).await;
-        }
+        let timeout = std::time::Duration::from_millis(WORKER_NOTIFY_TIMEOUT_MS);
+        futures::future::join_all(workers.iter().map(|(model_id, worker)| async move {
+            let Ok(mut writer) = tokio::time::timeout(timeout, worker.writer.lock()).await else {
+                tracing::debug!(
+                    model = %model_id,
+                    what,
+                    "Worker writer busy — skipping this best-effort notification"
+                );
+                return;
+            };
+            match tokio::time::timeout(timeout, send_daemon(&mut *writer, msg, &[])).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    tracing::debug!(model = %model_id, what, error = %e, "Worker notification failed");
+                }
+                Err(_) => {
+                    worker.dead.store(true, Ordering::Release);
+                    tracing::warn!(
+                        model = %model_id,
+                        what,
+                        timeout_ms = WORKER_NOTIFY_TIMEOUT_MS,
+                        "Worker stopped reading its socket — marking it dead. It is \
+                         being retired rather than left holding a half-written \
+                         message no later message could be parsed after."
+                    );
+                }
+            }
+        }))
+        .await;
     }
 
     /// Tell every live worker that `request_id` is finished with its KV cache.
@@ -5524,21 +5594,8 @@ impl ModelProcessPool {
     /// precisely would mean tracking which workers a request reached for no
     /// benefit over sending it to all of them.
     pub async fn release_request_kv(&self, request_id: Uuid) {
-        let workers: Vec<Arc<WorkerHandle>> = self
-            .workers
-            .iter()
-            .filter(|e| !e.value().dead.load(Ordering::Acquire))
-            .map(|e| e.value().clone())
-            .collect();
-        for worker in workers {
-            let mut writer = worker.writer.lock().await;
-            let _ = send_daemon(
-                &mut *writer,
-                &DaemonMsg::ReleaseRequestKv { request_id },
-                &[],
-            )
+        self.notify_every_worker(&DaemonMsg::ReleaseRequestKv { request_id }, "release-kv")
             .await;
-        }
     }
 
     /// Unload all segments for a model (kills the worker subprocess).
@@ -6310,6 +6367,87 @@ mod tests {
         assert!(
             !pool.hosts_whole_model(&gone, 48),
             "a dead worker is not holding anything"
+        );
+    }
+
+    /// A cancel arriving over the network must not be able to stop the node
+    /// receiving anything.
+    ///
+    /// `cancel_request` is awaited INLINE from the message dispatcher's
+    /// `CancelInference` arm, and the dispatch loop is the network event loop's
+    /// only consumer — so an unbounded wait there is not a slow cancel, it is a
+    /// node that goes silent to the whole swarm (gotcha #74;
+    /// `docs/FUTURE_WORK.md` #90 is 45 minutes of exactly that shape).
+    ///
+    /// The stall modelled here is the realistic one: another task holding the
+    /// writer lock while it sends to a worker that is not draining. Without the
+    /// bound this never returns.
+    #[tokio::test]
+    async fn a_cancel_cannot_be_held_up_for_ever_by_a_busy_worker() {
+        let pool = ModelProcessPool::new(std::path::PathBuf::from("/tmp/swarmllm-notify-bound"));
+        let model = ModelId("stuck".into());
+        let handle = fake_worker_handle_on(false, None, false).await;
+        pool.workers.insert(model.clone(), handle.clone());
+
+        // Another task is mid-message and never finishes — the writer lock is
+        // held for the rest of the test.
+        let held = handle.writer.lock().await;
+
+        let elapsed = {
+            let started = std::time::Instant::now();
+            tokio::time::timeout(
+                std::time::Duration::from_secs(20),
+                pool.cancel_request(uuid::Uuid::new_v4()),
+            )
+            .await
+            .expect("a cancel must not wait on a busy worker for ever");
+            started.elapsed()
+        };
+        drop(held);
+
+        assert!(
+            elapsed < std::time::Duration::from_secs(10),
+            "the fan-out must be bounded by one timeout, took {elapsed:?}"
+        );
+        assert!(
+            !handle.dead.load(Ordering::Acquire),
+            "a writer held by another task says nothing about the worker's \
+             health — only a socket that will not accept bytes does"
+        );
+    }
+
+    /// The fan-out is bounded by ONE timeout, not by the number of workers.
+    ///
+    /// Four stuck workers sequentially would be four times the ceiling, and the
+    /// ceiling is what the dispatch loop pays.
+    #[tokio::test]
+    async fn the_fan_out_is_bounded_once_not_once_per_worker() {
+        let pool = ModelProcessPool::new(std::path::PathBuf::from("/tmp/swarmllm-notify-fanout"));
+        let mut held = Vec::new();
+        for i in 0..4 {
+            let handle = fake_worker_handle_on(false, None, false).await;
+            pool.workers
+                .insert(ModelId(format!("stuck-{i}")), handle.clone());
+            held.push(handle);
+        }
+        let mut guards = Vec::new();
+        for h in &held {
+            guards.push(h.writer.lock().await);
+        }
+
+        let started = std::time::Instant::now();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            pool.cancel_request(uuid::Uuid::new_v4()),
+        )
+        .await
+        .expect("bounded");
+        let elapsed = started.elapsed();
+        drop(guards);
+
+        assert!(
+            elapsed < std::time::Duration::from_millis(WORKER_NOTIFY_TIMEOUT_MS * 2),
+            "four stuck workers must cost about one timeout, not four; took {elapsed:?}"
         );
     }
 
