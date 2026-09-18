@@ -867,6 +867,7 @@ pub fn error_kind(err: &crate::error::SwarmError) -> &'static str {
     match err {
         E::Config(_) => "Config",
         E::CreditError(_) => "CreditError",
+        E::ContextWindowReached { .. } => "ContextWindowReached",
         E::Database(_) => "Database",
         E::DecryptionFailed => "DecryptionFailed",
         E::Encryption(_) => "Encryption",

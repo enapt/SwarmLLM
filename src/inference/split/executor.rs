@@ -18,6 +18,22 @@ use super::kv_cache::KvCacheStore;
 use super::model::SplitModel;
 use super::{FfnVariant, LayerVariant, SsmState};
 
+/// Did this forward run into the context window because the REPLY grew into it,
+/// rather than because the prompt was too long to start?
+///
+/// One position arriving after the conversation has already begun is a decode
+/// step, and a decode step reaching the wall means the model generated until it
+/// got there — a reply finished for length. Everything else is prefill, or a
+/// chunk of one, where the caller really did send more than fits and the 400 is
+/// correct.
+///
+/// A named predicate rather than an inline condition because it is the whole
+/// distinction `docs/FUTURE_WORK.md` #85 turns on, and because the inline form
+/// is not testable without a loaded model.
+fn window_overflow_is_a_finished_reply(seq_len: usize, index_pos: usize) -> bool {
+    seq_len == 1 && index_pos > 0
+}
+
 impl SplitModel {
     /// Build an ADDITIVE causal mask: `0.0` where a query may attend, `-inf`
     /// where it may not.
@@ -460,6 +476,25 @@ impl SplitModel {
         // to avoid cryptic tensor dimension errors in attention.
         let total_seq = index_pos + seq_len;
         if total_seq > self.max_seq_len {
+            // A single position arriving after the conversation has already
+            // started is a DECODE step: the server accepted this request and
+            // generated until it reached the wall, so the length is the
+            // model's doing and not the caller's. That is a reply finished for
+            // length, and the coordinator's loop turns it into exactly that —
+            // it is only an error here because a forward has no way to end a
+            // generation. Reporting it as a 400 blamed the caller for the
+            // server's own output and, on the non-streaming surface, discarded
+            // the whole reply to do it (`docs/FUTURE_WORK.md` #85).
+            //
+            // Everything else reaching this line IS a prompt too long to
+            // start — prefill, or a chunk of one — and keeps the 400 and the
+            // wording below, which is correct there.
+            if window_overflow_is_a_finished_reply(seq_len, index_pos) {
+                return Err(SwarmError::ContextWindowReached {
+                    used: total_seq,
+                    window: self.max_seq_len,
+                });
+            }
             // Name the setting. "Reduce your prompt" is not an action the
             // caller can always take — an agentic client's prompt is its tool
             // schema, sent before the user has typed anything — and it points
@@ -1884,5 +1919,33 @@ impl SplitModel {
         }?;
 
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod context_window_tests {
+    use super::window_overflow_is_a_finished_reply;
+
+    /// A decode step reaching the wall is a reply that finished for length.
+    #[test]
+    fn one_position_into_an_existing_conversation_is_a_finished_reply() {
+        assert!(window_overflow_is_a_finished_reply(1, 255));
+    }
+
+    /// A prompt too long to start is the caller's, and keeps its 400.
+    #[test]
+    fn a_prompt_that_does_not_fit_is_not_a_finished_reply() {
+        assert!(
+            !window_overflow_is_a_finished_reply(4096, 0),
+            "prefill overflow is the caller's to fix"
+        );
+        assert!(
+            !window_overflow_is_a_finished_reply(512, 1024),
+            "a CHUNK of a prompt is still a prompt, not a generated reply"
+        );
+        assert!(
+            !window_overflow_is_a_finished_reply(1, 0),
+            "a single-token prompt at position 0 has generated nothing"
+        );
     }
 }

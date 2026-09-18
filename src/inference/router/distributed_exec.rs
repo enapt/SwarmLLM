@@ -969,6 +969,11 @@ fn failure_is_penalty_worthy(err: &SwarmError, had_remote_segment: bool) -> bool
         // and nobody else's, so it can never justify docking a peer — the same
         // reason its `ServiceUnavailable` sibling sits here.
         | SwarmError::LocalMemoryUnavailable(_)
+        // The model's context window is a property of the MODEL, not of the
+        // peer that happened to be computing when the reply reached it. Docking
+        // a peer for a reply that ran to its natural length would penalise
+        // whoever served the longest answers.
+        | SwarmError::ContextWindowReached { .. }
         | SwarmError::NotImplemented(_)
         | SwarmError::LocalOnly(_)
         | SwarmError::Internal(_)

@@ -242,6 +242,32 @@ pub enum SwarmError {
     #[error("Service unavailable: {0}")]
     LocalMemoryUnavailable(String),
 
+    /// Generation ran into the model's context window.
+    ///
+    /// **Not a validation failure, and the difference is the whole point.** A
+    /// prompt that is too long at prefill IS the caller's to fix, and stays
+    /// `Validation`. This one is raised mid-DECODE, after the server accepted
+    /// the request and generated for as long as it took to reach the wall — so
+    /// reporting it as a 400 blames the caller for a length the MODEL chose,
+    /// and on the non-streaming surface threw away a complete reply to do it
+    /// (`docs/FUTURE_WORK.md` #85: a 38-token prompt, 40 seconds of work, and
+    /// "this conversation is 260 tokens, longer than the 256 …").
+    ///
+    /// A generation that reaches the window has finished for LENGTH, which is
+    /// what `finish_reason: "length"` already means on the OpenAI surface and
+    /// what `resolve_max_new_tokens` already does on the local path by lowering
+    /// a non-explicit budget to the room available. The coordinator's decode
+    /// loop converts this variant into that finish whenever tokens have been
+    /// produced.
+    ///
+    /// It carries the numbers rather than a sentence because the class has to
+    /// survive two boundaries that keep no types — the worker IPC hop and the
+    /// network hop — and `reclassify_flattened_error` recovers it from this
+    /// Display form. That is why the wording below is part of the TYPE and not
+    /// prose for a human to read (gotcha #295).
+    #[error("Context window reached: {used} of {window}")]
+    ContextWindowReached { used: usize, window: usize },
+
     /// This build does not implement the thing that was asked for.
     ///
     /// Distinct from `ServiceUnavailable`, which means "not right now" and
@@ -324,6 +350,17 @@ pub fn reclassify_flattened_error(message: &str) -> Option<SwarmError> {
     }
     if let Some(d) = detail_after(message, "Segment failover exhausted: ") {
         return Some(SwarmError::SegmentFailoverExhausted(d));
+    }
+    // `{used} of {window}` — the numbers are the payload, so an unparseable
+    // tail is not this error and must not be guessed at.
+    if let Some(d) = detail_after(message, "Context window reached: ") {
+        if let Some((used, window)) = d.split_once(" of ") {
+            if let (Ok(used), Ok(window)) =
+                (used.trim().parse::<usize>(), window.trim().parse::<usize>())
+            {
+                return Some(SwarmError::ContextWindowReached { used, window });
+            }
+        }
     }
     None
 }
@@ -526,7 +563,14 @@ pub fn classify_error(err: &SwarmError) -> (StatusCode, String, &'static str) {
             err.to_string(),
             "server_error",
         ),
-        SwarmError::InvalidNickname(_) | SwarmError::Validation(_) => (
+        // Only reachable when the conversation was ALREADY at the window, so no
+        // token could be produced — the coordinator turns every other case into
+        // a `length` finish. There the caller's conversation genuinely is too
+        // long, which is what a 400 says, and it reads exactly as it did before
+        // this variant existed.
+        SwarmError::ContextWindowReached { .. }
+        | SwarmError::InvalidNickname(_)
+        | SwarmError::Validation(_) => (
             StatusCode::BAD_REQUEST,
             err.to_string(),
             "invalid_request_error",

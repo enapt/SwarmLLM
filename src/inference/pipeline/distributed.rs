@@ -48,14 +48,14 @@ impl PipelineExecutor {
         // when fewer than 2 segments (Item 2 covers single-segment) or any
         // other precondition fails (TP groups, non-greedy, no draft, etc.).
         let outcome = self.try_dsd_distributed(token_tx.clone()).await;
-        if let Some(out) = self.keeping_the_partial(outcome, is_streaming).await? {
+        if let Some(out) = self.keeping_the_partial(outcome, token_tx.as_ref()).await? {
             return Ok(out);
         }
 
         // Item 2 Phase 3: greedy single-segment distributed speculative
         // path. Requires draft model loaded.
         let outcome = self.try_speculative_distributed(token_tx.clone()).await;
-        if let Some(out) = self.keeping_the_partial(outcome, is_streaming).await? {
+        if let Some(out) = self.keeping_the_partial(outcome, token_tx.as_ref()).await? {
             return Ok(out);
         }
 
@@ -78,7 +78,7 @@ impl PipelineExecutor {
         // wire itself is still the wrong shape for a miss round, and that is
         // written up in `docs/FUTURE_WORK.md`.
         let outcome = self.try_ngram_only_distributed(token_tx.clone()).await;
-        if let Some(out) = self.keeping_the_partial(outcome, is_streaming).await? {
+        if let Some(out) = self.keeping_the_partial(outcome, token_tx.as_ref()).await? {
             return Ok(out);
         }
 
@@ -89,7 +89,7 @@ impl PipelineExecutor {
         // scheduler consider the swarm re-prefills every prompt for ever
         // (report #018).
         let outcome = self.try_local_generate_fastpath(token_tx.clone()).await;
-        if let Some(out) = self.keeping_the_partial(outcome, is_streaming).await? {
+        if let Some(out) = self.keeping_the_partial(outcome, token_tx.as_ref()).await? {
             return Ok(out);
         }
 
@@ -99,7 +99,7 @@ impl PipelineExecutor {
         // through on non-eligibility (multi-segment, TP, vision, LoRA,
         // encrypted pipeline).
         let outcome = self.try_remote_generate_fastpath(token_tx.clone()).await;
-        if let Some(out) = self.keeping_the_partial(outcome, is_streaming).await? {
+        if let Some(out) = self.keeping_the_partial(outcome, token_tx.as_ref()).await? {
             return Ok(out);
         }
 
@@ -475,6 +475,22 @@ impl PipelineExecutor {
                                 // broke and the peer is charged for it.
                                 let err = crate::error::reclassify_flattened_error(&e)
                                     .unwrap_or(SwarmError::Inference(e));
+                                // Reaching the window is a finish, not a failure.
+                                let Some(err) =
+                                    length_finish_or_error(err, !generated_tokens.is_empty())
+                                else {
+                                    finish_reason = "length".to_string();
+                                    if let Some(ref tx) = token_tx {
+                                        let _ = tx
+                                            .send(StreamingTokenEvent {
+                                                text: String::new(),
+                                                finish_reason: Some("length".to_string()),
+                                                matched_stop_sequence: None,
+                                            })
+                                            .await;
+                                    }
+                                    break;
+                                };
                                 if may_salvage(is_streaming, &generated_tokens) {
                                     interrupted_by = Some(err);
                                     finish_reason =
@@ -498,6 +514,22 @@ impl PipelineExecutor {
                     }
                 }
                 Err(e) => {
+                    // Reaching the window is a finish, not a failure — checked
+                    // before the log line below, which would otherwise record a
+                    // completed reply as a pipeline failure.
+                    let Some(e) = length_finish_or_error(e, !generated_tokens.is_empty()) else {
+                        finish_reason = "length".to_string();
+                        if let Some(ref tx) = token_tx {
+                            let _ = tx
+                                .send(StreamingTokenEvent {
+                                    text: String::new(),
+                                    finish_reason: Some("length".to_string()),
+                                    matched_stop_sequence: None,
+                                })
+                                .await;
+                        }
+                        break;
+                    };
                     // Note: failover for remote-segment timeouts/errors is
                     // attempted INSIDE forward_through_segments
                     // (see failover_segment). Reaching this arm means either
@@ -2389,13 +2421,65 @@ impl PipelineExecutor {
     async fn keeping_the_partial(
         &self,
         outcome: Result<Option<InferenceOutput>, SwarmError>,
-        is_streaming: bool,
+        token_tx: Option<&StreamingTokenTx>,
     ) -> Result<Option<InferenceOutput>, SwarmError> {
         let Err(err) = outcome else {
             return outcome;
         };
+        let is_streaming = token_tx.is_some();
         let request_id = self.request.id;
-        let Some((mut content, ids, prompt_tokens)) = self.partial_reply.taken() else {
+        let partial = self.partial_reply.taken();
+
+        // A reply that ran into the model's context window FINISHED — and this
+        // is the only place all five alternative coordinators can be told so at
+        // once. The standard loop below has its own two arms; these five do
+        // not, and the DEFAULT distributed path is one of them
+        // (`try_ngram_only_distributed` — a node holding nothing takes it for
+        // every request), which is why the first version of this fix, written
+        // only in the standard loop, left a streamed chat ending on
+        // "Validation error: this conversation is 257 tokens" for a 61-token
+        // prompt. Same shape as FUTURE_WORK #88, in the same five paths.
+        let produced_any = partial.as_ref().is_some_and(|(_, ids, _)| !ids.is_empty());
+        let err = match length_finish_or_error(err, produced_any) {
+            Some(err) => err,
+            None => {
+                let (mut content, ids, prompt_tokens) =
+                    partial.expect("produced_any is false without a partial");
+                crate::inference::finalize_reply_text(&mut content, self.reply_stops().await);
+                tracing::info!(
+                    request_id = %request_id,
+                    completion_tokens = ids.len(),
+                    "DIAG: the reply reached the model's context window — finishing for length"
+                );
+                // A streamed reply MUST get its terminal event: `api::openai::
+                // streaming` reads "no finish event arrived" as "this path never
+                // streamed" and re-emits the whole content as one delta, so
+                // returning Ok without this hands the reader the reply twice
+                // (gotcha #414).
+                if let Some(tx) = token_tx {
+                    let _ = tx
+                        .send(StreamingTokenEvent {
+                            text: String::new(),
+                            finish_reason: Some("length".to_string()),
+                            matched_stop_sequence: None,
+                        })
+                        .await;
+                }
+                return Ok(Some(InferenceOutput {
+                    request_id,
+                    content,
+                    prompt_tokens,
+                    completion_tokens: ids.len() as u32,
+                    finish_reason: "length".to_string(),
+                    session_id: self.request.session_id.clone(),
+                    token_logprobs: vec![],
+                    matched_stop_sequence: None,
+                    trace: None,
+                }));
+            }
+        };
+
+        let Some((mut content, ids, prompt_tokens)) = partial else {
             return Err(err);
         };
         if !may_salvage(is_streaming, &ids) {
@@ -2451,6 +2535,40 @@ impl PipelineExecutor {
 /// one from the first, so salvage is the last resort and never the first.
 pub(crate) fn may_salvage(is_streaming: bool, generated: &[u32]) -> bool {
     !is_streaming && !generated.is_empty()
+}
+
+/// A reply that ran into the model's context window has FINISHED, not failed.
+///
+/// Returns `None` when the decode loop should end the reply with
+/// `finish_reason: "length"`, and `Some(err)` with the error to report
+/// otherwise.
+///
+/// **One place, because the decode loop has two failure arms** — a peer's
+/// `NetworkFinishReason::Error` and a local `Err` — and the arm that is easy to
+/// forget is the one whose peer is on the far side of two boundaries that keep
+/// no types. Both reach this; a third would inherit it.
+///
+/// **With nothing produced it stays an error, and wears the old wording.** The
+/// window can only be reached at the first decode step if the conversation
+/// already filled it, and "this conversation is longer than this model is set
+/// to serve" is then exactly true and exactly actionable — it is what the
+/// caller saw before this variant existed, so nothing regresses for the case
+/// the 400 was always right about. Naming `max_seq_len_override` matters more
+/// than the count: an agentic client's prompt is its tool schema, and
+/// "send less" is not something its user can do.
+pub(crate) fn length_finish_or_error(err: SwarmError, produced_any: bool) -> Option<SwarmError> {
+    let SwarmError::ContextWindowReached { used, window } = err else {
+        return Some(err);
+    };
+    if produced_any {
+        return None;
+    }
+    Some(SwarmError::Validation(format!(
+        "This conversation is {used} tokens, longer than the {window} this model \
+         is currently set to serve. Raise it in Settings → Advanced → \
+         max_seq_len_override (the model itself supports more), or send a \
+         shorter prompt or a smaller max_tokens."
+    )))
 }
 
 #[cfg(test)]
@@ -2550,7 +2668,7 @@ mod salvage_tests {
                 Err(SwarmError::PeerUnresponsive(
                     "the tail peer went silent".into(),
                 )),
-                false,
+                None,
             )
             .await;
 
@@ -2570,6 +2688,98 @@ mod salvage_tests {
         );
     }
 
+    /// The default distributed path reaches the window and FINISHES.
+    ///
+    /// All five alternative coordinators funnel through here, and none of them
+    /// asks this for itself — the first version of this fix lived in the
+    /// standard decode loop only, and a streamed chat on
+    /// `try_ngram_only_distributed` (what a node holding nothing takes for
+    /// every request) still ended on "Validation error: this conversation is
+    /// 257 tokens" for a 61-token prompt. Measured on a two-node rig.
+    #[tokio::test]
+    async fn a_reply_that_reached_the_window_comes_back_as_a_finished_reply() {
+        let state = crate::inference::pipeline::tests::make_test_state();
+        let exec = executor(state.clone());
+        let id = exec.request.id;
+        generate_something(&exec).await;
+
+        let out = exec
+            .keeping_the_partial(
+                Err(SwarmError::ContextWindowReached {
+                    used: 257,
+                    window: 256,
+                }),
+                None,
+            )
+            .await
+            .expect("reaching the window is not a failure")
+            .expect("the reply must come back");
+
+        assert_eq!(out.finish_reason, "length");
+        assert_eq!(out.content, "Half an answer");
+        assert_eq!(out.completion_tokens, 3);
+        assert!(
+            state.take_salvaged_reply(id).is_none(),
+            "this is a completed reply, not a salvage — recording it as one \
+             would let the router hand it over as a last resort instead of the \
+             answer it is"
+        );
+    }
+
+    /// And a STREAMED one gets its terminal event, or the SSE encoder reads the
+    /// missing finish as "this path never streamed" and re-emits the whole
+    /// reply as one delta (gotcha #414).
+    #[tokio::test]
+    async fn a_streamed_reply_that_reached_the_window_is_told_it_finished() {
+        let state = crate::inference::pipeline::tests::make_test_state();
+        let exec = executor(state.clone());
+        generate_something(&exec).await;
+        let (tx, mut rx) = super::StreamingTokenTx::channel(8);
+
+        let out = exec
+            .keeping_the_partial(
+                Err(SwarmError::ContextWindowReached {
+                    used: 257,
+                    window: 256,
+                }),
+                Some(&tx),
+            )
+            .await
+            .expect("reaching the window is not a failure")
+            .expect("the reply must come back");
+        assert_eq!(out.finish_reason, "length");
+
+        let event = rx.try_recv().expect("a terminal event must have been sent");
+        assert_eq!(event.finish_reason.as_deref(), Some("length"));
+        assert!(
+            event.text.is_empty(),
+            "the terminal event carries no text — the deltas already did"
+        );
+    }
+
+    /// Null control: nothing generated is still a failure, and it wears the
+    /// message the caller used to get. The window can only be hit at the first
+    /// decode step if the conversation already filled it, and there "this
+    /// conversation is too long" is exactly true.
+    #[tokio::test]
+    async fn reaching_the_window_with_nothing_generated_is_still_an_error() {
+        let state = crate::inference::pipeline::tests::make_test_state();
+        let exec = executor(state.clone());
+        let out = exec
+            .keeping_the_partial(
+                Err(SwarmError::ContextWindowReached {
+                    used: 257,
+                    window: 256,
+                }),
+                None,
+            )
+            .await;
+        let Err(SwarmError::Validation(ref text)) = out else {
+            panic!("expected a validation error, got {out:?}");
+        };
+        assert!(text.contains("max_seq_len_override"));
+    }
+
     /// Null control 1: a STREAMED request keeps its error untouched. The
     /// client already has the text, and an `Ok` here makes the SSE encoder
     /// re-emit the whole reply as one delta (gotcha #414).
@@ -2579,8 +2789,9 @@ mod salvage_tests {
         let exec = executor(state.clone());
         let id = exec.request.id;
         generate_something(&exec).await;
+        let (tx, _rx) = super::StreamingTokenTx::channel(8);
         let out = exec
-            .keeping_the_partial(Err(SwarmError::Inference("boom".into())), true)
+            .keeping_the_partial(Err(SwarmError::Inference("boom".into())), Some(&tx))
             .await;
         assert!(out.is_err());
         assert!(
@@ -2598,7 +2809,7 @@ mod salvage_tests {
         let exec = executor(state.clone());
         let id = exec.request.id;
         let out = exec
-            .keeping_the_partial(Err(SwarmError::Inference("boom".into())), false)
+            .keeping_the_partial(Err(SwarmError::Inference("boom".into())), None)
             .await;
         assert!(out.is_err());
         assert!(state.take_salvaged_reply(id).is_none());
@@ -2613,8 +2824,101 @@ mod salvage_tests {
         let exec = executor(state.clone());
         let id = exec.request.id;
         generate_something(&exec).await;
-        let out = exec.keeping_the_partial(Ok(None), false).await;
+        let out = exec.keeping_the_partial(Ok(None), None).await;
         assert!(matches!(out, Ok(None)));
         assert!(state.take_salvaged_reply(id).is_none());
+    }
+}
+
+#[cfg(test)]
+mod context_window_finish_tests {
+    use super::length_finish_or_error;
+    use crate::error::SwarmError;
+
+    /// The defect this exists for: 40 seconds of work, a complete reply, and a
+    /// 400 blaming the caller's prompt for a length the model chose
+    /// (`docs/FUTURE_WORK.md` #85). A reply that reached the window has
+    /// finished.
+    #[test]
+    fn a_reply_that_reached_the_window_has_finished_not_failed() {
+        let err = SwarmError::ContextWindowReached {
+            used: 260,
+            window: 256,
+        };
+        assert!(
+            length_finish_or_error(err, true).is_none(),
+            "with tokens produced this must end the reply, not fail it"
+        );
+    }
+
+    /// With nothing produced the conversation really was too long to start, so
+    /// the old message is still the right one — and still a 400.
+    #[test]
+    fn nothing_produced_keeps_the_message_the_caller_used_to_get() {
+        let err = SwarmError::ContextWindowReached {
+            used: 257,
+            window: 256,
+        };
+        let reported = length_finish_or_error(err, false).expect("must still be an error");
+        let SwarmError::Validation(ref text) = reported else {
+            panic!("expected a validation error, got {reported:?}");
+        };
+        assert!(text.contains("257"), "names the conversation length");
+        assert!(text.contains("256"), "names the window");
+        assert!(
+            text.contains("max_seq_len_override"),
+            "names the setting that fixes it — the one action an agentic \
+             client's operator can actually take"
+        );
+        let (status, _, kind) = crate::error::classify_error(&reported);
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(kind, "invalid_request_error");
+    }
+
+    /// Every other failure passes through untouched — this must not swallow a
+    /// peer going silent or a segment failing over.
+    #[test]
+    fn any_other_failure_is_returned_unchanged() {
+        for err in [
+            SwarmError::PeerUnresponsive("gone".into()),
+            SwarmError::Inference("something else".into()),
+            SwarmError::Validation("a prompt too long at prefill".into()),
+        ] {
+            let name = format!("{err:?}");
+            assert!(
+                length_finish_or_error(err, true).is_some(),
+                "{name} must not be treated as a finished reply"
+            );
+        }
+    }
+
+    /// The class has to survive the worker IPC hop AND the network hop, both of
+    /// which deliver a bare string. This is the round-trip that makes the fix
+    /// work at all on a peer-served segment — without it the coordinator sees
+    /// `Inference(..)`, reports 500, and the reply is lost exactly as before.
+    #[test]
+    fn the_variant_survives_a_boundary_that_keeps_no_types() {
+        let original = SwarmError::ContextWindowReached {
+            used: 4097,
+            window: 4096,
+        };
+        let flattened = original.to_string();
+        let recovered = crate::error::reclassify_flattened_error(&flattened)
+            .expect("the Display form must reclassify");
+        assert!(
+            matches!(
+                recovered,
+                SwarmError::ContextWindowReached {
+                    used: 4097,
+                    window: 4096
+                }
+            ),
+            "got {recovered:?} from {flattened:?}"
+        );
+        // And a lookalike that is not this error must not be mistaken for it.
+        assert!(
+            crate::error::reclassify_flattened_error("Context window reached: soon").is_none(),
+            "an unparseable tail is not this error"
+        );
     }
 }

@@ -8183,3 +8183,120 @@ authed_msg = network_out_rx.recv() => {
         "a missing marker must be visible as missing"
     );
 }
+
+/// Every failure arm of the distributed decode loop asks whether the reply
+/// FINISHED before it reports that it failed.
+///
+/// The loop has two of them — a peer's `NetworkFinishReason::Error` and a local
+/// `Err` — and the one that is easy to forget is the peer's, which is exactly
+/// the path `docs/FUTURE_WORK.md` #85 was reported on: a reply that reached the
+/// model's context window came back as HTTP 400 blaming the caller's prompt for
+/// a length the model chose, and on the non-streaming surface the whole reply
+/// was discarded to say so.
+///
+/// Testing `length_finish_or_error` cannot establish this: a test that
+/// exercises a helper cannot tell anyone it is CALLED (gotcha #601).
+/// `may_salvage` marks each failure arm, so the counts must match — a scan over
+/// the FUNCTION BODY rather than a window of N lines above each arm, because
+/// the first version of this guard used 25 lines and the real code sat at 26
+/// (`arch-guards-and-tests.md`: take the whole body, never a character window).
+#[test]
+fn every_failure_arm_of_the_decode_loop_asks_whether_the_reply_finished() {
+    let src = std::fs::read_to_string(repo_root().join("src/inference/pipeline/distributed.rs"))
+        .expect("distributed.rs");
+    let body = fn_body(&src, "pub(super) async fn execute_distributed(")
+        .expect("execute_distributed must still exist");
+    let (arms, checks) = finish_checks_and_salvage_arms(body);
+    assert!(
+        arms >= 2,
+        "expected both failure arms of the decode loop, found {arms} — the loop \
+         was restructured and this guard no longer describes it"
+    );
+    assert_eq!(
+        checks, arms,
+        "{arms} failure arms but {checks} asked whether the reply simply reached \
+         the context window first. An arm that skips it turns a finished reply \
+         into a 400 blaming the caller"
+    );
+
+    // The five ALTERNATIVE coordinators are covered at their one choke point,
+    // and that is not optional: the default distributed path is one of them
+    // (`try_ngram_only_distributed` — a node holding nothing takes it for every
+    // request), so a fix written only in the standard loop above left a streamed
+    // chat ending on "Validation error: this conversation is 257 tokens" for a
+    // 61-token prompt. Measured on a two-node rig before and after.
+    let choke = fn_body(&src, "    async fn keeping_the_partial(")
+        .expect("keeping_the_partial must still exist");
+    assert!(
+        choke.contains("length_finish_or_error("),
+        "the choke point wrapping the five alternative coordinators must ask \
+         whether the reply reached the context window — none of them asks for \
+         itself"
+    );
+    assert!(
+        choke.contains("finish_reason: Some(\"length\".to_string())"),
+        "a STREAMED reply must get its terminal length event here, or \
+         api::openai::streaming reads the missing finish as \"never streamed\" \
+         and re-emits the whole reply as one delta (gotcha #414)"
+    );
+
+    // And the producer is wired, or the coordinator never sees the variant.
+    let executor = std::fs::read_to_string(repo_root().join("src/inference/split/executor.rs"))
+        .expect("executor.rs");
+    assert!(
+        executor.contains("window_overflow_is_a_finished_reply(seq_len, index_pos)")
+            && executor.contains("SwarmError::ContextWindowReached"),
+        "the context-window pre-flight must tell a finished reply apart from a \
+         prompt that never fitted"
+    );
+}
+
+/// `(failure arms, arms that asked whether the reply finished)` in one function
+/// body. Separated so the self-test below can drive it on a source string that
+/// is not on disk.
+fn finish_checks_and_salvage_arms(body: &str) -> (usize, usize) {
+    (
+        body.matches("may_salvage(is_streaming").count(),
+        body.matches("length_finish_or_error(").count(),
+    )
+}
+
+/// The planted violation, kept — a scan that finds nothing is
+/// indistinguishable from one that cannot find anything (gotcha #413).
+#[test]
+fn the_finish_check_guard_catches_an_arm_that_skips_it() {
+    let one_arm_skips = r#"
+    match outcome {
+        Ok(r) => {
+            let Some(err) = length_finish_or_error(err, produced) else { break; };
+            if may_salvage(is_streaming, &generated_tokens) { break; }
+        }
+        Err(e) => {
+            if may_salvage(is_streaming, &generated_tokens) { break; }
+            return Err(e);
+        }
+    }
+"#;
+    assert_eq!(
+        finish_checks_and_salvage_arms(one_arm_skips),
+        (2, 1),
+        "two arms, one check — the guard must see the difference"
+    );
+
+    let both_ask = r#"
+    match outcome {
+        Ok(r) => {
+            let Some(err) = length_finish_or_error(err, produced) else { break; };
+            if may_salvage(is_streaming, &generated_tokens) { break; }
+        }
+        Err(e) => {
+            let Some(e) = length_finish_or_error(e, produced) else { break; };
+            if may_salvage(is_streaming, &generated_tokens) { break; }
+            return Err(e);
+        }
+    }
+"#;
+    let (arms, checks) = finish_checks_and_salvage_arms(both_ask);
+    assert_eq!(arms, checks, "the correct shape must not fire");
+    assert_eq!(arms, 2);
+}
