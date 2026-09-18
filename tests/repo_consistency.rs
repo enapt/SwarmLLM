@@ -8300,3 +8300,102 @@ fn the_finish_check_guard_catches_an_arm_that_skips_it() {
     assert_eq!(arms, checks, "the correct shape must not fire");
     assert_eq!(arms, 2);
 }
+
+/// A hint is chosen by the error's TYPE, never by matching our own prose.
+///
+/// `error_hint_with_key` had an arm reading
+/// `SwarmError::PipelineError(msg) if msg.contains("No node available for layer")`.
+/// The scheduler stopped emitting that wording on 2026-08-10 — it says
+/// "No reachable node holds …" now, through the typed `ModelIncompleteInSwarm`
+/// — so the arm became unreachable and the 21 translations behind it were dead
+/// weight. Nothing went red: the orphan guard above only checks that a key
+/// APPEARS in `src/error.rs`, not that the arm can be reached, and a test
+/// pinned to the phrase passed while no user could ever see the hint
+/// (gotcha #295, the same trap that made `is_transient_remote_failure` miss a
+/// producer whose words differed).
+///
+/// Matching an UPSTREAM provider's words is different and allowed: "quota",
+/// "billing" and the rest come from OpenAI or Anthropic, are outside this
+/// repo's control, and there is no type to read them from. The rule is only
+/// that OUR OWN message text must never decide OUR OWN hint.
+#[test]
+fn a_hint_is_chosen_by_type_never_by_matching_our_own_prose() {
+    let src = std::fs::read_to_string(repo_root().join("src/error.rs")).expect("error.rs");
+    let body = fn_body(&src, "pub fn error_hint_with_key(").expect("error_hint_with_key");
+    let offenders = hint_arms_matching_our_own_prose(body);
+    assert!(
+        offenders.is_empty(),
+        "these hint arms pick a hint by matching a SwarmError's own message \
+         text. That text is rewritten without anyone thinking about the hint, \
+         and when it is the arm goes unreachable in silence — give the case its \
+         own variant instead: {offenders:?}"
+    );
+}
+
+/// Statements in `error_hint_with_key` that guard a `SwarmError` arm on the
+/// contents of its own message. Separated so the self-test below can drive it
+/// on a source string that is not on disk.
+fn hint_arms_matching_our_own_prose(body: &str) -> Vec<String> {
+    // Line-oriented rather than `statements()`: the arms of this match are
+    // multi-line `Some((..))` expressions, and the statement joiner swallows
+    // the whole match into one entry — the guard still fires, but its message
+    // dumps half the function instead of naming the arm. A one-line lookahead
+    // covers the only split rustfmt produces here, the guard on its own line.
+    let lines: Vec<&str> = body.lines().collect();
+    let mut out = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        if !line.contains("SwarmError::") {
+            continue;
+        }
+        let joined = match lines.get(i + 1) {
+            Some(next) => format!("{} {}", line.trim(), next.trim()),
+            None => line.trim().to_string(),
+        };
+        // `if <something>.contains(` between the pattern and its `=>`.
+        let Some(head) = joined.split("=>").next() else {
+            continue;
+        };
+        if head.contains(" if ") && head.contains(".contains(") {
+            let snippet: String = head.trim().chars().take(90).collect();
+            out.push(format!("{}: {snippet}", i + 1));
+        }
+    }
+    out
+}
+
+/// The planted violation, kept — a scan that finds nothing is
+/// indistinguishable from one that cannot find anything (gotcha #413).
+#[test]
+fn the_hint_prose_guard_catches_an_arm_keyed_on_our_own_wording() {
+    let planted = r#"
+pub fn error_hint_with_key(err: &SwarmError) -> Option<(&'static str, &'static str)> {
+    match err {
+        SwarmError::PipelineError(msg) if msg.contains("No node available for layer") => Some((
+            "pipeline_missing_layer",
+            "...",
+        )),
+    }
+}
+"#;
+    assert_eq!(
+        hint_arms_matching_our_own_prose(planted).len(),
+        1,
+        "the guard must name an arm keyed on our own wording"
+    );
+
+    // An upstream provider's body is not our prose, and must not fire.
+    let upstream = r#"
+pub fn error_hint_with_key(err: &SwarmError) -> Option<(&'static str, &'static str)> {
+    let lower = body.to_lowercase();
+    let looks_like_quota = lower.contains("quota") || lower.contains("billing");
+    match err {
+        SwarmError::ProviderError { .. } if looks_like_quota => Some(("provider_quota", "...")),
+    }
+}
+"#;
+    assert!(
+        hint_arms_matching_our_own_prose(upstream).is_empty(),
+        "matching an upstream provider's words is allowed — there is no type to \
+         read them from"
+    );
+}

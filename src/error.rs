@@ -823,18 +823,6 @@ pub fn error_hint_with_key(err: &SwarmError) -> Option<(&'static str, &'static s
             "A model file did not download completely and will be fetched again \
              automatically. This usually means the connection dropped part-way.",
         )),
-        // `PipelineError` covers two causes needing OPPOSITE advice, and the
-        // generic text asserted the wrong one. A tester was told "a peer went
-        // offline mid-request" when the real cause was a piece of the model
-        // missing locally that no peer could supply — so following the hint
-        // means retrying for ever instead of fetching the piece. Reported
-        // 2026-07-30.
-        SwarmError::PipelineError(msg) if msg.contains("No node available for layer") => Some((
-            "pipeline_missing_layer",
-            "Part of this model isn't available — not on this machine, and not on any \
-             connected peer. Fetch the whole model with `swarmllm get-model <name> --all`, \
-             or wait for more peers to come online.",
-        )),
         // The remaining pipeline failures are a mix of transient and permanent
         // causes, and we do not know which this one is. The old wording picked
         // the transient reading and stated it as fact — "a peer went offline …
@@ -1016,7 +1004,6 @@ mod tests {
                 expected_bytes: 2,
                 actual_bytes: 1,
             },
-            SwarmError::PipelineError("No node available for layer 3".into()),
             SwarmError::PipelineError("something else".into()),
             SwarmError::PeerUnresponsive("x".into()),
             SwarmError::SegmentFailoverExhausted("x".into()),
@@ -1397,7 +1384,15 @@ mod tests {
             SwarmError::PromptPrivacyUnavailable {
                 model_id: "m".into(),
             },
-            SwarmError::PipelineError("No node available for layer 10".into()),
+            // Permanent because no amount of waiting frees disk, and its hint
+            // names the two actions that do. `LocalOnly` was tried here first
+            // and is NOT a fit: its hint says "try again", correctly — on the
+            // right machine — so it would have failed this test for the one
+            // reason that is not a defect.
+            SwarmError::InsufficientDisk {
+                need_mb: 100,
+                have_mb: 10,
+            },
         ] {
             let hint = error_hint(&err).expect("permanent failure needs a hint");
             let lower = hint.to_lowercase();
