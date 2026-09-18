@@ -52,7 +52,27 @@ TOML
 echo "shapes: $("$BIN" --version) on port $PORT"
 SWARMLLM_NODE_DATA_DIR="$D" "$BIN" run -p "$PORT" > "$D/node.log" 2>&1 &
 PID=$!
-sleep 12
+# WAIT FOR READY, do not guess how long starting takes.
+#
+# This was `sleep 12`, and `.claude/rules/architecture.md` § "Timeouts: bound
+# what actually varies" says why that is wrong: a fixed deadline is only correct
+# when the work behind it has a fixed size. Startup is not fixed — the
+# auto-manage scan walks every model in the store, so the wait grows with the
+# number of models the machine holds.
+#
+# At the .187 gate the store had grown enough that BOTH binaries missed the
+# constant: the downloaded .187 artifact answered `/health` after 15 s and the
+# deployed .186 after 19 s. The harness reported `node did not start` for a node
+# that was starting perfectly well, and it did so TWICE — which is what tells it
+# apart from the documented 12 s flake, since that one re-runs clean.
+#
+# `smoke_test.sh` already polled, which is why it passed the same artifact
+# minutes earlier. This is the same shape, so the two harnesses can no longer
+# disagree about whether a node came up.
+for _ in $(seq 1 60); do
+  [ -f "$D/api_key" ] && curl -s -m 3 "http://localhost:$PORT/health" >/dev/null 2>&1 && break
+  sleep 2
+done
 K=$(cat "$D/api_key" 2>/dev/null || true)
 API="http://localhost:$PORT"
 fails=0
