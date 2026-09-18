@@ -35,6 +35,18 @@ computer holds no model of its own; a reply that had been generating for
 minutes could vanish completely. Answers that were being streamed to you as
 they were written were never affected, because you already had the text.
 
+**And the terminal is quiet again when nothing is happening.**
+
+If you run `swarmllm run` in a terminal with the dashboard open, most of what
+scrolled past was the dashboard asking "which computers could run this model?"
+for every model on the page, several times a minute, and the answer being
+written out in full. On an idle machine that was **61% of the log**.
+
+Those explanations are worth having — they are how you find out why your
+computer ran something itself instead of sharing the work — so they are
+unchanged for a request you actually made. It is only the dashboard's own
+background questions that are now quiet, and `-v` still shows them.
+
 Nothing about how computers talk to each other has changed and nodes do not
 need to update together.
 

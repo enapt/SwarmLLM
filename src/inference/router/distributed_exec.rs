@@ -12,7 +12,7 @@ use crate::daemon::SharedState;
 use crate::error::SwarmError;
 use crate::inference::chat_template;
 use crate::inference::pipeline::PipelineExecutor;
-use crate::inference::scheduler::PipelineScheduler;
+use crate::inference::scheduler::{PipelineScheduler, Purpose};
 use crate::types::{InferenceRequest, NetworkCommand, PipelineAssignment};
 
 use super::spot_check::{check_distributed_result, settle_participant_trust};
@@ -369,7 +369,16 @@ async fn assemble_awaiting_dht(
     request_id: uuid::Uuid,
     prompt_tokens: Option<u32>,
 ) -> Result<PipelineAssignment, SwarmError> {
-    let first = scheduler.assemble_pipeline_for(model_id, local_node_id, request_id, prompt_tokens);
+    // A real request: every routing line is wanted at `info`, which is what
+    // the diagnostics guide's "why did my machine run this itself" answer
+    // reads (`scheduler::Purpose`).
+    let first = scheduler.assemble_pipeline_for(
+        model_id,
+        local_node_id,
+        request_id,
+        Purpose::Route,
+        prompt_tokens,
+    );
     let Err(err) = first else {
         if let Ok(ref a) = first {
             // Book this plan's demand on each peer before anyone else is
@@ -387,9 +396,13 @@ async fn assemble_awaiting_dht(
     let deadline = std::time::Instant::now() + DHT_ASSEMBLY_GRACE;
     while std::time::Instant::now() < deadline {
         tokio::time::sleep(DHT_ASSEMBLY_POLL).await;
-        if let Ok(assignment) =
-            scheduler.assemble_pipeline_for(model_id, local_node_id, request_id, prompt_tokens)
-        {
+        if let Ok(assignment) = scheduler.assemble_pipeline_for(
+            model_id,
+            local_node_id,
+            request_id,
+            Purpose::Route,
+            prompt_tokens,
+        ) {
             scheduler.record_peer_commitments(&assignment, local_node_id, prompt_tokens);
             tracing::info!(
                 %request_id,

@@ -379,7 +379,7 @@ fn greedy_never_hands_a_node_more_layers_than_it_can_hold() {
     rest.max_hostable_layers = Some(48);
 
     let segments = scheduler
-        .greedy_assign(48, &[big, rest], false)
+        .greedy_assign(48, &[big, rest], false, super::Purpose::Route)
         .expect("a valid assignment exists");
 
     let first = &segments[0];
@@ -410,7 +410,7 @@ fn a_model_that_fits_nobody_is_still_assigned_rather_than_refused() {
     only.max_hostable_layers = Some(8);
 
     let segments = scheduler
-        .greedy_assign(48, &[only], false)
+        .greedy_assign(48, &[only], false, super::Purpose::Route)
         .expect("must fall back to an unbounded route rather than refuse");
     assert_eq!(
         segments.last().unwrap().layer_range.1,
@@ -428,7 +428,9 @@ fn an_unknown_capacity_still_takes_the_whole_range() {
     let scheduler = PipelineScheduler::new(state);
     let mut only = simple_candidate(1, vec![(0, 48)]);
     only.max_hostable_layers = None;
-    let segments = scheduler.greedy_assign(48, &[only], false).unwrap();
+    let segments = scheduler
+        .greedy_assign(48, &[only], false, super::Purpose::Route)
+        .unwrap();
     assert_eq!(segments.len(), 1, "unknown capacity must not fragment");
     assert_eq!(segments[0].layer_range, (0, 48));
 }
@@ -497,7 +499,9 @@ fn greedy_assign_multi_range_candidate() {
         },
     ];
 
-    let segments = scheduler.greedy_assign(14, &candidates, false).unwrap();
+    let segments = scheduler
+        .greedy_assign(14, &candidates, false, super::Purpose::Route)
+        .unwrap();
     // Should produce 3 segments: [0,2) on A, [2,10) on B, [10,14) on A
     assert_eq!(segments.len(), 3);
     assert_eq!(segments[0].layer_range, (0, 2));
@@ -1680,6 +1684,7 @@ fn a_full_gpu_hands_the_model_to_a_nearby_peer() {
             local_cpu_tokens_per_sec: 0.0,
             prompt_tokens: None,
         },
+        super::Purpose::Route,
     );
     assert_eq!(
         picked.map(|c| c.node_id.clone()),
@@ -1706,7 +1711,8 @@ fn a_healthy_local_gpu_keeps_the_request_here() {
                 model_vram_mb: MODEL_MB,
                 local_cpu_tokens_per_sec: 0.0,
                 prompt_tokens: None
-            }
+            },
+            super::Purpose::Route,
         )
         .is_none(),
         "a node that is not CPU-bound for lack of VRAM must not delegate"
@@ -1733,7 +1739,8 @@ fn a_distant_peer_is_never_handed_the_model() {
                 model_vram_mb: MODEL_MB,
                 local_cpu_tokens_per_sec: 0.0,
                 prompt_tokens: None
-            }
+            },
+            super::Purpose::Route,
         )
         .is_none(),
         "a peer beyond the latency bound must never be delegated to"
@@ -1765,7 +1772,8 @@ fn a_peer_a_continent_away_is_still_worth_delegating_to() {
                 model_vram_mb: MODEL_MB,
                 local_cpu_tokens_per_sec: 0.0,
                 prompt_tokens: None
-            }
+            },
+            super::Purpose::Route,
         )
         .map(|c| c.node_id.clone()),
         Some(NodeId([0xBB; 32])),
@@ -1808,7 +1816,8 @@ fn a_peer_that_is_slow_at_reading_the_prompt_is_not_handed_a_long_one() {
                 model_vram_mb: MODEL_MB,
                 local_cpu_tokens_per_sec: 6.46,
                 prompt_tokens: Some(12_000)
-            }
+            },
+            super::Purpose::Route,
         )
         .is_none(),
         "a peer priced slower than us for this prompt must not be delegated to, \
@@ -1842,7 +1851,8 @@ fn a_short_prompt_still_goes_to_the_faster_processor() {
                 model_vram_mb: MODEL_MB,
                 local_cpu_tokens_per_sec: 6.46,
                 prompt_tokens: Some(16)
-            }
+            },
+            super::Purpose::Route,
         )
         .map(|c| c.node_id.clone()),
         Some(NodeId([0xBB; 32])),
@@ -1869,7 +1879,8 @@ fn an_unmeasured_peer_is_still_tried() {
                 model_vram_mb: MODEL_MB,
                 local_cpu_tokens_per_sec: 0.0,
                 prompt_tokens: Some(12_000)
-            }
+            },
+            super::Purpose::Route,
         )
         .map(|c| c.node_id.clone()),
         Some(NodeId([0xBB; 32])),
@@ -1954,7 +1965,8 @@ fn a_nearer_peer_still_wins_over_a_distant_one() {
                 model_vram_mb: MODEL_MB,
                 local_cpu_tokens_per_sec: 0.0,
                 prompt_tokens: None
-            }
+            },
+            super::Purpose::Route,
         )
         .map(|c| c.node_id.clone()),
         Some(NodeId([0xCC; 32])),
@@ -1985,7 +1997,8 @@ fn only_a_directly_measured_peer_qualifies() {
                     model_vram_mb: MODEL_MB,
                     local_cpu_tokens_per_sec: 0.0,
                     prompt_tokens: None
-                }
+                },
+                super::Purpose::Route,
             )
             .is_none(),
             "{tier:?} must not be delegated to"
@@ -2015,7 +2028,8 @@ fn a_node_with_no_card_hands_the_model_to_a_much_faster_processor_peer() {
                 model_vram_mb: MODEL_MB,
                 local_cpu_tokens_per_sec: 4.0,
                 prompt_tokens: None
-            }
+            },
+            super::Purpose::Route,
         )
         .map(|c| c.node_id.clone()),
         Some(NodeId([0xBB; 32])),
@@ -2036,7 +2050,8 @@ fn a_node_with_no_card_hands_the_model_to_a_much_faster_processor_peer() {
                 model_vram_mb: MODEL_MB,
                 local_cpu_tokens_per_sec: 4.0,
                 prompt_tokens: None
-            }
+            },
+            super::Purpose::Route,
         )
         .is_none(),
         "1.5x is inside the margin a self-reported figure gets"
@@ -2055,7 +2070,8 @@ fn a_node_with_no_card_hands_the_model_to_a_much_faster_processor_peer() {
             model_vram_mb: MODEL_MB,
             local_cpu_tokens_per_sec: 4.0,
             prompt_tokens: None
-        }
+        },
+        super::Purpose::Route,
     )
     .is_none());
 }
@@ -2079,7 +2095,8 @@ fn a_peer_holding_only_some_layers_is_not_a_delegate() {
             model_vram_mb: MODEL_MB,
             local_cpu_tokens_per_sec: 0.0,
             prompt_tokens: None
-        }
+        },
+        super::Purpose::Route,
     )
     .is_none());
 }
@@ -2105,7 +2122,8 @@ fn a_peer_without_room_to_spare_is_not_a_delegate() {
                     model_vram_mb: MODEL_MB,
                     local_cpu_tokens_per_sec: 0.0,
                     prompt_tokens: None
-                }
+                },
+                super::Purpose::Route,
             )
             .is_none(),
             "free={free:?} is not enough room for a {MODEL_MB} MB model"
@@ -2126,7 +2144,8 @@ fn a_peer_without_room_to_spare_is_not_a_delegate() {
             model_vram_mb: MODEL_MB,
             local_cpu_tokens_per_sec: 0.0,
             prompt_tokens: None
-        }
+        },
+        super::Purpose::Route,
     )
     .is_some());
 }
@@ -2154,7 +2173,8 @@ fn a_peer_without_room_for_the_boomerangs_middle_is_not_given_it() {
                 model_vram_mb: MODEL_MB,
                 local_cpu_tokens_per_sec: 0.0,
                 prompt_tokens: None
-            }
+            },
+            super::Purpose::Route,
         )
         .is_none(),
         "a peer one layer short of the middle must not be handed the middle"
@@ -2176,7 +2196,8 @@ fn a_peer_without_room_for_the_boomerangs_middle_is_not_given_it() {
                 model_vram_mb: MODEL_MB,
                 local_cpu_tokens_per_sec: 0.0,
                 prompt_tokens: None
-            }
+            },
+            super::Purpose::Route,
         )
         .is_some(),
         "room for exactly the layers it is given is enough"
@@ -2240,7 +2261,8 @@ fn a_prompt_too_long_for_the_peers_card_is_not_delegated_to_it() {
                 model_vram_mb: MODEL_MB,
                 local_cpu_tokens_per_sec: 0.0,
                 prompt_tokens: None
-            }
+            },
+            super::Purpose::Route,
         )
         .is_none(),
         "a card that cannot hold this prompt's KV cache must not be given the model"
@@ -2261,7 +2283,8 @@ fn a_prompt_too_long_for_the_peers_card_is_not_delegated_to_it() {
             model_vram_mb: MODEL_MB,
             local_cpu_tokens_per_sec: 0.0,
             prompt_tokens: None
-        }
+        },
+        super::Purpose::Route,
     )
     .is_some());
 }
@@ -2287,7 +2310,8 @@ fn the_processor_speed_branch_is_bounded_by_memory_too() {
                 model_vram_mb: MODEL_MB,
                 local_cpu_tokens_per_sec: 4.0,
                 prompt_tokens: None
-            }
+            },
+            super::Purpose::Route,
         )
         .is_none(),
         "being three times faster does not create memory it does not have"
@@ -2314,7 +2338,8 @@ fn a_peer_that_has_told_us_nothing_about_its_memory_is_still_eligible() {
                 model_vram_mb: MODEL_MB,
                 local_cpu_tokens_per_sec: 0.0,
                 prompt_tokens: None
-            }
+            },
+            super::Purpose::Route,
         )
         .is_some(),
         "unknown is not the same fact as full"
@@ -2337,7 +2362,8 @@ fn an_untrusted_peer_is_not_shown_the_prompt() {
             model_vram_mb: MODEL_MB,
             local_cpu_tokens_per_sec: 0.0,
             prompt_tokens: None
-        }
+        },
+        super::Purpose::Route,
     )
     .is_none());
 }
@@ -2357,7 +2383,8 @@ fn an_unknown_model_size_keeps_the_request_here() {
             model_vram_mb: 0,
             local_cpu_tokens_per_sec: 0.0,
             prompt_tokens: None
-        }
+        },
+        super::Purpose::Route,
     )
     .is_none());
 }
@@ -2378,7 +2405,8 @@ fn with_no_willing_peer_the_request_stays_local() {
             model_vram_mb: MODEL_MB,
             local_cpu_tokens_per_sec: 0.0,
             prompt_tokens: None
-        }
+        },
+        super::Purpose::Route,
     )
     .is_none());
 }
@@ -2400,7 +2428,8 @@ fn the_local_node_is_never_its_own_delegate() {
             model_vram_mb: MODEL_MB,
             local_cpu_tokens_per_sec: 0.0,
             prompt_tokens: None
-        }
+        },
+        super::Purpose::Route,
     )
     .is_none());
 }
@@ -2424,7 +2453,8 @@ fn privacy_is_the_callers_decision_not_a_peer_filter() {
                 model_vram_mb: MODEL_MB,
                 local_cpu_tokens_per_sec: 0.0,
                 prompt_tokens: None
-            }
+            },
+            super::Purpose::Route,
         )
         .is_some(),
         "the peer is eligible regardless of privacy; the caller picks the shape"
@@ -2514,7 +2544,8 @@ fn a_clearly_faster_processor_peer_can_take_the_work() {
                 model_vram_mb: MODEL_MB,
                 local_cpu_tokens_per_sec: 1.0,
                 prompt_tokens: None
-            }
+            },
+            super::Purpose::Route,
         )
         .is_some(),
         "a peer 4x faster should take it"
@@ -2539,7 +2570,8 @@ fn a_marginally_faster_processor_peer_does_not() {
             model_vram_mb: MODEL_MB,
             local_cpu_tokens_per_sec: 1.0,
             prompt_tokens: None
-        }
+        },
+        super::Purpose::Route,
     )
     .is_none());
 }
@@ -2562,7 +2594,8 @@ fn an_unknown_local_speed_refuses_a_processor_peer() {
             model_vram_mb: MODEL_MB,
             local_cpu_tokens_per_sec: 0.0,
             prompt_tokens: None
-        }
+        },
+        super::Purpose::Route,
     )
     .is_none());
 }
@@ -2584,7 +2617,8 @@ fn a_card_with_room_needs_no_speed_comparison() {
             model_vram_mb: MODEL_MB,
             local_cpu_tokens_per_sec: 99.0,
             prompt_tokens: None
-        }
+        },
+        super::Purpose::Route,
     )
     .is_some());
 }
@@ -3520,6 +3554,7 @@ fn a_processor_bound_holder_hands_a_long_prompt_to_a_pipeline_of_faster_cards() 
             &ModelId("split-14b".into()),
             &local,
             uuid::Uuid::new_v4(),
+            super::Purpose::Route,
             Some(14_000),
         )
         .unwrap();
@@ -3556,6 +3591,7 @@ fn with_privacy_off_the_processor_bound_holder_hands_the_whole_model_to_the_card
             &ModelId("split-14b".into()),
             &local,
             uuid::Uuid::new_v4(),
+            super::Purpose::Route,
             Some(14_000),
         )
         .unwrap();
@@ -3583,6 +3619,7 @@ fn a_short_prompt_stays_on_the_processor_when_the_cards_are_far_away() {
                 &ModelId("split-14b".into()),
                 &local,
                 uuid::Uuid::new_v4(),
+                super::Purpose::Route,
                 None,
             )
             .unwrap();
@@ -3616,6 +3653,7 @@ fn a_slow_enough_processor_hands_even_a_short_prompt_to_distant_cards() {
             &ModelId("split-14b".into()),
             &local,
             uuid::Uuid::new_v4(),
+            super::Purpose::Route,
             None,
         )
         .unwrap();
@@ -3891,10 +3929,22 @@ fn the_local_candidate_is_priced_by_the_device_the_request_would_use() {
     let manifest = state.model_registry.get_manifest(&mid).unwrap();
     let scheduler = PipelineScheduler::new(state);
     let pick = |cands: Vec<NodeCandidate>| cands.into_iter().find(|c| c.node_id == local).unwrap();
-    let on_card =
-        pick(scheduler.gather_candidates(&manifest, &local, uuid::Uuid::new_v4(), None, &|| false));
-    let on_processor =
-        pick(scheduler.gather_candidates(&manifest, &local, uuid::Uuid::new_v4(), None, &|| true));
+    let on_card = pick(scheduler.gather_candidates(
+        &manifest,
+        &local,
+        uuid::Uuid::new_v4(),
+        None,
+        super::Purpose::Route,
+        &|| false,
+    ));
+    let on_processor = pick(scheduler.gather_candidates(
+        &manifest,
+        &local,
+        uuid::Uuid::new_v4(),
+        None,
+        super::Purpose::Route,
+        &|| true,
+    ));
     assert!(
         on_card.has_gpu,
         "a request the card runs gets the card's prefill prior"
@@ -3959,7 +4009,8 @@ fn a_boomerangs_middle_is_priced_as_the_middle_it_will_be_given() {
                 model_vram_mb: 1_200,
                 local_cpu_tokens_per_sec: 4.279,
                 prompt_tokens: Some(16),
-            }
+            },
+            super::Purpose::Route,
         )
         .is_none(),
         "a middle segment half a second away is entered once per token; handing \
@@ -3985,7 +4036,8 @@ fn the_same_peer_still_gets_the_whole_model_when_that_is_the_shape() {
                 model_vram_mb: 1_200,
                 local_cpu_tokens_per_sec: 4.279,
                 prompt_tokens: Some(16),
-            }
+            },
+            super::Purpose::Route,
         )
         .map(|c| c.node_id.clone()),
         Some(NodeId([0xBB; 32])),
@@ -4143,7 +4195,7 @@ fn the_greedy_fallback_does_not_hand_one_node_more_than_it_can_hold() {
     tail.max_hostable_layers = Some(24);
 
     let segments = scheduler
-        .greedy_assign(48, &[wide, middle, tail], false)
+        .greedy_assign(48, &[wide, middle, tail], false, super::Purpose::Route)
         .expect("a plan respecting every bound exists");
 
     let mut per_node: std::collections::HashMap<NodeId, u32> = std::collections::HashMap::new();
@@ -4184,7 +4236,7 @@ fn an_impossible_bound_falls_through_to_the_relaxed_pass() {
     // …and the public entry point recovers, because a served request beats a
     // refused one and the holder's own admission is the backstop.
     let segments = scheduler
-        .greedy_assign(48, &[only], false)
+        .greedy_assign(48, &[only], false, super::Purpose::Route)
         .expect("the relaxed pass routes it");
     assert_eq!(segments.last().map(|s| s.layer_range.1), Some(48));
 }
@@ -4224,7 +4276,13 @@ fn a_whole_model_peer_no_longer_ends_the_search_before_it_runs() {
 
     let scheduler = PipelineScheduler::with_delegation_footprint(state, LOCAL_PROCESSOR_TPS, 8_000);
     let assignment = scheduler
-        .assemble_pipeline_for(&model, &local, uuid::Uuid::new_v4(), Some(14_000))
+        .assemble_pipeline_for(
+            &model,
+            &local,
+            uuid::Uuid::new_v4(),
+            super::Purpose::Route,
+            Some(14_000),
+        )
         .unwrap();
     let nodes: Vec<NodeId> = assignment
         .segments
@@ -4271,7 +4329,13 @@ fn the_whole_model_peer_is_still_chosen_when_it_is_genuinely_cheapest() {
 
     let scheduler = PipelineScheduler::with_delegation_footprint(state, LOCAL_PROCESSOR_TPS, 8_000);
     let assignment = scheduler
-        .assemble_pipeline_for(&model, &local, uuid::Uuid::new_v4(), Some(14_000))
+        .assemble_pipeline_for(
+            &model,
+            &local,
+            uuid::Uuid::new_v4(),
+            super::Purpose::Route,
+            Some(14_000),
+        )
         .unwrap();
     let nodes: Vec<NodeId> = assignment
         .segments
@@ -4421,7 +4485,12 @@ fn the_greedy_fallback_applies_the_prompt_trust_bar() {
     trusted.load = 0.5;
 
     let segs = scheduler
-        .greedy_assign(28, &[cheap_but_docked, trusted], false)
+        .greedy_assign(
+            28,
+            &[cheap_but_docked, trusted],
+            false,
+            super::Purpose::Route,
+        )
         .expect("a valid assignment exists");
 
     assert_eq!(
@@ -4439,7 +4508,12 @@ fn the_greedy_fallback_applies_the_prompt_trust_bar() {
 fn greedy_still_answers_when_every_layer_zero_holder_is_docked() {
     let scheduler = PipelineScheduler::new(make_shared_state());
     let segs = scheduler
-        .greedy_assign(28, &[docked(0xD3, vec![(0, 28)])], false)
+        .greedy_assign(
+            28,
+            &[docked(0xD3, vec![(0, 28)])],
+            false,
+            super::Purpose::Route,
+        )
         .expect("a docked peer is better than refusing the request");
     assert_eq!(segs[0].node_id, NodeId([0xD3; 32]));
 }
@@ -4766,7 +4840,13 @@ fn a_hand_off_records_what_the_cost_model_expected_of_it() {
 
     let scheduler = PipelineScheduler::with_delegation_footprint(state, LOCAL_PROCESSOR_TPS, 8_000);
     let assignment = scheduler
-        .assemble_pipeline_for(&model, &local, request_id, Some(14_000))
+        .assemble_pipeline_for(
+            &model,
+            &local,
+            request_id,
+            super::Purpose::Route,
+            Some(14_000),
+        )
         .unwrap();
 
     // The control for the control: this really is a hand-off — prompt privacy

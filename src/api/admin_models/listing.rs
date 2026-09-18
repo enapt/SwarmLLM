@@ -1186,27 +1186,37 @@ pub async fn pipeline_plan(
     let mid = crate::types::ModelId(model_id.clone());
     let local_node_id = state.shared_state.identity.node_id().clone();
     let scheduler = crate::inference::scheduler::PipelineScheduler::new(state.shared_state.clone());
-    let assignment =
-        match scheduler.assemble_pipeline_for(&mid, &local_node_id, uuid::Uuid::new_v4(), None) {
-            Ok(a) => a,
-            Err(e) if no_route_is_the_answer(&e) => {
-                // Not a failure, so not logged as one — but still worth a line,
-                // because "the dashboard shows no route for this model" is a
-                // question people ask and the answer is otherwise only in a
-                // response body nobody kept.
-                tracing::debug!(model_id = %model_id, reason = %e, "pipeline preview: no route");
-                return Ok(Json(serde_json::json!({
-                    "model_id": model_id,
-                    "local_node_id": format!("{}", local_node_id),
-                    "local_region": state.shared_state.config.identity.region.clone(),
-                    "segments": [],
-                    "standbys": [],
-                    "routable": false,
-                    "reason": crate::error::error_body(&e),
-                })));
-            }
-            Err(e) => return Err(ApiError(e)),
-        };
+    // `Preview`, not `Route`: this answers "what would happen", and the
+    // dashboard asks it once per visible model card whenever any peer's shard
+    // total changes. At `Route` those ~6 routing lines per card came to 61% of
+    // an idle node's log, describing routes nobody requested — see
+    // `scheduler::Purpose`. The plan itself is identical either way.
+    let assignment = match scheduler.assemble_pipeline_for(
+        &mid,
+        &local_node_id,
+        uuid::Uuid::new_v4(),
+        crate::inference::scheduler::Purpose::Preview,
+        None,
+    ) {
+        Ok(a) => a,
+        Err(e) if no_route_is_the_answer(&e) => {
+            // Not a failure, so not logged as one — but still worth a line,
+            // because "the dashboard shows no route for this model" is a
+            // question people ask and the answer is otherwise only in a
+            // response body nobody kept.
+            tracing::debug!(model_id = %model_id, reason = %e, "pipeline preview: no route");
+            return Ok(Json(serde_json::json!({
+                "model_id": model_id,
+                "local_node_id": format!("{}", local_node_id),
+                "local_region": state.shared_state.config.identity.region.clone(),
+                "segments": [],
+                "standbys": [],
+                "routable": false,
+                "reason": crate::error::error_body(&e),
+            })));
+        }
+        Err(e) => return Err(ApiError(e)),
+    };
 
     // Map segment layer range → full list of shard indices so the UI can
     // highlight every cell the segment covers, not just the anchor shard.

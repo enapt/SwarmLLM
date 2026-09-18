@@ -190,6 +190,14 @@ model-worker: Model loaded ... device=Cuda(...)
 A node that holds every layer of a model decides, on every pipeline assembly,
 whether to run it alone. Since v0.3.152 the whole decision is at `info`:
 
+> **These lines describe a request you made.** The dashboard also asks the
+> scheduler what *would* happen, once per visible model card whenever any peer's
+> shard total changes, and those previews log the same lines at `debug` —
+> otherwise an idle node with the dashboard open spends most of its log
+> describing routes for models nobody asked for (61% of it, measured). So the
+> lines below appear for your request and not for the dashboard's polling; if
+> you want the preview's reasoning too, `-v`. See `scheduler::Purpose`.
+
 ```
 Local node has full layer coverage — single local segment
         candidates= cheapest_peer= cheapest_peer_cost_ms=

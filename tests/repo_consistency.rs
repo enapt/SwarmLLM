@@ -7821,3 +7821,124 @@ fn two(&self) -> InferenceOutput {
         "the test exemption must end with the module"
     );
 }
+
+/// Every routing line in `src/inference/scheduler/mod.rs` goes through
+/// `route_info!`, which is `info!` for a request and `debug!` for a preview.
+///
+/// **Why the whole set and not a chosen few.** The write-up that prompted this
+/// listed eleven line numbers. There were **twenty**, and one of the nine it
+/// missed was `Encrypted pipeline active` — which that same write-up had
+/// MEASURED as one of the six lines a single preview emits. Acting on the list
+/// would have left a sixth of the noise in place while looking finished. A
+/// count in prose, again (the reply-finalisation census made the identical
+/// mistake twice in one day).
+///
+/// So the invariant is the absence: no bare `tracing::info!` inside the
+/// functions that plan a route. A new routing diagnostic added there is
+/// exactly how an idle node goes back to logging ~100 lines a minute for
+/// requests nobody made, and it is invisible in review because the line looks
+/// like every other `info!` in the daemon.
+///
+/// Lines outside those functions are untouched — this is scoped to route
+/// planning, not to the file.
+#[test]
+fn every_routing_diagnostic_is_scoped_to_its_purpose() {
+    let src = std::fs::read_to_string(repo_root().join("src/inference/scheduler/mod.rs"))
+        .expect("scheduler/mod.rs");
+    let offenders = bare_info_in_routing_fns(&src);
+    // Counted on the macro name and its parenthesis alone. `route_info!(purpose,`
+    // was the obvious spelling and rustfmt split one of the twenty across two
+    // lines the moment it was written — the exact brittleness
+    // `.claude/rules/arch-guards-and-tests.md` warns about: never match a
+    // literal carrying the indentation rustfmt happened to produce. The
+    // definition spells itself `macro_rules! route_info {`, with no
+    // parenthesis, so every match here is a call site.
+    let sites = src.matches("route_info!(").count();
+    assert!(
+        sites >= 20,
+        "only {sites} route_info! sites — the routing lines have been moved \
+         back to a bare info! or the macro was renamed"
+    );
+    assert!(
+        offenders.is_empty(),
+        "these routing lines log at info! even for a preview — use \
+         route_info!(purpose, ..) so a dashboard poll does not describe routes \
+         nobody asked for (see scheduler::Purpose): {offenders:?}"
+    );
+}
+
+/// Line numbers of every `tracing::info!` inside a route-planning function.
+/// Separated from the test so the self-test below can drive it on a source
+/// string that is not on disk.
+fn bare_info_in_routing_fns(src: &str) -> Vec<usize> {
+    const PLANNERS: &[&str] = &[
+        "assemble_pipeline_for",
+        "gather_candidates",
+        "delegation_target",
+        "greedy_assign",
+        "greedy_assign_inner",
+    ];
+    // Which function each line belongs to, by the most recent `fn` above it.
+    let mut current = String::new();
+    let mut out = Vec::new();
+    for (i, line) in src.lines().enumerate() {
+        let t = line.trim_start();
+        if let Some(rest) = t
+            .strip_prefix("pub fn ")
+            .or_else(|| t.strip_prefix("pub(crate) fn "))
+            .or_else(|| t.strip_prefix("pub(super) fn "))
+            .or_else(|| t.strip_prefix("async fn "))
+            .or_else(|| t.strip_prefix("fn "))
+        {
+            current = rest
+                .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .next()
+                .unwrap_or("")
+                .to_string();
+        }
+        if line.contains("tracing::info!(") && PLANNERS.contains(&current.as_str()) {
+            out.push(i + 1);
+        }
+    }
+    out
+}
+
+/// The planted violation, kept — a scan that finds nothing is
+/// indistinguishable from one that cannot find anything (gotcha #413).
+#[test]
+fn the_routing_diagnostic_guard_catches_a_bare_info_line() {
+    let planted = r#"
+impl PipelineScheduler {
+    pub fn assemble_pipeline_for(&self, purpose: Purpose) -> u32 {
+        route_info!(purpose, "a properly scoped line");
+        tracing::info!(model = %m, "DIAG: a new routing line somebody added");
+        0
+    }
+}
+"#;
+    assert_eq!(
+        bare_info_in_routing_fns(planted),
+        vec![5],
+        "the guard must name the bare info! line"
+    );
+
+    // And must not fire on a line outside a route-planning function — the
+    // scope is route planning, not the file.
+    let elsewhere = r#"
+fn some_other_thing() {
+    tracing::info!("this one is nobody's business here");
+}
+"#;
+    assert!(
+        bare_info_in_routing_fns(elsewhere).is_empty(),
+        "only the planners are in scope"
+    );
+
+    // A planner's own `route_info!` lines are fine on their own.
+    let clean = r#"
+fn gather_candidates(&self, purpose: Purpose) {
+    route_info!(purpose, "DIAG: pipeline candidate");
+}
+"#;
+    assert!(bare_info_in_routing_fns(clean).is_empty());
+}

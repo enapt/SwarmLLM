@@ -8,6 +8,60 @@ use crate::types::{
     TensorParallelGroup,
 };
 
+/// Why a pipeline plan is being assembled: to serve a request, or to answer a
+/// question about what WOULD happen.
+///
+/// **Routing diagnostics are for a request somebody made.** One route preview
+/// is 6 INFO lines, and the dashboard fires one per visible model card whenever
+/// any peer's hosted-shard total changes — every 30-45 s on a live swarm. On
+/// this project's own node that came to **61% of the log**: 13,680
+/// `DIAG: pipeline candidate` lines out of 36,885 in 12.5 h, describing routes
+/// for models nobody had asked for. A new user running `swarmllm run` in a
+/// terminal watches it scroll past at the DEFAULT level.
+///
+/// **Dropping the level outright is the wrong fix**, which is why this type
+/// exists instead. The diagnostics guide answers a real user question — "why
+/// did my machine run this itself instead of using the swarm?" — from exactly
+/// these lines at default level, a v0.3.152 decision, and `-v` drowns them in
+/// every other debug line in the daemon. That question is always about a
+/// request the user made, so it keeps every line; a preview logs the same
+/// lines at `debug!`.
+///
+/// **It is a required parameter, not something inferred.** Deriving it from
+/// `active_traces` — which `note_predicted_route_cost` legitimately does,
+/// because there the consequence is a no-op — would make a real request whose
+/// trace failed to register lose its routing diagnostics at exactly the moment
+/// they are wanted. `.claude/rules/architecture.md` § "Make the wrong call
+/// unrepresentable".
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Purpose {
+    /// A request is being served. Every routing line is wanted.
+    Route,
+    /// Something is asking what would happen — the dashboard's route preview.
+    /// The plan is identical; only its loudness differs.
+    Preview,
+}
+
+impl Purpose {
+    /// Whether this plan's routing diagnostics describe a real request.
+    fn explains_a_real_request(self) -> bool {
+        matches!(self, Purpose::Route)
+    }
+}
+
+/// A routing diagnostic: `info!` when it explains a request somebody made,
+/// `debug!` when it explains a preview. See [`Purpose`] for why the two are
+/// not the same line at the same level.
+macro_rules! route_info {
+    ($purpose:expr, $($arg:tt)*) => {
+        if $purpose.explains_a_real_request() {
+            tracing::info!($($arg)*);
+        } else {
+            tracing::debug!($($arg)*);
+        }
+    };
+}
+
 /// PipelineScheduler assembles a distributed inference pipeline
 /// by selecting the best nodes for each layer range.
 #[derive(Clone)]
@@ -704,6 +758,7 @@ fn trusted_with_the_plaintext_prompt(c: &NodeCandidate, local_node_id: &NodeId) 
 fn delegation_target<'a>(
     candidates: &'a [NodeCandidate],
     input: &DelegationInput<'_>,
+    purpose: Purpose,
 ) -> Option<&'a NodeCandidate> {
     let DelegationInput {
         local_node_id,
@@ -814,7 +869,7 @@ fn delegation_target<'a>(
         // this node's processor, once per candidate per assembly, and "why is
         // my fast machine idle" is the question an operator at the default log
         // level needs answered — a tester grepping for it found nothing.
-        tracing::info!(
+        route_info!(purpose,
             peer = %c.node_id,
             reach = ?c.reach,
             latency_ms = c.latency_ms,
@@ -1733,7 +1788,13 @@ impl PipelineScheduler {
         model_id: &ModelId,
         local_node_id: &NodeId,
     ) -> Result<PipelineAssignment, SwarmError> {
-        self.assemble_pipeline_for(model_id, local_node_id, uuid::Uuid::new_v4(), None)
+        self.assemble_pipeline_for(
+            model_id,
+            local_node_id,
+            uuid::Uuid::new_v4(),
+            Purpose::Route,
+            None,
+        )
     }
 
     /// Assemble a pipeline for the given model with a specific request ID.
@@ -1785,6 +1846,10 @@ impl PipelineScheduler {
         model_id: &ModelId,
         local_node_id: &NodeId,
         request_id: uuid::Uuid,
+        // Whether this plan is for a request or for a preview of one. It
+        // changes nothing about the plan — only how loudly the routing is
+        // explained. See `Purpose`.
+        purpose: Purpose,
         // Roughly how many tokens of prompt this request carries, when the
         // caller knows. `None` prices the request exactly as this scheduler did
         // before prompt length was threaded through, so a caller with no prompt
@@ -1814,7 +1879,7 @@ impl PipelineScheduler {
             .shared_state
             .encrypted_pipeline_for_request(model_id, request_id);
         if encrypted {
-            tracing::info!(
+            route_info!(purpose,
                 model = %model_id,
                 "Encrypted pipeline active — forcing first+last segments to local node"
             );
@@ -1844,6 +1909,7 @@ impl PipelineScheduler {
             local_node_id,
             request_id,
             prompt_tokens,
+            purpose,
             &local_on_processor,
         );
         if candidates.is_empty() {
@@ -1997,6 +2063,7 @@ impl PipelineScheduler {
                             ),
                         prompt_tokens,
                     },
+                    purpose,
                 )
             } else {
                 None
@@ -2055,7 +2122,7 @@ impl PipelineScheduler {
                         .find(|c| c.node_id == *local_node_id)
                         .and_then(|l| boomerang_assignment(l, peer, num_layers));
                     if let Some(segments) = local_cand {
-                        tracing::info!(
+                        route_info!(purpose,
                             model = %model_id,
                             peer = %peer.node_id,
                             peer_latency_ms = peer.latency_ms,
@@ -2098,7 +2165,7 @@ impl PipelineScheduler {
                         hand_off = Some(assignment);
                     }
                 } else {
-                    tracing::info!(
+                    route_info!(purpose,
                         model = %model_id,
                         peer = %peer.node_id,
                         peer_latency_ms = peer.latency_ms,
@@ -2206,7 +2273,7 @@ impl PipelineScheduler {
             })
             .unwrap_or(false);
         if local_cand.is_some() && !local_runs_whole_model {
-            tracing::info!(
+            route_info!(purpose,
                 model = %model_id,
                 num_layers,
                 max_hostable_layers = ?local_cand.and_then(|c| c.max_hostable_layers),
@@ -2230,7 +2297,7 @@ impl PipelineScheduler {
                 prompt_tokens,
                 encrypted,
             );
-            tracing::info!(
+            route_info!(purpose,
                 model = %model_id,
                 num_layers,
                 candidates = candidates.len(),
@@ -2303,7 +2370,7 @@ impl PipelineScheduler {
                 Ok(segs) => Ok(segs),
                 Err(margin_err) => match route_with(parallax::CapacityBound::PeersAtFaceValue) {
                     Ok(segs) => {
-                        tracing::info!(
+                        route_info!(purpose,
                             model = %model_id,
                             constrained_err = %margin_err,
                             "DIAG: no route fits the peers' advertised memory with our \
@@ -2319,7 +2386,7 @@ impl PipelineScheduler {
                                 // can produce a placement a peer's own figure
                                 // has already refused (report #028). Both are
                                 // true, which is why it is reached only here.
-                                tracing::info!(
+                                route_info!(purpose,
                                     model = %model_id,
                                     constrained_err = %face_value_err,
                                     "DIAG: no route fits even what the peers themselves \
@@ -2331,7 +2398,7 @@ impl PipelineScheduler {
                             Err(local_err) => {
                                 let unbounded = route_with(parallax::CapacityBound::LocalUnbounded);
                                 if unbounded.is_ok() {
-                                    tracing::info!(
+                                    route_info!(purpose,
                                         model = %model_id,
                                         constrained_err = %face_value_err,
                                         local_err = %local_err,
@@ -2354,7 +2421,7 @@ impl PipelineScheduler {
                 // runs" produced a wrong diagnosis on 2026-08-03. This is once
                 // per pipeline assembly, not per token, so it is affordable.
                 Ok(segs) => {
-                    tracing::info!(
+                    route_info!(purpose,
                         model = %model_id,
                         segments = segs.len(),
                         "DIAG: parallax routing selected chain"
@@ -2395,7 +2462,7 @@ impl PipelineScheduler {
                         );
                         let reason = verdict.reason();
                         if verdict.takes_the_pipeline() {
-                            tracing::info!(
+                            route_info!(purpose,
                                 model = %model_id,
                                 segments = segs.len(),
                                 local_processor_cost_ms = local_ms,
@@ -2465,7 +2532,7 @@ impl PipelineScheduler {
                                     // compare, the gate's plan stands as before.
                                     && hand_off_ms.is_none_or(|h| h < chain_ms)
                             }) {
-                                tracing::info!(
+                                route_info!(purpose,
                                     model = %model_id,
                                     local_processor_cost_ms = local_ms,
                                     pipeline_cost_ms = chain_ms,
@@ -2487,7 +2554,7 @@ impl PipelineScheduler {
                                 );
                                 return Ok(assignment);
                             }
-                            tracing::info!(
+                            route_info!(purpose,
                                 model = %model_id,
                                 local_processor_cost_ms = local_ms,
                                 pipeline_cost_ms = chain_ms,
@@ -2524,7 +2591,7 @@ impl PipelineScheduler {
                             encrypted,
                         );
                         if let Some(assignment) = hand_off {
-                            tracing::info!(
+                            route_info!(purpose,
                                 model = %model_id,
                                 err = %e,
                                 "DIAG: parallax routing unavailable — handing the model to \
@@ -2541,7 +2608,7 @@ impl PipelineScheduler {
                             );
                             return Ok(assignment);
                         }
-                        tracing::info!(
+                        route_info!(purpose,
                             model = %model_id,
                             err = %e,
                             cheapest_peer = ?passed_over.as_ref().map(|p| p.candidate.node_id.to_string()),
@@ -2557,16 +2624,16 @@ impl PipelineScheduler {
                             num_layers,
                         ));
                     }
-                    tracing::info!(
+                    route_info!(purpose,
                         model = %model_id,
                         err = %e,
                         "DIAG: parallax routing unavailable — falling back to greedy"
                     );
-                    self.greedy_assign(num_layers, &candidates, encrypted)?
+                    self.greedy_assign(num_layers, &candidates, encrypted, purpose)?
                 }
             }
         } else {
-            self.greedy_assign(num_layers, &candidates, encrypted)?
+            self.greedy_assign(num_layers, &candidates, encrypted, purpose)?
         };
 
         // Merge contiguous segments on the same node into a single segment.
@@ -2635,7 +2702,7 @@ impl PipelineScheduler {
         };
 
         let uncovered = segments_without_standby(&segments, &standbys);
-        tracing::info!(
+        route_info!(purpose,
             request_id = %request_id,
             model = %model_id,
             candidates_count = candidates.len(),
@@ -2747,6 +2814,7 @@ impl PipelineScheduler {
         local_node_id: &NodeId,
         request_id: uuid::Uuid,
         prompt_tokens: Option<u32>,
+        purpose: Purpose,
         // Would a request for this model run on the local node's PROCESSOR?
         // Consulted only if the local node holds any of the model, hence a
         // closure: the answer prices the model against the graphics budget,
@@ -2815,7 +2883,7 @@ impl PipelineScheduler {
         // working from a different idea of who was available.
         let route_override = self.shared_state.route_plan_override(request_id);
         if let Some(ref o) = route_override {
-            tracing::info!(
+            route_info!(purpose,
                 model = %manifest.id,
                 %request_id,
                 pretend_local_holds = ?o.pretend_local_holds,
@@ -3230,7 +3298,7 @@ impl PipelineScheduler {
                 manifest.num_layers,
                 prompt_tokens,
             );
-            tracing::info!(
+            route_info!(purpose,
                 node = %c.node_id,
                 ranges = ?c.available_ranges,
                 can_be_first = c.can_be_first,
@@ -3465,6 +3533,7 @@ impl PipelineScheduler {
         num_layers: u32,
         candidates: &[NodeCandidate],
         encrypted_pipeline: bool,
+        purpose: Purpose,
     ) -> Result<Vec<PipelineSegment>, SwarmError> {
         match self.greedy_assign_inner(num_layers, candidates, encrypted_pipeline, true) {
             Ok(segments) => Ok(segments),
@@ -3474,7 +3543,8 @@ impl PipelineScheduler {
                 if !candidates.iter().any(|c| c.max_hostable_layers.is_some()) {
                     return Err(capped_err);
                 }
-                tracing::info!(
+                route_info!(
+                    purpose,
                     num_layers,
                     "DIAG: no greedy route fits the peers' advertised memory — \
                      routing without that bound, a holder may be overcommitted"
