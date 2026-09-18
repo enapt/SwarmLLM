@@ -1127,12 +1127,57 @@ pub async fn prune_history(State(state): State<AppState>) -> Json<serde_json::Va
 
 // ── Pipeline Plan (read-only preview for UI) ──
 
+/// Is "there is no route" the ANSWER to this preview, rather than a failure of
+/// it?
+///
+/// `assemble_pipeline_for` is asked a question — what route would this model
+/// take right now — and nearly everything it can return answers that question:
+/// no reachable holder for a span, not enough capacity, a model whose manifest
+/// declares no layers, private mode or prompt privacy ruling the available
+/// peers out. None of those is a fault in the call. Reporting them as failed
+/// requests is what filled this node's log with `API request failed status=503`
+/// lines that no user request produced — 124 of them in 12.5 h on the live
+/// node, every one from the dashboard previewing its model cards.
+///
+/// **Deliberately a list of variants and not `classify_error`'s status**, which
+/// is the opposite of the usual rule here and needs its reason written down:
+/// `PipelineError` — the commonest assembly failure by far — answers 500, the
+/// same status as a genuine bug, so a status-derived predicate cannot tell the
+/// two apart. (It is the residue of a variant that `PeerUnresponsive`,
+/// `SegmentFailoverExhausted`, `ReplyTruncated`, `ModelIncompleteInSwarm` and
+/// `PromptPrivacyUnavailable` were each split out of, each time because 500
+/// reported a swarm condition as a crash. The residue was not re-examined and
+/// is noted in `docs/FUTURE_WORK.md`; changing it moves retry and monitoring
+/// behaviour on the inference path and is not this endpoint's to make.)
+///
+/// So the list is local, closed, and about ONE function's returns rather than a
+/// second opinion on what an error means. **A new variant defaults to being
+/// reported as a reason**, like `failure_is_penalty_worthy`'s default — one
+/// that is genuinely this node's bug must join the arm below.
+fn no_route_is_the_answer(err: &crate::error::SwarmError) -> bool {
+    use crate::error::SwarmError as E;
+    match err {
+        // The caller named something this node has never heard of. Actionable
+        // by whoever typed it, so it stays the 404 it already was.
+        E::ModelNotAvailable(_) | E::ShardNotFound(_) => false,
+        // Ours, and must keep being logged as ours.
+        E::Internal(_) | E::Inference(_) | E::Serialization(_) | E::Io(_) => false,
+        _ => true,
+    }
+}
+
 /// GET /api/admin/models/:id/pipeline-plan — Return the pipeline the scheduler
 /// would currently assemble for this model. Read-only: no execution, no side
 /// effects. Used by the frontend to render the inference path on the shard
-/// matrix and network map. Fails with 404 if the model isn't registered or if
-/// the current peer set can't cover all layers (same conditions that would
-/// fail a real inference request).
+/// matrix and network map.
+///
+/// **Answers 200 with `routable: false` and a `reason` when there is no route**,
+/// rather than reporting the swarm's current shape as a failed request. The
+/// reason carries the same message, `hint` and `hint_key` a real request would
+/// have been given, so the dashboard can say WHY the path is blank in the
+/// user's own language instead of drawing nothing — which is what a new node
+/// with few peers used to see for most models. 404 is still 404: an id this
+/// node has never heard of is the caller's mistake and can be acted on.
 pub async fn pipeline_plan(
     State(state): State<AppState>,
     Path(model_id): Path<String>,
@@ -1141,9 +1186,27 @@ pub async fn pipeline_plan(
     let mid = crate::types::ModelId(model_id.clone());
     let local_node_id = state.shared_state.identity.node_id().clone();
     let scheduler = crate::inference::scheduler::PipelineScheduler::new(state.shared_state.clone());
-    let assignment = scheduler
-        .assemble_pipeline_for(&mid, &local_node_id, uuid::Uuid::new_v4(), None)
-        .map_err(ApiError)?;
+    let assignment =
+        match scheduler.assemble_pipeline_for(&mid, &local_node_id, uuid::Uuid::new_v4(), None) {
+            Ok(a) => a,
+            Err(e) if no_route_is_the_answer(&e) => {
+                // Not a failure, so not logged as one — but still worth a line,
+                // because "the dashboard shows no route for this model" is a
+                // question people ask and the answer is otherwise only in a
+                // response body nobody kept.
+                tracing::debug!(model_id = %model_id, reason = %e, "pipeline preview: no route");
+                return Ok(Json(serde_json::json!({
+                    "model_id": model_id,
+                    "local_node_id": format!("{}", local_node_id),
+                    "local_region": state.shared_state.config.identity.region.clone(),
+                    "segments": [],
+                    "standbys": [],
+                    "routable": false,
+                    "reason": crate::error::error_body(&e),
+                })));
+            }
+            Err(e) => return Err(ApiError(e)),
+        };
 
     // Map segment layer range → full list of shard indices so the UI can
     // highlight every cell the segment covers, not just the anchor shard.
@@ -1217,7 +1280,72 @@ pub async fn pipeline_plan(
         "local_region": local_region,
         "segments": segments,
         "standbys": standbys,
+        "routable": true,
     })))
 }
 
 // ── Cloud Provider Management ──
+
+#[cfg(test)]
+mod pipeline_plan_tests {
+    use super::no_route_is_the_answer;
+    use crate::error::SwarmError;
+    use crate::types::{ModelId, ShardId};
+
+    /// Every failure `assemble_pipeline_for` can produce, and which side of the
+    /// preview's line it falls on. The five below are what the scheduler
+    /// actually returns today; the last two are the shapes that must NOT be
+    /// softened into "no route here" — a bad id, and our own bug.
+    #[test]
+    fn a_swarm_without_a_route_is_an_answer_and_a_bad_id_is_not() {
+        let mid = ModelId("m".into());
+
+        // The swarm's current shape, or this model's. These are what a preview
+        // reports, and each already carries a translated hint the dashboard
+        // shows in place of the missing route line.
+        for err in [
+            SwarmError::InsufficientCapacity(mid.clone()),
+            SwarmError::PipelineError("No node available for layer 3".into()),
+            SwarmError::PipelineError("Model has zero layers".into()),
+            SwarmError::ModelIncompleteInSwarm {
+                model_id: "m".into(),
+                layer: 3,
+                span: "layers 3-7".into(),
+            },
+            SwarmError::PrivateModeUnavailable {
+                model_id: "m".into(),
+                missing_shards: vec![2, 3],
+            },
+            SwarmError::PromptPrivacyUnavailable {
+                model_id: "m".into(),
+            },
+        ] {
+            assert!(
+                no_route_is_the_answer(&err),
+                "{err} describes the swarm, so a preview must answer with it, not fail"
+            );
+        }
+
+        // The caller's, or ours. These stay errors — a 404 is actionable by
+        // whoever typed the id, and a 500 must keep being logged as our bug.
+        assert!(
+            !no_route_is_the_answer(&SwarmError::ModelNotAvailable(mid.clone())),
+            "an id this node has never heard of is the caller's mistake"
+        );
+        assert!(
+            !no_route_is_the_answer(&SwarmError::ShardNotFound(ShardId {
+                model_id: mid,
+                index: 0
+            })),
+            "a part this node has never heard of is the caller's mistake"
+        );
+        assert!(
+            !no_route_is_the_answer(&SwarmError::Internal("boom".into())),
+            "our own bug must not be reported as a routing outcome"
+        );
+        assert!(
+            !no_route_is_the_answer(&SwarmError::Inference("boom".into())),
+            "our own bug must not be reported as a routing outcome"
+        );
+    }
+}

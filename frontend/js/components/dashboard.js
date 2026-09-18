@@ -275,10 +275,19 @@
       matrix.removeAttribute('data-has-plan');
       matrix.querySelectorAll('.planned-cell').forEach(function(el) { el.classList.remove('planned-cell'); });
       matrix.querySelectorAll('.planned-row').forEach(function(el) { el.classList.remove('planned-row'); });
+      matrix.querySelectorAll('.shard-matrix-noroute').forEach(function(el) { el.remove(); });
       svg.innerHTML = '';
 
       App.data.loadPipelinePlan(modelId)
         .then(function(plan) {
+          // "No route right now" is an ANSWER, and the daemon sends the reason
+          // with it. Drawing nothing was indistinguishable from the fetch
+          // having failed, and on a node with few peers — every new one — that
+          // is what most model cards showed.
+          if (plan && plan.routable === false && plan.reason) {
+            App.dashboard._showNoRouteReason(matrix, plan.reason);
+            return;
+          }
           if (!plan || !plan.segments || plan.segments.length === 0) return;
           // Cache plan on the matrix so resize-driven redraws can reuse it
           // without re-fetching from the server.
@@ -316,7 +325,32 @@
             matrix._pipelineIO = io;
           }
         })
-        .catch(function() { /* quiet: plan unavailable (no peers etc.) */ });
+        .catch(function() { /* quiet: the fetch itself failed (node unreachable) */ });
+    },
+
+    // Say why the route line is missing, in the reader's own language.
+    //
+    // The daemon sends the same `message` / `hint` / `hint_key` a real request
+    // for this model would have been given, so this reuses
+    // `U.extractErrorMessage` rather than composing a second explanation of the
+    // same condition. The HINT is what a person can act on ("download the parts
+    // yourself from the Models tab"); the message names the model id and is
+    // English, so it is only the fallback when a hint key is missing.
+    _showNoRouteReason: function(matrix, reason) {
+      if (!matrix || !reason) return;
+      var text = '';
+      var key = reason.hint_key;
+      if (typeof key === 'string' && key.length > 0) {
+        var lookup = 'error_hint.' + key;
+        var translated = I18n.t(lookup);
+        if (translated && translated !== lookup) text = translated;
+      }
+      if (!text) text = U.extractErrorMessage({ error: reason }, '');
+      if (!text) return;
+      var el = document.createElement('div');
+      el.className = 'shard-matrix-empty shard-matrix-noroute';
+      el.textContent = text;
+      matrix.appendChild(el);
     },
 
     _drawPipelinePath: function(matrix) {

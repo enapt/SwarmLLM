@@ -96,7 +96,7 @@ with a type-tag byte for tensor payloads.
 ## Testing
 
 **Always say which feature set a count came from.** Current, with
-`--features dev,claude-subscription`: **2752 lib** (+12 ignored),
+`--features dev,claude-subscription`: **2753 lib** (+12 ignored),
 79 integration (31 `integration` + 34 `integration_phase10_11` + 14 `yamux_substream`),
 116 repo-consistency, 1 `api_key_side_effects`, 38 `swarmllm-types` (**not** run
 by a bare `cargo test` — CI runs it explicitly),

@@ -6119,6 +6119,19 @@ textarea.pool-code-input { min-height: 4.5em; }
   padding: 12px;
   text-align: center;
 }
+/* Why no route line is drawn across the grid above. A second muted paragraph
+   under a muted paragraph reads as more of the same, so this one is a callout:
+   it is answering a question the reader is already asking. */
+.shard-matrix-noroute {
+  max-width: 62ch;
+  margin: 4px auto 0;
+  padding: 10px 12px;
+  text-align: left;
+  border-left: 2px solid var(--orange);
+  background: var(--bg-primary);
+  border-radius: var(--radius-sm);
+  line-height: 1.5;
+}
 .shard-matrix-showall {
   margin-top: 6px;
   background: transparent;

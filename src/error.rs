@@ -649,9 +649,38 @@ macro_rules! log_at_level {
     }};
 }
 
+/// Describe a failure the way the API reports it: the `{"message", "type",
+/// "param", "code"}` object, plus the hint when there is one.
+///
+/// **One builder, because there are now two readers.** A failed request carries
+/// this under `"error"`; a read-only preview that finds nothing to show carries
+/// the same object under `"reason"` and a 200, because a preview answering "no
+/// route, and here is why" has answered rather than failed
+/// (`api::admin_models::listing::pipeline_plan`). Built here so the two cannot
+/// describe the same condition differently — the frontend reads both through
+/// `utils.js::extractErrorMessage`, which needs `hint_key` present either way.
+pub fn error_body(err: &SwarmError) -> serde_json::Value {
+    let (_status, message, error_type) = classify_error(err);
+    let mut error_obj = serde_json::json!({
+        "message": message,
+        "type": error_type,
+        "param": null,
+        "code": error_type
+    });
+    // `hint` stays exactly as it was — English prose, for API clients and
+    // for anything that cannot translate. `hint_key` is additive: it is
+    // what the dashboard looks up to show the same advice in the user's own
+    // language, and what a client can branch on without matching prose.
+    if let Some((key, hint_text)) = error_hint_with_key(err) {
+        error_obj["hint"] = serde_json::Value::String(hint_text.to_string());
+        error_obj["hint_key"] = serde_json::Value::String(key.to_string());
+    }
+    error_obj
+}
+
 impl IntoResponse for ApiError {
     fn into_response(self) -> axum::response::Response {
-        let (status, message, error_type) = classify_error(&self.0);
+        let (status, _message, _error_type) = classify_error(&self.0);
 
         // Record every failure the API returns, at the severity its cause
         // deserves — see `FailureLevel`. Logs `self.0`, not `message`: the
@@ -665,22 +694,11 @@ impl IntoResponse for ApiError {
             "API request failed"
         );
 
-        let mut error_obj = serde_json::json!({
-            "message": message,
-            "type": error_type,
-            "param": null,
-            "code": error_type
-        });
-        // `hint` stays exactly as it was — English prose, for API clients and
-        // for anything that cannot translate. `hint_key` is additive: it is
-        // what the dashboard looks up to show the same advice in the user's own
-        // language, and what a client can branch on without matching prose.
-        if let Some((key, hint_text)) = error_hint_with_key(&self.0) {
-            error_obj["hint"] = serde_json::Value::String(hint_text.to_string());
-            error_obj["hint_key"] = serde_json::Value::String(key.to_string());
-        }
-
-        (status, Json(serde_json::json!({ "error": error_obj }))).into_response()
+        (
+            status,
+            Json(serde_json::json!({ "error": error_body(&self.0) })),
+        )
+            .into_response()
     }
 }
 
