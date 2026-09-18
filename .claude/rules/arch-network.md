@@ -426,6 +426,7 @@ Full evidence: `docs/invariants/network.md`
 - **`update::SelfUpdateBlocker` — "this node cannot update itself" carries WHY** — `UpdateChecker::self_update_blocker` returns the reason; `key()` is the stable string the dashboard translates across 21 locales, `advice()` the English one the daemon log and `swarmllm update` print.
 - **`ModelRegistry::manifests_to_gossip`** — the single answer to "which manifests should this node re-broadcast?": ones it published **and ones it holds a shard of**.
 - **`model::manifest::merge_known_shard_hashes`** — the rule that a shard hash may go from unknown to known but never back.
+- **`model::manifest::keep_known_hashes_over_contradicting_ones`** — the sibling rule: a hash we already hold is not replaced by a stranger's CONTRADICTING one when the two manifests describe the same shape. Shards this node HOLDS are exempt, because there the claim is testable. Without it the registry oscillated for ever between two peers.
 - **`types::slugify_model_name`** — the single derivation of a model id from a human display name.
 - **`model::huggingface::is_trusted_publisher`** — canonical curator-allowlist check for an HF `repo_id`.
 - **`SharedState::resolve_connected_peer_id_bytes`** — the resolver to use for any message that `network::manager::relay::is_relay_eligible` refuses, i.e. everything except `RemoteGenerateRequest` / `StreamingToken` / `CancelInference`. For those, "reachable" means "connected".

@@ -375,9 +375,12 @@ pub fn classify_p2p_shard_acceptance(
 /// and surfacing only hours later, after a restart.
 ///
 /// Merging makes hash knowledge MONOTONIC — a hash may go from unknown to
-/// known, or be replaced by a differing known one (a genuine re-publish), but
-/// never back to unknown. Note the converse is deliberately NOT protected: a
-/// real incoming hash still wins over a real stored one, exactly as before.
+/// known, but never back to unknown.
+///
+/// Replacing a known hash with a DIFFERENT known one is the sibling rule, and
+/// it lives in `keep_known_hashes_over_contradicting_ones` below — it used to
+/// be "deliberately not protected", and that is what let the registry
+/// oscillate.
 pub fn merge_known_shard_hashes(incoming: &mut ModelManifest, known: &ModelManifest) -> usize {
     let mut recovered = 0usize;
     for shard in incoming.shards.iter_mut() {
@@ -394,6 +397,72 @@ pub fn merge_known_shard_hashes(incoming: &mut ModelManifest, known: &ModelManif
         }
     }
     recovered
+}
+
+/// Keep a shard hash we already hold rather than take a stranger's
+/// contradicting one, returning how many were kept.
+///
+/// **Only call this when the two manifests describe the same SHAPE** — the
+/// caller checks with `ModelRegistry::describes_a_different_build`, which is
+/// the single answer to that question. That gate is the whole argument: a
+/// genuine re-publish is a new FILE, so its shard sizes and total size move and
+/// the shape check sees it. Shape-identical with a different hash is not a
+/// re-publish; it is two peers disagreeing about one file.
+///
+/// **`held_locally` names the shards this node has on disk, and they are
+/// exempt.** For those, a contradicting hash is not an unanswerable claim — it
+/// is a testable one, and adopting it is what makes `register_manifest` queue
+/// the shard for re-check, which is the ONLY way a node learns from the swarm
+/// that the bytes it is serving are wrong (gotcha #382; the startup sweep runs
+/// before any corrected hash can arrive). Stabilising those would trade a log
+/// flood for a corrupt shard nobody can report. The oscillation this fixes is
+/// on shards the node does NOT hold, where there is no file to hash and so
+/// nothing that could ever settle the disagreement.
+///
+/// Until 2026-09-18 a real incoming hash simply won, and with two such peers
+/// gossiping on a timer neither ever did: the stored hash alternated for ever,
+/// every flip counted as a genuine change, and on the live node three models —
+/// exactly the three it held 0, 0 and 1-of-16 shards of — re-registered 10-12
+/// times a minute, **2,260 of 3,392 log lines (67%) in 71 minutes**, after the
+/// routing flood had already been fixed. Reproduced as a unit test: the stored
+/// hash read `[1, 3, 1, 3, 1, 3, 1, 3]`.
+///
+/// The cost is not only the log. `ModelRegistry::shard_holders` filters holders
+/// by `expected_build_tag`, which is **this node's own manifest hash for that
+/// shard** — so an oscillating hash oscillates the set of peers the node
+/// believes can serve those layers, and a request's candidate set depended on
+/// which half of the flip it arrived in.
+///
+/// Keeping ours is the same asymmetry every neighbouring rule already uses: a
+/// gossiped hash is a claim about the claimant's build, not evidence about the
+/// model (`ModelRegistry::mismatch_policy`), and provenance we fetched
+/// ourselves outranks it (`origin_verified_hash`, applied after this and still
+/// winning). It is not a claim that ours is the right one — it is that
+/// alternating between two unevidenced claims is worse than holding either,
+/// and that the disagreement should be settled by an origin download rather
+/// than by whichever peer gossiped last.
+pub fn keep_known_hashes_over_contradicting_ones(
+    incoming: &mut ModelManifest,
+    known: &ModelManifest,
+    held_locally: &std::collections::HashSet<u32>,
+) -> usize {
+    let mut kept = 0usize;
+    for shard in incoming.shards.iter_mut() {
+        if shard.hash == [0u8; 32] || held_locally.contains(&shard.index) {
+            continue;
+        }
+        if let Some(ours) = known
+            .shards
+            .iter()
+            .find(|s| s.index == shard.index && s.hash != [0u8; 32])
+        {
+            if ours.hash != shard.hash {
+                shard.hash = ours.hash;
+                kept += 1;
+            }
+        }
+    }
+    kept
 }
 
 /// Build ShardInfo entries from `LayerShardLayout` computed by `compute_layer_shard_layouts`.

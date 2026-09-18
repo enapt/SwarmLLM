@@ -786,6 +786,62 @@ Holding a shard is the honest signal, which is why the gossip handler
 deliberately does NOT require `sender == publisher`. `publisher` means who
 published it — do not reintroduce a self-claim to grant broadcast rights.
 
+## `model::manifest::keep_known_hashes_over_contradicting_ones`
+
+**The rule.** When a gossiped manifest gives a different non-zero hash for a
+shard we already have a non-zero hash for, and the two manifests describe the
+same SHAPE, keep ours. Shards this node HOLDS are exempt.
+
+**What it replaced.** `merge_known_shard_hashes` protected unknown → known and
+its doc comment said the converse was "deliberately NOT protected: a real
+incoming hash still wins over a real stored one". The reasoning was about
+genuine re-publishes, and it was right about those and wrong about the signal
+that identifies one: a re-publish is a new FILE, so its shard sizes and total
+size move, and `ModelRegistry::describes_a_different_build` — which compares
+SHAPE, never hashes — already sees it. A hash that changes while the shape does
+not is not a re-publish.
+
+**What it was measured at.** On the live node, 2026-09-18, v0.3.188-alpha, in a
+71-minute window: **2,260 of 3,392 log lines — 67%** — were
+`DIAG: register_manifest` for exactly three models, at 10-12 a minute each. The
+INFO is gated on `changed`, computed below the merge and the origin override
+precisely so a settled swarm stays quiet, so the stored `manifest_hash` was
+genuinely flapping. Two peers re-gossiping different hashes for one file
+overwrote each other indefinitely; the unit test read `[1, 3, 1, 3, 1, 3, 1, 3]`.
+
+The three models were exactly the three the node held least of — 0, 0 and
+1-of-16 shards. That correlation is the mechanism, not a coincidence: the origin
+override (`origin_verified_hash`) settles any shard the node downloaded itself,
+so only shards with no local provenance could flap.
+
+**Why it is not only log noise.** `ModelRegistry::shard_holders` filters holders
+by `expected_build_tag`, which is *this node's own manifest hash for that
+shard*. An oscillating hash oscillates the set of peers the node believes can
+serve those layers, so a request's candidate set depended on which half of the
+flip it arrived in. It also cost a `persist` DB write and a `recheck` walk per
+flip.
+
+**What a change must keep.**
+
+- **The shape gate.** Without it a genuine re-publish can never be adopted.
+  `a_republished_model_still_replaces_the_hashes_we_had`.
+- **The held-shard exemption.** For a shard on our own disk a contradicting
+  hash is a *testable* claim, and adopting it is what makes `register_manifest`
+  queue the re-check — the only way a node learns from the swarm that the bytes
+  it is serving are wrong (gotcha #382; the startup sweep runs before any
+  corrected hash can arrive). Stabilising those would trade a log flood for a
+  corrupt shard nobody can report.
+  `a_held_shard_is_rechecked_when_its_expected_hash_changes`.
+- **Origin provenance still outranks everything.** The override runs after this
+  and is unchanged. `an_origin_hash_outranks_a_peers_contradicting_claim`.
+- **Blanks still learn.** `keeping_our_hash_does_not_stop_a_blank_being_filled`.
+
+**What it does NOT claim.** Not that our hash is the right one. Only that
+alternating between two unevidenced claims is worse than holding either, and
+that an origin download — not whichever peer gossiped last — is what settles
+it. The disagreement is now reported once, rate-limited on the same key the
+origin-contradiction warning uses.
+
 ## `model::manifest::merge_known_shard_hashes`
 
 (2026-08-24) — the rule that a

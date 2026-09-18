@@ -325,12 +325,74 @@ impl ModelRegistry {
         // carries a non-zero hash. Losing one therefore means the next download
         // of that shard is accepted on trust and announced to the swarm
         // unchecked. See `manifest::merge_known_shard_hashes`.
-        let recovered = match self.manifests.get(&manifest.id) {
-            Some(prev) => {
-                crate::model::manifest::merge_known_shard_hashes(&mut manifest, prev.value())
-            }
-            None => 0,
+        //
+        // The sibling rule runs in the same guard: a hash we already hold is
+        // not replaced by a stranger's CONTRADICTING one, when the two
+        // manifests describe the same shape. Two peers gossiping different
+        // hashes for one file used to overwrite each other for ever — see
+        // `manifest::keep_known_hashes_over_contradicting_ones`. One
+        // `manifests.get` covers both so this adds no second acquisition of
+        // the same map shard.
+        // Which of this model's shards are on our own disk. Computed BEFORE the
+        // `manifests` guard below, so no map is held across a read of another.
+        // These are exempt from the keep-ours rule: for a shard we hold, a
+        // contradicting hash is a testable claim, and adopting it is what
+        // queues the re-check that tells us our own bytes are wrong (#382).
+        let held_locally: std::collections::HashSet<u32> = match self.local_node_id.as_ref() {
+            Some(me) => manifest
+                .shards
+                .iter()
+                .filter(|s| {
+                    self.shard_holders
+                        .get(&ShardId {
+                            model_id: manifest.id.clone(),
+                            index: s.index,
+                        })
+                        .is_some_and(|h| h.contains_key(me))
+                })
+                .map(|s| s.index)
+                .collect(),
+            None => std::collections::HashSet::new(),
         };
+        let (recovered, contested) = match self.manifests.get(&manifest.id) {
+            Some(prev) => {
+                let recovered =
+                    crate::model::manifest::merge_known_shard_hashes(&mut manifest, prev.value());
+                let contested = if Self::describes_a_different_build(prev.value(), &manifest) {
+                    0
+                } else {
+                    crate::model::manifest::keep_known_hashes_over_contradicting_ones(
+                        &mut manifest,
+                        prev.value(),
+                        &held_locally,
+                    )
+                };
+                (recovered, contested)
+            }
+            None => (0, 0),
+        };
+        if contested > 0 {
+            // Rate-limited on the same key the origin-contradiction warning
+            // uses, and for the same reason: this fires once per SHARD, and the
+            // peers that disagree re-gossip on a timer.
+            if let Some(suppressed) = crate::model::manifest::note_manifest_rejection(
+                crate::model::manifest::RejectionKey::Manifest {
+                    model: manifest.id.clone(),
+                    manifest_hash: manifest.manifest_hash,
+                },
+            ) {
+                tracing::warn!(
+                    model = %manifest.id,
+                    publisher = %manifest.publisher,
+                    contested,
+                    suppressed_since_last = suppressed,
+                    "Keeping the shard hashes we already had — this manifest \
+                     describes the same file with different hashes, which is a \
+                     disagreement between peers rather than a new build. An \
+                     origin download is what settles it."
+                );
+            }
+        }
         if recovered > 0 {
             tracing::debug!(
                 model = %manifest.id,
@@ -425,7 +487,7 @@ impl ModelRegistry {
         // live on two distinct peers for one model, whose layers then could not
         // be routed at all. `load_from_dir` re-derives this hash too, so the
         // inconsistency also survived a restart through the DB.
-        if recovered > 0 || overridden > 0 {
+        if recovered > 0 || contested > 0 || overridden > 0 {
             manifest.manifest_hash = manifest.compute_hash();
         }
 
@@ -1875,23 +1937,39 @@ mod tests {
         );
     }
 
-    /// The converse, which is deliberately NOT protected: a genuine re-publish
-    /// changes the bytes, and the newer real hash must win. Only unknown is
-    /// treated as "no information".
+    /// The converse USED to be deliberately unprotected — "a genuine re-publish
+    /// changes the bytes, so the newer real hash must win" — and that is what
+    /// let the registry oscillate (2026-09-18).
+    ///
+    /// The reasoning was right about re-publishes and wrong about which signal
+    /// identifies one. A re-publish is a new FILE, so its shard sizes move and
+    /// `describes_a_different_build` sees it —
+    /// `a_republished_model_still_replaces_the_hashes_we_had` is that case and
+    /// still passes. A hash that changes while the SHAPE does not is two peers
+    /// disagreeing about one file, and taking whichever gossiped last meant
+    /// taking both, for ever, ten times a minute.
+    ///
+    /// For a shard we HOLD the old behaviour is kept, because there the claim
+    /// can be tested — see
+    /// `a_held_shard_is_rechecked_when_its_expected_hash_changes`.
     #[test]
-    fn a_real_hash_still_replaces_an_earlier_real_hash() {
+    fn a_contradicting_hash_does_not_win_on_a_shard_we_do_not_hold() {
         let registry = ModelRegistry::new();
 
         let mut first = test_manifest("m", "M");
         first.shards = vec![test_shard(0, [1u8; 32])];
         registry.register_manifest(first);
 
-        let mut republished = test_manifest("m", "M");
-        republished.shards = vec![test_shard(0, [2u8; 32])];
-        registry.register_manifest(republished);
+        let mut same_shape_other_hash = test_manifest("m", "M");
+        same_shape_other_hash.shards = vec![test_shard(0, [2u8; 32])];
+        registry.register_manifest(same_shape_other_hash);
 
         let stored = registry.get_manifest(&ModelId("m".into())).unwrap();
-        assert_eq!(stored.shards[0].hash, [2u8; 32]);
+        assert_eq!(
+            stored.shards[0].hash, [1u8; 32],
+            "with no file to hash and no origin provenance, nothing here \
+             adjudicates — so hold still rather than follow the last speaker"
+        );
     }
 
     /// Two independent GGUF builds of one model answer to the same id, because
@@ -2221,6 +2299,105 @@ mod tests {
             swarmllm_types::build_tag_from_hash(&[7u8; 32]),
             swarmllm_types::build_tag_from_hash(&[8u8; 32])
         ));
+    }
+
+    /// Two peers disagreeing about one file must not make the registry
+    /// oscillate for ever.
+    ///
+    /// Before the fix this read `[1, 3, 1, 3, 1, 3, 1, 3]`: each gossip round
+    /// overwrote the last, every flip counted as a genuine change, and on the
+    /// live node three models re-registered 10-12 times a minute — 67% of the
+    /// log. The hash also decides `expected_build_tag`, so the set of peers
+    /// believed able to serve those layers flipped with it.
+    #[test]
+    fn contradicting_gossiped_hashes_settle_instead_of_oscillating() {
+        let registry = ModelRegistry::new();
+        let id = ModelId("m".into());
+
+        let mut first = test_manifest("m", "M");
+        first.shard_count = 2;
+        first.shards = vec![test_shard(0, [1u8; 32]), test_shard(1, [2u8; 32])];
+        first.manifest_hash = first.compute_hash();
+
+        // Same SHAPE — same shard_count, total_size_bytes and per-shard
+        // size_bytes — but a different hash for shard 0. Two copies of one
+        // file, not two builds; a real re-publish moves the sizes.
+        let mut second = test_manifest("m", "M");
+        second.shard_count = 2;
+        second.shards = vec![test_shard(0, [3u8; 32]), test_shard(1, [2u8; 32])];
+        second.manifest_hash = second.compute_hash();
+
+        registry.register_manifest(first.clone());
+        let settled = registry.get_manifest(&id).unwrap().manifest_hash;
+
+        let mut seen = Vec::new();
+        for _ in 0..4 {
+            registry.register_manifest(second.clone());
+            seen.push(registry.get_manifest(&id).unwrap().shards[0].hash[0]);
+            registry.register_manifest(first.clone());
+            seen.push(registry.get_manifest(&id).unwrap().shards[0].hash[0]);
+        }
+        assert_eq!(
+            seen,
+            vec![1u8; 8],
+            "the stored hash must not follow whichever peer gossiped last"
+        );
+        assert_eq!(
+            registry.get_manifest(&id).unwrap().manifest_hash,
+            settled,
+            "a settled manifest_hash is what keeps `changed` false, which is \
+             what keeps this out of the log and off the DB"
+        );
+    }
+
+    /// The gate that keeps a genuine re-publish working: a new FILE moves the
+    /// shard sizes, so the shape check sees it and the new hashes are adopted.
+    #[test]
+    fn a_republished_model_still_replaces_the_hashes_we_had() {
+        let registry = ModelRegistry::new();
+        let id = ModelId("m".into());
+
+        let mut old = test_manifest("m", "M");
+        old.shard_count = 1;
+        old.shards = vec![test_shard(0, [1u8; 32])];
+        old.manifest_hash = old.compute_hash();
+        registry.register_manifest(old);
+
+        let mut republished = test_manifest("m", "M");
+        republished.shard_count = 1;
+        republished.total_size_bytes = 2048;
+        let mut shard = test_shard(0, [3u8; 32]);
+        shard.size_bytes = 1024;
+        republished.shards = vec![shard];
+        republished.manifest_hash = republished.compute_hash();
+        registry.register_manifest(republished);
+
+        assert_eq!(
+            registry.get_manifest(&id).unwrap().shards[0].hash,
+            [3u8; 32],
+            "a different-shaped manifest is a new build and must be adopted"
+        );
+    }
+
+    /// And a blank still learns from a real one — the sibling rule is untouched.
+    #[test]
+    fn keeping_our_hash_does_not_stop_a_blank_being_filled() {
+        let registry = ModelRegistry::new();
+        let id = ModelId("m".into());
+
+        let mut known = test_manifest("m", "M");
+        known.shard_count = 2;
+        known.shards = vec![test_shard(0, [1u8; 32]), test_shard(1, [0u8; 32])];
+        registry.register_manifest(known);
+
+        let mut other_holder = test_manifest("m", "M");
+        other_holder.shard_count = 2;
+        other_holder.shards = vec![test_shard(0, [0u8; 32]), test_shard(1, [5u8; 32])];
+        registry.register_manifest(other_holder);
+
+        let stored = registry.get_manifest(&id).unwrap();
+        assert_eq!(stored.shards[0].hash, [1u8; 32], "ours is kept");
+        assert_eq!(stored.shards[1].hash, [5u8; 32], "theirs is learned");
     }
 
     fn test_shard(index: u32, hash: Blake3Hash) -> ShardInfo {
