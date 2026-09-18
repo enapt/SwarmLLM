@@ -2,7 +2,6 @@
 //! loop, per-segment forward sequencing, and standby failover.
 
 use crate::error::SwarmError;
-use crate::inference::chat_template;
 use crate::inference::router::{InferenceOutput, StreamingTokenEvent, StreamingTokenTx};
 use crate::types::{LayerForward, LayerResult, NetworkCommand, NetworkFinishReason, TensorFormat};
 
@@ -142,14 +141,13 @@ impl PipelineExecutor {
         } else {
             None
         };
-        // Text-based stop sequences from the cached GGUF header (read once above)
-        let stop_strings = if let Some((ref tmpl, _, _)) = header_data {
-            chat_template::extract_stop_strings(tmpl.as_deref())
-        } else {
-            let info = self.shared_state.loaded_model_info.read().await;
-            let tmpl = info.as_ref().and_then(|i| i.chat_template.as_deref());
-            chat_template::extract_stop_strings(tmpl)
-        };
+        // Every stop sequence that ends this reply — the caller's own as well
+        // as the template's. This used to derive the template half here and
+        // never read `sampling_params.stop` at all, so a caller's `stop` was
+        // ignored on every distributed request; `reply_stops` is the one answer
+        // and the prompt build above has already warmed it, so this costs no
+        // second header parse.
+        let stop_strings = self.reply_stops().await.to_vec();
         // Accumulate decoded text for stop-string matching (both streaming and non-streaming)
         let mut accumulated_text = String::new();
 

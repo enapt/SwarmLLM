@@ -1,5 +1,31 @@
 # Changelog
 
+## Unreleased
+
+**Answers from the swarm no longer show you the model's private notes, and
+`stop` now works.**
+
+When your computer does not hold a model itself, the answer is assembled from
+other people's computers. On that route three finishing steps were being
+skipped, so what came back was closer to the model's raw output than to an
+answer:
+
+- **A "thinking" model showed you its scratchpad.** Models that reason in a
+  `<think>` block before answering had that block returned as the answer. The
+  same question answered by your own computer came back clean.
+- **Markers meant for the software leaked into the text.** Things like
+  `<|im_end|>` are how a model says "my turn is over". They are not meant to be
+  read, and on some models they were appearing in replies.
+- **The `stop` setting was ignored.** If you asked for generation to stop at a
+  particular phrase, that request was dropped on every answer assembled across
+  computers — the phrase came back in the reply and generation carried on past
+  it. Tools that rely on `stop` to frame a reply were affected.
+
+Your own computer answering on its own was never affected, which is why this
+could look like "the swarm gives worse answers" rather than a defect. Nothing
+about how computers talk to each other has changed and nodes do not need to
+update together.
+
 ## [0.3.187-alpha] — 2026-09-18
 
 Three ways this software was wrong about itself.

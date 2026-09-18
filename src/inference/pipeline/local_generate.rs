@@ -53,9 +53,7 @@ impl PipelineExecutor {
         // pairing is the point: a marker we do not pass is one nothing will
         // match, and the local worker truncates only the stop list it is
         // handed.
-        let (prompt, sampling) = self
-            .build_prompt_and_stops(self.request.sampling_params.clone())
-            .await;
+        let (prompt, sampling) = self.build_prompt_and_stops().await;
 
         tracing::info!(
             %request_id,

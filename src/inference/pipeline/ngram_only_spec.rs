@@ -583,14 +583,17 @@ impl PipelineExecutor {
                 .await;
         }
 
-        Ok(Some(self.finish_speculative(
-            request_id,
-            generated,
-            &decoder,
-            &eos_tokens,
-            prompt_token_count as u32,
-            finish_reason,
-        )))
+        Ok(Some(
+            self.finish_speculative(
+                request_id,
+                generated,
+                &decoder,
+                &eos_tokens,
+                prompt_token_count as u32,
+                finish_reason,
+            )
+            .await,
+        ))
     }
 }
 

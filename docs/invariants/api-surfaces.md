@@ -51,6 +51,62 @@ correct: `take_leading_reasoning_block` requires the closing tag because without
 one it cannot know where the scratchpad ends. Reproduced at `max_tokens: 30`
 (shown) and clean at 500 (stripped). Do not "fix" this by guessing the end.
 
+### And a second time, on the DEFAULT distributed path (2026-09-18, gotcha #643)
+
+"Five paths produce a reply" was the wrong count. The three speculative
+coordinators — `ngram_only_spec`, `dsd` and `speculative` — are reply sources
+too, they share one finaliser (`finish_speculative`), and it called nothing. It
+filtered EOS **ids** out of the token list and returned the decode verbatim.
+
+**Filtering EOS ids is not finalising**, and the gap is not cosmetic:
+
+- a control marker the tokenizer never declared as EOS — `<|im_end|>` on a
+  model that declares only `<|endoftext|>`, `<|end|>` on Phi — is an id no
+  filter catches, so it reached the user as visible text;
+- a `<think>…</think>` block came back as the answer, i.e. #634 again;
+- **a caller's `stop` was ignored outright.** `finish_speculative` took no
+  stops, set `matched_stop_sequence: None` unconditionally, and nothing
+  downstream applies them: `grep -n "sampling_params.stop" src/inference/`
+  matched only `executor.rs`.
+
+**Who is on that path.** `try_ngram_only_distributed` is the DEFAULT — it needs
+only `ngram_lookup_enabled` (true), no draft model configured (the default) and
+one remote segment, so a node holding nothing takes it for every request. That
+is every new user.
+
+**And the standard loop had the other half of the same bug.**
+`pipeline::distributed` derived its stop set from `extract_stop_strings(template)`
+and never read `sampling_params.stop` at all, so a caller's `stop` was ignored
+on *every* distributed request, speculative or not — while the local path
+applied it twice over (in the executor, then again with template stops). One
+path implementing half an invariant and another implementing the other half is
+`.claude/rules/architecture.md` § "One invariant, N paths" in its purest form.
+
+**The fix is a value, not a parameter.** `PipelineExecutor::reply_stops` answers
+"what stops end this reply" once per request — caller's ∪ template's, via the
+existing `chat_template::with_template_stops` — and `build_prompt_with_header`
+warms it with the template it actually built the prompt from, in all three of
+its branches including the `loaded_info_describes` filter (#294). A parameter
+was the obvious design and is the wrong one: there are seven `finish_speculative`
+call sites, and `&[]` is always spellable. Warming at the prompt choke point is
+also what makes it free — the standard loop had already parsed the header, and a
+second `GgufTokenizerMeta::from_gguf_file` allocates the whole vocabulary.
+
+**How it was proved before it was fixed.** Two tests written against the
+unchanged code, both red:
+`a_speculative_reply_is_finalised_like_every_other_reply` got
+`"<think>thinking</think>\n\nAnswer<|im_end|>"` where `"Answer"` was expected,
+and `a_callers_stop_sequence_truncates_a_speculative_reply` got
+`"One Two Three"` for `stop: ["Two"]`. Asserted on `finish_speculative`, the
+shared finaliser, rather than once per path — so a fourth speculative
+coordinator inherits the coverage.
+
+**What a change must keep.** `remote_generate` remains the one caller passing an
+empty stop set, for the reason above: the PEER ran that decode. A coordinator
+that sampled the tokens itself has no peer to have done it and must pass
+`reply_stops`. The distinction is "who decided which token came next", not
+"is this request distributed".
+
 ## A reply budget the caller did not choose is a ceiling, not a demand
 
 **`inference::model_worker::resolve_max_new_tokens` is the single answer to "how

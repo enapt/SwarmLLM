@@ -127,6 +127,79 @@ impl PipelineExecutor {
         self.build_prompt_with_header(header_data.as_ref()).await
     }
 
+    /// Every stop sequence this request's reply must be finalised against:
+    /// the caller's own, plus the ones the model's chat template implies.
+    ///
+    /// **This is the single answer for a coordinator that turns tokens back
+    /// into text itself**, and it exists because the two halves keep being
+    /// separated. `build_prompt_and_stops` keeps them together for the paths
+    /// that hand `sampling_params` to somebody else's sampler; a coordinator
+    /// that samples locally never sends those params anywhere, so it needs the
+    /// same merge at the other end — where the reply is finalised.
+    ///
+    /// Both halves had gone missing on all three speculative coordinators,
+    /// which share one finaliser (`finish_speculative`) and gave it no stops at
+    /// all: `finalize_reply_text` was never called there, so a caller's `stop`
+    /// was ignored, a `<think>` scratchpad came back as the answer, and a
+    /// control marker the tokenizer had not declared as EOS reached the user as
+    /// visible text. The n-gram one is the DEFAULT distributed path — the one a
+    /// node holding nothing takes for every request. Same failure as gotcha
+    /// #634, one path further along.
+    ///
+    /// It is a value on the executor rather than a parameter because a
+    /// parameter is something a caller can get wrong, and seven call sites had.
+    /// `build_prompt_with_header` warms it with the template it actually built
+    /// the prompt from, so the stops cannot describe a different one; the
+    /// `get_or_init` below is the answer for a path that finalises without
+    /// having built a prompt through it.
+    pub(super) async fn reply_stops(&self) -> &[String] {
+        self.reply_stops
+            .get_or_init(|| async {
+                let model_id = &self.request.model_id;
+                let header_path = self
+                    .shared_state
+                    .model_dir(&model_id.0)
+                    .join(crate::model::shard::HEADER_FILENAME);
+                let header_data = template_from_header(&header_path);
+                let template = self
+                    .template_the_prompt_was_built_from(header_data.as_ref())
+                    .await;
+                self.stops_for(template.as_deref())
+            })
+            .await
+    }
+
+    /// Record the stop set implied by `template` alongside the caller's own.
+    /// Ignores a second call: the first one came from the prompt this reply
+    /// answers, and that is the one the stops must describe.
+    fn warm_reply_stops(&self, template: Option<&str>) {
+        let _ = self.reply_stops.set(self.stops_for(template));
+    }
+
+    fn stops_for(&self, template: Option<&str>) -> Vec<String> {
+        chat_template::with_template_stops(self.request.sampling_params.clone(), template).stop
+    }
+
+    /// Which chat template `build_prompt_with_header` resolves for this
+    /// request, given the same `header_data`. Shared with `reply_stops` so a
+    /// prompt and the stops that end it cannot be derived from different
+    /// templates — including the `loaded_model_info` branch, which is only
+    /// legitimate when that singleton really describes this model (#294).
+    async fn template_the_prompt_was_built_from(
+        &self,
+        header_data: Option<&(Option<String>, String, String)>,
+    ) -> Option<String> {
+        match header_data {
+            Some((tmpl, _, _)) => tmpl.clone(),
+            None => {
+                let info = self.shared_state.loaded_model_info.read().await;
+                info.as_ref()
+                    .filter(|i| loaded_info_describes(&i.name, &self.request.model_id.0))
+                    .and_then(|i| i.chat_template.clone())
+            }
+        }
+    }
+
     /// The prompt AND the stop strings its chat template implies, resolved
     /// together from one read of the model's header.
     ///
@@ -151,35 +224,18 @@ impl PipelineExecutor {
     ///
     /// Returning one value keeps them in step: a caller cannot take the prompt
     /// and forget the stops.
+    ///
+    /// It takes no `params`: both callers passed `self.request.sampling_params`
+    /// and any other value would describe a different request, so there is
+    /// nothing for a caller to get wrong. The stop set itself comes from
+    /// `reply_stops`, which the prompt build above has just warmed.
     pub(super) async fn build_prompt_and_stops(
         &self,
-        params: swarmllm_types::inference::SamplingParams,
     ) -> (String, swarmllm_types::inference::SamplingParams) {
-        let model_id = &self.request.model_id;
-        let header_path = self
-            .shared_state
-            .model_dir(&model_id.0)
-            .join(crate::model::shard::HEADER_FILENAME);
-        let header_data = template_from_header(&header_path);
-        let prompt = self.build_prompt_with_header(header_data.as_ref()).await;
-
-        // Resolve the template the same way `build_prompt_with_header` does, so
-        // the stops always describe the template the prompt was actually built
-        // from — including the `loaded_model_info` branch, which is only
-        // legitimate when that singleton really describes this model (#294).
-        let template: Option<String> = match header_data {
-            Some((ref tmpl, _, _)) => tmpl.clone(),
-            None => {
-                let info = self.shared_state.loaded_model_info.read().await;
-                info.as_ref()
-                    .filter(|i| loaded_info_describes(&i.name, &model_id.0))
-                    .and_then(|i| i.chat_template.clone())
-            }
-        };
-        (
-            prompt,
-            chat_template::with_template_stops(params, template.as_deref()),
-        )
+        let prompt = self.build_prompt().await;
+        let mut params = self.request.sampling_params.clone();
+        params.stop = self.reply_stops().await.to_vec();
+        (prompt, params)
     }
 
     /// Build chat prompt using pre-parsed GGUF header data or loaded_model_info fallback.
@@ -189,6 +245,9 @@ impl PipelineExecutor {
     ) -> String {
         let model_id = &self.request.model_id;
         if let Some((tmpl, bos, eos)) = header_data {
+            // The stops that end this reply are recorded from the template it
+            // is being asked in — see `reply_stops`.
+            self.warm_reply_stops(tmpl.as_deref());
             let prompt = chat_template::build_prompt_with_model(
                 &self.request.messages,
                 tmpl.as_deref(),
@@ -224,15 +283,19 @@ impl PipelineExecutor {
             .as_ref()
             .filter(|i| loaded_info_describes(&i.name, &model_id.0));
         match matching {
-            Some(i) => chat_template::build_prompt_with_model(
-                &self.request.messages,
-                i.chat_template.as_deref(),
-                &i.bos_token,
-                &i.eos_token,
-                Some(&model_id.0),
-                self.request.tools.as_deref(),
-            ),
+            Some(i) => {
+                self.warm_reply_stops(i.chat_template.as_deref());
+                chat_template::build_prompt_with_model(
+                    &self.request.messages,
+                    i.chat_template.as_deref(),
+                    &i.bos_token,
+                    &i.eos_token,
+                    Some(&model_id.0),
+                    self.request.tools.as_deref(),
+                )
+            }
             None => {
+                self.warm_reply_stops(None);
                 if info.is_some() {
                     tracing::debug!(
                         model = %model_id,

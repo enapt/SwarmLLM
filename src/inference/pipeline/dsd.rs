@@ -407,14 +407,17 @@ impl PipelineExecutor {
             "DSD: request complete"
         );
 
-        Ok(Some(self.finish_speculative(
-            request_id,
-            generated,
-            &decoder,
-            &eos_set,
-            prompt_token_count as u32,
-            finish_reason,
-        )))
+        Ok(Some(
+            self.finish_speculative(
+                request_id,
+                generated,
+                &decoder,
+                &eos_set,
+                prompt_token_count as u32,
+                finish_reason,
+            )
+            .await,
+        ))
     }
 }
 

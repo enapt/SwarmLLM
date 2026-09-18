@@ -325,14 +325,17 @@ impl PipelineExecutor {
                         Ok(d) => (d, false),
                         Err(e2) => {
                             tracing::warn!(%request_id, error = %e2, "speculative: draft step failed after n-gram fallback — partial");
-                            return Ok(Some(self.finish_speculative(
-                                request_id,
-                                generated,
-                                &decoder,
-                                &eos_tokens,
-                                prompt_token_count as u32,
-                                "stop".into(),
-                            )));
+                            return Ok(Some(
+                                self.finish_speculative(
+                                    request_id,
+                                    generated,
+                                    &decoder,
+                                    &eos_tokens,
+                                    prompt_token_count as u32,
+                                    "stop".into(),
+                                )
+                                .await,
+                            ));
                         }
                     }
                 } else {
@@ -348,14 +351,17 @@ impl PipelineExecutor {
                     Err(e) => {
                         tracing::warn!(%request_id, error = %e, "speculative: draft step failed — falling back");
                         // Return the partial output as a failed-fallback signal.
-                        return Ok(Some(self.finish_speculative(
-                            request_id,
-                            generated,
-                            &decoder,
-                            &eos_tokens,
-                            prompt_token_count as u32,
-                            "stop".into(),
-                        )));
+                        return Ok(Some(
+                            self.finish_speculative(
+                                request_id,
+                                generated,
+                                &decoder,
+                                &eos_tokens,
+                                prompt_token_count as u32,
+                                "stop".into(),
+                            )
+                            .await,
+                        ));
                     }
                 };
                 (d, false)
@@ -393,14 +399,17 @@ impl PipelineExecutor {
                 Ok(r) => r,
                 Err(e) => {
                     tracing::warn!(%request_id, error = %e, "speculative: verify failed — returning partial");
-                    return Ok(Some(self.finish_speculative(
-                        request_id,
-                        generated,
-                        &decoder,
-                        &eos_tokens,
-                        prompt_token_count as u32,
-                        "stop".into(),
-                    )));
+                    return Ok(Some(
+                        self.finish_speculative(
+                            request_id,
+                            generated,
+                            &decoder,
+                            &eos_tokens,
+                            prompt_token_count as u32,
+                            "stop".into(),
+                        )
+                        .await,
+                    ));
                 }
             };
             // Remote forwarded verify_tokens.len() = γ+1 positions →
@@ -414,14 +423,17 @@ impl PipelineExecutor {
                     want_min = drafts.len() + 1,
                     "speculative: insufficient spec_logits — returning partial"
                 );
-                return Ok(Some(self.finish_speculative(
-                    request_id,
-                    generated,
-                    &decoder,
-                    &eos_tokens,
-                    prompt_token_count as u32,
-                    "stop".into(),
-                )));
+                return Ok(Some(
+                    self.finish_speculative(
+                        request_id,
+                        generated,
+                        &decoder,
+                        &eos_tokens,
+                        prompt_token_count as u32,
+                        "stop".into(),
+                    )
+                    .await,
+                ));
             }
 
             // After this forward, remote KV was grown by verify_tokens.len().
@@ -540,17 +552,31 @@ impl PipelineExecutor {
             "speculative: round stats"
         );
 
-        Ok(Some(self.finish_speculative(
-            request_id,
-            generated,
-            &decoder,
-            &eos_tokens,
-            prompt_token_count as u32,
-            finish_reason,
-        )))
+        Ok(Some(
+            self.finish_speculative(
+                request_id,
+                generated,
+                &decoder,
+                &eos_tokens,
+                prompt_token_count as u32,
+                finish_reason,
+            )
+            .await,
+        ))
     }
 
-    pub(super) fn finish_speculative(
+    /// Turn what a speculative coordinator generated into the reply the caller
+    /// gets. All three of them — n-gram-only, DSD and draft-model speculative —
+    /// end here, which is why this is where the reply is finalised.
+    ///
+    /// Filtering EOS *ids* is not finalising. A control marker the tokenizer
+    /// never declared as EOS is still a control marker, a `<think>` block is
+    /// still a scratchpad, and a caller's `stop` still has to be honoured — so
+    /// this went through `finalize_reply_text` like every other reply source
+    /// from 2026-09-18, against the stops `reply_stops` resolved for this
+    /// request. Before that it returned the decode verbatim, on the path a node
+    /// holding nothing takes for every request.
+    pub(super) async fn finish_speculative(
         &self,
         request_id: uuid::Uuid,
         generated: Vec<u32>,
@@ -564,17 +590,25 @@ impl PipelineExecutor {
             .filter(|t| !eos_tokens.contains(t))
             .collect();
         let completion_tokens = clean.len() as u32;
-        let content = decoder.decode_tokens(&clean);
+        let mut content = decoder.decode_tokens(&clean);
+        let matched = crate::inference::finalize_reply_text(&mut content, self.reply_stops().await);
         InferenceOutput {
             request_id,
             content,
             prompt_tokens,
             completion_tokens,
-            finish_reason,
+            // A reply a stop sequence ended did not run out of room. Every
+            // other path reports this as `stop`, and the Anthropic surface
+            // turns the pair into `stop_reason: "stop_sequence"` plus the
+            // string that matched.
+            finish_reason: if matched.is_some() {
+                "stop".to_string()
+            } else {
+                finish_reason
+            },
             session_id: self.request.session_id.clone(),
             token_logprobs: vec![],
-            // Speculative path: matched stop string isn't tracked here today.
-            matched_stop_sequence: None,
+            matched_stop_sequence: matched,
             trace: None,
         }
     }
@@ -1170,5 +1204,156 @@ mod sampled_accept_reject_tests {
         );
         // And the greedy helper it replaces cannot express this at all.
         assert_eq!(greedy_accept_reject(&[], &rows).1, 1);
+    }
+}
+
+#[cfg(test)]
+mod finalisation_tests {
+    use super::CachedDecoder;
+    use super::PipelineExecutor;
+    use crate::types::{
+        ChatMessage, InferenceRequest, ModelId, NetworkCommand, PipelineAssignment, PriorityTier,
+        Role, SamplingParams, ShardId,
+    };
+    use std::collections::HashSet;
+
+    /// A decoder that returns each vocabulary piece verbatim. The GPT-2 arm is
+    /// a per-character byte lookup, so an identity table over ASCII is what
+    /// makes `decode_tokens` a plain concatenation of the pieces — enough to
+    /// put a known string in front of the finaliser.
+    fn verbatim_decoder(vocab: &[&str]) -> CachedDecoder {
+        let mut byte_decoder = std::collections::HashMap::new();
+        for b in 0u8..=127 {
+            byte_decoder.insert(b as char, b);
+        }
+        CachedDecoder {
+            vocab: vocab.iter().map(|s| (*s).to_string()).collect(),
+            byte_decoder,
+            is_sentencepiece: false,
+            has_tokenizer: true,
+        }
+    }
+
+    fn executor_with(stops: Vec<String>) -> PipelineExecutor {
+        let state = crate::inference::pipeline::tests::make_test_state();
+        let request = InferenceRequest {
+            id: uuid::Uuid::new_v4(),
+            model_id: ModelId("m".into()),
+            messages: vec![ChatMessage {
+                role: Role::User,
+                content: "hello".into(),
+                images: vec![],
+            }],
+            sampling_params: SamplingParams {
+                stop: stops,
+                ..Default::default()
+            },
+            stream: false,
+            requester: state.identity.node_id().clone(),
+            priority: PriorityTier::Silver,
+            created_at: chrono::Utc::now(),
+            session_id: None,
+            lora_adapter: None,
+            tools: None,
+            cancel: None,
+            route_override: None,
+        };
+        let (tx, _rx) = tokio::sync::mpsc::channel::<NetworkCommand>(8);
+        let assignment = PipelineAssignment {
+            request_id: request.id,
+            segments: vec![crate::types::PipelineSegment {
+                node_id: state.identity.node_id().clone(),
+                shard_id: ShardId {
+                    model_id: ModelId("m".into()),
+                    index: 0,
+                },
+                layer_range: (0, 1),
+            }],
+            standbys: vec![],
+            tp_groups: vec![],
+            supports_speculative: false,
+        };
+        PipelineExecutor::new(state, tx, request, assignment)
+    }
+
+    /// **The three speculative coordinators are reply sources too.**
+    /// `finalize_reply_text` says every source of reply text must end by
+    /// calling it, and `finish_speculative` — the one finaliser all three
+    /// share — did not: it filtered EOS *ids* and returned the rest verbatim.
+    /// So a reasoning model answered over the default distributed path with its
+    /// scratchpad as the answer, and a control marker the tokenizer had not
+    /// declared as EOS reached the user as text. Same failure as gotcha #634
+    /// one path further along.
+    #[tokio::test]
+    async fn a_speculative_reply_is_finalised_like_every_other_reply() {
+        let exec = executor_with(vec![]);
+        let decoder = verbatim_decoder(&[
+            "<think>",
+            "thinking",
+            "</think>",
+            "\n\n",
+            "Answer",
+            "<|im_end|>",
+        ]);
+        let out = exec
+            .finish_speculative(
+                exec.request.id,
+                vec![0, 1, 2, 3, 4, 5],
+                &decoder,
+                &HashSet::new(),
+                7,
+                "stop".to_string(),
+            )
+            .await;
+        assert_eq!(
+            out.content, "Answer",
+            "the scratchpad, the control marker and the newlines it stranded \
+             must all be gone — got {:?}",
+            out.content
+        );
+    }
+
+    /// A caller's own `stop` sequence is honoured on this path. It reaches the
+    /// coordinator in `sampling_params` and nothing on the speculative paths
+    /// ever read it, so `stop: ["Two"]` came back with "Two" in the reply.
+    #[tokio::test]
+    async fn a_callers_stop_sequence_truncates_a_speculative_reply() {
+        let exec = executor_with(vec!["Two".to_string()]);
+        let decoder = verbatim_decoder(&["One ", "Two ", "Three"]);
+        let out = exec
+            .finish_speculative(
+                exec.request.id,
+                vec![0, 1, 2],
+                &decoder,
+                &HashSet::new(),
+                7,
+                "length".to_string(),
+            )
+            .await;
+        assert_eq!(out.content, "One ");
+        assert_eq!(
+            out.matched_stop_sequence.as_deref(),
+            Some("Two"),
+            "the Anthropic surface reports this as `stop_sequence`"
+        );
+        assert_eq!(
+            out.finish_reason, "stop",
+            "a reply ended by a stop sequence did not run out of room"
+        );
+    }
+
+    /// The stop set a reply is finalised against includes the caller's own.
+    /// The standard distributed loop derived only the template's half and
+    /// never read `sampling_params.stop` at all, so `stop: ["\n\nHuman:"]`
+    /// was ignored on every distributed request — this is the half that made
+    /// it one answer for both loops.
+    #[tokio::test]
+    async fn the_reply_stop_set_carries_the_callers_own_stops() {
+        let exec = executor_with(vec!["\n\nHuman:".to_string()]);
+        assert!(
+            exec.reply_stops().await.contains(&"\n\nHuman:".to_string()),
+            "got {:?}",
+            exec.reply_stops().await
+        );
     }
 }

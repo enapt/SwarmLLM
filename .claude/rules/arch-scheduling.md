@@ -368,18 +368,36 @@ a comment on one of them explaining exactly why it mattered.
 
 `inference::finalize_reply_text` is the single place reply text is finalised —
 control-token scrub, leading `<think>` reasoning block, stop truncation, the
-newlines that step strands. Five paths produce a reply; four called it and
-**`pipeline::remote_generate` did not**, which is the path taken whenever ONE
-peer holds the whole model and so the commonest distributed shape there is. A
-reasoning model asked over the swarm answered with its raw scratchpad while the
-same request answered locally came back clean (gotcha #634).
+newlines that step strands. It has now been missed TWICE, and each time on the
+commonest distributed shape of the day:
+
+- **`pipeline::remote_generate`**, the path taken whenever ONE peer holds the
+  whole model. A reasoning model asked over the swarm answered with its raw
+  scratchpad while the same request answered locally came back clean (#634).
+- **All three speculative coordinators**, which share one finaliser —
+  `finish_speculative` — and gave it no stops at all. Filtering EOS *ids* is
+  not finalising, so a control marker the tokenizer never declared as EOS
+  reached the user as text, a `<think>` block came back as the answer, and a
+  caller's `stop` was ignored outright. The n-gram one is the DEFAULT
+  distributed path: a node holding nothing takes it for every request
+  (2026-09-18, gotcha #643).
+
+**`PipelineExecutor::reply_stops` is the single answer to "what stops end this
+reply"** — the caller's own plus the template's, warmed by
+`build_prompt_with_header` so the stops always describe the template the prompt
+was built from. It is a value on the executor rather than a parameter because a
+parameter is something seven call sites can get wrong, and the standard
+distributed loop derived only the template half and never read
+`sampling_params.stop` at all.
 
 Finalise on the COORDINATOR, never by trusting the serving node: only the
 coordinator covers peers on builds that never learned to strip anything, and the
-helper is documented idempotent. Call it with an **empty stop set** — the peer
-already applied the caller's stops and its own template's and reports what
-matched in `matched_stop_seq`, so re-deciding that here, against stops derived
-for a model this node may not hold, can truncate a reply the peer correctly kept.
+helper is documented idempotent. **`remote_generate` is the one caller that
+passes an EMPTY stop set** — there the peer ran the decode, applied the caller's
+stops and its own template's, and reports what matched in `matched_stop_seq`, so
+re-deciding it here against stops derived for a model this node may not hold can
+truncate a reply the peer correctly kept. A coordinator that sampled the tokens
+ITSELF has no such peer and must pass `reply_stops`.
 
 An UNCLOSED `<think>` is still shown, and must stay that way: nothing knows
 where an unfinished thought ends.

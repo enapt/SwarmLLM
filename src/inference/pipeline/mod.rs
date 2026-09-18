@@ -709,6 +709,11 @@ pub struct PipelineExecutor {
     /// names its culprit and fails over per segment. Per request, not global:
     /// one bad hand-off says nothing about the next request's peers.
     pub(super) chaining_disabled: bool,
+    /// This request's complete stop set — see `reply_stops`. Warmed by
+    /// `build_prompt_with_header`, the choke point every prompt passes
+    /// through, so it always describes the template the prompt was actually
+    /// built from and finalising costs no second header parse.
+    pub(super) reply_stops: tokio::sync::OnceCell<Vec<String>>,
 }
 
 impl PipelineExecutor {
@@ -725,6 +730,7 @@ impl PipelineExecutor {
             assignment,
             collected_logprobs: std::sync::Mutex::new(Vec::new()),
             chaining_disabled: false,
+            reply_stops: tokio::sync::OnceCell::new(),
         }
     }
 
