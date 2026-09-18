@@ -172,11 +172,9 @@ a change, especially your own.
 
 **v0.3.187-alpha released and deployed to both nodes (2026-09-18).** Nothing
 functional is unreleased; `cargo audit` reports only advisories documented in
-`SECURITY.md`. ✅ The .186 gate's one open item — a shapes check that could not
-run — **was a real defect and is fixed**; it now reads OK on the shipped
-artifact. ⚠ **One thing left open and it needs a DECISION, not code**:
-`docs/FUTURE_WORK.md` #55, the registration budget charged by metadata rather
-than residency — it changes what this node offers the swarm.
+`SECURITY.md`. ⚠ **One item open, and it needs a DECISION rather than code** —
+`docs/FUTURE_WORK.md` #55: the registration budget is charged by metadata, not
+residency, so changing it alters what this node offers the swarm.
 Release procedure: **`memory/release_gate.md`** — the ordered steps and every
 caution earned at a past gate; do not re-derive it. Per-release history:
 `memory/round_history.md`. Gotchas: `memory/gotchas.md` (next free index lives
