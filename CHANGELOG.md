@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## [0.3.188-alpha] — 2026-09-18
 
 **Answers from the swarm no longer show you the model's private notes, and
 `stop` now works.**
