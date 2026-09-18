@@ -906,6 +906,75 @@ segment's range between them, which is why that request had no redundancy to
 fail over to in the first place. Salvage makes the loss partial; it does not
 make the request survivable.
 
+### The salvage was only on the path the fix was written in (2026-09-18, #88)
+
+`execute_distributed` tries FIVE alternative generation paths before reaching
+the decode loop the salvage lived in — `try_dsd_distributed`,
+`try_speculative_distributed`, `try_ngram_only_distributed`,
+`try_local_generate_fastpath`, `try_remote_generate_fastpath` — and each was
+called with `?`. Each runs a complete decode of its own, so a failure part-way
+through a reply left the function before the loop, the `Err` arms,
+`may_salvage` and `note_salvaged_reply` had ever been reached.
+`grep -c may_salvage` was **0** in `ngram_only_spec.rs`, `dsd.rs` and
+`speculative.rs`. Observed on a probe: `try_ngram_only_distributed ELIGIBLE`,
+~220 tokens over 40 s, failed, **no** "keeping the partial reply" line and no
+"Pipeline failed and failover was unsuccessful" line either.
+
+**And the n-gram path is the DEFAULT**, so the population was a node holding
+nothing — every new user. The severity is still narrower than it looks and that
+is worth keeping honest: `forward_through_segments` attempts segment failover
+internally and the router retries a transient failure, so a lost reply needs
+both of those to fail as well. What made it worth a round is who is on the path,
+not how often it fires.
+
+**Why a per-request accumulator rather than three more calls.** "Call the helper
+in three more places" is the fix this entry is a counter-example to — a helper
+nobody is *obliged* to call will eventually not be called, and the salvage had
+just proved it about itself. The choke point could not assemble the reply
+either: `execute_distributed` has no access to the tokens a spec path holds in
+its own local. So the reply is accumulated as it is produced and the salvage is
+a read:
+
+- **`pipeline::PartialReply`** lives on the executor (a `std::sync::Mutex`, the
+  same pattern and the same reason as `collected_logprobs`) and is filled by
+  `emit_streaming_batch` / `emit_first_streaming_token`. Those are the one place
+  all three coordinators turn accepted tokens into reply text, and
+  `streamed_reply_text_goes_through_the_shared_emit_helpers` in
+  `tests/repo_consistency.rs` already **obliges** a new coordinator in
+  `src/inference/pipeline/` to use them. The obligation was already enforced;
+  this borrows it.
+- **`keeping_the_partial`** is the single reader, wrapping all five calls, so a
+  sixth path added to that list inherits the salvage without knowing it exists.
+- **The recording happens BEFORE `emit_streaming_batch`'s
+  `token_tx`-is-`None` early return.** That return is what made the old code
+  correct-looking and wrong: a non-streamed request is the only one a salvage
+  is for, and it was exactly the one leaving that function having done nothing.
+
+This is vLLM's shape, arrived at for the same reason: the accumulated output
+lives in the engine's per-request state and an abort returns it, rather than
+each decode strategy remembering to report what it had.
+
+**What the accumulator stores, and why two things.** The TEXT is accumulated per
+emitted batch, because the reader of a salvage has no decoder in hand — the same
+granularity a streaming client receives, with the same edge (a multi-byte
+character split across a batch boundary decodes to a replacement character).
+The token IDS are kept beside it for two jobs a count cannot share: they are the
+honest `completion_tokens` — the trace logged `tokens=0` for these failures
+while ~220 had been generated, so it could not even say how much was lost — and
+they are what `may_salvage` is asked about, unchanged.
+
+**A salvaged reply is finalised.** The accumulated text has been through no
+scrub at all, so `keeping_the_partial` calls `finalize_reply_text` with
+`reply_stops` like every other reply source (gotcha #643, found in the same
+files while researching this).
+
+**Verified by removing the mechanism.** Restoring the pre-fix early return in
+both emitters turns
+`a_path_that_fails_part_way_still_hands_back_what_it_generated` red on "the
+tokens it generated must be kept", while the three null controls — a streamed
+request, a failure with nothing generated, and a success — stay green, which is
+what says they are controls and not passengers.
+
 ## A peer advertises the memory it will HONOUR, not the memory it has
 
 **`NodeCapability::memory_for_model_layers_mb` is the single answer to "how much

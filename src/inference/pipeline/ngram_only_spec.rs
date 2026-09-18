@@ -353,7 +353,14 @@ impl PipelineExecutor {
         let mut fallback_rounds: u32 = 0;
 
         // Stream first token
-        super::emit_first_streaming_token(&token_tx, &decoder, first_token, &eos_tokens).await;
+        super::emit_first_streaming_token(
+            &self.partial_reply,
+            &token_tx,
+            &decoder,
+            first_token,
+            &eos_tokens,
+        )
+        .await;
         if eos_tokens.contains(&first_token) {
             finish_reason = "stop".into();
         }
@@ -427,6 +434,7 @@ impl PipelineExecutor {
                 // point. A hand-rolled send here is exactly how a control token
                 // reaches a client (gotcha #414).
                 super::emit_streaming_batch(
+                    &self.partial_reply,
                     &token_tx,
                     &decoder,
                     &[bonus],
@@ -511,6 +519,7 @@ impl PipelineExecutor {
             // the accumulator below still sees it and stops; `emit_streaming_batch`
             // is what keeps it off the wire, for every path at once.
             super::emit_streaming_batch(
+                &self.partial_reply,
                 &token_tx,
                 &decoder,
                 &emitted,

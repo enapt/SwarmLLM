@@ -25,6 +25,10 @@ impl PipelineExecutor {
     ) -> Result<InferenceOutput, SwarmError> {
         let request_id = self.request.id;
         let max_tokens = self.request.sampling_params.max_tokens;
+        // Read here rather than beside the decode loop below: the five
+        // alternative paths tried first each run a complete decode, and
+        // `keeping_the_partial` needs the same answer they do.
+        let is_streaming = token_tx.is_some();
 
         if max_tokens == 0 {
             return Ok(InferenceOutput {
@@ -43,13 +47,15 @@ impl PipelineExecutor {
         // Item 12 Phase 4: DSD multi-segment greedy speculative. Falls through
         // when fewer than 2 segments (Item 2 covers single-segment) or any
         // other precondition fails (TP groups, non-greedy, no draft, etc.).
-        if let Some(out) = self.try_dsd_distributed(token_tx.clone()).await? {
+        let outcome = self.try_dsd_distributed(token_tx.clone()).await;
+        if let Some(out) = self.keeping_the_partial(outcome, is_streaming).await? {
             return Ok(out);
         }
 
         // Item 2 Phase 3: greedy single-segment distributed speculative
         // path. Requires draft model loaded.
-        if let Some(out) = self.try_speculative_distributed(token_tx.clone()).await? {
+        let outcome = self.try_speculative_distributed(token_tx.clone()).await;
+        if let Some(out) = self.keeping_the_partial(outcome, is_streaming).await? {
             return Ok(out);
         }
 
@@ -71,7 +77,8 @@ impl PipelineExecutor {
         // f32 return per round. The payoff gate is what bounds that now; the
         // wire itself is still the wrong shape for a miss round, and that is
         // written up in `docs/FUTURE_WORK.md`.
-        if let Some(out) = self.try_ngram_only_distributed(token_tx.clone()).await? {
+        let outcome = self.try_ngram_only_distributed(token_tx.clone()).await;
+        if let Some(out) = self.keeping_the_partial(outcome, is_streaming).await? {
             return Ok(out);
         }
 
@@ -81,7 +88,8 @@ impl PipelineExecutor {
         // without this a node that stands its API fast path aside to let the
         // scheduler consider the swarm re-prefills every prompt for ever
         // (report #018).
-        if let Some(out) = self.try_local_generate_fastpath(token_tx.clone()).await? {
+        let outcome = self.try_local_generate_fastpath(token_tx.clone()).await;
+        if let Some(out) = self.keeping_the_partial(outcome, is_streaming).await? {
             return Ok(out);
         }
 
@@ -90,7 +98,8 @@ impl PipelineExecutor {
         // worker runs the full decode loop and streams tokens back. Falls
         // through on non-eligibility (multi-segment, TP, vision, LoRA,
         // encrypted pipeline).
-        if let Some(out) = self.try_remote_generate_fastpath(token_tx.clone()).await? {
+        let outcome = self.try_remote_generate_fastpath(token_tx.clone()).await;
+        if let Some(out) = self.keeping_the_partial(outcome, is_streaming).await? {
             return Ok(out);
         }
 
@@ -134,7 +143,6 @@ impl PipelineExecutor {
         // model lock acquisition. Avoids per-token mutex + DashMap scan.
         let mut cached_eos: Option<std::collections::HashSet<u32>> = None;
         let mut cached_decoder: Option<CachedDecoder> = None;
-        let is_streaming = token_tx.is_some();
         // For streaming: accumulate decoded text to avoid redundant final decode
         let mut streamed_text = if is_streaming {
             Some(String::new())
@@ -2354,6 +2362,72 @@ pub(super) fn exhausted_message(segment: usize, last_failure: Option<&str>) -> S
     }
 }
 
+impl PipelineExecutor {
+    /// The one place a failure inside an ALTERNATIVE generation path keeps what
+    /// that path had already generated.
+    ///
+    /// `execute_distributed` tries five paths before reaching its own decode
+    /// loop, and each of them runs a complete decode of its own. Every one was
+    /// called with `?`, so a failure part-way through a reply propagated past
+    /// the loop's `may_salvage` arms entirely and the caller got a bare error
+    /// with nothing in it — report #028's "total loss" again, on the paths that
+    /// grew up beside that fix rather than through it. `grep -c may_salvage`
+    /// was 0 in all three speculative files. Observed: ~220 tokens generated
+    /// over 40 s, request failed, nothing salvaged (FUTURE_WORK #88).
+    ///
+    /// **It reads rather than records.** The shared emit helpers fill
+    /// `self.partial_reply` as they turn tokens into text, so no path has to
+    /// remember anything and a sixth path added to that list inherits this. A
+    /// helper nobody is obliged to call will eventually not be called, which is
+    /// what this entry was.
+    ///
+    /// The failure is still returned unchanged: the log line, the peer penalty,
+    /// the trust update and the error broadcast all see exactly what they saw
+    /// before, and `router::salvaged_reply_if_lost` hands the partial over only
+    /// once the attempt AND its retry are definitively over. A complete answer
+    /// from a second route beats a truncated one from the first.
+    async fn keeping_the_partial(
+        &self,
+        outcome: Result<Option<InferenceOutput>, SwarmError>,
+        is_streaming: bool,
+    ) -> Result<Option<InferenceOutput>, SwarmError> {
+        let Err(err) = outcome else {
+            return outcome;
+        };
+        let request_id = self.request.id;
+        let Some((mut content, ids, prompt_tokens)) = self.partial_reply.taken() else {
+            return Err(err);
+        };
+        if !may_salvage(is_streaming, &ids) {
+            return Err(err);
+        }
+        // Finalised like any other reply — a partial is still a reply, and the
+        // text accumulated here has been through no scrub at all (gotcha #643).
+        crate::inference::finalize_reply_text(&mut content, self.reply_stops().await);
+        tracing::info!(
+            request_id = %request_id,
+            completion_tokens = ids.len(),
+            error = %err,
+            "DIAG: keeping the partial reply of a request that failed part-way"
+        );
+        self.shared_state.note_salvaged_reply(
+            request_id,
+            InferenceOutput {
+                request_id,
+                content,
+                prompt_tokens,
+                completion_tokens: ids.len() as u32,
+                finish_reason: crate::inference::FINISH_REASON_INTERRUPTED.to_string(),
+                session_id: self.request.session_id.clone(),
+                token_logprobs: vec![],
+                matched_stop_sequence: None,
+                trace: None,
+            },
+        );
+        Err(err)
+    }
+}
+
 /// May a reply that ends in a failure still be handed to the caller?
 ///
 /// Three conditions, and each one is load-bearing.
@@ -2377,4 +2451,170 @@ pub(super) fn exhausted_message(segment: usize, last_failure: Option<&str>) -> S
 /// one from the first, so salvage is the last resort and never the first.
 pub(crate) fn may_salvage(is_streaming: bool, generated: &[u32]) -> bool {
     !is_streaming && !generated.is_empty()
+}
+
+#[cfg(test)]
+mod salvage_tests {
+    use super::PipelineExecutor;
+    use crate::error::SwarmError;
+    use crate::types::{
+        ChatMessage, InferenceRequest, ModelId, NetworkCommand, PipelineAssignment,
+        PipelineSegment, PriorityTier, Role, SamplingParams, ShardId,
+    };
+
+    fn verbatim_decoder(vocab: &[&str]) -> super::super::prompt::CachedDecoder {
+        let mut byte_decoder = std::collections::HashMap::new();
+        for b in 0u8..=127 {
+            byte_decoder.insert(b as char, b);
+        }
+        super::super::prompt::CachedDecoder {
+            vocab: vocab.iter().map(|s| (*s).to_string()).collect(),
+            byte_decoder,
+            is_sentencepiece: false,
+            has_tokenizer: true,
+        }
+    }
+
+    fn executor(state: std::sync::Arc<crate::daemon::SharedState>) -> PipelineExecutor {
+        let request = InferenceRequest {
+            id: uuid::Uuid::new_v4(),
+            model_id: ModelId("m".into()),
+            messages: vec![ChatMessage {
+                role: Role::User,
+                content: "hello".into(),
+                images: vec![],
+            }],
+            sampling_params: SamplingParams::default(),
+            stream: false,
+            requester: state.identity.node_id().clone(),
+            priority: PriorityTier::Silver,
+            created_at: chrono::Utc::now(),
+            session_id: None,
+            lora_adapter: None,
+            tools: None,
+            cancel: None,
+            route_override: None,
+        };
+        let (tx, _rx) = tokio::sync::mpsc::channel::<NetworkCommand>(8);
+        let assignment = PipelineAssignment {
+            request_id: request.id,
+            segments: vec![PipelineSegment {
+                node_id: state.identity.node_id().clone(),
+                shard_id: ShardId {
+                    model_id: ModelId("m".into()),
+                    index: 0,
+                },
+                layer_range: (0, 1),
+            }],
+            standbys: vec![],
+            tp_groups: vec![],
+            supports_speculative: false,
+        };
+        PipelineExecutor::new(state, tx, request, assignment)
+    }
+
+    /// Emit three tokens the way a speculative coordinator does on a
+    /// NON-streamed request — the case `emit_streaming_batch` used to leave
+    /// immediately, having recorded nothing.
+    async fn generate_something(exec: &PipelineExecutor) {
+        let decoder = verbatim_decoder(&["Half ", "an ", "answer"]);
+        let eos = std::collections::HashSet::new();
+        let mut finish = String::new();
+        super::super::emit_first_streaming_token(&exec.partial_reply, &None, &decoder, 0, &eos)
+            .await;
+        super::super::emit_streaming_batch(
+            &exec.partial_reply,
+            &None,
+            &decoder,
+            &[1, 2],
+            &eos,
+            &mut finish,
+        )
+        .await;
+    }
+
+    /// **FUTURE_WORK #88.** The salvage built for report #028 lived only in
+    /// `execute_distributed`'s own decode loop, while the five alternative
+    /// paths tried before it were each called with `?` — so ~220 generated
+    /// tokens were discarded and the caller got a bare error. The partial is
+    /// now accumulated by the shared emit helpers and read at one choke point.
+    #[tokio::test]
+    async fn a_path_that_fails_part_way_still_hands_back_what_it_generated() {
+        let state = crate::inference::pipeline::tests::make_test_state();
+        let exec = executor(state.clone());
+        let id = exec.request.id;
+        generate_something(&exec).await;
+
+        let out = exec
+            .keeping_the_partial(
+                Err(SwarmError::PeerUnresponsive(
+                    "the tail peer went silent".into(),
+                )),
+                false,
+            )
+            .await;
+
+        // The failure is still the failure: everything that reasons about one
+        // must see exactly what it saw before.
+        assert!(matches!(out, Err(SwarmError::PeerUnresponsive(_))));
+
+        let salvaged = state
+            .take_salvaged_reply(id)
+            .expect("the tokens it generated must be kept");
+        assert_eq!(salvaged.content, "Half an answer");
+        assert_eq!(salvaged.completion_tokens, 3);
+        assert_eq!(
+            salvaged.finish_reason,
+            crate::inference::FINISH_REASON_INTERRUPTED,
+            "a decode a failure ended did not stop naturally"
+        );
+    }
+
+    /// Null control 1: a STREAMED request keeps its error untouched. The
+    /// client already has the text, and an `Ok` here makes the SSE encoder
+    /// re-emit the whole reply as one delta (gotcha #414).
+    #[tokio::test]
+    async fn a_streamed_request_salvages_nothing() {
+        let state = crate::inference::pipeline::tests::make_test_state();
+        let exec = executor(state.clone());
+        let id = exec.request.id;
+        generate_something(&exec).await;
+        let out = exec
+            .keeping_the_partial(Err(SwarmError::Inference("boom".into())), true)
+            .await;
+        assert!(out.is_err());
+        assert!(
+            state.take_salvaged_reply(id).is_none(),
+            "a streamed reply must not be salvaged"
+        );
+    }
+
+    /// Null control 2: a path that generated nothing keeps its error. An empty
+    /// salvage is a failure wearing a 200, and it would replace an error
+    /// carrying the class, the hint and the peer attribution.
+    #[tokio::test]
+    async fn a_failure_with_nothing_generated_salvages_nothing() {
+        let state = crate::inference::pipeline::tests::make_test_state();
+        let exec = executor(state.clone());
+        let id = exec.request.id;
+        let out = exec
+            .keeping_the_partial(Err(SwarmError::Inference("boom".into())), false)
+            .await;
+        assert!(out.is_err());
+        assert!(state.take_salvaged_reply(id).is_none());
+    }
+
+    /// And a SUCCESS is returned untouched, with nothing recorded — the
+    /// choke point wraps every alternative path, so it sees far more
+    /// successes than failures.
+    #[tokio::test]
+    async fn a_successful_path_is_passed_straight_through() {
+        let state = crate::inference::pipeline::tests::make_test_state();
+        let exec = executor(state.clone());
+        let id = exec.request.id;
+        generate_something(&exec).await;
+        let out = exec.keeping_the_partial(Ok(None), false).await;
+        assert!(matches!(out, Ok(None)));
+        assert!(state.take_salvaged_reply(id).is_none());
+    }
 }

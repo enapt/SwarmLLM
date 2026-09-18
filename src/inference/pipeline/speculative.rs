@@ -247,7 +247,14 @@ impl PipelineExecutor {
         let mut pending_truncate: Option<u32> = None;
 
         // Stream the first token if we have a streaming channel.
-        super::emit_first_streaming_token(&token_tx, &decoder, first_token, &eos_tokens).await;
+        super::emit_first_streaming_token(
+            &self.partial_reply,
+            &token_tx,
+            &decoder,
+            first_token,
+            &eos_tokens,
+        )
+        .await;
 
         let mut acceptance_proposed: u32 = 0;
         let mut acceptance_accepted: u32 = 0;
@@ -467,6 +474,7 @@ impl PipelineExecutor {
 
             // Streaming per token.
             super::emit_streaming_batch(
+                &self.partial_reply,
                 &token_tx,
                 &decoder,
                 &emitted,

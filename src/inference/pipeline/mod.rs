@@ -562,6 +562,72 @@ pub(super) fn build_kv_truncate_forward(
     }
 }
 
+/// What a request has generated so far, kept so a failure can still hand back
+/// the work already done.
+///
+/// **It is filled by the shared emit helpers**, the one place all three
+/// speculative coordinators turn accepted tokens into reply text — and a place
+/// `streamed_reply_text_goes_through_the_shared_emit_helpers` in
+/// `tests/repo_consistency.rs` obliges a new coordinator to use. So nothing has
+/// to remember to record a partial: recording is what emitting IS, and a fourth
+/// coordinator inherits it. Read at one choke point,
+/// `PipelineExecutor::keeping_the_partial`.
+///
+/// The text is accumulated per emitted BATCH rather than decoded once at the
+/// end, because the reader of a salvage has no decoder in hand. That is the
+/// same granularity a streaming client already receives, so the salvaged reply
+/// is exactly what a streaming caller would have seen — with the same edge: a
+/// multi-byte character split across a batch boundary decodes to a replacement
+/// character. Acceptable on a path that exists to return something rather than
+/// nothing, and not worth carrying a vocabulary around for.
+///
+/// The token ids are kept beside the text for two different jobs: they are the
+/// honest `completion_tokens` (the trace logged `tokens=0` for these failures
+/// while ~220 had been generated), and they are what `may_salvage` asks about.
+#[derive(Default)]
+pub(super) struct PartialReply {
+    inner: std::sync::Mutex<PartialReplyState>,
+}
+
+#[derive(Default)]
+struct PartialReplyState {
+    text: String,
+    ids: Vec<u32>,
+    prompt_tokens: u32,
+}
+
+impl PartialReply {
+    /// Add an emitted batch. `text` is what the client was shown for it.
+    fn record(&self, text: &str, ids: &[u32]) {
+        let mut state = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        state.text.push_str(text);
+        state.ids.extend_from_slice(ids);
+    }
+
+    /// How many positions the prompt occupied, for the salvage's usage figure.
+    /// Recorded by `extract_model_cache`, which every speculative coordinator
+    /// calls — missing it costs the usage number, never the reply.
+    fn note_prompt_tokens(&self, prompt_tokens: u32) {
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .prompt_tokens = prompt_tokens;
+    }
+
+    /// The reply so far, or `None` if nothing has been generated.
+    fn taken(&self) -> Option<(String, Vec<u32>, u32)> {
+        let mut state = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if state.ids.is_empty() {
+            return None;
+        }
+        Some((
+            std::mem::take(&mut state.text),
+            std::mem::take(&mut state.ids),
+            state.prompt_tokens,
+        ))
+    }
+}
+
 /// Send a single token's decoded text down the streaming channel,
 /// ignoring any send error (matches the "first-token" pattern that
 /// fires before the per-round loop). Used by speculative / DSD /
@@ -569,6 +635,7 @@ pub(super) fn build_kv_truncate_forward(
 /// fire-and-forget — disconnection at this point is fine, the per-round
 /// loop will detect it on the next emit.
 pub(in crate::inference::pipeline) async fn emit_first_streaming_token(
+    partial: &PartialReply,
     token_tx: &Option<StreamingTokenTx>,
     decoder: &prompt::CachedDecoder,
     token: u32,
@@ -580,8 +647,13 @@ pub(in crate::inference::pipeline) async fn emit_first_streaming_token(
     if eos.contains(&token) {
         return;
     }
+    let text = decoder.decode_tokens(&[token]);
+    // Recorded BEFORE the streaming check, and whatever the channel does with
+    // it: a salvage is for the NON-streamed request, so the one case that
+    // needs this is the one where `token_tx` is `None` and the old code
+    // returned here having done nothing.
+    partial.record(&text, &[token]);
     if let Some(tx) = token_tx {
-        let text = decoder.decode_tokens(&[token]);
         let _ = tx
             .send(crate::inference::router::StreamingTokenEvent {
                 text,
@@ -598,12 +670,24 @@ pub(in crate::inference::pipeline) async fn emit_first_streaming_token(
 /// caller can bail out of further bookkeeping. Shared by
 /// speculative / DSD / ngram-only-spec.
 pub(in crate::inference::pipeline) async fn emit_streaming_batch(
+    partial: &PartialReply,
     token_tx: &Option<StreamingTokenTx>,
     decoder: &prompt::CachedDecoder,
     tokens: &[u32],
     eos: &std::collections::HashSet<u32>,
     finish_reason: &mut String,
 ) -> bool {
+    // Recorded for every caller, before the streaming check below returns:
+    // a non-streamed request is exactly the one a salvage exists for, and it
+    // is the one that used to leave here having recorded nothing. EOS is
+    // dropped from the text for the same reason it is dropped from the wire,
+    // and kept among the ids so the count matches what the decode produced.
+    let kept: Vec<u32> = tokens
+        .iter()
+        .copied()
+        .filter(|t| !eos.contains(t))
+        .collect();
+    partial.record(&decoder.decode_tokens(&kept), tokens);
     let tx = match token_tx {
         Some(tx) => tx,
         None => return false,
@@ -714,6 +798,9 @@ pub struct PipelineExecutor {
     /// through, so it always describes the template the prompt was actually
     /// built from and finalising costs no second header parse.
     pub(super) reply_stops: tokio::sync::OnceCell<Vec<String>>,
+    /// What this request has generated so far — see [`PartialReply`]. Written
+    /// by the shared emit helpers, read once by `keeping_the_partial`.
+    pub(super) partial_reply: PartialReply,
 }
 
 impl PipelineExecutor {
@@ -731,6 +818,7 @@ impl PipelineExecutor {
             collected_logprobs: std::sync::Mutex::new(Vec::new()),
             chaining_disabled: false,
             reply_stops: tokio::sync::OnceCell::new(),
+            partial_reply: PartialReply::default(),
         }
     }
 

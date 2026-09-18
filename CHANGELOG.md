@@ -22,9 +22,21 @@ answer:
   it. Tools that rely on `stop` to frame a reply were affected.
 
 Your own computer answering on its own was never affected, which is why this
-could look like "the swarm gives worse answers" rather than a defect. Nothing
-about how computers talk to each other has changed and nodes do not need to
-update together.
+could look like "the swarm gives worse answers" rather than a defect.
+
+**And a long answer that fails near the end is no longer thrown away.**
+
+If a computer helping with your reply drops out part-way, SwarmLLM tries
+another route first — that has not changed, and a complete answer is always
+preferred. But when there is no other route either, you now get the part that
+was written instead of an error with nothing in it. That already worked on one
+route and silently did not on the others, including the one used when your
+computer holds no model of its own; a reply that had been generating for
+minutes could vanish completely. Answers that were being streamed to you as
+they were written were never affected, because you already had the text.
+
+Nothing about how computers talk to each other has changed and nodes do not
+need to update together.
 
 ## [0.3.187-alpha] — 2026-09-18
 

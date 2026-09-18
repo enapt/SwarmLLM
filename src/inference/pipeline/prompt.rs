@@ -363,10 +363,22 @@ impl PipelineExecutor {
 
     /// Extract prompt token count, EOS tokens, and a cached decoder from metadata.
     /// No model lock needed — uses cached metadata from SplitModelEntry.
+    ///
+    /// Also records the prompt's length for a possible salvage — see
+    /// [`super::PartialReply`]. Here because every speculative coordinator
+    /// calls this and none of them has to remember; the figure only ever
+    /// decorates a partial reply's usage, so a path that skips it loses the
+    /// number rather than the reply.
     pub(super) async fn extract_model_cache(
         &self,
         prompt: &str,
     ) -> (usize, Vec<u32>, CachedDecoder) {
+        let out = self.extract_model_cache_inner(prompt).await;
+        self.partial_reply.note_prompt_tokens(out.0 as u32);
+        out
+    }
+
+    async fn extract_model_cache_inner(&self, prompt: &str) -> (usize, Vec<u32>, CachedDecoder) {
         let model_id = &self.assignment.segments[0].shard_id.model_id;
         let entry_key = self.shared_state.find_split_model_key(model_id);
         let entry = entry_key

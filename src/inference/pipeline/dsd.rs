@@ -188,7 +188,14 @@ impl PipelineExecutor {
         let mut expected_kv_len: u32 = prompt_token_count as u32;
         let mut pending_truncate: Option<u32> = None;
 
-        super::emit_first_streaming_token(&token_tx, &decoder, first_token, &eos_set).await;
+        super::emit_first_streaming_token(
+            &self.partial_reply,
+            &token_tx,
+            &decoder,
+            first_token,
+            &eos_set,
+        )
+        .await;
 
         let mut acceptance_proposed: u32 = 0;
         let mut acceptance_accepted: u32 = 0;
@@ -326,6 +333,7 @@ impl PipelineExecutor {
             }
 
             super::emit_streaming_batch(
+                &self.partial_reply,
                 &token_tx,
                 &decoder,
                 &emitted,

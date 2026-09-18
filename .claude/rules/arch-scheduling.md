@@ -200,6 +200,28 @@ the caller — called at the one point per dispatch path where the attempt is
 definitively over, which is after the retry in `dispatch_single` and after the
 sole attempt on the batched path.
 
+**Recording it must not be something a path remembers.** The salvage shipped
+inside `execute_distributed`'s own decode loop, and the FIVE alternative paths
+it tries first — DSD, draft-model speculative, n-gram-only, local-generate,
+remote-generate — were each called with `?`, so a failure part-way through a
+reply propagated straight past it: ~220 tokens generated, request failed,
+nothing kept (FUTURE_WORK #88). `grep -c may_salvage` was 0 in all three
+speculative files. This entry is "a helper nobody is obliged to call will
+eventually not be called" firing on the salvage itself.
+
+So it is a READ, not a call: **`pipeline::PartialReply` on the executor is
+filled by the shared emit helpers** — the one place those coordinators turn
+accepted tokens into reply text, and a place
+`streamed_reply_text_goes_through_the_shared_emit_helpers` already obliges a new
+coordinator to use — and **`keeping_the_partial` is the one choke point that
+reads it**, wrapping all five calls. Recording is what emitting IS, and a sixth
+path inherits both. `emit_streaming_batch` records BEFORE its
+`token_tx`-is-`None` early return: the non-streamed request is the only one a
+salvage is for, and it was the one leaving there having done nothing.
+
+A salvaged reply is finalised like any other (§ "A reply a PEER generated…") —
+the accumulated text has been through no scrub at all.
+
 → `docs/invariants/scheduling.md`
 
 ## What a peer HOLDS on disk and what it has LOADED are different facts
