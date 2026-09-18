@@ -1,5 +1,79 @@
 # Changelog
 
+## [0.3.187-alpha] — 2026-09-18
+
+Three ways this software was wrong about itself.
+
+It believed memory was in use that it had already freed. It believed it could
+not run a model that it was running at that moment. And inside a container on
+Windows, it believed it was a different kind of system entirely. None of the
+three reported an error. They showed up as "this got slower" and "this sees
+fewer computers than my other one" — the kind of problem you live with because
+it never announces itself.
+
+Two of them made repeated questions far more expensive than they needed to be,
+which is worst on exactly the setups least able to afford it: a long
+conversation, or an assistant that resends a large instruction block before
+every message, on a computer without a fast graphics card.
+
+Nodes do not need to update together, and nothing about how computers talk to
+each other has changed.
+
+### Fixed
+
+- **A long question locked out the next one for ten minutes.** Ask a large
+  question, and every later large question was refused with a message saying
+  there was not enough free memory — even the identical question, and even
+  though the memory had already been given back. The advice it offered, to close
+  other programs, could not have helped: nothing else was using that memory.
+
+  A conversation sets memory aside before it starts and returns it when it
+  finishes. Returning it worked; cancelling the reservation did not, so the
+  computer went on counting memory it was no longer holding until a ten-minute
+  timer cleared it. On a machine with a smaller graphics card this looked like
+  the whole thing had broken after a single large question.
+
+  The reservation and the memory are now released together, in one place, so a
+  future change cannot free one and forget the other.
+
+- **Repeated questions were computed from scratch every time.** When this
+  computer answers a request itself, it is meant to take a direct route that
+  reuses the work it already did on the part of the question it has seen before.
+  In a full day of records, that route ran zero times.
+
+  Every model this computer offers to the network is kept on a list, and the
+  list has a size limit. A model that did not fit on the list was treated as one
+  this computer cannot run — while it was, at that moment, running it. A limit
+  on what to offer other people should not change how you do work you have
+  already taken on.
+
+  Models that are not on the list now answer from their own file description
+  instead, and only when this computer holds both ends of the model, so a reply
+  can never start with a piece missing. Alongside the memory fix above, asking
+  the same long question twice now reuses almost all of it rather than none.
+
+- **A node run in Docker on Windows could not be reached, and lost the computers
+  that most needed it.** It saw fewer peers than another node on the same
+  account, and the ones it missed were the home machines behind a router — which
+  is where most graphics cards are.
+
+  Docker Desktop on Windows runs containers on the same underlying system as
+  WSL, so this software's check for "am I running under WSL" answered yes for an
+  ordinary container. That check exists to apply settings suited to WSL's
+  network, and one of them is to listen only on the computer's own internal
+  address. In a container that setting is fatal: a published port cannot reach a
+  program listening internally, so the port looked open from the outside and led
+  nowhere.
+
+  It now recognises when it is inside a container and leaves the network
+  settings alone, which is what a container wants. Nothing changes for a real
+  WSL installation — that direction was checked deliberately, because getting it
+  wrong would undo an earlier fix.
+
+  If you are on an affected version today, setting the network values by hand in
+  `config.toml` works around it. Explicit settings were always honoured, which
+  is why that workaround worked at all.
+
 ## [0.3.186-alpha] — 2026-09-17
 
 Four things the software said that were not true. Three of them were visible to
