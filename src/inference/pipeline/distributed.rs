@@ -796,7 +796,23 @@ impl PipelineExecutor {
         generated_ids: &[u32],
     ) -> Result<LayerResult, SwarmError> {
         let mut activations = initial_activations;
-        let num_segments = self.assignment.segments.len();
+        // Read LIVE, never cached across the loop.
+        //
+        // A failover can now replace one segment with SEVERAL — when no single
+        // stand-in holds the failed range but a few cover it between them
+        // (`docs/FUTURE_WORK.md` #17) — and it splices them into the assignment
+        // so the replacement survives into every later decode step. A count
+        // taken before the loop would then be stale for the rest of THIS
+        // forward, in the two places it decides something:
+        //
+        //   * the loop bound, so the spliced-in tail would never run;
+        //   * `is_last`, which decides WHICH SEGMENT SAMPLES — off by one, the
+        //     wrong segment samples and the reply is quietly not the model's.
+        //
+        // Re-reading costs a `Vec::len` per segment per token and removes the
+        // whole class. Later tokens were always consistent, because this
+        // function re-enters per forward; only the forward that failed over
+        // could see the stale value.
         let pipeline_start = std::time::Instant::now();
 
         // How far a chained run has already carried us. When a run of remote
@@ -812,7 +828,7 @@ impl PipelineExecutor {
         // `while` rather than `for`: a chained failure re-runs the SAME index
         // unchained (no increment), everything else advances at the bottom.
         let mut idx = 0usize;
-        while idx < num_segments {
+        while idx < self.assignment.segments.len() {
             if idx < chained_through {
                 // A chained run carried this segment, so its input never passed
                 // through here and the history we hold for it is no longer the
@@ -824,7 +840,7 @@ impl PipelineExecutor {
                 idx += 1;
                 continue;
             }
-            let is_last = idx == num_segments - 1;
+            let is_last = idx == self.assignment.segments.len() - 1;
             let segment = &self.assignment.segments[idx];
 
             // What we are about to send this segment, kept so a stand-in can be
@@ -1021,7 +1037,7 @@ impl PipelineExecutor {
                 if is_last {
                     tracing::info!(
                         request_id = %request_id,
-                        num_segments,
+                        num_segments = self.assignment.segments.len(),
                         pipeline_ms = pipeline_start.elapsed().as_millis() as u64,
                         "DIAG: forward_through_segments completed (last segment local)"
                     );
@@ -1079,7 +1095,7 @@ impl PipelineExecutor {
                 // the head means a run that ends at the last segment is not
                 // recognised as finishing the pipeline, and the coordinator
                 // walks off the end of the loop with the reply in its hand.
-                let run_is_last = idx + chain.len() == num_segments - 1;
+                let run_is_last = idx + chain.len() == self.assignment.segments.len() - 1;
 
                 let vision_for_wire = if idx == 0 && sequence_num == 0 {
                     precomputed_vision.clone()
@@ -1523,7 +1539,7 @@ impl PipelineExecutor {
                             if run_is_last {
                                 tracing::info!(
                                     request_id = %request_id,
-                                    num_segments,
+                                    num_segments = self.assignment.segments.len(),
                                     pipeline_ms = pipeline_start.elapsed().as_millis() as u64,
                                     "DIAG: forward_through_segments completed (last segment remote)"
                                 );
@@ -1744,6 +1760,45 @@ impl PipelineExecutor {
     /// caller's own error at once, exactly as the primary path does, because
     /// every standby would reproduce it. And a standby that says it does not
     /// hold the shard loses its claim, as a primary holder would.
+    /// Record who serves the failed segment from now on, so later tokens go
+    /// straight there instead of failing over again every step.
+    ///
+    /// With one stand-in this rewrites the segment in place, exactly as it
+    /// always did. With several — a cover assembled from nodes that hold a
+    /// piece each — the one segment becomes N, spliced in at the same index and
+    /// in layer order.
+    ///
+    /// **Applied only after the first part has answered**, so a cover that
+    /// cannot be reached leaves the assignment untouched and the caller is free
+    /// to try the next one. Splicing first and unwinding on failure would leave
+    /// a half-installed chain if the unwind were ever missed.
+    ///
+    /// The caller's loop re-reads `segments.len()` every iteration, so it walks
+    /// into the spliced parts and recomputes `is_last` against the new length.
+    /// That is load-bearing: `is_last` decides which segment samples.
+    fn install_takeover(
+        assignment: &mut crate::types::PipelineAssignment,
+        failed_idx: usize,
+        cover: &[crate::types::PipelineSegment],
+        request_id: uuid::Uuid,
+    ) {
+        if cover.is_empty() {
+            return;
+        }
+        if cover.len() > 1 {
+            tracing::info!(
+                request_id = %request_id,
+                segment = failed_idx,
+                parts = cover.len(),
+                nodes = ?cover.iter().map(|p| format!("{}[{}-{}]", p.node_id, p.layer_range.0, p.layer_range.1)).collect::<Vec<_>>(),
+                "DIAG: segment taken over by several nodes covering it between them"
+            );
+        }
+        assignment
+            .segments
+            .splice(failed_idx..=failed_idx, cover.iter().cloned());
+    }
+
     async fn failover_segment(
         &mut self,
         failed_idx: usize,
@@ -1914,19 +1969,50 @@ impl PipelineExecutor {
             self.cancel_segment_on(&abandoned, request_id, failed_idx)
                 .await;
 
-            // Find a standby covering this segment's layer range that has not
-            // already failed it.
-            let standby = self
-                .assignment
-                .standbys
-                .iter()
-                .find(|s| {
-                    crate::inference::scheduler::standby_covers(s, failed_segment.layer_range)
-                        && !tried.contains(&s.node_id)
-                })
-                .cloned();
+            // What can take this segment's layer range over — one stand-in that
+            // holds all of it, or several that cover it between them.
+            //
+            // **A composite is only offered where no replay is needed**, i.e.
+            // the prompt pass. Mid-reply a stand-in must be given the segment's
+            // retained input history, and that history exists only for the
+            // range the COORDINATOR sent to. The second part of a composite is
+            // fed by the first part's OUTPUT, which never passed through here
+            // and was never retained — so there is nothing to replay onto it,
+            // and a cache rebuilt without it is plausible and wrong, which is
+            // the exact failure this path refuses elsewhere. Not a limitation to
+            // be lifted casually: it needs a retention scheme that does not
+            // exist (`docs/FUTURE_WORK.md` #17).
+            let cover = if failover_can_restore_state(sequence_num) {
+                crate::inference::scheduler::standby_cover_for(
+                    &self.assignment.standbys,
+                    failed_segment.layer_range,
+                    &tried,
+                )
+            } else {
+                self.assignment
+                    .standbys
+                    .iter()
+                    .find(|s| {
+                        crate::inference::scheduler::standby_covers(s, failed_segment.layer_range)
+                            && !tried.contains(&s.node_id)
+                    })
+                    .map(|s| vec![s])
+            };
+            let cover: Option<Vec<crate::types::PipelineSegment>> =
+                cover.map(|parts| parts.into_iter().cloned().collect());
 
-            let Some(backup) = standby else {
+            // The first part is what this call forwards to; any parts after it
+            // are spliced in behind and run by the loop that called us, which
+            // recomputes `is_last` from the live segment count.
+            let composite = cover.as_ref().is_some_and(|c| c.len() > 1);
+            // Only the FINAL part of a cover ends the pipeline, so a part with
+            // others behind it must not be told it samples — `generated_ids`
+            // rides on that flag, and the wrong segment sampling is a reply that
+            // is quietly not the model's.
+            let is_last = is_last && !composite;
+            let backup = cover.as_ref().map(|c| c[0].clone());
+
+            let Some(backup) = backup else {
                 tracing::error!(
                     request_id = %request_id,
                     failed_segment = failed_idx,
@@ -2034,8 +2120,12 @@ impl PipelineExecutor {
                     .await
                 {
                     Ok(result) => {
-                        self.assignment.segments[failed_idx].node_id = backup.node_id;
-                        self.assignment.segments[failed_idx].layer_range = backup.layer_range;
+                        Self::install_takeover(
+                            &mut self.assignment,
+                            failed_idx,
+                            cover.as_deref().unwrap_or_default(),
+                            request_id,
+                        );
                         return Ok(result);
                     }
                     Err(e) => {
@@ -2237,8 +2327,12 @@ impl PipelineExecutor {
 
             // Update the assignment so subsequent tokens use the standby
             // directly, avoiding repeated failover + 30s timeout per token.
-            self.assignment.segments[failed_idx].node_id = backup.node_id;
-            self.assignment.segments[failed_idx].layer_range = backup.layer_range;
+            Self::install_takeover(
+                &mut self.assignment,
+                failed_idx,
+                cover.as_deref().unwrap_or_default(),
+                request_id,
+            );
 
             return Ok(result);
         }
@@ -2924,5 +3018,118 @@ mod context_window_finish_tests {
             crate::error::reclassify_flattened_error("Context window reached: soon").is_none(),
             "an unparseable tail is not this error"
         );
+    }
+}
+
+#[cfg(test)]
+mod composite_takeover_tests {
+    use super::PipelineExecutor;
+    use crate::types::{ModelId, NodeId, PipelineAssignment, PipelineSegment, ShardId};
+
+    fn seg(n: u8, range: (u32, u32)) -> PipelineSegment {
+        PipelineSegment {
+            node_id: NodeId([n; 32]),
+            shard_id: ShardId {
+                model_id: ModelId("m".into()),
+                index: 0,
+            },
+            layer_range: range,
+        }
+    }
+
+    fn assignment(segments: Vec<PipelineSegment>) -> PipelineAssignment {
+        PipelineAssignment {
+            request_id: uuid::Uuid::nil(),
+            segments,
+            standbys: vec![],
+            tp_groups: vec![],
+            supports_speculative: false,
+        }
+    }
+
+    /// One stand-in rewrites the segment in place; several replace it with one
+    /// segment each, in layer order and at the same index.
+    #[test]
+    fn a_takeover_installs_one_segment_or_the_whole_cover_in_its_place() {
+        // The single-stand-in case must be byte-for-byte what it always was.
+        let mut a = assignment(vec![seg(1, (0, 8)), seg(2, (8, 32))]);
+        PipelineExecutor::install_takeover(&mut a, 1, &[seg(7, (8, 32))], uuid::Uuid::nil());
+        assert_eq!(a.segments.len(), 2, "one stand-in replaces one segment");
+        assert_eq!(a.segments[1].node_id, NodeId([7; 32]));
+
+        // The composite case: one segment becomes two, spliced at index 1 so
+        // the segment BEFORE it and the segment AFTER it both keep their place.
+        let mut a = assignment(vec![seg(1, (0, 8)), seg(2, (8, 24)), seg(3, (24, 32))]);
+        PipelineExecutor::install_takeover(
+            &mut a,
+            1,
+            &[seg(7, (8, 16)), seg(8, (16, 24))],
+            uuid::Uuid::nil(),
+        );
+        assert_eq!(
+            a.segments
+                .iter()
+                .map(|s| (s.node_id.clone(), s.layer_range))
+                .collect::<Vec<_>>(),
+            vec![
+                (NodeId([1; 32]), (0, 8)),
+                (NodeId([7; 32]), (8, 16)),
+                (NodeId([8; 32]), (16, 24)),
+                (NodeId([3; 32]), (24, 32)),
+            ],
+            "the cover goes in where the failed segment was, in layer order, \
+             and the tail segment is still behind it"
+        );
+
+        // An empty cover is a no-op rather than a segment silently vanishing.
+        let mut a = assignment(vec![seg(1, (0, 8)), seg(2, (8, 32))]);
+        PipelineExecutor::install_takeover(&mut a, 1, &[], uuid::Uuid::nil());
+        assert_eq!(a.segments.len(), 2);
+        assert_eq!(a.segments[1].node_id, NodeId([2; 32]));
+    }
+
+    /// **The property the whole splice rests on: after it, `is_last` still
+    /// names the segment that ends the pipeline.**
+    ///
+    /// `forward_through_segments` used to cache `segments.len()` before its
+    /// loop. Nothing spliced, so it was never stale — but the moment one
+    /// segment can become several, a cached count is wrong for the rest of that
+    /// forward in the two places it decides something: the loop bound, so the
+    /// spliced-in tail never runs, and `is_last`, which decides WHICH SEGMENT
+    /// SAMPLES. An off-by-one there produces a reply that is quietly not the
+    /// model's, and nothing errors.
+    ///
+    /// This asserts the arithmetic both ways round, because the stale reading
+    /// is the one that looks right.
+    #[test]
+    fn is_last_still_names_the_final_segment_after_a_cover_is_spliced_in() {
+        let mut a = assignment(vec![seg(1, (0, 8)), seg(2, (8, 24)), seg(3, (24, 32))]);
+        let stale = a.segments.len();
+
+        PipelineExecutor::install_takeover(
+            &mut a,
+            1,
+            &[seg(7, (8, 16)), seg(8, (16, 24))],
+            uuid::Uuid::nil(),
+        );
+
+        let live = a.segments.len();
+        assert_eq!((stale, live), (3, 4), "the splice added one segment");
+
+        // Live: the last index is the tail segment, which is the one that ends
+        // the model and therefore the one that samples.
+        let last_live = live - 1;
+        assert_eq!(a.segments[last_live].layer_range, (24, 32));
+
+        // Stale: the count taken before the splice names the segment BEFORE it.
+        let last_stale = stale - 1;
+        assert_ne!(
+            a.segments[last_stale].layer_range,
+            (24, 32),
+            "this is the defect the live read exists to prevent — the cached \
+             count names a middle segment, which would then sample and end the \
+             pipeline early"
+        );
+        assert_eq!(a.segments[last_stale].layer_range, (16, 24));
     }
 }

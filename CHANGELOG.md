@@ -50,6 +50,20 @@ download the rest of the model, or turn private answering off for it. The same
 message already existed for a missing first part; this is its other half, and
 each now points you at the right piece. Available in all 21 languages.
 
+**A long answer survives a computer dropping out in more cases than before.**
+
+When a model is spread across several computers and one of them drops out
+mid-answer, SwarmLLM looks for another that can take its share over. Until now
+that had to be a single computer holding all of that share; if nobody did, the
+answer ended there — even when two or three others held a piece each and could
+have covered it between them.
+
+They can now take it over together, in order, the same way the original path
+was assembled. This applies while your question is still being read, which is
+when a takeover is possible at all; once the answer has started, a replacement
+still needs the conversation so far, which only a computer holding the whole
+share can be given.
+
 **Three rare failures no longer send you after a problem you don't have.**
 
 When something went wrong inside SwarmLLM itself — a request that finished

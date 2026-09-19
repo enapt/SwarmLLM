@@ -8735,3 +8735,90 @@ fn the_execution_failure_guard_catches_a_wrapped_pipeline_error() {
         "matching on the variant is legitimate; only building one misleads a reader"
     );
 }
+
+/// **The pipeline's segment count is read live, never cached across the forward
+/// loop — because `is_last` decides which segment SAMPLES.**
+///
+/// A failover can replace one segment with several, when no single stand-in
+/// holds the failed range but a few cover it between them
+/// (`docs/FUTURE_WORK.md` #17). It splices them into the assignment so the
+/// replacement survives into every later decode step.
+///
+/// `forward_through_segments` used to take `self.assignment.segments.len()`
+/// once, before its loop. Nothing spliced, so it was never stale — but with a
+/// splice it is wrong for the rest of THAT forward in two places, and the
+/// second one is silent:
+///
+/// * the loop bound, so the spliced-in tail is never run;
+/// * `is_last`, which decides which segment samples and carries `generated_ids`.
+///   Off by one, a middle segment ends the pipeline and the reply is quietly
+///   not the model's. Nothing errors and nothing warns — the same shape as the
+///   KV-context loss that `failover_can_restore_state` exists to refuse.
+///
+/// Later tokens were always fine, because the function re-enters per forward.
+/// Only the forward that failed over could see the stale value, which is
+/// exactly the reading that would survive casual testing.
+#[test]
+fn the_pipelines_segment_count_is_never_cached_across_the_forward_loop() {
+    let src = std::fs::read_to_string("src/inference/pipeline/distributed.rs")
+        .expect("read distributed.rs");
+    let body = method_body(&src, "    async fn forward_through_segments_inner(")
+        .expect("forward_through_segments_inner was renamed — re-point this guard");
+
+    for (line, stmt) in statements(body) {
+        // A binding that snapshots the length, e.g. `let num_segments =
+        // self.assignment.segments.len();`. Comparing against it directly is
+        // what the loop does and is fine; storing it is what goes stale.
+        let binds_len = stmt.trim_start().starts_with("let ")
+            && stmt.contains("segments.len()")
+            && !stmt.contains("==")
+            && !stmt.contains("<");
+        assert!(
+            !binds_len,
+            "src/inference/pipeline/distributed.rs:{line}: the segment count \
+             must be read live. A failover can splice one segment into several \
+             part-way through this loop, and a cached count then names the \
+             wrong segment as last — which is the one that samples.\n  {stmt}"
+        );
+    }
+
+    assert!(
+        body.contains("let is_last = idx == self.assignment.segments.len() - 1;"),
+        "`is_last` must be computed from the live segment count"
+    );
+}
+
+/// The guard above must fire on the binding it forbids and pass on the live
+/// read that replaced it. Planted violation, per `.claude/rules/architecture.md`
+/// § "A source-scanning guard is only as good as the spellings it knows".
+#[test]
+fn the_segment_count_guard_catches_a_cached_length() {
+    let binds = |stmt: &str| {
+        stmt.trim_start().starts_with("let ")
+            && stmt.contains("segments.len()")
+            && !stmt.contains("==")
+            && !stmt.contains("<")
+    };
+
+    assert!(
+        binds("let num_segments = self.assignment.segments.len();"),
+        "the exact shape this replaced must be caught"
+    );
+    // rustfmt wraps a longer one; `statements` rejoins it, so the guard sees
+    // the same single line and must still catch it.
+    let wrapped = "        let num_segments =\n            self.assignment.segments.len();\n";
+    assert!(
+        statements(wrapped).into_iter().any(|(_, s)| binds(&s)),
+        "a wrapped binding is the same defect and must not slip through"
+    );
+
+    // Null controls: the live comparisons the loop actually uses must pass.
+    assert!(
+        !binds("let is_last = idx == self.assignment.segments.len() - 1;"),
+        "comparing against the live length is the fix, not the defect"
+    );
+    assert!(
+        !binds("while idx < self.assignment.segments.len() {"),
+        "the live loop bound must not be flagged"
+    );
+}

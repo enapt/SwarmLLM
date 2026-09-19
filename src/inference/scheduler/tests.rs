@@ -5014,3 +5014,86 @@ fn a_peer_that_cannot_serve_inference_is_not_a_candidate() {
          itself healthy and would fail every request it was sent"
     );
 }
+
+/// **Several nodes that cover a range between them can stand in for it.**
+///
+/// A stand-in used to have to hold the whole of a failed segment by itself. On
+/// a swarm of many small holders that is often nobody, so a segment the swarm
+/// could collectively have replaced had none and the reply ended
+/// (`docs/FUTURE_WORK.md` #17).
+///
+/// The assertions that matter are the refusals: a cover with a HOLE in it must
+/// answer `None`. Returning a partial cover would run the reply through layers
+/// nobody executed, and nothing downstream could detect it — the same
+/// silent-wrongness the mid-reply failover refuses a replay for.
+#[test]
+fn a_standby_can_be_assembled_from_several_nodes_covering_a_range_between_them() {
+    let node = |b: u8| NodeId([b; 32]);
+    let seg = |n: u8, range: (u32, u32)| PipelineSegment {
+        node_id: node(n),
+        shard_id: ShardId {
+            model_id: ModelId("m".into()),
+            index: 0,
+        },
+        layer_range: range,
+    };
+    let ranges = |c: &Vec<&PipelineSegment>| c.iter().map(|s| s.layer_range).collect::<Vec<_>>();
+
+    // Two holders, each with half of the failed segment's range.
+    let split = vec![seg(2, (8, 20)), seg(3, (20, 32))];
+    let cover = super::standby_cover_for(&split, (8, 32), &[])
+        .expect("two nodes tile the range between them");
+    assert_eq!(ranges(&cover), vec![(8, 20), (20, 32)]);
+
+    // A single stand-in holding all of it is still preferred, and is returned
+    // as a one-element cover so the common path is unchanged.
+    let mut with_whole = split.clone();
+    with_whole.insert(0, seg(9, (0, 32)));
+    let cover = super::standby_cover_for(&with_whole, (8, 32), &[]).unwrap();
+    assert_eq!(
+        cover.len(),
+        1,
+        "one node holding the lot beats a chain of two"
+    );
+    assert_eq!(cover[0].node_id, node(9));
+
+    // A HOLE is not a cover. 8-20 and 24-32 leave 20-24 unserved.
+    let holed = vec![seg(2, (8, 20)), seg(3, (24, 32))];
+    assert!(
+        super::standby_cover_for(&holed, (8, 32), &[]).is_none(),
+        "a cover with a gap would run the reply through layers nobody executed"
+    );
+
+    // Short of the end is not a cover either.
+    let short = vec![seg(2, (8, 20)), seg(3, (20, 28))];
+    assert!(
+        super::standby_cover_for(&short, (8, 32), &[]).is_none(),
+        "stopping before the segment ends leaves the tail unserved"
+    );
+
+    // A machine already tried for this request is not offered again — without
+    // this a retry re-picks the node that just failed and waits for it twice.
+    assert!(
+        super::standby_cover_for(&split, (8, 32), &[node(3)]).is_none(),
+        "the only holder of 20-32 has already failed, so there is no cover"
+    );
+    let cover = super::standby_cover_for(&with_whole, (8, 32), &[node(9)])
+        .expect("the whole-range standby is barred, so the tiling is used");
+    assert_eq!(ranges(&cover), vec![(8, 20), (20, 32)]);
+
+    // Overlapping parts are fine, and the greedy step takes the one reaching
+    // furthest so the chain is as short as it can be — every hop is a round
+    // trip on the token path.
+    let overlapping = vec![seg(2, (8, 16)), seg(3, (8, 24)), seg(4, (16, 32))];
+    let cover = super::standby_cover_for(&overlapping, (8, 32), &[]).unwrap();
+    assert_eq!(
+        ranges(&cover),
+        vec![(8, 24), (16, 32)],
+        "prefer the part that reaches furthest rather than the first that fits"
+    );
+
+    // A wider-than-needed part is allowed: holding MORE than the range is what
+    // `standby_covers` has always accepted.
+    let wide = vec![seg(2, (0, 20)), seg(3, (18, 40))];
+    assert!(super::standby_cover_for(&wide, (8, 32), &[]).is_some());
+}

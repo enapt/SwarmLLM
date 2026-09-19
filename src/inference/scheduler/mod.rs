@@ -475,6 +475,62 @@ pub(crate) fn standby_covers(standby: &PipelineSegment, range: (u32, u32)) -> bo
     standby.layer_range.0 <= range.0 && standby.layer_range.1 >= range.1
 }
 
+/// **The single answer to "what could take this layer range over?"** — one
+/// standby that covers it outright, or several that tile it between them.
+///
+/// A standby used to have to hold the whole of a failed segment by itself. On a
+/// swarm of many small holders that is often nobody, so a segment the swarm
+/// could collectively have replaced had no stand-in at all and the reply ended
+/// (`docs/FUTURE_WORK.md` #17). Several nodes covering a range between them can
+/// stand in for it, in order, exactly as the primary chain does.
+///
+/// **A whole-range standby is always preferred** and is returned as a
+/// single-element cover, so the common case keeps its existing behaviour down
+/// to the node chosen. A tiling is only assembled when no single standby
+/// qualifies.
+///
+/// The tiling is greedy from `range.0`: at each step take the untried standby
+/// that starts at or before the frontier and reaches FURTHEST past it, which
+/// minimises the number of hops — each hop is a network round trip on the token
+/// path. It answers `None` unless the frontier reaches `range.1`, so a partial
+/// tiling is never returned: handing back a cover with a hole in it would
+/// produce a reply assembled from layers that were never run, which is the
+/// silent-wrongness this whole path exists to prevent.
+///
+/// `tried` bars machines this request has already failed on, so a retry cannot
+/// re-pick one and wait for it twice.
+pub(crate) fn standby_cover_for<'a>(
+    standbys: &'a [PipelineSegment],
+    range: (u32, u32),
+    tried: &[NodeId],
+) -> Option<Vec<&'a PipelineSegment>> {
+    let usable = |s: &&PipelineSegment| !tried.contains(&s.node_id);
+
+    if let Some(whole) = standbys
+        .iter()
+        .find(|s| usable(s) && standby_covers(s, range))
+    {
+        return Some(vec![whole]);
+    }
+
+    let mut cover: Vec<&PipelineSegment> = Vec::new();
+    let mut frontier = range.0;
+    while frontier < range.1 {
+        let next = standbys
+            .iter()
+            .filter(usable)
+            // Not already in this cover — one node may legitimately appear
+            // twice in `standbys` for different segments, but using the same
+            // entry twice in one cover would loop.
+            .filter(|s| !cover.iter().any(|c| std::ptr::eq(*c, *s)))
+            .filter(|s| s.layer_range.0 <= frontier && s.layer_range.1 > frontier)
+            .max_by_key(|s| s.layer_range.1)?;
+        frontier = next.layer_range.1;
+        cover.push(next);
+    }
+    (!cover.is_empty()).then_some(cover)
+}
+
 /// Could this candidate actually STAND IN for `segment_layers` more layers, on
 /// top of the `already_committed` layers this same plan has already given it?
 ///
@@ -602,7 +658,11 @@ pub(crate) fn segments_without_standby(
     segments
         .iter()
         .enumerate()
-        .filter(|(_, seg)| !standbys.iter().any(|s| standby_covers(s, seg.layer_range)))
+        // Asked through `standby_cover_for`, not `standby_covers`, because a
+        // segment backed by several nodes that tile it between them HAS a
+        // stand-in — reporting it as bare would be gotcha #451's shape again:
+        // a count that contradicts what failover then does with the same plan.
+        .filter(|(_, seg)| standby_cover_for(standbys, seg.layer_range, &[]).is_none())
         .map(|(idx, _)| idx)
         .collect()
 }
@@ -4315,6 +4375,86 @@ impl PipelineScheduler {
                     shard_id: backup.shard_id.clone(),
                     layer_range: segment.layer_range,
                 });
+                continue;
+            }
+
+            // Nobody holds the whole segment. Several nodes may still cover it
+            // between them, and on a swarm of many small holders that is the
+            // common shape — which is why a segment with no stand-in used to
+            // end the reply where the swarm collectively could have replaced it
+            // (`docs/FUTURE_WORK.md` #17).
+            //
+            // Each part is pushed as an ordinary standby entry, so nothing about
+            // the assignment's shape changes and nothing crosses the wire
+            // differently; `standby_cover_for` is what recognises them as a set.
+            // Each part is filtered and charged exactly as a whole-range standby
+            // is, so a node cannot be committed past its own bound by being used
+            // for a piece of a segment rather than all of it.
+            //
+            // Greedy from the segment's start, taking the candidate that reaches
+            // FURTHEST past the frontier: fewest hops, and each hop is a network
+            // round trip on the token path. Assembled into a scratch list and
+            // only committed if it reaches the end — a partial tiling is worse
+            // than none, because a cover with a hole runs a reply through layers
+            // that were never executed.
+            let mut cover: Vec<PipelineSegment> = Vec::new();
+            let mut charge: Vec<(NodeId, u32)> = Vec::new();
+            let mut frontier = segment.layer_range.0;
+            while frontier < segment.layer_range.1 {
+                let best = candidates
+                    .iter()
+                    .filter(|c| c.node_id != segment.node_id)
+                    .filter(|c| !cover.iter().any(|p| p.node_id == c.node_id))
+                    .filter(|c| {
+                        standby_may_take(c, segment, local_node_id, num_layers, encrypted_pipeline)
+                    })
+                    .filter_map(|c| {
+                        // The furthest this candidate reaches past the frontier,
+                        // from whichever of its ranges contains it.
+                        let reach = c
+                            .available_ranges
+                            .iter()
+                            .filter(|r| r.0 <= frontier && r.1 > frontier)
+                            .map(|r| r.1)
+                            .max()?
+                            .min(segment.layer_range.1);
+                        let part_layers = reach.saturating_sub(frontier);
+                        let already = committed.get(&c.node_id).copied().unwrap_or(0)
+                            + charge
+                                .iter()
+                                .filter(|(n, _)| *n == c.node_id)
+                                .map(|(_, l)| *l)
+                                .sum::<u32>();
+                        standby_has_room(c.max_hostable_layers, already, part_layers).then_some((
+                            c,
+                            reach,
+                            part_layers,
+                        ))
+                    })
+                    .max_by_key(|(_, reach, _)| *reach);
+                let Some((c, reach, part_layers)) = best else {
+                    cover.clear();
+                    break;
+                };
+                cover.push(PipelineSegment {
+                    node_id: c.node_id.clone(),
+                    shard_id: c.shard_id.clone(),
+                    layer_range: (frontier, reach),
+                });
+                charge.push((c.node_id.clone(), part_layers));
+                frontier = reach;
+            }
+            if !cover.is_empty() {
+                tracing::debug!(
+                    segment = ?segment.layer_range,
+                    parts = cover.len(),
+                    nodes = ?cover.iter().map(|p| format!("{}[{}-{}]", p.node_id, p.layer_range.0, p.layer_range.1)).collect::<Vec<_>>(),
+                    "DIAG: no single standby covers this segment — assembled one from several"
+                );
+                for (node, layers) in charge {
+                    *committed.entry(node).or_insert(0) += layers;
+                }
+                standbys.extend(cover);
             }
         }
 
