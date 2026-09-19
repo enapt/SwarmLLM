@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.3.190-alpha] — UNRELEASED (set this date when cutting the release)
+## [0.3.190-alpha] — 2026-09-19
 
 **Your computer will use its graphics card for more of your models.**
 
