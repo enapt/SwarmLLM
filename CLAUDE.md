@@ -47,16 +47,14 @@ Two that carry contracts rather than just versions:
 ## Coding Conventions
 
 ### Error Handling
-- Use `thiserror` for defining error types in `src/error.rs` (SwarmError enum)
-- Use `anyhow` only in `main.rs` and integration tests
-- Map SwarmError variants to HTTP status codes via `ApiError`. **Never choose an
-  error type at a call site** — `classify_error` is the single answer. The full
-  variant → status contract, and the two follow-ups a new variant must not skip,
-  are in `.claude/rules/completeness.md` (always-on).
-- Network errors: retry with exponential backoff (3 attempts)
-- Inference errors: return immediately, never retry silently
-- Shard integrity errors: quarantine shard, re-download, penalize peer trust
-- Credit errors: degrade priority tier, never block
+- `thiserror` for `SwarmError` in `src/error.rs`; `anyhow` only in `main.rs` and
+  integration tests.
+- **Never choose an error type at a call site** — `classify_error` is the single
+  answer. The full variant → status contract, and the two follow-ups a new
+  variant must not skip, are in `.claude/rules/completeness.md` (always-on).
+- Network errors: retry with exponential backoff (3 attempts). Inference errors:
+  return immediately, never retry silently. Shard integrity: quarantine,
+  re-download, penalize peer trust. Credits: degrade tier, never block.
 
 ### Naming
 `PascalCase` types, `snake_case` fns. Newtype wrappers for safety —
@@ -98,10 +96,10 @@ with a type-tag byte for tensor payloads.
 **Always say which feature set a count came from.** Current, with
 `--features dev,claude-subscription`: **2795 lib** (+12 ignored),
 79 integration (31 `integration` + 34 `integration_phase10_11` + 14 `yamux_substream`),
-136 repo-consistency, 1 `api_key_side_effects`, 40 `swarmllm-types` (**not** run
-by a bare `cargo test` — CI runs it explicitly),
-and 11 in the vendored request-response patch.
-Clippy clean. That last suite is run on its own:
+136 repo-consistency, 1 `api_key_side_effects`, 40 `swarmllm-types`, and 11 in
+the vendored request-response patch. Clippy clean. The last two are **not** run
+by a bare `cargo test` — CI runs the types crate explicitly, and the vendored
+one needs
 `cargo test --manifest-path vendor/libp2p-request-response/Cargo.toml --lib`.
 
 ⚠ **A count edited after the test run is an untested change.** Counts live in
@@ -162,35 +160,26 @@ a change, especially your own.
 - `docs/ARCHITECTURE.md` — **primary reference**: subsystems, source tree, protocols, security model
 - `docs/invariants/` — the evidence behind each rule (7 topics). **Read the topic file before changing code a rule names.**
 - `.claude/rules/diagnosis.md` — **read before blaming any change for any symptom, and before implementing anything non-trivial.** Rule 0 is research-first; then baseline before blaming, verify the mechanism fired, check the test fails without the fix.
-- `docs/DIAGNOSTICS.md` — `DIAG:` instrumentation, benches and their traps
-- `docs/FUTURE_WORK.md` — deferred items, with enough context to pick up cold
-- `docs/CREDITS_DESIGN.md` (before touching credits) · `docs/book/` — mdBook site
-- `.claude/sweep-log.jsonl` — every `/sweep` finding. **Grep before re-reporting.**
-- `SwarmLLM_Technical_Specification.docx` — **gitignored, absent from a clone.**
+- `docs/FUTURE_WORK.md` — deferred items. ⚠ **An entry's own SCOPE is a hypothesis** (gotcha #654) and its line numbers are often wrong (#645) — trace a producer to its CONSUMER before planning from it.
+- `docs/DIAGNOSTICS.md` (`DIAG:` instrumentation, bench traps) · `docs/CREDITS_DESIGN.md` (before touching credits) · `docs/book/` — mdBook site
+- `.claude/sweep-log.jsonl` — every `/sweep` finding. **Grep before re-reporting.** `SwarmLLM_Technical_Specification.docx` is **gitignored, absent from a clone.**
 
 ## Status
 
 **v0.3.190-alpha released and deployed to both nodes (2026-09-19).** Nothing
-functional is unreleased; `cargo audit` reports only advisories documented in
-`SECURITY.md`. Conformance on the downloaded artifact was identical line for
-line to the .189 baseline. It shipped five fixes: the graphics-memory budget now
-charged by what the pool reserves (#55), a node that cannot serve withdrawing
-inference while still serving shards (#89, part of #90), both halves of the
-prompt-privacy refusal and three execution failures moved off the route
-planner's internal signal (#86), and a standby assembled from several nodes
-covering a range between them (#17).
-⚠ **#90's CAUSE IS STILL UNKNOWN** — a 45-minute dispatcher stall. Four
-candidates eliminated with evidence; the node now names a stall and stops peers
-routing into it, but nothing prevents or explains one.
-⚠ **Before planning from any `docs/FUTURE_WORK.md` entry, read gotcha #654**:
-two entries' own scope was wrong in one day, in opposite directions. Trace a
-producer to its CONSUMER before believing an entry's account of the work.
+functional is unreleased; conformance on the downloaded artifact was identical
+line for line to the .189 baseline. It closed `docs/FUTURE_WORK.md` #55, #89,
+#86 and #17.
+⚠ **#90's CAUSE IS STILL UNKNOWN** — a 45-minute dispatcher stall. The node now
+names one and stops peers routing into it; nothing prevents or explains one.
+⚠ **#17 (composite standbys) has never run on a live multi-node failover** —
+unit tests and a guard only, on the token hot path. Rig recipe: #85.
 Release procedure: **`memory/release_gate.md`** — the ordered steps and every
-caution earned at a past gate; do not re-derive it. Per-release history:
-`memory/round_history.md`. Gotchas: `memory/gotchas.md` (next free index lives
-in `memory/MEMORY.md`, not here — it drifted when both claimed it). Standing
-cautions: `memory/open_cautions.md` — **read at session start.** (`memory/` is
-the auto-memory dir outside the repo: `~/.claude/projects/-home-user-SwarmLLM/memory/`.)
+caution earned at a past gate; do not re-derive it. History:
+`memory/round_history.md`. Gotchas: `memory/gotchas.md` (next free index lives in
+`memory/MEMORY.md`, not here — it drifted when both claimed it). Standing
+cautions: `memory/open_cautions.md` — **read at session start.** `memory/` is
+`~/.claude/projects/-home-user-SwarmLLM/memory/`, outside the repo.
 
 ## Pushes are public-facing
 

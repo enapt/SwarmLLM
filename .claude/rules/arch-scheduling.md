@@ -324,6 +324,30 @@ to separate: `standby_covers` asks whether a node HOLDS the range,
 
 → `docs/invariants/scheduling.md`
 
+## A stand-in may be SEVERAL nodes, and the segment count is then read live
+
+**`scheduler::standby_cover_for` is the single answer to "what could take this
+layer range over"** — one standby holding all of it (always preferred, returned
+as a one-element cover) or several that tile it between them. A cover with a
+HOLE, or one short of the end, answers `None`: a partial tiling runs the reply
+through layers nobody executed, which nothing downstream can detect. Ask through
+it, not `standby_covers`, or a plan reports a composite-backed segment as bare.
+
+**Offered only on the prompt pass.** Mid-reply a stand-in must be replayed the
+segment's retained input history, and part 2's input is part 1's OUTPUT, which
+never passed through the coordinator and was never retained. Lifting that needs
+a retention scheme that does not exist.
+
+**`forward_through_segments_inner` therefore reads `segments.len()` LIVE**, in
+the loop bound and in `is_last`. A takeover splices one segment into several, so
+a count cached before the loop leaves the spliced tail unrun and — worse
+silently — makes `is_last` name a middle segment, and `is_last` decides WHICH
+SEGMENT SAMPLES. `install_takeover` splices only AFTER the first part answers,
+so an unreachable cover leaves the assignment untouched. Guard:
+`the_pipelines_segment_count_is_never_cached_across_the_forward_loop`.
+
+→ `docs/invariants/scheduling.md`
+
 ## A count and an outcome that disagree are two different questions
 
 `scheduler::standby_covers` is the one predicate for "could this standby take

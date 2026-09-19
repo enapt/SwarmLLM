@@ -1361,6 +1361,66 @@ pretending to.
 worthless until you check that something fills that input on the path the guard
 exists for. Grep for the writer, and check it runs where the reader runs.
 
+## A stand-in may be SEVERAL nodes, and the segment count is then read live
+
+**`scheduler::standby_cover_for(standbys, range, tried)` is the single answer to
+"what could take this layer range over"** (2026-09-19, `docs/FUTURE_WORK.md`
+#17). It returns one standby holding all of the range — always preferred, and
+returned as a ONE-ELEMENT cover so the pre-existing path is unchanged down to
+the node chosen — or a greedy tiling from the range's start, taking at each step
+the part that reaches FURTHEST past the frontier. Fewest hops, because each hop
+is a network round trip on the token path.
+
+**Why it exists.** A stand-in had to hold the whole of a failed segment by
+itself. On a swarm of many small holders that is often nobody, so a segment the
+swarm could collectively have replaced had none at all and the reply ended —
+report #028's residual, left open because item 18's shape 2 had to land first.
+
+**The refusals are the substance.** A cover with a HOLE, or one that stops short
+of the end, answers `None`. A partial tiling would run the reply through layers
+nobody executed, and nothing downstream could detect it: the coordinator
+receives a well-formed activation of the right shape either way. That is the
+same class of silent wrongness `failover_can_restore_state` refuses a replay
+for, and the reason the greedy loop returns `None` rather than its best effort.
+
+**Restricted to the prompt pass, and not casually liftable.** Mid-reply a
+stand-in must be replayed the segment's retained input history, and
+`retained_activations` holds only what the COORDINATOR sent — i.e. the input to
+the whole range. The second part of a composite is fed by the first part's
+OUTPUT, which never passed through the coordinator and was never retained. There
+is nothing to replay onto it, so lifting this needs a new retention scheme, not
+a relaxed condition.
+
+**The splice, and the hot-path rule it forces.** A composite must persist into
+every LATER decode step, not just the forward that failed over — so the
+assignment genuinely changes shape and `install_takeover` splices N segments in
+at the failed index. (A side map was considered and does not work for exactly
+this reason.) It splices only AFTER the first part has answered, so a cover that
+cannot be reached leaves the assignment untouched and the caller tries the next
+one; splice-then-unwind would leave a half-installed chain the first time an
+unwind was missed.
+
+`forward_through_segments_inner` therefore reads `self.assignment.segments.len()`
+LIVE, in both the loop bound and `is_last`. It used to cache it once before the
+loop, which was correct only because nothing spliced. With a splice a cached
+count leaves the spliced tail unrun, and — the silent half — makes `is_last`
+name a middle segment. **`is_last` decides which segment SAMPLES**, so an
+off-by-one there ends the pipeline early and the reply is quietly not the
+model's. Only the forward that failed over could ever see the stale value, since
+the function re-enters per token; that is precisely the reading that survives
+casual testing. Guards:
+`the_pipelines_segment_count_is_never_cached_across_the_forward_loop` (verified
+by re-introducing the cached binding in the real source) and
+`the_segment_count_guard_catches_a_cached_length`.
+
+`segments_without_standby` asks through the cover too, so a plan cannot report a
+composite-backed segment as bare — gotcha #451's shape, a count contradicting
+what failover then does with the same plan.
+
+⚠ **Verified by unit test and guard, NOT on a live multi-node failover.** The
+two-node rig in `docs/FUTURE_WORK.md` #85 is the cheapest end-to-end exercise
+and has not been run against this.
+
 ## A standby is a capacity commitment, not just a coverage claim
 
 `scheduler::standby_has_room(max_hostable_layers, already_committed,

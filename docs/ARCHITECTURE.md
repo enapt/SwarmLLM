@@ -194,6 +194,29 @@ The **MessageDispatcher** is a dedicated task in `daemon/dispatch/mod.rs` that r
 
 It is the **only** consumer of `network_out`, which carries gossip *and* every inbound `LayerForward`, `LayerResult`, `StreamingToken` and `RemoteGenerateRequest` — so a dispatcher that stops consuming is a node that has left the swarm while still answering its own health endpoint. That happened for 45 minutes on 2026-09-18 and nothing noticed, because `daemon::supervisor` watches its `JoinSet` for a task that RETURNS (a panic or a clean exit) and a task parked inside an `.await` does neither. Since v0.3.189 the dispatcher writes a liveness marker (`metrics.note_dispatch`, taken the instant `recv()` returns and before the `match`, so it covers every arm) and **HealthMonitor** — a different task on its own timer — reports a stall past 300 s at `error!`, naming the last message's variant. The cause of that stall is still open: `docs/FUTURE_WORK.md` #90.
 
+**Since v0.3.190 the node also WITHDRAWS inference when it cannot serve.**
+`SharedState::inference_outage` is the single predicate behind two unrelated
+faults that share one shape — a total inference outage that reports itself as
+healthy: `InferenceOutage::GraphicsRuntimeGone` (a driver updated under a
+running daemon, so no worker of any kind starts — this binary links `libcuda`,
+and a processor-only worker fails identically) and
+`InferenceOutage::DispatcherStalled` (past `DISPATCH_STALL_AFTER`, the same
+constant the log line reads, so the two cannot disagree about when a stall
+began). `NodeCapability::can_serve_inference` carries it to peers and
+`scheduler::gather_candidates` acts on it — the one place a candidate is
+admitted, so the DP, the capacity rungs, the standby search and
+`delegation_target` all inherit it.
+
+**Shard serving is untouched by construction, not by exception**: shard sources
+come from a different gatherer (`auto_manage::scoring::gather_candidates`) and a
+byte-range read needs no worker. **The wire default is `true`** — a peer that
+advertises nothing has not said no, the same rule
+`PeerResidency::WarmAmountUnknown` exists for; reading silence as incapacity
+would have excluded every not-yet-upgraded node from inference. Rebuilt on every
+broadcast, so the withdrawal reverses itself when the condition clears. Guard:
+`both_inference_outages_withdraw_through_one_predicate`.
+→ `docs/FUTURE_WORK.md` #89, #90.
+
 ## Startup Sequence
 
 ```

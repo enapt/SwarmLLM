@@ -312,6 +312,35 @@ emitted()`.
 
 → `docs/invariants/api-surfaces.md`
 
+## `PipelineError` is the route planner's signal to ITSELF
+
+It is control flow, not a user-facing error. The capacity-rung walker in
+`assemble_pipeline_for` catches each one and tries the next `CapacityBound`;
+`greedy_assign` catches its own capacity refusal and re-runs unbounded. Those
+producers never reach a caller and are correct as they are.
+
+**A failure raised while EXECUTING is ours, or it gets its own variant** —
+never this one. Three execution failures were filed under it ("Pipeline has no
+segments", "Pipeline completed without producing a result", "Response channel
+dropped") and each inherited its hint: *fetch the model part that is missing*.
+None of them is that, so the advice could not help — gotcha #295's family. They
+are `Internal` now, which carries no hint by design. Guard:
+`an_execution_failure_is_never_the_route_planners_internal_signal`, drawn at the
+DIRECTORY because that is where the meaning changes — `scheduler/` plans a
+route, `pipeline/` runs one.
+
+⚠ **`ServiceUnavailable` is the wrong home for a failure of OUR OWN machinery**:
+`router::remote_peer_could_not_serve` reads it as "a peer could not serve" and
+bars that peer from the retry.
+
+**Both ends of the prompt-privacy refusal are named separately** —
+`PromptPrivacyUnavailable` (shard 0, the embedding table) and
+`PromptPrivacyNeedsFinalShard` (the output head). Same 503 and same
+`error_type`, because to a caller it is one situation; two variants because the
+two send the reader after DIFFERENT parts, and one hint cannot do that.
+
+→ `docs/invariants/api-surfaces.md`
+
 ## Single-source-of-truth helpers — API surfaces, errors and streaming
 
 Each names the ONE place a decision is made. A second implementation of any of
