@@ -202,6 +202,22 @@ pub fn verify_release_sidecar_with(
     Ok(())
 }
 
+/// The trusted comment a release signature must carry.
+///
+/// **This is the producing half of the rule `comment_describes` enforces, and
+/// it lives here so there is only one of it.** `examples/sign_release.rs`
+/// calls this rather than formatting its own string: the signer and the
+/// verifier disagreeing would not fail any build or any test — it would
+/// produce releases that look perfectly signed and that every node refuses,
+/// discovered only in the field. `the_signer_and_the_verifier_agree_on_the_
+/// comment_format` pins the round trip.
+pub fn trusted_comment(asset_name: &str, version: &str) -> String {
+    format!(
+        "swarmllm-release asset:{asset_name} version:{}",
+        normalize_version(version)
+    )
+}
+
 /// Does this (already authenticated) trusted comment describe exactly this
 /// asset at this version?
 ///
@@ -312,6 +328,32 @@ mod tests {
         version: &str,
     ) -> Result<(), SignatureError> {
         verify_release_sidecar_with(&test_public_key(), sidecar, sig_text, asset, version)
+    }
+
+    /// The signer and the verifier must agree, and nothing else would notice
+    /// if they stopped: a mismatch produces releases that look correctly signed
+    /// and that every node rejects. Exercised across the spellings that reach
+    /// these functions, including a `v`-prefixed tag.
+    #[test]
+    fn the_signer_and_the_verifier_agree_on_the_comment_format() {
+        for (asset, version) in [
+            ("swarmllm-linux-x86_64", "0.3.191-alpha"),
+            ("swarmllm-linux-x86_64-cuda", "v0.3.191-alpha"),
+            ("swarmllm-windows-x86_64-gpu.exe", "1.0.0"),
+        ] {
+            let comment = trusted_comment(asset, version);
+            assert!(
+                comment_describes(&comment, asset, version),
+                "the verifier rejects what the signer writes: {comment:?}"
+            );
+            // ...and it must still be specific about WHICH artifact.
+            assert!(!comment_describes(
+                &comment,
+                "swarmllm-macos-aarch64",
+                version
+            ));
+            assert!(!comment_describes(&comment, asset, "0.0.1"));
+        }
     }
 
     #[test]

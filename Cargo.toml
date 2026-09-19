@@ -310,6 +310,24 @@ claude-subscription = []
 
 
 [dev-dependencies]
+# Signing half of minisign, for `examples/sign_release.rs` ONLY - the release
+# gate's offline signer. Deliberately a DEV dependency: nothing shipped can
+# sign, and the daemon carries only `minisign-verify`.
+#
+# It exists so the key is unlocked ONCE per release instead of once per asset.
+# The `rsign` CLI reads its password straight from /dev/tty through rpassword,
+# with no env var and no stdin path (a piped password dies `os error 6`), so
+# seven assets meant seven prompts at the gate.
+#
+# The example is deliberately NOT declared as `[[example]]`: auto-discovery
+# finds nothing when `examples/` is absent, which is the Docker build context,
+# whereas a declared entry without an explicit `path` fails to parse the whole
+# manifest there (gotcha #268).
+minisign = "0.9"
+# Reads the signing password from the terminal for the example above.
+# `minisign`'s own `helpers::get_password` is behind a private module.
+rpassword = "7"
+
 tempfile = "3"
 # `test-util` (not part of tokio's `full`) gives tests a paused clock, so a
 # deferred action can be asserted without sleeping for its real delay.

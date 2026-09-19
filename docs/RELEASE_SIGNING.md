@@ -43,9 +43,14 @@ presence of signatures suggest otherwise.
 Generate the keypair on the machine that will cut releases. Do this once.
 
 ```bash
-cargo install rsign2                      # pure-Rust minisign, no C toolchain
+cargo install rsign2                      # only needed for this one step
 rsign generate -p release_pubkey.pub -s ~/.swarmllm-release-secret.key
 ```
+
+`rsign` is used here and nowhere else. Signing a release goes through
+`examples/sign_release.rs`, built from this repo, because it unlocks the key
+ONCE for the whole release — `rsign` reads its password straight from
+`/dev/tty` per invocation, which meant one prompt per asset.
 
 It will ask for a password. Use one — the file is the whole security boundary.
 
@@ -82,8 +87,12 @@ because it cannot sign. One command finishes the job:
 examples/sign_release.sh v0.3.191-alpha
 ```
 
-That downloads each sidecar, signs it, verifies the result against the *public*
-key in the repo, uploads the signatures and un-drafts the release. It refuses to
+That downloads every sidecar and checks the set is complete **before**
+asking for anything, then prompts for the password **once** and signs them
+all. Each signature is verified against the *public* key in the repo before
+it can be uploaded, and the signer refuses outright if the secret key is not
+the one `release_pubkey.txt` publishes — signing with the wrong key produces
+a release that looks perfect and that every node rejects. It refuses to
 sign a release with a missing sidecar, because publishing a partially signed
 release would silently freeze every node on the missing platform.
 

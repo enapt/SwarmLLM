@@ -63,17 +63,17 @@ PUBKEY_FILE="$ROOT/release_pubkey.txt"
 # uses so a human reading a signature sees what they expect.
 VERSION="${TAG#v}"
 
-command -v rsign >/dev/null 2>&1 || {
-  echo "rsign not found. Install the signer with:" >&2
-  echo "    cargo install rsign2" >&2
-  echo "(the C 'minisign' works too, but this script drives rsign)" >&2
-  exit 1
-}
+# The signer is `examples/sign_release.rs`, built from this repo, because it
+# unlocks the key ONCE for the whole release. The `rsign` CLI cannot: it reads
+# the password straight from /dev/tty per invocation, so seven assets meant
+# seven prompts. `rsign` is still the tool anyone else uses to VERIFY a release.
+command -v cargo >/dev/null 2>&1 || { echo "cargo not found (needed to build the signer)" >&2; exit 1; }
 command -v gh >/dev/null 2>&1 || { echo "gh CLI not found" >&2; exit 1; }
 [ -f "$SECRET_KEY" ] || {
   echo "No secret key at $SECRET_KEY" >&2
   echo "Generate one ONCE, and keep it off this repository and off GitHub:" >&2
   echo "    rsign generate -p release_pubkey.pub -s $SECRET_KEY" >&2
+  echo "  (install that one-off generator with: cargo install rsign2)" >&2
   echo "then put the RW... line from release_pubkey.pub into release_pubkey.txt" >&2
   exit 1
 }
@@ -99,6 +99,9 @@ echo "Signing $TAG (${#ASSETS[@]} assets) with $SECRET_KEY"
 echo "Public key the field trusts: $PUBKEY"
 echo
 
+# Fetch every sidecar and check the set is complete BEFORE asking for the
+# password. A release missing a platform is not signable, and finding that out
+# after someone has typed their passphrase is a poor way to learn it.
 MISSING=()
 for asset in "${ASSETS[@]}"; do
   sidecar="${asset}.sha256"
@@ -125,19 +128,7 @@ for asset in "${ASSETS[@]}"; do
     rm -f "$WORK/$asset"
   fi
 
-  # The trusted comment is covered by the signature, and `update_signature.rs`
-  # CHECKS it rather than displaying it. Without these two fields a genuine
-  # signature for one asset could be replayed as another's, so the format here
-  # is a contract with `comment_describes` — not a label.
-  rsign sign "$WORK/$sidecar" \
-    -s "$SECRET_KEY" \
-    -x "$WORK/${sidecar}.minisig" \
-    -t "swarmllm-release asset:${asset} version:${VERSION}" \
-    -c "SwarmLLM release signature"
-
-  # Verify with the PUBLISHED key, not whichever one signed.
-  rsign verify "$WORK/$sidecar" -x "$WORK/${sidecar}.minisig" -P "$PUBKEY" >/dev/null
-  echo "  [$asset] signed and verified"
+  echo "  [$asset] checksum file fetched"
 done
 
 if [ "${#MISSING[@]}" -gt 0 ]; then
@@ -151,6 +142,23 @@ if [ "${#MISSING[@]}" -gt 0 ]; then
   exit 1
 fi
 
+# One password prompt for the whole release. The signer refuses before writing
+# anything if this key is not the one `release_pubkey.txt` publishes, and
+# verifies each signature it produces against that key before it can be
+# uploaded. Both the trusted-comment format and the prehashed mode are its
+# contract with `src/update_signature.rs`.
+echo
+echo "Signing ${#ASSETS[@]} checksum files — one password for all of them."
+# Pinned to the feature set the gate has already built (CLAUDE.md's standard
+# build command), and to this repo's manifest so the script works from any
+# directory. The signer needs none of the daemon, but an example links the lib,
+# so matching the flags means this reuses the existing artifacts instead of
+# compiling the tree a second way. `--no-default-features` alone does NOT
+# compile: the frontend needs `embedded` or `dev`.
+cargo run --quiet --manifest-path "$ROOT/Cargo.toml" \
+  --no-default-features --features dev,claude-subscription \
+  --example sign_release -- "$VERSION" "$WORK" "${ASSETS[@]}"
+
 echo
 echo "Uploading ${#ASSETS[@]} signatures…"
 gh release upload "$TAG" --repo "$REPO" --clobber "$WORK"/*.minisig
@@ -163,3 +171,4 @@ echo
 echo "Done. $TAG is signed and published."
 echo "Anyone can verify an asset independently with:"
 echo "    rsign verify <asset>.sha256 -x <asset>.sha256.minisig -P $PUBKEY"
+echo "  (or the minisign CLI; both read this format)"
