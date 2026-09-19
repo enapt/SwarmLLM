@@ -8,6 +8,55 @@ names** — the rule statement in `architecture.md` is the summary, this is the
 reasoning, and several of these describe a fix that looked obviously correct
 and was not.
 
+## A generation that reaches the context window has finished, not failed
+
+**The rule.** Reaching the model's context window mid-DECODE is a reply that has
+finished for length. `SwarmError::ContextWindowReached { used, window }` carries
+it out of `split/executor.rs`, and `length_finish_or_error` converts it to
+`finish_reason: "length"` wherever tokens were produced.
+
+**What it replaced.** The same pre-flight answered `SwarmError::Validation` for
+both cases, so a reply that ran to the wall was reported as the caller's
+mistake: *"This conversation is 260 tokens, longer than the 256 this model is
+currently set to serve … send a shorter prompt"* — for a 38-token prompt, after
+40 seconds of work.
+
+**Measured on a two-node rig, same request, before and after** (v0.3.188
+released vs the fix). Non-streaming: `finish_reason: "error"` → **`"length"`**.
+Streaming: 198 deltas followed by an **error event** → 198 deltas followed by a
+terminal `"length"` chunk and **zero error events**. `total_tokens: 257` against
+a 256 window on every run is the mechanism firing exactly at the wall.
+
+⚠ **The entry that reported this (`docs/FUTURE_WORK.md` #85) said the reply was
+DISCARDED and the status was 400. That was true on .187 and is not on .188** —
+#88's salvage already ships. What remained was the label, and the streaming
+error event. Re-measure before repeating a severity from an older entry.
+
+**What a change must keep.**
+
+- **Prefill overflow stays a 400 with the existing wording.** The discriminator
+  is `seq_len == 1 && index_pos > 0` — one position into a conversation that has
+  already started. A CHUNK of a prompt is still a prompt.
+- **With nothing produced it stays an error**, rewritten to the old `Validation`
+  message: the window can only be hit at the first decode step if the
+  conversation already filled it, and there that wording is exactly true. This
+  is why the fix needed **no new user-facing string and no new i18n key**.
+- **The variant carries NUMBERS, not prose.** It must survive the worker IPC hop
+  and the network hop, neither of which keeps types;
+  `reclassify_flattened_error` recovers it from its Display form, so the wording
+  is part of the TYPE (gotcha #295).
+- **Every failure arm asks, and so does the choke point.** The decode loop has
+  two arms; `keeping_the_partial` wraps the five alternative coordinators, none
+  of which asks for itself. The first version of this fix covered only the loop
+  and was inert on `try_ngram_only_distributed`, the DEFAULT path for a node
+  holding nothing. Guard:
+  `every_failure_arm_of_the_decode_loop_asks_whether_the_reply_finished`, which
+  compares COUNTS rather than looking back N lines — its first version looked
+  back 25 and the real code sat at 26.
+- **A streamed reply gets its terminal event** at the choke point, or
+  `api::openai::streaming` reads the missing finish as "never streamed" and
+  re-emits the whole reply as one delta (gotcha #414).
+
 ## A reply is finalised on the coordinator, including one a peer generated
 
 (2026-09-17, gotcha #634.)

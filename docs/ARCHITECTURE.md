@@ -192,6 +192,8 @@ Single Rust binary, three simultaneous functions:
 
 The **MessageDispatcher** is a dedicated task in `daemon/dispatch/mod.rs` that routes inbound network messages to the appropriate subsystem. Inference messages go to InferenceRouter, CreditGossip updates peer balance distributions, and pool messages go to PoolManager.
 
+It is the **only** consumer of `network_out`, which carries gossip *and* every inbound `LayerForward`, `LayerResult`, `StreamingToken` and `RemoteGenerateRequest` — so a dispatcher that stops consuming is a node that has left the swarm while still answering its own health endpoint. That happened for 45 minutes on 2026-09-18 and nothing noticed, because `daemon::supervisor` watches its `JoinSet` for a task that RETURNS (a panic or a clean exit) and a task parked inside an `.await` does neither. Since v0.3.189 the dispatcher writes a liveness marker (`metrics.note_dispatch`, taken the instant `recv()` returns and before the `match`, so it covers every arm) and **HealthMonitor** — a different task on its own timer — reports a stall past 300 s at `error!`, naming the last message's variant. The cause of that stall is still open: `docs/FUTURE_WORK.md` #90.
+
 ## Startup Sequence
 
 ```

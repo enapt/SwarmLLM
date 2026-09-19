@@ -272,6 +272,22 @@ terminal `finish_reason: Some(..)` does not merely omit a marker — it
 
 → `docs/invariants/api-surfaces.md`
 
+## A generation that reaches the context window has FINISHED, not failed
+
+`SwarmError::ContextWindowReached { used, window }` is raised at the
+`split/executor.rs` pre-flight ONLY for a decode step into an existing
+conversation (`window_overflow_is_a_finished_reply(seq_len, index_pos)`), and
+`pipeline::distributed::length_finish_or_error` turns it into
+`finish_reason: "length"` wherever tokens were produced. A prompt too long to
+START keeps its 400 and its wording, which is correct there.
+
+**Both halves of the decode loop and the choke point wrapping the five
+alternative coordinators must ask.** The default distributed path is one of
+those five, so a fix written only in the standard loop is inert for every node
+that holds no model — which is every new user.
+
+→ `docs/invariants/api-surfaces.md`
+
 ## A stream that fails must say so (2026-09-01)
 
 `finish_reason` carries only what the OpenAI spec defines — `stop`, `length`,
