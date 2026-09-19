@@ -170,11 +170,16 @@ a change, especially your own.
 
 ## Status
 
-**v0.3.188-alpha released and deployed to both nodes (2026-09-18).** Nothing
+**v0.3.189-alpha released and deployed to both nodes (2026-09-19).** Nothing
 functional is unreleased; `cargo audit` reports only advisories documented in
-`SECURITY.md`. ⚠ **Two open items, BOTH needing a DECISION not code, and each
-alters what this node offers the swarm**: `docs/FUTURE_WORK.md` #55 (budget
-charged by metadata, not residency) and #89 (dead graphics stack still offered).
+`SECURITY.md`. Conformance on the downloaded artifact was identical line for
+line to the .188 baseline. ⚠ **Three open items, ALL needing a DECISION not
+code**: `docs/FUTURE_WORK.md` #55 (budget charged by metadata, not residency),
+#89 (dead graphics stack still offered), and #86 (the no-route split — the
+English wording is a choice to make before minting 21 translations). ⚠ **#90 —
+a 45-minute dispatcher stall whose CAUSE IS STILL UNKNOWN.** Four candidates
+eliminated with evidence; .189 makes a recurrence identify itself, and whether
+the node should ACT on one is the same shape of decision as #89.
 Release procedure: **`memory/release_gate.md`** — the ordered steps and every
 caution earned at a past gate; do not re-derive it. Per-release history:
 `memory/round_history.md`. Gotchas: `memory/gotchas.md` (next free index lives
