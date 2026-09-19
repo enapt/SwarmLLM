@@ -93,18 +93,34 @@ impl UpdateMode {
 impl UpdateConfig {
     /// The mode actually in force, migrating a pre-`mode` config.
     ///
-    /// A legacy `auto_update` of `stable`/`all` was an explicit opt-in to
-    /// automatic downloads and is preserved as `Download`. Legacy `disabled`
-    /// becomes `Notify`, NOT `Off`: it was the shipped default rather than a
-    /// decision, and it suppressed the update check entirely — so nodes went on
-    /// running old builds with nothing ever telling anyone. `mode = "off"` is
-    /// how you actually opt out now.
+    /// **A config that never chose resolves to `Install` (2026-09-19).** It was
+    /// `Notify` until release signing landed, and `Notify` never installs — so
+    /// a fleet of default nodes only moved when each operator acted. Measured
+    /// on the live swarm that day: of five peers, two were still two releases
+    /// behind after ~16 h and ~4.5 h of uptime, having checked roughly sixteen
+    /// and four times each. They were not failing; they were waiting for a
+    /// human who was never coming.
+    ///
+    /// **What made this safe to change is `crate::update_signature`, not a
+    /// change of mind.** Unattended self-replacement was held back behind audit
+    /// item C1 for as long as a release was authenticated only by a checksum
+    /// published beside it, because anyone who could swap the binary could swap
+    /// the checksum. Now an update must carry a signature from a key that never
+    /// exists in CI. **If that verification is ever weakened, this default has
+    /// to go back** — the two are one decision.
+    ///
+    /// The legacy field no longer distinguishes anything: `disabled` was the
+    /// shipped default rather than a decision, and `stable`/`all` were opt-ins
+    /// to *less* than the default now does. All three resolve the same way, and
+    /// an explicit `mode` still wins — `off`, `notify` and `download` are how
+    /// you opt out, in increasing order of what you keep.
     pub fn effective_mode(&self) -> UpdateMode {
         match self.mode {
             Some(m) => m,
             None => match self.auto_update {
-                AutoUpdateMode::Disabled => UpdateMode::Notify,
-                AutoUpdateMode::Stable | AutoUpdateMode::All => UpdateMode::Download,
+                AutoUpdateMode::Disabled | AutoUpdateMode::Stable | AutoUpdateMode::All => {
+                    UpdateMode::Install
+                }
             },
         }
     }
@@ -123,13 +139,12 @@ impl Default for UpdateConfig {
         Self {
             // MUST stay `None`, matching the `#[serde(default)]` on the field.
             // `None` is the designed "not explicitly set" state that
-            // `effective_mode` resolves from `auto_update`; hardcoding
-            // `Some(Notify)` here made the answer depend on whether the
-            // `[updates]` *section* happened to exist — a section with no
-            // `mode` key deserialized to `None` while a missing section used
-            // this impl and got `Some(Notify)`. With the default
-            // `auto_update: Disabled`, `effective_mode(None)` is already
-            // `Notify`, so agreeing costs nothing.
+            // `effective_mode` resolves; hardcoding a mode here made the answer
+            // depend on whether the `[updates]` *section* happened to exist — a
+            // section with no `mode` key deserialized to `None` while a missing
+            // section used this impl and got the hardcoded value. Leaving it
+            // `None` means both routes go through `effective_mode` and cannot
+            // disagree, whatever that function decides today.
             mode: None,
             auto_update: AutoUpdateMode::Disabled,
             check_interval_hours: default_check_interval_hours(),
@@ -138,11 +153,15 @@ impl Default for UpdateConfig {
     }
 }
 
-// Auto-update default is `Disabled` per docs/ARCHITECTURE.md "Key Design
-// Decisions" and the C1 deferred-item note: until binary signing is wired,
-// every node opting in to auto-update is downloading SHA256-only-verified
-// binaries from GitHub. Default-disabled is the documented safe posture;
-// users opt-in via `[updates] auto_update = "stable"` in config.toml.
+// This is the LEGACY field's default and it no longer decides anything on its
+// own — `effective_mode` resolves every value of it to `Install`. It stays
+// `Disabled` because it is written into every config file on disk and changing
+// the literal would rewrite those files to no purpose.
+//
+// It used to carry the C1 posture: while a release was authenticated only by a
+// SHA256 sidecar published beside it, default-disabled was the documented safe
+// answer. Release signing (`src/update_signature.rs`) is what retired that
+// argument on 2026-09-19 — not a reassessment of the risk.
 //
 // **The section is `[updates]`, plural.** This said `[update]` for a long time.
 // An unknown section warns and is ignored, so anyone following it set nothing
@@ -265,23 +284,33 @@ mod update_mode_tests {
     /// contains `auto_update = "disabled"` — the shipped default, not a choice —
     /// and that value suppressed the update check entirely, so nodes ran old
     /// builds with nothing ever saying so.
+    ///
+    /// It resolved to `Notify` from then until 2026-09-19, which told those
+    /// nodes about releases without ever installing one. Now that a release
+    /// must be signed, it resolves to `Install`.
     #[test]
-    fn a_legacy_config_starts_getting_notified() {
+    fn a_legacy_config_keeps_itself_up_to_date() {
         let cfg: UpdateConfig = toml::from_str("auto_update = \"disabled\"").unwrap();
         assert_eq!(cfg.mode, None, "old configs have no mode key");
-        assert_eq!(cfg.effective_mode(), UpdateMode::Notify);
+        assert_eq!(cfg.effective_mode(), UpdateMode::Install);
     }
 
-    /// ...but a deliberate opt-in to automatic downloads must not be downgraded.
+    /// A legacy opt-in must never come out as LESS than a config that chose
+    /// nothing at all. `stable`/`all` meant "update me automatically" and
+    /// mapped to `Download` while the default was `Notify`; once the default
+    /// became `Install`, leaving them at `Download` would have quietly demoted
+    /// the people who had asked for this all along.
     #[test]
-    fn a_legacy_opt_in_is_preserved() {
+    fn a_legacy_opt_in_is_never_weaker_than_the_default() {
+        let default_mode = UpdateConfig::default().effective_mode();
         for legacy in ["stable", "all"] {
             let cfg: UpdateConfig = toml::from_str(&format!("auto_update = \"{legacy}\"")).unwrap();
-            assert_eq!(
-                cfg.effective_mode(),
-                UpdateMode::Download,
-                "legacy auto_update = {legacy} opted in to downloading"
+            assert!(
+                cfg.effective_mode() >= default_mode,
+                "legacy auto_update = {legacy} opted IN, so it must not resolve \
+                 to less than the default ({default_mode:?})"
             );
+            assert_eq!(cfg.effective_mode(), UpdateMode::Install);
         }
     }
 
@@ -312,7 +341,7 @@ mod update_mode_tests {
     fn prereleases_are_included_by_default() {
         let cfg = UpdateConfig::default();
         assert!(cfg.include_prereleases);
-        assert_eq!(cfg.effective_mode(), UpdateMode::Notify);
+        assert_eq!(cfg.effective_mode(), UpdateMode::Install);
         // A fresh install checks often enough to matter when several releases
         // can ship in one day.
         assert!(cfg.check_interval_hours <= 1);
@@ -322,21 +351,22 @@ mod update_mode_tests {
     /// `auto_update` field it is derived from.
     ///
     /// `auto_update` defaults to `Disabled`, and `effective_mode` deliberately
-    /// resolves that to `Notify` — so a stock install checks for releases and
-    /// says so. `GET /api/admin/version` reported the legacy field instead and
-    /// therefore answered "disabled" on a node that was checking on schedule,
-    /// with a populated `last_checked` sitting next to it (observed live
-    /// 2026-08-10). Anyone asking "will this node tell me about a release?" got
-    /// the wrong answer from the endpoint built to answer it.
+    /// does not honour that literally. `GET /api/admin/version` reported the
+    /// legacy field instead and therefore answered "disabled" on a node that
+    /// was checking on schedule, with a populated `last_checked` sitting next
+    /// to it (observed live 2026-08-10). Anyone asking "will this node tell me
+    /// about a release?" got the wrong answer from the endpoint built to
+    /// answer it — and the gap is wider now that the stock answer is that the
+    /// node installs by itself.
     #[test]
-    fn a_stock_install_reports_that_it_checks_for_updates() {
+    fn a_stock_install_reports_that_it_keeps_itself_updated() {
         let cfg = UpdateConfig::default();
         assert_eq!(cfg.auto_update, AutoUpdateMode::Disabled, "precondition");
         assert_eq!(
             cfg.effective_mode().as_str(),
-            "notify",
-            "a default node checks and notifies — reporting the legacy field \
-             here is how it came to claim updates were disabled"
+            "install",
+            "a default node installs — reporting the legacy field here is how \
+             it came to claim updates were disabled"
         );
     }
 

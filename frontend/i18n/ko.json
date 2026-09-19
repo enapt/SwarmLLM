@@ -1134,7 +1134,7 @@
   "settings.trust_lan_desc": "로컬 네트워크의 기기가 키를 붙여넣지 않고도 이 대시보드를 열 수 있도록 합니다. Tailscale 서브넷 라우터나 컨테이너를 통해 SwarmLLM에 연결하여 요청이 본인이 아닌 라우터 주소에서 도착하는 경우 켜세요.",
   "settings.unreadable": "⚠ 현재 설정을 읽지 못해 지금은 변경할 수 없습니다. 이 창을 닫고 잠시 후에 설정을 다시 열어 주세요.",
   "settings.update_mode": "소프트웨어 업데이트",
-  "settings.update_mode_desc": "업데이트는 GitHub에서 내려받아 공개된 체크섬으로 검증합니다. 자동 설치는 이 컴퓨터가 진행 중인 작업을 마칠 때까지 기다린 뒤 다시 시작합니다.",
+  "settings.update_mode_desc": "업데이트는 GitHub에서 제공되며, 설치되기 전에 SwarmLLM 릴리스 키의 유효한 서명이 있어야 합니다. 서명이 없거나 변조된 다운로드는 거부됩니다. 자동 설치는 이 컴퓨터가 진행 중인 작업을 마칠 때까지 기다린 뒤 다시 시작합니다.",
   "settings.update_mode_download": "백그라운드로 내려받고 설치는 직접",
   "settings.update_mode_install": "자동으로 설치하고 유휴 상태일 때 다시 시작",
   "settings.update_mode_notify": "사용 가능하면 알려주기",

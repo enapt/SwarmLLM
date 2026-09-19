@@ -56,6 +56,26 @@ pub struct UpdateInfo {
     pub published_at: String,
     /// SHA256 checksum (hex) if a .sha256 sidecar asset exists.
     pub checksum_sha256: Option<String>,
+    /// The `.sha256` sidecar EXACTLY as downloaded, kept because the release
+    /// signature covers those bytes — `checksum_sha256` above has already been
+    /// through `sidecar_hash`, and a re-serialised sidecar will not verify.
+    ///
+    /// `#[serde(default)]` so an `UpdateInfo` persisted by an older build still
+    /// deserialises; it then arrives as `None` and the update is refused for
+    /// want of a signature, which is the correct answer rather than a failure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sidecar_body: Option<String>,
+    /// Detached minisign signature over `sidecar_body`, from the
+    /// `<asset>.sha256.minisig` release asset. Verified against the key
+    /// compiled into this binary — see `crate::update_signature`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature_minisig: Option<String>,
+    /// The release asset this update installs, e.g.
+    /// `swarmllm-linux-x86_64-cuda`. Held because the signature's trusted
+    /// comment names it, and the check is what stops a genuine signature for
+    /// one asset being replayed onto another.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asset_name: Option<String>,
     /// Whether the update binary has been downloaded and is ready to apply.
     #[serde(default)]
     pub downloaded: bool,
@@ -178,6 +198,16 @@ pub struct UpdateChecker {
     /// Present only when running inside the daemon. The standalone
     /// `swarmllm update` CLI has no node to drain, so it stays `None`.
     shared: Option<Arc<crate::daemon::SharedState>>,
+    /// The key releases must be signed by, when it is not the one compiled in.
+    ///
+    /// `#[cfg(test)]` — the field does not exist in a shipped binary, so there
+    /// is no configuration, environment variable or API that can point a real
+    /// node at a different signing key. Tests need it because the download and
+    /// apply paths now refuse an unsigned release, and the key in
+    /// `release_pubkey.txt` is the maintainer's, not something a checkout can
+    /// sign with.
+    #[cfg(test)]
+    release_key_override: Option<minisign_verify::PublicKey>,
 }
 
 /// GitHub release API response (subset of fields we need).
@@ -201,6 +231,87 @@ struct GitHubRelease {
 struct GitHubAsset {
     name: String,
     browser_download_url: String,
+}
+
+/// The single answer to "was this release published by us?".
+///
+/// Both the download and the apply path call it, and `apply_update` takes the
+/// whole `UpdateInfo` so neither can be reached without the material this
+/// needs. Everything it can refuse is refused the same way — a release that is
+/// unsigned, signed by another key, or signed for a different artifact is not
+/// installable, and this build says which.
+///
+/// `SwarmError::Validation` matches what the rest of this path already returns
+/// for a refused release (the SSRF check, the size cap, a missing sidecar);
+/// nothing here is an internal fault or an upstream one.
+fn verify_release_authenticity_with(
+    key: &minisign_verify::PublicKey,
+    info: &UpdateInfo,
+) -> Result<(), SwarmError> {
+    let Some(asset_name) = info.asset_name.as_deref() else {
+        return Err(SwarmError::Validation(
+            "Update rejected: this release record predates signature checking. \
+             Run an update check again to re-fetch it."
+                .to_string(),
+        ));
+    };
+    let Some(sidecar) = info.sidecar_body.as_deref() else {
+        return Err(SwarmError::Validation(format!(
+            "Update rejected: no {asset_name}.sha256 checksum file was published with this release."
+        )));
+    };
+    let Some(signature) = info.signature_minisig.as_deref() else {
+        return Err(SwarmError::Validation(format!(
+            "Update rejected: this release is not signed — {asset_name}.sha256.minisig is missing. \
+             Install it by hand if you trust it, or wait for a signed release."
+        )));
+    };
+
+    crate::update_signature::verify_release_sidecar_with(
+        key,
+        sidecar.as_bytes(),
+        signature,
+        asset_name,
+        &info.latest_version,
+    )
+    .map_err(|e| SwarmError::Validation(format!("Update rejected: {e}")))?;
+
+    tracing::info!(
+        asset = %asset_name,
+        version = %info.latest_version,
+        "Release signature verified (minisign)"
+    );
+    Ok(())
+}
+
+/// Fetch a small text asset (a `.sha256` sidecar or its `.minisig`) from a
+/// release, by exact asset name.
+///
+/// Returns the body **verbatim** — no trimming. A detached signature covers
+/// the bytes as published, so the caller decides what may be normalised and
+/// what may not.
+///
+/// A missing asset and a failed fetch both answer `None`, deliberately: the
+/// only caller treats an unverifiable release as one it will not install, and
+/// there is no useful difference between "the maintainer did not sign this"
+/// and "we could not read the signature" at that decision.
+async fn fetch_release_text(assets: &[GitHubAsset], want: &str) -> Option<String> {
+    let asset = assets.iter().find(|a| a.name == want)?;
+    match UPDATE_CHECK_CLIENT
+        .get(&asset.browser_download_url)
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => resp.text().await.ok(),
+        Ok(resp) => {
+            tracing::debug!(asset = %want, status = %resp.status(), "release asset fetch failed");
+            None
+        }
+        Err(e) => {
+            tracing::debug!(asset = %want, error = %e, "release asset fetch failed");
+            None
+        }
+    }
 }
 
 /// Pick the newest applicable release from a `/releases` list (GitHub returns
@@ -442,6 +553,9 @@ impl UpdateChecker {
             state,
             dashboard_tx,
             shared: None,
+            // The real checker always uses the key compiled into this build.
+            #[cfg(test)]
+            release_key_override: None,
         }
     }
 
@@ -637,25 +751,33 @@ impl UpdateChecker {
             }
         };
 
-        // Look for a .sha256 checksum sidecar
-        let checksum_sha256 = if let Some(sha_asset) = release
-            .assets
-            .iter()
-            .find(|a| a.name == format!("{asset_name}.sha256"))
-        {
-            match UPDATE_CHECK_CLIENT
-                .get(&sha_asset.browser_download_url)
-                .send()
-                .await
-            {
-                Ok(resp) if resp.status().is_success() => {
-                    resp.text().await.ok().map(|t| t.trim().to_string())
-                }
-                _ => None,
-            }
-        } else {
-            None
-        };
+        // Look for a .sha256 checksum sidecar, and the detached signature over
+        // it. Both are kept: `checksum_sha256` is the trimmed body the hash
+        // comparison uses, `sidecar_body` the bytes the signature covers.
+        //
+        // These MUST NOT be conflated. The signature is over what the release
+        // published, trailing newline and all, so trimming first — which the
+        // checksum path does, and must keep doing — turns a valid signature
+        // into an invalid one.
+        let sidecar_body =
+            fetch_release_text(&release.assets, &format!("{asset_name}.sha256")).await;
+        let checksum_sha256 = sidecar_body.as_deref().map(|t| t.trim().to_string());
+
+        let signature_minisig =
+            fetch_release_text(&release.assets, &format!("{asset_name}.sha256.minisig")).await;
+
+        // Say so at CHECK time rather than only at install time. A release
+        // without a signature is not installable by this build, and an
+        // operator watching the log should learn that when the release
+        // appears, not an hour later when the install is refused.
+        if signature_minisig.is_none() {
+            tracing::warn!(
+                asset = %asset_name,
+                version = %latest_tag,
+                "This release has no detached signature ({asset_name}.sha256.minisig) — \
+                 it can be downloaded but will not be installed automatically"
+            );
+        }
 
         let blocker = self.self_update_blocker().await;
         let info = UpdateInfo {
@@ -665,6 +787,9 @@ impl UpdateChecker {
             changelog: release.body.clone().unwrap_or_default(),
             published_at: release.published_at.clone().unwrap_or_default(),
             checksum_sha256,
+            sidecar_body,
+            signature_minisig,
+            asset_name: Some(asset_name.clone()),
             downloaded: false,
             // One probe, three fields: whether it can, why not, and where. A
             // second call to `can_self_update` here would create and delete
@@ -734,6 +859,24 @@ impl UpdateChecker {
         }
     }
 
+    /// Resolve the signing key this node trusts, then check the release
+    /// against it. The one entry point for authenticity; both the download and
+    /// the apply path call this and nothing else.
+    fn verify_release_authenticity(&self, info: &UpdateInfo) -> Result<(), SwarmError> {
+        #[cfg(test)]
+        if let Some(key) = self.release_key_override.as_ref() {
+            return verify_release_authenticity_with(key, info);
+        }
+
+        let key = crate::update_signature::release_public_key().map_err(|e| {
+            // A build with no usable key is a packaging fault, not a bad
+            // release, and saying so is the difference between "our release is
+            // broken" and "your build is". It still refuses to install.
+            SwarmError::Validation(format!("Update rejected: {e}"))
+        })?;
+        verify_release_authenticity_with(&key, info)
+    }
+
     /// Build a checker with an explicit binary path, for tests that need to
     /// control where the staging file lives.
     #[cfg(test)]
@@ -746,10 +889,17 @@ impl UpdateChecker {
             state: Arc::new(RwLock::new(UpdateState::default())),
             dashboard_tx: tx,
             shared: None,
+            release_key_override: Some(crate::update_signature::test_fixtures::public_key()),
         }
     }
 
     pub async fn download_update(&self, info: &UpdateInfo) -> Result<PathBuf, SwarmError> {
+        // SEC: authenticity first, before a byte is fetched or a staged file is
+        // reused. This sits ABOVE the reuse shortcut deliberately — that path
+        // returns early on a hash match alone, so a check placed after it would
+        // be skipped for exactly the file that has been sitting on disk longest.
+        self.verify_release_authenticity(info)?;
+
         // A verified binary for this exact release may already be staged beside
         // the running one — reuse it rather than fetching ~1 GB again.
         //
@@ -985,33 +1135,47 @@ impl UpdateChecker {
     /// pointing at an older release must not be silently re-applied even
     /// if the SHA256 still matches.
     ///
-    /// `expected_checksum_sha256` re-verifies the staged file's hash before
-    /// the rename. Between download (where the hash was first verified)
-    /// and apply, the staging file sits on disk for an unbounded interval
-    /// (the dashboard "check / apply" buttons are separate calls). A
-    /// process running as the same user can swap the staging file during
-    /// that window. Re-hashing here closes that TOCTOU.
+    /// The staged file's hash is re-verified before the rename. Between
+    /// download (where the hash was first verified) and apply, the staging
+    /// file sits on disk for an unbounded interval (the dashboard "check /
+    /// apply" buttons are separate calls). A process running as the same user
+    /// can swap the staging file during that window. Re-hashing here closes
+    /// that TOCTOU.
+    ///
+    /// Takes the whole [`UpdateInfo`] rather than a version and a checksum
+    /// **so that the release signature cannot be left behind**. Three call
+    /// sites reach this — the automatic installer, the dashboard button and
+    /// `swarmllm update` — and every one of them already held an `UpdateInfo`
+    /// and was passing two fields out of it. Passing the object means a caller
+    /// cannot express "apply this, unverified"; see `.claude/rules/architecture.md`
+    /// § "One invariant, N paths", rule 2.
     pub fn apply_update(
         &self,
         tmp_path: &std::path::Path,
-        latest_version: &str,
-        expected_checksum_sha256: Option<&str>,
+        info: &UpdateInfo,
     ) -> Result<(), SwarmError> {
-        self.apply_update_with_version(tmp_path, latest_version, expected_checksum_sha256)
+        self.apply_update_with_version(tmp_path, info)
     }
 
     fn apply_update_with_version(
         &self,
         tmp_path: &std::path::Path,
-        latest_version: &str,
-        expected_checksum_sha256: Option<&str>,
+        info: &UpdateInfo,
     ) -> Result<(), SwarmError> {
+        let latest_version = info.latest_version.as_str();
+        let expected_checksum_sha256 = info.checksum_sha256.as_deref();
         tracing::debug!(path = %tmp_path.display(), "DIAG: apply_update starting");
         if !tmp_path.exists() {
             return Err(SwarmError::ServiceUnavailable(
                 "Update file not found — download first".to_string(),
             ));
         }
+
+        // SEC: the release must be signed by the key compiled into this build.
+        // Re-checked here and not only at download time for the same reason the
+        // hash is: the `UpdateInfo` and the staging file both sit around between
+        // a dashboard "check" and a later "apply".
+        self.verify_release_authenticity(info)?;
 
         // SEC: re-verify the version is strictly newer than the running build at
         // apply time. The version was checked in `check_for_update`, but the
@@ -1105,11 +1269,7 @@ impl UpdateChecker {
         );
 
         let staged = self.preferred_tmp_path();
-        if let Err(e) = self.apply_update(
-            &staged,
-            &info.latest_version,
-            info.checksum_sha256.as_deref(),
-        ) {
+        if let Err(e) = self.apply_update(&staged, info) {
             tracing::error!(error = %e, "Update apply failed — staying on the current version");
             shared.emit_activity(
                 crate::daemon::state::ActivityEvent::new(
@@ -1310,7 +1470,9 @@ impl UpdateChecker {
                         state.last_error = None;
                     }
                     let _ = self.dashboard_tx.send(
-                        crate::daemon::state::DashboardSignal::UpdateAvailable(info.clone()),
+                        crate::daemon::state::DashboardSignal::UpdateAvailable(Box::new(
+                            info.clone(),
+                        )),
                     );
 
                     // Install mode finishes the job. Announce first (above) so
@@ -2167,12 +2329,14 @@ mod tests {
     #[test]
     fn update_config_defaults() {
         let config = UpdateConfig::default();
-        // Automatic INSTALLING stays opt-in — these are unsigned binaries
-        // verified only by a published SHA256 (deferred item C1, minisign).
+        // The legacy literal is unchanged — it is written into every config
+        // file on disk and `effective_mode` no longer reads it for meaning.
         assert_eq!(config.auto_update, crate::config::AutoUpdateMode::Disabled);
-        // ...but a fresh install must at least find out an update exists, and
-        // often enough to matter when several releases can ship in one day.
-        assert_eq!(config.effective_mode(), crate::config::UpdateMode::Notify);
+        // Automatic installing became the default on 2026-09-19, once a
+        // release had to carry a signature this node can verify (C1 closed).
+        // Before that it was `Notify`, and a default fleet simply never moved.
+        assert_eq!(config.effective_mode(), crate::config::UpdateMode::Install);
+        // Often enough to matter when several releases can ship in one day.
         assert!(config.check_interval_hours <= 1);
     }
 
@@ -2185,6 +2349,11 @@ mod tests {
             changelog: "Bug fixes".into(),
             published_at: "2026-01-01T00:00:00Z".into(),
             checksum_sha256: Some("abc123".into()),
+            sidecar_body: Some("abc123  swarmllm-linux-x86_64\n".into()),
+            signature_minisig: Some(
+                "untrusted comment: x\nAAAA\ntrusted comment: y\nBBBB\n".into(),
+            ),
+            asset_name: Some("swarmllm-linux-x86_64".into()),
             downloaded: false,
             self_update_supported: true,
             self_update_blocked: None,
@@ -2194,6 +2363,13 @@ mod tests {
         let parsed: UpdateInfo = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.latest_version, "1.0.0");
         assert_eq!(parsed.checksum_sha256, Some("abc123".into()));
+        assert_eq!(parsed.asset_name.as_deref(), Some("swarmllm-linux-x86_64"));
+        assert_eq!(
+            parsed.sidecar_body.as_deref(),
+            Some("abc123  swarmllm-linux-x86_64\n"),
+            "the sidecar must survive a round-trip byte for byte — the \
+             signature is over these bytes"
+        );
     }
 
     #[test]
@@ -2217,8 +2393,9 @@ mod staged_reuse_tests {
     }
 
     fn info_for(checksum: Option<String>) -> UpdateInfo {
+        use crate::update_signature::test_fixtures as sig;
         UpdateInfo {
-            latest_version: "0.9.9".to_string(),
+            latest_version: sig::STAGED_VERSION.to_string(),
             current_version: "0.9.8".to_string(),
             // A syntactically valid GitHub URL that would fail to connect.
             // Reaching it at all is the failure this test detects.
@@ -2226,6 +2403,13 @@ mod staged_reuse_tests {
             changelog: String::new(),
             published_at: String::new(),
             checksum_sha256: checksum,
+            // Genuinely signed by the suite's throwaway key — `download_update`
+            // refuses an unsigned release before it looks at anything else, so
+            // these fixtures have to carry a real signature to reach the
+            // staging behaviour they are about.
+            sidecar_body: Some(sig::STAGED_SIDECAR.to_string()),
+            signature_minisig: Some(sig::STAGED_SIGNATURE.to_string()),
+            asset_name: Some(sig::STAGED_ASSET.to_string()),
             downloaded: false,
             self_update_supported: true,
             self_update_blocked: None,
@@ -2310,6 +2494,102 @@ mod staged_reuse_tests {
             b"pretend binary",
             "the staged binary must survive — the writability probe truncates, \
              so the reuse check has to run before it"
+        );
+    }
+
+    /// A release with no `.minisig` is not installable, however good its hash
+    /// is. This is the whole point of audit item C1: a matching checksum from
+    /// the same place as the binary proves only that nothing was corrupted in
+    /// transit.
+    #[tokio::test]
+    async fn an_unsigned_release_is_refused_before_anything_is_fetched() {
+        let dir = tempfile::tempdir().unwrap();
+        let binary = dir.path().join("swarmllm");
+        std::fs::write(&binary, b"running binary").unwrap();
+        let checker = UpdateChecker::for_test(binary);
+
+        let mut info = info_for(Some(sha256_hex(b"pretend binary")));
+        info.signature_minisig = None;
+
+        let err = checker
+            .download_update(&info)
+            .await
+            .expect_err("an unsigned release must not be downloaded");
+        assert!(
+            err.to_string().contains("not signed"),
+            "the refusal should say the release is unsigned, got: {err}"
+        );
+    }
+
+    /// The ordering the comment in `download_update` insists on: the signature
+    /// gate sits ABOVE the staged-reuse shortcut. Without that, the one file
+    /// that has been sitting on disk longest is the one that skips the check.
+    #[tokio::test]
+    async fn the_staged_reuse_shortcut_cannot_skip_the_signature() {
+        let dir = tempfile::tempdir().unwrap();
+        let binary = dir.path().join("swarmllm");
+        std::fs::write(&binary, b"running binary").unwrap();
+
+        let checker = UpdateChecker::for_test(binary);
+        // A staged file whose hash matches perfectly — the reuse path would
+        // return it immediately if it ran first.
+        let staged = checker.preferred_tmp_path();
+        std::fs::write(&staged, b"pretend binary").unwrap();
+
+        let mut info = info_for(Some(sha256_hex(b"pretend binary")));
+        info.signature_minisig = None;
+
+        assert!(
+            checker.download_update(&info).await.is_err(),
+            "a staged file with a matching hash must still not be reused \
+             when the release carries no signature"
+        );
+    }
+
+    /// The cross-asset replay, at the level that matters: a genuine signature
+    /// for one asset, presented as the release record for another.
+    #[tokio::test]
+    async fn a_signature_minted_for_another_asset_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let binary = dir.path().join("swarmllm");
+        std::fs::write(&binary, b"running binary").unwrap();
+        let checker = UpdateChecker::for_test(binary);
+
+        let mut info = info_for(Some(sha256_hex(b"pretend binary")));
+        info.asset_name = Some("swarmllm-linux-x86_64-cuda".to_string());
+
+        let err = checker
+            .download_update(&info)
+            .await
+            .expect_err("the signature names a different asset");
+        assert!(
+            err.to_string().contains("different download"),
+            "the refusal should name the mismatch, got: {err}"
+        );
+    }
+
+    /// An `UpdateInfo` persisted by a build that predates signing deserialises
+    /// with `None` in the new fields. It must be refused and re-fetched, not
+    /// treated as "nothing to check".
+    #[tokio::test]
+    async fn an_update_record_from_before_signing_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let binary = dir.path().join("swarmllm");
+        std::fs::write(&binary, b"running binary").unwrap();
+        let checker = UpdateChecker::for_test(binary);
+
+        let mut info = info_for(Some(sha256_hex(b"pretend binary")));
+        info.asset_name = None;
+        info.sidecar_body = None;
+        info.signature_minisig = None;
+
+        let err = checker
+            .download_update(&info)
+            .await
+            .expect_err("a pre-signing record cannot be verified");
+        assert!(
+            err.to_string().contains("predates signature checking"),
+            "the refusal should tell the operator to re-check, got: {err}"
         );
     }
 }

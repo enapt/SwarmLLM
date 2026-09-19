@@ -1,0 +1,23 @@
+# Every release asset the auto-updater can download, and therefore every asset
+# whose `.sha256` sidecar must carry a detached minisign signature.
+#
+# Read by BOTH `examples/sign_release.sh` (which signs them) and the `publish`
+# job in `.github/workflows/release.yml` (which refuses to publish without
+# them), so the two cannot drift apart.
+#
+# `an_asset_the_updater_can_ask_for_is_an_asset_we_sign` in
+# tests/repo_consistency.rs fails the build if `update.rs` can request a name
+# that is not listed here. That guard matters because the failure is silent in
+# the worst way: an unsigned asset is refused by every node, so a platform
+# missing from this list quietly freezes at its current version instead of
+# reporting an error anyone sees.
+#
+# Blank lines and `#` comments are ignored.
+
+swarmllm-linux-x86_64
+swarmllm-linux-x86_64-baseline
+swarmllm-linux-x86_64-cuda
+swarmllm-macos-aarch64
+swarmllm-windows-x86_64.exe
+swarmllm-windows-x86_64-baseline.exe
+swarmllm-windows-x86_64-gpu.exe

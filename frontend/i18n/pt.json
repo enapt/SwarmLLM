@@ -1134,7 +1134,7 @@
   "settings.trust_lan_desc": "Permite que dispositivos da sua rede local abram este painel sem colar uma chave. Ative esta opção se aceder ao SwarmLLM através de um router de sub-rede Tailscale ou de um contentor, onde os pedidos chegam do endereço do router em vez do seu.",
   "settings.unreadable": "⚠ Não foi possível ler as suas configurações atuais, por isso não podem ser alteradas agora. Feche esta janela e volte a abrir as Configurações daqui a pouco.",
   "settings.update_mode": "Atualizações do software",
-  "settings.update_mode_desc": "As atualizações são transferidas do GitHub e verificadas com uma soma de verificação publicada. A instalação automática aguarda que esta máquina termine o trabalho em curso e depois reinicia.",
+  "settings.update_mode_desc": "As atualizações vêm do GitHub e precisam ter uma assinatura válida da chave de lançamento do SwarmLLM antes de qualquer instalação — um download sem assinatura ou alterado é recusado. A instalação automática espera esta máquina terminar o trabalho em andamento e depois reinicia.",
   "settings.update_mode_download": "Transferir em segundo plano; eu instalo",
   "settings.update_mode_install": "Instalar automaticamente e reiniciar quando inativo",
   "settings.update_mode_notify": "Avisar-me quando houver uma disponível",

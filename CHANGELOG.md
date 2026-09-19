@@ -1,5 +1,52 @@
 # Changelog
 
+## [0.3.191-alpha] — UNRELEASED (set this date when cutting the release)
+
+**SwarmLLM now keeps itself up to date, and checks who really made an update
+before installing it.**
+
+Until now a new version would only install if you went and clicked the button.
+Almost nobody did — not because anyone decided against it, but because that was
+simply the setting every node started with. Looking at the live network on
+19 September, two of the five computers connected were still two releases
+behind, having checked for updates roughly sixteen times each and waited for a
+person who was never going to come. From this version, a computer that has not
+been told otherwise installs updates by itself and restarts when it is idle.
+
+That change was only safe to make because of the second one.
+
+Every release is now **signed**, and your computer refuses to install one that
+is not. The signing key exists on one machine and is never uploaded to GitHub,
+never stored in an automated build, and never leaves that computer. Previously
+an update was checked against a checksum published alongside it — which proves
+a download was not damaged on the way, but proves nothing about who put it
+there, because anyone who could replace the download could replace the checksum
+next to it. A signature cannot be produced without the key, so a tampered or
+substituted release is now rejected outright rather than installed.
+
+Your computer also checks that a signature was issued for *this exact download
+and this exact version*, so a genuine signature cannot be lifted from one file
+and reused on another.
+
+If you would rather keep installing updates yourself, that is one setting:
+choose **"Tell me when one is available"** under Software updates in Settings,
+or put `mode = "notify"` under `[updates]` in your config file. Nothing changes
+for anyone who has already chosen a setting — only computers that never picked
+one are affected.
+
+**Worth being straight about what this does not cover.** Signing proves a
+release came from us and reached you unaltered. It cannot prove the release was
+built from the source code we published; that needs reproducible builds, which
+remain future work.
+
+Anyone can check a release independently, without running our software:
+
+```
+rsign verify swarmllm-linux-x86_64.sha256 \
+  -x swarmllm-linux-x86_64.sha256.minisig \
+  -P <the key published in release_pubkey.txt>
+```
+
 ## [0.3.190-alpha] — 2026-09-19
 
 **Your computer will use its graphics card for more of your models.**

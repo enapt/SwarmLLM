@@ -123,6 +123,11 @@ chacha20poly1305 = "0.10"
 sha2 = "0.10"
 hkdf = "0.12"
 blake3 = "1"
+# Verify-only half of minisign (audit item C1). Zero-dependency, and its
+# streaming verifier never holds the artifact in memory — the CUDA asset is
+# ~1 GB. Signing is done offline with `rsign2`/`minisign`; nothing in this
+# binary can sign, by design.
+minisign-verify = "0.2"
 zeroize = { version = "1", features = ["derive"] }
 rand = "0.8"
 

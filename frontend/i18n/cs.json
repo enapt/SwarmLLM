@@ -1134,7 +1134,7 @@
   "settings.trust_lan_desc": "Umožní zařízením ve vaší místní síti otevřít tento panel bez vkládání klíče. Zapněte, pokud se ke SwarmLLM připojujete přes směrovač podsítě Tailscale nebo přes kontejner, kde požadavky přicházejí z adresy směrovače místo z vaší.",
   "settings.unreadable": "⚠ Vaše současná nastavení se nepodařilo načíst, takže je teď nelze změnit. Zavřete toto okno a za chvíli Nastavení otevřete znovu.",
   "settings.update_mode": "Aktualizace softwaru",
-  "settings.update_mode_desc": "Aktualizace se stahují z GitHubu a ověřují se proti zveřejněnému kontrolnímu součtu. Automatická instalace počká, až tento počítač dokončí práci, a poté se restartuje.",
+  "settings.update_mode_desc": "Aktualizace pocházejí z GitHubu a před instalací musí nést platný podpis vydávacím klíčem SwarmLLM — nepodepsané nebo pozměněné stažení je odmítnuto. Automatická instalace počká, až tento počítač dokončí rozdělanou práci, a poté se restartuje.",
   "settings.update_mode_download": "Stahovat na pozadí, nainstaluji sám",
   "settings.update_mode_install": "Instalovat automaticky a restartovat při nečinnosti",
   "settings.update_mode_notify": "Dát mi vědět, až bude k dispozici",

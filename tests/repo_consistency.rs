@@ -2158,6 +2158,161 @@ fn every_model_facing_entry_point_counts_the_request() {
     );
 }
 
+/// A build must trust a signing key, or it can never update itself again.
+///
+/// `release_pubkey.txt` is compiled in with `include_str!`, and every update
+/// path fails closed without it. That is the right behaviour at runtime and a
+/// terrible thing to discover after shipping: the binary builds, starts, serves
+/// and checks for updates perfectly well, and then refuses every one of them —
+/// and because the refusal is on the node rather than in the release, no amount
+/// of re-cutting the release fixes it. The only way out is a new binary, which
+/// is precisely the thing that can no longer install itself.
+///
+/// So the missing key is caught here, at build time, where it costs nothing.
+#[test]
+fn a_build_carries_a_usable_release_signing_key() {
+    let raw = std::fs::read_to_string("release_pubkey.txt")
+        .expect("release_pubkey.txt is missing — every build embeds it");
+
+    let key_line = raw
+        .lines()
+        .map(str::trim)
+        .rev()
+        .find(|l| !l.is_empty() && !l.starts_with("untrusted comment:") && !l.starts_with('#'))
+        .unwrap_or("");
+
+    assert!(
+        !key_line.is_empty(),
+        "release_pubkey.txt holds no key, so this build would refuse every \
+         update it is ever offered. Generate one (see docs/RELEASE_SIGNING.md) \
+         and commit the public half."
+    );
+
+    // Shape-check it the way the daemon does, so a truncated paste fails here
+    // rather than on every node in the field. A minisign Ed25519 public key is
+    // 42 bytes base64-encoded, and the untrusted-comment line is not part of it.
+    assert!(
+        key_line.starts_with("RW"),
+        "release_pubkey.txt does not look like a minisign public key (should \
+         start with RW): {key_line:.16}…"
+    );
+    assert_eq!(
+        key_line.len(),
+        56,
+        "a minisign public key is 56 base64 characters; this is {} — likely a \
+         truncated copy/paste, which would be found only by a node refusing an \
+         update",
+        key_line.len()
+    );
+}
+
+/// Every asset the updater can ask for is an asset we sign.
+///
+/// `release_signed_assets.txt` drives both `examples/sign_release.sh` and the
+/// `publish` job's refusal to un-draft an unsigned release. If `update.rs`
+/// learns to request a name that is not in that file, nothing fails loudly:
+/// the release publishes, and every node on that platform refuses the update
+/// because it carries no signature — freezing them at their current version
+/// with no error anyone sees. That is the same silent-freeze failure the
+/// publish job's own comment describes for the baseline builds.
+///
+/// Built from `asset_name_for`/`baseline_asset_name`'s own matrix rather than
+/// a hand-kept list, so adding a platform to the updater fails here until the
+/// signing list catches up.
+#[test]
+fn an_asset_the_updater_can_ask_for_is_an_asset_we_sign() {
+    let listed: std::collections::BTreeSet<String> =
+        std::fs::read_to_string("release_signed_assets.txt")
+            .expect("release_signed_assets.txt is missing")
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .map(str::to_string)
+            .collect();
+
+    // The published matrix, in the same shape `asset_name_for` produces. Kept
+    // beside `asset_names_match_the_published_release_matrix` in `update.rs`,
+    // which pins these spellings against the release itself.
+    let mut requestable: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for (os, arch, variant, windows) in [
+        ("linux", "x86_64", "", false),
+        ("linux", "x86_64", "-cuda", false),
+        ("macos", "aarch64", "", false),
+        ("windows", "x86_64", "", true),
+        ("windows", "x86_64", "-gpu", true),
+    ] {
+        let base = if windows {
+            format!("swarmllm-{os}-{arch}{variant}.exe")
+        } else {
+            format!("swarmllm-{os}-{arch}{variant}")
+        };
+        requestable.insert(base);
+    }
+    // The baseline variants a pre-AVX2 host asks for instead. `update.rs`
+    // skips the update entirely when these are absent, so an unsigned baseline
+    // and a missing one look identical from the field.
+    requestable.insert("swarmllm-linux-x86_64-baseline".to_string());
+    requestable.insert("swarmllm-windows-x86_64-baseline.exe".to_string());
+
+    let unsigned: Vec<&String> = requestable.difference(&listed).collect();
+    assert!(
+        unsigned.is_empty(),
+        "the updater can download these, but nothing signs them — every node on \
+         those platforms would silently stop updating:\n  {}",
+        unsigned
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join("\n  ")
+    );
+
+    let unused: Vec<&String> = listed.difference(&requestable).collect();
+    assert!(
+        unused.is_empty(),
+        "these are signed but the updater never asks for them — either a \
+         platform was dropped from update.rs and not from the signing list, or \
+         the list has a typo that is silently signing nothing:\n  {}",
+        unused
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join("\n  ")
+    );
+}
+
+/// The release workflow must not publish a release the field cannot verify.
+///
+/// The signature check in `publish` is the only thing standing between a build
+/// completing and an unsigned release going out under the `--draft=false` on
+/// the line below it. A revert that drops the check leaves a workflow that
+/// still looks correct — it publishes, and everything is green — while every
+/// node refuses the result.
+#[test]
+fn the_release_workflow_refuses_to_publish_without_signatures() {
+    let wf =
+        std::fs::read_to_string(".github/workflows/release.yml").expect("release.yml is missing");
+
+    assert!(
+        wf.contains("release_signed_assets.txt"),
+        "the publish job no longer reads the signed-asset list, so it cannot \
+         tell a signed release from an unsigned one"
+    );
+    assert!(
+        wf.contains(".sha256.minisig"),
+        "the publish job no longer looks for signatures"
+    );
+
+    // The check has to come BEFORE the un-draft, not merely exist in the file.
+    let gate = wf.find(".sha256.minisig").expect("checked above");
+    let publish = wf
+        .find("--draft=false")
+        .expect("the workflow must still publish somewhere");
+    assert!(
+        gate < publish,
+        "the signature check sits AFTER the un-draft, so it cannot prevent one"
+    );
+}
+
 /// What a node REPORTS about updates must be what it DOES.
 ///
 /// `updates.auto_update` is the legacy field. It defaults to `Disabled`, and

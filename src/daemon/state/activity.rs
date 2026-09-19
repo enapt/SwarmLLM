@@ -148,7 +148,12 @@ pub enum DashboardSignal {
     /// Model state changed (shard download, load, prune) — frontend should re-fetch models.
     ModelsChanged,
     /// Software update available — push banner to dashboard.
-    UpdateAvailable(crate::update::UpdateInfo),
+    ///
+    /// Boxed because this is a BROADCAST channel: every variant costs what the
+    /// largest one costs, on every clone to every subscriber, and the other two
+    /// carry no data at all. `UpdateInfo` grew past the threshold when release
+    /// signing added the sidecar and its signature to it (2026-09-19).
+    UpdateAvailable(Box<crate::update::UpdateInfo>),
 }
 
 /// Cached info about a locally loaded model (lock-free reads).

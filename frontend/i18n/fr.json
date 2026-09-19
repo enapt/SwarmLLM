@@ -1134,7 +1134,7 @@
   "settings.trust_lan_desc": "Permet aux appareils de votre réseau local d'ouvrir ce tableau de bord sans coller de clé. Activez cette option si vous accédez à SwarmLLM via un routeur de sous-réseau Tailscale ou un conteneur, où les requêtes arrivent depuis l'adresse du routeur plutôt que la vôtre.",
   "settings.unreadable": "⚠ Impossible de lire vos réglages actuels, ils ne peuvent donc pas être modifiés pour le moment. Fermez cette fenêtre et rouvrez les Paramètres dans un instant.",
   "settings.update_mode": "Mises à jour du logiciel",
-  "settings.update_mode_desc": "Les mises à jour sont téléchargées depuis GitHub et vérifiées avec une somme de contrôle publiée. L'installation automatique attend que cette machine ait terminé son travail en cours, puis redémarre.",
+  "settings.update_mode_desc": "Les mises à jour proviennent de GitHub et doivent porter une signature valide de la clé de publication SwarmLLM avant toute installation — un téléchargement non signé ou modifié est refusé. L'installation automatique attend que cette machine ait terminé son travail en cours, puis redémarre.",
   "settings.update_mode_download": "Télécharger en arrière-plan, je l'installerai",
   "settings.update_mode_install": "Installer automatiquement et redémarrer à l'arrêt",
   "settings.update_mode_notify": "Me prévenir lorsqu'une est disponible",

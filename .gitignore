@@ -33,6 +33,15 @@ Thumbs.db
 *.key
 *.p12
 
+# Release signing (audit item C1). The SECRET key must never reach this repo —
+# `*.key` above already covers the filename `examples/sign_release.sh`
+# recommends, and these are the other spellings the minisign docs use.
+# `release_pubkey.txt` is deliberately NOT ignored: the public half is compiled
+# into every binary and has to be in version control.
+release_seckey*
+minisign.key
+*.minisig
+
 # Claude Code — commit team config, ignore personal/local
 CLAUDE.local.md
 .claude/settings.local.json

@@ -1134,7 +1134,7 @@
   "settings.trust_lan_desc": "Låter enheter i ditt lokala nätverk öppna den här panelen utan att klistra in en nyckel. Slå på detta om du når SwarmLLM via en Tailscale-subnätsrouter eller en container, där förfrågningar kommer från routerns adress i stället för din egen.",
   "settings.unreadable": "⚠ Dina nuvarande inställningar kunde inte läsas, så de går inte att ändra just nu. Stäng det här fönstret och öppna Inställningar igen om en stund.",
   "settings.update_mode": "Programuppdateringar",
-  "settings.update_mode_desc": "Uppdateringar hämtas från GitHub och kontrolleras mot en publicerad kontrollsumma. Automatisk installation väntar tills datorn är klar med sitt arbete och startar sedan om.",
+  "settings.update_mode_desc": "Uppdateringar hämtas från GitHub och måste bära en giltig signatur från SwarmLLM:s utgivningsnyckel innan något installeras — en osignerad eller ändrad nedladdning avvisas. Automatisk installation väntar tills den här maskinen är klar med det den håller på med och startar sedan om sig själv.",
   "settings.update_mode_download": "Ladda ner i bakgrunden, jag installerar själv",
   "settings.update_mode_install": "Installera automatiskt och starta om när datorn är ledig",
   "settings.update_mode_notify": "Meddela mig när det finns en",

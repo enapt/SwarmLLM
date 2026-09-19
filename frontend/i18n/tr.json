@@ -1134,7 +1134,7 @@
   "settings.trust_lan_desc": "Yerel ağınızdaki cihazların bu panoyu anahtar yapıştırmadan açmasına izin verir. SwarmLLM'e bir Tailscale alt ağ yönlendiricisi veya bir kapsayıcı üzerinden erişiyorsanız ve istekler sizin yerine yönlendiricinin adresinden geliyorsa bunu açın.",
   "settings.unreadable": "⚠ Mevcut ayarlarınız okunamadı, bu yüzden şu anda değiştirilemiyor. Bu pencereyi kapatıp birazdan Ayarlar'ı yeniden açın.",
   "settings.update_mode": "Yazılım güncellemeleri",
-  "settings.update_mode_desc": "Güncellemeler GitHub'dan indirilir ve yayımlanmış bir sağlama toplamıyla doğrulanır. Otomatik kurulum, bu makine işini bitirene kadar bekler ve ardından yeniden başlar.",
+  "settings.update_mode_desc": "Güncellemeler GitHub'dan gelir ve herhangi bir şey kurulmadan önce SwarmLLM yayın anahtarının geçerli bir imzasını taşımalıdır; imzasız veya değiştirilmiş bir indirme reddedilir. Otomatik kurulum, bu makine yürüttüğü işi bitirene kadar bekler ve ardından kendini yeniden başlatır.",
   "settings.update_mode_download": "Arka planda indir, kurulumu ben yaparım",
   "settings.update_mode_install": "Otomatik kur ve boştayken yeniden başlat",
   "settings.update_mode_notify": "Yeni sürüm çıkınca haber ver",

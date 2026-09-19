@@ -1134,7 +1134,7 @@
   "settings.trust_lan_desc": "Memungkinkan perangkat di jaringan lokal Anda membuka dasbor ini tanpa menempelkan kunci. Aktifkan jika Anda mengakses SwarmLLM melalui router subnet Tailscale atau sebuah kontainer, di mana permintaan datang dari alamat router alih-alih alamat Anda sendiri.",
   "settings.unreadable": "⚠ Pengaturan Anda saat ini tidak dapat dibaca, jadi belum bisa diubah sekarang. Tutup jendela ini dan buka lagi Pengaturan sebentar lagi.",
   "settings.update_mode": "Pembaruan perangkat lunak",
-  "settings.update_mode_desc": "Pembaruan diunduh dari GitHub dan diperiksa terhadap checksum yang dipublikasikan. Pemasangan otomatis menunggu mesin ini menyelesaikan pekerjaannya, lalu memulai ulang.",
+  "settings.update_mode_desc": "Pembaruan berasal dari GitHub dan harus membawa tanda tangan yang sah dari kunci rilis SwarmLLM sebelum apa pun dipasang — unduhan yang tidak ditandatangani atau telah diubah akan ditolak. Pemasangan otomatis menunggu sampai mesin ini menyelesaikan pekerjaan yang sedang berjalan, lalu memulai ulang dirinya.",
   "settings.update_mode_download": "Unduh di latar belakang, saya yang memasang",
   "settings.update_mode_install": "Pasang otomatis dan mulai ulang saat menganggur",
   "settings.update_mode_notify": "Beri tahu saya bila tersedia",

@@ -66,11 +66,7 @@ pub async fn run_update_command(check_only: bool) -> anyhow::Result<()> {
                 Ok(tmp_path) => {
                     println!("Downloaded to: {}", tmp_path.display());
                     println!("Applying update...");
-                    match checker.apply_update(
-                        &tmp_path,
-                        &info.latest_version,
-                        info.checksum_sha256.as_deref(),
-                    ) {
+                    match checker.apply_update(&tmp_path, &info) {
                         Ok(()) => {
                             println!("\nUpdate applied — v{} is on disk.", info.latest_version);
                             report_restart_needed(&info.latest_version).await;

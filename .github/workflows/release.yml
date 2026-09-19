@@ -530,6 +530,11 @@ jobs:
     timeout-minutes: 15
     runs-on: ubuntu-latest
     steps:
+      # Needed for `release_signed_assets.txt` below — the list of assets that
+      # must carry a signature. It is read from the repo rather than repeated
+      # here so the signer, this guard and the updater cannot drift apart.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
       - name: Mark release as published
         env:
           GH_TOKEN: ${{ github.token }}
@@ -537,8 +542,7 @@ jobs:
         run: |
           set -euo pipefail
           TAG="${GITHUB_REF_NAME}"
-          # `--repo` lets gh CLI skip `git remote get-url origin` lookup,
-          # so we don't need `actions/checkout@v4` on this job.
+          # `--repo` lets gh CLI skip `git remote get-url origin` lookup.
           # Check for each platform's archive BY NAME, not by counting.
           #
           # A raw count cannot tell "every platform shipped" from "one platform
@@ -589,8 +593,37 @@ jobs:
             echo "or publish deliberately by hand if shipping without these is intended."
             exit 1
           fi
+          # Every asset the auto-updater can download must carry a detached
+          # signature over its `.sha256`, or nodes refuse to install it
+          # (audit item C1). CI cannot produce those: the key is offline, on
+          # the maintainer's machine, which is the entire point — a workflow
+          # able to sign is a workflow an attacker can sign with.
+          #
+          # So this job no longer publishes by itself. It establishes that the
+          # build is COMPLETE and then hands over: `examples/sign_release.sh`
+          # signs and un-drafts. A draft is the correct resting state for an
+          # unsigned release, not a failure, so this exits 0 either way.
+          UNSIGNED=()
+          while read -r asset; do
+            [ -n "$asset" ] || continue
+            grep -qxF "${asset}.sha256.minisig" <<<"$NAMES" || UNSIGNED+=("$asset")
+          done < <(grep -vE '^[[:space:]]*#|^[[:space:]]*$' release_signed_assets.txt)
+
+          if [ "${#UNSIGNED[@]}" -gt 0 ]; then
+            echo "$TAG is built and complete, and is staying a DRAFT until it is signed."
+            echo ""
+            echo "Unsigned so far:"
+            printf '  %s\n' "${UNSIGNED[@]}"
+            echo ""
+            echo "On the machine holding the release key:"
+            echo "    examples/sign_release.sh $TAG"
+            echo ""
+            echo "That signs each checksum file, uploads the signatures and publishes."
+            exit 0
+          fi
+
           gh release edit "$TAG" --repo "$REPO" --draft=false
-          echo "Published $TAG with all $(wc -l <<<"$NAMES") asset(s)"
+          echo "Published $TAG with all $(wc -l <<<"$NAMES") asset(s), signatures present"
 
   # Reclaim cache quota from tags that will never restore it again.
   #

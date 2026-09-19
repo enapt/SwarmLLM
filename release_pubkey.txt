@@ -1,0 +1,14 @@
+# SwarmLLM release-signing public key (audit item C1).
+#
+# Replace everything below this comment block with the single base64 line from
+# your minisign public key — the line that starts with "RW". The matching
+# SECRET key is generated once, offline, and never committed, never uploaded to
+# GitHub, and never placed in a CI secret. See docs/RELEASE_SIGNING.md.
+#
+# While this file holds no key, this build cannot verify a release signature
+# and therefore will not install an update. That is deliberate: a node that
+# cannot check authenticity must not self-replace its own binary.
+#
+# Generate with:
+#   rsign generate -p release_pubkey.pub -s ~/.swarmllm-release-secret.key
+RWQCl2Zm1nWUxsXPjCPhsCDGJE343QmtsRt8Iv/ZpLh30x0fy+NmpZjR

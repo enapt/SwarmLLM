@@ -1061,7 +1061,7 @@ pub async fn check_update(
             us.last_error = None;
             // Notify WebSocket
             state.shared_state.signal_dashboard(
-                crate::daemon::state::DashboardSignal::UpdateAvailable(info.clone()),
+                crate::daemon::state::DashboardSignal::UpdateAvailable(Box::new(info.clone())),
             );
             Ok(Json(serde_json::json!({
                 "status": "update_available",
@@ -1140,13 +1140,7 @@ pub async fn apply_update(
     // staged file to close the TOCTOU between download and apply (the
     // staging file sits on disk for an unbounded interval between
     // dashboard "check" and "apply" clicks).
-    checker
-        .apply_update(
-            &tmp_path,
-            &info.latest_version,
-            info.checksum_sha256.as_deref(),
-        )
-        .map_err(ApiError)?;
+    checker.apply_update(&tmp_path, &info).map_err(ApiError)?;
 
     // Restart into it, rather than leaving the node running the old image while
     // reporting success. Replacing the file changes nothing about a process

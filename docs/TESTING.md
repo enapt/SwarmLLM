@@ -73,7 +73,10 @@ killall swarmllm   # or systemctl stop swarmllm
 ./swarmllm run
 ```
 
-In a future release we'll re-enable auto-update once binary signing is in place. Until then, please update by hand whenever a new release lands.
+Since v0.3.191-alpha releases are signed, and nodes verify that signature before
+installing anything — so auto-update is on by default again. If you would rather
+do it by hand, set `mode = "notify"` under `[updates]` in your config.toml and the
+node will only tell you a release exists.
 
 ## Thank you
 
