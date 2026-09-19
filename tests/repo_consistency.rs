@@ -2334,42 +2334,65 @@ fn the_dispatch_db_scan_catches_a_planted_blocking_call() {
 /// Dockerfile actually copies" — is what this makes mechanical.
 #[test]
 fn everything_the_build_includes_is_in_the_docker_context() {
-    let dockerfile = std::fs::read_to_string("Dockerfile").expect("Dockerfile is missing");
-
-    // Directories and files the builder stage has before it compiles.
-    let copied: Vec<String> = dockerfile
-        .lines()
-        .map(str::trim)
-        .filter(|l| l.starts_with("COPY ") && !l.contains("--from="))
-        .flat_map(|l| {
-            let mut parts: Vec<&str> = l.split_whitespace().skip(1).collect();
-            parts.pop(); // destination
-            parts.into_iter().map(str::to_string).collect::<Vec<_>>()
-        })
+    // EVERY Dockerfile, not just the default one. Checking only `Dockerfile`
+    // is how v0.3.191's CUDA image failed after the CPU image was fixed: the
+    // guard passed, because it was looking at the file that had been repaired.
+    // The always-on architecture rules call this the repo's most repeated
+    // defect - one invariant, N paths.
+    let mut dockerfiles: Vec<String> = std::fs::read_dir(".")
+        .expect("read repo root")
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .filter(|n| n.starts_with("Dockerfile"))
         .collect();
+    dockerfiles.sort();
+    assert!(
+        dockerfiles.len() >= 2,
+        "expected at least Dockerfile and Dockerfile.cuda, found {dockerfiles:?} - \
+         if an image was removed, update this guard deliberately"
+    );
 
     let mut missing = Vec::new();
-    for entry in walk_rs_files("src") {
-        let src = std::fs::read_to_string(&entry).unwrap_or_default();
-        for cap in src
-            .split("include_str!(\"")
-            .skip(1)
-            .chain(src.split("include_bytes!(\"").skip(1))
-        {
-            let Some(rel) = cap.split('"').next() else {
-                continue;
-            };
-            // Resolve against the including file's directory, as rustc does.
-            let base = std::path::Path::new(&entry).parent().unwrap();
-            let joined = base.join(rel);
-            let norm = normalise(&joined);
-            // Anything still under a copied path is fine.
-            let covered = copied.iter().any(|c| {
-                let c = c.trim_end_matches('/');
-                norm == c || norm.starts_with(&format!("{c}/"))
-            });
-            if !covered {
-                missing.push(format!("{entry} includes {rel} -> {norm}"));
+    for dockerfile_name in &dockerfiles {
+        let dockerfile = std::fs::read_to_string(dockerfile_name)
+            .unwrap_or_else(|e| panic!("cannot read {dockerfile_name}: {e}"));
+
+        // Directories and files the builder stage has before it compiles.
+        let copied: Vec<String> = dockerfile
+            .lines()
+            .map(str::trim)
+            .filter(|l| l.starts_with("COPY ") && !l.contains("--from="))
+            .flat_map(|l| {
+                let mut parts: Vec<&str> = l.split_whitespace().skip(1).collect();
+                parts.pop(); // destination
+                parts.into_iter().map(str::to_string).collect::<Vec<_>>()
+            })
+            .collect();
+
+        for entry in walk_rs_files("src") {
+            let src = std::fs::read_to_string(&entry).unwrap_or_default();
+            for cap in src
+                .split("include_str!(\"")
+                .skip(1)
+                .chain(src.split("include_bytes!(\"").skip(1))
+            {
+                let Some(rel) = cap.split('"').next() else {
+                    continue;
+                };
+                // Resolve against the including file's directory, as rustc does.
+                let base = std::path::Path::new(&entry).parent().unwrap();
+                let joined = base.join(rel);
+                let norm = normalise(&joined);
+                // Anything still under a copied path is fine.
+                let covered = copied.iter().any(|c| {
+                    let c = c.trim_end_matches('/');
+                    norm == c || norm.starts_with(&format!("{c}/"))
+                });
+                if !covered {
+                    missing.push(format!(
+                        "{dockerfile_name}: {entry} includes {rel} -> {norm}"
+                    ));
+                }
             }
         }
     }

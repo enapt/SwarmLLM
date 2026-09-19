@@ -83,6 +83,11 @@ RUN mkdir -p src crates/swarmllm-frontend/src crates/swarmllm-types/src && \
     rm -rf src crates/swarmllm-frontend/src crates/swarmllm-types/src
 
 # Copy full source and build with CUDA support
+# `release_pubkey.txt` is SOURCE even though it is not under src/: the lib
+# pulls it in with `include_str!`. Same line exists in `Dockerfile`; the
+# guard now checks EVERY Dockerfile, because fixing only one is how the
+# CUDA image failed after the CPU image was repaired.
+COPY release_pubkey.txt ./
 COPY src/ src/
 COPY crates/ crates/
 COPY frontend/ frontend/
