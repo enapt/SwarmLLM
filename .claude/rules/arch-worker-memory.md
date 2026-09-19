@@ -63,6 +63,19 @@ had been left on the broken signal 400 lines below the fix.
 
 → `docs/invariants/memory.md`
 
+## A budget is charged by whatever owns the resource
+
+**`SharedState::committed_memory_mb` is the single answer to "how much of this
+memory is committed right now"**, and it asks `ModelProcessPool`
+(`vram_committed_mb` / `ram_committed_mb`) because the pool admits, charges and
+reclaims. Never charge a budget by summing `split_models` — those entries are
+GGUF headers read at scan time with no worker behind them, so the figure can
+only go up. It read `loaded_mb=5124` eighteen seconds after boot with zero
+workers, and nodes delegated models smaller than their free graphics memory.
+Guard: `a_memory_budget_is_charged_by_the_pool_never_by_the_metadata_map`.
+
+→ `docs/invariants/memory.md`
+
 ## A subprocess you are waiting for can die instead, and the graphics stack can go mid-run
 
 `spawn_worker` races `child.wait()` against `listener.accept()`. Watching the

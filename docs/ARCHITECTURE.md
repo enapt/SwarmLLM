@@ -1104,9 +1104,18 @@ with an active pipeline — and cannot unload a worker. Trimming an entry that i
 still wanted costs a header re-read, not a killed worker.
 
 A separate **registration** budget decides whether to advertise another segment
-as locally servable (`split_model_budget_with` + `split_models_committed_mb` +
+as locally servable (`split_model_budget_with` + `committed_memory_mb` +
 `MemoryScope`: the graphics budget, or `inference.max_split_model_memory_mb` on
 a node with no card). **It may refuse; it may never take.**
+
+**It is charged by what `ModelProcessPool` has committed, never by summing this
+cache.** Until v0.3.190 it summed `estimated_vram_mb` over the entries above —
+GGUF headers with no worker behind them — so it filled at scan time with memory
+nothing held and never fell: the live node reported `loaded_mb=5124` eighteen
+seconds after boot with zero workers, while the card held 2027 MiB. A node then
+served only the first card's-worth of models it happened to scan and delegated
+the rest, including models far smaller than its free graphics memory. Guard:
+`a_memory_budget_is_charged_by_the_pool_never_by_the_metadata_map`.
 
 Until v0.3.130 this cache carried its own VRAM budget that evicted entries *and*
 killed their workers — a second accountant with a smaller estimate, a weaker

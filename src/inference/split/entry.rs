@@ -146,26 +146,14 @@ pub struct BatchItem<'a> {
     pub request_id: &'a str,
 }
 
-/// Megabytes of the budgeted memory the resident split-model entries have
-/// been REGISTERED against.
-///
-/// `holds_budgeted_memory` decides which of them count: `split_models` holds
-/// segments on both devices, and counting a processor-resident one against the
-/// graphics card over-states what the card is carrying.
-///
-/// **This is a registration figure, not a residency figure.** What is actually
-/// on the card is `ModelProcessPool::vram_committed_mb`, charged at spawn — see
-/// [`trim_split_model_cache`] for why the two must not be confused.
-pub fn split_models_committed_mb(
-    split_models: &dashmap::DashMap<SplitModelKey, SplitModelEntry>,
-    holds_budgeted_memory: &dyn Fn(&crate::types::ModelId) -> bool,
-) -> u64 {
-    split_models
-        .iter()
-        .filter(|e| holds_budgeted_memory(&e.key().0))
-        .map(|e| e.value().estimated_vram_mb)
-        .sum()
-}
+// A `split_models` sum used to live here, and the budget in
+// `auto_manage::scan` was charged from it. Its own doc called it "a
+// registration figure, not a residency figure" and named
+// `ModelProcessPool::vram_committed_mb` as the residency one; the budget used
+// it anyway, so it filled at scan time with memory nothing held and never fell
+// (`docs/FUTURE_WORK.md` #55). `SharedState::committed_memory_mb` asks the pool
+// instead. Do not reintroduce a budget charged by this map — every entry in it
+// is a GGUF header read from disk, not a loaded model.
 
 /// Bound the split-model METADATA cache to `max_entries`, least-recently-used
 /// first. Entries whose model has an active pipeline are kept.

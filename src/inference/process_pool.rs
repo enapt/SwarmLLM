@@ -2165,40 +2165,14 @@ impl ModelProcessPool {
         self.cpu_pinned_models.contains(model_id)
     }
 
-    /// Does this model occupy graphics memory — or, for one not yet loaded,
-    /// will it?
-    ///
-    /// The single answer to both halves of "may a graphics-memory budget be
-    /// enforced against this model": whether loading it consumes any, and
-    /// whether unloading it releases any. Resident answers from the worker's
-    /// own recorded placement; not resident predicts from
-    /// [`ModelProcessPool::cpu_reason`], which is what the next spawn will do.
-    ///
-    /// **Why it exists.** `SharedState::ensure_split_model_entry` runs an LRU
-    /// eviction against the graphics budget every time a split-model entry is
-    /// created, and knew nothing about placement — so creating an entry for a
-    /// segment bound for the PROCESSOR evicted and killed a model that was
-    /// running happily on the card, freeing memory for something that would
-    /// never touch it. Measured here 2026-08-27: an 8B holding 4685 MB was
-    /// unloaded 35 s after it loaded, on the load of a 1-layer `force_cpu=true`
-    /// segment, and the tester who reported the sibling defect saw exactly the
-    /// same shape (a 3B evicted 35 s in, `freed_by` naming itself).
-    ///
-    /// It reads through `charges_ram` so the three ways a model can only ever
-    /// land in system memory — sent to the processor, no card detected, a build
-    /// without CUDA — give one answer rather than three.
-    pub fn model_uses_gpu_memory(&self, model_id: &ModelId) -> bool {
-        // Live worker only, for the reason in `cpu_placement_reason`.
-        let going_to_cpu = match self.live_worker(model_id) {
-            Some(handle) => handle.placed_on_cpu_because.is_some(),
-            None => self.cpu_reason(model_id).is_some(),
-        };
-        !charges_ram(
-            going_to_cpu,
-            self.gpu_detected.load(std::sync::atomic::Ordering::Relaxed),
-            cfg!(feature = "candle-cuda"),
-        )
-    }
+    // `model_uses_gpu_memory` stood here: a per-model placement predicate whose
+    // only consumer was the registration budget in `auto_manage::scan`, which
+    // summed metadata entries rather than asking what was resident. That budget
+    // now reads `vram_committed_mb` / `ram_committed_mb` directly
+    // (`docs/FUTURE_WORK.md` #55), and a charge the pool made already knows its
+    // own device, so the prediction had no one left to serve. The placement
+    // rule itself is unchanged and lives in `charges_ram`, recorded per worker
+    // at spawn as `charged_against_ram` and read back by `holds_gpu_memory`.
 
     /// The configured value, before any override — so a log line can show what
     /// the user asked for next to what actually happened.

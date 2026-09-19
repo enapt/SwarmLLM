@@ -8399,3 +8399,94 @@ pub fn error_hint_with_key(err: &SwarmError) -> Option<(&'static str, &'static s
          read them from"
     );
 }
+
+/// **A memory budget is charged by the component that owns the memory, never by
+/// summing the `split_models` metadata map.**
+///
+/// `split_models` holds `SplitModelEntry` values built by reading GGUF headers
+/// off disk while scanning the models directory. No worker exists behind them
+/// and no device memory has been allocated, so `estimated_vram_mb` is a
+/// PREDICTION about a model that may never load. `ModelProcessPool` is the one
+/// owner of both graphics and system memory — it admits, charges and reclaims —
+/// so `vram_committed_mb` / `ram_committed_mb` are the only figures that fall
+/// again when a worker unloads.
+///
+/// Measured on the live node 2026-09-17 (`docs/FUTURE_WORK.md` #55): the
+/// auto-load budget reported `loaded_mb=5124` **eighteen seconds after boot
+/// with zero workers spawned**, while the card held 2027 MiB and the pool's own
+/// admission logged `committed_mb=1044` in the same second. The cap therefore
+/// filled permanently in scan order, a node could locally serve only the first
+/// card's-worth of models it happened to scan, and the scheduler called even a
+/// 0.5B "does not fit our GPU" and delegated it to a peer.
+///
+/// The distinction was documented the whole time — the deleted helper called
+/// itself "a registration figure, not a residency figure" and named
+/// `vram_committed_mb` as the residency one — and the budget read the
+/// registration figure anyway. A doc comment did not hold it; this does.
+#[test]
+fn a_memory_budget_is_charged_by_the_pool_never_by_the_metadata_map() {
+    let state = std::fs::read_to_string("src/daemon/state/mod.rs").expect("read state/mod.rs");
+    let body = method_body(&state, "    pub fn committed_memory_mb(")
+        .expect("committed_memory_mb was renamed — re-point this guard");
+
+    for owner in ["vram_committed_mb", "ram_committed_mb"] {
+        assert!(
+            body.contains(owner),
+            "committed_memory_mb must ask `ModelProcessPool::{owner}` — the pool \
+             is what actually holds the memory, and its figure comes back down \
+             when a worker unloads"
+        );
+    }
+
+    for path in rust_sources_under("src") {
+        let src = std::fs::read_to_string(&path).expect("read source");
+        for (line, stmt) in statements(&src) {
+            let summed = stmt.contains(".sum()") || stmt.contains(".sum::");
+            assert!(
+                !(summed && stmt.contains("estimated_vram_mb")),
+                "{}:{line}: a budget summed over `estimated_vram_mb` charges \
+                 GGUF headers read at scan time for memory nothing holds — it \
+                 fills in scan order and never falls (FUTURE_WORK #55). Ask \
+                 `SharedState::committed_memory_mb`, which reads the pool.\n  {stmt}",
+                path.display()
+            );
+        }
+    }
+}
+
+/// The guard above must actually be able to fire, including on the wrapped
+/// shape rustfmt produces for a chain this long. Planted violation, per
+/// `.claude/rules/architecture.md` § "A source-scanning guard is only as good
+/// as the spellings it knows".
+#[test]
+fn the_metadata_budget_guard_catches_a_sum_rustfmt_has_wrapped() {
+    let planted = "fn committed(&self) -> u64 {\n\
+        \x20   self.split_models\n\
+        \x20       .iter()\n\
+        \x20       .map(|e| e.value().estimated_vram_mb)\n\
+        \x20       .sum()\n\
+        }\n";
+
+    let caught = statements(planted).into_iter().any(|(_, stmt)| {
+        (stmt.contains(".sum()") || stmt.contains(".sum::")) && stmt.contains("estimated_vram_mb")
+    });
+    assert!(
+        caught,
+        "the statement scanner must rejoin a wrapped iterator chain — this is \
+         exactly the shape the deleted helper had, and a guard that only sees \
+         it on one line would never have fired on the real code"
+    );
+
+    // Null control: reading ONE entry's estimate is ordinary and must not fire.
+    let innocent = "fn one(&self) -> u64 {\n\
+        \x20   self.entry.estimated_vram_mb\n\
+        }\n";
+    let fired = statements(innocent).into_iter().any(|(_, stmt)| {
+        (stmt.contains(".sum()") || stmt.contains(".sum::")) && stmt.contains("estimated_vram_mb")
+    });
+    assert!(
+        !fired,
+        "a guard that fires on any mention of the field would forbid reading an \
+         entry at all"
+    );
+}

@@ -2966,26 +2966,37 @@ impl SharedState {
         }
     }
 
-    /// "Does this model occupy the memory `scope` is protecting?", as a
-    /// closure the eviction helpers can apply per model.
-    fn budgeted_memory_predicate(
-        &self,
-        scope: MemoryScope,
-    ) -> impl Fn(&crate::types::ModelId) -> bool + '_ {
-        move |model_id: &crate::types::ModelId| match scope {
-            MemoryScope::GraphicsMemory => self.model_process_pool.model_uses_gpu_memory(model_id),
-            // No card on this node, so every resident model is holding the
-            // only memory there is.
-            MemoryScope::AllResident => true,
+    /// Megabytes of `scope`'s memory **actually committed right now**, asked of
+    /// the component that owns it.
+    ///
+    /// `ModelProcessPool` admits, charges and reclaims both kinds of memory, so
+    /// it is the only thing that knows what is resident; the figure moves back
+    /// down when a worker unloads.
+    ///
+    /// **This used to sum `estimated_vram_mb` over the `split_models` map, and
+    /// that map is METADATA** — entries created by scanning GGUF headers, with
+    /// no worker behind them. So the budget was charged at scan time for memory
+    /// nothing held, filled permanently in scan order, and never fell: the live
+    /// node reported `loaded_mb=5124` eighteen seconds after boot with zero
+    /// workers spawned, while the card held 2027 MiB and the pool's own
+    /// admission logged `committed_mb=1044` in the same second. A node with
+    /// several models could then locally serve only the first card's-worth it
+    /// happened to scan, and the scheduler called even a 0.5B "does not fit our
+    /// GPU" and delegated it to a peer (`docs/FUTURE_WORK.md` #55).
+    ///
+    /// The distinction was already written down — `split_models_committed_mb`
+    /// called itself "a registration figure, not a residency figure" and named
+    /// this function's source as the residency one — and the budget used the
+    /// registration figure anyway. **A budget must be charged by the thing that
+    /// owns the resource**, which is the same rule that took the unload out of
+    /// `ensure_split_model_entry` (gotcha #402).
+    pub fn committed_memory_mb(&self, scope: MemoryScope) -> u64 {
+        match scope {
+            MemoryScope::GraphicsMemory => self.model_process_pool.vram_committed_mb(),
+            // No card on this node, so the general ceiling is about system
+            // memory and the pool's RAM charge is the matching figure.
+            MemoryScope::AllResident => self.model_process_pool.ram_committed_mb(),
         }
-    }
-
-    /// Megabytes of `scope`'s memory currently held by resident split models.
-    pub fn split_models_committed_mb(&self, scope: MemoryScope) -> u64 {
-        crate::inference::split::split_models_committed_mb(
-            &self.split_models,
-            &self.budgeted_memory_predicate(scope),
-        )
     }
 
     /// Ensure a split model metadata entry exists for the given key.
@@ -3429,25 +3440,34 @@ mod split_model_cache_tests {
         assert!(state.split_models.contains_key(&second));
     }
 
-    /// The sibling half: memory held on the processor is not graphics memory,
-    /// so it must not be counted against the graphics budget.
+    /// The sibling half: a metadata entry is not memory, in EITHER scope.
+    ///
+    /// `split_models` holds GGUF headers read while scanning the models
+    /// directory. Nothing is loaded, no worker exists, and the card is empty —
+    /// so a budget asked what is committed must answer zero.
+    ///
+    /// **This is the #55 measurement in miniature.** The live node reported
+    /// `loaded_mb=5124` eighteen seconds after boot with zero workers spawned,
+    /// because the figure summed these entries: the cap then filled in scan
+    /// order, never fell, and the node delegated models far smaller than its
+    /// free graphics memory. Against the sum this test asserted 4685 for
+    /// `AllResident`, whose predicate counted every entry unconditionally.
     #[test]
-    fn processor_resident_models_do_not_count_against_the_graphics_budget() {
+    fn metadata_entries_are_not_committed_memory_in_either_scope() {
         let state = test_state();
         state
             .split_models
             .insert((ModelId("m".into()), 0, 32), entry(4685));
-        state.model_process_pool.set_gpu_layers(0);
 
         assert_eq!(
-            state.split_models_committed_mb(MemoryScope::GraphicsMemory),
+            state.committed_memory_mb(MemoryScope::GraphicsMemory),
             0,
-            "nothing is on the card, so the card is empty"
+            "no worker has spawned, so the card carries nothing"
         );
         assert_eq!(
-            state.split_models_committed_mb(MemoryScope::AllResident),
-            4685,
-            "the general ceiling on a card-less node still counts it"
+            state.committed_memory_mb(MemoryScope::AllResident),
+            0,
+            "and a header read off disk holds no system memory either"
         );
     }
 }

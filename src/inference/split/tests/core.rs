@@ -566,25 +566,12 @@ fn the_metadata_cache_keeps_entries_for_models_with_active_pipelines() {
     assert!(split_models.contains_key(&busy));
 }
 
-/// Memory a processor-resident model holds is not graphics memory, so it must
-/// not be counted against the graphics registration budget — otherwise the card
-/// looks full while it is empty, and a model that fits is refused.
-#[test]
-fn only_models_on_the_card_are_counted_against_the_graphics_budget() {
-    use crate::types::*;
-
-    let split_models: dashmap::DashMap<SplitModelKey, SplitModelEntry> = dashmap::DashMap::new();
-    split_models.insert((ModelId("on-cpu".into()), 0, 10), make_dummy_entry(4000));
-    split_models.insert((ModelId("on-gpu".into()), 0, 10), make_dummy_entry(1000));
-
-    let holds = |m: &ModelId| m.0 == "on-gpu";
-    assert_eq!(split_models_committed_mb(&split_models, &holds), 1000);
-    assert_eq!(
-        split_models_committed_mb(&split_models, &all_on_gpu),
-        5000,
-        "control: the placement-blind sum is what over-stated the card"
-    );
-}
+// The graphics-budget sum this file used to exercise is gone: a budget is now
+// charged by what `ModelProcessPool` has committed, not by summing these
+// metadata entries (`docs/FUTURE_WORK.md` #55). The replacement assertion —
+// that an entry with no worker behind it is worth zero in either memory scope —
+// lives beside the accessor, in `daemon::state`'s
+// `metadata_entries_are_not_committed_memory_in_either_scope`.
 
 // ── Batch forward tests ──
 

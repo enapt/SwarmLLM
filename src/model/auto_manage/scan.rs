@@ -655,14 +655,15 @@ pub async fn check_and_load_model(
 
         // VRAM budget pre-check: skip loading if budget is full (shards stay on disk for P2P)
         //
-        // Counted through `split_models_committed_mb` rather than by summing
-        // every entry, because this budget is the graphics card's and the map
-        // holds segments on both devices: a processor-resident model was
-        // inflating the figure with memory it does not hold on the card, and so
-        // blocking a load the card had room for.
+        // Charged by what `ModelProcessPool` has actually committed, never by
+        // summing the `split_models` metadata map. Those entries are GGUF
+        // headers read at scan time with no worker behind them, so charging
+        // them filled the budget in scan order before anything was resident and
+        // never released it — see `SharedState::committed_memory_mb` for the
+        // measurement, and `docs/FUTURE_WORK.md` #55.
         if let Some((budget, scope)) = shared.split_model_budget_with(vram_budget_mb) {
             let estimated = estimate_segment_vram_mb(&manifest, layer_start, layer_end);
-            let total_loaded = shared.split_models_committed_mb(scope);
+            let total_loaded = shared.committed_memory_mb(scope);
             if total_loaded + estimated > budget {
                 // Refuse to register; never evict. What is already registered
                 // belongs to models this node is offering, and the graphics

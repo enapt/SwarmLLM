@@ -359,20 +359,39 @@ graphics memory and did not, so the budget was enforced against a phantom.
 That premise is gone — this no longer claims to free anything. Trimming an
 entry still wanted now costs a header re-read, not a killed worker.
 **A registration budget survives, and may refuse but never take.**
-`SharedState::split_model_budget_with` + `split_models_committed_mb` + the
+`SharedState::split_model_budget_with` + `committed_memory_mb` + the
 `MemoryScope` enum answer "should this node advertise another segment as
 locally servable?" — `compute_vram_budget` (the card) or, on a node with no
 card, `inference.max_split_model_memory_mb`. `MemoryScope` exists because
-those two were reached through one `.or()` and describe different memory:
-filtering by graphics residency under the second would disable it on exactly
-the machines it is for. **`ModelProcessPool::model_uses_gpu_memory`** is the
-single answer to "does this model occupy graphics memory", resident from the
-worker's own `placed_on_cpu_because` and otherwise predicted from
-`cpu_reason`, read through `charges_ram` so "sent to the processor", "no card
-detected" and "a build without CUDA" give one answer rather than three.
-**The rule to carry**: a budget over a collection whose members live in
-different places must be told which place each one is in — and a component
-that does not own a resource must not be able to reclaim it.
+those two were reached through one `.or()` and describe different memory.
+
+**And the budget is charged by the component that OWNS the memory** —
+`ModelProcessPool::vram_committed_mb` / `ram_committed_mb` — not by summing
+`estimated_vram_mb` over `split_models`, which is what it did until v0.3.190
+(`docs/FUTURE_WORK.md` #55). Those entries are GGUF headers read while scanning
+the models directory: no worker, no allocation, just a prediction about a model
+that may never load. So the cap filled at scan time with memory nothing held and
+could never fall — measured on the live node 2026-09-17 as `loaded_mb=5124`
+**eighteen seconds after boot with zero workers spawned**, against 2027 MiB
+actually on the card and the pool's own `committed_mb=1044` in the same second.
+The consequence was not a log line: the cap consumed itself permanently in scan
+order, so a node locally served only the first card's-worth of models it
+happened to scan, and the scheduler reported even a 0.5B as "does not fit our
+GPU" and delegated it to a peer.
+
+**The tell was already in the code.** The deleted helper's own doc said "this is
+a registration figure, not a residency figure" and named `vram_committed_mb` as
+the residency one; the budget read the registration figure regardless. A doc
+comment describing the trap did not stop the trap — the guard
+`a_memory_budget_is_charged_by_the_pool_never_by_the_metadata_map` does, and
+`model_uses_gpu_memory` (the placement predicate that existed only to filter
+that sum) went with it. The placement rule itself is unchanged: `charges_ram`
+decides at spawn, is recorded as `charged_against_ram`, and is read back by
+`holds_gpu_memory`.
+
+**The rule to carry**: a budget must be charged by whatever admits and releases
+the resource, so the figure falls again when the resource is freed — and a
+component that does not own a resource must not be able to reclaim it.
 
 **`evict_worker_where` / `evict_this_worker` is how a worker leaves
 `workers`** (2026-09-05, gotcha #467), and `unload_model` is the one
