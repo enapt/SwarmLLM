@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.3.191-alpha] — UNRELEASED (set this date when cutting the release)
+## [0.3.191-alpha] — 2026-09-19
 
 **SwarmLLM now keeps itself up to date, and checks who really made an update
 before installing it.**
@@ -46,6 +46,18 @@ rsign verify swarmllm-linux-x86_64.sha256 \
   -x swarmllm-linux-x86_64.sha256.minisig \
   -P <the key published in release_pubkey.txt>
 ```
+
+**If SwarmLLM stopped with "Illegal instruction", there is a build for your
+computer and the download page now says so.**
+
+The ordinary Linux and Windows downloads are compiled for processors made from
+2013 onwards, which makes them roughly three times faster at running models on
+the processor. On an older machine they stop on the very first instruction,
+before printing anything — and because nothing is actually wrong with the
+download, every obvious check comes back clean. A build for older processors
+has shipped in every release for months and there was no way to discover it
+existed. Both are now listed, with the symptom and the one command that
+confirms it. Reported by someone it was blocking.
 
 **Three places where saving a record could stop your computer hearing the
 network.**
