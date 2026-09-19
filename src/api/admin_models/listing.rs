@@ -158,7 +158,11 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
     //
     // `blocked` is the state that masking used to hide: prompt privacy is ON for
     // this model and this node CANNOT satisfy it, so every request for it fails
-    // with "Encrypted pipeline requires the requesting node to hold shard 0".
+    // — `SwarmError::PromptPrivacyUnavailable` when the model's first part is
+    // missing, `PromptPrivacyNeedsFinalShard` when it is the last. Named by
+    // TYPE rather than quoted: the wording this comment used to carry had not
+    // been printed by anything for weeks, which is the same staleness
+    // `docs/FUTURE_WORK.md` #86 was written about.
     // Reported live 2026-08-09 on a model whose shards had since been removed —
     // the dashboard said `encrypted_pipeline: false` while the scheduler said
     // "Encrypted pipeline active" for the same model in the same second, and

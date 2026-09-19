@@ -35,6 +35,21 @@ graphics-driver case.
 If you are running an older version, nothing changes for you and other computers
 will keep sending you work exactly as before.
 
+**Turning on private answering without the whole model now explains itself.**
+
+Private answering keeps both ends of your request on your own computer, which
+means your computer needs both the first and the last part of the model stored
+locally. If it had the first part but not the last, the request failed with a
+message that said something had gone wrong inside SwarmLLM, and advice to wait
+and try again — which could never work, because nothing was broken and nothing
+would change by waiting.
+
+It now says plainly that private answering is on, that the last part of the
+model is not stored here, and gives you the two things that actually resolve it:
+download the rest of the model, or turn private answering off for it. The same
+message already existed for a missing first part; this is its other half, and
+each now points you at the right piece. Available in all 21 languages.
+
 ## [0.3.189-alpha] — 2026-09-19
 
 **A long answer that fills up the model's memory now ends properly instead of

@@ -85,7 +85,7 @@ with a type-tag byte for tensor payloads.
 - **5** WS message types, **2** broadcast channels. Do not add to either set.
 - Nav ranking, storage-key constants and `App.data.*` are in
   `.claude/rules/arch-frontend.md`, which loads when you open `frontend/`.
-- i18n: **1389 translation keys** (**1391 entries per locale** incl. `_lang` +
+- i18n: **1390 translation keys** (**1392 entries per locale** incl. `_lang` +
   `_dir`) × 21 languages, sorted by key. Parity and counts are asserted — **update
   BOTH CLAUDE.md and `docs/ARCHITECTURE.md`**. A new key MUST be translated into
   all 21; no English fallback (`.claude/rules/i18n.md`).
@@ -96,7 +96,7 @@ with a type-tag byte for tensor payloads.
 ## Testing
 
 **Always say which feature set a count came from.** Current, with
-`--features dev,claude-subscription`: **2790 lib** (+12 ignored),
+`--features dev,claude-subscription`: **2792 lib** (+12 ignored),
 79 integration (31 `integration` + 34 `integration_phase10_11` + 14 `yamux_substream`),
 132 repo-consistency, 1 `api_key_side_effects`, 40 `swarmllm-types` (**not** run
 by a bare `cargo test` — CI runs it explicitly),

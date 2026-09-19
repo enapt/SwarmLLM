@@ -755,6 +755,29 @@ fn trusted_with_the_plaintext_prompt(c: &NodeCandidate, local_node_id: &NodeId) 
     &c.node_id == local_node_id || c.trust_score >= DELEGATE_MIN_TRUST
 }
 
+/// Prompt privacy is on, and this node does not hold the model's last part.
+///
+/// One helper for both sites that can reach this conclusion, so the two cannot
+/// drift into describing the same refusal differently. It derives the model
+/// name exactly as the shard-0 sibling does, a few hundred lines above.
+///
+/// **It was `SwarmError::PipelineError` until 2026-09-19**, which answers 500 —
+/// reporting a deliberate setting as a crash in the node the user is talking
+/// to, the fault five other variants were split out of that one to fix — and
+/// which picks its hint by substring-matching our own prose, so this refusal
+/// inherited the default: a peer went offline, try again. Retrying cannot help
+/// a policy refusal, and following that advice loops (gotcha #295).
+/// `docs/FUTURE_WORK.md` #86.
+fn prompt_privacy_needs_final_shard(candidates: &[NodeCandidate]) -> SwarmError {
+    let model = candidates
+        .first()
+        .map(|c| c.shard_id.model_id.0.as_str())
+        .unwrap_or("this model");
+    SwarmError::PromptPrivacyNeedsFinalShard {
+        model_id: model.to_string(),
+    }
+}
+
 fn delegation_target<'a>(
     candidates: &'a [NodeCandidate],
     input: &DelegationInput<'_>,
@@ -3781,12 +3804,7 @@ impl PipelineScheduler {
                             if !capped.is_empty() {
                                 options = capped;
                             } else {
-                                return Err(SwarmError::PipelineError(
-                                    "Encrypted pipeline requires the requesting node to hold \
-                                     the final shard (output head). Download the last shard \
-                                     to enable this mode."
-                                        .to_string(),
-                                ));
+                                return Err(prompt_privacy_needs_final_shard(candidates));
                             }
                         } else {
                             // Local node truly can't finish — no range reaches the end
@@ -3798,12 +3816,7 @@ impl PipelineScheduler {
                             if !not_reaching_end.is_empty() {
                                 options = not_reaching_end;
                             } else {
-                                return Err(SwarmError::PipelineError(
-                                    "Encrypted pipeline requires the requesting node to hold \
-                                     the final shard (output head). Download the last shard \
-                                     to enable this mode."
-                                        .to_string(),
-                                ));
+                                return Err(prompt_privacy_needs_final_shard(candidates));
                             }
                         }
                     }

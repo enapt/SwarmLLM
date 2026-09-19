@@ -986,6 +986,9 @@ fn failure_is_penalty_worthy(err: &SwarmError, had_remote_segment: bool) -> bool
         | SwarmError::InsufficientCapacity(_)
         | SwarmError::PrivateModeUnavailable { .. }
         | SwarmError::PromptPrivacyUnavailable { .. }
+        // Our own setting, refusing because of what is on our own disk. Both
+        // ends of it name this machine and nobody else's.
+        | SwarmError::PromptPrivacyNeedsFinalShard { .. }
         | SwarmError::ModelIncompleteInSwarm { .. }
         // Raised only when NO node anywhere holds the model's mmproj shard —
         // a swarm-wide gap, the same shape as `InsufficientCapacity` and
@@ -1126,6 +1129,33 @@ mod tests {
             ),
             true,
         ));
+    }
+
+    /// Both ends of the prompt-privacy refusal name THIS node's own setting and
+    /// THIS node's own disk, so no peer may lose trust for either.
+    ///
+    /// The final-shard half was `PipelineError` until 2026-09-19, which
+    /// `failure_is_penalty_worthy` exempts — so it was correct by accident,
+    /// through a variant that also answered 500 and handed out retry advice
+    /// that could never work (`docs/FUTURE_WORK.md` #86). Splitting it into its
+    /// own variant fixes the status and the hint, and this is the third
+    /// follow-up a new variant must not skip: the match arm defaults to
+    /// `_ => true`, i.e. blame the peer.
+    #[test]
+    fn a_privacy_refusal_never_docks_a_peer() {
+        for err in [
+            SwarmError::PromptPrivacyUnavailable {
+                model_id: "m".into(),
+            },
+            SwarmError::PromptPrivacyNeedsFinalShard {
+                model_id: "m".into(),
+            },
+        ] {
+            assert!(
+                !failure_is_penalty_worthy(&err, true),
+                "a peer had no part in our privacy setting: {err}"
+            );
+        }
     }
 
     #[test]

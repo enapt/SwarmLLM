@@ -190,6 +190,25 @@ pub enum SwarmError {
     #[error("Prompt privacy is on for {model_id}, but this node does not hold shard 0 (the embedding table) that keeps your prompt away from every peer")]
     PromptPrivacyUnavailable { model_id: String },
 
+    /// The OTHER end of the same refusal: prompt privacy is on, and this node
+    /// does not hold the FINAL shard — the output head, which has to stay local
+    /// for the reply to be produced here rather than on a peer.
+    ///
+    /// Split out of `PipelineError` on 2026-09-19 (`docs/FUTURE_WORK.md` #86).
+    /// As a `PipelineError` it answered **500**, reporting a deliberate setting
+    /// as a crash in the node the user was talking to — the exact fault five
+    /// other variants were split out of that one to fix — and it inherited a
+    /// hint telling the user a peer had gone offline and to try again, which is
+    /// advice that can never work for a policy refusal and sends them round a
+    /// loop with no exit (gotcha #295).
+    ///
+    /// Its own variant rather than a field on the sibling above, because the
+    /// two situations need DIFFERENT next steps: one says fetch the start of
+    /// the model, the other the end. A shared variant would have to pick one
+    /// hint for both, and half its readers would be sent after the wrong piece.
+    #[error("Prompt privacy is on for {model_id}, but this node does not hold the model's last part (the output head) that keeps your prompt away from every peer")]
+    PromptPrivacyNeedsFinalShard { model_id: String },
+
     /// No reachable node holds the piece of this model covering `layer` — the
     /// swarm is missing part of it, so no pipeline can be assembled.
     ///
@@ -464,7 +483,13 @@ pub fn classify_error(err: &SwarmError) -> (StatusCode, String, &'static str) {
             err.to_string(),
             "private_mode_error",
         ),
-        SwarmError::PromptPrivacyUnavailable { .. } => (
+        // The two ends of the same policy refusal, and deliberately the same
+        // `error_type`: to a caller this is one situation — prompt privacy is
+        // on and this node does not hold enough of the model to honour it. They
+        // are separate VARIANTS because the piece to fetch differs, and the
+        // hint has to name the right one.
+        SwarmError::PromptPrivacyUnavailable { .. }
+        | SwarmError::PromptPrivacyNeedsFinalShard { .. } => (
             StatusCode::SERVICE_UNAVAILABLE,
             err.to_string(),
             "prompt_privacy_error",
@@ -892,6 +917,16 @@ pub fn error_hint_with_key(err: &SwarmError) -> Option<(&'static str, &'static s
             "prompt_privacy_unavailable",
             "Prompt privacy keeps your prompt on this machine, which needs the model's \
              first part stored here — and it isn't. Either fetch it with \
+             `swarmllm get-model <name>`, or turn prompt privacy off for this model to \
+             let the swarm run it. Retrying as-is won't help.",
+        )),
+        // The sibling, naming the other end. Same shape and same two ways out,
+        // because it is the same setting refusing for the same reason — what
+        // must differ is WHICH part it sends the reader after.
+        SwarmError::PromptPrivacyNeedsFinalShard { .. } => Some((
+            "prompt_privacy_needs_final_shard",
+            "Prompt privacy keeps both ends of this request on this machine, which needs \
+             the model's last part stored here — and it isn't. Either fetch it with \
              `swarmllm get-model <name>`, or turn prompt privacy off for this model to \
              let the swarm run it. Retrying as-is won't help.",
         )),
@@ -1416,6 +1451,70 @@ mod tests {
         })
         .into_response();
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    /// The last-shard half of the same refusal, and the reason it is a separate
+    /// variant: **the two ends send the reader after DIFFERENT parts.**
+    ///
+    /// It was `SwarmError::PipelineError` until 2026-09-19, which meant 500 —
+    /// a deliberate setting reported as a crash in the node the user is talking
+    /// to — and a hint chosen by substring-matching our own prose, so it
+    /// inherited the default "a peer went offline, try again". Retrying is the
+    /// one thing that cannot resolve a policy refusal, and a user following
+    /// that advice loops for ever (gotcha #295).
+    ///
+    /// Asserted on the ADVICE rather than the wording: a test pinned to a
+    /// phrase passes while the reader is still being sent to the wrong end of
+    /// the model.
+    #[test]
+    fn each_end_of_the_privacy_refusal_sends_the_user_after_the_right_part() {
+        let first = SwarmError::PromptPrivacyUnavailable {
+            model_id: "m".into(),
+        };
+        let last = SwarmError::PromptPrivacyNeedsFinalShard {
+            model_id: "m".into(),
+        };
+
+        // Same situation to a caller, so the same status and the same type.
+        for err in [&first, &last] {
+            let (status, _msg, error_type) = classify_error(err);
+            assert_eq!(
+                status,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "a refusal by configuration is not a crash in this node"
+            );
+            assert_eq!(error_type, "prompt_privacy_error");
+        }
+
+        let (first_key, first_hint) = error_hint_with_key(&first).expect("first-part hint");
+        let (last_key, last_hint) = error_hint_with_key(&last).expect("last-part hint");
+
+        assert_ne!(
+            first_key, last_key,
+            "two hints that cannot both be right need two keys — one of them \
+             would otherwise name the wrong end in all 21 languages"
+        );
+        assert!(
+            first_hint.contains("first part") && !first_hint.contains("last part"),
+            "the shard-0 refusal must send the reader after the model's START"
+        );
+        assert!(
+            last_hint.contains("last part") && !last_hint.contains("first part"),
+            "the final-shard refusal must send the reader after the model's END"
+        );
+
+        // Neither may suggest the one thing that cannot work.
+        for hint in [first_hint, last_hint] {
+            assert!(
+                hint.contains("won't help"),
+                "a policy refusal must say plainly that retrying cannot resolve \
+                 it — the advice, not the wording, is what a reader acts on"
+            );
+        }
+
+        // The matching "must not dock a peer" assertion lives beside the
+        // predicate that decides it, in `router::distributed_exec`'s tests —
+        // `a_privacy_refusal_never_docks_a_peer`.
     }
 
     /// A peer going silent mid-request is a transient serve failure, not a bug
