@@ -1399,3 +1399,49 @@ three things, and two of them were wrong:
   its job is to find the bytes elsewhere, which for a cancel is the opposite of
   what was asked. It returns `false` (the download has ended) on the cancel
   path, never `true` (a retry is on its way).
+
+## LAN membership is decided only from what we observed (2026-09-19)
+
+**What it replaced.** `handle_identify_received` computed
+
+```rust
+let addr_is_lan = multiaddr_is_local(&info.observed_addr) || /* connection addr */;
+```
+
+`observed_addr` is what the PEER reports it sees our address as. It is
+attacker-controlled, and it decided whether that peer sat inside our privacy
+boundary: `pool::scope::allowed_node_set` (and `api/pool.rs`) admit every
+`is_lan_peer` into private mode when `pool.private_mode_allow_lan` is on, which
+defaults to `true` (`config/credit.rs`). A peer could therefore place itself
+inside private mode by reporting that it observed us at `192.168.x.x`, and
+outbound prompts would be routed to it.
+
+**How it was found.** Not by the exploit — by a user noticing a peer listed as
+LAN with nothing else filled in. Peer `9594e1ffaa2d8156`, nickname "win": public
+IP `87.4.107.33`, **1220 ms** RTT, `is_lan_peer: true`, advertising a Docker
+bridge address (`172.17.0.5`) and `127.0.0.1` alongside its real one.
+
+**Two things made it hard to see.** The code already carried a comment saying it
+deliberately did NOT infer LAN from `listen_addrs` — true, and reassuring, and
+about a different input than the one that was wrong. And the log line read
+`LAN peer detected from listen_addrs`, naming evidence the code had not used
+since that comment was written. Both have been corrected; a rule that lives only
+in a comment gets re-broken (gotcha #593), and here the comment actively
+misdirected.
+
+**Affected releases.** Introduced 2026-07-21 in `938e8de4`, so every release from
+**v0.3.3-alpha to v0.3.191-alpha** inclusive. The flag is in-memory only and is
+not persisted, so restarting on a fixed build clears any bad classification.
+
+**What a change must keep.** The three legitimate inputs are ours: the
+connection's remote address, mDNS, and a measured RTT. A relayed connection
+carries no `ip4`/`ip6` hop at all, so `multiaddr_is_local` answers false for it,
+which is correct. `an_asset…`-style scans are not enough here — the guard
+inspects the statements that COMPUTE the decision (`let addr_is_lan =` /
+`let is_lan =`), because the `PeerInfo` literal legitimately stores
+`addresses: info.listen_addrs` in the same statement as `is_lan_peer: is_lan`.
+
+⚠ **Still open**: the flag is sticky (`was_lan || addr_is_lan`, cleared only by
+mDNS `Expired`), so a single spurious sub-5 ms RTT sample latches LAN for the
+life of the process. No longer attacker-controlled, but worth revisiting.
+

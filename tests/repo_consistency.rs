@@ -2437,6 +2437,79 @@ fn walk_rs_files(dir: &str) -> Vec<String> {
     out
 }
 
+/// Whether a peer is on our LAN is decided ONLY from what we observed.
+///
+/// `is_lan_peer` is a privacy boundary, not a label: `pool::scope` admits every
+/// LAN peer into private mode when `pool.private_mode_allow_lan` is on, and
+/// that is the DEFAULT. So the inputs to it are a trust decision.
+///
+/// `identify::Info` carries two things the PEER controls — `observed_addr` (its
+/// claim about what address it sees us on) and `listen_addrs` (its claim about
+/// itself). Neither is evidence about where the peer is. Using `observed_addr`
+/// let any peer put itself inside private mode by reporting that it observed us
+/// at a private address; found in the field on 2026-09-19 as a node 1220 ms away
+/// on a public IP reading `is_lan_peer: true`. libp2p reached the same
+/// conclusion in go-libp2p#577.
+///
+/// The legitimate inputs are all our own observations: the connection's remote
+/// address, mDNS (link-local multicast cannot be forged from off-link), and a
+/// round-trip time we measured.
+#[test]
+fn lan_membership_is_never_decided_from_what_a_peer_told_us() {
+    let src =
+        std::fs::read_to_string("src/network/manager/identify.rs").expect("identify.rs is missing");
+    let body = fn_body(&src, "fn handle_identify_received(")
+        .expect("handle_identify_received not found — did the signature change?");
+
+    let mut offenders = Vec::new();
+    let mut saw_decision = false;
+    for (line, stmt) in statements(body) {
+        let flat = stmt.replace(char::is_whitespace, "");
+        // ONLY the statements that COMPUTE the decision. Deliberately not "any
+        // statement mentioning is_lan": the `PeerInfo` literal legitimately
+        // stores `addresses: info.listen_addrs` for display and dialling in the
+        // same statement as `is_lan_peer: is_lan`, and flagging that would be a
+        // false positive that gets the guard weakened or deleted.
+        let decides_lan = flat.contains("letaddr_is_lan=") || flat.contains("letis_lan=");
+        if !decides_lan {
+            continue;
+        }
+        saw_decision = true;
+        for peer_claim in ["observed_addr", "listen_addrs"] {
+            if flat.contains(peer_claim) {
+                offenders.push(format!(
+                    "line {line}: `{peer_claim}` feeds the LAN decision"
+                ));
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "these decide `is_lan_peer` from something the PEER told us, which puts \
+         it inside private mode on its own say-so:\n  {}\n\n\
+         Use only what we observed: the connection's remote address, mDNS, or a \
+         measured RTT.",
+        offenders.join("\n  ")
+    );
+
+    // The positive half, twice over — without it the scan above passes for a
+    // function that decides nothing, which is the failure mode the guards rules
+    // file calls "a scan that finds nothing is indistinguishable from one that
+    // cannot find anything".
+    assert!(
+        saw_decision,
+        "no `let addr_is_lan = …` / `let is_lan = …` statement was found in \
+         handle_identify_received, so this guard inspected nothing — the \
+         decision was renamed or moved and the scan needs updating"
+    );
+    assert!(
+        body.contains("peer_remote_addrs"),
+        "handle_identify_received no longer consults the connection's remote \
+         address, so it has stopped using the one input we actually observe"
+    );
+}
+
 /// A build must trust a signing key, or it can never update itself again.
 ///
 /// `release_pubkey.txt` is compiled in with `include_str!`, and every update

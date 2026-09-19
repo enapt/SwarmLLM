@@ -223,6 +223,26 @@ The loop-stall tripwire in `NetworkManager::run` (per-arm, ≥100 ms → `DIAG:
 network event loop stalled`) exists because this investigation's first
 hypothesis was the loop; a shadow node cleared it in four minutes. Keep it.
 
+## Whether a peer is on our LAN is decided only from what WE observed
+
+`is_lan_peer` is a privacy boundary, not a label: `pool::scope::allowed_node_set`
+admits every LAN peer into private mode whenever `pool.private_mode_allow_lan` is
+on, and that is the **default**. So its inputs are a trust decision.
+
+**Never derive it from `identify::Info`.** Both `observed_addr` (the peer's claim
+about what address it sees US on) and `listen_addrs` (its claim about itself) are
+peer-controlled, and neither is evidence about where the peer is. The legitimate
+inputs are the three we gather ourselves: the connection's own remote address,
+mDNS (link-local multicast cannot be forged from off-link), and an RTT we
+measured.
+
+⚠ **The flag is sticky** — `was_lan || addr_is_lan`, cleared only by mDNS
+`Expired` — so one wrong classification lasts for the life of the process.
+
+Guard: `lan_membership_is_never_decided_from_what_a_peer_told_us`.
+
+→ `docs/invariants/network.md`
+
 ## Completing libp2p Identify does not make a peer one of ours
 
 **`network::manager::identify::peer_speaks_swarmllm`** is the single answer to

@@ -1,5 +1,41 @@
 # Changelog
 
+## [0.3.192-alpha] — 2026-09-19
+
+**Private mode could treat a distant computer as being on your home network.**
+
+Private mode exists so your prompts only go to computers you have chosen — the
+ones in your pool, plus anything on your own local network. Deciding what counts
+as "your own local network" was partly based on something the other computer
+told us: its report of what address it saw us arrive from. That is not something
+we can check, and a computer that reported a home-network address was treated as
+though it were in the room with you. It would then be eligible to receive your
+prompts while private mode was on.
+
+We found this because a peer on the network was showing up as local while
+plainly being 1200 milliseconds away in another country. Nothing suggests it was
+deliberate — the likely cause there is an ordinary machine running inside a
+container, which reports internal addresses — but the same report could have
+been sent on purpose.
+
+Your computer now decides this only from things it can see for itself: the
+address the connection actually came from, discovery on the local network, and
+a round trip it timed. Nothing the other side claims is used.
+
+**Scope.** This affected private mode only. It could allow a computer to be
+offered work it should not have been offered; it did not expose stored files,
+credentials or anything outside the prompts routed while private mode was on. If
+you have never turned private mode on, nothing about your setup changed, because
+without it your prompts already go to the wider swarm by design.
+
+**Affected versions: v0.3.3-alpha through v0.3.191-alpha** — about two months.
+The classification was never written to disk, so restarting on this version
+clears it. Updating is enough; there is nothing to clean up by hand.
+
+Thanks to the person who looked at their peer list and asked why a machine was
+marked local with no other details filled in. The missing details turned out to
+be a separate and harmless thing, and asking about it is what surfaced this.
+
 ## [0.3.191-alpha] — 2026-09-19
 
 **SwarmLLM now keeps itself up to date, and checks who really made an update

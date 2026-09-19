@@ -263,12 +263,25 @@ impl NetworkManager {
         // advertises `127.0.0.1` (and often a private cloud-interface IP) too,
         // which used to mislabel every remote peer — e.g. a public relay anchor
         // reached over its public IP — as "LAN".
-        let addr_is_lan = multiaddr_is_local(&info.observed_addr)
-            || self
-                .peer_remote_addrs
-                .get(&peer_id)
-                .map(multiaddr_is_local)
-                .unwrap_or(false);
+        // ⚠ ONLY evidence WE observed. `info.observed_addr` is deliberately NOT
+        // consulted: it is the PEER's claim about what address it sees us on,
+        // i.e. attacker-controlled input, and `is_lan_peer` is a privacy
+        // boundary — `pool::scope::allowed_node_set` admits every LAN peer when
+        // `pool.private_mode_allow_lan` is on, which is the DEFAULT. Trusting
+        // it let any peer place itself inside private mode by reporting that it
+        // observed us at `192.168.x.x`, and prompts would then be routed to it.
+        //
+        // Found in the field 2026-09-19: a node on a public IP in another
+        // country, 1220 ms away, reading `is_lan_peer: true`. libp2p makes the
+        // same call for the same reason — go-libp2p#577 accepts an observed
+        // address only when it corroborates something already advertised, and
+        // only after repeated sightings. We need none of that here, because the
+        // connection's own remote address is evidence we gather ourselves.
+        let addr_is_lan = self
+            .peer_remote_addrs
+            .get(&peer_id)
+            .map(multiaddr_is_local)
+            .unwrap_or(false);
         let is_lan = was_lan || addr_is_lan;
         let peer_info = PeerInfo {
             node_id: node_id.clone(),
@@ -297,10 +310,15 @@ impl NetworkManager {
         self.shared_state
             .peer_registry
             .insert(node_id.clone(), peer_info);
-        // If identify just newly marked this peer as LAN (based on its advertised
-        // addresses), bump the LAN peer counter and emit a discovery event. This
-        // covers peers that were reached via loopback probe or bootstrap where
-        // mDNS never fired but the addresses are clearly local.
+        // If identify just newly marked this peer as LAN, bump the counter and
+        // emit a discovery event. This covers peers reached over a genuinely
+        // private address where mDNS never fired.
+        //
+        // The comment here used to say "based on its advertised addresses" and
+        // the log line said "from listen_addrs" — both were wrong, and wrong in
+        // the reassuring direction: they described a rule the code had already
+        // been written to avoid, which is exactly what stopped anyone noticing
+        // that the real input included the peer's own claim about us.
         if !was_lan && addr_is_lan {
             let count = self
                 .shared_state
@@ -312,7 +330,11 @@ impl NetworkManager {
                 count,
                 if count == 1 { "" } else { "s" }
             );
-            tracing::info!(%peer_id, lan_peers = count, "LAN peer detected from listen_addrs");
+            tracing::info!(
+                %peer_id,
+                lan_peers = count,
+                "LAN peer detected from the connection's own remote address"
+            );
             self.shared_state.emit_activity(
                 crate::daemon::state::ActivityEvent::new("network", "lan_peer_discovered", msg)
                     .with_detail_num(count as i64)
