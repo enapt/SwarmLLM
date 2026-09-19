@@ -170,16 +170,21 @@ a change, especially your own.
 
 ## Status
 
-**v0.3.189-alpha released and deployed to both nodes (2026-09-19).** Nothing
+**v0.3.190-alpha released and deployed to both nodes (2026-09-19).** Nothing
 functional is unreleased; `cargo audit` reports only advisories documented in
 `SECURITY.md`. Conformance on the downloaded artifact was identical line for
-line to the .188 baseline. ⚠ **Three open items, ALL needing a DECISION not
-code**: `docs/FUTURE_WORK.md` #55 (budget charged by metadata, not residency),
-#89 (dead graphics stack still offered), and #86 (the no-route split — the
-English wording is a choice to make before minting 21 translations). ⚠ **#90 —
-a 45-minute dispatcher stall whose CAUSE IS STILL UNKNOWN.** Four candidates
-eliminated with evidence; .189 makes a recurrence identify itself, and whether
-the node should ACT on one is the same shape of decision as #89.
+line to the .189 baseline. It shipped five fixes: the graphics-memory budget now
+charged by what the pool reserves (#55), a node that cannot serve withdrawing
+inference while still serving shards (#89, part of #90), both halves of the
+prompt-privacy refusal and three execution failures moved off the route
+planner's internal signal (#86), and a standby assembled from several nodes
+covering a range between them (#17).
+⚠ **#90's CAUSE IS STILL UNKNOWN** — a 45-minute dispatcher stall. Four
+candidates eliminated with evidence; the node now names a stall and stops peers
+routing into it, but nothing prevents or explains one.
+⚠ **Before planning from any `docs/FUTURE_WORK.md` entry, read gotcha #654**:
+two entries' own scope was wrong in one day, in opposite directions. Trace a
+producer to its CONSUMER before believing an entry's account of the work.
 Release procedure: **`memory/release_gate.md`** — the ordered steps and every
 caution earned at a past gate; do not re-derive it. Per-release history:
 `memory/round_history.md`. Gotchas: `memory/gotchas.md` (next free index lives
