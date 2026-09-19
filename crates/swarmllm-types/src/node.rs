@@ -200,6 +200,31 @@ pub struct NodeCapability {
     #[serde(default)]
     pub anchor_mode: bool,
 
+    /// Can this node run inference work **right now**?
+    ///
+    /// `false` means the node has detected that it cannot execute a request at
+    /// all, however much memory or how many shards it advertises — so peers
+    /// should route inference elsewhere. It keeps serving SHARDS regardless:
+    /// a byte-range read needs no worker, and a node in this state is still the
+    /// most useful thing it can be.
+    ///
+    /// Two conditions set it, and both are outages that report themselves as
+    /// health (see `SharedState::inference_outage`):
+    ///
+    /// - the graphics stack died under a running node, so no worker of any kind
+    ///   starts — this binary links `libcuda`, so a processor-only worker fails
+    ///   in the loader exactly as a card-bound one does;
+    /// - the message dispatcher has stopped consuming, so nothing inbound is
+    ///   reaching this node in the first place.
+    ///
+    /// **`#[serde(default)]` must answer `true`, not `false`.** A node on an
+    /// older build advertises nothing here, and reading that silence as "cannot
+    /// serve" would route around every peer that has not upgraded — the exact
+    /// failure `resident_layers`' third state exists to avoid. Unknown means
+    /// "no reason to think otherwise", as it does for every other field here.
+    #[serde(default = "serving_inference_unless_told_otherwise")]
+    pub can_serve_inference: bool,
+
     /// Layers of each model this node currently has LOADED, by model id.
     ///
     /// `hosted_shards` says what is on disk; this says what is in memory right
@@ -224,6 +249,14 @@ pub struct NodeCapability {
     /// an older build, which is the failure the additive rule exists to prevent.
     #[serde(default)]
     pub resident_layers: Vec<ResidentModelLayers>,
+}
+
+/// The serde default for [`NodeCapability::can_serve_inference`].
+///
+/// Named rather than `|| true` so the reason survives: a node that says nothing
+/// is not a node that has said no. See the field's own documentation.
+fn serving_inference_unless_told_otherwise() -> bool {
+    true
 }
 
 /// How many layers of one model a node has resident. See
@@ -419,7 +452,7 @@ pub struct PeerExchangeResponse {
 mod version_compat_tests {
     use super::*;
 
-    fn base_fields() -> serde_json::Value {
+    pub(super) fn base_fields() -> serde_json::Value {
         serde_json::json!({
             "node_id": vec![0u8; 32],
             "gpu": null,
@@ -588,5 +621,57 @@ mod version_compat_tests {
         assert_eq!(round.features, features::ALL);
         assert_eq!(round.protocol_version, PROTOCOL_VERSION);
         assert!(round.relay_capable);
+    }
+}
+
+#[cfg(test)]
+mod serving_inference_tests {
+    use super::version_compat_tests::base_fields;
+    use super::*;
+
+    /// **A node that says nothing about serving is willing to serve.**
+    ///
+    /// `can_serve_inference` was added after v0.3.189, so every node already in
+    /// the swarm advertises a capability without it. If the missing field read
+    /// as `false`, a coordinator on the new build would exclude every peer on
+    /// an older one from inference — the whole swarm, on the day of release,
+    /// and silently, because each such node is healthy and simply never chosen.
+    ///
+    /// This is `PeerResidency::WarmAmountUnknown`'s rule in a second place:
+    /// silence is unknown, and unknown is never a refusal.
+    #[test]
+    fn a_capability_without_the_field_can_still_serve() {
+        let v = base_fields();
+        assert!(
+            v.as_object().unwrap().get("can_serve_inference").is_none(),
+            "this fixture must NOT carry the field — it stands in for a node \
+             built before it existed"
+        );
+        let cap: NodeCapability = serde_json::from_value(v).unwrap();
+        assert!(
+            cap.can_serve_inference,
+            "a peer that has never heard of this field must remain a candidate"
+        );
+    }
+
+    /// And an explicit refusal survives the wire, in both directions — the
+    /// withdrawal is worthless if it does not reach the peers doing the routing.
+    #[test]
+    fn an_explicit_refusal_round_trips() {
+        let mut v = base_fields();
+        v.as_object_mut()
+            .unwrap()
+            .insert("can_serve_inference".into(), serde_json::json!(false));
+
+        let cap: NodeCapability = serde_json::from_value(v).unwrap();
+        assert!(!cap.can_serve_inference);
+
+        let round: NodeCapability =
+            serde_json::from_str(&serde_json::to_string(&cap).unwrap()).unwrap();
+        assert!(
+            !round.can_serve_inference,
+            "the refusal must not be dropped when we re-serialise it — this \
+             struct is re-broadcast, so a lost `false` reads as a recovery"
+        );
     }
 }

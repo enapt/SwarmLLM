@@ -101,6 +101,17 @@ by `cpu_reason` (`CpuReason::GpuUnavailable`) and by the health monitor, which
 `libcuda.so.1`, so a bad library stops every new process in the loader and a
 CPU-only worker exits 127 exactly as a GPU one does.
 
+**Which is why it also withdraws INFERENCE, not just the card.**
+`SharedState::inference_outage` is the single answer to "can this node run a
+request right now", and it answers for this AND for a stalled message
+dispatcher — two unrelated faults with one shape: a total inference outage that
+reports itself as healthy. `NodeCapability::can_serve_inference` carries it, and
+the scheduler's `gather_candidates` acts on it. **Shard serving stays up** — a
+byte-range read needs no worker — and the field defaults to `true` on the wire,
+because a peer that says nothing has not said no. Guard:
+`both_inference_outages_withdraw_through_one_predicate`.
+→ `docs/FUTURE_WORK.md` #89, #90.
+
 → `docs/invariants/memory.md`
 
 ## A fan-out to every worker is bounded, and the two waits mean different things

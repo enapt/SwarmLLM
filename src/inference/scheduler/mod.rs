@@ -2808,6 +2808,26 @@ impl PipelineScheduler {
     /// the data they advertise. Without it, retracting a stale claim is futile:
     /// the DHT still lists the holder, so the retry re-learns it and picks the
     /// same dead peer (observed live 2026-07-26).
+    /// Has this peer told us it cannot run inference work at the moment?
+    ///
+    /// Reads `NodeCapability::can_serve_inference`, which a node sets false
+    /// when its graphics stack has died or its message dispatcher has stopped
+    /// consuming — two outages that leave it answering its own health checks
+    /// normally, so nothing else here can detect them.
+    ///
+    /// **A peer we know nothing about can serve.** No capability gossiped yet,
+    /// or a peer on a build predating the field, both answer `true`: the field
+    /// defaults to `true` on the wire for the reason
+    /// `PeerResidency::WarmAmountUnknown` exists — treating silence as a
+    /// refusal would route around every peer that has not upgraded.
+    fn peer_can_serve_inference(&self, node_id: &NodeId) -> bool {
+        self.shared_state
+            .peer_registry
+            .get(node_id)
+            .and_then(|p| p.capability.as_ref().map(|c| c.can_serve_inference))
+            .unwrap_or(true)
+    }
+
     fn gather_candidates(
         &self,
         manifest: &ModelManifest,
@@ -2956,6 +2976,25 @@ impl PipelineScheduler {
                     && !self.shared_state.connected_node_ids.contains(&node_id)
                     && !self.shared_state.peer_reachable_via_relay(&node_id)
                 {
+                    continue;
+                }
+                // The peer says it cannot run a request at the moment — its
+                // graphics stack died, or it has stopped receiving from the
+                // swarm. Both make it a candidate that can only fail, and it
+                // reports itself healthy throughout, so this claim is the only
+                // way to know (`NodeCapability::can_serve_inference`).
+                //
+                // It keeps every one of its shards in the registry and stays a
+                // source for DOWNLOADS, which is a different gatherer
+                // (`auto_manage::scoring::gather_candidates`) and needs no
+                // worker on the far side.
+                //
+                // Absent capability is NOT a refusal: an older peer advertises
+                // nothing here and the field defaults to true, per the same
+                // rule `PeerResidency::WarmAmountUnknown` exists for — reading
+                // silence as incapacity routes around every peer that has not
+                // upgraded yet.
+                if !is_local && !self.peer_can_serve_inference(&node_id) {
                     continue;
                 }
                 node_shards.entry(node_id).or_default().push(shard.index);

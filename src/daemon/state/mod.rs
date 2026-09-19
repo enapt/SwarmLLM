@@ -267,6 +267,44 @@ pub enum MemoryScope {
     AllResident,
 }
 
+/// How long the message dispatcher may take nothing off its channel before that
+/// counts as a stall rather than a quiet moment.
+///
+/// Deliberately several health-ping intervals: `HealthPing`/`HealthPong` alone
+/// keep the marker moving on any node with a peer, so a node this silent is not
+/// an idle one. **One constant, because two readers act on it** — the log line
+/// that names the stall and the capability that withdraws inference because of
+/// it must not disagree about when it started.
+pub const DISPATCH_STALL_AFTER: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Why this node cannot run inference work at the moment, as answered by
+/// [`SharedState::inference_outage`].
+///
+/// Both variants describe a TOTAL inference outage that the node's own health
+/// endpoint reports as fine, and both leave shard serving working — that needs
+/// no worker and no inbound dispatch, and a node in this state serving shards
+/// is the most useful thing it can still be.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InferenceOutage {
+    /// The graphics stack died under the running daemon; no worker of any kind
+    /// will start until the node restarts. Not a card problem — the binary
+    /// links `libcuda`, so a processor-only worker fails identically.
+    GraphicsRuntimeGone,
+    /// The message dispatcher has stopped consuming, so nothing inbound is
+    /// reaching this node at all.
+    DispatcherStalled,
+}
+
+impl InferenceOutage {
+    /// The clause that goes in the log line, in the node owner's terms.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::GraphicsRuntimeGone => "the graphics stack stopped working",
+            Self::DispatcherStalled => "the node stopped receiving from the swarm",
+        }
+    }
+}
+
 pub struct SharedState {
     // Core infrastructure (accessed by nearly every subsystem)
     /// The config the daemon **booted with**. Correct for anything decided once
@@ -2194,6 +2232,47 @@ impl SharedState {
         originated.saturating_add(served)
     }
 
+    /// **The single answer to "can this node run inference work right now?"** —
+    /// `None` when it can, otherwise why it cannot.
+    ///
+    /// Two failures share this accessor because they share a shape: each one
+    /// stops the node serving *anything* while leaving it reporting itself
+    /// healthy, and the answer to both is the same — tell peers to route
+    /// inference elsewhere, and keep serving shards, which need no worker at
+    /// all. Implementing them separately would have produced two withdrawal
+    /// mechanisms that could disagree about what this node is advertising.
+    ///
+    /// - [`InferenceOutage::GraphicsRuntimeGone`] — a graphics driver was
+    ///   updated under a running daemon, so `libcuda.so.1` is orphaned for new
+    ///   processes. The daemon keeps the mapping it already has and looks fine;
+    ///   every worker it `exec`s dies in the loader. **This is not "the card is
+    ///   gone, fall back to the processor"** — the binary links `libcuda`, so a
+    ///   CPU-only worker exits 127 exactly as a GPU one does (gotcha #647).
+    /// - [`InferenceOutage::DispatcherStalled`] — the message dispatcher has
+    ///   stopped taking messages off its channel, so nothing inbound reaches
+    ///   this node: not a `LayerForward`, not a `RemoteGenerateRequest`, not
+    ///   gossip. Observed for 45 minutes on 2026-09-18, ended only by a restart
+    ///   (`docs/FUTURE_WORK.md` #90). The CAUSE is still unknown; this reports
+    ///   the state rather than curing it.
+    ///
+    /// **Both are read on the health monitor's own tick**, never from the
+    /// affected task — a node cannot report through the channel that is stuck,
+    /// and `daemon::supervisor` sees only a task that RETURNS, so a task parked
+    /// for ever inside an `.await` produces no signal at all.
+    pub fn inference_outage(&self) -> Option<InferenceOutage> {
+        if crate::daemon::gpu_support::gpu_runtime_has_failed() {
+            return Some(InferenceOutage::GraphicsRuntimeGone);
+        }
+        match self.metrics.dispatch_idle_for() {
+            // A zero marker means nothing has been dispatched yet, which is a
+            // young node rather than a stalled one.
+            Some((idle, _)) if idle >= DISPATCH_STALL_AFTER => {
+                Some(InferenceOutage::DispatcherStalled)
+            }
+            _ => None,
+        }
+    }
+
     /// Should a request this node COULD serve locally be offered to the router
     /// instead, so a peer can take it?
     ///
@@ -3438,6 +3517,68 @@ mod split_model_cache_tests {
         assert!(trimmed.is_empty());
         assert!(state.split_models.contains_key(&resident));
         assert!(state.split_models.contains_key(&second));
+    }
+
+    /// A dispatcher that has stopped consuming is an inference outage, and a
+    /// node that has simply been quiet is not.
+    ///
+    /// The distinction is the whole design of the threshold: `HealthPing` /
+    /// `HealthPong` keep the marker moving on any node with a peer, so silence
+    /// this long is a stall rather than an idle moment. Withdrawing inference
+    /// on a node that is merely quiet would take healthy machines out of the
+    /// swarm, which is the false positive this trades against.
+    ///
+    /// The graphics arm is deliberately not exercised here:
+    /// `gpu_runtime_has_failed` is process-global, so setting it would leak
+    /// into every test running beside this one. It is covered where it is set,
+    /// in `process_pool::diagnose_failed_start`.
+    #[test]
+    fn a_stalled_dispatcher_is_an_inference_outage_and_a_quiet_one_is_not() {
+        use std::sync::atomic::Ordering::Relaxed;
+
+        let state = test_state();
+
+        assert_eq!(
+            state.inference_outage(),
+            None,
+            "a node that has dispatched nothing yet has just started — the \
+             marker reads 0, which is not a stall"
+        );
+
+        let now = chrono::Utc::now().timestamp_millis();
+        state
+            .metrics
+            .last_dispatch_at_ms
+            .store(now - 1_000, Relaxed);
+        assert_eq!(
+            state.inference_outage(),
+            None,
+            "one second of quiet is a quiet node"
+        );
+
+        // Just inside the threshold, then just past it.
+        let stall_ms = super::DISPATCH_STALL_AFTER.as_millis() as i64;
+        state
+            .metrics
+            .last_dispatch_at_ms
+            .store(now - (stall_ms - 2_000), Relaxed);
+        assert_eq!(
+            state.inference_outage(),
+            None,
+            "under the threshold must not withdraw — a false positive here \
+             removes a working node from the swarm until it restarts"
+        );
+
+        state
+            .metrics
+            .last_dispatch_at_ms
+            .store(now - (stall_ms + 1_000), Relaxed);
+        assert_eq!(
+            state.inference_outage(),
+            Some(super::InferenceOutage::DispatcherStalled),
+            "past the threshold the node is not receiving from the swarm at \
+             all, whatever its health endpoint says"
+        );
     }
 
     /// The sibling half: a metadata entry is not memory, in EITHER scope.

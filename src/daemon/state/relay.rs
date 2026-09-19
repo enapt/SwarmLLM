@@ -1102,6 +1102,7 @@ mod tests {
             features,
             relay_reservations: reservations,
             anchor_mode: false,
+            can_serve_inference: true,
             resident_layers: Vec::new(),
         }
     }

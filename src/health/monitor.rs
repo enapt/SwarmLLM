@@ -454,11 +454,10 @@ impl HealthMonitor {
     /// it says which arm to look at, which is the question a recurrence has to
     /// answer.
     fn report_dispatcher_stall(&self) {
-        const STALL_AFTER: Duration = Duration::from_secs(300);
         let Some((idle, kind)) = self.shared_state.metrics.dispatch_idle_for() else {
             return;
         };
-        if idle < STALL_AFTER {
+        if idle < crate::daemon::state::DISPATCH_STALL_AFTER {
             return;
         }
         tracing::error!(
@@ -469,8 +468,10 @@ impl HealthMonitor {
             "The message dispatcher has taken nothing off its channel for \
              {}s — this node is not receiving from the swarm at all, whatever \
              its health endpoint says. The kind above is the last message it \
-             accepted, and so the handler to suspect. Restarting the node \
-             clears it; see docs/FUTURE_WORK.md #90.",
+             accepted, and so the handler to suspect. Inference has been \
+             withdrawn from what this node advertises so peers stop routing \
+             work it cannot receive; shard serving continues. Restarting the \
+             node clears it; see docs/FUTURE_WORK.md #90.",
             idle.as_secs()
         );
     }
@@ -597,11 +598,39 @@ impl HealthMonitor {
             }
         }
 
+        // Can this node actually run a request right now? Two failures say no —
+        // the graphics stack dying under us, and the dispatcher going deaf —
+        // and both report themselves as health, so peers keep routing work that
+        // can only fail. `SharedState::inference_outage` is the one answer;
+        // withdrawing here rather than per cause is what stops the two
+        // conditions advertising different things about the same node.
+        //
+        // Shard serving is deliberately untouched. A byte-range read needs no
+        // worker and no inbound dispatch, so a node in this state can still be
+        // the copy that keeps a model reachable for everyone else — which is
+        // the whole reason this is a withdrawal of inference and not of the
+        // node (docs/FUTURE_WORK.md #89, #90).
+        let outage = self.shared_state.inference_outage();
+        if let Some(reason) = outage {
+            tracing::warn!(
+                target: "swarmllm::health::monitor",
+                reason = reason.as_str(),
+                "Telling the swarm this node cannot take inference work for now \
+                 — {}. It is still serving the model pieces it holds, and will \
+                 offer inference again by itself if the problem clears.",
+                reason.as_str()
+            );
+        }
+
         // A card we can no longer reach is not capacity, and advertising it
         // does active harm: peers route work here by what we claim, so a node
         // whose graphics stack has died would keep being sent GPU-sized
         // segments and would keep failing them. Withdrawing the claim leaves
         // the node advertising what it can still honour — its processor.
+        //
+        // Kept beside the inference withdrawal above rather than folded into
+        // it: this one is about the CARD specifically, and a node can lose its
+        // card's capacity for reasons that still leave it able to serve.
         //
         // Done here rather than by clearing `gpu_info` because this capability
         // is rebuilt on every broadcast, so the withdrawal takes effect on the
@@ -824,6 +853,11 @@ impl HealthMonitor {
             // nothing and serves nothing by design, which looks identical to a
             // broken node in a peer list.
             anchor_mode: self.shared_state.config.node.anchor_mode,
+            // Whether we can run a request at all, from the one predicate.
+            // Rebuilt every broadcast like the rest of this struct, so the
+            // withdrawal reverses itself the moment the condition clears — a
+            // worker starting again, or the dispatcher resuming.
+            can_serve_inference: outage.is_none(),
             // What is LOADED, as distinct from what is on disk above. A peer
             // pricing our spare capacity needs to know how much of a model we
             // have already paid for; without it the only signal is "did this

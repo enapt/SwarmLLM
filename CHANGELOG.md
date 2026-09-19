@@ -1,5 +1,40 @@
 # Changelog
 
+## [0.3.190-alpha] — UNRELEASED (set this date when cutting the release)
+
+**Your computer will use its graphics card for more of your models.**
+
+SwarmLLM decides how many models it can run on your graphics card by adding up
+how much memory they need. It was counting every model it had *found* on your
+disk, rather than the ones it had actually loaded — and it counted them while
+starting up, before anything was running at all. The total filled up in whatever
+order your models happened to be read, never went back down, and after that your
+computer handed work to other people's machines that it could easily have done
+itself. On the computer where this was found it was reporting 5 GB in use a few
+seconds after starting, with nothing loaded and 2 GB genuinely in use.
+
+It now counts what is really loaded, so the figure falls again when a model is
+unloaded, and your card's actual free space is what decides. If you have several
+models and have noticed small ones being sent away to the swarm, this is why.
+
+**A computer that cannot run anything now says so, instead of quietly
+accepting work it will fail.**
+
+Two things can stop a computer running models while everything still looks
+healthy from the outside: updating your graphics driver while SwarmLLM is
+running, and the part of SwarmLLM that receives messages from other computers
+getting stuck. In both cases the computer carried on telling everyone it was
+available, so other people's requests kept being sent to it and kept failing.
+
+It now tells the others it cannot take that work for the time being. **It keeps
+sharing the model pieces it stores** — that needs nothing of what has broken, and
+it is the most useful thing it can still do. It goes back to offering to run
+models by itself as soon as the problem clears, with no restart needed for the
+graphics-driver case.
+
+If you are running an older version, nothing changes for you and other computers
+will keep sending you work exactly as before.
+
 ## [0.3.189-alpha] — 2026-09-19
 
 **A long answer that fills up the model's memory now ends properly instead of

@@ -8490,3 +8490,132 @@ fn the_metadata_budget_guard_catches_a_sum_rustfmt_has_wrapped() {
          entry at all"
     );
 }
+
+/// **Both inference outages withdraw through ONE predicate, and the stall
+/// threshold is one constant.**
+///
+/// Two unrelated failures make this node useless for inference while leaving it
+/// answering its own health checks normally: the graphics stack dying under a
+/// running daemon (`docs/FUTURE_WORK.md` #89 — no worker of any kind starts,
+/// because the binary links `libcuda`), and the message dispatcher going deaf
+/// (#90 — nothing inbound arrives at all, observed for 45 minutes).
+///
+/// They arrived as separate findings and it would have been natural to give
+/// each its own withdrawal. That is the defect this repo repeats most: one
+/// invariant implemented per path, where fixing the path in the bug report
+/// leaves the others broken. Here the shared invariant is *what this node tells
+/// the swarm about itself*, and two writers of it could advertise different
+/// things on the same broadcast.
+///
+/// So `SharedState::inference_outage` is the single answer, and
+/// `can_serve_inference` is set from it — never by re-deriving either cause at
+/// the capability site. The threshold is shared for the same reason: the log
+/// line that names a stall and the withdrawal that acts on it must not disagree
+/// about when it began.
+#[test]
+fn both_inference_outages_withdraw_through_one_predicate() {
+    let monitor = std::fs::read_to_string("src/health/monitor.rs").expect("read monitor.rs");
+    let body = method_body(&monitor, "    async fn broadcast_capabilities(")
+        .expect("broadcast_capabilities was renamed — re-point this guard");
+
+    assert!(
+        body.contains("inference_outage()"),
+        "broadcast_capabilities must ask `SharedState::inference_outage` — it \
+         is the single answer to whether this node can run a request, and both \
+         FUTURE_WORK #89 and #90 depend on it giving ONE answer"
+    );
+
+    let setter = statements(body)
+        .into_iter()
+        .find(|(_, s)| s.contains("can_serve_inference:"))
+        .map(|(_, s)| s)
+        .expect("broadcast_capabilities must set `can_serve_inference`");
+    assert!(
+        setter.contains("outage"),
+        "`can_serve_inference` must be set from the predicate's answer, not \
+         re-derived. A second derivation here is how the graphics-stack case \
+         and the dispatcher case come to advertise different things about the \
+         same node.\n  {setter}"
+    );
+
+    // The threshold lives with the predicate, so the reader that REPORTS a
+    // stall and the one that acts on it cannot disagree about when it began.
+    // Scoped to that method: other durations in this file are unrelated, and a
+    // whole-file scan for the literal caught `WSL_FIREWALL_GRACE` on the first
+    // run — a guard that fires on a neighbour teaches the next person to widen
+    // an exemption rather than fix a defect.
+    let stall = method_body(&monitor, "    fn report_dispatcher_stall(")
+        .expect("report_dispatcher_stall was renamed — re-point this guard");
+    assert!(
+        stall.contains("DISPATCH_STALL_AFTER"),
+        "report_dispatcher_stall must read `daemon::state::DISPATCH_STALL_AFTER`"
+    );
+    for (line, stmt) in statements(stall) {
+        assert!(
+            !stmt.contains("from_secs("),
+            "src/health/monitor.rs:{line}: a duration literal inside \
+             report_dispatcher_stall is a second stall threshold — the log line \
+             and the capability withdrawal would then start at different \
+             times.\n  {stmt}"
+        );
+    }
+
+    let state = std::fs::read_to_string("src/daemon/state/mod.rs").expect("read state/mod.rs");
+    assert!(
+        state.contains("pub const DISPATCH_STALL_AFTER"),
+        "DISPATCH_STALL_AFTER must stay defined beside `inference_outage`, \
+         which is its other reader"
+    );
+}
+
+/// The guard above must be able to fire on a re-derivation, not merely on the
+/// absence of a call. Planted violation, per `.claude/rules/architecture.md` §
+/// "A source-scanning guard is only as good as the spellings it knows".
+#[test]
+fn the_outage_guard_catches_a_re_derived_withdrawal() {
+    let planted = "impl HealthMonitor {\n\
+        \x20   async fn broadcast_capabilities(&mut self) {\n\
+        \x20       let outage = self.shared_state.inference_outage();\n\
+        \x20       let cap = NodeCapability {\n\
+        \x20           can_serve_inference: !crate::daemon::gpu_support::gpu_runtime_has_failed(),\n\
+        \x20       };\n\
+        \x20   }\n\
+        }\n";
+    let body = method_body(planted, "    async fn broadcast_capabilities(")
+        .expect("the extractor must find the method");
+
+    // The presence half passes — the call IS there — which is exactly why the
+    // guard cannot rest on it.
+    assert!(body.contains("inference_outage()"));
+
+    let setter = statements(body)
+        .into_iter()
+        .find(|(_, s)| s.contains("can_serve_inference:"))
+        .map(|(_, s)| s)
+        .expect("the scanner must see the setter");
+    assert!(
+        !setter.contains("outage"),
+        "the planted re-derivation must be caught: it calls the predicate and \
+         then ignores it, which is the shape a second withdrawal would take"
+    );
+
+    // Null control: the real shape must satisfy the same check.
+    let correct = "impl HealthMonitor {\n\
+        \x20   async fn broadcast_capabilities(&mut self) {\n\
+        \x20       let outage = self.shared_state.inference_outage();\n\
+        \x20       let cap = NodeCapability {\n\
+        \x20           can_serve_inference: outage.is_none(),\n\
+        \x20       };\n\
+        \x20   }\n\
+        }\n";
+    let ok_body = method_body(correct, "    async fn broadcast_capabilities(").unwrap();
+    let ok_setter = statements(ok_body)
+        .into_iter()
+        .find(|(_, s)| s.contains("can_serve_inference:"))
+        .map(|(_, s)| s)
+        .expect("the scanner must see the correct setter too");
+    assert!(
+        ok_setter.contains("outage"),
+        "a guard that cannot pass on correct code is not a guard"
+    );
+}

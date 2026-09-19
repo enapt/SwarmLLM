@@ -678,6 +678,7 @@ fn slow_peer_capability(node: &NodeId) -> crate::types::NodeCapability {
         features: 0,
         relay_reservations: vec![],
         anchor_mode: false,
+        can_serve_inference: true,
         resident_layers: Vec::new(),
     }
 }
@@ -2995,6 +2996,7 @@ fn capability_with_gpu(free_mb: Option<u64>) -> crate::types::NodeCapability {
         features: 0,
         relay_reservations: vec![],
         anchor_mode: false,
+        can_serve_inference: true,
         resident_layers: Vec::new(),
     }
 }
@@ -4893,5 +4895,122 @@ fn the_privacy_bar_and_the_starting_score_agree_by_choice() {
          prompts in cleartext, so make it on purpose and update this test.",
         super::DELEGATE_MIN_TRUST,
         crate::credit::trust::DEFAULT_TRUST
+    );
+}
+
+/// A peer that has told the swarm it cannot run inference is not a candidate —
+/// and one that has said nothing still is.
+///
+/// Two outages make a node useless for inference while leaving it answering its
+/// own health checks normally: its graphics stack dying under it (no worker of
+/// any kind starts, because the binary links `libcuda`), and its message
+/// dispatcher going deaf (nothing inbound arrives at all). Peers cannot detect
+/// either from outside, so the node says so itself in
+/// `NodeCapability::can_serve_inference`, and this is where that claim is acted
+/// on — `gather_candidates`, the one place a candidate is admitted.
+///
+/// **The second half is the one that matters on release day.** The field did
+/// not exist before this change, so every node already in the swarm advertises
+/// a capability without it. Reading that absence as a refusal would empty the
+/// candidate set of every peer that had not upgraded yet.
+///
+/// `docs/FUTURE_WORK.md` #89 and #90.
+#[test]
+fn a_peer_that_cannot_serve_inference_is_not_a_candidate() {
+    fn holder_with(can_serve: Option<bool>, id: u8) -> (NodeId, PeerInfo) {
+        let node = NodeId([id; 32]);
+        let capability = can_serve.map(|flag| {
+            let mut cap = slow_peer_capability(&node);
+            cap.can_serve_inference = flag;
+            cap
+        });
+        (
+            node.clone(),
+            PeerInfo {
+                node_id: node,
+                addresses: vec![],
+                capability,
+                last_seen: chrono::Utc::now(),
+                latency_ms: Some(10),
+                trust_score: 0.8,
+                peer_id_bytes: None,
+                ack_srtt_ms: None,
+                active_request_count: 0,
+                first_seen: 0,
+                verified_transaction_count: 0,
+                is_lan_peer: false,
+                goodput_bytes_per_sec: None,
+                goodput_samples: 0,
+            },
+        )
+    }
+
+    // `can_serve` decides whether the ONLY holder of the model's second half
+    // can be used, so the pipeline either assembles or it does not.
+    fn assembles_with(can_serve: Option<bool>) -> bool {
+        let state = make_shared_state();
+        let local_id = state.identity.node_id().clone();
+
+        let shards = vec![
+            ShardInfo {
+                index: 0,
+                layer_range: (0, 16),
+                size_bytes: 2_000_000_000,
+                hash: [0u8; 32],
+                tensors: vec![],
+            },
+            ShardInfo {
+                index: 1,
+                layer_range: (16, 32),
+                size_bytes: 2_000_000_000,
+                hash: [0u8; 32],
+                tensors: vec![],
+            },
+        ];
+        state
+            .model_registry
+            .register_manifest(make_manifest("test-model", 32, shards));
+
+        // The local node holds the first half outright.
+        state.model_registry.record_shard_holder(
+            ShardId {
+                model_id: ModelId("test-model".into()),
+                index: 0,
+            },
+            local_id.clone(),
+        );
+
+        let (peer, info) = holder_with(can_serve, 2);
+        state.model_registry.record_shard_holder(
+            ShardId {
+                model_id: ModelId("test-model".into()),
+                index: 1,
+            },
+            peer.clone(),
+        );
+        state.peer_registry.insert(peer.clone(), info);
+        // Liveness oracle — without this the peer is filtered for being
+        // disconnected and the test would pass for the wrong reason (gotcha #86).
+        state.connected_node_ids.insert(peer);
+
+        PipelineScheduler::new(state)
+            .assemble_pipeline(&ModelId("test-model".into()), &local_id)
+            .is_ok()
+    }
+
+    assert!(
+        assembles_with(Some(true)),
+        "a peer that says it can serve must be usable — the control, without \
+         which the negative case below proves nothing"
+    );
+    assert!(
+        assembles_with(None),
+        "a peer on a build predating the field advertises no capability at all, \
+         and must stay usable: absence is unknown, never a refusal"
+    );
+    assert!(
+        !assembles_with(Some(false)),
+        "a peer that has withdrawn inference must not be routed to — it reports \
+         itself healthy and would fail every request it was sent"
     );
 }
