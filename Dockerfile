@@ -47,7 +47,16 @@ RUN mkdir -p src crates/swarmllm-frontend/src crates/swarmllm-types/src && \
     cargo build --release 2>/dev/null || true && \
     rm -rf src crates/swarmllm-frontend/src crates/swarmllm-types/src
 
-# Copy full source and build the real binary
+# Copy full source and build the real binary.
+#
+# `release_pubkey.txt` is SOURCE even though it is not under src/: the lib pulls
+# it in with `include_str!`, so a build without it fails to compile. It is here
+# rather than with the manifests above so that rotating the key does not
+# invalidate the dependency-cache layer. Gotcha #268's general shape — a
+# construct that is correct in the repository and wrong in this reduced build
+# context, where the only workflow that would notice runs on a tag. Guarded by
+# `everything_the_build_includes_is_in_the_docker_context`.
+COPY release_pubkey.txt ./
 COPY src/ src/
 COPY crates/ crates/
 COPY frontend/ frontend/

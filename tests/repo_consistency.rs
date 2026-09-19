@@ -2319,6 +2319,101 @@ fn the_dispatch_db_scan_catches_a_planted_blocking_call() {
     );
 }
 
+/// Everything the build compiles IN must exist in the Docker build context.
+///
+/// `include_str!` / `include_bytes!` read files at compile time, and the
+/// Dockerfile copies a deliberately small subset of the repository — `src/`,
+/// `crates/`, `frontend/`, `config/`, the manifests and `vendor/`. A path that
+/// escapes those is correct in a checkout and fails only inside the image.
+///
+/// That failure surfaces at the TAG, because the Docker workflow runs on
+/// nothing else: `release_pubkey.txt` was added, every test and all 14 CI jobs
+/// stayed green, and v0.3.191-alpha's image build died on
+/// `couldn't read src/../release_pubkey.txt`. Gotcha #268 is the same shape
+/// (a `[[example]]` without a path) and its own lesson — "ask what the
+/// Dockerfile actually copies" — is what this makes mechanical.
+#[test]
+fn everything_the_build_includes_is_in_the_docker_context() {
+    let dockerfile = std::fs::read_to_string("Dockerfile").expect("Dockerfile is missing");
+
+    // Directories and files the builder stage has before it compiles.
+    let copied: Vec<String> = dockerfile
+        .lines()
+        .map(str::trim)
+        .filter(|l| l.starts_with("COPY ") && !l.contains("--from="))
+        .flat_map(|l| {
+            let mut parts: Vec<&str> = l.split_whitespace().skip(1).collect();
+            parts.pop(); // destination
+            parts.into_iter().map(str::to_string).collect::<Vec<_>>()
+        })
+        .collect();
+
+    let mut missing = Vec::new();
+    for entry in walk_rs_files("src") {
+        let src = std::fs::read_to_string(&entry).unwrap_or_default();
+        for cap in src
+            .split("include_str!(\"")
+            .skip(1)
+            .chain(src.split("include_bytes!(\"").skip(1))
+        {
+            let Some(rel) = cap.split('"').next() else {
+                continue;
+            };
+            // Resolve against the including file's directory, as rustc does.
+            let base = std::path::Path::new(&entry).parent().unwrap();
+            let joined = base.join(rel);
+            let norm = normalise(&joined);
+            // Anything still under a copied path is fine.
+            let covered = copied.iter().any(|c| {
+                let c = c.trim_end_matches('/');
+                norm == c || norm.starts_with(&format!("{c}/"))
+            });
+            if !covered {
+                missing.push(format!("{entry} includes {rel} -> {norm}"));
+            }
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "these files are compiled in but are NOT in the Docker build context, so \
+         `cargo build` succeeds here and the image build fails at the tag:\n  {}\n\n\
+         Add a COPY line to the Dockerfile's builder stage.",
+        missing.join("\n  ")
+    );
+}
+
+/// Collapse `a/b/../c` to `a/c` without touching the filesystem — the path may
+/// legitimately not exist on the machine running the test.
+fn normalise(p: &std::path::Path) -> String {
+    let mut out: Vec<String> = Vec::new();
+    for c in p.components() {
+        match c {
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => out.push(other.as_os_str().to_string_lossy().to_string()),
+        }
+    }
+    out.join("/")
+}
+
+fn walk_rs_files(dir: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return out;
+    };
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            out.extend(walk_rs_files(&p.to_string_lossy()));
+        } else if p.extension().is_some_and(|x| x == "rs") {
+            out.push(p.to_string_lossy().to_string());
+        }
+    }
+    out
+}
+
 /// A build must trust a signing key, or it can never update itself again.
 ///
 /// `release_pubkey.txt` is compiled in with `include_str!`, and every update
