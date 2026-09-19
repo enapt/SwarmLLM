@@ -8619,3 +8619,119 @@ fn the_outage_guard_catches_a_re_derived_withdrawal() {
         "a guard that cannot pass on correct code is not a guard"
     );
 }
+
+/// Does this statement CONSTRUCT a `PipelineError`, as opposed to matching one?
+///
+/// `matches!(err, SwarmError::PipelineError(_))` in a test is legitimate — it
+/// asks a question about a value. Only a construction puts the wrong hint in
+/// front of a reader. The discriminator is the binding: a construction is
+/// followed by a payload (`"..."`, `format!`, an identifier), a pattern by `_)`.
+fn constructs_pipeline_error(stmt: &str) -> bool {
+    const NEEDLE: &str = "SwarmError::PipelineError(";
+    stmt.match_indices(NEEDLE)
+        .any(|(i, _)| !stmt[i + NEEDLE.len()..].starts_with("_)"))
+}
+
+/// **A failure during EXECUTION is ours or it is named; it is never the routing
+/// search's internal signal.**
+///
+/// `SwarmError::PipelineError` is what the route planner returns to itself. The
+/// rung walker in `assemble_pipeline_for` catches each one and tries the next
+/// bound, and `greedy_assign` catches its own capacity refusal and re-runs
+/// unbounded — so those producers are control flow and never reach a caller.
+///
+/// Three execution-path failures were filed under the same variant and DID
+/// reach callers: "Pipeline has no segments", "Pipeline completed without
+/// producing a result" and "Response channel dropped". All three are this
+/// node's own machinery, and all three inherited `PipelineError`'s hint —
+/// *"the model is missing a piece, fetch it with `swarmllm get-model <name>
+/// --all`"* — which names a condition none of them is. A reader following it
+/// could not be helped by it, which is gotcha #295's family and the reason
+/// `docs/FUTURE_WORK.md` #86 exists. They are `SwarmError::Internal` now, which
+/// carries no hint by design: there is nothing a reader can do about our bug.
+///
+/// The line this guard draws is the directory, because it matches the meaning:
+/// `inference/scheduler/` PLANS a route and may signal to itself;
+/// `inference/pipeline/` RUNS one, and a failure there has a real cause that
+/// deserves its own name.
+#[test]
+fn an_execution_failure_is_never_the_route_planners_internal_signal() {
+    for path in rust_sources_under("src/inference/pipeline") {
+        let src = std::fs::read_to_string(&path).expect("read source");
+        for (line, stmt) in statements(&src) {
+            assert!(
+                !constructs_pipeline_error(&stmt),
+                "{}:{line}: `PipelineError` is the ROUTE PLANNER's signal to \
+                 itself — the rung walker and `greedy_assign` both catch it and \
+                 retry, so nothing here is expecting it. Raising it while \
+                 EXECUTING hands the caller a hint telling them to fetch a \
+                 missing model part, whatever actually went wrong \
+                 (FUTURE_WORK #86). Use `Internal` when it is ours, or give the \
+                 failure its own variant.\n  {stmt}",
+                path.display()
+            );
+        }
+    }
+
+    // And the planner still owns it — if this goes to zero the variant is dead
+    // and should be removed outright rather than left as a trap.
+    let planner: usize = rust_sources_under("src/inference/scheduler")
+        .iter()
+        .map(|p| {
+            std::fs::read_to_string(p)
+                .expect("read source")
+                .matches("SwarmError::PipelineError(")
+                .count()
+        })
+        .sum();
+    assert!(
+        planner > 0,
+        "no producer left in the route planner: `PipelineError` is now dead and \
+         should be deleted, along with its `classify_error` arm and its \
+         `pipeline_generic` hint in 21 locales"
+    );
+}
+
+/// The guard above must fire on the shape it forbids, including across the line
+/// break rustfmt puts in a long `return Err(...)`. Planted violation, per
+/// `.claude/rules/architecture.md` § "A source-scanning guard is only as good
+/// as the spellings it knows".
+#[test]
+fn the_execution_failure_guard_catches_a_wrapped_pipeline_error() {
+    let planted = "fn run(&self) -> Result<(), SwarmError> {\n\
+        \x20   return Err(SwarmError::PipelineError(\n\
+        \x20       \"Pipeline has no segments\".to_string(),\n\
+        \x20   ));\n\
+        }\n";
+    let caught = statements(planted)
+        .into_iter()
+        .any(|(_, s)| constructs_pipeline_error(&s));
+    assert!(
+        caught,
+        "the statement scanner must rejoin the wrapped `return Err(` that \
+         rustfmt produces — every one of the three real sites had that shape, \
+         so a guard blind to it would have caught none of them"
+    );
+
+    // Null control: the replacement must not trip it.
+    let fixed = "fn run(&self) -> Result<(), SwarmError> {\n\
+        \x20   return Err(SwarmError::Internal(\n\
+        \x20       \"Pipeline has no segments\".to_string(),\n\
+        \x20   ));\n\
+        }\n";
+    assert!(
+        !statements(fixed)
+            .into_iter()
+            .any(|(_, s)| constructs_pipeline_error(&s)),
+        "a guard that cannot pass on the corrected code is not a guard"
+    );
+
+    // And asking whether a value IS one is not producing one. This is what the
+    // guard caught on its first run — a test in `pipeline/local.rs` pinning the
+    // old variant — and silencing it by exempting the file would have left the
+    // rule unable to see a real construction beside it.
+    assert!(
+        !constructs_pipeline_error("assert!(matches!(err, SwarmError::PipelineError(_)));"),
+        "matching on the variant is legitimate; only building one misleads a reader"
+    );
+}

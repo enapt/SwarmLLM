@@ -1150,9 +1150,20 @@ pub async fn prune_history(State(state): State<AppState>) -> Json<serde_json::Va
 /// two apart. (It is the residue of a variant that `PeerUnresponsive`,
 /// `SegmentFailoverExhausted`, `ReplyTruncated`, `ModelIncompleteInSwarm` and
 /// `PromptPrivacyUnavailable` were each split out of, each time because 500
-/// reported a swarm condition as a crash. The residue was not re-examined and
-/// is noted in `docs/FUTURE_WORK.md`; changing it moves retry and monitoring
-/// behaviour on the inference path and is not this endpoint's to make.)
+/// reported a swarm condition as a crash.)
+///
+/// **The residue WAS re-examined, on 2026-09-19, and what is left is
+/// deliberate** (`docs/FUTURE_WORK.md` #86). Every remaining producer outside
+/// this endpoint's reach is the route planner signalling to ITSELF — the rung
+/// walker catches each and tries the next bound, `greedy_assign` catches its
+/// own capacity refusal and re-runs unbounded — so none of them reaches a
+/// caller at all. The three that DID reach callers were execution failures
+/// ("Pipeline has no segments", "Pipeline completed without producing a
+/// result", "Response channel dropped"); they are `Internal` now and land in
+/// the arm below, as this comment's own rule says they must. What still arrives
+/// here as `PipelineError` is "Model has zero layers", which is a statement
+/// about the MODEL and belongs on the reason side of the line — which is what
+/// the test beside this function asserts.
 ///
 /// So the list is local, closed, and about ONE function's returns rather than a
 /// second opinion on what an error means. **A new variant defaults to being

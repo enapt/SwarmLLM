@@ -556,7 +556,21 @@ impl PipelineExecutor {
                     SegmentOutcome::SenderDropped,
                     budget.is_prefill(),
                 );
-                Err(SwarmError::PipelineError("Response channel dropped".into()))
+                // OURS, by the same reasoning the comment above gives for not
+                // charging the peer: this node's own machinery dropped the
+                // sender. `Internal` keeps that — it is in
+                // `failure_is_penalty_worthy`'s local-only list exactly as
+                // `PipelineError` was, and the message is unchanged, so neither
+                // the penalty nor the retry moves.
+                //
+                // **Deliberately NOT `ServiceUnavailable`**, which reads as
+                // "a peer could not serve" (`router::remote_peer_could_not_serve`)
+                // and would bar that peer from the retry — the mis-attribution
+                // this site already refuses to make. What changes is the HINT:
+                // `PipelineError` told the reader to fetch a missing model part,
+                // which cannot help when we cancelled or failed over elsewhere
+                // (`docs/FUTURE_WORK.md` #86, gotcha #295).
+                Err(SwarmError::Internal("Response channel dropped".into()))
             }
             Err(_) => {
                 tracing::error!(
@@ -1054,7 +1068,16 @@ mod segment_budget_tests {
         )
         .await
         .expect_err("a dropped sender is still a failure for this request");
-        assert!(matches!(err, SwarmError::PipelineError(_)), "{err:?}");
+        // Ours, so `Internal` — this node's own machinery dropped the sender.
+        // It was `PipelineError` until 2026-09-19, which handed the reader that
+        // variant's hint: fetch the model part that is missing. Nothing is
+        // missing here (FUTURE_WORK #86).
+        assert!(matches!(err, SwarmError::Internal(_)), "{err:?}");
+        assert!(
+            crate::error::error_hint(&err).is_none(),
+            "our own bug has no advice to offer, and the hint it used to carry \
+             pointed at a condition this is not: {err:?}"
+        );
 
         assert_eq!(
             state.peer_delivery_samples(&node),

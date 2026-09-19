@@ -1651,7 +1651,11 @@ impl PipelineExecutor {
             idx += 1;
         }
 
-        Err(SwarmError::PipelineError(
+        // OURS: the decode loop ran to its end without producing a result and
+        // without raising a reason for it. Nothing external can put us here, so
+        // it is `Internal` rather than `PipelineError` — whose hint would have
+        // sent the reader after a missing model part (`docs/FUTURE_WORK.md` #86).
+        Err(SwarmError::Internal(
             "Pipeline completed without producing a result".to_string(),
         ))
     }

@@ -932,9 +932,15 @@ impl PipelineExecutor {
         );
 
         if num_segments == 0 {
-            return Err(SwarmError::PipelineError(
-                "Pipeline has no segments".to_string(),
-            ));
+            // OURS, so `Internal` and not `PipelineError`. The scheduler handed
+            // back a plan with nothing in it; no peer, no setting and no model
+            // shape can cause that. As a `PipelineError` it carried that
+            // variant's hint — "the model is missing a piece, fetch it with
+            // `swarmllm get-model <name> --all`" — which is advice for a
+            // condition this is not, so following it could not help
+            // (`docs/FUTURE_WORK.md` #86, gotcha #295). `Internal` has no hint
+            // by design: there is nothing the reader can do about our bug.
+            return Err(SwarmError::Internal("Pipeline has no segments".to_string()));
         }
 
         // Check if this is a single-node pipeline on the local node AND the

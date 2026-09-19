@@ -50,6 +50,19 @@ download the rest of the model, or turn private answering off for it. The same
 message already existed for a missing first part; this is its other half, and
 each now points you at the right piece. Available in all 21 languages.
 
+**Three rare failures no longer send you after a problem you don't have.**
+
+When something went wrong inside SwarmLLM itself — a request that finished
+without producing anything, or one whose internal handover broke — the message
+told you the model was missing a piece and to download the rest of it. That was
+never the cause, and downloading anything would not have helped. These now say
+plainly that the fault is in SwarmLLM and offer no advice, because there is
+nothing you could do about it.
+
+Nothing else changes: these were already reported as faults in your own
+computer, which is correct, and they are still recorded that way for anyone
+looking at logs.
+
 ## [0.3.189-alpha] — 2026-09-19
 
 **A long answer that fills up the model's memory now ends properly instead of
