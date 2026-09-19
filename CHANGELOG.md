@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.3.189-alpha] — UNRELEASED (set this date when cutting the release)
+## [0.3.189-alpha] — 2026-09-19
 
 **A long answer that fills up the model's memory now ends properly instead of
 looking like something went wrong.**
