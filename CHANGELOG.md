@@ -47,6 +47,25 @@ rsign verify swarmllm-linux-x86_64.sha256 \
   -P <the key published in release_pubkey.txt>
 ```
 
+**Three places where saving a record could stop your computer hearing the
+network.**
+
+Everything another computer sends yours — requests, replies, the running
+commentary of a shared model — arrives through a single queue, handled one
+message at a time. Three pieces of credit and download bookkeeping saved
+records to disk from inside that handler, and the database allows only one
+write at a time. While another part of SwarmLLM held that write, the handler
+sat and waited, and nothing from the network was read at all.
+
+The bookkeeping now happens out of the way, so the queue keeps moving. Nothing
+about what gets recorded has changed.
+
+**Being straight about what this is:** a node going deaf for 33-45 minutes has
+been seen twice, and its cause is still not known. This removes one way it
+could happen; it is not a diagnosis, and we are not claiming the problem is
+solved. The measurement added in the previous release will name the culprit the
+next time it occurs.
+
 ## [0.3.190-alpha] — 2026-09-19
 
 **Your computer will use its graphics card for more of your models.**

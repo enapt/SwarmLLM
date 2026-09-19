@@ -336,6 +336,145 @@ pub fn estimate_vram_from_shard_dir(
 /// CreditGossip messages are used to update the peer balance distribution.
 /// Other messages (health, discovery) are handled by their respective
 /// subsystems directly via SharedState or are already handled by NetworkManager.
+/// Validate and record an inbound credit transaction, OFF the dispatch loop.
+///
+/// Everything here was inline in the `CreditTransaction` arm, and two steps of
+/// it block: the replay-check `get_json` and the recording `put_json`. redb
+/// permits one write transaction at a time, and a *blocking* call does not even
+/// yield to the runtime — so the single consumer of `network_out` waited here
+/// for whatever else held the write lock, with every inbound `LayerForward`,
+/// `LayerResult` and `StreamingToken` queued behind it. Gotcha #74 states the
+/// contract ("blocking it kills the node's responsiveness") and
+/// `docs/FUTURE_WORK.md` #90 is what it looks like when it happens.
+///
+/// **The caller must serialise these.** The replay check and the write that
+/// satisfies it are not atomic, so two concurrent copies of one transaction
+/// can both pass `get_json` before either calls `put_json` — and the balance is
+/// then applied twice. That is gotcha #76's silent double-credit arriving by a
+/// new route. One permit keeps the exact serial behaviour the inline code had.
+///
+/// Signature and freshness checks run in here too. They gate only this
+/// function's own writes, so moving them costs nothing — no state is touched
+/// before they pass.
+async fn record_peer_credit_transaction(
+    shared_state: Arc<SharedState>,
+    tx: crate::types::CreditTransaction,
+) {
+    // SEC-C3: Reject duplicate transactions (UUID replay check)
+    if let Ok(Some(_)) = shared_state.db.get_json::<crate::types::CreditTransaction>(
+        crate::credit::ledger::TREE_TRANSACTIONS,
+        &tx.id.to_string(),
+    ) {
+        tracing::warn!(tx_id = %tx.id, "Rejecting replayed credit transaction");
+        return;
+    }
+    // SEC: Freshness window — gotcha #32 / #44 one-sided staleness.
+    // Shared invariant with the balance report (same skew + max age).
+    if let Err(e) = crate::credit::ledger::check_signed_freshness(
+        tx.timestamp,
+        crate::credit::ledger::CLOCK_SKEW_TOLERANCE_SECS,
+        crate::credit::ledger::BALANCE_REPORT_MAX_AGE_SECS,
+        "credit tx",
+    ) {
+        tracing::warn!(tx_id = %tx.id, error = %e, "Rejecting credit tx");
+        return;
+    }
+    // SEC: Verify dual Ed25519 signatures before accepting.
+    // Without this check, any peer can forge arbitrary credit transactions.
+    {
+        use ed25519_dalek::VerifyingKey;
+        let from_key = match VerifyingKey::from_bytes(&tx.from.0) {
+            Ok(k) => k,
+            Err(_) => {
+                tracing::warn!(tx_id = %tx.id, "Credit tx rejected: invalid from key");
+                return;
+            }
+        };
+        let to_key = match VerifyingKey::from_bytes(&tx.to.0) {
+            Ok(k) => k,
+            Err(_) => {
+                tracing::warn!(tx_id = %tx.id, "Credit tx rejected: invalid to key");
+                return;
+            }
+        };
+        // verify_single_signatures checks both signatures; replay already checked above
+        if let Err(e) =
+            crate::credit::transaction::verify_single_signatures(&tx, &from_key, &to_key)
+        {
+            tracing::warn!(
+                tx_id = %tx.id,
+                error = %e,
+                "Credit tx rejected: signature verification failed"
+            );
+            return;
+        }
+    }
+    // Anti-gaming validation for network transactions.
+    //
+    // Still `try_lock`, and now for a second reason as well as the original:
+    // the periodic AG sweep in `health/monitor.rs` holds the same mutex, and
+    // skipping a check on contention is acceptable because signatures and
+    // replay are already verified — AG only adds rate-window and subnet
+    // heuristics. Same pattern as `health/monitor.rs:128`.
+    match shared_state.credits.anti_gaming.try_lock() {
+        Ok(mut ag) => match ag.check_and_record_transaction(&tx.from, &tx.to, tx.amount) {
+            Ok(decision) => {
+                if decision == crate::credit::anti_gaming::SpotCheckDecision::RequiresVerification {
+                    tracing::info!(
+                        tx_id = %tx.id,
+                        from = %tx.from,
+                        to = %tx.to,
+                        amount = tx.amount,
+                        "Anti-gaming: spot check recommended for transaction"
+                    );
+                }
+            }
+            Err(violation) => {
+                tracing::warn!(
+                    tx_id = %tx.id,
+                    violation = %violation,
+                    "Anti-gaming rejected credit transaction"
+                );
+                return;
+            }
+        },
+        Err(_) => {
+            tracing::debug!(
+                tx_id = %tx.id,
+                "anti_gaming contended, skipping rate-window check"
+            );
+        }
+    }
+    // Record the transaction and apply balance change if we are the recipient
+    let local_id = shared_state.identity.node_id().clone();
+    if tx.to == local_id {
+        if let Err(e) = crate::credit::ledger::apply_credit_direct_noted(
+            &shared_state.credits.credit_balance,
+            &shared_state.db,
+            tx.amount,
+            crate::credit::ledger::CreditDelta::Earning,
+            "peer_credit_tx_in",
+        )
+        .await
+        {
+            tracing::warn!(error = %e, "Failed to apply credit transaction");
+        }
+        let bal = shared_state.credits.credit_balance.read().await;
+        tracing::info!(
+            amount = tx.amount,
+            balance = bal.balance,
+            "Applied incoming credit transaction"
+        );
+    }
+    let key = tx.id.to_string();
+    if let Err(e) = shared_state
+        .db
+        .put_json(crate::credit::ledger::TREE_TRANSACTIONS, &key, &tx)
+    {
+        tracing::warn!(error = %e, "Failed to store credit transaction");
+    }
+}
+
 pub(crate) async fn dispatch_network_messages(
     network_out_rx: &mut mpsc::Receiver<AuthenticatedMessage>,
     router_tx: &mpsc::Sender<RouterCommand>,
@@ -354,6 +493,14 @@ pub(crate) async fn dispatch_network_messages(
         "Peer-work concurrency set from the contribution level"
     );
     let forward_semaphore = Arc::new(tokio::sync::Semaphore::new(forward_limit));
+    // Exactly ONE permit, and that is the point rather than a tuning choice:
+    // `record_peer_credit_transaction` reads the replay table and later writes
+    // it, non-atomically, so two concurrent copies of one transaction would
+    // both pass the check and the balance would be applied twice (gotcha #76's
+    // double-credit, by a new route). One permit reproduces the serial
+    // behaviour the work had while it ran inline in this loop — the only thing
+    // that changes is that the loop no longer waits for it.
+    let credit_tx_permits = Arc::new(tokio::sync::Semaphore::new(1));
     // SEC: Per-peer concurrent forward counter to prevent single-peer semaphore exhaustion
     let peer_forward_counts: Arc<
         dashmap::DashMap<crate::types::NodeId, std::sync::atomic::AtomicUsize>,
@@ -807,112 +954,35 @@ pub(crate) async fn dispatch_network_messages(
                                             tracing::debug!("Dropping unauthenticated CreditTransaction");
                                             continue;
                                         }
-                                        // SEC-C3: Reject duplicate transactions (UUID replay check)
-                                        if let Ok(Some(_)) = shared_state.db.get_json::<crate::types::CreditTransaction>(
-                                            crate::credit::ledger::TREE_TRANSACTIONS,
-                                            &tx.id.to_string(),
-                                        ) {
-                                            tracing::warn!(tx_id = %tx.id, "Rejecting replayed credit transaction");
-                                            continue;
-                                        }
-                                        // SEC: Freshness window — gotcha #32 / #44 one-sided staleness.
-                                        // Shared invariant with the balance report (same skew + max age).
-                                        if let Err(e) = crate::credit::ledger::check_signed_freshness(
-                                            tx.timestamp,
-                                            crate::credit::ledger::CLOCK_SKEW_TOLERANCE_SECS,
-                                            crate::credit::ledger::BALANCE_REPORT_MAX_AGE_SECS,
-                                            "credit tx",
-                                        ) {
-                                            tracing::warn!(tx_id = %tx.id, error = %e, "Rejecting credit tx");
-                                            continue;
-                                        }
-                                        // SEC: Verify dual Ed25519 signatures before accepting.
-                                        // Without this check, any peer can forge arbitrary credit transactions.
-                                        {
-                                            use ed25519_dalek::VerifyingKey;
-                                            let from_key = match VerifyingKey::from_bytes(&tx.from.0) {
-                                                Ok(k) => k,
-                                                Err(_) => {
-                                                    tracing::warn!(tx_id = %tx.id, "Credit tx rejected: invalid from key");
-                                                    continue;
-                                                }
-                                            };
-                                            let to_key = match VerifyingKey::from_bytes(&tx.to.0) {
-                                                Ok(k) => k,
-                                                Err(_) => {
-                                                    tracing::warn!(tx_id = %tx.id, "Credit tx rejected: invalid to key");
-                                                    continue;
-                                                }
-                                            };
-                                            // verify_single_signatures checks both signatures; replay already checked above
-                                            if let Err(e) = crate::credit::transaction::verify_single_signatures(&tx, &from_key, &to_key) {
-                                                tracing::warn!(
-                                                    tx_id = %tx.id,
-                                                    error = %e,
-                                                    "Credit tx rejected: signature verification failed"
-                                                );
-                                                continue;
-                                            }
-                                        }
-                                        // Anti-gaming validation for network transactions.
-                                        // Use try_lock to avoid blocking the dispatch loop on contention —
-                                        // the periodic AG sweep in health/monitor.rs holds the same mutex for
-                                        // cleanup. Skipping a check on contention is acceptable: the dispatcher
-                                        // has already verified signatures + replay; AG just adds rate-window
-                                        // and subnet heuristics. Same pattern as health/monitor.rs:128.
-                                        match shared_state.credits.anti_gaming.try_lock() {
-                                            Ok(mut ag) => {
-                                                match ag.check_and_record_transaction(&tx.from, &tx.to, tx.amount) {
-                                                    Ok(decision) => {
-                                                        if decision == crate::credit::anti_gaming::SpotCheckDecision::RequiresVerification {
-                                                            tracing::info!(
-                                                                tx_id = %tx.id,
-                                                                from = %tx.from,
-                                                                to = %tx.to,
-                                                                amount = tx.amount,
-                                                                "Anti-gaming: spot check recommended for transaction"
-                                                            );
-                                                        }
-                                                    }
-                                                    Err(violation) => {
-                                                        tracing::warn!(
-                                                            tx_id = %tx.id,
-                                                            violation = %violation,
-                                                            "Anti-gaming rejected credit transaction"
-                                                        );
-                                                        continue;
-                                                    }
-                                                }
+                                        // Hand the rest off. Everything that remains — replay check,
+                                        // freshness, signatures, anti-gaming, the balance apply and the
+                                        // record — is bookkeeping for credits that currently gate nothing,
+                                        // and two steps of it BLOCK on redb. Doing it here made the only
+                                        // consumer of `network_out` wait on a database write transaction
+                                        // (gotcha #74; `docs/FUTURE_WORK.md` #90).
+                                        //
+                                        // `try_acquire_owned` rather than a queue: one permit is already
+                                        // held only while a transaction is being recorded, so a refusal
+                                        // means another is in flight. Dropping is safe today — credits are
+                                        // DORMANT, a dropped record changes no routing or serving decision,
+                                        // and the sender retries. It is deliberately NOT charged to a
+                                        // channel counter: the message left `network_out` successfully, and
+                                        // charging a drop to the channel it already cleared is gotcha
+                                        // #648's third trap.
+                                        match credit_tx_permits.clone().try_acquire_owned() {
+                                            Ok(permit) => {
+                                                let st = Arc::clone(shared_state);
+                                                tokio::spawn(async move {
+                                                    let _permit = permit;
+                                                    record_peer_credit_transaction(st, tx).await;
+                                                });
                                             }
                                             Err(_) => {
-                                                tracing::debug!(
+                                                tracing::warn!(
                                                     tx_id = %tx.id,
-                                                    "anti_gaming contended, skipping rate-window check"
+                                                    "Dropping credit transaction: another is still being recorded"
                                                 );
                                             }
-                                        }
-                                        // Record the transaction and apply balance change
-                                        // if we are the recipient
-                                        let local_id = shared_state.identity.node_id().clone();
-                                        if tx.to == local_id {
-                                            if let Err(e) = crate::credit::ledger::apply_credit_direct_noted(
-                                                &shared_state.credits.credit_balance,
-                                                &shared_state.db,
-                                                tx.amount,
-                                                crate::credit::ledger::CreditDelta::Earning,
-                                            "peer_credit_tx_in").await {
-                                                tracing::warn!(error = %e, "Failed to apply credit transaction");
-                                            }
-                                            let bal = shared_state.credits.credit_balance.read().await;
-                                            tracing::info!(
-                                                amount = tx.amount,
-                                                balance = bal.balance,
-                                                "Applied incoming credit transaction"
-                                            );
-                                        }
-                                        let key = tx.id.to_string();
-                                        if let Err(e) = shared_state.db.put_json(crate::credit::ledger::TREE_TRANSACTIONS, &key, &tx) {
-                                            tracing::warn!(error = %e, "Failed to store credit transaction");
                                         }
                                     }
                                     // Process shard announcements from peers
@@ -1703,13 +1773,22 @@ pub(crate) async fn dispatch_network_messages(
                                                 mmproj_filename: gossip.mmproj_filename.clone(),
                                             };
                                             shared_state.models.hf_sources.insert(mid.clone(), source.clone());
-                                            // Persist to DB
-                                            let _ = shared_state.db.put_json("hf_sources", &mid.0, &source);
-                                            // Also write hf_source.json to disk so discover_hf_sources finds it on restart
+                                            // Persist to the DB and to disk, both OFF this loop.
+                                            //
+                                            // The disk write was already spawned; the DB write beside it
+                                            // was not — and redb serialises writers, so it waited here,
+                                            // in the only task that consumes `network_out`, for as long
+                                            // as another subsystem held the write transaction. The
+                                            // in-memory map inserted just above is what every reader
+                                            // consults, so neither write has to land before this loop
+                                            // moves on. Gotcha #74; `docs/FUTURE_WORK.md` #90.
                                             let model_dir = shared_state.model_dir(&mid.0);
                                             {
                                                 let json_str = serde_json::to_string_pretty(&source).unwrap_or_default();
+                                                let db = shared_state.db.clone();
+                                                let key = mid.0.clone();
                                                 tokio::task::spawn_blocking(move || {
+                                                    let _ = db.put_json("hf_sources", &key, &source);
                                                     if model_dir.is_dir() {
                                                         let hf_path = model_dir.join(crate::model::shard::HF_SOURCE_FILENAME);
                                                         if !hf_path.exists() {

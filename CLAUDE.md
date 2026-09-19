@@ -96,7 +96,7 @@ with a type-tag byte for tensor payloads.
 **Always say which feature set a count came from.** Current, with
 `--features dev,claude-subscription`: **2810 lib** (+12 ignored),
 79 integration (31 `integration` + 34 `integration_phase10_11` + 14 `yamux_substream`),
-139 repo-consistency, 1 `api_key_side_effects`, 40 `swarmllm-types`, and 11 in
+141 repo-consistency, 1 `api_key_side_effects`, 40 `swarmllm-types`, and 11 in
 the vendored request-response patch. Clippy clean. The last two are **not** run
 by a bare `cargo test` — CI runs the types crate explicitly, and the vendored
 one needs

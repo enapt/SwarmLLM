@@ -2158,6 +2158,167 @@ fn every_model_facing_entry_point_counts_the_request() {
     );
 }
 
+/// Find database calls that run INLINE in a dispatch-loop body.
+///
+/// Spawned regions are masked out first: work handed to `tokio::spawn` or
+/// `spawn_blocking` does not hold the loop, which is the whole point. Anything
+/// left is a call the single consumer of `network_out` waits for.
+///
+/// Fail-closed on the method name — only `clone` (an `Arc` bump, not I/O) is
+/// allowed — so a database method added later is caught without anyone
+/// remembering to extend a list.
+fn inline_db_calls(body: &str) -> Vec<String> {
+    // Mask `tokio::spawn(..)` / `spawn_blocking(..)` argument spans, keeping
+    // byte offsets and line count stable so `statements()` still lines up.
+    let bytes: Vec<char> = body.chars().collect();
+    let mut masked: Vec<char> = bytes.clone();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let rest: String = bytes[i..(i + 24).min(bytes.len())].iter().collect();
+        if rest.starts_with("tokio::spawn(")
+            || rest.starts_with("spawn_blocking(")
+            || rest.starts_with("tokio::task::spawn_blocking(")
+        {
+            let open = i + rest.find('(').unwrap();
+            let (mut depth, mut j) = (0i32, open);
+            while j < bytes.len() {
+                match bytes[j] {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                j += 1;
+            }
+            for c in masked.iter_mut().take(j.min(bytes.len())).skip(i) {
+                if *c != '\n' {
+                    *c = ' ';
+                }
+            }
+            i = j;
+            continue;
+        }
+        i += 1;
+    }
+    let masked: String = masked.into_iter().collect();
+
+    let mut hits = Vec::new();
+    for (line, stmt) in statements(&masked) {
+        // `statements` joins rustfmt-wrapped chains, so `shared_state\n.db\n
+        // .put_json(..)` reads back as one string — the wrapped form is the
+        // ordinary one at this indentation depth.
+        let flat = stmt.replace(char::is_whitespace, "");
+        let mut from = 0usize;
+        while let Some(k) = flat[from..].find(".db.") {
+            let at = from + k + ".db.".len();
+            let method: String = flat[at..]
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            if !method.is_empty() && method != "clone" {
+                hits.push(format!("line {line}: .db.{method}(…)"));
+            }
+            from = at;
+        }
+    }
+    hits
+}
+
+/// The dispatch loop must never wait on the database.
+///
+/// `dispatch_network_messages` is the ONLY consumer of `network_out`, which
+/// carries gossip and every inbound `LayerForward` / `LayerResult` /
+/// `StreamingToken` / `RemoteGenerateRequest`. redb permits one write
+/// transaction at a time, and a blocking call does not even yield to the
+/// runtime — so a `db.put_json(..)` here stops the node receiving *anything*
+/// for as long as another subsystem holds the write lock.
+///
+/// That is gotcha #74's contract ("blocking it kills the node's
+/// responsiveness") and `docs/FUTURE_WORK.md` #90 is what it looks like in the
+/// field: 33-45 minutes of total inbound silence, twice, on a node reporting
+/// itself healthy. Three such calls were found on 2026-09-19 and moved off the
+/// loop. An `.await` audit does not catch these — that is why this scans for
+/// the call rather than for the wait.
+#[test]
+fn the_dispatch_loop_never_waits_on_the_database() {
+    let src =
+        std::fs::read_to_string("src/daemon/dispatch/mod.rs").expect("dispatch/mod.rs is missing");
+    let body = fn_body(&src, "pub(crate) async fn dispatch_network_messages(")
+        .expect("dispatch_network_messages not found — did the signature change?");
+
+    let hits = inline_db_calls(body);
+    assert!(
+        hits.is_empty(),
+        "these database calls run inline in the dispatch loop, so the node stops \
+         receiving every inbound message while they wait:\n  {}\n\nHand the work \
+         to a spawned task (see `record_peer_credit_transaction`), or to \
+         `spawn_blocking` when it is pure I/O the loop does not need the result \
+         of.",
+        hits.join("\n  ")
+    );
+}
+
+/// The scanner above finds nothing today, which is indistinguishable from a
+/// scanner that cannot find anything — so plant the violation it exists to
+/// catch, including the rustfmt-wrapped shape that blinded six earlier guards
+/// (gotcha #413).
+#[test]
+fn the_dispatch_db_scan_catches_a_planted_blocking_call() {
+    let inline = r#"
+    loop {
+        match msg {
+            SwarmMessage::Thing(t) => {
+                let _ = shared_state.db.put_json("tree", &k, &t);
+            }
+        }
+    }
+"#;
+    assert_eq!(
+        inline_db_calls(inline).len(),
+        1,
+        "a plain inline db call must be caught"
+    );
+
+    let wrapped = r#"
+    loop {
+        if let Err(e) = shared_state
+            .db
+            .put_json(crate::credit::ledger::TREE_TRANSACTIONS, &key, &tx)
+        {
+            warn(e);
+        }
+    }
+"#;
+    assert_eq!(
+        inline_db_calls(wrapped).len(),
+        1,
+        "a rustfmt-wrapped chain must be caught — this is the shape that has \
+         blinded guards before"
+    );
+
+    // Spawned work is fine, and must NOT be reported.
+    let spawned = r#"
+    loop {
+        let db = shared_state.db.clone();
+        tokio::task::spawn_blocking(move || {
+            let _ = db.put_json("hf_sources", &key, &source);
+        });
+        tokio::spawn(async move {
+            let _ = st.db.put_json("tree", &k, &v);
+        });
+    }
+"#;
+    assert!(
+        inline_db_calls(spawned).is_empty(),
+        "work handed to a spawned task does not hold the loop: {:?}",
+        inline_db_calls(spawned)
+    );
+}
+
 /// A build must trust a signing key, or it can never update itself again.
 ///
 /// `release_pubkey.txt` is compiled in with `include_str!`, and every update
