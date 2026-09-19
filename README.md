@@ -11,7 +11,7 @@ A peer-to-peer LLM inference network in a single Rust binary. Pool hardware with
 
 **Join the swarm. Run AI together — for free.**
 
-> **Status — alpha**, actively developed. Distributed inference is stable across multi-node deployments. 2795 lib tests + 79 integration tests run on every PR; continuous security sweeps. [Report issues](https://github.com/enapt/SwarmLLM/issues).
+> **Status — alpha**, actively developed. Distributed inference is stable across multi-node deployments. 2810 lib tests + 79 integration tests run on every PR; continuous security sweeps. [Report issues](https://github.com/enapt/SwarmLLM/issues).
 >
 > **Recent work (September 2026) — a model that does not quite fit your graphics card no longer loses the card.** Placement used to be all or nothing: a model needing a little more graphics memory than was free ran *entirely* on the processor while the card sat idle beside it. Since v0.3.145 the node splits it — the first layers on the card, the rest on the processor, the count chosen automatically — measured on an RTX 3070 at **1.8× the processor-only speed** for a 7B that no longer fits, against 7–8× when it does (see [Benchmarks](#benchmarks)). The same month: **a model no single node can hold is served** by chaining peers (a 14B across three machines on two continents), every node advertises a *measured* speed instead of a constant that was 5× low, the diagnostics report is safe to paste in public, Apple Silicon nodes can update themselves again — and a machine that vanishes or refuses mid-request now costs the request seconds, not minutes (v0.3.147).
 >
@@ -66,10 +66,21 @@ Your browser opens to `localhost:8800`. The setup wizard auto-detects your hardw
 |----------|------|-------|
 | **Windows x86_64** | **`SwarmLLM-Setup.exe`** | **Recommended** — installer auto-detects GPU (NVIDIA / AMD / Intel) |
 | Linux x86_64 + CUDA | `swarmllm-linux-x86_64-cuda.tar.gz` | NVIDIA GPU acceleration — **RTX 30-series or newer** |
-| Linux x86_64 | `swarmllm-linux-x86_64.tar.gz` | CPU inference |
+| Linux x86_64 | `swarmllm-linux-x86_64.tar.gz` | CPU inference — needs a 2013-or-newer processor (AVX2) |
+| Linux x86_64 (older CPUs) | `swarmllm-linux-x86_64-baseline.tar.gz` | Same software, for processors without AVX2 |
 | Windows x86_64 (GPU) | `swarmllm-windows-x86_64-gpu.zip` | Raw binary: Vulkan + CUDA static |
 | Windows x86_64 (CPU) | `swarmllm-windows-x86_64-cpu.zip` | Raw binary: CPU-only fallback |
+| Windows x86_64 (older CPUs) | `swarmllm-windows-x86_64-baseline.zip` | Same software, for processors without AVX2 |
 | macOS Apple Silicon | `swarmllm-macos-aarch64.tar.gz` | CPU inference (Metal planned) |
+
+> **If it stops immediately with `Illegal instruction`, download the baseline
+> build.** The ordinary Linux and Windows builds are compiled for processors
+> from 2013 onwards (AVX2), which makes them roughly 3x faster at running
+> models on the processor. On an older machine they stop on the very first
+> instruction, before printing anything — and because nothing is actually
+> wrong with the download, the usual checks (`ldd`, re-downloading, checking
+> permissions) all come back clean. Check with `grep -c avx2 /proc/cpuinfo`
+> on Linux: `0` means you want the baseline build.
 
 > **NVIDIA GPU acceleration needs an RTX 30-series or newer** (compute
 > capability 8.0+ — Ampere, Ada, Blackwell; the RTX 20-series and GTX 16-series
@@ -666,7 +677,7 @@ cargo run -- run
 
 ## Development Transparency
 
-SwarmLLM was developed collaboratively between a human developer and Claude Code. The human provided architecture direction, testing, and review; Claude wrote the code. We disclose this openly so you can judge the project on its technical merits — 2795 lib tests + 79 integration tests run on every PR, every commit passes `cargo fmt` and `cargo clippy -- -D warnings`, and continuous multi-agent code sweeps and security audits track findings in `.claude/sweep-log.jsonl`. Contributions, scrutiny, and feedback all welcome.
+SwarmLLM was developed collaboratively between a human developer and Claude Code. The human provided architecture direction, testing, and review; Claude wrote the code. We disclose this openly so you can judge the project on its technical merits — 2810 lib tests + 79 integration tests run on every PR, every commit passes `cargo fmt` and `cargo clippy -- -D warnings`, and continuous multi-agent code sweeps and security audits track findings in `.claude/sweep-log.jsonl`. Contributions, scrutiny, and feedback all welcome.
 
 ## License
 
