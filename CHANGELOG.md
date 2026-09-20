@@ -1,5 +1,49 @@
 # Changelog
 
+## [0.3.193-alpha] — 2026-09-20
+
+**Computers can now tell how far apart two OTHER computers are, and your
+computer knows what country it is in.**
+
+When a model is too large for one machine, SwarmLLM runs it across several. How
+quickly that works depends almost entirely on how far apart those machines are,
+because the reply travels the whole chain once for every word produced. Measured
+on the live network this release: the same kind of split ran at under half a
+word per second across Thailand and Italy, and at nearly seven words per second
+between two machines eighteen milliseconds apart — one an ordinary laptop, the
+other a small six-core box with no graphics card at all. Distance is the thing
+that matters, and until now nothing in the system could see it.
+
+Two changes toward fixing that. Neither changes how work is routed yet; both are
+the groundwork, published so they can be checked against reality first.
+
+**Every computer now keeps and shares a position.** Not a location on Earth — a
+position on a map where distance means time. Any machine can then estimate the
+delay between any two others by comparing their positions, with no extra network
+traffic: the position is learned from round trips already being timed. This is
+Vivaldi, a method from 2004 used by other peer-to-peer systems for the same job.
+
+**Your computer now uses the country it detects for deciding what to keep.** It
+has always worked out where it is when it starts. But three parts of the system
+asked instead for a country typed into a settings file by hand, which almost
+nobody has done, so those parts read "nowhere". One of them decides which pieces
+of which models to keep, and is meant to prefer a piece that no nearby machine
+has — so that a model can be run by machines close to each other. Reading
+"nowhere" turned that off entirely.
+
+**Also fixed:** a computer that ran out of memory for a model would refuse the
+request outright instead of asking another computer to take it, even when the
+network had several copies. On the machine this was found on, a model with nine
+other holders failed in 46 milliseconds without one of them being asked. Present
+since v0.3.154.
+
+**Corrected in the documentation:** the notice that tells you when keeping your
+prompts private is slowing replies down has never once appeared, because of
+where it sits in the code. The cost is real — re-measured this release at nine
+to fourteen times slower, and it grows with distance rather than being a fixed
+multiplier. Nothing about privacy itself changed; the record now says plainly
+that people were not being told.
+
 ## [0.3.192-alpha] — 2026-09-19
 
 **Private mode could treat a distant computer as being on your home network.**
