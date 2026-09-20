@@ -2742,17 +2742,26 @@ impl SharedState {
         }
     }
 
-    /// This node's coordinate, for publishing — `None` until it has settled
-    /// enough to be worth acting on.
+    /// This node's coordinate, for publishing. **Always published once we have
+    /// one, however rough** — the confidence rides in its `error` field.
     ///
-    /// Publishing an unsettled coordinate would be worse than publishing none:
-    /// a reader cannot tell a rough position from a confident one except by the
-    /// error we send, and every consumer would have to re-check it. Answering
-    /// `None` makes "not ready" the same case as "older build", which every
-    /// reader already handles by falling back to what it did before.
+    /// ⚠ This withheld an unsettled coordinate until 2026-09-20, and that
+    /// **deadlocked the whole system**: a node only refines its coordinate
+    /// against a peer that publishes one, and every node starts unsettled, so
+    /// every node published `None`, nobody ever refined, and nobody ever became
+    /// settled. Symmetric and permanent. Measured on two real nodes 4 ms apart
+    /// — both on this build, both reporting `predicted None` indefinitely.
+    ///
+    /// Publishing a rough coordinate is not a hazard, it is how Vivaldi works:
+    /// the receiver weighs every sample by `w = e_i / (e_i + e_j)`, so a
+    /// high-error node is automatically discounted rather than excluded. That
+    /// weighting IS the paper's answer to high-error nodes, and suppressing
+    /// publication removes it.
+    ///
+    /// `is_usable()` is the CONSUMER's gate — routing declines to act on a
+    /// coordinate it does not trust. Keep it there and not here.
     pub fn network_coord_for_publication(&self) -> Option<swarmllm_types::netcoord::NetworkCoord> {
-        let c = *self.metrics.network_coord.read().ok()?;
-        c.is_usable().then_some(c)
+        Some(*self.metrics.network_coord.read().ok()?)
     }
 
     /// This node's region for reporting/geo purposes: the explicitly configured
@@ -3485,6 +3494,53 @@ impl SharedState {
             return None;
         }
         self.resolve_peer_id_bytes(node_id)
+    }
+}
+
+#[cfg(test)]
+mod network_coord_tests {
+    /// **A fresh node must publish its coordinate, however rough.**
+    ///
+    /// Withholding it until it settled deadlocked the entire system: a node
+    /// refines its coordinate only against a peer that publishes one, every
+    /// node starts unsettled, so every node published nothing, nobody refined,
+    /// and nobody ever settled. Symmetric and permanent — measured on two real
+    /// nodes 4 ms apart, both reporting no prediction indefinitely.
+    ///
+    /// The confidence travels in the coordinate's own `error`, and the
+    /// receiver discounts it through `w = e_i / (e_i + e_j)`. `is_usable()`
+    /// belongs to whoever ROUTES on a coordinate, never to publishing it.
+    #[test]
+    fn a_brand_new_node_still_publishes_its_coordinate() {
+        use crate::identity::Identity;
+        use crate::inference::executor::ModelExecutor;
+        use crate::storage::db::Database;
+        use tokio::sync::Mutex;
+
+        let temp = tempfile::tempdir().unwrap();
+        let db = Database::open(temp.path()).unwrap();
+        let (state, _, _) = crate::daemon::SharedState::new(
+            crate::config::Config::default(),
+            Identity::generate(),
+            db,
+            std::sync::Arc::new(Mutex::new(ModelExecutor::new())),
+            None,
+        );
+
+        let published = state.network_coord_for_publication();
+        assert!(
+            published.is_some(),
+            "a node that has measured nothing must STILL publish its \
+             coordinate — withholding it is a deadlock, because no peer can \
+             refine against a coordinate that was never sent"
+        );
+        // And it must be honest about knowing nothing, since that error is
+        // exactly what stops a peer trusting it.
+        let c = published.unwrap();
+        assert!(
+            !c.is_usable(),
+            "a fresh coordinate must still report itself unusable to consumers"
+        );
     }
 }
 
