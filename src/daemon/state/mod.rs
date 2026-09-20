@@ -951,6 +951,7 @@ impl SharedState {
             inbound_forward_aborts: DashMap::new(),
             cancel_signals: DashMap::new(),
             metrics: MetricsProviders {
+                network_coord: std::sync::RwLock::new(swarmllm_types::netcoord::NetworkCoord::new()),
                 node_stats: RwLock::new(NodeStats::default()),
                 inference_requests_total: AtomicU64::new(0),
                 requests_served_atomic: AtomicU64::new(0),
@@ -2713,6 +2714,45 @@ impl SharedState {
             }
         }
         false
+    }
+
+    /// Fold one measured round trip into this node's network coordinate.
+    ///
+    /// **The single writer of `metrics.network_coord`.** `rtt_ms` must be a
+    /// real measurement to `node_id`; the peer's own published coordinate is
+    /// looked up here so no caller has to know where capabilities live, and a
+    /// peer that publishes none teaches us nothing (there is no coordinate to
+    /// be pushed relative to) and is skipped.
+    ///
+    /// Deliberately fed from the tensor path's acknowledged forwards rather
+    /// than from a health ping: those samples are already gated to SMALL
+    /// forwards, where the elapsed time is the peer's round trip rather than
+    /// the payload's transfer — which is exactly the quantity Vivaldi models,
+    /// and the same reason `ACK_OBSERVE_MAX_BYTES` exists.
+    pub fn observe_network_coord(&self, node_id: &NodeId, rtt_ms: f32) {
+        let Some(remote) = self
+            .peer_registry
+            .get(node_id)
+            .and_then(|p| p.capability.as_ref().and_then(|c| c.coord))
+        else {
+            return;
+        };
+        if let Ok(mut ours) = self.metrics.network_coord.write() {
+            ours.observe(rtt_ms, &remote);
+        }
+    }
+
+    /// This node's coordinate, for publishing — `None` until it has settled
+    /// enough to be worth acting on.
+    ///
+    /// Publishing an unsettled coordinate would be worse than publishing none:
+    /// a reader cannot tell a rough position from a confident one except by the
+    /// error we send, and every consumer would have to re-check it. Answering
+    /// `None` makes "not ready" the same case as "older build", which every
+    /// reader already handles by falling back to what it did before.
+    pub fn network_coord_for_publication(&self) -> Option<swarmllm_types::netcoord::NetworkCoord> {
+        let c = *self.metrics.network_coord.read().ok()?;
+        c.is_usable().then_some(c)
     }
 
     /// This node's region for reporting/geo purposes: the explicitly configured

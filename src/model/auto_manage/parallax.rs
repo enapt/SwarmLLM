@@ -316,6 +316,7 @@ mod tests {
                 node_id: remote.clone(),
                 addresses: vec![],
                 capability: Some(crate::types::NodeCapability {
+                    coord: None,
                     cpu: None,
                     node_id: remote.clone(),
                     gpu: None,

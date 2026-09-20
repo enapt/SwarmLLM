@@ -11,6 +11,19 @@ use super::capacity::SwarmCapacity;
 
 /// Metrics, stats, and provider configuration.
 pub struct MetricsProviders {
+    /// This node's Vivaldi network coordinate — the position that lets ANY
+    /// reader estimate the round trip between two nodes, including two peers
+    /// neither of which is the reader.
+    ///
+    /// Written only by `SharedState::observe_network_coord`, from round trips
+    /// the tensor path already measures (`AckRttEstimator`'s samples, which are
+    /// gated to small forwards where the time is the peer's rather than the
+    /// payload's). Read by the capability builder that publishes it and — once
+    /// routing consumes it — by the scheduler.
+    ///
+    /// A `std::sync::RwLock` rather than an async one because both readers are
+    /// synchronous and the critical section is a struct copy.
+    pub network_coord: std::sync::RwLock<swarmllm_types::netcoord::NetworkCoord>,
     pub inference_requests_total: AtomicU64,
     /// Mirror of node_stats.requests_served as an AtomicU64 — written from
     /// multiple async contexts. The RwLock-guarded field on NodeStats was

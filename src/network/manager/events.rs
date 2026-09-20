@@ -243,6 +243,18 @@ impl NetworkManager {
                                 {
                                     info.ack_srtt_ms = srtt;
                                 }
+                                // Same sample, second consumer: the network
+                                // coordinate. It wants the RAW round trip, not
+                                // the smoothed-and-capped routing figure —
+                                // `srtt` doubles on a miss and is clamped at
+                                // `ACK_SRTT_ROUTING_CAP_MS`, both of which
+                                // would teach the coordinate a distance
+                                // nothing travelled. Vivaldi does its own
+                                // smoothing through the error weight.
+                                self.shared_state.observe_network_coord(
+                                    &node_id,
+                                    elapsed.as_secs_f64() as f32 * 1000.0,
+                                );
                             }
                         }
                         // Throughput, from the same completed forward. This one

@@ -70,9 +70,25 @@ pub mod features {
     /// directions.
     pub const RESEND_TOKENS: u64 = 1 << 5;
 
+    /// The node maintains and publishes a Vivaldi coordinate
+    /// (`NodeCapability::coord`), so readers can estimate the round trip
+    /// between it and any OTHER node carrying one.
+    ///
+    /// Unlike the bits above, nothing is ever *sent* on the strength of this
+    /// one — it advertises a fact, not a message type, and the field is an
+    /// `Option` that a reader already has to handle. It exists so a node can
+    /// tell "this peer has no coordinate yet" from "this peer's build has
+    /// none", which decides whether a missing coordinate is worth waiting for.
+    pub const NETWORK_COORDS: u64 = 1 << 6;
+
     /// The full feature set THIS build implements. Advertised by every node.
-    pub const ALL: u64 =
-        RELAY | TENSOR_RELAY | PIPELINE_CHAIN | PIPELINE_CHAIN_V2 | FORWARD_ACK | RESEND_TOKENS;
+    pub const ALL: u64 = RELAY
+        | TENSOR_RELAY
+        | PIPELINE_CHAIN
+        | PIPELINE_CHAIN_V2
+        | FORWARD_ACK
+        | RESEND_TOKENS
+        | NETWORK_COORDS;
 
     /// Does `advertised` include every bit in `needed`?
     pub fn supports(advertised: u64, needed: u64) -> bool {
@@ -134,6 +150,22 @@ pub struct NodeCapability {
     /// Voluntary ISO 3166-1 alpha-2 country code (e.g. "US", "DE").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub region: Option<String>,
+    /// This node's Vivaldi network coordinate, so ANY reader can estimate the
+    /// round trip between this node and another — including two peers neither
+    /// of which is the reader.
+    ///
+    /// That estimate is the one fact the routing cost model never had: it
+    /// prices each candidate by the reader's OWN round trip to it, so a chain
+    /// of peers in one city and a chain spanning three continents came out the
+    /// same. `region` is the coarse stand-in (same / adjacent / distant) and
+    /// stays as the fallback.
+    ///
+    /// `None` from a node predating the field, and `None` on a node whose
+    /// coordinate has not settled yet (`NetworkCoord::is_usable`) — a reader
+    /// falls back to exactly what it did before, so unknown never excludes.
+    /// Gated by [`features::NETWORK_COORDS`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coord: Option<crate::netcoord::NetworkCoord>,
     /// Estimated tokens/s for a 7B Q4 model based on GPU memory bandwidth.
     /// Used by the scheduler as a speed tie-breaker.
     #[serde(default)]

@@ -15,6 +15,7 @@ pub mod identity;
 pub mod ids;
 pub mod inference;
 pub mod model;
+pub mod netcoord;
 pub mod network;
 pub mod node;
 pub mod pool;

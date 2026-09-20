@@ -1081,6 +1081,7 @@ mod tests {
         reservations: Vec<crate::types::NodeId>,
     ) -> crate::types::NodeCapability {
         crate::types::NodeCapability {
+            coord: None,
             node_id: crate::types::NodeId([0u8; 32]),
             gpu: None,
             cpu: None,

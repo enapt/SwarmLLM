@@ -818,6 +818,8 @@ impl HealthMonitor {
         let cap = crate::types::NodeCapability {
             // OS family only — see the field docs on why not a version string.
             os: Some(std::env::consts::OS.to_string()),
+            // `None` until it has settled — see `network_coord_for_publication`.
+            coord: self.shared_state.network_coord_for_publication(),
             node_id: node_id.clone(),
             gpu: gpu_info,
             cpu: local_cpu_info(),
