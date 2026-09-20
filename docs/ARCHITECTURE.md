@@ -299,7 +299,8 @@ SwarmLLM uses a 5-layer zero-config discovery stack. Each layer is independent �
 │    event penalty (-0.03).                                   │
 │                                                             │
 │  Gossip Network ID: "swarmllm-mainnet-v1" (fixed)           │
-│    Configurable via gossip_network_id for private networks  │
+│    gossip_network_id separates TOPICS, not routing — the     │
+│    DHT is shared, so it is not an isolation boundary         │
 └─────────────────────────────────────────────────────────────┘
 ```
 

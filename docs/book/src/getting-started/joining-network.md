@@ -33,14 +33,39 @@ bootstrap_peers = ["/ip4/203.0.113.50/udp/8800/quic-v1/p2p/12D3KooW..."]
 
 ## Private Networks
 
-To run a private cluster that doesn't mix with the public network:
+`gossip_network_id` puts a group of computers on their own announcement
+channels, with their own key, so they discover each other's models separately
+from the public network:
 
 ```toml
 [network]
 gossip_network_id = "my-private-network"
 ```
 
-Only nodes with the same `gossip_network_id` can communicate.
+**On its own this is not an isolation boundary, and it is important not to
+treat it as one.** It separates announcements. It does not stop your computer
+sending work to a computer outside the group: which machines hold which model
+parts is also learned through the shared peer-to-peer directory, which every
+SwarmLLM node takes part in regardless of this setting. Measured on a test
+group whose very first request was answered by a public node.
+
+**To actually keep work inside a set of machines, use a pool and turn on
+private mode:**
+
+```toml
+[pool]
+private_mode_allow_lan = false   # default is true, and "LAN" includes any
+                                 # other node on the same network
+```
+
+Then link the machines into a pool and switch private mode on. That is an
+explicit list of computers, checked before any work is handed out, and it is
+the only thing that decides where your prompts go. Use both together for a
+private cluster: `gossip_network_id` to keep the announcements separate, pool
+private mode to keep the work in.
+
+Note `private_mode_allow_lan` is read at startup, so it belongs in the config
+file before you start the node rather than being changed while it runs.
 
 ## Firewall & internet reachability
 

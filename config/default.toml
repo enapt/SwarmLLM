@@ -67,7 +67,13 @@ enable_encryption = true           # E2E encryption for tensor forwards.
                                    # encryption is unaffected.
 enable_quic = true                 # QUIC transport (set false on WSL2 — QUIC wins connection race over TCP)
 # listen_address = "0.0.0.0"      # Bind address for P2P (set "127.0.0.1" on WSL2)
-# gossip_network_id = "my-private-net"  # Uncomment for private networks (default: "swarmllm-mainnet-v1")
+# Put this node on its own announcement channels, separate from the public
+# swarm (default: "swarmllm-mainnet-v1").
+# NOT an isolation boundary on its own: which nodes hold which shards is also
+# learned through the shared DHT, so a node can still send work outside the
+# group. To keep work in, use a pool with private mode and
+# [pool] private_mode_allow_lan = false.
+# gossip_network_id = "my-private-net"
 
 [inference]
 default_model = ""             # Empty = first available

@@ -253,7 +253,7 @@ A layered discovery stack means nodes find each other without manual configurati
 | **Peer Exchange** | Connected peers share their known peer lists | On each new connection |
 | **Kademlia DHT** | Network-wide peer routing | Continuously |
 
-Two laptops on the same Wi-Fi find each other in seconds. A brand-new install auto-joins the public network via a built-in bootstrap anchor — nothing to configure. Returning users reconnect cached peers in under a second. For private networks, set `gossip_network_id` in config to isolate from the public network.
+Two laptops on the same Wi-Fi find each other in seconds. A brand-new install auto-joins the public network via a built-in bootstrap anchor — nothing to configure. Returning users reconnect cached peers in under a second. For a private group, set `gossip_network_id` in config to put those nodes on their own announcement channels — and, to keep work inside the group, pair it with a pool in private mode, which is the part that decides where requests may go.
 
 **Connecting across the internet** used to need manual NAT/port-forwarding — now it mostly just works:
 

@@ -114,8 +114,29 @@ pub struct NetworkConfig {
     #[serde(default = "default_true")]
     pub enable_mdns: bool,
     /// Gossip network ID for grouping nodes. All nodes sharing the same ID
-    /// can decode each other's sealed gossip. Defaults to "swarmllm-mainnet-v1".
-    /// Set to a custom value (e.g. "my-private-net") for private networks.
+    /// can decode each other's sealed gossip, and they subscribe to their own
+    /// topics. Defaults to "swarmllm-mainnet-v1".
+    ///
+    /// ⚠ **This scopes GOSSIP. It is not an isolation boundary, and it must not
+    /// be documented as one** — it said "for private networks" until
+    /// 2026-09-21, and four user-facing documents repeated that, one of them
+    /// promising the traffic "never reaches the public swarm and vice versa".
+    ///
+    /// **Kademlia is one DHT for every SwarmLLM node**, whatever their gossip
+    /// id: the provider key is derived from the model id alone, so
+    /// `merge_dht_providers` fills `shard_holders` with public-swarm nodes and
+    /// the router will happily send a segment to one. Reproduced twice —
+    /// gotcha #352 (2026-08-21) and again on 2026-09-21, where a two-node rig
+    /// on `manifest-rig-0920` recorded **six public holders for a shard and not
+    /// its own private partner**, and its first request was answered outside
+    /// the group.
+    ///
+    /// **What actually isolates is `pool::scope::allowed_node_set`** — a pool
+    /// plus `private_mode`, with `pool.private_mode_allow_lan = false` (it
+    /// defaults TRUE, and "LAN" includes any other node on the same network).
+    /// That filters the DHT-merged holders before assembly. Pair the two for a
+    /// private cluster; neither substitutes for the other.
+    #[doc(alias = "private network")]
     #[serde(default)]
     pub gossip_network_id: Option<String>,
     /// Enable AutoNAT for NAT detection (default: true).
