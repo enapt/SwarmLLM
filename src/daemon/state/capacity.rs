@@ -124,9 +124,14 @@ pub fn compute_swarm_capacity(state: &SharedState) -> SwarmCapacity {
     let mut total_vram_mb = local_vram_mb;
     let mut gpu_nodes = if local_vram_mb > 0 { 1 } else { 0 };
     let mut regions: BTreeSet<String> = BTreeSet::new();
-    if let Some(my_region) = state.config.identity.region.as_ref() {
+    // `effective_region_sync`, never `config.identity.region` — the accessor's
+    // own doc names the capacity announcement as a path that must use it. The
+    // configured value is `None` unless the owner hand-edited config.toml, so
+    // this node left ITSELF out of the region count while counting every peer,
+    // and `regions_represented` was short by one on every auto-detected node.
+    if let Some(my_region) = state.effective_region_sync() {
         if !my_region.is_empty() {
-            regions.insert(my_region.clone());
+            regions.insert(my_region);
         }
     }
 

@@ -1223,7 +1223,7 @@ pub async fn pipeline_plan(
             return Ok(Json(serde_json::json!({
                 "model_id": model_id,
                 "local_node_id": format!("{}", local_node_id),
-                "local_region": state.shared_state.config.identity.region.clone(),
+                "local_region": state.shared_state.effective_region_sync(),
                 "segments": [],
                 "standbys": [],
                 "routable": false,
@@ -1298,7 +1298,10 @@ pub async fn pipeline_plan(
         })
         .collect();
 
-    let local_region = state.shared_state.config.identity.region.clone();
+    // `effective_region_sync`, never `config.identity.region` — the route
+    // preview labelled this node's own segment with no region on any node whose
+    // owner never hand-edited config.toml, while labelling every peer's.
+    let local_region = state.shared_state.effective_region_sync();
     Ok(Json(serde_json::json!({
         "model_id": model_id,
         "local_node_id": format!("{}", local_node_id),

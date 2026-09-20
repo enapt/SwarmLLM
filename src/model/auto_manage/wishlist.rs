@@ -165,7 +165,15 @@ pub fn refresh_wishlist(state: &SharedState) {
 /// Build a fresh wishlist snapshot. Pure function over registry state.
 pub fn compute_wishlist(state: &SharedState) -> Wishlist {
     let local_node_id = state.identity.node_id().clone();
-    let local_region: Option<String> = state.config.identity.region.clone();
+    // `effective_region_sync`, never `config.identity.region`: the configured
+    // value is `None` on every node whose owner did not hand-edit config.toml,
+    // and the auto-detected one lives in `detected_region`. Reading the config
+    // field here made every region branch below unreachable on the common node
+    // — the wishlist could not prefer a shard its own region was missing, which
+    // is the input the regional-placement work depends on.
+    // `auto_manage::manager::our_region` already did this correctly, so the two
+    // halves of auto-manage disagreed about where this node is.
+    let local_region: Option<String> = state.effective_region_sync();
     let online_node_count = (state.connected_node_ids.len() as u32) + 1;
     // What this node could host, on whichever device would run it. Asking the
     // card alone answered 0 on every processor-only machine, so the two

@@ -6402,6 +6402,93 @@ fn the_privacy_map_guard_catches_the_form_the_defect_took() {
         .any(|(_, t)| t.contains("encrypted_pipeline_models")));
 }
 
+/// **This node's region is auto-detected, and three sites asked for the typed
+/// one.** `identity.region` is `None` unless the owner hand-edited config.toml;
+/// the IP-geolocated value lives in `SharedState::detected_region`, and
+/// `effective_region{,_sync}` is the one accessor that resolves the two — its
+/// own doc already warned that reading the config field directly "reports 'no
+/// region' on the common auto-detected node".
+///
+/// Three production sites read it anyway (2026-09-20), so on a normal node:
+/// the wishlist could not prefer a shard its own region was missing (every
+/// region branch in `compute_wishlist` unreachable), the capacity announcement
+/// left this node out of its own region count while counting every peer, and
+/// the route preview labelled our segment with no region. `our_region()` in
+/// `auto_manage::manager` did it correctly all along, so the two halves of
+/// auto-manage disagreed about where this node is.
+///
+/// This is the input every regional-placement decision reads, so it is the
+/// precondition for `docs/plans/regional_pipelines.md`.
+#[test]
+fn this_nodes_region_is_read_through_the_accessor_that_knows_it_was_detected() {
+    let allowed = [
+        // Owns the field and both accessors — the precedence lives here.
+        "src/daemon/state/mod.rs",
+        // Runs the geolocation and applies the configured value over it.
+        "src/daemon/background.rs",
+        // Parses and defaults the config itself.
+        "src/config/mod.rs",
+    ];
+    let mut offenders = Vec::new();
+    for path in rust_files_under(std::path::Path::new("src")) {
+        let rel = path.to_string_lossy().replace('\\', "/");
+        if allowed.iter().any(|a| rel.ends_with(a)) {
+            continue;
+        }
+        let Ok(src) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        for (line, text) in statements(&src) {
+            if text.contains("config.identity.region") {
+                offenders.push(format!("{rel}:{line}: {}", text.trim()));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "this node's region must be read through `SharedState::effective_region()` \
+         or `effective_region_sync()`. `config.identity.region` is None on every \
+         node whose owner did not hand-edit config.toml, so reading it directly \
+         silently disables whatever depends on it:\n{}",
+        offenders.join("\n")
+    );
+}
+
+/// The scan above must see the real shape, and must not fire on the comments
+/// the fix left behind naming the field it forbids. Planted, per
+/// `.claude/rules/arch-guards-and-tests.md`.
+#[test]
+fn the_region_accessor_guard_catches_the_form_the_defect_took() {
+    let inline = "fn f() { let r = state.config.identity.region.clone(); }\n";
+    assert!(
+        statements(inline)
+            .iter()
+            .any(|(_, t)| t.contains("config.identity.region")),
+        "the guard must see the plain read — this is exactly what wishlist.rs had"
+    );
+
+    // The shape rustfmt produces once the chain is long enough, which is what
+    // the capacity and listing sites looked like.
+    let wrapped = "fn f() {\n    if let Some(r) = state\n        .shared_state\n        .config\n        .identity\n        .region\n        .as_ref()\n    {\n        go(r);\n    }\n}\n";
+    assert!(
+        statements(wrapped)
+            .iter()
+            .any(|(_, t)| t.contains("config.identity.region")),
+        "a wrapped chain must rejoin, or the guard is blind to the common form"
+    );
+
+    // Null control, and not a hypothetical one: all three fixes carry a comment
+    // naming the field, so a guard that read comments would fail on the fix.
+    let commented =
+        "fn f() {\n    // never `config.identity.region` — use the accessor\n    let a = 1;\n}\n";
+    assert!(
+        !statements(commented)
+            .iter()
+            .any(|(_, t)| t.contains("config.identity.region")),
+        "a comment naming the field is how the fix explains itself and must not fire"
+    );
+}
+
 /// Is this `remove_session` call gated on the peer serving an active pipeline?
 ///
 /// The whole guard, kept as its own function so its reach can be tested by
