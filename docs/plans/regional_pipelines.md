@@ -96,16 +96,68 @@ property from per-MODEL chain completeness: every shard can be regionally
 replicated while no short regional chain exists, because nothing bounds how
 many distinct holders a region's coverage is spread across.
 
+## ✅ The premise is validated (2026-09-20, measured)
+
+**A two-node split at 18 ms runs at 6.76 tok/s with the network at 17% of each
+token** — `xlam-2-3b`, 36 layers, us `L0-16` on a laptop GPU (19-42 ms) and a
+6-core i5 with no GPU on `L16-36` (80-82 ms), tpot 148 ms of which ~25 ms is
+network. The same model whole on one capable remote peer measures 5.03-9.31,
+so a split across two modest machines is in the same league. Against the
+intercontinental chain's 2850 ms tpot, where network was ~90%.
+
+**At 18 ms, hops are noise and compute dominates.** That is the whole design
+premise and it now has a number.
+
+Two things the validation changed:
+
+- ⚠ **Contiguity is not optional.** Same two nodes: contiguous halves gave **2**
+  segments; shards picked by "what is missing" (2,3,9,13 of the 14B) gave
+  **7**. Completing coverage is not the goal — completing it contiguously is.
+- ⚠ **The pair cannot run a 14B at all**, because the neighbour is CPU-only with
+  6 cores. Coverage was 16/16 and the route still failed. Capacity binds before
+  topology does, and a pod needs to be sized for the model, not just cover it.
+
 ## The plan
 
 Ordered so each stage is independently shippable and measurable, and so no
 stage depends on a later one.
 
-### Stage 0 — Measure whether the fleet can do this at all (no code)
+### Stage 0 — Measure whether the fleet can do this at all ✅ DONE
 
-**Decision-relevant unknown**: are there ≥2 peers within ~80 ms of *each other*
-holding complementary shards? If the fleet is 9 peers in 9 places, regional
-pods are impossible today and Stages 2-3 change shape.
+**Answered 2026-09-20.** The fleet is us + **one peer at 18 ms** + eight at
+~1100 ms — and the 18 ms peer is `is_lan_peer: true`, our own Proxmox box.
+**There is still no independent same-region peer**, so pods over the public
+internet remain unvalidated; what is validated is that the mechanism works when
+the latency is right.
+
+The finding that mattered was not latency:
+
+| between the two machines 18 ms apart | count |
+|---|---|
+| models 100% ours | 11 |
+| models 100% the neighbour's | 2 |
+| **models split between them** | **0** |
+
+**Not one model divided between two machines on the same LAN.** They converged
+on holding whole models independently — `peer_path_matrix.sh`'s header already
+warned that auto-manage does this. So Stage 3 is not an optimisation; it is a
+correction to a system that converges on the opposite of what is needed.
+
+Also learned, and load-bearing for any placement scheme: **P2P shard transfer
+from a ~1100 ms peer ran at 50 KB/s and stalled out**, while
+`POST /api/admin/hf/download-shards` ran at **88 MB/s** — about 1700x. A
+placement plan that assumes peers can seed each other is planning on the slow
+path.
+
+### Stage 0b — a defect the validation exposed, worth fixing early
+
+**"No reachable node holds layers X-Y" is reported for a CAPACITY failure.**
+Seen twice: every layer was held by a reachable node both times, and the real
+cause was that no node had the memory (`assemble_pipeline_for completed
+segments=7` followed by `no route fits even what the peers themselves
+advertised`). A user reading it goes hunting for missing shards when the answer
+is RAM, and the hint — fetch the missing piece — cannot fix a capacity refusal.
+Wants its own variant per `completeness.md`.
 
 We cannot answer it yet — we only measure RTT to peers, never between them.
 Cheapest probe: take RTT vectors from the two vantage points we control (local
