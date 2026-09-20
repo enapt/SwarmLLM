@@ -675,6 +675,10 @@ impl NetworkManager {
         // borrows the registry for the call that consumes the builder, and the
         // registry lives behind a lock this node keeps so the totals can be
         // read later. See `network::bandwidth`.
+        // Where GossipSub's per-topic byte counters land. Its own registry, not
+        // the bandwidth one, so the builder's `&mut` borrow above is untouched
+        // and the two readings stay independently parseable.
+        let gossip_meter = shared_state.metrics.gossip.clone();
         let swarm = shared_state.metrics.bandwidth.clone().arm(|bw_registry| {
             let swarm = SwarmBuilder::with_existing_identity(keypair)
                 .with_tokio()
@@ -719,6 +723,7 @@ impl NetworkManager {
                         config
                             .network
                             .effective_max_connections(config.node.contribution.clone()),
+                        Some(&gossip_meter),
                     )
                     .map_err(|e| {
                         Box::new(std::io::Error::other(e.to_string()))

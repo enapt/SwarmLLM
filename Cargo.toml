@@ -68,6 +68,15 @@ libp2p = { version = "0.56", features = [
     "mdns",
 ] }
 libp2p-stream = "0.4.0-alpha"
+# Direct, only to switch ON `libp2p-gossipsub/metrics` — the `metrics` feature of
+# the `libp2p` facade does NOT enable it, and without it gossipsub keeps its
+# per-topic byte counters to itself. Those counters are the only place the
+# announcement half of this node's traffic can be measured rather than inferred
+# by elimination, which is what two field reports had to do (2026-09-11,
+# 2026-09-20). ⚠ The version must track whatever `libp2p` pins, or cargo builds
+# TWO copies and the counters we read are not the ones the swarm writes — a
+# silent zero. `the_gossip_counters_come_from_the_same_crate_libp2p_uses` pins it.
+libp2p-gossipsub = { version = "0.49", features = ["metrics"] }
 # The registry libp2p's bandwidth counters are registered into. Pinned to the
 # version libp2p itself depends on — two copies would give us a registry libp2p
 # cannot write to, and the failure would be a silent zero.

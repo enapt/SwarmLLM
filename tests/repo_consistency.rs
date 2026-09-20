@@ -9540,3 +9540,65 @@ fn the_segment_count_guard_catches_a_cached_length() {
         "the live loop bound must not be flagged"
     );
 }
+
+/// The gossip byte counters must come from the SAME `libp2p-gossipsub` libp2p
+/// itself uses.
+///
+/// `libp2p-gossipsub` is a direct dependency of this crate for one reason: to
+/// switch on its `metrics` feature, which the `libp2p` facade's own `metrics`
+/// feature does NOT enable. That is the only way the announcement half of this
+/// node's traffic can be measured rather than inferred by elimination, which is
+/// what two field reports had to do (2026-09-11, 2026-09-20).
+///
+/// The hazard is that the direct requirement and libp2p's drift apart. Cargo
+/// would then build **two** copies, `libp2p` would register its counters into
+/// one and `network::bandwidth::GossipMeter` would read the other — and the
+/// failure has no symptom: the split simply reads absent, which is also what a
+/// node that has sent no gossip yet reads (gotcha #582). A version bump is the
+/// likely trigger, which is exactly when nobody is looking at this.
+///
+/// Reads the RESOLVED tree rather than the requirement text, because it is the
+/// resolution that decides how many copies exist.
+///
+/// ⚠ **What planting the violation actually showed (2026-09-21).** Pinning the
+/// direct requirement BACKWARDS (`0.49` → `0.48`) does not produce two copies:
+/// cargo refuses to resolve at all, because the older minor has no `metrics`
+/// feature — *"`libp2p-gossipsub` does not have that feature"*. So a backward
+/// drift is already loud and this guard is not what catches it.
+///
+/// **The case it exists for is the FORWARD one**: `libp2p` bumps to a newer
+/// gossipsub while this requirement stays put. Both carry `metrics`, both
+/// resolve, and cargo builds two copies — silently. That case cannot be planted
+/// today because no such version exists yet, which is precisely why the guard
+/// is written now rather than when the bump lands.
+#[test]
+fn the_gossip_counters_come_from_the_same_crate_libp2p_uses() {
+    let out = std::process::Command::new(env!("CARGO"))
+        .args(["metadata", "--format-version", "1"])
+        .current_dir(repo_root())
+        .output()
+        .expect("cargo metadata");
+    assert!(out.status.success(), "cargo metadata failed");
+    let meta: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("cargo metadata is not JSON");
+
+    let versions: std::collections::BTreeSet<String> = meta["packages"]
+        .as_array()
+        .expect("packages array")
+        .iter()
+        .filter(|p| p["name"].as_str() == Some("libp2p-gossipsub"))
+        .filter_map(|p| p["version"].as_str().map(str::to_string))
+        .collect();
+
+    assert_eq!(
+        versions.len(),
+        1,
+        "the resolved tree has {} copies of libp2p-gossipsub ({:?}). libp2p registers \
+         its gossip counters into one and `network::bandwidth::GossipMeter` reads the \
+         other, so the per-topic traffic split goes SILENTLY ABSENT. Align the direct \
+         requirement in Cargo.toml with whatever libp2p pins. (To confirm this guard \
+         still fires, set that requirement to an older minor and re-run.)",
+        versions.len(),
+        versions
+    );
+}

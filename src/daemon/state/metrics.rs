@@ -227,6 +227,15 @@ pub struct MetricsProviders {
     /// to ask their node what it was sending, and had to stop the daemon and
     /// diff the interface counters to find out (2026-09-11 suggestion).
     pub bandwidth: Arc<crate::network::bandwidth::BandwidthMeter>,
+    /// The same question, split by WHICH traffic — GossipSub's own per-topic
+    /// byte counters, armed when the behaviour is built.
+    ///
+    /// Separate from `bandwidth` because the two are read from different
+    /// registries and one can be present while the other is absent: the
+    /// transport counters appear on the first byte of any protocol, these on
+    /// the first gossip message. Both answer `None` rather than zero when
+    /// nothing is counting, for the reason in `BandwidthMeter::totals`.
+    pub gossip: Arc<crate::network::bandwidth::GossipMeter>,
 }
 
 /// How long a channel may keep refusing messages before the next drop is

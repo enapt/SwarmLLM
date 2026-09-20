@@ -108,6 +108,12 @@ pub fn build_behaviour(
     known_peers: usize,
     network_config: Option<&NetworkConfig>,
     max_total: u32,
+    // Where GossipSub's own per-topic byte counters are registered, so the
+    // announcement half of this node's traffic can be MEASURED rather than
+    // inferred by elimination — see `network::bandwidth::GossipMeter`. Taken by
+    // reference with interior mutability rather than `&mut Registry`, so the
+    // swarm builder's borrow of its own registry is untouched.
+    gossip_meter: Option<&crate::network::bandwidth::GossipMeter>,
 ) -> Result<SwarmBehaviour, Box<dyn std::error::Error>> {
     let local_peer_id = local_key.public().to_peer_id();
 
@@ -186,6 +192,14 @@ pub fn build_behaviour(
         gossipsub_config,
     )
     .map_err(|e| format!("GossipSub init error: {e}"))?;
+    // `with_metrics` consumes and returns the behaviour, so this is the one
+    // point it can be attached. A node built without a meter (tests) keeps the
+    // unmeasured behaviour rather than a second code path.
+    let gossipsub = match gossip_meter {
+        Some(meter) => meter
+            .arm(|registry| gossipsub.with_metrics(registry, gossipsub::MetricsConfig::default())),
+        None => gossipsub,
+    };
 
     // Request/Response for all direct peer communication:
     // - JSON control messages (shard transfers, PEX, health)
@@ -384,6 +398,7 @@ mod tests {
             0,
             None,
             150,
+            None,
         );
         assert!(result.is_ok());
     }
@@ -409,6 +424,7 @@ mod tests {
             0,
             None,
             150,
+            None,
         );
         assert!(result.is_ok());
     }
@@ -429,6 +445,7 @@ mod tests {
             0,
             None,
             150,
+            None,
         );
         assert!(result.is_ok());
         let behaviour = result.unwrap();
@@ -456,6 +473,7 @@ mod tests {
             0,
             None,
             150,
+            None,
         );
         let behaviour = result.unwrap();
         assert!(!behaviour.autonat_client.is_enabled());

@@ -29,7 +29,7 @@ pub fn network_traffic_json(shared: &crate::daemon::SharedState) -> serde_json::
         // could not tell those apart from outside.
         return serde_json::Value::Null;
     };
-    serde_json::json!({
+    let mut out = serde_json::json!({
         "in_bytes": bw.inbound_bytes,
         "out_bytes": bw.outbound_bytes,
         "in_bytes_per_sec": bw.inbound_bytes_per_sec,
@@ -49,7 +49,41 @@ pub fn network_traffic_json(shared: &crate::daemon::SharedState) -> serde_json::
         "relay_bytes_forwarded": shared
             .relay_inference_bytes
             .load(std::sync::atomic::Ordering::Relaxed),
-    })
+    });
+    // WHICH traffic, not just how much — the ask two field reports made after
+    // each had to answer it by elimination instead.
+    //
+    // ⚠ These are GossipSub's own message-length counters, so they are a floor
+    // on gossip's share of the wire, not its exact cost: the framing, the Noise
+    // encryption and the yamux headers around each message are counted by the
+    // transport totals above and not here. `other_*` is therefore the
+    // REMAINDER, including shard transfers, inference, DHT, identify and ping
+    // AND that per-message overhead — which is why it is named for what it is
+    // rather than presented as a category. An attribution that quietly absorbs
+    // what it cannot explain is the thing being fixed.
+    if let Some(g) = shared.metrics.gossip.totals() {
+        let by_topic: Vec<serde_json::Value> = g
+            .by_topic
+            .iter()
+            .map(|(topic, sent, recv)| {
+                serde_json::json!({ "topic": topic, "sent_bytes": sent, "recv_bytes": recv })
+            })
+            .collect();
+        if let Some(obj) = out.as_object_mut() {
+            obj.insert("gossip_sent_bytes".into(), g.sent_bytes.into());
+            obj.insert("gossip_recv_bytes".into(), g.recv_bytes.into());
+            obj.insert("gossip_by_topic".into(), by_topic.into());
+            obj.insert(
+                "other_out_bytes".into(),
+                bw.outbound_bytes.saturating_sub(g.sent_bytes).into(),
+            );
+            obj.insert(
+                "other_in_bytes".into(),
+                bw.inbound_bytes.saturating_sub(g.recv_bytes).into(),
+            );
+        }
+    }
+    out
 }
 
 /// GET /metrics — Prometheus/OpenMetrics text-format endpoint.

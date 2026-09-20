@@ -1010,6 +1010,7 @@ impl SharedState {
                 ngram_hits: std::sync::atomic::AtomicU64::new(0),
                 ngram_misses: std::sync::atomic::AtomicU64::new(0),
                 bandwidth: Arc::new(crate::network::bandwidth::BandwidthMeter::new()),
+                gossip: Arc::new(crate::network::bandwidth::GossipMeter::new()),
             },
             credits: CreditPool {
                 credit_balance: Arc::new(RwLock::new(crate::types::CreditBalance {
