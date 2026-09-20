@@ -22,6 +22,16 @@ pub struct HealthMonitor {
     last_announced_shards: std::collections::HashSet<crate::types::ShardId>,
     /// Counter for periodic full re-announce (ensures late-joining peers get data).
     shard_announce_counter: u64,
+    /// `manifest_hash` of each model as this node last put it on the wire, so a
+    /// manifest is re-broadcast when it CHANGES rather than every tick. See
+    /// `broadcast_manifests` for what that was costing.
+    last_announced_manifests: std::collections::HashMap<crate::types::ModelId, [u8; 32]>,
+    /// Counter for the periodic full manifest re-announce, the anti-entropy half
+    /// of the same scheme.
+    manifest_announce_counter: u64,
+    /// Peers that were connected when manifests last went out. A peer outside
+    /// this set has never been sent our picture, and gets a full round.
+    peers_told_about_manifests: std::collections::HashSet<crate::types::NodeId>,
     /// Per-acquisition liveness tracker: model_id → (last bytes seen, when seen).
     /// If bytes don't advance for STALL_THRESHOLD, the acquisition is reconciled
     /// against disk (mark Complete if shards present, Failed otherwise).
@@ -57,6 +67,45 @@ pub struct HealthMonitor {
 /// and it is why the message below reports what was seen instead of asserting a
 /// cause.
 const WSL_FIREWALL_GRACE: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// How many gossip-broadcast rounds between full re-announcements.
+///
+/// Shard announcements and model manifests are both delta-broadcast — sent when
+/// they change — with a full re-send every this many rounds so a peer that
+/// joined during a quiet spell still converges. **One constant for both**,
+/// because they answer the same question about the same tick and a reader
+/// comparing them should not have to check whether two `10`s mean the same
+/// thing. At the ≤10-peer cadence of one round per 30 s that is a full picture
+/// every 5 minutes; a node with many peers broadcasts less often and the
+/// interval scales with it.
+///
+/// Each holder's counter is phased independently, so a model held by several
+/// nodes is re-announced several times per cycle — and a newly connected peer
+/// triggers a full round outright, which is the case this interval would
+/// otherwise have to be short for.
+const FULL_REANNOUNCE_EVERY_TICKS: u64 = 10;
+
+/// Is this a round where every manifest goes out, changed or not?
+///
+/// Pure so the truth table can be asserted directly — the expensive half of
+/// `broadcast_manifests` is one `if` and it is the whole fix.
+fn manifest_round_is_full(counter: u64, new_peer_arrived: bool) -> bool {
+    new_peer_arrived || counter.is_multiple_of(FULL_REANNOUNCE_EVERY_TICKS)
+}
+
+/// Does this one manifest go on the wire this round?
+///
+/// `last_announced` is the `manifest_hash` this node last broadcast for the
+/// model, or `None` if it never has. A manifest nobody has been told about is
+/// always sent — "unchanged" is only meaningful against something previously
+/// announced.
+fn manifest_needs_broadcast(
+    last_announced: Option<&[u8; 32]>,
+    current_hash: &[u8; 32],
+    full_round: bool,
+) -> bool {
+    full_round || last_announced.is_none_or(|prev| prev != current_hash)
+}
 
 /// How long a download tracking entry can sit unchanged before being treated
 /// as stalled. Generous enough to tolerate slow peers and HF rate limiting.
@@ -164,6 +213,9 @@ impl HealthMonitor {
             shutdown_rx,
             last_announced_shards: std::collections::HashSet::new(),
             shard_announce_counter: 0,
+            last_announced_manifests: std::collections::HashMap::new(),
+            manifest_announce_counter: 0,
+            peers_told_about_manifests: std::collections::HashSet::new(),
             acq_liveness: std::collections::HashMap::new(),
             peer_dl_liveness: std::collections::HashMap::new(),
             started_at: std::time::Instant::now(),
@@ -909,9 +961,12 @@ impl HealthMonitor {
             let current_set: std::collections::HashSet<_> = hosted_shards.iter().cloned().collect();
             let shards_changed = current_set != self.last_announced_shards;
             self.shard_announce_counter += 1;
-            // Full re-announce every 10 broadcast cycles so late-joining peers
-            // eventually discover our shards even if nothing changed.
-            let periodic_reannounce = self.shard_announce_counter.is_multiple_of(10);
+            // Full re-announce every `FULL_REANNOUNCE_EVERY_TICKS` broadcast
+            // cycles so late-joining peers eventually discover our shards even
+            // if nothing changed.
+            let periodic_reannounce = self
+                .shard_announce_counter
+                .is_multiple_of(FULL_REANNOUNCE_EVERY_TICKS);
 
             if shards_changed || periodic_reannounce {
                 let shard_count = hosted_shards.len();
@@ -941,20 +996,101 @@ impl HealthMonitor {
     }
 
     /// Broadcast model manifests and HF sources so peers can discover and acquire models.
-    async fn broadcast_manifests(&self) {
+    ///
+    /// **A manifest goes out when it CHANGES, not on every tick.** It used to go
+    /// out on every tick, and a manifest is not a small message: it carries the
+    /// full tensor table of every shard — name, GGUF offset, shard offset and
+    /// size per tensor — because `daemon::shard_loader` needs that table to load
+    /// a split model from shard files. Measured on the release node 2026-09-20:
+    /// 15 manifests totalling **825 KB**, republished every 30 s to a mesh of 6,
+    /// i.e. **1.31 Mbps of egress from one node doing nothing at all** — before
+    /// counting the copies of every other node's manifests this one forwards.
+    /// The node measured 4.8 Mbps out with zero inference and no relaying, which
+    /// is the shape two separate field reports described (2026-09-11 and
+    /// 2026-09-20) and neither could be answered from config.
+    ///
+    /// Each republish is sealed with a fresh nonce, so the bytes differ every
+    /// time, so the message id differs, so **GossipSub's duplicate cache never
+    /// suppressed any of it**. Pushing a large payload to everyone on a timer is
+    /// the pattern GossipSub's own IHAVE/IWANT layer exists to avoid: metadata
+    /// is disseminated periodically and full messages are sent on request
+    /// (libp2p/specs, pubsub/gossipsub). We cannot lazy-pull a manifest yet —
+    /// there is no on-demand manifest fetch, gossip is the only way one arrives
+    /// (gotcha #296) — so the cheap half of the same idea is taken here: send it
+    /// when it changes, and re-send the lot rarely.
+    ///
+    /// Two things keep discovery working, because a newcomer that cannot see a
+    /// model cannot run it and that failure has happened before (gotcha #296):
+    ///
+    /// 1. **A full round every `FULL_REANNOUNCE_EVERY_TICKS` broadcasts**, the
+    ///    same anti-entropy the shard announce beside this already does, and for
+    ///    the same reason. Holders' counters are independently phased, so a
+    ///    model held by *k* nodes is re-announced roughly *k* times per cycle.
+    /// 2. **A full round whenever a peer we have not announced to appears.**
+    ///    That is precisely the case the per-tick flood was paying for — someone
+    ///    new who needs the whole picture — and it costs one round per join
+    ///    instead of one round per 30 seconds for ever.
+    async fn broadcast_manifests(&mut self) {
         let our_id = self.shared_state.identity.node_id().clone();
+
+        self.manifest_announce_counter += 1;
+
+        // Anyone connected that the last round did not reach. Compared as a set
+        // rather than a count so a simultaneous join and leave is still a join:
+        // the newcomer is the whole reason this branch exists.
+        let connected: std::collections::HashSet<crate::types::NodeId> = self
+            .shared_state
+            .connected_node_ids
+            .iter()
+            .map(|p| p.key().clone())
+            .collect();
+        let new_peer_arrived = connected
+            .difference(&self.peers_told_about_manifests)
+            .next()
+            .is_some();
+
+        let full_round = manifest_round_is_full(self.manifest_announce_counter, new_peer_arrived);
+
         // Models we published OR hold a shard of. A publisher-only filter here
         // silently stopped model discovery for the whole swarm — see
         // `ModelRegistry::manifests_to_gossip`.
-        for manifest in self
+        let manifests = self
             .shared_state
             .model_registry
-            .manifests_to_gossip(&our_id)
-        {
+            .manifests_to_gossip(&our_id);
+
+        // Anything we no longer gossip stops being remembered, so a model that
+        // is deleted and later re-acquired is announced again as the change it
+        // is. Without this the map only ever grows and a re-added model looks
+        // unchanged.
+        let still_gossiped: std::collections::HashSet<crate::types::ModelId> =
+            manifests.iter().map(|m| m.id.clone()).collect();
+        self.last_announced_manifests
+            .retain(|id, _| still_gossiped.contains(id));
+
+        let mut sent = 0usize;
+        for manifest in manifests {
+            // `manifest_hash` covers the shard table AND every tensor entry
+            // (`ModelManifest::compute_hash`), so it is the right answer to
+            // "would a peer see anything new?".
+            if !manifest_needs_broadcast(
+                self.last_announced_manifests.get(&manifest.id),
+                &manifest.manifest_hash,
+                full_round,
+            ) {
+                continue;
+            }
+
             let msg = NetworkCommand::Broadcast(SwarmMessage::ModelManifest(manifest.clone()));
             if let Err(e) = self.network_tx.send(msg).await {
                 tracing::debug!(error = %e, model = %manifest.id, "DIAG: failed to broadcast manifest");
+                // Not recorded as announced — a send that failed must be retried
+                // on the next tick, not suppressed as already done.
+                continue;
             }
+            self.last_announced_manifests
+                .insert(manifest.id.clone(), manifest.manifest_hash);
+            sent += 1;
 
             // Also broadcast HfSourceGossip so late-joining peers discover the HF source
             if let Some(hf_source) = self.shared_state.models.hf_sources.get(&manifest.id) {
@@ -970,6 +1106,20 @@ impl HealthMonitor {
                     tracing::debug!(error = %e, model = %manifest.id, "DIAG: failed to broadcast HF source");
                 }
             }
+        }
+
+        // Only a round that actually went out may claim to have reached these
+        // peers; otherwise a failed send would latch the newcomer as told.
+        if sent > 0 || full_round {
+            self.peers_told_about_manifests = connected;
+        }
+        if sent > 0 {
+            tracing::debug!(
+                sent,
+                full_round,
+                new_peer_arrived,
+                "DIAG: broadcast model manifests"
+            );
         }
     }
 
@@ -1794,6 +1944,62 @@ impl HealthMonitor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The regression this whole scheme exists for. A manifest carries the full
+    /// tensor table of every shard, and 15 of them measured 825 KB on the
+    /// release node — republished to a mesh of 6 every 30 s, i.e. 1.31 Mbps of
+    /// egress from a node doing nothing. An unchanged manifest on an ordinary
+    /// round must not go on the wire.
+    #[test]
+    fn an_unchanged_manifest_is_not_rebroadcast() {
+        let hash = [7u8; 32];
+        assert!(
+            !manifest_needs_broadcast(Some(&hash), &hash, false),
+            "a manifest a peer has already been sent, unchanged, on an ordinary \
+             round, is the 825 KB this node must stop republishing every 30 s"
+        );
+    }
+
+    /// The three reasons it still goes out. Each is a way a peer could otherwise
+    /// be left without a model it needs, and a node that cannot see a model
+    /// cannot run it — that failure has shipped before (gotcha #296).
+    #[test]
+    fn a_manifest_still_goes_out_when_anyone_could_be_missing_it() {
+        let hash = [7u8; 32];
+        let other = [9u8; 32];
+        assert!(
+            manifest_needs_broadcast(None, &hash, false),
+            "never announced — nobody has it"
+        );
+        assert!(
+            manifest_needs_broadcast(Some(&other), &hash, false),
+            "changed since we announced it — peers hold a stale one"
+        );
+        assert!(
+            manifest_needs_broadcast(Some(&hash), &hash, true),
+            "a full round sends everything, which is what makes a late joiner converge"
+        );
+    }
+
+    /// A full round is reached two ways, and the peer one is what lets the
+    /// periodic one be rare. Without it the interval would have to be short
+    /// enough for a newcomer to wait out, which is the cost being removed.
+    #[test]
+    fn a_new_peer_forces_a_full_round_without_waiting_for_the_timer() {
+        // Mid-cycle: nothing periodic is due.
+        assert!(
+            !manifest_round_is_full(FULL_REANNOUNCE_EVERY_TICKS + 1, false),
+            "an ordinary tick between full rounds sends only what changed"
+        );
+        assert!(
+            manifest_round_is_full(FULL_REANNOUNCE_EVERY_TICKS + 1, true),
+            "someone we have never announced to is connected — send the lot now"
+        );
+        assert!(
+            manifest_round_is_full(FULL_REANNOUNCE_EVERY_TICKS, false),
+            "the anti-entropy round still fires on its own"
+        );
+    }
 
     /// The whole point of the check. This warning first shipped unconditional at
     /// config-load, so it fired on every WSL2 mirrored node on every start —

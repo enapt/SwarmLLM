@@ -678,7 +678,21 @@
               totalEl.textContent = '\u2191' + U.formatBytes(traffic.out_bytes || 0) +
                 '  \u2193' + U.formatBytes(traffic.in_bytes || 0);
             }
-            netCell.setAttribute('data-tooltip', I18n.t('hw.network_tip'));
+            // Some of that may be other people's traffic passing through. This
+            // node starts donating upload the moment it becomes reachable from
+            // the internet, and until now nothing said so anywhere a person
+            // looks \u2014 an operator found out months later from their own logs.
+            var tip = I18n.t('hw.network_tip');
+            var relayEl = document.getElementById('net-relaying');
+            if (relayEl) {
+              relayEl.hidden = !traffic.relaying_for_others;
+              if (traffic.relaying_for_others) {
+                relayEl.textContent = I18n.t('hw.network_relaying_badge');
+                tip += '\n\n' + I18n.t('hw.network_relaying_tip')
+                  .replace('{bytes}', U.formatBytes(traffic.relay_bytes_forwarded || 0));
+              }
+            }
+            netCell.setAttribute('data-tooltip', tip);
           } else {
             netCell.hidden = true;
           }

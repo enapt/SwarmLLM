@@ -1268,6 +1268,12 @@ pub async fn get_config(State(state): State<AppState>) -> Json<serde_json::Value
         "dashboard_trust_lan": state.shared_state.cfg().api.dashboard_trust_lan,
         "dashboard_trust_overlay": config.api.dashboard_trust_overlay,
         "dashboard_on_overlay": crate::api::dashboard_trust::node_is_on_overlay(&state.shared_state),
+        // Runtime value, and paired with whether it is actually in effect: the
+        // setting is a willingness, and a NAT'd node can answer yes and relay
+        // nothing. A panel offering only the willingness cannot tell an operator
+        // which of those they are looking at.
+        "relay_forwarding_auto": state.shared_state.cfg().network.relay_forwarding_auto,
+        "relaying_for_others": state.shared_state.relay_forwarding_enabled(),
         // Effective, not raw: a config predating the `mode` key reports what it
         // actually does rather than a null the settings panel can't render.
         "update_mode": match config.updates.effective_mode() {
@@ -1498,6 +1504,17 @@ pub async fn update_config(
         tracing::info!(
             enabled = trust_lan,
             "Dashboard local-network trust changed via admin API"
+        );
+    }
+    if let Some(relay_auto) = body.relay_forwarding_auto {
+        // The only way to decline relay donation used to be hand-editing
+        // config.toml, which is not a thing this product asks anyone to do —
+        // so in practice every publicly reachable node donated whether or not
+        // its owner would have agreed (field report 2026-09-20).
+        config.network.relay_forwarding_auto = relay_auto;
+        tracing::info!(
+            enabled = relay_auto,
+            "Relay donation setting changed via admin API"
         );
     }
 
@@ -1827,6 +1844,10 @@ pub struct ConfigUpdate {
     /// "off" | "notify" | "download" | "install". Takes effect on restart —
     /// the UpdateChecker task is spawned (or not) at startup.
     pub update_mode: Option<String>,
+    /// Donate upload bandwidth relaying other peers' inference once this node
+    /// is reachable from the internet. Defaults ON, and until 2026-09-20 could
+    /// only be declined by hand-editing `config.toml`.
+    pub relay_forwarding_auto: Option<bool>,
 }
 
 /// POST /api/admin/shutdown — Gracefully shut down the node.

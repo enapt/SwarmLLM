@@ -34,6 +34,21 @@ pub fn network_traffic_json(shared: &crate::daemon::SharedState) -> serde_json::
         "out_bytes": bw.outbound_bytes,
         "in_bytes_per_sec": bw.inbound_bytes_per_sec,
         "out_bytes_per_sec": bw.outbound_bytes_per_sec,
+        // Is some of the above other people's traffic passing through?
+        //
+        // `relay_forwarding_auto` DEFAULTS ON, and a node that becomes publicly
+        // reachable starts donating upload to strangers from that moment. Until
+        // now the only evidence was one INFO line at the moment it flipped and a
+        // config field nobody sets — an operator on a metered home connection
+        // found out months later by reading their own logs (field report
+        // 2026-09-20). It rides here rather than in its own payload because this
+        // is the one builder all three status surfaces share, and "how much of
+        // my connection is SwarmLLM using" and "how much of that is not even
+        // mine" are the same question.
+        "relaying_for_others": shared.relay_forwarding_enabled(),
+        "relay_bytes_forwarded": shared
+            .relay_inference_bytes
+            .load(std::sync::atomic::Ordering::Relaxed),
     })
 }
 

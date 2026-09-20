@@ -764,7 +764,22 @@
                  limit on everything this node sends, which it is not: a user
                  set it to 1 Mbps, measured 11 Mbps, and reasonably concluded
                  the setting did nothing (2026-09-11 suggestion). -->
-            <span class="text-muted field-hint" data-i18n="settings.max_bandwidth_help">Caps how fast this computer sends model parts to others. It does not limit inference or the background traffic that keeps it connected — the Network figure on the dashboard shows the total.</span>
+            <span class="text-muted field-hint" data-i18n="settings.max_bandwidth_help">Caps how fast this computer sends model parts to others. It does not limit inference or the background traffic that keeps it connected — the Network figure on the dashboard shows uploads and downloads separately.</span>
+          </div>
+          <!-- Donating relay capacity used to be on by default with no way to
+               decline short of hand-editing config.toml, and nothing on any
+               screen said it was happening — an operator on a home connection
+               found out months later from their own logs (2026-09-20). -->
+          <div class="form-group">
+            <div class="flex-center gap-1">
+              <label class="toggle-switch" style="margin-right:4px">
+                <input type="checkbox" id="settings-relay-auto">
+                <span class="toggle-slider"></span>
+              </label>
+              <span data-i18n="settings.relay_auto">Help other computers connect to each other</span>
+            </div>
+            <span class="text-muted field-hint" data-i18n="settings.relay_auto_desc">When this computer can be reached from the internet, it passes traffic between computers that cannot reach each other directly. This uses your upload allowance for other people's work. Turn it off if your connection is metered or slow.</span>
+            <span class="text-muted field-hint" id="settings-relay-active" hidden data-i18n="settings.relay_auto_active">This computer is relaying right now.</span>
           </div>
           <div class="form-group">
             <label for="settings-disk">
@@ -1197,6 +1212,14 @@
                     <div class="hw-cell-body">
                       <span class="node-hw-label"><span data-i18n="hw.network_total">Since start</span></span>
                       <span class="mono node-hw-value" id="net-total">...</span>
+                    </div>
+                    <!-- Shown only while this node is carrying other people's
+                         traffic. It starts doing that by itself once it becomes
+                         reachable from the internet, and nothing said so
+                         anywhere a person looks until now. Text is set from JS
+                         because the row is hidden the rest of the time. -->
+                    <div class="hw-cell-body">
+                      <span class="node-hw-value hw-relaying" id="net-relaying" hidden></span>
                     </div>
                   </div>
                 </div>

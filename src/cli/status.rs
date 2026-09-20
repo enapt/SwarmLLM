@@ -134,6 +134,10 @@ fn print_summary(json: &serde_json::Value) {
         println!("Traffic:   {line}");
     }
 
+    if let Some(line) = describe_relaying(json.get("network_traffic")) {
+        println!("Relaying:  {line}");
+    }
+
     let downloading = list("models_downloading");
     if !downloading.is_empty() {
         println!("Fetching:  {}", downloading.join(", "));
@@ -182,6 +186,37 @@ fn describe_traffic(traffic: Option<&serde_json::Value>) -> Option<String> {
         // Two readings are needed for a rate and only one has been taken.
         _ => Some(format!("{totals} (rate not measured yet)")),
     }
+}
+
+/// Whether this node is carrying other people's traffic, and how much.
+///
+/// Printed only when it IS — a node that relays nothing has nothing to say, and
+/// a line reading "no" on every machine is a line people stop reading.
+///
+/// It exists because the answer was previously invisible. `relay_forwarding_auto`
+/// defaults on, so a node that becomes publicly reachable starts donating its
+/// upload to strangers with no more notice than one INFO line at the moment it
+/// happened; an operator discovered it months later while investigating their
+/// bandwidth (field report 2026-09-20). Whatever the right default is, finding
+/// out by accident is not acceptable on a home connection.
+///
+/// A function rather than inline formatting so the wording can be pinned by a
+/// test, like `describe_traffic` above it.
+fn describe_relaying(traffic: Option<&serde_json::Value>) -> Option<String> {
+    let t = traffic?.as_object()?;
+    if t.get("relaying_for_others").and_then(|v| v.as_bool()) != Some(true) {
+        return None;
+    }
+    let forwarded = t
+        .get("relay_bytes_forwarded")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    Some(format!(
+        "yes — this node carries traffic for peers that cannot reach each other \
+         directly ({} forwarded so far). Set network.relay_forwarding_auto = false \
+         to stop.",
+        human_bytes(forwarded),
+    ))
 }
 
 /// Bytes, in the unit a person would use.
@@ -325,6 +360,46 @@ mod tests {
     fn a_node_with_no_counters_prints_no_traffic_line() {
         assert_eq!(describe_traffic(None), None);
         assert_eq!(describe_traffic(Some(&serde_json::Value::Null)), None);
+    }
+
+    /// A node donating its upload to strangers says so, and says how to stop.
+    /// The default is ON for any publicly reachable node, and the only previous
+    /// evidence was one INFO line at the moment it flipped.
+    #[test]
+    fn a_relaying_node_says_so_and_names_the_setting_that_stops_it() {
+        let line = describe_relaying(Some(&serde_json::json!({
+            "in_bytes": 1u64,
+            "out_bytes": 1u64,
+            "relaying_for_others": true,
+            "relay_bytes_forwarded": 3_221_225_472u64,
+        })))
+        .expect("a relaying node reports it");
+        assert!(line.contains("3.00 GB forwarded"), "{line}");
+        assert!(
+            line.contains("relay_forwarding_auto"),
+            "an operator who does not want this must be told what to turn off: {line}"
+        );
+    }
+
+    /// A node that is not relaying prints nothing, so the line means something
+    /// when it does appear.
+    #[test]
+    fn a_node_that_relays_nothing_prints_no_relay_line() {
+        assert_eq!(
+            describe_relaying(Some(&serde_json::json!({
+                "in_bytes": 1u64,
+                "out_bytes": 1u64,
+                "relaying_for_others": false,
+                "relay_bytes_forwarded": 0u64,
+            }))),
+            None
+        );
+        // An older daemon's payload carries neither field.
+        assert_eq!(
+            describe_relaying(Some(&serde_json::json!({ "in_bytes": 1u64 }))),
+            None
+        );
+        assert_eq!(describe_relaying(None), None);
     }
 
     /// The line a person reads for a worker stuck on a request nobody is

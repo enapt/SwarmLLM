@@ -418,6 +418,7 @@
         max_disk_mb: parseInt(val('settings-disk'), 10),
         auto_manage_shards: val('settings-auto-shards') === 'on',
         dashboard_trust_lan: !!(document.getElementById('settings-trust-lan') || {}).checked,
+        relay_forwarding_auto: !!(document.getElementById('settings-relay-auto') || {}).checked,
         update_mode: val('settings-update-mode') || undefined,
       };
     },
@@ -446,6 +447,13 @@
         document.getElementById('settings-disk').value = data.max_disk_mb || 50000;
         var trustLanEl = document.getElementById('settings-trust-lan');
         if (trustLanEl) trustLanEl.checked = !!data.dashboard_trust_lan;
+        // The willingness and whether it is actually in effect are different
+        // facts — a NAT'd node answers yes to the first and relays nothing —
+        // so the panel shows the second only when it is true.
+        var relayEl = document.getElementById('settings-relay-auto');
+        if (relayEl) relayEl.checked = data.relay_forwarding_auto !== false;
+        var relayActiveEl = document.getElementById('settings-relay-active');
+        if (relayActiveEl) relayActiveEl.hidden = !data.relaying_for_others;
         var updModeEl = document.getElementById('settings-update-mode');
         if (updModeEl && data.update_mode) updModeEl.value = data.update_mode;
         var autoManage = data.auto_manage_shards ? 'on' : 'off';
