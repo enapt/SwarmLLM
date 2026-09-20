@@ -1234,6 +1234,54 @@ instrumentation item 3 asks for.
 
 ## The routing cost model's network term overestimates a boomerang (open, 2026-09-08)
 
+### Measured 2026-09-20 — the network term is charged ONCE PER SEGMENT, not per token
+
+**`inference.parallax_partial_ranges` (default `false`) is the setting that lets
+a peer holding the whole model be given only PART of it**, and its own doc names
+the reason it is off:
+
+> The cost model in `scheduler/parallax.rs` charges a remote hop's network cost
+> ONCE per segment, so it cannot see that penalty and will keep choosing the
+> split. Enabling this is only sensible once that per-token term exists.
+
+**This session measured that missing per-token term.** A segment boundary costs
+a traversal on EVERY token, not once: `tpot` tracked the peer's RTT (1103-1131 ms
+against a 1043 ms RTT for one extra hop, 2118 ms for two), and a 4-segment chain
+ran at 0.35 tok/s against 4-7 tok/s for the same model on one peer.
+
+**And turning the flag on made a real route WORSE, exactly as the doc predicts.**
+Same request, same exclusions, `llama-xlam-2-8b-fc-r-q4-k-m`:
+
+| `parallax_partial_ranges` | route | result |
+|---|---|---|
+| `false` (default) | 4 segments / 2 peers (TH,IT,TH,IT) | 0.35 tok/s, completed in ~90 s |
+| `true` | 4 segments / **3** peers, incl. `87054abd` for a **4-layer** slice | **did not finish in 580 s** |
+
+With more split shapes expressible and hop cost still charged once, the DP
+recruited a third peer for four layers and the request never returned. **Under-
+priced hops plus more freedom to split is worse than less freedom**, which is
+the argument for leaving the default alone until the per-token term lands.
+
+⚠ **The flag is not inert, though — `encrypted_pipeline` turns it on implicitly**
+(`let partial = config.inference.parallax_partial_ranges || encrypted`), which
+is the only reason a boomerang can route at all against a whole-model holder.
+So every privacy request already routes under the permissive rule this entry
+says is mispriced, and that is the shape #447(iii) measured at ~5x out.
+
+**Two facts a tuner needs and this entry did not have:**
+
+1. **Peer speed does not track RTT** — solo on one model: 105 ms RTT → 5.39
+   tok/s, 1043 ms → 2.66, 643 ms → **0.48**. A cost model that prices a hop from
+   round-trip time is ranking on a signal that is not throughput, and this fleet
+   spans 11x.
+2. **A chain runs at the pace of its worst segment, and segment size does not
+   protect you** — one sample put 2 of 32 layers on the slow peer and tpot went
+   152 ms → 3768 ms. Cost is not proportional to layers assigned, so a term
+   linear in layer count cannot express it.
+
+Method and full numbers: `memory/perf_baseline_0920_post192.md`; traps in
+gotchas #658-#660.
+
 ### Instrumented 2026-09-08 — read the logs before touching the constant
 
 Every request that took a priced route now logs `predicted_ms` beside `total_ms`, and
