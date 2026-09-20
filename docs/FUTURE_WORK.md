@@ -339,8 +339,14 @@ ranking them means re-reading each against the code and that has not been done.
 
 ### Not bugs, and deliberately not ranked
 
-`Auto-enabled prompt privacy can cost 6x on a long prompt` is DECIDED and communicated,
-not a defect. The GPU-swap costing, prefix-keyed remote KV, f16 stored KV, ring decode
+`Auto-enabled prompt privacy can cost 6x on a long prompt` is DECIDED — but
+⚠ **NOT communicated, contrary to what this line said until 2026-09-20.** The
+telling is what option 2 shipped, and it has fired zero times in the live log
+because its one call site is suppressed whenever the priced search decides,
+which is the default. Re-measured at 9-14x, and the cost is really one round
+trip per token to the middle peer, so it scales with that peer's distance. Read
+the ⚠ REOPENED section under that heading before quoting either figure.
+The GPU-swap costing, prefix-keyed remote KV, f16 stored KV, ring decode
 and prefill microbatching are throughput work; they live under their own headings below.
 
 **Disk speed does not bias routing** (asked 2026-09-11, report #020, by a reporter whose
@@ -2557,6 +2563,68 @@ anything repeated per request is repeated at the user for ever.
 **The figure is reported and never acted on.** Nothing in the routing reads it.
 That separation is the decision, and a future change that makes the router
 consult it has re-opened everything above.
+
+### ⚠ REOPENED 2026-09-20 — option 2 shipped INERT, so nobody has ever been told
+
+**`report_privacy_cost` has fired ZERO times**: 4 days and 349,198 lines of the
+live node's log, on a node where the boomerang is the default for every model
+it holds both ends of. This is not an absence-of-evidence reading (diagnosis
+rule 2) — the code says why.
+
+Its one call site (`scheduler/mod.rs:2182`) is gated on `!search_will_decide`,
+and inside that branch `local_is_degraded` is already true, so the gate reduces
+to:
+
+```
+search_will_decide == config.inference.parallax_routing && candidates.len() > 1
+```
+
+`parallax_routing` **defaults to true**. So the warning can only ever fire for a
+model with exactly ONE candidate holder, or on a node that has turned parallax
+routing off by hand. **Any model with two or more holders — the normal case, and
+the only case where a boomerang has anywhere to go — can never produce it.**
+
+The suppression is deliberate and its comment is correct: announcing the
+hand-off's figure beside a plan the search is about to re-price would name a
+route the user never gets, and "a privacy cost for whatever the search does
+choose is a different figure and is not computed anywhere yet". **What was
+missed is the consequence**: the search decides in the default configuration, so
+option 2 does not merely report the wrong figure sometimes — it reports nothing,
+ever. The decision above was "tell and let them choose", explicitly against
+Firefox DoH's silence, and what shipped is that silence.
+
+**Measured 2026-09-20, v0.3.192, live node, one variable, one binary** —
+`swarm_route` override to fix the shape, boomerang toggled per model, same peer
+(`4a3ac72e`, IT, 1043 ms RTT), same 48-token reply, each arm re-run after
+restoring the setting:
+
+| shape | privacy ON | privacy OFF | ratio |
+|---|---|---|---|
+| whole model to the peer | 0.47 tok/s (tpot 2118 ms) | 6.57 tok/s (152 ms) | 14x |
+| shards 0-1 kept here | 0.91 (1103 ms) | 9.94 (101 ms) | 11x |
+| shards 0-4 kept here | 0.90 (1110 ms) | 8.16 (123 ms) | 9x |
+
+Restoring the setting brought the penalty straight back (0.88 tok/s, tpot
+1131 ms), and `Server-Timing` gained and lost its `seg0;dur=…` entry with it —
+privacy ON pays a per-token segment forward, privacy OFF takes
+`remote_generate` and the peer runs its own decode loop.
+
+**tpot tracks the peer's RTT, not the model.** 1103-1131 ms against a 1043 ms
+RTT for one extra hop, 2118 ms for two — exactly what the endpoint's own
+`overhead_note` predicts ("~2x RTT to the last remote segment"). So the cost is
+not 6x or 14x in general: **it is one round trip per token to whichever peer
+holds the middle**, and it scales with that peer's distance. The 2026-09-05
+report's 6x was a long prompt on a near peer; a short reply from a far peer is
+worse, and nothing bounds it.
+
+⚠ **This was found by benchmarking, and the thing that made it visible was
+holding the model.** A node holding no shards has privacy stand down and sees
+none of this. A node that has finished fetching a model is the one that gets
+slow — the opposite of what a user would predict, and still unannounced.
+
+**Not fixed here**: computing the privacy cost for the route the search
+actually chooses is the missing figure the comment names, and re-opens a
+decided privacy policy. That is the user's call, not a change to improvise.
 
 ## The chat-template renderer is a Jinja subset, and Qwen3 is past its edge (FIXED 2026-09-10)
 
