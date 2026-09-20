@@ -166,20 +166,23 @@ a change, especially your own.
 
 ## Status
 
-**v0.3.190-alpha released and deployed to both nodes (2026-09-19).** Nothing
-functional is unreleased; conformance on the downloaded artifact was identical
-line for line to the .189 baseline. It closed `docs/FUTURE_WORK.md` #55, #89,
-#86 and #17.
-⚠ **#90's CAUSE IS STILL UNKNOWN** — a 45-minute dispatcher stall. The node now
-names one and stops peers routing into it; nothing prevents or explains one.
-⚠ **#17 (composite standbys) has never run on a live multi-node failover** —
-unit tests and a guard only, on the token hot path. Rig recipe: #85.
-Release procedure: **`memory/release_gate.md`** — the ordered steps and every
-caution earned at a past gate; do not re-derive it. History:
-`memory/round_history.md`. Gotchas: `memory/gotchas.md` (next free index lives in
-`memory/MEMORY.md`, not here — it drifted when both claimed it). Standing
-cautions: `memory/open_cautions.md` — **read at session start.** `memory/` is
-`~/.claude/projects/-home-user-SwarmLLM/memory/`, outside the repo.
+**v0.3.192-alpha released and deployed (2026-09-20); the WHOLE swarm is on it.**
+Nothing functional is unreleased.
+
+**Releases are SIGNED (audit C1 closed, .191) and auto-update defaults to
+`Install`** — safe only because of that verification; the two must move
+together. CI leaves a release DRAFT; `examples/sign_release.sh <tag>` publishes
+it. → `docs/RELEASE_SIGNING.md`, `memory/release_gate.md` step 7.
+
+⚠ **#90's CAUSE IS UNKNOWN** — a dispatcher stall seen TWICE (33-45 min), each
+ended only by a restart; `cancel_request` is ELIMINATED (its fix shipped in .189
+and it recurred). ⚠ **#17 has never run on a live multi-node failover** (#85).
+
+`memory/` is `~/.claude/projects/-home-user-SwarmLLM/memory/`, outside the repo:
+**`release_gate.md`** (ordered steps + every caution earned at a gate — do not
+re-derive), `round_history.md`, `gotchas.md` (next free index is in `MEMORY.md`,
+not here — it drifted when both claimed it), **`open_cautions.md` — read at
+session start.**
 
 ## Pushes are public-facing
 
