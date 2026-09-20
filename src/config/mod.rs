@@ -526,7 +526,32 @@ impl Config {
         // wins; both of those already ignore an empty value, so reaching here
         // with an empty list means nothing anywhere asked for one.
         let opted_out = config.network.disable_default_bootstrap || config.node.anchor_mode;
-        if config.network.bootstrap_peers.is_empty() && !opted_out {
+        if opted_out {
+            // **The opt-out has to beat serde's default, and it did not.**
+            //
+            // `bootstrap_peers` carries `#[serde(default = "default_bootstrap_peers")]`,
+            // so a config that never mentions the key arrives here already
+            // holding the three public anchors — and the fallback below only
+            // fires on an EMPTY list, so it was never reached and the flag did
+            // nothing. `disable_default_bootstrap = true` on its own therefore
+            // still dialled the public anchors, which is the one thing its own
+            // documentation promises it will not do ("a private or air-gapped
+            // swarm that must never contact the public anchors"). Reproduced
+            // 2026-09-20 on a two-node rig: `bootstrap_peers=3` in the resolved
+            // config and 39 outbound dials to the public anchor in the first
+            // second.
+            //
+            // It worked only if you ALSO wrote `bootstrap_peers = []` — which
+            // is what the test asserting this behaviour did, so the gap was
+            // invisible from the suite.
+            //
+            // Cleared only when the list IS exactly the built-ins, so an
+            // explicit private anchor list survives the opt-out: the flag means
+            // "never the PUBLIC ones", not "never any".
+            if config.network.bootstrap_peers == network::default_bootstrap_peers() {
+                config.network.bootstrap_peers.clear();
+            }
+        } else if config.network.bootstrap_peers.is_empty() {
             config.network.bootstrap_peers = network::default_bootstrap_peers();
             tracing::info!(
                 count = config.network.bootstrap_peers.len(),
@@ -915,6 +940,69 @@ api_key = "test-key-abc"
 
         let config = Config::load_or_create(Some(&path), None, None, None, None, vec![]).unwrap();
         assert!(config.network.bootstrap_peers.is_empty());
+    }
+
+    /// The same opt-out, written the way anyone would actually write it —
+    /// **without** also listing `bootstrap_peers = []`.
+    ///
+    /// This is the case the test above does not reach, and it was broken:
+    /// `bootstrap_peers` defaults via serde to the three public anchors, so a
+    /// config that never mentions the key is not empty by the time the fallback
+    /// is considered, and the flag had no effect at all. Reproduced on a rig
+    /// 2026-09-20 — `bootstrap_peers=3` in the resolved config and 39 dials to
+    /// the public anchor from a node whose config said never to contact it.
+    #[test]
+    fn the_opt_out_works_without_also_writing_an_empty_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[network]\ndisable_default_bootstrap = true\n").unwrap();
+
+        let config = Config::load_or_create(Some(&path), None, None, None, None, vec![]).unwrap();
+        assert!(
+            config.network.bootstrap_peers.is_empty(),
+            "a node told never to contact the public anchors must not be handed them \
+             by a serde default: got {:?}",
+            config.network.bootstrap_peers
+        );
+    }
+
+    /// An anchor reaches the same opt-out through `node.anchor_mode`, and the
+    /// shipped `deploy/anchor/config.toml` is not the only way an anchor gets
+    /// configured — one written without `bootstrap_peers = []` was dialling
+    /// itself for the same reason.
+    #[test]
+    fn anchor_mode_alone_is_enough_to_stop_the_default_anchors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[node]\nanchor_mode = true\n").unwrap();
+
+        let config = Config::load_or_create(Some(&path), None, None, None, None, vec![]).unwrap();
+        assert!(
+            config.network.bootstrap_peers.is_empty(),
+            "an anchor IS the bootstrap and must not dial itself: got {:?}",
+            config.network.bootstrap_peers
+        );
+    }
+
+    /// The opt-out means "never the PUBLIC anchors", not "never any peer" — a
+    /// private swarm names its own and must keep it.
+    #[test]
+    fn opting_out_keeps_a_private_bootstrap_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[network]\ndisable_default_bootstrap = true\n\
+             bootstrap_peers = [\"/ip4/10.0.0.2/tcp/8810/p2p/12D3KooWPrivateAnchorExample\"]\n",
+        )
+        .unwrap();
+
+        let config = Config::load_or_create(Some(&path), None, None, None, None, vec![]).unwrap();
+        assert_eq!(
+            config.network.bootstrap_peers,
+            vec!["/ip4/10.0.0.2/tcp/8810/p2p/12D3KooWPrivateAnchorExample".to_string()],
+            "an explicitly configured private anchor survives the opt-out"
+        );
     }
 
     /// An anchor IS the bootstrap; making it dial itself is the one case the
