@@ -36,6 +36,95 @@
 
 use serde::{Deserialize, Serialize};
 
+/// How long a round-trip sample stays eligible to be the window's minimum.
+///
+/// Bounded in TIME, not just in count, so the estimate can RISE again when a
+/// path genuinely degrades. An all-time minimum would latch the best moment the
+/// network ever had and never let go.
+pub const LATENCY_WINDOW_MS: u64 = 300_000;
+
+/// Hard cap on retained samples per peer, so a chatty peer cannot grow the
+/// window without bound between evictions.
+pub const LATENCY_WINDOW_MAX_SAMPLES: usize = 64;
+
+/// The round trips seen to ONE peer recently, answering with the **minimum**.
+///
+/// # Why a minimum, when the reference implementation uses a median
+///
+/// HashiCorp's Serf/Consul — the most battle-tested Vivaldi deployment — keeps
+/// `LatencyFilterSamples` per node and takes their MEDIAN. That is right for
+/// their input: a lightweight UDP gossip probe, where noise is modest and
+/// roughly symmetric, and a median rejects the occasional outlier without
+/// biasing the estimate.
+///
+/// **Our input is not that.** The round trip we can measure is an
+/// application-level request/response that queues behind the node's own event
+/// loop, and measured on this fleet 2026-09-20 the contamination was large and
+/// one-sided: against a peer whose ICMP round trip was 0.563-1.539 ms, the
+/// application figure came back **bimodal — 3-8 ms or 118-158 ms**, with 10 of
+/// 14 samples in the slow mode. A median of that is 120 ms. **The median would
+/// be the contamination**, faithfully encoded as distance, because a median
+/// filter assumes most samples are near-clean and here most are not.
+///
+/// A minimum is right whenever the corruption only ever ADDS, which queueing
+/// and scheduling delay do: the smallest round trip recently observed is the
+/// best available estimate of the propagation delay underneath them. It is the
+/// same argument BBR makes for min-RTT, and the same "min-of-N" discipline this
+/// repo already applies to benchmarking (gotcha #367).
+///
+/// ⚠ **If the measurement source is ever changed to a true network-level round
+/// trip, revisit this** — with a clean signal the median becomes the better
+/// estimator again, because a minimum over clean samples chases the low tail.
+#[derive(Clone, Debug, Default)]
+pub struct LatencyFilter {
+    /// `(observed_at_ms, rtt_ms)`, oldest first.
+    samples: std::collections::VecDeque<(u64, f32)>,
+}
+
+impl LatencyFilter {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record a sample and return the window's minimum — the figure to feed
+    /// the coordinate. `None` when the sample carries no information.
+    ///
+    /// `now_ms` is passed in rather than read from a clock so this stays pure
+    /// and its window behaviour is testable without sleeping.
+    pub fn observe(&mut self, now_ms: u64, rtt_ms: f32) -> Option<f32> {
+        if !(rtt_ms.is_finite() && rtt_ms > 0.0) {
+            return self.min();
+        }
+        self.samples.push_back((now_ms, rtt_ms));
+        let cutoff = now_ms.saturating_sub(LATENCY_WINDOW_MS);
+        while self.samples.front().is_some_and(|(at, _)| *at < cutoff) {
+            self.samples.pop_front();
+        }
+        while self.samples.len() > LATENCY_WINDOW_MAX_SAMPLES {
+            self.samples.pop_front();
+        }
+        self.min()
+    }
+
+    /// The smallest round trip still in the window.
+    pub fn min(&self) -> Option<f32> {
+        self.samples
+            .iter()
+            .map(|(_, ms)| *ms)
+            .fold(None, |acc: Option<f32>, ms| {
+                Some(acc.map_or(ms, |a| a.min(ms)))
+            })
+    }
+
+    pub fn len(&self) -> usize {
+        self.samples.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.samples.is_empty()
+    }
+}
+
 /// Vivaldi's `c_c`: how far a node moves toward where a sample says it belongs.
 /// 0.25 is the paper's value — large enough to converge in a few samples, small
 /// enough that one bad measurement cannot throw the coordinate across the map.
@@ -242,6 +331,76 @@ mod tests {
             }
         }
         (coords, worst)
+    }
+
+    /// The 14 consecutive samples measured against the LAN peer on
+    /// 2026-09-20, whose true round trip was 0.563-1.539 ms by ICMP. Kept
+    /// verbatim because the SHAPE is the whole argument for a minimum: it is
+    /// bimodal, and the slow mode is the majority.
+    const FIELD_SAMPLES: [f32; 14] = [
+        4.0, 118.0, 3.0, 3.0, 121.0, 132.0, 120.0, 123.0, 120.0, 120.0, 158.0, 132.0, 8.0, 125.0,
+    ];
+
+    #[test]
+    fn the_filter_recovers_the_real_link_from_a_contaminated_majority() {
+        let mut f = LatencyFilter::new();
+        let mut last = None;
+        for (i, s) in FIELD_SAMPLES.iter().enumerate() {
+            last = f.observe(i as u64 * 1000, *s);
+        }
+        let got = last.expect("a minimum after 14 samples");
+        assert_eq!(
+            got, 3.0,
+            "the window must answer with the real link (~1-3 ms by ICMP), not \
+             the queueing delay that dominates the samples"
+        );
+
+        // The comparison that justifies diverging from Serf's median filter.
+        let mut sorted = FIELD_SAMPLES;
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let median = (sorted[6] + sorted[7]) / 2.0;
+        assert!(
+            median > 100.0,
+            "sanity: the median of this real sample really is the \
+             contamination ({median} ms), which is why a median filter is \
+             wrong for THIS input"
+        );
+    }
+
+    /// Bounded in time, so a path that genuinely gets worse is not masked for
+    /// ever by one good moment.
+    #[test]
+    fn a_stale_good_sample_stops_counting() {
+        let mut f = LatencyFilter::new();
+        assert_eq!(f.observe(0, 3.0), Some(3.0));
+        assert_eq!(f.observe(1_000, 200.0), Some(3.0), "still in window");
+        let after = f
+            .observe(LATENCY_WINDOW_MS + 2_000, 200.0)
+            .expect("a value");
+        assert_eq!(
+            after, 200.0,
+            "once the good sample ages out the estimate must rise; an all-time \
+             minimum would latch the best moment the network ever had"
+        );
+    }
+
+    #[test]
+    fn the_window_is_bounded_and_ignores_junk() {
+        let mut f = LatencyFilter::new();
+        for i in 0..(LATENCY_WINDOW_MAX_SAMPLES * 2) {
+            f.observe(i as u64, 50.0);
+        }
+        assert!(
+            f.len() <= LATENCY_WINDOW_MAX_SAMPLES,
+            "retained {} samples, cap is {}",
+            f.len(),
+            LATENCY_WINDOW_MAX_SAMPLES
+        );
+        let before = f.min();
+        for bad in [0.0, -5.0, f32::NAN, f32::INFINITY] {
+            f.observe(1_000, bad);
+        }
+        assert_eq!(before, f.min(), "a junk sample must not enter the window");
     }
 
     #[test]

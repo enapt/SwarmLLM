@@ -24,6 +24,17 @@ pub struct MetricsProviders {
     /// A `std::sync::RwLock` rather than an async one because both readers are
     /// synchronous and the critical section is a struct copy.
     pub network_coord: std::sync::RwLock<swarmllm_types::netcoord::NetworkCoord>,
+    /// Recent round trips per peer, answering with the windowed MINIMUM — the
+    /// only figure fed to `network_coord`.
+    ///
+    /// The round trip we can measure is application-level and queues behind
+    /// the remote node's event loop, so it is contaminated one-sidedly and, on
+    /// this fleet, bimodally: 3-8 ms or 118-158 ms against a peer whose ICMP
+    /// round trip is ~1 ms. Feeding raw samples taught the coordinate the
+    /// queueing delay. See `LatencyFilter` for why this is a minimum where
+    /// Serf's equivalent is a median.
+    pub network_coord_samples:
+        DashMap<crate::types::NodeId, swarmllm_types::netcoord::LatencyFilter>,
     pub inference_requests_total: AtomicU64,
     /// Mirror of node_stats.requests_served as an AtomicU64 — written from
     /// multiple async contexts. The RwLock-guarded field on NodeStats was

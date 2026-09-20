@@ -1445,3 +1445,81 @@ inspects the statements that COMPUTE the decision (`let addr_is_lan =` /
 mDNS `Expired`), so a single spurious sub-5 ms RTT sample latches LAN for the
 life of the process. No longer attacker-controlled, but worth revisiting.
 
+
+---
+
+## A network coordinate must be published rough, and fed a MINIMUM
+
+**Rule**: `.claude/rules/arch-network.md` § "Network coordinates".
+**Added** 2026-09-20, both halves found by deploying rather than by review.
+
+### What it replaced
+
+`NodeCandidate::latency_ms` is OUR round trip to a candidate. The routing cost
+model had nothing else, so it priced each node in isolation and summed — unable
+to distinguish three peers in one city from three on three continents. Measured
+the same day: a 4-segment chain alternating Thailand↔Italy ran at **0.35 tok/s**
+against **6.76** for the same kind of split inside 18 ms, and the difference is
+entirely per-token traversals the model could not see.
+
+Vivaldi (Dabek et al., SIGCOMM'04) gives each node a coordinate whose distance
+to another node's coordinate predicts the round trip *between those two nodes*.
+Implemented in `swarmllm_types::netcoord` as the paper's adaptive-timestep form
+(Figure 3), 2-D plane plus height, `c_c = c_e = 0.25`.
+
+### The two things that were wrong, and how they were found
+
+**1. Publishing was gated on confidence, which deadlocks the whole system.**
+`network_coord_for_publication` returned `None` until `is_usable()`. A node only
+refines its coordinate against a peer that publishes one; every node starts
+unsettled; so every node published nothing, nobody refined, nobody settled.
+Symmetric and permanent. Observed exactly so: two nodes 4 ms apart, both on the
+build, both reporting no prediction indefinitely.
+
+A rough coordinate is not a hazard to publish — the error travels WITH it and
+the receiver discounts every sample by `w = e_i / (e_i + e_j)`. That weighting
+**is** the paper's mechanism for high-error nodes; withholding the coordinate
+removes it rather than protecting anyone. `is_usable()` belongs to whoever
+routes on a coordinate.
+
+**2. The measurable round trip is not a network measurement.**
+Fed raw samples, the coordinate learned the remote node's event-loop scheduling
+delay. Measured against the LAN peer, 14 consecutive samples:
+
+```
+4, 118, 3, 3, 121, 132, 120, 123, 120, 120, 158, 132, 8, 125   (ms)
+```
+
+**Bimodal** — 3-8 ms or 118-158 ms, nothing between — against an ICMP round trip
+to the same host, at the same time, of **min 0.563 / avg 0.920 / max 1.539 ms**,
+with the remote at load 0.35. So ~120 ms of the application-level figure is the
+peer's own scheduling, not distance.
+
+`LatencyFilter` therefore answers with the **windowed minimum**, not each raw
+sample. ⚠ **This deliberately differs from the reference implementation**:
+HashiCorp's Serf/Consul keeps `LatencyFilterSamples` per node and takes their
+MEDIAN, which is right for a light UDP gossip probe whose noise is modest and
+symmetric. Ours is neither: 10 of those 14 samples are in the slow mode, so the
+median IS the contamination (120 ms) and a median filter would encode it as
+distance. A minimum is correct precisely when the corruption only ever ADDS,
+which queueing and scheduling do — BBR's min-RTT argument, and the same
+min-of-N discipline this repo already applies to benchmarking (gotcha #367).
+
+The window is bounded in TIME (`LATENCY_WINDOW_MS`), not only in count, so a
+path that genuinely degrades is not masked for ever by one good moment.
+
+### What a change must keep
+
+- **Publish whenever we have a coordinate.** Pinned by
+  `a_brand_new_node_still_publishes_its_coordinate`; verified by restoring the
+  old behaviour and watching it fail.
+- **Feed the filtered minimum, never a raw sample.**
+  `SharedState::observe_network_coord` is the single writer and does the
+  filtering itself, so no caller can bypass it.
+- **Record the sample even when the peer publishes no coordinate yet** — the
+  window describes the link, not our current ability to use it.
+- ⚠ **If the measurement source is ever replaced by a true network-level round
+  trip, revisit the minimum** — over clean samples a minimum chases the low tail
+  and the median becomes the better estimator again.
+- Nothing routed on coordinates as of 2026-09-20. A consumer must check
+  `is_usable()` and fall back to `region`.

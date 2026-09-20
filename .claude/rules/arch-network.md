@@ -429,6 +429,32 @@ silently break at the wire if duplicated:
   prefix-sniff helper used by API + frontend to route between v2 and
   the legacy 8-char path.
 
+## Network coordinates: publish them rough, feed them a MINIMUM
+
+`NodeCapability.coord` is a Vivaldi coordinate so any reader can estimate the
+round trip between two peers, **neither of which is the reader** — the one fact
+the routing cost model never had (`NodeCandidate::latency_ms` is only ever OUR
+round trip). Additive, `#[serde(default)]`, gated by `features::NETWORK_COORDS`.
+
+Two halves, both learned by deploying rather than by review:
+
+- **Publish it however rough.** Gating publication on `is_usable()` deadlocks
+  every node simultaneously: a node refines only against a peer that publishes
+  one, all start unsettled, so none ever publishes and none ever settles. The
+  error rides WITH the coordinate and the receiver discounts by
+  `w = e_i/(e_i+e_j)` — that weighting IS Vivaldi's answer to high-error nodes.
+  `is_usable()` is the CONSUMER's gate. Guard:
+  `a_brand_new_node_still_publishes_its_coordinate`.
+- **Feed the windowed MINIMUM, never a raw sample.** The measurable round trip
+  is application-level and carries the remote event loop's scheduling delay —
+  measured bimodal at 3-8 ms or 118-158 ms against a peer whose ICMP round trip
+  was ~1 ms. `LatencyFilter` answers with the minimum, and ⚠ **deliberately
+  differs from Serf's median** because here the slow mode is the MAJORITY, so a
+  median would encode the queueing as distance. `SharedState::observe_network_coord`
+  is the single writer and filters internally so no caller can bypass it.
+
+→ `docs/invariants/network.md`
+
 ## Single-source-of-truth helpers — Network protocol, peers and the model registry
 
 Each names the ONE place a decision is made. A second implementation of any of

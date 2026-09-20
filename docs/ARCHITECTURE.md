@@ -454,10 +454,25 @@ without ever being able to read them.
   nothing, which keeps the older, more generous pricing so a mixed-version swarm
   keeps routing. Added 2026-09-11, additive and `#[serde(default)]`; the same
   fact Petals publishes for the same reason.
+- **How far apart two OTHER nodes are — `NodeCapability.coord`.** Every other
+  latency figure in the scheduler is *our* round trip to a peer
+  (`NodeCandidate::latency_ms`), so a chain of three peers in one city and a
+  chain spanning three continents priced the same. A Vivaldi network coordinate
+  (`swarmllm_types::netcoord`, Dabek et al. SIGCOMM'04 — 2-D plane plus a height
+  for the access link) makes the distance between any two published coordinates
+  an estimate of the round trip between those two nodes, computed locally with
+  no extra probing. Added 2026-09-20, additive, `#[serde(default)]`, gated by
+  `features::NETWORK_COORDS`; `region` remains the coarse fallback.
+  **Two things it is easy to get wrong, both found in the field**: a coordinate
+  must be published even while rough (the error rides with it and the receiver
+  discounts by `w = e_i/(e_i+e_j)`; withholding it deadlocks every node at
+  once), and it must be fed a **windowed minimum** round trip rather than raw
+  samples, because the measurable round trip is application-level and carries
+  the remote event loop's scheduling delay. → `docs/invariants/network.md`
 - **Feature-gated + prefer-direct.** `NodeCapability` advertises
   `protocol_version: u16` and a `features: u64` bitset
   (`features::{RELAY, TENSOR_RELAY, PIPELINE_CHAIN, PIPELINE_CHAIN_V2,
-  FORWARD_ACK, RESEND_TOKENS}`); a node only attempts a relayed send when
+  FORWARD_ACK, RESEND_TOKENS, NETWORK_COORDS}`); a node only attempts a relayed send when
   the *recipient* advertises the matching bit, so the protocol evolves additively
   with no flag-day. The relay is chosen only when there is no usable direct
   connection (`has_direct_connection` false — the circuit-only case); a real

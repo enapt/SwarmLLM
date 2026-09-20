@@ -952,6 +952,7 @@ impl SharedState {
             cancel_signals: DashMap::new(),
             metrics: MetricsProviders {
                 network_coord: std::sync::RwLock::new(swarmllm_types::netcoord::NetworkCoord::new()),
+                network_coord_samples: dashmap::DashMap::new(),
                 node_stats: RwLock::new(NodeStats::default()),
                 inference_requests_total: AtomicU64::new(0),
                 requests_served_atomic: AtomicU64::new(0),
@@ -2730,6 +2731,24 @@ impl SharedState {
     /// the payload's transfer — which is exactly the quantity Vivaldi models,
     /// and the same reason `ACK_OBSERVE_MAX_BYTES` exists.
     pub fn observe_network_coord(&self, node_id: &NodeId, rtt_ms: f32) {
+        // Filter FIRST, and record the sample even when the peer publishes no
+        // coordinate yet: the window is about this link, not about whether we
+        // can use it right now, and throwing samples away while a peer starts
+        // up would leave the window empty exactly when the first usable
+        // coordinate arrives.
+        let now_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
+        let filtered = {
+            let mut f = self
+                .metrics
+                .network_coord_samples
+                .entry(node_id.clone())
+                .or_default();
+            f.observe(now_ms, rtt_ms)
+        };
+        let Some(filtered) = filtered else {
+            return;
+        };
+
         let Some(remote) = self
             .peer_registry
             .get(node_id)
@@ -2738,7 +2757,7 @@ impl SharedState {
             return;
         };
         if let Ok(mut ours) = self.metrics.network_coord.write() {
-            ours.observe(rtt_ms, &remote);
+            ours.observe(filtered, &remote);
         }
     }
 
