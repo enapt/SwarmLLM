@@ -1,5 +1,60 @@
 # Changelog
 
+## [0.3.194-alpha] — 2026-09-21
+
+**An idle computer was uploading several megabits per second, for ever. Most of
+it was SwarmLLM re-sending lists it had already sent.**
+
+Two people reported their connection being used far more heavily than they
+expected, and the setting that looked like it should cap it did not. We pointed
+their own measuring method at our release machine and found the same thing: with
+nothing being asked of it, no downloads running and nobody's traffic passing
+through it, it was sending 4.8 megabits per second and receiving 4.9. One of the
+reporting machines worked out to roughly 159 gigabytes of upload a month on an
+ordinary home connection.
+
+Almost all of it was this: every thirty seconds, a computer told its neighbours
+the full contents of every model it holds a piece of — and that list names every
+single component of every model, so fifteen models came to 825 kilobytes. It
+went out every thirty seconds whether or not anything had changed, to six
+neighbours each time, and every computer on the network was doing it to every
+other.
+
+**That list is now sent when it changes.** The full version still goes out
+periodically, and immediately whenever a computer appears that has not been told
+yet — so a machine joining the network still sees every available model at once.
+Measured on a two-machine test: five sends where the old version made
+twenty-two, settling to about a tenth of the old volume. A newly connected
+machine had the full list seventeen milliseconds after connecting.
+
+**A computer that is passing other people's traffic now says so.** If your
+machine can be reached from the internet, it helps computers that cannot reach
+each other directly by passing traffic between them. That is useful to the
+network and it uses your upload allowance — and until now nothing on any screen
+mentioned it was happening. The dashboard and `swarmllm status` now show it,
+with how much has been passed on, **and it can be switched off in Settings.**
+Previously that needed hand-editing a configuration file.
+
+**Fixed: the setting for staying off the public network did nothing.** A
+computer told never to contact the public network contacted it anyway, unless
+its configuration also contained a second line that nobody would know to add.
+The same applied to machines run as network helpers, which were connecting to
+themselves on every start.
+
+**Corrected in the documentation, and this one matters.** The setting that
+groups computers into their own network was described in four places as making
+them private — one of them said their traffic "never reaches the public swarm
+and vice versa". That is not what it does. It separates the announcements those
+computers exchange; it does not stop your machine sending work to a machine
+outside the group, because which computer holds which piece of a model is looked
+up in a directory shared by everyone. Keeping work inside a set of machines is
+what a pool in private mode does, and the documentation now says so.
+
+**Also:** the listing that shows how far away a computer is estimated to be was
+comparing that estimate against a single noisy reading rather than the settled
+one it is built from, which made good estimates look wrong. Nothing routes on
+those estimates yet.
+
 ## [0.3.193-alpha] — 2026-09-20
 
 **Computers can now tell how far apart two OTHER computers are, and your
