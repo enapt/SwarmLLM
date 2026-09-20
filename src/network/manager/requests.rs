@@ -300,6 +300,15 @@ impl NetworkManager {
                                     // Counted HERE, beside the throttle, so the
                                     // figure and the cap can never describe
                                     // different sets of bytes.
+                                    //
+                                    // That means bytes READ, not bytes
+                                    // delivered: if `net_tx` is closed below,
+                                    // this chunk is counted and never sent.
+                                    // Deliberate — the alternative is a counter
+                                    // that disagrees with the limit it exists to
+                                    // make checkable, and the only way to reach
+                                    // that branch is a daemon already shutting
+                                    // down, where the counter dies with it.
                                     shared_for_count.metrics.shard_bytes_out.fetch_add(
                                         sr.data.len() as u64,
                                         std::sync::atomic::Ordering::Relaxed,
@@ -609,6 +618,13 @@ impl NetworkManager {
                     total_size = data.total_size,
                     "Received shard data chunk"
                 );
+                // Before the pending-request lookup on purpose: a late or
+                // duplicated response still crossed this node's link and still
+                // cost its owner the bandwidth, which is the question this
+                // counter answers. It is NOT a count of shards acquired.
+                //
+                // A relaxed atomic add is the only work done on the event loop
+                // here, which is what gotcha #11 requires of this function.
                 self.shared_state
                     .metrics
                     .shard_bytes_in
