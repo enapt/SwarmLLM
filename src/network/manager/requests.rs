@@ -533,6 +533,23 @@ impl NetworkManager {
                                     tracing::debug!(%peer, rtt_ms, "Peer RTT measured");
                                 }
                             }
+                            // Feed the network coordinate. **This is its
+                            // primary source**, not the tensor path: the
+                            // acknowledged-forward samples only exist while
+                            // this node is actually serving a distributed
+                            // request, so a node that is merely connected
+                            // would never accumulate one and would publish
+                            // `None` for ever. The PEX ping runs against every
+                            // peer on a timer regardless of load, which is
+                            // what makes a coordinate converge at all.
+                            //
+                            // Placed AFTER the `peer_info` borrow above has
+                            // been dropped: `observe_network_coord` reads
+                            // `peer_registry` itself, and holding a `get_mut`
+                            // Ref across another call on the same map is
+                            // gotcha #10.
+                            self.shared_state
+                                .observe_network_coord(&node_id, rtt_ms as f32);
                         }
                     }
                     // SEC: Only process PEX from registered peers

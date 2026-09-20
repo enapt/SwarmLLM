@@ -86,10 +86,28 @@ pub fn serialize_peer_to_json(
         .map(|c| c.version.clone())
         .filter(|v| !v.is_empty());
     let uptime_seconds = peer.capability.as_ref().map(|c| c.uptime_seconds);
+    // What this peer's published coordinate predicts our round trip to it is,
+    // beside the round trip we actually measured. Reported as a PAIR on
+    // purpose: a coordinate is only worth routing on if its prediction tracks
+    // the measurement, and the cheapest way to know is to be able to read both
+    // off one listing. `null` until both sides publish one.
+    let predicted_rtt_ms = peer
+        .capability
+        .as_ref()
+        .and_then(|c| c.coord)
+        .and_then(|theirs| {
+            state
+                .metrics
+                .network_coord
+                .read()
+                .ok()
+                .map(|ours| ours.distance_ms(&theirs))
+        });
     let mut obj = serde_json::json!({
         "node_id": format!("{}", peer.node_id),
         "nickname": nickname,
         "latency_ms": peer.latency_ms,
+        "predicted_rtt_ms": predicted_rtt_ms,
         "trust_score": peer.trust_score,
         "healthy": healthy,
         "gpu": peer.capability.as_ref().and_then(|c| c.gpu.as_ref().map(|g| &g.name)),
