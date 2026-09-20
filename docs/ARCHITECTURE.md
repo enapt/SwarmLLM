@@ -2116,6 +2116,15 @@ message rather than the chat page.
   just what this code writes. **`null`, never zero, when nothing is counting**; the
   status renderer then prints no Traffic line at all. One of THREE payloads carrying
   it (see `api::metrics::network_traffic_json`), and the one that was missed.
+  Also carries `relaying_for_others` + `relay_bytes_forwarded` (2026-09-21) — a
+  publicly reachable node donates relay capacity by DEFAULT and nothing said so
+  anywhere a person looks; and, once any gossip has been sent,
+  `gossip_sent_bytes` / `gossip_recv_bytes` / `gossip_by_topic` with
+  `other_out_bytes` / `other_in_bytes` as the explicit remainder. ⚠ The gossip
+  figures come from GossipSub's own per-topic counters and measure MESSAGE
+  LENGTH, so they are a floor — the framing and encryption around each message
+  land in `other_*`, which is named for what it is rather than presented as a
+  category.
 
 ### OpenAI Responses API (`/v1/responses`)
 OpenAI-compatible Responses endpoint — the 2026 default API for o-series / gpt-5 / reasoning-era callers:
@@ -2255,7 +2264,13 @@ Routes Claude model requests through a locally-authenticated `claude` CLI subpro
 - `GET     /api/admin/models` — Model list with shard status, VRAM estimates, acquisition state. `encrypted_pipeline` is the EFFECTIVE state (`flag && has_first && has_last`) so the UI's "privacy is on" indicator never claims privacy that is not happening; `encrypted_pipeline_blocked` reports the case that masking hides — the setting is on and this node cannot satisfy it, so every request for that model fails. Both are needed: without the second, the failing state appears on no surface a user looks at (gotcha #286). `peers_hosting` counts other computers whose copy this node could actually FETCH — it goes through the build-filtered `shard_holders`, because a holder on a different GGUF build cannot serve bytes our hash check would accept; `peers_other_build` (2026-09-15) counts the ones excluded for exactly that reason, and the two travel together (`ModelPeerCounts`) so a call site cannot report a smaller number with no explanation. The per-shard `holders` in the WebSocket `stats_update` tick is filtered the same way, because both write the same dashboard row and an unfiltered one made the number depend on which writer touched it last. → `docs/invariants/network.md` § "A holder record names a BUILD".
 - `POST    /api/admin/models/{id}/add` — Trigger model acquisition
 - `GET     /api/admin/models/{id}/status` — Model acquisition progress
-- `GET     /api/admin/peers` — Connected peers with latency/trust
+- `GET     /api/admin/peers` — Connected peers with latency/trust. Carries
+  `predicted_rtt_ms` (what the peer's published network coordinate predicts)
+  beside `measured_min_rtt_ms` + `rtt_samples` (2026-09-21) — the windowed
+  MINIMUM the coordinate is actually fed, not `latency_ms`, which is the last
+  raw sample and is bimodal. Judging the estimate against the raw sample is
+  the comparison the design says not to make, and the pair existed to answer
+  exactly that question
 - `GET     /api/admin/diagnostics` — Plain-text support dump, **address-redacted unless `?full=1`** (it is written to be pasted into a bug report; `swarmllm diagnostics` is the CLI wrapper). Sections: **this machine** (CPU, GPU,
   measured memory bandwidth, and the advertised 7B tok/s every peer's
   scheduler ranks this node on — the answer to "why does nobody route work
