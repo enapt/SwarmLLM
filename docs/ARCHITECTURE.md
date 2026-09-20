@@ -2361,6 +2361,13 @@ Routes Claude model requests through a locally-authenticated `claude` CLI subpro
 - `/` → redirect to `/admin`
 
 ### Frontend Architecture
+- **Embedded payload size**: **~1196 KB** (html 142 + css 265 + js 789,
+  measured 2026-09-17) plus ONE locale (~90 KB for `en`, 167 KB for Thai — only
+  the active one is served) plus 88 KB of fonts, which the budget does not
+  count. Capped by `frontend_payload_stays_within_budget` in
+  `tests/repo_consistency.rs` — **a regression budget, not a goal**: it exists
+  so growth is noticed, not so the number is defended. Moved here from
+  `CLAUDE.md` 2026-09-20, which keeps the cap and points at this breakdown.
 - **No build step**: Vanilla HTML/CSS/JS — no framework, no bundler, no Node.js
 - **Component architecture**: `App` global namespace with component sub-objects (`App.chat`, `App.dashboard`, etc.)
   - `frontend/js/core/state.js` — App namespace, shared mutable state, theme, storage keys, and `streaming` — replies in flight keyed by SESSION id (the Send/Stop buttons and the AbortController were page-level while the chats sharing them are not, report #015)

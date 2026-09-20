@@ -67,10 +67,9 @@ for config; the network uses a unified codec — JSON control messages, binary
 with a type-tag byte for tensor payloads.
 
 ### Async Patterns
-- All subsystems communicate via `tokio::sync::mpsc` channels
-- SharedState fields use `DashMap` for concurrent reads or `RwLock` for single-value state
-- Graceful shutdown via `tokio::sync::watch` channel
-- Use `tokio::select!` in daemon/mod.rs to wait for shutdown or task exit
+Subsystems talk over `tokio::sync::mpsc`; SharedState uses `DashMap` for
+concurrent reads and `RwLock` for single values; shutdown is a
+`tokio::sync::watch`, awaited beside task exit in `daemon/mod.rs`'s `select!`.
 
 ### Logging
 `tracing`, structured spans carrying request_id / model_id / peer_count, target
@@ -87,9 +86,8 @@ with a type-tag byte for tensor payloads.
   `_dir`) × 21 languages, sorted by key. Parity and counts are asserted — **update
   BOTH CLAUDE.md and `docs/ARCHITECTURE.md`**. A new key MUST be translated into
   all 21; no English fallback (`.claude/rules/i18n.md`).
-- Payload **~1196 KB** (html 142 + css 265 + js 789, 2026-09-17) + one locale
-  (~90 KB en, Thai 167 KB) + 88 KB fonts (not counted). Capped by
-  `frontend_payload_stays_within_budget` — a regression budget, not a goal.
+- Payload ~1196 KB, capped by `frontend_payload_stays_within_budget` — a
+  regression budget, not a goal. Breakdown: `docs/ARCHITECTURE.md` § Frontend.
 
 ## Testing
 
@@ -161,28 +159,38 @@ a change, especially your own.
 - `docs/invariants/` — the evidence behind each rule (7 topics). **Read the topic file before changing code a rule names.**
 - `.claude/rules/diagnosis.md` — **read before blaming any change for any symptom, and before implementing anything non-trivial.** Rule 0 is research-first; then baseline before blaming, verify the mechanism fired, check the test fails without the fix.
 - `docs/FUTURE_WORK.md` — deferred items. ⚠ **An entry's own SCOPE is a hypothesis** (gotcha #654) and its line numbers are often wrong (#645) — trace a producer to its CONSUMER before planning from it.
+- `docs/plans/regional_pipelines.md` — **why split inference is slow and the staged fix.** Read before touching routing, placement or the cost model.
 - `docs/DIAGNOSTICS.md` (`DIAG:` instrumentation, bench traps) · `docs/CREDITS_DESIGN.md` (before touching credits) · `docs/book/` — mdBook site
 - `.claude/sweep-log.jsonl` — every `/sweep` finding. **Grep before re-reporting.** `SwarmLLM_Technical_Specification.docx` is **gitignored, absent from a clone.**
 
 ## Status
 
-**v0.3.192-alpha released and deployed (2026-09-20); the WHOLE swarm is on it.**
+**v0.3.193-alpha released, signed and deployed to both nodes (2026-09-20).**
 Nothing functional is unreleased.
+
+**A split is only fast when the machines are CLOSE, and nothing in the router
+can see the difference.** A split relocates the work rather than dividing it,
+and the chain is walked once per TOKEN: 0.35 tok/s across Thailand↔Italy
+against 6.76 for the same split at 18 ms. .193 ships the groundwork — network
+coordinates (how far apart two OTHER nodes are) and a region fix that had
+silently disabled all regional placement. ⚠ **Nothing routes on coordinates
+yet, deliberately.** **Read `docs/plans/regional_pipelines.md` before touching
+routing, placement or the cost model.**
 
 **Releases are SIGNED (audit C1 closed, .191) and auto-update defaults to
 `Install`** — safe only because of that verification; the two must move
 together. CI leaves a release DRAFT; `examples/sign_release.sh <tag>` publishes
-it. → `docs/RELEASE_SIGNING.md`, `memory/release_gate.md` step 7.
+it. ⚠ **It accepts the WRONG tag silently** and reports success — confirm
+`draft=false` + a non-zero `.minisig` count afterwards.
+→ `docs/RELEASE_SIGNING.md`, `memory/release_gate.md` step 7 + § .193 gate.
 
 ⚠ **#90's CAUSE IS UNKNOWN** — a dispatcher stall seen TWICE (33-45 min), each
 ended only by a restart; `cancel_request` is ELIMINATED (its fix shipped in .189
 and it recurred). ⚠ **#17 has never run on a live multi-node failover** (#85).
 
-`memory/` is `~/.claude/projects/-home-user-SwarmLLM/memory/`, outside the repo:
-**`release_gate.md`** (ordered steps + every caution earned at a gate — do not
-re-derive), `round_history.md`, `gotchas.md` (next free index is in `MEMORY.md`,
-not here — it drifted when both claimed it), **`open_cautions.md` — read at
-session start.**
+`memory/` is `~/.claude/projects/-home-user-SwarmLLM/memory/`, outside the repo
+— `MEMORY.md` indexes it. **Read `open_cautions.md` and `next_up.md` at session
+start**, and `release_gate.md` before a release rather than re-deriving it.
 
 ## Pushes are public-facing
 

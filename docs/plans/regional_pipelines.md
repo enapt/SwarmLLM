@@ -166,7 +166,16 @@ Cheapest probe: take RTT vectors from the two vantage points we control (local
 **Exit criterion**: an inter-peer RTT matrix, and per-region model coverage.
 Everything below is sized by that answer.
 
-### Stage 1 — Fix the region bug (hours)
+### Stage 1 — Fix the region bug ✅ SHIPPED in v0.3.193 (`ec7dd9ba`)
+
+Done as described. Verified rather than assumed: this node logs
+`Auto-detected region region=TH` on every boot and had no configured region, so
+the wishlist's whole regional branch was unreachable. Guard:
+`this_nodes_region_is_read_through_the_accessor_that_knows_it_was_detected`,
+with a planted violation AND a null control — the fix's own comments name the
+forbidden field, so a guard that read comments would have failed on the fix.
+
+Original plan below.
 
 Point the three sites at `effective_region_sync()` / `effective_region()`. Add
 a `tests/repo_consistency.rs` guard forbidding a direct read of
@@ -178,7 +187,34 @@ violation.
 **Verify by**: regional holder counts becoming non-zero on this node, and the
 capacity announcement carrying a region. Not by reading the diff.
 
-### Stage 2 — Give the scheduler inter-peer latency (the key enabler)
+### Stage 2 — Give the scheduler inter-peer latency ⚠ BUILT AND DEPLOYED, not yet consumed
+
+Shipped in v0.3.193 (`b3efe2af`, `77b82b99`, `14456b91`).
+`swarmllm_types::netcoord` implements the paper's adaptive-timestep form, 2-D
+plane plus height, published in `NodeCapability.coord` behind
+`features::NETWORK_COORDS`. **Nothing routes on it yet, deliberately** — which
+is what made the two field bugs harmless:
+
+- **Publication was gated on confidence, which deadlocked every node at once.**
+  All start unsettled → all publish `None` → none can refine → none settle.
+- **The measurable round trip is not a network measurement.** Bimodal 3-8 ms /
+  118-158 ms against a peer whose ICMP is ~1 ms, so it is now fed a **windowed
+  MINIMUM** — deliberately unlike Serf's median, because here the slow mode is
+  the majority.
+
+**Status after deploying to both nodes**: ordering is correct (69 ms vs 336 ms
+predicted) but the LAN peer reads ~10x its true 6 ms — one global position must
+satisfy every peer at once, and with one peer at 6 ms and the rest at
+500-900 ms the height term inflates the near estimate. That is the documented
+"poor at picking the CLOSEST node" limitation, not a bug.
+
+**Before wiring a consumer**: soak, then compare `predicted_rtt_ms` against the
+windowed MINIMUM measured per peer, never the instantaneous sample. Both
+columns are on `/api/admin/peers`.
+
+Original plan below.
+
+### Stage 2 (original) — Give the scheduler inter-peer latency (the key enabler)
 
 Adopt **network coordinates** ([Vivaldi](https://dl.acm.org/doi/10.1145/1030194.1015471)):
 each node maintains a low-dimensional coordinate from the RTTs it already
