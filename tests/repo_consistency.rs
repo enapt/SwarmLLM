@@ -8998,6 +8998,130 @@ fn the_metadata_budget_guard_catches_a_sum_rustfmt_has_wrapped() {
     );
 }
 
+/// Every `if !admitted { … }` block in a source file, with its line number and
+/// its whole body — brace-matched, never a character window
+/// (`.claude/rules/arch-guards-and-tests.md`).
+fn admission_refusal_blocks(src: &str) -> Vec<(usize, String)> {
+    let mut out = Vec::new();
+    let mut from = 0usize;
+    while let Some(hit) = src[from..].find("if !admitted {") {
+        let at = from + hit;
+        let line = src[..at].matches('\n').count() + 1;
+        let open = at + src[at..].find('{').expect("the needle carries its brace");
+        let mut depth = 0usize;
+        let mut end = open;
+        for (i, ch) in src[open..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = open + i;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        out.push((line, src[open..=end].to_string()));
+        from = end.max(at + 1);
+    }
+    out
+}
+
+/// **Report #019, on the path it was never fixed on.** This node's own memory
+/// budget refusing a load is the ONE local failure the router re-plans
+/// (`router::local_memory_refused_the_load`), and it can only recognise it by
+/// TYPE — `LocalMemoryUnavailable` deliberately shares `ServiceUnavailable`'s
+/// wording so a PEER refusing for memory keeps being read as a peer.
+///
+/// `get_or_spawn`'s refusal was given the variant when it was introduced
+/// (`1b99ad14`, v0.3.163). `charge_additional_segment`'s — the GROWTH path, and
+/// the common case on a swarm node — was written three days earlier
+/// (`0ff4fc30`, v0.3.154) and kept `ServiceUnavailable`. So a node that had
+/// served one segment of a model for a peer, and was then asked for the whole
+/// model, was refused by its own budget, earned no re-plan, recorded no
+/// `note_local_memory_refusal`, and answered 503 for a model the swarm had nine
+/// holders for. Measured on the live node 2026-09-20 against v0.3.192.
+#[test]
+fn an_admission_refusal_is_the_variant_the_router_re_plans() {
+    let src =
+        std::fs::read_to_string("src/inference/process_pool.rs").expect("read process_pool.rs");
+    let blocks = admission_refusal_blocks(&src);
+    assert!(
+        blocks.len() >= 2,
+        "the admission sites are spelled differently now — re-point this guard \
+         (found {} `if !admitted` blocks)",
+        blocks.len()
+    );
+
+    let mut refusals = 0;
+    for (line, body) in blocks {
+        // The arms that demote to the processor rather than refuse return no
+        // error at all, and are not what this guard is about.
+        if !body.contains("return Err(SwarmError::") {
+            continue;
+        }
+        refusals += 1;
+        assert!(
+            !body.contains("SwarmError::ServiceUnavailable"),
+            "process_pool.rs:{line}: this node's own memory budget refusing is \
+             `LocalMemoryUnavailable`, never `ServiceUnavailable` — the router \
+             re-plans the first and reads the second as a PEER that could not \
+             serve, so the request 503s with holders available (report #019)"
+        );
+        assert!(
+            body.contains("SwarmError::LocalMemoryUnavailable"),
+            "process_pool.rs:{line}: an admission refusal must name \
+             `LocalMemoryUnavailable` so the router can re-plan it"
+        );
+    }
+    assert_eq!(
+        refusals, 2,
+        "expected both admission refusals — the spawn-time one and the \
+         growth-time one. A change in that count means this guard is looking at \
+         different code than it was written for"
+    );
+}
+
+/// The guard above must fire on the shape the defect actually had, and must not
+/// read a demotion arm as a refusal. Planted violation, per
+/// `.claude/rules/arch-guards-and-tests.md` § "A source-scanning guard is only
+/// as good as the spellings it knows".
+#[test]
+fn the_admission_refusal_guard_catches_the_wrong_variant() {
+    let planted = "        let admitted = self.admit_to_gpu(model_id, delta_mb);\n\
+        \x20       if !admitted {\n\
+        \x20           return Err(SwarmError::ServiceUnavailable(format!(\n\
+        \x20               \"{} layers of {} need more than this node has left\",\n\
+        \x20               layers, model_id.0,\n\
+        \x20           )));\n\
+        \x20       }\n";
+    let blocks = admission_refusal_blocks(planted);
+    assert_eq!(
+        blocks.len(),
+        1,
+        "the block finder must see the planted refusal"
+    );
+    assert!(
+        blocks[0].1.contains("SwarmError::ServiceUnavailable"),
+        "and must hand the guard the body carrying the wrong variant — a finder \
+         that returned an empty body would keep the guard green for ever"
+    );
+
+    // Null control: a demotion arm refuses nothing and must not be read as a
+    // refusal, or the guard would forbid falling back to the processor.
+    let innocent = "        if !admitted {\n\
+        \x20           self.place_on_cpu(model_id);\n\
+        \x20       }\n";
+    let blocks = admission_refusal_blocks(innocent);
+    assert_eq!(blocks.len(), 1, "the arm is still found...");
+    assert!(
+        !blocks[0].1.contains("return Err(SwarmError::"),
+        "...but carries no refusal, so the guard skips it"
+    );
+}
+
 /// **Both inference outages withdraw through ONE predicate, and the stall
 /// threshold is one constant.**
 ///

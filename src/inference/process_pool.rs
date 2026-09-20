@@ -3210,16 +3210,40 @@ impl ModelProcessPool {
             self.admit_to_cpu(model_id, delta_mb)
         };
         if !admitted {
-            return Err(SwarmError::ServiceUnavailable(format!(
+            // Its own variant, not `ServiceUnavailable`, for the same reason
+            // the spawn-time refusal in `get_or_spawn` uses it: this is OUR
+            // memory budget declining, and it is the one local failure the
+            // router re-plans with no remote segment involved. Typed as
+            // `ServiceUnavailable` the refusal read as "a peer could not
+            // serve" (`router::remote_peer_could_not_serve`), so
+            // `local_memory_refused_the_load` answered false, no re-plan was
+            // earned and no `note_local_memory_refusal` was recorded — a node
+            // holding every shard 503'd a model the swarm had nine holders for
+            // (measured on the live node 2026-09-20). Report #019 is this same
+            // defect on the worker-IPC path; the GROWTH path was written before
+            // the variant existed and was missed when it arrived.
+            //
+            // The Display of both variants is `Service unavailable: {0}`, so
+            // nothing a caller or a peer reads changes.
+            //
+            // The figure must come from the budget that actually refused:
+            // `admit_to_gpu` charges `vram_reserved_mb` and `admit_to_cpu`
+            // charges `ram_reserved_mb`, and reading the RAM map for a card
+            // refusal reported "its worker is already holding 0 MB" while the
+            // card held 6.8 GB.
+            let held_mb = if on_gpu {
+                &self.vram_reserved_mb
+            } else {
+                &self.ram_reserved_mb
+            }
+            .get(model_id)
+            .map(|v| *v)
+            .unwrap_or(0);
+            return Err(SwarmError::LocalMemoryUnavailable(format!(
                 "{} layers {}..{} of {} need about {} MB more than this node has left \
                  (its worker is already holding {} MB) — another holder will have to \
                  take that part",
-                layers,
-                segment.0,
-                segment.1,
-                model_id.0,
-                delta_mb,
-                self.ram_reserved_mb.get(model_id).map(|v| *v).unwrap_or(0),
+                layers, segment.0, segment.1, model_id.0, delta_mb, held_mb,
             )));
         }
         handle.record_charged_segment(segment, delta_mb);
