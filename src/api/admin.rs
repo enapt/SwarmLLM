@@ -103,11 +103,31 @@ pub fn serialize_peer_to_json(
                 .ok()
                 .map(|ours| ours.distance_ms(&theirs))
         });
+    // ...and the figure the prediction should actually be judged against.
+    //
+    // `latency_ms` above is the last sample, and the measurable round trip is
+    // application-level: it carries the remote event loop's scheduling delay
+    // and is bimodal — 3-8 ms or 118-158 ms against a peer whose ICMP round
+    // trip is ~1 ms. The coordinate is deliberately NOT fed that; it is fed
+    // `LatencyFilter`'s windowed MINIMUM. So a listing that shows the sample
+    // beside the prediction invites exactly the comparison the design says not
+    // to make, and the pair could not answer the question it exists for.
+    //
+    // `samples` rides with it because a minimum over two samples and one over
+    // forty are not the same claim, and nothing else on this row says which.
+    let (measured_min_rtt_ms, rtt_samples) = state
+        .metrics
+        .network_coord_samples
+        .get(&peer.node_id)
+        .map(|f| (f.min(), f.len()))
+        .unwrap_or((None, 0));
     let mut obj = serde_json::json!({
         "node_id": format!("{}", peer.node_id),
         "nickname": nickname,
         "latency_ms": peer.latency_ms,
         "predicted_rtt_ms": predicted_rtt_ms,
+        "measured_min_rtt_ms": measured_min_rtt_ms,
+        "rtt_samples": rtt_samples,
         "trust_score": peer.trust_score,
         "healthy": healthy,
         "gpu": peer.capability.as_ref().and_then(|c| c.gpu.as_ref().map(|g| &g.name)),
