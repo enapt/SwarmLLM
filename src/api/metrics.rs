@@ -22,6 +22,26 @@ pub(crate) const LATENCY_SAMPLE_MAX_AGE: Duration = Duration::from_secs(600);
 /// One builder for both stats payloads (the admin endpoint and the WebSocket
 /// tick), because those two have diverged before and a traffic figure that
 /// differs between the page and the API is worse than none.
+/// What is left of the measured total after every named category.
+///
+/// `None` when the named categories exceed the total, which means the figures
+/// were taken at different instants rather than that nothing else is on the
+/// wire. Reporting `0` there claimed exactly that while 72 MB was in flight
+/// (2026-09-21), so this refuses instead — an attribution that cannot account
+/// for itself says so.
+///
+/// **The categories legitimately LEAD the transport total**, so `None` is
+/// expected mid-transfer and is not a fault: a shard chunk is counted when it
+/// is handed to the network layer, while the transport counts it once it has
+/// actually been written, encrypted and muxed. Measured on a rig serving a
+/// shard: `shard_served_bytes` reached 8 MB against a transport total of
+/// 433 KB, and the remainder reappeared (447 KB, against 34 MB served) within
+/// seconds of the transfer settling. It is a lag of seconds on lifetime
+/// counters, not a permanent skew.
+fn residual(total: u64, named: u64) -> Option<u64> {
+    total.checked_sub(named)
+}
+
 pub fn network_traffic_json(shared: &crate::daemon::SharedState) -> serde_json::Value {
     let Some(bw) = shared.metrics.bandwidth.current() else {
         // Absent, not zero: a node that is not counting and a node that is
@@ -29,9 +49,23 @@ pub fn network_traffic_json(shared: &crate::daemon::SharedState) -> serde_json::
         // could not tell those apart from outside.
         return serde_json::Value::Null;
     };
+    // ⚠ The TOTALS are read live, not from `bw`.
+    //
+    // `current()` is a snapshot taken on the health-monitor tick, while the
+    // per-category counters below are read now. Mixing the two makes the
+    // remainder a difference between two instants: measured 2026-09-21 on a
+    // node serving a shard, `shard_served_bytes` (live, 83.9 MB) exceeded
+    // `out_bytes` (snapshot, 51.2 MB) and the remainder saturated to **0** —
+    // reporting "nothing else on the wire" while 72 MB was in flight. A
+    // residual that can read zero because its own numerator is stale is worse
+    // than no residual. The RATES still come from `bw`, which is the only
+    // thing two readings are needed for.
+    let totals = shared.metrics.bandwidth.totals();
+    let in_bytes = totals.map_or(bw.inbound_bytes, |t| t.inbound_bytes);
+    let out_bytes = totals.map_or(bw.outbound_bytes, |t| t.outbound_bytes);
     let mut out = serde_json::json!({
-        "in_bytes": bw.inbound_bytes,
-        "out_bytes": bw.outbound_bytes,
+        "in_bytes": in_bytes,
+        "out_bytes": out_bytes,
         "in_bytes_per_sec": bw.inbound_bytes_per_sec,
         "out_bytes_per_sec": bw.outbound_bytes_per_sec,
         // Is some of the above other people's traffic passing through?
@@ -61,6 +95,26 @@ pub fn network_traffic_json(shared: &crate::daemon::SharedState) -> serde_json::
     // AND that per-message overhead — which is why it is named for what it is
     // rather than presented as a category. An attribution that quietly absorbs
     // what it cannot explain is the thing being fixed.
+    // The one category the existing cap actually covers, so its scope is
+    // checkable rather than merely documented.
+    if let Some(obj) = out.as_object_mut() {
+        obj.insert(
+            "shard_served_bytes".into(),
+            shared
+                .metrics
+                .shard_bytes_out
+                .load(std::sync::atomic::Ordering::Relaxed)
+                .into(),
+        );
+        obj.insert(
+            "shard_fetched_bytes".into(),
+            shared
+                .metrics
+                .shard_bytes_in
+                .load(std::sync::atomic::Ordering::Relaxed)
+                .into(),
+        );
+    }
     if let Some(g) = shared.metrics.gossip.totals() {
         let by_topic: Vec<serde_json::Value> = g
             .by_topic
@@ -73,14 +127,26 @@ pub fn network_traffic_json(shared: &crate::daemon::SharedState) -> serde_json::
             obj.insert("gossip_sent_bytes".into(), g.sent_bytes.into());
             obj.insert("gossip_recv_bytes".into(), g.recv_bytes.into());
             obj.insert("gossip_by_topic".into(), by_topic.into());
-            obj.insert(
-                "other_out_bytes".into(),
-                bw.outbound_bytes.saturating_sub(g.sent_bytes).into(),
-            );
-            obj.insert(
-                "other_in_bytes".into(),
-                bw.inbound_bytes.saturating_sub(g.recv_bytes).into(),
-            );
+            // The remainder is what is left after EVERY named category, or it
+            // silently re-counts them and the split stops adding up.
+            let shard_out = shared
+                .metrics
+                .shard_bytes_out
+                .load(std::sync::atomic::Ordering::Relaxed);
+            let shard_in = shared
+                .metrics
+                .shard_bytes_in
+                .load(std::sync::atomic::Ordering::Relaxed);
+            // Absent rather than zero when the named categories exceed the
+            // total — the same rule the totals themselves follow. That can
+            // still happen benignly: a chunk can land between reading the
+            // transport counters and reading the shard ones.
+            if let Some(v) = residual(out_bytes, g.sent_bytes + shard_out) {
+                obj.insert("other_out_bytes".into(), v.into());
+            }
+            if let Some(v) = residual(in_bytes, g.recv_bytes + shard_in) {
+                obj.insert("other_in_bytes".into(), v.into());
+            }
         }
     }
     out
@@ -202,6 +268,53 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
             bw.outbound_bytes
         );
     }
+
+    // The same bytes, split by what they were FOR. Graphable beside the total
+    // above, which is the form an operator chasing their connection actually
+    // needs — two reports had to reach it by elimination instead.
+    //
+    // Gossip is emitted only once some has been sent: a `Family` has no rows
+    // until a label set exists, so a zero here would mean "not counted yet" as
+    // often as "none sent" (gotcha #582). Shard bytes are our own atomics at a
+    // choke point we control, so their zero is a real zero and always emitted.
+    if let Some(g) = shared.metrics.gossip.totals() {
+        let _ = writeln!(
+            buf,
+            "# HELP swarmllm_gossip_bytes_total Bytes of gossip by topic and direction \
+             (message length only — framing and encryption are in the transport total)"
+        );
+        let _ = writeln!(buf, "# TYPE swarmllm_gossip_bytes_total counter");
+        for (topic, sent, recv) in &g.by_topic {
+            // Prometheus label values escape backslash, quote and newline; a
+            // topic name carries none of those, but escaping is the contract
+            // rather than a property of today's names.
+            let t = topic.replace('\\', "\\\\").replace('"', "\\\"");
+            let _ = writeln!(
+                buf,
+                "swarmllm_gossip_bytes_total{{topic=\"{t}\",direction=\"out\"}} {sent}"
+            );
+            let _ = writeln!(
+                buf,
+                "swarmllm_gossip_bytes_total{{topic=\"{t}\",direction=\"in\"}} {recv}"
+            );
+        }
+    }
+    let _ = writeln!(
+        buf,
+        "# HELP swarmllm_shard_bytes_total Bytes of model shards served to peers and \
+         fetched from them — the ONLY traffic resources.max_bandwidth_mbps throttles"
+    );
+    let _ = writeln!(buf, "# TYPE swarmllm_shard_bytes_total counter");
+    let _ = writeln!(
+        buf,
+        "swarmllm_shard_bytes_total{{direction=\"out\"}} {}",
+        shared.metrics.shard_bytes_out.load(Ordering::Relaxed)
+    );
+    let _ = writeln!(
+        buf,
+        "swarmllm_shard_bytes_total{{direction=\"in\"}} {}",
+        shared.metrics.shard_bytes_in.load(Ordering::Relaxed)
+    );
 
     // swarmllm_shards_hosted (gauge)
     let local_shards = count_local_shards(shared);
@@ -714,5 +827,36 @@ mod tests {
         // Stale 9.5s entry must be filtered; only the two fresh values remain.
         assert_eq!(kept.len(), 2);
         assert!(kept.iter().all(|&v| v < 1.0));
+    }
+}
+
+#[cfg(test)]
+mod traffic_split_tests {
+    use super::residual;
+
+    /// The ordinary case: the named categories are part of the total, and what
+    /// is left is reported.
+    #[test]
+    fn the_remainder_is_what_the_named_categories_do_not_account_for() {
+        assert_eq!(residual(1000, 400), Some(600));
+        assert_eq!(residual(1000, 1000), Some(0), "fully accounted for is zero");
+    }
+
+    /// **The defect this exists for.** The transport total is a snapshot taken
+    /// on the health-monitor tick; the per-category counters are read now. On a
+    /// node serving a shard the live shard counter read 83.9 MB against a
+    /// snapshot total of 51.2 MB, and a saturating subtraction reported
+    /// `other_out_bytes: 0` — "nothing else is on the wire" — while 72 MB was
+    /// in flight. Measured 2026-09-21.
+    #[test]
+    fn a_stale_total_reports_no_remainder_rather_than_zero() {
+        assert_eq!(
+            residual(51_159_190, 83_886_080),
+            None,
+            "named exceeding the total means the figures disagree about WHEN, \
+             not that the remainder is empty"
+        );
+        // One byte over is still a disagreement, not a zero remainder.
+        assert_eq!(residual(1000, 1001), None);
     }
 }

@@ -263,6 +263,9 @@ impl NetworkManager {
                 self.pending_shard_responses
                     .insert(ticket, (std::time::Instant::now(), channel));
                 let net_tx = self.internal_cmd_tx.clone();
+                // Moved into the task so the count happens where the bytes are,
+                // off the swarm event loop.
+                let shared_for_count = self.shared_state.clone();
                 tokio::spawn(async move {
                     let (data, total_size) = match prepared {
                         Some((path, offset, chunk_size, model_id, shard_index)) => {
@@ -293,7 +296,16 @@ impl NetworkManager {
                                 }
                             }
                             match resp {
-                                SwarmResponse::ShardData(sr) => (sr.data, sr.total_size),
+                                SwarmResponse::ShardData(sr) => {
+                                    // Counted HERE, beside the throttle, so the
+                                    // figure and the cap can never describe
+                                    // different sets of bytes.
+                                    shared_for_count.metrics.shard_bytes_out.fetch_add(
+                                        sr.data.len() as u64,
+                                        std::sync::atomic::Ordering::Relaxed,
+                                    );
+                                    (sr.data, sr.total_size)
+                                }
                                 _ => (Vec::new(), 0),
                             }
                         }
@@ -597,6 +609,10 @@ impl NetworkManager {
                     total_size = data.total_size,
                     "Received shard data chunk"
                 );
+                self.shared_state
+                    .metrics
+                    .shard_bytes_in
+                    .fetch_add(data.data.len() as u64, std::sync::atomic::Ordering::Relaxed);
                 // Route to AcquisitionManager — always clean up tracking state
                 // NET-C1: Look up by OutboundRequestId for correct correlation
                 if let Some((_, shard_id)) = self.pending_shard_requests.remove(&request_id) {

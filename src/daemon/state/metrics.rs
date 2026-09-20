@@ -236,6 +236,26 @@ pub struct MetricsProviders {
     /// the first gossip message. Both answer `None` rather than zero when
     /// nothing is counting, for the reason in `BandwidthMeter::totals`.
     pub gossip: Arc<crate::network::bandwidth::GossipMeter>,
+    /// Shard bytes this node has SERVED to peers, and received from them.
+    ///
+    /// The one category an operator can already act on: `shard_upload_mbps` —
+    /// what `resources.max_bandwidth_mbps` sets — throttles exactly this and
+    /// nothing else. Counting it makes the cap's scope checkable instead of
+    /// documented, which is the whole complaint behind field reports
+    /// 2026-09-11 and 2026-09-20; the second bounded it by counting a log line
+    /// because there was no counter.
+    ///
+    /// Plain atomics rather than a meter: unlike gossip and the transport
+    /// totals, these are OUR OWN bytes at a choke point we control, so there is
+    /// no registry to parse and no "is anything counting?" ambiguity. Zero
+    /// here genuinely means zero.
+    ///
+    /// Written off the swarm event loop, in the spawned task that already does
+    /// the disk read and the throttle sleep (gotcha #11), and on the inbound
+    /// response path. Never from the tensor-forward path, which is deliberately
+    /// outside the cap and outside this.
+    pub shard_bytes_out: std::sync::atomic::AtomicU64,
+    pub shard_bytes_in: std::sync::atomic::AtomicU64,
 }
 
 /// How long a channel may keep refusing messages before the next drop is
