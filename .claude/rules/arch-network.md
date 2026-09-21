@@ -454,6 +454,46 @@ silently break at the wire if duplicated:
   prefix-sniff helper used by API + frontend to route between v2 and
   the legacy 8-char path.
 
+## Gossip says what CHANGED, to everyone — and what one peer lacks, to that peer
+
+Three rules, all paid for on 2026-09-21 by measuring a node that held no models
+and served nothing while spending ~2.6 Mbit/s.
+
+- **Publish on CHANGE, never per item per tick.** `broadcast_region_summary`
+  emitted one message per known model plus one per `(model, region)` demand
+  entry every 30 s, unconditionally. `swarm/regions` carried **87 messages a
+  second inbound at 557 bytes each** — a message-RATE problem, which no payload
+  shrink would have touched. Change-gate on a digest of what is being
+  ASSERTED, and **exclude any timestamp**: fold the clock in and every message
+  reads as changed, so the gate suppresses nothing while looking right in
+  review.
+- **Gossip only what this node MEASURED.** `region_demand` is written by the
+  inbound `ModelDemandGossip` handler, so publishing from it re-originated the
+  whole swarm's demand table under our own id every 30 s, refreshing timestamps
+  that should have been ageing out. `local_region_demand` is the measured half
+  and the only one that may be published; the two have different key types, so
+  the wrong one no longer compiles at the publish site. Guard:
+  `the_demand_we_gossip_is_the_demand_we_measured`. **GossipSub already carries
+  the originator's message to every node — re-originating is not what makes it
+  travel.**
+- **A newcomer is caught up POINT TO POINT.** Gossip cannot be addressed to one
+  peer, so answering "someone new connected" with a topic-wide re-announce made
+  one join cost every node a full copy of every manifest: inbound on
+  `swarm/models` went **98.8 → 398.3 KB/s** after a single node joined, and
+  peers reconnect about once every 80 s. `NetworkCommand::SendDirectMessage`
+  carries any `SwarmMessage` over request_response and the receiver dispatches
+  it exactly as a gossiped one, so this needs no new variant and no feature
+  bit. The periodic full round stays as the bound on a catch-up that failed.
+  BitTorrent draws the same line: BEP 3's bitfield goes to the peer that
+  connected, and only per-piece `have` deltas go to everyone.
+
+⚠ **`NodeCapabilityUpdate` is still broadcast every tick and is NOT
+change-gated** — `ram_available_mb`, `disk_available_mb` and `uptime_seconds`
+move every tick, so it cannot be gated as it stands without separating the
+stable fields from the volatile ones. → `docs/FUTURE_WORK.md` #91.
+
+→ `docs/invariants/network.md`
+
 ## Network coordinates: publish them rough, feed them a MINIMUM
 
 `NodeCapability.coord` is a Vivaldi coordinate so any reader can estimate the

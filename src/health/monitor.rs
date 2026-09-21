@@ -32,6 +32,16 @@ pub struct HealthMonitor {
     /// Peers that were connected when manifests last went out. A peer outside
     /// this set has never been sent our picture, and gets a full round.
     peers_told_about_manifests: std::collections::HashSet<crate::types::NodeId>,
+    /// What this node last said about each `(region, model)`, so a regional
+    /// summary is re-broadcast when it CHANGES rather than once per model per
+    /// tick. Measured 2026-09-21: an idle node holding no models published 114
+    /// gossip messages every 30 s, of which 20 were these — about models it
+    /// does not have, to say a number that had not moved.
+    last_announced_region_summaries:
+        std::collections::HashMap<(String, crate::types::ModelId), u64>,
+    /// Counter for the periodic full regional re-announce, the anti-entropy
+    /// half of the same scheme.
+    region_summary_counter: u64,
     /// Per-acquisition liveness tracker: model_id → (last bytes seen, when seen).
     /// If bytes don't advance for STALL_THRESHOLD, the acquisition is reconciled
     /// against disk (mark Complete if shards present, Failed otherwise).
@@ -80,17 +90,44 @@ const WSL_FIREWALL_GRACE: std::time::Duration = std::time::Duration::from_secs(3
 /// interval scales with it.
 ///
 /// Each holder's counter is phased independently, so a model held by several
-/// nodes is re-announced several times per cycle — and a newly connected peer
-/// triggers a full round outright, which is the case this interval would
-/// otherwise have to be short for.
+/// nodes is re-announced several times per cycle. A newly connected peer does
+/// NOT force one: it is sent our picture directly instead, because a broadcast
+/// cannot be addressed to the one node that needs it.
 const FULL_REANNOUNCE_EVERY_TICKS: u64 = 10;
 
-/// Is this a round where every manifest goes out, changed or not?
+/// Is this a round where every manifest is BROADCAST, changed or not?
 ///
 /// Pure so the truth table can be asserted directly — the expensive half of
 /// `broadcast_manifests` is one `if` and it is the whole fix.
-fn manifest_round_is_full(counter: u64, new_peer_arrived: bool) -> bool {
-    new_peer_arrived || counter.is_multiple_of(FULL_REANNOUNCE_EVERY_TICKS)
+///
+/// This used to take `new_peer_arrived` and return true for it. That answered a
+/// question about one peer with a message to every peer, which is the whole
+/// cost being removed here; the newcomer now gets a direct catch-up.
+fn manifest_round_is_full(counter: u64) -> bool {
+    counter.is_multiple_of(FULL_REANNOUNCE_EVERY_TICKS)
+}
+
+/// What this node is ASSERTING about a `(region, model)`, independent of when
+/// it says it.
+///
+/// `timestamp_ms` is deliberately excluded: it moves every tick by
+/// construction, so folding it in would make every summary look changed and
+/// suppress nothing — the shape of a change-gate that silently does not gate.
+fn region_summary_digest(summary: &crate::types::RegionShardSummary) -> u64 {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(summary.region.as_bytes());
+    hasher.update(summary.model_id.0.as_bytes());
+    hasher.update(&summary.region_node_count.to_le_bytes());
+    for (index, count) in &summary.shard_counts {
+        hasher.update(&index.to_le_bytes());
+        hasher.update(&count.to_le_bytes());
+    }
+    let digest = hasher.finalize();
+    u64::from_le_bytes(
+        digest.as_bytes()[..8]
+            .try_into()
+            .expect("a blake3 digest is 32 bytes, so its first 8 are always there"),
+    )
 }
 
 /// Does this one manifest go on the wire this round?
@@ -216,6 +253,8 @@ impl HealthMonitor {
             last_announced_manifests: std::collections::HashMap::new(),
             manifest_announce_counter: 0,
             peers_told_about_manifests: std::collections::HashSet::new(),
+            last_announced_region_summaries: std::collections::HashMap::new(),
+            region_summary_counter: 0,
             acq_liveness: std::collections::HashMap::new(),
             peer_dl_liveness: std::collections::HashMap::new(),
             started_at: std::time::Instant::now(),
@@ -1044,12 +1083,17 @@ impl HealthMonitor {
             .iter()
             .map(|p| p.key().clone())
             .collect();
-        let new_peer_arrived = connected
-            .difference(&self.peers_told_about_manifests)
-            .next()
-            .is_some();
-
-        let full_round = manifest_round_is_full(self.manifest_announce_counter, new_peer_arrived);
+        // A newcomer no longer forces a BROADCAST round — it is caught up
+        // directly below. Gossip has no way to address one peer, so answering
+        // "someone new is here" with a topic-wide re-announce made a single
+        // join cost every node in the swarm a full copy of every manifest.
+        // Measured 2026-09-21: `swarm/models` inbound went from 98.8 KB/s
+        // settled to 398.3 KB/s for minutes after ONE node joined, and with
+        // peers reconnecting about once every 80 s that spike was most of the
+        // steady state. BitTorrent draws this line in the same place — BEP 3's
+        // bitfield goes to the peer that connected, over that connection, and
+        // only per-piece `have` deltas are sent to everyone afterwards.
+        let full_round = manifest_round_is_full(self.manifest_announce_counter);
 
         // Models we published OR hold a shard of. A publisher-only filter here
         // silently stopped model discovery for the whole swarm — see
@@ -1069,7 +1113,7 @@ impl HealthMonitor {
             .retain(|id, _| still_gossiped.contains(id));
 
         let mut sent = 0usize;
-        for manifest in manifests {
+        for manifest in &manifests {
             // `manifest_hash` covers the shard table AND every tensor entry
             // (`ModelManifest::compute_hash`), so it is the right answer to
             // "would a peer see anything new?".
@@ -1108,24 +1152,76 @@ impl HealthMonitor {
             }
         }
 
-        // Only a round that actually went out may claim to have reached these
-        // peers; otherwise a failed send would latch the newcomer as told.
-        if sent > 0 || full_round {
+        // Catch up anyone we have never announced to, point to point.
+        //
+        // This is the anti-entropy the per-tick flood used to pay for, aimed at
+        // the node that actually needs it. `SwarmRequest::Message` carries any
+        // `SwarmMessage` over request_response and the receiver dispatches it
+        // exactly as it would a gossiped one, so an older peer needs no new
+        // message type and no feature bit to understand this.
+        let mut caught_up = std::collections::HashSet::new();
+        for node_id in connected.difference(&self.peers_told_about_manifests) {
+            let Some(target_peer_bytes) =
+                self.shared_state.resolve_connected_peer_id_bytes(node_id)
+            else {
+                // Not resolvable right now — leave it out of the told set so
+                // the next tick tries again.
+                continue;
+            };
+            let mut delivered = 0usize;
+            for manifest in &manifests {
+                let msg = NetworkCommand::SendDirectMessage {
+                    target_peer_bytes: target_peer_bytes.clone(),
+                    message: SwarmMessage::ModelManifest(manifest.clone()),
+                    delivery_request_id: None,
+                };
+                if self.network_tx.send(msg).await.is_err() {
+                    break;
+                }
+                delivered += 1;
+            }
+            if delivered == manifests.len() {
+                caught_up.insert(node_id.clone());
+            }
+            tracing::debug!(
+                peer = %node_id,
+                delivered,
+                of = manifests.len(),
+                "DIAG: caught a new peer up on manifests directly"
+            );
+        }
+
+        // Only peers actually reached may be recorded as told; a peer left out
+        // is retried next tick rather than latched as done.
+        if full_round {
             self.peers_told_about_manifests = connected;
+        } else {
+            self.peers_told_about_manifests.extend(caught_up);
+            self.peers_told_about_manifests
+                .retain(|node_id| connected.contains(node_id));
         }
         if sent > 0 {
-            tracing::debug!(
-                sent,
-                full_round,
-                new_peer_arrived,
-                "DIAG: broadcast model manifests"
-            );
+            tracing::debug!(sent, full_round, "DIAG: broadcast model manifests");
         }
     }
 
-    /// Broadcast compact per-region shard summaries and demand gossip.
-    /// Published on every 30s tick to `swarm/regions` topic.
-    async fn broadcast_region_summary(&self) {
+    /// Broadcast per-region shard summaries and demand gossip to `swarm/regions`.
+    ///
+    /// **A summary goes out when it CHANGES**, with a full re-announce every
+    /// `FULL_REANNOUNCE_EVERY_TICKS` rounds — the same anti-entropy
+    /// `broadcast_manifests` uses, and for the same reason. Publishing one
+    /// message per known model per tick made `swarm/regions` the busiest topic
+    /// on the swarm by message count: measured 2026-09-21 on a node holding no
+    /// models at all, 114 published messages every 30 s and 87 arriving per
+    /// SECOND, at 557 bytes each. That is a message-rate problem, not a payload
+    /// one, and the duplicate factor was 1.31 — GossipSub's deduplication was
+    /// working; there was simply that much being said.
+    ///
+    /// **Demand comes from `local_region_demand`, never `region_demand`** — see
+    /// the note on those fields. The merged map holds what every peer told us,
+    /// and re-publishing it re-originated the whole swarm's demand table under
+    /// this node's id every 30 s.
+    async fn broadcast_region_summary(&mut self) {
         // Determine our region — skip if unknown. Canonical resolver (configured
         // region wins, else IP-detected) so this gossip agrees with the capacity
         // announcement and WS region counts.
@@ -1136,6 +1232,11 @@ impl HealthMonitor {
 
         let our_id = self.shared_state.identity.node_id().clone();
         let now_ms = crate::types::unix_now_ms();
+
+        self.region_summary_counter += 1;
+        let full_round = self
+            .region_summary_counter
+            .is_multiple_of(FULL_REANNOUNCE_EVERY_TICKS);
 
         // Count same-region peers (including self)
         let mut region_node_count: u32 = 1; // self
@@ -1195,28 +1296,53 @@ impl HealthMonitor {
                 timestamp_ms: now_ms,
             };
 
-            // Also update our own shared state
+            // Our own shared state is updated every tick regardless: it is a
+            // local map, it costs nothing, and only the BROADCAST is rationed.
             let key = (our_region.clone(), manifest.id.clone());
             self.shared_state
                 .region_shard_summaries
-                .insert(key, summary.clone());
+                .insert(key.clone(), summary.clone());
+
+            // Has anything we would be ASSERTING moved? The digest deliberately
+            // excludes `timestamp_ms`, which changes every tick by construction
+            // and would suppress nothing.
+            let digest = region_summary_digest(&summary);
+            if !full_round && self.last_announced_region_summaries.get(&key) == Some(&digest) {
+                continue;
+            }
 
             let msg = NetworkCommand::Broadcast(SwarmMessage::RegionShardSummary(summary));
             if let Err(e) = self.network_tx.send(msg).await {
                 tracing::debug!(error = %e, model = %manifest.id, "Failed to broadcast region summary");
+                // A send that failed is not a thing the swarm has been told, so
+                // it must be retried next tick rather than remembered as done.
+                continue;
             }
+            self.last_announced_region_summaries.insert(key, digest);
         }
 
-        // Broadcast demand gossip for models with recent requests
-        for entry in self.shared_state.region_demand.iter() {
-            let (model_id, region) = entry.key();
+        // Anything we no longer summarise stops being remembered, so a model
+        // that goes away and comes back is announced as the change it is.
+        self.last_announced_region_summaries
+            .retain(|(region, _), _| region == &our_region);
+
+        // Demand gossip for models THIS node has served recently.
+        //
+        // `local_region_demand` rather than `region_demand`: the latter is the
+        // merged view, so iterating it re-published every peer's demand under
+        // our own id — 93 messages every 30 s on a node that had served nothing
+        // at all, each round refreshing timestamps that should have been
+        // ageing out. GossipSub already carries the originator's message to
+        // every node; re-originating it was never what made it travel.
+        for entry in self.shared_state.local_region_demand.iter() {
+            let model_id = entry.key();
             let rate = *entry.value();
             if rate < 0.01 {
                 continue; // Don't gossip negligible demand
             }
             let demand = crate::types::ModelDemandGossip {
                 model_id: model_id.clone(),
-                region: region.clone(),
+                region: our_region.clone(),
                 decayed_rate: rate,
                 window_requests: 0, // Raw count already decayed into rate
                 publisher: our_id.clone(),
@@ -1981,23 +2107,99 @@ mod tests {
         );
     }
 
-    /// A full round is reached two ways, and the peer one is what lets the
-    /// periodic one be rare. Without it the interval would have to be short
-    /// enough for a newcomer to wait out, which is the cost being removed.
+    fn summary_for_test(
+        model: &str,
+        counts: &[(u32, u32)],
+        nodes: u32,
+        timestamp_ms: u64,
+    ) -> crate::types::RegionShardSummary {
+        crate::types::RegionShardSummary {
+            region: "TH".to_string(),
+            model_id: crate::types::ModelId(model.to_string()),
+            shard_counts: counts.to_vec(),
+            region_node_count: nodes,
+            publisher: crate::types::NodeId([3u8; 32]),
+            timestamp_ms,
+        }
+    }
+
+    /// The sibling regression, measured on the live swarm 2026-09-21: one
+    /// summary per KNOWN model per 30 s tick, from every node, whether or not
+    /// anything had moved. `swarm/regions` was carrying 87 messages a second
+    /// inbound at 557 bytes each — a message-rate problem that no payload
+    /// shrink would have touched.
+    ///
+    /// ⚠ The digest must ignore `timestamp_ms`. Including it is the failure
+    /// this asserts against: every summary would read as changed, the gate
+    /// would suppress nothing, and the bug would look fixed in review.
     #[test]
-    fn a_new_peer_forces_a_full_round_without_waiting_for_the_timer() {
-        // Mid-cycle: nothing periodic is due.
+    fn an_unchanged_region_summary_is_not_rebroadcast() {
+        let first = summary_for_test("llama-3.2-3b", &[(0, 2), (1, 2)], 3, 1_000);
+        let later = summary_for_test("llama-3.2-3b", &[(0, 2), (1, 2)], 3, 9_999_999);
+        assert_eq!(
+            region_summary_digest(&first),
+            region_summary_digest(&later),
+            "the same claim made at a later moment is the same claim — if the \
+             clock moves the digest, the change-gate suppresses nothing"
+        );
+    }
+
+    /// Everything the summary actually asserts must move the digest, or a real
+    /// regional change would be silently withheld from the swarm — which is
+    /// worse than the traffic it saves.
+    #[test]
+    fn a_changed_region_summary_still_goes_out() {
+        let base = summary_for_test("llama-3.2-3b", &[(0, 2), (1, 2)], 3, 1_000);
+        for (label, other) in [
+            (
+                "a shard gained a holder",
+                summary_for_test("llama-3.2-3b", &[(0, 2), (1, 3)], 3, 1_000),
+            ),
+            (
+                "a shard lost its last holder",
+                summary_for_test("llama-3.2-3b", &[(0, 2), (1, 0)], 3, 1_000),
+            ),
+            (
+                "the region gained a node",
+                summary_for_test("llama-3.2-3b", &[(0, 2), (1, 2)], 4, 1_000),
+            ),
+            (
+                "a different model entirely",
+                summary_for_test("qwen3-1.7b", &[(0, 2), (1, 2)], 3, 1_000),
+            ),
+        ] {
+            assert_ne!(
+                region_summary_digest(&base),
+                region_summary_digest(&other),
+                "{label} — this is information the swarm needs"
+            );
+        }
+    }
+
+    /// A newcomer must NOT force a broadcast round any more.
+    ///
+    /// It used to, and that is what made a single join cost every node in the
+    /// swarm a full copy of every manifest — measured 2026-09-21 as
+    /// `swarm/models` inbound going 98.8 → 398.3 KB/s after one node joined,
+    /// with peers reconnecting about once every 80 s. The newcomer is caught up
+    /// point to point instead, which is where BitTorrent puts the bitfield.
+    #[test]
+    fn only_the_timer_forces_a_full_broadcast_round() {
         assert!(
-            !manifest_round_is_full(FULL_REANNOUNCE_EVERY_TICKS + 1, false),
+            !manifest_round_is_full(FULL_REANNOUNCE_EVERY_TICKS + 1),
             "an ordinary tick between full rounds sends only what changed"
         );
         assert!(
-            manifest_round_is_full(FULL_REANNOUNCE_EVERY_TICKS + 1, true),
-            "someone we have never announced to is connected — send the lot now"
+            manifest_round_is_full(FULL_REANNOUNCE_EVERY_TICKS),
+            "the anti-entropy round still fires on its own, so a peer that \
+             missed a direct catch-up converges within one interval"
         );
+        // The bound that makes the direct catch-up safe to rely on: a peer the
+        // point-to-point send never reached still gets everything within one
+        // full-round interval, and nothing about a join changes that.
         assert!(
-            manifest_round_is_full(FULL_REANNOUNCE_EVERY_TICKS, false),
-            "the anti-entropy round still fires on its own"
+            (1..FULL_REANNOUNCE_EVERY_TICKS).all(|counter| !manifest_round_is_full(counter)),
+            "no tick inside the interval broadcasts everything"
         );
     }
 

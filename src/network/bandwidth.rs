@@ -272,9 +272,39 @@ impl InferenceTraffic {
 pub struct GossipTotals {
     pub sent_bytes: u64,
     pub recv_bytes: u64,
-    /// `(topic, sent, received)`, sorted by topic so a reader diffing two
-    /// snapshots is not comparing a reordered list.
-    pub by_topic: Vec<(String, u64, u64)>,
+    /// Per topic, sorted by topic so a reader diffing two snapshots is not
+    /// comparing a reordered list.
+    pub by_topic: Vec<GossipTopicTotals>,
+}
+
+/// One topic's gossip counters: the bytes, and the message counts that explain
+/// them.
+///
+/// Bytes alone cannot say *why* a topic is expensive, and answering that by
+/// estimating message sizes against publish intervals is how an investigation
+/// arrives at a number an order of magnitude out. GossipSub already keeps the
+/// counts; this reads them:
+///
+/// - `published` is what this node ORIGINATED; `sent` is that plus every copy
+///   it forwarded for the mesh. `sent / published` is therefore what relaying
+///   costs us, and a node whose `sent` dwarfs its `published` is paying for
+///   other nodes' chatter rather than its own — which changes who the fix
+///   belongs to.
+/// - `recv_unfiltered` counts every copy the mesh delivered, `recv` only those
+///   that survived duplicate filtering. Their ratio is the duplicate factor:
+///   the one number that separates "the messages are big" from "the messages
+///   are frequent" from "every peer sends us the same one".
+/// - `sent_bytes / sent` is the average message size, which is what decides
+///   whether a payload belongs on a broadcast topic at all.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct GossipTopicTotals {
+    pub topic: String,
+    pub sent_bytes: u64,
+    pub recv_bytes: u64,
+    pub sent: u64,
+    pub published: u64,
+    pub recv: u64,
+    pub recv_unfiltered: u64,
 }
 
 impl Default for GossipMeter {
@@ -351,40 +381,82 @@ impl GossipMeter {
 /// Prefix this node registers GossipSub's metrics under.
 const GOSSIP_METRIC_PREFIX: &str = "gossip";
 
-/// The two rows read out of it, already carrying the prefix and OpenMetrics'
+/// The rows read out of it, already carrying the prefix and OpenMetrics'
 /// counter suffix.
-const GOSSIP_SENT_METRIC: &str = "gossip_topic_msg_sent_bytes_total";
-const GOSSIP_RECV_METRIC: &str = "gossip_topic_msg_recv_bytes_total";
+///
+/// ⚠ `..._recv_counts_total` is NOT a prefix of
+/// `..._recv_counts_unfiltered_total` — `_unfiltered` follows `counts`, not
+/// `_total` — so prefix matching cannot confuse the two. That is a property of
+/// upstream's spelling rather than of this list, and getting it wrong reads as
+/// a plausible wrong number instead of an absent one, so
+/// `the_duplicate_counter_is_not_read_as_the_filtered_one` pins it.
+const GOSSIP_SENT_BYTES_METRIC: &str = "gossip_topic_msg_sent_bytes_total";
+const GOSSIP_RECV_BYTES_METRIC: &str = "gossip_topic_msg_recv_bytes_total";
+const GOSSIP_SENT_METRIC: &str = "gossip_topic_msg_sent_counts_total";
+const GOSSIP_PUBLISHED_METRIC: &str = "gossip_topic_msg_published_total";
+const GOSSIP_RECV_METRIC: &str = "gossip_topic_msg_recv_counts_total";
+const GOSSIP_RECV_UNFILTERED_METRIC: &str = "gossip_topic_msg_recv_counts_unfiltered_total";
 
-/// Sum GossipSub's per-topic byte counters.
+/// Which field a matched row lands in.
+#[derive(Clone, Copy)]
+enum GossipSlot {
+    SentBytes,
+    RecvBytes,
+    Sent,
+    Published,
+    Recv,
+    RecvUnfiltered,
+}
+
+/// Sum GossipSub's per-topic counters, bytes and messages alike.
 ///
 /// The label is `hash`, which for an `IdentTopic` — the only kind this node
 /// publishes — is the topic name itself, so the breakdown is readable.
 fn parse_gossip_totals(text: &str) -> Option<GossipTotals> {
     use std::collections::BTreeMap;
-    let mut per_topic: BTreeMap<String, (u64, u64)> = BTreeMap::new();
+    // The unfiltered row is matched FIRST: it is the one name that shares a
+    // leading run with another, and ordering makes that safe here rather than
+    // relying on the reader to notice.
+    const ROWS: &[(&str, GossipSlot)] = &[
+        (GOSSIP_RECV_UNFILTERED_METRIC, GossipSlot::RecvUnfiltered),
+        (GOSSIP_SENT_BYTES_METRIC, GossipSlot::SentBytes),
+        (GOSSIP_RECV_BYTES_METRIC, GossipSlot::RecvBytes),
+        (GOSSIP_SENT_METRIC, GossipSlot::Sent),
+        (GOSSIP_PUBLISHED_METRIC, GossipSlot::Published),
+        (GOSSIP_RECV_METRIC, GossipSlot::Recv),
+    ];
+
+    let mut per_topic: BTreeMap<String, GossipTopicTotals> = BTreeMap::new();
     let mut saw_any = false;
 
     for line in text.lines() {
-        let (rest, is_sent) = if let Some(rest) = line.strip_prefix(GOSSIP_SENT_METRIC) {
-            (rest, true)
-        } else if let Some(rest) = line.strip_prefix(GOSSIP_RECV_METRIC) {
-            (rest, false)
-        } else {
+        let Some((rest, slot)) = ROWS
+            .iter()
+            .find_map(|(name, slot)| line.strip_prefix(name).map(|rest| (rest, *slot)))
+        else {
             continue;
         };
         let Some((labels, value)) = rest.rsplit_once(' ') else {
             continue;
         };
-        let Ok(bytes) = value.trim().parse::<f64>() else {
+        let Ok(value) = value.trim().parse::<f64>() else {
             continue;
         };
+        let value = value as u64;
         let topic = extract_topic_label(labels).unwrap_or("unknown").to_string();
-        let slot = per_topic.entry(topic).or_insert((0, 0));
-        if is_sent {
-            slot.0 += bytes as u64;
-        } else {
-            slot.1 += bytes as u64;
+        let entry = per_topic
+            .entry(topic.clone())
+            .or_insert_with(|| GossipTopicTotals {
+                topic,
+                ..Default::default()
+            });
+        match slot {
+            GossipSlot::SentBytes => entry.sent_bytes += value,
+            GossipSlot::RecvBytes => entry.recv_bytes += value,
+            GossipSlot::Sent => entry.sent += value,
+            GossipSlot::Published => entry.published += value,
+            GossipSlot::Recv => entry.recv += value,
+            GossipSlot::RecvUnfiltered => entry.recv_unfiltered += value,
         }
         saw_any = true;
     }
@@ -393,10 +465,10 @@ fn parse_gossip_totals(text: &str) -> Option<GossipTotals> {
         return None;
     }
     let mut totals = GossipTotals::default();
-    for (topic, (sent, recv)) in per_topic {
-        totals.sent_bytes += sent;
-        totals.recv_bytes += recv;
-        totals.by_topic.push((topic, sent, recv));
+    for (_, topic) in per_topic {
+        totals.sent_bytes += topic.sent_bytes;
+        totals.recv_bytes += topic.recv_bytes;
+        totals.by_topic.push(topic);
     }
     Some(totals)
 }
@@ -511,6 +583,18 @@ gossip_topic_msg_sent_bytes_total{hash=\"swarmllm/health\"} 4096
 # TYPE gossip_topic_msg_recv_bytes counter
 gossip_topic_msg_recv_bytes_total{hash=\"swarmllm/models\"} 1650000
 gossip_topic_msg_recv_bytes_total{hash=\"swarmllm/health\"} 2048
+# HELP gossip_topic_msg_sent_counts Number of gossip messages sent to each topic.
+# TYPE gossip_topic_msg_sent_counts counter
+gossip_topic_msg_sent_counts_total{hash=\"swarmllm/models\"} 900
+# HELP gossip_topic_msg_published Number of gossip messages published to each topic.
+# TYPE gossip_topic_msg_published counter
+gossip_topic_msg_published_total{hash=\"swarmllm/models\"} 60
+# HELP gossip_topic_msg_recv_counts_unfiltered Messages received before filtering.
+# TYPE gossip_topic_msg_recv_counts_unfiltered counter
+gossip_topic_msg_recv_counts_unfiltered_total{hash=\"swarmllm/models\"} 1200
+# HELP gossip_topic_msg_recv_counts Messages received after filtering.
+# TYPE gossip_topic_msg_recv_counts counter
+gossip_topic_msg_recv_counts_total{hash=\"swarmllm/models\"} 300
 # EOF
 ";
 
@@ -522,11 +606,66 @@ gossip_topic_msg_recv_bytes_total{hash=\"swarmllm/health\"} 2048
         assert_eq!(
             got.by_topic,
             vec![
-                ("swarmllm/health".to_string(), 4096, 2048),
-                ("swarmllm/models".to_string(), 825_000, 1_650_000),
+                GossipTopicTotals {
+                    topic: "swarmllm/health".to_string(),
+                    sent_bytes: 4096,
+                    recv_bytes: 2048,
+                    ..Default::default()
+                },
+                GossipTopicTotals {
+                    topic: "swarmllm/models".to_string(),
+                    sent_bytes: 825_000,
+                    recv_bytes: 1_650_000,
+                    sent: 900,
+                    published: 60,
+                    recv: 300,
+                    recv_unfiltered: 1200,
+                },
             ],
-            "sorted by topic, and sent/received paired per topic — the breakdown \
-             is the whole point, not just the total"
+            "sorted by topic, with the counts that explain the bytes beside them — \
+             the breakdown is the whole point, not just the total"
+        );
+    }
+
+    /// The two receive counters differ by one word in the middle of the name,
+    /// and reading one as the other yields a duplicate factor of exactly 1.0 —
+    /// a plausible number that says the opposite of the truth. Absent would be
+    /// safe; wrong is not, which is why this is pinned separately.
+    #[test]
+    fn the_duplicate_counter_is_not_read_as_the_filtered_one() {
+        let got = parse_gossip_totals(GOSSIP_SHAPE).expect("the counters must be found");
+        let models = got
+            .by_topic
+            .iter()
+            .find(|t| t.topic == "swarmllm/models")
+            .expect("the models topic is in the fixture");
+        assert_eq!(
+            models.recv, 300,
+            "the FILTERED count, not the unfiltered one"
+        );
+        assert_eq!(models.recv_unfiltered, 1200);
+        assert_ne!(
+            models.recv, models.recv_unfiltered,
+            "if these ever read equal from this fixture, prefix matching has \
+             collapsed the two and every duplicate factor reads 1.0"
+        );
+    }
+
+    /// `sent` counts forwarding as well as speaking, and telling the two apart
+    /// is what says whether a topic's cost is ours to fix or the swarm's.
+    #[test]
+    fn publishing_and_forwarding_are_counted_separately() {
+        let got = parse_gossip_totals(GOSSIP_SHAPE).expect("the counters must be found");
+        let models = got
+            .by_topic
+            .iter()
+            .find(|t| t.topic == "swarmllm/models")
+            .expect("the models topic is in the fixture");
+        assert_eq!(models.published, 60);
+        assert_eq!(models.sent, 900);
+        assert!(
+            models.sent > models.published,
+            "a node forwards more than it speaks; collapsing these hides that"
         );
     }
 
@@ -583,9 +722,17 @@ gossip_topic_msg_recv_bytes_total{hash=\"swarmllm/health\"} 2048
         });
 
         let text = meter.encoded_for_test();
+        // Every name the parser matches on, not just the pair it started with:
+        // this loop silently stopped covering the byte counters the moment the
+        // constants beside them were renamed, and a name upstream no longer
+        // registers reads as a category that is absent rather than wrong.
         for base in [
+            GOSSIP_SENT_BYTES_METRIC.trim_end_matches("_total"),
+            GOSSIP_RECV_BYTES_METRIC.trim_end_matches("_total"),
             GOSSIP_SENT_METRIC.trim_end_matches("_total"),
+            GOSSIP_PUBLISHED_METRIC.trim_end_matches("_total"),
             GOSSIP_RECV_METRIC.trim_end_matches("_total"),
+            GOSSIP_RECV_UNFILTERED_METRIC.trim_end_matches("_total"),
         ] {
             assert!(
                 text.lines().any(|l| {
@@ -621,7 +768,14 @@ gossip_topic_msg_recv_bytes_total{hash=\"swarmllm/health\"} 2048
         let got = parse_gossip_totals("gossip_topic_msg_sent_bytes_total{other=\"x\"} 512\n")
             .expect("the row is still ours");
         assert_eq!(got.sent_bytes, 512);
-        assert_eq!(got.by_topic, vec![("unknown".to_string(), 512, 0)]);
+        assert_eq!(
+            got.by_topic,
+            vec![GossipTopicTotals {
+                topic: "unknown".to_string(),
+                sent_bytes: 512,
+                ..Default::default()
+            }]
+        );
     }
 
     #[test]

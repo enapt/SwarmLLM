@@ -9602,3 +9602,68 @@ fn the_gossip_counters_come_from_the_same_crate_libp2p_uses() {
         versions
     );
 }
+
+/// What this node GOSSIPS as demand must be what it MEASURED, never the merged
+/// view it assembled from everyone else.
+///
+/// `region_demand` is written by the inbound `ModelDemandGossip` handler, so a
+/// publisher that iterates it re-originates every peer's demand under this
+/// node's id. Measured on the live swarm 2026-09-21: a probe node that had
+/// served zero requests and held zero models published ~93 demand messages
+/// every 30 s, all of it other people's traffic, each round refreshing
+/// timestamps that should have been ageing out. `swarm/regions` was carrying 87
+/// messages a second inbound as a result — at 557 bytes each, a message-rate
+/// problem that no payload shrink would have touched.
+///
+/// GossipSub already propagates the originator's message to every node;
+/// re-originating it was never what made it travel.
+#[test]
+fn the_demand_we_gossip_is_the_demand_we_measured() {
+    let src = std::fs::read_to_string("src/health/monitor.rs")
+        .expect("the gossip publisher lives in the health monitor");
+    let mut offenders = Vec::new();
+    for (line, text) in statements(&src) {
+        // `local_region_demand` contains the shorter name as a substring, so
+        // the check is for a read of the MERGED map specifically.
+        let reads_merged_map = text.contains(".region_demand")
+            && !text.contains(".local_region_demand")
+            && (text.contains(".iter()") || text.contains(".get("));
+        if reads_merged_map {
+            offenders.push(format!("src/health/monitor.rs:{line}: {}", text.trim()));
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "the health monitor must publish demand from `local_region_demand` (what \
+         this node measured), never from `region_demand` (what every peer told \
+         it). Publishing the merged map re-originates the whole swarm's demand \
+         table under this node's id every 30 s:\n{}",
+        offenders.join("\n")
+    );
+}
+
+/// The scan above must be able to see the mistake it forbids, in the shape the
+/// defect actually had — a `for … in self.shared_state.region_demand.iter()`
+/// that rustfmt may wrap across lines — and must NOT fire on the map it steers
+/// people towards, or the fix would read as the bug.
+#[test]
+fn the_demand_source_guard_catches_the_form_the_defect_took() {
+    let wrapped = "fn f() {\n    for entry in self\n        .shared_state\n        .region_demand\n        .iter()\n    {\n        let _ = entry;\n    }\n}\n";
+    assert!(
+        statements(wrapped)
+            .iter()
+            .any(|(_, t)| t.contains(".region_demand")
+                && !t.contains(".local_region_demand")
+                && t.contains(".iter()")),
+        "the guard cannot see a wrapped chain, which is the form the publisher had"
+    );
+    let fixed = "fn f() {\n    for entry in self.shared_state.local_region_demand.iter() {\n        let _ = entry;\n    }\n}\n";
+    assert!(
+        statements(fixed)
+            .iter()
+            .all(|(_, t)| !(t.contains(".region_demand")
+                && !t.contains(".local_region_demand")
+                && t.contains(".iter()"))),
+        "the guard must not fire on `local_region_demand`, or the fix reads as the bug"
+    );
+}

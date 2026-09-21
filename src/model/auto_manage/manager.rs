@@ -870,10 +870,36 @@ impl AutoShardManager {
             let old = if old.is_finite() { old } else { 0.0 };
             let new_rate = old * EMA_DECAY_WEIGHT + fresh as f64 * EMA_FRESH_WEIGHT;
             if new_rate > 0.001 {
-                self.shared_state.region_demand.insert(key, new_rate);
+                self.shared_state
+                    .region_demand
+                    .insert(key.clone(), new_rate);
             } else {
                 // Clean up negligible entries
                 self.shared_state.region_demand.remove(&key);
+            }
+
+            // The same EMA over OUR OWN counter only, kept apart from the
+            // merged view above because only this half is ours to gossip.
+            //
+            // `old` comes from this map rather than from `region_demand`, so a
+            // same-region peer's gossip cannot inflate the figure we then
+            // publish as our own measurement — which fed a region's traffic
+            // back into itself and made every entry immortal.
+            let (model_id, _) = key;
+            let own_old = self
+                .shared_state
+                .local_region_demand
+                .get(&model_id)
+                .map(|v| *v)
+                .filter(|v| v.is_finite())
+                .unwrap_or(0.0);
+            let own_rate = own_old * EMA_DECAY_WEIGHT + fresh as f64 * EMA_FRESH_WEIGHT;
+            if own_rate > 0.001 {
+                self.shared_state
+                    .local_region_demand
+                    .insert(model_id, own_rate);
+            } else {
+                self.shared_state.local_region_demand.remove(&model_id);
             }
         }
     }

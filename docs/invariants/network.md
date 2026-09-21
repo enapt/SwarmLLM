@@ -1646,3 +1646,108 @@ per 120 s is the best available anyway.
   fast observation (gotcha #502).
 - Nothing routed on coordinates as of 2026-09-21. A consumer must check
   `is_usable()` and fall back to `region`.
+
+## Gossip volume: what an idle node was actually saying (2026-09-21)
+
+`docs/FUTURE_WORK.md` #91 asked for the idle rate to be re-measured on a build
+carrying the 2026-09-20 manifest fix before sizing anything else. This is that
+measurement, and it moved the problem twice.
+
+### The instrument came first
+
+The byte counters alone could not answer *why* a topic was expensive, and
+estimating message sizes against publish intervals produced an answer an order
+of magnitude out — twice. GossipSub already keeps the counts; `GossipMeter` was
+reading two of its six families. `network/bandwidth.rs` now parses all six:
+
+| family | what it answers |
+|---|---|
+| `topic_msg_published` | what THIS node originated |
+| `topic_msg_sent_counts` | that plus everything it forwarded |
+| `topic_msg_recv_counts_unfiltered` | every copy the mesh delivered |
+| `topic_msg_recv_counts` | what survived duplicate filtering |
+| `topic_msg_{sent,recv}_bytes` | the bytes, as before |
+
+`sent / published` is what relaying costs; `unfiltered / recv` is the duplicate
+factor; `sent_bytes / sent` is the average message size. All three were guesses
+before, and each guess was wrong.
+
+### What it found
+
+A probe node holding no models and serving nothing, on the live swarm:
+
+```
+topic          pub/s  sent/s  recv/s  unfil/s   dup   KB/s in   B/msg
+swarm/regions   3.79  132.03   87.40   114.65  1.31      62.4      557
+swarm/models    0.03    6.90    5.99     7.79  1.30      98.8   12,993
+gossip total: 161.7 KB/s in, 157.4 KB/s out — ~2.6 Mbit/s to do nothing
+```
+
+Three conclusions, two of which contradicted the leading hypothesis:
+
+1. **Duplicates were never the problem.** The duplicate factor is 1.31;
+   GossipSub's deduplication was working. Tuning `mesh_n`, enabling IDONTWANT or
+   disabling `flood_publish` would each have bought almost nothing.
+2. **`swarm/regions` is a message-RATE problem**: 87 inbound per second at 557
+   bytes. The probe itself published 113.7 messages per 30 s tick — ~93
+   `ModelDemandGossip`, 20 `RegionShardSummary`, one wishlist — **about models
+   it did not hold, carrying demand it had never measured.**
+3. **`swarm/models` is a message-SIZE problem**: 13 KB per message, 6 per
+   second, because a manifest carries every shard's full tensor table.
+
+### The demand loop
+
+`region_demand` is written by the inbound `ModelDemandGossip` handler AND
+iterated wholesale by the publisher, which stamped `publisher: our_id` on every
+entry. So each node re-originated the union of everyone's demand every 30 s, and
+each round refreshed the timestamps the staleness check relies on — the entries
+could not age out. A node that had served zero requests published 93 of them.
+
+Fixed by splitting the two facts that shared one map: `local_region_demand`
+(what we measured, keyed by model, maintained by `decay_request_counts`) and
+`region_demand` (the merged view, still what scoring/pruning/wishlist read).
+The publisher reads only the former. The key types differ, so the old code does
+not compile at the publish site; `the_demand_we_gossip_is_the_demand_we_measured`
+guards the rest of the file.
+
+### The newcomer flood
+
+`broadcast_manifests` treated "a peer we have not announced to is connected" as
+a reason for a full BROADCAST round. Gossip cannot address one peer, so one join
+cost every node in the swarm a full copy of every manifest. Measured directly:
+restarting one probe took `swarm/models` inbound from 98.8 to **398.3 KB/s**,
+and peers reconnect about once every 80 s, so the spike was most of the steady
+state rather than an event.
+
+`NetworkCommand::SendDirectMessage` already carried any `SwarmMessage` over
+request_response, and `requests.rs`'s fall-through dispatches it exactly as a
+gossiped one — so the catch-up needed no new variant, no feature bit, and works
+against peers that predate it. The periodic full round remains as the bound on a
+catch-up that failed to land.
+
+BitTorrent's answer is the same shape and older: BEP 3 sends the bitfield to the
+peer that connected, over that connection, and broadcasts only per-piece `have`
+deltas afterwards; BEP 9 fetches torrent metadata on demand in 16 KiB blocks,
+verified against the infohash, rather than flooding it.
+
+### Verified, not assumed
+
+- Region summaries: published **3.79 → 0.08 msg/s**, the residual being the
+  designed 5-minute anti-entropy round.
+- The change-gate's null control: planting `timestamp_ms` into the digest turns
+  `an_unchanged_region_summary_is_not_rebroadcast` red, which is the exact way
+  this gate would silently stop gating.
+- The demand guard's null control: the pre-fix read planted back into
+  `health/monitor.rs` fails `the_demand_we_gossip_is_the_demand_we_measured`.
+- The catch-up path: `DIAG: caught a new peer up on manifests directly` observed
+  nine times with `delivered=1 of=1`.
+
+### Still open
+
+`NodeCapabilityUpdate` is broadcast every tick with no change gate.
+`uptime_seconds`, `ram_available_mb` and `disk_available_mb` move every tick, so
+it cannot be gated as it stands — the stable fields would have to be separated
+from the volatile ones, or the volatile ones sent rarely. And a manifest at 13 KB
+is still a broadcast payload; the BEP 9 shape (gossip `(model_id,
+manifest_hash)`, fetch the tensor table on demand, verify against the hash) is
+the remaining structural fix.

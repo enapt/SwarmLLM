@@ -723,7 +723,26 @@ pub struct SharedState {
     pub active_relay_circuits: DashMap<(libp2p::PeerId, libp2p::PeerId), std::time::Instant>,
     pub region_shard_summaries:
         DashMap<(String, crate::types::ModelId), crate::types::RegionShardSummary>,
+    /// Demand per `(model, region)` as this node currently believes it — the
+    /// MERGED view, our own measurements blended with every peer's gossip.
+    /// Read by auto-manage scoring, pruning and the wishlist, all of which want
+    /// the whole picture.
+    ///
+    /// ⚠ **Never publish from this map.** It is what we HEARD;
+    /// `local_region_demand` is what we MEASURED, and only the latter is ours
+    /// to assert. Re-publishing the merged view re-originated every peer's
+    /// demand under this node's id, which made the entries immortal (each round
+    /// refreshed their timestamps) and meant an idle node holding no models
+    /// published ~93 demand messages every 30 s about other people's traffic.
+    /// GossipSub already propagates the originator's message across the mesh;
+    /// re-originating it was never what made it travel.
     pub region_demand: DashMap<(crate::types::ModelId, String), f64>,
+    /// Demand this node MEASURED itself, per model, always for its own region:
+    /// the EMA of `models.model_request_counts`, maintained by
+    /// `auto_manage::manager::decay_request_counts` and read only by the health
+    /// monitor's gossip publisher. A node that has served nothing has nothing
+    /// here and so says nothing.
+    pub local_region_demand: DashMap<crate::types::ModelId, f64>,
     pub dht_query_tx: mpsc::Sender<crate::types::ModelId>,
 
     /// Persistent pipeline-stream client handle, installed by NetworkManager at
@@ -1229,6 +1248,7 @@ impl SharedState {
             )),
             region_shard_summaries: DashMap::new(),
             region_demand: DashMap::new(),
+            local_region_demand: DashMap::new(),
             dht_query_tx,
             shutdown_tx,
         });

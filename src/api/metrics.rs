@@ -126,11 +126,24 @@ pub fn network_traffic_json(shared: &crate::daemon::SharedState) -> serde_json::
         obj.insert("inference_in_bytes".into(), inf_in.into());
     }
     if let Some(g) = shared.metrics.gossip.totals() {
+        // The counts ride beside the bytes because bytes alone cannot say WHY a
+        // topic is expensive. `published` is what this node originated and
+        // `sent_msgs` is that plus what it forwarded, so the two together say
+        // whether the cost is ours or the swarm's; `recv_msgs_unfiltered`
+        // against `recv_msgs` is the duplicate factor.
         let by_topic: Vec<serde_json::Value> = g
             .by_topic
             .iter()
-            .map(|(topic, sent, recv)| {
-                serde_json::json!({ "topic": topic, "sent_bytes": sent, "recv_bytes": recv })
+            .map(|t| {
+                serde_json::json!({
+                    "topic": t.topic,
+                    "sent_bytes": t.sent_bytes,
+                    "recv_bytes": t.recv_bytes,
+                    "sent_msgs": t.sent,
+                    "published_msgs": t.published,
+                    "recv_msgs": t.recv,
+                    "recv_msgs_unfiltered": t.recv_unfiltered,
+                })
             })
             .collect();
         if let Some(obj) = out.as_object_mut() {
@@ -295,11 +308,12 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
              (message length only — framing and encryption are in the transport total)"
         );
         let _ = writeln!(buf, "# TYPE swarmllm_gossip_bytes_total counter");
-        for (topic, sent, recv) in &g.by_topic {
+        for topic in &g.by_topic {
+            let (sent, recv) = (topic.sent_bytes, topic.recv_bytes);
             // Prometheus label values escape backslash, quote and newline; a
             // topic name carries none of those, but escaping is the contract
             // rather than a property of today's names.
-            let t = topic.replace('\\', "\\\\").replace('"', "\\\"");
+            let t = topic.topic.replace('\\', "\\\\").replace('"', "\\\"");
             let _ = writeln!(
                 buf,
                 "swarmllm_gossip_bytes_total{{topic=\"{t}\",direction=\"out\"}} {sent}"
