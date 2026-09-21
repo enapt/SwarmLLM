@@ -173,6 +173,52 @@ pub struct SwarmCodec {
     /// between tensor and prefix-KV (the call site only attempts compression
     /// when the relevant flag is on, so a single threshold is fine).
     pub compress_threshold: usize,
+    /// Where distributed-inference bytes are counted, when this codec belongs
+    /// to a running node.
+    ///
+    /// The codec is the only place that sees what actually goes on the wire:
+    /// tensor payloads are zstd-compressed here when `compress_tensors` is on,
+    /// which it is by default, so a counter at the send site would report bytes
+    /// the interface never carried. `None` in `Default` and in tests, so the
+    /// codec stays constructible with no node behind it.
+    pub inference_traffic: Option<std::sync::Arc<crate::network::bandwidth::InferenceTraffic>>,
+}
+
+/// This protocol's own frame header: one tag byte and a four-byte big-endian
+/// length. Counted as part of a message's cost, and counted the same way in
+/// both directions — `read_wire_frame` has already consumed it by the time the
+/// body is in hand, so the read side adds it back rather than reporting a
+/// slightly smaller message than the write side did.
+const WIRE_FRAME_HEADER_LEN: usize = 5;
+
+/// Is this request distributed-inference traffic, for the traffic split?
+///
+/// **Shard transfers are deliberately excluded** — they have their own counters
+/// at the choke point that applies `resources.max_bandwidth_mbps`, and counting
+/// them twice would make the categories exceed the transport total and push the
+/// remainder to absent.
+///
+/// **`RelayedTensor` is excluded too**: it is somebody else's inference passing
+/// through this node, already reported as `relay_bytes_forwarded`. Folding it in
+/// here would tell a user their own work was using a line that relaying was.
+fn counts_as_inference(req: &SwarmRequest) -> bool {
+    match req {
+        SwarmRequest::TensorPayload(_) => true,
+        // The fast path a node holding a whole model serves on: the reply comes
+        // back a token at a time as ordinary messages, and on such a node it is
+        // most of what inference costs. Leaving it out reported a busy server as
+        // nearly idle.
+        SwarmRequest::Message(m) => matches!(
+            **m,
+            crate::types::SwarmMessage::StreamingToken(_)
+                | crate::types::SwarmMessage::RemoteGenerateRequest(_)
+                | crate::types::SwarmMessage::ResendTokens(_)
+                | crate::types::SwarmMessage::CancelInference(_)
+        ),
+        SwarmRequest::ShardTransfer(_)
+        | SwarmRequest::RelayedTensor(_)
+        | SwarmRequest::PrefixKvFetch(_) => false,
+    }
 }
 
 impl Default for SwarmCodec {
@@ -182,6 +228,7 @@ impl Default for SwarmCodec {
             compress_prefix_kv: false,
             compress_level: 1,
             compress_threshold: 1024,
+            inference_traffic: None,
         }
     }
 }
@@ -490,8 +537,12 @@ impl request_response::Codec for SwarmCodec {
         T: AsyncRead + Unpin + Send,
     {
         let (tag, buf) = read_wire_frame(io, "read_request", REQUEST_LARGE_TAGS).await?;
+        // The bytes this frame cost, before `buf` is moved or decompressed.
+        // `read_wire_frame` has already consumed the header, so add it back —
+        // the write side counted it and the two must describe the same message.
+        let wire_len = (buf.len() + WIRE_FRAME_HEADER_LEN) as u64;
 
-        match tag {
+        let req = match tag {
             WIRE_TAG_JSON => serde_json::from_slice(&buf)
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e)),
             WIRE_TAG_TENSOR => Ok(SwarmRequest::TensorPayload(buf)),
@@ -505,7 +556,13 @@ impl request_response::Codec for SwarmCodec {
                 io::ErrorKind::InvalidData,
                 format!("Unknown wire tag: 0x{:02x}", unknown),
             )),
+        }?;
+        if let Some(traffic) = &self.inference_traffic {
+            if counts_as_inference(&req) {
+                traffic.record_in(wire_len);
+            }
         }
+        Ok(req)
     }
 
     async fn read_response<T>(
@@ -592,6 +649,10 @@ impl request_response::Codec for SwarmCodec {
     where
         T: AsyncWrite + Unpin + Send,
     {
+        // Classified before the match consumes it. The frame length is what
+        // goes on the wire — after compression, which is the whole reason this
+        // counting lives here rather than at the send site.
+        let is_inference = self.inference_traffic.is_some() && counts_as_inference(&req);
         // Build the complete frame in a single buffer before writing.
         // Quinn's QUIC stream has no BufWriter and flush() is a no-op,
         // so a single write_all() is more reliable than multiple small writes.
@@ -606,6 +667,11 @@ impl request_response::Codec for SwarmCodec {
             other => build_json_frame(&other, "message")?,
         };
         let frame_len = frame.len();
+        if is_inference {
+            if let Some(traffic) = &self.inference_traffic {
+                traffic.record_out(frame_len as u64);
+            }
+        }
         tracing::trace!(frame_len, "DIAG: codec write_request start");
         io.write_all(&frame).await?;
         tracing::trace!(frame_len, "DIAG: codec write_request done");
@@ -884,6 +950,137 @@ mod compression {
 mod tests {
     use super::compression::{compress_tensor, decompress_tensor};
     use super::*;
+    // The codec methods are trait methods; the tests below call them directly.
+    use libp2p::request_response::Codec as _;
+
+    /// **Why this counting lives in the codec at all.**
+    ///
+    /// The obvious home is the send site, and it is wrong: `compress_tensors`
+    /// defaults on, so the bytes that travel are the zstd frame, not the
+    /// activation the send site holds. This asserts the recorded figure is the
+    /// COMPRESSED frame — i.e. materially smaller than the payload — because an
+    /// over-count would not merely misreport inference, it would be subtracted
+    /// from the transport total and corrupt `other_*`.
+    #[tokio::test]
+    async fn inference_bytes_are_counted_as_the_compressed_frame() {
+        use futures::io::Cursor;
+        let traffic = std::sync::Arc::new(crate::network::bandwidth::InferenceTraffic::default());
+        let mut codec = SwarmCodec {
+            inference_traffic: Some(traffic.clone()),
+            ..SwarmCodec::default()
+        };
+        assert!(codec.compress_tensors, "the default this test is about");
+
+        // Highly compressible, and far above `compress_threshold`.
+        let payload = vec![0xA5u8; 64 * 1024];
+        let mut sink = Cursor::new(Vec::new());
+        codec
+            .write_request(
+                &StreamProtocol::new(PROTOCOL_ID),
+                &mut sink,
+                SwarmRequest::TensorPayload(payload.clone()),
+            )
+            .await
+            .unwrap();
+
+        let (sent, _) = traffic.totals();
+        let wire = sink.into_inner();
+        assert_eq!(
+            sent,
+            wire.len() as u64,
+            "what is recorded must be what was written"
+        );
+        assert!(
+            sent < payload.len() as u64 / 2,
+            "the frame is compressed ({sent} bytes for a {} byte payload); a \
+             counter at the send site would have recorded the payload and \
+             reported more traffic than the interface ever carried",
+            payload.len()
+        );
+    }
+
+    /// The two directions must describe the same message, or a node's own split
+    /// disagrees with its peer's about one exchange. The read side has already
+    /// consumed the frame header, so it has to add it back.
+    #[tokio::test]
+    async fn the_two_directions_count_a_message_the_same() {
+        use futures::io::Cursor;
+        let out = std::sync::Arc::new(crate::network::bandwidth::InferenceTraffic::default());
+        let r#in = std::sync::Arc::new(crate::network::bandwidth::InferenceTraffic::default());
+        let mut writer = SwarmCodec {
+            inference_traffic: Some(out.clone()),
+            ..SwarmCodec::default()
+        };
+        let mut reader = SwarmCodec {
+            inference_traffic: Some(r#in.clone()),
+            ..SwarmCodec::default()
+        };
+
+        let mut sink = Cursor::new(Vec::new());
+        writer
+            .write_request(
+                &StreamProtocol::new(PROTOCOL_ID),
+                &mut sink,
+                SwarmRequest::TensorPayload(vec![0x5Au8; 40_000]),
+            )
+            .await
+            .unwrap();
+        let wire = sink.into_inner();
+
+        let mut source = Cursor::new(wire.clone());
+        let got = reader
+            .read_request(&StreamProtocol::new(PROTOCOL_ID), &mut source)
+            .await
+            .unwrap();
+        assert!(matches!(got, SwarmRequest::TensorPayload(_)));
+
+        let (sent, _) = out.totals();
+        let (_, received) = r#in.totals();
+        assert_eq!(sent, wire.len() as u64);
+        assert_eq!(
+            received, sent,
+            "the receiver must account for the same bytes the sender did"
+        );
+    }
+
+    /// Shard transfers have their own counters at the choke point that applies
+    /// the bandwidth cap. Counting them here as well would make the named
+    /// categories exceed the transport total and push the remainder to absent —
+    /// the exact failure the first version of this split shipped with.
+    #[tokio::test]
+    async fn a_shard_transfer_is_not_counted_as_inference() {
+        use futures::io::Cursor;
+        let traffic = std::sync::Arc::new(crate::network::bandwidth::InferenceTraffic::default());
+        let mut codec = SwarmCodec {
+            inference_traffic: Some(traffic.clone()),
+            ..SwarmCodec::default()
+        };
+        let mut sink = Cursor::new(Vec::new());
+        codec
+            .write_request(
+                &StreamProtocol::new(PROTOCOL_ID),
+                &mut sink,
+                SwarmRequest::ShardTransfer(ShardRequest {
+                    shard_id: crate::types::ShardId {
+                        model_id: ModelId("m".into()),
+                        index: 0,
+                    },
+                    chunk_offset: 0,
+                    chunk_size: 1,
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            traffic.totals(),
+            (0, 0),
+            "a shard transfer is counted elsewhere; counting it twice breaks the remainder"
+        );
+        assert!(
+            !sink.into_inner().is_empty(),
+            "control: something really was written"
+        );
+    }
 
     #[test]
     fn relayed_tensor_encode_decode_roundtrip() {

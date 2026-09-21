@@ -114,6 +114,11 @@ pub fn build_behaviour(
     // reference with interior mutability rather than `&mut Registry`, so the
     // swarm builder's borrow of its own registry is untouched.
     gossip_meter: Option<&crate::network::bandwidth::GossipMeter>,
+    // Where the codec records the inference half of the same split. Cloned into
+    // the codec rather than borrowed, because the codec outlives this call and
+    // is cloned per connection — see `network::bandwidth::InferenceTraffic` for
+    // why it cannot be counted at the send sites.
+    inference_traffic: Option<std::sync::Arc<crate::network::bandwidth::InferenceTraffic>>,
 ) -> Result<SwarmBehaviour, Box<dyn std::error::Error>> {
     let local_peer_id = local_key.public().to_peer_id();
 
@@ -213,9 +218,13 @@ pub fn build_behaviour(
             compress_prefix_kv: net_cfg.prefix_kv_compression,
             compress_level: net_cfg.tensor_compress_level,
             compress_threshold: net_cfg.tensor_compress_threshold,
+            inference_traffic,
         }
     } else {
-        SwarmCodec::default()
+        SwarmCodec {
+            inference_traffic,
+            ..SwarmCodec::default()
+        }
     };
     let request_response = request_response::Behaviour::with_codec(
         codec,
@@ -399,6 +408,7 @@ mod tests {
             None,
             150,
             None,
+            None,
         );
         assert!(result.is_ok());
     }
@@ -425,6 +435,7 @@ mod tests {
             None,
             150,
             None,
+            None,
         );
         assert!(result.is_ok());
     }
@@ -445,6 +456,7 @@ mod tests {
             0,
             None,
             150,
+            None,
             None,
         );
         assert!(result.is_ok());
@@ -473,6 +485,7 @@ mod tests {
             0,
             None,
             150,
+            None,
             None,
         );
         let behaviour = result.unwrap();

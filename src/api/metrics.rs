@@ -87,14 +87,17 @@ pub fn network_traffic_json(shared: &crate::daemon::SharedState) -> serde_json::
     // WHICH traffic, not just how much — the ask two field reports made after
     // each had to answer it by elimination instead.
     //
-    // ⚠ These are GossipSub's own message-length counters, so they are a floor
-    // on gossip's share of the wire, not its exact cost: the framing, the Noise
-    // encryption and the yamux headers around each message are counted by the
-    // transport totals above and not here. `other_*` is therefore the
-    // REMAINDER, including shard transfers, inference, DHT, identify and ping
-    // AND that per-message overhead — which is why it is named for what it is
-    // rather than presented as a category. An attribution that quietly absorbs
-    // what it cannot explain is the thing being fixed.
+    // ⚠ The gossip figures are GossipSub's own message-length counters, so they
+    // are a floor on gossip's share of the wire, not its exact cost: the
+    // framing, the Noise encryption and the yamux headers around each message
+    // are counted by the transport totals above and not here. The inference
+    // figures beside them DO include this protocol's own frame header, because
+    // they are counted in our codec where the real frame is in hand. `other_*`
+    // is therefore the REMAINDER — DHT, identify, ping, relaying for others, and
+    // the per-message transport overhead of everything above — which is why it
+    // is named for what it is rather than presented as a category. An
+    // attribution that quietly absorbs what it cannot explain is the thing
+    // being fixed.
     // The one category the existing cap actually covers, so its scope is
     // checkable rather than merely documented.
     if let Some(obj) = out.as_object_mut() {
@@ -114,6 +117,13 @@ pub fn network_traffic_json(shared: &crate::daemon::SharedState) -> serde_json::
                 .load(std::sync::atomic::Ordering::Relaxed)
                 .into(),
         );
+        // The category a user actually means by "is my line doing WORK?" —
+        // tensor forwards, the results that answer them, and the tokens a
+        // fast-path reply streams back. Counted in the codec, on the frame that
+        // really goes out, because tensor payloads are compressed on the way.
+        let (inf_out, inf_in) = shared.metrics.inference.totals();
+        obj.insert("inference_out_bytes".into(), inf_out.into());
+        obj.insert("inference_in_bytes".into(), inf_in.into());
     }
     if let Some(g) = shared.metrics.gossip.totals() {
         let by_topic: Vec<serde_json::Value> = g
@@ -141,10 +151,11 @@ pub fn network_traffic_json(shared: &crate::daemon::SharedState) -> serde_json::
             // total — the same rule the totals themselves follow. That can
             // still happen benignly: a chunk can land between reading the
             // transport counters and reading the shard ones.
-            if let Some(v) = residual(out_bytes, g.sent_bytes + shard_out) {
+            let (inf_out, inf_in) = shared.metrics.inference.totals();
+            if let Some(v) = residual(out_bytes, g.sent_bytes + shard_out + inf_out) {
                 obj.insert("other_out_bytes".into(), v.into());
             }
-            if let Some(v) = residual(in_bytes, g.recv_bytes + shard_in) {
+            if let Some(v) = residual(in_bytes, g.recv_bytes + shard_in + inf_in) {
                 obj.insert("other_in_bytes".into(), v.into());
             }
         }
@@ -858,5 +869,26 @@ mod traffic_split_tests {
         );
         // One byte over is still a disagreement, not a zero remainder.
         assert_eq!(residual(1000, 1001), None);
+    }
+
+    /// **The remainder must subtract EVERY named category.** Forgetting one
+    /// does not leave a gap in that category — it silently inflates `other_*`,
+    /// which is the figure a user reads as "unexplained", so the split appears
+    /// to add up while pointing at the wrong thing.
+    ///
+    /// Asserted as arithmetic rather than by scanning the source: a guard over
+    /// prose breaks on a reflow (gotcha #615), and this is the property that
+    /// actually matters.
+    #[test]
+    fn a_category_left_out_of_the_remainder_inflates_it_by_exactly_itself() {
+        let (total, gossip, shard, inference) = (10_000u64, 1_000u64, 2_000u64, 3_000u64);
+        assert_eq!(
+            residual(total, gossip + shard + inference),
+            Some(4_000),
+            "every named category subtracted"
+        );
+        // The shape of the mistake: inference omitted, and the remainder is
+        // wrong by precisely the traffic it was meant to explain.
+        assert_eq!(residual(total, gossip + shard), Some(7_000));
     }
 }

@@ -511,6 +511,31 @@ different set of bytes depending on where it landed.
   else. Its name promised more, which is how a user set it to 1 Mbps, measured
   11, and concluded it did nothing.
 
+**WHICH traffic, not just how much.** Both field reports had to reason by
+elimination — "inference is zero, serving is bounded by a log line, the rest
+must be announcements" — so the total is split by category in
+`api::metrics::network_traffic_json`, which all three stats surfaces share:
+
+| Category | Counted where | Exact or a floor |
+|---|---|---|
+| `gossip_*` (+ `gossip_by_topic`) | GossipSub's own per-topic counters | floor — message length, not framing |
+| `shard_served_bytes` / `shard_fetched_bytes` | the choke point that applies the bandwidth cap | exact, and makes the cap's scope checkable |
+| `inference_out_bytes` / `inference_in_bytes` | **the codec** (`network/protocol/mod.rs`) | exact, including this protocol's 5-byte frame header |
+| `other_*` | the remainder | DHT, identify, ping, relaying for others, and everything above's transport overhead |
+
+- **Inference is counted in the CODEC, not at the send sites**, because
+  `network.tensor_compression` defaults ON: the send site holds the
+  uncompressed activation, so a counter there reports bytes the interface never
+  carried. An over-count is worse than a gap — the remainder is the total MINUS
+  the named categories, so it corrupts `other_*` too. `counts_as_inference`
+  deliberately excludes shard transfers (counted elsewhere; twice would break
+  the sum) and `RelayedTensor` (somebody else's work, already
+  `relay_bytes_forwarded`).
+- **The remainder reports ABSENT rather than zero** when the named categories
+  exceed the total. That happens benignly — the total is a health-monitor
+  snapshot and the categories are read live — and the first version floored it
+  instead, reporting `other_out_bytes: 0` while 72 MB was in flight.
+
 ## Inference Pipeline
 
 ### Split Inference Engine

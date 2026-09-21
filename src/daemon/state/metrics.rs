@@ -256,6 +256,27 @@ pub struct MetricsProviders {
     /// outside the cap and outside this.
     pub shard_bytes_out: std::sync::atomic::AtomicU64,
     pub shard_bytes_in: std::sync::atomic::AtomicU64,
+    /// Distributed-inference bytes on the wire: tensor forwards and the results
+    /// that answer them, plus the tokens a fast-path reply streams back.
+    ///
+    /// The category a user actually asks about — "is my line being used for
+    /// WORK, or for chatter?" — and the one that was hardest to answer by
+    /// elimination, because it is bursty and looks like nothing at all when the
+    /// node is idle. Gossip and shard serving between them left it inside
+    /// `other_*` with the DHT, identify and ping, which are constant and tiny;
+    /// a user watching a 4 Mbps remainder could not tell which it was.
+    ///
+    /// Counted in the CODEC, not at the send sites, because
+    /// `network.tensor_compression` defaults on and the send site holds the
+    /// uncompressed activation — see [`InferenceTraffic`] for why an over-count
+    /// here would corrupt `other_*` rather than merely misreport itself.
+    ///
+    /// ⚠ **`resources.max_bandwidth_mbps` does NOT cover this.** That cap is
+    /// shard serving only, and the reason to count these separately is so that
+    /// stays visible rather than implied.
+    ///
+    /// [`InferenceTraffic`]: crate::network::bandwidth::InferenceTraffic
+    pub inference: Arc<crate::network::bandwidth::InferenceTraffic>,
 }
 
 /// How long a channel may keep refusing messages before the next drop is

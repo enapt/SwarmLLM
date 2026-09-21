@@ -1013,6 +1013,7 @@ impl SharedState {
                 gossip: Arc::new(crate::network::bandwidth::GossipMeter::new()),
                 shard_bytes_out: std::sync::atomic::AtomicU64::new(0),
                 shard_bytes_in: std::sync::atomic::AtomicU64::new(0),
+                inference: Arc::new(crate::network::bandwidth::InferenceTraffic::default()),
             },
             credits: CreditPool {
                 credit_balance: Arc::new(RwLock::new(crate::types::CreditBalance {

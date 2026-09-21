@@ -32,7 +32,7 @@
 //! landed. Upstream's wrapper is applied in exactly one place, after all of
 //! them.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 
 /// Cumulative bytes in and out since the daemon started.
@@ -220,6 +220,51 @@ impl BandwidthMeter {
 pub struct GossipMeter {
     registry: Mutex<prometheus_client::registry::Registry>,
     armed: AtomicBool,
+}
+
+/// Distributed-inference bytes on the wire, counted in the codec.
+///
+/// **Why the codec and not the send sites.** The obvious place is where a
+/// forward is handed to the transport (`dispatch_tensor_payload`), and it is
+/// wrong: `network.tensor_compression` defaults to **true**, so the bytes that
+/// actually travel are the zstd-compressed frame, not the activation payload
+/// the send site holds. Counting there reports more than the interface ever
+/// carried — and since `other_*` is the total MINUS the named categories, an
+/// over-count does not just misreport inference, it corrupts the remainder.
+/// The codec is the one place the real frame is in hand, on both directions.
+///
+/// Counted as the whole wire frame including this protocol's own 5-byte header,
+/// consistently in both directions. Noise, yamux and TCP/QUIC overhead sit
+/// underneath and stay in `other_*`.
+///
+/// **What is deliberately NOT counted here**: shard transfers, which have their
+/// own counters at the choke point that applies `resources.max_bandwidth_mbps`
+/// — counting them twice would make the split stop adding up — and
+/// `RelayedTensor`, which is somebody else's inference passing through and is
+/// already reported as `relay_bytes_forwarded`.
+#[derive(Debug, Default)]
+pub struct InferenceTraffic {
+    out: AtomicU64,
+    inbound: AtomicU64,
+}
+
+impl InferenceTraffic {
+    pub fn record_out(&self, bytes: u64) {
+        self.out.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    pub fn record_in(&self, bytes: u64) {
+        self.inbound.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    /// `(sent, received)`. Zero genuinely means zero — unlike the transport and
+    /// gossip meters, nothing here can be "not counting yet".
+    pub fn totals(&self) -> (u64, u64) {
+        (
+            self.out.load(Ordering::Relaxed),
+            self.inbound.load(Ordering::Relaxed),
+        )
+    }
 }
 
 /// Gossip bytes, in total and per topic.
