@@ -115,6 +115,7 @@ pub fn serialize_peer_to_json(
     //
     // `samples` rides with it because a minimum over two samples and one over
     // forty are not the same claim, and nothing else on this row says which.
+    let decode_terms = state.observed_decode_terms(&peer.node_id);
     let (measured_min_rtt_ms, rtt_samples) = state
         .metrics
         .network_coord_samples
@@ -128,6 +129,13 @@ pub fn serialize_peer_to_json(
         "predicted_rtt_ms": predicted_rtt_ms,
         "measured_min_rtt_ms": measured_min_rtt_ms,
         "rtt_samples": rtt_samples,
+        // What a VISIT to this peer costs before any layer is computed, and
+        // what each layer adds — present only where its samples spanned enough
+        // segment widths to tell the two apart. Absent is the ordinary case and
+        // means the peer is priced by the proportional coefficient alone, as
+        // every peer was before this was measured. → `PeerSpeed::decode_terms`.
+        "decode_fixed_ms_per_visit": decode_terms.map(|(fixed, _)| fixed),
+        "decode_ms_per_layer": decode_terms.map(|(_, per_layer)| per_layer),
         "trust_score": peer.trust_score,
         "healthy": healthy,
         "gpu": peer.capability.as_ref().and_then(|c| c.gpu.as_ref().map(|g| &g.name)),

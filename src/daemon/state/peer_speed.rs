@@ -81,6 +81,102 @@ const RANKING_STALE_AFTER: Duration = Duration::from_secs(600);
 /// peer can ever come back from.
 const MIN_INTACT_DELIVERY_RATIO: f32 = 0.05;
 
+/// Least samples before a two-term fit is trusted over the proportional EMA.
+///
+/// Two points define a line, so three is the first count that can disagree with
+/// them — and a fit from two samples is an interpolation dressed as a model.
+const TWO_TERM_MIN_SAMPLES: u32 = 4;
+
+/// Least weighted variance in the layer count before the two terms can be told
+/// apart at all.
+///
+/// A peer always given the SAME segment width gives a singular system: every
+/// `(fixed, slope)` pair through that one point fits it equally, and solving
+/// anyway returns whatever the floating-point noise decides. A peer holding one
+/// shard of one model is exactly that case, which is why the proportional EMA
+/// stays as the fallback rather than being replaced.
+const TWO_TERM_MIN_LAYER_VARIANCE: f32 = 1.0;
+
+/// One peer's `segment_ms ≈ fixed + slope × layers`, fitted online.
+///
+/// **Why a second term at all.** Measured 2026-09-20 (gotcha #659): a peer given
+/// **2 of 32 layers** took a chain's time-per-token from 152 ms to 3768 ms —
+/// the other 30 layers cost less than those 2. A model with only a per-layer
+/// coefficient cannot express that, in either direction: it under-prices a
+/// small segment on an expensive peer and over-prices a large one on a cheap
+/// peer, and the first mistake is the one that routes work to the machine that
+/// will ruin the request.
+///
+/// ⚠ **The fixed cost is NOT the round trip and must not be derived from one.**
+/// Same session, solo on one model: 105 ms RTT → 5.39 tok/s, 1043 ms → 2.66,
+/// 643 ms → **0.48**. The peer 1043 ms away is five times faster than the one
+/// 643 ms away, so ping predicts nothing about what a peer does to a chain. It
+/// is whatever that peer spends per visit — scheduling, worker IPC, cache
+/// handling, its own load — and the only honest way to know it is to measure it.
+///
+/// Decayed least squares, weighted like the EMAs beside it so one sample moves
+/// it by [`ALPHA`]: every accumulator is scaled by `1 - ALPHA` before the new
+/// sample is added at `ALPHA`.
+#[derive(Debug, Clone, Default)]
+struct LinearFit {
+    /// Σw, Σwx, Σwx², Σwy, Σwxy with x = layers, y = ms.
+    w: f64,
+    wx: f64,
+    wxx: f64,
+    wy: f64,
+    wxy: f64,
+    samples: u32,
+}
+
+impl LinearFit {
+    fn observe(&mut self, layers: u32, ms: f64) {
+        let decay = (1.0 - ALPHA) as f64;
+        let a = ALPHA as f64;
+        let x = layers as f64;
+        self.w = self.w * decay + a;
+        self.wx = self.wx * decay + a * x;
+        self.wxx = self.wxx * decay + a * x * x;
+        self.wy = self.wy * decay + a * ms;
+        self.wxy = self.wxy * decay + a * x * ms;
+        self.samples = self.samples.saturating_add(1);
+    }
+
+    /// `(fixed_ms, ms_per_layer)`, or `None` when the samples cannot tell the
+    /// two apart — too few, or all at one width.
+    ///
+    /// **A negative SLOPE declines.** Cost falling as a segment gets wider is
+    /// not something a peer does; it is what one stall on a narrow segment
+    /// looks like, and the proportional EMA is the better answer about those
+    /// samples.
+    ///
+    /// **A negative FIXED term is clamped to zero, not declined.** It is an
+    /// estimate of a quantity that cannot be negative, so a peer whose cost
+    /// really is proportional fits it at zero plus noise and lands below it
+    /// about half the time. Declining there would make this fire only for
+    /// expensive peers and never for cheap ones, which is a bias, not a
+    /// safeguard. Clamping leaves the slope carrying the whole cost — the
+    /// pessimistic direction, and the one this codebase already prefers for a
+    /// candidate it is unsure about.
+    fn terms(&self) -> Option<(f32, f32)> {
+        if self.samples < TWO_TERM_MIN_SAMPLES || self.w <= 0.0 {
+            return None;
+        }
+        // w · Σwx² − (Σwx)² is the weighted variance of x, times w². Zero when
+        // every sample had the same layer count.
+        let denom = self.w * self.wxx - self.wx * self.wx;
+        let variance = denom / (self.w * self.w);
+        if !variance.is_finite() || variance < TWO_TERM_MIN_LAYER_VARIANCE as f64 {
+            return None;
+        }
+        let slope = (self.w * self.wxy - self.wx * self.wy) / denom;
+        let fixed = (self.wy - slope * self.wx) / self.w;
+        if !slope.is_finite() || !fixed.is_finite() || slope < 0.0 {
+            return None;
+        }
+        Some((fixed.max(0.0) as f32, slope as f32))
+    }
+}
+
 /// Observed compute speed of one peer, plus how reliably the path to it
 /// actually delivers.
 #[derive(Debug, Clone)]
@@ -92,6 +188,11 @@ pub struct PeerSpeed {
     /// EMA of ms per layer for one decode step of a WHOLE model run on the
     /// peer — no per-token round trip. See [`WorkKind::Delegated`].
     delegated_ms_per_layer: Option<f32>,
+    /// The same decode samples, fitted as `fixed + slope × layers` instead of
+    /// forced through the origin. See [`LinearFit`] for the measurement that
+    /// makes the second term necessary. Decode only: it is the token hot path,
+    /// and the one where a mispriced small segment ruins a whole reply.
+    decode_fit: LinearFit,
     prefill_samples: u32,
     decode_samples: u32,
     delegated_samples: u32,
@@ -131,6 +232,7 @@ impl Default for PeerSpeed {
             prefill_ms_per_layer_byte: None,
             decode_ms_per_layer: None,
             delegated_ms_per_layer: None,
+            decode_fit: LinearFit::default(),
             prefill_samples: 0,
             decode_samples: 0,
             delegated_samples: 0,
@@ -188,6 +290,13 @@ impl PeerSpeed {
         if !warm && matches!(kind, WorkKind::Decode | WorkKind::Delegated) {
             return;
         }
+        // The same sample, unnormalised, for the two-term fit. Fed the RAW
+        // wall-clock and layer count rather than the per-layer figure above,
+        // because dividing by `layers` is precisely what makes the fixed term
+        // unrecoverable.
+        if matches!(kind, WorkKind::Decode) {
+            self.decode_fit.observe(layers, segment_ms as f64);
+        }
         let (slot, count) = match kind {
             WorkKind::Prefill => (
                 &mut self.prefill_ms_per_layer_byte,
@@ -214,10 +323,32 @@ impl PeerSpeed {
             WorkKind::Prefill => {
                 self.prefill_ms_per_layer_byte? * layers as f32 * activation_bytes as f32
             }
-            WorkKind::Decode => self.decode_ms_per_layer? * layers as f32,
+            // Two-term where the samples can support one. This also sizes the
+            // per-segment deadline, where the proportional model was wrong in
+            // the dangerous direction: a small segment on a peer with a large
+            // fixed cost got a correspondingly small budget and was failed over
+            // before it could possibly have answered.
+            WorkKind::Decode => match self.decode_terms() {
+                Some((fixed, per_layer)) => fixed + per_layer * layers as f32,
+                None => self.decode_ms_per_layer? * layers as f32,
+            },
             WorkKind::Delegated => self.delegated_ms_per_layer? * layers as f32,
         };
         predicted.is_finite().then_some(predicted)
+    }
+
+    /// `(fixed_ms_per_visit, ms_per_layer)` for a decode step, when the samples
+    /// can tell the two apart. `None` falls the caller back to the proportional
+    /// EMA, which is what every peer used before this existed.
+    ///
+    /// **Expires with the ranking figure**, for the same reason: a fit nobody
+    /// has refreshed in [`RANKING_STALE_AFTER`] describes a peer as it was, and
+    /// a stale price is how the routing ratchet starts.
+    pub fn decode_terms(&self) -> Option<(f32, f32)> {
+        if self.updated_at.elapsed() > RANKING_STALE_AFTER {
+            return None;
+        }
+        self.decode_fit.terms()
     }
 
     /// Per-layer cost used for *ranking* peers against each other, in ms.
@@ -798,5 +929,141 @@ mod ranking_trusts_only_what_it_measured {
             "a delivery observation must leave the speed clock untouched"
         );
         assert!(s.intact_delivery_ratio().is_some());
+    }
+}
+
+/// The second term, against the numbers that showed it was missing.
+#[cfg(test)]
+mod two_term_tests {
+    use super::*;
+
+    /// Feed a peer whose real behaviour is `fixed + per_layer × layers`, at
+    /// widths a router would actually give it, and check both terms come back.
+    fn observe_synthetic(s: &mut PeerSpeed, fixed: u64, per_layer: u64, widths: &[u32]) {
+        for &layers in widths {
+            s.observe(
+                WorkKind::Decode,
+                fixed + per_layer * layers as u64,
+                layers,
+                4096,
+                true,
+            );
+        }
+    }
+
+    /// **The defect, in the shape it was measured in (gotcha #659).**
+    ///
+    /// A peer whose cost is nearly all fixed — 1000 ms per visit, 5 ms per
+    /// layer — is given 2 layers. The proportional model divides its 32-layer
+    /// observation by 32 and multiplies back by 2, pricing it at a sixteenth of
+    /// what it will actually cost, which is exactly the mistake that put 2 of
+    /// 32 layers on the peer that took a chain from 152 ms/token to 3768.
+    #[test]
+    fn a_small_segment_on_an_expensive_peer_is_not_priced_as_a_small_cost() {
+        let mut s = PeerSpeed::default();
+        observe_synthetic(&mut s, 1000, 5, &[32, 16, 24, 8, 32, 16]);
+
+        let (fixed, per_layer) = s
+            .decode_terms()
+            .expect("widths vary, so the fit identifies");
+        assert!(
+            (fixed - 1000.0).abs() < 60.0,
+            "fixed term {fixed} should recover ~1000 ms"
+        );
+        assert!(
+            (per_layer - 5.0).abs() < 3.0,
+            "slope {per_layer} should recover ~5 ms/layer"
+        );
+
+        let predicted = s.predict_ms(WorkKind::Decode, 2, 4096).unwrap();
+        assert!(
+            predicted > 900.0,
+            "2 layers on this peer costs ~1010 ms, predicted {predicted}"
+        );
+
+        // What the proportional model says about the same peer, for contrast:
+        // its EMA sits near the mean of segment_ms/layers, and 2 layers priced
+        // through it is an order of magnitude cheaper than the truth.
+        let proportional = s.ranking_ms_per_layer().unwrap() * 2.0;
+        assert!(
+            proportional < predicted / 4.0,
+            "the proportional price ({proportional}) must be the one that is \
+             badly wrong here, or this test is not about the defect"
+        );
+    }
+
+    /// **The fallback is the whole safety argument.** A peer holding one shard
+    /// of one model is always given the same width, so the two terms are not
+    /// separable and nothing about its pricing may change.
+    #[test]
+    fn a_peer_always_given_the_same_width_keeps_the_proportional_price() {
+        let mut s = PeerSpeed::default();
+        observe_synthetic(&mut s, 1000, 5, &[16, 16, 16, 16, 16, 16]);
+        assert!(
+            s.decode_terms().is_none(),
+            "one width cannot identify two terms; every (fixed, slope) through \
+             that point fits it equally"
+        );
+        // And the prediction is exactly what it always was.
+        let expected = s.ranking_ms_per_layer().unwrap() * 16.0;
+        let got = s.predict_ms(WorkKind::Decode, 16, 4096).unwrap();
+        assert!((got - expected).abs() < 0.01);
+    }
+
+    /// Too few samples is the other way the fit must decline. Two points define
+    /// a line and cannot disagree with it.
+    #[test]
+    fn a_fit_needs_more_samples_than_it_has_parameters() {
+        let mut s = PeerSpeed::default();
+        observe_synthetic(&mut s, 1000, 5, &[32, 8]);
+        assert!(s.decode_terms().is_none());
+        observe_synthetic(&mut s, 1000, 5, &[24, 16]);
+        assert!(
+            s.decode_terms().is_some(),
+            "four samples across four widths"
+        );
+    }
+
+    /// A peer whose cost really is proportional must fit a fixed term near
+    /// zero, not invent one — otherwise this makes every peer look expensive to
+    /// visit and suppresses splitting everywhere.
+    #[test]
+    fn a_genuinely_proportional_peer_fits_almost_no_fixed_cost() {
+        let mut s = PeerSpeed::default();
+        observe_synthetic(&mut s, 0, 20, &[32, 16, 24, 8, 32, 16]);
+        let (fixed, per_layer) = s.decode_terms().expect("widths vary");
+        assert!(fixed < 40.0, "fixed term {fixed} should be ~0");
+        assert!((per_layer - 20.0).abs() < 3.0, "slope {per_layer} ~20");
+    }
+
+    /// Samples the shape cannot explain — a cold load, a load spike — push the
+    /// fit negative. That is not a rounding error to clamp: it means the model
+    /// does not describe these samples, and the EMA is the better answer.
+    #[test]
+    fn a_fit_that_comes_out_negative_declines_rather_than_clamping() {
+        let mut s = PeerSpeed::default();
+        // Cost FALLING with width is not something a peer does; it is what a
+        // one-off stall on a narrow segment looks like.
+        for (layers, ms) in [(4u32, 5_000u64), (8, 3_000), (16, 1_500), (32, 400)] {
+            s.observe(WorkKind::Decode, ms, layers, 4096, true);
+        }
+        assert!(
+            s.decode_terms().is_none(),
+            "a negative slope means the samples are about something else"
+        );
+    }
+
+    /// The fit expires with the ranking figure it sits beside, or a peer that
+    /// fell out of rotation keeps its price for ever — the routing ratchet.
+    #[test]
+    fn the_fit_goes_stale_with_the_rest_of_the_measurement() {
+        let mut s = PeerSpeed::default();
+        observe_synthetic(&mut s, 1000, 5, &[32, 16, 24, 8]);
+        assert!(s.decode_terms().is_some());
+        s.updated_at = Instant::now() - (RANKING_STALE_AFTER + Duration::from_secs(1));
+        assert!(
+            s.decode_terms().is_none(),
+            "a stale fit must fall back like a stale EMA does"
+        );
     }
 }

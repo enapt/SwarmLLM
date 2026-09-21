@@ -168,6 +168,31 @@ other and cannot measure both.
 
 → `docs/invariants/scheduling.md`
 
+## What a peer costs per VISIT is not what it costs per layer
+
+`PeerSpeed::decode_terms` fits `segment_ms ≈ fixed + slope × layers` per peer,
+and `NodeCandidate::observed_fixed_ms_per_visit` carries the fixed half into
+`vertex_cost` as the per-visit term — the one already multiplied by
+`ASSUMED_FORWARD_PASSES` when a segment is entered per token.
+
+**Sizing a segment small does not make it cheap.** A peer given 2 of 32 layers
+took a chain from 152 ms/token to 3768: the other 30 layers cost less than those
+2 (gotcha #659). A purely proportional coefficient prices those 2 layers at a
+sixteenth of the peer, which is precisely why the router put them there.
+
+⚠ **The fixed cost is NOT the round trip and must never be derived from one.**
+On this fleet a peer 1043 ms away is five times faster than one at 643. Ping
+measures the path; this measures what the peer spends per visit.
+
+**The fallback is the safety argument, not a detail.** The two terms are only
+separable when a peer's samples span differing segment widths — a peer holding
+one shard of one model never does — and `None` prices it exactly as before.
+`observed_latency_ms_per_layer` and `observed_fixed_ms_per_visit` are read
+TOGETHER: the slope beside a zero fixed cost prices a peer lower than either
+model alone.
+
+→ `docs/invariants/scheduling.md`
+
 ## A reply under way is never moved to a machine that cannot continue it
 
 `distributed::failover_can_restore_state(sequence_num)` — true only on the

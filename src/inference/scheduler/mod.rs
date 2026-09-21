@@ -123,6 +123,19 @@ struct NodeCandidate {
     /// for the other is a measured mis-pricing, not a rounding error; see
     /// `parallax::vertex_cost`.
     observed_delegated_ms_per_layer: Option<f32>,
+    /// What one VISIT to this peer costs before a single layer is computed, in
+    /// ms, when the samples can tell that apart from the per-layer term.
+    ///
+    /// `None` — which is every peer until it has served segments of differing
+    /// widths — prices exactly as before. Where it is present,
+    /// `observed_latency_ms_per_layer` beside it is the fitted SLOPE rather than
+    /// the proportional EMA, and the two are read together or not at all.
+    ///
+    /// **Why this term exists at all**: a peer given 2 of 32 layers took a
+    /// chain from 152 ms/token to 3768 (gotcha #659). A purely proportional
+    /// model prices those 2 layers at a sixteenth of the peer's cost, which is
+    /// the mistake that put them there. → `PeerSpeed::decode_terms`.
+    observed_fixed_ms_per_visit: Option<f32>,
     /// Expected attempts to get ONE intact reply out of this peer, from the
     /// measured fraction that arrive whole. 1.0 for the local node and for any
     /// peer whose path has been reliable or is unmeasured.
@@ -3217,11 +3230,21 @@ impl PipelineScheduler {
             // whatever the card served for someone else and says nothing about
             // the processor about to do this work. A node with no card at all
             // keeps its samples — all its work is processor work.
-            let observed_latency_ms_per_layer =
+            // The fitted pair when the samples support one, else the
+            // proportional EMA with no fixed term — read together, because a
+            // slope from the fit beside a fixed cost of zero would price the
+            // peer lower than either model does alone.
+            let (observed_latency_ms_per_layer, observed_fixed_ms_per_visit) =
                 if local_on_processor && self.shared_state.gpu_info.is_some() {
-                    None
+                    (None, None)
                 } else {
-                    self.shared_state.observed_latency_ms_per_layer(&node_id)
+                    match self.shared_state.observed_decode_terms(&node_id) {
+                        Some((fixed, per_layer)) => (Some(per_layer), Some(fixed)),
+                        None => (
+                            self.shared_state.observed_latency_ms_per_layer(&node_id),
+                            None,
+                        ),
+                    }
                 };
             // Deliberately `None` for the local node: there is no such thing as
             // delegating to ourselves, and a local segment pays no network at
@@ -3380,6 +3403,7 @@ impl PipelineScheduler {
                 region_score,
                 est_tokens_per_sec,
                 observed_latency_ms_per_layer,
+                observed_fixed_ms_per_visit,
                 observed_delegated_ms_per_layer,
                 expected_attempts,
                 is_pool_member: is_pool,
@@ -3429,6 +3453,11 @@ impl PipelineScheduler {
                 latency_ms = c.latency_ms,
                 est_tokens_per_sec = c.est_tokens_per_sec,
                 observed_ms_per_layer = ?c.observed_latency_ms_per_layer,
+                // Present only where the samples could separate a per-visit
+                // cost from a per-layer one. Its absence is the ordinary case
+                // and means this peer is priced exactly as it always was —
+                // which is what makes the two distinguishable in a live log.
+                observed_fixed_ms_per_visit = ?c.observed_fixed_ms_per_visit,
                 observed_delegated_ms_per_layer = ?c.observed_delegated_ms_per_layer,
                 observed_prefill_ms_per_layer_byte = ?c.observed_prefill_ms_per_layer_byte,
                 has_gpu = c.has_gpu,

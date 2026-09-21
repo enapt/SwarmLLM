@@ -2187,6 +2187,20 @@ impl SharedState {
             .and_then(|s| s.ranking_ms_per_layer())
     }
 
+    /// `(fixed_ms_per_visit, ms_per_layer)` for a decode step on this peer,
+    /// when its samples span enough segment widths to tell the two apart.
+    ///
+    /// `None` is the ordinary answer and prices the peer exactly as it always
+    /// was — a peer holding one shard of one model is always given the same
+    /// width and can never identify a fixed term. See `PeerSpeed::decode_terms`
+    /// for the measurement that makes the second term worth having.
+    pub fn observed_decode_terms(&self, node_id: &crate::types::NodeId) -> Option<(f32, f32)> {
+        self.metrics
+            .peer_speed
+            .get(node_id)
+            .and_then(|s| s.decode_terms())
+    }
+
     /// This peer's MEASURED prefill coefficient, in ms per (layer x activation
     /// byte). `None` when we have never prefilled through it, or the figure has
     /// gone stale.

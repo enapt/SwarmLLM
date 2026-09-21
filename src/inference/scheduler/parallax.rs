@@ -363,7 +363,24 @@ pub(super) fn vertex_cost(
     // term to avoid double-counting. When we don't have an observation yet, use
     // the traditional two-part cost (network + static compute estimate).
     let (base_network_ms, per_layer_ms) = if let Some(obs_per_layer) = observation {
-        (0.0, obs_per_layer)
+        // A measured peer's segment time is `fixed + per_layer × layers`, and
+        // the fixed half is what a visit costs before any layer is computed —
+        // scheduling, worker IPC, cache handling, that peer's own load. Where
+        // the samples could tell the two apart, charge it as the per-visit term
+        // so it scales with VISITS rather than with layers.
+        //
+        // ⚠ The measurement that makes this necessary: a peer given 2 of 32
+        // layers took a chain from 152 ms/token to 3768 (gotcha #659). Priced
+        // proportionally those 2 layers cost a sixteenth of the peer, which is
+        // exactly why the router put them there. And the fixed cost is NOT the
+        // round trip — on this fleet a peer 1043 ms away is five times faster
+        // than one at 643 — so it cannot be derived from `latency_ms` and is
+        // measured instead.
+        //
+        // `None` keeps the previous behaviour exactly: the observation is then
+        // the proportional EMA, which already carries the round trip inside it,
+        // and adding a network term beside it would double-count.
+        (c.observed_fixed_ms_per_visit.unwrap_or(0.0), obs_per_layer)
     } else {
         let network = if is_local {
             0.0
@@ -1216,6 +1233,7 @@ mod tests {
             region_score: 1.0,
             est_tokens_per_sec,
             observed_latency_ms_per_layer: None,
+            observed_fixed_ms_per_visit: None,
             observed_delegated_ms_per_layer: None,
             expected_attempts: 1.0,
             is_pool_member: false,
@@ -1551,6 +1569,78 @@ mod tests {
             delegated.network_ms * ASSUMED_FORWARD_PASSES,
             "mid-chain network should scale by the assumed pass count"
         );
+    }
+
+    /// **A measured peer's per-visit cost must scale with VISITS, not layers.**
+    ///
+    /// The defect this closes (gotcha #659): a peer given 2 of 32 layers took a
+    /// chain from 152 ms/token to 3768. Priced only per layer, those 2 layers
+    /// cost a sixteenth of the peer — which is why the router chose them. With
+    /// the fixed term measured, a narrow segment on that peer is priced at
+    /// nearly its full cost, because that is what it costs.
+    #[test]
+    fn a_narrow_segment_on_an_expensive_peer_is_priced_near_its_full_cost() {
+        let local = NodeId([9u8; 32]);
+        // 1000 ms to visit, 5 ms a layer: almost all of it is the visit.
+        let mut measured = cand(2, vec![(0, 32)], 20, 0.0, true, true, 0.0);
+        measured.observed_latency_ms_per_layer = Some(5.0);
+        measured.observed_fixed_ms_per_visit = Some(1000.0);
+
+        // The same peer as the proportional model saw it: one coefficient
+        // covering both, taken over a 32-layer segment.
+        let mut proportional = measured.clone();
+        proportional.observed_fixed_ms_per_visit = None;
+        proportional.observed_latency_ms_per_layer = Some((1000.0 + 5.0 * 32.0) / 32.0);
+
+        let narrow_measured = vertex_cost(&measured, (8, 10), &local, 32, None);
+        let narrow_proportional = vertex_cost(&proportional, (8, 10), &local, 32, None);
+        assert!(
+            narrow_measured.total() > narrow_proportional.total() * 4.0,
+            "two layers on this peer cost ~1010 ms, and the proportional model \
+             prices them at ~73; measured {} vs proportional {}",
+            narrow_measured.total(),
+            narrow_proportional.total()
+        );
+    }
+
+    /// The fixed term is charged once per VISIT, so a segment twice as wide on
+    /// the same peer does not cost twice as much — which is the whole reason a
+    /// single per-layer coefficient could not express this peer.
+    #[test]
+    fn widening_a_segment_on_a_fixed_cost_peer_adds_only_its_layers() {
+        let local = NodeId([9u8; 32]);
+        let mut c = cand(2, vec![(0, 32)], 20, 0.0, true, true, 0.0);
+        c.observed_latency_ms_per_layer = Some(5.0);
+        c.observed_fixed_ms_per_visit = Some(1000.0);
+
+        let narrow = vertex_cost(&c, (8, 10), &local, 32, None).total();
+        let wide = vertex_cost(&c, (8, 14), &local, 32, None).total();
+        let extra = wide - narrow;
+        // Four more layers at 5 ms, times the assumed pass count.
+        let expected = 4.0 * 5.0 * ASSUMED_FORWARD_PASSES;
+        assert!(
+            (extra - expected).abs() < expected * 0.2,
+            "four extra layers should add ~{expected} ms, added {extra}"
+        );
+    }
+
+    /// **The fallback must change nothing.** A peer whose samples cannot
+    /// identify a fixed term — every peer holding one shard of one model — is
+    /// priced exactly as it was before this term existed.
+    #[test]
+    fn a_peer_without_a_fitted_fixed_term_is_priced_exactly_as_before() {
+        let local = NodeId([9u8; 32]);
+        let mut c = cand(2, vec![(0, 32)], 20, 0.0, true, true, 0.0);
+        c.observed_latency_ms_per_layer = Some(31.4);
+        c.observed_fixed_ms_per_visit = None;
+
+        let v = vertex_cost(&c, (8, 16), &local, 32, None);
+        assert_eq!(
+            v.network_ms, 0.0,
+            "with no fitted fixed term the observation carries the round trip \
+             itself, and charging a network term beside it double-counts"
+        );
+        assert_eq!(v.compute_ms, 31.4 * 8.0 * ASSUMED_FORWARD_PASSES);
     }
 
     /// A remote segment starting at layer 0 but NOT covering the whole model is
@@ -3040,6 +3130,7 @@ mod transfer_cost_tests {
             region_score: 1.0,
             est_tokens_per_sec: 20.0,
             observed_latency_ms_per_layer: None,
+            observed_fixed_ms_per_visit: None,
             observed_delegated_ms_per_layer: None,
             observed_prefill_ms_per_layer_byte: None,
             expected_attempts: 1.0,

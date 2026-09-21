@@ -715,6 +715,79 @@ exists because the window is five minutes and the app-limited rule governs only
 what happens across rotations — the first version of its test passed with the
 rule disabled.
 
+## What a peer costs per VISIT is not what it costs per layer
+
+**Rule**: `.claude/rules/arch-scheduling.md` § "What a peer costs per VISIT".
+
+### The measurement
+
+A forced 4-segment spread on 2026-09-20 (`llama-xlam-2-8b`, gotcha #659)
+produced three readings that together say the cost model was missing a term:
+
+1. **The slow member dominates regardless of how few layers it gets.** One
+   sample put **2 of 32 layers** on the slow peer and time-per-token went
+   **152 ms → 3768 ms** — the other 30 layers cost less than those 2. Identical
+   shape to the 2026-09-05 privacy report, where 2 of 36 layers were 55.3 s of
+   73.8 s.
+2. **Peer speed does not track RTT.** Solo on one model: 105 ms → 5.39 tok/s,
+   1043 ms → 2.66, 643 ms → **0.48**. The peer a second away is five times
+   faster than the one two-thirds of a second away.
+3. **A wider spread is not costly for its hops.** The chain runs peer-to-peer;
+   the coordinator makes one round trip. The cost is compute on the worst
+   member.
+
+### Why the model could not express it
+
+`PeerSpeed` normalised every decode sample to `segment_ms / layers` and priced a
+candidate at `coefficient × layers`. That is a line through the origin, so it
+asserts a peer given half as many layers costs half as much — and reading (1)
+says that is false by more than an order of magnitude.
+
+The arithmetic of the mistake: a peer whose real cost is `1000 + 5 × layers`,
+measured over 32 layers, records `1160/32 = 36.3` ms/layer. Priced for 2 layers
+that is **73 ms**, against a true **1010 ms**. The router picked the cheapest
+option available and the option was fictional.
+
+### The fix
+
+`LinearFit` — decayed least squares on `(layers, segment_ms)`, weighted like the
+EMAs beside it so one sample moves it by `ALPHA`. Five running sums, no history
+kept. `decode_terms()` solves it, and `NodeCandidate::observed_fixed_ms_per_visit`
+carries the fixed half into `vertex_cost`'s existing per-visit slot — the one
+already multiplied by `ASSUMED_FORWARD_PASSES` for a segment entered per token.
+
+### What a change must keep
+
+- **The fallback, which is most peers.** Two terms are separable only when the
+  samples span differing widths; a peer holding one shard of one model is
+  always given the same width, and `TWO_TERM_MIN_LAYER_VARIANCE` declines there.
+  `None` prices exactly as before this existed — that is what makes this safe to
+  ship without a live routing experiment.
+- **The two fields are read together.** The fitted SLOPE beside a fixed cost of
+  zero prices a peer below what either model says alone.
+- **Never derive the fixed term from `latency_ms`.** Reading (2) is the whole
+  reason it is measured; a ping says nothing about what a peer does to a chain.
+- **A negative slope declines; a negative intercept clamps.** Cost falling with
+  width is not a peer behaviour, it is one stall on a narrow segment. An
+  intercept below zero is noise around a quantity that cannot be negative, and
+  declining there would make this fire only for expensive peers — a bias, not a
+  safeguard.
+- **The fit expires with the ranking figure** (`RANKING_STALE_AFTER`), or a peer
+  that fell out of rotation keeps its price for ever. That is the routing
+  ratchet, and it falls hardest on modest hardware.
+
+### Still open
+
+**Not yet confirmed on a live multi-node run.** It is guarded by unit tests
+built from the measured numbers, and a null control — reverting the one line in
+`vertex_cost` turns
+`a_narrow_segment_on_an_expensive_peer_is_priced_near_its_full_cost` red. What
+is missing is a field reading: `observed_fixed_ms_per_visit` is on the candidate
+DIAG line and on `/api/admin/peers` as `decode_fixed_ms_per_visit` precisely so
+the first live occurrence can be read off rather than inferred. **Check it is
+ever non-null before claiming this changed anything** — a fit that never
+identifies is inert, and this repo has shipped an inert instrument twice.
+
 ## A reply under way is never moved to a machine that cannot continue it
 
 `distributed::failover_can_restore_state(sequence_num)` — true only on the
