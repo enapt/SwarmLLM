@@ -1,5 +1,40 @@
 # Changelog
 
+## [0.3.196-alpha] — 2026-09-21
+
+**A node that is sitting idle now uses far less of your internet connection.**
+
+**Fixed: an idle node was using about 2.6 Mbit/s of your connection to do
+nothing.** A node that holds no models and answers no requests still has to
+stay in touch with the rest of the network — but almost everything it was
+saying, it had already said. Three separate causes, all now fixed:
+
+- It announced what each region of the network holds once per model, every
+  thirty seconds, whether or not anything had changed. It now speaks up when
+  something actually changes, with a full refresh every five minutes so a
+  machine that missed one still catches up.
+- It repeated, under its own name, what every other machine had told it about
+  which models are in demand. Because each repetition refreshed the timestamp,
+  that information could never expire, and machines that had never answered a
+  single request were busily reporting other people's traffic as their own. A
+  machine now reports only what it measured itself. One that has served nothing
+  says nothing.
+- When a single machine joined the network, every other machine re-sent its
+  entire list of models to everyone. Joining is common — machines reconnect
+  throughout the day — and one join briefly quadrupled the traffic arriving at
+  every node. A machine joining is now brought up to date privately, by the
+  machines it connects to, instead of by an announcement to the whole network.
+
+**New: you can see which kind of traffic your node is using.** The node already
+showed how much of your connection it was using; it now also reports how many
+messages it sent, how many it merely passed along for other machines, and how
+many arrived more than once. This is what made the problem above findable —
+three earlier explanations, each reasoned from message sizes, were wrong by
+between ten and a hundred times, and the counts settled it in a single reading.
+
+If you run a node on a metered or shared connection, this is the release to
+take.
+
 ## [0.3.195-alpha] — 2026-09-21
 
 **A request could die because two machines quietly stopped agreeing on a key —
