@@ -81,6 +81,18 @@ pub mod features {
     /// none", which decides whether a missing coordinate is worth waiting for.
     pub const NETWORK_COORDS: u64 = 1 << 6;
 
+    /// The node CONFIRMS a re-keyed session before the other end starts using
+    /// it: having completed an ephemeral exchange it initiated, it immediately
+    /// sends a `SwarmMessage::SessionKeyConfirm` sealed under the new key.
+    ///
+    /// A responder that sees this bit may therefore keep sealing with the key
+    /// it already has until that confirmation opens — which is what stops a
+    /// lost exchange reply leaving one end holding a key the other has never
+    /// seen. Without the bit the responder adopts the new key immediately, as
+    /// every build before this one did, because an older peer will never send
+    /// a confirmation and waiting for one would strand the link instead.
+    pub const SESSION_KEY_CONFIRM: u64 = 1 << 7;
+
     /// The full feature set THIS build implements. Advertised by every node.
     pub const ALL: u64 = RELAY
         | TENSOR_RELAY
@@ -88,7 +100,8 @@ pub mod features {
         | PIPELINE_CHAIN_V2
         | FORWARD_ACK
         | RESEND_TOKENS
-        | NETWORK_COORDS;
+        | NETWORK_COORDS
+        | SESSION_KEY_CONFIRM;
 
     /// Does `advertised` include every bit in `needed`?
     pub fn supports(advertised: u64, needed: u64) -> bool {

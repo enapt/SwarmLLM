@@ -43,7 +43,28 @@ and `establish_session` is idempotent — nothing repairs the mismatch.
 
 **A session the peer cannot open repairs itself.** A failed `open` calls
 `request_rekey` (inside `open`, so every decrypt site inherits it) and
-`key_rotation` performs one rate-limited ephemeral exchange.
+`key_rotation` performs one rate-limited ephemeral exchange — including when
+this node holds NO session for that peer, which is the same dead link, not a
+milder one.
+
+→ `docs/invariants/network.md`
+
+## A key derived while ANSWERING an exchange waits until the peer proves it has it
+
+A rekey is two messages and the second can be lost, so a responder that installs
+before answering can be left holding a key the initiator never saw — one
+direction dead, neither end able to notice. `accept_ephemeral_exchange` parks it
+in `unconfirmed` and keeps sealing with the key both ends still agree on; `open`
+promotes it, carrying its replay window, on the first message that opens under
+it. The initiator seals `SESSION_CONFIRM_MARKER` as it installs —
+`complete_ephemeral_session` RETURNS those bytes, so the seal and the install
+cannot come apart — and ordinary traffic confirms just as well.
+
+**Gated on `features::SESSION_KEY_CONFIRM`**: a peer that cannot confirm is
+answered the old way, or the failure is only mirrored. Answering an exchange also
+drops our own outstanding initiation, so two crossing rotations cannot leave each
+end sealing with a key the other holds only as superseded. WireGuard's rule, for
+the same reason.
 
 → `docs/invariants/network.md`
 

@@ -153,6 +153,45 @@ struct PreviousKey {
     retired_at: Instant,
 }
 
+/// A key this node derived while ANSWERING a peer's exchange, held openable but
+/// never sealed with until the peer proves it has the same key.
+///
+/// An exchange is two messages and the second one can be lost. The responder
+/// derives the key before it answers, so installing it there commits to a key
+/// the initiator may never receive: from that moment everything the responder
+/// seals is unopenable, in one direction only, and neither end can tell. Seen
+/// live on 2026-09-20 — a peer's forward arrived under a key at `recv_nonce=0`,
+/// the first message of a session this node had never installed, 102 s after
+/// its own rotation tick.
+///
+/// So the derived key waits here instead, and moves into the session when the
+/// peer's `SessionKeyConfirm` — or simply its next sealed message — opens under
+/// it. Until then the existing key keeps sealing, which is exactly what both
+/// ends still agree on. It carries its own replay window for the same reason
+/// [`PreviousKey`] does, and that window travels with it on promotion so the
+/// confirming message cannot be replayed afterwards.
+struct UnconfirmedKey {
+    cipher_key: Zeroizing<[u8; 32]>,
+    replay_window: std::sync::Mutex<ReplayWindow>,
+    derived_at: Instant,
+}
+
+/// When a key derived as the RESPONDER of an exchange takes effect.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeyAdoption {
+    /// Only once the peer proves it holds the same key. Correct, and safe only
+    /// against a peer that will actually say so — `features::SESSION_KEY_CONFIRM`.
+    OnConfirmation,
+    /// At once, the behaviour of every build before the confirmation existed.
+    /// An older peer never confirms, so waiting for it would leave this node
+    /// sealing with a key that peer HAS retired — the same failure, mirrored.
+    Immediately,
+}
+
+/// The plaintext a [`SessionKeyConfirm`](crate::types::SessionKeyConfirm)
+/// seals. Its content carries nothing; opening it is the whole message.
+pub const SESSION_CONFIRM_MARKER: &[u8] = b"swarmllm-session-key-confirm-v1";
+
 /// A cached pairwise session derived from X25519 ECDH.
 pub struct CachedSession {
     /// SEC: wrapped in `Zeroizing` so eviction / SessionManager drop overwrites
@@ -273,6 +312,9 @@ pub struct SessionManager {
     /// idempotence guard. WireGuard keeps a previous keypair for the same
     /// reason and with the same per-keypair counter.
     retired: DashMap<NodeId, PreviousKey>,
+    /// Keys derived as the RESPONDER of an exchange, not yet proven to be held
+    /// by the peer. See [`UnconfirmedKey`].
+    unconfirmed: DashMap<NodeId, UnconfirmedKey>,
     /// Peers this node has asked for a repair handshake, and when.
     ///
     /// A session the other end cannot open is not a session, and nothing else
@@ -320,6 +362,7 @@ impl SessionManager {
             local_secret: secret,
             local_public: public,
             retired: DashMap::new(),
+            unconfirmed: DashMap::new(),
             sessions: DashMap::new(),
             pending_ephemeral: DashMap::new(),
             pending_ephemeral_pub: DashMap::new(),
@@ -412,16 +455,26 @@ impl SessionManager {
     /// Called when the peer responds with their ephemeral public key.
     /// Derives the session key from the ephemeral DH and installs the session.
     /// The ephemeral secret is consumed (dropped/zeroized) after derivation.
+    ///
+    /// Returns the marker sealed under the NEW key, for the caller to send as
+    /// [`SwarmMessage::SessionKeyConfirm`](crate::types::SwarmMessage). The
+    /// responder is waiting for it: it derived this key before answering and
+    /// will not seal with it until something opens under it, so a caller that
+    /// drops this leaves the peer sealing with the previous key until the
+    /// grace window runs out. Returning it from here rather than leaving the
+    /// caller to build it means the seal and the install cannot come apart.
+    ///
+    /// `None` means no session was installed — there was nothing to confirm.
     pub fn complete_ephemeral_session(
         &self,
         peer: &NodeId,
         peer_ephemeral_pub_bytes: &[u8; 32],
-    ) -> bool {
+    ) -> Option<Vec<u8>> {
         let ephemeral_secret = match self.pending_ephemeral.remove(peer) {
             Some((_, pending)) => pending.secret,
             None => {
                 tracing::warn!(peer = %peer, "No pending ephemeral exchange to complete");
-                return false;
+                return None;
             }
         };
 
@@ -433,7 +486,7 @@ impl SessionManager {
             Some((_, b)) => b,
             None => {
                 tracing::warn!(peer = %peer, "pending_ephemeral_pub missing — dropping ephemeral session");
-                return false;
+                return None;
             }
         };
         let our_ephemeral_pub = PublicKey::from(our_ephemeral_pub_bytes);
@@ -445,19 +498,35 @@ impl SessionManager {
 
         self.install_session(peer, cipher_key);
         tracing::debug!(peer = %peer, "Established ephemeral forward-secret session");
-        true
+        // Sealed here, under the key that was just installed, so the bytes and
+        // the key cannot be from different exchanges.
+        match self.seal(peer, SESSION_CONFIRM_MARKER, SESSION_CONFIRM_MARKER) {
+            Ok(sealed) => Some(sealed),
+            Err(e) => {
+                tracing::warn!(peer = %peer, error = %e, "Could not seal the session confirmation");
+                None
+            }
+        }
     }
 
     /// Handle an incoming ephemeral key exchange request (responder side).
     ///
     /// Generates a fresh ephemeral keypair, computes the shared secret with
-    /// the initiator's ephemeral public key, installs the session, and
-    /// returns our ephemeral public key for the response message.
-    /// The ephemeral secret is consumed (dropped/zeroized) after derivation.
+    /// the initiator's ephemeral public key, and returns our ephemeral public
+    /// key for the response message. The ephemeral secret is consumed
+    /// (dropped/zeroized) after derivation.
+    ///
+    /// **The derived key does not take effect here** when `adopt` is
+    /// [`KeyAdoption::OnConfirmation`] and a session already exists: our answer
+    /// can be lost, and a key only this end holds breaks every forward the peer
+    /// sends us until something repairs it. It waits in `unconfirmed` and is
+    /// adopted when the peer opens it — WireGuard's rule, and see
+    /// [`UnconfirmedKey`] for the live failure it comes from.
     pub fn accept_ephemeral_exchange(
         &self,
         peer: &NodeId,
         peer_ephemeral_pub_bytes: &[u8; 32],
+        adopt: KeyAdoption,
     ) -> [u8; 32] {
         let our_ephemeral_secret = EphemeralSecret::random_from_rng(rand::rngs::OsRng);
         let our_ephemeral_public = PublicKey::from(&our_ephemeral_secret);
@@ -473,8 +542,42 @@ impl SessionManager {
             &peer_ephemeral_pub,
         );
 
-        self.install_session(peer, cipher_key);
-        tracing::debug!(peer = %peer, "Accepted ephemeral forward-secret session (responder)");
+        // With no session at all there is nothing else to seal with, so the
+        // key has to take effect now — and there is nothing to lose either:
+        // the state it would be protecting does not exist.
+        if adopt == KeyAdoption::Immediately || !self.sessions.contains_key(peer) {
+            self.install_session(peer, cipher_key);
+            tracing::debug!(peer = %peer, "Accepted ephemeral forward-secret session (responder)");
+            return our_pub_bytes;
+        }
+
+        // Answering an exchange while one of our own is outstanding means both
+        // ends initiated at once. Each would then adopt the other's key and
+        // they would end up sealing with keys the other holds only as
+        // superseded — fine until that grace window closes, then broken in both
+        // directions. Dropping our own initiation means at most one new key per
+        // link per round, and if the two genuinely crossed, neither takes and
+        // the next rotation tries again with nothing broken in between.
+        if self.pending_ephemeral.remove(peer).is_some() {
+            self.pending_ephemeral_pub.remove(peer);
+            tracing::debug!(
+                peer = %peer,
+                "Two key exchanges crossed — dropping ours and answering theirs"
+            );
+        }
+
+        self.unconfirmed.insert(
+            peer.clone(),
+            UnconfirmedKey {
+                cipher_key,
+                replay_window: std::sync::Mutex::new(ReplayWindow::new()),
+                derived_at: Instant::now(),
+            },
+        );
+        tracing::debug!(
+            peer = %peer,
+            "Derived a forward-secret key (responder) — sealing with the current one until the peer confirms"
+        );
 
         our_pub_bytes
     }
@@ -487,15 +590,25 @@ impl SessionManager {
     /// concurrent `seal`/`open` never observes the peer as sessionless mid-rekey
     /// — a remove-then-insert would open exactly that gap.
     fn install_session(&self, peer: &NodeId, cipher_key: Zeroizing<[u8; 32]>) {
+        self.install_with_window(peer, cipher_key, ReplayWindow::new());
+    }
+
+    /// `install_session`, for a key that already has a replay window worth
+    /// keeping — a key promoted out of `unconfirmed` has just opened a message,
+    /// and starting it a fresh window would let that message be replayed.
+    fn install_with_window(
+        &self,
+        peer: &NodeId,
+        cipher_key: Zeroizing<[u8; 32]>,
+        window: ReplayWindow,
+    ) {
         use dashmap::mapref::entry::Entry;
         match self.sessions.entry(peer.clone()) {
             Entry::Occupied(mut occupied) => {
                 let session = occupied.get_mut();
                 let retired_key = std::mem::replace(&mut session.cipher_key, cipher_key);
-                let retired_window = std::mem::replace(
-                    &mut session.replay_window,
-                    std::sync::Mutex::new(ReplayWindow::new()),
-                );
+                let retired_window =
+                    std::mem::replace(&mut session.replay_window, std::sync::Mutex::new(window));
                 // The new key starts its own nonce sequence; the retired key
                 // keeps the window it accumulated, so replays under it are
                 // still caught.
@@ -539,6 +652,10 @@ impl SessionManager {
         // before a session is established, orphaning these entries until evict_stale.
         self.pending_ephemeral.remove(peer);
         self.pending_ephemeral_pub.remove(peer);
+        // A key we never sealed with goes with the session: the reconnect runs
+        // a fresh exchange, and promoting a key derived before the drop would
+        // reinstate a session this call exists to end.
+        self.unconfirmed.remove(peer);
         if had_session {
             tracing::debug!(peer = %peer, "Cleared encryption session (peer disconnected)");
         }
@@ -608,60 +725,73 @@ impl SessionManager {
         nonce_counter_bytes.copy_from_slice(&sealed[4..12]);
         let recv_nonce = u64::from_le_bytes(nonce_counter_bytes);
 
-        let Some(session) = self.sessions.get(peer) else {
-            // No live session — but a message sealed just before the peer
-            // dropped can still be in flight, and refusing it here is what
-            // killed a 4m43s generation (report #028).
-            return self
-                .open_with_retired(peer, sealed, aad, recv_nonce)
-                .ok_or_else(|| SwarmError::NoSession(peer.clone()));
-        };
-
-        if let Some(plaintext) = try_open_with(
-            &session.cipher_key,
-            &session.replay_window,
-            sealed,
-            aad,
-            recv_nonce,
-        ) {
-            tracing::trace!(
-                peer = %peer,
+        // The live key. The common case, and the only one that costs a single
+        // lookup — everything below it runs once per failure, never per message.
+        let mut had_session = false;
+        let mut had_previous = false;
+        if let Some(session) = self.sessions.get(peer) {
+            had_session = true;
+            had_previous = session.previous.is_some();
+            if let Some(plaintext) = try_open_with(
+                &session.cipher_key,
+                &session.replay_window,
+                sealed,
+                aad,
                 recv_nonce,
-                aad_len = aad.len(),
-                plaintext_len = plaintext.len(),
-                "DIAG: open() decryption success"
-            );
+            ) {
+                tracing::trace!(
+                    peer = %peer,
+                    recv_nonce,
+                    aad_len = aad.len(),
+                    plaintext_len = plaintext.len(),
+                    "DIAG: open() decryption success"
+                );
+                return Ok(plaintext);
+            }
+        }
+
+        // A key we derived answering this peer's exchange and have not used.
+        // Opening under it is the peer telling us it has the same key, which is
+        // the only thing that makes it safe to seal with — so this is where it
+        // takes effect. See `UnconfirmedKey`.
+        if let Some(plaintext) = self.open_with_unconfirmed(peer, sealed, aad, recv_nonce) {
             return Ok(plaintext);
         }
 
-        // Fall back to the key this one replaced. A rekey does not reach both
-        // ends at the same instant, and when two rotations cross, each end can
-        // briefly hold a key from a different exchange — so a message that fails
-        // under the current key is very often perfectly valid under the previous
-        // one, not an attack. The previous key carries its own replay window, so
-        // this is a second authenticated check, not a relaxed one.
-        if let Some(previous) = session.previous.as_ref() {
-            if previous.retired_at.elapsed() <= PREVIOUS_KEY_GRACE {
-                if let Some(plaintext) = try_open_with(
-                    &previous.cipher_key,
-                    &previous.replay_window,
-                    sealed,
-                    aad,
-                    recv_nonce,
-                ) {
-                    tracing::debug!(
-                        peer = %peer,
-                        recv_nonce,
-                        retired_secs = previous.retired_at.elapsed().as_secs(),
-                        "Opened with the superseded key — the peer has not adopted the new one yet"
-                    );
-                    return Ok(plaintext);
+        // Fall back to the key the live one replaced. A rekey does not reach
+        // both ends at the same instant, so a message that fails under the
+        // current key is very often perfectly valid under the previous one, not
+        // an attack. The previous key carries its own replay window, so this is
+        // a second authenticated check, not a relaxed one.
+        if had_session {
+            if let Some(session) = self.sessions.get(peer) {
+                if let Some(previous) = session.previous.as_ref() {
+                    if previous.retired_at.elapsed() <= PREVIOUS_KEY_GRACE {
+                        if let Some(plaintext) = try_open_with(
+                            &previous.cipher_key,
+                            &previous.replay_window,
+                            sealed,
+                            aad,
+                            recv_nonce,
+                        ) {
+                            tracing::debug!(
+                                peer = %peer,
+                                recv_nonce,
+                                retired_secs = previous.retired_at.elapsed().as_secs(),
+                                "Opened with the superseded key — the peer has not adopted the new one yet"
+                            );
+                            return Ok(plaintext);
+                        }
+                    }
                 }
             }
         }
 
         // A session re-established after a disconnect has a brand-new key and
-        // no `previous`, so the key the sender is still using lives here.
+        // no `previous`, so the key the sender is still using lives here. With
+        // no session at all this is the whole answer: a message sealed just
+        // before the peer dropped can still be in flight, and refusing it is
+        // what killed a 4m43s generation (report #028).
         if let Some(plaintext) = self.open_with_retired(peer, sealed, aad, recv_nonce) {
             return Ok(plaintext);
         }
@@ -671,14 +801,18 @@ impl SessionManager {
             recv_nonce,
             aad_len = aad.len(),
             sealed_len = sealed.len(),
-            had_previous = session.previous.is_some(),
+            had_session,
+            had_previous,
             had_retired = self.retired.contains_key(peer),
-            "DIAG: open() decryption FAILED under the current, superseded and retired keys \
+            "DIAG: open() decryption FAILED under every key held for this peer \
              — likely AAD mismatch or an unrelated key"
         );
-        // Ask for a repair handshake. Here rather than at the two call sites,
-        // so a third one inherits it: this is the ONE place that knows every
-        // key we hold for this peer has been tried and none of them fit.
+        // Ask for a repair handshake. Here rather than at the call sites, so a
+        // new one inherits it: this is the ONE place that knows every key we
+        // hold for this peer has been tried and none of them fit. **Including
+        // when we hold none** — having no session is not a milder version of
+        // holding the wrong one, it is the same broken link, and the exchange
+        // that repairs it needs no session to run.
         //
         // A replayed or forged frame lands here too and also arms a repair.
         // That is deliberate and costs nothing: the exchange is rate-limited,
@@ -687,7 +821,53 @@ impl SessionManager {
         // by PeerId at the Noise layer — and a peer can always negotiate a
         // fresh key by asking.
         self.request_rekey(peer);
-        Err(SwarmError::DecryptionFailed)
+        if had_session {
+            Err(SwarmError::DecryptionFailed)
+        } else {
+            Err(SwarmError::NoSession(peer.clone()))
+        }
+    }
+
+    /// Try the key derived while answering this peer's exchange, and adopt it
+    /// if it opens.
+    ///
+    /// Promotion is the point: the peer sealing under it is proof both ends
+    /// have it, which is the one thing `accept_ephemeral_exchange` could not
+    /// know. The window the key accumulated travels with it, so the message
+    /// that confirmed it cannot then be replayed.
+    fn open_with_unconfirmed(
+        &self,
+        peer: &NodeId,
+        sealed: &[u8],
+        aad: &[u8],
+        recv_nonce: u64,
+    ) -> Option<Vec<u8>> {
+        // Scoped so the map guard is released before `install_with_window`
+        // touches `sessions` — and before `unconfirmed.remove` touches this map.
+        let plaintext = {
+            let pending = self.unconfirmed.get(peer)?;
+            try_open_with(
+                &pending.cipher_key,
+                &pending.replay_window,
+                sealed,
+                aad,
+                recv_nonce,
+            )?
+        };
+        if let Some((_, confirmed)) = self.unconfirmed.remove(peer) {
+            let window = confirmed
+                .replay_window
+                .into_inner()
+                .unwrap_or_else(|e| e.into_inner());
+            self.install_with_window(peer, confirmed.cipher_key, window);
+            tracing::debug!(
+                peer = %peer,
+                recv_nonce,
+                derived_secs = confirmed.derived_at.elapsed().as_secs(),
+                "The peer confirmed the new session key — adopting it"
+            );
+        }
+        Some(plaintext)
     }
 
     /// Arm a repair handshake with `peer`, unless one was armed recently.
@@ -791,6 +971,18 @@ impl SessionManager {
         // anything, for no benefit.
         self.retired
             .retain(|_, k| k.retired_at.elapsed() <= PREVIOUS_KEY_GRACE);
+        // An unconfirmed key is waiting for the peer's first message under it,
+        // which is its own traffic and may be minutes away — so it is swept on
+        // the session clock, not the much shorter grace window. Sweeping it
+        // sooner would throw away a perfectly good rotation; the next tick
+        // derives another one anyway.
+        self.unconfirmed.retain(|peer, k| {
+            let keep = k.derived_at.elapsed() < max_age;
+            if !keep {
+                tracing::debug!(peer = %peer, "Dropped a session key the peer never confirmed");
+            }
+            keep
+        });
         // SEC: Purge pending ephemeral exchanges that were never completed.
         let ephemeral_ttl = std::time::Duration::from_secs(PENDING_EPHEMERAL_TTL_SECS);
         let before = self.pending_ephemeral.len();
@@ -948,12 +1140,26 @@ mod tests {
     }
 
     /// Perform a full ephemeral rekey between two managers, as the rotation
-    /// tick does. Returns nothing — both sides end up holding the new key with
-    /// the one it replaced in their previous slot.
+    /// tick does — all THREE legs, including the confirmation the initiator
+    /// sends once it has installed the key. Both sides end up holding the new
+    /// key with the one it replaced in their previous slot.
+    ///
+    /// The third leg is not decoration: `sm_b` answered as the responder and
+    /// deliberately keeps sealing with the old key until it opens something
+    /// under the new one (see [`UnconfirmedKey`]). A helper that stopped at two
+    /// legs would leave the pair half-rotated and quietly weaken every test
+    /// built on it.
     fn rekey(sm_a: &SessionManager, sm_b: &SessionManager, node_a: &NodeId, node_b: &NodeId) {
         let a_eph = sm_a.initiate_ephemeral_exchange(node_b);
-        let b_eph = sm_b.accept_ephemeral_exchange(node_a, &a_eph);
-        assert!(sm_a.complete_ephemeral_session(node_b, &b_eph));
+        let b_eph = sm_b.accept_ephemeral_exchange(node_a, &a_eph, KeyAdoption::OnConfirmation);
+        let confirm = sm_a
+            .complete_ephemeral_session(node_b, &b_eph)
+            .expect("the initiator installs the key and seals a confirmation");
+        assert_eq!(
+            sm_b.open(node_a, &confirm, SESSION_CONFIRM_MARKER).unwrap(),
+            SESSION_CONFIRM_MARKER,
+            "the confirmation is what makes the responder adopt the key"
+        );
     }
 
     /// Identify fires repeatedly, and re-establishing used to reset the nonce
@@ -1249,10 +1455,13 @@ mod tests {
         let a_eph_pub = sm_a.initiate_ephemeral_exchange(&node_b);
 
         // B accepts (responder side): gets A's ephemeral pub, generates its own
-        let b_eph_pub = sm_b.accept_ephemeral_exchange(&node_a, &a_eph_pub);
+        let b_eph_pub =
+            sm_b.accept_ephemeral_exchange(&node_a, &a_eph_pub, KeyAdoption::OnConfirmation);
 
         // A completes: uses B's ephemeral pub response
-        assert!(sm_a.complete_ephemeral_session(&node_b, &b_eph_pub));
+        assert!(sm_a
+            .complete_ephemeral_session(&node_b, &b_eph_pub)
+            .is_some());
 
         // Now both should have forward-secret sessions
         let plaintext = b"forward secret message";
@@ -1279,15 +1488,15 @@ mod tests {
 
         // First ephemeral session
         let a_eph1 = sm_a.initiate_ephemeral_exchange(&node_b);
-        let b_eph1 = sm_b.accept_ephemeral_exchange(&node_a, &a_eph1);
-        sm_a.complete_ephemeral_session(&node_b, &b_eph1);
+        let b_eph1 = sm_b.accept_ephemeral_exchange(&node_a, &a_eph1, KeyAdoption::OnConfirmation);
+        let _ = sm_a.complete_ephemeral_session(&node_b, &b_eph1);
 
         let sealed1 = sm_a.seal(&node_b, b"msg1", b"").unwrap();
 
         // Second ephemeral session (re-key)
         let a_eph2 = sm_a.initiate_ephemeral_exchange(&node_b);
-        let b_eph2 = sm_b.accept_ephemeral_exchange(&node_a, &a_eph2);
-        sm_a.complete_ephemeral_session(&node_b, &b_eph2);
+        let b_eph2 = sm_b.accept_ephemeral_exchange(&node_a, &a_eph2, KeyAdoption::OnConfirmation);
+        let _ = sm_a.complete_ephemeral_session(&node_b, &b_eph2);
 
         let sealed2 = sm_a.seal(&node_b, b"msg1", b"").unwrap();
 
@@ -1309,7 +1518,9 @@ mod tests {
 
         // Try to complete without initiating
         let fake_pub = [42u8; 32];
-        assert!(!sm_a.complete_ephemeral_session(&node_b, &fake_pub));
+        assert!(sm_a
+            .complete_ephemeral_session(&node_b, &fake_pub)
+            .is_none());
     }
 
     #[test]
@@ -1338,8 +1549,8 @@ mod tests {
 
         // Ephemeral exchange
         let a_eph = sm_a.initiate_ephemeral_exchange(&node_b);
-        let b_eph = sm_b.accept_ephemeral_exchange(&node_a, &a_eph);
-        sm_a.complete_ephemeral_session(&node_b, &b_eph);
+        let b_eph = sm_b.accept_ephemeral_exchange(&node_a, &a_eph, KeyAdoption::OnConfirmation);
+        let _ = sm_a.complete_ephemeral_session(&node_b, &b_eph);
 
         // The ephemeral public keys should not equal the static public keys
         assert_ne!(&a_eph, sm_a.local_public_key().as_bytes());
@@ -1435,6 +1646,32 @@ mod disconnect_retirement_tests {
         (a, b, na, nb)
     }
 
+    /// A complete ephemeral rekey, all three legs — initiate, accept, confirm
+    /// — after which BOTH ends are on the new key. Stopping at two legs leaves
+    /// the responder deliberately on the old one (see [`UnconfirmedKey`]).
+    fn rekey(
+        initiator: &SessionManager,
+        responder: &SessionManager,
+        initiator_node: &NodeId,
+        responder_node: &NodeId,
+    ) {
+        let i_pub = initiator.initiate_ephemeral_exchange(responder_node);
+        let r_pub = responder.accept_ephemeral_exchange(
+            initiator_node,
+            &i_pub,
+            KeyAdoption::OnConfirmation,
+        );
+        let confirm = initiator
+            .complete_ephemeral_session(responder_node, &r_pub)
+            .expect("the initiator installs the key and seals a confirmation");
+        assert_eq!(
+            responder
+                .open(initiator_node, &confirm, SESSION_CONFIRM_MARKER)
+                .unwrap(),
+            SESSION_CONFIRM_MARKER
+        );
+    }
+
     /// **The defect report #028 exposed.** A forward is sealed, the peer's
     /// connection drops and comes back, and the message already in flight then
     /// cannot be read — because `remove_session` destroyed the key along with
@@ -1454,9 +1691,7 @@ mod disconnect_retirement_tests {
         // or not anything was retired — the first version of this test passed
         // with the fix reverted for exactly that reason. Forward secrecy means
         // the real link is ephemeral, and a reconnect genuinely changes the key.
-        let a_pub = a.initiate_ephemeral_exchange(&nb);
-        let b_pub = b.accept_ephemeral_exchange(&na, &a_pub);
-        assert!(a.complete_ephemeral_session(&nb, &b_pub));
+        rekey(&a, &b, &na, &nb);
         let sealed = a.seal(&nb, b"activations", aad).unwrap();
 
         // B's connection drops. Its guard cannot see that it is mid-request:
@@ -1569,9 +1804,7 @@ mod disconnect_retirement_tests {
     fn a_session_the_peer_no_longer_holds_asks_to_be_repaired() {
         let (a, b, na, nb) = pair();
         let aad = b"header";
-        let a_pub = a.initiate_ephemeral_exchange(&nb);
-        let b_pub = b.accept_ephemeral_exchange(&na, &a_pub);
-        assert!(a.complete_ephemeral_session(&nb, &b_pub));
+        rekey(&a, &b, &na, &nb);
 
         // B's link drops and comes back; B retires and re-handshakes, A does
         // not. Past the grace window, so the retired key cannot mask it.
@@ -1590,9 +1823,7 @@ mod disconnect_retirement_tests {
         assert_eq!(b.take_rekey_requests(), vec![na.clone()]);
 
         // Which repairs it: one exchange, and what A seals opens again.
-        let a_pub = a.initiate_ephemeral_exchange(&nb);
-        let b_pub = b.accept_ephemeral_exchange(&na, &a_pub);
-        assert!(a.complete_ephemeral_session(&nb, &b_pub));
+        rekey(&a, &b, &na, &nb);
         let sealed = a.seal(&nb, b"activations", aad).unwrap();
         assert_eq!(b.open(&na, &sealed, aad).unwrap(), b"activations");
     }
@@ -1620,5 +1851,284 @@ mod disconnect_retirement_tests {
         // And taking them empties the queue: the rotation task must not
         // re-handshake with the same peer on every wake-up.
         assert!(b.take_rekey_requests().is_empty());
+    }
+}
+
+/// The third leg of a key exchange: the initiator proving it installed the key,
+/// and what happens when the second leg never arrives.
+///
+/// **The defect these come from**, seen live 2026-09-20 and field-reported the
+/// same evening against v0.3.193: a peer's forward arrived sealed under a key
+/// this node had never installed — `recv_nonce=0`, the first message of a
+/// session — 102 s after its own rotation tick, and the request died with
+/// `Could not decrypt forward`. The responder of an exchange derived the key
+/// and adopted it before its answer was delivered, so a lost answer left one
+/// end sealing with a key the other had never seen, in one direction, with
+/// nothing on either side able to notice.
+#[cfg(test)]
+mod key_confirmation_tests {
+    use super::*;
+
+    fn pair() -> (SessionManager, SessionManager, NodeId, NodeId) {
+        let a = SessionManager::from_ed25519_key(&[21u8; 32]);
+        let b = SessionManager::from_ed25519_key(&[23u8; 32]);
+        let na = NodeId([5u8; 32]);
+        let nb = NodeId([6u8; 32]);
+        assert!(a.establish_session(&nb, b.local_public));
+        assert!(b.establish_session(&na, a.local_public));
+        (a, b, na, nb)
+    }
+
+    /// The reported failure, reproduced: A initiates, B answers, and B's answer
+    /// is lost. B must still be sealing with the key A has.
+    ///
+    /// **Null control**: with the deferral removed — `KeyAdoption::Immediately`
+    /// below — the same three lines fail, because B seals under a key A never
+    /// derived. That is the bug, and it is what this asserts is gone.
+    #[test]
+    fn a_lost_answer_leaves_both_ends_on_the_key_they_share() {
+        let (a, b, na, nb) = pair();
+        let aad = b"header";
+
+        let a_pub = a.initiate_ephemeral_exchange(&nb);
+        let _lost = b.accept_ephemeral_exchange(&na, &a_pub, KeyAdoption::OnConfirmation);
+        // A never hears back, so it never installs and never confirms.
+
+        let from_b = b.seal(&na, b"result", aad).unwrap();
+        assert_eq!(
+            a.open(&nb, &from_b, aad).unwrap(),
+            b"result",
+            "B must keep sealing with the key A still holds"
+        );
+        let from_a = a.seal(&nb, b"activations", aad).unwrap();
+        assert_eq!(a_and_b_agree(&b, &na, &from_a, aad), b"activations");
+    }
+
+    fn a_and_b_agree(b: &SessionManager, na: &NodeId, sealed: &[u8], aad: &[u8]) -> Vec<u8> {
+        b.open(na, sealed, aad).expect("the link is intact")
+    }
+
+    /// The null control the test above names, run rather than described: the
+    /// old behaviour, and the failure it produces.
+    #[test]
+    fn adopting_a_key_before_the_peer_has_it_breaks_one_direction() {
+        let (a, b, na, nb) = pair();
+        let aad = b"header";
+
+        let a_pub = a.initiate_ephemeral_exchange(&nb);
+        let _lost = b.accept_ephemeral_exchange(&na, &a_pub, KeyAdoption::Immediately);
+
+        let from_b = b.seal(&na, b"result", aad).unwrap();
+        assert!(
+            a.open(&nb, &from_b, aad).is_err(),
+            "this is the defect: B has moved to a key A has never seen"
+        );
+        // And the direction that still works is what made it invisible.
+        let from_a = a.seal(&nb, b"activations", aad).unwrap();
+        assert_eq!(b.open(&na, &from_a, aad).unwrap(), b"activations");
+    }
+
+    /// The confirmation is what moves the responder onto the new key.
+    #[test]
+    fn the_confirmation_adopts_the_new_key() {
+        let (a, b, na, nb) = pair();
+        let aad = b"header";
+
+        let a_pub = a.initiate_ephemeral_exchange(&nb);
+        let b_pub = b.accept_ephemeral_exchange(&na, &a_pub, KeyAdoption::OnConfirmation);
+        let confirm = a
+            .complete_ephemeral_session(&nb, &b_pub)
+            .expect("completing seals a confirmation for the caller to send");
+
+        // Before it lands, B is still on the old key — deliberately. Asserted
+        // on the key it holds, not only on a message opening: A has already
+        // installed the new key by now, so a round trip succeeds either way
+        // and would not notice the difference this test is about.
+        assert!(
+            b.unconfirmed.get(&na).is_some(),
+            "the derived key must be waiting, not in use"
+        );
+        let before = b.seal(&na, b"old-key", aad).unwrap();
+        assert_eq!(a.open(&nb, &before, aad).unwrap(), b"old-key");
+
+        assert_eq!(
+            b.open(&na, &confirm, SESSION_CONFIRM_MARKER).unwrap(),
+            SESSION_CONFIRM_MARKER
+        );
+
+        // After it, both ends are on the new one and the old is superseded.
+        let after = b.seal(&na, b"new-key", aad).unwrap();
+        assert_eq!(a.open(&nb, &after, aad).unwrap(), b"new-key");
+        assert!(
+            b.unconfirmed.get(&na).is_none(),
+            "a confirmed key belongs to the session, not to the waiting room"
+        );
+    }
+
+    /// The confirmation cannot be replayed afterwards. The window the key
+    /// accumulated while it waited travels with it into the session — a fresh
+    /// one would forget the nonce that had just been accepted.
+    #[test]
+    fn the_confirming_message_cannot_be_replayed() {
+        let (a, b, na, nb) = pair();
+
+        let a_pub = a.initiate_ephemeral_exchange(&nb);
+        let b_pub = b.accept_ephemeral_exchange(&na, &a_pub, KeyAdoption::OnConfirmation);
+        let confirm = a.complete_ephemeral_session(&nb, &b_pub).unwrap();
+
+        assert!(b.open(&na, &confirm, SESSION_CONFIRM_MARKER).is_ok());
+        assert!(
+            b.open(&na, &confirm, SESSION_CONFIRM_MARKER).is_err(),
+            "the same frame must not open twice under the promoted key"
+        );
+    }
+
+    /// Ordinary traffic confirms a key just as well as the confirmation does —
+    /// the message is a prompt, not the only proof. An older initiator that
+    /// never sends one is therefore still adopted the moment it forwards
+    /// anything, which is what keeps the two builds interoperable.
+    #[test]
+    fn the_peers_first_sealed_message_also_confirms_the_key() {
+        let (a, b, na, nb) = pair();
+        let aad = b"header";
+
+        let a_pub = a.initiate_ephemeral_exchange(&nb);
+        let b_pub = b.accept_ephemeral_exchange(&na, &a_pub, KeyAdoption::OnConfirmation);
+        let _confirm_never_sent = a.complete_ephemeral_session(&nb, &b_pub).unwrap();
+
+        let forward = a.seal(&nb, b"activations", aad).unwrap();
+        assert_eq!(b.open(&na, &forward, aad).unwrap(), b"activations");
+
+        let reply = b.seal(&na, b"result", aad).unwrap();
+        assert_eq!(
+            a.open(&nb, &reply, aad).unwrap(),
+            b"result",
+            "B adopted the key on A's forward, so its reply opens under it"
+        );
+    }
+
+    /// A peer that cannot confirm — an older build — is answered the way it
+    /// expects, or the link would break in the other direction instead: it
+    /// retires the key we kept and nothing we sealed would open.
+    #[test]
+    fn a_peer_that_cannot_confirm_is_answered_the_old_way() {
+        let (a, b, na, nb) = pair();
+        let aad = b"header";
+
+        let a_pub = a.initiate_ephemeral_exchange(&nb);
+        let b_pub = b.accept_ephemeral_exchange(&na, &a_pub, KeyAdoption::Immediately);
+        let _ = a.complete_ephemeral_session(&nb, &b_pub);
+
+        assert!(
+            b.unconfirmed.get(&na).is_none(),
+            "nothing is waiting: the key took effect at once"
+        );
+        let from_b = b.seal(&na, b"result", aad).unwrap();
+        assert_eq!(a.open(&nb, &from_b, aad).unwrap(), b"result");
+    }
+
+    /// With no session at all there is nothing to fall back to, so the key has
+    /// to take effect immediately whatever the peer supports — and nothing is
+    /// at risk, because there is no working state to protect.
+    #[test]
+    fn a_first_exchange_takes_effect_at_once() {
+        let a = SessionManager::from_ed25519_key(&[31u8; 32]);
+        let b = SessionManager::from_ed25519_key(&[33u8; 32]);
+        let na = NodeId([7u8; 32]);
+        let nb = NodeId([8u8; 32]);
+
+        let a_pub = a.initiate_ephemeral_exchange(&nb);
+        let b_pub = b.accept_ephemeral_exchange(&na, &a_pub, KeyAdoption::OnConfirmation);
+        assert!(b.has_session(&na), "a responder with no session installs");
+        let _ = a.complete_ephemeral_session(&nb, &b_pub);
+
+        let sealed = b.seal(&na, b"result", b"aad").unwrap();
+        assert_eq!(a.open(&nb, &sealed, b"aad").unwrap(), b"result");
+    }
+
+    /// Two rotations crossing used to leave each end sealing with a key the
+    /// other held only as superseded — fine for three minutes, then broken in
+    /// both directions at once. Answering an exchange drops our own, so at most
+    /// one new key per link per round.
+    #[test]
+    fn two_exchanges_that_cross_leave_the_link_working() {
+        let (a, b, na, nb) = pair();
+        let aad = b"header";
+
+        // Both initiate before either has answered.
+        let a_pub = a.initiate_ephemeral_exchange(&nb);
+        let b_pub = b.initiate_ephemeral_exchange(&na);
+
+        // Each then answers the other's, which cancels its own initiation.
+        let _a_answer = a.accept_ephemeral_exchange(&nb, &b_pub, KeyAdoption::OnConfirmation);
+        let _b_answer = b.accept_ephemeral_exchange(&na, &a_pub, KeyAdoption::OnConfirmation);
+
+        assert!(
+            a.complete_ephemeral_session(&nb, &_b_answer).is_none(),
+            "our own initiation was dropped when we answered theirs"
+        );
+        assert!(b.complete_ephemeral_session(&na, &_a_answer).is_none());
+
+        // Neither adopted anything, and the link is exactly as it was.
+        let from_a = a.seal(&nb, b"activations", aad).unwrap();
+        assert_eq!(b.open(&na, &from_a, aad).unwrap(), b"activations");
+        let from_b = b.seal(&na, b"result", aad).unwrap();
+        assert_eq!(a.open(&nb, &from_b, aad).unwrap(), b"result");
+    }
+
+    /// A key nobody ever confirmed does not wait for ever — but it is swept on
+    /// the session clock, not the much shorter grace window, because the
+    /// confirming traffic is the peer's own and may be minutes away.
+    #[test]
+    fn an_unconfirmed_key_is_eventually_swept() {
+        let (a, b, na, nb) = pair();
+        let a_pub = a.initiate_ephemeral_exchange(&nb);
+        let _ = b.accept_ephemeral_exchange(&na, &a_pub, KeyAdoption::OnConfirmation);
+        assert!(b.unconfirmed.get(&na).is_some());
+
+        b.evict_stale(Duration::from_secs(600));
+        assert!(
+            b.unconfirmed.get(&na).is_some(),
+            "a key derived seconds ago is still worth keeping"
+        );
+
+        b.evict_stale(Duration::from_nanos(1));
+        assert!(b.unconfirmed.get(&na).is_none());
+    }
+
+    /// A disconnect ends everything about the session, including a key derived
+    /// before the drop: the reconnect runs a fresh exchange, and promoting the
+    /// old one would reinstate what the disconnect exists to end.
+    #[test]
+    fn a_disconnect_drops_a_key_that_was_never_confirmed() {
+        let (a, b, na, nb) = pair();
+        let a_pub = a.initiate_ephemeral_exchange(&nb);
+        let _ = b.accept_ephemeral_exchange(&na, &a_pub, KeyAdoption::OnConfirmation);
+
+        b.remove_session(&na);
+        assert!(b.unconfirmed.get(&na).is_none());
+    }
+
+    /// Having no session for a peer is not a milder failure than holding the
+    /// wrong key — it is the same broken link, and the exchange that repairs it
+    /// needs no session to run. It armed no repair until 2026-09-21.
+    #[test]
+    fn a_message_from_a_peer_we_have_no_session_with_arms_a_repair() {
+        let (a, _b, _na, nb) = pair();
+        let stranger = SessionManager::from_ed25519_key(&[41u8; 32]);
+        let unopenable = {
+            let nc = NodeId([9u8; 32]);
+            assert!(stranger.establish_session(&nc, a.local_public));
+            stranger.seal(&nc, b"nope", b"header").unwrap()
+        };
+
+        a.remove_session(&nb);
+        a.retired.clear();
+        assert!(a.open(&nb, &unopenable, b"header").is_err());
+        assert_eq!(
+            a.take_rekey_requests(),
+            vec![nb.clone()],
+            "a link with no session must still ask to be repaired"
+        );
     }
 }

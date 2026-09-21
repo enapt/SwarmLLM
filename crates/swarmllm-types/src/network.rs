@@ -150,6 +150,11 @@ pub enum SwarmMessage {
     // a range of its content tokens again (gotcha #438). Additive: gated on
     // `features::RESEND_TOKENS`, so an older node is never sent one.
     ResendTokens(ResendTokens),
+
+    // Forward secrecy — the initiator of an ephemeral exchange proving it has
+    // installed the new key. Additive: gated on
+    // `features::SESSION_KEY_CONFIRM`, so an older node is never sent one.
+    SessionKeyConfirm(SessionKeyConfirm),
 }
 
 impl SwarmMessage {
@@ -196,6 +201,7 @@ impl SwarmMessage {
             Self::PoolModelAvailability(_) => "PoolModelAvailability",
             Self::RelayedEnvelope(_) => "RelayedEnvelope",
             Self::ResendTokens(_) => "ResendTokens",
+            Self::SessionKeyConfirm(_) => "SessionKeyConfirm",
         }
     }
 }
@@ -506,6 +512,33 @@ pub struct EphemeralKeyExchange {
     pub ephemeral_pubkey: [u8; 32],
     /// Whether this is an initiation (true) or a response (false).
     pub is_initiator: bool,
+}
+
+/// The initiator of an ephemeral exchange telling the responder that the new
+/// key is installed on its side, by sealing a fixed marker under it.
+///
+/// An exchange has two messages and the second one can be lost. The responder
+/// derives the new key before it answers, so if its answer never lands the
+/// initiator keeps the old key while the responder has moved on — and from
+/// then on nothing the responder seals can be opened. This message is the
+/// missing third leg: the responder adopts the new key only once this opens,
+/// so a lost answer costs a rotation rather than the link.
+///
+/// It is the same rule WireGuard follows — a responder may not send under a
+/// new keypair until it has received one transport message under it, because
+/// only that proves the initiator got the handshake response.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SessionKeyConfirm {
+    /// The `session_id` of the exchange being confirmed. Carried for logs and
+    /// bound into the seal, so a confirmation cannot be replayed onto a
+    /// different exchange.
+    pub session_id: uuid::Uuid,
+    /// The sender's node identity, checked against the transport-authenticated
+    /// sender exactly as `EphemeralKeyExchange` is.
+    pub node_id: NodeId,
+    /// A fixed marker sealed under the newly installed session key. Opening it
+    /// is the whole proof: only a node holding that key could have produced it.
+    pub sealed: Vec<u8>,
 }
 
 /// Commands sent from daemon tasks to the NetworkManager.

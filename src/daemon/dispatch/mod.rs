@@ -2017,10 +2017,27 @@ pub(crate) async fn dispatch_network_messages(
                                         if exchange.node_id == our_id {
                                             // Ignore our own broadcast
                                         } else if exchange.is_initiator {
-                                            // Peer wants to re-key: accept and reply
+                                            // Peer wants to re-key: accept and reply.
+                                            //
+                                            // The new key takes effect here only
+                                            // for a peer that will never confirm
+                                            // it. One that will is answered with
+                                            // the key parked: our reply can be
+                                            // lost, and a key only this end holds
+                                            // breaks every forward that peer sends
+                                            // us until a repair handshake runs.
+                                            let adopt = if shared_state.peer_advertises_feature(
+                                                &exchange.node_id,
+                                                swarmllm_types::node::features::SESSION_KEY_CONFIRM,
+                                            ) {
+                                                crate::crypto::session::KeyAdoption::OnConfirmation
+                                            } else {
+                                                crate::crypto::session::KeyAdoption::Immediately
+                                            };
                                             let response_pub = sm.accept_ephemeral_exchange(
                                                 &exchange.node_id,
                                                 &exchange.ephemeral_pubkey,
+                                                adopt,
                                             );
                                             let reply = SwarmMessage::EphemeralKeyExchange(EphemeralKeyExchange {
                                                 session_id: exchange.session_id,
@@ -2054,11 +2071,96 @@ pub(crate) async fn dispatch_network_messages(
                                                 );
                                             }
                                         } else {
-                                            // Response to our initiation: complete the exchange
-                                            sm.complete_ephemeral_session(
+                                            // Response to our initiation: complete
+                                            // the exchange, then tell the peer we
+                                            // have the key. It derived the same key
+                                            // before answering and — if it is a
+                                            // build that waits — will not seal with
+                                            // it until this opens, so skipping the
+                                            // confirmation leaves it on the old key
+                                            // until the grace window closes.
+                                            let sealed = sm.complete_ephemeral_session(
                                                 &exchange.node_id,
                                                 &exchange.ephemeral_pubkey,
                                             );
+                                            if let Some(sealed) = sealed {
+                                                let target = shared_state
+                                                    .resolve_connected_peer_id_bytes(
+                                                        &exchange.node_id,
+                                                    );
+                                                if let Some(target_bytes) = target {
+                                                    let confirm = SwarmMessage::SessionKeyConfirm(
+                                                        crate::types::SessionKeyConfirm {
+                                                            session_id: exchange.session_id,
+                                                            node_id: our_id,
+                                                            sealed,
+                                                        },
+                                                    );
+                                                    if let Err(e) = network_tx.try_send(
+                                                        NetworkCommand::SendDirectMessage {
+                                                            target_peer_bytes: target_bytes,
+                                                            message: confirm,
+                                                            delivery_request_id: None,
+                                                        },
+                                                    ) {
+                                                        tracing::warn!(
+                                                            error = %e,
+                                                            peer = %exchange.node_id,
+                                                            "Dropping session key confirmation: network_tx busy"
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    // The other end of an exchange we initiated
+                                    // proving it installed the new key. Opening it
+                                    // is the whole message — `open` adopts the key
+                                    // it was sealed with.
+                                    SwarmMessage::SessionKeyConfirm(confirm) => {
+                                        let Some(ref sender) = authenticated_sender else {
+                                            tracing::debug!(
+                                                "Dropping unauthenticated SessionKeyConfirm"
+                                            );
+                                            continue;
+                                        };
+                                        if sender != &confirm.node_id {
+                                            tracing::warn!(
+                                                sender = %sender,
+                                                claimed = %confirm.node_id,
+                                                "Session key confirmation rejected: sender mismatch"
+                                            );
+                                            continue;
+                                        }
+                                        let marker = crate::crypto::session::SESSION_CONFIRM_MARKER;
+                                        match shared_state.session_manager.open(
+                                            &confirm.node_id,
+                                            &confirm.sealed,
+                                            marker,
+                                        ) {
+                                            Ok(plaintext) if plaintext == marker => {
+                                                tracing::debug!(
+                                                    peer = %confirm.node_id,
+                                                    session_id = %confirm.session_id,
+                                                    "Session key confirmed by the peer"
+                                                );
+                                            }
+                                            Ok(_) => {
+                                                tracing::warn!(
+                                                    peer = %confirm.node_id,
+                                                    "Session key confirmation opened but did not carry the marker"
+                                                );
+                                            }
+                                            Err(e) => {
+                                                // `open` has already armed a repair
+                                                // handshake; nothing more to do but
+                                                // say which message failed.
+                                                tracing::debug!(
+                                                    peer = %confirm.node_id,
+                                                    error = %e,
+                                                    "Session key confirmation did not open"
+                                                );
+                                            }
                                         }
                                     }
                                     // Tensor-parallel AllReduce: collect partial from a TP rank

@@ -98,6 +98,86 @@ A forged or replayed frame also arms a repair. That is deliberate and costs
 nothing — connections are authenticated by PeerId at the Noise layer, so only
 that peer can trigger it, and it can always ask for a fresh key anyway.
 
+### The third failure: a key only ONE end ever had (2026-09-21, field-reported on v0.3.193)
+
+The repair above treats divergence as something to recover from. This is where
+it came from, and it was being manufactured on a timer.
+
+**A rekey is two messages, and the second one can be lost.** The responder
+derived the new key and installed it *before* answering, so if its answer never
+arrived the initiator kept the old key while the responder had moved on. From
+that moment nothing the responder sealed could be opened — in ONE direction,
+which is why neither end could see it: the initiator's forwards still arrived
+and were still answered.
+
+**Measured, not reasoned about.** A peer's forward reached this node under a key
+it had never installed — `recv_nonce=0`, the first message of a session, 102 s
+after this node's own rotation tick — and the request died with `Could not
+decrypt forward`. The same peer's own report that evening carried two more, on
+two different peers, in two different topologies, both on the FIRST segment of a
+pipeline. One sender, three receivers, one signature: the divergence was being
+made by whoever answered an exchange, not by any particular peer.
+
+Three ways an answer is lost, and none of them is exotic: the reply is a
+fire-and-forget `SendDirectMessage` with no delivery id, so libp2p's
+request-response layer may drop it silently under load; `network_tx.try_send`
+drops it when the channel is full; and the peer may be unresolvable for the
+moment it takes to answer. The comment beside the send said a dropped reply
+"re-runs on the next exchange" — true of the reply, false of its consequence,
+because the responder had already committed.
+
+**The rule: a key derived while ANSWERING an exchange does not take effect until
+the peer proves it has it.** This is WireGuard's, for the same reason — a
+responder may not send under a new keypair until it has received one transport
+message under it, because only that proves the initiator got the handshake
+response ([wireguard.com/protocol](https://www.wireguard.com/protocol/)).
+
+The implementation is `SessionManager`'s `unconfirmed` slot:
+
+- `accept_ephemeral_exchange` parks the derived key there instead of installing
+  it, and keeps sealing with the key both ends still agree on. With no session
+  at all it installs as before — there is nothing else to seal with, and no
+  working state to protect.
+- `open` tries the parked key after the live one and, when it opens, promotes
+  it. **The window it accumulated travels with it** (`install_with_window`), or
+  the message that confirmed it could be replayed under the promoted key.
+- The initiator seals `SESSION_CONFIRM_MARKER` the moment it installs;
+  `complete_ephemeral_session` RETURNS those bytes so the seal and the install
+  cannot come apart, and the dispatch handler sends them as
+  `SwarmMessage::SessionKeyConfirm`.
+- **Ordinary traffic confirms a key just as well.** The message is a prompt, not
+  the proof — which is what keeps an older initiator working: it never sends one
+  and is adopted the moment it forwards anything.
+
+**Gated on `features::SESSION_KEY_CONFIRM`, and the gate is not decoration.** A
+peer that cannot confirm must be answered the old way, or the failure is simply
+mirrored: it would retire the key we kept waiting on and nothing we sealed would
+open. Unknown reads as "cannot confirm", which is what an absent capability
+gives.
+
+**Answering an exchange also drops our own outstanding initiation.** Two
+rotations crossing used to leave each end sealing with a key the other held only
+as superseded — fine for `PREVIOUS_KEY_GRACE`, then broken in both directions at
+once. Now at most one new key per link per round: if they genuinely crossed,
+neither takes and the next tick tries again with nothing broken in between.
+
+**And a peer we hold NO session for now arms a repair too.** That path returned
+`NoSession` and armed nothing, on the reasoning that there was no session to
+repair — but an exchange needs no session to run, and "no key" is not a milder
+version of "the wrong key", it is the same dead link.
+
+Guards: `key_confirmation_tests` in `src/crypto/session.rs`, including
+`adopting_a_key_before_the_peer_has_it_breaks_one_direction` — the old behaviour
+kept as a running null control, because the fix and the defect differ by one
+enum value and a test that cannot tell them apart is not a test.
+
+**What this does NOT fix.** A decrypt failure still ends the request it lands
+on. The repair arms in the same call and completes in a round trip, but by then
+`failover_segment` has already exhausted a segment that usually has no standby
+(every single-peer delegation, by design) — so the user sees `Segment 0 failed
+with no standby available`. Making a known-transient, known-self-repairing
+failure survivable is separate work: see `docs/FUTURE_WORK.md`.
+
 ## A disagreement nobody can read is not an instrument
 
 (2026-09-13.) **`state.models.disputed_shards` is the record of "we checked,
