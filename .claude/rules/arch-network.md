@@ -488,6 +488,37 @@ and served nothing while spending ~2.6 Mbit/s.
   BitTorrent draws the same line: BEP 3's bitfield goes to the peer that
   connected, and only per-piece `have` deltas go to everyone.
 
+## A counter named for an outcome may only be counting the attempt
+
+GossipSub's `sent` / `sent_bytes` count **attempts, once per recipient**:
+`msg_sent` runs at the top of `send_message`, before the connected-peer lookup
+and before the queue that can refuse the message. So a per-topic figure may
+legitimately **exceed** `BandwidthMeter`'s total, and
+`sum(topic.sent_bytes) <= out_bytes` must NOT be asserted — the GAP IS THE
+SIGNAL, and it is gossip this node was asked to relay and could not.
+
+Reported from the field 2026-09-21 (`swarm/models sent = 389 MB` on a node whose
+`out_bytes` was 179 MB). `GossipMeter`'s own doc had claimed these were "the
+figure that matches what leaves the interface" — **the comment reasoned about
+one quantity while the counter measured another**, which is the timeouts rule's
+trap in a new place.
+
+**Both drop paths must be read; they come from different places and are
+independently absent.** Queue EXPIRY raises `HandlerEvent::MessageDropped` and
+increments `*_messages_dropped_per_topic`; queue FULL touches **no metric family
+at all** and leaves the crate only as `gossipsub::Event::SlowPeer`. Reading only
+the metrics misses the half that moves on a congested node.
+
+⚠ **`sent_msgs` is not a publish rate** — it includes forwards times recipients.
+`published_msgs` is the only field that says whether this node's own timer fires.
+
+⚠ **Second firing of gotcha #673.** GossipSub keeps ~28 metric families; this
+node parsed six, and the three that answered the question were among the
+twenty-two it did not. **Before estimating the components of a total, look for
+the counter you are not reading.**
+
+→ `docs/invariants/network.md` § "Gossip volume"
+
 ⚠ **`NodeCapabilityUpdate` is still broadcast every tick and is NOT
 change-gated** — `ram_available_mb`, `disk_available_mb` and `uptime_seconds`
 move every tick, so it cannot be gated as it stands without separating the

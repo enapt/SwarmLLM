@@ -143,6 +143,13 @@ pub fn network_traffic_json(shared: &crate::daemon::SharedState) -> serde_json::
                     "published_msgs": t.published,
                     "recv_msgs": t.recv,
                     "recv_msgs_unfiltered": t.recv_unfiltered,
+                    // How much of `sent_msgs` never went. These are INSIDE it,
+                    // not beside it — see `GossipMeter`. A reader comparing a
+                    // topic's `sent_bytes` against `out_bytes` needs these to
+                    // make the two agree.
+                    "dropped_publish_msgs": t.dropped_publish,
+                    "dropped_forward_msgs": t.dropped_forward,
+                    "dropped_timeout_msgs": t.dropped_timeout,
                 })
             })
             .collect();
@@ -150,6 +157,16 @@ pub fn network_traffic_json(shared: &crate::daemon::SharedState) -> serde_json::
             obj.insert("gossip_sent_bytes".into(), g.sent_bytes.into());
             obj.insert("gossip_recv_bytes".into(), g.recv_bytes.into());
             obj.insert("gossip_by_topic".into(), by_topic.into());
+            // Why `gossip_sent_bytes` may EXCEED `out_bytes`, which is
+            // otherwise unreadable as anything but a broken counter. Both
+            // halves are reported because they come from different places and
+            // are independently absent: the first is gossipsub's own per-topic
+            // metric (queue expiry), the second is the `SlowPeer` event (queue
+            // full), which no metric family covers.
+            obj.insert("gossip_dropped_msgs".into(), g.dropped_msgs.into());
+            let (sf_publish, sf_forward) = shared.metrics.gossip.send_failures();
+            obj.insert("gossip_send_failures_publish".into(), sf_publish.into());
+            obj.insert("gossip_send_failures_forward".into(), sf_forward.into());
             // The remainder is what is left after EVERY named category, or it
             // silently re-counts them and the split stops adding up.
             let shard_out = shared

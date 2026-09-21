@@ -1672,6 +1672,59 @@ reading two of its six families. `network/bandwidth.rs` now parses all six:
 factor; `sent_bytes / sent` is the average message size. All three were guesses
 before, and each guess was wrong.
 
+### The same lesson again, six weeks' worth of confidence later (2026-09-21)
+
+Six of ~28 families is still not all of them, and a tester found the next gap by
+arithmetic: their node reported `swarm/models sent_bytes = 389.48 MB` against
+`network_traffic.out_bytes = 178.9 MB`. **A part cannot be 2.2x its whole**, and
+their marginal ratio held near 5x across three readings minutes apart.
+
+**The counter is not wrong; its name is.** `msg_sent` is incremented at the
+first statement of `send_message(peer_id, rpc)` — before the connected-peer
+lookup, before the IDONTWANT check, and before
+`peer.sender.send_message(rpc)`, which returns `Err` when that peer's handler
+queue is full (libp2p-gossipsub 0.49.5). So `sent` means **attempted, once per
+recipient**, and a forward dropped for a slow peer is counted and never sent.
+
+Two consequences, both now written into the code:
+
+1. **`sum(topic.sent_bytes) <= out_bytes` is NOT an invariant** and must not be
+   asserted, which is what the reporter asked for. Their ask was right in spirit
+   and wrong in mechanism: the gap is a measurement of dropped relaying.
+2. **`GossipMeter`'s doc comment was the other half of the bug.** It claimed
+   these counters were "the figure that matches what leaves the interface". The
+   comment reasoned about deliveries while the counter measured attempts — the
+   same trap § Timeouts records, where four of five constants had a comment
+   about one quantity bounding another.
+
+**Two drop paths, and only one has a metric.** Queue EXPIRY raises
+`HandlerEvent::MessageDropped` and increments `publish_messages_dropped_per_topic`,
+`forward_messages_dropped_per_topic` and `timedout_messages_dropped_per_topic`
+(the last beside each of the first two, so summing all three double-counts).
+Queue FULL bumps an internal `failed_messages` map and the peer score and
+**touches no metric family at all** — it leaves the crate only as
+`gossipsub::Event::SlowPeer`, drained per peer per heartbeat. A fix that read
+only the metrics would have missed the half that actually moves on the
+congested node that prompted the report.
+
+**And the log could not have answered it.** The default filter is
+`swarmllm=info`, scoped to our own crate, so libp2p's own `Send Queue full.
+Could not send` WARN never appears: an 82 MB log on this node had **zero**
+`libp2p_*` lines of any kind. That was nearly reported as "zero drops here" —
+diagnosis rule 2, caught by asking whether the source could have shown it.
+
+**The healthy reading, for comparison.** This node, same hour: gossip
+2.674 GB against `out_bytes` 2.830 GB, ratio **0.94**, drops zero — the 5.5%
+shortfall is Noise/yamux/QUIC framing. **A ratio above 1 is a node failing to
+relay what the mesh hands it**, which is a capacity problem on that node and not
+an accounting one.
+
+⚠ **`sent_msgs` is not a publish rate**, and reading it as one is how
+`swarm/regions` looked unfixed after v0.3.196 change-gated it. It includes
+forwards times recipients. Measured on this node after the fix: **0.12
+published/s against 236 sent/s** — the publish gate works, and essentially all
+of the volume is relaying for a swarm still mostly on older builds.
+
 ### What it found
 
 A probe node holding no models and serving nothing, on the live swarm:

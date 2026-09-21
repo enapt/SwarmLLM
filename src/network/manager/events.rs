@@ -488,6 +488,40 @@ impl NetworkManager {
                 tracing::debug!(%peer, ?request_id, "DIAG: ResponseSent event — response written to wire");
             }
 
+            // ── GossipSub peer too slow to take what we are sending it ──
+            //
+            // A peer whose send queue is full. GossipSub has already counted
+            // these messages as SENT — `msg_sent` runs at the top of
+            // `send_message`, before the queue can refuse them — and it records
+            // the refusal in no metric family at all, so this event is the only
+            // way the figure leaves the crate. Without it a node that cannot
+            // keep up with relaying reports the traffic it INTENDED, and the
+            // gap against the transport counters reads as a broken counter
+            // rather than as a node falling behind (reported from the field
+            // 2026-09-21: `swarm/models sent = 389 MB` on a node whose
+            // `out_bytes` was 179 MB).
+            //
+            // Logged at `debug` deliberately: gossipsub drains this per peer on
+            // every heartbeat that had a failure, so a `warn` here would be the
+            // per-message ActivityEvent mistake in another costume. The counter
+            // is the durable record.
+            SwarmEvent::Behaviour(SwarmBehaviourEvent::Gossipsub(gossipsub::Event::SlowPeer {
+                peer_id,
+                failed_messages,
+            })) => {
+                tracing::debug!(
+                    %peer_id,
+                    publish = failed_messages.publish,
+                    forward = failed_messages.forward,
+                    timeout = failed_messages.timeout,
+                    "DIAG: gossip send queue full — messages counted as sent were dropped"
+                );
+                self.shared_state
+                    .metrics
+                    .gossip
+                    .note_slow_peer(failed_messages.publish, failed_messages.forward);
+            }
+
             // ── GossipSub peer subscribed — flush matching buffered messages (NET-I4) ──
             //
             // Only the just-subscribed topic is eligible for replay — a

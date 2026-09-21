@@ -211,15 +211,46 @@ impl BandwidthMeter {
 /// counters label by transport stack (`/ip4/tcp`, `/ip4/udp/quic-v1`) and know
 /// nothing about protocols above the muxer.
 ///
-/// So this reads GossipSub's own per-topic counters, which count **every copy
-/// put on the wire** — `send_message` records a publish AND a forward, once per
-/// recipient — which is the figure that matches what leaves the interface, not
-/// the number of distinct messages composed. The same encode-and-parse shape as
-/// `BandwidthMeter`, and for the same reason: `prometheus_client::Registry`
-/// cannot be iterated.
+/// So this reads GossipSub's own per-topic counters. The same encode-and-parse
+/// shape as `BandwidthMeter`, and for the same reason:
+/// `prometheus_client::Registry` cannot be iterated.
+///
+/// ⚠ **`sent` and `sent_bytes` count ATTEMPTS, once per recipient — not
+/// deliveries.** `send_message` increments `msg_sent` at its very first
+/// statement, before the connected-peer lookup and before
+/// `peer.sender.send_message(rpc)`, which returns `Err` when that peer's
+/// handler queue is full (libp2p-gossipsub 0.49.5, `behaviour.rs`). A forward
+/// dropped for a slow peer is therefore counted as sent and never reaches the
+/// interface.
+///
+/// This comment used to claim the opposite — "the figure that matches what
+/// leaves the interface" — and a tester found it by arithmetic instead
+/// (2026-09-21): their node reported `swarm/models sent = 389 MB` against
+/// `out_bytes = 179 MB`, a part 2.2x its whole. **A sub-counter here may
+/// legitimately exceed `BandwidthMeter`'s total, and the GAP IS THE SIGNAL** —
+/// it is gossip this node was asked to relay and could not. Do not assert
+/// `sum(topic.sent_bytes) <= out_bytes`; report the drops instead, which is
+/// what `dropped_*` and `send_failures` below are for.
 pub struct GossipMeter {
     registry: Mutex<prometheus_client::registry::Registry>,
     armed: AtomicBool,
+    /// Sends refused outright because the recipient's handler queue was FULL,
+    /// as reported by `gossipsub::Event::SlowPeer`.
+    ///
+    /// **This is the half the registry cannot answer.** There are two ways a
+    /// counted send never happens, and gossipsub meters only one of them: the
+    /// queue-EXPIRY path raises `HandlerEvent::MessageDropped` and increments
+    /// `*_messages_dropped_per_topic`, while the queue-FULL path in
+    /// `send_message` bumps an internal `failed_messages` map, adjusts the peer
+    /// score, and touches no metric family at all. The only way out of the
+    /// crate for that one is the `SlowPeer` event, drained on each heartbeat.
+    ///
+    /// ⚠ **It carries no topic**, which is why these are flat atomics rather
+    /// than another per-topic row — `FailedMessages` is per PEER, by kind.
+    /// Plain atomics, so zero genuinely means zero, unlike the registry-derived
+    /// figures above; the same distinction [`InferenceTraffic`] documents.
+    send_failures_publish: AtomicU64,
+    send_failures_forward: AtomicU64,
 }
 
 /// Distributed-inference bytes on the wire, counted in the codec.
@@ -272,6 +303,11 @@ impl InferenceTraffic {
 pub struct GossipTotals {
     pub sent_bytes: u64,
     pub recv_bytes: u64,
+    /// Gossip messages counted as sent that expired in a peer's send queue,
+    /// summed over every topic. Non-zero means this node is being asked to
+    /// relay more than it can, and that `sent_bytes` overstates the wire by
+    /// roughly this share.
+    pub dropped_msgs: u64,
     /// Per topic, sorted by topic so a reader diffing two snapshots is not
     /// comparing a reordered list.
     pub by_topic: Vec<GossipTopicTotals>,
@@ -296,6 +332,9 @@ pub struct GossipTotals {
 ///   are frequent" from "every peer sends us the same one".
 /// - `sent_bytes / sent` is the average message size, which is what decides
 ///   whether a payload belongs on a broadcast topic at all.
+/// - `dropped_*` is how much of `sent` never actually went. See
+///   [`GossipMeter`]: `sent` counts attempts, so these are already INSIDE it
+///   and must be subtracted, never added.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct GossipTopicTotals {
     pub topic: String,
@@ -305,6 +344,18 @@ pub struct GossipTopicTotals {
     pub published: u64,
     pub recv: u64,
     pub recv_unfiltered: u64,
+    /// Messages this node ORIGINATED that expired in a peer's send queue.
+    pub dropped_publish: u64,
+    /// Messages this node was RELAYING that expired in a peer's send queue.
+    /// On a node that forwards far more than it publishes — which is every
+    /// node in this swarm — this is the one that moves.
+    pub dropped_forward: u64,
+    /// The same events counted once more, by cause rather than by kind:
+    /// gossipsub increments this beside each of the two above. It is
+    /// `dropped_publish + dropped_forward` whenever the queue-expiry path is
+    /// the only one running, and it is carried separately so a future
+    /// upstream drop cause does not silently inflate the two named ones.
+    pub dropped_timeout: u64,
 }
 
 impl Default for GossipMeter {
@@ -318,7 +369,31 @@ impl GossipMeter {
         Self {
             registry: Mutex::new(prometheus_client::registry::Registry::default()),
             armed: AtomicBool::new(false),
+            send_failures_publish: AtomicU64::new(0),
+            send_failures_forward: AtomicU64::new(0),
         }
+    }
+
+    /// Record one `gossipsub::Event::SlowPeer`.
+    ///
+    /// Called from the swarm event loop with the counts gossipsub drained for
+    /// that peer this heartbeat. `publish` is what this node originated and
+    /// could not hand over; `forward` is what it was relaying for the mesh.
+    pub fn note_slow_peer(&self, publish: usize, forward: usize) {
+        self.send_failures_publish
+            .fetch_add(publish as u64, Ordering::Relaxed);
+        self.send_failures_forward
+            .fetch_add(forward as u64, Ordering::Relaxed);
+    }
+
+    /// `(publish, forward)` sends refused because a peer's queue was full.
+    ///
+    /// Zero genuinely means zero — see the field docs.
+    pub fn send_failures(&self) -> (u64, u64) {
+        (
+            self.send_failures_publish.load(Ordering::Relaxed),
+            self.send_failures_forward.load(Ordering::Relaxed),
+        )
     }
 
     /// Hand a prefixed sub-registry to GossipSub's `with_metrics`, once, while
@@ -396,6 +471,17 @@ const GOSSIP_SENT_METRIC: &str = "gossip_topic_msg_sent_counts_total";
 const GOSSIP_PUBLISHED_METRIC: &str = "gossip_topic_msg_published_total";
 const GOSSIP_RECV_METRIC: &str = "gossip_topic_msg_recv_counts_total";
 const GOSSIP_RECV_UNFILTERED_METRIC: &str = "gossip_topic_msg_recv_counts_unfiltered_total";
+/// The three drop families, which this node did NOT read until 2026-09-21.
+///
+/// GossipSub keeps ~28 metric families and `GossipMeter` parsed six. These are
+/// the ones that answer "why does a topic claim more bytes than the interface
+/// carried", and their absence is the second firing of gotcha #673 — the first
+/// having been the four count families that turned the .196 investigation into
+/// arithmetic. **Before estimating the components of a total, look for the
+/// counter you are not reading.**
+const GOSSIP_DROPPED_PUBLISH_METRIC: &str = "gossip_publish_messages_dropped_per_topic_total";
+const GOSSIP_DROPPED_FORWARD_METRIC: &str = "gossip_forward_messages_dropped_per_topic_total";
+const GOSSIP_DROPPED_TIMEOUT_METRIC: &str = "gossip_timedout_messages_dropped_per_topic_total";
 
 /// Which field a matched row lands in.
 #[derive(Clone, Copy)]
@@ -406,6 +492,9 @@ enum GossipSlot {
     Published,
     Recv,
     RecvUnfiltered,
+    DroppedPublish,
+    DroppedForward,
+    DroppedTimeout,
 }
 
 /// Sum GossipSub's per-topic counters, bytes and messages alike.
@@ -424,6 +513,9 @@ fn parse_gossip_totals(text: &str) -> Option<GossipTotals> {
         (GOSSIP_SENT_METRIC, GossipSlot::Sent),
         (GOSSIP_PUBLISHED_METRIC, GossipSlot::Published),
         (GOSSIP_RECV_METRIC, GossipSlot::Recv),
+        (GOSSIP_DROPPED_PUBLISH_METRIC, GossipSlot::DroppedPublish),
+        (GOSSIP_DROPPED_FORWARD_METRIC, GossipSlot::DroppedForward),
+        (GOSSIP_DROPPED_TIMEOUT_METRIC, GossipSlot::DroppedTimeout),
     ];
 
     let mut per_topic: BTreeMap<String, GossipTopicTotals> = BTreeMap::new();
@@ -457,6 +549,9 @@ fn parse_gossip_totals(text: &str) -> Option<GossipTotals> {
             GossipSlot::Published => entry.published += value,
             GossipSlot::Recv => entry.recv += value,
             GossipSlot::RecvUnfiltered => entry.recv_unfiltered += value,
+            GossipSlot::DroppedPublish => entry.dropped_publish += value,
+            GossipSlot::DroppedForward => entry.dropped_forward += value,
+            GossipSlot::DroppedTimeout => entry.dropped_timeout += value,
         }
         saw_any = true;
     }
@@ -468,6 +563,9 @@ fn parse_gossip_totals(text: &str) -> Option<GossipTotals> {
     for (_, topic) in per_topic {
         totals.sent_bytes += topic.sent_bytes;
         totals.recv_bytes += topic.recv_bytes;
+        // The two KINDS, not the `timeout` cause counted beside them — adding
+        // all three would double every drop.
+        totals.dropped_msgs += topic.dropped_publish + topic.dropped_forward;
         totals.by_topic.push(topic);
     }
     Some(totals)
@@ -595,6 +693,15 @@ gossip_topic_msg_recv_counts_unfiltered_total{hash=\"swarmllm/models\"} 1200
 # HELP gossip_topic_msg_recv_counts Messages received after filtering.
 # TYPE gossip_topic_msg_recv_counts counter
 gossip_topic_msg_recv_counts_total{hash=\"swarmllm/models\"} 300
+# HELP publish_messages_dropped_per_topic Number of publish messages dropped per topic.
+# TYPE gossip_publish_messages_dropped_per_topic counter
+gossip_publish_messages_dropped_per_topic_total{hash=\"swarmllm/models\"} 7
+# HELP forward_messages_dropped_per_topic Number of forward messages dropped per topic.
+# TYPE gossip_forward_messages_dropped_per_topic counter
+gossip_forward_messages_dropped_per_topic_total{hash=\"swarmllm/models\"} 111
+# HELP timedout_messages_dropped_per_topic Number of timedout messages dropped per topic.
+# TYPE gossip_timedout_messages_dropped_per_topic counter
+gossip_timedout_messages_dropped_per_topic_total{hash=\"swarmllm/models\"} 118
 # EOF
 ";
 
@@ -620,10 +727,70 @@ gossip_topic_msg_recv_counts_total{hash=\"swarmllm/models\"} 300
                     published: 60,
                     recv: 300,
                     recv_unfiltered: 1200,
+                    dropped_publish: 7,
+                    dropped_forward: 111,
+                    dropped_timeout: 118,
                 },
             ],
             "sorted by topic, with the counts that explain the bytes beside them — \
              the breakdown is the whole point, not just the total"
+        );
+    }
+
+    /// The drops are what make a topic's `sent_bytes` exceeding `out_bytes`
+    /// readable, so they must be parsed, summed by KIND, and must not
+    /// double-count the `timeout` cause gossipsub records beside each one.
+    ///
+    /// Without this the field report that prompted them (2026-09-21, a node
+    /// reporting `swarm/models sent = 389 MB` against `out_bytes = 179 MB`)
+    /// has no answer in the payload at all.
+    #[test]
+    fn the_drops_that_explain_an_impossible_total_are_read_and_not_double_counted() {
+        let got = parse_gossip_totals(GOSSIP_SHAPE).expect("the counters must be found");
+        assert_eq!(
+            got.dropped_msgs,
+            7 + 111,
+            "publish + forward are the two KINDS; adding `timeout` as well \
+             would count every drop twice, because gossipsub increments it \
+             beside each kind rather than instead of one"
+        );
+        let models = got
+            .by_topic
+            .iter()
+            .find(|t| t.topic == "swarmllm/models")
+            .expect("the models topic is in the fixture");
+        assert_eq!(models.dropped_forward, 111);
+        assert_eq!(
+            models.dropped_forward + models.dropped_publish,
+            models.dropped_timeout,
+            "in the fixture every drop is a queue expiry, which is the only \
+             cause upstream currently raises — a future second cause is why \
+             `dropped_timeout` is carried separately instead of derived"
+        );
+        assert!(
+            models.dropped_forward < models.sent,
+            "a drop is INSIDE `sent`, never beside it"
+        );
+    }
+
+    /// The queue-FULL path has no metric family at all, so a reader who only
+    /// has the registry cannot see it. Zero must therefore mean zero here.
+    #[test]
+    fn the_queue_full_drops_come_from_the_event_because_no_counter_carries_them() {
+        let meter = GossipMeter::new();
+        assert_eq!(
+            meter.send_failures(),
+            (0, 0),
+            "plain atomics: zero is a measurement, not 'not counting yet'"
+        );
+        meter.note_slow_peer(2, 40);
+        meter.note_slow_peer(0, 3);
+        assert_eq!(
+            meter.send_failures(),
+            (2, 43),
+            "publish and forward stay separate — on a relaying node it is the \
+             forward half that moves, and which half it is says whose problem \
+             the congestion is"
         );
     }
 
@@ -733,12 +900,26 @@ gossip_topic_msg_recv_counts_total{hash=\"swarmllm/models\"} 300
             GOSSIP_PUBLISHED_METRIC.trim_end_matches("_total"),
             GOSSIP_RECV_METRIC.trim_end_matches("_total"),
             GOSSIP_RECV_UNFILTERED_METRIC.trim_end_matches("_total"),
+            GOSSIP_DROPPED_PUBLISH_METRIC.trim_end_matches("_total"),
+            GOSSIP_DROPPED_FORWARD_METRIC.trim_end_matches("_total"),
+            GOSSIP_DROPPED_TIMEOUT_METRIC.trim_end_matches("_total"),
         ] {
+            // The metadata NAME, compared whole. `starts_with` was the obvious
+            // check and it is too weak by exactly the margin that matters: a
+            // truncated constant is a prefix of the real name, so
+            // `gossip_forward_messages_dropped` matched
+            // `gossip_forward_messages_dropped_per_topic` and the guard passed
+            // on a name that parses nothing. Found 2026-09-21 by sabotaging
+            // this constant and watching only the FIXTURE tests go red — the
+            // check that arms the real behaviour, i.e. the one whose whole
+            // purpose is catching an upstream rename, stayed green.
             assert!(
                 text.lines().any(|l| {
-                    ["# HELP ", "# TYPE ", "# UNIT "]
-                        .iter()
-                        .any(|p| l.strip_prefix(p).is_some_and(|r| r.starts_with(base)))
+                    ["# HELP ", "# TYPE ", "# UNIT "].iter().any(|p| {
+                        l.strip_prefix(p)
+                            .and_then(|r| r.split_whitespace().next())
+                            .is_some_and(|name| name == base)
+                    })
                 }),
                 "gossipsub no longer registers {base} — the traffic split would go \
                  silently absent. Registry was:\n{text}"

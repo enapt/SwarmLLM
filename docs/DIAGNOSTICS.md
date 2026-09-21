@@ -1315,6 +1315,49 @@ separated from a loop problem in four minutes. `grep "loop stalled" node.log |
 grep -oE "arm=[^ ]+ took_ms=[0-9]+" | sort | uniq -c | sort -rn` names the
 culprit when there is one.
 
+## A gossip topic reports more bytes sent than the node sent in total (2026-09-21)
+
+Reported from the field on v0.3.196: a node whose `network_traffic.out_bytes`
+read **178.9 MB** reported `swarm/models sent_bytes = 389.48 MB` — a part 2.2x
+its whole — with the marginal ratio steady near **5x** across three readings.
+
+**This is not a broken counter, and the gap is the finding.** GossipSub's
+`sent`/`sent_bytes` count **attempts, once per recipient**: `msg_sent` runs at
+the very top of `send_message`, before the connected-peer lookup and before
+`peer.sender.send_message(rpc)`, which returns `Err` when that peer's handler
+queue is full. A forward dropped for a slow peer is counted and never reaches
+the interface. So `sum(topic.sent_bytes) <= out_bytes` does **not** hold by
+construction — do not assert it.
+
+What to read instead, all in the same traffic payload:
+
+| field | means |
+|---|---|
+| `gossip_dropped_msgs` | counted as sent, then **expired** in a peer's queue |
+| `gossip_send_failures_forward` | relays **refused outright** — queue was full |
+| `gossip_send_failures_publish` | this node's own messages refused the same way |
+| `<topic>.dropped_forward_msgs` | the same expiries, per topic |
+
+A healthy node reads `gossip_sent_bytes` slightly **below** `out_bytes` — the
+difference is Noise/yamux/QUIC framing, about 5%. Measured here 2026-09-21:
+2.674 GB gossip against 2.830 GB total, ratio 0.94, drops zero. A node whose
+ratio is **above 1** is failing to relay what the mesh is handing it, which is a
+capacity problem on that node, not an accounting one.
+
+⚠ **The log cannot answer this.** The default filter is `swarmllm=info`, scoped
+to our own crate, so libp2p's own `Send Queue full. Could not send` warning is
+suppressed on every default node — an 82 MB log here had zero `libp2p_*` lines
+of any kind. Run with `-vv` to see them, or read the counters above, which is
+why they exist. `DIAG: gossip send queue full` is our own line for the same
+event and is also at `debug`, because gossipsub re-raises it per peer per
+heartbeat while congestion lasts.
+
+⚠ **`sent_msgs` is not a publish rate.** It includes forwards, multiplied by
+recipients. **`published_msgs` is the field that says whether this node's own
+timer is still firing** — reading `sent_msgs` as a publish rate is what made
+`swarm/regions` look like it was still on a timer after v0.3.196 change-gated
+it (measured after: 0.12 published/s, against 236 sent/s of pure relay).
+
 ## "no receipt acknowledgement within Ns" — late, or missing? (2026-08-25)
 
 A peer that fails every distributed request with this looks dead. It may simply
