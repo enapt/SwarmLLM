@@ -473,6 +473,14 @@ Two halves, both learned by deploying rather than by review:
   differs from Serf's median** because here the slow mode is the MAJORITY, so a
   median would encode the queueing as distance. `SharedState::observe_network_coord`
   is the single writer and filters internally so no caller can bypass it.
+- **A window sized in TIME must be read against the rate that fills it.**
+  `LATENCY_WINDOW_MS` (5 min) and `RR_PING_INTERVAL_SECS` (120 s) live in
+  different files and were never read together: a merely-connected peer put 3
+  samples in a window capped at 64, so the "minimum" was a minimum of three and
+  answered in the slow mode a third of the time. `LATENCY_WINDOW_MIN_SAMPLES`
+  is the floor that fixes it, `LATENCY_SAMPLE_MAX_AGE_MS` the bound that stops
+  the floor resurrecting an hour-old estimate. **Before trusting any windowed
+  statistic here, ask what feeds it and how often.**
 
 → `docs/invariants/network.md`
 

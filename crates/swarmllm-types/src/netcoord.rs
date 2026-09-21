@@ -47,6 +47,39 @@ pub const LATENCY_WINDOW_MS: u64 = 300_000;
 /// window without bound between evictions.
 pub const LATENCY_WINDOW_MAX_SAMPLES: usize = 64;
 
+/// Never age a sample out while this few remain, however old it is.
+///
+/// **Found 2026-09-21, from a live reading**: every peer on the release node
+/// reported `rtt_samples: 3`, against a cap of 64. The only sample source that
+/// runs regardless of load is the PEX ping at `RR_PING_INTERVAL_SECS` (120 s,
+/// `network/manager/mod.rs`), so a merely-connected peer can put **at most 3**
+/// samples in a 5-minute window — the other source, an acknowledged tensor
+/// forward, exists only while this node is serving distributed work.
+///
+/// A minimum over 3 draws is not the filter documented on [`LatencyFilter`].
+/// On the real sample kept in this file's tests, **10 of 14 observations are in
+/// the slow mode**, so three draws miss the fast mode outright about a third of
+/// the time and two draws about half — and what Vivaldi is then taught as the
+/// distance to that peer is the remote node's own event-loop delay. The two
+/// constants were each reasonable and were never read against each other; the
+/// window was sized for a stream only a busy node produces.
+///
+/// The cost is paid only on a QUIET link, and it is a slower reaction to
+/// genuine degradation: the estimate rises once this many newer samples exist,
+/// ~16 min at the ping rate rather than 5. At that rate there is nothing better
+/// to be had — an estimate needs samples. On a busy link the window fills many
+/// times over and this floor never binds.
+pub const LATENCY_WINDOW_MIN_SAMPLES: usize = 8;
+
+/// Age past which a sample is dropped whatever the floor says.
+///
+/// The floor exists so a quiet peer still has an estimate, not so a peer that
+/// went silent for an hour can answer with the minimum it had back then.
+/// Without this, a peer that came back WORSE would report its old best until
+/// the floor had been refilled one ping at a time; with it, the first new
+/// sample flushes everything stale at once.
+pub const LATENCY_SAMPLE_MAX_AGE_MS: u64 = 1_800_000;
+
 /// The round trips seen to ONE peer recently, answering with the **minimum**.
 ///
 /// # Why a minimum, when the reference implementation uses a median
@@ -96,8 +129,21 @@ impl LatencyFilter {
             return self.min();
         }
         self.samples.push_back((now_ms, rtt_ms));
+        // Too old to describe the path at all, floor or no floor.
+        let hard_cutoff = now_ms.saturating_sub(LATENCY_SAMPLE_MAX_AGE_MS);
+        while self
+            .samples
+            .front()
+            .is_some_and(|(at, _)| *at < hard_cutoff)
+        {
+            self.samples.pop_front();
+        }
+        // Then the ordinary window — but never down to a count too small to be
+        // a minimum of anything. See `LATENCY_WINDOW_MIN_SAMPLES`.
         let cutoff = now_ms.saturating_sub(LATENCY_WINDOW_MS);
-        while self.samples.front().is_some_and(|(at, _)| *at < cutoff) {
+        while self.samples.len() > LATENCY_WINDOW_MIN_SAMPLES
+            && self.samples.front().is_some_and(|(at, _)| *at < cutoff)
+        {
             self.samples.pop_front();
         }
         while self.samples.len() > LATENCY_WINDOW_MAX_SAMPLES {
@@ -369,19 +415,107 @@ mod tests {
 
     /// Bounded in time, so a path that genuinely gets worse is not masked for
     /// ever by one good moment.
+    ///
+    /// Takes enough newer samples to clear `LATENCY_WINDOW_MIN_SAMPLES`: the
+    /// floor is what stops a quiet peer's window holding three draws, and the
+    /// price of it is exactly this — the estimate rises after that many newer
+    /// samples rather than at the window edge.
     #[test]
     fn a_stale_good_sample_stops_counting() {
         let mut f = LatencyFilter::new();
         assert_eq!(f.observe(0, 3.0), Some(3.0));
         assert_eq!(f.observe(1_000, 200.0), Some(3.0), "still in window");
-        let after = f
-            .observe(LATENCY_WINDOW_MS + 2_000, 200.0)
-            .expect("a value");
+        let mut last = None;
+        for i in 0..=LATENCY_WINDOW_MIN_SAMPLES {
+            last = f.observe(LATENCY_WINDOW_MS + 2_000 + i as u64 * 1_000, 200.0);
+        }
         assert_eq!(
-            after, 200.0,
+            last.expect("a value"),
+            200.0,
             "once the good sample ages out the estimate must rise; an all-time \
              minimum would latch the best moment the network ever had"
         );
+    }
+
+    /// **The defect the floor exists for, at the cadence that produces it.**
+    ///
+    /// The PEX ping is the only sample source that runs regardless of load, at
+    /// `RR_PING_INTERVAL_SECS` = 120 s, so a merely-connected peer offers three
+    /// samples per 5-minute window — which is exactly what every peer on the
+    /// release node reported on 2026-09-21 (`rtt_samples: 3`).
+    ///
+    /// Scored over EVERY prefix of the real sample rather than its end, because
+    /// a single end-state is cherry-picking: `FIELD_SAMPLES` happens to finish
+    /// beside a fast observation, so asserting on the last answer alone passes
+    /// with the floor removed and proves nothing (gotcha #502).
+    ///
+    /// The floor does not make a slow answer impossible and this does not claim
+    /// it does — the sample contains a run of eight consecutive slow
+    /// observations, which no window of eight can see past. It makes it rare:
+    /// **8 of 14 prefixes answer in the fast mode at three samples, 13 of 14
+    /// with the floor.** Remove the floor and this goes red.
+    #[test]
+    fn a_quiet_peers_window_usually_finds_the_fast_mode() {
+        const PING_INTERVAL_MS: u64 = 120_000;
+        /// Above the measured fast mode (3-8 ms), far below the slow one
+        /// (118-158 ms). Nothing in this sample lands between them.
+        const FAST_MODE_CEILING_MS: f32 = 20.0;
+
+        let mut f = LatencyFilter::new();
+        let mut fast_answers = 0;
+        for (i, s) in FIELD_SAMPLES.iter().enumerate() {
+            let min = f
+                .observe(i as u64 * PING_INTERVAL_MS, *s)
+                .expect("a minimum after any valid sample");
+            if min < FAST_MODE_CEILING_MS {
+                fast_answers += 1;
+            }
+        }
+        assert!(
+            fast_answers >= 13,
+            "at the real ping rate only {fast_answers} of {} prefixes answered \
+             in the fast mode; three samples per window scores 8, so the \
+             window is not holding what the floor promises",
+            FIELD_SAMPLES.len()
+        );
+        assert!(
+            f.len() >= LATENCY_WINDOW_MIN_SAMPLES,
+            "a peer pinged every {}s must still hold {} samples, held {}",
+            PING_INTERVAL_MS / 1000,
+            LATENCY_WINDOW_MIN_SAMPLES,
+            f.len()
+        );
+    }
+
+    /// The floor keeps a quiet peer's estimate alive; it must not resurrect one
+    /// from an hour ago. A peer that goes silent and comes back WORSE answers
+    /// honestly on its first new sample, not after the floor is refilled.
+    #[test]
+    fn a_sample_too_old_to_mean_anything_goes_whatever_the_floor_says() {
+        let mut f = LatencyFilter::new();
+        for i in 0..LATENCY_WINDOW_MIN_SAMPLES {
+            f.observe(i as u64 * 1_000, 3.0);
+        }
+        assert_eq!(f.min(), Some(3.0));
+
+        let much_later = LATENCY_SAMPLE_MAX_AGE_MS + 60_000;
+        assert_eq!(
+            f.observe(much_later, 200.0),
+            Some(200.0),
+            "one sample after a long silence must flush the stale window, not \
+             report the minimum the path had before it"
+        );
+        assert_eq!(f.len(), 1);
+    }
+
+    /// The floor must not defeat the cap: a busy peer is still bounded.
+    #[test]
+    fn the_floor_does_not_lift_the_hard_cap() {
+        let mut f = LatencyFilter::new();
+        for i in 0..(LATENCY_WINDOW_MAX_SAMPLES * 3) {
+            f.observe(i as u64 * 10, 50.0);
+        }
+        assert!(f.len() <= LATENCY_WINDOW_MAX_SAMPLES);
     }
 
     #[test]

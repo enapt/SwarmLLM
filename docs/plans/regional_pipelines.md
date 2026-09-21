@@ -212,6 +212,34 @@ satisfy every peer at once, and with one peer at 6 ms and the rest at
 windowed MINIMUM measured per peer, never the instantaneous sample. Both
 columns are on `/api/admin/peers`.
 
+#### The soak reading, 2026-09-21 — and a defect it found first
+
+Taking that comparison found something before the judging could start: **every
+peer read `rtt_samples: 3`**, against a filter cap of 64. `LATENCY_WINDOW_MS`
+(5 min) and `RR_PING_INTERVAL_SECS` (120 s) live in different files and had
+never been read against each other, so the "windowed minimum" was a minimum of
+three — which on a bimodal input whose slow mode is the majority answers in the
+slow mode about a third of the time. Fixed with `LATENCY_WINDOW_MIN_SAMPLES`;
+→ `docs/invariants/network.md` § "A window sized in time is only as good as the
+rate that fills it". **The comparison this stage asks for has therefore still
+not been made on a trustworthy instrument** — retake it after a release
+carrying that fix.
+
+The reading itself, for the record: the distant peers predicted within
+0.8-1.7x of their measured minimum, and the near peer at **24.8x** (497 ms
+predicted, 20 ms measured).
+
+⚠ **That near/far split is the thing Stage 3 has to design around, not a number
+to wait for.** The coordinate is documented as poor at picking the single
+*closest* node (Azureus; Pharos answers it with a second local-cluster tier) and
+`netcoord.rs` accepts that explicitly, on the grounds that the routing question
+is "20 ms or 600 ms". **Stage 3's question is not that one.** Building a
+regionally tight pod means ranking peers that are all nearby, which is exactly
+where this instrument is weakest. So a consumer may use the coordinate to
+EXCLUDE the far half of the swarm, and must not use it to order the near half —
+for that, `measured_min_rtt_ms` is our own direct measurement and is better.
+Decide which of the two a Stage 3 predicate is asking for before writing it.
+
 Original plan below.
 
 ### Stage 2 (original) — Give the scheduler inter-peer latency (the key enabler)

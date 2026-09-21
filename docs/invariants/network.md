@@ -1588,6 +1588,42 @@ min-of-N discipline this repo already applies to benchmarking (gotcha #367).
 The window is bounded in TIME (`LATENCY_WINDOW_MS`), not only in count, so a
 path that genuinely degrades is not masked for ever by one good moment.
 
+**3. A window sized in time is only as good as the rate that fills it
+(2026-09-21).** The plan for this work was "soak, then judge `predicted_rtt_ms`
+against the windowed minimum". Taking that reading on the release node found
+something before the judging could start: **every peer reported
+`rtt_samples: 3`**, against a `LATENCY_WINDOW_MAX_SAMPLES` of 64.
+
+The arithmetic was never done. The only sample source that runs regardless of
+load is the PEX ping, at `RR_PING_INTERVAL_SECS` = 120 s
+(`network/manager/mod.rs`); the other, an acknowledged tensor forward, exists
+only while this node is serving distributed work. So a merely-connected peer can
+put **at most 3** samples in a 5-minute window — the cap was unreachable by a
+factor of 21, and the two constants live in different files and were never read
+against each other.
+
+**That makes the minimum a minimum of three**, on an input where 10 of 14
+observations are in the slow mode. Scored over every prefix of the sample above
+at the real ping cadence, **8 of 14 answers land in the fast mode at three
+samples per window; 13 of 14 with the floor** — the rest of the time Vivaldi is
+taught the remote node's event-loop delay as the distance to it. That is a
+plausible contributor to the near-peer overestimate the coordinate work already
+recorded, though it is *not* established as its cause: the Azureus
+closest-node limitation is a separate and sufficient explanation, and both can
+hold at once.
+
+`LATENCY_WINDOW_MIN_SAMPLES` is the fix — age a sample out on the ordinary
+window only while more than this many remain. `LATENCY_SAMPLE_MAX_AGE_MS`
+bounds it, so a peer that went silent for an hour and came back WORSE flushes
+its stale window on the first new sample instead of answering with the minimum
+it had back then.
+
+⚠ **Raising the ping rate was the other option and was rejected**: an idle node's
+upload was a live field complaint fixed the day before (entry 91), and more
+probing is exactly what that fix removed. The floor costs a quiet link a slower
+reaction to genuine degradation — ~16 min instead of 5 — which at one sample
+per 120 s is the best available anyway.
+
 ### What a change must keep
 
 - **Publish whenever we have a coordinate.** Pinned by
@@ -1601,5 +1637,12 @@ path that genuinely degrades is not masked for ever by one good moment.
 - ⚠ **If the measurement source is ever replaced by a true network-level round
   trip, revisit the minimum** — over clean samples a minimum chases the low tail
   and the median becomes the better estimator again.
-- Nothing routed on coordinates as of 2026-09-20. A consumer must check
+- **Keep the window fed enough to be a window.** `LATENCY_WINDOW_MIN_SAMPLES`
+  is paired with `RR_PING_INTERVAL_SECS`; changing either without the other
+  puts the filter back where it was. Guard:
+  `a_quiet_peers_window_usually_finds_the_fast_mode`, which scores every prefix
+  of the real sample rather than its end — asserting on the last answer alone
+  passes with the floor removed, because that sample happens to finish beside a
+  fast observation (gotcha #502).
+- Nothing routed on coordinates as of 2026-09-21. A consumer must check
   `is_usable()` and fall back to `region`.
