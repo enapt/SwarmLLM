@@ -1089,8 +1089,12 @@ impl HealthMonitor {
         // join cost every node in the swarm a full copy of every manifest.
         // Measured 2026-09-21: `swarm/models` inbound went from 98.8 KB/s
         // settled to 398.3 KB/s for minutes after ONE node joined, and with
-        // peers reconnecting about once every 80 s that spike was most of the
-        // steady state. BitTorrent draws this line in the same place — BEP 3's
+        // peers reconnecting about 7 times an hour on an 8-peer node, the
+        // trigger fired roughly as often as the 5-minute periodic round. (An
+        // earlier note here said once every 80 s and was wrong — it counted
+        // `connection established` lines, which include the post-restart dial
+        // burst and libp2p's several connections per peer.)
+        // BitTorrent draws this line in the same place — BEP 3's
         // bitfield goes to the peer that connected, over that connection, and
         // only per-piece `have` deltas are sent to everyone afterwards.
         let full_round = manifest_round_is_full(self.manifest_announce_counter);
@@ -2181,8 +2185,9 @@ mod tests {
     /// It used to, and that is what made a single join cost every node in the
     /// swarm a full copy of every manifest — measured 2026-09-21 as
     /// `swarm/models` inbound going 98.8 → 398.3 KB/s after one node joined,
-    /// with peers reconnecting about once every 80 s. The newcomer is caught up
-    /// point to point instead, which is where BitTorrent puts the bitfield.
+    /// with peers reconnecting about 7 times an hour on an 8-peer node — often
+    /// enough to roughly double the rate of full rounds. The newcomer is caught
+    /// up point to point instead, which is where BitTorrent puts the bitfield.
     #[test]
     fn only_the_timer_forces_a_full_broadcast_round() {
         assert!(

@@ -480,7 +480,8 @@ and served nothing while spending ~2.6 Mbit/s.
   peer, so answering "someone new connected" with a topic-wide re-announce made
   one join cost every node a full copy of every manifest: inbound on
   `swarm/models` went **98.8 → 398.3 KB/s** after a single node joined, and
-  peers reconnect about once every 80 s. `NetworkCommand::SendDirectMessage`
+  peers reconnect about 7 times an hour on an 8-peer node, roughly doubling the
+  rate of full rounds. `NetworkCommand::SendDirectMessage`
   carries any `SwarmMessage` over request_response and the receiver dispatches
   it exactly as a gossiped one, so this needs no new variant and no feature
   bit. The periodic full round stays as the bound on a catch-up that failed.

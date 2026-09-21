@@ -1716,8 +1716,22 @@ guards the rest of the file.
 a reason for a full BROADCAST round. Gossip cannot address one peer, so one join
 cost every node in the swarm a full copy of every manifest. Measured directly:
 restarting one probe took `swarm/models` inbound from 98.8 to **398.3 KB/s**,
-and peers reconnect about once every 80 s, so the spike was most of the steady
-state rather than an event.
+and peers reconnect about 7 times an hour on an 8-peer node, so the trigger
+fired roughly as often as the 5-minute periodic round — enough to about double
+the full-round rate.
+
+⚠ **An earlier version of this section said once every 80 s, and that was
+wrong.** It counted `connection established` lines, which include the
+post-restart dial burst (16 in one minute) and libp2p's several connections per
+peer; a later sample was half OUR OWN probe node being restarted. Re-measured on
+a window with no restart and no test node: **7 `io_error` closes in 57 minutes**
+across 3 peers, 6 of them from 2, with dial failures bounded at 5 attempts and
+exponential backoff. Note gotcha #46 — every peer fires a `clean_close` or
+`idle_timeout` on KEEP_ALIVE expiry, so only `io_error` closes are a signal at
+all — and `closed_findings.md` 08-29, which already settled peer churn as "that
+peer's link, not our logic". The fix still stands: one join should not cost a
+swarm-wide flood at any frequency, and the 98.8 → 398.3 KB/s spike per join is
+measured. Its share of the steady state was overstated.
 
 `NetworkCommand::SendDirectMessage` already carried any `SwarmMessage` over
 request_response, and `requests.rs`'s fall-through dispatches it exactly as a
