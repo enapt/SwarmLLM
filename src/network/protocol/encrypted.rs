@@ -140,6 +140,10 @@ pub fn build_layer_forward_aad(forward: &LayerForward) -> Vec<u8> {
     // how the LAST segment penalises its own repetitions, so anything that could
     // rewrite it could steer the reply.
     super::layer_forward::append_generated_ids_trailer(&mut aad, forward);
+    // The pre-embedded trailer (0x09). Bound like the rest: it decides whether
+    // the receiver reads the payload as a tensor or tokenises it as text, so
+    // flipping it turns a reply into nonsense without touching the seal.
+    super::layer_forward::append_pre_embedded_trailer(&mut aad, forward);
 
     aad
 }
@@ -246,6 +250,7 @@ pub fn encode_layer_forward_encrypted(
     // encrypted forward fails to open.
     super::layer_forward::append_chain_trailers(&mut buf, forward);
     super::layer_forward::append_generated_ids_trailer(&mut buf, forward);
+    super::layer_forward::append_pre_embedded_trailer(&mut buf, forward);
 
     Ok(buf)
 }
@@ -462,6 +467,7 @@ pub fn decode_layer_forward_encrypted(
     let chain = super::layer_forward::read_chain_trailer(data, &mut cursor);
     let requester_node_id = super::layer_forward::read_reply_to_trailer(data, &mut cursor);
     let generated_ids = super::layer_forward::read_generated_ids_trailer(data, &mut cursor);
+    let pre_embedded_trailer = super::layer_forward::read_pre_embedded_trailer(data, &mut cursor);
     let _ = cursor;
 
     let forward = LayerForward {
@@ -477,7 +483,7 @@ pub fn decode_layer_forward_encrypted(
         chain,
         sender_peer_bytes: None,
         requester_node_id,
-        pre_embedded: tp_pre_embedded,
+        pre_embedded: tp_pre_embedded || pre_embedded_trailer,
         generated_ids,
         adapter_id: None,
         draft_tokens,
@@ -829,6 +835,69 @@ mod tests {
             &aad[..],
             "the trailer is appended; it must not disturb the bytes before it"
         );
+    }
+
+    /// **The second field that never reached the wire (2026-09-21).**
+    ///
+    /// `pre_embedded` travelled only inside the tensor-parallel trailer, which
+    /// an ordinary pipeline forward never carries. It decides whether the
+    /// receiver reads the payload as a TENSOR or tokenises it as TEXT, so
+    /// losing it means a node handed a locally-embedded prompt runs
+    /// `String::from_utf8_lossy` over float bytes and answers nonsense. That is
+    /// the whole of `inference.local_embedding_privacy`.
+    #[test]
+    fn encrypted_envelope_preserves_pre_embedded_without_tensor_parallelism() {
+        let mut orig = base_forward();
+        assert!(orig.tp_meta.is_none(), "an ordinary pipeline forward");
+        orig.pre_embedded = true;
+        let bytes = encode_layer_forward_encrypted(&orig, vec![0u8; 64]).unwrap();
+        let (decoded, _sealed, _aad) = decode_layer_forward_encrypted(&bytes).unwrap();
+        assert!(
+            decoded.pre_embedded,
+            "without this the receiver tokenises a tensor as a prompt"
+        );
+    }
+
+    /// A tensor-parallel frame already carries the flag in `0x02`, so it must
+    /// not gain a second trailer — that would change bytes a released node
+    /// already parses.
+    #[test]
+    fn a_tensor_parallel_frame_does_not_gain_a_second_pre_embedded_trailer() {
+        let mut tp = base_forward();
+        tp.tp_meta = Some(TensorParallelMeta {
+            tp_rank: 0,
+            tp_size: 2,
+            single_layer: 3,
+            phase: TpPhase::Full,
+        });
+        tp.pre_embedded = true;
+        let with_tp = build_layer_forward_aad(&tp);
+
+        let mut same_but_not_pre_embedded = tp.clone();
+        same_but_not_pre_embedded.pre_embedded = false;
+        // The 0x02 trailer carries the flag, so the two differ by the byte
+        // INSIDE it and not by an extra trailer's length.
+        assert_eq!(
+            with_tp.len(),
+            build_layer_forward_aad(&same_but_not_pre_embedded).len()
+        );
+
+        let (decoded, _s, _a) = decode_layer_forward_encrypted(
+            &encode_layer_forward_encrypted(&tp, vec![0u8; 8]).unwrap(),
+        )
+        .unwrap();
+        assert!(decoded.pre_embedded);
+    }
+
+    /// Bound into the AAD: flipping it turns a reply into nonsense without
+    /// touching a byte of the sealed activations.
+    #[test]
+    fn aad_authenticates_pre_embedded() {
+        let mut a = base_forward();
+        a.pre_embedded = true;
+        let mut b = a.clone();
+        b.pre_embedded = false;
+        assert_ne!(build_layer_forward_aad(&a), build_layer_forward_aad(&b));
     }
 
     #[test]

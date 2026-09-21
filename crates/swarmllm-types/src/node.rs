@@ -106,6 +106,22 @@ pub mod features {
     /// so an unrecognised one makes every encrypted forward fail to open.
     pub const FORWARD_GENERATED_IDS: u64 = 1 << 8;
 
+    /// Understands the pre-embedded trailer (`0x09`) on a `LayerForward`: the
+    /// payload is already embedded hidden states rather than prompt text.
+    ///
+    /// `LayerForward.pre_embedded` travelled ONLY inside the tensor-parallel
+    /// trailer (`0x02`), which an ordinary pipeline forward never carries, so a
+    /// node receiving a locally-embedded prompt read the flag as false and
+    /// tokenised a float tensor as UTF-8 text. That is the whole of
+    /// `inference.local_embedding_privacy`, whose entire purpose is to hand a
+    /// REMOTE first segment hidden states instead of raw token ids.
+    ///
+    /// Gated for the same reason as the trailer beside it: an older peer
+    /// rebuilds the seal's AAD from the trailers it parsed. A coordinator that
+    /// cannot send this to the peer holding segment 0 refuses the request
+    /// rather than silently sending tokens the caller asked to keep private.
+    pub const FORWARD_PRE_EMBEDDED: u64 = 1 << 9;
+
     /// The full feature set THIS build implements. Advertised by every node.
     pub const ALL: u64 = RELAY
         | TENSOR_RELAY
@@ -115,7 +131,8 @@ pub mod features {
         | RESEND_TOKENS
         | NETWORK_COORDS
         | SESSION_KEY_CONFIRM
-        | FORWARD_GENERATED_IDS;
+        | FORWARD_GENERATED_IDS
+        | FORWARD_PRE_EMBEDDED;
 
     /// Does `advertised` include every bit in `needed`?
     pub fn supports(advertised: u64, needed: u64) -> bool {

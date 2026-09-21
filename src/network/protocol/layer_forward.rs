@@ -116,6 +116,7 @@ pub fn encode_layer_forward(forward: &LayerForward) -> Result<Vec<u8>, SwarmErro
     // and the AAD, so the three cannot disagree about these bytes.
     append_chain_trailers(&mut buf, forward);
     append_generated_ids_trailer(&mut buf, forward);
+    append_pre_embedded_trailer(&mut buf, forward);
 
     Ok(buf)
 }
@@ -161,6 +162,37 @@ pub(crate) fn append_generated_ids_trailer(buf: &mut Vec<u8>, forward: &LayerFor
 /// peer would not merely ignore the bytes: it reconstructs the seal's AAD from
 /// the trailers it PARSED, so an unrecognised one makes every encrypted forward
 /// fail to open.
+/// Write the pre-embedded trailer: `0x09 | flags(1)`, bit 0 set.
+///
+/// **`pre_embedded` reached the wire ONLY inside the tensor-parallel trailer
+/// (`0x02`)**, which an ordinary pipeline forward never carries — so a node
+/// handed a locally-embedded prompt read the flag as false and took
+/// `String::from_utf8_lossy` to a float tensor, tokenising the bytes as a
+/// prompt. Silent nonsense, and it is the whole of
+/// `inference.local_embedding_privacy`, which exists precisely to give a REMOTE
+/// first segment hidden states rather than raw token ids.
+///
+/// Emitted only when the flag is set AND no `tp_meta` trailer is present, so a
+/// tensor-parallel frame is unchanged (0x02 already carries it) and every
+/// forward that is not pre-embedded is byte-identical to before.
+pub(crate) fn append_pre_embedded_trailer(buf: &mut Vec<u8>, forward: &LayerForward) {
+    if !forward.pre_embedded || forward.tp_meta.is_some() {
+        return;
+    }
+    buf.push(0x09);
+    buf.push(0x01);
+}
+
+/// Read the pre-embedded trailer (`0x09`) at `cursor`, if present.
+pub(crate) fn read_pre_embedded_trailer(data: &[u8], cursor: &mut usize) -> bool {
+    if data.len() < *cursor + 2 || data[*cursor] != 0x09 {
+        return false;
+    }
+    let set = data[*cursor + 1] & 0x01 != 0;
+    *cursor += 2;
+    set
+}
+
 pub(crate) fn read_generated_ids_trailer(data: &[u8], cursor: &mut usize) -> Vec<u32> {
     if data.len() < *cursor + 3 || data[*cursor] != 0x08 {
         return Vec::new();
@@ -522,6 +554,9 @@ pub fn decode_layer_forward(data: &[u8]) -> Result<LayerForward, SwarmError> {
     let chain = read_chain_trailer(data, &mut cursor);
     let requester_node_id = read_reply_to_trailer(data, &mut cursor);
     let generated_ids = read_generated_ids_trailer(data, &mut cursor);
+    // Either source may carry it: `0x02` for a tensor-parallel frame, `0x09`
+    // for an ordinary one. Read both so neither shape can lose it.
+    let pre_embedded_trailer = read_pre_embedded_trailer(data, &mut cursor);
     let _ = cursor;
 
     Ok(LayerForward {
@@ -537,7 +572,7 @@ pub fn decode_layer_forward(data: &[u8]) -> Result<LayerForward, SwarmError> {
         chain,
         sender_peer_bytes: None,
         requester_node_id,
-        pre_embedded: tp_pre_embedded,
+        pre_embedded: tp_pre_embedded || pre_embedded_trailer,
         generated_ids,
         adapter_id: None,
         draft_tokens,

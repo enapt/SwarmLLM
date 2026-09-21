@@ -205,6 +205,37 @@ impl PipelineExecutor {
             None
         };
 
+        // The node holding segment 0 has to be told that what it is receiving
+        // is already embedded, or it takes `String::from_utf8_lossy` to a float
+        // tensor and tokenises the bytes as a prompt — silent nonsense, which
+        // is what every build before 2026-09-21 did, because the flag only ever
+        // travelled inside the tensor-parallel trailer.
+        //
+        // **Refuse rather than fall back.** Sending raw token ids instead would
+        // work perfectly and quietly break the one promise this setting makes.
+        // A local segment 0 needs nothing: the forward never reaches a wire.
+        if local_embedder.is_some() {
+            let first = &self.assignment.segments[0];
+            let first_is_remote = first.node_id != *self.shared_state.identity.node_id();
+            if first_is_remote
+                && !self.shared_state.peer_advertises_feature(
+                    &first.node_id,
+                    swarmllm_types::node::features::FORWARD_PRE_EMBEDDED,
+                )
+            {
+                tracing::warn!(
+                    request_id = %request_id,
+                    peer = %first.node_id,
+                    model = %model_id,
+                    "Refusing prompt privacy: the node holding the first segment \
+                     cannot be told the prompt is already embedded"
+                );
+                return Err(SwarmError::PromptPrivacyUnavailable {
+                    model_id: model_id.0.clone(),
+                });
+            }
+        }
+
         // Hoist the EOS fallback set out of the decode loop. The fallback is
         // only consulted on the very first forward (seq_num==0) before
         // `cached_eos` is populated; afterward `cached_eos` is always Some,
