@@ -152,19 +152,24 @@ UNDETERMINED and never a fix — use it BEFORE blaming a change, especially your
 
 ## Status
 
-**v0.3.194-alpha released, signed and deployed to both nodes (2026-09-21).**
-⚠ **Five commits on main are NOT in it** (.195 material) — `memory/next_up.md`.
+**v0.3.195-alpha released, signed and deployed to both nodes (2026-09-21);
+`main` is clean.** ⚠ **Its two new `LayerForward` trailers (`0x08`, `0x09`) have
+NEVER been exercised in the field** — `memory/next_up.md` says what to read off
+a live node first.
 
-⚠ **Gossip is most of an idle node's traffic, and a manifest is BIG** — it
-carries every shard's full tensor table (26-104 KB each). **Never re-broadcast
-bulk state on a timer**; .194 sends one only when it CHANGES. Most of a node's
-traffic is FORWARDING peers' manifests, so a one-node upgrade saves little.
+⚠ **A new wire trailer is NOT a no-op for an older peer** — decoders rebuild the
+seal's AAD from the trailers they PARSED, so an unknown one breaks every
+encrypted forward. **Feature-gate every optional trailer at the SENDER.**
 
-**A split is only fast when the machines are CLOSE**: it relocates work rather
-than dividing it, and the chain is walked once per TOKEN — 0.35 tok/s
-Thailand↔Italy against 6.76 at 18 ms. ⚠ **Nothing routes on coordinates yet,
-deliberately.** **Read `docs/plans/regional_pipelines.md` before touching
-routing, placement or the cost model.**
+⚠ **Never re-broadcast bulk state on a timer.** A manifest carries every shard's
+full tensor table (26-104 KB each) and re-sending all of them every 30 s was
+most of an idle node's traffic; one is sent only when it CHANGES.
+
+**A split is only fast when the machines are CLOSE** — it relocates work rather
+than dividing it and the chain is walked once per TOKEN (0.35 tok/s
+Thailand↔Italy against 6.76 at 18 ms). ⚠ **Nothing routes on coordinates yet.**
+**Read `docs/plans/regional_pipelines.md` before touching routing, placement or
+the cost model.**
 
 **Releases are SIGNED and auto-update defaults to `Install`** — the two must
 move together. CI leaves a DRAFT; `examples/sign_release.sh <tag>` publishes it.
@@ -174,16 +179,16 @@ vs 9 `.sha256` is CORRECT.** → `docs/RELEASE_SIGNING.md`, `memory/release_gate
 
 ⚠ **#90's CAUSE IS UNKNOWN** — a dispatcher stall seen TWICE (33-45 min), ended
 only by a restart; `cancel_request` is ELIMINATED. ⚠ **#17 has never run on a
-live multi-node failover** (#85) — a two-node rig exists now and proved
-2-segment inference, so the expensive half is built.
+live multi-node failover, and a TWO-node rig cannot test it** — a composite
+stand-in needs two nodes besides the one that failed, so four daemons.
 
-⚠ **`gossip_network_id` is NOT an isolation boundary** — it scopes gossip TOPICS,
-the DHT is shared, so a node on a private id still routes work to public peers.
+⚠ **`gossip_network_id` is NOT an isolation boundary** — it scopes gossip TOPICS
+only; the DHT is shared, so such a node still routes work to public peers.
 Isolation is a pool + `private_mode` + `private_mode_allow_lan = false` (#352).
 
-`memory/` is `~/.claude/projects/-home-user-SwarmLLM/memory/`, outside the repo
-— `MEMORY.md` indexes it. **Read `open_cautions.md` and `next_up.md` at session
-start**, and `release_gate.md` before a release rather than re-deriving it.
+`memory/` is `~/.claude/projects/-home-user-SwarmLLM/memory/` — `MEMORY.md`
+indexes it. **Read `open_cautions.md` and `next_up.md` at session start**, and
+`release_gate.md` before a release rather than re-deriving it.
 
 ## Pushes are public-facing
 
