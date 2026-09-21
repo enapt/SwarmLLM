@@ -528,6 +528,34 @@ node parsed six, and the three that answered the question were among the
 twenty-two it did not. **Before estimating the components of a total, look for
 the counter you are not reading.**
 
+## A manifest's tensor table is DERIVED data, and the shard count is its OUTPUT
+
+The per-shard tensor table is **~92% of a manifest's bytes**, and a manifest is
+86% of inbound gossip — so it is roughly **80% of all gossip traffic**. It is
+also a pure function of the GGUF header and ONE integer, so a holder of the
+header can rebuild it instead of being sent it. `daemon::shard_loader::derive_tensor_entries`
+does; the loader uses it only as a FALLBACK, so a manifest that carries a table
+is still used exactly as before.
+
+⚠ **`manifest.shard_count` is the layout's OUTPUT (`layouts.len()`), not its
+input.** The publisher passes `div_ceil(total_size, shard_size)`, and
+`compute_layer_shard_layouts` can return FEWER shards than asked for — on this
+node's 15 models the two differ for 5, always by one. **Feeding the recorded
+count back in reproduces 10 of 15 and silently mis-places the other 5.** So the
+count is SEARCHED for, and the published per-shard `size_bytes` are the oracle
+that says which candidate is the publisher's.
+
+⚠ **Do NOT "fix" the underproduction.** Its own comment claims it cannot
+happen, and it does — but every shard FILE in the swarm was cut by the current
+behaviour, so changing it would re-split models and make new nodes disagree
+with every existing manifest. The behaviour is load-bearing.
+
+⚠ **A wrong offset does not fail — it reads the wrong weights and answers
+confidently.** Hence the oracle, and hence `derive_tensor_entries` returns
+`None` rather than a partial or unverified table. Verified against all 15 real
+models by `a_derived_tensor_table_matches_the_published_one` (ignored; needs
+`SWARMLLM_TEST_MODEL_DIR`).
+
 ⚠ **A topic is not a message type.** `swarm/models` carries SIX variants, so
 its per-topic counters cannot rank two fixes that target different variants on
 it. `state.metrics.gossip_by_kind` counts received gossip by
