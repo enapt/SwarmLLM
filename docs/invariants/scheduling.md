@@ -778,6 +778,12 @@ already multiplied by `ASSUMED_FORWARD_PASSES` for a segment entered per token.
 
 ### Still open
 
+**The precondition IS met on the live fleet** — checked rather than assumed,
+2026-09-21, from the release node's own log: **12 distinct models** routed
+(22 to 48 layers) and chains of 1, 2, 3, 4 and 7 segments, so a peer in regular
+use is given several different widths. A fit that could never identify would
+make this inert, which is the failure mode to rule out first.
+
 **Not yet confirmed on a live multi-node run.** It is guarded by unit tests
 built from the measured numbers, and a null control — reverting the one line in
 `vertex_cost` turns
