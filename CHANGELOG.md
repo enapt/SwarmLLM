@@ -1,5 +1,56 @@
 # Changelog
 
+## [0.3.197-alpha] — 2026-09-22
+
+**Your node is better at judging what other machines can actually handle, and
+more honest about what it knows.**
+
+**Fixed: a request could be handed to a machine that had no room for it.** When
+your node splits work across the network, it works out how much of a model each
+machine can hold — including room for the conversation itself. That second part
+was being skipped whenever your node held no part of the model in question,
+which is the normal situation for a machine that is coordinating rather than
+serving. The machine would accept a share it could not hold, run for about
+twenty seconds, and then fail partway through with nothing lined up to take
+over. Reported from the field, and matching an earlier report about a 6 GB
+graphics card given a long conversation to hold. Your node now reads what it
+needs before deciding, using a file it already downloads — nothing extra is
+fetched, and a slow connection costs nothing, because the request simply
+proceeds as it did before.
+
+**Fixed: the model list counted a machine as having a model when it held a
+single piece of it.** On this machine that overstated thirteen of fifteen
+models; one showed five computers as having a model when exactly one held a
+complete copy. The list now reports both numbers, and neither can be shown
+without the other: how many machines hold any part, which is what matters for
+sharing the work of a split model, and how many hold all of it, which is what
+matters for whether anyone could serve it alone or take over from a machine
+that drops out. The health summary on a model card was already correct and is
+unchanged.
+
+**New: your node reports when it is too busy to pass messages along.** A single
+topic could claim to have sent more than the node reported sending in total — a
+part larger than its whole — which made the traffic figures unusable for working
+out where a connection was going. The figures were not wrong; they counted each
+message once per destination and at the moment it was queued, so a message
+dropped for a machine that had fallen behind was still counted. Your node now
+reports what it dropped, so the gap is readable instead of mysterious. A node
+whose gossip total sits just under its connection total is healthy; one above it
+is falling behind on passing messages along, and now says so.
+
+**New: the traffic figures say which kind of message is costing you.** They
+could say which topic was expensive, but one topic carries six different kinds
+of message. Measured on an idle node: descriptions of models are 86% of
+everything arriving, at an average of 32 KB each. That settles which change is
+worth making next, and corrects a figure this project had been carrying — a
+model description averages 32 KB, not the 13 KB previously recorded.
+
+**Groundwork: a node can now work out a model's internal layout for itself**
+rather than being told it, rebuilding it from the model file's own header when
+a description arrives without one. That table is about 92% of a description's
+size, and descriptions are most of the chatter on the network. Nothing yet stops
+sending it — this is the half that lets a machine cope without it.
+
 ## [0.3.196-alpha] — 2026-09-21
 
 **A node that is sitting idle now uses far less of your internet connection.**
