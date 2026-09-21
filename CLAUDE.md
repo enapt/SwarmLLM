@@ -9,22 +9,19 @@
 
 ## Project Overview
 
-SwarmLLM is a single Rust binary that functions as a peer-to-peer node in a decentralized LLM inference network. Each node simultaneously participates in a P2P network, runs an HTTP server (OpenAI-compatible API + admin dashboard), and manages local resources (GPU/CPU compute, storage, bandwidth).
+A single Rust binary: a peer-to-peer node in a decentralized LLM inference network. Each node joins the P2P swarm, runs an HTTP server (OpenAI-compatible API + dashboard) and manages local compute, storage and bandwidth.
 
 - **Language**: Rust (2021 edition)
 - **Async Runtime**: Tokio (multi-threaded)
-- **Minimum Rust Version**: 1.90+ (set by `redb`; enforced by `msrv_claim_matches_the_dependency_tree` in `tests/repo_consistency.rs` — do not edit by hand, run that test)
+- **Minimum Rust Version**: 1.90+ (set by `redb`; enforced by `msrv_claim_matches_the_dependency_tree` — do not hand-edit, run that test)
 - **Primary Port**: 8800 (HTTP API on TCP:8800, P2P on TCP:8810 + UDP/QUIC:8800)
 
 ## Architecture
 
-12 Tokio tasks wired with `mpsc` channels — NetworkManager, InferenceRouter,
-MessageDispatcher, CreditLedger, HealthMonitor, ShardRebalancer,
-AcquisitionManager, ApiServer, PoolManager, AutoShardManager, HfWatcher,
-UpdateChecker. Shared state is `Arc<SharedState>` (`DashMap` / `RwLock`),
-organized into 4 sub-structs — `state.events`, `state.credits`, `state.models`,
-`state.metrics` — plus cross-cutting root fields and **two** configs: `config`
-(boot snapshot, startup-only decisions) and `live_config`, **read via
+12 Tokio tasks wired with `mpsc` channels (named in `docs/ARCHITECTURE.md`).
+Shared state is `Arc<SharedState>` in 4 sub-structs — `state.events`,
+`state.credits`, `state.models`, `state.metrics` — plus root fields and **two**
+configs: `config` (boot snapshot, startup-only) and `live_config`, **read via
 `state.cfg()`** for anything the user can change while the node runs.
 
 No stubs anywhere. Deferred items belong in `docs/ARCHITECTURE.md` § "Deferred
@@ -32,17 +29,18 @@ Items", never as a `// TODO`.
 
 ## Key Dependencies
 
-libp2p 0.56, axum 0.8, candle 0.10 (CUDA, **vendored + patched** — see
-`vendor/`), redb 4, ed25519/x25519-dalek 2, chacha20poly1305, blake3, dashmap 6,
-tokio, clap 4, tracing, reqwest, zstd. Full list in `Cargo.toml`.
-
-Two that carry contracts rather than just versions:
+libp2p 0.56, axum 0.8, candle 0.10 (CUDA, **vendored + patched**, see `vendor/`),
+redb 4, dalek 2, chacha20poly1305, blake3, dashmap 6, tokio, clap 4, tracing.
+Full list in `Cargo.toml`. Three carry contracts, not just versions:
 
 - **minijinja 2.24 + minijinja-contrib (pycompat)** renders chat templates — the
   engine HF's TGI and SGLang use. Its `trim_blocks` / `lstrip_blocks` /
   `keep_trailing_newline` / `pycompat` settings are part of the contract.
 - **`serde_json` and `minijinja` are both built with `preserve_order`.** Drop
   either and every tool schema reaches the model alphabetised.
+- **`libp2p-gossipsub` is a DIRECT dep only to enable its `metrics` feature**
+  (the facade's does not). If it drifts from libp2p's pin, cargo builds two
+  copies and the traffic split reads as silently absent. Guarded.
 
 ## Coding Conventions
 
@@ -52,9 +50,8 @@ Two that carry contracts rather than just versions:
 - **Never choose an error type at a call site** — `classify_error` is the single
   answer. The full variant → status contract, and the two follow-ups a new
   variant must not skip, are in `.claude/rules/completeness.md` (always-on).
-- Network errors: retry with exponential backoff (3 attempts). Inference errors:
-  return immediately, never retry silently. Shard integrity: quarantine,
-  re-download, penalize peer trust. Credits: degrade tier, never block.
+- Network: retry with backoff (3). Inference: return immediately, never retry
+  silently. Shard integrity: quarantine, re-download, penalize trust.
 
 ### Naming
 `PascalCase` types, `snake_case` fns. Newtype wrappers for safety —
@@ -77,27 +74,24 @@ concurrent reads and `RwLock` for single values; shutdown is a
 `-vvv` trace.
 
 ### Frontend
-- Vanilla HTML/CSS/JS — no framework, no build step; embedded via `include_dir!`.
-  `App` global namespace. File inventory: `docs/ARCHITECTURE.md` source tree.
+- Vanilla HTML/CSS/JS — no framework, no build step, embedded via `include_dir!`.
+  Detail in `.claude/rules/arch-frontend.md`, which loads when you open `frontend/`.
 - **5** WS message types, **2** broadcast channels. Do not add to either set.
-- Nav ranking, storage-key constants and `App.data.*` are in
-  `.claude/rules/arch-frontend.md`, which loads when you open `frontend/`.
-- i18n: **1395 translation keys** (**1397 entries per locale** incl. `_lang` +
-  `_dir`) × 21 languages, sorted by key. Parity and counts are asserted — **update
-  BOTH CLAUDE.md and `docs/ARCHITECTURE.md`**. A new key MUST be translated into
-  all 21; no English fallback (`.claude/rules/i18n.md`).
+- i18n: **1395 translation keys** (**1397 entries per locale** incl. `_lang` + `_dir`) × 21,
+  sorted. Counts asserted — **update BOTH CLAUDE.md and `docs/ARCHITECTURE.md`**.
+  A new key MUST be translated into all 21; **no English fallback.**
 - Payload ~1196 KB, capped by `frontend_payload_stays_within_budget` — a
-  regression budget, not a goal. Breakdown: `docs/ARCHITECTURE.md` § Frontend.
+  regression budget, not a goal.
 
 ## Testing
 
-**Always say which feature set a count came from.** Current, with
+**Always say which feature set a count came from.** With
 `--features dev,claude-subscription`: **2826 lib** (+12 ignored),
-79 integration (31 `integration` + 34 `integration_phase10_11` + 14 `yamux_substream`),
-148 repo-consistency, 1 `api_key_side_effects`, 51 `swarmllm-types`, and 11 in
-the vendored request-response patch. Clippy clean. The last two are **not** run
-by a bare `cargo test` — CI runs the types crate explicitly, and the vendored
-one needs
+79 integration (31 + 34 + 14 `yamux_substream`), **148 repo-consistency**,
+1 `api_key_side_effects`, 51 `swarmllm-types`, and 11 in the vendored
+request-response patch — plus 15 in the `swarmllm` BIN target (`cli::*`, counted
+nowhere else). Clippy clean. The types crate and the vendored patch are **not**
+run by a bare `cargo test`:
 `cargo test --manifest-path vendor/libp2p-request-response/Cargo.toml --lib`.
 
 ⚠ **A count edited after the test run is an untested change.** Counts live in
@@ -110,12 +104,12 @@ has put main red twice.
   `cargo test --test integration_phase10_11 -- --ignored end_to_end`.
 - CI is **14 jobs, all 14 required** by branch protection. `examples/check_ci_gate.sh`
   reports required-vs-produced drift — run it against a **COMPLETED** run only.
-- **Benches, harnesses and their traps: `docs/DIAGNOSTICS.md` § Benchmarks.** The
-  release gate's three (`smoke_test.sh`, `release_shapes.sh`,
-  `family_conformance.sh`) all run on the DOWNLOADED artifact.
+- **Benches and their traps: `docs/DIAGNOSTICS.md` § Benchmarks.** The gate's three
+  (`smoke_test.sh`, `release_shapes.sh`, `family_conformance.sh`) run on the
+  DOWNLOADED artifact. Pinned models: `docs/REFERENCE_MODELS.md`.
 - **Measurement**: min-of-N on an IDLE box, benchmarks only — **not live** (#367).
-  A/B inside ONE binary via an env switch, never across two builds. **Verify the
-  mechanism fired.** Pinned models: `docs/REFERENCE_MODELS.md`.
+  A/B inside ONE binary via an env switch. **Verify the mechanism fired** — and
+  when the mechanism IS a measurement, check it against a known answer.
 
 ## Key Design Decisions
 
@@ -123,35 +117,28 @@ has put main red twice.
 - Data dir: `~/.local/share/swarmllm/` (Linux), `~/Library/Application Support/swarmllm/` (macOS), `%APPDATA%\swarmllm\` (Windows)
 - Port layout: HTTP API on TCP:port, P2P TCP on port+10 (Noise+Yamux), P2P QUIC on UDP:port
 - Credit transactions require dual Ed25519 signatures (serving node + requesting node)
-- **Credits are DORMANT (2026-08-17) — they gate nothing.** `MIN_BALANCE_FOR_INFERENCE = 0`
-  and `calculate_tier` returns a constant; the accounting still runs but no balance
-  affects who is served or how fast. `credits_stay_dormant` fails the build if one
-  starts gating again. **Read `docs/CREDITS_DESIGN.md` before touching credits** —
-  why it is off, what is actually true today, and the exit criteria.
+- **Credits are DORMANT — they gate nothing**, and `credits_stay_dormant` fails
+  the build if one starts. **Read `docs/CREDITS_DESIGN.md` before touching them.**
 - KV-cache sessions expire after 10 min idle; shards are BLAKE3-verified on every
   load; pipeline failover uses per-segment hot standbys.
-- **Encryption is two layers**: `network.enable_encryption` (DEFAULT TRUE, seals
-  every inter-node activation, no plaintext fallback) and
-  `inference.encrypted_pipeline` ("boomerang", DEFAULT FALSE, this node keeps
-  both ends). ⚠ **Boomerang is a STRUCTURAL guarantee, not a cryptographic one**
-  — peers still see intermediate hidden states in plaintext, ~81% invertible
-  back to text. Never describe it as hiding data from the computing node.
-  → `docs/ARCHITECTURE.md` § Pipeline Privacy Model.
+- **Encryption is two layers**: `network.enable_encryption` (DEFAULT TRUE) and
+  `inference.encrypted_pipeline` ("boomerang", DEFAULT FALSE). ⚠ **Boomerang is
+  STRUCTURAL, not cryptographic** — peers still see hidden states in plaintext,
+  ~81% invertible to text. **Never describe it as hiding data from the computing
+  node.** → `docs/ARCHITECTURE.md` § Pipeline Privacy Model.
 - **Private mode** restricts YOUR outbound inference to pool/LAN nodes only; the node
   still serves the swarm. `pool::scope::allowed_node_set()` gates everything.
-- **No full model download, ever implicitly.** A node NEVER needs the whole GGUF or
-  every shard to serve. Shards come individually over byte-range requests, and
-  inference loads from shard files + `gguf_header.bin`. Downloading everything is
-  opt-in (offline use, seeding). **Never add code that implicitly downloads a full
-  model or reconstructs a GGUF from shards.**
+- **No full model download, ever implicitly.** A node never needs the whole GGUF
+  to serve — shards arrive individually and inference loads from them plus
+  `gguf_header.bin`. **Never add code that implicitly downloads a full model or
+  reconstructs a GGUF from shards.**
 
 ## Subagent Choices for This Codebase
 
-Override the default that would pick haiku — these invariants need reasoning, not
-pattern-matching: `code-reviewer`, `code-architect`, `Plan`, `root-cause` →
-**sonnet**. **Never delegate production code writing.** `Task(root-cause)` returns
-CAUSED / NOT-CAUSED / UNDETERMINED and never a fix — reach for it BEFORE blaming
-a change, especially your own.
+These invariants need reasoning, not pattern-matching: `code-reviewer`,
+`code-architect`, `Plan`, `root-cause` → **sonnet**, never haiku. **Never
+delegate production code writing.** `root-cause` returns CAUSED / NOT-CAUSED /
+UNDETERMINED and never a fix — use it BEFORE blaming a change, especially yours.
 
 ## Reference Documents
 
@@ -160,33 +147,39 @@ a change, especially your own.
 - `.claude/rules/diagnosis.md` — **read before blaming any change for any symptom, and before implementing anything non-trivial.** Rule 0 is research-first; then baseline before blaming, verify the mechanism fired, check the test fails without the fix.
 - `docs/FUTURE_WORK.md` — deferred items. ⚠ **An entry's own SCOPE is a hypothesis** (gotcha #654) and its line numbers are often wrong (#645) — trace a producer to its CONSUMER before planning from it.
 - `docs/plans/regional_pipelines.md` — **why split inference is slow and the staged fix.** Read before touching routing, placement or the cost model.
-- `docs/DIAGNOSTICS.md` (`DIAG:` instrumentation, bench traps) · `docs/CREDITS_DESIGN.md` (before touching credits) · `docs/book/` — mdBook site
-- `.claude/sweep-log.jsonl` — every `/sweep` finding. **Grep before re-reporting.** `SwarmLLM_Technical_Specification.docx` is **gitignored, absent from a clone.**
+- `docs/DIAGNOSTICS.md` (`DIAG:`, bench traps) · `docs/CREDITS_DESIGN.md` · `docs/book/`
+- `.claude/sweep-log.jsonl` — every `/sweep` finding. **Grep before re-reporting.**
 
 ## Status
 
-**v0.3.193-alpha released, signed and deployed to both nodes (2026-09-20).**
-Nothing functional is unreleased.
+**v0.3.194-alpha released, signed and deployed to both nodes (2026-09-21).**
+⚠ **Five commits on main are NOT in it** (.195 material) — `memory/next_up.md`.
 
-**A split is only fast when the machines are CLOSE, and nothing in the router
-can see the difference.** A split relocates the work rather than dividing it,
-and the chain is walked once per TOKEN: 0.35 tok/s across Thailand↔Italy
-against 6.76 for the same split at 18 ms. .193 ships the groundwork — network
-coordinates (how far apart two OTHER nodes are) and a region fix that had
-silently disabled all regional placement. ⚠ **Nothing routes on coordinates
-yet, deliberately.** **Read `docs/plans/regional_pipelines.md` before touching
+⚠ **Gossip is most of an idle node's traffic, and a manifest is BIG** — it
+carries every shard's full tensor table (26-104 KB each). **Never re-broadcast
+bulk state on a timer**; .194 sends one only when it CHANGES. Most of a node's
+traffic is FORWARDING peers' manifests, so a one-node upgrade saves little.
+
+**A split is only fast when the machines are CLOSE**: it relocates work rather
+than dividing it, and the chain is walked once per TOKEN — 0.35 tok/s
+Thailand↔Italy against 6.76 at 18 ms. ⚠ **Nothing routes on coordinates yet,
+deliberately.** **Read `docs/plans/regional_pipelines.md` before touching
 routing, placement or the cost model.**
 
-**Releases are SIGNED (audit C1 closed, .191) and auto-update defaults to
-`Install`** — safe only because of that verification; the two must move
-together. CI leaves a release DRAFT; `examples/sign_release.sh <tag>` publishes
-it. ⚠ **It accepts the WRONG tag silently** and reports success — confirm
-`draft=false` + a non-zero `.minisig` count afterwards.
-→ `docs/RELEASE_SIGNING.md`, `memory/release_gate.md` step 7 + § .193 gate.
+**Releases are SIGNED and auto-update defaults to `Install`** — the two must
+move together. CI leaves a DRAFT; `examples/sign_release.sh <tag>` publishes it.
+⚠ **It takes the WRONG tag silently** — confirm `draft=false`, a non-zero
+`.minisig` count, and that the trusted comment names THIS version. **7 minisigs
+vs 9 `.sha256` is CORRECT.** → `docs/RELEASE_SIGNING.md`, `memory/release_gate.md`.
 
-⚠ **#90's CAUSE IS UNKNOWN** — a dispatcher stall seen TWICE (33-45 min), each
-ended only by a restart; `cancel_request` is ELIMINATED (its fix shipped in .189
-and it recurred). ⚠ **#17 has never run on a live multi-node failover** (#85).
+⚠ **#90's CAUSE IS UNKNOWN** — a dispatcher stall seen TWICE (33-45 min), ended
+only by a restart; `cancel_request` is ELIMINATED. ⚠ **#17 has never run on a
+live multi-node failover** (#85) — a two-node rig exists now and proved
+2-segment inference, so the expensive half is built.
+
+⚠ **`gossip_network_id` is NOT an isolation boundary** — it scopes gossip TOPICS,
+the DHT is shared, so a node on a private id still routes work to public peers.
+Isolation is a pool + `private_mode` + `private_mode_allow_lan = false` (#352).
 
 `memory/` is `~/.claude/projects/-home-user-SwarmLLM/memory/`, outside the repo
 — `MEMORY.md` indexes it. **Read `open_cautions.md` and `next_up.md` at session
