@@ -528,6 +528,18 @@ node parsed six, and the three that answered the question were among the
 twenty-two it did not. **Before estimating the components of a total, look for
 the counter you are not reading.**
 
+⚠ **A topic is not a message type.** `swarm/models` carries SIX variants, so
+its per-topic counters cannot rank two fixes that target different variants on
+it. `state.metrics.gossip_by_kind` counts received gossip by
+`SwarmMessage::kind_name` — measured 2026-09-21: **`ModelManifest` is 86.4% of
+inbound gossip bytes at 32 KB/msg**, `NodeCapabilityUpdate` 3.4%. **So the
+manifest shape is the fix worth building and the capability change-gate is
+not.** ⚠ And a manifest averages **32 KB, not the 13 KB** long carried in the
+queue — that came from a per-topic average across all six variants. **An
+average over a mixed population is not a figure about any member of it.**
+Counted on RECEIVE, because an idle node's upload is relaying and what it
+relays is what it received.
+
 → `docs/invariants/network.md` § "Gossip volume"
 
 ⚠ **`NodeCapabilityUpdate` is still broadcast every tick and is NOT

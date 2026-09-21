@@ -87,6 +87,18 @@ impl NetworkManager {
 
                 match decoded {
                     Ok((sender_node_id, msg)) => {
+                        // What this topic is actually made OF. Recorded here
+                        // because this is the one place an inbound gossip
+                        // message exists both as bytes and as a variant —
+                        // GossipSub's own counters stop at the topic, and
+                        // `swarm/models` carries six variants whose fixes are
+                        // different pieces of work (`docs/FUTURE_WORK.md` #91).
+                        // `message.data` is the sealed frame as it arrived, so
+                        // it is comparable with the per-topic byte counters.
+                        self.shared_state
+                            .metrics
+                            .gossip_by_kind
+                            .note_recv(msg.kind_name(), message.data.len());
                         // NET-M10: Reject gossip messages with timestamps older than 5 minutes
                         // or more than 30s in the future. Routed through the centralised
                         // one-sided helper (gotcha #44) so the .abs()-style replay-window

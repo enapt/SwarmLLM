@@ -1698,6 +1698,41 @@ reading two of its six families. `network/bandwidth.rs` now parses all six:
 factor; `sent_bytes / sent` is the average message size. All three were guesses
 before, and each guess was wrong.
 
+### And a third time, deliberately this time (2026-09-21)
+
+`swarm/models` is 82% of an idle node's upload, and it carries **six** variants.
+`docs/FUTURE_WORK.md` #91's two remaining fixes — change-gating
+`NodeCapabilityUpdate`, and moving manifests off the broadcast path — target
+two *different* variants on that one topic, so the per-topic counters could not
+rank them. **Estimating the split from sizes and intervals is precisely what
+this entry records getting wrong three times**, so the instrument came first
+again: `GossipKindMeter` counts received gossip by `SwarmMessage::kind_name`.
+
+Measured on a probe node holding no models, 217 s window, 9 peers:
+
+| variant | msg/s | KB/s | share | B/msg |
+|---|---|---|---|---|
+| `ModelManifest` | 2.93 | **92.51** | **86.4%** | **32,332** |
+| `ModelDemandGossip` | 16.15 | 6.53 | 6.1% | 414 |
+| `NodeCapabilityUpdate` | 1.08 | 3.65 | 3.4% | 3,477 |
+| `RegionShardSummary` | 5.00 | 2.19 | 2.0% | 448 |
+| `HfSourceGossip` | 3.01 | 1.21 | 1.1% | 412 |
+| `ShardAnnounce` | 0.12 | 0.56 | 0.5% | 4,770 |
+
+**The ranking is decisive and it is not close.** Manifests are 86.4% of inbound
+gossip bytes; the capability broadcast is 3.4%, and change-gating it cannot
+recover all of that because some ticks carry a real change. **The BEP 9 shape
+is the fix worth building; `NodeCapabilityUpdate` gating is not**, and that is
+now a measurement rather than a preference.
+
+⚠ **A manifest averages 32 KB, not the 13 KB this entry and the work queue both
+carried.** That figure came from the per-topic average over all six variants,
+which the cheap ones drag down. **An average across a mixed population is not a
+figure about any member of it.**
+
+⚠ Note the highest message RATE — `ModelDemandGossip` at 16 msg/s — is 6% of
+the bytes. Rate and volume rank differently, which is why both are reported.
+
 ### The same lesson again, six weeks' worth of confidence later (2026-09-21)
 
 Six of ~28 families is still not all of them, and a tester found the next gap by

@@ -164,6 +164,24 @@ pub fn network_traffic_json(shared: &crate::daemon::SharedState) -> serde_json::
             // metric (queue expiry), the second is the `SlowPeer` event (queue
             // full), which no metric family covers.
             obj.insert("gossip_dropped_msgs".into(), g.dropped_msgs.into());
+            // What the topics above are MADE OF. A topic name is one question
+            // short of actionable when six variants share it — see
+            // `GossipKindMeter`. Received, because an idle node's upload is
+            // relaying and what it relays is what it received.
+            let by_kind: Vec<serde_json::Value> = shared
+                .metrics
+                .gossip_by_kind
+                .totals()
+                .into_iter()
+                .map(|k| {
+                    serde_json::json!({
+                        "kind": k.kind,
+                        "recv_msgs": k.msgs,
+                        "recv_bytes": k.bytes,
+                    })
+                })
+                .collect();
+            obj.insert("gossip_recv_by_kind".into(), by_kind.into());
             let (sf_publish, sf_forward) = shared.metrics.gossip.send_failures();
             obj.insert("gossip_send_failures_publish".into(), sf_publish.into());
             obj.insert("gossip_send_failures_forward".into(), sf_forward.into());

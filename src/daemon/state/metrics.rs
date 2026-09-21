@@ -277,6 +277,27 @@ pub struct MetricsProviders {
     ///
     /// [`InferenceTraffic`]: crate::network::bandwidth::InferenceTraffic
     pub inference: Arc<crate::network::bandwidth::InferenceTraffic>,
+    /// What a gossip topic is actually made OF, by message variant.
+    ///
+    /// GossipSub's own counters stop at the topic, and `swarm/models` carries
+    /// six variants — `ModelManifest`, `NodeCapabilityUpdate`, `ShardAnnounce`,
+    /// `ShardDownloadProgress`, `HfSourceGossip`, `PrefixCacheAnnounce`. That
+    /// topic is **82% of an idle node's upload** (measured 2026-09-21), and
+    /// `docs/FUTURE_WORK.md` #91's two remaining fixes — change-gating the
+    /// capability broadcast, and moving manifests off the broadcast path —
+    /// sit on that same topic. Nothing said which of the six was paying for
+    /// it, so the two could be told apart only by estimating from sizes and
+    /// intervals.
+    ///
+    /// **That estimate is the one #91 records getting wrong by 10-100x, three
+    /// times.** Gotcha #673 is the rule it left: before costing the parts of
+    /// an expensive total, find the counter you are not reading.
+    ///
+    /// Counted on RECEIVE, which is the figure that decides this: an idle node
+    /// publishes ~0.2% of what it sends, so its upload is relaying, and what it
+    /// relays is what it received. Bytes are the sealed frame as it arrived, so
+    /// they are comparable with the per-topic counters beside them.
+    pub gossip_by_kind: Arc<crate::network::bandwidth::GossipKindMeter>,
 }
 
 /// How long a channel may keep refusing messages before the next drop is

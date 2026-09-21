@@ -773,6 +773,50 @@ gossip_timedout_messages_dropped_per_topic_total{hash=\"swarmllm/models\"} 118
         );
     }
 
+    /// A topic name is one question short of actionable when six variants
+    /// share the topic, so the composition must come back heaviest-first and
+    /// in a stable order — a reader diffing two readings must not be handed a
+    /// reshuffled list.
+    #[test]
+    fn received_gossip_is_broken_down_by_variant_heaviest_first() {
+        let meter = GossipKindMeter::default();
+        assert!(
+            meter.totals().is_empty(),
+            "an isolated node has no composition to report, and saying so is \
+             honest — unlike reporting zeroes for variants never seen"
+        );
+        meter.note_recv("NodeCapabilityUpdate", 1_500);
+        meter.note_recv("NodeCapabilityUpdate", 1_500);
+        meter.note_recv("ModelManifest", 13_000);
+        meter.note_recv("ShardAnnounce", 300);
+
+        let got = meter.totals();
+        assert_eq!(
+            got.iter().map(|k| k.kind).collect::<Vec<_>>(),
+            vec!["ModelManifest", "NodeCapabilityUpdate", "ShardAnnounce"],
+            "by BYTES, not by count — one 13 KB manifest outweighs two 1.5 KB \
+             capability updates, and bytes are what the line is billed for"
+        );
+        assert_eq!(got[1].msgs, 2, "counts accumulate per variant");
+        assert_eq!(got[1].bytes, 3_000);
+    }
+
+    /// Two variants with identical byte totals must not swap places between
+    /// reads: the map iterates in an arbitrary order, so the tie needs a
+    /// deterministic tiebreak or a diff of two readings invents movement.
+    #[test]
+    fn equal_variants_keep_a_stable_order_between_readings() {
+        let meter = GossipKindMeter::default();
+        meter.note_recv("Bravo", 100);
+        meter.note_recv("Alpha", 100);
+        for _ in 0..20 {
+            assert_eq!(
+                meter.totals().iter().map(|k| k.kind).collect::<Vec<_>>(),
+                vec!["Alpha", "Bravo"]
+            );
+        }
+    }
+
     /// The queue-FULL path has no metric family at all, so a reader who only
     /// has the registry cannot see it. Zero must therefore mean zero here.
     #[test]
@@ -1073,5 +1117,76 @@ gossip_timedout_messages_dropped_per_topic_total{hash=\"swarmllm/models\"} 118
             format!("{BANDWIDTH_METRIC_BASE}_total"),
             "the row name is the metadata name plus OpenMetrics' counter suffix"
         );
+    }
+}
+
+/// What gossip is made OF, by `SwarmMessage` variant.
+///
+/// GossipSub's per-topic counters answer "which topic is expensive" and stop
+/// there. `swarm/models` carries six different variants and is most of an idle
+/// node's upload, so "which topic" is one question short of actionable — the
+/// two candidate fixes in `docs/FUTURE_WORK.md` #91 target two different
+/// variants ON THAT TOPIC, and picking between them from message sizes and
+/// publish intervals is exactly the estimate that entry records being wrong by
+/// 10-100x, three times (gotcha #673).
+///
+/// **Counted on RECEIVE, deliberately.** An idle node publishes a fraction of
+/// a percent of what it sends — its upload is relaying, and what it relays is
+/// what it received, so the received composition is what its bandwidth is made
+/// of. Counting at the publish sites would measure the one part that is
+/// already cheap.
+///
+/// Plain atomics behind a map keyed by `SwarmMessage::kind_name`, so zero
+/// genuinely means zero and a variant that has never arrived is simply absent
+/// — unlike the registry-derived meters above, nothing here can be "not
+/// counting yet".
+#[derive(Default)]
+pub struct GossipKindMeter {
+    by_kind: dashmap::DashMap<&'static str, GossipKindCount>,
+}
+
+#[derive(Default)]
+struct GossipKindCount {
+    msgs: AtomicU64,
+    bytes: AtomicU64,
+}
+
+/// One variant's share of received gossip.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct GossipKindTotals {
+    pub kind: &'static str,
+    pub msgs: u64,
+    pub bytes: u64,
+}
+
+impl GossipKindMeter {
+    /// Record one decoded inbound gossip message.
+    ///
+    /// `wire_bytes` is the sealed frame as it arrived, not the decoded
+    /// struct's size: that is what the interface actually carried, and it is
+    /// what makes these comparable with the per-topic byte counters.
+    pub fn note_recv(&self, kind: &'static str, wire_bytes: usize) {
+        let entry = self.by_kind.entry(kind).or_default();
+        entry.msgs.fetch_add(1, Ordering::Relaxed);
+        entry.bytes.fetch_add(wire_bytes as u64, Ordering::Relaxed);
+    }
+
+    /// Every variant seen, heaviest first — the order the question is asked
+    /// in. Empty until the first gossip message arrives, which is honest: an
+    /// isolated node genuinely has no composition to report.
+    pub fn totals(&self) -> Vec<GossipKindTotals> {
+        let mut out: Vec<GossipKindTotals> = self
+            .by_kind
+            .iter()
+            .map(|e| GossipKindTotals {
+                kind: e.key(),
+                msgs: e.value().msgs.load(Ordering::Relaxed),
+                bytes: e.value().bytes.load(Ordering::Relaxed),
+            })
+            .collect();
+        // By bytes, then by name so equal rows do not reorder between reads —
+        // a listing a person diffs against an earlier one must not shuffle.
+        out.sort_by(|a, b| b.bytes.cmp(&a.bytes).then_with(|| a.kind.cmp(b.kind)));
+        out
     }
 }

@@ -1053,6 +1053,7 @@ impl SharedState {
                 ngram_misses: std::sync::atomic::AtomicU64::new(0),
                 bandwidth: Arc::new(crate::network::bandwidth::BandwidthMeter::new()),
                 gossip: Arc::new(crate::network::bandwidth::GossipMeter::new()),
+                gossip_by_kind: Arc::new(crate::network::bandwidth::GossipKindMeter::default()),
                 shard_bytes_out: std::sync::atomic::AtomicU64::new(0),
                 shard_bytes_in: std::sync::atomic::AtomicU64::new(0),
                 inference: Arc::new(crate::network::bandwidth::InferenceTraffic::default()),
