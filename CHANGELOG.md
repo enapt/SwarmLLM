@@ -1,5 +1,61 @@
 # Changelog
 
+## [0.3.195-alpha] — 2026-09-21
+
+**A request could die because two machines quietly stopped agreeing on a key —
+and three things that were switched on but had never actually worked.**
+
+**Fixed: a request failing with "could not decrypt", on a machine that was
+perfectly healthy.** Reported by someone running two machines, and found in our
+own logs the same evening. Machines re-agree an encryption key every ten
+minutes, which takes two messages — and the second one can go missing. The
+machine answering started using the new key the moment it made it, before it
+knew its answer had arrived, so a lost answer left it sealing everything with a
+key the other end had never seen. Only one direction broke, which is why nobody
+could see it: work still flowed the other way and was still answered. A key is
+now used only once the other machine has proved it has the same one. If you saw
+requests fail after about a minute with a message about decrypting, this was it.
+
+**Fixed: asking for less repetition did nothing on a split model.** If you set
+`frequency_penalty` or `presence_penalty` and the model was running across
+several machines, the setting was silently ignored — the information those
+settings are computed from was never sent to the machine doing the writing. On
+one machine it worked; split across several it did not.
+
+**Fixed: keeping your prompt off other machines did not work.** The setting that
+processes your prompt locally, so the machine running the model never receives
+your words as text, could not do its job: the marker telling that machine what
+it was receiving never travelled with the message, so it read a block of numbers
+as if it were your prompt. It now travels. Where the other machine is too old to
+understand it, the request is refused with a clear reason rather than quietly
+sending your prompt as text.
+
+**Faster: a small piece of work on a slow machine is no longer mistaken for a
+small cost.** When a model is split up, the program estimates what each machine
+costs before deciding who does what — and it assumed that giving a machine half
+as much work costs half as much. Measured on the live network, one machine given
+2 layers out of 32 took a reply from about six words a second to one every four
+seconds; the other 30 layers together cost less than those 2. Most of what using
+a machine costs is paid before any work starts, and the old estimate had nowhere
+to put that. Each machine's cost is now learned as two numbers, so a small piece
+of work on an expensive machine is priced at what it really costs and the
+program stops reaching for it. The same mistake was cutting those pieces of work
+off early, because their time limit was calculated the same way.
+
+**You can now see how much of your connection is inference work.** The traffic
+panel already separated announcements and file transfers; everything else — the
+actual work of answering requests — fell into one line called "other", which is
+the one line you cannot act on. It has its own line now, and "other" finally
+means what it says: finding neighbours, keep-alives, and passing traffic for
+other people.
+
+**Fixed: the estimate of how far away a machine is was a guess from three
+readings.** That estimate is built from the shortest round trip seen recently,
+because the longer ones are mostly the other machine being busy rather than
+distance. "Recently" meant five minutes and a machine is checked every two, so
+it was the shortest of three — which lands on the wrong one about a third of the
+time. Nothing routes on these estimates yet, so no request changes today.
+
 ## [0.3.194-alpha] — 2026-09-21
 
 **An idle computer was uploading several megabits per second, for ever. Most of
