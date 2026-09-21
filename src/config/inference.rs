@@ -608,9 +608,16 @@ pub struct InferenceConfig {
     pub encrypted_pipeline_auto: bool,
 
     /// **Recommended on** wherever the node holds both ends of a model: it is
-    /// the only setting that stops the machine serving you from reading your
-    /// prompt. Default off solely because it cannot route without both ends
-    /// locally — see `encrypted_pipeline`.
+    /// what makes the boomerang routable at all, and the boomerang is the only
+    /// shape where the machine serving you is never handed the prompt itself.
+    /// Default off solely because it cannot route without both ends locally —
+    /// see `encrypted_pipeline`.
+    ///
+    /// ⚠ **That is a structural property, not a cryptographic one**, and this
+    /// comment used to claim more than it can: the middle machine receives
+    /// hidden states in plaintext and they are ~81% invertible back to text.
+    /// It stops the prompt being handed over as text; it does not hide it.
+    /// → `docs/ARCHITECTURE.md` § Pipeline Privacy Model.
     ///
     /// **`encrypted_pipeline` does not work without this.** Encryption forces the
     /// first and last segments onto the local node, so the middle must come from
