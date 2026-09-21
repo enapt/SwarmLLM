@@ -152,30 +152,32 @@ UNDETERMINED and never a fix — use it BEFORE blaming a change, especially your
 
 ## Status
 
-**v0.3.195-alpha released, signed and deployed to both nodes (2026-09-21);
-`main` is clean.** ⚠ **Its two new `LayerForward` trailers (`0x08`, `0x09`) have
-NEVER been exercised in the field** — `memory/next_up.md` says what to read off
-a live node first.
+**v0.3.196-alpha released, signed and deployed to both nodes (2026-09-21);
+`main` is clean.** ⚠ **`.195`'s two `LayerForward` trailers (`0x08`, `0x09`)
+have STILL never been exercised in the field** — `memory/next_up.md` says what
+to read off a live node first.
 
 ⚠ **A new wire trailer is NOT a no-op for an older peer** — decoders rebuild the
 seal's AAD from the trailers they PARSED, so an unknown one breaks every
 encrypted forward. **Feature-gate every optional trailer at the SENDER.**
 
-⚠ **Never re-broadcast bulk state on a timer.** A manifest carries every shard's
-full tensor table (26-104 KB each) and re-sending all of them every 30 s was
-most of an idle node's traffic; one is sent only when it CHANGES.
+⚠ **Gossip says what CHANGED, to everyone — and what ONE peer lacks, to that
+peer.** Three fixes paid for this: bulk state on a timer (a manifest carries
+every shard's tensor table, 26-104 KB); re-publishing what peers told US as if
+it were ours (an immortal feedback loop); and answering "someone joined" with a
+topic-wide flood. ⚠ **Before estimating why a total is expensive, find the
+counter you are not reading** — three estimates from sizes × intervals were each
+10-100x wrong (#673). → `.claude/rules/arch-network.md`, `docs/invariants/network.md`.
 
-**A split is only fast when the machines are CLOSE** — it relocates work rather
-than dividing it and the chain is walked once per TOKEN (0.35 tok/s
-Thailand↔Italy against 6.76 at 18 ms). ⚠ **Nothing routes on coordinates yet.**
-**Read `docs/plans/regional_pipelines.md` before touching routing, placement or
-the cost model.**
+**A split is only fast when the machines are CLOSE** — it relocates work and the
+chain is walked once per TOKEN (0.35 tok/s Thailand↔Italy vs 6.76 at 18 ms).
+⚠ **Nothing routes on coordinates yet.** **Read
+`docs/plans/regional_pipelines.md` before touching routing, placement or cost.**
 
-**Releases are SIGNED and auto-update defaults to `Install`** — the two must
-move together. CI leaves a DRAFT; `examples/sign_release.sh <tag>` publishes it.
+**Releases are SIGNED; CI leaves a DRAFT and the signing script publishes it.**
 ⚠ **It takes the WRONG tag silently** — confirm `draft=false`, a non-zero
-`.minisig` count, and that the trusted comment names THIS version. **7 minisigs
-vs 9 `.sha256` is CORRECT.** → `docs/RELEASE_SIGNING.md`, `memory/release_gate.md`.
+`.minisig` count (7 vs 9 `.sha256` is CORRECT) and that the trusted comment
+names THIS version. → `memory/release_gate.md`, `docs/RELEASE_SIGNING.md`.
 
 ⚠ **#90's CAUSE IS UNKNOWN** — a dispatcher stall seen TWICE (33-45 min), ended
 only by a restart; `cancel_request` is ELIMINATED. ⚠ **#17 has never run on a
@@ -183,8 +185,8 @@ live multi-node failover, and a TWO-node rig cannot test it** — a composite
 stand-in needs two nodes besides the one that failed, so four daemons.
 
 ⚠ **`gossip_network_id` is NOT an isolation boundary** — it scopes gossip TOPICS
-only; the DHT is shared, so such a node still routes work to public peers.
-Isolation is a pool + `private_mode` + `private_mode_allow_lan = false` (#352).
+only; the DHT is shared. Isolation is a pool + `private_mode` +
+`private_mode_allow_lan = false` (#352).
 
 `memory/` is `~/.claude/projects/-home-user-SwarmLLM/memory/` — `MEMORY.md`
 indexes it. **Read `open_cautions.md` and `next_up.md` at session start**, and
