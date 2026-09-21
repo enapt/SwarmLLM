@@ -7735,6 +7735,104 @@ fn regex_lite_word(haystack: &str, needle: &str) -> bool {
     false
 }
 
+/// Does this listing body report both halves of the holder question, close
+/// enough together that a reader meets them as a pair?
+///
+/// A proximity window rather than two file-level `contains`: the file mentions
+/// plenty of things, and "both words appear somewhere" would stay green if the
+/// second moved to an unrelated handler. Sized from the real emission, where
+/// the two sit a comment apart.
+fn reports_partial_and_complete_together(body: &str) -> bool {
+    let Some(at) = body.find("\"peers_hosting\"") else {
+        return false;
+    };
+    let window_end = (at + 1200).min(body.len());
+    body[at..window_end].contains("\"peers_complete\"")
+}
+
+/// "Has a part of it" and "could serve it alone" are two counts, and the
+/// listing must never report one without the other.
+///
+/// `peers_hosting` counts a peer that holds ANY part. That is the right answer
+/// for "who contributes" — a split pipeline runs on partial holders — and the
+/// wrong one for the question a reader actually asks it. A plan reported four
+/// holders beside `total_standbys=0` and both were true: `find_standbys` needs
+/// a candidate covering the WHOLE segment, and two of those four held 7/9 and
+/// 4/9 (field report, 2026-09-21).
+///
+/// Measured on the live node that day: **13 of 15 models** had more any-part
+/// holders than complete ones, and `thudm-glm-4-9b-0414-q4-k-m` read five
+/// holders against exactly **one** complete copy. A reader given only the first
+/// number cannot tell a well-replicated model from a single point of failure.
+///
+/// Fourth time a count has been read as an answer it cannot give — gotcha #451
+/// (as coverage), #464 (as capacity), #465 (as per-segment availability). The
+/// rule those left behind is *print the answer, not the count*.
+#[test]
+fn a_model_listing_reports_who_has_a_part_and_who_has_all_of_it() {
+    let path = "src/api/admin_models/listing.rs";
+    let src = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{path}: {e}"));
+    let body = fn_body(&src, "pub async fn list_models(")
+        .unwrap_or_else(|| panic!("{path}: list_models not found"));
+    assert!(
+        reports_partial_and_complete_together(body),
+        "{path}: the listing reports `peers_hosting` without `peers_complete` \
+         beside it. The first counts peers holding ANY part; only the second \
+         says whether anyone could serve this model alone or stand in for it. \
+         Reporting the first on its own is what let a plan log four holders \
+         next to no standby at all — see ModelPeerCounts, and gotcha #451's \
+         family."
+    );
+    // Built together as well as reported together. `for_model` takes all three
+    // maps so the counts cannot come from different walks of the registry and
+    // disagree about the same peer — the failure the struct exists to make
+    // unrepresentable.
+    assert!(
+        statements(&src)
+            .iter()
+            .any(|(_, s)| s.contains("complete: complete.get(key)")),
+        "{path}: `ModelPeerCounts::complete` is no longer looked up under the \
+         same key as `servable`."
+    );
+}
+
+/// The scan above finds nothing on a body that omits the second count — a
+/// guard that cannot fail is the thing `arch-guards-and-tests.md` was written
+/// about, and four of five guards here once had exactly that shape (#413).
+#[test]
+fn the_holder_pair_guard_catches_a_listing_that_reports_only_one_count() {
+    let paired = r#"
+            "local": hosted_shards > 0,
+            "peers_hosting": peers.servable,
+            // a comment sitting between them, as in the real emission
+            "peers_complete": peers.complete,
+            "peers_other_build": peers.other_build,
+    "#;
+    let lone = r#"
+            "local": hosted_shards > 0,
+            "peers_hosting": peers.servable,
+            "peers_other_build": peers.other_build,
+    "#;
+    assert!(
+        reports_partial_and_complete_together(paired),
+        "the pair must read as satisfied when both counts are emitted together"
+    );
+    assert!(
+        !reports_partial_and_complete_together(lone),
+        "the planted violation went unnoticed — this guard cannot fail, so it \
+         has never been telling us anything"
+    );
+    // And far apart is not together: the window is the point.
+    let far = format!(
+        "\"peers_hosting\": peers.servable,{}\"peers_complete\": peers.complete,",
+        " ".repeat(2000)
+    );
+    assert!(
+        !reports_partial_and_complete_together(&far),
+        "a count 2 KB away from its pair is not reported beside it"
+    );
+}
+
 /// A holder count a person reads is the count that could actually serve them.
 ///
 /// `ModelRegistry::shard_holders` drops holders that positively claim a

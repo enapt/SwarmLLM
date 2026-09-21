@@ -18,25 +18,90 @@ use super::validate_model_id;
 /// first without the second is what let a filtered count read as reassurance.
 #[derive(Clone, Copy, Default)]
 struct ModelPeerCounts {
-    /// Peers whose copy we could fetch and verify.
+    /// Peers holding at least ONE part of this model whose copy we could fetch
+    /// and verify. A partial holder is a real contributor — a split pipeline
+    /// runs on exactly these — so this is the right count for "who has any of
+    /// it", and the wrong one for every question about serving it whole.
     servable: usize,
+    /// Peers holding EVERY part. BitTorrent's seeder/peer line, and the same
+    /// reason for drawing it: only a complete copy can answer for the whole
+    /// model, stand in for a whole-model segment, or keep it alive alone.
+    ///
+    /// Reported from the field 2026-09-21: a plan logged four holders beside
+    /// `total_standbys=0`, and both were true — `find_standbys` needs a
+    /// candidate covering the WHOLE segment, and two of those four held 7/9
+    /// and 4/9. Measured on this node the same day, **13 of 15 models** had
+    /// `servable` above `complete`; GLM-4-9B read five holders against **one**
+    /// complete copy. A reader who cannot see this pair cannot tell a model
+    /// with five replicas from one with a single point of failure.
+    complete: usize,
     /// Peers that positively claim a different GGUF build of the same model id.
     other_build: usize,
 }
 
 impl ModelPeerCounts {
-    /// Look both counts up under the SAME key, so the pair cannot be built
-    /// from two different lookups and disagree.
+    /// Look every count up under the SAME key, so they cannot be built from
+    /// different lookups and disagree.
     fn for_model(
         key: &str,
         servable: &std::collections::HashMap<String, std::collections::HashSet<String>>,
+        complete: &std::collections::HashMap<String, std::collections::HashSet<String>>,
         other_build: &std::collections::HashMap<String, std::collections::HashSet<String>>,
     ) -> Self {
         Self {
             servable: servable.get(key).map_or(0, |s| s.len()),
+            complete: complete.get(key).map_or(0, |s| s.len()),
             other_build: other_build.get(key).map_or(0, |s| s.len()),
         }
     }
+}
+
+/// Which peers hold EVERY part of each model, from what each peer holds and
+/// what parts the model is known to have.
+///
+/// The denominator is what the registry knows rather than a manifest's
+/// `shard_count`, because this listing includes models this node holds no
+/// manifest for at all — and a figure that goes absent for exactly the models a
+/// user cannot check any other way is worse than one that is merely
+/// conservative. Where the two differ the registry's is the smaller, so this
+/// can over-report completeness for a model whose later parts nobody has
+/// announced yet. **It cannot invent a holder**, which is the direction that
+/// matters: the count exists to stop a model looking better replicated than it
+/// is.
+///
+/// A model with no known parts yields nobody rather than everybody — `>= 0` is
+/// true for every peer, and "we know of no parts" must not read as "everyone
+/// has all of them".
+///
+/// ⚠ **The vision sentinel is discarded HERE, not by the callers.** `mmproj`
+/// rides as shard index `u32::MAX` and is a separate download that is never
+/// fetched automatically, so counting it in the denominator would leave every
+/// peer of every vision model permanently incomplete. There are two collection
+/// sites — per-shard gossip and capability announcements — and a rule both of
+/// them have to remember is one that a third site will not. Stripping it at
+/// the single place the question is answered makes the mistake
+/// unrepresentable.
+fn complete_holders(
+    per_model_peer_parts: &std::collections::HashMap<
+        String,
+        std::collections::HashMap<String, std::collections::HashSet<u32>>,
+    >,
+    per_model_all_parts: &std::collections::HashMap<String, std::collections::HashSet<u32>>,
+) -> std::collections::HashMap<String, std::collections::HashSet<String>> {
+    let real_parts =
+        |parts: &std::collections::HashSet<u32>| parts.iter().filter(|i| **i != u32::MAX).count();
+    per_model_peer_parts
+        .iter()
+        .map(|(model, per_peer)| {
+            let total = per_model_all_parts.get(model).map_or(0, real_parts);
+            let complete = per_peer
+                .iter()
+                .filter(|(_, parts)| total > 0 && real_parts(parts) >= total)
+                .map(|(peer, _)| peer.clone())
+                .collect();
+            (model.clone(), complete)
+        })
+        .collect()
 }
 
 pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::Value>> {
@@ -65,10 +130,35 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
         String,
         std::collections::HashSet<String>,
     > = std::collections::HashMap::new();
+    // Which part indices each peer holds, and which parts the model has at
+    // all, so "holds every part" can be answered rather than assumed from a
+    // peer appearing once. Both halves are gathered in the SAME passes that
+    // build the counts above — a completeness figure assembled from a
+    // different walk of the registry could disagree with the count beside it,
+    // which is the defect this exists to fix, one level up.
+    //
+    // The vision sentinel is NOT filtered here — `complete_holders` discards
+    // it, so neither of these two sites can forget to.
+    let mut model_peer_parts: std::collections::HashMap<
+        String,
+        std::collections::HashMap<String, std::collections::HashSet<u32>>,
+    > = std::collections::HashMap::new();
+    let mut model_all_parts: std::collections::HashMap<String, std::collections::HashSet<u32>> =
+        std::collections::HashMap::new();
     for (shard_id, _raw_holders) in state.shared_state.model_registry.all_shard_entries() {
         let model_name = shard_id.model_id.0.clone();
+        model_all_parts
+            .entry(model_name.clone())
+            .or_default()
+            .insert(shard_id.index);
         for holder in state.shared_state.model_registry.shard_holders(&shard_id) {
             if holder != local_node_id {
+                model_peer_parts
+                    .entry(model_name.clone())
+                    .or_default()
+                    .entry(format!("{}", holder))
+                    .or_default()
+                    .insert(shard_id.index);
                 model_peers
                     .entry(model_name.clone())
                     .or_default()
@@ -106,10 +196,29 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
                 {
                     continue;
                 }
+                // The completeness half must follow the SAME admissions as the
+                // count, or a peer admitted here and absent there reads as
+                // holding nothing. This is the second of the two writers, and
+                // the pair of them is what made the original count mean "any
+                // part" without anywhere saying so.
+                model_all_parts
+                    .entry(model_name.clone())
+                    .or_default()
+                    .insert(shard.index);
+                model_peer_parts
+                    .entry(model_name.clone())
+                    .or_default()
+                    .entry(peer_id.clone())
+                    .or_default()
+                    .insert(shard.index);
                 model_peers.entry(model_name).or_default().insert(peer_id);
             }
         }
     }
+
+    // Derived AFTER both writers have run, so neither path can produce a peer
+    // the other has not been able to contribute parts for.
+    let model_peers_complete = complete_holders(&model_peer_parts, &model_all_parts);
 
     // Helper: count local and global shard availability for a manifest
     // Delegates to `api::count_shard_availability` so this and `/v1/models`
@@ -270,7 +379,18 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
                     // `None`: a listing answers for the node, not for a request,
                     // so there is no per-request override to apply.
                     .local_fast_path_for(&crate::types::ModelId(id.to_string()), None),
+            // ⚠ ANY part, not the whole model. A split pipeline runs on
+            // partial holders, so this is the honest count of who contributes
+            // — and it cannot answer "who could serve this on their own",
+            // which is `peers_complete`. Reading this one as that one is what
+            // made a plan report four holders beside no standby at all.
             "peers_hosting": peers.servable,
+            // Of those, the ones holding EVERY part: who could serve the whole
+            // model, stand in for a whole-model segment, or keep it alive if
+            // everyone else dropped out. Travels beside `peers_hosting`
+            // deliberately — either alone is a number a reader will finish the
+            // wrong sentence with.
+            "peers_complete": peers.complete,
             // Other computers that have this model in a DIFFERENT build — a
             // different upload of the same quantisation, which shares not one
             // shard hash with ours. They are excluded from `peers_hosting`
@@ -388,8 +508,12 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
             // Stale entry — files deleted while running. Skip.
             // The model will still appear from registry/peers if applicable.
         } else {
-            let peer_count =
-                ModelPeerCounts::for_model(&info.name, &model_peers, &model_peers_other_build);
+            let peer_count = ModelPeerCounts::for_model(
+                &info.name,
+                &model_peers,
+                &model_peers_complete,
+                &model_peers_other_build,
+            );
             seen_ids.insert(info.name.clone());
 
             // Try both the display name and the slugified ID to avoid duplicates.
@@ -470,8 +594,12 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
 
         let (hosted_count, global_available) = count_shard_availability(m, &state);
 
-        let peer_count =
-            ModelPeerCounts::for_model(&m.id.0, &model_peers, &model_peers_other_build);
+        let peer_count = ModelPeerCounts::for_model(
+            &m.id.0,
+            &model_peers,
+            &model_peers_complete,
+            &model_peers_other_build,
+        );
         let shard_detail = build_shard_detail(m, &state);
 
         let (source, mode) = if hosted_count == m.shard_count as usize {
@@ -655,7 +783,12 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
             "discovered",
             "full",
             "network",
-            ModelPeerCounts::for_model(model_name, &model_peers, &model_peers_other_build),
+            ModelPeerCounts::for_model(
+                model_name,
+                &model_peers,
+                &model_peers_complete,
+                &model_peers_other_build,
+            ),
             vec![],
         ));
     }
@@ -1375,5 +1508,119 @@ mod pipeline_plan_tests {
             !no_route_is_the_answer(&SwarmError::Inference("boom".into())),
             "our own bug must not be reported as a routing outcome"
         );
+    }
+}
+
+#[cfg(test)]
+mod complete_holder_tests {
+    use super::complete_holders;
+    use std::collections::{HashMap, HashSet};
+
+    fn parts(idx: &[u32]) -> HashSet<u32> {
+        idx.iter().copied().collect()
+    }
+
+    /// The live reading that prompted this, kept as the fixture so the numbers
+    /// in the doc comments can be checked rather than believed.
+    ///
+    /// `meta-llama-3.1-8b-instruct-q4-k-m` on 2026-09-21: four peers holding a
+    /// part, of which two held all nine. The plan logged four holders and no
+    /// standby, and both were true.
+    #[test]
+    fn the_eight_b_reading_that_looked_like_four_holders_had_two_complete_copies() {
+        let mut per_peer = HashMap::new();
+        per_peer.insert(
+            "bf7b32634b65626e".to_string(),
+            parts(&[0, 1, 2, 3, 4, 5, 6, 7, 8]),
+        );
+        per_peer.insert(
+            "4a3ac72ece5a85cb".to_string(),
+            parts(&[0, 1, 2, 3, 4, 5, 6, 7, 8]),
+        );
+        per_peer.insert(
+            "e561df35d8c9a3ac".to_string(),
+            parts(&[0, 1, 2, 3, 4, 5, 6]),
+        );
+        per_peer.insert("9594e1ffaa2d8156".to_string(), parts(&[0, 1, 2, 3]));
+        let model = "meta-llama-3.1-8b-instruct-q4-k-m".to_string();
+
+        let mut peer_parts = HashMap::new();
+        peer_parts.insert(model.clone(), per_peer);
+        let mut all_parts = HashMap::new();
+        all_parts.insert(model.clone(), parts(&[0, 1, 2, 3, 4, 5, 6, 7, 8]));
+
+        let complete = complete_holders(&peer_parts, &all_parts);
+        let got = &complete[&model];
+        assert_eq!(
+            got.len(),
+            2,
+            "four peers hold a part; only two hold all nine, and only those two \
+             could stand in for the whole model"
+        );
+        assert!(got.contains("bf7b32634b65626e") && got.contains("4a3ac72ece5a85cb"));
+        assert!(
+            !got.contains("e561df35d8c9a3ac"),
+            "7 of 9 is a contributor to a split, not a copy of the model"
+        );
+    }
+
+    /// The mmproj sentinel is not a part of the text model. Counted in the
+    /// denominator it would make every peer of every vision model incomplete
+    /// for ever, because mmproj is never fetched automatically.
+    #[test]
+    fn the_vision_sentinel_does_not_make_every_holder_incomplete() {
+        let model = "llava-v1.5-7b-q4".to_string();
+        let mut per_peer = HashMap::new();
+        // The peer holds both text parts and NOT the vision encoder — the
+        // ordinary case, since mmproj is never fetched automatically.
+        per_peer.insert("aaaa".to_string(), parts(&[0, 1]));
+        let mut peer_parts = HashMap::new();
+        peer_parts.insert(model.clone(), per_peer);
+        // The sentinel is handed IN, exactly as the collection sites produce
+        // it. If the helper stopped stripping it the denominator would be 3
+        // and this peer would read as incomplete for ever.
+        let mut all_parts = HashMap::new();
+        all_parts.insert(model.clone(), parts(&[0, 1, u32::MAX]));
+
+        assert_eq!(
+            complete_holders(&peer_parts, &all_parts)[&model].len(),
+            1,
+            "a peer holding every text part is complete; the vision encoder is \
+             a separate download and not a missing part"
+        );
+    }
+
+    /// "We know of no parts" must not read as "everyone holds all of them" —
+    /// `parts.len() >= 0` is true for every peer, which is the shape that
+    /// turns an empty registry into a swarm full of complete replicas.
+    #[test]
+    fn a_model_with_no_known_parts_has_no_complete_holders() {
+        let model = "freshly-gossiped".to_string();
+        let mut per_peer = HashMap::new();
+        per_peer.insert("aaaa".to_string(), HashSet::new());
+        let mut peer_parts = HashMap::new();
+        peer_parts.insert(model.clone(), per_peer);
+        let all_parts = HashMap::new();
+
+        assert!(
+            complete_holders(&peer_parts, &all_parts)[&model].is_empty(),
+            "an unknown denominator yields nobody, never everybody"
+        );
+    }
+
+    /// A peer that somehow reports more parts than the model is known to have
+    /// is complete, not excluded — the registry's denominator is the one that
+    /// can lag, so `>=` is deliberate and this pins it against a later `==`.
+    #[test]
+    fn a_peer_ahead_of_our_registry_still_counts_as_complete() {
+        let model = "partly-known".to_string();
+        let mut per_peer = HashMap::new();
+        per_peer.insert("aaaa".to_string(), parts(&[0, 1, 2]));
+        let mut peer_parts = HashMap::new();
+        peer_parts.insert(model.clone(), per_peer);
+        let mut all_parts = HashMap::new();
+        all_parts.insert(model.clone(), parts(&[0, 1]));
+
+        assert_eq!(complete_holders(&peer_parts, &all_parts)[&model].len(), 1);
     }
 }

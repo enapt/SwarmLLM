@@ -166,6 +166,17 @@ different GGUF build**, against `expected_build_tag` — this node's own manifes
 hash for that shard. It is the single read accessor for the holder map (~60
 consumers), which is why the filter lives there and not at the call sites.
 
+⚠ **"Holds a part" and "could serve it alone" are two counts, and the listing
+reports both.** `peers_hosting` counts ANY part — right for "who contributes",
+since a split pipeline runs on partial holders, and wrong for every question
+about serving the model whole. `peers_complete` (BitTorrent's seeder/peer line)
+is the one that can answer. A plan logged four holders beside
+`total_standbys=0` and both were true; **13 of 15 models measured had more
+any-part holders than complete ones.** Fourth firing of "a count is not a
+statement about X" (#451 coverage, #464 capacity, #465 per-segment).
+⚠ The dashboard health badge is per-SHARD and was already correct — do not
+swap its count, which would understate a genuinely safe model.
+
 **`all_shard_entries` is the RAW map, and a count rendered to a person is a
 claim to that person.** Anything that shows or decides on a holder count asks
 `shard_holders` per shard; narrowing to `contains(&local_node_id)` is the one

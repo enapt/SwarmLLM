@@ -394,6 +394,32 @@ Five things a change here must keep:
   writer touched the row last. Guard:
   `a_holder_count_shown_to_a_person_is_the_count_that_can_serve`, verified to
   go red on the real pre-fix `websocket.rs`.
+- **"Has a part of it" and "could serve it alone" are two counts** (2026-09-21).
+  `peers_hosting` counts a peer holding ANY part. That is right for "who
+  contributes" — a split pipeline runs on exactly those peers — and wrong for
+  the question a reader actually asks it. A plan logged four holders beside
+  `total_standbys=0` and **both were true**: `find_standbys` needs a candidate
+  covering the WHOLE segment, and two of those four held 7/9 and 4/9.
+  `peers_complete` is BitTorrent's seeder/peer line, and is the count that can
+  answer for the whole model.
+  Measured on the live node the day it was added: **13 of 15 models** had more
+  any-part holders than complete ones, and `thudm-glm-4-9b-0414-q4-k-m` read
+  **five holders against one complete copy** — a reader given only the first
+  number cannot tell a well-replicated model from a single point of failure.
+  ⚠ **The dashboard's health badge was already correct** and was deliberately
+  left alone: it is computed per SHARD, so `say_safe` is reached only when every
+  part has ≥2 holders — a state in which the model genuinely is safe however few
+  peers hold all of it. Swapping the count there would have understated it. The
+  defect was the catalog, not the sentence. **Fourth firing of "a count is not a
+  statement about X"** — #451 (coverage), #464 (capacity), #465 (per-segment
+  availability). Guards:
+  `a_model_listing_reports_who_has_a_part_and_who_has_all_of_it` plus a planted
+  violation, and `complete_holders` is a pure helper so the vision sentinel and
+  the empty-denominator case are unit-tested rather than argued.
+  ⚠ **`u32::MAX` (mmproj) is stripped inside `complete_holders`, not by its two
+  collection sites** — counted in the denominator it would leave every peer of
+  every vision model incomplete for ever, and a rule two sites must remember is
+  one a third will not.
 - **A count that silently shrinks is worse than one that is too high**, so the
   peers dropped are reported next to the ones kept: `peers_other_build` rides
   beside `peers_hosting` in the model listing, and the card says "N other
