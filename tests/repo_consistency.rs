@@ -7735,6 +7735,90 @@ fn regex_lite_word(haystack: &str, needle: &str) -> bool {
     false
 }
 
+/// A router learns the model's geometry BEFORE it prices anyone's memory.
+///
+/// `max_hostable_layers` charges a peer for the prompt's KV cache from
+/// `head_count_kv` / `head_dim`, which live in `gguf_header.bin`, and
+/// `gguf_meta_for` reads only the LOCAL one. A coordinator planning a model it
+/// holds no part of therefore charged nothing for KV — the bound went
+/// weights-only, and on the `WarmAmountUnknown` branch vanished outright. A
+/// warm 6 GB card was handed 24 layers of an 8,111-token prompt and died in
+/// attention 22 s in with no standby (gotcha #447; field report 2026-09-21).
+///
+/// The ordering is the whole fix, and it is invisible at the call site: both
+/// lines are one statement each and swapping them compiles, runs, and quietly
+/// restores the defect for the first request on every model.
+///
+/// **Only this path needs it.** The admin `pipeline_plan` preview passes
+/// `prompt_tokens: None`, so its KV term is `(0, 0)` whatever the geometry —
+/// and it fires once per visible model card on every shard-total change, so
+/// warming there would put a HuggingFace fetch on a dashboard refresh.
+#[test]
+fn a_route_learns_the_model_geometry_before_it_prices_peer_memory() {
+    let path = "src/inference/router/distributed_exec.rs";
+    let src = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{path}: {e}"));
+    let body = fn_body(&src, "async fn assemble_awaiting_dht(")
+        .unwrap_or_else(|| panic!("{path}: assemble_awaiting_dht not found"));
+    assert!(
+        warms_geometry_before_planning(body),
+        "{path}: `assemble_awaiting_dht` prices a plan without first calling \
+         `ensure_model_geometry`. Without it a coordinator that holds no part \
+         of the model charges peers nothing for the prompt's KV cache — see \
+         gotcha #447."
+    );
+}
+
+/// Both orderings compile, so the scan has to distinguish them. A guard that
+/// only checked both names were present would pass on the broken order, which
+/// is the shape `arch-guards-and-tests.md` exists to stop.
+///
+/// ⚠ **Comments are stripped first.** The first version of this compared raw
+/// offsets and failed on correct code: the explanation above the call names
+/// `assemble_pipeline_for` in prose, several lines BEFORE the call it is
+/// explaining, so the planner appeared to come first. A scan that reads
+/// comments is reading the wrong document — and this one failed in the safe
+/// direction only by luck.
+fn warms_geometry_before_planning(body: &str) -> bool {
+    let code: String = body
+        .lines()
+        .map(|l| match l.find("//") {
+            Some(at) => &l[..at],
+            None => l,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    match (
+        code.find("ensure_model_geometry"),
+        code.find("assemble_pipeline_for"),
+    ) {
+        (Some(warm), Some(plan)) => warm < plan,
+        _ => false,
+    }
+}
+
+#[test]
+fn the_geometry_ordering_guard_catches_the_swapped_order() {
+    let right = "scheduler.ensure_model_geometry(m).await;\nlet p = s.assemble_pipeline_for(m);";
+    let swapped = "let p = s.assemble_pipeline_for(m);\nscheduler.ensure_model_geometry(m).await;";
+    let missing = "let p = s.assemble_pipeline_for(m);";
+    assert!(warms_geometry_before_planning(right));
+    assert!(
+        !warms_geometry_before_planning(swapped),
+        "a warm AFTER the plan is the defect, not the fix — it compiles and \
+         runs and leaves the first request on every model unbounded"
+    );
+    assert!(!warms_geometry_before_planning(missing));
+    // The real shape that broke the first version of this scan: the planner is
+    // named in the comment ABOVE the warm, so raw offsets read it as first.
+    let commented = "// `assemble_pipeline_for` is synchronous, so we warm here\n\
+                     scheduler.ensure_model_geometry(m).await;\n\
+                     let p = s.assemble_pipeline_for(m);";
+    assert!(
+        warms_geometry_before_planning(commented),
+        "a mention in a comment is not a call — this scan must read code"
+    );
+}
+
 /// Does this listing body report both halves of the holder question, close
 /// enough together that a reader meets them as a pair?
 ///

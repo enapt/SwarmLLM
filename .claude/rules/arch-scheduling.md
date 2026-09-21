@@ -310,6 +310,35 @@ the geometry from the local `gguf_header.bin` on a miss.
 `the_model_geometry_is_read_through_one_accessor` in
 `tests/repo_consistency.rs` fails the build on a bare `gguf_meta.get(`.
 
+⚠ **"Local" is the catch: a coordinator routing a model it holds no part of has
+no geometry, so `max_hostable_layers` charged peers NOTHING for the prompt's KV
+cache** — weights-only, and on the `WarmAmountUnknown` branch no bound at all.
+That is gotcha #447's mechanism (a warm 6 GB card handed 24 layers of an
+8,111-token prompt, dead in attention 22 s in with no standby), and the
+second half of the 2026-09-21 field report.
+
+**`SharedState::ensure_model_geometry` closes it, called from
+`assemble_awaiting_dht` BEFORE the plan** — `assemble_pipeline_for` is
+synchronous and this is a fetch. Guard:
+`a_route_learns_the_model_geometry_before_it_prices_peer_memory`, because both
+orderings compile and the wrong one is silent.
+
+- **It adds no fetch that was not already happening.** Every distributed
+  coordinator's `extract_model_cache` pulls the same header into the same
+  directory, so geometry already self-healed after one request — **only the
+  FIRST request per model was ever exposed.** This moves that fetch ahead of
+  the plan that needed it.
+- **Best effort, bounded by a TOTAL timeout** — the exception to § Timeouts,
+  justified because `probe_gguf_file` retries on `NETWORK_RETRY_DELAYS`
+  (~155 s), no router may wait that long, and the work has a known small size
+  (6-9 MB, tokenizer-dominated). **Timing out costs nothing beyond the old
+  behaviour.** A failure sets a cooldown: "HuggingFace has no such file" does
+  not change between two requests a second apart.
+- ⚠ **The admin `pipeline_plan` preview must NOT warm.** It passes
+  `prompt_tokens: None`, so its KV term is `(0, 0)` whatever the geometry, and
+  it fires once per visible model card on every shard-total change — warming
+  there would put a HuggingFace fetch on a dashboard refresh.
+
 → `docs/invariants/scheduling.md`
 
 ## Three consumers have now read `standbys.len()` as an answer it cannot give

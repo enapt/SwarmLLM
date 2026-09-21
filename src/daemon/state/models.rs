@@ -106,6 +106,28 @@ pub struct ModelMgmt {
     /// path, without throttling re-selection). Cleared on successful completion;
     /// expired-and-idle entries self-evict on read to keep the map bounded.
     pub shard_download_backoff: DashMap<crate::types::ShardId, ShardDownloadBackoff>,
+    /// Models whose `gguf_header.bin` this node has tried to fetch purely to
+    /// learn their GEOMETRY, and must not immediately try again for.
+    ///
+    /// A coordinator prices a peer's capacity for a prompt from
+    /// `head_count_kv` / `head_dim`, which live in the header — and
+    /// `gguf_meta_for` reads only the LOCAL one. Routing a model this node
+    /// holds no part of therefore charged nothing for the prompt's KV cache,
+    /// and on the `WarmAmountUnknown` branch dropped the capacity bound
+    /// entirely. A warm 6 GB card was handed 24 layers of an 8,111-token
+    /// prompt and died in attention 22 s in, with no standby (gotcha #447, and
+    /// the field report of 2026-09-21).
+    ///
+    /// **Only the FIRST request per model was ever exposed**: every
+    /// distributed coordinator calls `extract_model_cache`, which fetches the
+    /// same header on a miss and writes it to the same directory, so the
+    /// geometry self-heals once a request has run. `ensure_model_geometry`
+    /// simply moves that fetch to BEFORE the plan instead of after it, which
+    /// is why it costs no bytes that were not already being fetched.
+    ///
+    /// Written only by `SharedState::ensure_model_geometry`. Absent means
+    /// "never tried"; `Instant` is when another attempt is allowed.
+    pub geometry_probe_retry_after: DashMap<crate::types::ModelId, std::time::Instant>,
     pub model_request_counts: DashMap<crate::types::ModelId, AtomicU64>,
     pub resource_schedule: RwLock<crate::config::ResourceSchedule>,
     pub prune_history: RwLock<VecDeque<crate::types::PruneEvent>>,
@@ -835,6 +857,7 @@ mod tests {
             shards_pending_verification: dashmap::DashSet::new(),
             disputed_shards: dashmap::DashSet::new(),
             shard_download_backoff: DashMap::new(),
+            geometry_probe_retry_after: DashMap::new(),
             model_request_counts: DashMap::new(),
             resource_schedule: RwLock::new(Default::default()),
             prune_history: RwLock::new(VecDeque::new()),

@@ -1729,6 +1729,20 @@ fn regions_adjacent(a: &str, b: &str) -> bool {
 }
 
 impl PipelineScheduler {
+    /// Learn this model's geometry before a plan prices anyone's memory.
+    ///
+    /// Delegates to `SharedState::ensure_model_geometry`, which carries the
+    /// reasoning and the bound. It lives here because `shared_state` is
+    /// private and should stay so: the router asks the scheduler to prepare
+    /// itself, rather than reaching through it.
+    ///
+    /// **Not called by `assemble_pipeline_for`, which is synchronous** — this
+    /// is a fetch, and making the planner async to hold it would be a large
+    /// refactor for a step the one real caller can take first.
+    pub(crate) async fn ensure_model_geometry(&self, model_id: &ModelId) {
+        self.shared_state.ensure_model_geometry(model_id).await;
+    }
+
     /// Say what prompt privacy is costing this request, when it is material.
     ///
     /// Rate-limited per model: a boomerang is chosen on EVERY request to that

@@ -65,6 +65,29 @@ pub const MAX_RECENT_TRACES: usize = 50;
 /// [`SharedState::remove_acquisition_if_idle`] for what decides the removal.
 pub const ACQUISITION_CLEANUP_DELAY: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// How long a router will wait for a model's header before planning without it.
+///
+/// A TOTAL deadline, which § Timeouts normally forbids, and the two conditions
+/// that make one honest are both met: the work behind it has a known small size
+/// (a few MB of GGUF header), and the alternative is unbounded —
+/// `probe_gguf_file` retries on `NETWORK_RETRY_DELAYS` (`[5, 30, 120]`), so its
+/// own inactivity timeouts permit around 155 s, and no router may wait that
+/// long to choose a peer.
+///
+/// Sized against what it buys: the header this fetches is 6-9 MB on the models
+/// measured here (it carries the tokenizer), so this admits roughly a 1 MB/s
+/// link. A slower one loses the KV term for the first request and keeps it for
+/// every request after, because the execution path writes the same file.
+const GEOMETRY_PROBE_BUDGET: std::time::Duration = std::time::Duration::from_secs(8);
+
+/// How long before this node will try a failed geometry fetch again.
+///
+/// The failure being throttled is "HuggingFace does not have this under that
+/// name", which does not change between two requests a second apart. Long
+/// enough that a model nobody can fetch is not probed per request; short
+/// enough that a transient outage costs one cooldown, not a restart.
+const GEOMETRY_PROBE_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(600);
+
 /// Where the "a remote machine has successfully dialled us" observation is kept
 /// so it survives a restart. See [`SharedState::observed_inbound_connection`]
 /// for why it has to: the fact being recorded is a property of the machine's
@@ -1131,6 +1154,7 @@ impl SharedState {
                 shards_pending_verification: dashmap::DashSet::new(),
                 disputed_shards: dashmap::DashSet::new(),
                 shard_download_backoff: DashMap::new(),
+                geometry_probe_retry_after: DashMap::new(),
                 parallax_stability: DashMap::new(),
                 cross_node_prefix_index: DashMap::new(),
                 peer_prefix_blocks: DashMap::new(),
@@ -2132,6 +2156,101 @@ impl SharedState {
             }
         }
         self.gguf_meta.get(model_id)
+    }
+
+    /// Make a model's geometry available to the ROUTER, fetching the header
+    /// if this node holds no part of the model. **Best effort, and silent.**
+    ///
+    /// `gguf_meta_for` reads only the local `gguf_header.bin`, so a
+    /// coordinator planning a model it does not hold has no `head_count_kv` /
+    /// `head_dim` and charges a peer NOTHING for the prompt's KV cache —
+    /// `max_hostable_layers` then bounds weights only, and on the
+    /// `WarmAmountUnknown` branch returns `None`, i.e. no bound at all. That
+    /// is how a warm 6 GB card was handed 24 layers of an 8,111-token prompt
+    /// and died in attention 22 s in with no standby (gotcha #447).
+    ///
+    /// **This adds no fetch that was not already happening.** Every
+    /// distributed coordinator calls `extract_model_cache`, which fetches this
+    /// same header on a miss into this same directory — so the geometry
+    /// already self-heals after one request. All this does is move the fetch
+    /// to before the plan instead of after it, closing the first-request hole.
+    ///
+    /// **Bounded by a TOTAL timeout, which is the exception to the rule in
+    /// `.claude/rules/architecture.md` § Timeouts and is justified here:**
+    /// `probe_gguf_file` retries on `NETWORK_RETRY_DELAYS` (`[5, 30, 120]`),
+    /// so its own inactivity timeouts permit ~155 s — and a router cannot wait
+    /// that long to decide where to send a request. The work behind this
+    /// deadline also has a known, small size (a few MB), which is the
+    /// condition that makes a fixed deadline honest. **Exceeding it costs
+    /// nothing beyond today's behaviour**: the bound is simply absent for this
+    /// one request, exactly as it is absent now.
+    pub async fn ensure_model_geometry(&self, model_id: &crate::types::ModelId) {
+        // The overwhelmingly common case: we hold the model, or a previous
+        // request already fetched it. No await, no allocation.
+        if self.gguf_meta_for(model_id).is_some() {
+            return;
+        }
+        // Nothing to fetch from. A model gossiped with no HuggingFace source
+        // is not a failure — it is a model whose geometry this node cannot
+        // learn this way, and retrying per request would be a request-rate
+        // probe of an answer that will not change.
+        let Some(source) = self.models.hf_sources.get(model_id).map(|s| s.clone()) else {
+            return;
+        };
+        if let Some(until) = self.models.geometry_probe_retry_after.get(model_id) {
+            if std::time::Instant::now() < *until {
+                return;
+            }
+        }
+        // Claim the attempt BEFORE awaiting, so concurrent requests for the
+        // same model do not each open their own transfer. The cooldown is set
+        // whatever the outcome; success is picked up by `gguf_meta_for`
+        // finding the file, not by clearing this.
+        self.models.geometry_probe_retry_after.insert(
+            model_id.clone(),
+            std::time::Instant::now() + GEOMETRY_PROBE_COOLDOWN,
+        );
+        let model_dir = self.model_dir(&model_id.0);
+        let fetch = async {
+            let info = crate::model::huggingface::probe_gguf_file(
+                &source.repo_id,
+                &source.filename,
+                self.cfg().model.shard_size_bytes(),
+            )
+            .await
+            .ok()?;
+            crate::model::huggingface::download_gguf_header(
+                &source.repo_id,
+                &source.filename,
+                &model_dir,
+                info.header_size,
+            )
+            .await
+            .ok()
+        };
+        match tokio::time::timeout(GEOMETRY_PROBE_BUDGET, fetch).await {
+            Ok(Some(_)) => {
+                tracing::info!(
+                    model = %model_id.0,
+                    repo = %source.repo_id,
+                    "DIAG: fetched a model header to price peer memory before routing"
+                );
+            }
+            // Both arms are ordinary, not faults: the model may not be on
+            // HuggingFace under that name any more, or the link may be slow.
+            // Routing continues with the bound this node had before.
+            Ok(None) => tracing::debug!(
+                model = %model_id.0,
+                "DIAG: could not fetch model header for routing; capacity bound \
+                 will charge weights only for this request"
+            ),
+            Err(_) => tracing::debug!(
+                model = %model_id.0,
+                budget_ms = GEOMETRY_PROBE_BUDGET.as_millis(),
+                "DIAG: model header fetch outran its routing budget; capacity \
+                 bound will charge weights only for this request"
+            ),
+        }
     }
 
     /// SWARM-SPEC Layer 2: record a successful forward observation

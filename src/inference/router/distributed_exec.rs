@@ -369,6 +369,23 @@ async fn assemble_awaiting_dht(
     request_id: uuid::Uuid,
     prompt_tokens: Option<u32>,
 ) -> Result<PipelineAssignment, SwarmError> {
+    // Learn the model's geometry BEFORE pricing anyone's memory, if this node
+    // holds no part of it. `max_hostable_layers` charges a peer for the
+    // prompt's KV cache from `head_count_kv` / `head_dim`, which live in the
+    // header — and without them it charges nothing, which is how a warm 6 GB
+    // card was handed 24 layers of an 8,111-token prompt and died in attention
+    // with no standby (gotcha #447).
+    //
+    // Here rather than inside the scheduler because `assemble_pipeline_for` is
+    // synchronous and this is a fetch; this function is already the place a
+    // plan waits for something to land before being made, which is what its
+    // DHT grace below does.
+    //
+    // Best effort and bounded — see `ensure_model_geometry`. It adds no fetch
+    // that was not already happening: every distributed coordinator's
+    // `extract_model_cache` pulls the same header into the same directory, so
+    // this only moves it ahead of the plan that needed it.
+    scheduler.ensure_model_geometry(model_id).await;
     // A real request: every routing line is wanted at `info`, which is what
     // the diagnostics guide's "why did my machine run this itself" answer
     // reads (`scheduler::Purpose`).
