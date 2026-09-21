@@ -1133,7 +1133,21 @@ impl PipelineExecutor {
                     // segments is wasted bytes. Send empty for non-last
                     // segments and when the caller passed an empty slice
                     // (penalties == 0 fast path; no wire bloat).
-                    generated_ids: if is_last && !generated_ids.is_empty() {
+                    //
+                    // ⚠ **And only to a peer that can read them.** These ride in
+                    // the `0x08` trailer, which a node predating it does not
+                    // parse — and it rebuilds the seal's AAD from the trailers
+                    // it DID parse, so sending one blind makes every encrypted
+                    // forward to that peer fail to open. An older peer keeps the
+                    // behaviour it has always had: no penalties applied, which
+                    // is what this field failing to reach the wire at all meant
+                    // for everyone until 2026-09-21.
+                    generated_ids: if is_last
+                        && !generated_ids.is_empty()
+                        && self.shared_state.peer_advertises_feature(
+                            &segment.node_id,
+                            swarmllm_types::node::features::FORWARD_GENERATED_IDS,
+                        ) {
                         generated_ids.to_vec()
                     } else {
                         Vec::new()

@@ -136,6 +136,10 @@ pub fn build_layer_forward_aad(forward: &LayerForward) -> Vec<u8> {
     // one writer both encoders use — so "who is next" AND "who gets the
     // answer" are authenticated.
     super::layer_forward::append_chain_trailers(&mut aad, forward);
+    // The decoded-so-far trailer (0x08). Bound like every other one: it decides
+    // how the LAST segment penalises its own repetitions, so anything that could
+    // rewrite it could steer the reply.
+    super::layer_forward::append_generated_ids_trailer(&mut aad, forward);
 
     aad
 }
@@ -241,6 +245,7 @@ pub fn encode_layer_forward_encrypted(
     // here too or the receiver reconstructs a different AAD and every chained
     // encrypted forward fails to open.
     super::layer_forward::append_chain_trailers(&mut buf, forward);
+    super::layer_forward::append_generated_ids_trailer(&mut buf, forward);
 
     Ok(buf)
 }
@@ -456,6 +461,7 @@ pub fn decode_layer_forward_encrypted(
     // decoder uses, so the two wire readers cannot drift apart.
     let chain = super::layer_forward::read_chain_trailer(data, &mut cursor);
     let requester_node_id = super::layer_forward::read_reply_to_trailer(data, &mut cursor);
+    let generated_ids = super::layer_forward::read_generated_ids_trailer(data, &mut cursor);
     let _ = cursor;
 
     let forward = LayerForward {
@@ -472,7 +478,7 @@ pub fn decode_layer_forward_encrypted(
         sender_peer_bytes: None,
         requester_node_id,
         pre_embedded: tp_pre_embedded,
-        generated_ids: Vec::new(),
+        generated_ids,
         adapter_id: None,
         draft_tokens,
         spec_logits_requested,
@@ -745,6 +751,84 @@ mod tests {
         let (decoded, sealed_out, _aad) = decode_layer_forward_encrypted(&bytes).unwrap();
         assert_eq!(decoded.chunk_meta, orig.chunk_meta);
         assert_eq!(sealed_out, sealed);
+    }
+
+    /// **The defect (2026-09-21): the decoded-so-far ids never reached the
+    /// wire.** Both binary encoders built a frame without them and both
+    /// decoders set the field empty, so a distributed request carrying
+    /// `frequency_penalty` or `presence_penalty` had them silently dropped
+    /// whenever the segment that SAMPLES was remote —
+    /// `sampling::apply_repetition_penalties` returns immediately on an empty
+    /// list. The caller asked for less repetition and got none.
+    #[test]
+    fn encrypted_envelope_preserves_the_decoded_so_far_ids() {
+        let mut orig = base_forward();
+        orig.generated_ids = vec![9, 8, 7, 6, 5];
+        let bytes = encode_layer_forward_encrypted(&orig, vec![0u8; 64]).unwrap();
+        let (decoded, _sealed, _aad) = decode_layer_forward_encrypted(&bytes).unwrap();
+        assert_eq!(
+            decoded.generated_ids, orig.generated_ids,
+            "without these the sampling segment applies no penalty at all"
+        );
+    }
+
+    /// The trailer sits after the chaining ones, so a forward carrying both
+    /// must still read both. Adjacency is where a positional parser breaks.
+    #[test]
+    fn the_ids_trailer_survives_beside_a_chain() {
+        let mut orig = base_forward();
+        orig.chain = vec![crate::types::ChainHop {
+            node_id: crate::types::NodeId([4u8; 32]),
+            layer_range: (8, 16),
+        }];
+        orig.requester_node_id = Some([2u8; 32]);
+        orig.generated_ids = vec![11, 22, 33];
+        let bytes = encode_layer_forward_encrypted(&orig, vec![0u8; 32]).unwrap();
+        let (decoded, _sealed, _aad) = decode_layer_forward_encrypted(&bytes).unwrap();
+        assert_eq!(decoded.chain, orig.chain);
+        assert_eq!(decoded.requester_node_id, orig.requester_node_id);
+        assert_eq!(decoded.generated_ids, orig.generated_ids);
+    }
+
+    /// Bound into the AAD like every other trailer: these decide how the last
+    /// segment penalises its own repetitions, so anything able to rewrite them
+    /// could steer the reply without touching the sealed activations.
+    #[test]
+    fn aad_authenticates_the_decoded_so_far_ids() {
+        let mut a = base_forward();
+        a.generated_ids = vec![1, 2, 3];
+        let aad_a = build_layer_forward_aad(&a);
+
+        let mut b = a.clone();
+        b.generated_ids = vec![1, 2, 4];
+        assert_ne!(aad_a, build_layer_forward_aad(&b), "changing an id");
+
+        let mut c = a.clone();
+        c.generated_ids = Vec::new();
+        assert_ne!(aad_a, build_layer_forward_aad(&c), "stripping them");
+    }
+
+    /// **The compatibility argument, asserted rather than claimed.** A forward
+    /// with no ids must be byte-identical to what every released node sends and
+    /// expects — the trailer is why this one is feature-gated, and an
+    /// unconditional emission would make every encrypted forward to an older
+    /// peer fail to open.
+    #[test]
+    fn a_forward_without_ids_is_byte_identical_to_before() {
+        let plain = base_forward();
+        assert!(plain.generated_ids.is_empty());
+        let aad = build_layer_forward_aad(&plain);
+
+        let mut with_ids = plain.clone();
+        with_ids.generated_ids = vec![1, 2, 3];
+        let aad_with = build_layer_forward_aad(&with_ids);
+        // 1 marker + 2 length + 3 x 4 bytes.
+        assert_eq!(aad_with.len(), aad.len() + 15);
+        assert_eq!(
+            &aad_with[..aad.len()],
+            &aad[..],
+            "the trailer is appended; it must not disturb the bytes before it"
+        );
     }
 
     #[test]

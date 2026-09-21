@@ -93,6 +93,19 @@ pub mod features {
     /// a confirmation and waiting for one would strand the link instead.
     pub const SESSION_KEY_CONFIRM: u64 = 1 << 7;
 
+    /// Understands the decoded-so-far trailer (`0x08`) on a `LayerForward`: the
+    /// tokens generated so far, which the SAMPLING segment needs to apply the
+    /// caller's `frequency_penalty` / `presence_penalty`.
+    ///
+    /// The field existed from the beginning and never reached the wire — both
+    /// binary encoders omitted it and both decoders set it empty — so a
+    /// distributed request whose last segment was remote had its penalties
+    /// silently dropped. A coordinator only emits the trailer to a peer
+    /// advertising this bit, because an older peer does not merely ignore an
+    /// unknown trailer: it rebuilds the seal's AAD from the trailers it parsed,
+    /// so an unrecognised one makes every encrypted forward fail to open.
+    pub const FORWARD_GENERATED_IDS: u64 = 1 << 8;
+
     /// The full feature set THIS build implements. Advertised by every node.
     pub const ALL: u64 = RELAY
         | TENSOR_RELAY
@@ -101,7 +114,8 @@ pub mod features {
         | FORWARD_ACK
         | RESEND_TOKENS
         | NETWORK_COORDS
-        | SESSION_KEY_CONFIRM;
+        | SESSION_KEY_CONFIRM
+        | FORWARD_GENERATED_IDS;
 
     /// Does `advertised` include every bit in `needed`?
     pub fn supports(advertised: u64, needed: u64) -> bool {

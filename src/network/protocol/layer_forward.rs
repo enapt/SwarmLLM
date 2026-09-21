@@ -115,8 +115,74 @@ pub fn encode_layer_forward(forward: &LayerForward) -> Result<Vec<u8>, SwarmErro
     // peer chaining. One writer for the plaintext frame, the encrypted frame
     // and the AAD, so the three cannot disagree about these bytes.
     append_chain_trailers(&mut buf, forward);
+    append_generated_ids_trailer(&mut buf, forward);
 
     Ok(buf)
+}
+
+/// Write the decoded-so-far trailer: `0x08 | n(2 LE) | n × id(4 LE)`.
+///
+/// **The field this carries never reached the wire at all until 2026-09-21.**
+/// Both binary encoders built a `LayerForward` without it and both decoders set
+/// it empty, so a request with `frequency_penalty` or `presence_penalty` whose
+/// SAMPLING segment was remote had its penalties silently dropped:
+/// `sampling::apply_repetition_penalties` returns immediately on an empty list.
+/// The caller asked for less repetition, got none, and nothing reported it.
+///
+/// Only the last segment samples, so only it is ever sent these — see
+/// `PipelineExecutor::forward_through_segments`. Empty means no trailer, so
+/// every forward that does not need it is byte-identical to before.
+///
+/// **Not a privacy step backwards.** These are the tokens of the reply so far
+/// and they ride in the cleartext trailer, like every other trailer — but the
+/// only node ever sent them is the one that SAMPLED them, and the bytes are
+/// still inside the Noise session between the two peers. A relay never sees
+/// them: a relayed tensor is ephemeral-sealed for its target in full.
+///
+/// Capped at `u16::MAX` ids by the length field, which is far above any
+/// context window a reply reaches.
+pub(crate) fn append_generated_ids_trailer(buf: &mut Vec<u8>, forward: &LayerForward) {
+    if forward.generated_ids.is_empty() {
+        return;
+    }
+    let n = forward.generated_ids.len().min(u16::MAX as usize);
+    buf.push(0x08);
+    buf.extend_from_slice(&(n as u16).to_le_bytes());
+    for id in forward.generated_ids.iter().take(n) {
+        buf.extend_from_slice(&id.to_le_bytes());
+    }
+}
+
+/// Read the decoded-so-far trailer (`0x08`) at `cursor`, if present.
+///
+/// Absent on every node that predates it, in which case the receiver keeps the
+/// old behaviour — no penalties — which is why the sender gates on
+/// `features::FORWARD_GENERATED_IDS` rather than emitting it blind. An older
+/// peer would not merely ignore the bytes: it reconstructs the seal's AAD from
+/// the trailers it PARSED, so an unrecognised one makes every encrypted forward
+/// fail to open.
+pub(crate) fn read_generated_ids_trailer(data: &[u8], cursor: &mut usize) -> Vec<u32> {
+    if data.len() < *cursor + 3 || data[*cursor] != 0x08 {
+        return Vec::new();
+    }
+    let n = match data[*cursor + 1..*cursor + 3].try_into() {
+        Ok(b) => u16::from_le_bytes(b) as usize,
+        Err(_) => return Vec::new(),
+    };
+    let need = 3 + n * 4;
+    if n == 0 || data.len() < *cursor + need {
+        return Vec::new();
+    }
+    let mut ids = Vec::with_capacity(n);
+    for i in 0..n {
+        let at = *cursor + 3 + i * 4;
+        ids.push(u32::from_le_bytes(match data[at..at + 4].try_into() {
+            Ok(b) => b,
+            Err(_) => return Vec::new(),
+        }));
+    }
+    *cursor += need;
+    ids
 }
 
 /// Write the chaining trailers: `0x06 | n | n × (node_id(32) | layer_start(4
@@ -455,6 +521,7 @@ pub fn decode_layer_forward(data: &[u8]) -> Result<LayerForward, SwarmError> {
     // after one, the reply-to trailer (0x07) naming the coordinator.
     let chain = read_chain_trailer(data, &mut cursor);
     let requester_node_id = read_reply_to_trailer(data, &mut cursor);
+    let generated_ids = read_generated_ids_trailer(data, &mut cursor);
     let _ = cursor;
 
     Ok(LayerForward {
@@ -471,7 +538,7 @@ pub fn decode_layer_forward(data: &[u8]) -> Result<LayerForward, SwarmError> {
         sender_peer_bytes: None,
         requester_node_id,
         pre_embedded: tp_pre_embedded,
-        generated_ids: Vec::new(),
+        generated_ids,
         adapter_id: None,
         draft_tokens,
         spec_logits_requested,

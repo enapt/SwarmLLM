@@ -322,7 +322,11 @@ These helpers exist as the single source of truth for invariants that
 silently break at the wire if duplicated:
 
 - **`network::protocol::build_layer_forward_aad`** — encryption AAD
-  bytes for `LayerForward` envelopes. Both encrypt
+  bytes for `LayerForward` envelopes. ⚠ **A new trailer is NOT a no-op for an
+  older peer.** Decoders reconstruct the AAD from the trailers they PARSED, so
+  one they do not know makes every encrypted forward fail to open — every
+  optional trailer must be feature-gated at the sender, not merely "ignored" at
+  the receiver. `0x08` (the decoded-so-far ids) is the worked example. Both encrypt
   (`network/manager/tensors.rs`, `network/pipeline_stream.rs`) and
   decrypt (`decode_layer_forward_encrypted`) MUST go through it.
   Adding a new authenticated field to `LayerForward` means extending
