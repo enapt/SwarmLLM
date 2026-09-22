@@ -56,17 +56,23 @@ fn build_fused_decode_ptx() {
     // Windows. `CUDA_ROOT` is kept as a second spelling for a hand-built
     // toolkit. An escape hatch named after a variable nobody sets is not an
     // escape hatch; the bare `nvcc` fallback is what was doing the work.
+    // ⚠ The executable is `nvcc.exe` on Windows, and `Path::exists()` is
+    // literal — checking for `bin/nvcc` there is always false, which would make
+    // this whole override inert on the one platform where the toolkit location
+    // is least predictable. It would still BUILD, by falling through to the
+    // bare-name branch, so nothing would ever have reported it.
+    let nvcc_exe = if cfg!(windows) { "nvcc.exe" } else { "nvcc" };
     let nvcc = std::env::var_os("CUDA_PATH")
         .or_else(|| std::env::var_os("CUDA_ROOT"))
-        .map(|root| PathBuf::from(root).join("bin").join("nvcc"))
+        .map(|root| PathBuf::from(root).join("bin").join(nvcc_exe))
         .filter(|p| p.exists())
         .unwrap_or_else(|| {
-            let default = PathBuf::from("/usr/local/cuda/bin/nvcc");
+            let default = PathBuf::from("/usr/local/cuda/bin").join(nvcc_exe);
             if default.exists() {
                 default
             } else {
-                // On PATH — which is how the Windows GPU and Linux CUDA builds
-                // have been resolving it, both green.
+                // Bare name, resolved through PATH (and PATHEXT on Windows).
+                // This is how both GPU builds were already finding it, green.
                 PathBuf::from("nvcc")
             }
         });
