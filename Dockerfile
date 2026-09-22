@@ -35,6 +35,11 @@ WORKDIR /build
 # the cargo registry and compile deps, then replace with real source.
 COPY Cargo.toml Cargo.lock build.rs ./
 COPY vendor/ vendor/
+# `kernels/` is BUILD INPUT that build.rs reads by path. This image does not
+# enable `candle-cuda`, so build.rs returns before touching it — copied anyway
+# because a build input present in only ONE of the two Dockerfiles is exactly
+# how `release_pubkey.txt` broke the other image after the first was repaired.
+COPY kernels/ kernels/
 COPY crates/swarmllm-frontend/Cargo.toml crates/swarmllm-frontend/Cargo.toml
 COPY crates/swarmllm-types/Cargo.toml crates/swarmllm-types/Cargo.toml
 

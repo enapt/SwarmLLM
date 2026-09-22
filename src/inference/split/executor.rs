@@ -443,13 +443,18 @@ impl SplitModel {
         // Skip the clock_gettime syscall when DEBUG tracing is off — fires per
         // token per layer-forward, and the elapsed time is consumed only by
         // the debug! at the end of this fn.
-        // `SWARMLLM_PROFILE=1` must be sufficient on its own. It used to only
-        // gate the *dump*, while the clock that feeds it was started solely
-        // when DEBUG logging was on — so the documented way to profile printed
-        // nothing at the default log level, which is how anyone reaching for it
-        // would first try it.
+        // **Each diagnostic flag must be sufficient on its own.** This has now
+        // caught out two of them the same way: the block below is what prints
+        // them, and it is reached only if this clock was started, so a flag
+        // missing from this condition is a flag that silently prints nothing at
+        // the default log level — which is how anyone reaching for it would
+        // first try it. `SWARMLLM_PROFILE=1` was the first (it gated only the
+        // dump); `SWARMLLM_COUNT_KERNELS=1` was the second, found 2026-09-22
+        // while measuring a fusion with it. **Add the flag here as well as at
+        // its dump.**
         let forward_start = (tracing::enabled!(tracing::Level::DEBUG)
-            || crate::inference::prof::enabled())
+            || crate::inference::prof::enabled()
+            || crate::inference::prof::counting_kernels())
         .then(std::time::Instant::now);
         // Use component presence rather than layer indices for shard-aware is_first/is_last
         let is_first = self.tok_embeddings.is_some();
@@ -1258,7 +1263,8 @@ impl SplitModel {
         // to `forward_inner_impl`, and a node serving several users does not go
         // through it. `SWARMLLM_PROFILE=1` now covers both.
         let forward_start = (tracing::enabled!(tracing::Level::DEBUG)
-            || crate::inference::prof::enabled())
+            || crate::inference::prof::enabled()
+            || crate::inference::prof::counting_kernels())
         .then(std::time::Instant::now);
         let is_first = self.tok_embeddings.is_some();
         let is_last = self.output.is_some();

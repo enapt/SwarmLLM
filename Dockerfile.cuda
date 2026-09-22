@@ -70,6 +70,12 @@ ENV CUDA_COMPUTE_CAP=75
 # Cache dependency compilation
 COPY Cargo.toml Cargo.lock build.rs ./
 COPY vendor/ vendor/
+# `kernels/` is BUILD INPUT, not source: build.rs runs `nvcc --ptx` over it
+# whenever `candle-cuda` is on, which is both `cargo build` lines below. It
+# has to land before the dependency-cache pass, not with `src/`, because that
+# pass runs build.rs too — and that pass swallows its errors (`|| true`), so a
+# missing kernel would first surface as a failure of the real build at the end.
+COPY kernels/ kernels/
 COPY crates/swarmllm-frontend/Cargo.toml crates/swarmllm-frontend/Cargo.toml
 COPY crates/swarmllm-types/Cargo.toml crates/swarmllm-types/Cargo.toml
 

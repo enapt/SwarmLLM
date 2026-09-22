@@ -110,6 +110,22 @@ pub(crate) fn enabled() -> bool {
     *ON.get_or_init(|| std::env::var("SWARMLLM_PROFILE").as_deref() == Ok("1"))
 }
 
+/// Is `SWARMLLM_COUNT_KERNELS=1` set? Asked by the forward pass so that the
+/// flag is enough on its own — see [`dump_kernel_launches`].
+///
+/// Delegates to candle, which owns the counter, rather than reading the
+/// variable a second time here.
+pub(crate) fn counting_kernels() -> bool {
+    #[cfg(feature = "candle-cuda")]
+    {
+        candle_core::cuda::counting_kernels()
+    }
+    #[cfg(not(feature = "candle-cuda"))]
+    {
+        false
+    }
+}
+
 /// Print which CUDA kernels this forward pass launched, and how many times.
 ///
 /// **Why this is separate from the stage profile above.** The stages say where

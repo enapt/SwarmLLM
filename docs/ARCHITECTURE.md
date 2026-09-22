@@ -82,7 +82,15 @@ swarmllm/
 │                 check_ci_gate.sh — branch protection vs the jobs CI produces;
 │                 decode_bound_by.py — is decode bound by the GPU or by one CPU thread;
 │                 decode_submissions.sh — GPU submissions per decoded token, via nsys;
+│                 kernel_count_ab.sh — A/B two arms of ONE binary by per-kernel launch
+│                 count, and diff the replies (a fusion here is bit-identical, so a
+│                 reply that moves is a bug);
 │                 smoke_test.sh, release_shapes.sh, family_conformance.sh — the release gate's three)
+├── kernels/       (SwarmLLM's own CUDA kernels, compiled to PTX by build.rs under
+│                 `candle-cuda` and loaded via candle's `get_or_load_custom_func`.
+│                 fused_decode.cu — fusions that remove a launch + an alloc + a free
+│                 per layer each. `candle-kernels` is a registry crate, so this is how
+│                 a kernel gets added without vendoring a fifth one)
 └── tests/         (integration tests)
 ```
 

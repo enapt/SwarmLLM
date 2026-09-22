@@ -175,11 +175,26 @@ submissions per layer, not faster arithmetic.
   cudarc's per-allocation events are disabled on that basis. **Adding a second
   stream means re-enabling them** (`SWARMLLM_CUDA_EVENT_TRACKING=1`) or buffers
   cross streams unsynchronised — a silently wrong reply, not an error.
-- **Next moves are ordered in `docs/plans/local_decode_submissions.md`**, sized
-  from llama.cpp's own decode work: fusion first (~10% each for RMS-norm+add and
-  GEMV+gated-activation), then stable buffers, then CUDA graphs (~1.2x, batch-1).
-  Fused kernels go through candle's unused `get_or_load_custom_func` (PTX from
-  our own `build.rs`), not a fifth vendored crate.
+  ⚠ **That stream is the LEGACY NULL stream, and CUDA forbids graph capture on
+  it** — so "one stream" is also the blocker on CUDA graphs, not just a licence
+  for the event change. `per_thread_stream()` does not solve it here: this
+  forward runs on a rayon pool thread that varies.
+- **Fused kernels are OURS, in `kernels/*.cu`**, compiled to PTX by `build.rs`
+  and loaded through candle's `get_or_load_custom_func` — not a fifth vendored
+  crate, since `candle-kernels` is a registry dep. **Write each one to be
+  bit-identical to the candle ops it replaces** (same expression, same order,
+  no `-use_fast_math`), so an A/B moves the submission count and nothing else;
+  `examples/kernel_count_ab.sh` checks both halves of that in one run.
+  ⚠ **`get_or_load_custom_func` counts launches too** — it must, or a fusion
+  reads as removing two launches where it removed one.
+- **Next moves are ordered in `docs/plans/local_decode_submissions.md`**: fusion
+  first, then CUDA graphs (~1.2x batch-1 on an H100, likely more here), with
+  stable buffers **no longer known to be a prerequisite** — graph memory nodes
+  may give candle's per-op allocations fixed addresses for free.
+  ⚠ **Do not re-derive the ordering from llama.cpp's**: their budget has no
+  allocation line (ggml plans one compute buffer), and the "~10% per fusion"
+  this file used to quote was their CEILING over all of them, not an estimate
+  of each (gotcha #680).
 - **Judge such a change by the submission COUNT, not the clock** — the count is
   deterministic, this box spreads 10-18%. `SWARMLLM_ZERO_QMATMUL_BUFFERS=1`
   restores the old behaviour for a one-binary A/B.

@@ -45,7 +45,16 @@ fn kernel_counts() -> &'static std::sync::Mutex<HashMap<String, u64>> {
     C.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
-fn counting_kernels() -> bool {
+/// SwarmLLM patch: the single answer to "is kernel counting on".
+///
+/// Public because the consumer that PRINTS the counts is in another crate and
+/// must gate on the same answer — `inference::split::executor` only reaches its
+/// reporting block when something asks for it, and before this was exported
+/// that something could only be `SWARMLLM_PROFILE=1`. Setting the counting flag
+/// and seeing nothing is the exact trap the comment on `forward_start` already
+/// warns about for the profiler; two readers of one env var would be the other
+/// way to get it wrong.
+pub fn counting_kernels() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("SWARMLLM_COUNT_KERNELS").as_deref() == Ok("1"))
 }
@@ -314,6 +323,15 @@ impl CudaDevice {
         module_name: &str,
         ptx: &str,
     ) -> Result<CudaFunc> {
+        // SwarmLLM patch: count here TOO, not only in `get_or_load_func`.
+        //
+        // This is the path SwarmLLM's own fused kernels take
+        // (`kernels/fused_decode.cu`, loaded as PTX). Counting only candle's
+        // built-in kernels would make every fusion look better than it is: a
+        // fused kernel replacing two candle ones would show as -2 launches per
+        // layer when the truth is -1, and the instrument would be wrong in
+        // exactly the direction that flatters the change it exists to judge.
+        count_kernel_launch(fn_name);
         let ms = self.custom_modules.read().unwrap();
         if let Some(mdl) = ms.get(module_name).as_ref() {
             let func = mdl.load_function(fn_name).w()?;
@@ -334,8 +352,9 @@ impl CudaDevice {
     }
 
     pub fn get_or_load_func(&self, fn_name: &str, mdl: &kernels::Module) -> Result<CudaFunc> {
-        // SwarmLLM patch: this is the ONE path a candle kernel launch takes
-        // (`get_or_load_custom_func` has no callers), so counting here answers
+        // SwarmLLM patch: the path every BUILT-IN candle kernel launch takes
+        // (SwarmLLM's own PTX kernels go through `get_or_load_custom_func`,
+        // which counts as well), so counting here answers
         // "which kernels does a token actually launch" — the question that
         // decides which fusion is worth doing. Off unless
         // `SWARMLLM_COUNT_KERNELS=1`; see `count_kernel_launch`.

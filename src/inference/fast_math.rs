@@ -131,17 +131,48 @@ mod avx2 {
 #[cfg(target_feature = "avx2")]
 use avx2::{exp_inplace_avx2, silu_mul_avx2};
 
-/// `silu(gate) * up` as one fused CPU pass where possible; the candle
-/// composition (two ops, two temporaries) everywhere else.
+/// PTX for the fused decode kernels, compiled from `kernels/fused_decode.cu`
+/// by `build.rs` and loaded through candle's `get_or_load_custom_func`.
+#[cfg(feature = "candle-cuda")]
+const FUSED_DECODE_PTX: &str = include_str!(concat!(env!("OUT_DIR"), "/fused_decode.ptx"));
+
+/// `SWARMLLM_FUSE_SILU_MUL=0` puts the two-kernel candle composition back on
+/// the CUDA path, so the fusion can be A/B'd inside ONE binary — which is how
+/// every other submission-count change here was attributed
+/// (`.claude/rules/diagnosis.md` § 4). Read once and cached: this sits on the
+/// per-layer decode path.
+#[cfg(feature = "candle-cuda")]
+fn fuse_silu_mul_on_cuda() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("SWARMLLM_FUSE_SILU_MUL").as_deref() != Ok("0"))
+}
+
+/// `silu(gate) * up` as one fused pass where possible; the candle composition
+/// (two ops, two temporaries) everywhere else.
+///
+/// Fused on the CPU since the AVX2 work, and on CUDA since the decode budget
+/// showed `usilu_f32` and `bmul_f32` running once each per layer — two
+/// launches, two allocations and two frees for an elementwise pass over a few
+/// KB. → `docs/invariants/inference.md` § "A decode token is bound by GPU
+/// submission COUNT, not bandwidth".
 pub fn silu_mul(gate: &Tensor, up: &Tensor) -> Result<Tensor> {
-    if matches!(gate.device(), Device::Cpu)
-        && gate.dtype() == DType::F32
+    let shapes_fusable = gate.dtype() == DType::F32
         && up.dtype() == DType::F32
         && gate.is_contiguous()
         && up.is_contiguous()
-        && gate.dims() == up.dims()
-    {
-        return gate.apply_op2_no_bwd(up, &SiluMul);
+        && gate.dims() == up.dims();
+
+    if shapes_fusable {
+        match gate.device() {
+            Device::Cpu => return gate.apply_op2_no_bwd(up, &SiluMul),
+            #[cfg(feature = "candle-cuda")]
+            Device::Cuda(_) if up.device().same_device(gate.device()) => {
+                if fuse_silu_mul_on_cuda() {
+                    return gate.apply_op2_no_bwd(up, &SiluMul);
+                }
+            }
+            _ => {}
+        }
     }
     candle_nn::ops::silu(gate)? * up
 }
@@ -182,6 +213,63 @@ impl CustomOp2 for SiluMul {
             .zip(u.par_chunks(chunk))
             .for_each(|((o, g), u)| silu_mul_into(g, u, o));
         Ok((CpuStorage::F32(out), Shape::from_dims(l1.shape().dims())))
+    }
+
+    /// One `silu_mul_f32` launch in place of candle's `usilu_f32` + `bmul_f32`.
+    ///
+    /// Removes a launch, an allocation and a free per layer. The output comes
+    /// from `alloc_fully_overwritten` because the kernel's grid-stride loop
+    /// assigns every element it owns — the precondition that accessor
+    /// documents.
+    ///
+    /// ⚠ **Bit-identical to the composed path**, not merely close: the kernel
+    /// evaluates candle's own `silu_fwd` expression and then candle's `bmul`,
+    /// in that order. `cuda_silu_mul_is_bit_identical_to_the_composed_path`
+    /// pins it, so an A/B of this switch moves the submission count and
+    /// nothing else.
+    #[cfg(feature = "candle-cuda")]
+    fn cuda_fwd(
+        &self,
+        s1: &candle_core::CudaStorage,
+        l1: &Layout,
+        s2: &candle_core::CudaStorage,
+        l2: &Layout,
+    ) -> Result<(candle_core::CudaStorage, Shape)> {
+        use candle_core::cuda_backend::cudarc::driver::{LaunchConfig, PushKernelArg};
+        use candle_core::cuda_backend::WrapErr;
+
+        let dev = s1.device.clone();
+        let g = s1.as_cuda_slice::<f32>()?;
+        let u = s2.as_cuda_slice::<f32>()?;
+        let (Some((go, ge)), Some((uo, ue))) = (l1.contiguous_offsets(), l2.contiguous_offsets())
+        else {
+            candle_core::bail!("silu-mul: inputs must be contiguous");
+        };
+        let numel = ge - go;
+        if numel != ue - uo {
+            candle_core::bail!("silu-mul: shape mismatch {numel} vs {}", ue - uo);
+        }
+        let g = g.slice(go..ge);
+        let u = u.slice(uo..ue);
+
+        let out = dev.alloc_fully_overwritten::<f32>(numel)?;
+        let func =
+            dev.get_or_load_custom_func("silu_mul_f32", "swarmllm_fused_decode", FUSED_DECODE_PTX)?;
+        let cfg = LaunchConfig::for_num_elems(numel as u32);
+        let mut builder = func.builder();
+        builder.arg(&numel);
+        builder.arg(&g);
+        builder.arg(&u);
+        builder.arg(&out);
+        // SAFETY: ffi. Shapes and contiguity are checked above; the kernel
+        // reads `numel` elements of each input and writes `numel` of the
+        // output, all three allocated at that length.
+        unsafe { builder.launch(cfg) }.w()?;
+
+        Ok((
+            candle_core::CudaStorage::wrap_cuda_slice(out, dev),
+            Shape::from_dims(l1.shape().dims()),
+        ))
     }
 }
 
@@ -238,6 +326,72 @@ mod tests {
                 .map(|(a, b)| (a - b).abs() / a.abs().max(b.abs()).max(1e-6))
                 .fold(0f32, f32::max);
             assert!(worst < 2e-6, "{rows}x{cols}: worst rel diff {worst}");
+        }
+    }
+
+    /// The CUDA fusion must agree with the two kernels it replaces EXACTLY,
+    /// not to a tolerance.
+    ///
+    /// That is the whole point of the bar: the fused kernel exists to cut a
+    /// launch, an allocation and a free per layer, so an A/B between it and
+    /// the composed path has to isolate the submission count. Any arithmetic
+    /// difference at all would mean replies change with the switch, and then
+    /// "did this help" and "is this still correct" stop being separable
+    /// questions. `kernels/fused_decode.cu` evaluates candle's own `silu_fwd`
+    /// and `bmul` expressions in that order to make it reachable.
+    ///
+    /// ⚠ Gated, so no default build compiles it — run
+    /// `cargo test --features candle-cuda --all-targets` after touching
+    /// either side (`arch-inference.md` § "Cross-feature compile checks").
+    #[cfg(feature = "candle-cuda")]
+    #[test]
+    fn cuda_silu_mul_is_bit_identical_to_the_composed_path() {
+        let dev = match Device::new_cuda(0) {
+            Ok(d) => d,
+            Err(e) => {
+                // No card on this machine: the compile is the check here.
+                //
+                // ⚠ **Say so out loud.** A test that skips silently passes
+                // identically whether it ran or not — the vacuous-test trap of
+                // `.claude/rules/diagnosis.md` § 5, and the same shape gotcha
+                // #259 fixed by asserting the condition it depended on really
+                // held. This skip fires on a missing `LD_LIBRARY_PATH` just as
+                // readily as on a missing GPU, so it is reachable on the one
+                // box that CAN check this. Run with `--nocapture` and look for
+                // this line before believing a pass.
+                eprintln!("SKIPPED cuda_silu_mul bit-identity: no CUDA device ({e})");
+                return;
+            }
+        };
+        // Shapes a real FFN produces: one decode row against several
+        // intermediate widths, plus a prefill-sized block and a width that is
+        // not a multiple of the block size.
+        for (rows, cols) in [(1usize, 5632usize), (1, 8960), (128, 5632), (3, 1001)] {
+            let gate = Tensor::randn(0f32, 3.0, (rows, cols), &dev).unwrap();
+            let up = Tensor::randn(0f32, 1.0, (rows, cols), &dev).unwrap();
+
+            let want = (candle_nn::ops::silu(&gate).unwrap() * &up)
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap();
+            let got = gate
+                .apply_op2_no_bwd(&up, &SiluMul)
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap();
+
+            assert_eq!(got.len(), want.len(), "{rows}x{cols}: length");
+            for (i, (g, w)) in got.iter().zip(&want).enumerate() {
+                assert_eq!(
+                    g.to_bits(),
+                    w.to_bits(),
+                    "{rows}x{cols}: element {i} differs: fused {g} vs composed {w}"
+                );
+            }
         }
     }
 }

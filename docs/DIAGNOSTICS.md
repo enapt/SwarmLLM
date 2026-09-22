@@ -1502,6 +1502,18 @@ submission COUNT, not bandwidth".
 2. **GPU or CPU?** `examples/decode_bound_by.py`. Costs nothing and rules out
    half the hypotheses.
 3. **How many submissions?** `examples/decode_submissions.sh`.
+3b. **Which kernels, and did my change remove the one I think?**
+   `examples/kernel_count_ab.sh VAR ON OFF` runs both arms of one binary with
+   `SWARMLLM_COUNT_KERNELS=1`, prints the per-kernel-name launch counts side by
+   side, and **diffs the generated text**. It needs no profiler, so it is cheap
+   enough to run on every fusion — and it is the right instrument, because a
+   single fusion is worth ~1 launch per layer, well under the ~10% this box's
+   clock can resolve.
+   ⚠ **Take the reply diff as seriously as the counts.** Fused kernels here are
+   written bit-identical to the candle ops they replace, so a reply that moves
+   is a correctness bug, not rounding.
+   ⚠ It reads the LAST `seq_len=1` block: prefill's mix is different and much
+   larger, and the warm-up request's forwards are in the same log.
 4. **Where inside a layer?** `SWARMLLM_PROFILE=1` **plus**
    `SWARMLLM_PROFILE_SYNC=1` for correct per-stage attribution on CUDA.
    ⚠ **Read the two runs for different questions.** Sync inserts a

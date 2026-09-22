@@ -18,7 +18,10 @@ mod error;
 mod utils;
 pub use device::{CudaDevice, DeviceId};
 // SwarmLLM patch: per-kernel launch counts for the decode-submission work.
-pub use device::take_kernel_launch_counts;
+// `counting_kernels` is exported alongside the drain because the code that
+// PRINTS the counts lives in another crate and has to gate on the same answer
+// — see the note on `counting_kernels` itself.
+pub use device::{counting_kernels, take_kernel_launch_counts};
 pub use error::{CudaError, WrapErr};
 pub use utils::{Map1, Map1Any, Map2, Map2Any, Map2InPlace, Map3, S};
 

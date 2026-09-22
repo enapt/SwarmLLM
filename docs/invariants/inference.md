@@ -286,6 +286,25 @@ cache read at ~900 KV × 28 layers is ~7 ms/token on this box; the kernel sits a
 
 ## `inference::fast_math`
 
+⚠ **`silu_mul` now fuses on CUDA as well as on the CPU (2026-09-22), and the two
+halves are held to DIFFERENT bars.** The CPU arm uses the AVX2 polynomial `exp`
+and is tolerance-tested (2e-6 rel). The CUDA arm is a kernel of ours
+(`kernels/fused_decode.cu::silu_mul_f32`, PTX from `build.rs`, loaded through
+`CudaDevice::get_or_load_custom_func`) and is held to **bit-identity** with the
+`usilu_f32` + `bmul_f32` pair it replaces — same expression, same order, and
+`build.rs` passes no `-use_fast_math` precisely so `expf` is the same function
+on both sides. `cuda_silu_mul_is_bit_identical_to_the_composed_path` asserts it
+per element.
+
+**Why the harder bar on the GPU and not the CPU.** The CPU fusion was a
+*throughput* change and its correctness question was "close enough for an
+activation". The CUDA fusion is a *submission-count* change worth ~1 launch per
+layer — below what this box's clock can resolve — so it is judged by
+`examples/kernel_count_ab.sh`, which A/Bs the count inside one binary via
+`SWARMLLM_FUSE_SILU_MUL=0`. That A/B only means anything if the two arms compute
+the same thing exactly; a tolerance would make "did it get faster" and "is it
+still right" the same question. **A future fused kernel here inherits that bar.**
+
 (2026-08-21 night) — eight-lane AVX2 `expf`
 (`exp_inplace`, Cephes polynomial, ~2 ulp vs libm, pinned by
 `vectorised_exp_tracks_libm` over [-80, 80]) and the fused `silu_mul` CustomOp2.
@@ -1052,9 +1071,16 @@ story is NOT established** by this data.
 ### Projections that share an activation must share the work — `QMatMul::forward_shared`
 
 **How the kernel mix was established, and why guessing had to stop.** nsys gives
-no GPU-side kernel table on WSL2, so `CudaDevice::get_or_load_func` — the one
-path a candle kernel launch takes — now counts launches by name under
+no GPU-side kernel table on WSL2, so `CudaDevice::get_or_load_func` — the path
+every BUILT-IN candle kernel launch takes — counts launches by name under
 `SWARMLLM_COUNT_KERNELS=1`, dumped per forward pass beside the stage profile.
+⚠ **`get_or_load_custom_func` counts too, and must**: SwarmLLM's own PTX kernels
+are the only thing on that path, so counting only candle's would make every
+fusion read as removing one launch per layer more than it does — the instrument
+wrong in exactly the direction that flatters the change it exists to judge.
+⚠ **The flag is sufficient on its own now.** It was not: the block that prints
+was gated on DEBUG-or-`SWARMLLM_PROFILE`, so setting it and seeing nothing was
+indistinguishable from the thing not happening (gotcha #681).
 One decode token, tinyllama, 22 layers, **601 launches, 27.3 per layer**:
 
 | kernel | /layer | | kernel | /layer |

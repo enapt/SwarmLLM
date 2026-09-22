@@ -59,8 +59,9 @@ exact, and it is the counts that stages below move:
 ## The plan
 
 Ordered so each stage is independently shippable and measurable, and so no
-stage depends on a later one. **Stage 3 is a prerequisite for stage 4** and that
-ordering is the main non-obvious thing here.
+stage depends on a later one. ⚠ **This section originally said "Stage 3 is a
+prerequisite for Stage 4"; that is WITHDRAWN** — see § Ordering item 3. Stage 4's
+real preconditions are in item 3b, and the first of them is a blocker.
 
 ### Stage 1 — Stop zero-filling buffers the next kernel overwrites ✅ SHIPPED
 
@@ -124,52 +125,208 @@ with unique prompts, filtered to one chunk size.
 
 **What the kernel table says to do next**, now that it exists (per layer):
 `rmsnorm_f32` 2.05 + `badd_f32` 2.00 are four launches for norms and residuals
-that fusion could make two; `affine_f32` + `bmul_f32` + `softmax_f32` are three
-launches for the attention tail that `scaled_masked_softmax` already describes
-as one operation. Both need a new CUDA kernel, and `candle-kernels` is a
+that fusion could make two; `affine_f32` + `softmax_f32` are two launches for the
+attention tail that `scaled_masked_softmax` already describes as one operation.
+⚠ **This list first named `bmul_f32` in the attention tail as well. It is not
+there** — Stage 2c's A/B took `bmul_f32` from 1.00/layer to **zero**, so its only
+caller was the gated activation. Both need a new CUDA kernel, and `candle-kernels` is a
 registry crate rather than a vendored one — so that means either vendoring it or
-using candle's unused `get_or_load_custom_func` path with our own module.
+using candle's `get_or_load_custom_func` path with our own module — which is
+what Stage 2c below did, so the route is no longer hypothetical.
+
+### Stage 2c — silu(gate) × up as ONE kernel ✅ SHIPPED (count-verified, no speed claim)
+
+**The first kernel of our own, and the proof that the route in works.**
+`kernels/fused_decode.cu::silu_mul_f32` replaces candle's `usilu_f32` +
+`bmul_f32`; `build.rs` compiles it with `nvcc --ptx` and
+`CudaDevice::get_or_load_custom_func` loads it. **No fifth vendored crate.**
+
+Measured on tinyllama (22 layers), `examples/kernel_count_ab.sh
+SWARMLLM_FUSE_SILU_MUL 1 0`:
+
+| kernel | on | off |
+|---|---|---|
+| `silu_mul_f32` | **1.00/layer** | — |
+| `usilu_f32` | — | 1.00/layer |
+| `bmul_f32` | — | 1.00/layer |
+| **total launches/token** | **513** | 535 |
+
+−1.00 launch per layer (−22/token), plus the allocation and free that op no
+longer makes: **−66 submissions per token**. **Replies identical.**
+
+⚠ **No tok/s figure is quoted and none should be.** −66 of ~1,900 submissions is
+~3%, and this box cannot resolve a decode change below ~10%. This ships on the
+count and on bit-identity, the same basis as .198's prefill half. **Claiming a
+speed-up here would be inventing one.**
+
+⚠ `bmul_f32` went to **zero**, not to 1.00 — its only caller was this multiply.
+The attention tail is `affine_f32` + `softmax_f32`, so the earlier note that it
+also used `bmul_f32` was wrong.
+
+**Two instrument bugs had to be fixed first, and both would have flattered this
+result:**
+
+1. **`get_or_load_custom_func` did not count launches** — only
+   `get_or_load_func` did, and our PTX kernels are the only thing that takes the
+   custom path. The table would have shown −2.00/layer for a change worth −1.00.
+2. **`SWARMLLM_COUNT_KERNELS=1` printed nothing at all** at the default log
+   level; the reporting block was gated on DEBUG-or-`SWARMLLM_PROFILE`
+   (gotcha #681).
+
+`SWARMLLM_FUSE_SILU_MUL=0` is the off arm.
+
+### ▶ The add+RMS-norm fusion, designed but NOT built (2026-09-22)
+
+The bigger of the two, and the design question that makes it bigger is worth
+recording rather than re-deriving. Our pattern is
+
+```
+x      = attn + residual          badd_f32     ← needed later, as the residual
+normed = rms_norm(x) * weight     rmsnorm_f32  ← fed to the FFN
+```
+
+**Two outputs are genuinely required**, and candle's `CustomOp` returns one
+storage. The way through, verified rather than assumed:
+
+- Allocate **one buffer of 2N** and have the kernel write the sum into the
+  first half and the normed value into the second.
+- Split it with `narrow(0, i, 1)?.reshape(orig)?`. **Both are zero-copy here** —
+  `narrow` on dim 0 of a contiguous tensor keeps contiguous strides, and
+  `Tensor::reshape` takes the `is_contiguous()` branch, which builds
+  `Layout::contiguous_with_offset(shape, start_offset)` and copies nothing
+  (`vendor/candle/candle-core/src/tensor.rs`). Checked in the source, because
+  the whole saving would be given back by one hidden `copy_strided_src`.
+- Cost: **−1 launch, −1 alloc, −1 free per site, ×2 sites = −6 submissions per
+  layer**, against the silu×up fusion's −3.
+
+⚠ **Do NOT copy llama.cpp's `rms_norm_f32` here — it fuses the OTHER order.**
+Theirs is `RMS_NORM → MUL → ADD`, ending `dst[col] = scale * x[col] *
+mul[mul_col] + add[add_col]`, with a `static_assert(!do_add || do_multiply)`.
+Ours is `ADD → RMS_NORM → MUL`, which upstream has only as a separate
+`add_rms_norm` path that is architecture-gated. **Same three ops, different
+graph, and the kernel is not interchangeable.**
+
+⚠ And their fused-GLU work goes further than ours does: `ggml_cuda_should_fuse_mul_mat`
+fuses **`ffn_up` MUL_MAT + `ffn_gate` MUL_MAT + GLU**, writing the activated
+result straight out of the matmul epilogue. `QMatMul::forward_shared` (shipped
+in .198) is the *activation-sharing* half of that; the epilogue half — a fused
+SwiGLU tail on `mul_mat_vec_via_q8_1` — would remove the gate/up intermediates
+as well, and is the follow-up if the elementwise fusion pays.
 
 ### ▶ Ordering REVISED 2026-09-22 after reading how llama.cpp did this
 
 The stages below were ordered by size of the line in the budget. Reading
-llama.cpp's own decode work reorders them, and sizes two of them from someone
-else's measurements instead of our guesses.
+llama.cpp's own decode work reorders them.
+
+⚠ **Re-read the same day, and the second pass changed three of its claims** —
+two of them in the direction that flattered the plan. The corrections are
+inline below, marked; gotcha **#680** carries what to do differently. **The
+re-ordering itself survived; the reasons for it did not.**
 
 **Sources**: [NVIDIA on CUDA graphs in llama.cpp](https://developer.nvidia.com/blog/optimizing-llama-cpp-ai-inference-with-cuda-graphs)
 · [am17an, token-generation optimizations](https://am17an.bearblog.dev/new-post/)
 (llama.cpp discussion #17621) · [issue #12152](https://github.com/ggml-org/llama.cpp/issues/12152)
+· [CUDA Programming Guide § CUDA Graphs](https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/cuda-graphs.html)
+(graph memory nodes, fixed addresses, update rules)
+· [CUDA graph capture constraints](https://docs.nvidia.com/dl-cuda-graph/cuda-graph-basics/constraints.html)
+(the legacy-stream prohibition, what may be allocated during capture)
+· [huggingface/grout](https://github.com/huggingface/grout) — a Rust decoder that
+captures decode as a graph "once per sequence length class"
 
-**1. Fusion now comes FIRST, with reference numbers.** llama.cpp measured
-**329 → 419 tok/s (~27%)** on an RTX 5090 / gpt-oss-20b from a set of decode
-fusions, and each of the two that map onto our kernel table was worth ~10% on
-its own:
+**1. Fusion now comes FIRST.** llama.cpp measured **329 → 419 tok/s (~27%)** on
+an RTX 5090 / gpt-oss-20b from a set of decode fusions, two of which map onto
+our kernel table:
 
-| their fusion | ~gain | our kernels, per layer |
-|---|---|---|
-| RMS-norm fused with the preceding multiply/add | ~10% | `rmsnorm_f32` 2.05 + `badd_f32` 2.00 |
-| GEMV fused with the gated activation | ~10% | `usilu_f32` 1.00 + `bmul_f32` 1.00 |
-| TopK-MoE (softmax + expert select) | ~10% | MoE only — would also remove `topk_cpu`'s host round trip |
+| their fusion | our kernels, per layer |
+|---|---|
+| RMS-norm fused with the preceding multiply/add | `rmsnorm_f32` 2.05 + `badd_f32` 2.00 |
+| GEMV fused with the gated activation | `usilu_f32` 1.00 + `bmul_f32` 1.00 |
+| TopK-MoE (softmax + expert select) | MoE only — would also remove `topk_cpu`'s host round trip |
+
+⚠ **CORRECTED 2026-09-22 (same day): there is no "~10% each" in the source, and
+this document asserted one.** What am17an writes is *"none of these PRs increase
+the TG by more than 10%"* — a **CEILING on each**, published to explain why the
+combined 27% is the number worth quoting. Reading it as a point estimate turned
+someone else's upper bound into our forecast, which is how a plan acquires a
+number nobody measured. **The honest statement is: each of these was worth
+something under 10% to them, on their hardware, against their budget — and their
+budget has no allocation line at all** (ggml plans one compute buffer; ours
+allocates per op, § Stage 3). Size our fusions from OUR kernel table, and quote
+theirs only as the ceiling it is.
 
 Their reasoning is ours: *"fusing kernels reduces memory traffic and kernel
 launch time… token generation is memory-bound rather than compute-bound"*.
 
 **2. Where our fused kernels go, without a fifth vendored crate.**
 `candle-kernels` is a registry crate, but `CudaDevice::get_or_load_custom_func`
-takes **PTX as a string** and has no callers — so a small `.cu` compiled to PTX
+takes **PTX as a string** and had no callers upstream — so a small `.cu` compiled to PTX
 by our own `build.rs` under `candle-cuda` loads through it. That is the cheap
 route in, and it makes each fusion independently shippable and A/B-able.
 
-**3. Stage 3 before stage 4 is CONFIRMED, and was a guess before.** llama.cpp
-patches only the KV-cache pointers in an already-instantiated graph each token
-(`cudaGraphExecUpdate` for the rarer structural change) — **which works because
-its ACTIVATION addresses are already stable, in a fixed compute buffer.** candle
-allocates every output fresh, so every node's parameters would change each
-token and patching them all buys nothing. Stable buffers really are the
-prerequisite.
-⚠ Trap to carry in: the `cudaKernelNodeParams` from
+**3. ~~Stage 3 before stage 4 is CONFIRMED~~ — WITHDRAWN 2026-09-22, same day.**
+The argument was: llama.cpp patches only the KV-cache pointers in an
+already-instantiated graph each token (`cudaGraphExecUpdate` for the rarer
+structural change), **which works because its ACTIVATION addresses are already
+stable in a fixed compute buffer**; candle allocates every output fresh, so
+every node's parameters would change each token and patching them all buys
+nothing.
+
+Every sentence of that is true, and the conclusion still does not follow,
+because it assumes the only way to build the graph is *capture once, then patch
+per token*. **There is a second way, and it is the one that suits candle.**
+Stream capture turns `cuMemAllocAsync` / `cuMemFreeAsync` into **graph memory
+nodes**, and the CUDA Programming Guide is explicit about what that buys:
+*"Graph allocations have fixed addresses over the life of a graph including
+repeated instantiations and launches."* The allocations candle makes during
+capture become part of the graph and hand back **the same addresses on every
+replay** — so there is nothing to patch, and a graph would remove most of the
+alloc/free line (~1,300 submissions) as well as the launch line.
+
+**So stage 3 is not known to be a prerequisite, and may be unnecessary.** It is
+also not established that it isn't: the capture has real preconditions of its
+own (item 3b), and this is a deduction from documentation, not a measurement.
+⚠ **Settle it with the cheap experiment, not with more reading**: capture one
+decode step, replay it, and compare the logits against the uncaptured path. Two
+outcomes, both worth having — it works and stage 3 is deleted, or it fails and
+the failure names the real precondition.
+⚠ Trap to carry in either way: the `cudaKernelNodeParams` from
 `cudaGraphKernelNodeGetParams` is **owned by the node** (#12152) — patch the
 values it holds, never swap in your own pointers.
+
+**3b. The capture preconditions nobody had written down.** Found by reading the
+capture rules rather than the graph rules, and all four are checkable before any
+code is written:
+
+- ⛔ **Capture is IMPOSSIBLE on the stream candle uses today.** *"Stream capture
+  can be used on any CUDA stream except `cudaStreamLegacy`"* — and
+  `BackendDevice::new` takes `context.default_stream()`, which cudarc defines as
+  `cu_stream: null_mut()`, i.e. exactly that stream. This is the same fact
+  Stage 2 turned on; it cuts the other way here.
+  ⛔ **`per_thread_stream()` looks like the way out and is NOT.** It is
+  capturable, and unlike `new_stream()` it does not flip cudarc's
+  `is_in_multi_stream_mode()` — so it appears to keep Stage 2 valid for free.
+  But per-thread means **one stream per OS thread**, and this forward is not
+  pinned to one: `cpu_pools::in_phase_pool` runs it via `pool.install(f)` on a
+  rayon worker, and *which* pool depends on the calibration state. Different
+  tokens would land on different streams with event tracking off, which is the
+  unsynchronised-buffer hazard — a wrong reply, not an error.
+  ✅ **The way that survives the check is one explicitly created stream**
+  (`new_stream()`) with **every** `CudaDevice` on it. Event tracking can stay
+  off, because "one stream in use" is what that rests on, not "the default
+  stream" — but note candle builds several devices and each takes
+  `default_stream()` today (Stage 2's finding), so this is a change to
+  `BackendDevice::new`, not a call site. ⚠ A half-migration, with some devices
+  on the new stream and some on the legacy one, is worse than either end state.
+- **Every `cuMemFreeAsync` inside the capture must free memory allocated inside
+  the same capture.** A tensor that existed before the region and drops inside
+  it aborts the capture.
+- **No host synchronisation inside the region**, which puts the logits
+  `cuMemcpyDtoHAsync` + sync at the boundary: capture the forward, sample
+  outside — or do Stage 5's on-device sampling first and capture the lot.
+- **The KV length changes every token**, so a graph is valid for one length
+  unless the attention kernel stops taking it as a launch parameter. HuggingFace's
+  own `grout` compiles *"once per sequence length class (prefill vs decode)"*,
+  which is the shape to aim at; llama.cpp instead patches per token.
 
 **4. Graphs are worth ~1.2x, batch-1 only — and likely MORE here.** That figure
 is Llama 7B on an **H100**, where a launch costs ~3-5 us; this box measures
@@ -196,8 +353,10 @@ A decode step's activation shapes are fully determined by (model, batch, one
 position). So an arena keyed on the shape sequence, allocated once per model and
 reused, removes both counts almost entirely.
 
-⚠ **This is also what unblocks stage 4**, and that is the reason to do it before
-the more attractive-looking graph work. See below.
+⚠ ~~**This is also what unblocks stage 4**~~ — **withdrawn**, see § Ordering
+item 3. If capture turns these allocations into graph memory nodes, stage 4
+removes this line too and stage 3 has no separate reason to exist. **Run that
+experiment before spending a day here.**
 
 ### Stage 4 — Capture the decode step as a CUDA graph
 
@@ -207,20 +366,29 @@ single submission, which is the canonical fix for a launch-bound decoder;
 llama.cpp added exactly this (`GGML_CUDA_USE_GRAPHS`) for exactly this reason,
 and it helps small models on decode most, which is the shape seen here.
 
-cudarc 0.17.8 has the API: `CudaGraph::begin_capture` / `end_capture` /
-`launch`.
+**cudarc 0.19.9** has the API: `CudaStream::begin_capture` / `end_capture` and
+`CudaGraph::launch`.
+⚠ **An earlier draft of this plan cited cudarc 0.17.8, which is the wrong
+crate.** 0.17.8 IS in `Cargo.lock` — pulled by `ug-cuda`, behind candle's
+optional `ug` feature, which this build does not enable. The version
+`candle-core` actually builds against, and therefore the one whose `CudaStream`
+our device holds, is **0.19.9**. The API exists in both, so the conclusion
+survived; the check did not. `workflow.md` § research item 2 says to read the
+registry source rather than recall it — this is what happens when you read the
+lock file instead of the dependency.
 
-⚠ **A graph replays against FIXED device pointers.** Today every op allocates a
-new buffer per token, so a captured graph would replay against addresses that no
-longer belong to it — the failure would be wrong numbers, not an error. **So
-stage 3 is not an optimisation to be done first for tidiness; it is the
-precondition.** llama.cpp's alternative is to keep the graph and *update* its
-kernel parameters per token rather than recapture, which is worth reading before
-choosing.
+⚠ **A graph replays against FIXED device pointers.** That is true and is the
+whole design constraint — but see § Ordering item 3: **graph memory nodes give
+candle's per-op allocations fixed addresses for free**, so this does not by
+itself make stage 3 a precondition. llama.cpp's alternative is to keep the graph
+and *update* its kernel parameters per token rather than recapture, which is
+worth reading before choosing.
 
-Also needs: one graph per distinct decode shape (KV length changes the attention
-kernel's parameters, not usually its shape), and a fallback path for the first
-token and for prefill.
+Also needs: a decision on how the changing KV length is handled (a graph per
+length class, as HuggingFace's `grout` does, or per-token parameter patching, as
+llama.cpp does), and a fallback path for the first token and for prefill. The
+four capture preconditions are in § Ordering item 3b — **the stream one is a
+blocker, not a detail.**
 
 **This is the highest-value stage and the highest-risk one.** Do not start it
 before stages 2-3 have shown the instrumentation and the A/B discipline work.
@@ -256,8 +424,9 @@ Independent of graphs, and the only stage that also helps the CPU backend (which
 | **1 + 2 together ✅** | 321 memsets + 2,625 event ops | **measured: +34% on BOTH a 1.1B and a 3B** — the only reading taken on a genuinely idle box, and the only one where median and best agree |
 | 1 memsets ✅ | 321 of 992 | +30% / +15% ⚠ contended box, superseded by the row above |
 | 2 event tracking ✅ | **2,625 → 0 event ops** | +15% / nothing ⚠ same caveat |
-| 3 buffer reuse | ~1,313 alloc/free | estimated ~3.5 ms/token |
-| 4 CUDA graphs | most of 625 launches | large, unestimated |
+| **2c silu×up fusion ✅** | 22 launches + 22 allocs + 22 frees | **count-verified −66/token; NO speed claim — below this box's resolution** |
+| 3 buffer reuse | ~1,313 alloc/free | estimated ~3.5 ms/token — **and possibly redundant**, § Ordering item 3 |
+| 4 CUDA graphs | most of 625 launches, **and possibly the 1,313 alloc/free too** | large, unestimated |
 | 5 fusion + D2H | tens of launches, 1 round trip | modest, and helps CPU too |
 
 ⚠ **These do not simply add, and measuring the pair proved it.** Compounding the
@@ -266,6 +435,22 @@ both switches together on an idle box gave **+34% on each**. The per-change arms
 were the contended ones, so the pair is what to trust. **Measure the combination
 you intend to ship, not the sum of the parts** — and note the corollary: the
 "small models gain more" story did not survive a quiet box.
+
+⚠⚠ **Fusion and graphs are not additive in a deeper way: they bill the same
+cost.** A fused kernel is worth a launch, an allocation and a free per layer —
+but a CUDA graph replays the whole sequence with ONE submission, so under a
+graph those savings are already taken and what is left of fusion is only the
+memory traffic and the smaller node count. **Do not plan on fusion's win
+surviving stage 4**, and do not let stage 4's size be argued from a launch count
+that fusion has already reduced. The reason to do fusion first is not that it
+compounds:
+
+- it is **independently shippable today**, where stage 4 has four unmet
+  preconditions and one of them is a blocker;
+- it is **low risk** — an elementwise kernel with a bit-identical reference;
+- it is **the only stage that also helps the CPU backend**, which is
+  dispatch-bound too and will never get a CUDA graph;
+- and it **proves the PTX route in**, which every later fused kernel needs.
 
 Once submissions stop being the binding constraint, bandwidth becomes it, and
 the 3B's ~5 ms floor is where this ends. Re-measure rather than projecting —

@@ -2395,6 +2395,31 @@ fn everything_the_build_includes_is_in_the_docker_context() {
                 }
             }
         }
+
+        // What the BUILD SCRIPT reads is a build input too, and the
+        // `include_str!` scan above cannot see it.
+        //
+        // The first one of these (`kernels/`, for `nvcc --ptx`) reaches the
+        // binary through `include_str!(concat!(env!("OUT_DIR"), ...))`, which
+        // begins with `concat!` rather than a literal and so does not match the
+        // pattern above at all. A source scan is only as good as the spellings
+        // it knows, and this was a spelling it did not know.
+        //
+        // `cargo:rerun-if-changed=` is the right thing to read because cargo
+        // already requires build.rs to declare every path it depends on — so
+        // the declaration exists whether or not anyone remembers this guard.
+        // Only the ROOT build.rs is scanned: its paths are relative to the
+        // docker context root, which is what a COPY line is relative to.
+        let build_rs = std::fs::read_to_string("build.rs").expect("read build.rs");
+        for norm in build_script_paths(&build_rs) {
+            let covered = copied.iter().any(|c| {
+                let c = c.trim_end_matches('/');
+                norm == c || norm.starts_with(&format!("{c}/"))
+            });
+            if !covered {
+                missing.push(format!("{dockerfile_name}: build.rs reads {norm}"));
+            }
+        }
     }
     assert!(
         missing.is_empty(),
@@ -2402,6 +2427,71 @@ fn everything_the_build_includes_is_in_the_docker_context() {
          `cargo build` succeeds here and the image build fails at the tag:\n  {}\n\n\
          Add a COPY line to the Dockerfile's builder stage.",
         missing.join("\n  ")
+    );
+}
+
+/// Every repo path a build script declares a dependency on, normalised.
+///
+/// `cargo:rerun-if-changed=` is read rather than the `Command`/`Path` calls
+/// around it because cargo already obliges build.rs to declare each path it
+/// depends on — so the declaration is there whether or not anyone remembers
+/// this guard exists.
+///
+/// A `println!` format string truncates at the first `{`, so
+/// `cargo:rerun-if-changed=kernels/{k}` yields `kernels` — the directory
+/// prefix, which is exactly the granularity a `COPY` line grants.
+/// `cargo:rerun-if-env-changed=` does not contain the key split on, so
+/// environment variable names never reach here.
+fn build_script_paths(build_rs: &str) -> Vec<String> {
+    build_rs
+        .split("cargo:rerun-if-changed=")
+        .skip(1)
+        .filter_map(|cap| {
+            let rel = cap
+                .split(['"', '\'', '{', '}'])
+                .next()?
+                .trim()
+                .trim_end_matches('/');
+            (!rel.is_empty()).then(|| normalise(std::path::Path::new(rel)))
+        })
+        .collect()
+}
+
+/// The scan above finds nothing when it is working and nothing when it is
+/// broken, so its reach is pinned here — `.claude/rules/arch-guards-and-tests.md`
+/// § "give every scan a self-test that plants the violation".
+#[test]
+fn the_docker_context_guard_sees_a_path_a_build_script_reads() {
+    // The real shape: a path built by a format string, beside an env var that
+    // must NOT be mistaken for one.
+    let found = build_script_paths(
+        r#"
+        println!("cargo:rerun-if-env-changed=CUDA_COMPUTE_CAP");
+        for k in KERNELS { println!("cargo:rerun-if-changed=kernels/{k}"); }
+        println!("cargo:rerun-if-changed=proto/wire.capnp");
+        "#,
+    );
+    assert!(
+        found.contains(&"kernels".to_string()),
+        "a format-string path must reduce to its directory prefix, got {found:?}"
+    );
+    assert!(
+        found.contains(&"proto/wire.capnp".to_string()),
+        "a literal path must survive intact, got {found:?}"
+    );
+    assert!(
+        !found.iter().any(|f| f.contains("CUDA_COMPUTE_CAP")),
+        "rerun-if-env-changed is not a path, got {found:?}"
+    );
+
+    // And the live build.rs really does declare one, so the guard above is
+    // actually exercising this on every run rather than iterating an empty
+    // list — which is how a scan comes to be green for months (gotcha #413).
+    let live = build_script_paths(&std::fs::read_to_string("build.rs").expect("read build.rs"));
+    assert!(
+        !live.is_empty(),
+        "build.rs declares no path dependencies — if that is deliberate, this \
+         guard and its Docker COPY lines need revisiting deliberately"
     );
 }
 
