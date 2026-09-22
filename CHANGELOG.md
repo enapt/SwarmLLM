@@ -1,5 +1,39 @@
 # Changelog
 
+## [0.3.198-alpha] — 2026-09-22
+
+**Text generation is faster on machines with an NVIDIA graphics card. The Phi
+models gain the most — around half again as fast — and the two other models
+measured gained about a third.**
+
+**Faster: the graphics card was idle about half the time it was meant to be
+working.** Producing one word means asking the card to carry out several hundred
+small pieces of work, and your node was spending longer asking than the card
+spent doing — a single processor core was fully occupied issuing the requests
+while the card waited between them. Two kinds of pointless request have been
+removed: clearing scratch memory that the very next step overwrites completely,
+and bookkeeping that guards against two streams of work colliding when there is
+only ever one. A 1.1-billion and a 3-billion parameter model each generate about
+a third faster as a result, measured with nothing else running on the machine.
+
+**Faster: Phi-3.5 and Phi-4 were doing part of their work three times over.**
+These models package three related pieces of each layer into one block. Your
+node was computing the whole block separately for each of the three pieces and
+then keeping only a third of each answer, so two thirds of that work was
+discarded. It is now computed once and shared. Phi-3.5-mini generates about 55%
+faster and Phi-4-mini about 22%.
+
+Every other model gains a little from the same change by a smaller route: where
+several pieces of a layer read the same input, that input is now prepared once
+rather than once per piece. On the models measured that gain was small enough to
+sit within normal run-to-run variation, so it is not being claimed as a number.
+
+**Nothing about the replies changes.** Every measurement above was taken with
+the same question and the same settings, and the answers came back identical
+word for word, on every model tested. The work removed was work whose result was
+being thrown away or recomputed.
+
+
 ## [0.3.197-alpha] — 2026-09-22
 
 **Your node is better at judging what other machines can actually handle, and
