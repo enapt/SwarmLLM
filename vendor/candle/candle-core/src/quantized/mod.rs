@@ -834,6 +834,50 @@ impl QMatMul {
         xs.to_dtype(DType::F16)?.matmul(&w)?.to_dtype(in_dtype)
     }
 
+    /// SwarmLLM patch: run several weight matrices against ONE activation,
+    /// quantizing that activation once instead of once per matmul.
+    ///
+    /// `q`/`k`/`v` share the post-attention-norm hidden state and the FFN's
+    /// `gate`/`up` share the post-FFN-norm one, but each matmul quantized its
+    /// input independently — 7 `quantize_q8_1` launches per layer for 7 matmuls
+    /// when only 4 inputs were distinct. On a machine where a decoded token is
+    /// bound by how many times the CPU talks to the driver, 3 needless launches
+    /// per layer is ~11% of them.
+    ///
+    /// **This owns the loop on purpose.** The sharing window must be closed to
+    /// anything but these matmuls: a cache keyed on the input's device pointer
+    /// would be unsound, because CUDA recycles freed addresses and a stale hit
+    /// is a silently wrong reply; and a guard the caller opens would leave a
+    /// window an unrelated matmul (LoRA, for one) could hit. Here `xs` is
+    /// borrowed for the whole call, so its storage cannot be freed, and nothing
+    /// else runs inside.
+    ///
+    /// Falls back to a plain loop off CUDA, for dequantized weights, and for a
+    /// single weight — so it is always correct to call and never *required*.
+    ///
+    /// → `docs/invariants/inference.md` § "A decode token is bound by GPU
+    ///   submission COUNT, not bandwidth"
+    pub fn forward_shared(xs: &Tensor, ws: &[&Self]) -> Result<Vec<Tensor>> {
+        #[cfg(feature = "cuda")]
+        {
+            // Only the quantized CUDA path shares anything: a dequantized
+            // weight goes through cuBLAS and never calls `quantize_q8_1`.
+            let shareable = xs.device().is_cuda()
+                && ws.len() > 1
+                && ws.iter().all(|w| matches!(w, Self::QTensor(_)));
+            if shareable {
+                return cuda::with_shared_activation(|| {
+                    ws.iter()
+                        .map(|w| crate::Module::forward(*w, xs))
+                        .collect()
+                });
+            }
+        }
+        ws.iter()
+            .map(|w| crate::Module::forward(*w, xs))
+            .collect()
+    }
+
     pub fn indexed_moe_forward(&self, x: &Tensor, ids: &Tensor) -> Result<Tensor> {
         match self {
             Self::QTensor(t) => t.indexed_moe_forward(x, ids),

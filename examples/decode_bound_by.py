@@ -84,8 +84,14 @@ def swarmllm_pids():
     pids = []
     for p in out.stdout.split():
         # By /proc/PID/exe, never a cmdline match.
+        #
+        # ⚠ Strip a " (deleted)" suffix first: readlink answers that for a
+        # process whose binary has since been REPLACED, which is the normal
+        # case right after a rebuild. Matching on endswith("swarmllm") alone
+        # skips exactly the processes you are looking for.
         try:
-            if os.readlink(f"/proc/{p}/exe").endswith("swarmllm"):
+            exe = os.readlink(f"/proc/{p}/exe").removesuffix(" (deleted)")
+            if exe.endswith("swarmllm"):
                 pids.append(int(p))
         except OSError:
             pass

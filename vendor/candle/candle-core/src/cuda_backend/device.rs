@@ -23,6 +23,54 @@ impl DeviceId {
     }
 }
 
+/// SwarmLLM patch: per-kernel-name launch counts, for answering which kernels
+/// a decoded token actually spends its submissions on.
+///
+/// A token was measured at ~625 `cuLaunchKernel` calls on a 22-layer model —
+/// 28 per layer, against roughly ten logical operations — and nsys on WSL2
+/// gives no GPU-side kernel table, so the composition has to come from the
+/// code. Counting in [`CudaDevice::get_or_load_func`] works because that is
+/// the only path a candle kernel launch takes.
+///
+/// ⚠ **Does NOT see cuBLAS's own kernels** (`cudaLaunchKernel_v7000`, ~45 per
+/// token), which are launched inside cuBLAS rather than through candle. Read
+/// the total from `examples/decode_submissions.sh` and this for the breakdown.
+///
+/// Off unless `SWARMLLM_COUNT_KERNELS=1`, and then it takes a mutex per launch
+/// — fine for a diagnostic run, not for a benchmark. **Never measure
+/// throughput with this on.**
+fn kernel_counts() -> &'static std::sync::Mutex<HashMap<String, u64>> {
+    static C: std::sync::OnceLock<std::sync::Mutex<HashMap<String, u64>>> =
+        std::sync::OnceLock::new();
+    C.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+fn counting_kernels() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("SWARMLLM_COUNT_KERNELS").as_deref() == Ok("1"))
+}
+
+#[inline]
+fn count_kernel_launch(fn_name: &str) {
+    if !counting_kernels() {
+        return;
+    }
+    if let Ok(mut m) = kernel_counts().lock() {
+        *m.entry(fn_name.to_string()).or_insert(0) += 1;
+    }
+}
+
+/// Drain the per-kernel launch counts, highest first. Empty unless
+/// `SWARMLLM_COUNT_KERNELS=1`.
+pub fn take_kernel_launch_counts() -> Vec<(String, u64)> {
+    let mut v: Vec<(String, u64)> = match kernel_counts().lock() {
+        Ok(mut m) => m.drain().collect(),
+        Err(_) => return Vec::new(),
+    };
+    v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    v
+}
+
 /// SwarmLLM patch: `SWARMLLM_CUDA_EVENT_TRACKING=1` keeps cudarc's
 /// per-allocation read/write events on the default-stream device.
 ///
@@ -286,6 +334,12 @@ impl CudaDevice {
     }
 
     pub fn get_or_load_func(&self, fn_name: &str, mdl: &kernels::Module) -> Result<CudaFunc> {
+        // SwarmLLM patch: this is the ONE path a candle kernel launch takes
+        // (`get_or_load_custom_func` has no callers), so counting here answers
+        // "which kernels does a token actually launch" — the question that
+        // decides which fusion is worth doing. Off unless
+        // `SWARMLLM_COUNT_KERNELS=1`; see `count_kernel_launch`.
+        count_kernel_launch(fn_name);
         let ms = self.modules.read().unwrap();
         if let Some(mdl) = ms.mdls[mdl.index()].as_ref() {
             let func = mdl.load_function(fn_name).w()?;

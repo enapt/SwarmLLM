@@ -1049,6 +1049,62 @@ reading had it at half, and the honest conclusion is that the earlier reading
 was noise, not that big models benefit less. **The "smaller models gain more"
 story is NOT established** by this data.
 
+### Projections that share an activation must share the work — `QMatMul::forward_shared`
+
+**How the kernel mix was established, and why guessing had to stop.** nsys gives
+no GPU-side kernel table on WSL2, so `CudaDevice::get_or_load_func` — the one
+path a candle kernel launch takes — now counts launches by name under
+`SWARMLLM_COUNT_KERNELS=1`, dumped per forward pass beside the stage profile.
+One decode token, tinyllama, 22 layers, **601 launches, 27.3 per layer**:
+
+| kernel | /layer | | kernel | /layer |
+|---|---|---|---|---|
+| `quantize_q8_1` | **7.05** | | `affine_f32` | 1.00 |
+| `mul_mat_vec_q4_K/q6_K` | 7.04 | | `bmul_f32` | 1.00 |
+| `rmsnorm_f32` | 2.05 | | `softmax_f32` | 1.00 |
+| `badd_f32` | 2.00 | | `ucopy_f32` | 1.00 |
+| `copy2d_f32` | 2.00 | | `usilu_f32` | 1.00 |
+| `rope_i_f32` | 2.00 | | | |
+
+**`quantize_q8_1` ran exactly once per matmul — 7 times for 4 distinct
+activations.** Q/K/V are three matmuls against the same post-attention-norm
+hidden state and the FFN's gate/up are two against the same post-FFN-norm one,
+so 3 per layer rebuilt a buffer byte-for-byte identical to one just built. That
+was the only outright *waste* in the table; the copies are KV-cache writes and
+the rest is structure that fusion would address, not redundancy.
+
+`QMatMul::forward_shared(xs, ws)` fixes both shapes it found:
+
+- **`Standard` weights** (llama, qwen, gemma, mistral…) — candle quantizes the
+  activation once for the group. Verified by count: `quantize_q8_1` **7.05 →
+  4.05 per layer**, 601 → 535 launches, every other kernel count unchanged.
+- **`FusedSlice` weights** (Phi-3/3.5/4, whose GGUF ships ONE fused QKV tensor)
+  — each projection was running the **whole fused matmul** and narrowing its own
+  slice out, so Q, K and V each computed all three. Now it runs once.
+
+**Measured** (idle box, A/B/A/B where noted, `SWARMLLM_SHARE_PROJECTIONS=0` is
+the off arm, replies byte-identical in every arm):
+
+| model | shared | unshared | delta |
+|---|---|---|---|
+| **phi-3.5-mini** (fused) | **71.5, 70.4** med | 46.2, 44.7 | **+55%** |
+| **phi-4-mini** (fused) | **49.4** med | 40.4 | **+22%** |
+| llama-3.2-3b | 74.0, 72.1 best | 72.0, 68.0 | +4% |
+| tinyllama-1.1b | 101.4, 99.5 med | 94.0, 93.0 | +7% |
+
+⚠ **The two halves are worth wildly different amounts and must not be quoted
+together.** The Phi win is real matmul work removed — two thirds of that
+projection's arithmetic — and separates by a margin nothing on this box can
+explain away. The shared-quantization win is ~11% of launches, i.e. ~5% of a
+token, and sits at the edge of what is resolvable: on tinyllama the medians
+separate and the bests overlap, on the 3B the reverse. **Do not present ~5% as
+established for the non-fused models on this evidence.**
+
+⚠ **`forward_shared` must stay optional.** It falls back to a plain loop for a
+single weight, a mixed group, dequantized weights and non-CUDA, so it is always
+correct to call — and LoRA is applied AFTER it returns, deliberately, because
+LoRA's own matmuls do not share that activation.
+
 ### What a change must keep
 
 - **Read the kernel before calling `alloc_fully_overwritten`.** The bound it

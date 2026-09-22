@@ -331,8 +331,20 @@ fn mul_mat_vec_via_q8_1(
     // per layer, i.e. two per quantized matmul (this buffer and `dst` below),
     // for 3.8 of 23 ms. See `docs/invariants/inference.md` § "A decode token
     // is bound by GPU submission count, not bandwidth".
-    let mut y_q8_1 = dev.alloc_fully_overwritten::<u8>(y_size_in_bytes)?;
-    quantize_q8_1(y, &mut y_q8_1, ncols, b_size, dev)?;
+    //
+    // SwarmLLM patch: reuse ONE quantization across weight matrices that share
+    // this activation — see `shared_activation`. Outside such a group this is
+    // exactly the old behaviour.
+    let y_q8_1: std::sync::Arc<CudaSlice<u8>> = match shared_take(ncols, b_size) {
+        Some(existing) => existing,
+        None => {
+            let mut buf = dev.alloc_fully_overwritten::<u8>(y_size_in_bytes)?;
+            quantize_q8_1(y, &mut buf, ncols, b_size, dev)?;
+            let buf = std::sync::Arc::new(buf);
+            shared_put(ncols, b_size, &buf);
+            buf
+        }
+    };
 
     let kernel_name = match dtype {
         GgmlDType::Q4_0 => "mul_mat_vec_q4_0_q8_1_cuda",
@@ -372,7 +384,7 @@ fn mul_mat_vec_via_q8_1(
 
     let mut builder = func.builder();
     builder.arg(&data.inner);
-    builder.arg(&y_q8_1);
+    builder.arg(&*y_q8_1);
     builder.arg(&dst);
     barg!(
         builder,
@@ -383,6 +395,91 @@ fn mul_mat_vec_via_q8_1(
     );
     unsafe { builder.launch(cfg) }.w()?;
     Ok(CudaStorage::wrap_cuda_slice(dst, dev.clone()))
+}
+
+/// SwarmLLM patch: one Q8_1 quantization of an activation, reused by every
+/// weight matrix that shares it.
+///
+/// **What it fixes.** `q`, `k` and `v` are three matmuls against the SAME
+/// post-attention-norm hidden state, and the FFN's `gate` and `up` are two
+/// against the same post-FFN-norm one. Each quantized its input independently,
+/// so a layer ran **7 `quantize_q8_1` launches for 7 matmuls when only 4 of the
+/// inputs were distinct** — measured at 7.05 quantize launches per layer
+/// against 7.04 matmuls on tinyllama, with 3 per layer recomputing a buffer
+/// byte-for-byte identical to one just built.
+///
+/// **Why this shape and not a cache.** A cache keyed on the input's device
+/// pointer is unsound here: `cuMemAllocAsync` recycles addresses, so a freed
+/// buffer's pointer reappears attached to different data, and a stale hit would
+/// be a silently wrong reply rather than a failure. [`shared_activation`]
+/// instead owns the whole window — it borrows `xs` for the duration, so the
+/// storage cannot be freed, and it runs the matmuls itself, so no unrelated
+/// matmul can observe the slot. That is "make the wrong call unrepresentable"
+/// rather than "document that forgetting it is the bug".
+///
+/// The `(ncols, b_size)` check is a belt-and-braces assertion, not the
+/// correctness argument: within one group every weight shares the activation's
+/// `k` by construction.
+///
+/// → `docs/invariants/inference.md` § "A decode token is bound by GPU
+///   submission COUNT, not bandwidth"
+struct SharedQ8 {
+    ncols: usize,
+    b_size: usize,
+    buf: std::sync::Arc<CudaSlice<u8>>,
+}
+
+std::thread_local! {
+    /// `Some` only while [`shared_activation`] is on the stack.
+    static SHARED_Q8: std::cell::RefCell<Option<Option<SharedQ8>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// The quantized activation for this group, if one has been built and matches.
+fn shared_take(ncols: usize, b_size: usize) -> Option<std::sync::Arc<CudaSlice<u8>>> {
+    SHARED_Q8.with(|s| {
+        let slot = s.borrow();
+        match &*slot {
+            Some(Some(sh)) if sh.ncols == ncols && sh.b_size == b_size => Some(sh.buf.clone()),
+            _ => None,
+        }
+    })
+}
+
+/// Record the quantization so the rest of the group can reuse it. A no-op
+/// unless a group is active, which is what keeps the non-grouped path identical.
+fn shared_put(ncols: usize, b_size: usize, buf: &std::sync::Arc<CudaSlice<u8>>) {
+    SHARED_Q8.with(|s| {
+        let mut slot = s.borrow_mut();
+        if let Some(inner @ None) = slot.as_mut() {
+            *inner = Some(SharedQ8 {
+                ncols,
+                b_size,
+                buf: buf.clone(),
+            });
+        }
+    })
+}
+
+/// Run `f`, letting the quantized-matmul path quantize the shared activation
+/// once and reuse it.
+///
+/// `f` must only run matmuls whose activation is the one the caller intends to
+/// share; [`crate::quantized::QMatMul::forward_shared`] is the only public way
+/// in, and it holds that invariant by owning the loop.
+pub(crate) fn with_shared_activation<T>(f: impl FnOnce() -> T) -> T {
+    /// Clears the slot however the group ends. **Not cosmetic**: on a panic an
+    /// early return would leave a quantized activation visible to the next
+    /// matmul on this thread, and a stale reuse is a silently wrong reply.
+    struct Clear;
+    impl Drop for Clear {
+        fn drop(&mut self) {
+            SHARED_Q8.with(|s| *s.borrow_mut() = None);
+        }
+    }
+    SHARED_Q8.with(|s| *s.borrow_mut() = Some(None));
+    let _clear = Clear;
+    f()
 }
 
 #[allow(clippy::too_many_arguments)]

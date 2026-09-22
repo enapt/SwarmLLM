@@ -47,8 +47,17 @@ mkdir -p "$OUT"
 stop_nodes() {
   # By /proc/PID/exe, never a cmdline pattern: `pgrep -f` matches shell
   # wrappers and has cost wasted restarts before.
+  #
+  # ⚠ The `(deleted)` arm is load-bearing, not defensive. `readlink` answers
+  # `/path/to/swarmllm (deleted)` for a process whose binary has since been
+  # REPLACED — which is the normal case here, because this script is run right
+  # after a rebuild. Matching only `*swarmllm` silently skips exactly the
+  # processes that need killing, and the next node then dies on
+  # "Database already open. Cannot acquire lock."
   for p in $(pgrep -x swarmllm 2>/dev/null); do
-    case "$(readlink "/proc/$p/exe" 2>/dev/null)" in *swarmllm) kill "$p";; esac
+    case "$(readlink "/proc/$p/exe" 2>/dev/null)" in
+      *swarmllm | *"swarmllm (deleted)") kill "$p" ;;
+    esac
   done
   for _ in $(seq 1 20); do pgrep -x swarmllm >/dev/null || break; sleep 1; done
 }

@@ -156,6 +156,14 @@ submissions per layer, not faster arithmetic.
   the next kernel fills completely; it skips the `cuMemsetD8Async` that
   `alloc_zeros` submits. **Read the kernel first** — it must ASSIGN every
   element it owns. Load-time padded buffers must stay zeroed.
+- **`QMatMul::forward_shared` is how several projections consume ONE
+  activation** — Q/K/V, and the FFN's gate/up. It quantizes the activation once
+  instead of per matmul, and for a `FusedSlice` model (Phi-3/3.5/4) runs the
+  fused matmul once instead of once per slice: **+55% on phi-3.5-mini**.
+  ⚠ Apply LoRA AFTER it returns; LoRA's matmuls do not share that activation.
+- **`SWARMLLM_COUNT_KERNELS=1` prints launches by kernel name per forward**,
+  which is how the per-layer mix is known at all (nsys has no GPU kernel table
+  on WSL2). Never benchmark with it on — it takes a mutex per launch.
 - **Judge such a change by the submission COUNT, not the clock** — the count is
   deterministic, this box spreads 10-18%. `SWARMLLM_ZERO_QMATMUL_BUFFERS=1`
   restores the old behaviour for a one-binary A/B.

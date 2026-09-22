@@ -91,6 +91,33 @@ model's token. ⚠ Read best-of-N, not the median: the bench node is on the live
 swarm and its daemon intermittently steals the decode thread's core.
 `SWARMLLM_CUDA_EVENT_TRACKING=1` restores the old behaviour.
 
+### Stage 2b — Projections that share an activation share the work ✅ SHIPPED
+
+Counting launches by kernel name (`SWARMLLM_COUNT_KERNELS=1`, added for this)
+showed `quantize_q8_1` running **7.05 times per layer for 7.04 matmuls** — once
+per matmul, for only 4 distinct activations. `QMatMul::forward_shared` fixes
+that (7.05 → 4.05 per layer, 601 → 535 launches) and, for the Phi family's
+fused QKV tensor, stops each of Q/K/V recomputing the **whole** fused matmul.
+
+| model | delta | |
+|---|---|---|
+| **phi-3.5-mini** | **+55%** | real matmul work removed; A/B/A/B, huge margin |
+| **phi-4-mini** | **+22%** | one pair |
+| llama-3.2-3b | +4% | at the edge of resolvable |
+| tinyllama | +7% | medians separate, bests overlap |
+
+⚠ **Two different effects — do not quote them together.** The Phi win is
+arithmetic; the rest is ~11% of launches ≈ ~5% of a token, and not established.
+`SWARMLLM_SHARE_PROJECTIONS=0` is the off arm.
+
+**What the kernel table says to do next**, now that it exists (per layer):
+`rmsnorm_f32` 2.05 + `badd_f32` 2.00 are four launches for norms and residuals
+that fusion could make two; `affine_f32` + `bmul_f32` + `softmax_f32` are three
+launches for the attention tail that `scaled_masked_softmax` already describes
+as one operation. Both need a new CUDA kernel, and `candle-kernels` is a
+registry crate rather than a vendored one — so that means either vendoring it or
+using candle's unused `get_or_load_custom_func` path with our own module.
+
 ### Stage 3 — Reuse activation buffers instead of allocating 657 per token
 
 **657 allocs + 656 frees, ~3.45 ms.** Every candle op allocates its output

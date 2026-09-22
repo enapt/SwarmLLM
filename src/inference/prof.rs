@@ -110,6 +110,49 @@ pub(crate) fn enabled() -> bool {
     *ON.get_or_init(|| std::env::var("SWARMLLM_PROFILE").as_deref() == Ok("1"))
 }
 
+/// Print which CUDA kernels this forward pass launched, and how many times.
+///
+/// **Why this is separate from the stage profile above.** The stages say where
+/// the *time* goes; this says where the *submissions* go, and on this hardware
+/// those are nearly the same question — a decoded token was measured at ~625
+/// `cuLaunchKernel` calls, 28 per layer against roughly ten logical operations
+/// per layer, with 17.6 of 23.0 ms/token inside the driver API. Knowing which
+/// kernels make up the 28 is what decides which fusion is worth doing, and nsys
+/// on WSL2 exposes no GPU-side kernel table, so the count has to come from the
+/// code.
+///
+/// Counted in candle's `CudaDevice::get_or_load_func`, the single path a candle
+/// kernel launch takes. ⚠ **cuBLAS's internal kernels are invisible to it**
+/// (~45 per token); take the total from `examples/decode_submissions.sh`.
+///
+/// Off unless `SWARMLLM_COUNT_KERNELS=1`, which makes every launch take a
+/// mutex. **Never measure throughput with it on.**
+pub(crate) fn dump_kernel_launches(seq_len: usize, index_pos: usize, num_layers: usize) {
+    #[cfg(feature = "candle-cuda")]
+    {
+        let counts = candle_core::cuda::take_kernel_launch_counts();
+        if counts.is_empty() {
+            return;
+        }
+        let total: u64 = counts.iter().map(|(_, n)| *n).sum();
+        eprintln!(
+            "KERNELS seq_len={seq_len} index_pos={index_pos} layers={num_layers} — \
+             {total} launches, {:.1} per layer",
+            total as f64 / num_layers.max(1) as f64
+        );
+        for (name, n) in counts {
+            eprintln!(
+                "  {n:>6}  {:>6.2}/layer  {name}",
+                n as f64 / num_layers.max(1) as f64
+            );
+        }
+    }
+    #[cfg(not(feature = "candle-cuda"))]
+    {
+        let _ = (seq_len, index_pos, num_layers);
+    }
+}
+
 /// Prints the breakdown and zeroes the counters. `total_ms` is the measured
 /// wall time of the whole forward, so the report can show what the stages do
 /// NOT account for — the gap is as informative as the stages themselves.

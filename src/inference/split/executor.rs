@@ -995,6 +995,7 @@ impl SplitModel {
                     start.elapsed().as_secs_f64() * 1000.0,
                 );
             }
+            crate::inference::prof::dump_kernel_launches(seq_len, index_pos, num_layers);
         }
 
         result.map(|t| (t, captured))

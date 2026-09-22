@@ -21,6 +21,17 @@ use crate::model::lora::LoraAdapter;
 
 // ── Quantized MatMul wrapper ──
 
+/// `SWARMLLM_SHARE_PROJECTIONS=0` makes [`QMatMul::forward_shared`] run a plain
+/// loop, so the sharing can be A/B'd inside ONE binary — the discipline in
+/// `.claude/rules/diagnosis.md` § 4, and the only way to attribute a decode
+/// change on a box whose tok/s spreads 10-18% between runs.
+///
+/// Read once and cached: this is consulted twice per layer.
+fn share_projection_work() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("SWARMLLM_SHARE_PROJECTIONS").as_deref() != Ok("0"))
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct QMatMul {
     pub(crate) inner: QMatMulInner,
@@ -137,6 +148,65 @@ impl QMatMul {
                     .contiguous()
             }
         }
+    }
+
+    /// Run several weight matrices against ONE activation, doing the work that
+    /// is common to them exactly once.
+    ///
+    /// Q/K/V share the post-attention-norm hidden state and the FFN's gate/up
+    /// share the post-FFN-norm one. Calling `forward` per projection made each
+    /// redo that shared work, in two different ways depending on the model:
+    ///
+    /// - **`Standard`** (llama, qwen, gemma, mistral…): each matmul quantized
+    ///   the activation to Q8_1 for itself, so a layer issued **7
+    ///   `quantize_q8_1` launches for 7 matmuls when only 4 inputs were
+    ///   distinct** — measured 7.05 per layer against 7.04 matmuls. On a
+    ///   machine where a decoded token is bound by how often the CPU talks to
+    ///   the driver, that is ~11% of its launches. Delegated to candle's
+    ///   `forward_shared`, which quantizes once.
+    /// - **`FusedSlice`** (Phi-3/3.5/4, whose GGUF ships one fused QKV tensor):
+    ///   every projection ran the **whole fused matmul** and then narrowed its
+    ///   own slice out, so Q, K and V each computed all three. Here the fused
+    ///   matmul runs once and each output is narrowed from it — a third of the
+    ///   matmul work these models were doing on that projection.
+    ///
+    /// Falls back to a plain loop for a mixed or single-weight group, so it is
+    /// always correct to call. Returns one tensor per weight, in order.
+    pub(crate) fn forward_shared(xs: &Tensor, ws: &[&Self]) -> CandleResult<Vec<Tensor>> {
+        if ws.len() > 1 && share_projection_work() {
+            // All slices of the SAME fused weight: compute it once.
+            if let QMatMulInner::FusedSlice { fused: first, .. } = &ws[0].inner {
+                let all_same = ws.iter().all(|w| match &w.inner {
+                    QMatMulInner::FusedSlice { fused, .. } => std::sync::Arc::ptr_eq(fused, first),
+                    _ => false,
+                });
+                if all_same {
+                    let full = first.forward(xs)?;
+                    return ws
+                        .iter()
+                        .map(|w| match &w.inner {
+                            QMatMulInner::FusedSlice { offset, len, .. } => full
+                                .narrow(candle_core::D::Minus1, *offset, *len)?
+                                .contiguous(),
+                            // Unreachable: `all_same` established every variant.
+                            _ => w.forward(xs),
+                        })
+                        .collect();
+                }
+            }
+            // All standard: let candle quantize the activation once.
+            let inners: Option<Vec<&candle_core::quantized::QMatMul>> = ws
+                .iter()
+                .map(|w| match &w.inner {
+                    QMatMulInner::Standard(m) => Some(m),
+                    _ => None,
+                })
+                .collect();
+            if let Some(inners) = inners {
+                return candle_core::quantized::QMatMul::forward_shared(xs, &inners);
+            }
+        }
+        ws.iter().map(|w| w.forward(xs)).collect()
     }
 }
 
@@ -263,7 +333,23 @@ impl Mlp {
         xs: &Tensor,
         lora: Option<(&LoraAdapter, usize)>,
     ) -> CandleResult<Tensor> {
-        let mut up = crate::inference::prof::timed!(P::FfnUpGate, self.ffn_up.forward(xs))?;
+        // `up` and `gate` are two matmuls against the SAME `xs`, so they are
+        // issued together and the activation is quantized once instead of
+        // twice — one fewer GPU launch per layer on the quantized CUDA path.
+        // LoRA is applied afterwards, per projection, exactly as before; it
+        // must stay OUTSIDE the shared call, because its own matmuls do not
+        // share this activation.
+        let (mut up, mut pre_gate) = crate::inference::prof::timed!(P::FfnUpGate, {
+            match self.ffn_gate {
+                Some(ref ffn_gate) => {
+                    let mut out = QMatMul::forward_shared(xs, &[&self.ffn_up, ffn_gate])?;
+                    let gate = out.pop().expect("forward_shared returns one per weight");
+                    let up = out.pop().expect("forward_shared returns one per weight");
+                    CandleResult::Ok((up, Some(gate)))
+                }
+                None => CandleResult::Ok((self.ffn_up.forward(xs)?, None)),
+            }
+        })?;
 
         if let Some((adapter, abs_layer)) = lora {
             let key_up = format!("blk.{abs_layer}.ffn_up");
@@ -281,8 +367,7 @@ impl Mlp {
 
         // GLU-style (gate present): act(gate(x)) * up(x)
         // Simple MLP (no gate): act(up(x))
-        let combined = if let Some(ref ffn_gate) = self.ffn_gate {
-            let mut gate = crate::inference::prof::timed!(P::FfnUpGate, ffn_gate.forward(xs))?;
+        let combined = if let Some(mut gate) = pre_gate.take() {
             if let Some((adapter, abs_layer)) = lora {
                 let key_gate = format!("blk.{abs_layer}.ffn_gate");
                 if let Some(lw) = adapter.weights.get(&key_gate) {
@@ -2058,9 +2143,20 @@ impl LayerWeights {
         lora: Option<(&LoraAdapter, usize)>,
     ) -> CandleResult<Tensor> {
         let (b_sz, seq_len, _n_embd) = x.dims3()?;
-        let mut q = crate::inference::prof::timed!(P::QkvProj, self.attention_wq.forward(x))?;
-        let mut k = crate::inference::prof::timed!(P::QkvProj, self.attention_wk.forward(x))?;
-        let mut v = crate::inference::prof::timed!(P::QkvProj, self.attention_wv.forward(x))?;
+        // Q, K and V are three matmuls against the SAME `x`, so the activation
+        // is quantized once for all three rather than once each — 2 fewer GPU
+        // launches per layer on the quantized CUDA path. Identical results and
+        // a plain loop everywhere else.
+        let (mut q, mut k, mut v) = crate::inference::prof::timed!(P::QkvProj, {
+            let mut out = QMatMul::forward_shared(
+                x,
+                &[&self.attention_wq, &self.attention_wk, &self.attention_wv],
+            )?;
+            let v = out.pop().expect("forward_shared returns one per weight");
+            let k = out.pop().expect("forward_shared returns one per weight");
+            let q = out.pop().expect("forward_shared returns one per weight");
+            CandleResult::Ok((q, k, v))
+        })?;
 
         // Apply LoRA deltas to Q/K/V projections if adapter is active
         if let Some((adapter, abs_layer)) = lora {
@@ -2262,9 +2358,18 @@ impl LayerWeights {
         }
 
         // ── Batched: projections, biases, norms, RoPE ──
-        let mut q = crate::inference::prof::timed!(P::QkvProj, self.attention_wq.forward(x))?;
-        let mut k = crate::inference::prof::timed!(P::QkvProj, self.attention_wk.forward(x))?;
-        let mut v = crate::inference::prof::timed!(P::QkvProj, self.attention_wv.forward(x))?;
+        // One quantization of `x` for all three projections — see the note on
+        // the single-position path above.
+        let (mut q, mut k, mut v) = crate::inference::prof::timed!(P::QkvProj, {
+            let mut out = QMatMul::forward_shared(
+                x,
+                &[&self.attention_wq, &self.attention_wk, &self.attention_wv],
+            )?;
+            let v = out.pop().expect("forward_shared returns one per weight");
+            let k = out.pop().expect("forward_shared returns one per weight");
+            let q = out.pop().expect("forward_shared returns one per weight");
+            CandleResult::Ok((q, k, v))
+        })?;
 
         if let Some((adapter, abs_layer)) = lora {
             for (name, t) in [("attn_q", &mut q), ("attn_k", &mut k), ("attn_v", &mut v)] {
