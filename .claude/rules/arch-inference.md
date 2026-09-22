@@ -171,6 +171,15 @@ submissions per layer, not faster arithmetic.
 - **`SWARMLLM_COUNT_KERNELS=1` prints launches by kernel name per forward**,
   which is how the per-layer mix is known at all (nsys has no GPU kernel table
   on WSL2). Never benchmark with it on — it takes a mutex per launch.
+- ⚠⚠ **There is exactly ONE CUDA stream, and two shipped changes depend on it.**
+  cudarc's per-allocation events are disabled on that basis. **Adding a second
+  stream means re-enabling them** (`SWARMLLM_CUDA_EVENT_TRACKING=1`) or buffers
+  cross streams unsynchronised — a silently wrong reply, not an error.
+- **Next moves are ordered in `docs/plans/local_decode_submissions.md`**, sized
+  from llama.cpp's own decode work: fusion first (~10% each for RMS-norm+add and
+  GEMV+gated-activation), then stable buffers, then CUDA graphs (~1.2x, batch-1).
+  Fused kernels go through candle's unused `get_or_load_custom_func` (PTX from
+  our own `build.rs`), not a fifth vendored crate.
 - **Judge such a change by the submission COUNT, not the clock** — the count is
   deterministic, this box spreads 10-18%. `SWARMLLM_ZERO_QMATMUL_BUFFERS=1`
   restores the old behaviour for a one-binary A/B.

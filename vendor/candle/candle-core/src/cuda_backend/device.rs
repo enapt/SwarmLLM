@@ -421,6 +421,17 @@ impl BackendDevice for CudaDevice {
         //
         // `SWARMLLM_CUDA_EVENT_TRACKING=1` restores it, for a one-binary A/B.
         //
+        // ⚠⚠ **ANYONE ADDING A SECOND STREAM MUST RE-ENABLE THIS.** The whole
+        // argument above is "there is only ever one stream". llama.cpp
+        // parallelises Q/K/V across streams for decode, so that is a plausible
+        // future change here — and it would leave every buffer allocated under
+        // this constructor with no events tracking its use, i.e. used across
+        // streams without synchronisation. The failure would be a silently
+        // wrong reply, not an error. `docs/plans/local_decode_submissions.md`
+        // § "Do NOT copy their concurrent streams" records why that change is
+        // not wanted on this box anyway: our bottleneck is the CPU issuing
+        // work, not the GPU idling between dependent launches.
+        //
         // → `docs/invariants/inference.md` § "A decode token is bound by GPU
         //   submission COUNT, not bandwidth"
         if !cuda_event_tracking_requested() {

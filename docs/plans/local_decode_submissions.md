@@ -130,6 +130,61 @@ as one operation. Both need a new CUDA kernel, and `candle-kernels` is a
 registry crate rather than a vendored one — so that means either vendoring it or
 using candle's unused `get_or_load_custom_func` path with our own module.
 
+### ▶ Ordering REVISED 2026-09-22 after reading how llama.cpp did this
+
+The stages below were ordered by size of the line in the budget. Reading
+llama.cpp's own decode work reorders them, and sizes two of them from someone
+else's measurements instead of our guesses.
+
+**Sources**: [NVIDIA on CUDA graphs in llama.cpp](https://developer.nvidia.com/blog/optimizing-llama-cpp-ai-inference-with-cuda-graphs)
+· [am17an, token-generation optimizations](https://am17an.bearblog.dev/new-post/)
+(llama.cpp discussion #17621) · [issue #12152](https://github.com/ggml-org/llama.cpp/issues/12152)
+
+**1. Fusion now comes FIRST, with reference numbers.** llama.cpp measured
+**329 → 419 tok/s (~27%)** on an RTX 5090 / gpt-oss-20b from a set of decode
+fusions, and each of the two that map onto our kernel table was worth ~10% on
+its own:
+
+| their fusion | ~gain | our kernels, per layer |
+|---|---|---|
+| RMS-norm fused with the preceding multiply/add | ~10% | `rmsnorm_f32` 2.05 + `badd_f32` 2.00 |
+| GEMV fused with the gated activation | ~10% | `usilu_f32` 1.00 + `bmul_f32` 1.00 |
+| TopK-MoE (softmax + expert select) | ~10% | MoE only — would also remove `topk_cpu`'s host round trip |
+
+Their reasoning is ours: *"fusing kernels reduces memory traffic and kernel
+launch time… token generation is memory-bound rather than compute-bound"*.
+
+**2. Where our fused kernels go, without a fifth vendored crate.**
+`candle-kernels` is a registry crate, but `CudaDevice::get_or_load_custom_func`
+takes **PTX as a string** and has no callers — so a small `.cu` compiled to PTX
+by our own `build.rs` under `candle-cuda` loads through it. That is the cheap
+route in, and it makes each fusion independently shippable and A/B-able.
+
+**3. Stage 3 before stage 4 is CONFIRMED, and was a guess before.** llama.cpp
+patches only the KV-cache pointers in an already-instantiated graph each token
+(`cudaGraphExecUpdate` for the rarer structural change) — **which works because
+its ACTIVATION addresses are already stable, in a fixed compute buffer.** candle
+allocates every output fresh, so every node's parameters would change each
+token and patching them all buys nothing. Stable buffers really are the
+prerequisite.
+⚠ Trap to carry in: the `cudaKernelNodeParams` from
+`cudaGraphKernelNodeGetParams` is **owned by the node** (#12152) — patch the
+values it holds, never swap in your own pointers.
+
+**4. Graphs are worth ~1.2x, batch-1 only — and likely MORE here.** That figure
+is Llama 7B on an **H100**, where a launch costs ~3-5 us; this box measures
+~10-12 us, so the same removal of submissions should buy proportionally more.
+
+**5. Do NOT copy their concurrent streams, and know why.** llama.cpp also
+parallelises Q/K/V across streams. NVIDIA describe the problem it solves as
+*"GPU-side activities associated with each kernel launch"* and **gaps between
+kernels** — the GPU idling between dependent launches. **Ours is CPU-side**: the
+worker burns 22-26 ms of CPU per 21-24 ms of wall, 1.08 cores. Overlapping
+streams does not reduce the CPU's submission work, so it fixes their bottleneck
+and not ours. ⚠⚠ **And it would invalidate `disable_event_tracking`** (shipped
+`939a86ca`), which rests on there being exactly one stream — see the hazard note
+on that patch.
+
 ### Stage 3 — Reuse activation buffers instead of allocating 657 per token
 
 **657 allocs + 656 frees, ~3.45 ms.** Every candle op allocates its output
