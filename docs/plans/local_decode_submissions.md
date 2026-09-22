@@ -402,6 +402,53 @@ llama.cpp does), and a fallback path for the first token and for prefill. The
 four capture preconditions are in § Ordering item 3b — **the stream one is a
 blocker, not a detail.**
 
+### ▶ Stage 4a — move every `CudaDevice` off the legacy stream ✅ SHIPPED
+
+The precondition, done on its own so that the graph change has one variable.
+`BackendDevice::new` takes `context.new_stream()`; `SWARMLLM_CUDA_LEGACY_STREAM=1`
+restores the old one. **One line, because everything follows the device's
+stream**: `CudaBlas::new` and `CudaRng::new` are handed it (cublas via
+`cublasSetStream_v2`), `candle-flash-attn` takes `dev.cuda_stream()`, every
+launch uses `self.stream.launch_builder`, `synchronize()` syncs `self.stream` —
+and `default_stream()` had exactly one use in the whole backend.
+
+⚠ **It changes the shape of the event-tracking argument**, which is why the
+comment on that patch and `docs/invariants/inference.md` were both rewritten:
+all devices used to share the legacy stream, so there was one stream
+process-wide; now each device has its own and the invariant is **one stream per
+device, buffers never crossing devices** (candle refuses cross-device tensors).
+⚠ And `SWARMLLM_CUDA_EVENT_TRACKING=1` stopped being a pure revert — with
+multi-stream mode now true it also hands cudarc back stream-sync management.
+
+### ▶ Stage 4b — what capturing OUR decode step still has to solve
+
+The probe establishes the platform. These are the program's problems, found by
+reading the forward rather than the CUDA docs, and each needs an answer before
+any capture code is written:
+
+1. **A tensor allocated BEFORE the region must not drop INSIDE it.**
+   `cudaFreeAsync` inside a capture is legal only for memory allocated in the
+   same capture. `layer_in` is reassigned every layer, so whatever it held on
+   entry — the embedding output, built before the region — drops inside it and
+   aborts the capture. **Fix: hold a clone alive across the capture.** This is
+   the one most likely to be discovered as a confusing runtime error.
+2. **A tensor allocated INSIDE and still live AFTER is allowed but aliases.**
+   The logits survive the region, so they become a graph allocation that
+   persists — and the *next replay hands out the same address*, overwriting the
+   previous token's logits. Fine as long as they are consumed before the next
+   replay, which decode does; write it down rather than rediscover it.
+3. **No host synchronisation inside the region.** The logits D2H happens after
+   `SplitModel::forward` returns, so the natural boundary is the forward itself.
+   Sampling on the device (Stage 5) would let the whole step be captured.
+4. **KV length changes every token**, so the attention kernel's parameters move.
+   Either a graph per length class (HuggingFace's `grout`) or per-token
+   parameter patching (llama.cpp). ⚠ `cudaGraphKernelNodeGetParams` hands back
+   params **owned by the node** (#12152) — patch the values, never swap in your
+   own pointers.
+5. **Capture must not run concurrently with another request** on the same
+   device. The worker is one model per process, but the prefill/decode paths and
+   the capability probe share a context.
+
 **This is the highest-value stage and the highest-risk one.** Do not start it
 before stages 2-3 have shown the instrumentation and the A/B discipline work.
 

@@ -92,6 +92,22 @@ fn cuda_event_tracking_requested() -> bool {
     *ON.get_or_init(|| std::env::var("SWARMLLM_CUDA_EVENT_TRACKING").as_deref() == Ok("1"))
 }
 
+/// SwarmLLM patch: `SWARMLLM_CUDA_LEGACY_STREAM=1` puts every `CudaDevice`
+/// back on the legacy null stream.
+///
+/// Off by default since 2026-09-22: CUDA refuses to capture a graph on the
+/// legacy stream, and capture is the route to collapsing a token's ~513
+/// launches and ~1,300 alloc/free calls into one submission. Setting this
+/// restores the old behaviour for an A/B inside one binary — and, by
+/// construction, makes graph capture impossible again.
+///
+/// Read once and cached; it sits on the device-construction path, and the
+/// answer must not change between two devices in one process.
+fn legacy_cuda_stream_requested() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("SWARMLLM_CUDA_LEGACY_STREAM").as_deref() == Ok("1"))
+}
+
 /// SwarmLLM patch: `SWARMLLM_ZERO_QMATMUL_BUFFERS=1` puts the zero-fill back
 /// on the buffers [`CudaDevice::alloc_fully_overwritten`] hands out.
 ///
@@ -418,48 +434,85 @@ impl BackendDevice for CudaDevice {
         // drop. Measured: **2,625 event API calls per decoded token** — four per
         // allocation, ~700 allocations a token — for ~1.5 ms of a 23 ms token.
         //
-        // They exist to synchronise a buffer used across MULTIPLE streams, and
-        // there is only ever one stream here:
-        //   * `default_stream()` hands back `cu_stream: null_mut()`, the legacy
-        //     default stream, and every production path into CUDA arrives
-        //     through this constructor (`Device::new_cuda` / `cuda_if_available`).
-        //   * `is_in_multi_stream_mode()` only becomes true once `new_stream()`
-        //     is called, which happens solely in `new_with_stream` below —
-        //     reachable only via `Device::new_cuda_with_stream`, which nothing
-        //     in this project calls. That constructor deliberately keeps
-        //     tracking ON.
-        //   * cudarc's own `is_managing_stream_synchronization()` is
-        //     `is_in_multi_stream_mode() && is_event_tracking()`, i.e. already
-        //     false here — so cudarc is not consuming these events either.
+        // They exist to synchronise a buffer used across MULTIPLE streams.
+        //
+        // ⚠ **The invariant is ONE STREAM PER DEVICE, and buffers never
+        // crossing devices.** It said "there is only ever one stream, process
+        // wide" until 2026-09-22, which was true while every device took
+        // `default_stream()` — cudarc hands back `cu_stream: null_mut()` for
+        // that, the same legacy stream for all of them. Moving off it (below)
+        // gives each device its OWN stream, so the old sentence would now be
+        // false while the conclusion still holds. What it actually rests on:
+        //   * This constructor is every production path into CUDA
+        //     (`Device::new_cuda` / `cuda_if_available`), and it takes exactly
+        //     one stream per device, whichever kind.
         //   * Same-stream ordering needs no events: `cuMemFreeAsync` on the
         //     allocating stream is ordered after work queued before it, which
         //     is the whole point of stream-ordered allocation.
-        //   * Even if a `new_with_stream` device were built alongside one of
-        //     these, candle gives them different `DeviceId`s and refuses to mix
-        //     tensors across devices, so a buffer cannot reach the other stream.
+        //   * Several devices ARE built — the daemon's capability probe and the
+        //     shard loader — and candle gives them different `DeviceId`s and
+        //     refuses to mix tensors across devices, so a buffer cannot reach
+        //     another device's stream. **This bullet used to be a hypothetical
+        //     about a constructor nobody called; since the migration it is the
+        //     load-bearing one.**
+        //   * `is_in_multi_stream_mode()` is now TRUE (`new_stream()` sets it),
+        //     so cudarc's `is_managing_stream_synchronization()` —
+        //     `is_in_multi_stream_mode() && is_event_tracking()` — is false only
+        //     because tracking is off, where before it was false twice over.
         //
-        // `SWARMLLM_CUDA_EVENT_TRACKING=1` restores it, for a one-binary A/B.
+        // ⚠ **`SWARMLLM_CUDA_EVENT_TRACKING=1` is therefore no longer a pure
+        // revert**: it re-enables the events AND hands cudarc back the job of
+        // managing stream synchronisation. Still a valid A/B — it can only add
+        // synchronisation, never remove it — but say which it is when quoting it.
         //
-        // ⚠⚠ **ANYONE ADDING A SECOND STREAM MUST RE-ENABLE THIS.** The whole
-        // argument above is "there is only ever one stream". llama.cpp
-        // parallelises Q/K/V across streams for decode, so that is a plausible
-        // future change here — and it would leave every buffer allocated under
-        // this constructor with no events tracking its use, i.e. used across
-        // streams without synchronisation. The failure would be a silently
-        // wrong reply, not an error. `docs/plans/local_decode_submissions.md`
-        // § "Do NOT copy their concurrent streams" records why that change is
-        // not wanted on this box anyway: our bottleneck is the CPU issuing
-        // work, not the GPU idling between dependent launches.
+        // ⚠⚠ **ANYONE GIVING ONE DEVICE A SECOND STREAM MUST RE-ENABLE THIS.**
+        // That device's buffers would have nothing tracking their use, i.e. used
+        // across streams unsynchronised, and the failure is a silently wrong
+        // reply rather than an error. `docs/plans/local_decode_submissions.md`
+        // § "Do NOT copy their concurrent streams" records why llama.cpp's
+        // Q/K/V stream parallelisation is not wanted here regardless: our
+        // bottleneck is the CPU issuing work, not the GPU idling between
+        // dependent launches.
         //
         // → `docs/invariants/inference.md` § "A decode token is bound by GPU
         //   submission COUNT, not bandwidth"
         if !cuda_event_tracking_requested() {
-            // SAFETY: one default stream, per the argument above. The contract
-            // is that the caller orders cross-stream use; there is no second
-            // stream to order against.
+            // SAFETY: one stream on this device, per the argument above. The
+            // contract is that the caller orders cross-stream use; this device
+            // has no second stream to order against.
             unsafe { context.disable_event_tracking() };
         }
-        let stream = context.default_stream();
+        // SwarmLLM patch: an explicitly created (non-blocking) stream, NOT the
+        // legacy null stream.
+        //
+        // **CUDA refuses to capture a graph on the legacy stream**, and a graph
+        // is the one change that would collapse a decoded token's ~513 kernel
+        // launches and ~1,300 allocation/free calls into a single submission.
+        // Measured rather than assumed: `examples/cuda_graph_probe.cu` arm A
+        // gets `cudaError 900` from `cudaStreamBeginCapture(cudaStreamLegacy)`
+        // on this driver, and that arm is written so a SUCCESS would report the
+        // claim wrong.
+        //
+        // Nothing else has to move with it, which is why this is one line:
+        // `CudaBlas::new` and `CudaRng::new` are handed this stream (cublas via
+        // `cublasSetStream_v2`), `candle-flash-attn` takes `dev.cuda_stream()`,
+        // every launch goes through `self.stream.launch_builder`, and
+        // `synchronize()` syncs `self.stream`. `default_stream()` had exactly
+        // one use in this backend and this was it.
+        //
+        // ⚠ The stream is NON-BLOCKING, so it does NOT implicitly synchronise
+        // with the legacy stream. Safe only because nothing in this process
+        // uses the legacy stream any more — **a partial migration is worse than
+        // either end state.** (A `llama`-feature build runs llama.cpp on its own
+        // context and shares no buffers with candle.)
+        //
+        // `SWARMLLM_CUDA_LEGACY_STREAM=1` restores the old stream for a
+        // one-binary A/B. It also makes graph capture impossible, by design.
+        let stream = if legacy_cuda_stream_requested() {
+            context.default_stream()
+        } else {
+            context.new_stream().w()?
+        };
         let blas = cudarc::cublas::CudaBlas::new(stream.clone()).w()?;
         let curand = cudarc::curand::CudaRng::new(299792458, stream.clone()).w()?;
         let module_store = ModuleStore {

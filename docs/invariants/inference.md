@@ -983,27 +983,39 @@ cudarc creates a read event AND a write event for every `CudaSlice` while
 both — **four event API calls per allocation, ~700 allocations a token**. They
 exist to synchronise a buffer used across MULTIPLE streams.
 
-There is only ever one stream:
+⚠ **RESTATED 2026-09-22 when the stream migration landed.** The justification
+was "there is only ever one stream, process-wide", which was true while every
+device took `default_stream()` — cudarc hands back `cu_stream: null_mut()` for
+that, *the same legacy stream for all of them*. `BackendDevice::new` now takes
+`context.new_stream()`, so each device has its OWN stream and that sentence is
+false while the conclusion still holds. **The invariant is ONE STREAM PER
+DEVICE, and buffers never crossing devices:**
 
 - `BackendDevice::new` — the constructor every production path reaches, via
-  `Device::new_cuda` / `cuda_if_available` — takes `context.default_stream()`,
-  and cudarc's `default_stream()` hands back `cu_stream: null_mut()`, the legacy
-  default stream. **Several `CudaDevice`s therefore share ONE stream**, which is
-  the opposite of what the call-site count suggests: three production sites
-  construct a device, and that was worth checking rather than assuming — the
-  first reading of it said "multiple devices, so multiple streams, so unsafe".
-- `is_in_multi_stream_mode()` turns true only when `new_stream()` is called,
-  which happens solely in `new_with_stream` — reachable only via
-  `Device::new_cuda_with_stream`, which nothing in this project calls. That
-  constructor deliberately keeps tracking ON.
-- cudarc's own `is_managing_stream_synchronization()` is
-  `is_in_multi_stream_mode() && is_event_tracking()` — **already false here**, so
-  cudarc is not consuming these events either.
+  `Device::new_cuda` / `cuda_if_available` — takes exactly one stream per
+  device, whichever kind.
 - Same-stream ordering needs no events: `cuMemFreeAsync` on the allocating
   stream is ordered after the work queued before it.
-- Even if a `new_with_stream` device were built alongside, candle gives the two
-  different `DeviceId`s and refuses to mix tensors across devices, so a buffer
-  cannot reach the other stream.
+- Several devices ARE built (the daemon's capability probe, the shard loader).
+  candle gives them different `DeviceId`s and refuses to mix tensors across
+  devices, so a buffer cannot reach another device's stream. **This was a
+  hypothetical about a constructor nobody called; it is now the load-bearing
+  bullet.**
+- cudarc's `is_managing_stream_synchronization()` is
+  `is_in_multi_stream_mode() && is_event_tracking()`. `is_in_multi_stream_mode()`
+  is now TRUE, so this is false *only* because tracking is off — before the
+  migration it was false twice over.
+  ⚠ **So `SWARMLLM_CUDA_EVENT_TRACKING=1` is no longer a pure revert**: it
+  restores the events AND hands cudarc back stream-synchronisation management.
+  It can only ADD synchronisation, so it remains a valid A/B; say which it is
+  when quoting it.
+
+**Why the migration happened at all**: CUDA refuses graph capture on the legacy
+stream, and a graph is the one change that collapses a token's ~513 launches and
+~1,300 alloc/free calls into a single submission. Measured, not assumed —
+`examples/cuda_graph_probe.cu` arm A gets `cudaError 900`, and that arm is a null
+control that would report the claim wrong if capture were permitted.
+`SWARMLLM_CUDA_LEGACY_STREAM=1` restores the old stream.
 
 `Drop` has no synchronous fallback when the events are absent — it skips the two
 `stream.wait()` calls and frees as before — so disabling is strictly less work.

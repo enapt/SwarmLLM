@@ -171,14 +171,17 @@ submissions per layer, not faster arithmetic.
 - **`SWARMLLM_COUNT_KERNELS=1` prints launches by kernel name per forward**,
   which is how the per-layer mix is known at all (nsys has no GPU kernel table
   on WSL2). Never benchmark with it on — it takes a mutex per launch.
-- ⚠⚠ **There is exactly ONE CUDA stream, and two shipped changes depend on it.**
-  cudarc's per-allocation events are disabled on that basis. **Adding a second
-  stream means re-enabling them** (`SWARMLLM_CUDA_EVENT_TRACKING=1`) or buffers
-  cross streams unsynchronised — a silently wrong reply, not an error.
-  ⚠ **That stream is the LEGACY NULL stream, and CUDA forbids graph capture on
-  it** — so "one stream" is also the blocker on CUDA graphs, not just a licence
-  for the event change. `per_thread_stream()` does not solve it here: this
-  forward runs on a rayon pool thread that varies.
+- ⚠⚠ **ONE CUDA STREAM PER DEVICE, and buffers never cross devices** — that is
+  what the disabled per-allocation events rest on. **Giving one device a second
+  stream means re-enabling them** (`SWARMLLM_CUDA_EVENT_TRACKING=1`) or its
+  buffers cross streams unsynchronised — a silently wrong reply, not an error.
+  ⚠ **Restated 2026-09-22**: it used to be "one stream process-wide", true only
+  while every device took the LEGACY null stream. `BackendDevice::new` now takes
+  `context.new_stream()`, because **CUDA refuses graph capture on the legacy
+  stream** (measured: `examples/cuda_graph_probe.cu` arm A, `cudaError 900`).
+  `SWARMLLM_CUDA_LEGACY_STREAM=1` restores it — and makes capture impossible.
+  ⚠ `SWARMLLM_CUDA_EVENT_TRACKING=1` is no longer a pure revert: multi-stream
+  mode is now true, so it also hands cudarc back stream-sync management.
 - **Fused kernels are OURS, in `kernels/*.cu`**, compiled to PTX by `build.rs`
   and loaded through candle's `get_or_load_custom_func` — not a fifth vendored
   crate, since `candle-kernels` is a registry dep. **Write each one to be
