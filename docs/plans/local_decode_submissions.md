@@ -427,16 +427,28 @@ reading the forward rather than the CUDA docs, and each needs an answer before
 any capture code is written:
 
 1. **A tensor allocated BEFORE the region must not drop INSIDE it.**
-   `cudaFreeAsync` inside a capture is legal only for memory allocated in the
-   same capture. `layer_in` is reassigned every layer, so whatever it held on
-   entry — the embedding output, built before the region — drops inside it and
-   aborts the capture. **Fix: hold a clone alive across the capture.** This is
-   the one most likely to be discovered as a confusing runtime error.
-2. **A tensor allocated INSIDE and still live AFTER is allowed but aliases.**
-   The logits survive the region, so they become a graph allocation that
-   persists — and the *next replay hands out the same address*, overwriting the
-   previous token's logits. Fine as long as they are consumed before the next
-   replay, which decode does; write it down rather than rediscover it.
+   ✅ **MEASURED, and the outcome is worse than an abort.** `cudaFreeAsync` on
+   memory allocated outside the capture returns **`invalid argument`
+   (cudaError 1) while the capture SURVIVES** and `cudaStreamEndCapture`
+   succeeds. So the memory is simply **not freed**: every captured token leaks
+   whatever `layer_in` held on entry, and candle's `Drop` records the error
+   rather than raising it at the cause. An abort would have been kinder.
+   **Fix: hold a clone alive across the capture** so nothing pre-existing drops
+   inside it.
+2. **Everything allocated INSIDE must also be FREED inside — including the
+   logits.** ⛔ **MEASURED, and this one is fatal, not cosmetic.** A graph with
+   an allocation that is still live cannot be relaunched: replay 1 succeeds,
+   **replay 2 fails with `invalid argument`**. Decoding token N+1 would simply
+   stop. The docs say an unfreed graph allocation "persists"; they do not say
+   the graph becomes unreplayable while it does.
+   **So the captured region cannot hand a tensor out.** The logits have to be
+   copied into a buffer allocated OUTSIDE the capture and the graph-allocated
+   one freed inside — which also disposes of the aliasing worry this item used
+   to carry.
+   ⚠ Both results come from a scratch probe whose FIRST verdict for item 1 was
+   wrong: it printed the failing return code and then computed "ALLOWED" from
+   `end_capture` alone. Same shape as #614 — **read the output, not the one
+   status you happened to branch on.**
 3. **No host synchronisation inside the region.** The logits D2H happens after
    `SplitModel::forward` returns, so the natural boundary is the forward itself.
    Sampling on the device (Stage 5) would let the whole step be captured.
