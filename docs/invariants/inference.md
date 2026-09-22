@@ -1019,6 +1019,36 @@ result. An isolated node (private gossip id, no bootstrap, no mDNS — the shape
 `examples/constrained_node_test.sh` uses) would remove the outliers at the
 source and is the better instrument if this needs to get finer.
 
+### Both changes together: +34%, and it corrects the per-change figures
+
+The cleanest reading of the two, because it is the only one taken with the box
+genuinely idle, 500-token generations, 8 reps, A/B/A/B, both switches flipped at
+once inside ONE binary:
+
+| model | both fixes (median / best) | neither | delta |
+|---|---|---|---|
+| tinyllama-1.1b | 92.7, 94.5 / 109.3, 120.5 | 69.1, 70.9 / 83.1, 86.9 | **+34%** |
+| llama-3.2-3b | 71.7, 68.2 / 76.0, 73.0 | 53.0, 51.4 / 60.3, 52.9 | **+34%** |
+
+**No overlap on either statistic, on either model** — the first measurement in
+this whole investigation where the median and the best agree, which is itself
+the sign the instrument was finally quiet.
+
+⚠ **This CONTRADICTS the per-change numbers above and supersedes them.**
+Compounding them (+30% then +15% on the 1.1B; +15% then nothing on the 3B)
+predicts +50% and +15%; the measurement says +34% and +34%. They cannot all be
+right, and the cumulative one is the better-conditioned: the per-change arms
+were taken on a box with a browser holding a core, at 120 tokens a run, where
+the median and best disagreed. **Quote +34% for the pair. Treat the per-change
+split as indicative only**, and do not use it to argue that one change is worth
+more than the other on a given model size — that split has not been measured
+well enough to carry the claim.
+
+The 3B gaining as much as the 1.1B is the part that did not survive: the earlier
+reading had it at half, and the honest conclusion is that the earlier reading
+was noise, not that big models benefit less. **The "smaller models gain more"
+story is NOT established** by this data.
+
 ### What a change must keep
 
 - **Read the kernel before calling `alloc_fully_overwritten`.** The bound it

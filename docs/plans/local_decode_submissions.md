@@ -159,17 +159,24 @@ Independent of graphs, and the only stage that also helps the CPU backend (which
 
 | stage | submissions removed | measured / estimated |
 |---|---|---|
-| 1 memsets ✅ | 321 of 992 | **measured: +30% / +15%** |
-| 2 event tracking ✅ | **2,625 → 0 event ops** | **measured: +15% on a 1.1B, nothing on a 3B** |
+| **1 + 2 together ✅** | 321 memsets + 2,625 event ops | **measured: +34% on BOTH a 1.1B and a 3B** — the only reading taken on a genuinely idle box, and the only one where median and best agree |
+| 1 memsets ✅ | 321 of 992 | +30% / +15% ⚠ contended box, superseded by the row above |
+| 2 event tracking ✅ | **2,625 → 0 event ops** | +15% / nothing ⚠ same caveat |
 | 3 buffer reuse | ~1,313 alloc/free | estimated ~3.5 ms/token |
 | 4 CUDA graphs | most of 625 launches | large, unestimated |
 | 5 fusion + D2H | tens of launches, 1 round trip | modest, and helps CPU too |
 
-⚠ **These do not simply add.** Once submissions stop being the binding
-constraint, bandwidth becomes it, and the 3B's ~5 ms floor is where this ends.
-**Expect the gains to shrink model by model as they land**, largest on small
-models throughout, and re-measure rather than projecting — three estimates from
-sizes × intervals were each 10-100x wrong elsewhere in this project (#673).
+⚠ **These do not simply add, and measuring the pair proved it.** Compounding the
+two per-change figures predicted +50% on the 1.1B and +15% on the 3B; measuring
+both switches together on an idle box gave **+34% on each**. The per-change arms
+were the contended ones, so the pair is what to trust. **Measure the combination
+you intend to ship, not the sum of the parts** — and note the corollary: the
+"small models gain more" story did not survive a quiet box.
+
+Once submissions stop being the binding constraint, bandwidth becomes it, and
+the 3B's ~5 ms floor is where this ends. Re-measure rather than projecting —
+three estimates from sizes × intervals were each 10-100x wrong elsewhere in this
+project (#673).
 
 ## What NOT to do
 
