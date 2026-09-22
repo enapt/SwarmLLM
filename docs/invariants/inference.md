@@ -806,3 +806,183 @@ the same area: `build_prompt_inner`'s no-template branch asks
 mistral or vicuna — and each of those was left with no stop for the marker it
 will actually emit. It now returns the always-on list.
 
+
+## A decode token is bound by GPU submission COUNT, not bandwidth (2026-09-22)
+
+Measured on the live release node — v0.3.197-alpha, Ryzen 7 5800H, RTX 3070
+Laptop 8 GB, WSL2 — with nsys and the worker's own forward-pass timer.
+
+### What it replaced
+
+The belief, written into `docs/plans/regional_pipelines.md` § "Why distance
+costs so much", that "the 8B is 32 layers ≈ 28 ms/token on this card whether
+one machine does it or four". The number is real; the attribution is not.
+**Most of a decode token is CPU-side CUDA submission cost, and the card is idle
+for about half of it.** That matters beyond bookkeeping: the plan's crossover
+arithmetic (a 4-way GPU split beats local CPU below ~90 ms RTT) is computed
+against a compute term that is mostly overhead, so the local arm of every such
+comparison is a moving target until this is fixed.
+
+### What it was measured at
+
+Three independent readings, each naming its own mechanism.
+
+**1. Per-layer cost is FLAT across a 3.3x span of bytes per token** — which a
+bandwidth-bound decode cannot be. `SWARMLLM_PROFILE=1` brackets
+`SplitModel::forward` alone (no IPC, no sampling, no HTTP); median of ~32
+decode steps, each model loaded by itself on an otherwise clean card:
+
+| model | quant | L | bytes/token | ms/token | ms/layer |
+|---|---|---|---|---|---|
+| tinyllama-1.1b | Q4_K_M | 22 | ~0.6 GB | 12.0 | 0.545 |
+| qwen2.5-0.5b | **F16** | 24 | ~1.0 GB | 11.5 | 0.479 |
+| gemma-2-2b-it | Q4_K_M | 26 | ~1.6 GB | 15.0 | 0.577 |
+| qwen3-1.7b | Q8_0 | 28 | ~1.8 GB | 16.0 | 0.571 |
+| llama-3.2-3b | Q4_K_M | 28 | ~2.0 GB | 16.0 | 0.571 |
+
+qwen2.5-0.5b at F16 moves ~1.7x tinyllama's bytes per token and is **faster**.
+Effective bandwidth runs 50 GB/s (tinyllama) to 125 GB/s (3b) against a card
+that delivers ~384 — 13-33% of roofline, and **the smallest model is the least
+efficient**, which is backwards for anything bandwidth-bound. `ms/layer` is
+constant to within ±10% while `bytes/token` moves 3.3x, so layer count, not
+size, predicts the cost.
+
+**2. The bottleneck is ONE SATURATED CPU THREAD, not the GPU.**
+`/proc/<worker>/stat` utime+stime across a 200-token generation, 3 reps, with
+profiling off so nothing is added to the path:
+
+```
+worker burned 22.7 / 26.0 / 24.6 ms CPU per token
+     against   21.0 / 24.1 / 22.6 ms WALL per token   = 1.08-1.09 cores busy
+```
+
+CPU time ≈ wall time means the thread is never waiting on the device. Were the
+GPU the constraint, the thread would sit blocked and this would read far below
+100%. The other side agrees: GPU utilization sampled every 200 ms through a
+sustained decode was **median 52%, memory controller 33%**.
+
+**3. What the thread is doing: 1,085 GPU submissions per token.** nsys
+`--trace=cuda` with the worker captured via `--trace-fork-before-exec`,
+counted over the steady-state decode window ONLY — model load and warm-up
+excluded, because weight upload does thousands of calls that have nothing to do
+with decode. tinyllama, 22 layers, per token:
+
+| API | calls/token | median | ms/token |
+|---|---|---|---|
+| `cuLaunchKernel` | **761** | 12.0 us | 8.6 |
+| `cuMemsetD8Async` | **323** | 11.8 us | 3.8 |
+| `cuMemAllocAsync` | 705 | 1.4 us | 1.0 |
+| `cuMemFreeAsync` | 704 | 1.3 us | 0.9 |
+| `cuEventCreate` + `cuEventDestroy` | 2,818 | 0.3 us | 0.95 |
+
+**17.55 of that token's 23.02 ms went inside the CUDA driver API**, 13.2 of it
+in launch + memset alone — **34.6 kernel launches and 14.7 memsets per LAYER**,
+for a model whose per-layer arithmetic is seven matmuls and a handful of
+elementwise passes.
+
+A launch costs ~10-12 us here because WSL2's virtualised driver marshals every
+submission through to the Windows host driver; native Linux is ~3-5 us. **So
+the CONSTANT is box-specific and the STRUCTURE is not** — at 5 us a launch the
+same token still spends ~5 ms submitting, and every node that is not a
+fully-native Linux GPU box pays nearer the number above. This has NOT been
+A/B'd against a native-Linux GPU, because the fleet has exactly one GPU node
+and it is this one; treat the multiplier as unvalidated and the ordering as
+established.
+
+⚠ **Counts are exact under nsys; the per-call TIMES are nsys-inflated.** Do not
+quote 12.0 us as the unprofiled cost of a launch.
+
+### The 323 memsets were free to delete, and that is what `alloc_fully_overwritten` is
+
+14.7 memsets per layer is two per quantized matmul, and both come from
+`alloc_zeros`, which is `alloc` **plus** a `cuMemsetD8Async`. Both buffers are
+overwritten in full by the very next kernel:
+
+- **`y_q8_1` / `input_quant`** — `quantize_q8_1`'s grid covers `kx_padded`, and
+  the padding tail is written explicitly: `ix < kx ? x[iy*kx + ix] : 0.0f`.
+  **That ternary only exists because the reference implementation does not
+  pre-zero either** — upstream llama.cpp hands `quantize_row_q8_1_cuda` pool
+  memory. A zeroed buffer would make the branch dead code.
+- **`dst`, `mul_mat_vec_q`** — `dst[j*nrows_dst + row0 + threadIdx.x] = tmp[...]`,
+  an assignment, and the grid covers every row (`nblocks == nrows` at b_size 1,
+  `ceil_div(nrows, 2)` with `rows_per_cuda_block == 2` above it).
+- **`dst`, MMQ** — assigns every in-range element, skipping only what is out of
+  range (`col_dst >= ncols_dst` returns, `row_dst >= nrows_dst` continues), and
+  the grid is `ceil_div` of both dimensions, so each element is covered once.
+
+`CudaDevice::alloc_fully_overwritten` is now the single way to ask for such a
+buffer. Upstream candle already does this for `dequantize_f32`'s output, so the
+pattern is not novel — it was simply not applied on the hot path.
+
+#### What it measured — A/B/A/B in one binary, 2026-09-22
+
+Arms differ ONLY by `SWARMLLM_ZERO_QMATMUL_BUFFERS`, in one
+`--features dev,claude-subscription,candle-cuda` release build, so nothing but
+the zero-fill changes between them.
+
+**The mechanism, from `examples/decode_submissions.sh`** — everything except
+the memsets is byte-identical, which is what makes it an experiment rather than
+an observation:
+
+| per token | patched | zeroed |
+|---|---|---|
+| `cuLaunchKernel` | 625.3 | 625.3 |
+| `cuMemsetD8Async` | **1.4** | **321.1** |
+| `cuMemAllocAsync` | 656.9 | 656.9 |
+| event ops | 2,625 | 2,625 |
+| **submissions/token** | **672** | **992** |
+
+**The outcome**, `examples/stream_bench.py`-style client-side decode window,
+3 reps per arm, run A/B/A/B:
+
+| model | A1 | B1 | A2 | B2 | A median | B median | delta |
+|---|---|---|---|---|---|---|---|
+| tinyllama-1.1b (22 L) | 72.4 | 53.0 | 72.5 | 58.3 | **72.5** | 55.7 | **+30%** |
+| llama-3.2-3b (28 L) | 54.8 | 50.4 | 59.3 | 48.8 | **57.1** | 49.6 | **+15%** |
+
+No overlap between arms on either model, and the repeat of A landed within
+0.1 tok/s of the first on tinyllama. **Correctness: all four arms, and the
+shipped v0.3.197 release binary, produced byte-identical replies** at
+temperature 0 (`d923429be4`, `b6f3ae2560`) — which is the check that an
+uninitialized buffer is in fact fully overwritten.
+
+⚠ **The two models' deltas differ by more than the submission arithmetic
+predicts** (-32% of submissions on both). Decode is submission-bound but not
+*only* submission-bound; the 3b moves 3.3x the bytes per token, so bandwidth is
+a larger share of its token and the same submissions removed buy proportionally
+less. **Expect the win to shrink as models get bigger**, and do not quote the
+tinyllama figure for a 7B.
+
+⚠ **Not measured on native Linux.** Every figure here is WSL2, where a
+submission costs ~2-3x native. The direction holds anywhere; the magnitude is
+this box's.
+
+### What a change must keep
+
+- **Read the kernel before calling `alloc_fully_overwritten`.** The bound it
+  needs is "assigns every element it owns". A kernel that leaves gaps, or one
+  later changed to accumulate (`+=`) into `dst`, turns this into garbage in a
+  reply rather than a visible failure — the worst shape of bug this file
+  records. `out` in the `indexed_moe_forward_*` path is deliberately still
+  zeroed for exactly this reason: nobody has read those kernels' coverage.
+- **The load-time padded buffers must STAY zeroed.** `PaddedCudaSlice`'s
+  padding is never written by any kernel; it exists so the matmul's padded row
+  reads land on defined bytes. Those allocations are once per model load, not
+  per token, so they cost nothing worth reclaiming.
+- **A/B it inside one binary.** `SWARMLLM_ZERO_QMATMUL_BUFFERS=1` restores the
+  zero-fill. That is how the effect was attributed, and it is the only way to
+  do it without two builds differing in more than one variable.
+- **Judge a submission-count change by the COUNT, not the clock.** The count is
+  deterministic and the clock on this box spreads 10-18% run to run. Re-run the
+  nsys window probe and compare calls/token; a change that does not move the
+  count did not do what it claims.
+
+### Why this is the same defect the CPU path already found
+
+§ `inference::decode_attn::gqa_decode_attention_cpu` above ends: "The DRAM
+floor for the cache read at ~900 KV × 28 layers is ~7 ms/token on this box; the
+kernel sits at ~15 — **the remainder is per-layer dispatch, not arithmetic.**"
+That was the CPU backend, reached from a different direction. Both backends are
+dispatch-bound per layer, and on both the arithmetic is a minority of the
+token. Treat "per-layer dispatch" as this project's standing first suspect for
+a decode number that will not move.

@@ -46,6 +46,30 @@ Crossover against not splitting at all: this node runs the 8B on its CPU at
 **~90 ms RTT**. Inside a country or a region like SE Asia that is comfortable.
 Across continents it is worse than doing nothing.
 
+> ⚠ **CORRECTED 2026-09-22 — the 28 ms is NOT the card's compute time.** It was
+> read as the arithmetic a split relocates; it is mostly CPU-side CUDA
+> submission cost. Measured with nsys on the release node: a decode token costs
+> **1,085 GPU submissions** and spends **17.6 of 23.0 ms inside the driver API**
+> on ONE saturated CPU thread, with the card at **52% utilization**, and
+> `ms/layer` is flat at 0.48-0.58 across a 3.3x span of bytes per token — so
+> **layer count, not model size, predicts decode cost**.
+> → `docs/invariants/inference.md` § "A decode token is bound by GPU submission
+> COUNT, not bandwidth".
+>
+> **What this does NOT change**: the conclusion of this document. A smaller
+> compute term makes the network term relatively *larger*, so locality still
+> dominates everything else combined, and every "what is missing" item below
+> stands.
+>
+> **What it does change**: the numbers in the table above are a floor set by
+> today's implementation, not by the hardware, and the ~90 ms crossover is
+> computed from two terms that are BOTH mostly removable overhead — the local
+> CPU arm too, where § `gqa_decode_attention_cpu` already records the kernel at
+> ~15 ms/token against a ~7 ms DRAM floor. As both shrink the crossover tightens
+> and a split has to be more local to pay for itself. **Recompute the crossover
+> from a re-measured local arm before using it to justify a placement
+> decision**; do not re-derive it from these figures.
+
 ## What is actually missing
 
 ### 1. A bug: regional placement cannot fire on a normal node

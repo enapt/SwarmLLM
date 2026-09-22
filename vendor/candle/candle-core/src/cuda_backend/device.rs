@@ -23,6 +23,19 @@ impl DeviceId {
     }
 }
 
+/// SwarmLLM patch: `SWARMLLM_ZERO_QMATMUL_BUFFERS=1` puts the zero-fill back
+/// on the buffers [`CudaDevice::alloc_fully_overwritten`] hands out.
+///
+/// Read once and cached: this sits inside the per-op allocation path, which a
+/// decoded token walks ~700 times, so a `getenv` per call would be its own
+/// measurable cost.
+fn zero_fully_overwritten_buffers() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("SWARMLLM_ZERO_QMATMUL_BUFFERS").as_deref() == Ok("1")
+    })
+}
+
 struct CudaRng(cudarc::curand::CudaRng);
 unsafe impl Send for CudaRng {}
 
@@ -62,6 +75,42 @@ impl CudaDevice {
         len: usize,
     ) -> Result<cudarc::driver::CudaSlice<T>> {
         self.stream.alloc_zeros::<T>(len).w()
+    }
+
+    /// SwarmLLM patch: allocate a buffer whose every element the NEXT kernel
+    /// writes, skipping the zero-fill `alloc_zeros` would submit.
+    ///
+    /// `alloc_zeros` is `alloc` **plus** a `cuMemsetD8Async`, and that memset
+    /// is a full GPU submission — on a virtualised driver it costs about as
+    /// much as a kernel launch (~10-12 us measured on WSL2) to zero a buffer
+    /// that is overwritten in its entirety microseconds later. Measured on a
+    /// 22-layer model: **323 memsets per decoded token**, 14.7 per layer, i.e.
+    /// two per quantized matmul, for 3.8 ms of a 23 ms token. Decode on this
+    /// box is bound by how many submissions a token costs, not by bandwidth,
+    /// so a submission removed is time removed.
+    ///
+    /// ⚠ **Every caller must have READ the kernel that fills the buffer** and
+    /// confirmed it ASSIGNS (never accumulates into) every element it owns.
+    /// A kernel that leaves gaps, or one changed later to `+=`, turns this
+    /// into garbage in a reply rather than a visible failure.
+    ///
+    /// `SWARMLLM_ZERO_QMATMUL_BUFFERS=1` restores the zero-fill, so the change
+    /// can be A/B'd inside ONE binary — which is how its effect was
+    /// attributed, per `.claude/rules/diagnosis.md` § 4.
+    ///
+    /// → `docs/invariants/inference.md` § "A decode token is bound by GPU
+    /// submission count, not bandwidth"
+    pub fn alloc_fully_overwritten<
+        T: cudarc::driver::DeviceRepr + cudarc::driver::ValidAsZeroBits,
+    >(
+        &self,
+        len: usize,
+    ) -> Result<cudarc::driver::CudaSlice<T>> {
+        if zero_fully_overwritten_buffers() {
+            self.alloc_zeros::<T>(len)
+        } else {
+            unsafe { self.alloc::<T>(len) }
+        }
     }
 
     pub fn memcpy_htod<

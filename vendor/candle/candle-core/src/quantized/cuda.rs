@@ -318,7 +318,20 @@ fn mul_mat_vec_via_q8_1(
     let ncols_padded = pad(ncols, MATRIX_ROW_PADDING);
     let y_size_in_bytes =
         b_size * ncols_padded * GgmlDType::Q8_1.type_size() / GgmlDType::Q8_1.block_size();
-    let mut y_q8_1 = dev.alloc_zeros::<u8>(y_size_in_bytes)?;
+    // SwarmLLM patch: uninitialized, not zeroed. `alloc_zeros` is
+    // `alloc` + a `cuMemsetD8Async`, and that memset is a full GPU submission
+    // costing as much as a kernel launch (~10 us measured on WSL2) for a
+    // buffer `quantize_q8_1` then overwrites in its entirety: its grid covers
+    // `kx_padded`, and the padding tail is written explicitly
+    // (`ix < kx ? x[...] : 0.0f`). That ternary only exists because the
+    // reference implementation does not pre-zero either — upstream llama.cpp
+    // hands `quantize_row_q8_1_cuda` pool memory.
+    //
+    // Measured: a decode token on a 22-layer model issued 323 memsets, ~14.7
+    // per layer, i.e. two per quantized matmul (this buffer and `dst` below),
+    // for 3.8 of 23 ms. See `docs/invariants/inference.md` § "A decode token
+    // is bound by GPU submission count, not bandwidth".
+    let mut y_q8_1 = dev.alloc_fully_overwritten::<u8>(y_size_in_bytes)?;
     quantize_q8_1(y, &mut y_q8_1, ncols, b_size, dev)?;
 
     let kernel_name = match dtype {
@@ -336,7 +349,14 @@ fn mul_mat_vec_via_q8_1(
     };
     let kernel_name = format!("{kernel_name}{b_size}");
     let func = dev.get_or_load_func(&kernel_name, &candle_kernels::QUANTIZED)?;
-    let dst = dev.alloc_zeros::<f32>(nrows * b_size)?;
+    // SwarmLLM patch: uninitialized — see the note on `y_q8_1` above.
+    // `mul_mat_vec_q` ASSIGNS every element it is responsible for
+    // (`dst[j*nrows_dst + row0 + threadIdx.x] = tmp[...]`, not `+=`), and the
+    // grid covers every row: `nblocks` is `nrows` at b_size 1 and
+    // `ceil_div(nrows, 2)` with `rows_per_cuda_block == 2` above it. Nothing
+    // reads `dst` before that write, so the zeroing is dead work.
+    // ⚠ A kernel that ever ACCUMULATES into `dst` would need the zeroing back.
+    let dst = dev.alloc_fully_overwritten::<f32>(nrows * b_size)?;
     // https://github.com/ggerganov/llama.cpp/blob/facb8b56f8fd3bb10a693bf0943ae9d69d0828ef/ggml-cuda/mmvq.cu#L98
     let (nblocks, nwarps) = match b_size {
         1 => (nrows as u32, 4),
@@ -391,7 +411,10 @@ fn mul_mat_via_q8_1(
     let k_padded = pad(k, MATRIX_ROW_PADDING);
     let y_size_in_bytes =
         k_padded * y_cols * GgmlDType::Q8_1.type_size() / GgmlDType::Q8_1.block_size();
-    let mut y_q8_1 = dev.alloc_zeros::<u8>(y_size_in_bytes)?;
+    // SwarmLLM patch: uninitialized — same kernel, same reasoning as the
+    // `mul_mat_vec_q8_1` path above. This one is on the PREFILL path, so it
+    // pays into time-to-first-token rather than tok/s.
+    let mut y_q8_1 = dev.alloc_fully_overwritten::<u8>(y_size_in_bytes)?;
     quantize_q8_1(y, &mut y_q8_1, k, y_cols, dev)?;
 
     let (kernel_name, mmq_x, mmq_y) = match dtype {
@@ -408,7 +431,12 @@ fn mul_mat_via_q8_1(
         _ => crate::bail!("unsupported dtype for quantized matmul {dtype:?}"),
     };
     let func = dev.get_or_load_func(kernel_name, &candle_kernels::QUANTIZED)?;
-    let dst = dev.alloc_zeros::<f32>(x_rows * y_cols)?;
+    // SwarmLLM patch: uninitialized. The MMQ epilogue assigns
+    // `dst[col_dst*nrows_dst + row_dst]` for every in-range element, skipping
+    // only what is out of range (`col_dst >= ncols_dst` returns,
+    // `row_dst >= nrows_dst` continues), and the grid is `ceil_div` of both
+    // dimensions, so each in-range element is covered exactly once.
+    let dst = dev.alloc_fully_overwritten::<f32>(x_rows * y_cols)?;
     let cfg = cudarc::driver::LaunchConfig {
         grid_dim: (
             ceil_div(x_rows, mmq_y) as u32,
@@ -464,7 +492,11 @@ fn indexed_moe_forward_fused_q8_1_input(
     let num_blocks_per_row = k_padded / q8_1_block_size;
     let dst_row_size_bytes = num_blocks_per_row * q8_1_type_size;
     let y_size_in_bytes = total_rows * dst_row_size_bytes;
-    let mut input_quant = dev.alloc_zeros::<u8>(y_size_in_bytes)?;
+    // SwarmLLM patch: uninitialized — `quantize_q8_1` overwrites all of it,
+    // as above. The `out` buffer below is deliberately left zeroed: the
+    // `indexed_moe_forward_*` kernels' coverage of it has not been read, and
+    // an unverified partial write would leak garbage into a reply.
+    let mut input_quant = dev.alloc_fully_overwritten::<u8>(y_size_in_bytes)?;
 
     let input_view = input.slice(0..);
     quantize_q8_1(&input_view, &mut input_quant, k, total_rows, dev)?;
@@ -978,7 +1010,7 @@ mod test {
         let el_padded = pad(el, MATRIX_ROW_PADDING);
         let y_size_in_bytes =
             el_padded * GgmlDType::Q8_1.type_size() / GgmlDType::Q8_1.block_size();
-        let mut y_q8_1 = unsafe { dev.alloc::<u8>(y_size_in_bytes)? };
+        let mut y_q8_1 = dev.alloc_fully_overwritten::<u8>(y_size_in_bytes)?;
         let vs: Vec<f32> = (0..el).map(|v| v as f32).collect();
         let y = dev.clone_htod(&vs)?;
         quantize_q8_1(&y.as_view(), &mut y_q8_1, el, 1, &dev)?;

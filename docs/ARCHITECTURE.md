@@ -80,6 +80,8 @@ swarmllm/
 │                 research_gate_probe.py — plants one violation per Bash mutation form
 │                 against `.claude/scripts/research-gate.sh` and reports which are caught;
 │                 check_ci_gate.sh — branch protection vs the jobs CI produces;
+│                 decode_bound_by.py — is decode bound by the GPU or by one CPU thread;
+│                 decode_submissions.sh — GPU submissions per decoded token, via nsys;
 │                 smoke_test.sh, release_shapes.sh, family_conformance.sh — the release gate's three)
 └── tests/         (integration tests)
 ```

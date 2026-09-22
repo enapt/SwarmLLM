@@ -144,6 +144,27 @@ non-existent temp dir with `CANDLE_FLASH_ATTN_CHECK_ONLY=1`, which exercises thi
 patch in ~50 s on every push — nothing else in CI compiles that crate, because
 compiling it is the cost being avoided.
 
+## A decode token is bound by GPU submission COUNT, not bandwidth (2026-09-22)
+
+Decode on the GPU spends most of a token in the CUDA driver API on ONE CPU
+thread — measured 1,085 submissions and 17.6 of 23.0 ms/token, with the card at
+52% and `ms/layer` flat (0.48-0.58) across a 3.3x span of bytes/token. **So
+layer count predicts decode cost, not model size**, and the lever is fewer
+submissions per layer, not faster arithmetic.
+
+- **`CudaDevice::alloc_fully_overwritten`** is the only way to allocate a buffer
+  the next kernel fills completely; it skips the `cuMemsetD8Async` that
+  `alloc_zeros` submits. **Read the kernel first** — it must ASSIGN every
+  element it owns. Load-time padded buffers must stay zeroed.
+- **Judge such a change by the submission COUNT, not the clock** — the count is
+  deterministic, this box spreads 10-18%. `SWARMLLM_ZERO_QMATMUL_BUFFERS=1`
+  restores the old behaviour for a one-binary A/B.
+- **"Per-layer dispatch" is the standing first suspect for a decode number that
+  will not move** — the CPU backend reached the same conclusion independently.
+
+→ `docs/invariants/inference.md` · technique in `docs/DIAGNOSTICS.md` § "Where a
+decode token actually goes"
+
 ## Attention kernel choice and the query-length cliff (2026-08-23)
 
 Four helpers now own decisions that used to be spread across call sites. All

@@ -1482,6 +1482,40 @@ spread widens with it. See gotcha #422.
 | `examples/release_shapes.sh [binary] [port] [model]` — note (2026-09-03) | the request shapes smoke cannot see | Since v0.3.150 the long-prompt check is REFUSED (503, no usage → "COULD NOT RUN") when the shapes node shares the card with a live node: the two models leave it a few hundred MB of KV budget and admission now says so instead of squeezing the cache onto host memory. Run it with the live node stopped for 7/7 (0.3.150 artifact: 7/7 with the card free, 6/7 + 1 could-not-run beside the live node) |
 | `examples/dropped_token_test.sh [binary]` | #438 — one content token of a peer-served reply LOST on the serving side must still yield a whole reply | Two ISOLATED nodes, the server holding the whole model (so the client's only route is the fast path). The server drops content token 5 of every reply once (`SWARMLLM_FAULT_DROP_STREAM_TOKEN=5`); the fix arm asserts `asking the peer to resend` + `resending tokens the coordinator never received` and no `gave up`; the control arm (`SWARMLLM_RESEND_TOKENS=0` on the client) must reproduce the old truncation, or the test cannot see the fix |
 | `examples/two_node_test.sh`, `3node_setup.sh`, `3node_sharded_setup.sh` | cross-node paths | EXPECTED to fail on a single multi-interface host — that is the documented connection-churn case, not a regression. Validate on two real machines |
+| `examples/decode_bound_by.py [model] [tokens] [reps]` | **what bounds decode: the GPU, or one CPU thread.** Worker CPU-time per token from `/proc/<pid>/stat` against wall time per token, with GPU utilization sampled alongside | No profiler, no restart — the cheap FIRST reading. `cpu/token ≈ wall/token` means a CPU thread is the bottleneck and the card is waiting; `<<` means the cost is GPU-side. ⚠ Many cores busy = the CPU backend, not the GPU — check placement first. Meaningless if a PEER served the request, so it prints the route header |
+| `examples/decode_submissions.sh [model] [tokens] [binary]` | **GPU submissions per decoded token** — `cuLaunchKernel` / `cuMemsetD8Async` / alloc / event counts, from nsys, counted over the steady-state decode window only | Judge a submission-count change by the COUNT; it is deterministic, while tok/s here spreads 10-18%. ⚠ Per-call TIMES are nsys-inflated — never quote them as the real cost. RESTARTS the node it profiles |
+
+### Where a decode token actually goes (2026-09-22)
+
+The first reading to take when a decode number will not move, and the order to
+take them in. Established that GPU decode on this box spends most of a token
+submitting work rather than doing it — 1,085 submissions and 17.6 of 23.0
+ms/token in the driver API, card at 52%. Full evidence and the numbers per
+model: `docs/invariants/inference.md` § "A decode token is bound by GPU
+submission COUNT, not bandwidth".
+
+1. **Is it even bandwidth?** Compare `ms/layer` across models of different
+   size. `SWARMLLM_PROFILE=1` makes the worker print a per-stage breakdown per
+   forward pass, and its `total` brackets `SplitModel::forward` alone — no IPC,
+   sampling or HTTP. **If `ms/layer` is flat while bytes/token moves, the cost
+   is per-layer dispatch and model size is not the variable.**
+2. **GPU or CPU?** `examples/decode_bound_by.py`. Costs nothing and rules out
+   half the hypotheses.
+3. **How many submissions?** `examples/decode_submissions.sh`.
+4. **Where inside a layer?** `SWARMLLM_PROFILE=1` **plus**
+   `SWARMLLM_PROFILE_SYNC=1` for correct per-stage attribution on CUDA.
+   ⚠ **Read the two runs for different questions.** Sync inserts a
+   `cuStreamSynchronize` at all 11 stage boundaries of every layer — 242 device
+   round trips per token on a 22-layer model — so it answers "where does the
+   time go" while inflating "how long does it take" (12.0 → ~29 ms/token
+   measured). The CHEAP stages are the ones it distorts most: `residual adds`
+   read 2.5 ms and `rms norms` 2.7 ms for work on a few KB, which is the sync
+   cost, not the add. Trust it for the big stages only.
+
+⚠ **`SWARMLLM_PROFILE=1` prints ~11 lines per forward pass**, i.e. per token.
+The dump is excluded from the `total` it reports, so per-forward figures stay
+clean — but end-to-end tok/s measured with it on is NOT comparable to a normal
+run. Take user-visible throughput with profiling off.
 
 ### Current baseline — 2026-08-29, v0.3.132-alpha
 
