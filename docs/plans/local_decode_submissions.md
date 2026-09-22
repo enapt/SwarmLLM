@@ -137,11 +137,17 @@ Independent of graphs, and the only stage that also helps the CPU backend (which
 - **Fuse the residual add and the RMS norm** into their neighbours. 28.4 launches
   per layer for ~7 matmuls means over half the launches are small elementwise
   passes.
-- **Chase the ~30 `cuMemcpyHtoDAsync_v2` per token** — roughly one per layer,
-  and nobody knows what they are. A per-layer host→device copy on the decode
-  path is a submission AND a possible stall; it may be a small tensor built on
-  the host each layer, which would be a straightforward fix. **Identify it
-  before designing anything around it.**
+- **Chase the ~30 `cuMemcpyHtoDAsync_v2` per token.** ⚠ **They are FIXED per
+  token, not per layer** — measured 30.3/token on a 22-layer model against
+  31.8 on a 28-layer one, i.e. +1.5 for +6 layers. The earlier reading of this
+  line ("roughly one per layer") was wrong, and the two-model comparison is
+  what settled it. So look in the per-token setup — embedding lookup, mask,
+  LM head, the handoff to sampling — not in the blocks.
+  Two are already identified and account for only two of them:
+  `split/token_embedding.rs`'s `to_device` on the token ids, and
+  `split/executor.rs`'s mask, both built on the host every forward. The
+  remaining ~28 need nsys backtraces (`--sample=cpu`) to attribute; worth
+  ~1.3 ms/token, so do it when something else already needs a profile run.
 - **Sample on the device.** The one `cuMemcpyDtoHAsync_v2` per token copies
   vocab-sized logits back to be sampled on the host — a blocking round trip on
   a box where a round trip measured ~70 us. Greedy and top-k are both
@@ -184,8 +190,18 @@ sizes × intervals were each 10-100x wrong elsewhere in this project (#673).
   has one GPU node. A tester with an NVIDIA card on native Linux running
   `examples/decode_bound_by.py` would settle how much of this is ours and how
   much is the platform — and it is one command that needs no build.
-- **What the ~30 host→device copies per token are.** Stage 5.
-- **Whether the worker ever builds more than one `CudaDevice`.** Gates stage 2.
+- **What the remaining ~28 host→device copies per token are.** Now known to be
+  fixed per token rather than per layer, which is where to look; two of the ~30
+  are identified. Stage 5.
+- ~~**Whether the worker ever builds more than one `CudaDevice`.**~~ ANSWERED
+  2026-09-22: it builds several, and they all share the **default** stream, so
+  stream count is one. Stage 2 shipped on that.
+- **How many launches a layer really costs.** Differencing the two models gives
+  a marginal ~15.6 launches and ~23 allocations per layer — but they differ in
+  vocabulary (32k vs 128k), KV-head count and tying as well as depth, so that is
+  two points with several variables and **not** a number to plan from. A third
+  and fourth model, or per-kernel-name counting inside
+  `CudaDevice::get_or_load_func`, would make it real.
 - **Whether the CPU backend's dispatch overhead has the same shape.** It is
   known to be dispatch-bound; nobody has counted anything there.
 - **How this interacts with speculation.** A verify pass over γ drafted tokens
