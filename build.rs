@@ -33,6 +33,7 @@ fn build_fused_decode_ptx() {
         println!("cargo:rerun-if-changed=kernels/{k}");
     }
     println!("cargo:rerun-if-env-changed=CUDA_COMPUTE_CAP");
+    println!("cargo:rerun-if-env-changed=CUDA_PATH");
     println!("cargo:rerun-if-env-changed=CUDA_ROOT");
 
     // Nothing to build for a CPU-only binary, which is every default build and
@@ -50,17 +51,25 @@ fn build_fused_decode_ptx() {
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| "80".to_string());
 
-    let nvcc = match std::env::var_os("CUDA_ROOT") {
-        Some(root) => PathBuf::from(root).join("bin").join("nvcc"),
-        None => {
+    // `CUDA_PATH` first, because that is the one this repo's CI actually sets —
+    // `gpu-build-env` exports it on Linux, and `Jimver/cuda-toolkit` sets it on
+    // Windows. `CUDA_ROOT` is kept as a second spelling for a hand-built
+    // toolkit. An escape hatch named after a variable nobody sets is not an
+    // escape hatch; the bare `nvcc` fallback is what was doing the work.
+    let nvcc = std::env::var_os("CUDA_PATH")
+        .or_else(|| std::env::var_os("CUDA_ROOT"))
+        .map(|root| PathBuf::from(root).join("bin").join("nvcc"))
+        .filter(|p| p.exists())
+        .unwrap_or_else(|| {
             let default = PathBuf::from("/usr/local/cuda/bin/nvcc");
             if default.exists() {
                 default
             } else {
+                // On PATH — which is how the Windows GPU and Linux CUDA builds
+                // have been resolving it, both green.
                 PathBuf::from("nvcc")
             }
-        }
-    };
+        });
 
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR set by cargo"));
 
