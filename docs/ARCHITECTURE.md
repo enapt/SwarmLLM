@@ -85,6 +85,9 @@ swarmllm/
 │                 kernel_count_ab.sh — A/B two arms of ONE binary by per-kernel launch
 │                 count, and diff the replies (a fusion here is bit-identical, so a
 │                 reply that moves is a bug);
+│                 cuda_graph_probe.cu — can this driver capture a CUDA graph, and does
+│                 an allocation captured into one replay? nvcc only, no repo build, so
+│                 it is the cheapest thing to hand a tester with a different card;
 │                 smoke_test.sh, release_shapes.sh, family_conformance.sh — the release gate's three)
 ├── kernels/       (SwarmLLM's own CUDA kernels, compiled to PTX by build.rs under
 │                 `candle-cuda` and loaded via candle's `get_or_load_custom_func`.

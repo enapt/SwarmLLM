@@ -282,13 +282,22 @@ capture become part of the graph and hand back **the same addresses on every
 replay** — so there is nothing to patch, and a graph would remove most of the
 alloc/free line (~1,300 submissions) as well as the launch line.
 
-**So stage 3 is not known to be a prerequisite, and may be unnecessary.** It is
-also not established that it isn't: the capture has real preconditions of its
-own (item 3b), and this is a deduction from documentation, not a measurement.
-⚠ **Settle it with the cheap experiment, not with more reading**: capture one
-decode step, replay it, and compare the logits against the uncaptured path. Two
-outcomes, both worth having — it works and stage 3 is deleted, or it fails and
-the failure names the real precondition.
+**So stage 3 is not a prerequisite.** ✅ **MEASURED 2026-09-22, not deduced** —
+`examples/cuda_graph_probe.cu` on this box (RTX 3070 Laptop, sm_86, driver
+13040, WSL2): a `cudaMallocAsync` issued *inside* a capture, used by two
+kernels and freed inside the same capture, replays **correctly three times out
+of three** against a persistent buffer zeroed before each replay. The pointer
+handed out during capture (`0xa00000000`) is a graph-reserved address, not a
+pool address.
+
+⚠ **This establishes the PLATFORM, not the program.** A real decode step still
+has to satisfy item 3b — in particular it must free inside the capture
+everything it allocates there, and contain no host synchronisation. What the
+probe removes is the *reason* stage 3 was called a prerequisite; the remaining
+preconditions are about our code, not about CUDA.
+✅ **And it answers a second open question for free: graph capture works under
+WSL2 on this driver.** That was not safe to assume — capture was crashing on
+WSL2 + Blackwell until WSL 2.7.0.
 ⚠ Trap to carry in either way: the `cudaKernelNodeParams` from
 `cudaGraphKernelNodeGetParams` is **owned by the node** (#12152) — patch the
 values it holds, never swap in your own pointers.
@@ -302,6 +311,9 @@ code is written:
   `BackendDevice::new` takes `context.default_stream()`, which cudarc defines as
   `cu_stream: null_mut()`, i.e. exactly that stream. This is the same fact
   Stage 2 turned on; it cuts the other way here.
+  ✅ **CONFIRMED on this driver, not just in the docs**: `cuda_graph_probe.cu`
+  arm A is a null control that would report the plan wrong if capture were
+  permitted. It is refused with `cudaError 900`.
   ⛔ **`per_thread_stream()` looks like the way out and is NOT.** It is
   capturable, and unlike `new_stream()` it does not flip cudarc's
   `is_in_multi_stream_mode()` — so it appears to keep Stage 2 valid for free.
@@ -425,8 +437,8 @@ Independent of graphs, and the only stage that also helps the CPU backend (which
 | 1 memsets ✅ | 321 of 992 | +30% / +15% ⚠ contended box, superseded by the row above |
 | 2 event tracking ✅ | **2,625 → 0 event ops** | +15% / nothing ⚠ same caveat |
 | **2c silu×up fusion ✅** | 22 launches + 22 allocs + 22 frees | **count-verified −66/token; NO speed claim — below this box's resolution** |
-| 3 buffer reuse | ~1,313 alloc/free | estimated ~3.5 ms/token — **and possibly redundant**, § Ordering item 3 |
-| 4 CUDA graphs | most of 625 launches, **and possibly the 1,313 alloc/free too** | large, unestimated |
+| 3 buffer reuse | ~1,313 alloc/free | estimated ~3.5 ms/token — **NOT a prerequisite for stage 4** (measured, § Ordering item 3); worth doing only on its own merits |
+| 4 CUDA graphs | most of 513 launches, **and the 1,313 alloc/free with them** | large, unestimated — and now the clear next big move |
 | 5 fusion + D2H | tens of launches, 1 round trip | modest, and helps CPU too |
 
 ⚠ **These do not simply add, and measuring the pair proved it.** Compounding the
