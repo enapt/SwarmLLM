@@ -69,24 +69,25 @@ submissions per token (**-32%**) for **+30% tok/s on a 1.1B and +15% on a 3B**,
 A/B/A/B in one binary, byte-identical replies in all four arms.
 `SWARMLLM_ZERO_QMATMUL_BUFFERS=1` restores the old behaviour.
 
-### Stage 2 — Turn off cudarc's per-allocation event tracking
+### Stage 2 — Turn off cudarc's per-allocation event tracking ✅ SHIPPED (count-verified)
 
-**1,314 + 1,311 event ops per token, ~1.5 ms.** cudarc creates a read event and
-a write event for **every** `CudaSlice` when `is_event_tracking()` is on, which
-it is by default, and destroys both on drop. They exist to synchronise buffers
-used across MULTIPLE STREAMS.
+**2,625 event ops per token → 0**, 2026-09-22. cudarc created a read event and a
+write event for every `CudaSlice`, waited on both in `Drop` and destroyed both —
+four event API calls per allocation, ~700 allocations a token.
 
-`CudaContext::disable_event_tracking()` exists and is `unsafe`; its contract is
-that the caller guarantees cross-stream safety.
+The precondition turned out the opposite way to the first reading of it. Three
+production sites construct a `CudaDevice`, which looks like several streams —
+but `BackendDevice::new` takes `context.default_stream()`, and cudarc's
+`default_stream()` is `cu_stream: null_mut()`, the legacy default stream. **All
+of them share ONE stream**, `is_in_multi_stream_mode()` is false, and cudarc's
+own `is_managing_stream_synchronization()` was therefore already false — it was
+not consuming the events it was creating. Full argument in the invariants file.
 
-**The precondition to establish first**: candle calls `context.new_stream()`
-exactly once, in `CudaDevice::new`, and `CudaDevice` is `Clone` over shared
-state — so one device is one stream. **What has NOT been checked is whether the
-worker ever constructs more than one `CudaDevice`** (per model? per resident
-worker slot?). If it does, two streams exist and this is unsafe as written.
-Answer that before touching it, and gate it on an env switch either way.
-
-Cheap, contained, and worth roughly what stage 1 was worth on the 3B.
+⚠ **Verified by COUNT only. The throughput effect is NOT claimed**: it sits
+below this box's noise floor, which reached 69-91% spread once Chrome's GPU
+process took 109% of a core. **A clean re-measure on an idle box is owed**, and
+until it exists this stage's line in the table below stays "unquantified".
+`SWARMLLM_CUDA_EVENT_TRACKING=1` restores the old behaviour.
 
 ### Stage 3 — Reuse activation buffers instead of allocating 657 per token
 
@@ -151,7 +152,7 @@ Independent of graphs, and the only stage that also helps the CPU backend (which
 | stage | submissions removed | measured / estimated |
 |---|---|---|
 | 1 memsets ✅ | 321 of 992 | **measured: +30% / +15%** |
-| 2 event tracking | ~2,625 event ops | estimated ~1.5 ms/token |
+| 2 event tracking ✅ | **2,625 → 0 event ops** | **unquantified** — below the noise floor of a contended box; re-measure owed |
 | 3 buffer reuse | ~1,313 alloc/free | estimated ~3.5 ms/token |
 | 4 CUDA graphs | most of 625 launches | large, unestimated |
 | 5 fusion + D2H | tens of launches, 1 round trip | modest, and helps CPU too |

@@ -23,6 +23,18 @@ impl DeviceId {
     }
 }
 
+/// SwarmLLM patch: `SWARMLLM_CUDA_EVENT_TRACKING=1` keeps cudarc's
+/// per-allocation read/write events on the default-stream device.
+///
+/// Off by default because that device only ever uses the default stream, so the
+/// events synchronise nothing — see the argument in `BackendDevice::new`. Read
+/// once and cached; it sits on the device-construction path, but the answer
+/// must not change between two devices in one process.
+fn cuda_event_tracking_requested() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("SWARMLLM_CUDA_EVENT_TRACKING").as_deref() == Ok("1"))
+}
+
 /// SwarmLLM patch: `SWARMLLM_ZERO_QMATMUL_BUFFERS=1` puts the zero-fill back
 /// on the buffers [`CudaDevice::alloc_fully_overwritten`] hands out.
 ///
@@ -325,6 +337,44 @@ impl BackendDevice for CudaDevice {
 
     fn new(ordinal: usize) -> Result<Self> {
         let context = cudarc::driver::CudaContext::new(ordinal).w()?;
+        // SwarmLLM patch: this constructor runs everything on the DEFAULT
+        // stream, so cudarc's per-allocation events cannot be doing anything.
+        //
+        // cudarc creates a read event AND a write event for every `CudaSlice`
+        // while `is_event_tracking()` is on (the default), and destroys both on
+        // drop. Measured: **2,625 event API calls per decoded token** — four per
+        // allocation, ~700 allocations a token — for ~1.5 ms of a 23 ms token.
+        //
+        // They exist to synchronise a buffer used across MULTIPLE streams, and
+        // there is only ever one stream here:
+        //   * `default_stream()` hands back `cu_stream: null_mut()`, the legacy
+        //     default stream, and every production path into CUDA arrives
+        //     through this constructor (`Device::new_cuda` / `cuda_if_available`).
+        //   * `is_in_multi_stream_mode()` only becomes true once `new_stream()`
+        //     is called, which happens solely in `new_with_stream` below —
+        //     reachable only via `Device::new_cuda_with_stream`, which nothing
+        //     in this project calls. That constructor deliberately keeps
+        //     tracking ON.
+        //   * cudarc's own `is_managing_stream_synchronization()` is
+        //     `is_in_multi_stream_mode() && is_event_tracking()`, i.e. already
+        //     false here — so cudarc is not consuming these events either.
+        //   * Same-stream ordering needs no events: `cuMemFreeAsync` on the
+        //     allocating stream is ordered after work queued before it, which
+        //     is the whole point of stream-ordered allocation.
+        //   * Even if a `new_with_stream` device were built alongside one of
+        //     these, candle gives them different `DeviceId`s and refuses to mix
+        //     tensors across devices, so a buffer cannot reach the other stream.
+        //
+        // `SWARMLLM_CUDA_EVENT_TRACKING=1` restores it, for a one-binary A/B.
+        //
+        // → `docs/invariants/inference.md` § "A decode token is bound by GPU
+        //   submission COUNT, not bandwidth"
+        if !cuda_event_tracking_requested() {
+            // SAFETY: one default stream, per the argument above. The contract
+            // is that the caller orders cross-stream use; there is no second
+            // stream to order against.
+            unsafe { context.disable_event_tracking() };
+        }
         let stream = context.default_stream();
         let blas = cudarc::cublas::CudaBlas::new(stream.clone()).w()?;
         let curand = cudarc::curand::CudaRng::new(299792458, stream.clone()).w()?;

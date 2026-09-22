@@ -957,6 +957,49 @@ tinyllama figure for a 7B.
 submission costs ~2-3x native. The direction holds anywhere; the magnitude is
 this box's.
 
+### The 2,625 event ops per token were guarding a hazard that cannot occur
+
+cudarc creates a read event AND a write event for every `CudaSlice` while
+`is_event_tracking()` is on (the default), waits on both in `Drop`, and destroys
+both — **four event API calls per allocation, ~700 allocations a token**. They
+exist to synchronise a buffer used across MULTIPLE streams.
+
+There is only ever one stream:
+
+- `BackendDevice::new` — the constructor every production path reaches, via
+  `Device::new_cuda` / `cuda_if_available` — takes `context.default_stream()`,
+  and cudarc's `default_stream()` hands back `cu_stream: null_mut()`, the legacy
+  default stream. **Several `CudaDevice`s therefore share ONE stream**, which is
+  the opposite of what the call-site count suggests: three production sites
+  construct a device, and that was worth checking rather than assuming — the
+  first reading of it said "multiple devices, so multiple streams, so unsafe".
+- `is_in_multi_stream_mode()` turns true only when `new_stream()` is called,
+  which happens solely in `new_with_stream` — reachable only via
+  `Device::new_cuda_with_stream`, which nothing in this project calls. That
+  constructor deliberately keeps tracking ON.
+- cudarc's own `is_managing_stream_synchronization()` is
+  `is_in_multi_stream_mode() && is_event_tracking()` — **already false here**, so
+  cudarc is not consuming these events either.
+- Same-stream ordering needs no events: `cuMemFreeAsync` on the allocating
+  stream is ordered after the work queued before it.
+- Even if a `new_with_stream` device were built alongside, candle gives the two
+  different `DeviceId`s and refuses to mix tensors across devices, so a buffer
+  cannot reach the other stream.
+
+`Drop` has no synchronous fallback when the events are absent — it skips the two
+`stream.wait()` calls and frees as before — so disabling is strictly less work.
+`SWARMLLM_CUDA_EVENT_TRACKING=1` restores it.
+
+⚠ **Verified by COUNT only: 2,625 → 0 event ops per token, with launches (671),
+memsets (1) and allocs (657) identical between arms.** The throughput effect is
+**below this box's noise floor and is NOT claimed.** Four arms A/B/A/B overlapped
+on best-of-N (off 82.8 / 70.1 against on 74.2 / 65.7 tok/s, tinyllama), and the
+spread reached 69-91% against 5-13% earlier the same day. The cause was found
+rather than assumed — **Chrome's GPU process at 109% of a core**, the same
+confound that made the 0901 baseline non-comparable, plus two resident model
+workers of my own. **A clean re-measure on an idle box is owed.** Replies stayed
+byte-identical across every arm.
+
 ### What a change must keep
 
 - **Read the kernel before calling `alloc_fully_overwritten`.** The bound it
