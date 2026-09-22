@@ -990,15 +990,34 @@ There is only ever one stream:
 `stream.wait()` calls and frees as before — so disabling is strictly less work.
 `SWARMLLM_CUDA_EVENT_TRACKING=1` restores it.
 
-⚠ **Verified by COUNT only: 2,625 → 0 event ops per token, with launches (671),
-memsets (1) and allocs (657) identical between arms.** The throughput effect is
-**below this box's noise floor and is NOT claimed.** Four arms A/B/A/B overlapped
-on best-of-N (off 82.8 / 70.1 against on 74.2 / 65.7 tok/s, tinyllama), and the
-spread reached 69-91% against 5-13% earlier the same day. The cause was found
-rather than assumed — **Chrome's GPU process at 109% of a core**, the same
-confound that made the 0901 baseline non-comparable, plus two resident model
-workers of my own. **A clean re-measure on an idle box is owed.** Replies stayed
-byte-identical across every arm.
+**Mechanism**: 2,625 → 0 event ops per token, with launches (671), memsets (1)
+and allocs (657) identical between arms — one variable.
+
+**Outcome, re-measured on an idle box** (500-token generations, 8 reps, A/B/A/B,
+one model resident). ⚠ The first attempt was taken with **Chrome's GPU process
+at 109% of a core** — the same confound that made the 0901 baseline
+non-comparable — and its arms overlapped; these replaced it:
+
+| model | off (best-of-N) | on (best-of-N) | verdict |
+|---|---|---|---|
+| tinyllama-1.1b (22 L) | **107.7 / 109.1** | 93.6 / 93.6 | **+15%**, no overlap |
+| llama-3.2-3b (28 L) | 71.1 / 78.8 | 72.9 / 74.7 | **no measurable effect** |
+
+**It helps the small model and does nothing for the 3B** — the same shape as the
+memset fix (+30% / +15%), and for the same reason: a fixed CPU saving is a
+smaller share of a token that carries 3.3x the bytes. **Do not quote a single
+figure for this change.** Replies were byte-identical across every arm.
+
+⚠ **Read best-of-N here, not the median.** The benchmark node is joined to the
+LIVE SWARM, and its daemon intermittently takes the core the decode thread needs
+— one rep measured 23.7 tok/s among others at 80-110. That wrecks the median
+(spreads 41-63% even on an idle box) while leaving the best sample clean, since
+interference only ever subtracts. min-of-N on an idle box is the documented
+method for exactly this reason (#367); the medians here overlap where the bests
+separate cleanly, and the medians are the wrong statistic, not a contrary
+result. An isolated node (private gossip id, no bootstrap, no mDNS — the shape
+`examples/constrained_node_test.sh` uses) would remove the outliers at the
+source and is the better instrument if this needs to get finer.
 
 ### What a change must keep
 

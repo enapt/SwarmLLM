@@ -83,10 +83,12 @@ of them share ONE stream**, `is_in_multi_stream_mode()` is false, and cudarc's
 own `is_managing_stream_synchronization()` was therefore already false — it was
 not consuming the events it was creating. Full argument in the invariants file.
 
-⚠ **Verified by COUNT only. The throughput effect is NOT claimed**: it sits
-below this box's noise floor, which reached 69-91% spread once Chrome's GPU
-process took 109% of a core. **A clean re-measure on an idle box is owed**, and
-until it exists this stage's line in the table below stays "unquantified".
+**Measured on an idle box**, 500-token generations, 8 reps, A/B/A/B, best-of-N:
+**tinyllama +15%** (107.7/109.1 against 93.6/93.6, no overlap) and
+**llama-3.2-3b no measurable effect** (71.1/78.8 against 72.9/74.7, overlapping).
+Same shape as stage 1 — a fixed CPU saving is a smaller share of a bigger
+model's token. ⚠ Read best-of-N, not the median: the bench node is on the live
+swarm and its daemon intermittently steals the decode thread's core.
 `SWARMLLM_CUDA_EVENT_TRACKING=1` restores the old behaviour.
 
 ### Stage 3 — Reuse activation buffers instead of allocating 657 per token
@@ -158,7 +160,7 @@ Independent of graphs, and the only stage that also helps the CPU backend (which
 | stage | submissions removed | measured / estimated |
 |---|---|---|
 | 1 memsets ✅ | 321 of 992 | **measured: +30% / +15%** |
-| 2 event tracking ✅ | **2,625 → 0 event ops** | **unquantified** — below the noise floor of a contended box; re-measure owed |
+| 2 event tracking ✅ | **2,625 → 0 event ops** | **measured: +15% on a 1.1B, nothing on a 3B** |
 | 3 buffer reuse | ~1,313 alloc/free | estimated ~3.5 ms/token |
 | 4 CUDA graphs | most of 625 launches | large, unestimated |
 | 5 fusion + D2H | tens of launches, 1 round trip | modest, and helps CPU too |
