@@ -110,6 +110,18 @@ fused QKV tensor, stops each of Q/K/V recomputing the **whole** fused matmul.
 arithmetic; the rest is ~11% of launches ≈ ~5% of a token, and not established.
 `SWARMLLM_SHARE_PROJECTIONS=0` is the off arm.
 
+⚠ **It took two goes: there are TWO quantized matmul paths** (vec for decode,
+MMQ for prefill/batch) and the first fix did one. Prefill sat at 7.05
+quantizations per layer while decode read 4.05, and only reading the count on
+the path I had NOT changed found it (gotcha #679). Both share now — prefill
+736 → 670 launches — but with **no measurable prefill speed-up** (min-of-N
+13 ms vs 14 over 56 chunk forwards), because prefill does real arithmetic over
+128 rows and submissions are a small share of its time.
+
+⚠ **Prefill cannot be measured through TTFT**: a repeated prompt is served from
+the prefix cache and reads ~0.02 s however slow prefill is. Use `PROF seq_len=N`
+with unique prompts, filtered to one chunk size.
+
 **What the kernel table says to do next**, now that it exists (per layer):
 `rmsnorm_f32` 2.05 + `badd_f32` 2.00 are four launches for norms and residuals
 that fusion could make two; `affine_f32` + `bmul_f32` + `softmax_f32` are three

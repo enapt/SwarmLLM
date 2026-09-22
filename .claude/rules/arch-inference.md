@@ -161,6 +161,13 @@ submissions per layer, not faster arithmetic.
   instead of per matmul, and for a `FusedSlice` model (Phi-3/3.5/4) runs the
   fused matmul once instead of once per slice: **+55% on phi-3.5-mini**.
   ⚠ Apply LoRA AFTER it returns; LoRA's matmuls do not share that activation.
+  ⚠ **TWO quantized matmul paths must both share** — `mul_mat_vec_via_q8_1`
+  (decode) and `mul_mat_via_q8_1` (MMQ: prefill, batch). The first fix did only
+  the vec one and nothing went red; the per-kernel count is what showed prefill
+  still at 7.05 quantizations per layer.
+- ⚠ **TTFT cannot measure prefill work**: a repeated prompt is served from the
+  PREFIX CACHE and reads ~0.02 s regardless. Use `PROF seq_len=N` with unique
+  prompts, filtered to ONE chunk size.
 - **`SWARMLLM_COUNT_KERNELS=1` prints launches by kernel name per forward**,
   which is how the per-layer mix is known at all (nsys has no GPU kernel table
   on WSL2). Never benchmark with it on — it takes a mutex per launch.

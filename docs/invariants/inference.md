@@ -1105,6 +1105,39 @@ single weight, a mixed group, dequantized weights and non-CUDA, so it is always
 correct to call — and LoRA is applied AFTER it returns, deliberately, because
 LoRA's own matmuls do not share that activation.
 
+#### Both quantized-matmul paths need it — the first version only fixed one
+
+⚠ **There are TWO quantized matmul entry points and the sharing landed on one.**
+`mul_mat_vec_via_q8_1` serves a single position (decode); `mul_mat_via_q8_1`
+serves a batch through the MMQ kernel (prefill, and any `b*m` over `max_bm`).
+After the first fix, decode showed 4.05 `quantize_q8_1` per layer and **prefill
+still showed 7.05** — `.claude/rules/architecture.md` § "One invariant, N paths"
+in miniature, on a helper written the same hour.
+
+**Only the per-kernel count caught it.** Nothing failed, no test went red, and
+the decode measurement looked like a complete success. The lesson is the rule's
+own: *enumerate the paths before believing a shared fix is applied* — and when a
+count exists, read it on every path, not the one you changed.
+
+Both paths share now (prefill 736 → 670 launches, `quantize_q8_1` 7.05 → 4.05
+per layer, one shared buffer layout — `k_padded × rows` — so the two are
+interchangeable).
+
+⚠ **No measurable prefill speed-up, and that is expected.** Min-of-N over 56
+`seq_len=128` chunk forwards, back to back: **13 ms against 14 (min), 27 against
+26 (median)** — inside the noise. Prefill does real arithmetic over 128 rows, so
+launches are a far smaller share of its time than of a decode step's, and the
+quantization it removes is small beside the matmuls. **Shipped for consistency
+and verified by count, not for a wall-clock gain — do not claim one.**
+
+⚠ **TTFT is the wrong instrument for prefill work.** It reads ~0.02 s for a
+repeated prompt however slow prefill is, because the **prefix cache** serves it
+and prefill never runs; and even with unique prompts it carries tokenization,
+scheduling and HTTP, and disagreed with the forward timer on direction.
+Measure `PROF seq_len=N`, make prompts unique, and filter to ONE chunk size —
+a 600-token prompt arrives as 118- and 128-token chunks, which are not
+comparable to each other.
+
 ### What a change must keep
 
 - **Read the kernel before calling `alloc_fully_overwritten`.** The bound it

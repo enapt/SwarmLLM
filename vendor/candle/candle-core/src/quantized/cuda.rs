@@ -508,11 +508,30 @@ fn mul_mat_via_q8_1(
     let k_padded = pad(k, MATRIX_ROW_PADDING);
     let y_size_in_bytes =
         k_padded * y_cols * GgmlDType::Q8_1.type_size() / GgmlDType::Q8_1.block_size();
-    // SwarmLLM patch: uninitialized — same kernel, same reasoning as the
-    // `mul_mat_vec_q8_1` path above. This one is on the PREFILL path, so it
-    // pays into time-to-first-token rather than tok/s.
-    let mut y_q8_1 = dev.alloc_fully_overwritten::<u8>(y_size_in_bytes)?;
-    quantize_q8_1(y, &mut y_q8_1, k, y_cols, dev)?;
+    // SwarmLLM patch: uninitialized, and shared across the group — same kernel
+    // and the same reasoning as the `mul_mat_vec_q8_1` path above.
+    //
+    // ⚠ **This path had to be fixed too, and nearly was not.** Sharing landed
+    // on the vec path first, and a prefill still showed 7.05 `quantize_q8_1`
+    // launches per layer where decode showed 4.05 — because a prompt takes the
+    // MMQ kernel and not the vec one. That is
+    // `.claude/rules/architecture.md` § "One invariant, N paths", this
+    // project's most-repeated defect, and only the per-kernel measurement
+    // caught it.
+    //
+    // It matters MORE here than at decode: the redundant quantization covers
+    // every row of the prompt chunk rather than one position, so it is real
+    // work and not a bare submission. It pays into time-to-first-token.
+    let y_q8_1: std::sync::Arc<CudaSlice<u8>> = match shared_take(k, y_cols) {
+        Some(existing) => existing,
+        None => {
+            let mut buf = dev.alloc_fully_overwritten::<u8>(y_size_in_bytes)?;
+            quantize_q8_1(y, &mut buf, k, y_cols, dev)?;
+            let buf = std::sync::Arc::new(buf);
+            shared_put(k, y_cols, &buf);
+            buf
+        }
+    };
 
     let (kernel_name, mmq_x, mmq_y) = match dtype {
         GgmlDType::Q4_0 => ("mul_mat_q4_0", 64, 128),
@@ -546,7 +565,7 @@ fn mul_mat_via_q8_1(
 
     let mut builder = func.builder();
     builder.arg(/* vx */ &data.inner);
-    builder.arg(/* vy */ &y_q8_1);
+    builder.arg(/* vy */ &*y_q8_1);
     builder.arg(/* dst */ &dst);
     barg!(
         builder,
