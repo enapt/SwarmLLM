@@ -1,5 +1,39 @@
 # Changelog
 
+## [0.3.199-alpha] — 2026-09-22
+
+**Nothing here changes what your node does or what it says.** Replies are
+byte-for-byte identical to 0.3.198 on every model tested. This is groundwork
+for a larger speed improvement on NVIDIA graphics cards, plus one small
+reduction in overhead that is honestly too small to measure on its own. **If
+0.3.198 is working for you, there is no urgency to update.**
+
+**A little less work per word, on NVIDIA cards.** Producing one word means
+asking the graphics card to carry out roughly nineteen hundred small pieces of
+work, and on the machine used for testing the asking — not the doing — is what
+limits speed. The last step of each layer used to be two separate requests, one
+to apply a mathematical curve and one to multiply. They are now a single
+request, removing 66 of those nineteen hundred. That is too small to separate
+from normal run-to-run variation on the test machine, so **no speed figure is
+being claimed.** It is included because it proves out the mechanism the larger
+improvement depends on, and because those requests are the thing that currently
+limits generation speed.
+
+**Groundwork: graphics work now has its own queue.** Recording a whole
+generation step once and replaying it for each word would remove nearly all of
+that per-request cost. The graphics driver refuses to record work sent down the
+default queue — which is the one this software has always used — so none of it
+could be recorded at all. That work now goes to a dedicated queue instead.
+Nothing else changes: the same calculations run in the same order, confirmed by
+checking that both settings produce an identical list of work and identical
+replies.
+
+This part has been confirmed to build for every supported graphics
+configuration, but it has only been *run* on a single card so far. If you use an
+NVIDIA card and see anything unexpected after updating, setting
+`SWARMLLM_CUDA_LEGACY_STREAM=1` restores the previous behaviour — and please do
+report it, because that is the kind of thing one machine cannot find alone.
+
 ## [0.3.198-alpha] — 2026-09-22
 
 **Text generation is faster on machines with an NVIDIA graphics card. The Phi
