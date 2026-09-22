@@ -152,10 +152,17 @@ UNDETERMINED and never a fix — use it BEFORE blaming a change, especially your
 
 ## Status
 
-**v0.3.196-alpha released, signed and deployed to both nodes (2026-09-21);
+**v0.3.198-alpha released, signed and deployed to both nodes (2026-09-22);
 `main` is clean.** ⚠ **`.195`'s two `LayerForward` trailers (`0x08`, `0x09`)
 have STILL never been exercised in the field** — `memory/next_up.md` says what
 to read off a live node first.
+
+**Local GPU decode is bound by SUBMISSION COUNT, not bandwidth** — `ms/layer` is
+flat across model size, so **layer count predicts decode cost**. `.198` removed
+needless submissions for +34% on a 1.1B and a 3B, and +55% on phi-3.5-mini by
+computing its fused QKV once instead of per projection. ⚠ **There is exactly
+ONE CUDA stream and two shipped changes depend on that.** Next moves, sized from
+llama.cpp's own work: `docs/plans/local_decode_submissions.md`.
 
 ⚠ **A new wire trailer is NOT a no-op for an older peer** — decoders rebuild the
 seal's AAD from the trailers they PARSED, so an unknown one breaks every
