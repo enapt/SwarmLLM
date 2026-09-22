@@ -175,13 +175,14 @@ submissions per layer, not faster arithmetic.
   what the disabled per-allocation events rest on. **Giving one device a second
   stream means re-enabling them** (`SWARMLLM_CUDA_EVENT_TRACKING=1`) or its
   buffers cross streams unsynchronised — a silently wrong reply, not an error.
-  ⚠ **Restated 2026-09-22**: it used to be "one stream process-wide", true only
-  while every device took the LEGACY null stream. `BackendDevice::new` now takes
-  `context.new_stream()`, because **CUDA refuses graph capture on the legacy
-  stream** (measured: `examples/cuda_graph_probe.cu` arm A, `cudaError 900`).
-  `SWARMLLM_CUDA_LEGACY_STREAM=1` restores it — and makes capture impossible.
-  ⚠ `SWARMLLM_CUDA_EVENT_TRACKING=1` is no longer a pure revert: multi-stream
-  mode is now true, so it also hands cudarc back stream-sync management.
+  ⛔ **Moving off the legacy stream SHIPPED BROKEN in v0.3.199-alpha and is now
+  opt-in** (`SWARMLLM_CUDA_OWN_STREAM=1`). Every model emitted garbage in a
+  `--features cuda` build while every test and the whole `candle-cuda` A/B
+  stayed green — **the cheap gate has no flash-attn and no llama backend**
+  (#677, #683). CUDA does refuse graph capture on the legacy stream (measured:
+  `cuda_graph_probe.cu` arm A, `cudaError 900`), so this still has to be solved
+  before graphs — but **reproduce under `--features cuda` on a real generation**,
+  not a unit test.
 - **Fused kernels are OURS, in `kernels/*.cu`**, compiled to PTX by `build.rs`
   and loaded through candle's `get_or_load_custom_func` — not a fifth vendored
   crate, since `candle-kernels` is a registry dep. **Write each one to be

@@ -92,20 +92,38 @@ fn cuda_event_tracking_requested() -> bool {
     *ON.get_or_init(|| std::env::var("SWARMLLM_CUDA_EVENT_TRACKING").as_deref() == Ok("1"))
 }
 
-/// SwarmLLM patch: `SWARMLLM_CUDA_LEGACY_STREAM=1` puts every `CudaDevice`
-/// back on the legacy null stream.
+/// SwarmLLM patch: `SWARMLLM_CUDA_OWN_STREAM=1` gives every `CudaDevice` its
+/// own explicitly created stream instead of the legacy null stream.
 ///
-/// Off by default since 2026-09-22: CUDA refuses to capture a graph on the
-/// legacy stream, and capture is the route to collapsing a token's ~513
-/// launches and ~1,300 alloc/free calls into one submission. Setting this
-/// restores the old behaviour for an A/B inside one binary — and, by
-/// construction, makes graph capture impossible again.
+/// ⛔ **OFF by default, and the default was flipped back on 2026-09-22 after it
+/// shipped broken.** CUDA refuses to capture a graph on the legacy stream, so
+/// moving off it is the precondition for collapsing a token's ~513 launches and
+/// ~1,300 alloc/free calls into one submission — but turning it on by default
+/// made **every model emit garbage** in a full `--features cuda` build:
+/// `给给给…` on tinyllama, `<|reserved_special_token_247|>…` on llama-3.2-3b.
+/// The same binary with this off answers correctly, which is what isolated it.
+///
+/// ⚠ **It was verified clean under `--features candle-cuda`, and that is
+/// exactly why it got through.** That feature set has no flash-attn and no
+/// llama backend, so the attention path a release build actually uses was never
+/// compiled, let alone run — gotcha #677 says in as many words that such a
+/// binary is "NOT a drop-in for the release node". **A change whose blast
+/// radius is every CUDA kernel in the process cannot be cleared by the cheap
+/// gate.**
+///
+/// The cause is not yet established. Leading hypothesis: several `CudaDevice`s
+/// are built (the daemon's capability probe and the shard loader) which used to
+/// share the ONE legacy stream and now each get their own, so work that was
+/// ordered by construction is now unordered with event tracking off.
+/// **Do not re-enable without reproducing under `--features cuda` on a real
+/// generation** — every unit test and the whole `candle-cuda` A/B passed while
+/// this was broken.
 ///
 /// Read once and cached; it sits on the device-construction path, and the
 /// answer must not change between two devices in one process.
-fn legacy_cuda_stream_requested() -> bool {
+fn own_cuda_stream_requested() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("SWARMLLM_CUDA_LEGACY_STREAM").as_deref() == Ok("1"))
+    *ON.get_or_init(|| std::env::var("SWARMLLM_CUDA_OWN_STREAM").as_deref() == Ok("1"))
 }
 
 /// SwarmLLM patch: `SWARMLLM_ZERO_QMATMUL_BUFFERS=1` puts the zero-fill back
@@ -455,15 +473,18 @@ impl BackendDevice for CudaDevice {
         //     another device's stream. **This bullet used to be a hypothetical
         //     about a constructor nobody called; since the migration it is the
         //     load-bearing one.**
-        //   * `is_in_multi_stream_mode()` is now TRUE (`new_stream()` sets it),
-        //     so cudarc's `is_managing_stream_synchronization()` —
-        //     `is_in_multi_stream_mode() && is_event_tracking()` — is false only
-        //     because tracking is off, where before it was false twice over.
+        //   * `is_in_multi_stream_mode()` is FALSE by default, because
+        //     `new_stream()` is what sets it and the default is back to
+        //     `default_stream()`. cudarc's
+        //     `is_managing_stream_synchronization()` —
+        //     `is_in_multi_stream_mode() && is_event_tracking()` — is therefore
+        //     false twice over, as it was before the migration attempt.
         //
-        // ⚠ **`SWARMLLM_CUDA_EVENT_TRACKING=1` is therefore no longer a pure
-        // revert**: it re-enables the events AND hands cudarc back the job of
-        // managing stream synchronisation. Still a valid A/B — it can only add
-        // synchronisation, never remove it — but say which it is when quoting it.
+        // ⚠ **Under `SWARMLLM_CUDA_OWN_STREAM=1` that changes**: multi-stream
+        // mode becomes true, so `SWARMLLM_CUDA_EVENT_TRACKING=1` then stops
+        // being a pure revert and also hands cudarc back stream-sync
+        // management. It can only ADD synchronisation, so it stays a valid A/B
+        // — but say which arm you are in when quoting it.
         //
         // ⚠⚠ **ANYONE GIVING ONE DEVICE A SECOND STREAM MUST RE-ENABLE THIS.**
         // That device's buffers would have nothing tracking their use, i.e. used
@@ -506,12 +527,16 @@ impl BackendDevice for CudaDevice {
         // either end state.** (A `llama`-feature build runs llama.cpp on its own
         // context and shares no buffers with candle.)
         //
-        // `SWARMLLM_CUDA_LEGACY_STREAM=1` restores the old stream for a
-        // one-binary A/B. It also makes graph capture impossible, by design.
-        let stream = if legacy_cuda_stream_requested() {
-            context.default_stream()
-        } else {
+        // ⛔ **Opt-in only** (`SWARMLLM_CUDA_OWN_STREAM=1`). Shipping it ON in
+        // v0.3.199-alpha made every model emit garbage in a `--features cuda`
+        // build while every test and the whole `candle-cuda` A/B stayed green —
+        // see the note on `own_cuda_stream_requested`. The legacy stream is the
+        // default until that is understood, which also means graph capture
+        // stays unreachable by default, by design.
+        let stream = if own_cuda_stream_requested() {
             context.new_stream().w()?
+        } else {
+            context.default_stream()
         };
         let blas = cudarc::cublas::CudaBlas::new(stream.clone()).w()?;
         let curand = cudarc::curand::CudaRng::new(299792458, stream.clone()).w()?;

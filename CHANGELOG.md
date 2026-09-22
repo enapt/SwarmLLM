@@ -1,38 +1,37 @@
 # Changelog
 
-## [0.3.199-alpha] — 2026-09-22
+## [0.3.200-alpha] — 2026-09-22
 
-**Nothing here changes what your node does or what it says.** Replies are
-byte-for-byte identical to 0.3.198 on every model tested. This is groundwork
-for a larger speed improvement on NVIDIA graphics cards, plus one small
-reduction in overhead that is honestly too small to measure on its own. **If
-0.3.198 is working for you, there is no urgency to update.**
+**Replaces 0.3.199-alpha, which was withdrawn before any node could install
+it.** That build generated nonsense on machines with an NVIDIA card — strings
+of repeated symbols instead of words — and was pulled within minutes of being
+published. It never became visible to nodes checking for updates, and none of
+ours were updated to it. If you somehow obtained it, update; if you are on
+0.3.198, you were never affected.
 
-**A little less work per word, on NVIDIA cards.** Producing one word means
-asking the graphics card to carry out roughly nineteen hundred small pieces of
-work, and on the machine used for testing the asking — not the doing — is what
-limits speed. The last step of each layer used to be two separate requests, one
-to apply a mathematical curve and one to multiply. They are now a single
-request, removing 66 of those nineteen hundred. That is too small to separate
-from normal run-to-run variation on the test machine, so **no speed figure is
-being claimed.** It is included because it proves out the mechanism the larger
-improvement depends on, and because those requests are the thing that currently
-limits generation speed.
+**What went wrong.** 0.3.199 moved the graphics work onto its own queue as
+preparation for a future speed improvement. That change was tested against a
+build configuration that leaves out two of the three graphics components the
+real release contains, so the combination that actually ships was never
+exercised. It is now switched off by default and kept only as an option for
+further investigation, so the queue behaviour is exactly what it was in
+0.3.198.
 
-**Groundwork: graphics work now has its own queue.** Recording a whole
-generation step once and replaying it for each word would remove nearly all of
-that per-request cost. The graphics driver refuses to record work sent down the
-default queue — which is the one this software has always used — so none of it
-could be recorded at all. That work now goes to a dedicated queue instead.
-Nothing else changes: the same calculations run in the same order, confirmed by
-checking that both settings produce an identical list of work and identical
-replies.
+**What this release does contain.** The one genuine improvement from 0.3.199,
+which was never implicated: the last step of each layer used to be two separate
+requests to the graphics card, one to apply a mathematical curve and one to
+multiply, and it is now a single request. That removes 66 of roughly nineteen
+hundred requests per word. It is too small to separate from normal run-to-run
+variation, so **no speed figure is claimed** — it is here because those
+requests are what currently limits generation speed, and this proves out the
+mechanism a larger improvement will use. Replies are byte-for-byte identical to
+0.3.198 on every model tested.
 
-This part has been confirmed to build for every supported graphics
-configuration, but it has only been *run* on a single card so far. If you use an
-NVIDIA card and see anything unexpected after updating, setting
-`SWARMLLM_CUDA_LEGACY_STREAM=1` restores the previous behaviour — and please do
-report it, because that is the kind of thing one machine cannot find alone.
+## [0.3.199-alpha] — WITHDRAWN
+
+Published briefly on 2026-09-22 and withdrawn the same hour: generation was
+broken on NVIDIA cards. Never visible to nodes checking for updates. Superseded
+by 0.3.200-alpha, which keeps its one good change and reverts the cause.
 
 ## [0.3.198-alpha] — 2026-09-22
 

@@ -1015,7 +1015,9 @@ stream, and a graph is the one change that collapses a token's ~513 launches and
 ~1,300 alloc/free calls into a single submission. Measured, not assumed —
 `examples/cuda_graph_probe.cu` arm A gets `cudaError 900`, and that arm is a null
 control that would report the claim wrong if capture were permitted.
-`SWARMLLM_CUDA_LEGACY_STREAM=1` restores the old stream.
+⛔ **The migration SHIPPED BROKEN in v0.3.199-alpha** — garbage from every
+model in a `--features cuda` build — and is now opt-in via
+`SWARMLLM_CUDA_OWN_STREAM=1`, default OFF. See gotcha #683.
 
 `Drop` has no synchronous fallback when the events are absent — it skips the two
 `stream.wait()` calls and frees as before — so disabling is strictly less work.

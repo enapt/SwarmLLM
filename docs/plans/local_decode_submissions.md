@@ -405,8 +405,9 @@ blocker, not a detail.**
 ### ▶ Stage 4a — move every `CudaDevice` off the legacy stream ✅ SHIPPED
 
 The precondition, done on its own so that the graph change has one variable.
-`BackendDevice::new` takes `context.new_stream()`; `SWARMLLM_CUDA_LEGACY_STREAM=1`
-restores the old one. **One line, because everything follows the device's
+⛔ **SHIPPED BROKEN and REVERTED to opt-in.** `BackendDevice::new` takes
+`context.new_stream()` only under `SWARMLLM_CUDA_OWN_STREAM=1`; the default is
+the legacy stream again. **One line, because everything follows the device's
 stream**: `CudaBlas::new` and `CudaRng::new` are handed it (cublas via
 `cublasSetStream_v2`), `candle-flash-attn` takes `dev.cuda_stream()`, every
 launch uses `self.stream.launch_builder`, `synchronize()` syncs `self.stream` —
