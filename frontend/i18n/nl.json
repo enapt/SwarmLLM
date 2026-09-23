@@ -1343,7 +1343,7 @@
   "utils.unknown_model": "Onbekend",
   "welcome.card1_body": "Gebruik het dropdown-menu bovenaan om te kiezen met welke AI je wilt chatten.",
   "welcome.card1_title": "Kies een model",
-  "welcome.card2_body": "Klik op + Model zoeken in de kop om open-source modellen op HuggingFace te bladeren.",
+  "welcome.card2_body": "Open het tabblad ‘De zwerm’ en kies ‘Zoeken op HuggingFace’ om open-source modellen te bekijken.",
   "welcome.card2_title": "Voeg meer modellen toe",
   "welcome.card3_body": "Auto-beheer houdt de modellen die je gebruikt en maakt ruimte vrij wanneer nodig. Schakel altijd om naar handmatig in Instellingen.",
   "welcome.card3_title": "Opslag regelt zichzelf",

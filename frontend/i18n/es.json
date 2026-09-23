@@ -1343,7 +1343,7 @@
   "utils.unknown_model": "Desconocido",
   "welcome.card1_body": "Usa el menú desplegable de arriba para elegir con qué IA quieres chatear.",
   "welcome.card1_title": "Elige un modelo",
-  "welcome.card2_body": "Pulsa + Buscar modelo en la barra superior para explorar modelos de código abierto en HuggingFace.",
+  "welcome.card2_body": "Abre la pestaña «El enjambre» y elige «Buscar en HuggingFace» para explorar modelos de código abierto.",
   "welcome.card2_title": "Añade más modelos",
   "welcome.card3_body": "La gestión automática conserva los modelos que usas y libera espacio cuando hace falta. Cámbialo a manual cuando quieras en Ajustes.",
   "welcome.card3_title": "El almacenamiento se gestiona solo",

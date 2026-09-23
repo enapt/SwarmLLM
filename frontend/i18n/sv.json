@@ -1343,7 +1343,7 @@
   "utils.unknown_model": "Okänd",
   "welcome.card1_body": "Använd rullgardinsmenyn högst upp för att välja vilken AI du vill chatta med.",
   "welcome.card1_title": "Välj en modell",
-  "welcome.card2_body": "Klicka på + Hitta modell i sidhuvudet för att bläddra bland öppna modeller på HuggingFace.",
+  "welcome.card2_body": "Öppna fliken ”Svärmen” och välj ”Sök HuggingFace” för att bläddra bland öppna modeller.",
   "welcome.card2_title": "Lägg till fler modeller",
   "welcome.card3_body": "Auto-hantering behåller modellerna du använder och frigör utrymme vid behov. Byt till Manuell när som helst i Inställningar.",
   "welcome.card3_title": "Lagringen sköter sig själv",

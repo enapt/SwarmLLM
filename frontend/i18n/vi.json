@@ -1343,7 +1343,7 @@
   "utils.unknown_model": "Không rõ",
   "welcome.card1_body": "Dùng menu thả xuống ở trên cùng để chọn AI bạn muốn trò chuyện.",
   "welcome.card1_title": "Chọn một mô hình",
-  "welcome.card2_body": "Bấm + Tìm mô hình ở thanh trên cùng để duyệt các mô hình mã nguồn mở trên HuggingFace.",
+  "welcome.card2_body": "Mở thẻ \"Bầy\" và chọn \"Tìm trên HuggingFace\" để duyệt các mô hình mã nguồn mở.",
   "welcome.card2_title": "Thêm mô hình khác",
   "welcome.card3_body": "Tự động quản lý giữ lại các mô hình bạn dùng và giải phóng dung lượng khi cần. Đổi sang Thủ công bất kỳ lúc nào trong Cài đặt.",
   "welcome.card3_title": "Bộ nhớ tự lo liệu",

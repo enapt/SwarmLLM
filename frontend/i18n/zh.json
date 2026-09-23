@@ -1343,7 +1343,7 @@
   "utils.unknown_model": "未知",
   "welcome.card1_body": "使用顶部的下拉菜单选择你想要对话的 AI。",
   "welcome.card1_title": "选择模型",
-  "welcome.card2_body": "点击顶部的+ 查找模型,从 HuggingFace 浏览开源模型。",
+  "welcome.card2_body": "打开「群组」标签页并选择「搜索 HuggingFace」，即可浏览开源模型。",
   "welcome.card2_title": "添加更多模型",
   "welcome.card3_body": "自动管理会保留你正在使用的模型,并在需要时释放空间。可以随时在设置中切换到手动模式。",
   "welcome.card3_title": "存储自动管理",

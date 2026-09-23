@@ -1343,7 +1343,7 @@
   "utils.unknown_model": "Sconosciuto",
   "welcome.card1_body": "Usa il menu a tendina in alto per scegliere con quale IA chattare.",
   "welcome.card1_title": "Scegli un modello",
-  "welcome.card2_body": "Clicca + Trova modello nell'intestazione per sfogliare i modelli open source su HuggingFace.",
+  "welcome.card2_body": "Apri la scheda «Lo sciame» e scegli «Cerca su HuggingFace» per sfogliare i modelli open source.",
   "welcome.card2_title": "Aggiungi altri modelli",
   "welcome.card3_body": "La gestione automatica mantiene i modelli che usi e libera spazio quando serve. Passa a Manuale quando vuoi dalle Impostazioni.",
   "welcome.card3_title": "Lo spazio si gestisce da solo",

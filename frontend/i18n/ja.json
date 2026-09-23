@@ -1343,7 +1343,7 @@
   "utils.unknown_model": "不明",
   "welcome.card1_body": "上部のドロップダウンで、チャットしたい AI を選びます。",
   "welcome.card1_title": "モデルを選ぶ",
-  "welcome.card2_body": "ヘッダーの+ モデルを探すをクリックして、HuggingFace のオープンソースモデルを参照できます。",
+  "welcome.card2_body": "「スウォーム」タブを開いて「HuggingFace を検索」を選ぶと、オープンソースモデルを参照できます。",
   "welcome.card2_title": "もっとモデルを追加",
   "welcome.card3_body": "自動管理は使用中のモデルを残し、必要に応じて空き容量を作ります。設定でいつでも手動に切り替えられます。",
   "welcome.card3_title": "ストレージは自動で管理",

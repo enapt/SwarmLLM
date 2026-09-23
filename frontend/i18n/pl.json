@@ -1343,7 +1343,7 @@
   "utils.unknown_model": "Nieznany",
   "welcome.card1_body": "Użyj rozwijanego menu u góry, aby wybrać, z jakim AI chcesz rozmawiać.",
   "welcome.card1_title": "Wybierz model",
-  "welcome.card2_body": "Kliknij + Znajdź model w nagłówku, aby przeglądać modele open-source na HuggingFace.",
+  "welcome.card2_body": "Otwórz kartę „Rój” i wybierz „Szukaj w HuggingFace”, aby przeglądać modele open-source.",
   "welcome.card2_title": "Dodaj więcej modeli",
   "welcome.card3_body": "Auto-zarządzanie zachowuje używane modele i zwalnia miejsce w razie potrzeby. W każdej chwili przełącz na tryb ręczny w Ustawieniach.",
   "welcome.card3_title": "Pamięć zarządza się sama",

@@ -1343,7 +1343,7 @@
   "utils.unknown_model": "Neznámý",
   "welcome.card1_body": "V rozbalovacím menu nahoře vyberte, s jakou AI chcete chatovat.",
   "welcome.card1_title": "Vyberte model",
-  "welcome.card2_body": "Klikněte v hlavičce na + Najít model a procházejte open-source modely na HuggingFace.",
+  "welcome.card2_body": "Otevřete kartu „Roj“ a zvolte „Hledat na HuggingFace“, kde můžete procházet open-source modely.",
   "welcome.card2_title": "Přidat další modely",
   "welcome.card3_body": "Automatická správa udržuje modely, které používáte, a uvolní místo, když je potřeba. V Nastavení můžete kdykoli přepnout na Ruční.",
   "welcome.card3_title": "Úložiště se postará samo",

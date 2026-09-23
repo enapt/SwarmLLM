@@ -1343,7 +1343,7 @@
   "utils.unknown_model": "Tidak diketahui",
   "welcome.card1_body": "Gunakan menu drop-down di atas untuk memilih AI yang ingin Anda ajak ngobrol.",
   "welcome.card1_title": "Pilih model",
-  "welcome.card2_body": "Klik + Cari model di bagian atas untuk menjelajah model open-source di HuggingFace.",
+  "welcome.card2_body": "Buka tab \"Kawanan\" lalu pilih \"Cari HuggingFace\" untuk menjelajah model open-source.",
   "welcome.card2_title": "Tambah lebih banyak model",
   "welcome.card3_body": "Kelola otomatis akan menyimpan model yang Anda pakai dan membebaskan ruang saat dibutuhkan. Beralih ke Manual kapan saja di Pengaturan.",
   "welcome.card3_title": "Penyimpanan terurus sendiri",

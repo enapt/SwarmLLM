@@ -1343,7 +1343,7 @@
   "utils.unknown_model": "Unknown",
   "welcome.card1_body": "Use the dropdown at the top to choose which AI you want to chat with.",
   "welcome.card1_title": "Pick a model",
-  "welcome.card2_body": "Click + Find model in the header to browse open-source models from HuggingFace.",
+  "welcome.card2_body": "Open the Models tab and choose Search HuggingFace to browse open-source models.",
   "welcome.card2_title": "Add more models",
   "welcome.card3_body": "Auto-manage keeps the models you use and frees space when needed. Switch to Manual anytime in Settings.",
   "welcome.card3_title": "Storage takes care of itself",

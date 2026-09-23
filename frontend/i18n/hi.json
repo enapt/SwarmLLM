@@ -1343,7 +1343,7 @@
   "utils.unknown_model": "अज्ञात",
   "welcome.card1_body": "ऊपर के ड्रॉपडाउन से चुनें कि आप किस AI से बात करना चाहते हैं।",
   "welcome.card1_title": "एक मॉडल चुनें",
-  "welcome.card2_body": "हेडर में + मॉडल खोजें पर क्लिक करके HuggingFace के ओपन-सोर्स मॉडल देखें।",
+  "welcome.card2_body": "\"स्वार्म\" टैब खोलें और ओपन-सोर्स मॉडल देखने के लिए \"HuggingFace खोजें\" चुनें।",
   "welcome.card2_title": "और मॉडल जोड़ें",
   "welcome.card3_body": "ऑटो-मैनेज आपके इस्तेमाल किए मॉडलों को रखता है और जरूरत पर जगह खाली करता है। कभी भी Settings में Manual पर बदलें।",
   "welcome.card3_title": "स्टोरेज खुद संभल जाता है",

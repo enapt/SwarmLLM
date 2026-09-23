@@ -1343,7 +1343,7 @@
   "utils.unknown_model": "Bilinmiyor",
   "welcome.card1_body": "Üstteki açılır menüyü kullanarak hangi yapay zekâyla sohbet etmek istediğinizi seçin.",
   "welcome.card1_title": "Bir model seçin",
-  "welcome.card2_body": "Başlıktaki + Model bul düğmesine tıklayıp HuggingFace'teki açık kaynak modellere göz atın.",
+  "welcome.card2_body": "\"Sürü\" sekmesini açın ve açık kaynak modellere göz atmak için \"HuggingFace'te ara\" seçeneğini seçin.",
   "welcome.card2_title": "Daha fazla model ekleyin",
   "welcome.card3_body": "Otomatik yönetim kullandığınız modelleri tutar, gerektiğinde yer açar. İstediğinizde Ayarlardan Manuel'e geçebilirsiniz.",
   "welcome.card3_title": "Depolama kendini yönetir",

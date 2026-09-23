@@ -1343,7 +1343,7 @@
   "utils.unknown_model": "Unbekannt",
   "welcome.card1_body": "Über das Dropdown oben wählst du, mit welcher KI du chatten möchtest.",
   "welcome.card1_title": "Modell auswählen",
-  "welcome.card2_body": "Klick auf + Modell finden in der Kopfleiste, um Open-Source-Modelle auf HuggingFace zu durchsuchen.",
+  "welcome.card2_body": "Öffne den Tab „Der Schwarm“ und wähle „HuggingFace durchsuchen“, um Open-Source-Modelle zu durchsuchen.",
   "welcome.card2_title": "Weitere Modelle hinzufügen",
   "welcome.card3_body": "Die automatische Verwaltung behält die Modelle, die du benutzt, und macht Platz, wenn es nötig wird. Jederzeit in den Einstellungen auf Manuell umschalten.",
   "welcome.card3_title": "Speicherplatz regelt sich von selbst",

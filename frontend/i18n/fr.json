@@ -1343,7 +1343,7 @@
   "utils.unknown_model": "Inconnu",
   "welcome.card1_body": "Utilisez le menu déroulant en haut pour choisir avec quelle IA vous voulez discuter.",
   "welcome.card1_title": "Choisissez un modèle",
-  "welcome.card2_body": "Cliquez sur + Trouver un modèle dans la barre du haut pour parcourir les modèles open-source sur HuggingFace.",
+  "welcome.card2_body": "Ouvrez l'onglet « L'essaim » et choisissez « Rechercher sur HuggingFace » pour parcourir les modèles open-source.",
   "welcome.card2_title": "Ajoutez d'autres modèles",
   "welcome.card3_body": "La gestion automatique garde les modèles que vous utilisez et libère de l'espace quand c'est nécessaire. Passez en mode manuel à tout moment depuis les Paramètres.",
   "welcome.card3_title": "Le stockage se gère tout seul",
