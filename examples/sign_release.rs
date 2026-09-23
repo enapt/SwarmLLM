@@ -76,7 +76,21 @@ fn read_password() -> Result<String, Box<dyn Error>> {
         )?)
     } else {
         let mut line = String::new();
-        std::io::stdin().lock().read_line(&mut line)?;
+        // EOF with NOTHING read means no terminal and nothing piped — not a
+        // password at all. Passed on as "", it came back from the key as
+        // "Wrong password", which sent the one person who can sign to re-type a
+        // correct password twice: a wrapper had run this in the background,
+        // and a background job's stdin is /dev/null (gotcha #691). A piped
+        // empty password still arrives as a newline and is unaffected.
+        if std::io::stdin().lock().read_line(&mut line)? == 0 {
+            return Err(
+                "no terminal to ask for the password on, and nothing on standard \
+                        input — run this from a terminal. If you did, something between \
+                        the terminal and this program is swallowing its input (a wrapper \
+                        that backgrounds the command gives it /dev/null)"
+                    .into(),
+            );
+        }
         Ok(line.trim_end_matches(['\r', '\n']).to_string())
     }
 }
