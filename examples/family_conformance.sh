@@ -154,6 +154,11 @@ offline_mode = true
 # artifact on its native device.
 [inference]
 gpu_layers = 0
+
+# A fresh data dir is a first run, and a first run opens the dashboard in the
+# browser: one stray tab per harness run, pointing at a port that dies with it.
+[ui]
+open_browser_on_start = false
 TOML
 
 echo "conformance: $("$BIN" --version) on port $PORT"

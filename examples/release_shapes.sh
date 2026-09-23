@@ -47,6 +47,11 @@ bootstrap_peers = []
 disable_default_bootstrap = true
 enable_mdns = false
 gossip_network_id = "swarmllm-shapes"
+
+# A fresh data dir is a first run, and a first run opens the dashboard in the
+# browser: one stray tab per harness run, pointing at a port that dies with it.
+[ui]
+open_browser_on_start = false
 TOML
 
 echo "shapes: $("$BIN" --version) on port $PORT"
