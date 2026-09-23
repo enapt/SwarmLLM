@@ -152,13 +152,16 @@ UNDETERMINED and never a fix — use it BEFORE blaming a change, especially your
 
 ## Status
 
-**v0.3.200-alpha is the live release (2026-09-23). `main` is AHEAD of it and
-unreleased**: the real fix for .199 (flash-attn launched on stream 0), fused
-residual add+norm, manifest Trickle suppression (idle gossip), hourly update
-checks for .deb/.rpm, a docs sweep + new README, honest privacy wording, a
-working Models-tab Download (`all_shards`) and proxies no longer getting admin
-(`api::origin`). The next release is the first to carry them — follow
-`memory/release_gate.md`, then re-measure idle gossip (`memory/next_up.md`).
+**v0.3.201-alpha is the live release (2026-09-23), signed and on both nodes.**
+Its headline is **#93**: a split reply decoded from an EMPTY cache — promotion
+retired a pinned worker once per token — now fixed three ways
+(`WorkerHandle::in_use`, the pin check, and a worker that REFUSES a forward
+whose conversation is gone). **Next: FUTURE_WORK #95** (the second request for a
+split model is refused for memory) → `memory/next_up.md`.
+
+⚠ **Behaviour gate = `reply_ab.sh` + a SPLIT**, not conformance alone:
+`family_conformance.sh` pins `gpu_layers = 0` and never splits, so it could not
+see #93. Scripts + recipe: `memory/gate_result_0201.md`.
 
 ⛔ **v0.3.199-alpha SHIPPED BROKEN and was WITHDRAWN** — cleared under
 `--features candle-cuda` (no flash-attn, no llama backend) while the release is
