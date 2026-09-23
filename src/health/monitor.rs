@@ -95,6 +95,25 @@ const WSL_FIREWALL_GRACE: std::time::Duration = std::time::Duration::from_secs(3
 /// cannot be addressed to the one node that needs it.
 const FULL_REANNOUNCE_EVERY_TICKS: u64 = 10;
 
+/// How long a manifest the WHOLE SWARM was just handed stays said.
+///
+/// Within this window of a gossiped copy of exactly our manifest — anyone's,
+/// ours included — this node does not re-announce it, on a full round or
+/// otherwise. That is RFC 6206's Trickle suppression: a node that has
+/// recently heard exactly what it was about to say says nothing. Without it
+/// every holder re-announced on its own full round, so a model held by *k*
+/// nodes went out *k* times every 5 minutes; measured on the release node
+/// 2026-09-23 at 0.22 manifests a second, ~35 KB each, **87% of all the
+/// gossip it received**, none of it news.
+///
+/// Why 30 minutes is safe: nothing else leans on the periodic round any more.
+/// A change is published the tick it happens (a different hash is never
+/// suppressed); a newcomer is caught up point to point until delivered; the
+/// registry never expires a manifest that stops being repeated. What is left
+/// for the periodic round is repairing a gossip message lost in flight, and
+/// that now takes at most this window plus one round instead of one round.
+const MANIFEST_QUIET_WINDOW: Duration = Duration::from_secs(30 * 60);
+
 /// Is this a round where every manifest is BROADCAST, changed or not?
 ///
 /// Pure so the truth table can be asserted directly — the expensive half of
@@ -136,12 +155,19 @@ fn region_summary_digest(summary: &crate::types::RegionShardSummary) -> u64 {
 /// model, or `None` if it never has. A manifest nobody has been told about is
 /// always sent — "unchanged" is only meaningful against something previously
 /// announced.
+///
+/// `swarm_heard_it` — the swarm was gossiped exactly this hash within
+/// `MANIFEST_QUIET_WINDOW` — overrides both. That is the Trickle suppression,
+/// and it is safe on the "changed" arm too: a change we LEARNED from gossip is
+/// one the swarm already has, while a change we made ourselves cannot have
+/// been heard by anyone yet and so still goes out.
 fn manifest_needs_broadcast(
     last_announced: Option<&[u8; 32]>,
     current_hash: &[u8; 32],
     full_round: bool,
+    swarm_heard_it: bool,
 ) -> bool {
-    full_round || last_announced.is_none_or(|prev| prev != current_hash)
+    !swarm_heard_it && (full_round || last_announced.is_none_or(|prev| prev != current_hash))
 }
 
 /// How long a download tracking entry can sit unchanged before being treated
@@ -1061,18 +1087,23 @@ impl HealthMonitor {
     /// Two things keep discovery working, because a newcomer that cannot see a
     /// model cannot run it and that failure has happened before (gotcha #296):
     ///
-    /// 1. **A full round every `FULL_REANNOUNCE_EVERY_TICKS` broadcasts**, the
-    ///    same anti-entropy the shard announce beside this already does, and for
-    ///    the same reason. Holders' counters are independently phased, so a
-    ///    model held by *k* nodes is re-announced roughly *k* times per cycle.
-    /// 2. **A full round whenever a peer we have not announced to appears.**
-    ///    That is precisely the case the per-tick flood was paying for — someone
-    ///    new who needs the whole picture — and it costs one round per join
-    ///    instead of one round per 30 seconds for ever.
+    /// 1. **A newcomer is caught up point to point**, every manifest sent
+    ///    directly and retried each tick until delivered. A broadcast cannot be
+    ///    addressed to the one node that needs it.
+    /// 2. **A full round every `FULL_REANNOUNCE_EVERY_TICKS` broadcasts**, the
+    ///    anti-entropy that repairs a gossip message lost in flight — minus any
+    ///    manifest the whole swarm was gossiped within `MANIFEST_QUIET_WINDOW`
+    ///    (RFC 6206's Trickle suppression). Holders' counters are phased
+    ///    independently, so without that a model held by *k* nodes went out *k*
+    ///    times per round; with it, once per window from whichever holder's
+    ///    round comes up first.
     async fn broadcast_manifests(&mut self) {
         let our_id = self.shared_state.identity.node_id().clone();
 
         self.manifest_announce_counter += 1;
+        self.shared_state
+            .models
+            .forget_manifests_heard_before(MANIFEST_QUIET_WINDOW);
 
         // Anyone connected that the last round did not reach. Compared as a set
         // rather than a count so a simultaneous join and leave is still a join:
@@ -1117,15 +1148,30 @@ impl HealthMonitor {
             .retain(|id, _| still_gossiped.contains(id));
 
         let mut sent = 0usize;
+        let mut suppressed = 0usize;
         for manifest in &manifests {
             // `manifest_hash` covers the shard table AND every tensor entry
             // (`ModelManifest::compute_hash`), so it is the right answer to
             // "would a peer see anything new?".
+            let swarm_heard_it = self.shared_state.models.manifest_heard_within(
+                &manifest.id,
+                &manifest.manifest_hash,
+                MANIFEST_QUIET_WINDOW,
+            );
             if !manifest_needs_broadcast(
                 self.last_announced_manifests.get(&manifest.id),
                 &manifest.manifest_hash,
                 full_round,
+                swarm_heard_it,
             ) {
+                if swarm_heard_it {
+                    // The swarm has this hash, so it no longer counts as a
+                    // change still owed — otherwise it would go out as one the
+                    // moment the window lapsed, on an ordinary round.
+                    self.last_announced_manifests
+                        .insert(manifest.id.clone(), manifest.manifest_hash);
+                    suppressed += 1;
+                }
                 continue;
             }
 
@@ -1138,6 +1184,14 @@ impl HealthMonitor {
             }
             self.last_announced_manifests
                 .insert(manifest.id.clone(), manifest.manifest_hash);
+            // Our own broadcast is gossip the swarm has now heard — GossipSub
+            // never hands a node its own message back, so without this we would
+            // re-announce on our next full round what we said a minute ago.
+            self.shared_state.models.note_manifest_heard(
+                &manifest.id,
+                manifest.manifest_hash,
+                crate::types::MessageTransport::Gossip,
+            );
             sent += 1;
 
             // Also broadcast HfSourceGossip so late-joining peers discover the HF source
@@ -1196,16 +1250,22 @@ impl HealthMonitor {
         }
 
         // Only peers actually reached may be recorded as told; a peer left out
-        // is retried next tick rather than latched as done.
-        if full_round {
-            self.peers_told_about_manifests = connected;
-        } else {
-            self.peers_told_about_manifests.extend(caught_up);
-            self.peers_told_about_manifests
-                .retain(|node_id| connected.contains(node_id));
-        }
-        if sent > 0 {
-            tracing::debug!(sent, full_round, "DIAG: broadcast model manifests");
+        // is retried next tick rather than latched as done. A full round used
+        // to mark EVERY connected peer told, on the grounds that the broadcast
+        // had just reached them — no longer true once a full round can be
+        // suppressed, and a newcomer whose direct catch-up failed would then
+        // be latched as told with nothing sent to it at all.
+        self.peers_told_about_manifests.extend(caught_up);
+        self.peers_told_about_manifests
+            .retain(|node_id| connected.contains(node_id));
+        if sent > 0 || suppressed > 0 {
+            tracing::debug!(
+                sent,
+                suppressed,
+                full_round,
+                "DIAG: broadcast model manifests (suppressed = the swarm was gossiped \
+                 that exact manifest within the quiet window)"
+            );
         }
     }
 
@@ -2084,30 +2144,58 @@ mod tests {
     fn an_unchanged_manifest_is_not_rebroadcast() {
         let hash = [7u8; 32];
         assert!(
-            !manifest_needs_broadcast(Some(&hash), &hash, false),
+            !manifest_needs_broadcast(Some(&hash), &hash, false, false),
             "a manifest a peer has already been sent, unchanged, on an ordinary \
              round, is the 825 KB this node must stop republishing every 30 s"
         );
     }
 
-    /// The three reasons it still goes out. Each is a way a peer could otherwise
-    /// be left without a model it needs, and a node that cannot see a model
-    /// cannot run it — that failure has shipped before (gotcha #296).
+    /// The three reasons it still goes out when the swarm has NOT just heard
+    /// it. Each is a way a peer could otherwise be left without a model it
+    /// needs, and a node that cannot see a model cannot run it — that failure
+    /// has shipped before (gotcha #296).
     #[test]
     fn a_manifest_still_goes_out_when_anyone_could_be_missing_it() {
         let hash = [7u8; 32];
         let other = [9u8; 32];
         assert!(
-            manifest_needs_broadcast(None, &hash, false),
+            manifest_needs_broadcast(None, &hash, false, false),
             "never announced — nobody has it"
         );
         assert!(
-            manifest_needs_broadcast(Some(&other), &hash, false),
+            manifest_needs_broadcast(Some(&other), &hash, false, false),
             "changed since we announced it — peers hold a stale one"
         );
         assert!(
-            manifest_needs_broadcast(Some(&hash), &hash, true),
-            "a full round sends everything, which is what makes a late joiner converge"
+            manifest_needs_broadcast(Some(&hash), &hash, true, false),
+            "a full round repairs a lost message, so it sends what nobody has \
+             repeated within the quiet window"
+        );
+    }
+
+    /// Trickle suppression (RFC 6206): a manifest the whole swarm was gossiped
+    /// within `MANIFEST_QUIET_WINDOW` is not repeated — on a full round, and
+    /// not as a "change" we merely learned from that same gossip.
+    ///
+    /// Without it every holder re-announced on its own full round: measured on
+    /// the release node 2026-09-23, 0.22 manifests a second at ~35 KB each
+    /// were 87% of the gossip it received, and none of them was news.
+    #[test]
+    fn a_manifest_the_swarm_just_heard_is_not_repeated() {
+        let hash = [7u8; 32];
+        let other = [9u8; 32];
+        assert!(
+            !manifest_needs_broadcast(Some(&hash), &hash, true, true),
+            "a full round must not repeat what another holder said minutes ago \
+             — that repetition, from every holder, was 87% of received gossip"
+        );
+        assert!(
+            !manifest_needs_broadcast(Some(&other), &hash, false, true),
+            "a change we learned from gossip is one the swarm already has"
+        );
+        assert!(
+            !manifest_needs_broadcast(None, &hash, true, true),
+            "a model we just picked up, whose manifest the swarm just heard"
         );
     }
 
@@ -2196,12 +2284,13 @@ mod tests {
         );
         assert!(
             manifest_round_is_full(FULL_REANNOUNCE_EVERY_TICKS),
-            "the anti-entropy round still fires on its own, so a peer that \
-             missed a direct catch-up converges within one interval"
+            "the anti-entropy round still fires on its own, to repair a gossip \
+             message lost in flight"
         );
-        // The bound that makes the direct catch-up safe to rely on: a peer the
-        // point-to-point send never reached still gets everything within one
-        // full-round interval, and nothing about a join changes that.
+        // A newcomer does not depend on it: its direct catch-up is retried every
+        // tick until delivered, and it is never marked told without one. What
+        // the full round repairs is a LOST gossip message, within
+        // `MANIFEST_QUIET_WINDOW` plus one interval.
         assert!(
             (1..FULL_REANNOUNCE_EVERY_TICKS).all(|counter| !manifest_round_is_full(counter)),
             "no tick inside the interval broadcasts everything"

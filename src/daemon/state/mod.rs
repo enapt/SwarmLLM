@@ -1156,6 +1156,7 @@ impl SharedState {
                 disputed_shards: dashmap::DashSet::new(),
                 shard_download_backoff: DashMap::new(),
                 geometry_probe_retry_after: DashMap::new(),
+                manifest_heard: DashMap::new(),
                 parallax_stability: DashMap::new(),
                 cross_node_prefix_index: DashMap::new(),
                 peer_prefix_blocks: DashMap::new(),

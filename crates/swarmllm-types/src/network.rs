@@ -26,6 +26,25 @@ pub struct AuthenticatedMessage {
     /// Transport-authenticated sender NodeId. None only for locally-generated messages.
     pub sender: Option<NodeId>,
     pub message: SwarmMessage,
+    /// How it reached us — which decides what its arrival PROVES. Required,
+    /// so a new delivery path cannot leave it to a default.
+    pub transport: MessageTransport,
+}
+
+/// How an inbound message reached this node. Local only; never on the wire.
+///
+/// The two say different things about everyone ELSE. GossipSub floods a
+/// message to every subscriber, so receiving one is evidence the whole swarm
+/// was handed it. A request-response delivery, a relayed envelope or a tensor
+/// stream reached this node alone — the point-to-point manifest catch-up a
+/// newcomer gets is the case that matters, since it arrives as an ordinary
+/// `ModelManifest` and must not be mistaken for a swarm-wide announcement.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MessageTransport {
+    /// Delivered by GossipSub: every subscriber was sent it.
+    Gossip,
+    /// Delivered to this node alone (request-response, relay, tensor stream).
+    Direct,
 }
 
 /// Top-level enum for all protocol messages sent over libp2p.

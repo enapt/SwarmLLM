@@ -442,6 +442,7 @@ async fn handle_inbound_stream(
         let auth = crate::types::AuthenticatedMessage {
             sender: shared_state.peer_to_node_id_from_registry(&peer_id),
             message: SwarmMessage::LayerForward(forward),
+            transport: crate::types::MessageTransport::Direct,
         };
         if outbound_tx.send(auth).await.is_err() {
             // Guard drop will remove the entry.

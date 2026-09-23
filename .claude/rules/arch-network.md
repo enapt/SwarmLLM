@@ -498,6 +498,17 @@ and served nothing while spending ~2.6 Mbit/s.
   bit. The periodic full round stays as the bound on a catch-up that failed.
   BitTorrent draws the same line: BEP 3's bitfield goes to the peer that
   connected, and only per-piece `have` deltas go to everyone.
+- **What the swarm just HEARD is not repeated** (RFC 6206, Trickle, *k* = 1).
+  Every holder re-announced its manifests on its own full round, so a model
+  held by *k* nodes went out *k* times per round — **87% of an idle node's
+  received gossip** (2026-09-23), none of it news. `state.models.manifest_heard`
+  holds the last hash the whole swarm was gossiped per model;
+  `broadcast_manifests` stays quiet about that exact hash for
+  `MANIFEST_QUIET_WINDOW`. ⚠ **Only a GOSSIPED arrival counts** — a point-to-point
+  catch-up reached one node, and counting it lets reconnects silence every
+  holder. `AuthenticatedMessage.transport` is required for that reason, and
+  `note_manifest_heard` ignores `Direct`. ⚠ Record only AFTER verification, and
+  never suppress a DIFFERENT hash — a disagreement is information.
 
 ## A counter named for an outcome may only be counting the attempt
 
@@ -561,8 +572,12 @@ its per-topic counters cannot rank two fixes that target different variants on
 it. `state.metrics.gossip_by_kind` counts received gossip by
 `SwarmMessage::kind_name` — measured 2026-09-21: **`ModelManifest` is 86.4% of
 inbound gossip bytes at 32 KB/msg**, `NodeCapabilityUpdate` 3.4%. **So the
-manifest shape is the fix worth building and the capability change-gate is
-not.** ⚠ And a manifest averages **32 KB, not the 13 KB** long carried in the
+manifest is the cost worth attacking and the capability change-gate is not.**
+⚠ **Its REPETITION was attacked first (Trickle, above), not its size.** Dropping
+the table from the wire is a gossip FORMAT change: ingestion verifies the hash
+too, older nodes two hops away would receive it, and the documented route is a
+new versioned topic (`docs/invariants/network.md` § "The repetition, not the
+size"). ⚠ And a manifest averages **32 KB, not the 13 KB** long carried in the
 queue — that came from a per-topic average across all six variants. **An
 average over a mixed population is not a figure about any member of it.**
 Counted on RECEIVE, because an idle node's upload is relaying and what it

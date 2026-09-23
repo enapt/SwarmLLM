@@ -142,6 +142,7 @@ impl NetworkManager {
                             let authed = crate::types::AuthenticatedMessage {
                                 sender: Some(sender_node_id),
                                 message: msg,
+                                transport: crate::types::MessageTransport::Gossip,
                             };
                             if let Err(e) = self.outbound_tx.try_send(authed) {
                                 if let Some(burst) = self

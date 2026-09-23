@@ -702,6 +702,7 @@ impl NetworkManager {
                     let msg = crate::types::AuthenticatedMessage {
                         sender: Some(node_id),
                         message: SwarmMessage::LayerForward(dispatch_forward),
+                        transport: crate::types::MessageTransport::Direct,
                     };
                     if let Err(e) = outbound_tx.try_send(msg) {
                         if let Some(burst) = shared_state

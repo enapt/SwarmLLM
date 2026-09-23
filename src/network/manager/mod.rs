@@ -887,6 +887,9 @@ impl NetworkManager {
             .try_send(crate::types::AuthenticatedMessage {
                 sender,
                 message: msg,
+                // Both callers are point-to-point: an inbound request-response
+                // message, or the inner message of a relayed envelope.
+                transport: crate::types::MessageTransport::Direct,
             })
     }
 

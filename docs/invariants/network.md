@@ -1879,3 +1879,110 @@ from the volatile ones, or the volatile ones sent rarely. And a manifest at 13 K
 is still a broadcast payload; the BEP 9 shape (gossip `(model_id,
 manifest_hash)`, fetch the tensor table on demand, verify against the hash) is
 the remaining structural fix.
+
+## The repetition, not the size: holders re-announcing each other (2026-09-23)
+
+### What was measured
+
+The release node on v0.3.200, 1 h up, 280 s window, zero inference, no downloads:
+
+```
+transport   42.2 KB/s in, 41.9 KB/s out  (~0.34 Mbit/s each way, ~110 GB/month)
+gossip      39.9 KB/s received as delivered by the mesh, ~9 KB/s after dedup
+by kind     ModelManifest      86.8%   0.22 msg/s   34,892 B/msg
+            NodeCapabilityUpdate 7.9%   0.20 msg/s    3,617 B/msg
+            everything else      5.3%
+```
+
+So after .196/.197 the manifest is still ~87% of what an idle node receives, but
+the SHAPE of the cost is now visible: 0.22 manifests a second is **~66 per
+5-minute round**, and in that window the registry logged no manifest that
+genuinely changed. Every one was a holder re-announcing, on its own full round,
+a manifest another holder had announced minutes earlier. Holders' round
+counters are phased independently (by design, so they do not burst together),
+so a model held by *k* nodes went out *k* times per round.
+
+### What it replaced, and why not the tensor-table redesign
+
+FUTURE_WORK #91's plan was to stop SENDING the tensor table (~92% of a
+manifest), letting receivers derive it from the GGUF header. Reading the code
+end to end showed it was more than "reorder one security check":
+
+1. `verify_hash_strict` runs on gossip INGESTION too (`daemon/dispatch/mod.rs`,
+   the `ModelManifest` arm), not only in `acquisition.rs` — the entry said
+   registration did not verify. A node that hears of a brand-new model has no
+   shards and no header, so it could not verify a table-less manifest there.
+2. There is no peer-to-peer way to fetch `gguf_header.bin`; a node gets it from
+   shard 0, the original GGUF or HuggingFace. (Loading needs it anyway, so
+   deriving at LOAD time is always possible — the problem is only ingestion.)
+3. GossipSub forwards the same bytes to every mesh peer, so "omit the table
+   when every CONNECTED peer supports it" still reaches older nodes two hops
+   away, which reject it (a rate-limited warning, no penalty) and stop learning
+   those models. The documented way to change a gossip format is a new
+   versioned TOPIC and a dual-subscription window — Ethereum's consensus layer
+   puts the fork digest in every topic name for exactly this
+   (`consensus-specs/specs/phase0/p2p-interface.md`: "Changing gossipsub/broadcasts
+   requires a coordinated upgrade where all clients start publishing to the new
+   topic together").
+
+That is a protocol migration. Suppressing the repetition gets the same order of
+saving with no wire change at all.
+
+### The rule: RFC 6206 (Trickle) suppression
+
+"A node that has recently heard exactly what it was about to say says nothing."
+Trickle was designed for this — many nodes holding consistent data, each
+tempted to re-advertise it on a timer — and its central parameter is the
+redundancy constant *k*: transmit only if fewer than *k* consistent copies were
+heard this interval. Here *k* = 1 and the interval is `MANIFEST_QUIET_WINDOW`
+(30 min):
+
+- `state.models.manifest_heard` records `(model → hash, when)` for a manifest
+  the WHOLE SWARM was handed — a verified gossiped copy, or our own broadcast.
+- `broadcast_manifests` skips any manifest whose exact hash is in there and
+  recent, on a full round or as a "change" it merely learned from that gossip.
+- A DIFFERENT hash is never suppressed: two holders disagreeing is information.
+
+Two details decide whether it is safe, and both are enforced by construction:
+
+- **Only GOSSIP proves the swarm heard it.** The point-to-point catch-up a
+  newcomer is sent arrives as an ordinary `ModelManifest`. Counting it as heard
+  would let reconnects (~7 an hour on an 8-peer node) keep every holder of a
+  model quiet while the swarm never heard it. `AuthenticatedMessage.transport`
+  is now a REQUIRED field, set at each of its four construction sites, and
+  `note_manifest_heard` takes it as a parameter and ignores `Direct`.
+- **Recorded only after `verify_hash_strict`**, so a forged copy carrying a real
+  hash cannot silence the holders who would repair it.
+
+It also closed a latent gap: a full round used to mark every connected peer as
+"told", reasoning that the broadcast had just reached them. With suppression a
+full round may broadcast nothing, so "told" now means only what the direct
+catch-up actually delivered, retried each tick until it lands.
+
+What the periodic round is still for, and why 30 minutes is enough: changes go
+out the tick they happen; newcomers are caught up point to point; the registry
+never expires a manifest that stops being repeated (`registry.rs` has no
+manifest `last_seen` — its only staleness sweep is for shard-holder claims).
+What remains is repairing a gossip message lost in flight, and that bound moves
+from one round (5 min) to the window plus one round.
+
+### Measured after (A/B, 2026-09-23)
+
+Two isolated nodes (private `gossip_network_id`, no mDNS, no bootstrap), both
+holding tinyllama, 40 minutes per arm, identical config — only the binary moved.
+Metric: `gossip_recv_by_kind[ModelManifest].recv_msgs`, which on a two-node
+network is exactly what the OTHER node gossiped.
+
+```
+                     received by A   received by B
+v0.3.200                  11              11        (one more every ~5 min)
+Trickle build              1               3
+```
+
+The Trickle build's sends, all of them: each node's one-time startup
+announcement; A's first monitor round (07:42:50); and ONE re-announcement for
+the pair at 08:14:11, A's first full round after the window lapsed — B's full
+round came up the same second, had already heard A's, and stayed quiet. Every
+other round on both nodes (144 of 146) logged `sent=0 suppressed=1`, so the
+mechanism fired rather than the outcome changing for some other reason.
+Scripts: `trickle_ab_v2.sh` (session e3b7669c scratchpad).

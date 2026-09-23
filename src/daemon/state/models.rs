@@ -128,6 +128,22 @@ pub struct ModelMgmt {
     /// Written only by `SharedState::ensure_model_geometry`. Absent means
     /// "never tried"; `Instant` is when another attempt is allowed.
     pub geometry_probe_retry_after: DashMap<crate::types::ModelId, std::time::Instant>,
+    /// The last manifest the WHOLE SWARM was handed for each model, and when:
+    /// `model → (manifest_hash, at)`.
+    ///
+    /// This is what lets a holder stay quiet. Every holder of a model
+    /// re-announces its manifest on the periodic full round, so a model held
+    /// by *k* nodes went out *k* times per round — 0.22 manifests a second at
+    /// ~35 KB each reached the release node on 2026-09-23, **87% of the gossip
+    /// it received**, and none of them said anything new. RFC 6206 (Trickle)
+    /// is the standard answer: a node that has recently heard exactly what it
+    /// was about to say says nothing.
+    ///
+    /// Written by `note_manifest_heard`, from the dispatcher for a VERIFIED
+    /// manifest and from `HealthMonitor::broadcast_manifests` for our own
+    /// broadcast; read by `manifest_heard_within`. Only a GOSSIPED arrival
+    /// counts — see `MessageTransport`.
+    pub manifest_heard: DashMap<crate::types::ModelId, ([u8; 32], std::time::Instant)>,
     pub model_request_counts: DashMap<crate::types::ModelId, AtomicU64>,
     pub resource_schedule: RwLock<crate::config::ResourceSchedule>,
     pub prune_history: RwLock<VecDeque<crate::types::PruneEvent>>,
@@ -528,6 +544,49 @@ impl ModelMgmt {
         self.shard_download_backoff.remove(shard_id);
     }
 
+    /// Record that the swarm was handed `model`'s manifest with this hash, now.
+    ///
+    /// The transport is a REQUIRED argument, and anything but gossip is
+    /// ignored: a point-to-point catch-up reached this node alone, so it is no
+    /// evidence that anyone else has the manifest. Counting it would let peers
+    /// reconnecting — about seven times an hour on an 8-peer node — keep every
+    /// holder of a model quiet while the rest of the swarm never heard it.
+    pub fn note_manifest_heard(
+        &self,
+        model: &crate::types::ModelId,
+        manifest_hash: [u8; 32],
+        transport: crate::types::MessageTransport,
+    ) {
+        if transport != crate::types::MessageTransport::Gossip {
+            return;
+        }
+        self.manifest_heard
+            .insert(model.clone(), (manifest_hash, std::time::Instant::now()));
+    }
+
+    /// Has the swarm been handed exactly this manifest within `window`?
+    ///
+    /// A DIFFERENT hash does not count: two holders disagreeing is information
+    /// the swarm needs, and suppressing it would hide the disagreement.
+    pub fn manifest_heard_within(
+        &self,
+        model: &crate::types::ModelId,
+        manifest_hash: &[u8; 32],
+        window: std::time::Duration,
+    ) -> bool {
+        self.manifest_heard
+            .get(model)
+            .is_some_and(|entry| &entry.0 == manifest_hash && entry.1.elapsed() < window)
+    }
+
+    /// Drop every record older than `window`, which can no longer suppress
+    /// anything. Called once per broadcast round, so the map holds at most
+    /// the models the swarm heard about in the last window.
+    pub fn forget_manifests_heard_before(&self, window: std::time::Duration) {
+        self.manifest_heard
+            .retain(|_, (_, at)| at.elapsed() < window);
+    }
+
     /// Mutate a model's AcquisitionStatus if present. No-op if the model has
     /// no acquisition entry. Locks `acquisition_progress` only for the body
     /// of the closure — do NOT hold the closure across `.await`.
@@ -837,6 +896,44 @@ mod tests {
     use super::*;
     use crate::types::ModelId;
 
+    /// A heard manifest only silences re-announcements when the swarm actually
+    /// HEARD it, and only while that is recent — the state half of the Trickle
+    /// rule in `HealthMonitor::broadcast_manifests`, where a mistake would
+    /// silence a model instead of saving traffic.
+    #[test]
+    fn only_a_recent_gossiped_copy_of_the_same_hash_counts_as_heard() {
+        let state = make_mgmt();
+        let model = ModelId("llama-3.2-3b".to_string());
+        let hash = [7u8; 32];
+        let other = [9u8; 32];
+        let window = std::time::Duration::from_secs(30 * 60);
+
+        state.note_manifest_heard(&model, hash, crate::types::MessageTransport::Direct);
+        assert!(
+            !state.manifest_heard_within(&model, &hash, window),
+            "a point-to-point catch-up reached THIS node alone — counting it, \
+             reconnects (~7/hour) would keep every holder quiet while the swarm \
+             never heard the manifest"
+        );
+
+        state.note_manifest_heard(&model, hash, crate::types::MessageTransport::Gossip);
+        assert!(state.manifest_heard_within(&model, &hash, window));
+        assert!(
+            !state.manifest_heard_within(&model, &other, window),
+            "a DIFFERENT hash is a disagreement the swarm needs to see, not a repeat"
+        );
+
+        // Past the window it neither counts nor survives the sweep. A zero
+        // window stands in for "long ago": subtracting from `Instant::now()`
+        // panics on a CI runner that has been up for less than the window.
+        assert!(!state.manifest_heard_within(&model, &hash, std::time::Duration::ZERO));
+        state.forget_manifests_heard_before(std::time::Duration::ZERO);
+        assert!(
+            state.manifest_heard.is_empty(),
+            "an expired record is swept"
+        );
+    }
+
     pub(super) fn make_mgmt() -> ModelMgmt {
         ModelMgmt {
             acquisition_progress: DashMap::new(),
@@ -858,6 +955,7 @@ mod tests {
             disputed_shards: dashmap::DashSet::new(),
             shard_download_backoff: DashMap::new(),
             geometry_probe_retry_after: DashMap::new(),
+            manifest_heard: DashMap::new(),
             model_request_counts: DashMap::new(),
             resource_schedule: RwLock::new(Default::default()),
             prune_history: RwLock::new(VecDeque::new()),

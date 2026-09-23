@@ -1842,6 +1842,8 @@ offline_mode = false           # Air-gapped: no internet, mDNS only
 
 All inbound network messages are wrapped in `AuthenticatedMessage` with the transport-verified sender `NodeId` (from libp2p Noise protocol). The MessageDispatcher validates sender identity against message claims for all security-sensitive message types (ShardAnnounce, CreditTransaction, CreditGossip, NicknameGossip, HealthPing/Pong, EphemeralKeyExchange). Mismatched messages are logged and dropped.
 
+It also carries a required `transport` — `Gossip` or `Direct` — because the two prove different things about everyone else: a gossiped message was flooded to every subscriber, a direct one (request-response, relay, tensor stream) reached this node alone. The manifest re-announcement suppression reads it (`docs/invariants/network.md` § "The repetition, not the size").
+
 ## Signed DHT Records
 
 Kademlia DHT records for capability and shard announcements are Ed25519-signed:

@@ -521,7 +521,7 @@ pub(crate) async fn dispatch_network_messages(
                     }
                     authed_msg = network_out_rx.recv() => {
                         match authed_msg {
-                            Some(AuthenticatedMessage { sender: authenticated_sender, message: msg }) => {
+                            Some(AuthenticatedMessage { sender: authenticated_sender, message: msg, transport }) => {
                                 // Liveness marker, written BEFORE the match and
                                 // so on every path through it, including the
                                 // `continue`s. `HealthMonitor` — a different
@@ -1302,6 +1302,17 @@ pub(crate) async fn dispatch_network_messages(
                                         // reject zero-hash to prevent gossip poisoning.
                                         match manifest.verify_hash_strict() {
                                             Ok(()) => {
+                                                // Recorded only once verified, so a forged copy
+                                                // carrying a real hash cannot silence the holders
+                                                // who would otherwise re-announce it. And only for
+                                                // gossip: `note_manifest_heard` ignores a
+                                                // point-to-point catch-up, which reached us alone.
+                                                // `HealthMonitor::broadcast_manifests` is the reader.
+                                                shared_state.models.note_manifest_heard(
+                                                    &manifest.id,
+                                                    manifest.manifest_hash,
+                                                    transport,
+                                                );
                                                 let is_new = shared_state
                                                     .model_registry
                                                     .get_manifest(&manifest.id)
