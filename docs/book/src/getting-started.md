@@ -16,9 +16,9 @@ SwarmLLM runs AI models on your own computer and, when a model is too big for on
 >   network. Your computer still helps others with what it can spare. Set it
 >   up under **More → My Devices**.
 >
-> Every answer is labelled with where it ran. **Prompt privacy** (the "Turn on
-> end-to-end encryption" button above the chat box) keeps the first and last
-> steps on your computer, so no other computer is handed your words as text.
+> **Start and finish on this computer** (the button above the chat box) keeps
+> the first and last steps on your computer, so no other computer is handed
+> your words as text.
 > It switches itself on for any model where you hold the first and last parts.
 > It is an extra layer, **not** a guarantee: the helpers still compute on
 > numbers that published attacks turn back into most of your text. It also

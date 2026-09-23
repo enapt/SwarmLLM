@@ -628,7 +628,7 @@ pub async fn set_model_encrypted_pipeline(
                 not_ready_note = Some(format!(
                     "Recorded, but not in effect yet: this node is missing {}. \
                      Requests for this model will be refused rather than sent out \
-                     unprotected. Fetch the missing shard(s) to make it usable.",
+                     without it. Fetch the missing shard(s) to make it usable.",
                     missing.join(" and ")
                 ));
             }
@@ -675,11 +675,14 @@ pub async fn set_model_encrypted_pipeline(
         "note": match (&not_ready_note, body.enabled) {
             (Some(warning), _) => warning.as_str(),
             (None, true) => {
-                "Encrypted pipeline active. Both embedding (first shard) and sampling (last shard) \
-                 run locally. Remote nodes only see intermediate activations. \
-                 Adds ~1 extra RTT per token for the return hop."
+                "Start and finish on this computer is on: embedding (first shard) and \
+                 sampling (last shard) run locally. Remote nodes still see the \
+                 intermediate activations in plaintext, which are partly invertible \
+                 back to text. Adds ~1 extra RTT per token for the return hop."
             }
-            (None, false) => "Encrypted pipeline disabled. Normal pipeline scheduling applies.",
+            (None, false) => {
+                "Start and finish on this computer is off. Normal pipeline scheduling applies."
+            }
         },
     })))
 }

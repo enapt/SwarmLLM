@@ -521,7 +521,9 @@
             App.models.load();
           })
           .catch(function() {
-            App.ui.showBanner('error', I18n.t('enc.fetch_started'));
+            // The request never completed, so nothing is downloading — this
+            // used to show the SUCCESS text ("Downloading the parts…") in red.
+            App.ui.showBanner('error', I18n.t('errors.server_unreachable'));
             encFetchEl.disabled = false;
           });
         return;
@@ -571,7 +573,8 @@
               }
               if (missing.length === 0) { App.ui.showBanner('info', I18n.t('init.no_missing_shards')); return; }
               App.hf.downloadShards({ repo_id: src.repo_id, filename: src.filename, shards: missing }).then(function(result) {
-                if (result.ok) App.ui.showBanner('success', I18n.t('init.downloading_shards', { shards: missing.join(', ') }));
+                // Parts are numbered from 1 everywhere a person reads them.
+                if (result.ok) App.ui.showBanner('success', I18n.t('init.downloading_shards', { shards: missing.map(function(i) { return i + 1; }).join(', ') }));
                 else App.ui.showBanner('error', result.errorMsg);
               });
             });

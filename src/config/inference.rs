@@ -466,10 +466,12 @@ pub struct InferenceConfig {
     /// protected our own cache from a peer's bad K/V and did not protect our
     /// user's prompts from a bad fetcher.
     ///
-    /// Meanwhile the dashboard says, unconditionally, "End-to-end encryption is
-    /// on. No peer can read your prompts or outputs." That sentence is true
-    /// with this off and was not true with it on, and a privacy promise that
-    /// depends on a setting nobody was offered is not a promise.
+    /// Meanwhile the dashboard said, unconditionally, "End-to-end encryption is
+    /// on. No peer can read your prompts or outputs." That sentence was never
+    /// true — peers compute on the activations in plaintext (2026-09-23 it was
+    /// replaced, see `enc.active_tip`) — and with this on it was false a second
+    /// way: a privacy promise that depends on a setting nobody was offered is
+    /// not a promise.
     ///
     /// Turning it on is a real speedup where several nodes serve the same
     /// system prompt, and it is a legitimate thing to want on a network of

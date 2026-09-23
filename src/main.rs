@@ -134,11 +134,14 @@ enum Commands {
         /// Model id to unload, e.g. llama-3.2-3b-instruct-q4-k-m.
         model: String,
     },
-    /// Make prompt privacy possible for a model by fetching the pieces it needs.
+    /// Let this computer start and finish a model's replies itself, by fetching
+    /// the parts that needs.
     ///
-    /// Prompt privacy keeps prompts and answers on this machine, which requires
-    /// holding the first and last piece of the model. This downloads exactly
-    /// those; privacy then turns on by itself. Needs a running daemon.
+    /// Starting and finishing here keeps your typed text and the reply's words
+    /// on this machine; other computers still see the numbers in between, which
+    /// can reveal much of them. It requires holding the first and last part of
+    /// the model. This downloads exactly those; the setting then turns on by
+    /// itself. Needs a running daemon.
     Privacy {
         /// Model id to make private, e.g. llama-3.2-3b-instruct-q4-k-m.
         model: String,

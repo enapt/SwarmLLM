@@ -166,7 +166,8 @@ pub struct NetworkConfig {
     /// listeners.
     #[serde(default, alias = "external_address")]
     pub external_addresses: ExternalAddresses,
-    /// Enable E2E encryption for tensor forwards and control messages (default: true).
+    /// Encrypt tensor forwards and control messages in transit (default: true).
+    /// Not end-to-end: the node computing a segment decrypts what it computes on.
     #[serde(default = "default_true")]
     pub enable_encryption: bool,
     /// Enable zstd compression for tensor payloads sent over the network.

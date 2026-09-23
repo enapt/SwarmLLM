@@ -1797,10 +1797,10 @@ impl PipelineScheduler {
                 "inference",
                 "privacy_cost",
                 format!(
-                    "Keeping your prompt private is adding about {seconds}s to replies from \
-                     {}. The first and last steps stay on this computer so no other machine \
-                     sees your words, and this computer is the slow part. You can turn this \
-                     off for this model in Settings if you would rather have speed.",
+                    "Starting and finishing replies on this computer is adding about \
+                     {seconds}s to replies from {}, and this computer is the slow part. You \
+                     can turn it off for this model on its card in the Dashboard if you \
+                     would rather have speed.",
                     model_id.0
                 ),
             )

@@ -350,7 +350,8 @@
       // button in the bar above" — and on this screen that was wrong three
       // times over: the bar is the session header's encryption banner, which
       // does not exist until a chat has been started; the button in it is
-      // labelled "Turn on end-to-end encryption", not that; and it is only
+      // labelled "Start and finish on this computer" (it said "Turn on
+      // end-to-end encryption" until 2026-09-23), not that; and it is only
       // offered when this device holds the model's FIRST and LAST pieces, so
       // on a new node with no pieces at all the advice could never be
       // followed. A new user's very first screen told them to do something

@@ -1686,7 +1686,7 @@ Models are loaded into VRAM only when needed, not eagerly at startup.
 
 **Startup behavior**: Models are still auto-loaded at startup (in popularity order), but this is best-effort — if VRAM fills up, remaining models stay on disk and are loaded on first request.
 
-## E2E Encryption
+## Encryption
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -1758,21 +1758,21 @@ What each node sees in a distributed pipeline (Requester → A → B → C):
 │  Raw token IDs       ✓        *          ✗          ✗            │
 │  Activations in      —        ✓          ✓          ✓            │
 │  Activations out     —        ✓          ✓          —            │
-│  Generated tokens    ✓(dec)   ✗          ✗          ✓(samples)  │
-│  Final response      ✓(dec)   ✗          ✗          ✓(seals)    │
+│  Generated tokens    ✓        ✗          ✗          ✓(samples)  │
+│  Final response      ✓        ✗          ✗          ✓           │
 │                                                                  │
 │  * Without local_embedding_privacy: Node A sees raw tokens       │
 │    With local_embedding_privacy: Node A sees FP32 activations    │
 │                                                                  │
 │  ⚠ The final-segment node ALWAYS sees generated output.          │
 │    This is inherent — sampling happens on the last node.         │
-│    Pipeline sealing encrypts tokens on the wire, but the         │
+│    Result sealing (Tier 2) is not active; either way, the        │
 │    node that samples them must see them.                          │
 │                                                                  │
 │  ⚠ Activation inversion: early-layer activations (especially    │
 │    layer 0) can theoretically be reversed to recover tokens.     │
 │    local_embedding_privacy eliminates the trivial case.          │
-│    Deep-layer inversion is an open research problem.             │
+│    Deep layers leak too: attacks recover ~81% of the text        │
 └──────────────────────────────────────────────────────────────────┘
 ```
 

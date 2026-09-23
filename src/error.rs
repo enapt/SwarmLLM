@@ -915,20 +915,20 @@ pub fn error_hint_with_key(err: &SwarmError) -> Option<(&'static str, &'static s
         )),
         SwarmError::PromptPrivacyUnavailable { .. } => Some((
             "prompt_privacy_unavailable",
-            "Prompt privacy keeps your prompt on this machine, which needs the model's \
-             first part stored here — and it isn't. Either fetch it with \
-             `swarmllm get-model <name>`, or turn prompt privacy off for this model to \
-             let the swarm run it. Retrying as-is won't help.",
+            "“Start and finish on this computer” is on for this model, and that needs \
+             the model's first part stored here — which it isn't. Either fetch it with \
+             `swarmllm get-model <name>`, or turn the setting off for this model on its \
+             card in the Dashboard to let the swarm run it. Retrying as-is won't help.",
         )),
         // The sibling, naming the other end. Same shape and same two ways out,
         // because it is the same setting refusing for the same reason — what
         // must differ is WHICH part it sends the reader after.
         SwarmError::PromptPrivacyNeedsFinalShard { .. } => Some((
             "prompt_privacy_needs_final_shard",
-            "Prompt privacy keeps both ends of this request on this machine, which needs \
-             the model's last part stored here — and it isn't. Either fetch it with \
-             `swarmllm get-model <name>`, or turn prompt privacy off for this model to \
-             let the swarm run it. Retrying as-is won't help.",
+            "“Start and finish on this computer” is on for this model, and that needs \
+             the model's last part stored here — which it isn't. Either fetch it with \
+             `swarmllm get-model <name>`, or turn the setting off for this model on its \
+             card in the Dashboard to let the swarm run it. Retrying as-is won't help.",
         )),
         // The only refusal that had no hint, and its message is the least
         // readable of them: "missing shards: [0, 1, 2, 3]" tells a non-technical
