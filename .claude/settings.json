@@ -63,7 +63,11 @@
       "Read(./.env)",
       "Read(./.env.*)",
       "Read(./vendor/**/target/**/*)",
-      "Read(./target/**/*)"
+      "Read(./target/**/deps/**)",
+      "Read(./target/**/build/**)",
+      "Read(./target/**/incremental/**)",
+      "Read(./target/**/.fingerprint/**)",
+      "Read(./target/**/examples/**)"
     ]
   },
   "includeGitInstructions": false,
