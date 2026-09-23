@@ -31,7 +31,7 @@ Run `/cleanup` after committing changes to: SharedState fields, API endpoints, J
 
 ## A count edited after the test run is an untested change
 
-Test counts live in FOUR places — `CLAUDE.md` twice, `README.md` twice — and
+Test counts live in THREE places — `CLAUDE.md` twice, `README.md` once — and
 `the_readme_test_counts_agree_with_each_other_and_with_claude_md` fails the
 build when they disagree. The i18n key count lives in `CLAUDE.md` and
 `docs/ARCHITECTURE.md`, with its own guard.

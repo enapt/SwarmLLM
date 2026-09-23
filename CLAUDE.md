@@ -95,7 +95,7 @@ run by a bare `cargo test`:
 `cargo test --manifest-path vendor/libp2p-request-response/Cargo.toml --lib`.
 
 ⚠ **A count edited after the test run is an untested change.** Counts live in
-`CLAUDE.md` ×2 and `README.md` ×2 and are cross-checked by a guard, so re-run
+`CLAUDE.md` ×2 and `README.md` ×1 and are cross-checked by a guard, so re-run
 `cargo test --test repo_consistency` after editing one, before `git add`. This
 has put main red twice.
 
