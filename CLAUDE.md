@@ -152,59 +152,53 @@ UNDETERMINED and never a fix — use it BEFORE blaming a change, especially your
 
 ## Status
 
-**v0.3.200-alpha released, signed and deployed to both nodes (2026-09-23);
-`main` is clean.** ⚠ **`.195`'s two `LayerForward` trailers (`0x08`, `0x09`)
-have STILL never been exercised in the field** — `memory/next_up.md` says what
-to read off a live node first.
+**v0.3.200-alpha is the live release (2026-09-23). `main` is AHEAD of it and
+unreleased**: the real fix for .199 (flash-attn launched on stream 0), fused
+residual add+norm, manifest Trickle suppression (idle gossip), hourly update
+checks for .deb/.rpm, a docs sweep + new README, honest privacy wording, a
+working Models-tab Download (`all_shards`) and proxies no longer getting admin
+(`api::origin`). The next release is the first to carry them — follow
+`memory/release_gate.md`, then re-measure idle gossip (`memory/next_up.md`).
 
-⛔⛔ **v0.3.199-alpha SHIPPED BROKEN and was WITHDRAWN** — every model emitted
-garbage on GPU. It was cleared using `--features candle-cuda`, which has **no
-flash-attn and no llama backend**, while the release is `--features cuda`.
-**Match the feature gate to a change's BLAST RADIUS, and remember a BUILD gate
-is not a BEHAVIOUR gate** — Cache warm passed all three cells, Windows GPU
-included, while nothing generated correctly (#683, #677).
-✅ **The release gate now verifies the ARTIFACT BEFORE signing.** The old order
-(sign, then check) is the only reason it reached the public. → `memory/release_gate.md`.
+⛔ **v0.3.199-alpha SHIPPED BROKEN and was WITHDRAWN** — cleared under
+`--features candle-cuda` (no flash-attn, no llama backend) while the release is
+`--features cuda`. **Match the feature gate to a change's blast radius; a BUILD
+gate is not a BEHAVIOUR gate** (#683, #677). The release gate now verifies the
+ARTIFACT before signing.
 
-**Local GPU decode is bound by SUBMISSION COUNT, not bandwidth** — `ms/layer` is
-flat across model size, so **layer count predicts decode cost**. `.198` gave
-+34% on a 1.1B and a 3B and +55% on phi-3.5-mini; `.200` adds the fused
-`silu(gate)×up` kernel (−66 submissions/token, **no speed claim** — below this
-box's resolution). **Our own CUDA kernels live in `kernels/*.cu`**, compiled to
-PTX by `build.rs` and loaded via `get_or_load_custom_func`; write each one
-bit-identical to the candle ops it replaces.
-⚠ **ONE CUDA stream PER DEVICE, and buffers never cross devices** — the
-disabled per-allocation events rest on that. Moving off the legacy stream is
-**opt-in and OFF** (`SWARMLLM_CUDA_OWN_STREAM=1`) after breaking .199; CUDA
-graphs need it, so that has to be solved first.
-Next moves: `docs/plans/local_decode_submissions.md`.
+**Local GPU decode is bound by SUBMISSION COUNT** — layer count predicts decode
+cost. Our own CUDA kernels live in `kernels/*.cu` (PTX via `build.rs`); write
+each bit-identical to the candle ops it replaces. ⚠ **ONE CUDA stream per
+device**; `SWARMLLM_CUDA_OWN_STREAM=1` stays opt-in and OFF. Next moves:
+`docs/plans/local_decode_submissions.md`.
 
-⚠ **A new wire trailer is NOT a no-op for an older peer** — decoders rebuild the
-seal's AAD from the trailers they PARSED, so an unknown one breaks every
-encrypted forward. **Feature-gate every optional trailer at the SENDER.**
+⚠ **The privacy mode is STRUCTURAL.** In the UI it is "Start and finish on this
+computer" — never "end-to-end", "encrypted pipeline" or "private" (#185 is
+superseded). ⚠ **"At this machine" is `RequestOrigin::is_this_machine`**, never
+`is_loopback()` — a same-host proxy is loopback for everyone (#689).
 
-⚠ **Gossip says what CHANGED, to everyone — and what ONE peer lacks, to that
-peer.** Three fixes paid for this. ⚠ **Before estimating why a total is
-expensive, find the counter you are not reading** — three estimates from
-sizes × intervals were each 10-100x wrong (#673).
-→ `arch-network.md`, `docs/invariants/network.md`.
+⚠ **A new wire trailer is NOT a no-op for an older peer** — feature-gate every
+optional trailer at the SENDER. ⚠ **Gossip says what CHANGED, to everyone; what
+ONE peer lacks, to that peer** — and find the counter you are not reading
+before estimating a total (#673). `.195`'s trailers `0x08`/`0x09` have still
+never run in the field.
 
-**A split is only fast when the machines are CLOSE** — it relocates work and the
-chain is walked once per TOKEN (0.35 tok/s Thailand↔Italy vs 6.76 at 18 ms).
-⚠ **Nothing routes on coordinates yet.** → `docs/plans/regional_pipelines.md`.
+**A split is only fast when the machines are CLOSE** (0.35 tok/s Thailand↔Italy
+vs 6.76 at 18 ms). Nothing routes on coordinates yet →
+`docs/plans/regional_pipelines.md`.
 
-**Releases are SIGNED; CI leaves a DRAFT and the signing script publishes it.**
-⚠ **It takes the WRONG tag silently** — confirm `draft=false`, a non-zero
-`.minisig` count (7 vs 9 `.sha256` is CORRECT) and that the trusted comment
-names THIS version. → `memory/release_gate.md`, `docs/RELEASE_SIGNING.md`.
+**Releases are SIGNED; CI leaves a DRAFT.** ⚠ The signing script takes the WRONG
+tag silently — confirm `draft=false`, `.minisig` count (7 vs 9 `.sha256` is
+correct) and the version in the trusted comment → `memory/release_gate.md`.
 
-⚠ **#90's CAUSE IS UNKNOWN** — a dispatcher stall seen TWICE (33-45 min);
-`cancel_request` is ELIMINATED. ⚠ **#17 has never run on a live failover, and a
-TWO-node rig cannot test it** — it needs four daemons.
+⚠ **#90's cause is unknown** (dispatcher stall, twice). ⚠ **#17 has never run on
+a live failover** — needs four daemons. ⚠ **`gossip_network_id` is NOT
+isolation** — a scratch node with bootstrap and mDNS off still found public
+peers within 20 s; only pool + `private_mode` + `private_mode_allow_lan = false`
+isolates (#352).
 
-⚠ **`gossip_network_id` is NOT an isolation boundary** — it scopes gossip TOPICS
-only; the DHT is shared. Isolation is a pool + `private_mode` +
-`private_mode_allow_lan = false` (#352).
+⛔ **Nothing may block compaction, so commit as you go** — a PreCompact "commit
+first" hook deadlocked a full context and lost a session (#687).
 
 `memory/` is `~/.claude/projects/-home-user-SwarmLLM/memory/` — `MEMORY.md`
 indexes it. **Read `open_cautions.md` and `next_up.md` at session start**, and
