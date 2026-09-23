@@ -58,7 +58,7 @@ enable_upnp = true                 # UPnP/IGD gateway port-mapping — auto-open
                                    # readable name on each. A single string also works:
                                    #   external_address = "/ip4/203.0.113.5/tcp/8810"
                                    # Flows into identify, the DHT, and every invite code this node mints.
-enable_encryption = true           # E2E encryption for tensor forwards.
+enable_encryption = true           # Encrypts tensor forwards in transit. Not end-to-end: the node computing a segment decrypts what it computes on.
                                    # Note: speculative / DSD / remote-generate
                                    # fast paths currently bypass the per-tensor
                                    # ChaCha session layer (deferred — see
@@ -87,7 +87,7 @@ max_batch_size = 1             # 1 = no batching (sequential); >1 enables batchi
 batch_timeout_ms = 50          # Ms to wait for more requests before dispatching a partial batch (0 = immediate)
 privacy_mode = false           # When true, user prompts are NOT written to disk (KV-cache sessions stay in-memory only)
 # local_embedding_privacy = false  # Embed tokens locally before sending to first segment (remote never sees raw tokens)
-# encrypted_pipeline = false   # Force first+last segment local (boomerang). No remote sees plaintext. Adds ~1 RTT/token. Per-model override via API.
+# encrypted_pipeline = false   # Force first+last segment local (boomerang). No remote sees the prompt text or sampled tokens, but remotes still see intermediate activations in plaintext, which are partly invertible to text. Adds ~1 RTT/token. Per-model override via API.
 # tensor_parallel = false      # Split single layers across LAN peers with per-layer AllReduce. OFF by default:
                                # over Ethernet the 2 round trips per layer cost more than the compute they split,
                                # and SwarmLLM's default pipeline parallelism moves one activation per SEGMENT instead.
@@ -111,8 +111,13 @@ format = "pretty"              # "pretty" or "json"
 open_browser_on_start = true   # Open browser to dashboard/setup on launch
 
 [updates]
-auto_update = "stable"         # "disabled", "stable", or "all"
-check_interval_hours = 6
+# Left commented so the built-in defaults apply. The .deb/.rpm install copies
+# this file in as the live config, and the "6" that used to be set here quietly
+# made packaged installs check every six hours instead of every hour.
+# mode = "install"               # off | notify | download | install (default: install —
+                                 # only signed releases, and only once the node is idle)
+# check_interval_hours = 1       # How often to check GitHub (default: 1)
+# include_prereleases = true     # Every release so far is tagged -alpha (default: true)
 
 [api]
 # api_key = ""                   # Bearer token for API auth. Empty = auto-generate on first run.
