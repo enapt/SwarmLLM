@@ -1321,7 +1321,13 @@
               icon: '⚠', label: I18n.t('enc.blocked'),
               detail: I18n.t('enc.blocked_detail', { missing: blockedMissing }),
               tip: I18n.t('enc.blocked_tip'),
-              action: I18n.t('enc.disable')
+              action: I18n.t('enc.disable'),
+              // The detail says "until you turn it off or download the missing
+              // part", and this state offered only the first: every request for
+              // the model was failing and the one fix that keeps privacy on had
+              // no button. `enable-privacy` fetches exactly the missing end parts
+              // and leaves an explicit ON alone, so it is safe to offer here.
+              fetchMissing: true
             };
           } else if (encActive) {
             encState = {
@@ -1361,7 +1367,9 @@
             ? ' data-enc-toggle="' + U.escapeHtml(m.id) + '" data-enc-ready="1" role="switch" aria-checked="' + (encActive ? 'true' : 'false') + '"'
             : '';
           var toggleCls = canToggle ? ' mce-section-toggleable' : '';
-          if (encState.fetchMissing) {
+          // Blocked keeps its "turn it off" label beside the fetch button —
+          // both are real ways out, and the toggle is still live there.
+          if (encState.fetchMissing && !encBlocked) {
             encState.action = '';
           }
           var fetchHtml2 = encState.fetchMissing
