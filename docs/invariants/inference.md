@@ -530,6 +530,105 @@ it asserts contiguity directly, then drives a prefill, a decode, and the batched
 path at mixed positions (which ropes *after* narrowing a row out, and so reaches
 the same defect by another route).
 
+## A RoPE layout is read off llama.cpp, per architecture (2026-09-24, FUTURE_WORK #96)
+
+**`ModelArch::use_rope_contiguous` is llama.cpp's `llama_model_rope_type`, arch
+by arch** — NEOX (contiguous halves) or NORM (interleaved pairs). GLM-4,
+Llama-4 and DeepSeek-2 are NORM there and were contiguous here.
+
+**What it cost.** GLM-4-9B-0414 answered short questions correctly and wrote
+broken, repeating code for anything longer — `def factorial(n):` restarted
+mid-function, indentation lost, lines cut off — on the released binary,
+whole-model on the processor, no split, no GPU, speculation on or off.
+**llama.cpp on the same file** (rebuilt, for this check only, from our shards:
+the header plus every tensor written back to its manifest `gguf_offset`,
+validated with the `gguf` package — a diagnostic done by hand, never something
+the product does) **and the same 25 prompt tokens wrote a correct recursive
+function.** "Short replies survive, long ones come apart" is
+the signature of wrong POSITIONS, not wrong weights: the first few tokens barely
+depend on rotation, later ones depend on it entirely.
+
+**Removing the cause stops it.** The build carrying only the tokenizer fixes
+(#97) — prompt already token-identical to llama.cpp's — was still garbled; the
+same build plus the layout change answered llama.cpp's own function, near word
+for word.
+
+**Why nothing caught it, and what that means for a change here.**
+
+- **Four tests asserted the wrong layout** (`test_glm4_arch_supported`,
+  `test_llama4_arch_supported`, `test_deepseek_arch_supported`,
+  `model_arch_properties`), each written against the function rather than the
+  reference. A property test pinned to its own implementation is a change
+  detector, not a check. `model_arch_properties` now states every supported
+  arch's layout as llama.cpp gives it — **add a row there, from llama.cpp's
+  list, for every new arch.**
+- **Conformance cannot see coherence.** It asserts a reply ARRIVES, STOPS and
+  leaks no marker; broken code passes all three.
+- **The reply A/B compares a release with the previous one**, which was broken
+  identically. Byte-identical across releases is evidence of no REGRESSION,
+  never of correctness. The only check that saw this compared against a
+  different implementation.
+- ⚠ **DeepSeek-2's MLA bypassed the flag** — `MlaWeights::apply_rope` called the
+  contiguous kernel directly. It is `rope_i` now. Llama-4 and DeepSeek-2 are
+  matched to llama.cpp (and to HF, which rotates complex pairs for both) but
+  **NOT run here**: no such model is on the fleet.
+
+## A special token is what the vocabulary says it is — and a prompt gets ONE BOS (2026-09-24, FUTURE_WORK #97)
+
+**`tokenizer::declared_special`** — CONTROL (3) or USER_DEFINED (4) in the
+GGUF's `tokenizer.ggml.token_type` — decides which vocabulary entries are
+matched whole in the text before the merge algorithm runs, on BOTH encoder
+paths, beside the old name shapes (`<…>`, `<|…|>`) so no vocabulary that was
+right changes. **`gguf_meta::add_bos_by_llama_cpp_rules`** decides whether a
+prompt gets a BOS, and **`SplitTokenizer::encode`** gives none to a text that
+already opens with one.
+
+**What it cost.** Compared against llama.cpp on every local model's own chat
+template (`examples/tokenizer_reference.py` → the ignored
+`tokenizer_agrees_with_llama_cpp`):
+
+| family | defect | llama.cpp agreement |
+|---|---|---|
+| GLM-4 | `[gMASK]` (every prompt's first token) spelled as 3 tokens; `<|endoftext|>` — one of its EOS tokens — prepended as BOS | 0/8 → **8/8** |
+| Mistral v0.3 | `[INST]` / `[/INST]` (every turn) spelled as 3 tokens each; doubled BOS | special tokens now 7/7 |
+| Gemma-2 | user-defined whitespace runs (all code indentation) split into single spaces; doubled BOS | 4/7 → **7/7** |
+| Llama-3.x | doubled BOS (48 prompt tokens against 47) | 8/8 throughout |
+
+Every GPT-2-style family (Qwen2.5/3, Phi-4-mini, xLAM, Llama-3) agrees in full.
+
+**Where each came from.**
+
+- The shapes were a guess at what "special" looks like. A vocabulary SAYS which
+  of its entries are control tokens; llama.cpp reads that
+  (`cache_special_tokens` / `tokenizer_st_partition`). User-defined entries are
+  literal text (Gemma's are runs of spaces and newlines), which is why the raw
+  vocabulary string is what gets matched.
+- `add_bos_token` defaulted to TRUE on a comment saying the field "is consumed
+  solely by the SPM path" — it was not; `SplitTokenizer::encode` prepends BOS
+  for every variant, and an earlier fix had MOVED it there on purpose. The
+  comment went stale when the consumer moved. llama.cpp: key when present; else
+  SentencePiece → true, GPT-2 BPE → true only for the pre-tokenizers that ask
+  (`llama-bpe`, `tekken`, …); glm4/chatglm-bpe → never.
+- The doubled BOS: Llama-3, Gemma and Mistral templates render `{{ bos_token }}`,
+  and the encoder then added its own. llama.cpp strips the template's copy when
+  its tokenizer will add one (`common/chat.cpp`); llama-cpp-python tokenizes a
+  rendered chat with no BOS of its own. Both leave exactly one.
+
+**What the reference test asserts, and what it only reports.** It ASSERTS that
+special tokens (by `token_type`) and BOS agree for every model, and that a
+GPT-2-style vocabulary agrees in full. It only REPORTS SentencePiece whitespace:
+llama.cpp inserts a `▁` after every special token (HF's `legacy` behaviour,
+which Mistral's own tokenizer does not use) and segments TinyLlama's
+merges-carrying vocabulary by score where we use merge rank. Phi-3.5, Mistral
+and TinyLlama keep those differences — **llama.cpp alone does not settle them;
+a Hugging Face `tokenizers` reference would.**
+
+**The harness is the part to keep.** No weights are read: each model gets a
+SPARSE GGUF (header + a hole to the real size), because llama.cpp checks tensor
+bounds even with `vocab_only`. A new model on the fleet, or any change to the
+tokenizer, is one command away from being checked against an independent
+implementation.
+
 ## `inference::attn_softmax::scaled_masked_softmax`
 
 (2026-08-07) — the single

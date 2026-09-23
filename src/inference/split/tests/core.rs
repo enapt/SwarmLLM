@@ -1027,15 +1027,31 @@ fn model_arch_detection() {
 
 #[test]
 fn model_arch_properties() {
-    // RoPE contiguous: Qwen2 family and DeepSeek2
-    assert!(ModelArch::Qwen2.use_rope_contiguous());
-    assert!(ModelArch::DeepSeek2.use_rope_contiguous());
-    assert!(!ModelArch::Llama.use_rope_contiguous());
-    assert!(ModelArch::Gemma.use_rope_contiguous());
-    assert!(ModelArch::Gemma2.use_rope_contiguous());
-    assert!(ModelArch::Phi3.use_rope_contiguous());
-    assert!(ModelArch::Starcoder2.use_rope_contiguous());
-    assert!(!ModelArch::Mistral.use_rope_contiguous());
+    // RoPE layout, EVERY supported arch, as llama.cpp's `llama_model_rope_type`
+    // assigns it (NEOX = contiguous, NORM = interleaved). This used to assert
+    // DeepSeek2 contiguous — agreeing with the code, not with the reference —
+    // and GLM-4 wrote broken code because of the same mistake (#96).
+    for (arch, contiguous) in [
+        ("llama", false),
+        ("mistral", false),
+        ("glm4", false),
+        ("llama4", false),
+        ("deepseek2", false),
+        ("qwen2", true),
+        ("qwen3", true),
+        ("qwen2moe", true),
+        ("gemma", true),
+        ("gemma2", true),
+        ("phi3", true),
+        ("starcoder2", true),
+    ] {
+        assert_eq!(
+            ModelArch::from_gguf_arch(arch).use_rope_contiguous(),
+            contiguous,
+            "{arch}: llama.cpp says {}",
+            if contiguous { "NEOX" } else { "NORM" }
+        );
+    }
 
     // Activation: Gemma uses Gelu, others SiLU
     assert_eq!(ModelArch::Gemma.default_activation(), Activation::Gelu);

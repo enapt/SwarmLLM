@@ -291,6 +291,30 @@ cannot bring the class back.
 
 → `docs/invariants/inference.md`
 
+## A RoPE layout is read off llama.cpp, per architecture
+
+**`ModelArch::use_rope_contiguous` is llama.cpp's `llama_model_rope_type`**
+(NEOX = contiguous, NORM = interleaved), arch by arch. GLM-4, Llama-4 and
+DeepSeek-2 are NORM and were contiguous here — GLM-4 wrote broken code on every
+long reply while conformance passed, and four tests asserted the wrong answer
+because they were written against the function (#96). **A new arch gets its row
+in `model_arch_properties` from llama.cpp's list, never from this function.**
+Byte-identical replies across releases prove no REGRESSION, never correctness.
+
+→ `docs/invariants/inference.md`
+
+## A special token is what the vocabulary says it is, and a prompt gets ONE BOS
+
+**`tokenizer::declared_special`** (CONTROL / USER_DEFINED in `token_type`)
+decides what is matched whole, on both encoder paths — the `<…>` shape missed
+GLM-4's `[gMASK]` and Mistral's `[INST]` (#97).
+**`gguf_meta::add_bos_by_llama_cpp_rules`** decides whether a prompt gets a
+BOS, and **`SplitTokenizer::encode`** gives none to a text already opening with
+one. Check a tokenizer change with `examples/tokenizer_reference.py` +
+`tokenizer_agrees_with_llama_cpp` — an independent implementation, not itself.
+
+→ `docs/invariants/inference.md`
+
 ## A vocabulary piece becomes token ids in exactly one place
 
 **`inference::tokenizer::BpeTokenizer::push_piece_ids`** is the only way a merged

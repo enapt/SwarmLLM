@@ -448,12 +448,19 @@ pub(crate) struct MlaWeights {
 }
 
 impl MlaWeights {
-    /// Apply contiguous RoPE to a tensor in BHSD layout.
+    /// Apply INTERLEAVED RoPE to a tensor in BHSD layout.
+    ///
+    /// MLA is DeepSeek-2's attention, and llama.cpp rotates its `q_pe`/`k_pe`
+    /// with `LLAMA_ROPE_TYPE_NORM` — interleaved pairs, which is what HF's
+    /// DeepSeek-V2 computes too (it reshapes `q_pe` to pairs before
+    /// `rotate_half`). This called the contiguous NeoX kernel, bypassing
+    /// `ModelArch::use_rope_contiguous` entirely (FUTURE_WORK #96). ⚠ Matched
+    /// to the reference, not run here: no DeepSeek-2 model is on the fleet.
     fn apply_rope(&self, x: &Tensor, index_pos: usize) -> CandleResult<Tensor> {
         let (_b_sz, _n_head, seq_len, _dim) = x.dims4()?;
         let cos = self.cos.narrow(0, index_pos, seq_len)?;
         let sin = self.sin.narrow(0, index_pos, seq_len)?;
-        candle_nn::rotary_emb::rope(&x.contiguous()?, &cos, &sin)
+        candle_nn::rotary_emb::rope_i(&x.contiguous()?, &cos, &sin)
     }
 
     /// MLA forward pass.

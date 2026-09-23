@@ -10,7 +10,8 @@ use candle_core::{DType, Device, Tensor};
 #[test]
 fn test_glm4_arch_supported() {
     assert!(ModelArch::Glm4.is_supported());
-    assert!(ModelArch::Glm4.use_rope_contiguous());
+    // llama.cpp: LLAMA_ROPE_TYPE_NORM (interleaved) — see `use_rope_contiguous`.
+    assert!(!ModelArch::Glm4.use_rope_contiguous());
     assert_eq!(ModelArch::Glm4.default_activation(), Activation::SiLU);
     assert!(!ModelArch::Glm4.use_gemma_norm());
     assert_eq!(ModelArch::from_gguf_arch("glm4"), ModelArch::Glm4);
@@ -19,7 +20,8 @@ fn test_glm4_arch_supported() {
 #[test]
 fn test_llama4_arch_supported() {
     assert!(ModelArch::Llama4.is_supported());
-    assert!(ModelArch::Llama4.use_rope_contiguous());
+    // llama.cpp: LLAMA_ROPE_TYPE_NORM (interleaved) — see `use_rope_contiguous`.
+    assert!(!ModelArch::Llama4.use_rope_contiguous());
     assert_eq!(ModelArch::Llama4.default_activation(), Activation::SiLU);
     assert!(!ModelArch::Llama4.use_gemma_norm());
     assert_eq!(ModelArch::from_gguf_arch("llama4"), ModelArch::Llama4);

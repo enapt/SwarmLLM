@@ -55,13 +55,31 @@ impl ModelArch {
 
     /// Whether this architecture uses contiguous RoPE (NeoX-style halves) vs
     /// interleaved (original GPT-J/LLaMA pairs). Matches llama.cpp's
-    /// `LLM_ROPE_TYPE_NEOX` (contiguous) vs `LLM_ROPE_TYPE_NORM` (interleaved).
+    /// `LLAMA_ROPE_TYPE_NEOX` (contiguous) vs `LLAMA_ROPE_TYPE_NORM`
+    /// (interleaved), as `llama_model_rope_type` assigns them.
+    ///
+    /// **Read off llama.cpp, arch by arch — never inferred.** GLM-4, Llama-4 and
+    /// DeepSeek-2 are NORM there and were contiguous here, with tests asserting
+    /// the wrong answer because they were written against this function rather
+    /// than against the reference. On GLM-4 that rotated every position of every
+    /// layer the wrong way: short replies survived and anything longer came
+    /// apart — broken, repeating code where llama.cpp, on the same file and the
+    /// same 25 prompt tokens, wrote a correct function (FUTURE_WORK #96). HF's
+    /// own implementations agree: GLM's `rotate_half` is the interleaved
+    /// `0::2`/`1::2` form, Llama-4 and DeepSeek-V2 rotate complex pairs.
+    /// ⚠ Llama-4 and DeepSeek-2 are matched to the reference and NOT run here —
+    /// no such model is on the test fleet.
     pub fn use_rope_contiguous(&self) -> bool {
-        // Interleaved (NORM): Llama, Mistral
+        // Interleaved (NORM): Llama, Mistral, GLM-4, Llama-4, DeepSeek-2
         // Contiguous (NEOX): everything else
         !matches!(
             self,
-            ModelArch::Llama | ModelArch::Mistral | ModelArch::Unknown(_)
+            ModelArch::Llama
+                | ModelArch::Mistral
+                | ModelArch::Glm4
+                | ModelArch::Llama4
+                | ModelArch::DeepSeek2
+                | ModelArch::Unknown(_)
         )
     }
 

@@ -14,7 +14,8 @@ use candle_core::{DType, Device, Tensor};
 #[test]
 fn test_deepseek_arch_supported() {
     assert!(ModelArch::DeepSeek2.is_supported());
-    assert!(ModelArch::DeepSeek2.use_rope_contiguous());
+    // llama.cpp: LLAMA_ROPE_TYPE_NORM (interleaved) — see `use_rope_contiguous`.
+    assert!(!ModelArch::DeepSeek2.use_rope_contiguous());
     assert_eq!(ModelArch::DeepSeek2.default_activation(), Activation::SiLU);
     assert!(!ModelArch::DeepSeek2.use_gemma_norm());
 }
