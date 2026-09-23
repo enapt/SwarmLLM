@@ -152,44 +152,55 @@ UNDETERMINED and never a fix — use it BEFORE blaming a change, especially your
 
 ## Status
 
-**v0.3.198-alpha released, signed and deployed to both nodes (2026-09-22);
+**v0.3.200-alpha released, signed and deployed to both nodes (2026-09-23);
 `main` is clean.** ⚠ **`.195`'s two `LayerForward` trailers (`0x08`, `0x09`)
 have STILL never been exercised in the field** — `memory/next_up.md` says what
 to read off a live node first.
 
+⛔⛔ **v0.3.199-alpha SHIPPED BROKEN and was WITHDRAWN** — every model emitted
+garbage on GPU. It was cleared using `--features candle-cuda`, which has **no
+flash-attn and no llama backend**, while the release is `--features cuda`.
+**Match the feature gate to a change's BLAST RADIUS, and remember a BUILD gate
+is not a BEHAVIOUR gate** — Cache warm passed all three cells, Windows GPU
+included, while nothing generated correctly (#683, #677).
+✅ **The release gate now verifies the ARTIFACT BEFORE signing.** The old order
+(sign, then check) is the only reason it reached the public. → `memory/release_gate.md`.
+
 **Local GPU decode is bound by SUBMISSION COUNT, not bandwidth** — `ms/layer` is
-flat across model size, so **layer count predicts decode cost**. `.198` removed
-needless submissions for +34% on a 1.1B and a 3B, and +55% on phi-3.5-mini by
-computing its fused QKV once instead of per projection. ⚠ **There is exactly
-ONE CUDA stream and two shipped changes depend on that.** Next moves, sized from
-llama.cpp's own work: `docs/plans/local_decode_submissions.md`.
+flat across model size, so **layer count predicts decode cost**. `.198` gave
++34% on a 1.1B and a 3B and +55% on phi-3.5-mini; `.200` adds the fused
+`silu(gate)×up` kernel (−66 submissions/token, **no speed claim** — below this
+box's resolution). **Our own CUDA kernels live in `kernels/*.cu`**, compiled to
+PTX by `build.rs` and loaded via `get_or_load_custom_func`; write each one
+bit-identical to the candle ops it replaces.
+⚠ **ONE CUDA stream PER DEVICE, and buffers never cross devices** — the
+disabled per-allocation events rest on that. Moving off the legacy stream is
+**opt-in and OFF** (`SWARMLLM_CUDA_OWN_STREAM=1`) after breaking .199; CUDA
+graphs need it, so that has to be solved first.
+Next moves: `docs/plans/local_decode_submissions.md`.
 
 ⚠ **A new wire trailer is NOT a no-op for an older peer** — decoders rebuild the
 seal's AAD from the trailers they PARSED, so an unknown one breaks every
 encrypted forward. **Feature-gate every optional trailer at the SENDER.**
 
 ⚠ **Gossip says what CHANGED, to everyone — and what ONE peer lacks, to that
-peer.** Three fixes paid for this: bulk state on a timer (a manifest carries
-every shard's tensor table, 26-104 KB); re-publishing what peers told US as if
-it were ours (an immortal feedback loop); and answering "someone joined" with a
-topic-wide flood. ⚠ **Before estimating why a total is expensive, find the
-counter you are not reading** — three estimates from sizes × intervals were each
-10-100x wrong (#673). → `.claude/rules/arch-network.md`, `docs/invariants/network.md`.
+peer.** Three fixes paid for this. ⚠ **Before estimating why a total is
+expensive, find the counter you are not reading** — three estimates from
+sizes × intervals were each 10-100x wrong (#673).
+→ `arch-network.md`, `docs/invariants/network.md`.
 
 **A split is only fast when the machines are CLOSE** — it relocates work and the
 chain is walked once per TOKEN (0.35 tok/s Thailand↔Italy vs 6.76 at 18 ms).
-⚠ **Nothing routes on coordinates yet.** **Read
-`docs/plans/regional_pipelines.md` before touching routing, placement or cost.**
+⚠ **Nothing routes on coordinates yet.** → `docs/plans/regional_pipelines.md`.
 
 **Releases are SIGNED; CI leaves a DRAFT and the signing script publishes it.**
 ⚠ **It takes the WRONG tag silently** — confirm `draft=false`, a non-zero
 `.minisig` count (7 vs 9 `.sha256` is CORRECT) and that the trusted comment
 names THIS version. → `memory/release_gate.md`, `docs/RELEASE_SIGNING.md`.
 
-⚠ **#90's CAUSE IS UNKNOWN** — a dispatcher stall seen TWICE (33-45 min), ended
-only by a restart; `cancel_request` is ELIMINATED. ⚠ **#17 has never run on a
-live multi-node failover, and a TWO-node rig cannot test it** — a composite
-stand-in needs two nodes besides the one that failed, so four daemons.
+⚠ **#90's CAUSE IS UNKNOWN** — a dispatcher stall seen TWICE (33-45 min);
+`cancel_request` is ELIMINATED. ⚠ **#17 has never run on a live failover, and a
+TWO-node rig cannot test it** — it needs four daemons.
 
 ⚠ **`gossip_network_id` is NOT an isolation boundary** — it scopes gossip TOPICS
 only; the DHT is shared. Isolation is a pool + `private_mode` +
