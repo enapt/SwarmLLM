@@ -5,7 +5,7 @@ use std::path::Path;
 use candle_core::quantized::gguf_file;
 
 use crate::error::SwarmError;
-use crate::inference::tokenizer::SplitTokenizer;
+use crate::inference::tokenizer::{SpecialTokenSpacing, SplitTokenizer};
 
 /// Sidecar file carrying `token_embd.weight` for weight-tied models.
 ///
@@ -275,6 +275,10 @@ pub struct GgufTokenizerMeta {
     /// own answer to "is this a special token"** — see
     /// `tokenizer::declared_special`.
     pub token_types: Vec<i32>,
+    /// `general.architecture` ("llama" when absent, as [`gguf_arch_str`]
+    /// answers). Read by [`special_token_spacing_for`] — a property of the
+    /// family's tokenizer the GGUF has no key for.
+    pub architecture: String,
 }
 
 /// Pre-tokenizers that make a GPT-2-style BPE vocabulary prepend BOS when the
@@ -320,6 +324,27 @@ fn add_bos_by_llama_cpp_rules(declared: Option<bool>, tokenizer_model: &str, pre
         "gpt2" => BPE_PRE_TOKENIZERS_THAT_ADD_BOS.contains(&pre),
         _ => false,
     })
+}
+
+/// How a SentencePiece vocabulary of this ARCHITECTURE treats the text beside
+/// a special token — the one place it is decided.
+///
+/// `phi3` is the one family that differs: its Hugging Face `tokenizer.json`
+/// marks every added token but `<unk>`, `<s>` and `<|endoftext|>` `rstrip`,
+/// and prefixes `▁` per segment. Checked against that file on this fleet's
+/// Phi-3.5-mini: 5 of 8 prompts matched before, every chat prompt differing,
+/// each by the newline after `<|user|>`/`<|end|>`/`<|assistant|>`. A `phi3`
+/// GGUF with a GPT-2 vocabulary (Phi-4-mini) never reaches the SentencePiece
+/// encoder, so this cannot touch it.
+///
+/// Keyed on the architecture, not on `general.name` as llama.cpp keys it
+/// ("phi-3"/"phi3" in the lowercased name), which misses this fleet's
+/// "Phi 3.5 Mini Instruct".
+pub(crate) fn special_token_spacing_for(architecture: &str) -> SpecialTokenSpacing {
+    match architecture {
+        "phi3" => SpecialTokenSpacing::StripAfterSpecialAndPrefixEach,
+        _ => SpecialTokenSpacing::FirstSegmentOnly,
+    }
 }
 
 /// Token strings that END GENERATION, searched for BY NAME in the vocabulary.
@@ -527,6 +552,7 @@ impl GgufTokenizerMeta {
             add_space_prefix,
             add_bos_token,
             token_types,
+            architecture: gguf_arch_str(ct),
         }
     }
 
@@ -655,14 +681,17 @@ impl GgufTokenizerMeta {
                 &self.token_types,
             ))
         } else if self.tokenizer_model == "llama" && !self.scores.is_empty() {
-            Some(SplitTokenizer::from_sentencepiece(
-                &self.vocab,
-                &self.scores,
-                self.add_space_prefix,
-                self.add_bos_token,
-                self.bos_token_id,
-                &self.token_types,
-            ))
+            Some(
+                SplitTokenizer::from_sentencepiece(
+                    &self.vocab,
+                    &self.scores,
+                    self.add_space_prefix,
+                    self.add_bos_token,
+                    self.bos_token_id,
+                    &self.token_types,
+                )
+                .with_special_token_spacing(special_token_spacing_for(&self.architecture)),
+            )
         } else {
             None
         }
@@ -766,6 +795,20 @@ pub fn ensure_gguf_header(model_dir: &Path) -> Result<(), SwarmError> {
 #[cfg(test)]
 mod add_bos_rule_tests {
     use super::add_bos_by_llama_cpp_rules as rule;
+
+    /// Phi-3 is the one SentencePiece family whose turn markers strip the
+    /// whitespace after them, and it is recognised by ARCHITECTURE — the file on
+    /// this fleet is named "Phi 3.5 Mini Instruct", which llama.cpp's name match
+    /// misses. Every other architecture keeps what the encoder always did.
+    #[test]
+    fn phi3_spacing_is_chosen_by_architecture() {
+        use super::special_token_spacing_for as spacing;
+        use crate::inference::tokenizer::SpecialTokenSpacing::*;
+        assert_eq!(spacing("phi3"), StripAfterSpecialAndPrefixEach);
+        for arch in ["llama", "gemma2", "qwen2", "glm4", "mistral", ""] {
+            assert_eq!(spacing(arch), FirstSegmentOnly, "{arch}");
+        }
+    }
 
     /// llama.cpp's rules (`llama_vocab::impl::load`), one arm each — the
     /// reference the old blanket `unwrap_or(true)` disagreed with (#97).

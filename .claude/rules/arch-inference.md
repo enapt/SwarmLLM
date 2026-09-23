@@ -319,6 +319,11 @@ GLM-4's `[gMASK]` and Mistral's `[INST]` (#97).
 BOS, and **`SplitTokenizer::encode`** gives none to a text already opening with
 one. Check a tokenizer change with `examples/tokenizer_reference.py` +
 `tokenizer_agrees_with_llama_cpp` — an independent implementation, not itself.
+⚠ **For SentencePiece WHITESPACE llama.cpp is no authority** (it agreed with
+HF in 3/7, 5/8, 3/8 on Mistral, Phi-3.5, TinyLlama) — re-reference with
+`examples/tokenizer_hf_reference.py` against the model's own tokenizer.json.
+**`gguf_meta::special_token_spacing_for`** decides by architecture what the
+GGUF does not record: Phi-3 strips whitespace after its turn markers.
 
 → `docs/invariants/inference.md`
 

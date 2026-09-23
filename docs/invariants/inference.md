@@ -616,12 +616,30 @@ Every GPT-2-style family (Qwen2.5/3, Phi-4-mini, xLAM, Llama-3) agrees in full.
 
 **What the reference test asserts, and what it only reports.** It ASSERTS that
 special tokens (by `token_type`) and BOS agree for every model, and that a
-GPT-2-style vocabulary agrees in full. It only REPORTS SentencePiece whitespace:
-llama.cpp inserts a `▁` after every special token (HF's `legacy` behaviour,
-which Mistral's own tokenizer does not use) and segments TinyLlama's
-merges-carrying vocabulary by score where we use merge rank. Phi-3.5, Mistral
-and TinyLlama keep those differences — **llama.cpp alone does not settle them;
-a Hugging Face `tokenizers` reference would.**
+GPT-2-style vocabulary agrees in full. It only REPORTS SentencePiece whitespace,
+where llama.cpp is no authority.
+
+**Settled against Hugging Face, the model's own tokenizer (2026-09-24).**
+`examples/tokenizer_hf_reference.py` re-references the same cases to each
+model's `tokenizer.json`. llama.cpp agreed with HF in only 3/7 (Mistral), 5/8
+(Phi-3.5) and 3/8 (TinyLlama) — it inserts a `▁` after every special token
+(Mistral v0.3's `Metaspace(prepend_scheme: "first")` does not), segments
+TinyLlama by score where HF uses its merges, and applies Phi-3's rule only by
+NAME. Ours against HF:
+- **TinyLlama 8/8, Mistral 6/7 — unchanged, ours was right.** The seventh is a
+  text OPENING with spaces: HF skips the dummy prefix, SentencePiece itself —
+  Mistral's own tokenizer — does not, and neither do we.
+- **Phi-3.5 5/8 → 8/8 — `SpecialTokenSpacing::StripAfterSpecialAndPrefixEach`.**
+  Its `tokenizer.json` marks every added token but `<unk>`/`<s>`/`<|endoftext|>`
+  `rstrip`, and its normalizer prefixes `▁` per segment, so `<|user|>\nWrite` is
+  `<|user|> ▁Write`: the newline the chat template writes after each marker is
+  one the model's own tokenizer never produced. llama.cpp has the identical set
+  (`llama-vocab.cpp`, the "phi-3"/"phi3" name branch) — and misses this fleet's
+  file, named "Phi 3.5 Mini Instruct". Chosen here by ARCHITECTURE
+  (`gguf_meta::special_token_spacing_for`), which a display name cannot defeat;
+  a `phi3` GGUF with a GPT-2 vocabulary (Phi-4-mini) never reaches this encoder.
+  Checked three ways: ours = HF = llama.cpp with its name rule forced on
+  (`kv_overrides general.name`), 8/8 each.
 
 **The harness is the part to keep.** No weights are read: each model gets a
 SPARSE GGUF (header + a hole to the real size), because llama.cpp checks tensor

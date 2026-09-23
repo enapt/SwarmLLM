@@ -619,6 +619,45 @@ pub struct SpmTokenizer {
     unk_id: Option<u32>,
     /// Special tokens sorted by length (longest first) for greedy matching
     special_tokens: Vec<(String, u32)>,
+    /// How the text beside a special token is treated — see
+    /// [`SpecialTokenSpacing`]. Chosen by the model's architecture in
+    /// `GgufTokenizerMeta::build_tokenizer`; the default is what this encoder
+    /// always did.
+    spacing: SpecialTokenSpacing,
+    /// The special tokens whose following whitespace is removed, resolved from
+    /// `spacing` when it is set. Empty unless `spacing` strips.
+    rstrip_ids: std::collections::HashSet<u32>,
+}
+
+/// How a SentencePiece vocabulary treats the text around a special token.
+///
+/// **Not recorded in the GGUF**: Hugging Face keeps it in `tokenizer.json` —
+/// per-token `AddedToken::rstrip`, and whether the dummy-prefix `▁` is a
+/// per-segment normalizer or a first-segment-only pre-tokenizer — and the GGUF
+/// conversion drops both. llama.cpp restores the one family that needs it by
+/// matching `general.name` against "phi-3"/"phi3" (`llama-vocab.cpp`), which
+/// silently misses a file named "Phi 3.5 Mini Instruct" — the one on this
+/// fleet. So it is chosen here by ARCHITECTURE instead (FUTURE_WORK #97
+/// follow-up, 2026-09-24).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum SpecialTokenSpacing {
+    /// Only the prompt's first text segment gets the dummy-prefix `▁`, and
+    /// whitespace after a special token is kept. Hugging Face's
+    /// `Metaspace(prepend_scheme: "first")`, which is Mistral v0.3's — checked
+    /// against its own `tokenizer.json`: 6 of 7 cases identical, the seventh a
+    /// text OPENING with spaces, where HF skips the prefix and SentencePiece
+    /// itself (Mistral's own tokenizer) does not.
+    #[default]
+    FirstSegmentOnly,
+    /// Phi-3 / Phi-3.5 (SentencePiece): whitespace to the RIGHT of every special
+    /// token except `<unk>`, `<s>` and `<|endoftext|>` is removed — HF's
+    /// `rstrip: true` on exactly those `added_tokens` — and every text segment
+    /// after a special token gets the `▁` prefix, because HF's normalizer is a
+    /// per-segment `Prepend("▁")`. So `<|user|>\nWrite` is `<|user|> ▁Write`,
+    /// not `<|user|> \n Write`: the newline the chat template writes is one the
+    /// model's own tokenizer never gave it. llama.cpp's rule for this family
+    /// is the same set, applied only when the name matches.
+    StripAfterSpecialAndPrefixEach,
 }
 
 impl SpmTokenizer {
@@ -676,12 +715,31 @@ impl SpmTokenizer {
             add_space_prefix,
             unk_id,
             special_tokens,
+            spacing: SpecialTokenSpacing::FirstSegmentOnly,
+            rstrip_ids: std::collections::HashSet::new(),
         }
+    }
+
+    /// Apply a family's special-token spacing — see [`SpecialTokenSpacing`].
+    fn set_spacing(&mut self, spacing: SpecialTokenSpacing) {
+        self.spacing = spacing;
+        self.rstrip_ids = match spacing {
+            SpecialTokenSpacing::FirstSegmentOnly => Default::default(),
+            SpecialTokenSpacing::StripAfterSpecialAndPrefixEach => self
+                .special_tokens
+                .iter()
+                .filter(|(t, _)| !matches!(t.as_str(), "<unk>" | "<s>" | "<|endoftext|>"))
+                .map(|&(_, id)| id)
+                .collect(),
+        };
     }
 
     /// Encode text to token IDs using SPM merge algorithm.
     pub fn encode(&self, text: &str) -> Vec<i64> {
         let mut result = Vec::new();
+        let prefix_each = self.spacing == SpecialTokenSpacing::StripAfterSpecialAndPrefixEach;
+        // The special token this segment follows, if it directly follows one.
+        let mut after_special: Option<u32> = None;
 
         // Split text around special tokens first
         let segments = self.split_special_tokens(text);
@@ -689,15 +747,33 @@ impl SpmTokenizer {
             if is_special {
                 if let Some(&(id, _)) = self.piece_to_id.get(&segment) {
                     result.push(id as i64);
+                    after_special = Some(id);
                 }
             } else {
-                // Normalize: replace spaces with ▁, optionally prepend ▁
-                let normalized = if self.add_space_prefix && result.is_empty() {
+                let mut segment = segment.as_str();
+                if after_special.is_some_and(|id| self.rstrip_ids.contains(&id)) {
+                    // ASCII whitespace, as llama.cpp's `isspace` strips; the
+                    // segment may vanish entirely (`<|end|>\n<|assistant|>`).
+                    segment = segment.trim_start_matches(|c: char| {
+                        matches!(c, ' ' | '\t' | '\n' | '\x0B' | '\x0C' | '\r')
+                    });
+                    if segment.is_empty() {
+                        after_special = None;
+                        continue;
+                    }
+                }
+                // Normalize: replace spaces with ▁, optionally prepend ▁ —
+                // to the first segment, or (per `spacing`) to every segment a
+                // special token precedes.
+                let prefix = self.add_space_prefix
+                    && (result.is_empty() || (prefix_each && after_special.is_some()));
+                let normalized = if prefix {
                     format!("\u{2581}{}", segment.replace(' ', "\u{2581}"))
                 } else {
                     segment.replace(' ', "\u{2581}")
                 };
                 result.extend(self.spm_encode(&normalized));
+                after_special = None;
             }
         }
         result
@@ -1017,6 +1093,15 @@ impl SplitTokenizer {
         }
     }
 
+    /// Apply a family's special-token spacing to the SentencePiece path (a no-op
+    /// for BPE) — see [`SpecialTokenSpacing`].
+    pub(crate) fn with_special_token_spacing(mut self, spacing: SpecialTokenSpacing) -> Self {
+        if let TokenizerKind::SentencePiece(spm) = &mut self.kind {
+            spm.set_spacing(spacing);
+        }
+        self
+    }
+
     /// Encode text to token IDs.
     ///
     /// BOS is prepended HERE, at the single entry point every variant shares,
@@ -1316,6 +1401,53 @@ mod declared_special_tests {
         let blind = SplitTokenizer::from_sentencepiece(&toks, &scores, false, false, None, &[]);
         let ids = blind.encode("[INST]a    b");
         assert!(!ids.contains(&3) && !ids.contains(&4), "{ids:?}");
+    }
+
+    /// Phi-3's own tokenizer strips the whitespace after its turn markers and
+    /// starts each following segment with `▁` — so the newline the chat
+    /// template writes after `<|user|>` is not what the model was given.
+    /// Checked on the real Phi-3.5-mini against its `tokenizer.json`: every
+    /// chat prompt differed before, only in exactly this (2026-09-24).
+    #[test]
+    fn phi3_strips_whitespace_after_its_turn_markers_and_prefixes_each_segment() {
+        let toks: Vec<String> = [
+            "<unk>",
+            "<s>",
+            "</s>",
+            "\u{2581}",
+            "<0x0A>",
+            "a",
+            "\u{2581}a",
+            "<|user|>",
+            "<|end|>",
+            "<|assistant|>",
+            "<|endoftext|>",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let scores = vec![0.0; toks.len()];
+        let mut types = vec![1i32; toks.len()];
+        for id in [0usize, 1, 2, 7, 8, 9, 10] {
+            types[id] = 3;
+        }
+        types[4] = 6;
+        let text = "<|user|>\na<|end|>\n<|assistant|>\n";
+
+        let phi3 = SplitTokenizer::from_sentencepiece(&toks, &scores, true, false, None, &types)
+            .with_special_token_spacing(SpecialTokenSpacing::StripAfterSpecialAndPrefixEach);
+        assert_eq!(
+            phi3.encode(text),
+            vec![7, 6, 8, 9],
+            "<|user|> ▁a <|end|> <|assistant|> — newlines stripped, segment prefixed"
+        );
+        // `<s>` is NOT stripped after (HF: `rstrip: false`), and the segment
+        // after it is still prefixed: " a" becomes "▁▁a".
+        assert_eq!(phi3.encode("<s> a"), vec![1, 3, 6]);
+
+        // THE CONTROL — every other family, and what Phi-3 got before.
+        let plain = SplitTokenizer::from_sentencepiece(&toks, &scores, true, false, None, &types);
+        assert_eq!(plain.encode(text), vec![7, 4, 5, 8, 4, 9, 4]);
     }
 }
 
@@ -1836,11 +1968,17 @@ mod bpe_merge_equivalence {
 ///   vocabulary's own `token_type`) appear in the same order, and BOS agrees;
 /// - for a GPT-2-style BPE vocabulary, the WHOLE sequence agrees.
 ///
-/// What it only REPORTS is SentencePiece whitespace: llama.cpp inserts a `▁`
-/// after every special token (Hugging Face's `legacy` behaviour), which
-/// Mistral's own tokenizer does not, and it segments TinyLlama's
-/// merges-carrying vocabulary by score rather than by merge rank. Neither is
-/// settled by llama.cpp alone, so neither fails this test.
+/// What it only REPORTS is SentencePiece whitespace, where llama.cpp is no
+/// authority: it inserts a `▁` after every special token (Hugging Face's
+/// `legacy` behaviour), which Mistral's own tokenizer does not, applies Phi-3's
+/// strip-after-marker rule only when the model's NAME matches, and segments
+/// TinyLlama's merges-carrying vocabulary by score. **Settled 2026-09-24 against
+/// each model's own `tokenizer.json`** (`examples/tokenizer_hf_reference.py`
+/// rewrites the cases to HF's ids): TinyLlama 8/8 and Mistral 6/7 identical as
+/// they were — the seventh a text OPENING with spaces, where SentencePiece
+/// (Mistral's own tokenizer) prefixes and HF does not — and Phi-3.5 5/8 → 8/8
+/// once [`SpecialTokenSpacing`] was applied. Point this test at HF-referenced
+/// cases to check a SentencePiece change.
 ///
 /// Gated on `SWARM_TOKENIZER_CASES`, a JSONL file written by
 /// `examples/tokenizer_reference.py` from llama.cpp (`llama-cpp-python`,

@@ -92,6 +92,8 @@ swarmllm/
 │                 it is the cheapest thing to hand a tester with a different card;
 │                 tokenizer_reference.py — every local model's chat template tokenized by
 │                 llama.cpp, for the ignored `tokenizer_agrees_with_llama_cpp` (FUTURE_WORK #97);
+│                 tokenizer_hf_reference.py — the same cases re-referenced to the model's
+│                 own Hugging Face tokenizer.json, where llama.cpp is no authority (SPM whitespace);
 │                 reply_ab.sh — greedy replies from one binary, for a two-binary diff; it
 │                 found #93, and byte-identical to the last release is NOT correctness (#96);
 │                 smoke_test.sh, release_shapes.sh, family_conformance.sh — the release gate's three)
