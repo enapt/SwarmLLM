@@ -562,6 +562,7 @@
   "errors.request_timeout": "请求超时 — 服务器可能繁忙或无法访问",
   "errors.server_unreachable": "无法连接 SwarmLLM — 是否正在运行？",
   "errors.untrusted_dashboard": "SwarmLLM 不会向 {addr} 发放访问密钥，因此此页面暂时无法进行任何更改。请粘贴您的访问密钥以解锁，或在运行 SwarmLLM 的计算机上于设置中允许此网络。",
+  "errors.untrusted_dashboard_proxied": "您是通过代理打开 SwarmLLM 的，它无法判断您是否就在运行它的计算机前，因此不会把访问密钥交给此页面。请粘贴您的访问密钥以解锁。",
   "errors.untrusted_dashboard_where": "访问密钥会在 SwarmLLM 启动时显示，并保存在其数据文件夹的 api_key 文件中。",
   "foreign_pool.pool_label": "池 {id}…",
   "foreign_pool.tile_sub": "仅供了解 — 您的推理始终保留在自己的池内。",

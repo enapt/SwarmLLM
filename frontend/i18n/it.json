@@ -562,6 +562,7 @@
   "errors.request_timeout": "Richiesta scaduta — il server potrebbe essere occupato o irraggiungibile",
   "errors.server_unreachable": "Impossibile raggiungere SwarmLLM — è in esecuzione?",
   "errors.untrusted_dashboard": "SwarmLLM non fornisce chiavi di accesso a {addr}, quindi questa pagina non può ancora modificare nulla. Incolla la tua chiave di accesso per sbloccarla, oppure autorizza questa rete nelle Impostazioni dal computer su cui gira SwarmLLM.",
+  "errors.untrusted_dashboard_proxied": "Hai aperto SwarmLLM tramite un proxy, quindi non può sapere se sei al computer su cui è in esecuzione e non darà a questa pagina la sua chiave di accesso. Incolla la tua chiave di accesso per sbloccarla.",
   "errors.untrusted_dashboard_where": "La tua chiave di accesso viene mostrata all'avvio di SwarmLLM ed è salvata nel file api_key della cartella dei dati.",
   "foreign_pool.pool_label": "Gruppo {id}…",
   "foreign_pool.tile_sub": "Solo a scopo informativo — le tue richieste restano nel tuo gruppo.",

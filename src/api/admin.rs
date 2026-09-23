@@ -1881,15 +1881,15 @@ pub struct ConfigUpdate {
 /// POST /api/admin/shutdown — Gracefully shut down the node.
 /// Only accepts requests from localhost (127.0.0.1 or ::1) for safety.
 pub async fn shutdown_node(
-    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    origin: crate::api::origin::RequestOrigin,
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    if !addr.ip().is_loopback() {
+    if !origin.is_this_machine() {
         return Err(ApiError(crate::error::SwarmError::LocalOnly(
             "Shutting the node down".into(),
         )));
     }
-    tracing::info!(addr = %addr, "Shutdown requested via API");
+    tracing::info!(addr = %origin.ip, "Shutdown requested via API");
 
     // Signal all subsystems to shut down via the watch channel.
     // The daemon.rs supervisor loop will handle graceful draining,
@@ -2666,7 +2666,7 @@ pub struct AdminResponsesQuery {
 /// than O(total_records). The full preview JSON is only built for the
 /// records that survive the bounded top-k pass.
 pub async fn list_responses(
-    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    origin: crate::api::origin::RequestOrigin,
     State(state): State<crate::api::server::AppState>,
     axum::extract::Query(params): axum::extract::Query<AdminResponsesQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
@@ -2674,7 +2674,7 @@ pub async fn list_responses(
     // shared cluster API key, exposing it to non-loopback callers would leak
     // every other user's prompts. Loopback callers (local dashboard) get the
     // full preview; remote API-key holders see metadata only.
-    let include_preview = addr.ip().is_loopback();
+    let include_preview = origin.is_this_machine();
     use std::cmp::Ordering;
     use std::collections::BinaryHeap;
 

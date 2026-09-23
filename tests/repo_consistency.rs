@@ -10190,3 +10190,54 @@ fn the_shard_download_guard_catches_a_request_naming_no_work() {
     // The helper's own definition is not a call.
     assert!(shard_downloads_naming_no_work("downloadShards: async function(body) {").is_empty());
 }
+
+/// Code lines (not comments) that decide something from a peer's socket
+/// address being loopback.
+fn socket_loopback_checks(src: &str) -> Vec<String> {
+    src.lines()
+        .filter(|l| {
+            let t = l.trim_start();
+            !t.starts_with("//") && t.contains(".ip().is_loopback()")
+        })
+        .map(|l| l.trim().to_string())
+        .collect()
+}
+
+/// "Is the person making this request at this machine?" has ONE answer:
+/// `api::origin::RequestOrigin::is_this_machine`.
+///
+/// `addr.ip().is_loopback()` means only that the last TCP hop began in this
+/// network namespace, and a reverse proxy on the same host is exactly that for
+/// everyone who can reach it. Seven privileges were decided that way — the
+/// automatic API-key handout, keyless `/metrics`, update check and apply,
+/// shutdown, prompt previews, the rate-limit exemption — and the book's own
+/// nginx example handed all of them to every visitor (2026-09-23).
+#[test]
+fn no_request_privilege_is_decided_by_a_bare_loopback_check() {
+    let offenders: Vec<String> = walk_rs_files("src/api")
+        .into_iter()
+        .filter(|p| !p.ends_with("src/api/origin.rs"))
+        .flat_map(|p| {
+            let src = std::fs::read_to_string(repo_root().join(&p)).unwrap_or_default();
+            socket_loopback_checks(&src)
+                .into_iter()
+                .map(move |l| format!("{p}: {l}"))
+        })
+        .collect();
+    assert!(
+        offenders.is_empty(),
+        "decide it with `RequestOrigin::is_this_machine()` (api/origin.rs), which also \
+         refuses a same-host reverse proxy:\n  {}",
+        offenders.join("\n  ")
+    );
+}
+
+#[test]
+fn the_loopback_guard_sees_a_check_and_skips_a_comment() {
+    let planted = "    if !addr.ip().is_loopback() {\n        return Err(e);\n    }";
+    assert_eq!(socket_loopback_checks(planted).len(), 1);
+    let chained = "let include_preview = addr.ip().is_loopback();";
+    assert_eq!(socket_loopback_checks(chained).len(), 1);
+    let comment = "    // used to be `addr.ip().is_loopback()`, which a proxy satisfies";
+    assert!(socket_loopback_checks(comment).is_empty());
+}

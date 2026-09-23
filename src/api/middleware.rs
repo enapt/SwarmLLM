@@ -343,9 +343,12 @@ pub async fn rate_limit_middleware(
     // search) so a runaway local script — or a malicious browser extension
     // running on localhost:8800 — can't loop-call them and burn HuggingFace
     // API quota or get our IP banned.
-    let is_loopback = addr.ip().is_loopback();
+    // "At this machine", not "over loopback": a same-host reverse proxy is
+    // loopback for every visitor (`api::origin`).
+    let is_this_machine =
+        crate::api::origin::RequestOrigin::new(addr.ip(), req.headers()).is_this_machine();
     let is_admin_get = path.starts_with("/api/admin/") && !is_mutating;
-    if is_loopback && is_admin_get && !is_outbound_admin_path(&path) {
+    if is_this_machine && is_admin_get && !is_outbound_admin_path(&path) {
         return next.run(req).await;
     }
 
@@ -479,6 +482,11 @@ pub async fn auth_middleware(
 ) -> Response {
     let path = req.uri().path().to_string();
     let method = req.method().clone();
+    // Decided once, from the socket AND the headers — see `api::origin`. Every
+    // "only for the person at this machine" branch below reads this, never
+    // `addr.ip().is_loopback()`, which a same-host reverse proxy satisfies on
+    // behalf of anyone who can reach it.
+    let origin = crate::api::origin::RequestOrigin::new(addr.ip(), req.headers());
 
     // R138 (closes R101/R102 deferrals about /metrics credit-balance
     // disclosure): when `api.metrics_auth_required` is set, /metrics
@@ -487,7 +495,7 @@ pub async fn auth_middleware(
     // (and the dashboard's loopback scrape).
     if state.shared_state.config.api.metrics_auth_required && path == "/metrics" {
         // Skip the loopback-exempt branch — fall through to Bearer check.
-    } else if is_exempt_request(&path, &method, addr.ip().is_loopback()) {
+    } else if is_exempt_request(&path, &method, origin.is_this_machine()) {
         // Exempt frontend routes, health, read-only dashboard endpoints (loopback-gated)
         return next.run(req).await;
     }
@@ -526,7 +534,7 @@ pub async fn auth_middleware(
     // opt-in and `api.dashboard_trust_overlay` exists to decline even that.
     if path == "/api/admin/api-key"
         && method == Method::GET
-        && crate::api::dashboard_trust::classify(&state.shared_state, addr.ip())
+        && crate::api::dashboard_trust::classify(&state.shared_state, origin)
             .await
             .is_trusted()
         && is_valid_bootstrap_nonce(&state, req.headers())
@@ -542,8 +550,8 @@ pub async fn auth_middleware(
     // See api/websocket.rs::handler and api/websocket.rs::issue_ticket.
 
     // Exempt internal forwarded requests authenticated with per-process secret token.
-    // Only on loopback — this is for local inter-process communication only.
-    if addr.ip().is_loopback() {
+    // Only from this machine — this is for local inter-process communication only.
+    if origin.is_this_machine() {
         if let Some(token) = req
             .headers()
             .get("x-swarm-internal-token")
@@ -565,7 +573,7 @@ pub async fn auth_middleware(
         let is_inference_path =
             path.starts_with("/v1/chat/completions") || path.starts_with("/v1/messages");
 
-        if addr.ip().is_loopback() {
+        if origin.is_this_machine() {
             // Loopback requires internal token (prevents localhost bypass)
             if let Some(token) = req
                 .headers()

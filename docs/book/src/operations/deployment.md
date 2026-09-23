@@ -220,17 +220,36 @@ server {
     server_name swarmllm.example.com;
 
     location / {
-        proxy_pass http://127.0.0.1:8800;
+        # This machine's LAN address — NOT 127.0.0.1 (see below).
+        proxy_pass http://192.168.1.10:8800;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
+        proxy_buffering off;       # stream tokens as they are generated
+        proxy_read_timeout 1h;     # generation has no server-side deadline
     }
 }
 ```
 
-Note: The reverse proxy only handles HTTP traffic. P2P (QUIC/UDP) must still be accessible directly on port 8800.
+**Do not proxy over `127.0.0.1`.** SwarmLLM treats someone at the machine
+itself as the owner: it hands the dashboard its API key automatically, serves
+`/metrics` without a key, and allows updating and shutting the node down.
+Behind a proxy on the same host, every visitor used to arrive from 127.0.0.1 —
+so anyone who could reach the proxy got admin access. Pointing `proxy_pass` at
+the machine's LAN address makes visitors remote, so they must paste the API key.
+Leave `api.dashboard_trust_lan` **off** for the same reason: with it on, LAN
+addresses — the proxy's included — are handed the key too.
+
+Versions after v0.3.200 also refuse those privileges to any request that
+carries a forwarding header (`X-Forwarded-For`, `X-Real-IP`, `Forwarded`,
+`Via`, `Tailscale-User-Login`) or names a host other than `localhost`, so the
+example above is safe either way. v0.3.200 and earlier check only the
+connection's address, and a proxy can be set up to send neither — nginx's
+defaults do — so keep `proxy_pass` off loopback regardless.
+
+Note: the proxy only carries HTTP. P2P must still be reachable directly: TCP 8810 and UDP 8800 (QUIC).
 
 ## Cloud Provider API Keys
 

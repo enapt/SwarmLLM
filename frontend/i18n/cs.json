@@ -562,6 +562,7 @@
   "errors.request_timeout": "Časový limit požadavku vypršel — server může být zaneprázdněn nebo nedostupný",
   "errors.server_unreachable": "Nelze se spojit se SwarmLLM — běží?",
   "errors.untrusted_dashboard": "SwarmLLM nevydává přístupové klíče pro {addr}, takže tato stránka zatím nemůže nic změnit. Vložte svůj přístupový klíč pro odemknutí, nebo tuto síť povolte v Nastavení na počítači, kde SwarmLLM běží.",
+  "errors.untrusted_dashboard_proxied": "SwarmLLM jste otevřeli přes proxy, takže nemůže poznat, zda sedíte u počítače, na kterém běží, a této stránce nepředá přístupový klíč. Vložte svůj přístupový klíč pro odemknutí.",
   "errors.untrusted_dashboard_where": "Přístupový klíč se zobrazí při spuštění SwarmLLM a je uložen v souboru api_key ve složce s daty.",
   "foreign_pool.pool_label": "Skupina {id}…",
   "foreign_pool.tile_sub": "Pouze pro přehled — vaše inference zůstává ve vaší skupině.",

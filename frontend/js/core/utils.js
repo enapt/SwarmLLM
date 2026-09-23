@@ -1048,8 +1048,12 @@
     return metaContent('client-trust') || 'loopback';
   }
 
+  // An allowlist, mirroring `DashboardTrust::is_trusted`: 'proxied' was added
+  // after this was written as `!== 'untrusted'`, which would have read a proxy
+  // as trusted. A value this build does not know is untrusted.
   function isTrustedOrigin() {
-    return clientTrust() !== 'untrusted';
+    var t = clientTrust();
+    return t === 'loopback' || t === 'overlay' || t === 'local-network';
   }
 
   // Export utilities

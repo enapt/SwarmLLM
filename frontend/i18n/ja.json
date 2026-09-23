@@ -562,6 +562,7 @@
   "errors.request_timeout": "リクエストがタイムアウトしました — サーバーがビジー状態か到達不能の可能性があります",
   "errors.server_unreachable": "SwarmLLMに接続できません — 実行中ですか？",
   "errors.untrusted_dashboard": "SwarmLLM は {addr} にアクセスキーを渡さないため、このページはまだ何も変更できません。アクセスキーを貼り付けてロックを解除するか、SwarmLLM を実行しているコンピューターの設定でこのネットワークを許可してください。",
+  "errors.untrusted_dashboard_proxied": "プロキシ経由で SwarmLLM を開いたため、SwarmLLM を実行しているコンピューターの前にあなたがいるか判断できず、このページにアクセスキーを渡しません。アクセスキーを貼り付けてロックを解除してください。",
   "errors.untrusted_dashboard_where": "アクセスキーは SwarmLLM の起動時に表示され、データフォルダー内の api_key ファイルに保存されています。",
   "foreign_pool.pool_label": "プール {id}…",
   "foreign_pool.tile_sub": "情報表示のみ — 推論は自分のプール内で完結します。",

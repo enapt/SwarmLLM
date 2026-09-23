@@ -53,6 +53,11 @@ Two settings accessors that are read everywhere and must not be re-derived:
   `addr.ip().is_loopback()` — that predicate is both too broad (a same-host
   reverse proxy satisfies it for a remote client) and too narrow (a container
   publish or Tailscale subnet router never does). Gotcha #195.
+- **`api::origin::RequestOrigin::is_this_machine`** is the single answer to
+  "is the person making this request at this machine?" — loopback AND a local
+  `Host` AND no forwarding header. Seven privileges hung off a bare loopback
+  check and one same-host proxy gave them all away (2026-09-23). Guard:
+  `no_request_privilege_is_decided_by_a_bare_loopback_check`.
 
 When adding a field, put it in the appropriate sub-struct unless it is accessed
 by 10+ files across 3+ subsystem boundaries. **Per-field rules — what each map

@@ -562,6 +562,7 @@
   "errors.request_timeout": "Tiempo de espera agotado — el servidor puede estar ocupado o inaccesible",
   "errors.server_unreachable": "No se puede conectar a SwarmLLM — ¿está ejecutándose?",
   "errors.untrusted_dashboard": "SwarmLLM no entrega claves de acceso a {addr}, así que esta página todavía no puede cambiar nada. Pega tu clave de acceso para desbloquearla, o autoriza esta red en Ajustes desde el ordenador que ejecuta SwarmLLM.",
+  "errors.untrusted_dashboard_proxied": "Abriste SwarmLLM a través de un proxy, así que no puede saber si estás en el ordenador donde se ejecuta y no le dará a esta página su clave de acceso. Pega tu clave de acceso para desbloquearla.",
   "errors.untrusted_dashboard_where": "Tu clave de acceso se muestra al iniciar SwarmLLM y se guarda en el archivo api_key de su carpeta de datos.",
   "foreign_pool.pool_label": "Grupo {id}…",
   "foreign_pool.tile_sub": "Solo para descubrir — tus consultas se quedan en tu grupo.",

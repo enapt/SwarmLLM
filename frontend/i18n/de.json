@@ -562,6 +562,7 @@
   "errors.request_timeout": "Zeitüberschreitung der Anfrage — Server ist möglicherweise beschäftigt oder nicht erreichbar",
   "errors.server_unreachable": "SwarmLLM nicht erreichbar — läuft es?",
   "errors.untrusted_dashboard": "SwarmLLM gibt keine Zugriffsschlüssel an {addr} heraus, daher kann diese Seite noch nichts ändern. Füge deinen Zugriffsschlüssel ein, um sie zu entsperren, oder erlaube dieses Netzwerk in den Einstellungen auf dem Computer, der SwarmLLM ausführt.",
+  "errors.untrusted_dashboard_proxied": "Du hast SwarmLLM über einen Proxy geöffnet. Es kann daher nicht erkennen, ob du an dem Computer sitzt, auf dem es läuft, und gibt dieser Seite seinen Zugriffsschlüssel nicht. Füge deinen Zugriffsschlüssel ein, um sie zu entsperren.",
   "errors.untrusted_dashboard_where": "Dein Zugriffsschlüssel wird beim Start von SwarmLLM angezeigt und liegt in der Datei api_key im Datenordner.",
   "foreign_pool.pool_label": "Pool {id}…",
   "foreign_pool.tile_sub": "Nur zur Übersicht — deine Anfragen bleiben in deinem Pool.",

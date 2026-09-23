@@ -1290,3 +1290,49 @@ Rules that follow:
    `fetch` has no intermediate bytes, so it cannot have an inactivity timeout.
    The chat tab streams, which is why its 30 s `authFetch` default bounds only
    time-to-headers and is harmless there.
+
+## "At this machine" is decided once, from the socket AND the headers (2026-09-23)
+
+**What it replaced.** Seven privileges were granted to "the person at this
+machine", each decided with `addr.ip().is_loopback()`: the automatic API-key
+handout (`middleware.rs`, through `dashboard_trust::classify`), keyless
+`/metrics`, `POST /api/admin/update/check` and `/update/apply`, `/shutdown`,
+prompt previews in `GET /api/admin/responses`, and the admin rate-limit
+exemption. Loopback means only that the last TCP hop began in this network
+namespace — and a reverse proxy on the same host is exactly that, for everyone
+who can reach it. The book's own nginx example (`proxy_pass
+http://127.0.0.1:8800`) therefore gave every visitor admin: the page served them
+a nonce, the nonce plus loopback bought the key. `tailscale serve` and Funnel do
+the same by design. Found by a docs audit reading the example against
+`dashboard_trust.rs`, whose own header had described the proxy case since it was
+written — the fix there changed the classifier's other branches and left the
+loopback branch as it was.
+
+**What was researched.** Jupyter (`check_host`, `ServerApp.local_hostnames`)
+treats a request as local only if the `Host` header is `localhost` or a
+loopback IP — it was written against DNS rebinding and covers proxies for the
+same reason: both carry the name the visitor used. Home Assistant
+(`trusted_proxies`) refuses forwarding headers from a proxy nobody declared.
+`tailscale serve` adds `X-Forwarded-For/Host/Proto` and `Tailscale-User-Login`;
+Caddy adds `X-Forwarded-*` by default; nginx adds nothing by default.
+
+**The rule.** `api::origin::RequestOrigin` is computed from the socket and the
+headers; `is_this_machine()` = loopback AND a local `Host` (or none) AND no
+forwarding header (`Forwarded`, `X-Forwarded-*`, `X-Real-IP`, `Via`,
+`Tailscale-User-Login`). `classify` takes the whole origin — never a bare
+address — and answers `DashboardTrust::Proxied` for any proxied request, so a
+LAN or tailnet proxy cannot carry LAN/overlay trust to whoever is behind it.
+`is_trusted` and the frontend's `isTrustedOrigin` are ALLOWLISTS: the frontend
+check had been `!== 'untrusted'`, which would have read the new label as trusted.
+
+**What it does not do.** It is defence in depth. A proxy configured to send no
+forwarding header and `Host: 127.0.0.1` (nginx's defaults) is still loopback and
+still trusted — which is why the docs keep saying never to proxy over loopback.
+Every signal only REMOVES a privilege, so none of them has to be trusted: a
+forged header costs its sender the automatic key and grants nothing. A person
+browsing their own machine by its hostname (Debian's `127.0.1.1`) now pastes the
+key once; failing closed there is the intended direction.
+
+Guard: `no_request_privilege_is_decided_by_a_bare_loopback_check` (with a
+planted self-test). Tests: `api::origin` (truth table incl. DNS rebinding and
+look-alike hosts), `a_proxied_request_is_never_trusted`.

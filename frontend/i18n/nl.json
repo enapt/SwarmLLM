@@ -562,6 +562,7 @@
   "errors.request_timeout": "Verzoek verlopen — server is mogelijk bezet of onbereikbaar",
   "errors.server_unreachable": "Kan SwarmLLM niet bereiken — draait het?",
   "errors.untrusted_dashboard": "SwarmLLM geeft geen toegangssleutels aan {addr}, dus deze pagina kan nog niets wijzigen. Plak je toegangssleutel om te ontgrendelen, of sta dit netwerk toe via Instellingen op de computer waarop SwarmLLM draait.",
+  "errors.untrusted_dashboard_proxied": "Je hebt SwarmLLM via een proxy geopend, dus het kan niet zien of je achter de computer zit waarop het draait, en geeft deze pagina zijn toegangssleutel niet. Plak je toegangssleutel om te ontgrendelen.",
   "errors.untrusted_dashboard_where": "Je toegangssleutel verschijnt bij het starten van SwarmLLM en staat in het bestand api_key in de gegevensmap.",
   "foreign_pool.pool_label": "Pool {id}…",
   "foreign_pool.tile_sub": "Alleen ter info — je verzoeken blijven binnen je eigen pool.",

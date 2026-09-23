@@ -562,6 +562,7 @@
   "errors.request_timeout": "Délai d'attente dépassé — le serveur est peut-être occupé ou inaccessible",
   "errors.server_unreachable": "Impossible de joindre SwarmLLM — est-il en marche ?",
   "errors.untrusted_dashboard": "SwarmLLM ne fournit pas de clés d'accès à {addr} : cette page ne peut donc encore rien modifier. Collez votre clé d'accès pour la déverrouiller, ou autorisez ce réseau dans les Paramètres depuis l'ordinateur qui exécute SwarmLLM.",
+  "errors.untrusted_dashboard_proxied": "Vous avez ouvert SwarmLLM via un proxy : il ne peut donc pas savoir si vous êtes devant l'ordinateur qui l'exécute et ne donnera pas sa clé d'accès à cette page. Collez votre clé d'accès pour la déverrouiller.",
   "errors.untrusted_dashboard_where": "Votre clé d'accès s'affiche au démarrage de SwarmLLM et se trouve dans le fichier api_key de son dossier de données.",
   "foreign_pool.pool_label": "Groupe {id}…",
   "foreign_pool.tile_sub": "Pour information seulement — vos requêtes restent dans votre groupe.",

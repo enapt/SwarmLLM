@@ -77,7 +77,7 @@ concurrent reads and `RwLock` for single values; shutdown is a
 - Vanilla HTML/CSS/JS — no framework, no build step, embedded via `include_dir!`.
   Detail in `.claude/rules/arch-frontend.md`, which loads when you open `frontend/`.
 - **5** WS message types, **2** broadcast channels. Do not add to either set.
-- i18n: **1395 translation keys** (**1397 entries per locale** incl. `_lang` + `_dir`) × 21,
+- i18n: **1396 translation keys** (**1398 entries per locale** incl. `_lang` + `_dir`) × 21,
   sorted. Counts asserted — **update BOTH CLAUDE.md and `docs/ARCHITECTURE.md`**.
   A new key MUST be translated into all 21; **no English fallback.**
 - Payload ~1196 KB, capped by `frontend_payload_stays_within_budget` — a
@@ -86,8 +86,8 @@ concurrent reads and `RwLock` for single values; shutdown is a
 ## Testing
 
 **Always say which feature set a count came from.** With
-`--features dev,claude-subscription`: **2875 lib** (+13 ignored),
-79 integration (31 + 34 + 14 `yamux_substream`), **159 repo-consistency**,
+`--features dev,claude-subscription`: **2879 lib** (+13 ignored),
+79 integration (31 + 34 + 14 `yamux_substream`), **161 repo-consistency**,
 1 `api_key_side_effects`, 54 `swarmllm-types`, and 11 in the vendored
 request-response patch — plus 15 in the `swarmllm` BIN target (`cli::*`, counted
 nowhere else). Clippy clean. The types crate and the vendored patch are **not**

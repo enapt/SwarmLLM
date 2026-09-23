@@ -1009,10 +1009,10 @@ pub async fn version_info(State(state): State<AppState>) -> Json<serde_json::Val
 /// Loopback-only — auto-downloads the binary as a side effect, so a remote
 /// API-key holder shouldn't be able to drive disk writes / binary swaps.
 pub async fn check_update(
-    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    origin: crate::api::origin::RequestOrigin,
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    if !addr.ip().is_loopback() {
+    if !origin.is_this_machine() {
         return Err(ApiError(crate::error::SwarmError::LocalOnly(
             "Checking for updates".into(),
         )));
@@ -1089,10 +1089,10 @@ pub async fn check_update(
 /// POST /api/admin/update/apply — Apply a downloaded update (restart required).
 /// Loopback-only — replaces the running binary, must not be remote-triggerable.
 pub async fn apply_update(
-    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    origin: crate::api::origin::RequestOrigin,
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    if !addr.ip().is_loopback() {
+    if !origin.is_this_machine() {
         return Err(ApiError(crate::error::SwarmError::LocalOnly(
             "Applying an update".into(),
         )));

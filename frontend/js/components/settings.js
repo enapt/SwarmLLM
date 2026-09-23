@@ -611,9 +611,13 @@
       // publish that is not the address in the user's address bar, and it is
       // the one they would have to allow. Fall back to the address bar only if
       // the page wasn't rendered by the daemon (dev server, raw file open).
-      text.textContent = I18n.t('errors.untrusted_dashboard', {
-        addr: U.clientAddr() || location.hostname,
-      });
+      // Through a proxy the address the daemon saw is the proxy's own, and
+      // "allow this network" would not help — so that case has its own words.
+      text.textContent = U.clientTrust() === 'proxied'
+        ? I18n.t('errors.untrusted_dashboard_proxied')
+        : I18n.t('errors.untrusted_dashboard', {
+          addr: U.clientAddr() || location.hostname,
+        });
       banner.appendChild(text);
 
       var form = document.createElement('form');

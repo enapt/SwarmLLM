@@ -43,13 +43,23 @@ pub enum DashboardTrust {
     Overlay,
     /// A private/LAN address, with `api.dashboard_trust_lan` enabled.
     LocalNetwork,
+    /// Arrived through a proxy (`api::origin`), so its address says nothing
+    /// about who is behind it. Never trusted, whatever the address: a
+    /// same-host proxy is loopback, and a LAN or tailnet proxy would otherwise
+    /// extend LAN/overlay trust to everyone who can reach it.
+    Proxied,
     /// Anything else — the browser must supply the key itself.
     Untrusted,
 }
 
 impl DashboardTrust {
+    /// An allowlist, so a variant added later is untrusted until someone
+    /// decides otherwise — the frontend's `isTrustedOrigin` mirrors it.
     pub fn is_trusted(self) -> bool {
-        !matches!(self, DashboardTrust::Untrusted)
+        matches!(
+            self,
+            DashboardTrust::Loopback | DashboardTrust::Overlay | DashboardTrust::LocalNetwork
+        )
     }
 
     /// Stable machine-readable tag, embedded in the dashboard HTML.
@@ -58,6 +68,7 @@ impl DashboardTrust {
             DashboardTrust::Loopback => "loopback",
             DashboardTrust::Overlay => "overlay",
             DashboardTrust::LocalNetwork => "local-network",
+            DashboardTrust::Proxied => "proxied",
             DashboardTrust::Untrusted => "untrusted",
         }
     }
@@ -192,13 +203,29 @@ fn multiaddr_has_tailscale_v6(addr: &str) -> bool {
     false
 }
 
-/// Classify a request's source address against this node's configuration.
+/// Classify a request against this node's configuration.
+///
+/// Takes the whole [`RequestOrigin`], never a bare address: a proxied request's
+/// address is the proxy's, and judging it by that is what handed the API key to
+/// anyone behind a same-host reverse proxy. A proxy is `Proxied` before any
+/// address test runs.
+pub async fn classify(
+    state: &SharedState,
+    origin: crate::api::origin::RequestOrigin,
+) -> DashboardTrust {
+    if origin.via_proxy {
+        return DashboardTrust::Proxied;
+    }
+    classify_address(state, origin.ip).await
+}
+
+/// The address half of [`classify`], for a request known not to be proxied.
 ///
 /// Order matters: loopback first (cheapest and always trusted), then the
 /// overlay (an authenticated network), then the LAN (an opt-in). A Tailscale
 /// address is reported as `Overlay` even when LAN trust is what would also have
 /// admitted it, so the dashboard explains the specific reason.
-pub async fn classify(state: &SharedState, ip: IpAddr) -> DashboardTrust {
+async fn classify_address(state: &SharedState, ip: IpAddr) -> DashboardTrust {
     if ip.is_loopback() {
         return DashboardTrust::Loopback;
     }
@@ -301,7 +328,10 @@ mod tests {
 
         // Before any Tailscale-specific evidence, a 100.x source is just
         // shared CGNAT space and proves nothing.
-        assert_eq!(classify(&state, peer).await, DashboardTrust::Untrusted);
+        assert_eq!(
+            classify_address(&state, peer).await,
+            DashboardTrust::Untrusted
+        );
 
         // Tailscale gives every node an address in its own IPv6 ULA prefix.
         // That is not shared space, so holding one is proof of membership.
@@ -309,7 +339,10 @@ mod tests {
             "/ip4/100.64.0.7/tcp/8810".into(),
             "/ip6/fd7a:115c:a1e0::1234/tcp/8810".into(),
         ]));
-        assert_eq!(classify(&state, peer).await, DashboardTrust::Overlay);
+        assert_eq!(
+            classify_address(&state, peer).await,
+            DashboardTrust::Overlay
+        );
     }
 
     /// Both CGNAT tests below assert what happens with NO Tailscale-specific
@@ -356,7 +389,7 @@ mod tests {
             "no Tailscale-specific evidence is present"
         );
         assert_eq!(
-            classify(&state, v4("100.101.102.103")).await,
+            classify_address(&state, v4("100.101.102.103")).await,
             DashboardTrust::Untrusted,
             "a CGNAT neighbour must not be handed the API key on this evidence"
         );
@@ -373,7 +406,7 @@ mod tests {
             "/ip6/fd00:dead:beef::1/tcp/8810".into()
         ]));
         assert_eq!(
-            classify(&state, v4("100.101.102.103")).await,
+            classify_address(&state, v4("100.101.102.103")).await,
             DashboardTrust::Untrusted
         );
     }
@@ -393,7 +426,7 @@ mod tests {
             "/ip4/203.0.113.9/tcp/8810".into(),
         ]));
         assert_eq!(
-            classify(&state, v4("100.101.102.103")).await,
+            classify_address(&state, v4("100.101.102.103")).await,
             DashboardTrust::Untrusted
         );
     }
@@ -406,16 +439,22 @@ mod tests {
     async fn lan_browser_is_trusted_only_after_the_opt_in() {
         let state = test_state(crate::config::Config::default());
         let router = v4("192.168.1.10");
-        assert_eq!(classify(&state, router).await, DashboardTrust::Untrusted);
+        assert_eq!(
+            classify_address(&state, router).await,
+            DashboardTrust::Untrusted
+        );
 
         let mut opted_in = (**state.cfg()).clone();
         opted_in.api.dashboard_trust_lan = true;
         state.apply_live_config(opted_in);
-        assert_eq!(classify(&state, router).await, DashboardTrust::LocalNetwork);
+        assert_eq!(
+            classify_address(&state, router).await,
+            DashboardTrust::LocalNetwork
+        );
 
         // A public address is never admitted by the LAN opt-in.
         assert_eq!(
-            classify(&state, v4("8.8.8.8")).await,
+            classify_address(&state, v4("8.8.8.8")).await,
             DashboardTrust::Untrusted
         );
     }
@@ -424,10 +463,47 @@ mod tests {
     async fn loopback_is_always_trusted() {
         let state = test_state(crate::config::Config::default());
         assert_eq!(
-            classify(&state, v4("127.0.0.1")).await,
+            classify_address(&state, v4("127.0.0.1")).await,
             DashboardTrust::Loopback
         );
-        assert_eq!(classify(&state, v6("::1")).await, DashboardTrust::Loopback);
+        assert_eq!(
+            classify_address(&state, v6("::1")).await,
+            DashboardTrust::Loopback
+        );
+    }
+
+    /// A proxy is never handed the key, whatever address it arrives from: a
+    /// same-host proxy is loopback (the book's nginx example handed the key to
+    /// every visitor), and a LAN proxy would otherwise carry LAN trust to
+    /// whoever is behind it.
+    #[tokio::test]
+    async fn a_proxied_request_is_never_trusted() {
+        use crate::api::origin::RequestOrigin;
+        use axum::http::{HeaderMap, HeaderValue};
+
+        let state = test_state(crate::config::Config::default());
+        let mut via_nginx = HeaderMap::new();
+        via_nginx.insert("host", HeaderValue::from_static("swarmllm.example.com"));
+        let origin = RequestOrigin::new(v4("127.0.0.1"), &via_nginx);
+        let verdict = classify(&state, origin).await;
+        assert_eq!(verdict, DashboardTrust::Proxied);
+        assert!(!verdict.is_trusted());
+
+        // Even with LAN trust switched on, a LAN proxy stays untrusted.
+        let mut opted_in = (**state.cfg()).clone();
+        opted_in.api.dashboard_trust_lan = true;
+        state.apply_live_config(opted_in);
+        let mut via_lan_proxy = HeaderMap::new();
+        via_lan_proxy.insert("host", HeaderValue::from_static("192.168.1.10:8800"));
+        via_lan_proxy.insert("x-forwarded-for", HeaderValue::from_static("203.0.113.9"));
+        let origin = RequestOrigin::new(v4("192.168.1.10"), &via_lan_proxy);
+        assert_eq!(classify(&state, origin).await, DashboardTrust::Proxied);
+
+        // And the browser at this machine is still trusted.
+        let mut direct = HeaderMap::new();
+        direct.insert("host", HeaderValue::from_static("localhost:8800"));
+        let origin = RequestOrigin::new(v4("127.0.0.1"), &direct);
+        assert_eq!(classify(&state, origin).await, DashboardTrust::Loopback);
     }
 
     /// Turning the overlay off is the escape hatch for someone sharing a
@@ -441,7 +517,7 @@ mod tests {
             .listen_multiaddrs
             .store(std::sync::Arc::new(vec!["/ip4/100.64.0.7/tcp/8810".into()]));
         assert_eq!(
-            classify(&state, v4("100.101.102.103")).await,
+            classify_address(&state, v4("100.101.102.103")).await,
             DashboardTrust::Untrusted
         );
     }

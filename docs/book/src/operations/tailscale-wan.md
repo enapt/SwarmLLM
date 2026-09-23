@@ -100,19 +100,22 @@ tp_max_latency_ms = 50        # Relax tensor parallelism latency threshold (defa
 
 ## Binding to a Specific Interface
 
-If you only want SwarmLLM accessible via Tailscale (not the local network):
+`network.listen_address` controls only the P2P listeners (TCP 8810, UDP 8800).
+The HTTP API and dashboard on TCP 8800 always listen on all interfaces (only
+`--anchor` limits them to loopback). To keep the API off your LAN, allow TCP
+8800 only on the Tailscale interface with your firewall:
 
-```toml
-[network]
-listen_address = "100.64.0.5"  # Bind only to Tailscale interface
+```bash
+sudo ufw allow in on tailscale0 to any port 8800 proto tcp
+sudo ufw deny 8800/tcp
 ```
 
-Or bind to localhost only and use Tailscale's [Funnel](https://tailscale.com/kb/1223/funnel) or port forwarding:
-
-```toml
-[network]
-listen_address = "127.0.0.1"
-```
+**Do not put `tailscale serve` or Funnel in front of the node.** They connect
+to it over loopback, and SwarmLLM treats a loopback connection as the person
+at the machine: v0.3.200 and earlier hand that connection the dashboard's API
+key — with Funnel, that is anyone on the internet. Later versions refuse it to
+any request carrying Tailscale's `Tailscale-User-Login` or `X-Forwarded-*`
+headers, but reaching the node directly over the tailnet needs no proxy at all.
 
 ## WireGuard / ZeroTier / Other VPNs
 
@@ -126,7 +129,7 @@ The same approach works with any VPN overlay:
 ## Security Notes
 
 - **API key still required** — remote access to inference endpoints requires Bearer token auth, even over Tailscale
-- **E2E encryption is independent of VPN** — SwarmLLM encrypts all P2P traffic with X25519 + ChaCha20-Poly1305 regardless of whether you use a VPN. The VPN adds a second layer of encryption at the network level
+- **Transport encryption is independent of the VPN** — every P2P connection is encrypted (Noise over TCP, TLS 1.3 over QUIC), and activations forwarded between computers are also sealed per hop with X25519 + ChaCha20-Poly1305 (`network.enable_encryption`, on by default). This protects data in transit only: a computer that works on part of your request decrypts it and sees those numbers, which can be turned back into much of your text. The VPN adds another layer of transport encryption.
 - **Dashboard requires the API key** — admin endpoints need Bearer token auth. The dashboard fetches that key for itself on page load, but only over networks the node trusts (see below)
 
 ## Opening the dashboard over Tailscale

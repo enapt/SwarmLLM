@@ -562,6 +562,7 @@
   "errors.request_timeout": "Yêu cầu đã hết thời gian — máy chủ có thể đang bận hoặc không thể truy cập",
   "errors.server_unreachable": "Không thể kết nối SwarmLLM — có đang chạy không?",
   "errors.untrusted_dashboard": "SwarmLLM không cấp khóa truy cập cho {addr}, nên trang này chưa thể thay đổi gì. Hãy dán khóa truy cập của bạn để mở khóa, hoặc cho phép mạng này trong Cài đặt trên máy tính đang chạy SwarmLLM.",
+  "errors.untrusted_dashboard_proxied": "Bạn đã mở SwarmLLM qua một proxy, nên nó không thể biết bạn có đang ở máy tính chạy nó hay không và sẽ không cấp khóa truy cập cho trang này. Hãy dán khóa truy cập của bạn để mở khóa.",
   "errors.untrusted_dashboard_where": "Khóa truy cập của bạn hiển thị khi SwarmLLM khởi động và được lưu trong tệp api_key ở thư mục dữ liệu.",
   "foreign_pool.pool_label": "Nhóm {id}…",
   "foreign_pool.tile_sub": "Chỉ để xem — yêu cầu của bạn vẫn ở trong nhóm của bạn.",

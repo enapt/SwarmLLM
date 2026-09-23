@@ -178,11 +178,15 @@ const CLIENT_TRUST_PLACEHOLDER: &str = "__SWARMLLM_CLIENT_TRUST__";
 /// missing the nonce (no key) or the trust markers (an unexplainable 401) —
 /// the substitutions belong together and were previously duplicated per
 /// handler.
-async fn render_dashboard(state: &AppState, html: String, client_ip: std::net::IpAddr) -> String {
+async fn render_dashboard(
+    state: &AppState,
+    html: String,
+    origin: crate::api::origin::RequestOrigin,
+) -> String {
     let nonce = state.issue_bootstrap_nonce();
-    let trust = crate::api::dashboard_trust::classify(&state.shared_state, client_ip).await;
+    let trust = crate::api::dashboard_trust::classify(&state.shared_state, origin).await;
     html.replace(BOOTSTRAP_NONCE_PLACEHOLDER, &nonce)
-        .replace(CLIENT_ADDR_PLACEHOLDER, &client_ip.to_string())
+        .replace(CLIENT_ADDR_PLACEHOLDER, &origin.ip.to_string())
         .replace(CLIENT_TRUST_PLACEHOLDER, trust.as_str())
 }
 
@@ -193,11 +197,11 @@ async fn render_dashboard(state: &AppState, html: String, client_ip: std::net::I
 /// must read out of the served HTML, raising the bar against curl-style
 /// attackers that previously bypassed via `Sec-Fetch-Site`.
 async fn serve_dashboard_with_nonce(
-    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    origin: crate::api::origin::RequestOrigin,
     axum::extract::State(state): axum::extract::State<AppState>,
 ) -> axum::response::Html<String> {
     let html = assets::dashboard_html_owned().await;
-    axum::response::Html(render_dashboard(&state, html, addr.ip()).await)
+    axum::response::Html(render_dashboard(&state, html, origin).await)
 }
 
 /// SPA catch-all variant of [`serve_dashboard_with_nonce`]. Any path that
@@ -205,12 +209,12 @@ async fn serve_dashboard_with_nonce(
 /// dashboard HTML with a fresh nonce so client-side routing resolves to
 /// the same shell.
 async fn serve_dashboard_catchall_with_nonce(
-    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    origin: crate::api::origin::RequestOrigin,
     axum::extract::State(state): axum::extract::State<AppState>,
     axum::extract::Path(_path): axum::extract::Path<String>,
 ) -> axum::response::Html<String> {
     let html = assets::dashboard_html_owned().await;
-    axum::response::Html(render_dashboard(&state, html, addr.ip()).await)
+    axum::response::Html(render_dashboard(&state, html, origin).await)
 }
 
 /// Build the Axum router with all routes.

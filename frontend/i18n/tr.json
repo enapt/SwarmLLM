@@ -562,6 +562,7 @@
   "errors.request_timeout": "İstek zaman aşımına uğradı — sunucu meşgul veya erişilemez olabilir",
   "errors.server_unreachable": "SwarmLLM'e ulaşılamıyor — çalışıyor mu?",
   "errors.untrusted_dashboard": "SwarmLLM {addr} adresine erişim anahtarı vermez, bu nedenle bu sayfa henüz hiçbir şeyi değiştiremez. Kilidi açmak için erişim anahtarınızı yapıştırın veya SwarmLLM'in çalıştığı bilgisayardaki Ayarlar'dan bu ağa izin verin.",
+  "errors.untrusted_dashboard_proxied": "SwarmLLM'i bir proxy üzerinden açtınız; bu yüzden onu çalıştıran bilgisayarın başında olup olmadığınızı anlayamaz ve bu sayfaya erişim anahtarını vermez. Kilidi açmak için erişim anahtarınızı yapıştırın.",
   "errors.untrusted_dashboard_where": "Erişim anahtarınız SwarmLLM başlatılırken gösterilir ve veri klasöründeki api_key dosyasında saklanır.",
   "foreign_pool.pool_label": "Havuz {id}…",
   "foreign_pool.tile_sub": "Yalnızca bilgi amaçlı — istekleriniz kendi havuzunuzda kalır.",

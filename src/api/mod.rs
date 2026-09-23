@@ -337,6 +337,7 @@ pub mod mcp;
 pub mod metrics;
 pub mod middleware;
 pub mod openai;
+pub mod origin;
 pub mod pool;
 pub mod process_memory;
 pub mod providers;

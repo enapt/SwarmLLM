@@ -562,6 +562,7 @@
   "errors.request_timeout": "Request timed out — server may be busy or unreachable",
   "errors.server_unreachable": "Can't reach SwarmLLM — is it running?",
   "errors.untrusted_dashboard": "SwarmLLM doesn't give access keys to {addr}, so this page can't change anything yet. Paste your access key to unlock it, or allow this network in Settings on the computer running SwarmLLM.",
+  "errors.untrusted_dashboard_proxied": "You opened SwarmLLM through a proxy, so it can't tell whether you're at the computer running it and won't give this page its access key. Paste your access key to unlock it.",
   "errors.untrusted_dashboard_where": "Your access key is shown when SwarmLLM starts, and is saved in the api_key file in its data folder.",
   "foreign_pool.pool_label": "Pool {id}…",
   "foreign_pool.tile_sub": "Discovery only — your inference stays in your pool.",
