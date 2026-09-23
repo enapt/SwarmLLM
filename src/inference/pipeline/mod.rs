@@ -509,7 +509,15 @@ pub(super) async fn forward_verify_through_segments(
                 MAX_INTERMEDIATE_ACTIVATION_BYTES
             )));
         }
-        if idx > 0 && result.activations.len() != activation_bytes.len() {
+        // By declared SHAPE, never byte length — the same rule and helper as
+        // the standard forward loop: an honest peer on the other
+        // `activation_compression` setting answers f32 where we sent Q8_0 (#98).
+        if idx > 0
+            && !crate::inference::tensor_util::activation_shape_matches(
+                &activation_bytes,
+                &result.activations,
+            )
+        {
             return Err(SwarmError::Inference(format!(
                 "spec verify segment {idx} returned wrong activation shape: got {} bytes, expected {}",
                 result.activations.len(),

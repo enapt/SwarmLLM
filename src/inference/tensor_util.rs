@@ -383,6 +383,105 @@ pub fn activation_positions(bytes: &[u8]) -> Option<u32> {
     dim(ndim - 2)
 }
 
+/// Does a segment's RETURNED activation carry the same shape as the one it was
+/// handed, in a well-formed payload for whatever encoding the peer chose?
+///
+/// **The shape is a property of the TENSOR, not of its bytes.** A hidden state
+/// crosses a segment boundary as f32 or as Q8_0 (`tensor_to_bytes_q8_0`,
+/// ~3.76x smaller), and which one is decided by the node that WROTE it — its own
+/// `inference.activation_compression`. Two honest nodes that differ on that
+/// setting carry the same `[1, 28, 4096]` as 458,772 bytes (f32) against the
+/// 121,876 bytes (Q8_0) this node sent — measured from a public v0.3.200 peer. Comparing byte lengths called that "the wrong activation shape",
+/// failed the healthy peer over, and ended the request when it had no standby
+/// (FUTURE_WORK #98, seen at the .201 gate and again 2026-09-24).
+///
+/// What the old check existed for is kept: a malformed or mis-shaped tensor
+/// from a broken or malicious peer is still refused HERE, before it is handed
+/// to the next worker (gotcha #20). The returned payload must be long enough
+/// for the shape and dtype it declares, by the same arithmetic `bytes_to_tensor`
+/// uses, and its dtype must be one this build decodes.
+pub fn activation_shape_matches(sent: &[u8], returned: &[u8]) -> bool {
+    let header = |bytes: &[u8]| -> Option<(Vec<u32>, u32, usize)> {
+        let word = |at: usize| -> Option<u32> {
+            Some(u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?))
+        };
+        let ndim = word(0)? as usize;
+        if ndim == 0 || ndim > 8 {
+            return None;
+        }
+        let shape: Vec<u32> = (0..ndim).map(|i| word(4 + i * 4)).collect::<Option<_>>()?;
+        let dtype_at = 4 + ndim * 4;
+        Some((shape, word(dtype_at)?, dtype_at + 4))
+    };
+    let (Some((want, _, _)), Some((got, dtype, payload_at))) = (header(sent), header(returned))
+    else {
+        return false;
+    };
+    if want != got {
+        return false;
+    }
+    let Some(elements) = got
+        .iter()
+        .try_fold(1usize, |acc, &d| acc.checked_mul(d as usize))
+        .filter(|&n| n > 0)
+    else {
+        return false;
+    };
+    let required = match dtype {
+        DTYPE_TAG_F32 => elements.checked_mul(4),
+        DTYPE_TAG_Q8_0 => quant::q8_0_byte_len_checked(elements),
+        _ => None,
+    };
+    required.is_some_and(|need| returned.len().saturating_sub(payload_at) >= need)
+}
+
+#[cfg(test)]
+mod activation_shape_tests {
+    use super::*;
+    use candle_core::{Device, Tensor};
+
+    fn hidden(positions: usize) -> Tensor {
+        Tensor::ones((1, positions, 64), candle_core::DType::F32, &Device::Cpu).unwrap()
+    }
+
+    /// The field case: this node sends Q8_0, an honest peer on the other
+    /// setting answers f32. Same tensor, 3.76x the bytes — not a wrong shape.
+    #[test]
+    fn a_differently_encoded_reply_of_the_same_shape_is_accepted() {
+        let sent = tensor_to_bytes_q8_0(&hidden(28)).unwrap();
+        let returned = tensor_to_bytes(&hidden(28)).unwrap();
+        assert_ne!(
+            sent.len(),
+            returned.len(),
+            "the premise: the byte lengths differ"
+        );
+        assert!(activation_shape_matches(&sent, &returned));
+        assert!(
+            activation_shape_matches(&returned, &sent),
+            "and the other way round"
+        );
+    }
+
+    /// What the check is FOR still holds: a different shape, a truncated
+    /// payload or an unknown encoding is refused before the next worker sees it.
+    #[test]
+    fn a_wrong_shape_or_a_malformed_payload_is_still_refused() {
+        let sent = tensor_to_bytes(&hidden(28)).unwrap();
+        assert!(!activation_shape_matches(
+            &sent,
+            &tensor_to_bytes(&hidden(27)).unwrap()
+        ));
+        let mut truncated = tensor_to_bytes(&hidden(28)).unwrap();
+        truncated.truncate(truncated.len() - 1);
+        assert!(!activation_shape_matches(&sent, &truncated));
+        let mut unknown = tensor_to_bytes(&hidden(28)).unwrap();
+        let dtype_at = 4 + 3 * 4;
+        unknown[dtype_at..dtype_at + 4].copy_from_slice(&7u32.to_le_bytes());
+        assert!(!activation_shape_matches(&sent, &unknown));
+        assert!(!activation_shape_matches(&sent, &[]));
+    }
+}
+
 #[cfg(test)]
 mod retention_header_tests {
     use super::*;

@@ -1611,8 +1611,14 @@ impl PipelineExecutor {
                             // is already pre-embedded (in which case the shape DOES
                             // preserve and the check is meaningful).
                             let is_embedding_expansion = idx == 0 && !pre_embedded;
+                            // By declared SHAPE, never byte length: a peer on
+                            // the other `activation_compression` setting answers
+                            // the same tensor as f32 where we sent Q8_0 (#98).
                             if !is_embedding_expansion
-                                && result.activations.len() != activations.len()
+                                && !crate::inference::tensor_util::activation_shape_matches(
+                                    &activations,
+                                    &result.activations,
+                                )
                             {
                                 tracing::warn!(
                                     request_id = %request_id,
