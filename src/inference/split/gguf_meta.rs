@@ -269,6 +269,57 @@ pub struct GgufTokenizerMeta {
     pub scores: Vec<f32>,
     pub add_space_prefix: bool,
     pub add_bos_token: bool,
+    /// `tokenizer.ggml.token_type`, one per vocabulary entry (GGUF's
+    /// `llama_token_type`: 1 normal, 2 unknown, 3 CONTROL, 4 USER_DEFINED,
+    /// 5 unused, 6 byte). Empty when the file carries none. **The vocabulary's
+    /// own answer to "is this a special token"** — see
+    /// `tokenizer::declared_special`.
+    pub token_types: Vec<i32>,
+}
+
+/// Pre-tokenizers that make a GPT-2-style BPE vocabulary prepend BOS when the
+/// GGUF does not say — llama.cpp's own list (`llama_vocab::impl::load`, the
+/// `add_bos = true` arms of the pre-tokenizer switch). Every OTHER BPE vocabulary
+/// defaults to no BOS there, which is what the model was converted against.
+const BPE_PRE_TOKENIZERS_THAT_ADD_BOS: &[&str] = &[
+    "llama3",
+    "llama-v3",
+    "llama-bpe",
+    "falcon3",
+    "falcon-h1",
+    "pixtral",
+    "midm-2.0",
+    "lfm2",
+    "jina-v5-nano",
+    "tekken",
+    "chameleon",
+];
+
+/// Pre-tokenizers whose models take NO BOS whatever the file declares:
+/// llama.cpp sets `special_bos_id = LLAMA_TOKEN_NULL` for them. GLM-4's GGUF
+/// declares `bos_token_id = <|endoftext|>` — which is also one of its EOS
+/// tokens — and omits `add_bos_token`; prepending it put an end-of-text marker
+/// in front of every prompt (FUTURE_WORK #97).
+const BPE_PRE_TOKENIZERS_WITHOUT_BOS: &[&str] = &["glm4", "chatglm-bpe"];
+
+/// Whether a prompt gets a BOS token, by llama.cpp's rules
+/// (`llama_vocab::impl::load`): the file's own `add_bos_token` when present;
+/// otherwise TRUE for a SentencePiece vocabulary (`tokenizer.ggml.model =
+/// "llama"`) and, for a GPT-2-style BPE one, true only for the pre-tokenizers
+/// that ask for it. A pre-tokenizer with no BOS at all overrides the key.
+///
+/// The old rule defaulted every vocabulary to true, on a comment saying the
+/// flag "is consumed solely by the SPM path" — it was not: `SplitTokenizer`
+/// prepends BOS for every variant.
+fn add_bos_by_llama_cpp_rules(declared: Option<bool>, tokenizer_model: &str, pre: &str) -> bool {
+    if BPE_PRE_TOKENIZERS_WITHOUT_BOS.contains(&pre) {
+        return false;
+    }
+    declared.unwrap_or(match tokenizer_model {
+        "llama" => true,
+        "gpt2" => BPE_PRE_TOKENIZERS_THAT_ADD_BOS.contains(&pre),
+        _ => false,
+    })
 }
 
 /// Token strings that END GENERATION, searched for BY NAME in the vocabulary.
@@ -444,16 +495,24 @@ impl GgufTokenizerMeta {
             .and_then(|v| v.to_bool().ok())
             .unwrap_or(true);
 
-        // llama.cpp defaults this to TRUE for SentencePiece vocabs and false
-        // only for BPE; this field is consumed solely by the SPM path below.
         // Defaulting to false meant every Llama-family GGUF that simply omits
         // the key — TinyLlama and Phi-3.5 among them — was prefilled with no
         // BOS at position 0, which is out-of-distribution for models trained
-        // with one and produced degenerate replies.
-        let add_bos_token = md
-            .get("tokenizer.ggml.add_bos_token")
-            .and_then(|v| v.to_bool().ok())
-            .unwrap_or(true);
+        // with one and produced degenerate replies. Defaulting to TRUE for
+        // every vocabulary then gave GLM-4 an end-of-text marker in front of
+        // every prompt. llama.cpp's per-tokenizer rule is the reference.
+        let add_bos_token = add_bos_by_llama_cpp_rules(
+            md.get("tokenizer.ggml.add_bos_token")
+                .and_then(|v| v.to_bool().ok()),
+            &tokenizer_model,
+            &pre_tokenizer,
+        );
+
+        let token_types: Vec<i32> = md
+            .get("tokenizer.ggml.token_type")
+            .and_then(|v| v.to_vec().ok())
+            .map(|arr| arr.iter().filter_map(|v| v.to_i32().ok()).collect())
+            .unwrap_or_default();
 
         Self {
             vocab,
@@ -467,6 +526,7 @@ impl GgufTokenizerMeta {
             scores,
             add_space_prefix,
             add_bos_token,
+            token_types,
         }
     }
 
@@ -592,6 +652,7 @@ impl GgufTokenizerMeta {
                 &self.tokenizer_model,
                 self.add_bos_token,
                 self.bos_token_id,
+                &self.token_types,
             ))
         } else if self.tokenizer_model == "llama" && !self.scores.is_empty() {
             Some(SplitTokenizer::from_sentencepiece(
@@ -600,6 +661,7 @@ impl GgufTokenizerMeta {
                 self.add_space_prefix,
                 self.add_bos_token,
                 self.bos_token_id,
+                &self.token_types,
             ))
         } else {
             None
@@ -699,6 +761,31 @@ pub fn ensure_gguf_header(model_dir: &Path) -> Result<(), SwarmError> {
         "Cannot create gguf_header.bin: no shard_000.bin or source GGUF found in {}",
         model_dir.display()
     )))
+}
+
+#[cfg(test)]
+mod add_bos_rule_tests {
+    use super::add_bos_by_llama_cpp_rules as rule;
+
+    /// llama.cpp's rules (`llama_vocab::impl::load`), one arm each — the
+    /// reference the old blanket `unwrap_or(true)` disagreed with (#97).
+    #[test]
+    fn bos_follows_llama_cpp_when_the_file_does_not_say() {
+        // GLM-4 declares <|endoftext|> as BOS and omits the key: no BOS.
+        assert!(!rule(None, "gpt2", "glm4"), "glm4 takes no BOS");
+        // ...and none even if a converter wrote the key, as llama.cpp nulls it.
+        assert!(!rule(Some(true), "gpt2", "chatglm-bpe"));
+        // Llama-3 omits the key too, and DOES take one: the pre-tokenizer says so.
+        assert!(rule(None, "gpt2", "llama-bpe"));
+        // Any other BPE vocabulary defaults to none.
+        assert!(!rule(None, "gpt2", "qwen2"));
+        assert!(!rule(None, "gpt2", "deepseek-llm"));
+        // SentencePiece defaults to one — TinyLlama and Phi-3.5 depend on it.
+        assert!(rule(None, "llama", "default"));
+        // A key that is present is the answer.
+        assert!(!rule(Some(false), "llama", "default"));
+        assert!(rule(Some(true), "gpt2", "qwen2"));
+    }
 }
 
 #[cfg(test)]

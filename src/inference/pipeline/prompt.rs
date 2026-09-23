@@ -799,7 +799,7 @@ mod prompt_position_tests {
             // GPT-2 byte-level alphabet: printable ASCII maps to itself.
             vocab.push((b as char).to_string());
         }
-        SplitTokenizer::from_bpe(&vocab, &[], "gpt-2", "gpt2", false, None)
+        SplitTokenizer::from_bpe(&vocab, &[], "gpt-2", "gpt2", false, None, &[])
     }
 
     /// The count handed back is the number of positions the model will occupy,

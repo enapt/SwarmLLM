@@ -74,6 +74,25 @@ fn pre_tokenizer_patterns(pre_type: &str) -> Option<&'static [&'static str]> {
     })
 }
 
+/// Does the vocabulary itself declare token `id` special — a CONTROL (3) or
+/// USER_DEFINED (4) entry in `tokenizer.ggml.token_type`?
+///
+/// **llama.cpp's rule, and the one to trust** (`llama_vocab::impl`'s
+/// `cache_special_tokens` and `tokenizer_st_partition`): such tokens are matched
+/// whole in the text before the merge algorithm ever sees it, so a chat
+/// template's markers become the ids the model was trained on. Guessing from the
+/// token's SHAPE (`<…>`, `<|…|>`) is what the two constructors did alone, and it
+/// cannot see a marker spelled otherwise — GLM-4's `[gMASK]`, Mistral v0.3's
+/// `[INST]` — which was then spelled out as three ordinary tokens in every
+/// prompt. User-defined entries are literal text (Gemma's runs of spaces and
+/// newlines), which is why the raw vocabulary string is what gets matched.
+///
+/// An absent array (older converters) answers false, leaving the name shapes as
+/// the whole rule exactly as before.
+pub(crate) fn declared_special(token_types: &[i32], id: u32) -> bool {
+    matches!(token_types.get(id as usize), Some(3 | 4))
+}
+
 /// BPE tokenizer built from GGUF metadata.
 /// Supports both GPT-2/Qwen2 byte-level BPE and SentencePiece BPE (LLaMA).
 pub struct BpeTokenizer {
@@ -109,6 +128,8 @@ impl BpeTokenizer {
         merges_raw: &[String],
         pre_type: &str,
         tokenizer_model: &str,
+        // `tokenizer.ggml.token_type`, or empty — see `declared_special`.
+        token_types: &[i32],
     ) -> Self {
         let is_sentencepiece = tokenizer_model == "llama";
         let mut token_to_id = HashMap::with_capacity(tokens.len());
@@ -164,10 +185,16 @@ impl BpeTokenizer {
 
         // Collect special tokens (e.g., <|im_start|>, <|im_end|>, <s>, </s>, <unk>,
         // <bos>, <eos>, <start_of_turn>, <end_of_turn>)
+        //
+        // What the VOCABULARY declares special comes first (`declared_special`);
+        // the name shapes stay beside it, so no vocabulary that tokenized
+        // correctly before this changes. The shapes alone never saw `[gMASK]`,
+        // the first token of every GLM-4 prompt (FUTURE_WORK #97).
         let mut special_tokens: Vec<(String, u32)> = token_to_id
             .iter()
-            .filter(|(t, _)| {
-                (t.starts_with("<|") && t.ends_with("|>"))
+            .filter(|(t, &id)| {
+                declared_special(token_types, id)
+                    || (t.starts_with("<|") && t.ends_with("|>"))
                     || (t.starts_with('<') && t.ends_with('>') && !t.contains(' ') && t.len() <= 20)
             })
             .map(|(t, &id)| (t.clone(), id))
@@ -537,6 +564,9 @@ pub struct SplitTokenizer {
     bos_id: Option<u32>,
     /// Whether to prepend BOS at position 0.
     add_bos_token: bool,
+    /// The BOS token's own text, so `encode` can see a prompt that already
+    /// opens with it — see there.
+    bos_text: Option<String>,
 }
 
 enum TokenizerKind {
@@ -598,7 +628,13 @@ impl SpmTokenizer {
         self.piece_to_id.len()
     }
 
-    pub fn new(tokens: &[String], scores: &[f32], add_space_prefix: bool) -> Self {
+    pub fn new(
+        tokens: &[String],
+        scores: &[f32],
+        add_space_prefix: bool,
+        // `tokenizer.ggml.token_type`, or empty — see `declared_special`.
+        token_types: &[i32],
+    ) -> Self {
         let mut piece_to_id = HashMap::new();
         for (i, (tok, &score)) in tokens.iter().zip(scores.iter()).enumerate() {
             piece_to_id.insert(tok.clone(), (i as u32, score));
@@ -610,12 +646,17 @@ impl SpmTokenizer {
         // searching for one family's spelling silently disables BOS for the
         // other, which is exactly the bug this parameter exists to prevent.
 
-        // Collect special tokens (control tokens like <bos>, <start_of_turn>, etc.)
+        // Collect special tokens (control tokens like <bos>, <start_of_turn>,
+        // etc.) — what the vocabulary declares, plus the old name shape. The
+        // shape alone missed Mistral v0.3's `[INST]` / `[/INST]`, which open and
+        // close every turn, and Gemma's user-defined whitespace runs, which
+        // SentencePiece always matches whole (FUTURE_WORK #97).
         let mut special_tokens: Vec<(String, u32)> = tokens
             .iter()
             .enumerate()
-            .filter(|(_, t)| {
-                t.starts_with('<') && t.ends_with('>') && !t.contains(' ') && t.len() <= 30
+            .filter(|(i, t)| {
+                declared_special(token_types, *i as u32)
+                    || (t.starts_with('<') && t.ends_with('>') && !t.contains(' ') && t.len() <= 30)
             })
             .map(|(i, t)| (t.clone(), i as u32))
             .collect();
@@ -936,12 +977,19 @@ impl SplitTokenizer {
         model: &str,
         add_bos_token: bool,
         bos_id: Option<u32>,
+        token_types: &[i32],
     ) -> Self {
+        let bos_id = Self::resolve_bos(tokens, bos_id);
         Self {
             kind: TokenizerKind::Bpe(Box::new(BpeTokenizer::from_gguf(
-                tokens, merges, pre_type, model,
+                tokens,
+                merges,
+                pre_type,
+                model,
+                token_types,
             ))),
-            bos_id: Self::resolve_bos(tokens, bos_id),
+            bos_text: bos_id.and_then(|id| tokens.get(id as usize).cloned()),
+            bos_id,
             add_bos_token,
         }
     }
@@ -953,10 +1001,18 @@ impl SplitTokenizer {
         add_space_prefix: bool,
         add_bos_token: bool,
         bos_id: Option<u32>,
+        token_types: &[i32],
     ) -> Self {
+        let bos_id = Self::resolve_bos(tokens, bos_id);
         Self {
-            kind: TokenizerKind::SentencePiece(SpmTokenizer::new(tokens, scores, add_space_prefix)),
-            bos_id: Self::resolve_bos(tokens, bos_id),
+            kind: TokenizerKind::SentencePiece(SpmTokenizer::new(
+                tokens,
+                scores,
+                add_space_prefix,
+                token_types,
+            )),
+            bos_text: bos_id.and_then(|id| tokens.get(id as usize).cloned()),
+            bos_id,
             add_bos_token,
         }
     }
@@ -969,9 +1025,23 @@ impl SplitTokenizer {
     /// — which is any GGUF shipping merges, TinyLlama included — was prefilled
     /// with no BOS at position 0 and produced degenerate replies. Adding a
     /// third variant cannot reintroduce that gap.
+    ///
+    /// **Once, never twice.** Llama-3, Gemma and Mistral chat templates render
+    /// `{{ bos_token }}` themselves, and the rendered prompt was then given a
+    /// SECOND one here — measured 48 prompt tokens against llama.cpp's 47 on
+    /// Llama-3.2-3B, 22 against 21 on Gemma-2 (FUTURE_WORK #97). llama.cpp
+    /// strips the template's copy when its tokenizer will add one
+    /// (`common/chat.cpp`), and llama-cpp-python tokenizes a rendered chat with
+    /// no BOS of its own; both leave exactly one. So a text that already opens
+    /// with the BOS token's text is not given another — the template's is
+    /// matched as the special token it is.
     pub fn encode(&self, text: &str) -> Vec<i64> {
         let mut out = Vec::new();
-        if self.add_bos_token {
+        let already_opens_with_bos = self
+            .bos_text
+            .as_deref()
+            .is_some_and(|bos| !bos.is_empty() && text.starts_with(bos));
+        if self.add_bos_token && !already_opens_with_bos {
             if let Some(bos) = self.bos_id {
                 out.push(bos as i64);
             }
@@ -1072,7 +1142,7 @@ mod pre_tokenizer_tests {
 
     fn encode_with(pre: &str, text: &str) -> Vec<String> {
         let vocab = bpe_vocab();
-        let tok = BpeTokenizer::from_gguf(&vocab, &merges(), pre, "gpt2");
+        let tok = BpeTokenizer::from_gguf(&vocab, &merges(), pre, "gpt2", &[]);
         tok.encode(text)
             .into_iter()
             .map(|id| vocab[id as usize].clone())
@@ -1147,7 +1217,7 @@ mod pre_tokenizer_tests {
     fn text_between_matches_is_never_dropped() {
         let vocab = bpe_vocab();
         for pre in ["gpt-2", "llama-bpe", "qwen2", "default", "starcoder"] {
-            let tok = BpeTokenizer::from_gguf(&vocab, &merges(), pre, "gpt2");
+            let tok = BpeTokenizer::from_gguf(&vocab, &merges(), pre, "gpt2", &[]);
             for text in [
                 "hello   world",
                 "hello \t world",
@@ -1198,8 +1268,77 @@ mod pre_tokenizer_tests {
 }
 
 #[cfg(test)]
+mod declared_special_tests {
+    use super::*;
+
+    /// GLM-4's prompt opens `[gMASK]<sop>`. `[gMASK]` is a CONTROL token in the
+    /// vocabulary but not `<…>`-shaped, so the name rule alone spelled it out
+    /// as ordinary pieces in every prompt (#97). A byte-level vocabulary with
+    /// no merges makes the expected ids arithmetic.
+    #[test]
+    fn a_control_token_the_vocabulary_declares_is_one_token_whatever_its_shape() {
+        let mut vocab: Vec<String> = (0u8..=127).map(|b| (b as char).to_string()).collect();
+        vocab.push("[gMASK]".into()); // 128
+        vocab.push("<sop>".into()); // 129
+        let mut types = vec![1i32; vocab.len()];
+        types[128] = 3;
+        types[129] = 3;
+        let text = "[gMASK]<sop>hi";
+
+        let tok = SplitTokenizer::from_bpe(&vocab, &[], "glm4", "gpt2", false, None, &types);
+        assert_eq!(tok.encode(text), vec![128, 129, b'h' as i64, b'i' as i64]);
+
+        // THE CONTROL: without the declared types only the `<…>` one is seen.
+        let blind = SplitTokenizer::from_bpe(&vocab, &[], "glm4", "gpt2", false, None, &[]);
+        let ids = blind.encode(text);
+        assert!(!ids.contains(&128) && ids.contains(&129), "{ids:?}");
+    }
+
+    /// Mistral v0.3 opens every turn with `[INST]` (CONTROL) and Gemma writes
+    /// indentation as USER_DEFINED runs of spaces, which SentencePiece always
+    /// matches whole. Both were invisible to the `<…>` rule on the SPM path.
+    #[test]
+    fn spm_matches_declared_control_and_user_defined_tokens_whole() {
+        let toks: Vec<String> = [
+            "<unk>", "<s>", "</s>", "[INST]", "    ", "\u{2581}", "a", "b",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let scores = vec![0.0; toks.len()];
+        let mut types = vec![1i32; toks.len()];
+        types[3] = 3;
+        types[4] = 4;
+
+        let tok = SplitTokenizer::from_sentencepiece(&toks, &scores, false, false, None, &types);
+        assert_eq!(tok.encode("[INST]a    b"), vec![3, 6, 4, 7]);
+
+        let blind = SplitTokenizer::from_sentencepiece(&toks, &scores, false, false, None, &[]);
+        let ids = blind.encode("[INST]a    b");
+        assert!(!ids.contains(&3) && !ids.contains(&4), "{ids:?}");
+    }
+}
+
+#[cfg(test)]
 mod bos_tests {
     use super::*;
+
+    /// A chat template that renders `{{ bos_token }}` itself must not end up
+    /// with two — the template's is the one (#97). A prompt without it still
+    /// gets one, which is TinyLlama's template.
+    #[test]
+    fn a_prompt_that_already_opens_with_bos_is_not_given_a_second() {
+        let (toks, scores) = llama_vocab();
+        let tok = SplitTokenizer::from_sentencepiece(&toks, &scores, true, true, Some(1), &[]);
+        let ids = tok.encode("<s>Hi there");
+        assert_eq!(ids.iter().filter(|&&t| t == 1).count(), 1, "{ids:?}");
+        assert_eq!(ids.first(), Some(&1));
+        assert_eq!(
+            tok.encode("Hi there").first(),
+            Some(&1),
+            "no BOS in the text: add one"
+        );
+    }
 
     /// A minimal Llama-style SPM vocab: `<s>` is id 1, as in every
     /// Llama/Mistral/Phi GGUF.
@@ -1217,7 +1356,7 @@ mod bos_tests {
     #[test]
     fn declared_bos_id_is_prepended_for_llama_vocab() {
         let (toks, scores) = llama_vocab();
-        let tok = SplitTokenizer::from_sentencepiece(&toks, &scores, true, true, Some(1));
+        let tok = SplitTokenizer::from_sentencepiece(&toks, &scores, true, true, Some(1), &[]);
         let ids = tok.encode("Hi there");
         assert_eq!(
             ids.first(),
@@ -1233,7 +1372,7 @@ mod bos_tests {
     #[test]
     fn undeclared_bos_falls_back_across_both_families() {
         let (toks, scores) = llama_vocab();
-        let tok = SplitTokenizer::from_sentencepiece(&toks, &scores, true, true, None);
+        let tok = SplitTokenizer::from_sentencepiece(&toks, &scores, true, true, None, &[]);
         assert_eq!(
             tok.encode("Hi there").first(),
             Some(&1i64),
@@ -1245,7 +1384,7 @@ mod bos_tests {
             .map(|s| s.to_string())
             .collect();
         let gscores = vec![0.0; gemma.len()];
-        let gtok = SplitTokenizer::from_sentencepiece(&gemma, &gscores, true, true, None);
+        let gtok = SplitTokenizer::from_sentencepiece(&gemma, &gscores, true, true, None, &[]);
         assert_eq!(
             gtok.encode("Hi").first(),
             Some(&1i64),
@@ -1263,7 +1402,7 @@ mod bos_tests {
             .map(|s| s.to_string())
             .collect();
         let merges: Vec<String> = vec![];
-        let tok = SplitTokenizer::from_bpe(&toks, &merges, "default", "llama", true, Some(1));
+        let tok = SplitTokenizer::from_bpe(&toks, &merges, "default", "llama", true, Some(1), &[]);
         assert_eq!(
             tok.encode("Hi").first(),
             Some(&1i64),
@@ -1275,7 +1414,7 @@ mod bos_tests {
     #[test]
     fn explicit_opt_out_is_respected() {
         let (toks, scores) = llama_vocab();
-        let tok = SplitTokenizer::from_sentencepiece(&toks, &scores, false, false, Some(1));
+        let tok = SplitTokenizer::from_sentencepiece(&toks, &scores, false, false, Some(1), &[]);
         assert_ne!(
             tok.encode("Hi there").first(),
             Some(&1i64),
@@ -1332,7 +1471,7 @@ mod spm_merge_tests {
     #[test]
     fn a_grown_symbol_invalidates_its_queued_bigram() {
         let (toks, scores) = stale_bigram_vocab();
-        let tok = SplitTokenizer::from_sentencepiece(&toks, &scores, false, false, None);
+        let tok = SplitTokenizer::from_sentencepiece(&toks, &scores, false, false, None, &[]);
         let ids = tok.encode("abcd");
         let got = pieces(&toks, &ids);
 
@@ -1353,7 +1492,7 @@ mod spm_merge_tests {
     #[test]
     fn a_valid_bigram_still_merges() {
         let (toks, scores) = stale_bigram_vocab();
-        let tok = SplitTokenizer::from_sentencepiece(&toks, &scores, false, false, None);
+        let tok = SplitTokenizer::from_sentencepiece(&toks, &scores, false, false, None, &[]);
         // No `c` to trigger the higher-scoring `bc`, so `ab` is uncontested.
         let ids = tok.encode("abd");
         assert_eq!(pieces(&toks, &ids), vec!["ab", "d"]);
@@ -1363,7 +1502,7 @@ mod spm_merge_tests {
     #[test]
     fn degenerate_inputs_are_unaffected() {
         let (toks, scores) = stale_bigram_vocab();
-        let tok = SplitTokenizer::from_sentencepiece(&toks, &scores, false, false, None);
+        let tok = SplitTokenizer::from_sentencepiece(&toks, &scores, false, false, None, &[]);
         assert!(tok.encode("").is_empty());
         assert_eq!(pieces(&toks, &tok.encode("a")), vec!["a"]);
         assert_eq!(pieces(&toks, &tok.encode("bc")), vec!["bc"]);
@@ -1462,7 +1601,7 @@ mod bpe_merge_equivalence {
             let j = (seed >> 33) as usize % (i + 1);
             merges.swap(i, j);
         }
-        SplitTokenizer::from_bpe(&pieces, &merges, "default", model, false, None)
+        SplitTokenizer::from_bpe(&pieces, &merges, "default", model, false, None, &[])
     }
 
     fn as_bpe(tok: &SplitTokenizer) -> &BpeTokenizer {
@@ -1615,7 +1754,7 @@ mod bpe_merge_equivalence {
             .iter()
             .map(|s| s.to_string())
             .collect();
-        let tok = SplitTokenizer::from_bpe(&pieces, &[], "default", "llama", false, None);
+        let tok = SplitTokenizer::from_bpe(&pieces, &[], "default", "llama", false, None, &[]);
         let bpe = as_bpe(&tok);
         let unk = 0i64;
         let tab = 3i64;
@@ -1649,7 +1788,7 @@ mod bpe_merge_equivalence {
             .iter()
             .map(|s| s.to_string())
             .collect();
-        let tok = SplitTokenizer::from_bpe(&pieces, &[], "gpt-2", "gpt2", false, None);
+        let tok = SplitTokenizer::from_bpe(&pieces, &[], "gpt-2", "gpt2", false, None, &[]);
         let bpe = as_bpe(&tok);
         // 'z' maps to a byte_encoder char that is not in this tiny vocabulary.
         assert_eq!(
@@ -1678,6 +1817,117 @@ mod bpe_merge_equivalence {
             elapsed < std::time::Duration::from_secs(5),
             "tokenizing {} chars took {elapsed:?} — the quadratic scan is back",
             text.chars().count()
+        );
+    }
+}
+
+/// Our tokenizer against llama.cpp's, on every model's own chat template.
+///
+/// **The independent reference this component lacked.** Every other tokenizer
+/// test compares the encoder to itself or to hand-written expectations, and
+/// conformance judges replies, not prompts — so vocabularies whose control
+/// markers were spelled out as text (GLM-4's `[gMASK]`, Mistral v0.3's `[INST]`)
+/// passed everything while every prompt to those families was malformed, and
+/// GLM-4 wrote broken code where llama.cpp, on the same file, wrote correct code
+/// (FUTURE_WORK #97).
+///
+/// What it ASSERTS is what is unambiguous:
+/// - for every model, the special tokens (CONTROL / USER_DEFINED in the
+///   vocabulary's own `token_type`) appear in the same order, and BOS agrees;
+/// - for a GPT-2-style BPE vocabulary, the WHOLE sequence agrees.
+///
+/// What it only REPORTS is SentencePiece whitespace: llama.cpp inserts a `▁`
+/// after every special token (Hugging Face's `legacy` behaviour), which
+/// Mistral's own tokenizer does not, and it segments TinyLlama's
+/// merges-carrying vocabulary by score rather than by merge rank. Neither is
+/// settled by llama.cpp alone, so neither fails this test.
+///
+/// Gated on `SWARM_TOKENIZER_CASES`, a JSONL file written by
+/// `examples/tokenizer_reference.py` from llama.cpp (`llama-cpp-python`,
+/// `vocab_only`) over each local model's GGUF header; no vocabulary is
+/// committed. Run with:
+/// ```sh
+/// python3 examples/tokenizer_reference.py /tmp/cases.jsonl
+/// SWARM_TOKENIZER_CASES=/tmp/cases.jsonl \
+///     cargo test --lib -- --ignored tokenizer_agrees_with_llama_cpp --nocapture
+/// ```
+#[cfg(test)]
+mod llama_cpp_reference {
+    use super::declared_special;
+
+    #[test]
+    #[ignore]
+    fn tokenizer_agrees_with_llama_cpp() {
+        let path = std::env::var("SWARM_TOKENIZER_CASES")
+            .expect("set SWARM_TOKENIZER_CASES to a file from examples/tokenizer_reference.py");
+        let verbose = std::env::var("SWARM_TOKENIZER_VERBOSE").is_ok();
+        let mut loaded = std::collections::HashMap::new();
+        // model -> (cases, fully identical, special/BOS disagreements)
+        let mut per_model: std::collections::BTreeMap<String, (usize, usize, usize)> =
+            Default::default();
+        let mut hard_failures = Vec::new();
+        for line in std::fs::read_to_string(&path).expect("read cases").lines() {
+            let case: serde_json::Value = serde_json::from_str(line).expect("case json");
+            let model = case["model"].as_str().unwrap().to_string();
+            let header = case["header"].as_str().unwrap().to_string();
+            let (meta, tok) = loaded.entry(header.clone()).or_insert_with(|| {
+                let meta = crate::inference::split::GgufTokenizerMeta::from_gguf_file(
+                    std::path::Path::new(&header),
+                )
+                .expect("header");
+                let tok = meta.build_tokenizer().expect("tokenizer");
+                (meta, tok)
+            });
+            let text = case["text"].as_str().unwrap();
+            let ours = tok.encode(text);
+            let reference: Vec<i64> = case["ref_ids"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_i64().unwrap())
+                .collect();
+            let specials = |ids: &[i64]| -> Vec<i64> {
+                ids.iter()
+                    .copied()
+                    .filter(|&id| declared_special(&meta.token_types, id as u32))
+                    .collect()
+            };
+            let bos = meta.bos_token_id.map(i64::from);
+            let starts_with_bos = |ids: &[i64]| bos.is_some() && ids.first().copied() == bos;
+            let full = ours == reference;
+            let special_ok = specials(&ours) == specials(&reference)
+                && starts_with_bos(&ours) == starts_with_bos(&reference);
+            let whole_sequence_required = meta.tokenizer_model == "gpt2";
+            let entry = per_model.entry(model.clone()).or_default();
+            entry.0 += 1;
+            if full {
+                entry.1 += 1;
+            }
+            if !special_ok {
+                entry.2 += 1;
+            }
+            if !special_ok || (whole_sequence_required && !full) {
+                hard_failures.push(format!(
+                    "{model}: {text:?}\n  ours {ours:?}\n  ref  {reference:?}"
+                ));
+            } else if verbose && !full {
+                println!(
+                    "WHITESPACE-ONLY {model}: {text:?}\n  ours {ours:?}\n  ref  {reference:?}"
+                );
+            }
+        }
+        for (model, (n, full, special_bad)) in &per_model {
+            println!(
+                "{model}: {full}/{n} identical, special tokens + BOS disagree in {special_bad}"
+            );
+        }
+        for f in &hard_failures {
+            println!("FAIL {f}");
+        }
+        assert!(
+            hard_failures.is_empty(),
+            "{} case(s) disagree with llama.cpp on special tokens, BOS, or a BPE sequence",
+            hard_failures.len()
         );
     }
 }

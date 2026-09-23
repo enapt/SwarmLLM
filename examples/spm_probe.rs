@@ -86,6 +86,7 @@ fn main() {
         meta.add_space_prefix,
         false,
         meta.bos_token_id,
+        &meta.token_types,
     );
 
     // `--from-file <path>`: one input per line, print `id,id,id` per line and
