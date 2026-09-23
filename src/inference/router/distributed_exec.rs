@@ -318,7 +318,7 @@ pub(super) async fn execute_distributed_batch(
                 // new Submit arrives).
                 active_count.fetch_sub(1, Ordering::Relaxed);
                 queue_notify.notify_one();
-                deliver_result(&request, result_tx, output, "distributed_batch");
+                deliver_result(&request, result_tx, output, &trace, "distributed_batch");
                 true // task completed normally, already decremented
             }),
         ));

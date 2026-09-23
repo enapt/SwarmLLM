@@ -266,12 +266,26 @@ pub enum RouterCommand {
 /// already on the request at every send site, and the SSE loop sets it ONLY on
 /// a genuine disconnect (`sse_tx.closed()`). So a cancelled request keeps the
 /// warning; an uncancelled one is the ordinary case and logs at debug.
+/// Hand a finished request's result to its caller, with its route attached.
+///
+/// **The trace is a REQUIRED parameter** — the rule `architecture.md` calls
+/// "make the wrong call unrepresentable". The route the API reports in its
+/// `x-swarm-route` headers is read off `InferenceOutput::trace`, and only
+/// `dispatch_single` set it: the batched distributed path and the local
+/// executor path each delivered a result with `trace: None`, so their replies
+/// carried no route at all and a locally answered chat reply showed no label
+/// (FUTURE_WORK #102). Every delivery goes through here, so here is where the
+/// snapshot is taken.
 pub(super) fn deliver_result(
     request: &InferenceRequest,
     result_tx: InferenceResultTx,
-    output: Result<InferenceOutput, SwarmError>,
+    mut output: Result<InferenceOutput, SwarmError>,
+    trace: &crate::inference::trace::RequestTrace,
     path: &'static str,
 ) {
+    if let Ok(ref mut result) = output {
+        result.trace = Some(trace.snapshot());
+    }
     if result_tx.send(output).is_ok() {
         return;
     }
@@ -338,6 +352,40 @@ mod deliver_result_tests {
         r
     }
 
+    /// **Every delivered result carries its route** (#102). Only
+    /// `dispatch_single` attached the trace; a reply from the batched
+    /// distributed path or the local executor reached the API with
+    /// `trace: None`, so it had no `x-swarm-route` header and the chat showed
+    /// no route for it. The trace is now a required parameter of the one
+    /// function all three call.
+    #[test]
+    fn a_delivered_result_carries_the_route_it_took() {
+        let req = request(false);
+        let trace = crate::inference::trace::RequestTrace::new(req.id, "m".to_string(), "chat");
+        trace.mark_assembled(
+            crate::inference::trace::Route::Local,
+            crate::inference::trace::local_segment(&crate::types::NodeId([1u8; 32]), (0, 22)),
+            0,
+        );
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+        let output = InferenceOutput {
+            request_id: req.id,
+            content: "hi".into(),
+            prompt_tokens: 1,
+            completion_tokens: 1,
+            finish_reason: "stop".into(),
+            session_id: None,
+            token_logprobs: Vec::new(),
+            matched_stop_sequence: None,
+            trace: None,
+        };
+        deliver_result(&req, tx, Ok(output), &trace, "test");
+        let got = rx.try_recv().expect("delivered").expect("ok");
+        let snap = got.trace.expect("the route travels with the result");
+        assert_eq!(snap.route.as_str(), "local");
+        assert_eq!(snap.segments.len(), 1);
+    }
+
     fn levels_when(cancelled: bool, take_the_result: bool) -> Vec<tracing::Level> {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let sub = Levels(seen.clone());
@@ -353,7 +401,8 @@ mod deliver_result_tests {
             None
         };
         tracing::subscriber::with_default(sub, || {
-            deliver_result(&req, tx, Err(SwarmError::NoModelLoaded), "test");
+            let trace = crate::inference::trace::RequestTrace::new(req.id, "m".to_string(), "chat");
+            deliver_result(&req, tx, Err(SwarmError::NoModelLoaded), &trace, "test");
         });
         drop(held);
         let out = seen.lock().unwrap().clone();

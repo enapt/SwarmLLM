@@ -64,6 +64,12 @@ pub(super) async fn execute_local_batch(
         let request = queued.request;
         let result_tx = queued.result_tx;
         let token_tx = queued.token_tx;
+        // The same trace every other path records into. This path used to drop
+        // it: its requests reached no dashboard, no request total and no
+        // latency figure (`publish_request_trace` is where those are counted),
+        // and its replies carried no route header (#102).
+        let trace = queued.trace;
+        trace.mark_dequeued();
 
         // Honor external cancel between batch items. Without this, a
         // cancelled request still runs full generation under the executor
@@ -237,10 +243,41 @@ pub(super) async fn execute_local_batch(
             Err(SwarmError::NoModelLoaded)
         };
 
+        // Whole model, in this process: one local segment, the same shape the
+        // local fast path records.
+        let num_layers = shared_state
+            .model_registry
+            .get_manifest(&request.model_id)
+            .map(|m| m.num_layers)
+            .unwrap_or(0);
+        trace.mark_assembled(
+            crate::inference::trace::Route::Local,
+            crate::inference::trace::local_segment(
+                shared_state.identity.node_id(),
+                (0, num_layers),
+            ),
+            0,
+        );
+        match &output {
+            Ok(r) => trace.mark_finished(
+                crate::inference::trace::Outcome::Ok,
+                r.prompt_tokens,
+                r.completion_tokens,
+            ),
+            Err(e) => trace.mark_finished(
+                crate::inference::trace::Outcome::Error(
+                    crate::inference::trace::error_kind(e).to_string(),
+                ),
+                0,
+                0,
+            ),
+        }
+        shared_state.publish_request_trace(&trace);
+
         finalize_request(&shared_state, &request, &output, None).await;
         shared_state.release_request_state(&request.id);
         cleanup.complete_one();
-        deliver_result(&request, result_tx, output, "local_batch");
+        deliver_result(&request, result_tx, output, &trace, "local_batch");
     }
 
     tracing::debug!(batch_size, "Local batch complete");

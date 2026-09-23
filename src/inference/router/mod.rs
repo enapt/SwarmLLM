@@ -1349,12 +1349,9 @@ impl InferenceRouter {
                 ),
             }
             shared_state.publish_request_trace(&trace);
-            // Hand the finished route to the API layer for response headers.
-            // Done here, at the one completion arm, rather than in each of the
-            // four response paths.
-            if let Ok(ref mut result) = output {
-                result.trace = Some(trace.snapshot());
-            }
+            // The finished route reaches the API layer's response headers
+            // through `deliver_result`, which every delivery path goes through
+            // and which takes the trace as a required parameter.
 
             // Latency and the request total are recorded inside
             // `publish_request_trace` above, at the single choke point every
@@ -1530,7 +1527,7 @@ impl InferenceRouter {
             active_count.fetch_sub(1, Ordering::Relaxed);
             queue_notify.notify_one();
 
-            deliver_result(&request, result_tx, output, "dispatch_single");
+            deliver_result(&request, result_tx, output, &trace, "dispatch_single");
         });
     }
 }
