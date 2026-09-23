@@ -61,7 +61,11 @@ set -u
 
 BIN="${1:-./target/release/swarmllm}"
 PORT="${2:-8821}"
-shift 2 2>/dev/null || true
+# Shift off what was given, however little: a bare `shift 2` with ONE argument
+# shifts nothing, which left the binary's path in the model list and reported
+# it "COULD NOT RUN" — a run of nothing, correctly refused, but for no reason
+# the caller could see (2026-09-24).
+shift $(( $# < 2 ? $# : 2 ))
 # Add a model here when its family is not already represented — the point is
 # family COVERAGE, not model count.
 # One per template family we can hold locally, and BOTH Phi tokenizer families.
