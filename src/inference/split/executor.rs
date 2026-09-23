@@ -17,6 +17,7 @@ use super::entry::BatchItem;
 use super::kv_cache::KvCacheStore;
 use super::model::SplitModel;
 use super::{FfnVariant, LayerVariant, SsmState};
+use crate::inference::residual_norm::Residual;
 
 /// Did this forward run into the context window because the REPLY grew into it,
 /// rather than because the prompt was too long to start?
@@ -466,7 +467,7 @@ impl SplitModel {
             .map_err(|e| SwarmError::Internal(format!("Device transfer failed: {e}")))?;
 
         // Determine the hidden state to start from
-        let mut layer_in = if is_first && !skip_embedding {
+        let layer_in = if is_first && !skip_embedding {
             // First segment: input is token IDs → apply embedding
             self.embed_tokens(&input)?
         } else {
@@ -673,6 +674,10 @@ impl SplitModel {
         let max_seq_len = self.max_seq_len;
         let mut captured: HashMap<usize, Tensor> = HashMap::new();
 
+        // The residual stream, carried between norm points so each layer's
+        // closing add can be fused into the next norm (`inference::residual_norm`).
+        let mut hidden = Residual::Ready(layer_in);
+
         // Run through our layers
         for (layer_idx, layer) in self.layers.iter().enumerate() {
             let abs_layer = self.layer_start + layer_idx;
@@ -709,10 +714,19 @@ impl SplitModel {
             // the whole per-token cost of hybrid placement, and it is why the
             // boundary has to stay contiguous.
             if let Some(target) = self.layer_devices.get(layer_idx) {
-                if !layer_in.device().same_device(target) {
-                    layer_in = layer_in.to_device(target).map_err(|e| {
-                        SwarmError::Internal(format!("layer {abs_layer} activation to device: {e}"))
-                    })?;
+                if !hidden.device().same_device(target) {
+                    // A pending residual sum is taken on the device it was
+                    // produced on, then moved — a fused add+norm cannot span
+                    // two devices.
+                    let moved = hidden
+                        .into_tensor()
+                        .and_then(|t| t.to_device(target))
+                        .map_err(|e| {
+                            SwarmError::Internal(format!(
+                                "layer {abs_layer} activation to device: {e}"
+                            ))
+                        })?;
+                    hidden = Residual::Ready(moved);
                     if let Some(m) = mask.as_ref() {
                         mask = Some(m.to_device(target).map_err(|e| {
                             SwarmError::Internal(format!("layer {abs_layer} mask to device: {e}"))
@@ -733,11 +747,11 @@ impl SplitModel {
             };
             match layer {
                 LayerVariant::Dense(lw) => {
-                    let x = layer_in;
-                    let residual = &x;
-                    let x = crate::inference::prof::timed!(
+                    // The previous layer's closing residual add is resolved
+                    // HERE, fused into this norm — see `inference::residual_norm`.
+                    let (residual, x) = crate::inference::prof::timed!(
                         crate::inference::prof::Stage::Norms,
-                        lw.attention_norm.forward(&x)
+                        hidden.add_norm(&lw.attention_norm)
                     )
                     .map_err(|e| SwarmError::Internal(format!("attn_norm: {e}")))?;
                     let mut attn = lw
@@ -757,16 +771,9 @@ impl SplitModel {
                             .forward(&attn)
                             .map_err(|e| SwarmError::Internal(format!("post_attn_norm: {e}")))?;
                     }
-                    let x = crate::inference::prof::timed!(
-                        crate::inference::prof::Stage::Residual,
-                        attn + residual
-                    )
-                    .map_err(SwarmError::internal)?;
-
-                    let residual = &x;
-                    let x = crate::inference::prof::timed!(
+                    let (residual, x) = crate::inference::prof::timed!(
                         crate::inference::prof::Stage::Norms,
-                        lw.ffn_norm.forward(&x)
+                        Residual::pending(attn, residual).add_norm(&lw.ffn_norm)
                     )
                     .map_err(|e| SwarmError::Internal(format!("ffn_norm: {e}")))?;
                     let mut x = match &lw.ffn {
@@ -783,11 +790,9 @@ impl SplitModel {
                             .forward(&x)
                             .map_err(|e| SwarmError::Internal(format!("post_ffw_norm: {e}")))?;
                     }
-                    layer_in = crate::inference::prof::timed!(
-                        crate::inference::prof::Stage::Residual,
-                        x + residual
-                    )
-                    .map_err(SwarmError::internal)?;
+                    // Not added here: the next norm point takes this sum
+                    // (`Residual::add_norm`), fused on CUDA.
+                    hidden = Residual::pending(x, residual);
                 }
                 LayerVariant::DeepSeek {
                     attention,
@@ -795,8 +800,8 @@ impl SplitModel {
                     attention_norm,
                     ffn_norm,
                 } => {
-                    let x = attention_norm
-                        .forward(&layer_in)
+                    let (residual, x) = hidden
+                        .add_norm(attention_norm)
                         .map_err(|e| SwarmError::Internal(format!("ds_attn_norm: {e}")))?;
                     let attn = attention
                         .forward_mla(
@@ -808,11 +813,10 @@ impl SplitModel {
                             kv_reserve,
                         )
                         .map_err(|e| SwarmError::Internal(format!("mla: {e}")))?;
-                    let x = (attn + &layer_in).map_err(SwarmError::internal)?;
-                    let residual = &x;
-                    let normed = ffn_norm
-                        .forward(&x)
-                        .map_err(|e| SwarmError::Internal(format!("ds_ffn_norm: {e}")))?;
+                    let (residual, normed) =
+                        Residual::pending(attn, residual)
+                            .add_norm(ffn_norm)
+                            .map_err(|e| SwarmError::Internal(format!("ds_ffn_norm: {e}")))?;
                     let ffn_out = match ffn {
                         FfnVariant::Dense(mlp) => mlp
                             .forward(&normed, None)
@@ -821,7 +825,7 @@ impl SplitModel {
                             .forward(&normed)
                             .map_err(|e| SwarmError::Internal(format!("moe: {e}")))?,
                     };
-                    layer_in = (ffn_out + residual).map_err(SwarmError::internal)?;
+                    hidden = Residual::pending(ffn_out, residual);
                 }
                 LayerVariant::Qwen35Attn {
                     ref weights,
@@ -829,10 +833,8 @@ impl SplitModel {
                     ref attention_norm,
                     ref post_attention_norm,
                 } => {
-                    let x = layer_in;
-                    let residual = &x;
-                    let x = attention_norm
-                        .forward(&x)
+                    let (residual, x) = hidden
+                        .add_norm(attention_norm)
                         .map_err(|e| SwarmError::Internal(format!("q35_attn_norm: {e}")))?;
                     let attn = weights
                         .forward_attn(
@@ -844,10 +846,8 @@ impl SplitModel {
                             kv_reserve,
                         )
                         .map_err(|e| SwarmError::Internal(format!("q35_attn: {e}")))?;
-                    let x = (attn + residual).map_err(SwarmError::internal)?;
-                    let residual = &x;
-                    let normed = post_attention_norm
-                        .forward(&x)
+                    let (residual, normed) = Residual::pending(attn, residual)
+                        .add_norm(post_attention_norm)
                         .map_err(|e| SwarmError::Internal(format!("q35_post_attn_norm: {e}")))?;
                     let ffn_out = match ffn {
                         FfnVariant::Dense(mlp) => mlp
@@ -857,7 +857,7 @@ impl SplitModel {
                             .forward(&normed)
                             .map_err(|e| SwarmError::Internal(format!("q35_moe: {e}")))?,
                     };
-                    layer_in = (ffn_out + residual).map_err(SwarmError::internal)?;
+                    hidden = Residual::pending(ffn_out, residual);
                 }
                 LayerVariant::Qwen35Ssm {
                     ref weights,
@@ -865,18 +865,14 @@ impl SplitModel {
                     ref attention_norm,
                     ref post_attention_norm,
                 } => {
-                    let x = layer_in;
-                    let residual = &x;
-                    let x = attention_norm
-                        .forward(&x)
+                    let (residual, x) = hidden
+                        .add_norm(attention_norm)
                         .map_err(|e| SwarmError::Internal(format!("q35_ssm_norm: {e}")))?;
                     let ssm_out = weights
                         .forward_deltanet(&x, &mut layer_ssm_states[layer_idx])
                         .map_err(|e| SwarmError::Internal(format!("q35_deltanet: {e}")))?;
-                    let x = (ssm_out + residual).map_err(SwarmError::internal)?;
-                    let residual = &x;
-                    let normed = post_attention_norm
-                        .forward(&x)
+                    let (residual, normed) = Residual::pending(ssm_out, residual)
+                        .add_norm(post_attention_norm)
                         .map_err(|e| SwarmError::Internal(format!("q35_post_ssm_norm: {e}")))?;
                     let ffn_out = match ffn {
                         FfnVariant::Dense(mlp) => mlp
@@ -886,7 +882,7 @@ impl SplitModel {
                             .forward(&normed)
                             .map_err(|e| SwarmError::Internal(format!("q35_ssm_moe: {e}")))?,
                     };
-                    layer_in = (ffn_out + residual).map_err(SwarmError::internal)?;
+                    hidden = Residual::pending(ffn_out, residual);
                 }
             }
             if let Some(start) = layer_start_time {
@@ -900,7 +896,11 @@ impl SplitModel {
             // Capture hidden state if requested (zero overhead when not capturing)
             if let Some(layers_to_capture) = capture_layers {
                 if layers_to_capture.contains(&abs_layer) {
-                    captured.insert(abs_layer, layer_in.clone());
+                    // A captured layer needs the value itself, so its closing
+                    // add is taken here rather than fused forward.
+                    let taken = hidden.into_tensor().map_err(SwarmError::internal)?;
+                    captured.insert(abs_layer, taken.clone());
+                    hidden = Residual::Ready(taken);
                 }
             }
         }
@@ -915,10 +915,14 @@ impl SplitModel {
         // The KV caches are deliberately NOT moved: each one belongs to its
         // layer and must stay on that layer's device, which is what makes the
         // card-resident layers actually fast.
-        if !self.layer_devices.is_empty() && !layer_in.device().same_device(&self.device) {
-            layer_in = layer_in.to_device(&self.device).map_err(|e| {
-                SwarmError::Internal(format!("segment output to primary device: {e}"))
-            })?;
+        if !self.layer_devices.is_empty() && !hidden.device().same_device(&self.device) {
+            let moved = hidden
+                .into_tensor()
+                .and_then(|t| t.to_device(&self.device))
+                .map_err(|e| {
+                    SwarmError::Internal(format!("segment output to primary device: {e}"))
+                })?;
+            hidden = Residual::Ready(moved);
         }
 
         // Write the updated KV-caches and SSM states back to the store.
@@ -955,8 +959,9 @@ impl SplitModel {
                 .as_ref()
                 .ok_or_else(|| SwarmError::Internal("Missing output head".into()))?;
 
-            let x = norm
-                .forward(&layer_in)
+            // The last layer's closing add, fused into the final norm.
+            let (_, x) = hidden
+                .add_norm(norm)
                 .map_err(|e| SwarmError::Internal(format!("final_norm: {e}")))?;
             let x = if all_positions {
                 x
@@ -977,8 +982,10 @@ impl SplitModel {
             }
             Ok(logits)
         } else {
-            // Intermediate segment: return hidden states for next segment
-            Ok(layer_in)
+            // Intermediate segment: return hidden states for next segment —
+            // a plain tensor of its own, since this is what gets serialised
+            // for the next node.
+            hidden.into_tensor().map_err(SwarmError::internal)
         };
 
         if let Some(start) = forward_start {
@@ -1467,8 +1474,11 @@ impl SplitModel {
         // Stack all hidden states into a single batch tensor:
         // [batch, seq_len, hidden_dim] (seq_len is 1 for decode, >1 for prefill chunks).
         let batch_refs: Vec<&Tensor> = per_request.iter().collect();
-        let mut batched = Tensor::cat(&batch_refs, 0)
+        let batched = Tensor::cat(&batch_refs, 0)
             .map_err(|e| SwarmError::Internal(format!("Batch stack: {e}")))?;
+        // Carried between norm points exactly as in `forward_inner_impl`, so
+        // the batched path fuses the same add+norm pairs.
+        let mut hidden = Residual::Ready(batched);
 
         // Process through layers
         for (layer_idx, layer) in self.layers.iter().enumerate() {
@@ -1481,10 +1491,16 @@ impl SplitModel {
             // transition here would fail only under concurrency, which is the
             // hardest kind of device bug to attribute.
             if let Some(target) = self.layer_devices.get(layer_idx) {
-                if !batched.device().same_device(target) {
-                    batched = batched.to_device(target).map_err(|e| {
-                        SwarmError::Internal(format!("batch to device at layer {layer_idx}: {e}"))
-                    })?;
+                if !hidden.device().same_device(target) {
+                    let moved = hidden
+                        .into_tensor()
+                        .and_then(|t| t.to_device(target))
+                        .map_err(|e| {
+                            SwarmError::Internal(format!(
+                                "batch to device at layer {layer_idx}: {e}"
+                            ))
+                        })?;
+                    hidden = Residual::Ready(moved);
                     if let Some(m) = mask.as_ref() {
                         mask = Some(m.to_device(target).map_err(|e| {
                             SwarmError::Internal(format!("batch mask to device: {e}"))
@@ -1494,10 +1510,8 @@ impl SplitModel {
             }
             match layer {
                 LayerVariant::Dense(lw) => {
-                    let residual = batched.clone();
-                    let normed = lw
-                        .attention_norm
-                        .forward(&batched)
+                    let (residual, normed) = hidden
+                        .add_norm(&lw.attention_norm)
                         .map_err(|e| SwarmError::Internal(format!("attn_norm: {e}")))?;
 
                     // One call for the whole batch: the qkv projections, RoPE
@@ -1528,12 +1542,8 @@ impl SplitModel {
                             .forward(&attn_batched)
                             .map_err(|e| SwarmError::Internal(format!("post_attn_norm: {e}")))?;
                     }
-                    let x = (&attn_batched + &residual).map_err(SwarmError::internal)?;
-
-                    let residual2 = x.clone();
-                    let x = lw
-                        .ffn_norm
-                        .forward(&x)
+                    let (residual2, x) = Residual::pending(attn_batched, residual)
+                        .add_norm(&lw.ffn_norm)
                         .map_err(|e| SwarmError::Internal(format!("ffn_norm: {e}")))?;
                     let mut x = match &lw.ffn {
                         FfnVariant::Dense(mlp) => mlp
@@ -1548,7 +1558,7 @@ impl SplitModel {
                             .forward(&x)
                             .map_err(|e| SwarmError::Internal(format!("post_ffw_norm: {e}")))?;
                     }
-                    batched = (&x + &residual2).map_err(SwarmError::internal)?;
+                    hidden = Residual::pending(x, residual2);
                 }
                 LayerVariant::DeepSeek {
                     attention,
@@ -1557,8 +1567,8 @@ impl SplitModel {
                     ffn_norm,
                 } => {
                     // DeepSeek batch: per-request attention (MLA), batched FFN
-                    let normed = attention_norm
-                        .forward(&batched)
+                    let (residual, normed) = hidden
+                        .add_norm(attention_norm)
                         .map_err(|e| SwarmError::Internal(format!("ds_attn_norm: {e}")))?;
 
                     let mut attn_outputs: Vec<Tensor> = Vec::with_capacity(batch_size);
@@ -1582,11 +1592,8 @@ impl SplitModel {
                     let attn_refs: Vec<&Tensor> = attn_outputs.iter().collect();
                     let attn_batched = Tensor::cat(&attn_refs, 0)
                         .map_err(|e| SwarmError::Internal(format!("mla restack: {e}")))?;
-                    let x = (&attn_batched + &batched).map_err(SwarmError::internal)?;
-
-                    let residual = x.clone();
-                    let normed = ffn_norm
-                        .forward(&x)
+                    let (residual, normed) = Residual::pending(attn_batched, residual)
+                        .add_norm(ffn_norm)
                         .map_err(|e| SwarmError::Internal(format!("ds_ffn_norm: {e}")))?;
                     let ffn_out = match ffn {
                         FfnVariant::Dense(mlp) => mlp
@@ -1596,7 +1603,7 @@ impl SplitModel {
                             .forward(&normed)
                             .map_err(|e| SwarmError::Internal(format!("moe_batch: {e}")))?,
                     };
-                    batched = (&ffn_out + &residual).map_err(SwarmError::internal)?;
+                    hidden = Residual::pending(ffn_out, residual);
                 }
                 LayerVariant::Qwen35Attn {
                     ref weights,
@@ -1605,9 +1612,8 @@ impl SplitModel {
                     ref post_attention_norm,
                 } => {
                     // Qwen 3.5 attention: per-request attention + batched FFN (same as Dense pattern)
-                    let residual = batched.clone();
-                    let normed = attention_norm
-                        .forward(&batched)
+                    let (residual, normed) = hidden
+                        .add_norm(attention_norm)
                         .map_err(|e| SwarmError::Internal(format!("q35b_attn_norm: {e}")))?;
 
                     let mut attn_outputs: Vec<Tensor> = Vec::with_capacity(batch_size);
@@ -1630,11 +1636,8 @@ impl SplitModel {
                     let attn_refs: Vec<&Tensor> = attn_outputs.iter().collect();
                     let attn_batched = Tensor::cat(&attn_refs, 0)
                         .map_err(|e| SwarmError::Internal(format!("q35b_attn_restack: {e}")))?;
-                    let x = (&attn_batched + &residual).map_err(SwarmError::internal)?;
-
-                    let residual2 = x.clone();
-                    let normed2 = post_attention_norm
-                        .forward(&x)
+                    let (residual2, normed2) = Residual::pending(attn_batched, residual)
+                        .add_norm(post_attention_norm)
                         .map_err(|e| SwarmError::Internal(format!("q35b_post_attn_norm: {e}")))?;
                     let ffn_out = match ffn {
                         FfnVariant::Dense(mlp) => mlp
@@ -1644,7 +1647,7 @@ impl SplitModel {
                             .forward(&normed2)
                             .map_err(|e| SwarmError::Internal(format!("q35b_moe: {e}")))?,
                     };
-                    batched = (&ffn_out + &residual2).map_err(SwarmError::internal)?;
+                    hidden = Residual::pending(ffn_out, residual2);
                 }
                 LayerVariant::Qwen35Ssm {
                     ref weights,
@@ -1653,9 +1656,8 @@ impl SplitModel {
                     ref post_attention_norm,
                 } => {
                     // Qwen 3.5 SSM: per-request DeltaNet (SSM state is per-request) + batched FFN
-                    let residual = batched.clone();
-                    let normed = attention_norm
-                        .forward(&batched)
+                    let (residual, normed) = hidden
+                        .add_norm(attention_norm)
                         .map_err(|e| SwarmError::Internal(format!("q35b_ssm_norm: {e}")))?;
 
                     let mut ssm_outputs: Vec<Tensor> = Vec::with_capacity(batch_size);
@@ -1672,11 +1674,8 @@ impl SplitModel {
                     let ssm_refs: Vec<&Tensor> = ssm_outputs.iter().collect();
                     let ssm_batched = Tensor::cat(&ssm_refs, 0)
                         .map_err(|e| SwarmError::Internal(format!("q35b_ssm_restack: {e}")))?;
-                    let x = (&ssm_batched + &residual).map_err(SwarmError::internal)?;
-
-                    let residual2 = x.clone();
-                    let normed2 = post_attention_norm
-                        .forward(&x)
+                    let (residual2, normed2) = Residual::pending(ssm_batched, residual)
+                        .add_norm(post_attention_norm)
                         .map_err(|e| SwarmError::Internal(format!("q35b_post_ssm_norm: {e}")))?;
                     let ffn_out = match ffn {
                         FfnVariant::Dense(mlp) => mlp
@@ -1686,10 +1685,14 @@ impl SplitModel {
                             .forward(&normed2)
                             .map_err(|e| SwarmError::Internal(format!("q35b_ssm_moe: {e}")))?,
                     };
-                    batched = (&ffn_out + &residual2).map_err(SwarmError::internal)?;
+                    hidden = Residual::pending(ffn_out, residual2);
                 }
             }
         }
+        // The per-request split and final norm below read the whole batch, so
+        // the last layer's closing add is taken here (once per forward, not
+        // per layer — not worth a fused path of its own).
+        let batched = hidden.into_tensor().map_err(SwarmError::internal)?;
 
         // Write updated KV-caches and SSM states back (take instead of clone to avoid copying)
         for (req_idx, item) in items.iter().enumerate() {

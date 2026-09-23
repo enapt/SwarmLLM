@@ -1523,6 +1523,9 @@ submission COUNT, not bandwidth".
    measured). The CHEAP stages are the ones it distorts most: `residual adds`
    read 2.5 ms and `rms norms` 2.7 ms for work on a few KB, which is the sync
    cost, not the add. Trust it for the big stages only.
+   Since 2026-09-23 those two are ONE stage, `residual add + rms norm`: on CUDA
+   the add is fused into the norm's kernel (`inference::residual_norm`), so a
+   separate add no longer exists to time. Older readings quote them apart.
 
 ⚠ **`SWARMLLM_PROFILE=1` prints ~11 lines per forward pass**, i.e. per token.
 The dump is excluded from the `total` it reports, so per-forward figures stay

@@ -7,9 +7,9 @@ use super::super::super::layers::{topk_cpu, MoeGatingFunc, MoeRoutingConfig};
 use super::super::rope::precompute_freqs_cis;
 use super::super::*;
 use super::common::*;
+use crate::inference::residual_norm::RmsNorm;
 use candle_core::quantized::QTensor;
 use candle_core::{DType, Device, Tensor};
-use candle_transformers::quantized_nn::RmsNorm;
 
 #[test]
 fn test_deepseek_arch_supported() {

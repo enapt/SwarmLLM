@@ -305,6 +305,50 @@ layer — below what this box's clock can resolve — so it is judged by
 the same thing exactly; a tolerance would make "did it get faster" and "is it
 still right" the same question. **A future fused kernel here inherits that bar.**
 
+## `inference::residual_norm` — residual add + RMS norm as one kernel (2026-09-23)
+
+The second fused kernel, and the first that needed a TYPE rather than a helper.
+One of its two sites straddles the layer boundary — the closing add of layer
+*i* is fused into the attention norm of layer *i+1* (or the final norm) — so
+fusing it means NOT doing the add where the layer ends, in eight hand-written
+copies across `SplitModel`'s single-request and batched loops.
+`Residual::Pending { delta, base }` carries the untaken sum and
+`Residual::add_norm` is the one place it is resolved; `into_tensor()` takes it
+where a plain tensor is needed (device transition, captured layer, non-final
+segment output).
+
+**Bit-identity, and why it holds.** `add_rmsnorm_f32` is candle-kernels
+0.10.2's `rmsnorm` statement for statement — strided accumulation,
+`__shfl_xor_sync` over masks 16..1, the shared-memory second stage above 32
+threads, `rsqrtf(mean + eps)`, `(scale * x) * alpha` — launched with candle-nn
+0.10.1's geometry (one block per row, 32 threads below 1024 columns, 1024 at or
+above). The only difference is that `x = a + b` is computed in a register
+instead of loaded from `badd_f32`'s output: one IEEE add either way, and FMA
+contraction cannot fuse an add into the multiply that FOLLOWS it, so
+`tmp += xi * xi` contracts identically. Both PTX builds use `-O3
+-std=c++17` and no fast-math (cudaforge adds no flags of its own).
+
+**Verified**, on the `--features cuda` build:
+- `cuda_add_rms_norm_is_bit_identical_to_the_composed_path` — six shapes,
+  both geometries, a prefill block and a batch, plus zero-copy (the sum is a
+  view at offset N of the one 2N allocation, not a copy).
+- **Its null control fired**: replacing the kernel's `tmp += xi * xi` with
+  `tmp += __fmul_rn(xi, xi)` (no FMA) fails it on a single ulp — element 9216
+  of `[1,128,3072]`, `-0.6935906` vs `-0.69359064`.
+- Real generations on tinyllama and llama-3.2-3b are byte-identical to the
+  released v0.3.200, fused and unfused.
+- Kernel count, llama-3.2-3b decode: 763 → **707 launches/token** (−2.00/layer:
+  `add_rmsnorm_f32` 2/layer replaces `badd_f32` 2/layer + `rmsnorm_f32` 2/layer;
+  one `rmsnorm_f32` remains for layer 0, whose input is the embedding).
+
+`SWARMLLM_FUSE_ADD_RMSNORM=0` is the off arm. Off CUDA nothing changes: the
+pending sum resolves through the old ops in the old order, and
+`a_pending_residual_resolves_to_the_composed_ops_on_the_cpu` pins it.
+
+⚠ The profiler's `residual adds` stage is gone — the add is now timed inside
+`residual add + rms norm` (`prof.rs`), because on CUDA there is no separate add
+left to time.
+
 (2026-08-21 night) — eight-lane AVX2 `expf`
 (`exp_inplace`, Cephes polynomial, ~2 ulp vs libm, pinned by
 `vectorised_exp_tracks_libm` over [-80, 80]) and the fused `silu_mul` CustomOp2.

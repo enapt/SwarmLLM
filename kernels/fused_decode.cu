@@ -56,3 +56,81 @@ extern "C" __global__ void silu_mul_f32(
         out[i] = (g / (1.0f + expf(-g))) * up[i];
     }
 }
+
+// (a + b) and rms_norm(a + b) * alpha, as ONE kernel with TWO outputs.
+//
+// Every dense layer hands its residual stream through this pattern twice —
+// `attn + residual` then the FFN norm, and `ffn + residual` then the NEXT
+// layer's attention norm (or the final norm) — and candle composes each as
+// `badd_f32` then `rmsnorm_f32`: two launches, and an allocation and a free for
+// the sum. Both results are needed: the sum IS the next residual, and the
+// normed value feeds the projections. candle's `CustomOp` returns one storage,
+// so the caller allocates ONE 2N buffer and passes its two halves here;
+// `inference::residual_norm` splits it back into two zero-copy views.
+//
+// ⚠ **This is candle's `rmsnorm` from `candle-kernels/src/reduce.cu`, statement
+// for statement** — the same per-thread strided accumulation, the same warp
+// reduction (`__shfl_xor_sync` over masks 16..1), the same shared-memory second
+// stage when `block_size > 32`, the same `rsqrtf(mean + eps)` and the same
+// `(scale * x) * alpha` order. The caller picks `block_size` by candle's rule
+// (32 below 1024 columns, else 1024) and launches one block per row, as candle
+// does. The only difference is where `x` comes from: candle loads what
+// `badd_f32` stored (`x + y`, one IEEE add), and this computes the same add in
+// a register. FMA contraction cannot fuse an add INTO the multiply that follows
+// it, so `xi` is the same rounded value and `tmp += xi * xi` contracts exactly
+// as candle's does. That is what makes the result BIT-identical, which
+// `cuda_add_rms_norm_is_bit_identical_to_the_composed_path` asserts.
+//
+// Both loops assign every element of their row, so the 2N output may come from
+// `alloc_fully_overwritten`.
+static __device__ __forceinline__ float fd_warp_reduce_sum(float x) {
+#pragma unroll
+    for (int mask = 16; mask > 0; mask >>= 1) {
+        x += __shfl_xor_sync(0xffffffff, x, mask, 32);
+    }
+    return x;
+}
+
+extern "C" __global__ void add_rmsnorm_f32(
+    const float *a,
+    const float *b,
+    const float *alpha,
+    float *normed,
+    float *sum,
+    const int ncols,
+    const int block_size,
+    const float eps
+) {
+    const int row = blockIdx.x*blockDim.y + threadIdx.y;
+    const int tid = threadIdx.x;
+
+    float tmp = 0.0f; // partial sum for thread in warp
+
+    for (int col = tid; col < ncols; col += block_size) {
+        const float xi = a[row*ncols + col] + b[row*ncols + col];
+        sum[row*ncols + col] = xi;
+        tmp += xi * xi;
+    }
+
+    // sum up partial sums
+    tmp = fd_warp_reduce_sum(tmp);
+    if (block_size > 32) {
+        __shared__ float s_sum[32];
+        int warp_id = threadIdx.x / 32;
+        int lane_id = threadIdx.x % 32;
+        if (lane_id == 0) {
+            s_sum[warp_id] = tmp;
+        }
+        __syncthreads();
+        tmp = s_sum[lane_id];
+        tmp = fd_warp_reduce_sum(tmp);
+    }
+
+    const float mean = tmp / ncols;
+    const float scale = rsqrtf(mean + eps);
+
+    for (int col = tid; col < ncols; col += block_size) {
+        float al = alpha[col];
+        normed[row*ncols + col] = scale * sum[row*ncols + col] * al;
+    }
+}

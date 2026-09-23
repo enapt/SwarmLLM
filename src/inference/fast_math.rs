@@ -134,7 +134,8 @@ use avx2::{exp_inplace_avx2, silu_mul_avx2};
 /// PTX for the fused decode kernels, compiled from `kernels/fused_decode.cu`
 /// by `build.rs` and loaded through candle's `get_or_load_custom_func`.
 #[cfg(feature = "candle-cuda")]
-const FUSED_DECODE_PTX: &str = include_str!(concat!(env!("OUT_DIR"), "/fused_decode.ptx"));
+pub(crate) const FUSED_DECODE_PTX: &str =
+    include_str!(concat!(env!("OUT_DIR"), "/fused_decode.ptx"));
 
 /// `SWARMLLM_FUSE_SILU_MUL=0` puts the two-kernel candle composition back on
 /// the CUDA path, so the fusion can be A/B'd inside ONE binary — which is how

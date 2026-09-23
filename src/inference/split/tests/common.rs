@@ -6,10 +6,10 @@
 use super::super::model::SplitModel;
 use super::super::rope::precompute_freqs_cis;
 use super::super::*;
+use crate::inference::residual_norm::RmsNorm;
 use crate::inference::split::kv_cache::LayerKv;
 use candle_core::quantized::QTensor;
 use candle_core::{DType, Device, Tensor};
-use candle_transformers::quantized_nn::RmsNorm;
 
 /// Build a randomly-initialised QMatMul of shape (out_d, in_d) on `device`.
 ///

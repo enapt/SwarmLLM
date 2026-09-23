@@ -1,7 +1,7 @@
 // ── Split model: loads only a range of layers from a GGUF ──
 
+use crate::inference::residual_norm::RmsNorm;
 use candle_core::{Device, Tensor};
-use candle_transformers::quantized_nn::RmsNorm;
 
 use crate::error::SwarmError;
 

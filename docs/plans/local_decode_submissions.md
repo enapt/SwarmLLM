@@ -175,7 +175,38 @@ result:**
 
 `SWARMLLM_FUSE_SILU_MUL=0` is the off arm.
 
-### ▶ The add+RMS-norm fusion, designed but NOT built (2026-09-22)
+### Stage 2d — residual add + RMS norm as ONE kernel ✅ BUILT 2026-09-23 (count-verified, no speed claim)
+
+`kernels/fused_decode.cu::add_rmsnorm_f32` replaces `badd_f32` + `rmsnorm_f32`
+at both norm points of every layer; `inference::residual_norm` carries the
+residual stream between them (`Residual::Pending` = "a sum not yet taken"), so
+the closing add of layer *i* is fused into the attention norm of layer *i+1*,
+and the last one into the final norm. All eight hand-written copies of the
+pattern (four layer variants × single-request and batched loops) go through
+`Residual::add_norm`, so a new variant gets the fusion by construction.
+
+Measured on the `--features cuda` release build (the #683 lesson: the
+feature set the release ships), llama-3.2-3b, 28 layers, one decode token,
+`SWARMLLM_FUSE_ADD_RMSNORM` on vs off in ONE binary:
+
+| kernel | on | off |
+|---|---|---|
+| `add_rmsnorm_f32` | **56** (2.00/layer) | — |
+| `badd_f32` | — | 56 |
+| `rmsnorm_f32` | 1 (layer 0's norm, whose input is the embedding) | 57 |
+| **total launches** | **707** | 763 |
+
+**−56 launches/token (−2.00/layer)**, plus the allocation and free of each sum
+buffer — **~168 fewer submissions per token** on this model. **Replies
+byte-identical** to the released v0.3.200 on tinyllama and llama-3.2-3b, fused
+and unfused. `cuda_add_rms_norm_is_bit_identical_to_the_composed_path` covers
+both of candle's launch geometries and a prefill block, and **was seen to fail**
+with one FMA removed from the kernel (`tmp += __fmul_rn(xi, xi)` → a 1-ulp
+difference at element 9216 of a `[1,128,3072]` block) — so it resolves a single
+rounding step. ⚠ **No tok/s claim**, for Stage 2c's reason: ~9% of launches is
+at the edge of what this box's clock resolves.
+
+The design notes that made it possible, kept:
 
 The bigger of the two, and the design question that makes it bigger is worth
 recording rather than re-deriving. Our pattern is

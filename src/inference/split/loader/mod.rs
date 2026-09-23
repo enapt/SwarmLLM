@@ -8,11 +8,11 @@ mod shards;
 
 use std::path::Path;
 
+use crate::inference::residual_norm::RmsNorm;
 use candle_core::quantized::gguf_file;
 use candle_core::quantized::QTensor;
 use candle_core::Device;
 use candle_nn::Embedding;
-use candle_transformers::quantized_nn::RmsNorm;
 
 use crate::error::SwarmError;
 

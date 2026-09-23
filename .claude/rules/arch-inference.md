@@ -199,6 +199,14 @@ submissions per layer, not faster arithmetic.
   `examples/kernel_count_ab.sh` checks both halves of that in one run.
   ⚠ **`get_or_load_custom_func` counts launches too** — it must, or a fusion
   reads as removing two launches where it removed one.
+  Two ship: `silu_mul_f32` and `add_rmsnorm_f32` (2026-09-23, −2 launches per
+  layer). **A residual add is never written at a layer's end** — the sum is
+  carried as `inference::residual_norm::Residual::Pending` and resolved at the
+  next norm by `Residual::add_norm`; take it with `into_tensor()` only where a
+  plain tensor is required (device move, capture, a non-final segment's
+  output). ⚠ cudarc 0.19 takes a `CudaViewMut` kernel argument only as
+  `&mut` — `&view` does not compile, and only a `--features candle-cuda`
+  build sees it.
 - **Next moves are ordered in `docs/plans/local_decode_submissions.md`**: fusion
   first, then CUDA graphs (~1.2x batch-1 on an H100, likely more here), with
   stable buffers **no longer known to be a prerequisite** — graph memory nodes

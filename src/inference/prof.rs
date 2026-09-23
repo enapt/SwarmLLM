@@ -33,8 +33,10 @@ stages! {
     FfnAct     => "activation * gate    (elementwise)",
     FfnDown    => "ffn down             (quantized matmul)",
     FfnProbe   => "ffn width probe      (per-call, m=1)",
-    Norms      => "rms norms",
-    Residual   => "residual adds",
+    // The residual add that precedes each norm is timed here too: on CUDA it is
+    // one fused kernel with the norm (`inference::residual_norm`), so there is
+    // no separate add left to time. It was its own stage until 2026-09-23.
+    Norms      => "residual add + rms norm",
 }
 
 pub(crate) const N: usize = LABELS.len();
