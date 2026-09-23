@@ -120,12 +120,13 @@
         ]
       }
     ],
-    "PreCompact": [
+    "SessionStart": [
       {
+        "matcher": "compact",
         "hooks": [
           {
             "type": "command",
-            "command": "bash ${CLAUDE_PROJECT_DIR}/.claude/scripts/pre-compact-save.sh",
+            "command": "bash ${CLAUDE_PROJECT_DIR}/.claude/scripts/post-compact-status.sh",
             "timeout": 30
           }
         ]

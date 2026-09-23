@@ -45,7 +45,10 @@ reading is never blocked, so every denial is resolvable by reading something.
    this silently disabled the whole path-scoped rules architecture **and**
    Claude Code's read-before-edit check, which is attached to the Edit tool.
 2. **the file exists and this session has never looked at it.** Restores
-   read-before-edit for the Bash path.
+   read-before-edit for the Bash path. A subagent's own reads count: its hook
+   input carries `agent_id`, and the gate follows that to the subagent's
+   transcript. Until 2026-09-23 it read only the parent's, and denied every
+   subagent edit of an existing file (gotcha #688).
 3. **the task consulted nothing this repo already knows.** Scoped per task via
    `prompt_id`, satisfied by `gotchas.md`, `closed_findings.md`,
    `docs/invariants/`, `FUTURE_WORK.md`, the sweep log, or a web search — item
@@ -146,12 +149,20 @@ Write for that audience without dumbing anything down:
 
 ## Memory Management Around Compaction
 
-The PreCompact hook blocks compaction while anything is uncommitted, and names the
-files. Commit, and compaction proceeds. (It no longer runs `cargo check`: that
-arm could not fail and only added ~30s to every compaction. And the hook itself
-was missing between 2026-04-08 and 2026-09-09 — deleted by an unrelated commit
-while this line went on promising it, so treat a documented safety net as a
-claim to verify rather than a fact.)
+**Nothing may block compaction.** A `SessionStart` hook (matcher `compact`,
+`post-compact-status.sh`) runs AFTER a compaction and lists what is still
+uncommitted, so the resumed session knows the work is pending. It replaced a
+PreCompact hook that refused to compact while anything was uncommitted — and
+that hook killed a whole session on 2026-09-23 (gotcha #687): work sat
+uncommitted for hours, the context filled, `/compact` was refused, and "commit
+and compact" then failed with "Prompt is too long", because there was no room
+left to run the commit it demanded. Compaction never touches the disk; what it
+can lose is only the knowledge that work is pending, and that is what the new
+hook restores.
+
+**So commit as you go — it is the only protection.** A session with hours of
+uncommitted work across a dozen agents is one bad compaction from losing the
+thread of it, whatever the hooks do.
 
 Before ~70% context usage, proactively update `memory/MEMORY.md` with anything
 worth carrying forward.

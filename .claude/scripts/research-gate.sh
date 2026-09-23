@@ -163,15 +163,27 @@ KNOWLEDGE = ("docs/invariants/", "docs/FUTURE_WORK.md", "gotchas.md",
 this_task_seen, this_task_web, this_task_knowledge = set(), False, False
 cur_prompt = None
 prompt_seen_in_transcript = False
+# A SUBAGENT's tool call carries `agent_id`, but `transcript_path` is still the
+# PARENT's (code.claude.com/docs/en/hooks, common input fields). Reading only
+# that one blocked every subagent edit on 2026-09-23 — the subagent had Read the
+# file, in a transcript this gate never opened (gotcha #688). Its own transcript
+# sits beside the parent's, and everything in it belongs to the current task.
+agent_id = d.get("agent_id", "")
+transcripts = [(transcript, False)]
+if agent_id and transcript.endswith(".jsonl"):
+    sub = os.path.join(transcript[:-len(".jsonl")], "subagents", f"agent-{agent_id}.jsonl")
+    if os.path.exists(sub):
+        transcripts.append((sub, True))
 try:
-    with open(transcript) as fh:
+  for path, whole_file_in_task in transcripts:
+    with open(path) as fh:
         for line in fh:
             try:
                 r = json.loads(line)
             except Exception:
                 continue
             pid = r.get("promptId") or r.get("prompt_id")
-            if pid:
+            if pid and not whole_file_in_task:
                 cur_prompt = pid
                 if pid == prompt_id:
                     prompt_seen_in_transcript = True
@@ -184,7 +196,7 @@ try:
                     continue
                 name, inp = b.get("name", ""), b.get("input", {}) or {}
                 blob = json.dumps(inp)
-                in_task = (cur_prompt == prompt_id)
+                in_task = whole_file_in_task or (cur_prompt == prompt_id)
                 if name in ("WebSearch", "WebFetch"):
                     searched_web = True
                     if in_task:
