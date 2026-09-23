@@ -4,15 +4,9 @@ This directory contains packaging files for various distribution formats.
 
 ## Homebrew (macOS / Linux)
 
-```bash
-# From the tap (when published):
-brew install enapt/tap/swarmllm
+Not yet published: there is no tap, so `brew install enapt/tap/swarmllm` does not work. `homebrew/swarmllm.rb` is a template (its version is still `0.1.0` and its checksums are placeholders), so installing it directly fails too.
 
-# Or install from the formula file directly:
-brew install --formula packaging/homebrew/swarmllm.rb
-```
-
-The formula is in `homebrew/swarmllm.rb`. To publish, create a [Homebrew tap](https://docs.brew.sh/How-to-Create-and-Maintain-a-Tap) repo at `github.com/enapt/homebrew-tap` and copy the formula there.
+To publish: set the version and both `sha256` lines to a real release, create a [Homebrew tap](https://docs.brew.sh/How-to-Create-and-Maintain-a-Tap) repo at `github.com/enapt/homebrew-tap`, and copy the formula there.
 
 ## Debian / Ubuntu (.deb)
 
@@ -46,18 +40,13 @@ Pre-built `.rpm` packages are attached to [GitHub releases](https://github.com/e
 
 ## Arch Linux (AUR)
 
-The `aur/PKGBUILD` builds from source. To publish to the AUR:
+Not yet published: there is no `swarmllm` package on the AUR, so `yay -S swarmllm` does not work. `aur/PKGBUILD` builds from source (its `pkgver` is still `0.1.0`). To publish it:
 
 1. Create an AUR package at https://aur.archlinux.org/packages/swarmllm
-2. Copy `PKGBUILD` and update the sha256sum
+2. Copy `PKGBUILD`, set `pkgver` to a real release, and update the sha256sum
 3. Generate `.SRCINFO` with `makepkg --printsrcinfo > .SRCINFO`
 
-Users install with:
-```bash
-yay -S swarmllm
-# or
-paru -S swarmllm
-```
+Once published, users install with `yay -S swarmllm` or `paru -S swarmllm`.
 
 ## Systemd Service
 

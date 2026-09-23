@@ -46,14 +46,10 @@ SGLang providers, so it gives you:
 
 ## Install
 
-```bash
-openclaw plugins install clawhub:openclaw-plugin-swarmllm   # from ClawHub
-openclaw plugins install npm:openclaw-plugin-swarmllm       # or from npm
-```
-
-From a checkout of the SwarmLLM repository (a local archive is outside
-ClawHub's review, so OpenClaw asks for `--force`, and the provider capability
-needs consent):
+Not yet published to ClawHub or npm, so `openclaw plugins install clawhub:…`
+and `npm:…` will not find it. Install it from a checkout of the SwarmLLM
+repository (a local archive is outside ClawHub's review, so OpenClaw asks for
+`--force`, and the provider capability needs consent):
 
 ```bash
 cd integrations/openclaw && npm install && npm run build && npm pack --pack-destination /tmp
@@ -133,11 +129,11 @@ the node and streams. The honest numbers from an RTX 3070 (8 GB) running a
 3B model: OpenClaw's 14,633-token first turn is read in about 15 s, but the
 KV cache for that many tokens is 5 GB beside the weights and fills the card,
 and a reply to a 30-tool agent prompt then came back at about one token per
-second (it now streams as it is written; before the release after v0.3.153 it
+second (it streams as it is written since v0.3.154; before that it
 arrived only once the model stopped). A 3B model also does not
 follow a prompt of that size; it rambles to the reply cap. Use the largest
-model the swarm offers you, keep `maxTokens` modest (the README config sets
-4096), and expect a card with more memory, or a peer that has it, to be what
+model the swarm offers you, keep `maxTokens` modest (4096 is a reasonable
+start), and expect a card with more memory, or a peer that has it, to be what
 makes the loop comfortable. The node-side work this points at is recorded in
 `docs/FUTURE_WORK.md` in the SwarmLLM repository.
 
@@ -181,9 +177,8 @@ your machine could not hold alone is what the swarm is for.
     for `Tensor too large` in the node's log. Any prompt past about 8,000
     tokens was refused outright by the machine receiving it, so OpenClaw's
     retries each hit the same wall and the session eventually gave up. Fixed
-    in the release after v0.3.153 — upgrade the nodes.
-  - *Nothing arrives until the model stops.* Fixed in the release after
-    v0.3.153. Before it, a reply that might be a tool call was held back until
+    in v0.3.154 — upgrade the nodes.
+  - *Nothing arrives until the model stops.* Fixed in v0.3.154. Before it, a reply that might be a tool call was held back until
     it could be told from prose, and OpenClaw always sends tools — so an agent
     turn showed nothing at all until the model finished. Now everything up to
     the first thing that could begin a tool call is sent as it is written.

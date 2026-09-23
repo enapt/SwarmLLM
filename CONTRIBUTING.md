@@ -13,9 +13,22 @@ cd SwarmLLM
 # CPU-only
 cargo build --release
 
-# With CUDA GPU acceleration
-cargo build --release --features candle-cuda
+# NVIDIA, Linux — the same features as the -cuda release (llama.cpp CUDA +
+# candle CUDA + flash-attention). Needs the CUDA toolkit and CMake.
+CUDA_COMPUTE_CAP=80 cargo build --release --features cuda
+
+# Windows GPU — the same features as the -gpu release (llama.cpp Vulkan +
+# candle CUDA). Needs the Vulkan SDK (VULKAN_SDK set) and the CUDA toolkit.
+cargo build --release --features windows-gpu
+
+# Development: dashboard served from ./frontend, plus the Claude-subscription
+# provider (the feature set CI tests)
+cargo build --no-default-features --features dev,claude-subscription
 ```
+
+`--features candle-cuda` on its own compiles, but it leaves out
+flash-attention and the llama.cpp backend. Never use it to judge GPU
+behaviour — test GPU changes with `--features cuda`.
 
 ## Running Tests
 
@@ -24,7 +37,11 @@ cargo build --release --features candle-cuda
 cargo test
 
 # Integration tests (must run single-threaded)
-cargo test --test integration -- --test-threads=1
+cargo test --test integration --test integration_phase10_11 --test yamux_substream -- --test-threads=1
+
+# Two packages a workspace-root `cargo test` does not run
+cargo test -p swarmllm-types
+cargo test --manifest-path vendor/libp2p-request-response/Cargo.toml --lib
 ```
 
 ## Code Quality
@@ -63,7 +80,7 @@ package, so a workspace-root `cargo test` never compiles them.
 - **Is it tested?** New functionality should have unit tests. Bug fixes should have a regression test where practical.
 - **Is it focused?** PRs that do one thing well get reviewed faster than sprawling changes.
 - **Does it match existing patterns?** Follow the conventions in `CLAUDE.md` — error handling with `thiserror`, `DashMap` for shared state, `mpsc` channels between subsystems, structured `tracing` logging.
-- **No unnecessary dependencies.** The binary is ~33–50 MB depending on platform and features. We want to keep it lean.
+- **No unnecessary dependencies.** Every dependency adds to what every user downloads. We want to keep the binary lean.
 
 ## Reporting Bugs
 
@@ -83,14 +100,14 @@ Open a [GitHub Issue](https://github.com/enapt/SwarmLLM/issues) using the featur
 ```bash
 # CPU image
 docker build -t swarmllm .
-docker run -p 8800:8800 -v swarmllm-data:/data swarmllm
+docker run -p 8800:8800/tcp -p 8800:8800/udp -p 8810:8810/tcp -v swarmllm-data:/data swarmllm
 
 # CUDA GPU image
 docker build -f Dockerfile.cuda -t swarmllm:cuda .
-docker run --gpus all -p 8800:8800 -v swarmllm-data:/data swarmllm:cuda
+docker run --gpus all -p 8800:8800/tcp -p 8800:8800/udp -p 8810:8810/tcp -v swarmllm-data:/data swarmllm:cuda
 
-# 3-node test cluster
-docker compose up
+# 3-node local test cluster
+docker compose -f docker-compose.dev.yml up
 ```
 
 ## Project Structure
@@ -98,7 +115,7 @@ docker compose up
 The codebase is a Cargo workspace with three crates:
 
 - **`swarmllm`** (root) — main binary and all subsystem logic
-- **`crates/swarmllm-types/`** — shared data types (78 types: NodeId, ModelManifest, SwarmMessage, etc.)
+- **`crates/swarmllm-types/`** — shared data types (NodeId, ModelManifest, SwarmMessage, etc.)
 - **`crates/swarmllm-frontend/`** — embedded or dev-mode frontend asset serving
 
 Key directories:
@@ -106,8 +123,8 @@ Key directories:
 - `src/network/` — libp2p networking, peer discovery, transport
 - `src/inference/` — router, pipeline, executor, split inference
 - `src/api/` — HTTP server, OpenAI/Anthropic endpoints, admin dashboard
-- `src/credit/` — credit system, transactions, anti-gaming
-- `frontend/` — vanilla HTML/CSS/JS dashboard (no build step): `js/core/` (4 modules: state, utils, data, tooltip), `js/components/` (17 UI modules), `js/init.js`, 4 standalone utilities (i18n, providers, neural-bg, topojson-client), 11 HTML `<template>` elements, 21 i18n languages
+- `src/credit/` — credit ledger, signed transactions, anti-gaming (dormant: credits gate nothing — read `docs/CREDITS_DESIGN.md` before changing it)
+- `frontend/` — vanilla HTML/CSS/JS dashboard (no build step): `js/core/`, `js/components/`, `js/init.js`, `frontend/i18n/` (every UI string is translated into every language — no English fallback). Layout: `docs/ARCHITECTURE.md` § Frontend Architecture
 
 ## Security Issues
 

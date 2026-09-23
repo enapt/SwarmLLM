@@ -1,17 +1,41 @@
-SwarmLLM — Quick Start
+SwarmLLM — Quick start
 ======================
 
-1. Extract this archive to any folder.
+WINDOWS
+  1. Double-click swarmllm.exe. If Windows says "Windows protected your PC",
+     click "More info", then "Run anyway" (the app isn't registered with
+     Microsoft yet).
+  2. A black window with scrolling text opens. That window IS SwarmLLM:
+     leave it open (minimising is fine). Closing it switches SwarmLLM off.
 
-2. Run the daemon:
-     Linux / macOS:   ./swarmllm run
-     Windows:         swarmllm.exe run
+MAC (Apple chip, M1 or newer)
+  1. Keep this folder in Documents or Downloads — not in Applications,
+     where SwarmLLM cannot update itself.
+  2. Double-click "swarmllm". The first time, macOS blocks it: open
+     System Settings > Privacy & Security, click "Open Anyway", then
+     double-click it again.
+  3. A Terminal window opens. That is SwarmLLM: leave it open.
 
-3. Open your browser to:
-     http://localhost:8800
+LINUX
+  In a terminal, in this folder:   ./swarmllm run
 
-That's it! The setup wizard will guide you through the rest.
+THEN
+  SwarmLLM opens in your web browser by itself. If it doesn't, go to
+  http://localhost:8800 — then pick a model and start chatting.
 
----
-Configuration: Edit config/default.toml to change settings (port, GPU, etc.)
-More info:     https://github.com/enapt/SwarmLLM
+  If SwarmLLM closes straight away, your processor may be older than 2013:
+  download the file ending in -baseline instead.
+
+  Updates install themselves (change this in Settings > Software updates).
+  Your settings and models are kept in:
+    Windows  %APPDATA%\swarmllm
+    Mac      ~/Library/Application Support/swarmllm
+    Linux    ~/.local/share/swarmllm
+  Change settings in the app. (default.toml next to this file is only a
+  reference copy — SwarmLLM does not read it.)
+
+  To uninstall: close SwarmLLM, then delete this folder and the one above.
+
+Help:    https://discord.gg/nq9be3u828
+Guide:   https://enapt.github.io/SwarmLLM/
+Issues:  https://github.com/enapt/SwarmLLM/issues

@@ -426,7 +426,9 @@ opt-level = 2
 # ---- Package Distribution ----
 
 [package.metadata.deb]
-maintainer = "SwarmLLM <security@enapt.dev>"
+# Free text on purpose: the old address was on a domain that does not exist.
+# Security reports go through GitHub's private reporting (see SECURITY.md).
+maintainer = "SwarmLLM (security reports: https://github.com/enapt/SwarmLLM/security/advisories/new)"
 depends = "$auto, openssl (>= 3.0)"
 section = "net"
 priority = "optional"

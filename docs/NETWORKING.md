@@ -1,14 +1,16 @@
 # Networking: making your node reachable & running an anchor
 
-SwarmLLM nodes find each other automatically **on the same local network** (via
-mDNS). Connecting **across the internet** is harder because most machines sit
-behind a home router that does NAT (Network Address Translation) — the outside
-world can't dial into them directly. This guide explains how SwarmLLM crosses
-that gap, how to check whether your node is reachable, and how to run a public
-**anchor node** that helps the whole network bootstrap.
+SwarmLLM computers find each other on their own. A fresh install dials the
+project's built-in anchor and joins the public swarm with no setup — even from
+behind a home router that does NAT (Network Address Translation), through
+relaying and hole punching. Computers on the same local network also find each
+other directly (mDNS).
 
-If you just want two machines on the same Wi-Fi to talk, you don't need any of
-this — mDNS handles it. Read on only if you want internet-wide peering.
+This guide is for going further: making your node **directly** reachable
+(faster connections, and it helps others), checking whether you're behind
+carrier-grade NAT, and running your own public **anchor node** — for example to
+seed a private network (`disable_default_bootstrap = true` plus your own
+`bootstrap_peers`).
 
 ---
 
@@ -156,8 +158,8 @@ external_address = "/dns4/myname.duckdns.org/tcp/8810"
    external_address = "/dns4/myname.duckdns.org/tcp/8810"   # or /ip4/<static-ip>/tcp/8810
    ```
 4. **Get the anchor's peer id** — needed for the bootstrap multiaddr. It's
-   printed at startup (`Local peer id: 12D3KooW...`) and shown on the dashboard
-   identity panel, or:
+   in the startup log (`Initializing network peer_id=12D3KooW...`) and shown on
+   the dashboard identity panel, or:
    ```bash
    ./swarmllm status | grep -i "peer id"
    ```

@@ -6,15 +6,25 @@ Download the right file for your system from the [GitHub Releases page](https://
 
 | Your Computer | File Name |
 |---|---|
-| **Windows** (most PCs) | `SwarmLLM-Setup.exe` (installer — auto-detects GPU) |
-| **Windows** (raw binary, GPU) | `swarmllm-windows-x86_64-gpu.zip` |
-| **Windows** (raw binary, CPU) | `swarmllm-windows-x86_64-cpu.zip` |
-| **Mac** (M1/M2/M3/M4) | `swarmllm-macos-aarch64.tar.gz` (compile-validated) |
-| **Mac** (older Intel) | Best-effort — build from source |
+| **Windows** (NVIDIA, AMD or Intel graphics card) | `swarmllm-windows-x86_64-gpu.zip` |
+| **Windows** (no graphics card, or not sure) | `swarmllm-windows-x86_64-cpu.zip` |
+| **Mac** (Apple chip — M1 or newer) | `swarmllm-macos-aarch64.tar.gz` (runs on the processor; no graphics acceleration yet) |
+| **Mac** (Intel chip) | Not supported yet — build from source (best-effort) |
 | **Linux** (most distros) | `swarmllm-linux-x86_64.tar.gz` |
 | **Linux** (NVIDIA GPU) | `swarmllm-linux-x86_64-cuda.tar.gz` |
+| **Linux** (processor from before 2013) | `swarmllm-linux-x86_64-baseline.tar.gz` |
+| **Windows** (processor from before 2013) | `swarmllm-windows-x86_64-baseline.zip` |
 
-> **Not sure which Mac?** Apple menu > "About This Mac." If it says "Apple M1" (or M2/M3/etc.), pick Apple Silicon. If it says "Intel," pick Intel.
+> **It stops immediately with `Illegal instruction`?** Download the
+> `-baseline` build. The ordinary Linux and Windows builds are made for
+> processors from 2013 onwards (they use AVX2 instructions), which makes them
+> roughly 3x faster at running models on the processor. On an older machine
+> they stop on the very first instruction, before printing anything — and
+> because nothing is wrong with the download, re-downloading or checking
+> permissions changes nothing. On Linux, `grep -c avx2 /proc/cpuinfo` printing
+> `0` means you want the baseline build.
+
+> **Not sure which Mac?** Apple menu > "About This Mac." If it says "Apple M1" (or M2/M3/etc.), use the Mac download. If it says "Intel," there is no download for your Mac yet.
 
 > **Which NVIDIA cards get GPU acceleration?** RTX 30-series and newer (also
 > RTX 40, RTX 50, and the A/H data-centre cards). The RTX 20-series, GTX
@@ -31,13 +41,34 @@ Download the right file for your system from the [GitHub Releases page](https://
 > To check your card: `nvidia-smi --query-gpu=name,compute_cap --format=csv`.
 > A number of 8.0 or higher gets GPU acceleration.
 
+## Check the download (optional, one command)
+
+The single-file downloads — `swarmllm-linux-x86_64`,
+`swarmllm-windows-x86_64-gpu.exe` and the like, plus the `.deb` and `.rpm` —
+each have a `.sha256` file beside them on the release page. (The `.zip` and
+`.tar.gz` archives don't.) Put both files in the same folder and run one
+command to catch a damaged or incomplete download:
+
+```bash
+sha256sum -c swarmllm-linux-x86_64.sha256            # Linux
+shasum -a 256 -c swarmllm-macos-aarch64.sha256       # Mac
+```
+
+Those `.sha256` files are also signed, and the built-in updater refuses an
+update whose signature it cannot verify.
+
 ## Install & Run
 
 ### Windows
 
-**Recommended — installer:** double-click `SwarmLLM-Setup.exe`. It detects your GPU (NVIDIA / AMD / Intel) and installs the matching binary. If SmartScreen warns you, click **More info** > **Run anyway**.
+1. Download `swarmllm-windows-x86_64-gpu.zip` (any NVIDIA, AMD or Intel graphics card — it bundles the NVIDIA libraries, so no CUDA Toolkit is needed) or `swarmllm-windows-x86_64-cpu.zip` (works on every PC).
+2. Right-click it and choose **Extract All** — running it from inside the zip view does not work.
+3. Double-click `swarmllm.exe` in the extracted folder. SmartScreen shows *"Windows protected your PC"* because the program is not code-signed yet: click **More info** > **Run anyway**.
+4. A console window opens: that is SwarmLLM running. Keep it open (minimising is fine) — closing it stops SwarmLLM. The dashboard opens in your browser.
 
-**Raw binary alternative:** download `swarmllm-windows-x86_64-gpu.zip` (Vulkan + CUDA static) or `swarmllm-windows-x86_64-cpu.zip` (CPU-only fallback), extract, and run `swarmllm.exe`.
+> **There is no `SwarmLLM-Setup.exe` at the moment.** The installer that
+> bundled both variants was dropped from the release build on 2026-04-22 and
+> has not been published since; earlier versions of this page still named it.
 
 From PowerShell on a raw binary:
 ```powershell
@@ -47,15 +78,18 @@ cd Downloads\swarmllm-windows-x86_64-gpu
 
 ### macOS
 
+Double-click the download in Finder to unpack it into a folder, keep that
+folder somewhere in your home folder (Documents or Downloads is fine), and
+double-click `swarmllm` inside it. A Terminal window opens — that is
+SwarmLLM running, so leave it open. Or from Terminal (the archive has no
+folder of its own, so unpack it into one):
+
 ```bash
-cd ~/Downloads
-tar xzf swarmllm-macos-aarch64.tar.gz
-cd swarmllm-macos-aarch64
-chmod +x swarmllm
+mkdir -p ~/swarmllm
+tar xzf ~/Downloads/swarmllm-macos-aarch64.tar.gz -C ~/swarmllm
+cd ~/swarmllm
 ./swarmllm run
 ```
-
-> **Note:** macOS aarch64 binaries are compile-validated and exercised in CI (test + clippy on `macos-15`); integration tests stay Linux-only for now. Intel Mac users should build from source.
 
 > **Where you put it matters on a Mac.** Keep SwarmLLM in a folder you own — anywhere under your home folder, as in the commands above. Folders like `/Applications` need administrator rights, and SwarmLLM cannot then replace its own binary, so it will tell you an update is available and decline to install it. Nothing else about it changes; move the file and updates work by themselves.
 
@@ -69,13 +103,29 @@ chmod +x swarmllm
 
 ### Linux
 
+The archive has no folder of its own, so unpack it into one (use
+`swarmllm-linux-x86_64-cuda.tar.gz` for an NVIDIA RTX 30-series card or newer):
+
 ```bash
-cd ~/Downloads
-tar xzf swarmllm-linux-x86_64.tar.gz
-cd swarmllm-linux-x86_64
-chmod +x swarmllm
+mkdir -p ~/swarmllm
+tar xzf ~/Downloads/swarmllm-linux-x86_64.tar.gz -C ~/swarmllm
+cd ~/swarmllm
 ./swarmllm run
 ```
+
+### Linux packages (.deb / .rpm)
+
+```bash
+sudo dpkg -i swarmllm_*_amd64.deb                      # Debian / Ubuntu
+sudo systemctl enable --now swarmllm                   # start it as a background service
+sudo rpm -i swarmllm_*.x86_64.rpm                      # Fedora / RHEL
+```
+
+The .deb sets SwarmLLM up as a background service that keeps its data in
+`/var/lib/swarmllm` (the access token is in `/var/lib/swarmllm/api_key`).
+Programs installed from a package **do not update themselves** — install the
+next release's package to update. Homebrew and AUR packages are not published
+yet.
 
 ### Docker
 
@@ -106,8 +156,8 @@ Pre-built images on GHCR:
 |---|---|
 | `ghcr.io/enapt/swarmllm:latest` | CPU-only |
 | `ghcr.io/enapt/swarmllm:latest-cuda` | NVIDIA GPU (CUDA 12.4) |
-| `ghcr.io/enapt/swarmllm:0.3.98-alpha` | Pinned version (CPU) |
-| `ghcr.io/enapt/swarmllm:0.3.98-alpha-cuda` | Pinned version (GPU) |
+| `ghcr.io/enapt/swarmllm:<version>` | A pinned release, e.g. `0.3.200-alpha` (CPU) |
+| `ghcr.io/enapt/swarmllm:<version>-cuda` | A pinned release (GPU) |
 
 Data is persisted in Docker volumes. Model shards are stored in the `swarmllm-models` volume (or bind-mount a host directory via `SWARMLLM_MODELS_DIR` in `.env`).
 
@@ -118,7 +168,7 @@ View logs with `docker compose logs -f`. The API key is printed on first startup
 Requires Rust 1.90+:
 
 ```bash
-cargo install --git https://github.com/enapt/SwarmLLM.git --tag v0.3.14-alpha
+cargo install --git https://github.com/enapt/SwarmLLM.git   # add --tag vX.Y.Z-alpha to pin a release
 swarmllm run
 ```
 
@@ -131,10 +181,12 @@ cargo build --release
 ./target/release/swarmllm run
 ```
 
-For CUDA GPU support:
+For NVIDIA GPU support, build what the release builds (llama.cpp + candle on
+CUDA + FlashAttention; it needs the CUDA toolkit and compiles for a long time):
 ```bash
-cargo build --release --features candle-cuda
+cargo build --release --features cuda
 ```
+Every feature flag is listed in `CONTRIBUTING.md`.
 
 For Apple Silicon: the default build runs on CPU. A Metal-accelerated
 build is on the roadmap but not yet implemented (no `metal` Cargo

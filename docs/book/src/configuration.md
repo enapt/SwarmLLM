@@ -37,7 +37,7 @@ max_disk_mb = 50000
 region = "US"
 
 [inference]
-gpu_layers = 35
+gpu_layers = -1   # auto: the whole model on the graphics card when it fits
 
 [auto_manage]
 enabled = true

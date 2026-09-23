@@ -15,6 +15,7 @@
   - [Shard-Only Mode](./configuration/shard-only.md)
   - [CLI Flags & Environment Variables](./configuration/cli-env.md)
 - [Troubleshooting](./troubleshooting.md)
+- [How SwarmLLM Compares](./comparison.md)
 
 ---
 

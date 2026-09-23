@@ -22,21 +22,36 @@ What should happen.
 
 What happens instead. Include error messages or log output if available.
 
-## Environment
+## Your computer
 
-- **OS:** (e.g., Ubuntu 24.04, Windows 11, macOS 15)
-- **Rust version:** (`rustc --version`)
-- **SwarmLLM version:** (`swarmllm --version` or commit hash)
-- **GPU:** (e.g., RTX 4090, none/CPU-only)
-- **Build flags:** (e.g., `--features candle-cuda`)
+- **Which download:** (e.g., `swarmllm-windows-x86_64-gpu.zip`, the `.deb`, Docker, or built from source)
+- **Computer:** (e.g., Windows 11 with an RTX 3060, MacBook Air M2, Ubuntu 24.04 without a graphics card)
 
-## Logs
+## Diagnostics
+
+In the app: **Settings → Testing & Diagnostics → Copy diagnostics**, then paste
+below. From a terminal: `swarmllm diagnostics`. The report includes your
+version and is safe to post: no keys, no invite codes, and network addresses
+are replaced with placeholders.
 
 <details>
-<summary>Log output (run with -vv for debug logging)</summary>
+<summary>Diagnostics report</summary>
 
 ```
-Paste logs here
+Paste here
 ```
 
 </details>
+
+## Logs (optional)
+
+<details>
+<summary>The last ~50 lines from the SwarmLLM window</summary>
+
+```
+Paste here — remove anything private first
+```
+
+</details>
+
+If you built from source, add `rustc --version` and the `--features` you used.

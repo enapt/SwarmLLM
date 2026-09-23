@@ -2,6 +2,10 @@
 
 ## Start here: why was that request slow, or where did it fail?
 
+SwarmLLM logs to the window it runs in. To keep a file on Linux or macOS,
+start it with `./swarmllm run >> node.log 2>&1`. Docker: `docker compose logs`;
+.deb package: `journalctl -u swarmllm`.
+
 Every completed request writes **one** summary line. Read it before anything
 else — it usually identifies the problem on its own:
 
@@ -94,7 +98,9 @@ stream, because a header cannot be revised once sent.
 
 1. Verify GPU works: `nvidia-smi`
 2. Install NVIDIA drivers if needed
-3. Enable GPU offloading: `./swarmllm run --gpu-layers 99`
+3. Check you downloaded a GPU build (`-gpu` on Windows, `-cuda` on Linux)
+4. On Linux the card must be an NVIDIA RTX 30-series or newer; older cards use the processor automatically and say so in the log
+5. Macs run on the processor only for now
 
 **WSL2 users:** The CUDA driver comes from your Windows NVIDIA driver. Check that `/usr/lib/wsl/lib/libcuda.so.1` exists and add to your `~/.bashrc`:
 ```bash
@@ -169,28 +175,33 @@ If the first inference request to a model takes noticeably longer than subsequen
 
 1. **GPU vs CPU:** CPU is 5-20x slower. Check Dashboard for GPU status.
 2. **Model too large:** Use Q4 quantization, match model size to VRAM.
-3. **Enable batching:** Set `max_batch_size = 4` in config.
+3. **Far-apart helpers:** a model split across distant computers is slow, because each word of the reply passes through every one of them. `swarmllm diagnostics` lists the slowest computers first.
 
 ## Database Corrupted
 
 ```bash
-# Back up first
-cp -r ~/.local/share/swarmllm ~/.local/share/swarmllm-backup
-# Delete database (models and config are preserved)
+# Stop SwarmLLM first, then back up just the database
+cp ~/.local/share/swarmllm/db.redb ~/swarmllm-db-backup.redb
 rm ~/.local/share/swarmllm/db.redb
-# Restart
 ./swarmllm run
 ```
 
+Models and `config.toml` are kept, but your **Access Token changes** (apps
+using the old one need the new one) and this device leaves its My Devices
+group.
+
 ## GPU Out of Memory
 
-If a model exceeds your GPU's VRAM, SwarmLLM automatically falls back to CPU inference. You'll see this in the logs:
+If a model is bigger than your graphics card, SwarmLLM puts as many of its
+layers on the card as fit and runs the rest on the processor. If loading on
+the card still runs out of memory, it retries on the processor and logs:
 
 ```
-WARN GPU OOM detected, retrying on CPU
+GPU OOM — retrying model load on CPU
 ```
 
-CPU inference is 5-20x slower but works for any model size. To avoid OOM:
+The processor is 5-20x slower, and a model that doesn't fit in the memory
+SwarmLLM may use is refused rather than swapped. To avoid OOM:
 - Use smaller quantizations (Q4 instead of Q8)
 - Use a model that fits in VRAM (check model size vs available VRAM in the dashboard)
 - For models too large for one GPU, use distributed inference across multiple nodes
@@ -228,9 +239,8 @@ its GPU memory) whenever the daemon unloads it by either path above.
 4. Check for `DIAG: segment TIMED OUT` — indicates network or compute bottleneck
 
 **High latency per token:**
-- Distributed inference adds ~20-130ms per token for network round-trips
-- Use TCP bootstrap addresses (not QUIC) for lowest latency
-- Ensure nodes are on the same LAN for tensor parallelism
+- Splitting a model adds one network round trip per computer for every word of the reply — fast on a local network, slow across continents
+- Tensor parallelism is off by default (`inference.tensor_parallel`) and only helps on a fast local network
 
 **Pipeline assembly fails:**
 - The scheduler needs enough shard coverage to build a complete pipeline
@@ -249,21 +259,16 @@ its GPU memory) whenever the daemon unloads it by either path above.
   the logs to confirm the fast-fail path engaged.
 
 **Concurrent requests stall when only some get dispatched:**
-- Concurrency is capped from `inference.max_concurrent_requests` (default
-  10). **Every requester gets the same tier** — `calculate_tier` ignores the
-  balance while credits are dormant, so the cap is Silver's for everyone and
-  the only way to raise it is the config knob. Excess requests queue until
-  prior ones complete. (The tiered caps Bronze=2 / Silver=5 / Gold=10 /
-  Platinum=20 still exist in the code and are what a re-enabled economy would
-  restore; see `docs/CREDITS_DESIGN.md`.)
-- If queued requests don't dispatch even after others complete,
-  check for a missed `queue_notify.notify_one()` after
-  `active_count.fetch_sub(1)` (should never happen on `main`; was a
-  real regression fixed in `da6f485`).
+- Concurrency is capped by `inference.max_concurrent_requests` (default
+  10), and any one requester may use at most half of it — the same for
+  everyone, since credits are dormant and gate nothing. Excess requests queue
+  until earlier ones finish; raise the setting to allow more.
 
 ## Cross-Node Prefix-KV Sharing
 
-The cross-node prefix fetch is default-on. Expected logs on a successful
+Off by default: a computer only shares its prefix cache if its owner sets
+`inference.share_prefix_cache_with_peers = true`, because announcing it
+reveals hashes of the prompts it has cached. Expected logs on a successful
 first hit of a peer's cached prefix:
 
 ```
@@ -300,84 +305,58 @@ A: DIAG: served PrefixKvFetch ... hit=true
   - `non_finite_tensors` → GPU overflow on the serving side
   - `deserialize_failed` → wire corruption — open an issue
 
-**Disable cross-node fetch entirely:**
-Set `inference.cross_node_prefix_trust_min = 2.0` in `config.toml`. The
-probe never fires because no peer passes the trust gate.
+**Stop sharing your own prefix cache:**
+Leave `inference.share_prefix_cache_with_peers = false` (the default).
 
 ## Running the Test Suite
 
-SwarmLLM ships 1158 lib tests + 75 integration tests + VLM E2E.
-
-```bash
-# Run all tests (release, used in CI)
-cargo test --release
-
-# Unit tests only (fastest feedback loop)
-cargo test --lib
-
-# Integration tests only
-cargo test --test '*'
-
-# A specific test by name substring
-cargo test --release prefix_cache
-
-# With CUDA features on (requires NVIDIA GPU)
-cargo test --release --features candle-cuda
-```
-
-If a test fails, the release build shows the name + line; rerun with
-`--nocapture` to see its stderr:
-
-```bash
-cargo test failing_test_name -- --nocapture
-```
-
-Integration tests under `tests/integration/` simulate multi-node P2P on
-loopback — they're the slow ones, and CI runs them with
-`--test-threads=1` to avoid port contention.
-
+Building SwarmLLM and running its tests is covered in
+[CONTRIBUTING.md](https://github.com/enapt/SwarmLLM/blob/main/CONTRIBUTING.md).
 See [Benchmarking](./operations/benchmarking.md) for reproducing the
 performance benchmarks and [Performance](./operations/performance.md)
 for which knobs turn each speedup on/off.
 
-## Model Trust
+## A model the swarm never picks up
 
-Models go through trust levels: Discovered → Pinned → DemandVerified → NetworkPopular. Auto-manage only downloads shards for models at sufficient trust levels.
+Computers only download parts of a model on their own once it has earned
+some trust, so a model from an unknown source can't make everyone download
+gigabytes. The trust levels you may see in the app are "Manually approved by
+you", "Has received real inference requests" and "Widely hosted across the
+network".
 
-**Model stuck at "Discovered":**
-- Pin it manually from the Dashboard to promote to "Pinned"
-- Models reach "DemandVerified" after receiving inference requests
-- Models reach "NetworkPopular" when enough peers host them
-- **R141**: HfWatcher auto-promotes `Discovered` → `DemandVerified` for trending HF models above the per-publisher download floor + 24h age:
-  - **Trusted curators** (meta-llama, mistralai, Qwen, google, microsoft, deepseek-ai, bartowski, TheBloke, unsloth, etc. — full list in `src/model/huggingface/watcher.rs::TRUSTED_HF_PUBLISHERS`) promote at **10k** downloads
-  - **Unknown publishers** promote at **100k** downloads
-  - Both tiers respect the 24h age gate (defeats download-pump attacks)
-- Failed promotions accrue strikes that exponentially extend the cooldown — 4 strikes blocks auto-promotion until you pin it manually
+- **Download any part of it yourself** (see [First Model](./getting-started/first-model.md)) —
+  that marks it as approved by you on this computer.
+- Popular models on HuggingFace are approved automatically once they are at
+  least a day old and have enough downloads: 10,000 for well-known publishers
+  (meta-llama, mistralai, Qwen, google, microsoft, deepseek-ai, bartowski,
+  TheBloke, unsloth and others), 100,000 for everyone else.
+- A model also earns trust when people send it requests, or when many
+  computers host it.
 
 ## Chat dropdown shows "No models available yet"
 
-This is the cold-start state. R141 surfaces actionable swarm-available
-models directly in the chat empty state — the dashboard renders three
-rows when no model is selected:
+This is the cold-start state. Click **Get shared test model** in the Chat tab
+to download a small model everyone can use and start chatting straight away.
+Once your computer hears from others, the Chat tab also shows three rows:
 
-- **"Available right now on the swarm"** — Hosting + Serveable wishlist
-  entries the swarm can route inference to today. Click any chip to
-  select that model and open a fresh chat.
-- **"The swarm is gathering these"** — Aspirational entries (partial
-  shard coverage on the network). Will be ready as the missing parts
-  finish downloading.
-- **"Popular models the swarm could adopt"** — HF trending Candidate
-  entries the swarm doesn't have yet. Click to route to the HF browse
-  pre-filtered to the repo so you can pick the quant variant.
+- **"Available right now on the swarm"** — models the swarm can run for you
+  today. Click one to select it and open a fresh chat.
+- **"The swarm is gathering these"** — the swarm has some of the parts; they
+  will be ready once the rest finish downloading.
+- **"Popular models the swarm could adopt"** — popular models nobody is
+  running yet. Clicking one opens the model search.
 
-If none of these appear: your node hasn't received any peer gossip yet
-AND HfWatcher hasn't returned a snapshot. Check **Settings → Connection**
-to verify the daemon found bootstrap peers; an air-gapped node with
-`hf_watcher_enabled = false` won't see Candidate entries by design.
+If none of these appear, your computer hasn't heard from any others yet.
+Check the **Computers** panel on the Dashboard, or run `swarmllm peers`, to
+see whether it found other computers. A computer with
+`hf_watcher_enabled = false` won't see the "could adopt" row by design.
 
 ## Still Stuck?
 
-- Run with full diagnostics: `./swarmllm run -vv 2>&1 | grep "DIAG:"`
-- See the [Diagnostics Guide](../../DIAGNOSTICS.md) for detailed log instrumentation
+- Run `./swarmllm diagnostics` and paste its output into your report — it is
+  safe to post publicly
+- For more detail in the log: `./swarmllm run -vv 2>&1 | grep "DIAG:"`
+- See the [Diagnostics Guide](https://github.com/enapt/SwarmLLM/blob/main/docs/DIAGNOSTICS.md) for detailed log instrumentation
 - Check [GitHub Issues](https://github.com/enapt/SwarmLLM/issues)
-- Open a new issue with: OS, hardware, `./swarmllm version`, and logs from `-vv`
+- Open a new issue with your OS, hardware, `./swarmllm version`, and the
+  `swarmllm diagnostics` output

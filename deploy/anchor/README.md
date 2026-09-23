@@ -13,13 +13,12 @@ only thing reachable from the internet is the P2P transport.
 
 ## Prerequisites
 
-- **A SwarmLLM release that includes anchor mode** (`--anchor`, added in R143).
-  The installer downloads the latest GitHub release binary — if that release
-  predates anchor mode, the service will fail with "unexpected argument
-  --anchor". Cut a release from `main` first, or build the binary elsewhere and
-  place it at `/usr/local/bin/swarmllm` before running the installer. (Building
-  from source *on* a 512 MB anchor VM isn't practical — candle needs more RAM to
-  compile; build on your dev box and copy the binary over.)
+- **A current SwarmLLM release.** Anchor mode (`--anchor`) has shipped in every
+  release since v0.3.1-alpha, and the installer downloads the newest release
+  binary for you. For a custom build, compile it on another machine (building
+  *on* a 512 MB anchor VM isn't practical — candle needs more RAM to compile),
+  copy it to `/usr/local/bin/swarmllm`, and run the installer with
+  `SKIP_DOWNLOAD=1`.
 - A host with a **real public IP** (not CGNAT — check: router WAN IP must equal
   `curl -4 ifconfig.me`). **A cheap VPS (static IP) is the simplest + safest** —
   no port-forwarding, no dynamic DNS, and your home network is never exposed.
@@ -78,8 +77,8 @@ sudo DUCKDNS_DOMAIN=your-name DUCKDNS_TOKEN=xxxx bash setup-anchor.sh
 Optional env vars:
 - `SSH_ALLOW_CIDR=1.2.3.4/32` — restrict SSH to your IP/subnet (recommended).
 - `SKIP_DOWNLOAD=1` — keep a binary you already placed at
-  `/usr/local/bin/swarmllm` (see the version note above — until a release ships
-  anchor mode, build it on your dev box and `scp` it over, then use this).
+  `/usr/local/bin/swarmllm` (for example a build of your own, copied over with
+  `scp`).
 
 **VPS firewall:** most providers (IONOS Cloud Panel, etc.) have their own
 firewall *in front of* the VM. Open **TCP 8810 + UDP 8800** there too — the
@@ -125,12 +124,14 @@ become discoverable to each other.
 - Default-deny firewall; only TCP 8810 + UDP 8800 exposed.
 - Inference surface **not running at all** (`--anchor`).
 - OS auto-patched (`unattended-upgrades`).
-- **swarmllm auto-updated by a root-run timer** (`swarmllm-update.timer`, daily),
+- **swarmllm auto-updated by a root-run timer** (`swarmllm-update.timer`, hourly),
   *not* by the daemon. The sandboxed non-root daemon deliberately can't rewrite
   its own binary, so a separate root-privileged updater checks for a newer
   release, verifies the SHA256, swaps the binary and restarts the service — the
-  same split as `unattended-upgrades` for the OS. Refuses unverified binaries;
-  never downgrades.
+  same split as `unattended-upgrades` for the OS. Refuses a binary whose SHA256
+  does not match the release's checksum file; never downgrades. Note: unlike the
+  daemon's own updater, it does not yet check the release signature
+  (`docs/RELEASE_SIGNING.md`), so it trusts GitHub's copy of the checksum.
 
 ## Updating an anchor that is already running
 
@@ -168,11 +169,10 @@ last looked with `journalctl -u swarmllm-update --since -1d`.
 ## Maintenance
 
 - **Status / logs**: `systemctl status swarmllm-anchor`, `journalctl -u swarmllm-anchor -f`
-- **Update binary now** (instead of waiting for the daily timer):
+- **Update binary now** (instead of waiting for the hourly timer):
   `sudo systemctl start swarmllm-update.service` then `journalctl -u swarmllm-update`.
 - **Check the auto-updater**: `systemctl list-timers swarmllm-update.timer`.
-- **Back up** `/var/lib/swarmllm` (holds the node identity keypair + credit
-  balance) and snapshot the VM so you can roll back cleanly.
+- **Back up** `/var/lib/swarmllm` (holds the node identity keypair) and snapshot the VM so you can roll back cleanly.
 - **Service won't start, `status=203/EXEC` in a restart loop**: the binary is
   missing from the path the unit invokes. Check first:
 

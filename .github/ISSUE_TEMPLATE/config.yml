@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Ask on Discord
+    url: https://discord.gg/nq9be3u828
+    about: Questions, help getting started, and finding people near you to team up with.
+  - name: GitHub Discussions
+    url: https://github.com/enapt/SwarmLLM/discussions
+    about: Ideas and questions that aren't bugs.

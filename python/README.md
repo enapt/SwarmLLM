@@ -6,11 +6,14 @@ Provides both synchronous and asynchronous clients for the OpenAI-compatible API
 
 ## Installation
 
+Not yet published to PyPI, so `pip install swarmllm-client` will not find it.
+Install it from this repository:
+
 ```bash
-pip install swarmllm-client
+pip install "git+https://github.com/enapt/SwarmLLM.git#subdirectory=python"
 ```
 
-Or from source:
+Or from a checkout:
 
 ```bash
 cd python/
@@ -27,7 +30,7 @@ from swarmllm_client import SwarmLLM
 client = SwarmLLM("http://localhost:8800", api_key="your-key")
 
 # Chat completion (auto-selects model if omitted)
-response = client.chat("Hello!", model="qwen2.5-coder-7b")
+response = client.chat("Hello!", model="qwen2.5-coder-7b-instruct-q4-k-m")
 print(response.content)
 
 # Streaming
@@ -41,7 +44,7 @@ messages = [
     ChatMessage(role="system", content="You are a helpful assistant."),
     ChatMessage(role="user", content="What is SwarmLLM?"),
 ]
-response = client.chat_completion(messages, model="qwen2.5-coder-7b")
+response = client.chat_completion(messages, model="qwen2.5-coder-7b-instruct-q4-k-m")
 print(response.content)
 print(f"Tokens used: {response.usage.total_tokens}")
 
@@ -86,7 +89,7 @@ print(f"Node: {stats.node_id}, Peers: {stats.peers_connected}")
 for peer in client.admin.peers():
     print(f"{peer.node_id} healthy={peer.healthy} gpu={peer.gpu}")
 
-# Credit balance
+# Credit balance (credits are dormant: recorded, but they gate nothing)
 credits = client.admin.credits()
 print(f"Balance: {credits.balance} ({credits.tier})")
 
@@ -129,10 +132,9 @@ other.pool.join(code)
 
 ### Embeddings
 
-```python
-result = client.embeddings("Hello world", model="embedding-model")
-print(result.data)  # [[0.1, 0.2, ...]]
-```
+A SwarmLLM node does not serve embeddings: `/v1/embeddings` answers 501 Not
+Implemented, so `client.embeddings()` always raises `SwarmLLMError`. Use a
+dedicated embedding service.
 
 ## Using the OpenAI SDK Directly
 
@@ -147,14 +149,14 @@ client = OpenAI(
 )
 
 response = client.chat.completions.create(
-    model="qwen2.5-coder-7b",
+    model="qwen2.5-coder-7b-instruct-q4-k-m",
     messages=[{"role": "user", "content": "Hello!"}],
 )
 print(response.choices[0].message.content)
 
 # Streaming works too
 for chunk in client.chat.completions.create(
-    model="qwen2.5-coder-7b",
+    model="qwen2.5-coder-7b-instruct-q4-k-m",
     messages=[{"role": "user", "content": "Tell me a story"}],
     stream=True,
 ):
@@ -187,7 +189,7 @@ except SwarmLLMError as e:
 |---|---|
 | `chat(prompt, ...)` | Single-turn chat (convenience) |
 | `chat_completion(messages, ...)` | Full chat completion with all parameters |
-| `embeddings(input, ...)` | Create text embeddings |
+| `embeddings(input, ...)` | Not served by a node (always 501) |
 | `models()` | List available models |
 | `status()` | Node status |
 | `health()` | Health check |
@@ -200,7 +202,7 @@ except SwarmLLMError as e:
 |---|---|
 | `stats()` | Node statistics and hardware info |
 | `peers()` | Connected peers |
-| `credits()` | Credit balance and tier |
+| `credits()` | Credit ledger (dormant — gates nothing) |
 | `api_key()` | Retrieve current API key |
 | `models()` | Models with shard status |
 | `model_status(model_id)` | Model acquisition progress |
@@ -234,7 +236,7 @@ except SwarmLLMError as e:
 | `get_nickname()` | Get node nickname |
 | `set_nickname(name)` | Set node nickname |
 | `delete_nickname()` | Remove nickname |
-| `leaderboard()` | Network credit leaderboard |
+| `leaderboard()` | Peers ranked by model parts hosted |
 | `peers()` | Peer identity directory |
 
 ### pool

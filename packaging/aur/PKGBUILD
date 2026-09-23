@@ -1,4 +1,4 @@
-# Maintainer: SwarmLLM <security@enapt.dev>
+# Maintainer: SwarmLLM (security reports: https://github.com/enapt/SwarmLLM/security/advisories/new)
 pkgname=swarmllm
 pkgver=0.1.0
 pkgrel=1

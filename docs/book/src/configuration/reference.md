@@ -29,15 +29,15 @@ booted with.
 | `listen_port` | integer | `8800` | Port for web dashboard and P2P networking |
 | `data_dir` | path | Platform-specific | Where SwarmLLM stores data |
 | `contribution` | string | `"minimal"` | Resource contribution: `"minimal"`, `"moderate"`, `"maximum"`. Applies without a restart, except for the two startup-fixed items noted above |
-| `contribution_auto` | boolean | `true` | Auto-scale contribution at swarm saturation. Applies without a restart |
+| `contribution_auto` | boolean | `true` | When a shard is already held by many other computers, let this node delete its copy sooner to free space. It never raises your contribution level. Applies without a restart |
 | `anchor_mode` | boolean | `false` | Run as a pure bootstrap / relay / reachability-probe node. Skips all inference — no models load, no HuggingFace polling, no shard acquisition, no auto-manage — and binds the dashboard to loopback only. The node still participates fully in the peer-to-peer network |
 
 ## `[resources]` — Resource Limits
 
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `max_gpu_vram_mb` | integer | `0` | Max GPU memory in MB. `0` = auto-detect |
-| `max_ram_mb` | integer | `0` | Max system RAM in MB for models loaded on the CPU. `0` = auto: 50% of system RAM on a machine with a GPU, 80% on a CPU-only node (where serving models is the machine's purpose). An explicitly configured value is clamped to what is actually free, so a figure larger than the machine cannot push it into swap. A model that does not fit is refused with a 503 rather than loaded |
+| `max_gpu_vram_mb` | integer | `0` | Max GPU memory in MB. `0` = auto: the card's size, minus what other programs are using, minus a safety margin set by `[node] contribution` (10% of the card at minimal, 7% at moderate, 5% at maximum, never under 512 MB or over 2 GB) — on an idle 8000 MB card at the default level, 7200 MB |
+| `max_ram_mb` | integer | `0` | Max system RAM in MB for models loaded on the CPU. `0` = auto, set by `[node] contribution`: at the default (minimal) about 31% of system RAM on a machine whose graphics card runs the models and 50% on a CPU-only node; moderate about 41% / 65%; maximum 50% / 80% (where serving models is the machine's purpose). An explicitly configured value is clamped to what is actually free, so a figure larger than the machine cannot push it into swap. A model that does not fit is refused with a 503 rather than loaded |
 | `max_disk_mb` | integer | `50000` | Max disk space in MB for model storage |
 | `max_bandwidth_mbps` | integer | `0` | Max upload bandwidth **for serving model files to peers, and nothing else**. Inference traffic and the background gossip that keeps this node connected are outside it, so this is not a cap on everything the node sends — a user who set it to 1 Mbps and then measured 11 was seeing traffic it never covered. `0` = auto, from `[node] contribution` — 10 Mbps at minimal, 50 at moderate, unlimited at maximum. To see what the node is *actually* sending, run `swarmllm status` or read the Network tile on the dashboard |
 | `max_cpu_threads` | integer | `0` | CPU threads used for inference. `0` = auto, from `[node] contribution` — half / three-quarters / all of the **physical** cores. More threads than physical cores makes this *slower*: quantised inference is limited by memory bandwidth, so two threads sharing a core contend rather than add (measured on an 8-core/16-thread laptop: 6 threads 2.36 tok/s, 16 threads 1.49). An explicit value is honoured up to the logical core count. |
@@ -66,8 +66,8 @@ booted with.
 | `max_peers` | integer | *(from `contribution`)* | Max simultaneous peer connections. Unset it follows `[node] contribution` — minimal `150`, moderate `300`, maximum `500`. An explicit value wins in either direction. |
 | `auto_relay` | boolean | `true` | Auto-use relay when NAT detected |
 | `relay_max_circuit_duration_secs` | integer | `3600` | Max relay circuit duration |
-| `relay_max_circuits` | integer | `16` | Max relay circuits to serve |
-| `enable_encryption` | boolean | `true` | E2E encryption for tensor forwards and control messages |
+| `relay_max_circuits` | integer | `128` | Max relay circuits to serve |
+| `enable_encryption` | boolean | `true` | Encrypt tensor forwards and control messages between computers. Protects against anyone watching the network; the receiving computer decrypts in order to do the work, so this is not end-to-end |
 | `enable_autonat` | boolean | `true` | NAT detection. Disable on WSL2 to reduce noise |
 | `enable_dcutr` | boolean | `true` | Hole punching. Disable on WSL2 to reduce noise |
 | `tensor_compression` | boolean | `true` | Zstd compression for tensor payloads |
@@ -77,7 +77,7 @@ booted with.
 | `listen_address` | string | `"0.0.0.0"` | Address to bind peer-to-peer listeners on. Set to `127.0.0.1` on WSL2 to avoid binding unreliable NAT adapters |
 | `enable_quic` | boolean | `true` | QUIC transport. Disabling it on WSL2 avoids a race where the faster QUIC handshake displaces the TCP connection |
 | `enable_upnp` | boolean | `true` | Ask the home router to open the peer-to-peer ports automatically, and confirm the resulting public address with the swarm. The zero-configuration path to being reachable from the internet |
-| `max_connections_per_peer` | integer | `2` | Simultaneous connections to a single peer. **Must be at least 2 for NAT hole punching**: the upgrade dials a direct connection while the relayed one is still open, so `1` kills one of them |
+| `max_connections_per_peer` | integer | `3` | Simultaneous connections to a single peer. **Must be at least 2 for NAT hole punching**: the upgrade dials a direct connection while the relayed one is still open, so `1` kills one of them |
 | `relay_forwarding` | boolean | `false` | Carry *inference* messages between two peers that cannot reach each other. Distinct from `enable_relay`, which carries the connection itself |
 | `relay_forwarding_auto` | boolean | `true` | Donate that relay capacity automatically once this node is confirmed reachable from the open internet |
 
@@ -89,7 +89,7 @@ booted with.
 | `session_timeout_seconds` | integer | `600` | Chat session memory lifetime (10 min) |
 | `max_concurrent_requests` | integer | `10` | Max parallel requests |
 | `model_path` | path | none | Path to a GGUF model file |
-| `gpu_layers` | integer | `-1` | Device placement. `-1` = auto: the whole model on the card when it fits, and when it does not, as many of its first layers as do with the rest on the processor (since v0.3.145; `SWARMLLM_HYBRID_OFFLOAD=0` turns the split off and falls back to processor-only). `0` = processor only. `>0` = put that many layers on the card and the rest on the processor. Architectures verified for the split: Llama, Llama 4, Qwen2, Gemma, Gemma 2, Phi-3, Mistral, Starcoder2, GLM-4; others load on one device as before |
+| `gpu_layers` | integer | `-1` | Device placement. `-1` = auto: the whole model on the card when it fits, and when it does not, as many of its first layers as do with the rest on the processor (since v0.3.145; `SWARMLLM_HYBRID_OFFLOAD=0` turns the split off and falls back to processor-only). `0` = processor only. `>0` = put that many layers on the card and the rest on the processor. Architectures allowed to split (code-checked): Llama, Llama 4, Qwen2, Gemma, Gemma 2, Phi-3, Mistral, Starcoder2, GLM-4 — Llama 4 is allowed but has not been run on a real model; others load on one device as before |
 | `kv_cache_ttl_secs` | integer | `600` | KV-cache lifetime |
 | `max_batch_size` | integer | `8` | How many requests run through the model together, amortising the weight reads that dominate a decode step. Measured on an RTX 3070 with llama-3.2-3b using per-request rates: no cost at any concurrency, about 3% at eight concurrent requests and about 16% at twelve — the gain grows with load. Neutral on a processor (6-core i5-10500T, llama-3.2-1b). Set to `1` to disable |
 | `batch_timeout_ms` | integer | `50` | Ms to wait for additional requests before dispatching a partial batch. `0` = dispatch immediately (purely opportunistic batching) |
@@ -99,8 +99,8 @@ booted with.
 | `max_split_model_memory_mb` | integer | none | Max GPU memory for split model cache |
 | `tensor_parallel` | boolean | `false` | Split single layers across LAN peers via per-layer AllReduce. Off by default — over Ethernet the two round trips per layer cost more than the compute they split, and a node that holds every layer never forms a group regardless |
 | `tp_max_latency_ms` | integer | `10` | Max peer latency (ms) for tensor parallelism groups (only consulted when `tensor_parallel = true`) |
-| `local_embedding_privacy` | boolean | `false` | Embed tokens locally before sending to first segment. Remote nodes never see raw token IDs |
-| `encrypted_pipeline` | boolean | `false` | Force first+last segment to local node (boomerang topology). No remote sees plaintext. Adds ~1 RTT/token. Per-model override via API. Requires shard 0 + final shard locally |
+| `local_embedding_privacy` | boolean | `false` | Embed tokens locally before sending to first segment. Remote nodes never see raw token IDs. They still receive hidden states, which published attacks can turn back into much of the text |
+| `encrypted_pipeline` | boolean | `false` | Prompt privacy ("boomerang"): run the first and last steps on this computer, so no other computer is handed the prompt as text or picks the reply's words. **Structural, not cryptographic** — middle computers still compute on hidden states in plaintext, which published attacks invert to roughly 81% of the input. Adds ~1 RTT/token. Per-model override via API. Requires shard 0 + final shard locally; see `encrypted_pipeline_auto` |
 | `privacy_mode` | boolean | `false` | Never write user prompts to disk — KV-cache sessions stay in memory only |
 | `parallax_routing` | boolean | `true` | Use Parallax shortest-path DP for segment assignment; falls back to greedy on any failure |
 | `persistent_pipeline_stream` | boolean | `false` | One long-lived libp2p stream per pipeline session instead of per-token request/response |
@@ -168,7 +168,7 @@ booted with.
 | `streaming_chunk_size_bytes` | integer | `262144` | Chunk size for the above. 256 KiB matches the age STREAM default and the TokenWeave K=2–4 sweet spot |
 | `streaming_min_activation_bytes` | integer | `65536` | Activations below this ship as a single frame regardless of the flag |
 | `streaming_chunk_assembly_ttl_secs` | integer | `30` | Receiver-side TTL for an incomplete chunk assembly before it is swept |
-| `prefill_target_ms` | integer | `100` | Wall-time budget for one tick of prompt processing **while more than one request is active** — the same limit as `prefill_chunk_tokens` but expressed in what a waiting request actually feels |
+| `prefill_target_ms` | integer | `200` | Wall-time budget for one tick of prompt processing **while more than one request is active** — the same limit as `prefill_chunk_tokens` but expressed in what a waiting request actually feels |
 | `encrypted_pipeline_auto` | boolean | `true` | Turn prompt privacy on automatically for any model where this node holds both the first and last shard, which is the only condition under which it can work. An explicit per-model or global `encrypted_pipeline` setting always wins |
 | `parallax_partial_ranges` | boolean | `false` | Let the router use only PART of a node's shard range, so a node holding a whole model can serve just one end of it. Off by default: the cost model charges a remote hop once per segment rather than per token, so it cannot see the round-trip penalty and over-splits |
 | `pipeline_chaining` | boolean | `true` | Chain consecutive remote pipeline segments peer to peer instead of returning every hop to the coordinator. Unchained, an N-segment pipeline costs N coordinator round trips per token; a chained run costs one trip out and one back however long it is, so per-token network cost stops scaling with shard count. A local segment ends a chain, so prompt privacy is unaffected — with `encrypted_pipeline` the first and last segments stay local and only the middle is chained. On by default since v0.3.109, validated end to end on two machines; every reason not to chain falls back to the old behaviour rather than failing, a chained run that fails is re-run unchained for that request, and peers on earlier versions are never chained to. Set to `false` to send every segment through the coordinator as before. See `docs/plans/direct_peer_chaining.md` |
@@ -181,8 +181,8 @@ booted with.
 | Option | Type | Default | Description |
 |---|---|---|---|
 | `level` | string | `"info"` | Log level: `"error"`, `"warn"`, `"info"`, `"debug"`, `"trace"` |
-| `format` | string | `"pretty"` | Log format: `"pretty"` or `"json"` |
-| `file` | path | none | Write logs to file |
+| `format` | string | `"pretty"` | Log format: `"pretty"` or `"json"`. Not applied yet — logs always go to the console in the readable format |
+| `file` | path | none | Not applied yet — logs always go to the console. To keep a file, redirect it: `swarmllm run >> node.log 2>&1` |
 
 ## `[ui]` — Web Interface
 
@@ -247,7 +247,7 @@ a tailnet — devices you authorised — which is why the LAN case stays opt-in.
 | `auto_switch_quants` | boolean | `true` | **R141 default flip**: auto-acquire the recommended quant variant when the recommender (R133) suggests a better one. Set `false` on metered links to keep the current quant |
 | `parallax_auto_rebalance` | boolean | `true` | Bias scoring toward Parallax allocator recommendations (C.2) |
 | `default_model_shard_cap` | integer | `0` | Max shards auto-manage acquires per model. `0` = unlimited. **Set this if you want to add capacity rather than redundancy** — see below |
-| `idle_unload_secs` | integer | `900` | Free a loaded model's GPU memory after this long with no local requests AND little demand for it elsewhere in the network. Shards stay on disk, so the model reloads on the next request |
+| `idle_unload_secs` | integer | `300` | Free a loaded model's GPU memory after this long with no local requests AND little demand for it elsewhere in the network. Shards stay on disk, so the model reloads on the next request |
 
 
 ### Contributing capacity vs. contributing redundancy
@@ -305,6 +305,10 @@ what gets *stored* where, not about how work is distributed.
 
 ## `[pool.credit_rates]` — Credit Rates
 
+> Credits are recorded but **dormant** — they gate nothing: no balance affects
+> who is served or how fast, and there is no token or payment. These rates only
+> change numbers in the internal ledger.
+
 | Option | Type | Default | Description |
 |---|---|---|---|
 | `inference_serve` | integer | `10` | Credits earned per layer per token served |
@@ -318,8 +322,9 @@ what gets *stored* where, not about how work is distributed.
 
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `auto_update` | string | `"disabled"` | Policy: `"disabled"`, `"stable"`, `"all"`. Default flipped to disabled in R88 (security — users opt in via `[updates] auto_update = "stable"`). |
-| `check_interval_hours` | integer | `6` | Update check frequency |
+| `mode` | string | *(unset → `"install"`)* | What the node does when a newer release exists: `"off"` (never checks), `"notify"` (tells you), `"download"` (downloads; you click to install), `"install"` (downloads, installs and restarts itself when idle). Updates are signed, and a node refuses one it cannot verify. Decided at start-up — see above |
+| `auto_update` | string | `"disabled"` | Legacy setting kept so old config files load. **It no longer changes anything** — unless `mode` is set, every value means `mode = "install"`. Use `mode` |
+| `check_interval_hours` | integer | `1` | Update check frequency |
 | `include_prereleases` | boolean | `true` | Offer pre-release builds. Defaults on because every release so far is tagged `-alpha`, so excluding them would mean never seeing an update at all |
 
 ## `[identity]` — Your Identity

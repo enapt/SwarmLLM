@@ -4,15 +4,16 @@ You're running an **alpha** build. Things will work; some things won't. This pag
 
 ## Before you file anything
 
-1. Confirm you're on the latest release: `./swarmllm version` and compare against the [GitHub releases page](https://github.com/enapt/SwarmLLM/releases). By default the node checks hourly and tells you when a new build exists; `./swarmllm update` downloads and installs it. If your install cannot update itself — a packaged `.deb` under a read-only unit, for instance — the node says so and names the folder to replace by hand.
-2. Re-run the failing action with verbose logging: `./swarmllm run -vv 2>&1 | tee /tmp/swarmllm.log`. Verbose adds `DIAG:` instrumentation that traces every step of the request lifecycle.
-3. Search the [open issues](https://github.com/enapt/SwarmLLM/issues) — a one-line confirmation on an existing issue is more useful than a duplicate.
+1. Confirm you're on the latest release: `./swarmllm version` (Windows: `swarmllm.exe version`) and compare against the [GitHub releases page](https://github.com/enapt/SwarmLLM/releases). By default SwarmLLM checks hourly and installs a new build by itself once it is idle; `./swarmllm update` does it straight away. If your install cannot update itself — a packaged `.deb` under a read-only unit, for instance — it says so and names the folder to replace by hand.
+2. Copy a diagnostics report: in the app, **Settings → Testing & Diagnostics → Copy diagnostics**, or run `./swarmllm diagnostics`. It is safe to post publicly: no keys, no invite codes, and network addresses are replaced with placeholders.
+3. Re-run the failing action with verbose logging: `./swarmllm run -vv 2>&1 | tee /tmp/swarmllm.log`. Verbose adds `DIAG:` instrumentation that traces every step of the request lifecycle. SwarmLLM writes its log only to its own window or terminal, not to a file, so capture it this way.
+4. Search the [open issues](https://github.com/enapt/SwarmLLM/issues) — a one-line confirmation on an existing issue is more useful than a duplicate.
 
 ## Where to file
 
 - **Bugs and crashes:** [GitHub Issues](https://github.com/enapt/SwarmLLM/issues/new).
 - **Security issues:** see `SECURITY.md` — please don't open a public issue for these.
-- **Quick questions / vibes:** issue with the `question` label is fine; we read them.
+- **Quick questions:** ask on [Discord](https://discord.gg/nq9be3u828) or in [Discussions](https://github.com/enapt/SwarmLLM/discussions).
 
 ## What to include in a bug report
 
@@ -38,15 +39,15 @@ Copy-paste this template:
 3. ...
 ```
 
-Stripping IPs and tokens is fine — the daemon's `node_id` (visible in Settings → Identity) is enough for us to correlate cross-tester reports.
+Stripping IPs and tokens is fine — the daemon's `node_id` (visible in Settings → Identity & Access) is enough for us to correlate cross-tester reports.
 
 ## Areas we especially want testing on
 
-- **Cold start.** Does your dashboard show models within ~30 seconds of first launch? If you see "No models available" with no actionable chips, that's a bug — please file it with peer count, network mode, and `~/.local/share/swarmllm/swarmllm.log`.
+- **Cold start.** Does your dashboard show models within ~30 seconds of first launch? If you see "No models available" with no actionable chips, that's a bug — please file it with how many computers you are connected to, the network mode, and a diagnostics report (Settings → Testing & Diagnostics → Copy diagnostics).
 - **Distributed inference latency.** If a 7B+ model runs slow when more than 2 nodes hold its shards, capture: model id, hosted_shards / shard_count, peer count, region, prompt length, time-to-first-token, tokens/sec. The `DIAG:` log lines around `pipeline_forward` and `forward_through_segments` are what we'll need.
-- **Pool invite codes.** Both v2 `swarmpool://...` blobs (R140) and legacy 8-character codes should work. Tell us which one you tried, what platform the inviter / joiner are on, and whether they're on the same LAN or across the internet.
+- **Pool invite codes.** Both `swarmpool://...` codes and legacy 8-character codes should work. Tell us which one you tried, what platform the inviter / joiner are on, and whether they're on the same LAN or across the internet.
 - **The setup wizard.** Hardware autodetect, contribution slider, peer/cloud setup. If anything looks wrong for your hardware (wrong VRAM detected, weird recommendation), screenshot the wizard plus paste `./swarmllm status --json`.
-- **Encryption modes.** `encrypted_pipeline = true` (per-model toggle in the Models tab) sends every activation through a per-request sealed channel. We want to know if it works, what the latency overhead feels like, and whether the "End-to-end encrypted" banner appears correctly during inference.
+- **Prompt privacy** (the "End-to-end encryption" toggle in the Models tab; `encrypted_pipeline` in config). It keeps the first and last parts of the model on your own computer, so other computers never receive your prompt or the reply as text. They do still receive the model's intermediate numbers for their share of the work, and those can be partly turned back into text — so it does not protect you from a computer that is doing the work. Tell us whether it switches on when you hold both end parts, how much slower replies get, and whether the status shown during a reply matches what you set.
 - **Translations.** SwarmLLM ships 21 languages. If a translation reads wrong or English text leaks through, switch to that language in Settings, screenshot the broken screen, and file with the locale code (e.g. `i18n: de`).
 
 ## What's known broken
@@ -55,28 +56,26 @@ Tracked in the [open GitHub issues](https://github.com/enapt/SwarmLLM/issues). B
 
 ## Privacy notes
 
-- The daemon does not send telemetry. Nothing crash-reports automatically. We rely on you to share logs.
-- Bug reports are public unless you mark them otherwise. Strip API keys, server addresses, and personal-data prompts before pasting.
+- SwarmLLM sends no telemetry to the project, and nothing crash-reports automatically — we rely on you to share logs. It does contact other services: GitHub (the hourly update check), Hugging Face (model downloads and popularity lists), and ip-api.com once at start-up to learn your country (skipped if you set `region` under `[identity]` in `config.toml`). Other computers in the swarm are told your computer's hardware summary, country, and which model parts it holds.
+- Bug reports on GitHub are public. Strip API keys, server addresses, and personal-data prompts before pasting.
 - Your peer-id is public anyway (gossip), so including it is fine and helps us correlate reports.
 
 ## Updating
 
-```bash
-# Stop the daemon
-killall swarmllm   # or systemctl stop swarmllm
+Updates install themselves. SwarmLLM checks GitHub every hour, refuses anything
+not signed with the SwarmLLM release key (releases are signed since
+v0.3.191-alpha), and installs and restarts once it has finished any work in
+progress. To change that, open **Settings → Software updates** (or set
+`mode = "notify"` under `[updates]` in `config.toml`). `./swarmllm update` checks
+and installs straight away.
 
-# Download the new binary from the GitHub releases page
-# Verify the SHA256 against the release notes
-# Replace your existing binary
-# Restart
-
-./swarmllm run
-```
-
-Since v0.3.191-alpha releases are signed, and nodes verify that signature before
-installing anything — so auto-update is on by default again. If you would rather
-do it by hand, set `mode = "notify"` under `[updates]` in your config.toml and the
-node will only tell you a release exists.
+To update by hand — for example a packaged install that cannot replace itself:
+stop SwarmLLM, download the new file from the
+[releases page](https://github.com/enapt/SwarmLLM/releases), replace the old one,
+and start it again. To verify a download yourself, see
+[RELEASE_SIGNING.md](RELEASE_SIGNING.md#verifying-a-release-independently) — the
+bare binaries carry a `.sha256` and a signature; the `.zip` and `.tar.gz`
+archives do not.
 
 ## Thank you
 

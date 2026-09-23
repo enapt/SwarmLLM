@@ -1700,13 +1700,15 @@ Models are loaded into VRAM only when needed, not eagerly at startup.
 │      bitmap) — allows reordered packets, rejects duplicates │
 │    Pending ephemeral keys expire after 60s (memory safety)  │
 │    Static DH fallback for initial session before first reke │
+│    Wire tag: TENSOR_TAG_ENCRYPTED = 0x10 (sealed forward)   │
 │                                                             │
-│  Tier 2: Pipeline Sealing (inference prompts)               │
-│    Per-request ephemeral key → sealed prompt/response       │
-│    Wire tag: TENSOR_TAG_ENCRYPTED = 0x10                    │
-│    Final segment seals output tokens for requester's X25519 │
-│    ⚠ Final-segment node sees tokens before sealing (must)   │
-│    Intermediate nodes see activations, not plaintext output │
+│  Tier 2: Pipeline Sealing — ⚠ NOT ACTIVE today              │
+│    Designed: final segment seals output tokens for the      │
+│    requester's X25519 key. It is called with NO key         │
+│    (dispatch/layer_forward.rs), so results travel under     │
+│    transport encryption (Noise / TLS) alone.                │
+│    ⚠ Final-segment node sees the tokens either way (must)   │
+│    Intermediate nodes see activations, not the output       │
 │                                                             │
 │  Tier 3: Sealed Gossip (broadcasts)                         │
 │    Mandatory Ed25519 signing — unsigned messages rejected   │
@@ -1844,22 +1846,24 @@ All inbound network messages are wrapped in `AuthenticatedMessage` with the tran
 
 It also carries a required `transport` — `Gossip` or `Direct` — because the two prove different things about everyone else: a gossiped message was flooded to every subscriber, a direct one (request-response, relay, tensor stream) reached this node alone. The manifest re-announcement suppression reads it (`docs/invariants/network.md` § "The repetition, not the size").
 
-## Signed DHT Records
+## DHT Records
 
-Kademlia DHT records for capability and shard announcements are Ed25519-signed:
-- Format: `[32B pubkey][64B signature][payload]`
-- Functions: `verify_dht_value()` in `src/network/discovery.rs` (signing is inline in NetworkManager)
-- Records expire after 1 hour with automatic re-publication
-
-Kademlia provider records (S5) track shard holders at scale:
+The DHT holds only Kademlia **provider records** (S5), saying which peers hold
+which shard. No values are stored — nothing calls `put_record` or
+`get_record` — so nothing in the DHT is a signed payload. A provider record is
+only as trustworthy as the peer that announced it, which is why every shard
+fetched from a provider is BLAKE3-verified on arrival, and a failed check costs
+that peer trust (`ShardVerificationFail`).
 - Key: `/swarm/provide/<model_id>/<shard_index>` per shard
 - Functions: `start_providing_shards()` / `stop_providing_shards()` / `query_shard_providers()`
 - Provider TTL: 1 hour, republication: 20 minutes
 - PeerId→NodeId via `peer_id_to_node_id()` in `transport.rs` (production); the reverse direction is test-only since libp2p derives PeerIds from keypairs directly
 
-**DHT shard keys are per-node** to prevent last-writer-wins collisions: records are keyed
-as `/swarm/shards/{model_id}/{node_id_hex}` (one record per node per model), not a single
-shared key that any node can overwrite. Each node publishes only its own shard holdings.
+`verify_dht_value()` in `src/network/discovery.rs` would check a
+`[32B pubkey][64B signature][payload]` value on a `GetRecord` result, but this
+build issues no `GetRecord` queries. (An earlier version of this section
+described signed capability/shard records under per-node keys
+`/swarm/shards/{model_id}/{node_id_hex}`; neither exists in the code.)
 
 ## Identity & Nicknames
 
@@ -2716,7 +2720,7 @@ A lightweight cross-subsystem event bus for real-time dashboard observability.
 
 ### Windows GPU Distribution Strategy
 
-Windows uses a three-binary installer (`SwarmLLM-Setup.exe`) to support all GPU vendors without requiring users to install CUDA Toolkit or Vulkan SDK:
+Windows was designed around a three-binary installer (`SwarmLLM-Setup.exe`) to support all GPU vendors without requiring users to install CUDA Toolkit or Vulkan SDK. ⚠ **The release workflow has not built it since 2026-04-22** (`b69326f5` dropped the job pending a storage-quota question, and it was never re-added), so users get the `-gpu` / `-cpu` zips instead — `installer/windows.iss` is the recipe to restore it:
 
 - **`swarmllm-gpu.exe`** — built with `--features windows-gpu`:
   - llama.cpp local inference via Vulkan (NVIDIA, AMD, Intel — `vulkan-1.dll` bundled with all GPU drivers)

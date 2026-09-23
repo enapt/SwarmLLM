@@ -22,7 +22,7 @@ SwarmLLM automatically extracts `gguf_header.bin` from `shard_000.bin` when firs
 
 - A 7B model is ~4.5 GB as a full GGUF, but a single shard is only ~512 MB
 - Nodes only load the layers they're assigned — no wasted disk or VRAM
-- You can participate in inference for a 70B model on a machine with 8 GB VRAM by hosting just a few shards
+- You can help serve a model bigger than your graphics card by hosting just a few of its shards
 
 ## Manual Shard Assignment (--shards)
 
@@ -32,7 +32,7 @@ For multi-node split inference, assign each node a subset of shards:
 ./swarmllm run --shards "0-3"    # This node handles shards 0, 1, 2, 3
 ```
 
-The range is persisted to the database and restored on subsequent runs. Start without `--shards` to clear.
+The range is saved and restored every time the node starts — even if you later start it without `--shards`. To go back to holding every shard, start once with `--shards all`.
 
 **Behavior when `--shards` is set:**
 - The node only advertises the specified shard indices
@@ -55,4 +55,4 @@ Both nodes discover each other, assemble a distributed pipeline, and forward hid
 
 ## Without --shards
 
-If you don't specify `--shards`, the node auto-detects and advertises **all** local shards. This is the normal mode for most users — `--shards` is only needed when you want explicit control over which layers a node handles.
+If you have never used `--shards` (or cleared it with `--shards all`), the node auto-detects and advertises **all** local shards. This is the normal mode for most users — `--shards` is only needed when you want explicit control over which layers a node handles.

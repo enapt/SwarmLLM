@@ -1,55 +1,65 @@
 # Getting Started
 
-SwarmLLM lets you combine your hardware with others to run AI models too large for any single machine — for free, with no API tokens or cloud fees. It's open-source, and traffic between machines is always encrypted.
+SwarmLLM runs AI models on your own computer and, when a model is too big for one computer, lets computers team up over the internet to run it together. It is free and open source — no account, no subscription, no crypto.
 
-> **On privacy, precisely.** Encrypted traffic means nobody *between* two
-> machines can read what passes between them. It does not mean the machine
-> running the model cannot read your prompt — it has to, in order to answer
-> you, in the same way any AI provider does.
+> **Is it private? It depends on where the model runs.**
 >
-> **Turning on prompt privacy is recommended** — it is the only setting that
-> stops other machines reading your prompts. Use the "Enable prompt privacy"
-> button above the chat box, or `inference.encrypted_pipeline` in your config.
-> Your machine then does the first and last steps itself, and helpers only ever
-> see partly-processed numbers.
+> - **On your own computer — yes.** When a model runs entirely on your
+>   computer, your conversation doesn't leave it.
+> - **In the public swarm — only partly.** Connections between computers are
+>   encrypted, so nobody watching the internet can read them. But the
+>   computers doing the work for you see what they are working on, and a
+>   determined person running one of them could reconstruct your question.
+>   **Don't send anything sensitive through the public swarm.**
+> - **Private Mode** keeps your requests on your own linked devices — and,
+>   unless you switch that off, other SwarmLLM computers on your local
+>   network. Your computer still helps others with what it can spare. Set it
+>   up under **More → My Devices**.
 >
-> What it costs, so you can decide:
->
-> | | |
-> |---|---|
-> | **Disk** | you need the first *and* last piece of the model on this machine |
-> | **Speed** | your machine swaps data with helpers once per word, so a long answer costs proportionally more time — a few seconds extra on a short reply |
-> | **Your hardware** | does more of the work, since the first and last steps run here |
-> | **Scope** | set per model, so you can have it on where it matters and off elsewhere |
->
-> It is off by default only because it cannot route unless you hold both ends of
-> the model. If you do, turn it on.
+> Every answer is labelled with where it ran. **Prompt privacy** (the "Turn on
+> end-to-end encryption" button above the chat box) keeps the first and last
+> steps on your computer, so no other computer is handed your words as text.
+> It switches itself on for any model where you hold the first and last parts.
+> It is an extra layer, **not** a guarantee: the helpers still compute on
+> numbers that published attacks turn back into most of your text. It also
+> makes replies slower (a few seconds extra on a short reply) and needs those
+> two parts on your disk. Details: [Security & Encryption](./architecture/security.md).
 
 This guide walks you through installation, downloading your first model, and chatting.
 
 ## Prerequisites
 
-- A computer running Windows, macOS, or Linux
+- Windows (64-bit), a Mac with an Apple chip (M1 or newer), or 64-bit Linux
 - At least 4 GB of RAM (8+ GB recommended)
 - At least 2 GB of free disk space (more for larger models)
-- An internet connection (for downloading models and connecting to peers)
+- An internet connection (for downloading models and connecting to other computers)
+
+**What leaving it running means.** While SwarmLLM is open, your computer
+shares what it can spare with the swarm. It doesn't notice when you're busy
+or gaming — set a **Resource Schedule** in the app to hold back at the times
+you choose, or close the SwarmLLM window. It also uses internet data every
+day just staying in touch with the swarm, and more while it shares model
+parts, so it is not a good fit for a capped connection. It doesn't start with
+your computer.
 
 ## Chapters
 
-- [Installation](./getting-started/installation.md) — Download and run SwarmLLM on your platform
+- [Installation](./getting-started/installation.md) — Download and run SwarmLLM on your computer
 - [First Model](./getting-started/first-model.md) — Download and chat with your first AI model
-- [Joining the Network](./getting-started/joining-network.md) — Connect to peers for distributed inference
+- [Joining the Network](./getting-started/joining-network.md) — How your computer finds others, and how to keep your requests on your own devices
 
 ## Quick Commands
 
+On Windows, type `swarmllm.exe` instead of `./swarmllm`.
+
 ```bash
-./swarmllm run                  # Start the node (default port 8800)
+./swarmllm run                  # Start SwarmLLM (default port 8800)
 ./swarmllm run -p 9000          # Start on a different port
-./swarmllm run -v               # Start with verbose logging
-./swarmllm status               # Check if the node is running
-./swarmllm chat                 # Interactive CLI chat
-./swarmllm bench                # Benchmark inference performance
-./swarmllm peers                # List connected peers
-./swarmllm diagnostics          # A node report for a bug report — safe to post publicly
+./swarmllm run -v               # Start with more detailed logging
+./swarmllm status               # Check that it is running and what it is doing
+./swarmllm chat                 # Chat in the terminal
+./swarmllm bench                # Measure speed
+./swarmllm peers                # List connected computers
+./swarmllm diagnostics          # A report for a bug report — safe to post publicly
 ./swarmllm version              # Show version number
 ```
