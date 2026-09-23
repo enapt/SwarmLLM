@@ -184,6 +184,26 @@ struct NodeCandidate {
     /// never to rank peers against each other, which is what the peer's own
     /// speed figures are for.
     has_gpu: bool,
+    /// The layer ranges this node's live worker for the model ALREADY holds, on
+    /// the device the request would use. **The local candidate only** — empty
+    /// for every peer, whose residency is priced by [`PeerResidency`] from what
+    /// it gossips.
+    ///
+    /// `max_hostable_layers` is room for layers NOT yet loaded; these are the
+    /// layers that need none. Every local-capacity check charges a segment
+    /// [`Self::layers_it_would_add`] rather than its width, so a split this node
+    /// served a moment ago is still a plan it can make (FUTURE_WORK #95).
+    held_ranges: Vec<crate::inference::process_pool::HeldRange>,
+}
+
+impl NodeCandidate {
+    /// Layers of NEW memory this candidate needs to run `range` — its width,
+    /// less what its live worker already holds, by the worker's own rules
+    /// (`process_pool::layers_added_by`). The width for any candidate holding
+    /// nothing, which is every peer.
+    fn layers_it_would_add(&self, range: (u32, u32)) -> u32 {
+        crate::inference::process_pool::layers_added_by(range, &self.held_ranges)
+    }
 }
 
 /// What a peer has told us about holding a model in memory.
@@ -1519,6 +1539,10 @@ struct RoutePrices {
 /// first plan was wrong about this node, so a second plan that consults only
 /// the same estimates reproduces it — and re-attempts the load that just
 /// failed, which is the retry-on-overload pattern rather than a failover.
+///
+/// The bound is weighed against the layers the whole model would ADD, not its
+/// width: a worker already holding part of it pays for the rest only, by the
+/// same rule the loader applies when the range arrives (FUTURE_WORK #95).
 fn local_can_hold_every_layer(
     pool: &crate::inference::process_pool::ModelProcessPool,
     model_id: &ModelId,
@@ -1530,7 +1554,7 @@ fn local_can_hold_every_layer(
         && (pool.hosts_whole_model(model_id, num_layers)
             || local_cand
                 .max_hostable_layers
-                .is_none_or(|k| k >= num_layers))
+                .is_none_or(|k| k >= local_cand.layers_it_would_add((0, num_layers))))
 }
 
 /// How many layers a delegated peer actually RUNS, given the shape the caller
@@ -2505,6 +2529,25 @@ impl PipelineScheduler {
                                 );
                                 Ok(segs)
                             }
+                            Err(local_err) if local_memory_already_refused => {
+                                // This rung exists so the LOADER decides and its
+                                // refusal names the shortfall — and on this
+                                // request it already has. Planning past our own
+                                // bound again re-attempts the very load it just
+                                // refused (#95's second half): the re-plan a
+                                // recorded refusal was meant to redirect, not
+                                // repeat. The router reports the ORIGINAL
+                                // itemised refusal when this re-plan fails.
+                                route_info!(purpose,
+                                    model = %model_id,
+                                    constrained_err = %face_value_err,
+                                    local_err = %local_err,
+                                    "DIAG: no route fits this node's own memory, and its \
+                                     loader already refused this request — not planning \
+                                     past that bound a second time"
+                                );
+                                Err(local_err)
+                            }
                             Err(local_err) => {
                                 let unbounded = route_with(parallax::CapacityBound::LocalUnbounded);
                                 if unbounded.is_ok() {
@@ -2717,6 +2760,22 @@ impl PipelineScheduler {
                                 prompt_tokens,
                             );
                             return Ok(assignment);
+                        }
+                        // The whole model here is the one route this request's
+                        // loader has already refused — `local_can_hold_every_layer`
+                        // answers false after a refusal by construction. Handing
+                        // it back is the retry-on-overload the recorded refusal
+                        // exists to prevent; failing the re-plan lets the router
+                        // report the ORIGINAL itemised shortfall instead.
+                        if local_memory_already_refused {
+                            route_info!(purpose,
+                                model = %model_id,
+                                err = %e,
+                                "DIAG: parallax routing unavailable, and this node's loader \
+                                 already refused this request — not planning the whole model \
+                                 here a second time"
+                            );
+                            return Err(e);
                         }
                         route_info!(purpose,
                             model = %model_id,
@@ -3320,6 +3379,16 @@ impl PipelineScheduler {
             // relaxed pass may credit it with). The local node has neither —
             // its own loader answers, and that answer needs no margin because
             // it is not a self-report.
+            // What of this model our own worker already holds, on the device
+            // the request would use. Asked of the local node only; a peer's
+            // residency is what it gossips (`PeerResidency`).
+            let held_ranges = if is_local {
+                self.shared_state
+                    .model_process_pool
+                    .held_layer_ranges(&manifest.id, has_gpu)
+            } else {
+                Vec::new()
+            };
             let (max_hostable_layers, max_hostable_layers_at_face_value) =
                 if node_id == *local_node_id {
                     let ours = self
@@ -3426,6 +3495,7 @@ impl PipelineScheduler {
                 max_hostable_layers_at_face_value,
                 observed_prefill_ms_per_layer_byte,
                 has_gpu,
+                held_ranges,
             });
         }
 
@@ -3476,6 +3546,14 @@ impl PipelineScheduler {
                 observed_prefill_ms_per_layer_byte = ?c.observed_prefill_ms_per_layer_byte,
                 has_gpu = c.has_gpu,
                 max_hostable_layers = ?c.max_hostable_layers,
+                // Beside the bound, because the bound is room for NEW layers:
+                // `Some(0)` next to held ranges is a node that can still run
+                // the split it is already holding (#95), not one with no room.
+                held_ranges = ?c
+                    .held_ranges
+                    .iter()
+                    .map(|h| h.range)
+                    .collect::<Vec<_>>(),
                 expected_attempts = c.expected_attempts,
                 // The COUNT beside the multiplier, because the multiplier
                 // alone cannot distinguish "this peer is reliable" from

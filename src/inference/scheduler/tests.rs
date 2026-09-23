@@ -356,6 +356,7 @@ fn simple_candidate(byte: u8, ranges: Vec<(u32, u32)>) -> NodeCandidate {
         max_hostable_layers_at_face_value: None,
         observed_prefill_ms_per_layer_byte: None,
         has_gpu: false,
+        held_ranges: Vec::new(),
         goodput_bytes_per_sec: None,
     }
 }
@@ -471,6 +472,7 @@ fn greedy_assign_multi_range_candidate() {
             max_hostable_layers_at_face_value: None,
             observed_prefill_ms_per_layer_byte: None,
             has_gpu: false,
+            held_ranges: Vec::new(),
             goodput_bytes_per_sec: None,
         },
         NodeCandidate {
@@ -498,6 +500,7 @@ fn greedy_assign_multi_range_candidate() {
             max_hostable_layers_at_face_value: None,
             observed_prefill_ms_per_layer_byte: None,
             has_gpu: false,
+            held_ranges: Vec::new(),
             goodput_bytes_per_sec: None,
         },
     ];
@@ -1460,6 +1463,7 @@ fn cost_cand(
         max_hostable_layers_at_face_value: None,
         observed_prefill_ms_per_layer_byte: None,
         has_gpu: false,
+        held_ranges: Vec::new(),
         goodput_bytes_per_sec: None,
     }
 }
@@ -2726,6 +2730,7 @@ fn one_node_is_not_made_standby_for_more_layers_than_it_can_run() {
         max_hostable_layers_at_face_value: cap,
         observed_prefill_ms_per_layer_byte: None,
         has_gpu: false,
+        held_ranges: Vec::new(),
         goodput_bytes_per_sec: None,
     };
 
@@ -2816,6 +2821,7 @@ fn a_node_with_room_still_stands_in_for_every_segment() {
         max_hostable_layers_at_face_value: cap,
         observed_prefill_ms_per_layer_byte: None,
         has_gpu: false,
+        held_ranges: Vec::new(),
         goodput_bytes_per_sec: None,
     };
     let seg = |byte: u8, r: (u32, u32)| PipelineSegment {
@@ -2906,6 +2912,7 @@ fn a_standby_is_chosen_by_cost_not_by_ping() {
         max_hostable_layers_at_face_value: None,
         observed_prefill_ms_per_layer_byte: None,
         has_gpu: gpu,
+        held_ranges: Vec::new(),
         goodput_bytes_per_sec: None,
     };
 
@@ -5105,4 +5112,119 @@ fn a_standby_can_be_assembled_from_several_nodes_covering_a_range_between_them()
     // `standby_covers` has always accepted.
     let wide = vec![seg(2, (0, 20)), seg(3, (18, 40))];
     assert!(super::standby_cover_for(&wide, (8, 32), &[]).is_some());
+}
+
+/// The whole-model check weighs the layers the model would ADD to what this
+/// node's worker already holds, by the loader's own rule (#95). A worker holding
+/// [0..2) (the spawn, recorded at zero) and [14..40) needs 40 - 26 = 14 more
+/// layers of room for the whole model, not 40.
+#[test]
+fn holding_part_of_a_model_counts_toward_holding_all_of_it() {
+    use crate::inference::process_pool::HeldRange;
+    let pool = crate::inference::process_pool::ModelProcessPool::new(std::path::PathBuf::from(
+        "/tmp/swarmllm-held-whole",
+    ));
+    let model = ModelId("half-served".into());
+    let mut c = local_full_coverage();
+    c.held_ranges = vec![
+        HeldRange {
+            range: (0, 2),
+            releasable_layers: 0,
+        },
+        HeldRange {
+            range: (14, 40),
+            releasable_layers: 26,
+        },
+    ];
+    c.max_hostable_layers = Some(14);
+    assert!(super::local_can_hold_every_layer(
+        &pool, &model, &c, 40, false
+    ));
+    c.max_hostable_layers = Some(13);
+    assert!(!super::local_can_hold_every_layer(
+        &pool, &model, &c, 40, false
+    ));
+
+    // THE CONTROL: the same room with nothing credited is 40 layers short.
+    c.max_hostable_layers = Some(14);
+    c.held_ranges.clear();
+    assert!(!super::local_can_hold_every_layer(
+        &pool, &model, &c, 40, false
+    ));
+}
+
+/// A node holding every shard of a 32-layer model, whose own bound is room for
+/// NO layers, beside a peer holding only the back half — so no route fits this
+/// node's memory and the last rung is the one that plans past it.
+fn a_full_holder_with_no_room(
+    request_refused: bool,
+) -> (Result<PipelineAssignment, SwarmError>, NodeId) {
+    // Room for nothing: a 40 MB budget against 50 MB of fixed terms. Set in
+    // CONFIG, because a real `SharedState` installs a live budget provider that
+    // `set_ram_budget_mb` does not reach — the first cut of this test set the
+    // pool's figure, planned with the machine's whole RAM on both arms, and
+    // passed its control for the wrong reason.
+    let (state, local, _b, _c) =
+        processor_holder_beside_two_gpu_halves_with(5, 20.0, |c| c.resources.max_ram_mb = 40);
+    let model = ModelId("split-14b".into());
+    state
+        .model_process_pool
+        .test_cost_curve
+        .insert(model.clone(), (50, 100));
+    assert_eq!(
+        state
+            .model_process_pool
+            .max_local_hostable_layers(&model, false),
+        Some(0),
+        "fixture: this node's own bound must be zero, or the test measures nothing"
+    );
+    // Nobody but this node holds layer 0, so no route can avoid it.
+    state.model_registry.remove_shard_holder(
+        &ShardId {
+            model_id: model.clone(),
+            index: 0,
+        },
+        &NodeId([0xB1; 32]),
+    );
+    let rid = uuid::Uuid::new_v4();
+    if request_refused {
+        state.note_local_memory_refusal(rid);
+    }
+    let scheduler = PipelineScheduler::with_local_processor_speed(state, LOCAL_PROCESSOR_TPS);
+    (
+        scheduler.assemble_pipeline_for(&model, &local, rid, super::Purpose::Route, Some(64)),
+        local,
+    )
+}
+
+/// **A re-plan after the loader's refusal must not plan past the bound it
+/// just corroborated** (#95's second half). The `LocalUnbounded` rung exists so
+/// the loader decides and its refusal names the shortfall; on a request whose
+/// loader has already refused, planning past our own bound again re-attempts
+/// that load — the retry-on-overload the recorded refusal exists to prevent. The
+/// router reports the ORIGINAL itemised refusal when this re-plan fails.
+#[test]
+fn a_replan_after_a_local_refusal_does_not_plan_past_the_local_bound_again() {
+    // THE CONTROL: before any refusal the last rung plans past the bound, so
+    // the loader can decide and name the shortfall — unchanged behaviour.
+    let (first, local) = a_full_holder_with_no_room(false);
+    let first = first.expect("before a refusal, the unbounded rung still lets the loader decide");
+    let ours: u32 = first
+        .segments
+        .iter()
+        .filter(|s| s.node_id == local)
+        .map(|s| s.layer_range.1 - s.layer_range.0)
+        .sum();
+    assert!(
+        ours > 1,
+        "the control plans past a bound of zero: {:?}",
+        first.segments
+    );
+
+    let (replan, _) = a_full_holder_with_no_room(true);
+    assert!(
+        replan.is_err(),
+        "after the loader refused, no plan past its bound: {:?}",
+        replan.map(|a| a.segments)
+    );
 }

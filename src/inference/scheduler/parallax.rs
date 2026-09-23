@@ -668,6 +668,23 @@ pub(super) fn route_shortest_path(
             split_points.push(num_layers - 1);
         }
     }
+    // Where this node's live worker already cuts the model. Those ranges cost
+    // it no new memory (`NodeCandidate::layers_it_would_add`), so they are
+    // the one local shape a node with no room left can still run — and they
+    // must be EXPRESSIBLE. They were cut at boundaries some earlier plan had
+    // on offer, often a capacity point that has since moved (a peer that is
+    // now warm reaches further), so nothing above guarantees them. Without
+    // these a split that answered one request could not be planned for the
+    // next (FUTURE_WORK #95).
+    for c in candidates.iter().filter(|c| &c.node_id == local_node_id) {
+        for h in &c.held_ranges {
+            for p in [h.range.0, h.range.1] {
+                if p > 0 && p < num_layers {
+                    split_points.push(p);
+                }
+            }
+        }
+    }
     split_points.sort_unstable();
     split_points.dedup();
 
@@ -779,10 +796,11 @@ pub(super) fn route_shortest_path(
     let mut vertices: Vec<Vertex> = Vec::new();
     for (cand_idx, (lo, hi)) in clamped {
         let c = &candidates[cand_idx];
+        let is_local = &c.node_id == local_node_id;
         // `None` = we cannot tell what this peer can hold, which must never be
         // read as "nothing" (gotcha #330: every node before v0.3.103 gossiped
         // zero free VRAM).
-        let cap = if &c.node_id == local_node_id {
+        let cap = if is_local {
             // Our own loader's answer, or nothing at all under the last resort.
             capacity
                 .binds_local()
@@ -793,10 +811,22 @@ pub(super) fn route_shortest_path(
             // is held to is the only thing a relaxation changes.
             capacity.peer_cap(c)
         };
-        let over_capacity = cap.is_some_and(|k| hi - lo > k);
+        // What a range costs against that cap. For the local node that is the
+        // layers it would ADD, because its bound is room for layers not yet
+        // loaded and its worker may already hold this very range (#95). A
+        // peer's figure already folds in what it has resident
+        // (`PeerResidency`), so its cost is the width.
+        let charged = |range: (u32, u32)| -> u32 {
+            if is_local {
+                c.layers_it_would_add(range)
+            } else {
+                range.1 - range.0
+            }
+        };
+        let over_capacity = cap.is_some_and(|k| charged((lo, hi)) > k);
         let mut push = |range: (u32, u32)| {
             if let Some(k) = cap {
-                if range.1 - range.0 > k {
+                if charged(range) > k {
                     return;
                 }
             }
@@ -1007,13 +1037,25 @@ pub(super) fn route_shortest_path(
     } else {
         None
     };
-    let local_span = |vi: usize| -> u32 {
-        let v = &vertices[vi];
-        if &candidates[v.cand_idx].node_id == local_node_id {
-            v.range.1 - v.range.0
-        } else {
-            0
-        }
+    let is_local_vertex =
+        |vi: usize| -> bool { &candidates[vertices[vi].cand_idx].node_id == local_node_id };
+    // What a local range costs against `local_cap`: the layers it would ADD
+    // to what this node's worker already holds (#95), which for a node
+    // holding nothing is its width, exactly as before.
+    let local_added = |range: (u32, u32)| -> u32 {
+        candidates
+            .iter()
+            .find(|c| &c.node_id == local_node_id)
+            .map_or(range.1 - range.0, |c| c.layers_it_would_add(range))
+    };
+    // A path's local total is carried as (what earlier local runs added, where
+    // the CURRENT local run began). Two adjacent local vertices are merged into
+    // ONE range by `merge_contiguous` before the loader sees them, and a merged
+    // range is priced differently from its parts — [0..2) and [2..14) are two
+    // ranges, [0..14) is one that may subsume a resident one or not — so the
+    // run is priced as the range the loader will actually be handed.
+    let local_total = |base: u32, run_start: Option<u32>, end: u32| -> u32 {
+        run_start.map_or(base, |s| base.saturating_add(local_added((s, end))))
     };
     // One pass of the search, seeded from the sources `apply_trust` allows.
     // Everything else — the forward relaxation, both memory bounds, the sink
@@ -1026,18 +1068,23 @@ pub(super) fn route_shortest_path(
         let mut best_cost = vec![f32::INFINITY; n];
         let mut parent: Vec<Option<usize>> = vec![None; n];
         let mut used_capped = vec![0u64; n];
-        let mut local_used = vec![0u32; n];
+        // What local runs BEFORE the current one added, and where the current
+        // local run began (`None` when the path's last vertex is a peer's).
+        let mut local_base = vec![0u32; n];
+        let mut local_run: Vec<Option<u32>> = vec![None; n];
 
         // Initialize sources.
         for i in 0..n {
             if source_ok(&vertices[i], apply_trust) {
-                let ours = local_span(i);
+                let run = is_local_vertex(i).then_some(vertices[i].range.0);
+                let ours = local_total(0, run, vertices[i].range.1);
                 if local_cap.is_some_and(|cap| ours > cap) {
                     continue;
                 }
                 best_cost[i] = vertices[i].cost_ms;
                 used_capped[i] = bit_of(i);
-                local_used[i] = ours;
+                local_base[i] = 0;
+                local_run[i] = run;
             }
         }
 
@@ -1062,7 +1109,15 @@ pub(super) fn route_shortest_path(
                     // This capped node is already carrying part of the chain.
                     continue;
                 }
-                let ours = local_used[v_idx] + local_span(w_idx);
+                // Extending a local run keeps its start; stepping onto a
+                // local vertex from a peer's starts a new run, and stepping
+                // onto a peer's closes the run into the base.
+                let (base, run) = match (is_local_vertex(w_idx), local_run[v_idx]) {
+                    (true, Some(s)) => (local_base[v_idx], Some(s)),
+                    (true, None) => (local_base[v_idx], Some(vertices[w_idx].range.0)),
+                    (false, run) => (local_total(local_base[v_idx], run, v_end), None),
+                };
+                let ours = local_total(base, run, vertices[w_idx].range.1);
                 if local_cap.is_some_and(|cap| ours > cap) {
                     // Extending here would give this node more layers, across all
                     // its segments, than its own loader will take.
@@ -1073,7 +1128,8 @@ pub(super) fn route_shortest_path(
                     best_cost[w_idx] = new_cost;
                     parent[w_idx] = Some(v_idx);
                     used_capped[w_idx] = used_capped[v_idx] | w_bit;
-                    local_used[w_idx] = ours;
+                    local_base[w_idx] = base;
+                    local_run[w_idx] = run;
                 }
             }
         }
@@ -1170,11 +1226,17 @@ pub(super) fn route_shortest_path(
             .find(|c| &c.node_id == local_node_id)
             .and_then(|c| c.max_hostable_layers)
         {
-            let ours: u32 = segments
-                .iter()
-                .filter(|s| &s.node_id == local_node_id)
-                .map(|s| s.layer_range.1.saturating_sub(s.layer_range.0))
-                .sum();
+            // Over the ranges the loader will be HANDED: adjacent local
+            // segments merged first, as `merge_contiguous` will merge them,
+            // then each priced at the layers it would add (#95).
+            let mut local_runs: Vec<(u32, u32)> = Vec::new();
+            for s in segments.iter().filter(|s| &s.node_id == local_node_id) {
+                match local_runs.last_mut() {
+                    Some(last) if last.1 == s.layer_range.0 => last.1 = s.layer_range.1,
+                    _ => local_runs.push(s.layer_range),
+                }
+            }
+            let ours: u32 = local_runs.into_iter().map(local_added).sum();
             if ours > cap.max(1) {
                 return Err(SwarmError::PipelineError(format!(
                     "parallax: this node would take {ours} layers across its segments, \
@@ -1242,6 +1304,7 @@ mod tests {
             max_hostable_layers_at_face_value: None,
             observed_prefill_ms_per_layer_byte: None,
             has_gpu: false,
+            held_ranges: Vec::new(),
             goodput_bytes_per_sec: None,
         }
     }
@@ -3102,6 +3165,115 @@ mod tests {
         assert_eq!(segs.len(), 3, "{segs:?}");
         assert_eq!(segs[1].node_id.0[0], 2, "{segs:?}");
     }
+
+    fn held(
+        range: (u32, u32),
+        releasable_layers: u32,
+    ) -> crate::inference::process_pool::HeldRange {
+        crate::inference::process_pool::HeldRange {
+            range,
+            releasable_layers,
+        }
+    }
+
+    /// **FUTURE_WORK #95: the split that answered one request could not be
+    /// planned for the next.** The node's first request split three ways —
+    /// [0..2) here on the processor, [2..14) on a peer's card, [14..40) here —
+    /// and left its worker holding those two ranges. The second request found
+    /// its bound at `Some(0)`: room for no MORE layers, because the resident
+    /// worker's own memory is counted as used. Charged at their width, both
+    /// held ranges exceeded that, no local vertex could be built, every rung
+    /// but the unbounded one failed "no valid source vertex", and the loader
+    /// refused the whole model: a 503 on the second question.
+    ///
+    /// Charged at what they ADD, the held ranges cost nothing and the same
+    /// split is found again. The peer can take 20 layers here, so a cheaper-
+    /// looking [2..20) exists — but the [20..40) it leaves this node is
+    /// CONTAINED in the held [14..40), which the worker would load a second
+    /// time (report #021), so it is correctly unaffordable.
+    #[test]
+    fn a_split_this_node_is_already_holding_is_planned_again() {
+        let local = NodeId([1u8; 32]);
+        let mut me = cand(1, vec![(0, 40)], 0, 0.0, true, true, 0.5);
+        me.node_id = local.clone();
+        me.max_hostable_layers = Some(0);
+        me.max_hostable_layers_at_face_value = Some(0);
+        // The spawn's own segment is recorded at zero, the growth at its width.
+        me.held_ranges = vec![held((0, 2), 0), held((14, 40), 26)];
+        let mut peer = cand(2, vec![(0, 40)], 5, 0.0, true, true, 60.0);
+        peer.max_hostable_layers = Some(20);
+        peer.max_hostable_layers_at_face_value = Some(20);
+
+        let route = |me: NodeCandidate| {
+            route_shortest_path(
+                40,
+                &[me, peer.clone()],
+                &local,
+                true,
+                true,
+                CapacityBound::Everyone,
+                Some(17),
+            )
+        };
+
+        // THE CONTROL — the node as #95 saw it, holding the same ranges but
+        // with nobody telling the planner so.
+        let mut blind = me.clone();
+        blind.held_ranges.clear();
+        let err = route(blind).expect_err("with no room and nothing credited, no local vertex");
+        assert!(err.to_string().contains("no valid source vertex"), "{err}");
+
+        let segs = route(me).expect("the held split is a route this node can run");
+        let shape: Vec<(u8, (u32, u32))> = segs
+            .iter()
+            .map(|s| (s.node_id.0[0], s.layer_range))
+            .collect();
+        assert_eq!(shape, vec![(1, (0, 2)), (2, (2, 14)), (1, (14, 40))]);
+    }
+
+    /// Two adjacent local vertices reach the loader as ONE range —
+    /// `merge_contiguous` runs after routing — and a merged range is priced
+    /// differently from its parts. Here [0..2) is held (recorded at zero, as a
+    /// spawn is) and the bound is 12: [0..2) + [2..14) price as 0 + 12 and look
+    /// affordable, but the loader is handed [0..14), which subsumes the spawn
+    /// range and releases nothing for it, so it needs 14. The search must see
+    /// the 14 and send [2..14) to the peer that can take it, slower as it is;
+    /// pricing the parts, it chose the local pair (plus the tail peer) and the
+    /// backstop then failed the whole route.
+    ///
+    /// Partial ranges OFF, so each peer offers only its whole range and the
+    /// one detour around the merged run is unambiguous.
+    #[test]
+    fn adjacent_local_segments_are_priced_as_the_range_the_loader_is_handed() {
+        let local = NodeId([1u8; 32]);
+        let mut me = cand(1, vec![(0, 20)], 0, 0.0, true, true, 20.0);
+        me.node_id = local.clone();
+        me.max_hostable_layers = Some(12);
+        me.max_hostable_layers_at_face_value = Some(12);
+        me.held_ranges = vec![held((0, 2), 0)];
+        // Slower than this node, so the search prefers the local pair whenever
+        // it believes the pair fits.
+        let slow = cand(2, vec![(2, 14)], 5, 0.0, false, false, 1.0);
+        let tail = cand(3, vec![(14, 20)], 5, 0.0, false, true, 20.0);
+
+        let segs = route_shortest_path(
+            20,
+            &[me, slow, tail],
+            &local,
+            false,
+            false,
+            CapacityBound::Everyone,
+            None,
+        )
+        .expect("a route within this node's bound exists, through the slow peer");
+        let shape: Vec<(u8, (u32, u32))> = segs
+            .iter()
+            .map(|s| (s.node_id.0[0], s.layer_range))
+            .collect();
+        // [0..2) held (0) + [14..20) (6): within 12, and the tail's six layers
+        // are cheaper here than a hop to the tail peer.
+        assert_eq!(shape, vec![(1, (0, 2)), (2, (2, 14)), (1, (14, 20))]);
+    }
 }
 
 #[cfg(test)]
@@ -3140,6 +3312,7 @@ mod transfer_cost_tests {
             max_hostable_layers: None,
             max_hostable_layers_at_face_value: None,
             has_gpu: true,
+            held_ranges: Vec::new(),
         }
     }
 

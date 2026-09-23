@@ -30,6 +30,19 @@ the identical plan (gotcha #452).
 
 → `docs/invariants/scheduling.md`
 
+## Room for more layers is not room for the layers already held
+
+**`NodeCandidate::held_ranges` + `layers_it_would_add`** charge a local segment
+only the layers it would ADD to what this node's live worker holds, by the
+worker's own exact-key rules (`process_pool::layers_added_by`) — never its
+width, and never a resident COUNT. `max_local_hostable_layers` is room for NEW
+layers; reading it as "layers this node can run" 503'd the second request for
+every split this node had just served (#95). The DP prices a local RUN (what
+`merge_contiguous` will hand the loader), held ranges are split points, and a
+re-plan after the loader's refusal never plans past the local bound again.
+
+→ `docs/invariants/scheduling.md`
+
 ## A plan that names this node for the whole model is a local generation
 
 **`pipeline::local_generate::try_local_generate_fastpath`** runs a single-segment

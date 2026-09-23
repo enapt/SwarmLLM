@@ -475,6 +475,25 @@ only partly dropped. Smaller than the error being fixed and in the same
 direction as the daemon's existing simplification; a rank-aware daemon model is
 the real fix (`docs/FUTURE_WORK.md`).
 
+**And the ADMISSION weighs the same peak the drop produces** (2026-09-24,
+FUTURE_WORK #95). The worker drops the subsumed ranges BEFORE loading, so its
+peak is the new range LESS what they held — yet admission weighed the full
+width against a total still counting them, and refused a consolidation that
+fits: [0..2) + [14..40) → [0..40) of a 40-layer model was charged 40 new layers
+when it needed 12. `charge_additional_segment` now admits
+`delta − WorkerHandle::subsumed_charge_mb` (read-only, same predicate as the
+release, `strictly_subsumes`), then records the segment at its full cost and
+drops the subsumed records. **It must NOT release them from the pool as well**:
+`admit_to_*` both checks AND charges, so the pool already took the net figure,
+and releasing the subsumed charge again frees it twice (the test pins the pool
+at 4250 where a double release reads 1650). "Admission before release" is kept
+— nothing is released until admission has answered, so a refusal leaves every
+charge standing. The planner prices a local range with the same discount
+(`process_pool::layers_added_by`), which is why the SPAWN's segment discounts
+nothing: it is recorded at zero MB, so its subsumption releases nothing. →
+`docs/invariants/scheduling.md` § "Room for more layers is not room for the
+layers already held".
+
 **A worker's charge is released by SUBTRACTING what THAT worker owed**
 (2026-09-05). `WorkerHandle::charged_mb` records the spawn's admission charge
 plus every range `charge_additional_segment` adds; `charged_segments` records

@@ -1096,7 +1096,7 @@ impl WorkerHandle {
         };
         let mut freed = 0u64;
         v.retain(|&(r, mb)| {
-            let subsumed = r.0 >= incoming.0 && r.1 <= incoming.1 && r != incoming;
+            let subsumed = strictly_subsumes(incoming, r);
             if subsumed {
                 freed = freed.saturating_add(mb);
             }
@@ -1110,6 +1110,26 @@ impl WorkerHandle {
             Ordering::AcqRel,
         );
         freed
+    }
+
+    /// What [`Self::release_subsumed_segments`] WOULD free for `incoming`,
+    /// without freeing it.
+    ///
+    /// Admission needs the figure before the charge exists: the worker drops
+    /// the ranges `incoming` strictly contains BEFORE it loads it
+    /// (`model_worker::ensure_model_loaded`), so the peak it reaches is the new
+    /// range less what those held, and that peak is what admission must weigh.
+    /// One predicate for both, so the admitted discount and the later release
+    /// cannot disagree about which ranges it covers.
+    fn subsumed_charge_mb(&self, incoming: (u32, u32)) -> u64 {
+        self.charged_segments
+            .lock()
+            .map(|v| {
+                v.iter()
+                    .filter(|&&(r, _)| strictly_subsumes(incoming, r))
+                    .fold(0u64, |acc, &(_, mb)| acc.saturating_add(mb))
+            })
+            .unwrap_or(0)
     }
 
     /// Record that this worker has been charged for `segment`, and add `mb` to
@@ -1502,6 +1522,56 @@ pub(crate) fn layers_that_fit(free_mb: u64, fixed_mb: u64, per_layer_mb: u64) ->
     Some((free_mb.saturating_sub(fixed_mb) / per_layer_mb) as u32)
 }
 
+/// Does loading `incoming` make the resident range `held` redundant?
+///
+/// **The worker's own rule, restated once for the daemon** —
+/// `model_worker::subsumed_segment_keys`: strict containment only. A range
+/// EQUAL to `incoming` is the caller's cache hit, not something to drop, and a
+/// partial overlap describes layers each range still needs on its own.
+fn strictly_subsumes(incoming: (u32, u32), held: (u32, u32)) -> bool {
+    held.0 >= incoming.0 && held.1 <= incoming.1 && held != incoming
+}
+
+/// One layer range a live worker already holds, as the planner must see it.
+///
+/// Read by the scheduler's local capacity bound so that a plan this node makes
+/// is a plan its loader will take (FUTURE_WORK #95). `releasable_layers` is
+/// NOT always the range's width: it is what `charge_additional_segment` takes
+/// off its admission when a new range strictly contains this one, which is the
+/// range's recorded CHARGE — and the spawn records its first segment at zero,
+/// because the spawn's own admission already paid for it. Pricing that range at
+/// its width would plan consolidations the loader then refuses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HeldRange {
+    pub range: (u32, u32),
+    pub releasable_layers: u32,
+}
+
+/// How many layers of NEW memory running `range` would take on a worker that
+/// already holds `held`.
+///
+/// Mirrors the worker, case by case (`model_worker::ensure_model_loaded`):
+///
+/// - a range it already holds EXACTLY is a cache hit — nothing is loaded;
+/// - a range that strictly contains held ones drops them BEFORE it loads, so
+///   it costs its width less what the daemon will release for them;
+/// - a range CONTAINED in a held superset is read from disk and held a second
+///   time (report #021), so it costs its full width, as does a partial overlap.
+///
+/// With nothing held this is the width, so a node with no live worker — and
+/// every peer, which carries no held ranges — is priced exactly as before.
+pub(crate) fn layers_added_by(range: (u32, u32), held: &[HeldRange]) -> u32 {
+    let width = range.1.saturating_sub(range.0);
+    if held.iter().any(|h| h.range == range) {
+        return 0;
+    }
+    let released: u32 = held
+        .iter()
+        .filter(|h| strictly_subsumes(range, h.range))
+        .fold(0u32, |acc, h| acc.saturating_add(h.releasable_layers));
+    width.saturating_sub(released)
+}
+
 /// One resident model-worker subprocess as the status surfaces report it.
 ///
 /// Read through [`ModelProcessPool::worker_summaries`]; every field is a fact
@@ -1728,6 +1798,11 @@ pub struct ModelProcessPool {
     /// Item 8 Phase 2b: worker-initiated fetch probes land here. Daemon
     /// drains and responds via `send_prefix_fetch_result`. Unset → drop.
     prefix_probe_tx: std::sync::OnceLock<mpsc::Sender<PrefixProbeEvent>>,
+    /// A model's `(fixed_mb, per_layer_mb)` for a test that needs the growth
+    /// path to weigh something. The real curve is read off a GGUF header on
+    /// disk, which a unit test must not depend on the developer's node for.
+    #[cfg(test)]
+    pub(crate) test_cost_curve: DashMap<ModelId, (u64, u64)>,
 }
 
 /// Command into the batch scheduler task.
@@ -1877,6 +1952,8 @@ impl ModelProcessPool {
             prefix_manifest_tx: std::sync::OnceLock::new(),
             progress_tx: std::sync::OnceLock::new(),
             prefix_probe_tx: std::sync::OnceLock::new(),
+            #[cfg(test)]
+            test_cost_curve: DashMap::new(),
         }
     }
 
@@ -3296,10 +3373,25 @@ impl ModelProcessPool {
             return Ok(());
         };
         let delta_mb = per_layer_mb.saturating_mul(layers);
+        // The worker drops every range this one strictly contains BEFORE it
+        // loads it, so the peak it reaches is the new range LESS what those
+        // held — and the peak is what admission exists to bound. Weighing the
+        // full width against a total that still includes the ranges about to
+        // go refused a consolidation that fits: a worker holding [0..2) and
+        // [14..40) of a 40-layer model, asked for [0..40), was charged for 40
+        // new layers when it needed 12 (FUTURE_WORK #95).
+        //
+        // Still "admission before release", which is the property that
+        // matters: nothing is released here, so a refusal leaves every charge
+        // standing for memory the worker still holds. The discount is read
+        // under `spawn_lock`, the same lock the release below runs under, so
+        // the two see the same ranges.
+        let subsumed_mb = handle.subsumed_charge_mb(segment);
+        let net_mb = delta_mb.saturating_sub(subsumed_mb);
         let admitted = if on_gpu {
-            self.admit_to_gpu(model_id, delta_mb)
+            self.admit_to_gpu(model_id, net_mb)
         } else {
-            self.admit_to_cpu(model_id, delta_mb)
+            self.admit_to_cpu(model_id, net_mb)
         };
         if !admitted {
             // Its own variant, not `ServiceUnavailable`, for the same reason
@@ -3335,28 +3427,33 @@ impl ModelProcessPool {
                 "{} layers {}..{} of {} need about {} MB more than this node has left \
                  (its worker is already holding {} MB) — another holder will have to \
                  take that part",
-                layers, segment.0, segment.1, model_id.0, delta_mb, held_mb,
+                layers, segment.0, segment.1, model_id.0, net_mb, held_mb,
             )));
         }
         handle.record_charged_segment(segment, delta_mb);
         // The worker drops the ranges this one covers before loading it, so the
-        // charge follows. Done AFTER admission, never before: admission is
-        // deliberately weighed against everything still charged, and if it
+        // charge follows. Done AFTER admission, never before: if admission
         // refuses, the forward is never sent and the worker never drops
         // anything — releasing first would free a charge for memory the worker
         // still holds.
         let released_mb = handle.release_subsumed_segments(segment);
-        if released_mb > 0 {
+        // The POOL was charged the net figure above, so what the dropped ranges
+        // held is already off it — releasing it again would free it twice.
+        // Only a difference between what was discounted and what was actually
+        // released (none, under the lock both run under) goes back.
+        let unaccounted_mb = released_mb.saturating_sub(subsumed_mb);
+        if unaccounted_mb > 0 {
             if on_gpu {
-                self.release_vram_charge(model_id, released_mb);
+                self.release_vram_charge(model_id, unaccounted_mb);
             } else {
-                self.release_ram_charge(model_id, released_mb);
+                self.release_ram_charge(model_id, unaccounted_mb);
             }
         }
         tracing::info!(
             model = %model_id,
             layers = format!("[{}..{})", segment.0, segment.1),
             delta_mb,
+            net_mb,
             released_mb,
             on_gpu,
             "Charging an additional segment to a live worker"
@@ -3377,6 +3474,10 @@ impl ModelProcessPool {
         on_gpu: bool,
     ) -> Option<(u64, u64)> {
         use crate::model::auto_manage::vram::{estimate_worker_ram_mb, estimate_worker_vram_mb};
+        #[cfg(test)]
+        if let Some(curve) = self.test_cost_curve.get(model_id) {
+            return Some(*curve);
+        }
         let base = self.footprint_inputs(model_id, None)?;
         if base.segment_layers == 0 {
             return None;
@@ -3473,8 +3574,65 @@ impl ModelProcessPool {
         })
     }
 
+    /// The layer ranges this model's live worker holds, as a plan for a request
+    /// on `on_gpu`'s device may count on them.
+    ///
+    /// **Empty unless the worker sits on that device.** A resident model has a
+    /// PLACEMENT, not just a presence (gotcha #329): a worker the card
+    /// refused holds no graphics memory, so its ranges say nothing about room on
+    /// the card, and the next request for that device will not be served by it.
+    /// `holds_gpu_memory` is the pool's one answer to where a worker's memory
+    /// was charged.
+    ///
+    /// Why it exists (FUTURE_WORK #95): [`Self::max_local_hostable_layers`] is
+    /// room for layers NOT yet loaded, weighed against everything committed —
+    /// this model's own resident worker included. Asked about a model this node
+    /// is half-way through serving, it answers "room for 0 more", and without
+    /// these ranges the planner could not see that the layers it wanted were
+    /// already in memory: a split that answered one request was refused for
+    /// memory on the next.
+    pub fn held_layer_ranges(&self, model_id: &ModelId, on_gpu: bool) -> Vec<HeldRange> {
+        let Some(handle) = self.live_worker(model_id) else {
+            return Vec::new();
+        };
+        if handle.holds_gpu_memory() != on_gpu {
+            return Vec::new();
+        }
+        let per_layer_mb = self
+            .segment_cost_curve(model_id, on_gpu)
+            .map(|(_, per_layer)| per_layer)
+            .unwrap_or(0);
+        let Ok(segments) = handle.charged_segments.lock() else {
+            return Vec::new();
+        };
+        segments
+            .iter()
+            .map(|&(range, mb)| HeldRange {
+                range,
+                // What `charge_additional_segment` will actually take off its
+                // admission for this range, in layers — zero for the spawn's
+                // own segment, which is recorded at zero MB.
+                releasable_layers: mb
+                    .checked_div(per_layer_mb)
+                    .map_or(0, |layers| u32::try_from(layers).unwrap_or(u32::MAX)),
+            })
+            .collect()
+    }
+
     pub fn max_local_hostable_layers(&self, model_id: &ModelId, on_gpu: bool) -> Option<u32> {
         let (fixed_mb, per_layer_mb) = self.segment_cost_curve(model_id, on_gpu)?;
+        // A live worker on this device has already paid the fixed terms, and
+        // `charge_additional_segment` charges only the LAYERS of a further
+        // range — so charging the process overhead again here under-counts
+        // the room it is actually offered.
+        let fixed_mb = if self
+            .live_worker(model_id)
+            .is_some_and(|h| h.holds_gpu_memory() == on_gpu)
+        {
+            0
+        } else {
+            fixed_mb
+        };
         // What is free after everything already charged, on whichever budget
         // this model would be weighed against.
         let free_mb = if on_gpu {
@@ -6444,6 +6602,168 @@ mod tests {
         h.charged_mb.store(50, Ordering::Release);
         h.release_subsumed_segments((0, 48));
         assert_eq!(h.charged_mb.load(Ordering::Acquire), 0);
+    }
+
+    /// A worker holding [0..2) (its spawn) and [14..40) of a 40-layer model, at
+    /// 100 MB a layer, with 50 MB of fixed process overhead. What
+    /// FUTURE_WORK #95's node held after the split that answered its first
+    /// request.
+    async fn worker_holding_both_ends(
+        pool: &ModelProcessPool,
+        model: &ModelId,
+    ) -> Arc<WorkerHandle> {
+        pool.test_cost_curve.insert(model.clone(), (50, 100));
+        // The spawn: fixed terms plus two layers, charged by its own admission
+        // and recorded at ZERO, exactly as `get_or_spawn` records it.
+        let h = admit_and_insert_cpu_worker(pool, model, 250, false).await;
+        h.record_charged_segment((0, 2), 0);
+        pool.charge_additional_segment(model, (14, 40), &h)
+            .await
+            .expect("26 more layers fit the budget");
+        assert_eq!(pool.ram_committed_mb(), 2850, "fixture: 250 + 26 x 100");
+        h
+    }
+
+    /// **A range that consolidates held ones is admitted for what it ADDS.**
+    /// The worker drops every range the new one strictly contains BEFORE it
+    /// loads it, so its peak is the new range less what those held. Weighing
+    /// the full width against a total still counting the ranges about to go
+    /// refused a consolidation that fits (#95).
+    ///
+    /// [0..40) here adds 40 layers (4000 MB) and releases [14..40)'s 2600 — the
+    /// spawn's [0..2) was recorded at zero, so it releases nothing — for a peak
+    /// of 2850 + 1400 = 4250 against a 4300 budget. Weighed at its width it is
+    /// 6850 and refused.
+    #[tokio::test]
+    async fn a_consolidating_range_is_admitted_for_what_it_adds_not_its_width() {
+        let pool = ModelProcessPool::new(std::path::PathBuf::from("/tmp/swarmllm-consolidate"));
+        let model = ModelId("half-served".into());
+        pool.set_ram_budget_mb(4300);
+        let h = worker_holding_both_ends(&pool, &model).await;
+
+        pool.charge_additional_segment(&model, (0, 40), &h)
+            .await
+            .expect("the peak after the drop fits, so the range is admitted");
+
+        // Charged ONCE: the pool took the net figure at admission, so the
+        // released ranges must not come off it a second time. A double release
+        // reads 1650 here and admits 2600 MB the machine does not have.
+        assert_eq!(pool.ram_committed_mb(), 4250, "the pool holds the peak");
+        assert_eq!(
+            h.charged_mb.load(Ordering::Acquire),
+            4250,
+            "and the worker owes exactly what the pool charged it"
+        );
+        assert!(h.segment_is_charged((0, 40)));
+        assert!(
+            !h.segment_is_charged((14, 40)) && !h.segment_is_charged((0, 2)),
+            "the consolidated ranges are gone from the record"
+        );
+    }
+
+    /// The control: when even the peak does not fit, the refusal leaves every
+    /// charge standing, because the worker never drops anything — "admission
+    /// before release" is kept. And the message names the NET shortfall.
+    #[tokio::test]
+    async fn a_consolidation_that_does_not_fit_releases_nothing() {
+        let pool = ModelProcessPool::new(std::path::PathBuf::from("/tmp/swarmllm-consolidate-no"));
+        let model = ModelId("half-served-tight".into());
+        pool.set_ram_budget_mb(4000);
+        let h = worker_holding_both_ends(&pool, &model).await;
+
+        let err = pool
+            .charge_additional_segment(&model, (0, 40), &h)
+            .await
+            .expect_err("2850 + 1400 > 4000");
+        assert!(
+            matches!(err, SwarmError::LocalMemoryUnavailable(_)),
+            "the variant the router re-plans on: {err}"
+        );
+        assert!(
+            err.to_string().contains("need about 1400 MB more"),
+            "the figure is what this range would ADD, not its width: {err}"
+        );
+        assert_eq!(pool.ram_committed_mb(), 2850, "nothing released");
+        assert!(h.segment_is_charged((14, 40)) && h.segment_is_charged((0, 2)));
+    }
+
+    /// What the planner is told this worker holds — and what each range would
+    /// give back if subsumed, which is its recorded CHARGE, not its width: the
+    /// spawn's own segment is recorded at zero, so pricing it at two layers
+    /// would plan consolidations the loader then refuses.
+    #[tokio::test]
+    async fn held_ranges_carry_what_the_loader_would_release_for_them() {
+        let pool = ModelProcessPool::new(std::path::PathBuf::from("/tmp/swarmllm-held"));
+        let model = ModelId("held-report".into());
+        pool.set_ram_budget_mb(100_000);
+        worker_holding_both_ends(&pool, &model).await;
+
+        let mut held = pool.held_layer_ranges(&model, false);
+        held.sort_by_key(|h| h.range);
+        assert_eq!(
+            held,
+            vec![
+                HeldRange {
+                    range: (0, 2),
+                    releasable_layers: 0
+                },
+                HeldRange {
+                    range: (14, 40),
+                    releasable_layers: 26
+                },
+            ]
+        );
+        // A resident model has a PLACEMENT (gotcha #329): this worker's memory
+        // is on the processor, so it offers a graphics-card plan nothing.
+        assert!(pool.held_layer_ranges(&model, true).is_empty());
+        assert!(pool
+            .held_layer_ranges(&ModelId("absent".into()), false)
+            .is_empty());
+    }
+
+    /// A live worker has already paid the fixed terms, and a further range is
+    /// charged its layers alone — so the room the bound reports must not
+    /// charge the process overhead a second time.
+    #[tokio::test]
+    async fn a_live_worker_is_not_charged_its_fixed_terms_twice() {
+        let pool = ModelProcessPool::new(std::path::PathBuf::from("/tmp/swarmllm-fixed-once"));
+        let model = ModelId("fixed-once".into());
+        pool.test_cost_curve.insert(model.clone(), (60, 100));
+        pool.set_ram_budget_mb(1300);
+
+        // No worker: a spawn pays the 60 MB of fixed terms, 1240 / 100 = 12.
+        assert_eq!(pool.max_local_hostable_layers(&model, false), Some(12));
+
+        let h = admit_and_insert_cpu_worker(&pool, &model, 250, false).await;
+        h.record_charged_segment((0, 2), 0);
+        // 1050 left beside it, all of it for layers: 10, not (1050 - 60) / 100 = 9.
+        assert_eq!(pool.max_local_hostable_layers(&model, false), Some(10));
+    }
+
+    /// The worker's own three cases, restated for the planner.
+    #[test]
+    fn layers_added_by_mirrors_what_the_worker_loads() {
+        let held = [
+            HeldRange {
+                range: (0, 2),
+                releasable_layers: 0,
+            },
+            HeldRange {
+                range: (14, 40),
+                releasable_layers: 26,
+            },
+        ];
+        // An exact hit loads nothing.
+        assert_eq!(layers_added_by((14, 40), &held), 0);
+        assert_eq!(layers_added_by((0, 2), &held), 0);
+        // A consolidation costs its width less what the daemon releases.
+        assert_eq!(layers_added_by((0, 40), &held), 40 - 26);
+        // Contained in a held superset: read from disk a second time (#021).
+        assert_eq!(layers_added_by((22, 40), &held), 18);
+        // A partial overlap needs every one of its layers.
+        assert_eq!(layers_added_by((10, 20), &held), 10);
+        // Nothing held: the width, which is how every peer is priced.
+        assert_eq!(layers_added_by((3, 9), &[]), 6);
     }
 
     /// The regression the whole-model capacity check would otherwise have been.

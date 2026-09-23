@@ -118,6 +118,91 @@ plan into an error. And when a struct's own field documentation describes a
 generality — "THIS segment, not the whole model" — check what its callers
 actually pass.
 
+## Room for more layers is not room for the layers already held (2026-09-24, #95)
+
+**`NodeCandidate::held_ranges` + `layers_it_would_add` — the local node is
+charged, per range, only the layers a segment would ADD to what its live worker
+already holds.** `max_local_hostable_layers` is room for layers NOT yet loaded,
+weighed against everything committed — this model's own resident worker
+included — and that is correct for what it answers. It was being read as "how
+many layers can this node run".
+
+**What it broke.** Found at the .201 gate, present in every release before it:
+GLM-4-9B on an 8 GB card whose card had refused the model. Request 1 priced the
+local candidate at `max_hostable_layers=Some(30)` and split three ways — [0..2)
+here, [2..14) on a peer's card, [14..40) here — and answered. It left the worker
+holding those two ranges (28 layers, 4595 MB). Request 2, seconds later, priced
+the same node at **`Some(0)`**: no room for more. Charged at their width, both
+held ranges exceeded zero, no local vertex could be built, every capacity rung
+failed `no valid source vertex`, the `LocalUnbounded` rung planned the whole
+model here, the loader refused it, the re-plan did the same, 503. The split that
+had just worked could not be planned again because the planner could not see
+that its layers were already in memory.
+
+**Why per range and not a bigger count.** The worker keys its map by the EXACT
+range (`model_worker::ensure_model_loaded`), so what a segment costs depends on
+its shape, not on how many layers are resident:
+
+- a range it holds EXACTLY is a cache hit — nothing is loaded;
+- a range that strictly contains held ones drops them BEFORE it loads, so it
+  costs its width less what the daemon releases for them;
+- a range CONTAINED in a held superset is read from disk a second time (report
+  #021), as is a partial overlap — full width.
+
+Crediting the resident COUNT would have let the search pick, say, [20..40) under
+a held [14..40) — the peer being faster — and the worker would then load 20
+layers a second time into memory that is not there. `process_pool::layers_added_by`
+is the worker's three cases, once, and both the planner and the tests read it.
+
+**Three things a change here must keep.**
+
+- **`releasable_layers` is the recorded CHARGE, not the width.** The spawn
+  records its first segment at zero MB (its admission already paid), so when a
+  later range subsumes it the daemon releases nothing for it. Pricing the spawn
+  range at its width would plan consolidations the loader then refuses — the
+  planner and the loader must be answering the same question.
+- **The DP prices a local RUN, not each local vertex.** `merge_contiguous` runs
+  after routing, so [0..2) + [2..14) reach the loader as [0..14) — which may
+  subsume a held range or not, and so costs differently from its parts. The DP
+  carries `(local_base, local_run)` along the best path; the post-reconstruction
+  check merges the same way before summing.
+- **Held ranges are split points.** They were cut at boundaries some earlier plan
+  offered, often a CAPACITY point that has since moved (a peer that is now warm
+  reaches further), so without them the one shape a full node can still run is
+  not expressible.
+
+**The loader was fixed to match** (`charge_additional_segment`): it admitted a
+consolidating range at its full width against a total still counting the ranges
+about to be dropped. It now admits the net peak — see `docs/invariants/memory.md`
+§ "A range that subsumes loaded ranges replaces them, before it loads".
+
+**And the refusal fact now reaches the last rung.** `LocalUnbounded` exists so
+the loader decides and its refusal names the shortfall; on a request whose
+loader has already refused, planning past our bound again re-attempts that load.
+Both places that could — the rung itself and the parallax-failure fallback's
+`local_only_assignment` — now consult `local_memory_refused_for_request`. The
+router reports the ORIGINAL itemised refusal when the re-plan fails, so the user
+sees no difference except one fewer doomed load.
+
+Also: a live worker on the same device has already paid the fixed terms, so
+`max_local_hostable_layers` no longer charges them to a further range —
+`charge_additional_segment` never did.
+
+Tests: `a_split_this_node_is_already_holding_is_planned_again`,
+`adjacent_local_segments_are_priced_as_the_range_the_loader_is_handed`,
+`holding_part_of_a_model_counts_toward_holding_all_of_it`,
+`a_replan_after_a_local_refusal_does_not_plan_past_the_local_bound_again`,
+`a_consolidating_range_is_admitted_for_what_it_adds_not_its_width`,
+`a_consolidation_that_does_not_fit_releases_nothing`,
+`held_ranges_carry_what_the_loader_would_release_for_them`,
+`a_live_worker_is_not_charged_its_fixed_terms_twice`,
+`layers_added_by_mirrors_what_the_worker_loads` — nine fixes toggled off one at a
+time, each turning its test red. ⚠ The refusal-arm test's first cut set
+`set_ram_budget_mb` on a pool inside a real `SharedState`, which installs a live
+budget provider that figure never reaches; both arms planned with the machine's
+whole RAM and the control passed for the wrong reason. The fixture now asserts
+its own premise (`max_local_hostable_layers == Some(0)`).
+
 ## The hand-off gate proposes; the priced search decides
 
 `assemble_pipeline_for` no longer RETURNS the whole-model hand-off. When the
