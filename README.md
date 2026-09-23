@@ -71,6 +71,8 @@ computer. Your first one is a one-time download of a few gigabytes — about the
 size of a big game update. If the browser doesn't open by itself, type
 `localhost:8800` into its address bar.
 
+![The Models tab: search for a model, see its size and whether it runs on your computer, and download it](docs/images/models.png)
+
 **And then leave it running, and tell someone near you.** While SwarmLLM is
 open, your computer helps the swarm with what it can spare. Every computer
 nearby makes bigger models faster for everyone in your area —
@@ -109,6 +111,8 @@ are in the
 The app comes in 21 languages, works on a phone, and shows which model gave
 each answer and how long it took.
 
+![The Dashboard: whether you're connected, what the swarm can run right now, and how much of your computer SwarmLLM is using](docs/images/dashboard.png)
+
 ## How it works
 
 An AI model is built from a stack of layers. SwarmLLM cuts a model into parts,
@@ -124,8 +128,9 @@ idea, applied to running AI instead of sharing files.)
 
 - **No central server.** Computers find each other on their own, even behind
   home routers.
-- **Nobody downloads the whole model.** Each computer keeps only the parts it
-  has room for, within limits you set.
+- **Nobody has to download the whole model.** Each computer keeps only the
+  parts it has room for, within limits you set — or every part, if the model
+  fits and you want to run it yourself.
 - **Every part is checked.** Model parts are verified when they arrive and
   every time they load, so a bad copy is caught and replaced.
 
@@ -139,6 +144,8 @@ across continents works, but slowly.
 
 So the swarm needs two things: **more computers, and enough of them close
 together.** No amount of code can do that part — only people can.
+
+![The network map, lighting up the countries with SwarmLLM computers online](docs/images/network-map.png)
 
 - **Install it, leave it running, and bring someone near you** — a friend
   across town, a housemate, your office. Your friend doesn't need to set
