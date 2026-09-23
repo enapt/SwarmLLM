@@ -1,5 +1,56 @@
 # Changelog
 
+## [0.3.202-alpha] — 2026-09-24
+
+**GLM-4 models give correct answers again, prompts now reach several popular
+models exactly as they were trained to read them, and a second question to a
+model split across computers no longer fails.**
+
+**Fixed: GLM-4 wrote broken replies to anything longer than a sentence.** Short
+answers looked right, but code, lists and longer explanations came out broken:
+lines repeated, indentation lost, code that could not run. This was true in
+every release that supported GLM-4, on every computer, whether or not the model
+was split. GLM-4 records each word's position in a particular layout, and
+SwarmLLM was using the layout meant for a different family of models; the
+longer the reply, the more that mattered. Found by running the same model file
+through llama.cpp, the reference implementation, with exactly the same input:
+it wrote a correct function where SwarmLLM wrote a broken one. SwarmLLM's reply
+now matches llama.cpp's nearly word for word. Llama-4 and DeepSeek-2 had the
+same wrong setting and are corrected to match llama.cpp too; no such model is
+on our test machines, so for those two the fix follows the reference and has
+not been run here.
+
+**Fixed: prompts to GLM-4, Mistral v0.3, Gemma-2 and Llama-3 contained the
+wrong markers.** Before a model reads your message, the conversation is turned
+into the model's own tokens, including special markers for where each turn
+starts and ends. GLM-4's and Mistral's markers were spelled out as ordinary
+text, GLM-4 was given an end-of-text marker in front of every question,
+Llama-3, Gemma and Mistral were given the start-of-conversation marker twice,
+and Gemma's code indentation was split into single spaces. Checked against
+llama.cpp on all 15 models we test with, the markers now agree in every case,
+and replies from Llama-3 and Gemma match llama.cpp's on the same files. Replies
+from these models may be worded a little differently from before.
+
+**Fixed: the second question to a model split across computers failed for
+memory.** When a model is too big for your computer alone — commonly a 7 to 9
+billion parameter model on an 8 GB graphics card — SwarmLLM splits it across
+computers. The first question worked; the second failed with "Service
+unavailable", because your computer counted the part of the model it was
+already holding as memory in use rather than as already loaded. It now knows
+exactly which parts it holds and plans the same split again.
+
+**Fixed: a computer that sent back its part of a reply uncompressed was treated
+as broken.** Computers in a split pass intermediate results along either
+compressed or not, depending on their own settings. A healthy computer that
+answered uncompressed, where yours had sent compressed data, was mistaken for
+one returning the wrong thing, and the request could fail with "wrong
+activation shape". Results are now checked by the shape they declare, and a
+result that really is malformed is still refused.
+
+**For maintainers:** the release-signing tool now says there is no terminal to
+ask for the password on, instead of reporting "Wrong password", when it is
+started without one.
+
 ## [0.3.201-alpha] — 2026-09-23
 
 **Replies split across computers no longer turn to nonsense when your graphics
