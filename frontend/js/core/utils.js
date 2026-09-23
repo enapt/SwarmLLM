@@ -1161,9 +1161,20 @@
         continue;
       }
       // Ordered list items (1. item)
-      if (line.match(/^[\s]*\d+\.\s+/)) {
+      var olMatch = line.match(/^[\s]*(\d+)\.\s+/);
+      if (olMatch) {
         if (inList && listTag !== 'ol') { html += '</' + listTag + '>'; inList = false; }
-        if (!inList) { html += '<ol class="md-list md-ol">'; inList = true; listTag = 'ol'; }
+        // A list STARTS at its first item's number (CommonMark's rule). Models
+        // write "loose" lists — a blank line, or an indented explanation,
+        // between items — and each of those closes the list above, so every
+        // item after the first opened a new <ol> the browser numbered from 1
+        // again: "1. 1. 1." for a three-step answer.
+        if (!inList) {
+          var start = parseInt(olMatch[1], 10);
+          html += '<ol class="md-list md-ol"' + (start > 1 ? ' start="' + start + '"' : '') + '>';
+          inList = true;
+          listTag = 'ol';
+        }
         html += '<li>' + inlineMarkdown(line.replace(/^[\s]*\d+\.\s+/, '')) + '</li>';
         continue;
       }
