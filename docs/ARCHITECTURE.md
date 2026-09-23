@@ -90,6 +90,10 @@ swarmllm/
 │                 cuda_graph_probe.cu — can this driver capture a CUDA graph, and does
 │                 an allocation captured into one replay? nvcc only, no repo build, so
 │                 it is the cheapest thing to hand a tester with a different card;
+│                 tokenizer_reference.py — every local model's chat template tokenized by
+│                 llama.cpp, for the ignored `tokenizer_agrees_with_llama_cpp` (FUTURE_WORK #97);
+│                 reply_ab.sh — greedy replies from one binary, for a two-binary diff; it
+│                 found #93, and byte-identical to the last release is NOT correctness (#96);
 │                 smoke_test.sh, release_shapes.sh, family_conformance.sh — the release gate's three)
 ├── kernels/       (SwarmLLM's own CUDA kernels, compiled to PTX by build.rs under
 │                 `candle-cuda` and loaded via candle's `get_or_load_custom_func`.
