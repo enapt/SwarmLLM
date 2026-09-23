@@ -96,6 +96,9 @@ swarmllm/
 │                 own Hugging Face tokenizer.json, where llama.cpp is no authority (SPM whitespace);
 │                 reply_ab.sh — greedy replies from one binary, for a two-binary diff; it
 │                 found #93, and byte-identical to the last release is NOT correctness (#96);
+│                 split_rig.sh — two isolated nodes holding chosen shards of one model, so a
+│                 request MUST split; `split` asks through it, `kill` breaks one side
+│                 mid-reply (KILL=A|B|B_UNLOAD) — the release gate's split check (#93);
 │                 smoke_test.sh, release_shapes.sh, family_conformance.sh — the release gate's three)
 ├── kernels/       (SwarmLLM's own CUDA kernels, compiled to PTX by build.rs under
 │                 `candle-cuda` and loaded via candle's `get_or_load_custom_func`.
