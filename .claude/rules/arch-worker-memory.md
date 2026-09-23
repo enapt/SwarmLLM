@@ -114,6 +114,26 @@ because a peer that says nothing has not said no. Guard:
 
 → `docs/invariants/memory.md`
 
+## A reply between two forwards is not idle
+
+**`WorkerHandle::in_use` is the single answer to "is this worker in use?"** —
+a response in flight OR a conversation it holds between forwards
+(`kv_holders`, stamped by every forward, released by `release_request_kv` /
+`cancel_request`, aged out `CONVERSATION_GAP_SECS` after the last forward).
+Promotion, both reclaims and `models_with_inflight_requests` ask it. Reading
+`responses` alone saw a split reply as idle between tokens, and promotion
+retired its worker 14 times in one reply — each respawn decoding from an empty
+cache (#93, gotcha #690). Guard:
+`whether_a_worker_is_in_use_is_decided_in_one_place`.
+
+**Promotion waits for the reason to be GONE** — `reason_still_holds` reads
+`cpu_reason`, the predicate the respawn reads first. **And a forward past the
+prompt pass whose conversation is gone is refused**
+(`model_worker::forward_lacks_its_conversation`, `ServiceUnavailable`), never
+decoded from nothing — whatever lost the worker.
+
+→ `docs/invariants/memory.md` § "A reply between two forwards is in use"
+
 ## A fan-out to every worker is bounded, and the two waits mean different things
 
 **`ModelProcessPool::notify_every_worker` is the one place a fire-and-forget

@@ -234,9 +234,29 @@ pub(super) async fn forward_verify_with_hedge(
     let hedge_started = Instant::now();
 
     // Phase 3: race primary vs hedge.
+    //
+    // Only a hedge that SUCCEEDED can win. The hedge runs under a new request
+    // id on a holder that never saw this request's prompt pass, so it has no
+    // conversation to continue and its worker refuses the step
+    // (`model_worker::forward_lacks_its_conversation`) — before that refusal
+    // existed it answered from an empty cache, and a hedge that won the race
+    // handed back logits computed from nothing (`docs/FUTURE_WORK.md` #93).
+    // Letting a fast refusal win would turn every fired hedge into a failed
+    // round, so a failed hedge falls back to waiting for the primary.
     let (winner_is_hedge, result) = tokio::select! {
         r = &mut primary_fut => (false, r),
-        r = &mut hedge_fut => (true, r),
+        r = &mut hedge_fut => match r {
+            Ok(hedged) => (true, Ok(hedged)),
+            Err(e) => {
+                tracing::info!(
+                    primary = %primary_request_id,
+                    hedge = %hedge_request_id,
+                    error = %e,
+                    "SWARM-SPEC L2: hedge failed — waiting for the primary"
+                );
+                (false, (&mut primary_fut).await)
+            }
+        },
     };
 
     let elapsed = start.elapsed().as_millis() as f32;

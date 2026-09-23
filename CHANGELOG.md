@@ -2,10 +2,25 @@
 
 ## [0.3.201-alpha] — 2026-09-23
 
-**The Models tab's Download button works, the app no longer calls a privacy
-option "end-to-end encryption", idle computers send less background traffic,
-and a reverse proxy on the same computer no longer gives its visitors admin
-access.**
+**Replies split across computers no longer turn to nonsense when your graphics
+card is short of memory. Also: the Models tab's Download button works, the app
+no longer calls a privacy option "end-to-end encryption", idle computers send
+less background traffic, and a reverse proxy on the same computer no longer
+gives its visitors admin access.**
+
+**Fixed: a reply split across computers could come back as nonsense.** When a
+model is too big for your graphics card, SwarmLLM can split the work: your
+computer does the first and last steps, another computer does the middle. If
+your card had already run out of memory for that model, your computer kept
+restarting its own part of the model during the reply, once for every word,
+trying to move it back onto the graphics card. Each restart threw the
+conversation away, so every word after that was worked out with no memory of
+your question, and the reply came out as repeated symbols or unrelated text —
+with no error anywhere. Seen with 7 to 9 billion parameter models on an 8 GB
+card, and present in earlier versions. Now your computer waits until the memory
+problem is actually gone, never restarts a part that is in the middle of a
+reply, and if a part ever does lose the conversation it stops with an error
+instead of answering from nothing.
 
 **Fixed: the Models tab's Download button failed on every click.** Searching
 for a model in the Models tab and clicking Download was refused every time, and

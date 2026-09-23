@@ -1169,6 +1169,25 @@ async fn run_fused_batch_forward(
     let is_first = model.is_first();
     let is_last = model.is_last();
 
+    // One request in the batch with no conversation here must not be decoded
+    // from nothing alongside the others. Declining the whole batch sends every
+    // request through `handle_forward`, which refuses that one and runs the
+    // rest — the batch is an optimisation, never a reason to skip the check.
+    let model_key = model.kv_model_key();
+    if let Some(lost) = requests.iter().find(|r| {
+        forward_lacks_its_conversation(
+            r.sequence_num,
+            r.index_pos,
+            kv_store.request_holds_state(model_key, &r.request_id.to_string()),
+        )
+    }) {
+        return Err(SwarmError::Internal(format!(
+            "fused batch declined — request {} has no conversation on this worker; \
+             running the batch one request at a time",
+            lost.request_id
+        )));
+    }
+
     // Slice payload per request and build tensor inputs.
     let mut input_tensors: Vec<candle_core::Tensor> = Vec::with_capacity(requests.len());
     let mut request_id_strings: Vec<String> = Vec::with_capacity(requests.len());
@@ -1312,6 +1331,45 @@ async fn run_fused_batch_forward(
     Ok(())
 }
 
+/// Is this forward being asked to continue a conversation this worker does not
+/// hold?
+///
+/// Every forward after the prompt pass extends a request's cache, and its
+/// attention reads everything the earlier forwards wrote here. If nothing was
+/// written — the worker was restarted mid-reply, the cache expired, or the
+/// prompt pass never ran on this machine — running it anyway attends over an
+/// empty cache and returns a well-formed, plausible result that is GARBAGE.
+/// Nothing downstream can tell: a split reply read `使用命令命令命令…` for 96
+/// tokens with no error in any log, because the daemon had retired this
+/// worker 14 times in one reply (`docs/FUTURE_WORK.md` #93, gotcha #690).
+///
+/// So it is refused. vLLM's rule for a preempted sequence is the same: its
+/// cache is swapped back in or recomputed, never decoded without. Both the
+/// single and the fused batch path ask this, and only this.
+fn forward_lacks_its_conversation(sequence_num: u32, index_pos: u32, holds_state: bool) -> bool {
+    sequence_num > 0 && index_pos > 0 && !holds_state
+}
+
+/// The refusal for [`forward_lacks_its_conversation`].
+///
+/// `ServiceUnavailable`, because it is this machine that cannot serve the
+/// step: with a remote segment in the plan the router re-plans the request
+/// from the prompt while nothing has reached the client, and otherwise the
+/// reply ends with an error — either is right, and an answer made from nothing
+/// is not.
+fn lost_conversation_error(
+    request_id: uuid::Uuid,
+    layers: (usize, usize),
+    index_pos: u32,
+) -> SwarmError {
+    SwarmError::ServiceUnavailable(format!(
+        "this computer no longer holds the conversation for request {request_id} \
+         (layers {}..{}, position {index_pos}) — its model process was restarted or its \
+         cache expired mid-reply, so it refuses rather than answer from nothing",
+        layers.0, layers.1
+    ))
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn handle_forward(
     writer: &mut IpcWriter,
@@ -1378,6 +1436,18 @@ async fn handle_forward(
     let model_key = model.kv_model_key().to_string();
     let req_id_str = request_id.to_string();
     let pre_embedded = fwd.pre_embedded;
+
+    if forward_lacks_its_conversation(
+        fwd.sequence_num,
+        fwd.index_pos,
+        kv_store.request_holds_state(&model_key, &req_id_str),
+    ) {
+        return Err(lost_conversation_error(
+            request_id,
+            (layer_start, layer_end),
+            fwd.index_pos,
+        ));
+    }
 
     // Clear per-request KV-cache at the start of a new request (prefill)
     if fwd.sequence_num == 0 {
@@ -5009,5 +5079,46 @@ mod spec_payoff_tests {
     fn a_measured_payoff_is_never_mistaken_for_unmeasured() {
         assert_ne!(blend_spec_payoff(0, 0.0), 0);
         assert_ne!(blend_spec_payoff(1, 0.0), 0);
+    }
+}
+
+#[cfg(test)]
+mod lost_conversation_tests {
+    use super::{forward_lacks_its_conversation, lost_conversation_error};
+    use crate::error::{reclassify_flattened_error, SwarmError};
+
+    /// The rule that stops a reply being decoded from nothing
+    /// (`docs/FUTURE_WORK.md` #93): a forward that continues a conversation
+    /// runs only where that conversation is.
+    #[test]
+    fn a_forward_past_the_prompt_is_refused_where_its_conversation_is_gone() {
+        // The case that produced 96 tokens of garbage: a decode step reaching a
+        // worker restarted since the prompt pass.
+        assert!(forward_lacks_its_conversation(5, 41, false));
+        // The same step where the cache is intact runs as always.
+        assert!(!forward_lacks_its_conversation(5, 41, true));
+        // A prompt pass starts the conversation, so it never needs one — and
+        // the worker clears whatever it holds for that id right after.
+        assert!(!forward_lacks_its_conversation(0, 0, false));
+        // A replay to a stand-in is one forward at position 0 by design
+        // (`pipeline::distributed::assemble_replay`): it rebuilds the cache.
+        assert!(!forward_lacks_its_conversation(3, 0, false));
+    }
+
+    /// The refusal crosses the worker IPC hop and the network hop as TEXT, and
+    /// is re-typed from its prefix on the far side (`reclassify_flattened_error`).
+    /// It must come back as `ServiceUnavailable`: that is what lets the router
+    /// re-plan the request, where `Inference` would report a crash.
+    #[test]
+    fn the_refusal_keeps_its_type_across_the_process_boundary() {
+        let err = lost_conversation_error(uuid::Uuid::nil(), (14, 40), 41);
+        assert!(matches!(err, SwarmError::ServiceUnavailable(_)));
+        assert!(
+            matches!(
+                reclassify_flattened_error(&err.to_string()),
+                Some(SwarmError::ServiceUnavailable(_))
+            ),
+            "flattened to text, it must still read as ServiceUnavailable: {err}"
+        );
     }
 }

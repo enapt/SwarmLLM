@@ -635,6 +635,16 @@ impl KvOccupancy {
 }
 
 impl KvCacheEntry {
+    /// Does this entry hold any of its request's conversation — a written
+    /// position in any layer's cache, or a hybrid model's SSM state?
+    pub(crate) fn holds_state(&self) -> bool {
+        self.layers
+            .iter()
+            .flatten()
+            .any(|kv| kv.current_seq_len() > 0)
+            || self.ssm_states.iter().any(Option::is_some)
+    }
+
     /// Bytes this entry reserves, and how many of them hold real tokens.
     ///
     /// Reads the ALLOCATED buffer (`Cache::all_data`), not the used window
@@ -1017,6 +1027,20 @@ impl KvCacheStore {
         key: &str,
     ) -> Option<dashmap::mapref::one::Ref<'a, String, KvCacheEntry>> {
         self.caches.get(key)
+    }
+
+    /// Does this store hold any of `request_id`'s conversation for this model
+    /// segment?
+    ///
+    /// Asked before a forward that CONTINUES a conversation is allowed to run
+    /// (`model_worker::forward_lacks_its_conversation`). The forward creates
+    /// its entry lazily, so "no entry" and "an entry with nothing written" mean
+    /// the same thing here: nothing for attention to read.
+    pub(crate) fn request_holds_state(&self, model_key: &str, request_id: &str) -> bool {
+        let key = Self::cache_key(model_key, request_id);
+        self.caches
+            .get(key.as_str())
+            .is_some_and(|entry| entry.holds_state())
     }
 
     /// Truncate a request's KV cache (all layers) to `target_len`. No-op if
@@ -1668,6 +1692,42 @@ mod tests {
             "mirror kept a different number of positions than the f32 cache"
         );
         assert!(slot.flash_operands().is_some());
+    }
+
+    /// A worker refuses a forward that continues a conversation when this
+    /// answers false (`model_worker::forward_lacks_its_conversation`), so it
+    /// must be false for every way of holding nothing — and a worker restarted
+    /// mid-reply is exactly the "no entry" case (`docs/FUTURE_WORK.md` #93).
+    #[test]
+    fn a_request_holds_state_only_once_something_is_written() {
+        let dev = candle_core::Device::Cpu;
+        let store = KvCacheStore::new(std::time::Duration::from_secs(60));
+        assert!(!store.request_holds_state("m", "r"), "no entry at all");
+        {
+            let _created = store.get_or_create("m", "r", 1);
+        }
+        assert!(
+            !store.request_holds_state("m", "r"),
+            "an entry the forward created but never wrote holds nothing"
+        );
+        {
+            let mut e = store.get_or_create("m", "r", 1);
+            let mut slot = LayerKv::with_capacity(2, 64, 64);
+            let k = t(&dev, 1, 2, 3, 4);
+            slot.append(&k, &k).unwrap();
+            e.layers[0] = Some(slot);
+        }
+        assert!(store.request_holds_state("m", "r"));
+        assert!(
+            !store.request_holds_state("m", "someone-else"),
+            "another request's cache is not this one's"
+        );
+        assert!(
+            !store.request_holds_state("other-segment", "r"),
+            "keyed by model segment as well as request"
+        );
+        store.clear_request("m", "r");
+        assert!(!store.request_holds_state("m", "r"));
     }
 
     /// Distinct values per position, so a truncation that kept the wrong

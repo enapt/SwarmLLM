@@ -7022,6 +7022,78 @@ fn the_growth_accountant_guard_catches_a_re_derived_placement() {
     );
 }
 
+/// Production statements of `process_pool.rs` that decide "is this worker in
+/// use?" from `responses` directly, i.e. anywhere but `WorkerHandle::in_use`.
+fn bare_worker_in_use_reads(src: &str) -> Vec<(usize, String)> {
+    let production = &src[..src.find("#[cfg(test)]").unwrap_or(src.len())];
+    let the_one_place = method_body(production, "    fn in_use(").unwrap_or("");
+    let scanned = production.replacen(the_one_place, "", 1);
+    statements(&scanned)
+        .into_iter()
+        .filter(|(_, stmt)| stmt.contains("responses.is_empty()"))
+        .collect()
+}
+
+/// **"Is this worker in use?" is answered in ONE place** —
+/// `WorkerHandle::in_use`, which counts a reply's conversation held between
+/// two forwards as well as a response in flight.
+///
+/// Five sites each read `!worker.responses.is_empty()`, and all five shared
+/// the blind spot: a split reply reaches its worker one forward per token, so
+/// between tokens nothing is in flight. Promotion to the card retired such a
+/// worker 14 times in one 96-token reply and every token after the first was
+/// decoded from an empty cache (`docs/FUTURE_WORK.md` #93, gotcha #690). The
+/// two reclaims and auto-manage's in-use set had the same hole. A sixth site
+/// reading `responses` would have it again.
+#[test]
+fn whether_a_worker_is_in_use_is_decided_in_one_place() {
+    let src =
+        std::fs::read_to_string("src/inference/process_pool.rs").expect("read process_pool.rs");
+    let body = method_body(&src, "    fn in_use(")
+        .expect("WorkerHandle::in_use was renamed — re-point this guard");
+    assert!(
+        body.contains("holds_live_conversation"),
+        "`WorkerHandle::in_use` must count a conversation held between forwards, \
+         not only a response in flight — that gap is the whole defect"
+    );
+    let bare = bare_worker_in_use_reads(&src);
+    assert!(
+        bare.is_empty(),
+        "decide whether a worker is in use with `WorkerHandle::in_use(window)`, \
+         never `responses` alone — a reply between two forwards has nothing in \
+         flight and is not finished:\n{bare:#?}"
+    );
+}
+
+/// The guard above must be able to fire, on a wrapped chain as well as a
+/// one-liner, and must not fire on the one place the read belongs.
+#[test]
+fn the_worker_in_use_guard_catches_a_bare_read() {
+    let planted = "impl WorkerHandle {\n\
+        \x20   fn in_use(&self, window: Duration) -> bool {\n\
+        \x20       !self.responses.is_empty() || self.holds_live_conversation(window)\n\
+        \x20   }\n\
+        }\n\
+        impl ModelProcessPool {\n\
+        \x20   fn reclaim(&self) {\n\
+        \x20       let busy = !worker\n\
+        \x20           .responses\n\
+        \x20           .is_empty();\n\
+        \x20   }\n\
+        }\n\
+        #[cfg(test)]\n\
+        mod tests {\n\
+        \x20   fn t() { assert!(h.responses.is_empty()); }\n\
+        }\n";
+    let found = bare_worker_in_use_reads(planted);
+    assert_eq!(
+        found.len(),
+        1,
+        "exactly the wrapped read in `reclaim` — not `in_use` itself, and not \
+         the test module: {found:#?}"
+    );
+}
+
 /// Name of the function containing a given 1-based line: the nearest `fn` at or
 /// above it. Used to exempt a specific call site rather than a whole file.
 fn enclosing_fn_name(src: &str, line: usize) -> Option<String> {

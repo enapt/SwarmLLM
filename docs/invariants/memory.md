@@ -1079,3 +1079,94 @@ bug-reported for exactly that (k8s-device-plugin #1014, gpu-operator #1065).
   GPU one does (verified 2026-09-18 by running `model-worker --help` under a
   deliberately corrupt `libcuda.so.1`). Guarded by
   `the_unavailable_message_does_not_promise_the_processor_takes_over`.
+
+## A reply between two forwards is in use, and a lost conversation is refused
+
+**The rule**: `.claude/rules/arch-worker-memory.md` § "A reply between two
+forwards is not idle".
+
+### What it replaced
+
+Five places in `ModelProcessPool` decided "is this worker in use?" as
+`!worker.responses.is_empty()`: promotion to the card
+(`worker_should_return_to_gpu`), the graphics-memory reclaim and its dry run,
+the RAM reclaim, and `models_with_inflight_requests`, which auto-manage reads.
+A split reply reaches its worker as **one forward per token**, so for most of
+its life nothing is in flight — and `last_used` is stamped at the START of a
+forward, so a slow processor forward already reads as idle past the 5 s floor
+the moment it returns.
+
+Promotion made it fatal. Its doc listed "the reason must actually be gone" as a
+guard, but the body only asked whether `gpu_estimate_mb` fit — and the
+estimate was for the slice the worker had been spawned with. Two layers of
+GLM-4-9B (631 MB) always fit, so a model still pinned after a graphics
+out-of-memory was retired; the respawn read the pin first and went straight
+back to the processor; the next forward retired it again.
+
+Measured 2026-09-23 at the v0.3.201 gate, on the released v0.3.200: a node
+short of graphics memory planned the default start-and-finish split — its own
+CPU for layers 0-2 and 14-40, a peer for 2-14. **14 retirements and 28 model
+loads in one 96-token reply**, the log saying "Graphics memory has freed up —
+retiring this model's processor worker" before each. Every reload began with an
+empty cache and the worker computed the next token anyway: `使用命令命令命令…`.
+Qwen2.5-Coder-7B and Mistral-7B produced the same kind of nonsense.
+
+### How the cause was established
+
+Five hypotheses died on a two-node rig with room for every worker: the n-gram
+path (off → same garbage), activation compression, CPU↔GPU mixing, the
+three-segment shape, and model size — a Mistral-7B boomerang answered
+correctly. What the failing runs had and the rig did not was **memory
+pressure on the coordinator**. Then removal: `SWARMLLM_VRAM_SWAP_MIN_IDLE_SECS=100000`
+on the same node, same split, same peer → **0 retirements, 3 loads, "The
+capital of France is Paris."**; the default restored → the garbage back.
+
+### The fix, and why it has three parts
+
+- **`WorkerHandle::in_use`** — a response in flight OR a conversation held
+  between forwards (`kv_holders`, stamped by every forward, removed by
+  `release_request_kv` / `cancel_request`). All five sites ask it; guarded by
+  `whether_a_worker_is_in_use_is_decided_in_one_place`.
+- **`PromotionInputs::reason_still_holds`**, fed by `cpu_reason` — the
+  predicate the respawn itself reads first, so promotion and respawn cannot
+  disagree about where the model will land.
+- **`model_worker::forward_lacks_its_conversation`** — a forward past the
+  prompt pass whose request holds nothing on this worker is refused as
+  `ServiceUnavailable`. The first two stop THIS cause; this one turns every
+  other way of losing a worker mid-reply (a crash, an explicit unload, a peer
+  that restarted) into a visible failure instead of a wrong answer. vLLM's rule
+  for a preempted sequence is the same: swap its cache back or recompute it,
+  never decode without it.
+
+### Why a conversation stops counting after two minutes
+
+`CONVERSATION_GAP_SECS` (120 s since the last forward, or the cache TTL if
+shorter). A node serving a slice for a REMOTE coordinator is never told that
+reply finished — only the coordinator calls `release_request_kv` — so without
+a bound, a model that answered a peer once would stay "in use" for the whole
+ten-minute cache TTL, and a small machine would refuse its owner's own request
+for memory. An active reply touches its worker every few seconds (3-10 s per
+token on the slowest chains measured here), and its coordinator abandons a
+decode step long before two minutes. A reply that is silent longer and then
+resumes on a retired worker meets the refusal above — visibly.
+
+### What a change must keep
+
+- **Never read `responses` alone to mean "in use".** A sixth site would have
+  the same hole; the guard fails the build.
+- **Stamp on every forward path.** `forward_direct` and `forward_batch` both
+  call `note_conversation`; `generate` does not need to (its worker clears the
+  cache when the call returns).
+- **The refusal must stay `ServiceUnavailable`** across the IPC and network
+  hops (`the_refusal_keeps_its_type_across_the_process_boundary`) — that is what
+  lets the router re-plan a request that has not streamed yet.
+- **A fused decode batch declines when any member lacks its conversation**, so
+  the per-request path refuses that one and runs the rest.
+
+### Residual, deliberately left
+
+Promotion prices the slice a worker was SPAWNED with, while admission prices
+the slice being requested now, so between requests a promotion can still cost
+one pointless reload (never a wrong answer). And a serving node could be told
+when a remote reply ends — a completion notice would release its cache and its
+protection at once instead of after the gap. `docs/FUTURE_WORK.md` #93.

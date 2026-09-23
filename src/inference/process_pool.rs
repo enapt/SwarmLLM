@@ -85,6 +85,21 @@ fn spawn_failure_cooldown(consecutive_failures: u32) -> std::time::Duration {
 /// Default KV-cache TTL in seconds (10 minutes). Overridden by config at startup.
 pub const DEFAULT_KV_CACHE_TTL_SECS: u64 = 600;
 
+/// How long after its last forward a reply's conversation keeps its worker in
+/// use ([`WorkerHandle::in_use`]).
+///
+/// An INACTIVITY bound, not a deadline on the reply: a live reply touches the
+/// worker once per token, seconds apart (3-10 s per token measured on the
+/// slowest chains here), and its coordinator gives up on a decode step long
+/// before two minutes. What needs a bound at all is the conversation served
+/// for a REMOTE coordinator — this node is never told that reply finished, so
+/// without one a model that answered a peer once would count as busy for the
+/// whole cache TTL, and a small machine would refuse its own owner's request
+/// for memory for ten minutes. A reply silent past this and then resumed on a
+/// retired worker is refused by the worker (`forward_lacks_its_conversation`),
+/// visibly — never decoded from nothing.
+const CONVERSATION_GAP_SECS: u64 = 120;
+
 /// Per-request buffered channel capacity for multiplexed worker responses.
 /// Long decode streams emit one WorkerMsg::Token per generated token; 256 gives
 /// plenty of headroom for a caller that's slow to consume without stalling the
@@ -239,7 +254,15 @@ struct PromotionInputs {
     /// kernel floor. **A VRAM pin is deliberately NOT one of them** — that is
     /// the condition this whole decision exists to reconsider.
     permanently_cpu_bound: bool,
-    /// A request is in flight against the worker right now.
+    /// [`ModelProcessPool::cpu_reason`] still has an answer — most often a VRAM
+    /// pin nothing has lifted yet. It is the predicate the respawn reads FIRST,
+    /// so while it holds, a retired worker comes straight back on the
+    /// processor: the pin is reconsidered once it is LIFTED, never while it
+    /// stands. Leaving this out retired a pinned model's worker on every
+    /// forward of a split reply (`docs/FUTURE_WORK.md` #93).
+    reason_still_holds: bool,
+    /// The worker is in use: a response in flight, or a request's cache held
+    /// between two forwards ([`WorkerHandle::in_use`]).
     busy: bool,
     idle_secs: u64,
     /// What the card would have to give it, as admission priced it.
@@ -276,21 +299,26 @@ struct PromotionInputs {
 ///
 /// - **Only a worker this node demoted.** On a machine with no card,
 ///   `cpu_placed` is false and there is nowhere to promote to.
-/// - **The reason must actually be gone.** Of the three causes in
-///   [`ModelProcessPool::cpu_reason`], only the OOM pin ever clears — so this
-///   fires on the event that lifted it rather than polling for one.
-/// - **Never a busy worker, and not one used inside
+/// - **The reason must actually be gone** (`reason_still_holds`). Of the three
+///   causes in [`ModelProcessPool::cpu_reason`], only the OOM pin ever clears —
+///   so this fires on the event that lifted it rather than polling for one.
+///   This bullet was written long before it was checked: the function used to
+///   ask only whether the estimate fit, so a model still pinned was retired,
+///   respawned on the processor by that same pin, and retired again.
+/// - **Never a worker in use, and not one used inside
 ///   [`vram_make_room_min_idle_secs`].** Unloading kills the subprocess, and a
 ///   request that arrives between the check and the kill dies with it. The idle
 ///   floor makes that window empty rather than merely unlikely. A model under
 ///   continuous load therefore waits for a gap in the traffic — the pin stays
-///   lifted, so the promotion happens at the first one.
+///   lifted, so the promotion happens at the first one. "In use" includes a
+///   reply holding its cache between two forwards ([`WorkerHandle::in_use`]):
+///   the gap between tokens is not a gap in the traffic.
 /// - **Cost the move before making it.** Retiring a worker and then failing
 ///   admission costs a cold start and buys nothing, so the model must fit the
 ///   budget as it stands *now*. An unreadable estimate (0) or an unset budget
 ///   is not evidence, and leaves the model where it is.
 fn should_return_to_gpu(i: &PromotionInputs) -> bool {
-    if !i.cpu_placed || i.permanently_cpu_bound || i.busy {
+    if !i.cpu_placed || i.permanently_cpu_bound || i.reason_still_holds || i.busy {
         return false;
     }
     if i.idle_secs < vram_make_room_min_idle_secs() {
@@ -373,6 +401,27 @@ struct WorkerHandle {
     /// Stored as seconds since `spawned_at` rather than a wall-clock stamp, so
     /// a clock step cannot make a busy worker look idle for hours.
     last_used: AtomicU64,
+    /// Requests whose conversation cache this worker holds BETWEEN forwards,
+    /// and when each last sent one.
+    ///
+    /// **A distributed reply is idle between tokens and is not finished.** It
+    /// reaches the worker as one forward per token, so `responses` is empty for
+    /// most of its life while the worker holds its cache — and `last_used` is
+    /// stamped at the START of a forward, so a slow CPU forward already reads
+    /// as idle the moment it returns. Every "is this worker in use?" that read
+    /// `responses` alone saw such a worker as free, and retiring it (to promote
+    /// it to the card, or to reclaim memory for another model) threw the cache
+    /// away mid-reply. The next forward ran on a fresh worker with nothing
+    /// behind it and the reply turned to garbage without an error anywhere:
+    /// GLM-4-9B, 14 retirements and 28 loads in one 96-token reply
+    /// (`docs/FUTURE_WORK.md` #93, gotcha #690).
+    ///
+    /// Stamped by every forward, removed when the request releases its cache
+    /// or is cancelled, and aged out [`CONVERSATION_GAP_SECS`] after its last
+    /// forward — the one bound a conversation served for a REMOTE coordinator
+    /// has, since nothing tells this node that reply finished. Read only
+    /// through [`WorkerHandle::in_use`].
+    kv_holders: std::sync::Mutex<std::collections::HashMap<Uuid, std::time::Instant>>,
     /// Why this node put this worker on the processor — `None` means it was
     /// spawned for the graphics card.
     ///
@@ -964,6 +1013,48 @@ impl WorkerHandle {
     /// opened once per model and then stopped checking. See gotcha #586.
     fn holds_gpu_memory(&self) -> bool {
         !self.charged_against_ram
+    }
+
+    /// **The single answer to "is this worker in use?"** — a response in flight,
+    /// OR a request's conversation cache it holds between two forwards.
+    ///
+    /// Every decision that can take a worker away asks this, never `responses`
+    /// alone: promotion to the card, both memory reclaims, and the in-use set
+    /// auto-manage reads. `tests/repo_consistency.rs` fails the build on a bare
+    /// read elsewhere, because each of the five sites that used to decide it
+    /// had the same blind spot (`kv_holders`).
+    fn in_use(&self, window: std::time::Duration) -> bool {
+        !self.responses.is_empty() || self.holds_live_conversation(window)
+    }
+
+    /// Does this worker hold the cache of a request that may still send it a
+    /// forward? Entries quiet for longer than `window`
+    /// ([`ModelProcessPool::conversation_window`]) are dropped as they are
+    /// found.
+    fn holds_live_conversation(&self, window: std::time::Duration) -> bool {
+        let mut holders = self
+            .kv_holders
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        holders.retain(|_, last| last.elapsed() <= window);
+        !holders.is_empty()
+    }
+
+    /// `request_id` has — or is about to have — a conversation cache on this
+    /// worker. Called by every forward, so the stamp is its last activity here.
+    fn note_conversation(&self, request_id: Uuid) {
+        self.kv_holders
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(request_id, std::time::Instant::now());
+    }
+
+    /// `request_id` released its cache here, or was cancelled.
+    fn forget_conversation(&self, request_id: Uuid) {
+        self.kv_holders
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&request_id);
     }
 
     /// Has this worker already been charged for `segment`?
@@ -2793,7 +2884,7 @@ impl ModelProcessPool {
                     model: e.key().clone(),
                     charge_mb: *e.value(),
                     idle_secs: worker.idle_secs(),
-                    busy: !worker.responses.is_empty(),
+                    busy: worker.in_use(self.conversation_window()),
                 })
             })
             .collect();
@@ -2842,7 +2933,8 @@ impl ModelProcessPool {
         should_return_to_gpu(&PromotionInputs {
             cpu_placed: true,
             permanently_cpu_bound: !self.gpu_is_usable(),
-            busy: !handle.responses.is_empty(),
+            reason_still_holds: self.cpu_reason(model_id).is_some(),
+            busy: handle.in_use(self.conversation_window()),
             idle_secs: handle.idle_secs(),
             gpu_estimate_mb: handle.gpu_estimate_mb,
             budget_mb,
@@ -2911,7 +3003,7 @@ impl ModelProcessPool {
                     model: e.key().clone(),
                     charge_mb: *e.value(),
                     idle_secs: worker.idle_secs(),
-                    busy: !worker.responses.is_empty(),
+                    busy: worker.in_use(self.conversation_window()),
                 })
             })
             .collect();
@@ -3119,7 +3211,7 @@ impl ModelProcessPool {
             let victim = self
                 .workers
                 .iter()
-                .filter(|e| e.key() != exclude && e.value().responses.is_empty())
+                .filter(|e| e.key() != exclude && !e.value().in_use(self.conversation_window()))
                 .min_by_key(|e| e.value().spawned_at)
                 .map(|e| e.key().clone());
             let Some(victim) = victim else {
@@ -3584,6 +3676,18 @@ impl ModelProcessPool {
     pub fn set_kv_cache_ttl(&self, ttl_secs: u64) {
         self.kv_cache_ttl_secs
             .store(ttl_secs, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// How long after its last forward a conversation still keeps its worker
+    /// [`WorkerHandle::in_use`]: [`CONVERSATION_GAP_SECS`], or the worker's own
+    /// cache TTL if that is shorter — past it the worker has dropped the cache
+    /// and there is nothing left to protect.
+    fn conversation_window(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(
+            self.kv_cache_ttl_secs
+                .load(std::sync::atomic::Ordering::Relaxed)
+                .min(CONVERSATION_GAP_SECS),
+        )
     }
 
     /// Apply the prefix-cache section of inference config to future-spawned workers.
@@ -4607,6 +4711,7 @@ impl ModelProcessPool {
             reader_handle,
             spawned_at: std::time::Instant::now(),
             last_used: AtomicU64::new(0),
+            kv_holders: std::sync::Mutex::new(std::collections::HashMap::new()),
             placed_on_cpu_because,
             charged_mb: AtomicU64::new(charged_mb),
             charged_segments: std::sync::Mutex::new(Vec::new()),
@@ -4800,6 +4905,9 @@ impl ModelProcessPool {
         // route any early error/reply. Unregistered on drop via ResponseGuard.
         let (resp_tx, mut resp_rx) = mpsc::channel(RESPONSE_CHANNEL_CAPACITY);
         let (mut guard, _) = handle.register_response(request_id, resp_tx, true);
+        // A forward leaves this request's cache on the worker for the next one,
+        // so the worker stays in use after `guard` is gone (`kv_holders`).
+        handle.note_conversation(request_id);
 
         let payload_buf: Vec<u8> = if vision_len == 0 {
             activations
@@ -4932,6 +5040,7 @@ impl ModelProcessPool {
             // cannot skip a single member, so cancelling one is meaningless.
             // Matches `cancelled_request_id`'s exclusion.
             let (g, _) = handle.register_response(f.request_id, tx, false);
+            handle.note_conversation(f.request_id);
             guards.push(g);
             receivers.push((f.request_id, rx));
         }
@@ -5504,8 +5613,18 @@ impl ModelProcessPool {
     /// Locally-originated cancels don't need this: `ResponseGuard` knows its
     /// own worker and messages it directly on drop.
     pub async fn cancel_request(&self, request_id: Uuid) {
+        self.forget_conversation_everywhere(request_id);
         self.notify_every_worker(&DaemonMsg::CancelRequest { request_id }, "cancel")
             .await;
+    }
+
+    /// `request_id` no longer keeps any worker in use. Every worker, for the
+    /// same reason the release fans out to every worker: a plan can give this
+    /// node two ranges of one model, and the request id is all we have.
+    fn forget_conversation_everywhere(&self, request_id: Uuid) {
+        for worker in self.workers.iter() {
+            worker.value().forget_conversation(request_id);
+        }
     }
 
     /// Send one fire-and-forget message to every live worker, **bounded**.
@@ -5592,6 +5711,7 @@ impl ModelProcessPool {
     /// precisely would mean tracking which workers a request reached for no
     /// benefit over sending it to all of them.
     pub async fn release_request_kv(&self, request_id: Uuid) {
+        self.forget_conversation_everywhere(request_id);
         self.notify_every_worker(&DaemonMsg::ReleaseRequestKv { request_id }, "release-kv")
             .await;
     }
@@ -5836,10 +5956,15 @@ impl ModelProcessPool {
     ///
     /// Anything asking "is this model busy?" should use this rather than
     /// re-deriving it from a caller-side map that covers one path.
+    ///
+    /// "In flight" includes a reply between two of its forwards, whose cache
+    /// the worker is holding — see [`WorkerHandle::in_use`]. Unloading the
+    /// model then would not fail that reply; it would corrupt it.
     pub fn models_with_inflight_requests(&self) -> Vec<ModelId> {
+        let window = self.conversation_window();
         self.workers
             .iter()
-            .filter(|e| !e.value().responses.is_empty())
+            .filter(|e| e.value().in_use(window))
             .map(|e| e.key().clone())
             .collect()
     }
@@ -6500,6 +6625,7 @@ mod tests {
             reader_handle,
             spawned_at: std::time::Instant::now(),
             last_used: AtomicU64::new(0),
+            kv_holders: std::sync::Mutex::new(std::collections::HashMap::new()),
             charged_mb: AtomicU64::new(0),
             charged_segments: std::sync::Mutex::new(Vec::new()),
             placed_on_cpu_because,
@@ -6722,6 +6848,77 @@ mod tests {
             "there is no card and no budget, so there is nothing to fit into. \
              Before this the resident check read placement and answered Some(true)"
         );
+    }
+
+    /// **The blind spot behind `docs/FUTURE_WORK.md` #93.** A split reply
+    /// reaches its worker one forward per token, so between two forwards
+    /// nothing is in flight — and all five "is this worker in use?" checks
+    /// read `responses` alone and answered no. The daemon then retired the
+    /// worker mid-reply (to promote it, or to reclaim memory) and the next
+    /// token was decoded from an empty cache.
+    #[tokio::test]
+    async fn a_reply_between_two_forwards_keeps_its_worker_in_use() {
+        let p = test_pool();
+        let m = ModelId("serving-a-split-reply".into());
+        let h = fake_worker_handle_on(false, Some(CpuReason::NotEnoughVram), true).await;
+        p.workers.insert(m.clone(), h.clone());
+        let reply = Uuid::new_v4();
+        assert!(
+            p.models_with_inflight_requests().is_empty(),
+            "nothing has used it yet"
+        );
+
+        h.note_conversation(reply);
+        assert!(
+            h.responses.is_empty(),
+            "between two forwards, nothing is in flight"
+        );
+        assert_eq!(
+            p.models_with_inflight_requests(),
+            vec![m.clone()],
+            "and the worker is still in use: it holds the reply's conversation"
+        );
+
+        p.release_request_kv(reply).await;
+        assert!(
+            p.models_with_inflight_requests().is_empty(),
+            "released the moment the reply finished"
+        );
+        h.note_conversation(reply);
+        p.cancel_request(reply).await;
+        assert!(
+            p.models_with_inflight_requests().is_empty(),
+            "and when it was cancelled"
+        );
+    }
+
+    /// Nothing tells a node that a reply it served for a REMOTE coordinator has
+    /// finished, so that conversation must stop counting on its own — or a
+    /// model that answered a peer once would stay "in use" for the whole cache
+    /// TTL and a small machine would refuse its owner's request for memory.
+    #[tokio::test]
+    async fn a_conversation_nobody_releases_stops_counting_after_the_gap() {
+        let p = test_pool();
+        let window = p.conversation_window();
+        assert_eq!(
+            window,
+            std::time::Duration::from_secs(CONVERSATION_GAP_SECS),
+            "the gap, not the ten-minute cache TTL"
+        );
+        let h = fake_worker_handle_on(false, None, true).await;
+        let Some(long_ago) = std::time::Instant::now().checked_sub(window * 2) else {
+            return; // a clock this young cannot express the case
+        };
+        h.kv_holders
+            .lock()
+            .unwrap()
+            .insert(Uuid::new_v4(), long_ago);
+        assert!(
+            !h.in_use(window),
+            "quiet for twice the gap: the reply is over"
+        );
+        h.note_conversation(Uuid::new_v4());
+        assert!(h.in_use(window), "a forward just now: the reply is live");
     }
 
     /// A worker charged against the card must not have its release taken off
@@ -7661,6 +7858,7 @@ mod admission_tests {
         PromotionInputs {
             cpu_placed: true,
             permanently_cpu_bound: false,
+            reason_still_holds: false,
             busy: false,
             idle_secs: 300,
             gpu_estimate_mb: 2200,
@@ -7690,13 +7888,32 @@ mod admission_tests {
 
     /// The two reasons that never clear — `gpu_layers = 0` and a card below
     /// the kernel floor — still block: respawning would land on the processor
-    /// again and cost a reload for nothing. (A VRAM pin does NOT block; that is
-    /// the condition this decision exists to reconsider.)
+    /// again and cost a reload for nothing. (A VRAM pin blocks only while it
+    /// stands — the next test. Once LIFTED it is the condition this decision
+    /// exists to reconsider.)
     #[test]
     fn a_model_permanently_bound_to_the_processor_is_not_retired() {
         let mut i = promotable();
         i.permanently_cpu_bound = true;
         assert!(!should_return_to_gpu(&i));
+    }
+
+    /// **The loop behind `docs/FUTURE_WORK.md` #93.** A model pinned after a
+    /// graphics out-of-memory, with a SMALL slice resident on the processor:
+    /// the slice's estimate (631 MB for two layers of GLM-4-9B) fits the card
+    /// easily, so the worker was retired — and the respawn read the same pin
+    /// and went straight back to the processor. On a split reply that ran once
+    /// per forward: 14 retirements and 28 loads in one 96-token reply, each
+    /// throwing the conversation away.
+    #[test]
+    fn a_model_still_pinned_to_the_processor_is_not_retired() {
+        let mut i = promotable();
+        i.gpu_estimate_mb = 631;
+        i.reason_still_holds = true;
+        assert!(
+            !should_return_to_gpu(&i),
+            "the respawn would read this same pin and land on the processor again"
+        );
     }
 
     /// Retiring a worker kills the subprocess. A request in flight dies with
