@@ -68,8 +68,11 @@ pub fn allowed_node_set(shared: &SharedState) -> Option<HashSet<NodeId>> {
         }
     }
 
-    // Optionally include LAN peers
-    if shared.config.pool.private_mode_allow_lan {
+    // Optionally include LAN peers. Read LIVE (`cfg()`): this is the privacy
+    // gate, and the boot snapshot kept admitting LAN peers after the owner had
+    // turned the allowance off and saved — until a restart (#281's class,
+    // FUTURE_WORK #101).
+    if shared.cfg().pool.private_mode_allow_lan {
         for entry in shared.peer_registry.iter() {
             if entry.value().is_lan_peer {
                 allowed.insert(entry.key().clone());
@@ -266,6 +269,45 @@ mod tests {
         let state = make_state(Config::default());
         let me = state.identity.node_id().clone();
         assert!(is_pool_member(&state, &me));
+    }
+
+    /// **The LAN allowance is read LIVE.** Private mode is a privacy boundary,
+    /// and the boot snapshot kept admitting LAN peers after the owner turned
+    /// `private_mode_allow_lan` off and saved, until a restart (#101).
+    #[test]
+    fn turning_the_lan_allowance_off_takes_effect_without_a_restart() {
+        let state = make_state(Config::default());
+        state.credits.private_mode.store(true, Relaxed);
+        let lan = crate::types::NodeId([5u8; 32]);
+        state.peer_registry.insert(
+            lan.clone(),
+            crate::types::PeerInfo {
+                node_id: lan.clone(),
+                addresses: vec![],
+                capability: None,
+                last_seen: chrono::Utc::now(),
+                latency_ms: Some(1),
+                trust_score: 0.5,
+                peer_id_bytes: None,
+                ack_srtt_ms: None,
+                active_request_count: 0,
+                first_seen: 0,
+                verified_transaction_count: 0,
+                is_lan_peer: true,
+                goodput_bytes_per_sec: None,
+                goodput_samples: 0,
+            },
+        );
+        // THE CONTROL: the default allows LAN peers, and this one is admitted.
+        assert!(allowed_node_set(&state).unwrap().contains(&lan));
+
+        let mut off = Config::default();
+        off.pool.private_mode_allow_lan = false;
+        state.apply_live_config(off);
+        assert!(
+            !allowed_node_set(&state).unwrap().contains(&lan),
+            "the saved setting must bind the privacy gate at once"
+        );
     }
 
     /// R134.7: cross-pool extras are empty when the user has not opted in,

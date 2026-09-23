@@ -623,7 +623,7 @@ async fn build_stats_message(state: &SharedState) -> String {
         .credits
         .offline_mode
         .load(std::sync::atomic::Ordering::Relaxed);
-    let allow_lan = state.config.pool.private_mode_allow_lan;
+    let allow_lan = state.cfg().pool.private_mode_allow_lan;
 
     // The hardware panel — RAM, the graphics gauge, the contribution figures.
     //

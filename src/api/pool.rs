@@ -644,7 +644,7 @@ pub async fn get_private_mode(State(state): State<AppState>) -> Json<serde_json:
         .credits
         .private_mode
         .load(std::sync::atomic::Ordering::Relaxed);
-    let allow_lan = state.shared_state.config.pool.private_mode_allow_lan;
+    let allow_lan = state.shared_state.cfg().pool.private_mode_allow_lan;
     let coverage = compute_pool_coverage(&state.shared_state).await;
 
     Json(serde_json::json!({
@@ -912,7 +912,7 @@ async fn compute_pool_coverage(shared: &crate::daemon::SharedState) -> serde_jso
     // Include LAN peers if configured
     let mut allowed = pool_members;
     allowed.insert(shared.identity.node_id().clone());
-    if shared.config.pool.private_mode_allow_lan {
+    if shared.cfg().pool.private_mode_allow_lan {
         for entry in shared.peer_registry.iter() {
             if entry.value().is_lan_peer {
                 allowed.insert(entry.key().clone());
