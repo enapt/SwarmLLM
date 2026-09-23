@@ -687,34 +687,33 @@
     pill.textContent = fit.text;
     row.appendChild(pill);
 
-    var actionBtn = document.createElement('button');
-    actionBtn.type = 'button';
-    actionBtn.className = 'browse-result-action';
-    if (fit.key === 'already') {
-      actionBtn.textContent = I18n.t('browse.action_hosting');
-      actionBtn.classList.add('browse-result-action-disabled');
-      actionBtn.disabled = true;
-    } else if (fit.key === 'too-large') {
-      actionBtn.textContent = I18n.t('browse.action_wishlist');
-      actionBtn.classList.add('browse-result-action');
-    } else {
-      actionBtn.textContent = I18n.t('browse.action_download');
-      actionBtn.classList.add('browse-result-action-primary');
-    }
-    actionBtn.addEventListener('click', function (e) {
-      e.stopPropagation();
-      if (actionBtn.disabled) return;
-      if (fit.key === 'too-large') {
-        // Add to wishlist (aspirational). Use the existing wishlist endpoint.
-        _browseAddToWishlist(repo);
+    // A model too large for the whole swarm gets NO action. It used to offer
+    // "+ Wishlist", whose click showed "Added … to the wishlist" and did
+    // nothing at all — there is no way to add to the wishlist, which is
+    // computed from what the swarm asks for. The row's own pill already says
+    // why nothing can be done here.
+    if (fit.key !== 'too-large') {
+      var actionBtn = document.createElement('button');
+      actionBtn.type = 'button';
+      actionBtn.className = 'browse-result-action';
+      if (fit.key === 'already') {
+        actionBtn.textContent = I18n.t('browse.action_hosting');
+        actionBtn.classList.add('browse-result-action-disabled');
+        actionBtn.disabled = true;
       } else {
+        actionBtn.textContent = I18n.t('browse.action_download');
+        actionBtn.classList.add('browse-result-action-primary');
+      }
+      actionBtn.addEventListener('click', function (e) {
+        e.stopPropagation();
+        if (actionBtn.disabled) return;
         // The variant the user chose in the size dropdown, if they opened it —
         // this read only the recommended one, so the dropdown did nothing.
         var chosen = row.querySelector('.browse-quant-row select');
         _browseDownload(repo, _browseVariant(repo, chosen ? chosen.value : null));
-      }
-    });
-    row.appendChild(actionBtn);
+      });
+      row.appendChild(actionBtn);
+    }
 
     // Expandable detail
     var detail = document.createElement('div');
@@ -823,13 +822,6 @@
       App.notifications && App.notifications.showToast &&
         App.notifications.showToast(I18n.t('browse.download_failed'), 'error');
     });
-  }
-
-  function _browseAddToWishlist(repo) {
-    // Best-effort: trigger a search query so the auto-manage scoring picks
-    // up the demand signal. Future improvement: explicit wishlist API.
-    App.notifications && App.notifications.showToast &&
-      App.notifications.showToast(I18n.t('browse.wishlist_added', { name: _prettyRepoName(repo.repo_id) }), 'info');
   }
 
   function _browseBind() {

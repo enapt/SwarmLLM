@@ -77,7 +77,7 @@ concurrent reads and `RwLock` for single values; shutdown is a
 - Vanilla HTML/CSS/JS — no framework, no build step, embedded via `include_dir!`.
   Detail in `.claude/rules/arch-frontend.md`, which loads when you open `frontend/`.
 - **5** WS message types, **2** broadcast channels. Do not add to either set.
-- i18n: **1396 translation keys** (**1398 entries per locale** incl. `_lang` + `_dir`) × 21,
+- i18n: **1394 translation keys** (**1396 entries per locale** incl. `_lang` + `_dir`) × 21,
   sorted. Counts asserted — **update BOTH CLAUDE.md and `docs/ARCHITECTURE.md`**.
   A new key MUST be translated into all 21; **no English fallback.**
 - Payload ~1196 KB, capped by `frontend_payload_stays_within_budget` — a
