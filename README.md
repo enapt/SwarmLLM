@@ -216,11 +216,14 @@ you play, pick a lighter contribution level in Settings, or set a
 when you open it; it doesn't start with your computer.
 
 **How much internet does it use?** A computer left running stays in touch with
-the swarm all the time, and uses more while it shares model parts. Today that
-is too much for a capped or pay-per-gigabyte connection. We are bringing it
-down — the latest fix targets most of it — and will publish a measured figure
-here once that fix has reached the swarm. You can cap how fast it shares model
-parts in Settings.
+the swarm all the time, and uses more while it shares model parts or answers
+requests. Measured on 24 September 2026 on a computer running the current
+release, idle and connected to six others: about **110 MB an hour received and
+130 MB an hour sent** — roughly 5 to 6 GB a day if it runs all day. Most of that
+is the swarm telling each other which models exist. That is still too much for
+a capped or pay-per-gigabyte connection, and we are still bringing it down. You
+can cap how fast it shares model parts in Settings, and it uses nothing while
+it is closed.
 
 **How much disk space?** SwarmLLM keeps what it stores within a disk limit —
 50 GB by default — which you can change in Settings.
