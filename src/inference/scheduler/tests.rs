@@ -357,6 +357,7 @@ fn simple_candidate(byte: u8, ranges: Vec<(u32, u32)>) -> NodeCandidate {
         observed_prefill_ms_per_layer_byte: None,
         has_gpu: false,
         held_ranges: Vec::new(),
+        published_room: None,
         goodput_bytes_per_sec: None,
     }
 }
@@ -473,6 +474,7 @@ fn greedy_assign_multi_range_candidate() {
             observed_prefill_ms_per_layer_byte: None,
             has_gpu: false,
             held_ranges: Vec::new(),
+            published_room: None,
             goodput_bytes_per_sec: None,
         },
         NodeCandidate {
@@ -501,6 +503,7 @@ fn greedy_assign_multi_range_candidate() {
             observed_prefill_ms_per_layer_byte: None,
             has_gpu: false,
             held_ranges: Vec::new(),
+            published_room: None,
             goodput_bytes_per_sec: None,
         },
     ];
@@ -1464,6 +1467,7 @@ fn cost_cand(
         observed_prefill_ms_per_layer_byte: None,
         has_gpu: false,
         held_ranges: Vec::new(),
+        published_room: None,
         goodput_bytes_per_sec: None,
     }
 }
@@ -2731,6 +2735,7 @@ fn one_node_is_not_made_standby_for_more_layers_than_it_can_run() {
         observed_prefill_ms_per_layer_byte: None,
         has_gpu: false,
         held_ranges: Vec::new(),
+        published_room: None,
         goodput_bytes_per_sec: None,
     };
 
@@ -2822,6 +2827,7 @@ fn a_node_with_room_still_stands_in_for_every_segment() {
         observed_prefill_ms_per_layer_byte: None,
         has_gpu: false,
         held_ranges: Vec::new(),
+        published_room: None,
         goodput_bytes_per_sec: None,
     };
     let seg = |byte: u8, r: (u32, u32)| PipelineSegment {
@@ -2913,6 +2919,7 @@ fn a_standby_is_chosen_by_cost_not_by_ping() {
         observed_prefill_ms_per_layer_byte: None,
         has_gpu: gpu,
         held_ranges: Vec::new(),
+        published_room: None,
         goodput_bytes_per_sec: None,
     };
 
@@ -3015,6 +3022,159 @@ fn capability_with_gpu(free_mb: Option<u64>) -> crate::types::NodeCapability {
         can_serve_inference: true,
         resident_layers: Vec::new(),
     }
+}
+
+/// What a range costs a peer that published its ranges, against its room for
+/// NEW layers: the layers its loader would add, plus — for every layer it
+/// already holds — this prompt's KV, which it has NOT paid for. Without that
+/// second term a warm peer is planned a long prompt over layers it holds for
+/// free and dies in attention (gotcha #447: a warm 6 GB card, 24 layers of an
+/// 8,111-token prompt, `CUDA_ERROR_OUT_OF_MEMORY` 22 s in).
+#[test]
+fn a_layer_a_peer_already_holds_still_costs_this_prompts_kv() {
+    let mut c = simple_candidate(2, vec![(0, 32)]);
+    c.held_ranges = vec![crate::inference::process_pool::HeldRange {
+        range: (0, 20),
+        releasable_layers: 0,
+    }];
+    let room = |reused_share: f64| super::PublishedRoom {
+        new_layers: Some(8),
+        new_layers_at_face_value: Some(8),
+        reused_share,
+    };
+
+    // A short prompt: the held range is free, a disjoint one costs its width.
+    c.published_room = Some(room(0.0));
+    assert_eq!(c.capacity_charge((0, 20)), 0, "held exactly: nothing new");
+    assert_eq!(c.capacity_charge((20, 28)), 8, "disjoint: all new");
+    // Contained in the held range: the loader keys ranges exactly and loads
+    // it again, so it is all new however much of it is resident.
+    assert_eq!(c.capacity_charge((4, 12)), 8);
+
+    // A long prompt whose KV is half a layer's full price: the same held range
+    // now costs ceil(20 × 0.5) = 10 layers of room, more than the 8 it has.
+    c.published_room = Some(room(0.5));
+    assert_eq!(c.capacity_charge((0, 20)), 10);
+    // Rounded UP, never down, so the charge cannot undercount a refusal.
+    c.published_room = Some(room(0.01));
+    assert_eq!(c.capacity_charge((0, 20)), 1);
+
+    // A peer that published nothing is charged the width, as before.
+    let plain = simple_candidate(3, vec![(0, 32)]);
+    assert_eq!(plain.capacity_charge((0, 20)), 20);
+}
+
+/// **FUTURE_WORK #99, gather half.** A peer that PUBLISHES the ranges behind
+/// its resident count is handed them as `held_ranges`, with a room for NEW
+/// layers — and its total (`max_hostable_layers`, which delegation, standbys
+/// and the greedy fallback read) is the same as a count-only peer's, because
+/// those consumers still mean TOTAL by it. A peer publishing only the count,
+/// as every earlier build does, is priced exactly as before.
+#[test]
+fn a_peer_that_publishes_its_ranges_is_priced_by_them() {
+    let state = make_shared_state();
+    let local = state.identity.node_id().clone();
+    let mid = ModelId("glm".into());
+    state.model_registry.register_manifest(make_manifest(
+        &mid.0,
+        32,
+        vec![ShardInfo {
+            index: 0,
+            layer_range: (0, 32),
+            size_bytes: 3_000_000_000,
+            hash: [0u8; 32],
+            tensors: vec![],
+        }],
+    ));
+    let with_ranges = NodeId([2u8; 32]);
+    let count_only = NodeId([3u8; 32]);
+    for (node, ranges) in [
+        (
+            &with_ranges,
+            vec![swarmllm_types::ResidentLayerRange {
+                start: 2,
+                end: 14,
+                releasable_layers: 0,
+            }],
+        ),
+        (&count_only, vec![]),
+    ] {
+        state.model_registry.record_shard_holder(
+            ShardId {
+                model_id: mid.clone(),
+                index: 0,
+            },
+            node.clone(),
+        );
+        let mut cap = capability_with_gpu(Some(1024));
+        cap.node_id = node.clone();
+        cap.resident_layers = vec![swarmllm_types::ResidentModelLayers {
+            model_id: mid.0.clone(),
+            layers: 12,
+            ranges,
+        }];
+        state.peer_registry.insert(
+            node.clone(),
+            PeerInfo {
+                node_id: node.clone(),
+                addresses: vec![],
+                capability: Some(cap),
+                last_seen: chrono::Utc::now(),
+                latency_ms: Some(10),
+                trust_score: 0.8,
+                peer_id_bytes: None,
+                ack_srtt_ms: None,
+                active_request_count: 0,
+                first_seen: 0,
+                verified_transaction_count: 0,
+                is_lan_peer: false,
+                goodput_bytes_per_sec: None,
+                goodput_samples: 0,
+            },
+        );
+        state.connected_node_ids.insert(node.clone());
+    }
+    let manifest = state.model_registry.get_manifest(&mid).unwrap();
+    let scheduler = PipelineScheduler::new(state);
+    let cands = scheduler.gather_candidates(
+        &manifest,
+        &local,
+        uuid::Uuid::new_v4(),
+        None,
+        super::Purpose::Route,
+        &|| false,
+    );
+    let find = |n: &NodeId| cands.iter().find(|c| &c.node_id == n).unwrap();
+    let (a, b) = (find(&with_ranges), find(&count_only));
+
+    assert_eq!(
+        a.held_ranges,
+        vec![crate::inference::process_pool::HeldRange {
+            range: (2, 14),
+            releasable_layers: 0,
+        }]
+    );
+    let room = a
+        .published_room
+        .expect("a peer that published its ranges has a room for new layers");
+    assert_eq!(
+        a.max_hostable_layers, b.max_hostable_layers,
+        "the TOTAL keeps its meaning for every consumer that reads it"
+    );
+    // No prompt, so no KV: the total is the room for new layers plus the 12
+    // held — the same free memory, read two ways.
+    assert_eq!(
+        room.new_layers.map(|n| n + 12),
+        a.max_hostable_layers,
+        "room for new layers is the total less what is held"
+    );
+    assert_eq!(room.reused_share, 0.0, "no prompt, no KV for held layers");
+
+    assert!(b.held_ranges.is_empty(), "a count is not a range");
+    assert!(
+        b.published_room.is_none(),
+        "a peer that published only a count is priced as before"
+    );
 }
 
 /// A peer that says how much of a model it is holding is charged full weight

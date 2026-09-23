@@ -203,6 +203,53 @@ budget provider that figure never reaches; both arms planned with the machine's
 whole RAM and the control passed for the wrong reason. The fixture now asserts
 its own premise (`max_local_hostable_layers == Some(0)`).
 
+### The peer half (2026-09-24, #99)
+
+**A peer is priced by the RANGES it holds when it says which they are.**
+`ResidentModelLayers::ranges` (`#[serde(default)]`, additive: gossip is JSON and
+nothing denies unknown fields) carries each range a peer's worker holds and what
+its loader would release for it, published by `resident_model_layers` from the
+same `ranges_held_by` the local planner reads — so a coordinator prices a peer's
+loader by the rules the peer prices itself by. Petals routes on exactly this:
+servers announce the contiguous block spans they serve.
+
+**What it broke.** Measured while verifying #95: the live node held [2..14) of
+GLM-4 and gossiped "12 resident". `PeerResidency::Layers(12)` credits those 12
+to ANY range, so the plan handed it [10..22) — the same credit, a different
+range — which its worker keys exactly and so had to load in full: 12 new layers,
+refused, failed over to a public peer.
+
+**The trap the fix had to avoid.** For peers `max_hostable_layers` means TOTAL
+layers, resident included, and `delegation_target`, `standby_has_room`, the
+greedy fallback and `cheapest_whole_model_peer` all read it that way — so it
+keeps that meaning. Only the pipeline search gets the finer figure,
+`PublishedRoom`: room for NEW layers (the Cold-shaped bound over the same free
+memory, from the same call) and the prompt's KV share. `capacity_charge` charges
+a range `added + ceil((width − added) × kv/(weights+kv))` — the bytes inequality
+`added × weights + width × kv ≤ usable`, divided through by one new layer's
+price. **The KV term is not optional**: a layer a peer holds has not paid for
+THIS prompt, and dropping it re-opens gotcha #447 (a warm 6 GB card handed 24
+layers of an 8,111-token prompt, dead in attention 22 s in). Held-range
+endpoints are split points for peers too, so the held shape is expressible.
+
+**A peer that publishes no ranges is priced exactly as before** — every build
+before this one, and `WarmAmountUnknown` keeps its generosity.
+
+**Evidence.** `a_peer_is_planned_the_range_it_holds_not_one_of_the_same_length`
+carries its own control (the count-only pricing hands the peer a range needing
+more than its 8 new layers) and goes red with the DP change toggled off —
+measured: `(10, 30)` instead of `(2, 14)`. Also
+`a_peer_that_publishes_its_ranges_is_priced_by_them` (gather: ranges read, total
+unchanged, room = total − held), `a_layer_a_peer_already_holds_still_costs_this_prompts_kv`,
+the publisher assertion in `held_ranges_carry_what_the_loader_would_release_for_them`,
+and `a_residency_entry_with_or_without_ranges_reads_as_it_was_sent` (types crate).
+**Live, two nodes of the new build** (`candle-cuda`, the TinyLlama split rig):
+request 2's per-candidate line read the peer as `held_ranges=[(12, 22)]
+new_layer_room=Some(22)` — published by its worker, gossiped, read by the
+planner; request 1, before anything was loaded, read `[]` / `None`.
+⚠ **Not yet exercised on a split whose plan MOVES between requests** — the rig's
+disjoint shards leave the planner no choice; that needs overlapping holdings.
+
 ## The hand-off gate proposes; the priced search decides
 
 `assemble_pipeline_for` no longer RETURNS the whole-model hand-off. When the

@@ -3541,23 +3541,38 @@ impl ModelProcessPool {
     /// Summed from each live worker's charged segments, which is the same
     /// bookkeeping the memory budget itself is kept on.
     pub fn resident_model_layers(&self) -> Vec<swarmllm_types::ResidentModelLayers> {
+        // Handles first, the map released before anything else is read: working
+        // out a releasable figure can mean parsing a GGUF header from disk, and
+        // that must not happen under the workers map's shard lock, which every
+        // spawn and reap takes to write.
+        let live: Vec<(ModelId, Arc<WorkerHandle>)> = self
+            .workers
+            .iter()
+            .filter(|e| !e.value().dead.load(Ordering::Acquire))
+            .map(|e| (e.key().clone(), e.value().clone()))
+            .collect();
         let mut out = Vec::new();
-        for entry in self.workers.iter() {
-            let handle = entry.value();
-            if handle.dead.load(Ordering::Acquire) {
-                continue;
-            }
-            let Ok(segments) = handle.charged_segments.lock() else {
-                continue;
-            };
-            let layers: u32 = segments
+        for (model_id, handle) in live {
+            // The same ranges, and the same releasable figure, that this
+            // node's own planner reads (`held_layer_ranges`) — a peer planning
+            // onto us must price our loader by the rules we price it by.
+            let held = self.ranges_held_by(&model_id, &handle);
+            let layers: u32 = held
                 .iter()
-                .map(|&((start, end), _)| end.saturating_sub(start))
+                .map(|h| h.range.1.saturating_sub(h.range.0))
                 .sum();
             if layers > 0 {
                 out.push(swarmllm_types::ResidentModelLayers {
-                    model_id: entry.key().0.clone(),
+                    model_id: model_id.0.clone(),
                     layers,
+                    ranges: held
+                        .iter()
+                        .map(|h| swarmllm_types::ResidentLayerRange {
+                            start: h.range.0,
+                            end: h.range.1,
+                            releasable_layers: h.releasable_layers,
+                        })
+                        .collect(),
                 });
             }
         }
@@ -3598,12 +3613,32 @@ impl ModelProcessPool {
         if handle.holds_gpu_memory() != on_gpu {
             return Vec::new();
         }
-        let per_layer_mb = self
-            .segment_cost_curve(model_id, on_gpu)
-            .map(|(_, per_layer)| per_layer)
-            .unwrap_or(0);
-        let Ok(segments) = handle.charged_segments.lock() else {
+        self.ranges_held_by(model_id, &handle)
+    }
+
+    /// Every range `handle` holds, each with what its loader would release for
+    /// it, priced on the device the worker's memory was charged to.
+    ///
+    /// The one place this is worked out, for this node's own planner
+    /// ([`Self::held_layer_ranges`]) and for what it tells peers
+    /// ([`Self::resident_model_layers`], FUTURE_WORK #99) — two derivations of
+    /// the releasable figure would let a peer plan a consolidation this node's
+    /// loader then refuses.
+    fn ranges_held_by(&self, model_id: &ModelId, handle: &WorkerHandle) -> Vec<HeldRange> {
+        let Ok(segments) = handle.charged_segments.lock().map(|s| s.clone()) else {
             return Vec::new();
+        };
+        // The per-layer figure is only needed to convert a range that was
+        // recorded at a cost, and `segment_cost_curve` parses the GGUF header
+        // off disk. A worker holding only the range it was spawned with — the
+        // common case — records zero and so costs no read at all, which
+        // matters because this also runs on every capability broadcast.
+        let per_layer_mb = if segments.iter().any(|&(_, mb)| mb > 0) {
+            self.segment_cost_curve(model_id, handle.holds_gpu_memory())
+                .map(|(_, per_layer)| per_layer)
+                .unwrap_or(0)
+        } else {
+            0
         };
         segments
             .iter()
@@ -6719,6 +6754,24 @@ mod tests {
         assert!(pool
             .held_layer_ranges(&ModelId("absent".into()), false)
             .is_empty());
+
+        // What PEERS are told (FUTURE_WORK #99) is the same ranges with the
+        // same releasable figures — a peer planning onto this node must price
+        // its loader by the rules this node prices it by — and the count
+        // beside them is their sum, as older builds read it.
+        let told = pool.resident_model_layers();
+        let entry = told
+            .iter()
+            .find(|r| r.model_id == model.0)
+            .expect("a resident model is announced");
+        assert_eq!(entry.layers, 28);
+        let mut ranges: Vec<_> = entry
+            .ranges
+            .iter()
+            .map(|r| ((r.start, r.end), r.releasable_layers))
+            .collect();
+        ranges.sort();
+        assert_eq!(ranges, vec![((0, 2), 0), ((14, 40), 26)]);
     }
 
     /// A live worker has already paid the fixed terms, and a further range is

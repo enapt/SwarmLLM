@@ -341,6 +341,38 @@ fn serving_inference_unless_told_otherwise() -> bool {
 pub struct ResidentModelLayers {
     pub model_id: String,
     pub layers: u32,
+    /// The exact ranges behind `layers`, as this node's loader keys them.
+    ///
+    /// **The count alone cannot say which plans are free** (FUTURE_WORK #99).
+    /// A worker keys its layers by exact `(start, end)`: an equal range loads
+    /// nothing, a range that strictly contains held ones drops them before
+    /// loading, and one contained in a held range is loaded a second time. So a
+    /// node holding `[2..14)` credited with "12 resident layers" was planned
+    /// `[10..22)`, needed 12 new layers, refused, and failed over. Petals routes
+    /// on exactly this — each server announces the contiguous block span it
+    /// serves, and clients route over the spans (<https://arxiv.org/pdf/2209.01188>).
+    ///
+    /// `#[serde(default)]` (empty), and empty keeps the count-only pricing an
+    /// older build's announcement gets — the additive-evolution rule. Adding a
+    /// field needs no feature bit here: gossip is JSON, and nothing in these
+    /// types denies unknown fields, so an older node reads past it.
+    #[serde(default)]
+    pub ranges: Vec<ResidentLayerRange>,
+}
+
+/// One range a node's worker holds, and what loading a range that strictly
+/// contains it would give back. See [`ResidentModelLayers::ranges`].
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ResidentLayerRange {
+    pub start: u32,
+    pub end: u32,
+    /// Layers of memory the loader releases when a strictly containing range
+    /// replaces this one — ZERO for the range a worker was spawned with, which
+    /// its admission recorded at no cost (`process_pool::HeldRange`). A peer
+    /// that sent nothing here is read as releasing nothing: the conservative
+    /// side, since over-crediting it is what plans a load it refuses.
+    #[serde(default)]
+    pub releasable_layers: u32,
 }
 
 impl NodeCapability {
@@ -697,6 +729,59 @@ mod version_compat_tests {
         assert_eq!(round.features, features::ALL);
         assert_eq!(round.protocol_version, PROTOCOL_VERSION);
         assert!(round.relay_capable);
+    }
+}
+
+#[cfg(test)]
+mod resident_ranges_tests {
+    use super::version_compat_tests::base_fields;
+    use super::*;
+
+    /// A residency entry from a build before FUTURE_WORK #99 carries a count
+    /// and no ranges, and must still parse — to NO ranges, which a reader
+    /// takes as "priced by the count, as before". And one that carries ranges
+    /// must survive the wire exactly, `releasable_layers` included, because a
+    /// peer's plan is priced off it.
+    #[test]
+    fn a_residency_entry_with_or_without_ranges_reads_as_it_was_sent() {
+        let mut v = base_fields();
+        v.as_object_mut().unwrap().insert(
+            "resident_layers".into(),
+            serde_json::json!([{ "model_id": "glm", "layers": 12 }]),
+        );
+        let old: NodeCapability = serde_json::from_value(v).unwrap();
+        assert_eq!(old.resident_layers.len(), 1);
+        assert_eq!(old.resident_layers[0].layers, 12);
+        assert!(
+            old.resident_layers[0].ranges.is_empty(),
+            "an older build's entry has no ranges, and must not be given any"
+        );
+
+        let entry = ResidentModelLayers {
+            model_id: "glm".into(),
+            layers: 14,
+            ranges: vec![
+                ResidentLayerRange {
+                    start: 2,
+                    end: 14,
+                    releasable_layers: 0,
+                },
+                ResidentLayerRange {
+                    start: 20,
+                    end: 22,
+                    releasable_layers: 2,
+                },
+            ],
+        };
+        let back: ResidentModelLayers =
+            serde_json::from_str(&serde_json::to_string(&entry).unwrap()).unwrap();
+        assert_eq!(back, entry);
+
+        // A range whose sender left `releasable_layers` out releases nothing —
+        // the side that cannot over-credit a peer.
+        let partial: ResidentLayerRange =
+            serde_json::from_value(serde_json::json!({ "start": 2, "end": 14 })).unwrap();
+        assert_eq!(partial.releasable_layers, 0);
     }
 }
 

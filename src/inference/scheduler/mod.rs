@@ -184,25 +184,84 @@ struct NodeCandidate {
     /// never to rank peers against each other, which is what the peer's own
     /// speed figures are for.
     has_gpu: bool,
-    /// The layer ranges this node's live worker for the model ALREADY holds, on
-    /// the device the request would use. **The local candidate only** — empty
-    /// for every peer, whose residency is priced by [`PeerResidency`] from what
-    /// it gossips.
+    /// The layer ranges this candidate's live worker for the model ALREADY
+    /// holds: for the local node, on the device the request would use; for a
+    /// peer, what it published (`ResidentModelLayers::ranges`, FUTURE_WORK #99)
+    /// — empty for a peer that published none, which is then priced by
+    /// [`PeerResidency`] alone, exactly as before.
     ///
-    /// `max_hostable_layers` is room for layers NOT yet loaded; these are the
-    /// layers that need none. Every local-capacity check charges a segment
-    /// [`Self::layers_it_would_add`] rather than its width, so a split this node
-    /// served a moment ago is still a plan it can make (FUTURE_WORK #95).
+    /// `max_hostable_layers` is room for layers NOT yet loaded on the local
+    /// node; these are the layers that need none. The DP charges a segment
+    /// [`Self::capacity_charge`] rather than its width, so a split a machine
+    /// served a moment ago is still a plan it can make (#95), and a peer is not
+    /// planned a range its loader must load afresh because it holds a
+    /// DIFFERENT one of the same length (#99).
     held_ranges: Vec<crate::inference::process_pool::HeldRange>,
+    /// A peer's room for NEW layers, and what a layer it already holds still
+    /// costs this prompt. `Some` only for a peer that published its ranges;
+    /// see [`PublishedRoom`].
+    published_room: Option<PublishedRoom>,
+}
+
+/// How much a peer that PUBLISHED its resident ranges can take on, in the
+/// units the pipeline search charges.
+///
+/// **`max_hostable_layers` keeps its meaning for peers — TOTAL layers,
+/// resident ones included** — because `delegation_target`, `standby_has_room`,
+/// the greedy fallback and `cheapest_whole_model_peer` all read it that way.
+/// The search alone needs the finer question, "what would THIS range cost that
+/// peer", and a total cannot answer it: 12 resident layers credit any 12-layer
+/// range, while the peer's loader keys ranges exactly and loads a different one
+/// in full (FUTURE_WORK #99).
+///
+/// In bytes the question is `added × weights + width × kv <= usable`: new
+/// layers need their weights and this prompt's KV, layers already held need
+/// the KV alone (they have not paid for THIS prompt — gotcha #447). Divided
+/// through by one new layer's full price (`weights + kv`), that is
+/// `added + (width − added) × reused_share <= new_layers` — so the room is a
+/// Cold-shaped bound and the charge is [`NodeCandidate::capacity_charge`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct PublishedRoom {
+    /// New layers (weights + this prompt's KV) its advertised free memory
+    /// buys, with our safety margin. `None` = cannot tell, never "no room".
+    new_layers: Option<u32>,
+    /// The same, taken at its word — what `CapacityBound::PeersAtFaceValue`
+    /// holds it to.
+    new_layers_at_face_value: Option<u32>,
+    /// What a layer it already holds costs this prompt, as a share of a new
+    /// layer: `kv / (weights + kv)`. 0 when either is unknown.
+    reused_share: f64,
 }
 
 impl NodeCandidate {
     /// Layers of NEW memory this candidate needs to run `range` — its width,
     /// less what its live worker already holds, by the worker's own rules
     /// (`process_pool::layers_added_by`). The width for any candidate holding
-    /// nothing, which is every peer.
+    /// nothing.
     fn layers_it_would_add(&self, range: (u32, u32)) -> u32 {
         crate::inference::process_pool::layers_added_by(range, &self.held_ranges)
+    }
+
+    /// What `range` costs this candidate against the cap the pipeline search
+    /// holds it to ([`parallax::CapacityBound`]), in layers.
+    ///
+    /// - A peer that published its ranges: the layers it would add, plus the
+    ///   reused layers' share of this prompt's KV, rounded UP so the charge
+    ///   never undercounts — see [`PublishedRoom`].
+    /// - Anyone else: [`Self::layers_it_would_add`] — for the local node, room
+    ///   for new layers is exactly what its cap measures (#95); for a peer that
+    ///   published nothing, holding nothing we know of, it is the width, and
+    ///   its figure already folds in residency (`PeerResidency`).
+    fn capacity_charge(&self, range: (u32, u32)) -> u32 {
+        let added = self.layers_it_would_add(range);
+        match self.published_room {
+            Some(room) => {
+                let reused = range.1.saturating_sub(range.0).saturating_sub(added);
+                let kv_units = (f64::from(reused) * room.reused_share).ceil() as u32;
+                added.saturating_add(kv_units)
+            }
+            None => added,
+        }
     }
 }
 
@@ -3382,13 +3441,39 @@ impl PipelineScheduler {
             // What of this model our own worker already holds, on the device
             // the request would use. Asked of the local node only; a peer's
             // residency is what it gossips (`PeerResidency`).
+            // A peer's, if it published them (FUTURE_WORK #99); see
+            // `NodeCandidate::held_ranges`.
+            let reported = if is_local {
+                None
+            } else {
+                self.shared_state.peer_registry.get(&node_id).and_then(|p| {
+                    p.capability.as_ref().and_then(|c| {
+                        c.resident_layers
+                            .iter()
+                            .find(|r| r.model_id == manifest.id.0)
+                            .cloned()
+                    })
+                })
+            };
             let held_ranges = if is_local {
                 self.shared_state
                     .model_process_pool
                     .held_layer_ranges(&manifest.id, has_gpu)
             } else {
-                Vec::new()
+                reported
+                    .as_ref()
+                    .map(|r| {
+                        r.ranges
+                            .iter()
+                            .map(|h| crate::inference::process_pool::HeldRange {
+                                range: (h.start, h.end),
+                                releasable_layers: h.releasable_layers,
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default()
             };
+            let mut published_room = None;
             let (max_hostable_layers, max_hostable_layers_at_face_value) =
                 if node_id == *local_node_id {
                     let ours = self
@@ -3403,15 +3488,7 @@ impl PipelineScheduler {
                     // us nothing about it — gossip is up to 30 s old, so a model
                     // it has just loaded would be missing — and falls back to
                     // the recency signal, which is what this did before.
-                    let reported_resident =
-                        self.shared_state.peer_registry.get(&node_id).and_then(|p| {
-                            p.capability.as_ref().and_then(|c| {
-                                c.resident_layers
-                                    .iter()
-                                    .find(|r| r.model_id == manifest.id.0)
-                                    .map(|r| r.layers)
-                            })
-                        });
+                    let reported_resident = reported.as_ref().map(|r| r.layers);
                     let residency = match reported_resident {
                         Some(layers) => PeerResidency::Layers(layers),
                         None if self.shared_state.peer_model_is_warm(
@@ -3429,7 +3506,7 @@ impl PipelineScheduler {
                     } else {
                         prompt_kv_per_layer_cpu
                     };
-                    let for_margin = |margin: f64| {
+                    let bound = |residency: PeerResidency, margin: f64| {
                         self.shared_state.peer_registry.get(&node_id).and_then(|p| {
                             max_hostable_layers(
                                 manifest.num_layers,
@@ -3442,7 +3519,26 @@ impl PipelineScheduler {
                             )
                         })
                     };
-                    (for_margin(DELEGATE_VRAM_MARGIN), for_margin(1.0))
+                    // Room for NEW layers is the Cold-shaped bound over the
+                    // same free memory — the advertised figure already
+                    // excludes what is resident — from the same function and
+                    // inputs as the totals below, so the two cannot drift.
+                    if !held_ranges.is_empty() {
+                        let full_price = bytes_per_layer.saturating_add(prompt_kv_per_layer);
+                        published_room = Some(PublishedRoom {
+                            new_layers: bound(PeerResidency::Cold, DELEGATE_VRAM_MARGIN),
+                            new_layers_at_face_value: bound(PeerResidency::Cold, 1.0),
+                            reused_share: if full_price == 0 {
+                                0.0
+                            } else {
+                                prompt_kv_per_layer as f64 / full_price as f64
+                            },
+                        });
+                    }
+                    (
+                        bound(residency, DELEGATE_VRAM_MARGIN),
+                        bound(residency, 1.0),
+                    )
                 };
             let gpu_vram_available_mb = if node_id == *local_node_id {
                 // Never used for the local node — the loader's own admission
@@ -3496,6 +3592,7 @@ impl PipelineScheduler {
                 observed_prefill_ms_per_layer_byte,
                 has_gpu,
                 held_ranges,
+                published_room,
             });
         }
 
@@ -3554,6 +3651,10 @@ impl PipelineScheduler {
                     .iter()
                     .map(|h| h.range)
                     .collect::<Vec<_>>(),
+                // A peer that published its ranges is held by the search to
+                // THIS, not `max_hostable_layers` (#99). Absent for everyone
+                // else, which is how the two pricings tell apart in a log.
+                new_layer_room = ?c.published_room.map(|r| r.new_layers),
                 expected_attempts = c.expected_attempts,
                 // The COUNT beside the multiplier, because the multiplier
                 // alone cannot distinguish "this peer is reliable" from

@@ -476,7 +476,12 @@ without ever being able to read them.
   `Layers(n)`, `Cold`, and `WarmAmountUnknown` for a peer that has published
   nothing, which keeps the older, more generous pricing so a mixed-version swarm
   keeps routing. Added 2026-09-11, additive and `#[serde(default)]`; the same
-  fact Petals publishes for the same reason.
+  fact Petals publishes for the same reason. **Since 2026-09-24 each entry also
+  carries its `ranges`** (`ResidentLayerRange`: start, end, and the layers its
+  loader releases if a containing range replaces it) — a count cannot say which
+  plans are free, because a worker keys layers by exact range (FUTURE_WORK #99).
+  The pipeline search prices such a peer per range (`PublishedRoom`,
+  `NodeCandidate::capacity_charge`); every other consumer still reads the total.
 - **How far apart two OTHER nodes are — `NodeCapability.coord`.** Every other
   latency figure in the scheduler is *our* round trip to a peer
   (`NodeCandidate::latency_ms`), so a chain of three peers in one city and a

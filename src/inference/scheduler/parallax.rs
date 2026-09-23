@@ -224,11 +224,17 @@ impl CapacityBound {
     ///
     /// There is no variant that returns `None` for a peer whose figure is
     /// known: that is the invariant this enum exists to carry.
+    ///
+    /// A peer that published its resident ranges is held to its room for NEW
+    /// layers and charged `NodeCandidate::capacity_charge`; one that did not is
+    /// held to its total and charged the width, as before (FUTURE_WORK #99).
     fn peer_cap(self, c: &NodeCandidate) -> Option<u32> {
-        match self {
-            Self::Everyone => c.max_hostable_layers,
-            Self::PeersAtFaceValue => c.max_hostable_layers_at_face_value,
-            Self::PeersUnbounded | Self::LocalUnbounded => None,
+        match (self, c.published_room) {
+            (Self::Everyone, Some(room)) => room.new_layers,
+            (Self::PeersAtFaceValue, Some(room)) => room.new_layers_at_face_value,
+            (Self::Everyone, None) => c.max_hostable_layers,
+            (Self::PeersAtFaceValue, None) => c.max_hostable_layers_at_face_value,
+            (Self::PeersUnbounded | Self::LocalUnbounded, _) => None,
         }
     }
 }
@@ -668,15 +674,17 @@ pub(super) fn route_shortest_path(
             split_points.push(num_layers - 1);
         }
     }
-    // Where this node's live worker already cuts the model. Those ranges cost
-    // it no new memory (`NodeCandidate::layers_it_would_add`), so they are
-    // the one local shape a node with no room left can still run — and they
-    // must be EXPRESSIBLE. They were cut at boundaries some earlier plan had
-    // on offer, often a capacity point that has since moved (a peer that is
-    // now warm reaches further), so nothing above guarantees them. Without
-    // these a split that answered one request could not be planned for the
-    // next (FUTURE_WORK #95).
-    for c in candidates.iter().filter(|c| &c.node_id == local_node_id) {
+    // Where a live worker already cuts the model — this node's, or a peer's
+    // that published its ranges. Those ranges cost it no new memory
+    // (`NodeCandidate::layers_it_would_add`), so they are the one shape a
+    // machine with no room left can still run — and they must be
+    // EXPRESSIBLE. They were cut at boundaries some earlier plan had on offer,
+    // often a capacity point that has since moved (a peer that is now warm
+    // reaches further), so nothing above guarantees them. Without these a
+    // split that answered one request could not be planned for the next
+    // (FUTURE_WORK #95 here, #99 on a peer). Empty for any peer that
+    // published nothing.
+    for c in candidates {
         for h in &c.held_ranges {
             for p in [h.range.0, h.range.1] {
                 if p > 0 && p < num_layers {
@@ -811,18 +819,13 @@ pub(super) fn route_shortest_path(
             // is held to is the only thing a relaxation changes.
             capacity.peer_cap(c)
         };
-        // What a range costs against that cap. For the local node that is the
-        // layers it would ADD, because its bound is room for layers not yet
-        // loaded and its worker may already hold this very range (#95). A
-        // peer's figure already folds in what it has resident
-        // (`PeerResidency`), so its cost is the width.
-        let charged = |range: (u32, u32)| -> u32 {
-            if is_local {
-                c.layers_it_would_add(range)
-            } else {
-                range.1 - range.0
-            }
-        };
+        // What a range costs against that cap — `NodeCandidate::capacity_charge`,
+        // the one definition: for the local node the layers it would ADD (its
+        // bound is room for layers not yet loaded, #95); for a peer that
+        // published its ranges the same plus the reused layers' KV (#99); for
+        // any other peer the width, since its figure already folds in what it
+        // has resident (`PeerResidency`).
+        let charged = |range: (u32, u32)| -> u32 { c.capacity_charge(range) };
         let over_capacity = cap.is_some_and(|k| charged((lo, hi)) > k);
         let mut push = |range: (u32, u32)| {
             if let Some(k) = cap {
@@ -1305,6 +1308,7 @@ mod tests {
             observed_prefill_ms_per_layer_byte: None,
             has_gpu: false,
             held_ranges: Vec::new(),
+            published_room: None,
             goodput_bytes_per_sec: None,
         }
     }
@@ -3274,6 +3278,73 @@ mod tests {
         // are cheaper here than a hop to the tail peer.
         assert_eq!(shape, vec![(1, (0, 2)), (2, (2, 14)), (1, (14, 20))]);
     }
+
+    /// **FUTURE_WORK #99: a peer credited with a COUNT is planned a range its
+    /// loader must load afresh.** Measured on 2026-09-24: a live node holding
+    /// [2..14) of GLM-4 reported "12 resident layers", was planned [10..22) —
+    /// the same credit, a different range — needed 12 new layers, refused, and
+    /// the request failed over to a public peer.
+    ///
+    /// Here the peer holds [2..14) and has room for 8 NEW layers (a total of
+    /// 20). It is 120x faster than this node, so the search gives it as much as
+    /// its bound allows. Held to its total and charged the width, it is handed
+    /// 20 layers of which every one is new — a load it refuses. Holding the
+    /// ranges it published, the only shape it can take in full is the one it
+    /// already holds.
+    #[test]
+    fn a_peer_is_planned_the_range_it_holds_not_one_of_the_same_length() {
+        let local = NodeId([1u8; 32]);
+        let mut me = cand(1, vec![(0, 40)], 0, 0.0, true, true, 0.5);
+        me.node_id = local.clone();
+        me.max_hostable_layers = Some(30);
+        me.max_hostable_layers_at_face_value = Some(30);
+        let mut peer = cand(2, vec![(0, 40)], 5, 0.0, true, true, 60.0);
+        // The total, as `PeerResidency::Layers(12)` prices it: 12 held + 8.
+        peer.max_hostable_layers = Some(20);
+        peer.max_hostable_layers_at_face_value = Some(20);
+        let peer_holds = [held((2, 14), 0)];
+
+        let route = |peer: NodeCandidate| {
+            route_shortest_path(
+                40,
+                &[me.clone(), peer],
+                &local,
+                true,
+                true,
+                CapacityBound::Everyone,
+                Some(17),
+            )
+            .expect("routable")
+        };
+        let peer_range = |segs: &[PipelineSegment]| {
+            segs.iter()
+                .find(|s| s.node_id.0[0] == 2)
+                .map(|s| s.layer_range)
+                .expect("the fast peer is used")
+        };
+
+        // THE CONTROL — the count-only pricing every earlier build gets.
+        let blind = route(peer.clone());
+        let handed = peer_range(&blind);
+        assert!(
+            crate::inference::process_pool::layers_added_by(handed, &peer_holds) > 8,
+            "the control must reproduce #99: {handed:?} needs more than the 8 new \
+             layers the peer has room for"
+        );
+
+        peer.held_ranges = peer_holds.to_vec();
+        peer.published_room = Some(crate::inference::scheduler::PublishedRoom {
+            new_layers: Some(8),
+            new_layers_at_face_value: Some(8),
+            reused_share: 0.0,
+        });
+        let segs = route(peer);
+        assert_eq!(
+            peer_range(&segs),
+            (2, 14),
+            "the peer is planned the range it holds, which costs it nothing new"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -3313,6 +3384,7 @@ mod transfer_cost_tests {
             max_hostable_layers_at_face_value: None,
             has_gpu: true,
             held_ranges: Vec::new(),
+            published_room: None,
         }
     }
 

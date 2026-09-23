@@ -41,6 +41,12 @@ every split this node had just served (#95). The DP prices a local RUN (what
 `merge_contiguous` will hand the loader), held ranges are split points, and a
 re-plan after the loader's refusal never plans past the local bound again.
 
+**A peer that publishes its ranges (`ResidentModelLayers::ranges`) is priced the
+same way** — `NodeCandidate::capacity_charge` against `PublishedRoom`'s room for
+NEW layers, KV of reused layers included (#99). ⚠ **`max_hostable_layers` keeps
+meaning TOTAL for peers** — four consumers read it so; only the search gets the
+finer figure. A peer publishing no ranges is priced as before.
+
 → `docs/invariants/scheduling.md`
 
 ## A plan that names this node for the whole model is a local generation
