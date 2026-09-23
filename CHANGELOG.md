@@ -1,5 +1,81 @@
 # Changelog
 
+## [0.3.201-alpha] — 2026-09-23
+
+**The Models tab's Download button works, the app no longer calls a privacy
+option "end-to-end encryption", idle computers send less background traffic,
+and a reverse proxy on the same computer no longer gives its visitors admin
+access.**
+
+**Fixed: the Models tab's Download button failed on every click.** Searching
+for a model in the Models tab and clicking Download was refused every time, and
+had been since the search was added in May, so someone new had no way to get a
+model from that tab. It now downloads what the row says: a model marked
+"✓ Runs locally" downloads every part, so you can chat with it straight away;
+otherwise it downloads one part as this computer's share of the swarm. The
+size you pick in the row's dropdown is now respected, "Runs locally" appears
+only when the whole model fits on this computer, and the empty chat's "Get
+shared test model" button now fetches the whole small model it promised.
+Models still arrive part by part, never as one large file.
+
+**Fixed for setups with a web server in front of SwarmLLM on the same
+computer.** This affects you only if you put nginx, Caddy, `tailscale serve`
+or Tailscale Funnel on the same computer as SwarmLLM and pointed it at
+127.0.0.1 — including anyone who followed the setup guide's nginx example. The
+person sitting at the computer gets a few things nobody else does: the
+dashboard receives its access key automatically, and only they can apply an
+update or shut the node down. SwarmLLM used to decide "sitting at the
+computer" by whether the connection came from the computer itself, and a proxy
+on the same computer connects that way on behalf of everyone who reaches it,
+so every visitor through it had admin access. Versions up to 0.3.200 are
+affected in that setup only; opening the dashboard in a browser on the same
+computer, or from another device on your network, was never affected. The
+request must now also be addressed to the computer itself and carry none of
+the headers proxies add. A dashboard opened through a proxy says so, in all 21
+languages, and asks for the access key. The guides now say to point a proxy at
+the computer's network address, never 127.0.0.1.
+
+**The privacy option is now described honestly.** The option that keeps a
+model's first and last steps on your own computer was labelled "End-to-end
+encryption", and the chat banner said your prompts "never leave this computer
+unencrypted". Neither was true: when a model is split across computers, the
+ones doing the middle steps work on numbers that can be turned back into much
+of what you wrote. The option is now called "Start and finish on this
+computer" in all 21 languages, and its descriptions say what it protects —
+other computers never receive your typed text or the reply — and what it does
+not. How the option works is unchanged; only what the app claims about it.
+
+**Less background network traffic.** An idle computer spent most of the
+network traffic it received hearing descriptions of models that had not
+changed, because every computer holding a model re-announced it every five
+minutes. A computer now stays quiet about a model the whole network was told
+about in the last 30 minutes. A change, or anything a newly connected computer
+needs, still goes out at once. On two test computers holding the same model,
+these announcements fell from 11 per computer over 40 minutes to 1 and 3. The
+saving grows as more of the network updates, and older versions work with it
+unchanged.
+
+**Packaged Linux installs (.deb and .rpm) check for new releases every
+hour**, like every other install, instead of every six hours.
+
+**Graphics cards: fewer requests per word.** On an NVIDIA card, adding each
+layer's result back in and the normalisation that follows it now run as one
+request to the card instead of two, which removes about 170 requests per word
+on a 3-billion-parameter model. Replies are byte-for-byte identical. As with
+0.3.200, no speed figure is claimed, because the change is smaller than our
+test machine can reliably measure. This release also fixes the cause of
+0.3.199's garbled replies, inside an optional mode that stays off by default;
+nothing changes for anyone on the default setting.
+
+**Documentation.** A new README written for people who aren't developers, with
+screenshots. The install guides no longer send Windows users to an installer
+that has not been built since April — they point to the zip downloads that do
+exist — and the Homebrew and AUR instructions, for packages that don't exist,
+are gone. The security and privacy claims across the guides now match the
+code: connections are encrypted in transit, but a computer doing part of the
+work can read what it computes on. Security reports now go through GitHub's
+private vulnerability reporting.
+
 ## [0.3.200-alpha] — 2026-09-22
 
 **Replaces 0.3.199-alpha, which was withdrawn before any node could install
