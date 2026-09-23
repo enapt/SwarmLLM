@@ -11502,6 +11502,16 @@ new. Worth doing for concurrent-decode memory efficiency — it is what lets vLL
 run many sessions on one card — but it is weeks, and it is not on the path back
 to any number this project has previously published.
 
+⚠ **Its kernels launch on a hardcoded `cudaStream_t stream = 0`** —
+`cache_kernels.cu` once, `attention_kernels.cu` twice (checked 2026-09-23). That
+is the exact defect that made v0.3.199-alpha emit garbage through
+candle-flash-attn (gotcha #683): stream 0 does not synchronise with a
+device's own non-blocking stream. Thread the caller's stream through before
+wiring it — upstream mistral.rs's `mistralrs-paged-attn` passes
+`dev.cuda_stream().cu_stream()` into every launcher. The flash-attn guard in
+`tests/repo_consistency.rs` starts checking these files the moment
+`candle-paged-attention` becomes a dependency.
+
 **The lesson worth keeping**: a feature flag being present in a build is not
 evidence the feature ran. Both halves of "FlashAttention + PagedAttention" were
 cited as the cause of the old benchmark; only one of them had a call site.

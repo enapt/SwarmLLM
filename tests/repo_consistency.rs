@@ -613,6 +613,168 @@ fn flash_attn_and_the_compute_cap_floor_agree() {
     );
 }
 
+/// C/CUDA/Rust source with `//` and `/* */` comments removed, so a guard over
+/// code cannot be satisfied — or tripped — by prose QUOTING the code, which the
+/// flash-attn patch's own comment does.
+fn strip_c_comments(src: &str) -> String {
+    let mut out = String::with_capacity(src.len());
+    let mut rest = src;
+    while !rest.is_empty() {
+        if let Some(after) = rest.strip_prefix("//") {
+            rest = after.find('\n').map_or("", |i| &after[i..]);
+        } else if let Some(after) = rest.strip_prefix("/*") {
+            rest = after.find("*/").map_or("", |i| &after[i + 2..]);
+        } else {
+            let c = rest.chars().next().expect("non-empty");
+            out.push(c);
+            rest = &rest[c.len_utf8()..];
+        }
+    }
+    out
+}
+
+fn without_whitespace(src: &str) -> String {
+    src.chars().filter(|c| !c.is_whitespace()).collect()
+}
+
+/// What stops a vendored attention kernel launching on a stream of its own
+/// choosing. Returns one line per violation; empty means the patch holds.
+///
+/// `api_cu`/`ffi_rs`/`lib_rs` are candle-flash-attn's `flash_api.cu`,
+/// `src/ffi.rs` and `src/lib.rs`; `paged` is `Some(kernels)` only when
+/// `candle-paged-attention` is actually a dependency.
+fn attention_stream_violations(
+    api_cu: &str,
+    ffi_rs: &str,
+    lib_rs: &str,
+    paged: Option<&[(String, String)]>,
+) -> Vec<String> {
+    let mut v = Vec::new();
+    let api = without_whitespace(&strip_c_comments(api_cu));
+    if api.contains("cudaStream_tstream=0;") {
+        v.push("flash_api.cu hardcodes `cudaStream_t stream = 0`".to_string());
+    }
+    if !api.contains("reinterpret_cast<cudaStream_t>(stream_ptr)") {
+        v.push("flash_api.cu does not launch on the caller's `stream_ptr`".to_string());
+    }
+    if !without_whitespace(&strip_c_comments(ffi_rs)).contains("stream_ptr:*mutc_void") {
+        v.push("ffi.rs's `run_mha` no longer takes `stream_ptr: *mut c_void`".to_string());
+    }
+    let lib = without_whitespace(&strip_c_comments(lib_rs));
+    let calls = lib.matches("ffi::run_mha(").count();
+    let passing = lib
+        .matches("stream.cu_stream()as*mutcore::ffi::c_void")
+        .count();
+    if calls == 0 {
+        v.push("lib.rs has no `ffi::run_mha(` call — renamed? update this guard".to_string());
+    } else if passing < calls {
+        v.push(format!(
+            "lib.rs calls `ffi::run_mha` {calls} time(s) but passes the device's \
+             stream in only {passing}"
+        ));
+    }
+    for (name, cu) in paged.unwrap_or_default() {
+        if without_whitespace(&strip_c_comments(cu)).contains("cudaStream_tstream=0;") {
+            v.push(format!(
+                "candle-paged-attention is now a dependency and {name} still hardcodes stream 0"
+            ));
+        }
+    }
+    v
+}
+
+/// The vendored flash-attention kernel launches on the DEVICE's stream.
+///
+/// Upstream candle-flash-attn 0.10.x hardcoded `cudaStream_t stream = 0`.
+/// That is harmless while candle runs on the legacy NULL stream and a data
+/// race the moment a device owns a stream: cudarc's `new_stream()` is
+/// `CU_STREAM_NON_BLOCKING`, which does not synchronise with stream 0, so the
+/// kernel read Q/K/V before they were written. v0.3.199-alpha shipped exactly
+/// that — every model emitted garbage on GPU (gotcha #683) — and upstream hit
+/// the same race (huggingface/candle PR #3596, fixed in 0.11.0 by #3655).
+///
+/// The runtime test, `flash_launches_on_the_devices_own_stream`, needs a CUDA
+/// build AND a card, so no CI job can run it. This one reads the source, so a
+/// re-vendor that drops the patch goes red on every push.
+///
+/// `candle-paged-attention` hardcodes stream 0 in three places too, and is
+/// deliberately exempt while nothing depends on it (`docs/ARCHITECTURE.md`,
+/// #257) — the moment something does, its kernels are checked as well.
+#[test]
+fn the_vendored_attention_kernels_launch_on_the_devices_stream() {
+    let root = repo_root();
+    let read =
+        |p: &str| std::fs::read_to_string(root.join(p)).unwrap_or_else(|e| panic!("read {p}: {e}"));
+    let manifest = read("Cargo.toml");
+    let paged_is_a_dependency = manifest
+        .lines()
+        .any(|l| l.trim_start().starts_with("candle-paged-attention") && l.contains('='));
+    let paged: Vec<(String, String)> = if paged_is_a_dependency {
+        let dir = root.join("vendor/candle-paged-attention/kernels");
+        std::fs::read_dir(&dir)
+            .unwrap_or_else(|e| panic!("read {}: {e}", dir.display()))
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|x| x == "cu"))
+            .map(|p| {
+                let body = std::fs::read_to_string(&p).expect("read .cu");
+                (p.file_name().unwrap().to_string_lossy().into_owned(), body)
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    let violations = attention_stream_violations(
+        &read("vendor/candle-flash-attn/kernels/flash_api.cu"),
+        &read("vendor/candle-flash-attn/src/ffi.rs"),
+        &read("vendor/candle-flash-attn/src/lib.rs"),
+        paged_is_a_dependency.then_some(paged.as_slice()),
+    );
+    assert!(
+        violations.is_empty(),
+        "a vendored attention kernel no longer launches on the device's own \
+         stream:\n  {}\nOn a device with its own stream that is a data race and \
+         a GARBAGE reply, not an error (v0.3.199-alpha, gotcha #683). Keep the \
+         SwarmLLM patch in vendor/candle-flash-attn.",
+        violations.join("\n  ")
+    );
+}
+
+/// The guard above catches the pre-fix source, in each of the forms it could
+/// come back in — planted, because a scan that finds nothing is otherwise
+/// indistinguishable from one that cannot find anything (gotcha #413).
+#[test]
+fn the_attention_stream_guard_catches_the_pre_fix_source() {
+    let fixed_cu = "void run_mha(float softcap, void *stream_ptr) {\n\
+                    // upstream: cudaStream_t stream = 0; // Use the default stream.\n\
+                    cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_ptr);\n}";
+    let fixed_ffi = "fn run_mha(softcap: f32,\n    stream_ptr: *mut c_void,\n);";
+    let fixed_lib = "ffi::run_mha(q_ptr,\n    /* stream_ptr */ stream.cu_stream() as *mut core::ffi::c_void,\n)";
+    assert!(
+        attention_stream_violations(fixed_cu, fixed_ffi, fixed_lib, None).is_empty(),
+        "the fixed shape — including a comment QUOTING the old line — must pass"
+    );
+
+    let old_cu =
+        "void run_mha(float softcap) {\n    cudaStream_t stream = 0; // Use the default stream.\n}";
+    assert!(!attention_stream_violations(old_cu, fixed_ffi, fixed_lib, None).is_empty());
+
+    let null_lib = "ffi::run_mha(q_ptr,\n    /* stream_ptr */ std::ptr::null_mut(),\n)";
+    assert!(!attention_stream_violations(fixed_cu, fixed_ffi, null_lib, None).is_empty());
+
+    let two_calls_one_fixed = format!("{fixed_lib}\n{null_lib}");
+    assert!(
+        !attention_stream_violations(fixed_cu, fixed_ffi, &two_calls_one_fixed, None).is_empty(),
+        "the varlen call site is the one most easily missed"
+    );
+
+    let paged = vec![("attention_kernels.cu".to_string(), old_cu.to_string())];
+    assert!(
+        !attention_stream_violations(fixed_cu, fixed_ffi, fixed_lib, Some(&paged)).is_empty(),
+        "once paged-attention is wired in, its stream-0 kernels are a violation"
+    );
+}
+
 /// Every `[[example]]` in the root manifest must declare an explicit `path`.
 ///
 /// Without one, cargo resolves the example by scanning `examples/` and **fails

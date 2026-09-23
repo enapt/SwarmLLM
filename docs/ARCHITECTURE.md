@@ -72,8 +72,10 @@ swarmllm/
 │   │                          without it a GPU node loaded such a model then failed every
 │   │                          request, gotcha #288)
 │   ├── candle-flash-attn/     (cudart linked STATICALLY so the binary needs only the display driver;
-│   │                          18 bf16 kernels + the FP16_SWITCH bf16 branch dropped — unreachable, 37→19)
-│   ├── candle-paged-attention/ (kernels only — NOTHING references it; PagedAttention was never wired, #257)
+│   │                          18 bf16 kernels + the FP16_SWITCH bf16 branch dropped — unreachable, 37→19;
+│   │                          `run_mha` launches on the CALLER's stream, not stream 0 — .199's garbage, #683)
+│   ├── candle-paged-attention/ (kernels only — NOTHING references it; PagedAttention was never wired, #257;
+│   │                          its kernels still hardcode stream 0 — fix before wiring it, see FUTURE_WORK)
 │   └── libp2p-request-response/ (11 tests, `--lib`)
 ├── examples/      (runnable checks + harnesses, NOT `cargo test` targets:
 │                 frontend_load_check.js — loads every module in index.html's order;
@@ -928,10 +930,16 @@ fails everything. So:
   `model_cpu_fallback` and `model_cpu_fallback_gpu_too_old` — because the
   frontend translates by kind, and one message must not be shown for the other.
 
-`vendor/candle-flash-attn` carries two patches: static `cudart_static` (upstream
-links it dynamically, which would put a hard `libcudart` dependency on a binary
-that today needs only the display driver), and the 18 bf16 kernels removed
-(`run_attention` casts to f16 before every call).
+`vendor/candle-flash-attn` carries three patches: static `cudart_static`
+(upstream links it dynamically, which would put a hard `libcudart` dependency on
+a binary that today needs only the display driver), the 18 bf16 kernels removed
+(`run_attention` casts to f16 before every call), and **`run_mha` launches on
+the caller's stream** (2026-09-23). Upstream 0.10.x hardcoded
+`cudaStream_t stream = 0`, which races against a device that owns a
+non-blocking stream — the cause of v0.3.199-alpha's garbage output (gotcha
+#683); upstream fixed the same race in 0.11.0 (huggingface/candle #3596/#3655).
+`the_vendored_attention_kernels_launch_on_the_devices_stream` in
+`tests/repo_consistency.rs` keeps a re-vendor from dropping it.
 
 ### Attention Kernel Selection
 

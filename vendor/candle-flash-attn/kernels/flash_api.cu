@@ -58,7 +58,13 @@ extern "C" void run_mha(
     int window_size_left,
     int window_size_right,
 
-    float softcap
+    float softcap,
+
+    // SwarmLLM patch: the stream to launch on, handed in by the caller.
+    // Upstream 0.10.x hardcoded `cudaStream_t stream = 0` below — see there.
+    // Same shape as upstream's own fix (candle 0.11.0, PR #3655), so a bump
+    // past 0.10 drops this patch rather than conflicting with it.
+    void *stream_ptr
 ) {
     Flash_fwd_params params;
     // Reset the parameters
@@ -131,6 +137,33 @@ extern "C" void run_mha(
     params.num_splits = 1;
     params.unpadded_lse = unpadded_lse;
 
-    cudaStream_t stream = 0; // Use the default stream.
+    // SwarmLLM patch: launch on the CALLER's stream, never a hardcoded one.
+    //
+    // Upstream wrote `cudaStream_t stream = 0; // Use the default stream.`,
+    // which is correct only while candle itself runs on the legacy NULL
+    // stream. The moment a `CudaDevice` owns a stream of its own — cudarc's
+    // `new_stream()`, which is CU_STREAM_NON_BLOCKING and therefore does NOT
+    // synchronise with stream 0 — this kernel ran unordered against every
+    // kernel candle issued: it read Q/K/V before they were written and
+    // candle read its output before it existed. That is what v0.3.199-alpha
+    // shipped: every model emitted garbage on GPU (`给给给…`), because prefill
+    // (always flash on CUDA) filled the KV cache with it.
+    //
+    // Measured on the published .200 artifact, one binary, env switches only:
+    // own stream → garbage; own stream + CUDA_LAUNCH_BLOCKING=1 → byte-
+    // identical to the legacy stream (ordering, not arithmetic); own stream
+    // with flash replaced by standard attention → byte-identical to legacy +
+    // standard. → `docs/invariants/inference.md` § "One CUDA stream per device".
+    //
+    // Upstream hit the same race and fixed it the same way: huggingface/candle
+    // PR #3596 ("the attention kernels launch on a different stream than the
+    // one that produced Q/K/V … a data race"), landed via PR #3655 in 0.11.0.
+    //
+    // "The types CUstream and cudaStream_t are identical and may be used
+    // interchangeably" (CUDA Runtime API § Interactions with the Driver API),
+    // so the driver handle cudarc gives us is the runtime stream. On the legacy
+    // stream the caller hands in null — the default build launches exactly
+    // where it always did.
+    cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_ptr);
     run_mha_fwd(params, stream);
 }

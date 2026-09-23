@@ -183,6 +183,14 @@ submissions per layer, not faster arithmetic.
   `cuda_graph_probe.cu` arm A, `cudaError 900`), so this still has to be solved
   before graphs — but **reproduce under `--features cuda` on a real generation**,
   not a unit test.
+  ✅ **Cause found and fixed 2026-09-23: vendored flash-attn launched on
+  `cudaStream_t stream = 0`**, which a `CU_STREAM_NON_BLOCKING` device stream
+  does not synchronise with. `run_mha` now takes the caller's stream
+  (upstream's own 0.11.0 fix). ⚠ **Verify "X uses the device's stream" at the
+  LAUNCH** — flash took `dev.cuda_stream()` for its pointer guards only
+  (#685). Guarded in CI by
+  `the_vendored_attention_kernels_launch_on_the_devices_stream`; the switch
+  stays OFF until graph capture needs it.
 - **Fused kernels are OURS, in `kernels/*.cu`**, compiled to PTX by `build.rs`
   and loaded through candle's `get_or_load_custom_func` — not a fifth vendored
   crate, since `candle-kernels` is a registry dep. **Write each one to be

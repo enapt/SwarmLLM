@@ -402,16 +402,48 @@ llama.cpp does), and a fallback path for the first token and for prefill. The
 four capture preconditions are in § Ordering item 3b — **the stream one is a
 blocker, not a detail.**
 
-### ▶ Stage 4a — move every `CudaDevice` off the legacy stream ✅ SHIPPED
+### ▶ Stage 4a — move every `CudaDevice` off the legacy stream — ⛔ shipped broken in .199, now OPT-IN; cause found 2026-09-23
 
 The precondition, done on its own so that the graph change has one variable.
 ⛔ **SHIPPED BROKEN and REVERTED to opt-in.** `BackendDevice::new` takes
 `context.new_stream()` only under `SWARMLLM_CUDA_OWN_STREAM=1`; the default is
-the legacy stream again. **One line, because everything follows the device's
-stream**: `CudaBlas::new` and `CudaRng::new` are handed it (cublas via
-`cublasSetStream_v2`), `candle-flash-attn` takes `dev.cuda_stream()`, every
-launch uses `self.stream.launch_builder`, `synchronize()` syncs `self.stream` —
-and `default_stream()` had exactly one use in the whole backend.
+the legacy stream again. The change was one line on the argument that
+everything follows the device's stream: `CudaBlas::new` and `CudaRng::new` are
+handed it (cublas via `cublasSetStream_v2`), every launch uses
+`self.stream.launch_builder`, `synchronize()` syncs `self.stream`, and
+`default_stream()` had exactly one use in the whole backend.
+
+⛔ **That argument had one false line, and it was the one that mattered.** It
+said "`candle-flash-attn` takes `dev.cuda_stream()`". It does — for the
+`device_ptr` guards only. The kernel itself launched on
+`cudaStream_t stream = 0; // Use the default stream.` in `flash_api.cu`. cudarc's
+`new_stream()` is `CU_STREAM_NON_BLOCKING`, which by CUDA's own rules does not
+synchronise with stream 0, so flash read Q/K/V before candle had written them.
+Prefill is always flash on CUDA, so every KV cache filled with garbage.
+**Isolated on the published .200 binary with env switches alone** (2026-09-23,
+tinyllama + llama-3.2-3b, temperature 0):
+
+| arm | stream | attention | replies |
+|---|---|---|---|
+| base | legacy | flash | correct |
+| own | own | flash | **`给给给…` / `<\|reserved_special_token_247\|>…`** |
+| own + `CUDA_LAUNCH_BLOCKING=1` | own | flash | correct, identical to base |
+| own + `force_standard_attn` | own | standard | correct, identical to legacy + standard |
+
+Serialising every launch cures it (ordering, not arithmetic) and removing flash
+cures it (the one kernel off the stream). Upstream hit the identical race
+(huggingface/candle PR #3596: "the attention kernels launch on a different
+stream than the one that produced Q/K/V … a data race") and fixed it in 0.11.0
+via #3655 — we vendor 0.10.1. **Fixed by the same patch shape**: `run_mha` takes
+`stream_ptr` and the Rust side passes `stream.cu_stream()` (null on the legacy
+stream, so the default build launches exactly where it always did).
+`the_vendored_attention_kernels_launch_on_the_devices_stream` guards the source
+in CI; `flash_launches_on_the_devices_own_stream` is the runtime test, which
+needs a card.
+
+⚠ **Why the switch stays OFF anyway**: the own stream buys nothing by itself —
+it exists for graph capture (Stage 4b), which is not built. Flipping the default
+is its own change with its own behaviour gate, not a side effect of this fix.
 
 ⚠ **It changes the shape of the event-tracking argument**, which is why the
 comment on that patch and `docs/invariants/inference.md` were both rewritten:

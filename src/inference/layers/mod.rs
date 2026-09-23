@@ -3909,6 +3909,127 @@ mod flash_vs_standard {
         }
     }
 
+    /// Flash must launch on the DEVICE's stream, whatever stream that is.
+    ///
+    /// v0.3.199-alpha moved candle off the legacy NULL stream and every model
+    /// emitted garbage on GPU, because the vendored `flash_api.cu` hardcoded
+    /// `cudaStream_t stream = 0`. cudarc's `new_stream()` is
+    /// `CU_STREAM_NON_BLOCKING`, which does not synchronise with stream 0, so
+    /// flash read its inputs before candle had written them and candle read
+    /// its output before flash had. A device on the legacy stream cannot show
+    /// this — everything shares stream 0 there — which is why every other test
+    /// here, all built on `Device::new_cuda`, passed while it was broken.
+    ///
+    /// So this one takes `new_cuda_with_stream`, and WIDENS the race on
+    /// purpose: Q is produced behind a large matmul, so when flash is launched
+    /// the kernel that writes its input has not even started. On the device's
+    /// own stream that ordering is guaranteed; on stream 0 flash reads
+    /// whatever the buffer held. Standard attention on the same tensors is the
+    /// reference — it never leaves candle, so it is ordered either way.
+    ///
+    /// ⚠ **Verified to FAIL with the fix removed** (2026-09-23, `--features
+    /// cuda`): both Rust call sites passing `std::ptr::null_mut()` instead of
+    /// `stream.cu_stream()`, i.e. exactly the old launch. Round 0 happened to
+    /// pass; round 1 read `inf` — a race does not lose every time, which is
+    /// why this runs three rounds. With the fix every round reads 4.6e-4. See
+    /// `docs/invariants/inference.md` § "Why .199 broke". A race test that
+    /// has never been seen red proves nothing.
+    #[test]
+    fn flash_launches_on_the_devices_own_stream() {
+        let dev = match Device::new_cuda_with_stream(0) {
+            Ok(d) => d,
+            Err(e) => {
+                // Say so: this skip fires on a missing LD_LIBRARY_PATH as
+                // readily as on a missing card (the vacuous-pass trap the
+                // silu×up bit-identity test documents).
+                eprintln!("SKIPPED flash own-stream test: no CUDA device ({e})");
+                return;
+            }
+        };
+        let (n_head, n_kv_head, head_dim, q_len) = (24usize, 8usize, 128usize, 256usize);
+        assert!(!cuda_decode_prefers_standard(q_len, n_head, n_kv_head));
+
+        let q = Tensor::randn(0f32, 1.0, (1, n_head, q_len, head_dim), &dev).unwrap();
+        let k = Tensor::randn(0f32, 1.0, (1, n_kv_head, q_len, head_dim), &dev).unwrap();
+        let v = Tensor::randn(0f32, 1.0, (1, n_kv_head, q_len, head_dim), &dev).unwrap();
+        let m = causal_mask(q_len, q_len, &dev);
+        let std_out = {
+            let _g = ForceStandardAttnGuard::new(true);
+            run_attention(
+                &q,
+                &k,
+                &v,
+                Some(&m),
+                n_head,
+                n_kv_head,
+                head_dim,
+                None,
+                None,
+            )
+            .unwrap()
+        };
+        dev.synchronize().unwrap();
+
+        for round in 0..3 {
+            // `q + 0`, where the zero is only available after a ~4096³
+            // matmul: bit-identical to Q, but written late on the stream.
+            let big = Tensor::randn(0f32, 1.0, (4096, 4096), &dev).unwrap();
+            let zero = big
+                .matmul(&big)
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .narrow(0, 0, q.elem_count())
+                .unwrap()
+                .reshape(q.dims())
+                .unwrap()
+                .affine(0.0, 0.0)
+                .unwrap();
+            let q_late = (&q + &zero).unwrap();
+            let flash_out = run_attention(
+                &q_late,
+                &k,
+                &v,
+                Some(&m),
+                n_head,
+                n_kv_head,
+                head_dim,
+                None,
+                None,
+            )
+            .unwrap();
+            let rel = ((&std_out - &flash_out)
+                .unwrap()
+                .abs()
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .max(0)
+                .unwrap()
+                .to_scalar::<f32>()
+                .unwrap())
+                / std_out
+                    .abs()
+                    .unwrap()
+                    .flatten_all()
+                    .unwrap()
+                    .max(0)
+                    .unwrap()
+                    .to_scalar::<f32>()
+                    .unwrap()
+                    .max(f32::MIN_POSITIVE);
+            println!("round {round}: flash on an own-stream device vs standard: {rel:.3e}");
+            // Same F16 tolerance as the warm-prefix check above. A race does
+            // not land near it: it reads unwritten memory.
+            assert!(
+                rel < 5e-2,
+                "round {round}: flash disagrees with standard by {rel:.3e} on a device \
+                 with its own stream — it is launching on a different stream than \
+                 the kernels that produced its inputs (see flash_api.cu's patch)."
+            );
+        }
+    }
+
     /// Bottom-right aligned causal mask, `[q_len, k_len]`, additive f32
     /// (`0.0` visible, `-inf` masked — the representation
     /// `scaled_masked_softmax` documents).

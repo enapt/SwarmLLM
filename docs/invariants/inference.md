@@ -1019,6 +1019,70 @@ control that would report the claim wrong if capture were permitted.
 model in a `--features cuda` build — and is now opt-in via
 `SWARMLLM_CUDA_OWN_STREAM=1`, default OFF. See gotcha #683.
 
+### Why .199 broke: one kernel was not on the device's stream (found 2026-09-23)
+
+The one-stream-per-device invariant above is only as good as the claim that
+EVERY launch uses the device's stream. One did not. `vendor/candle-flash-attn/
+kernels/flash_api.cu` ended `cudaStream_t stream = 0; // Use the default
+stream.` The Rust side DID take `dev.cuda_stream()` — for its `device_ptr`
+guards — which is what the Stage 4a review read. **"X uses the device's stream"
+is verified at the LAUNCH, not at the first mention of the stream** (gotcha
+#685).
+
+cudarc's `new_stream()` creates `CU_STREAM_NON_BLOCKING`, and CUDA's runtime
+docs are explicit: "The legacy default stream … synchronizes with all other
+streams in the same CUcontext **except for non-blocking streams**." So on an own
+stream, flash read Q/K/V before candle's kernels had written them and candle
+read flash's output before it existed. Prefill is always flash on CUDA, so every
+KV cache was built from garbage.
+
+**Isolated on the published .200 binary with environment switches only** — no
+rebuild, so nothing but the switch moved (tinyllama and llama-3.2-3b,
+temperature 0):
+
+| arm | replies |
+|---|---|
+| legacy stream, flash | correct |
+| **own stream, flash** | **`给给给…` / `<\|reserved_special_token_247\|>…`** |
+| own stream, flash, `CUDA_LAUNCH_BLOCKING=1` | identical to the first arm |
+| own stream, `force_standard_attn` | identical to legacy + standard |
+
+Serialising every launch cures it, so it is ORDERING, not arithmetic; removing
+flash cures it, so it is the one kernel off the stream. Upstream candle hit the
+identical race (PR #3596: "the attention kernels launch on a different stream
+than the one that produced Q/K/V … a data race") and fixed it in 0.11.0 via
+#3655; mistral.rs's own flash and paged-attention crates pass
+`dev.cuda_stream().cu_stream()` into every launcher. We vendor 0.10.1.
+
+**The fix is upstream's patch shape**: `run_mha(…, void *stream_ptr)` launches on
+`reinterpret_cast<cudaStream_t>(stream_ptr)`, and both Rust call sites pass
+`stream.cu_stream()`. "The types CUstream and cudaStream_t are identical and may
+be used interchangeably" (CUDA runtime API, driver interop), and on the legacy
+stream cudarc's handle is null — so the default build launches exactly where it
+always did.
+
+What keeps it fixed:
+
+- `the_vendored_attention_kernels_launch_on_the_devices_stream`
+  (`tests/repo_consistency.rs`, every push) reads the source with comments
+  stripped, and `the_attention_stream_guard_catches_the_pre_fix_source` plants
+  the old forms. It also covers `candle-paged-attention`, which hardcodes stream
+  0 in three places and is exempt only while nothing depends on it.
+- `flash_launches_on_the_devices_own_stream` (`layers/mod.rs`, needs a card and
+  `--features flash-attn`) builds the device with `new_cuda_with_stream` and
+  WIDENS the race: Q is produced as `q + 0` behind a 4096³ matmul, so on a
+  wrong stream flash reads it before it exists. **Seen red**: with the old
+  null-stream launch put back, round 0 passed and round 1 read `inf` — a race
+  does not lose every time, hence three rounds. With the fix: 4.6e-4, all
+  rounds.
+- **Real generations on the fixed `--features cuda` build**: with
+  `SWARMLLM_CUDA_OWN_STREAM=1`, tinyllama and llama-3.2-3b replies are
+  byte-identical to the released v0.3.200 (which produced `给给给…` under the
+  same switch), with and without `CUDA_LAUNCH_BLOCKING=1`.
+
+⚠ **The switch stays OFF.** An own stream buys nothing until graph capture
+exists; flipping the default is its own change and needs its own behaviour gate.
+
 `Drop` has no synchronous fallback when the events are absent — it skips the two
 `stream.wait()` calls and frees as before — so disabling is strictly less work.
 `SWARMLLM_CUDA_EVENT_TRACKING=1` restores it.

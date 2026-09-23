@@ -205,6 +205,11 @@ impl FlashAttn {
                 /* window_size_left */ window_size_left,
                 /* window_size_right */ window_size_right,
                 /* softcap */ self.softcap.unwrap_or(0f32),
+                // SwarmLLM patch: the device's own stream, the one every
+                // candle kernel that produced Q/K/V and will read `dst` runs
+                // on. See `flash_api.cu` for what hardcoding 0 cost.
+                /* stream_ptr */
+                stream.cu_stream() as *mut core::ffi::c_void,
             )
         }
 
@@ -676,6 +681,9 @@ impl FlashAttnVarLen {
                 /* window_size_left */ window_size_left,
                 /* window_size_right */ window_size_right,
                 /* softcap */ self.softcap.unwrap_or(0.0),
+                // SwarmLLM patch: see the non-varlen call above.
+                /* stream_ptr */
+                stream.cu_stream() as *mut core::ffi::c_void,
             )
         }
 

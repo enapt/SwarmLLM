@@ -48,6 +48,13 @@ extern "C" {
         window_size_right: c_int,
 
         softcap: f32,
+
+        // SwarmLLM patch: the stream the kernel launches on — the device's own,
+        // `CudaStream::cu_stream()`. Upstream 0.10.x hardcoded stream 0 in
+        // `flash_api.cu`, which ran unordered against a device that owns a
+        // non-blocking stream: v0.3.199-alpha's garbage output. Same signature
+        // as upstream's fix in 0.11.0 (PR #3655).
+        stream_ptr: *mut c_void,
     );
 
 }
