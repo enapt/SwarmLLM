@@ -405,6 +405,8 @@ impl Tensor {
         Self::randn_impl(mean, std, s, device, false)
     }
 
+    // SwarmLLM patch: see `cuda_backend::device::count_htod_copy`.
+    #[track_caller]
     pub(crate) fn new_impl<A: crate::device::NdArray>(
         array: A,
         shape: Shape,
@@ -422,6 +424,8 @@ impl Tensor {
     }
 
     /// Creates a new tensor on the specified device using the content and shape of the input.
+    // SwarmLLM patch: see `cuda_backend::device::count_htod_copy`.
+    #[track_caller]
     pub fn new<A: crate::device::NdArray>(array: A, device: &Device) -> Result<Self> {
         let shape = array.shape()?;
         Self::new_impl(array, shape, device, false)
@@ -515,6 +519,8 @@ impl Tensor {
         Self::from_vec_impl(data, len, device, false)
     }
 
+    // SwarmLLM patch: see `cuda_backend::device::count_htod_copy`.
+    #[track_caller]
     pub(crate) fn from_vec_impl<S: ShapeWithOneHole, D: crate::WithDType>(
         data: Vec<D>,
         shape: S,
@@ -540,6 +546,8 @@ impl Tensor {
     /// ]);
     /// # Ok::<(), candle_core::Error>(())
     /// ```
+    // SwarmLLM patch: see `cuda_backend::device::count_htod_copy`.
+    #[track_caller]
     pub fn from_vec<S: ShapeWithOneHole, D: crate::WithDType>(
         data: Vec<D>,
         shape: S,
@@ -561,6 +569,8 @@ impl Tensor {
     /// ]);
     /// # Ok::<(), candle_core::Error>(())
     /// ```
+    // SwarmLLM patch: see `cuda_backend::device::count_htod_copy`.
+    #[track_caller]
     pub fn from_slice<S: ShapeWithOneHole, D: crate::WithDType>(
         array: &[D],
         shape: S,
@@ -2365,6 +2375,8 @@ impl Tensor {
     }
 
     /// If the target device is the same as the tensor device, only a shallow copy is performed.
+    // SwarmLLM patch: see `cuda_backend::device::count_htod_copy`.
+    #[track_caller]
     pub fn to_device(&self, device: &Device) -> Result<Tensor> {
         if self.device().same_device(device) {
             Ok(self.clone())

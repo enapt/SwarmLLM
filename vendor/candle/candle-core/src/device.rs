@@ -446,6 +446,8 @@ impl Device {
         }
     }
 
+    // SwarmLLM patch: see `cuda_backend::device::count_htod_copy`.
+    #[track_caller]
     pub(crate) fn storage_from_slice<D: WithDType>(&self, data: &[D]) -> Result<Storage> {
         match self {
             Device::Cpu => Ok(Storage::Cpu(data.to_cpu_storage())),
@@ -460,6 +462,8 @@ impl Device {
         }
     }
 
+    // SwarmLLM patch: see `cuda_backend::device::count_htod_copy`.
+    #[track_caller]
     pub(crate) fn storage<A: NdArray>(&self, array: A) -> Result<Storage> {
         match self {
             Device::Cpu => Ok(Storage::Cpu(array.to_cpu_storage())),
@@ -476,6 +480,8 @@ impl Device {
         }
     }
 
+    // SwarmLLM patch: see `cuda_backend::device::count_htod_copy`.
+    #[track_caller]
     pub(crate) fn storage_owned<S: WithDType>(&self, data: Vec<S>) -> Result<Storage> {
         match self {
             Device::Cpu => Ok(Storage::Cpu(S::to_cpu_storage_owned(data))),

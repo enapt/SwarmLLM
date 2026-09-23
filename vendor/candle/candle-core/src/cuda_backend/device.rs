@@ -80,6 +80,52 @@ pub fn take_kernel_launch_counts() -> Vec<(String, u64)> {
     v
 }
 
+/// SwarmLLM patch: host→device copies, counted by the SOURCE LINE that asked
+/// for them, under the same `SWARMLLM_COUNT_KERNELS=1` switch.
+///
+/// A decoded token was measured at ~30 `cuMemcpyHtoDAsync_v2` calls, FIXED per
+/// token rather than per layer (30.3 on a 22-layer model, 31.8 on a 28-layer
+/// one), and nsys on WSL2 cannot say whose they are: CPU sampling is
+/// unavailable there, so `--cudabacktrace` has nothing to unwind with, and the
+/// release binary is stripped. Each one is also an allocation and a free, so a
+/// copy is three submissions on a path that is bound by submission COUNT.
+///
+/// Every host→device copy in candle goes through [`CudaDevice::clone_htod`] or
+/// [`CudaDevice::memcpy_htod`] — nothing in this tree calls the cudarc stream
+/// directly — so counting there is complete. Both are `#[track_caller]`, and so
+/// is the chain above them that moves host data onto a device
+/// (`Tensor::{new, from_vec, from_slice, to_device}` → `Device::storage*` →
+/// `storage_from_*`), so the location recorded is the line in OUR code that
+/// built the tensor, not a line inside candle. A copy candle makes for its own
+/// reasons (a reduction's dims and strides, a strided op's layout) reports the
+/// candle line of that op, which names the op.
+fn htod_counts() -> &'static std::sync::Mutex<HashMap<String, u64>> {
+    static C: std::sync::OnceLock<std::sync::Mutex<HashMap<String, u64>>> =
+        std::sync::OnceLock::new();
+    C.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+#[inline]
+fn count_htod_copy(at: &'static std::panic::Location<'static>) {
+    if !counting_kernels() {
+        return;
+    }
+    if let Ok(mut m) = htod_counts().lock() {
+        *m.entry(format!("{}:{}", at.file(), at.line())).or_insert(0) += 1;
+    }
+}
+
+/// Drain the host→device copy counts by source line, highest first. Empty
+/// unless `SWARMLLM_COUNT_KERNELS=1`.
+pub fn take_htod_copy_counts() -> Vec<(String, u64)> {
+    let mut v: Vec<(String, u64)> = match htod_counts().lock() {
+        Ok(mut m) => m.drain().collect(),
+        Err(_) => return Vec::new(),
+    };
+    v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    v
+}
+
 /// SwarmLLM patch: `SWARMLLM_CUDA_EVENT_TRACKING=1` keeps cudarc's
 /// per-allocation read/write events on the default-stream device.
 ///
@@ -216,6 +262,8 @@ impl CudaDevice {
         }
     }
 
+    // SwarmLLM patch: `#[track_caller]` + the count — see `count_htod_copy`.
+    #[track_caller]
     pub fn memcpy_htod<
         T: cudarc::driver::DeviceRepr,
         Src: cudarc::driver::HostSlice<T> + ?Sized,
@@ -225,6 +273,7 @@ impl CudaDevice {
         src: &Src,
         dst: &mut Dst,
     ) -> Result<()> {
+        count_htod_copy(std::panic::Location::caller());
         self.stream.memcpy_htod(src, dst).w()
     }
 
@@ -259,10 +308,13 @@ impl CudaDevice {
         self.stream.memcpy_dtoh(src, dst).w()
     }
 
+    // SwarmLLM patch: `#[track_caller]` + the count — see `count_htod_copy`.
+    #[track_caller]
     pub fn clone_htod<T: cudarc::driver::DeviceRepr, Src: cudarc::driver::HostSlice<T> + ?Sized>(
         &self,
         src: &Src,
     ) -> Result<cudarc::driver::CudaSlice<T>> {
+        count_htod_copy(std::panic::Location::caller());
         self.stream.clone_htod(src).w()
     }
 }
@@ -787,6 +839,9 @@ impl BackendDevice for CudaDevice {
         })
     }
 
+    // SwarmLLM patch: `#[track_caller]` on this and the two below carries the
+    // tensor-creating caller's line down to `count_htod_copy`.
+    #[track_caller]
     fn storage_from_slice<T: crate::WithDType>(&self, s: &[T]) -> Result<Self::Storage> {
         let slice = match T::cpu_storage_ref(s) {
             CpuStorageRef::U8(storage) => {
@@ -846,6 +901,7 @@ impl BackendDevice for CudaDevice {
         })
     }
 
+    #[track_caller]
     fn storage_from_cpu_storage(&self, storage: &CpuStorage) -> Result<CudaStorage> {
         let slice = match storage {
             CpuStorage::U8(storage) => {
@@ -905,6 +961,7 @@ impl BackendDevice for CudaDevice {
         })
     }
 
+    #[track_caller]
     fn storage_from_cpu_storage_owned(&self, storage: CpuStorage) -> Result<CudaStorage> {
         let slice = match storage {
             CpuStorage::U8(storage) => {

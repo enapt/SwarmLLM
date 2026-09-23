@@ -164,6 +164,19 @@ pub(crate) fn dump_kernel_launches(seq_len: usize, index_pos: usize, num_layers:
                 n as f64 / num_layers.max(1) as f64
             );
         }
+        // Host→device copies since the previous report, by the source line
+        // that asked for them. "Since the previous report", not "in this
+        // forward": the next token's input is built BETWEEN two forwards, so
+        // it lands in the next one's table — which is still per token.
+        // Same `  <count>  ...` shape as the kernel rows, so a reader that
+        // takes the block's numbered lines (`examples/kernel_count_ab.sh`)
+        // keeps these with it.
+        let copies = candle_core::cuda::take_htod_copy_counts();
+        let copied: u64 = copies.iter().map(|(_, n)| *n).sum();
+        eprintln!("  {copied:>6}  htod  TOTAL host->device copies");
+        for (at, n) in copies {
+            eprintln!("  {n:>6}  htod  {at}");
+        }
     }
     #[cfg(not(feature = "candle-cuda"))]
     {

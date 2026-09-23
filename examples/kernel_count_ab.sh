@@ -30,6 +30,11 @@
 #     removes one op removes an alloc and a free too, and they are invisible
 #     here; count them as one each per removed op.
 #
+# It DOES report host->device copies (`cuMemcpyHtoDAsync`), by the source line
+# that asked for each one — the `htod` rows, printed from the same switch. That
+# is the only attribution this box has for them: nsys cannot take CPU
+# backtraces on WSL2 and the release binary is stripped.
+#
 # It restarts the node it measures, so do not run it while a tester is using
 # this one.
 #
@@ -131,17 +136,21 @@ python3 - "$OUT/on.kernels" "$OUT/off.kernels" <<'PYEOF'
 import re, sys
 
 def read(p):
-    per, total = {}, None
+    per, total, htod = {}, None, {}
     for line in open(p):
         m = re.match(r"^KERNELS .*— (\d+) launches", line)
         if m:
             total = int(m.group(1)); continue
         m = re.match(r"^\s+(\d+)\s+([\d.]+)/layer\s+(\S+)", line)
         if m:
-            per[m.group(3)] = float(m.group(2))
-    return total, per
+            per[m.group(3)] = float(m.group(2)); continue
+        # Host->device copies, by the source line that asked for them.
+        m = re.match(r"^\s+(\d+)\s+htod\s+(.+)$", line)
+        if m:
+            htod[m.group(2).strip()] = int(m.group(1))
+    return total, per, htod
 
-(ton, on), (toff, off) = read(sys.argv[1]), read(sys.argv[2])
+(ton, on, hon), (toff, off, hoff) = read(sys.argv[1]), read(sys.argv[2])
 names = sorted(set(on) | set(off))
 print(f"{'kernel':<34}{'on':>9}{'off':>9}{'delta':>9}")
 for n in names:
@@ -150,6 +159,11 @@ for n in names:
         continue
     print(f"{n:<34}{a:>9.2f}{b:>9.2f}{a-b:>+9.2f}")
 print(f"{'TOTAL launches/token':<34}{ton:>9}{toff:>9}{ton-toff:>+9}")
+if hon or hoff:
+    print()
+    print(f"{'host->device copies, by caller':<60}{'on':>6}{'off':>6}")
+    for k in sorted(set(hon) | set(hoff), key=lambda k: -max(hon.get(k, 0), hoff.get(k, 0))):
+        print(f"{k[-60:]:<60}{hon.get(k, 0):>6}{hoff.get(k, 0):>6}")
 PYEOF
 
 echo
