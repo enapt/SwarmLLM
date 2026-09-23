@@ -165,6 +165,13 @@ submissions per layer, not faster arithmetic.
   (decode) and `mul_mat_via_q8_1` (MMQ: prefill, batch). The first fix did only
   the vec one and nothing went red; the per-kernel count is what showed prefill
   still at 7.05 quantizations per layer.
+- **`layers::value_for_matmul` — the KV cache is read where it lies.** The
+  cache is a strided VIEW of a reserved buffer on every decode step, so a
+  `.contiguous()` on it is a full copy per layer per token (one per layer:
+  34 → 2 host→device copies on phi-3.5-mini, replies byte-identical).
+  Never `.contiguous()` a cache view before a matmul; `matmul_reads_rhs_in_place`
+  is the backends' rule. **The `htod` rows** of `SWARMLLM_COUNT_KERNELS=1` name
+  the source line of every host→device copy — nsys here cannot.
 - ⚠ **TTFT cannot measure prefill work**: a repeated prompt is served from the
   PREFIX CACHE and reads ~0.02 s regardless. Use `PROF seq_len=N` with unique
   prompts, filtered to ONE chunk size.

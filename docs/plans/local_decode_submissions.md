@@ -52,7 +52,7 @@ exact, and it is the counts that stages below move:
 | `cuEventCreate` | 1,314 | 59.7 | 0.85 | **two events per allocation**, from cudarc's cross-stream tracking |
 | `cuEventDestroy_v2` | 1,311 | 59.6 | 0.64 | |
 | `cudaLaunchKernel_v7000` | 45 | 2.1 | 1.47 | runtime-API launches (cuBLAS internals) |
-| `cuMemcpyHtoDAsync_v2` | **30** | 1.4 | 1.30 | **~one host→device copy per layer — unexplained** |
+| `cuMemcpyHtoDAsync_v2` | **30** | 1.4 | 1.30 | **one per layer: attention copying the V cache contiguous — removed 2026-09-24 (`layers::value_for_matmul`), 2 per token left** |
 | `cuMemcpyDtoHAsync_v2` | 1 | — | 0.32 | logits to host for sampling; a blocking round trip |
 | `cuMemsetD8Async` | 1.4 | — | 0.05 | was 321 before stage 1 |
 
@@ -536,17 +536,24 @@ Independent of graphs, and the only stage that also helps the CPU backend (which
 - **Fuse the residual add and the RMS norm** into their neighbours. 28.4 launches
   per layer for ~7 matmuls means over half the launches are small elementwise
   passes.
-- **Chase the ~30 `cuMemcpyHtoDAsync_v2` per token.** ⚠ **They are FIXED per
-  token, not per layer** — measured 30.3/token on a 22-layer model against
-  31.8 on a 28-layer one, i.e. +1.5 for +6 layers. The earlier reading of this
-  line ("roughly one per layer") was wrong, and the two-model comparison is
-  what settled it. So look in the per-token setup — embedding lookup, mask,
-  LM head, the handoff to sampling — not in the blocks.
-  Two are already identified and account for only two of them:
-  `split/token_embedding.rs`'s `to_device` on the token ids, and
-  `split/executor.rs`'s mask, both built on the host every forward. The
-  remaining ~28 need nsys backtraces (`--sample=cpu`) to attribute; worth
-  ~1.3 ms/token, so do it when something else already needs a profile run.
+- **Chase the ~30 `cuMemcpyHtoDAsync_v2` per token.** ✅ **DONE 2026-09-24 —
+  and they were ONE PER LAYER after all.** ⚠ This line used to say the
+  opposite ("FIXED per token, not per layer", from 30.3 on a 22-layer model
+  against 31.8 on a 28-layer one); that two-model comparison was confounded,
+  and attribution settled it where the comparison could not. The `htod` rows of
+  `SWARMLLM_COUNT_KERNELS=1` (DIAGNOSTICS § "Where a decode token actually
+  goes", 3c) named the line: attention made the V cache contiguous before its
+  second matmul, and the cache is a strided view of a reserved buffer on every
+  decode step, so every layer copied its whole V cache every token — a `ucopy`
+  launch, an upload of its dims and strides, an alloc and a free, and traffic
+  that grows with the context. `layers::value_for_matmul` reads the view in
+  place (both matmuls this build runs accept it). One binary, A/B'd by
+  `SWARMLLM_CONTIGUOUS_V`: copies 24 → 2 (tinyllama, 22 layers), 30 → 2
+  (llama-3.2-3b, 28), 34 → 2 (phi-3.5-mini, 32, MHA), launches −22/−28/−32,
+  **replies byte-identical on all three**. The two left are the token id
+  (`split/model.rs::token_tensor`) and the embedding gather's index layout
+  (`quantized/cuda.rs` `gather_rows`); the decode mask is not built at all
+  (`seq_len == 1 → None`). No speed claim — the count is the instrument.
 - **Sample on the device.** The one `cuMemcpyDtoHAsync_v2` per token copies
   vocab-sized logits back to be sampled on the host — a blocking round trip on
   a box where a round trip measured ~70 us. Greedy and top-k are both

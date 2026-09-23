@@ -1514,6 +1514,17 @@ submission COUNT, not bandwidth".
    is a correctness bug, not rounding.
    ⚠ It reads the LAST `seq_len=1` block: prefill's mix is different and much
    larger, and the warm-up request's forwards are in the same log.
+3c. **Whose host→device copies?** The same switch prints `htod` rows under the
+   kernel table: every `cuMemcpyHtoDAsync` since the previous forward, by the
+   SOURCE LINE that asked for it (`#[track_caller]` through the vendored
+   candle's tensor-creation chain, so a `Tensor::new` reports OUR line and a
+   copy candle makes for its own reasons reports the op's line —
+   `cuda_backend/mod.rs` `copy_strided_src` is a `.contiguous()` of a strided
+   view). `kernel_count_ab.sh` diffs them per arm. It is the only attribution
+   this box has: nsys cannot take CPU backtraces on WSL2, and the release
+   binary is stripped. First use (2026-09-24): 22 of TinyLlama's 24 copies per
+   token were one per layer, attention copying the whole V cache
+   (`layers::value_for_matmul`) — where the plan had read them as fixed per token.
 4. **Where inside a layer?** `SWARMLLM_PROFILE=1` **plus**
    `SWARMLLM_PROFILE_SYNC=1` for correct per-stage attribution on CUDA.
    ⚠ **Read the two runs for different questions.** Sync inserts a

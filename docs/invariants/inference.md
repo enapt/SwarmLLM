@@ -1405,6 +1405,62 @@ comparable to each other.
   nsys window probe and compare calls/token; a change that does not move the
   count did not do what it claims.
 
+### The value cache is read where it lies — `layers::value_for_matmul` (2026-09-24)
+
+**What it replaced.** Both attention paths ended `att.matmul(&v.contiguous()?)`
+— the grouped GQA path and the plain one MHA takes — inherited from upstream
+candle's model code, written when candle's matmul took no strided operand at
+all. The KV cache is a VIEW: `SeqCache` narrows a buffer reserved for the whole
+reply (`kv_budget::positions_to_allocate`, since 2026-09-12) along the sequence
+axis, so during decode `v` is strided on EVERY step and the "no-op" copied the
+layer's whole V cache every token: one `ucopy_f32` launch, one host→device upload
+of its dims and strides (`params_from_layout`), an alloc and a free — plus
+memory traffic proportional to the context.
+
+**How it was found.** The plan's ~30 `cuMemcpyHtoDAsync` per token had been read
+as FIXED per token from a two-model comparison (30.3 at 22 layers, 31.8 at 28).
+nsys cannot attribute a copy on WSL2 (no CPU sampling, stripped binary), so the
+vendored candle now counts every host→device copy by `#[track_caller]` location
+(`htod` rows of `SWARMLLM_COUNT_KERNELS=1`). First run: 22 of 24 at one candle
+line, `copy_strided_src` — exactly one per layer. **The comparison had been
+confounded; the attribution was not.** A count that "settles" a question by
+differencing two models is weaker than one that names the line.
+
+**What it was measured at** (one `candle-cuda` binary, `SWARMLLM_CONTIGUOUS_V`
+0 vs 1, 24 greedy tokens, `examples/kernel_count_ab.sh`):
+
+| model | layers | copies/token | launches/token | reply |
+|---|---|---|---|---|
+| tinyllama-1.1b (GQA 32/4) | 22 | 24 → 2 | 469 → 447 | identical |
+| llama-3.2-3b (GQA 24/8) | 28 | 30 → 2 | 595 → 567 | identical |
+| phi-3.5-mini (MHA 32/32) | 32 | 34 → 2 | 583 → 551 | identical |
+
+Each removed launch also removes an alloc and a free. No tok/s claim: the count
+is the instrument, and the context-proportional half of the saving only shows at
+long context.
+
+**Why it is safe.** A narrow along the sequence axis leaves each matrix's rows
+contiguous and the batch axes collapsible (`stride[0] == stride[1] * dims[1]`),
+which both matmuls this build runs accept — CUDA's `gemm_config` (`CUBLAS_OP_N`
+arm + `stride_a`) and the CPU backend's `ab_skip`. Metal and Accelerate are not
+enabled. `matmul_reads_rhs_in_place` mirrors those rules clause for clause and
+declines anything else, which is then copied exactly as before — so a layout it
+misjudges could only ever cost the old copy, never an error or a wrong value.
+It is the same arithmetic over the same operands in the same order; only the
+batch stride differs, which is why the replies are byte-identical rather than
+close.
+
+**What a change must keep.**
+- `attention_over_a_reserved_cache_view_is_bit_identical_to_a_copy` (CPU,
+  grouped and MHA, b = 1 and 2) proves the backend ACCEPTS the view as well as
+  that the answer is unchanged; `a_reserved_value_cache_reaches_the_matmul_without_a_copy`
+  goes red with `SWARMLLM_CONTIGUOUS_V=1` (null control run).
+- A new backend feature (Metal, Accelerate, MKL) means re-checking its matmul's
+  stride rules against `matmul_reads_rhs_in_place` before enabling it.
+- The two copies left per token are the token id (`split/model.rs::token_tensor`)
+  and `gather_rows`'s index layout; removing the first needs sampling on the
+  device (Stage 5).
+
 ### Why this is the same defect the CPU path already found
 
 § `inference::decode_attn::gqa_decode_attention_cpu` above ends: "The DRAM

@@ -1507,9 +1507,12 @@ pub(crate) fn standard_attention(
 
     let k = candle_transformers::utils::repeat_kv(k.clone(), n_head / n_kv_head)?;
     let v = candle_transformers::utils::repeat_kv(v.clone(), n_head / n_kv_head)?;
-    // `v` is used once per block; make it contiguous here rather than inside
-    // the loop so a blocked run does not repeat the copy per block.
-    let v = v.contiguous()?;
+    // `v` is used once per block; settle its layout here rather than inside
+    // the loop so a blocked run does not repeat any copy per block. With one
+    // query head per KV head (`repeat_kv` then returns the cache view itself)
+    // this is the decode path, and the view is read where it lies — see
+    // `value_for_matmul`.
+    let v = value_for_matmul(&v)?;
     let kt = k.t()?;
 
     let q_len = q.dim(2)?;
@@ -1602,7 +1605,8 @@ fn grouped_gqa_attention(
     // is a reinterpretation of the head axis, so it has to be contiguous first.
     let qg = q.contiguous()?.reshape((b, n_kv_head, n_rep * q_len, d))?;
     let kt = k.t()?;
-    let v = v.contiguous()?;
+    // Read where it lies when the matmul can — see `value_for_matmul`.
+    let v = value_for_matmul(v)?;
 
     let mask_g = match mask {
         None => None,
@@ -1624,6 +1628,65 @@ fn grouped_gqa_attention(
 
     let out = attention_scores_block(&qg, &kt, &v, mask_g.as_ref(), head_dim, attn_logit_softcap)?;
     out.reshape((b, n_head, q_len, d))
+}
+
+/// `v` as the attention's second matmul will read it: the tensor itself when
+/// that matmul can take its layout where it lies, a contiguous copy otherwise.
+///
+/// **The value cache reaches attention as a VIEW, strided on every decode
+/// step.** `SeqCache` narrows a buffer reserved for the whole reply along the
+/// sequence axis, and an unconditional `.contiguous()` here copied the layer's
+/// ENTIRE V cache on every token of every layer: a `ucopy` launch, a
+/// host→device copy of its dims and strides, an allocation and a free — 22 of
+/// the 24 host→device copies a TinyLlama token made, plus traffic that grows
+/// with the context. Measured 2026-09-24 with the `htod` rows of
+/// `SWARMLLM_COUNT_KERNELS=1`. The copy came from upstream candle's model code
+/// (`att.matmul(&v.contiguous()?)`), written when its matmul took no strided
+/// operand at all; the one it has now does.
+///
+/// A narrow along the sequence axis leaves the rows contiguous and the batch
+/// axes collapsible — the one condition both matmuls this build can run share
+/// (CUDA's `gemm_config` and the CPU backend's `ab_skip`; Metal and Accelerate
+/// are not enabled). [`matmul_reads_rhs_in_place`] is that condition, and
+/// anything it declines is copied exactly as before, so a layout it does not
+/// recognise costs the old copy, never an error.
+///
+/// `SWARMLLM_CONTIGUOUS_V=1` restores the unconditional copy, for an A/B
+/// inside one binary.
+fn value_for_matmul(v: &Tensor) -> CandleResult<Tensor> {
+    static FORCE_COPY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let force_copy =
+        *FORCE_COPY.get_or_init(|| std::env::var("SWARMLLM_CONTIGUOUS_V").as_deref() == Ok("1"));
+    if !force_copy && matmul_reads_rhs_in_place(v.dims(), v.stride()) {
+        Ok(v.clone())
+    } else {
+        v.contiguous()
+    }
+}
+
+/// Can a batched matmul read a right-hand operand of this layout without a
+/// copy, on every backend this build runs?
+///
+/// Mirrors the backends' own tests, clause for clause: rows of the matrix
+/// contiguous (`stride[-1] == 1` and `stride[-2] == cols`, each excused when
+/// its axis has one element — CUDA's `CUBLAS_OP_N` arm), and the batch axes
+/// either absent, single, or collapsible into one (`s0 == s1 * d1`, or one of
+/// the two of size 1 — `gemm_config`'s `stride_a` and the CPU `ab_skip`). A
+/// transposed operand CUDA could also take is answered `false` deliberately:
+/// the CPU backend's rule differs there, and a copy is the safe side.
+pub(crate) fn matmul_reads_rhs_in_place(dims: &[usize], stride: &[usize]) -> bool {
+    let r = dims.len();
+    if r < 2 || stride.len() != r {
+        return false;
+    }
+    let (rows, cols) = (dims[r - 2], dims[r - 1]);
+    let rows_contiguous = (stride[r - 1] == 1 || cols == 1) && (stride[r - 2] == cols || rows == 1);
+    let batch_collapsible = match (&dims[..r - 2], &stride[..r - 2]) {
+        ([], []) | ([_], [_]) => true,
+        ([d0, d1], [s0, s1]) => *s0 == *s1 * *d1 || *d0 == 1 || *d1 == 1,
+        _ => false,
+    };
+    rows_contiguous && batch_collapsible
 }
 
 /// One block of [`standard_attention`] — the original body, over whatever
@@ -3152,6 +3215,157 @@ mod blocked_attention_tests {
                     "grouped GQA diverges from expanded at ({n_head},{n_kv_head}) \
                      q_len={q_len}: worst {worst}"
                 );
+            }
+        }
+    }
+
+    /// A KV cache as attention receives it: the first `len` positions of a
+    /// buffer reserved for `cap`, i.e. a view narrowed along the sequence axis
+    /// and so strided whenever `len < cap` — the shape `SeqCache` hands out on
+    /// every decode step.
+    fn reserved_cache_view(
+        b: usize,
+        h: usize,
+        cap: usize,
+        len: usize,
+        d: usize,
+        seed: f32,
+    ) -> Tensor {
+        let n = b * h * cap * d;
+        let data: Vec<f32> = (0..n)
+            .map(|i| ((i as f32 * 0.37 + seed).cos()) * 0.5)
+            .collect();
+        Tensor::from_vec(data, (b, h, cap, d), &Device::Cpu)
+            .unwrap()
+            .narrow(2, 0, len)
+            .unwrap()
+    }
+
+    /// The value cache is read WHERE IT LIES, not copied first — the mechanism
+    /// `value_for_matmul` exists for. Asserted on the returned tensor's layout:
+    /// a copy is contiguous and a view of a reserved cache is not, so this fails
+    /// the moment the helper copies again.
+    #[test]
+    fn a_reserved_value_cache_reaches_the_matmul_without_a_copy() {
+        for b in [1usize, 2] {
+            let v = reserved_cache_view(b, 4, 64, 23, 16, 0.4);
+            assert!(
+                !v.is_contiguous(),
+                "premise: a reserved cache view is strided"
+            );
+            let read = value_for_matmul(&v).unwrap();
+            assert!(
+                !read.is_contiguous(),
+                "b={b}: the value cache was copied before the matmul"
+            );
+            assert_eq!(read.stride(), v.stride(), "b={b}: not the same view");
+        }
+    }
+
+    /// The layouts the backends take in place, and the ones that must still be
+    /// copied. Each `false` row is a layout a backend REJECTS — reading it in
+    /// place would be a `MatMulNonContiguous` error, not a slower matmul.
+    #[test]
+    fn which_value_layouts_a_matmul_reads_in_place() {
+        let cases: &[(&str, &[usize], &[usize], bool)] = &[
+            (
+                "contiguous",
+                &[1, 4, 23, 16],
+                &[4 * 23 * 16, 23 * 16, 16, 1],
+                true,
+            ),
+            // Narrowed along the sequence axis of a [b, 4, 64, 16] buffer.
+            (
+                "reserved cache, b=1",
+                &[1, 4, 23, 16],
+                &[4 * 64 * 16, 64 * 16, 16, 1],
+                true,
+            ),
+            (
+                "reserved cache, b=2",
+                &[2, 4, 23, 16],
+                &[4 * 64 * 16, 64 * 16, 16, 1],
+                true,
+            ),
+            ("rank 3", &[4, 23, 16], &[64 * 16, 16, 1], true),
+            // Narrowed along the HEAD axis with b > 1: the batch axes no longer
+            // collapse into one stride.
+            (
+                "head-narrowed, b=2",
+                &[2, 2, 23, 16],
+                &[4 * 23 * 16, 23 * 16, 16, 1],
+                false,
+            ),
+            // Transposed rows (`k.t()`): declined on purpose, see the helper.
+            (
+                "transposed",
+                &[1, 4, 16, 23],
+                &[4 * 23 * 16, 23 * 16, 1, 16],
+                false,
+            ),
+            (
+                "padded rows",
+                &[1, 4, 23, 16],
+                &[4 * 23 * 32, 23 * 32, 32, 1],
+                false,
+            ),
+            (
+                "rank 5",
+                &[1, 1, 4, 23, 16],
+                &[4 * 23 * 16, 4 * 23 * 16, 23 * 16, 16, 1],
+                false,
+            ),
+        ];
+        for (name, dims, stride, want) in cases {
+            assert_eq!(
+                matmul_reads_rhs_in_place(dims, stride),
+                *want,
+                "{name}: dims {dims:?} stride {stride:?}"
+            );
+        }
+    }
+
+    /// Reading the cache in place must not change a single bit of attention's
+    /// output, on the grouped path (GQA prompt chunks and speculative widths)
+    /// and on the plain one (MHA, where `repeat_kv` hands back the view
+    /// itself). It is the same arithmetic over the same operands in the same
+    /// order — only the batch stride differs — so anything short of
+    /// bit-identical is a bug. It also proves the CPU matmul ACCEPTS the view:
+    /// a layout it rejects would fail here rather than in a user's reply.
+    #[test]
+    fn attention_over_a_reserved_cache_view_is_bit_identical_to_a_copy() {
+        let dev = Device::Cpu;
+        // (n_head, n_kv_head): grouped GQA, then MHA.
+        for (n_head, n_kv_head) in [(8usize, 2usize), (4, 4)] {
+            for q_len in [2usize, 5] {
+                for b in [1usize, 2] {
+                    let head_dim = 16;
+                    let len = 23;
+                    let n = b * n_head * q_len * head_dim;
+                    let qd: Vec<f32> = (0..n).map(|i| ((i as f32 * 0.91).sin()) * 0.5).collect();
+                    let q = Tensor::from_vec(qd, (b, n_head, q_len, head_dim), &dev).unwrap();
+                    let k = reserved_cache_view(b, n_kv_head, 64, len, head_dim, 1.1);
+                    let v = reserved_cache_view(b, n_kv_head, 64, len, head_dim, 2.3);
+                    let viewed =
+                        standard_attention(&q, &k, &v, None, head_dim, n_head, n_kv_head, None)
+                            .unwrap();
+                    let copied = standard_attention(
+                        &q,
+                        &k.contiguous().unwrap(),
+                        &v.contiguous().unwrap(),
+                        None,
+                        head_dim,
+                        n_head,
+                        n_kv_head,
+                        None,
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        viewed.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
+                        copied.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
+                        "({n_head},{n_kv_head}) q_len={q_len} b={b}"
+                    );
+                }
             }
         }
     }
