@@ -1,5 +1,65 @@
 # Changelog
 
+## [0.3.203-alpha] — 2026-09-24
+
+**Phi-3.5 reads its prompts the way it was trained to and no longer wanders off
+topic, a model split across computers reuses the part another computer already
+has loaded, and graphics cards do less work for every word of a reply. Plus a
+round of fixes to confusing buttons and messages.** If you are updating from
+0.3.201-alpha, the 0.3.202-alpha notes below apply as well.
+
+**Fixed: Phi-3 and Phi-3.5 were given a line break their own tokenizer never
+produces.** After each turn marker in a conversation, Phi-3.5's own tokenizer
+drops the line break the chat format writes and starts the next word with a
+space; SwarmLLM kept the line break. Checked against the tokenizer Microsoft
+publishes with the model, every chat prompt differed before and every one
+matches now. The difference showed: asked for three primary colours, the
+previous release answered and then carried on inventing a new, "more
+difficult" instruction; this release answers and stays on topic, and its reply
+to a simple question matches llama.cpp's word for word. llama.cpp itself
+applies this rule only when the model's file name says "phi-3", which the
+widely shared Phi-3.5 file does not. Phi-3.5's replies now begin with a space,
+as Mistral's always have.
+
+**Fixed: a computer that already had part of a model loaded could be handed a
+different part.** When a model is split across computers, each one says how
+much of the model it is already holding. It said *how many* layers, not
+*which* ones — so it could be asked to run a different stretch of the same
+length, which it had to load from scratch, could not fit, and refused, sending
+your request off to another computer. Computers now say exactly which layers
+they hold, and the planner gives each one the part it already has. Computers on
+older versions keep working as before.
+
+**Improved: less work on the graphics card for every word of a reply.** For
+every word generated, every layer of the model used to make a full copy of the
+model's working memory of the conversation before reading it — work that grows
+the longer a conversation gets. That copy is gone: on the models tested, each
+word now needs 22 to 32 fewer graphics-card operations, and replies are
+unchanged, byte for byte. We have not measured the speed-up on our test
+machine, whose timings vary too much to show a change this size.
+
+**Fixed: small things that pointed the wrong way.**
+- Numbered steps in a chat reply showed as 1, 1, 1 instead of 1, 2, 3.
+- The "+ Wishlist" button in model search did nothing; it is gone.
+- The welcome screen's "Add more models" pointed to a button that did not
+  exist; it now names the one that does.
+- A model blocked by "Start and finish on this computer" now offers to fetch
+  the part it is missing, from its card on the Dashboard.
+- Several error messages now point to the button on the Dashboard that fixes
+  the problem, not only to a command, and say that private mode is on the My
+  Devices page, not in Settings.
+- Turning off "allow computers on my network" in Private Mode takes effect
+  straight away instead of after a restart.
+- Every reply now reports where it ran, and requests answered by a model that
+  was already loaded are counted in the Dashboard's figures.
+
+**For maintainers:** the release checks that found last week's split-reply bug
+now live in the repo and build their own test setup (`examples/split_rig.sh`,
+`examples/reply_ab.sh`); `examples/tokenizer_hf_reference.py` checks prompts
+against a model's own Hugging Face tokenizer; the GPU kernel counter also names
+the code behind every CPU-to-GPU copy; and `family_conformance.sh` no longer
+mistakes its binary for a model name when run without a port.
+
 ## [0.3.202-alpha] — 2026-09-24
 
 **GLM-4 models give correct answers again, prompts now reach several popular
