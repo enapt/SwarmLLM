@@ -447,8 +447,12 @@
       get.className = 'btn btn-sm';
       get.textContent = I18n.t('reference.cold_start_cta');
       get.title = I18n.t('reference.cold_start_hint', { size: formatSize(std.size_mb) });
+      // The WHOLE model: this button only exists when nothing on the swarm
+      // can answer, and its hint promises chatting straight away at the
+      // model's full size. A fair share is one part, which cannot answer
+      // anything alone — so the promise could not come true (2026-09-23).
       get.addEventListener('click', function () {
-        App.referenceModels.acquire('standard', true);
+        App.referenceModels.acquire('standard', false);
       });
       actions.appendChild(get);
     }

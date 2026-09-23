@@ -200,13 +200,22 @@ Probe a remote GGUF file (size, shard layout).
 ### POST /api/admin/hf/download-shards
 Download specific shard indices from HuggingFace. Bearer auth required.
 
-Supports `peer_fair_share: true` for smart distribution — the backend computes a deterministic fair share of shards using BLAKE3(node_id || model_id), and peers with auto-manage enabled auto-acquire the rest.
+Name exactly one of these, or the request is refused with a 400:
+
+- `"shards": [0, 1, 2]` — these parts.
+- `"all_shards": true` — every part of the file, worked out from the probe the
+  endpoint runs anyway. What the Models tab's **Download** sends for a model
+  that fits this computer.
+- `"peer_fair_share": true` — one seed part, chosen by BLAKE3(node_id ||
+  model_id) so different computers seed different parts. Other computers with
+  auto-manage on pick up the rest only once the model clears the auto-manage
+  trust gate, so on its own this does not make a model usable.
 
 ```bash
 curl -X POST http://localhost:8800/api/admin/hf/download-shards \
   -H "Authorization: Bearer YOUR_API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"repo_id": "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF", "filename": "qwen2.5-coder-7b-instruct.Q4_K_M.gguf", "peer_fair_share": true}'
+  -d '{"repo_id": "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF", "filename": "qwen2.5-coder-7b-instruct.Q4_K_M.gguf", "all_shards": true}'
 ```
 
 ### GET /api/admin/hf/source/{model_id}

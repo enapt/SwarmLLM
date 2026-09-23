@@ -10101,3 +10101,92 @@ fn the_demand_source_guard_catches_the_form_the_defect_took() {
         "the guard must not fire on `local_region_demand`, or the fix reads as the bug"
     );
 }
+
+/// `downloadShards(...)` call sites whose request names no work.
+///
+/// `/api/admin/hf/download-shards` needs exactly one of a `shards` list,
+/// `peer_fair_share` or `all_shards`, and refuses a body with none. The Models
+/// tab's Download button sent `{repo_id, filename}` from the day it was
+/// written (2026-05-11) until 2026-09-23 — every click a 400, in the one place
+/// a new user looks for a model — and nothing noticed, because nothing ever
+/// clicked it. The argument must be an object literal so this can read it.
+fn shard_downloads_naming_no_work(src: &str) -> Vec<String> {
+    let mut offenders = Vec::new();
+    let mut from = 0;
+    while let Some(rel) = src[from..].find("downloadShards(") {
+        let at = from + rel;
+        from = at + "downloadShards(".len();
+        let rest = src[from..].trim_start();
+        if !rest.starts_with('{') {
+            offenders.push(format!(
+                "not an object literal: {}",
+                rest.chars().take(60).collect::<String>()
+            ));
+            continue;
+        }
+        // The literal, braces balanced.
+        let mut depth = 0usize;
+        let mut end = rest.len();
+        for (i, c) in rest.char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = i + 1;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let literal = &rest[..end];
+        let names_work = ["shards:", "peer_fair_share:", "all_shards:"]
+            .iter()
+            .any(|k| literal.contains(k));
+        if !names_work {
+            offenders.push(literal.chars().take(80).collect());
+        }
+    }
+    offenders
+}
+
+#[test]
+fn every_shard_download_request_names_its_work() {
+    let offenders: Vec<String> = read_frontend_js()
+        .iter()
+        .flat_map(|(path, src)| {
+            shard_downloads_naming_no_work(src)
+                .into_iter()
+                .map(move |o| format!("{path}: {o}"))
+        })
+        .collect();
+    assert!(
+        offenders.is_empty(),
+        "a download-shards request that names no parts is refused with a 400 — \
+         pass `shards`, `peer_fair_share` or `all_shards` in an object literal:\n  {}",
+        offenders.join("\n  ")
+    );
+}
+
+/// The scan's reach, planted: the shape that shipped, a variable it cannot
+/// read, and the three correct forms.
+#[test]
+fn the_shard_download_guard_catches_a_request_naming_no_work() {
+    let shipped = "App.hf.downloadShards({ repo_id: repo.repo_id, filename: filename }).then(f);";
+    assert_eq!(shard_downloads_naming_no_work(shipped).len(), 1);
+    assert_eq!(
+        shard_downloads_naming_no_work("App.hf.downloadShards(body);").len(),
+        1,
+        "a variable hides what it asks for"
+    );
+    for ok in [
+        "App.hf.downloadShards({ repo_id: r, filename: f, shards: missing })",
+        "App.hf.downloadShards({ repo_id: r, filename: f, peer_fair_share: true })",
+        "App.hf.downloadShards({\n  repo_id: r,\n  filename: f,\n  all_shards: whole,\n})",
+    ] {
+        assert!(shard_downloads_naming_no_work(ok).is_empty(), "{ok}");
+    }
+    // The helper's own definition is not a call.
+    assert!(shard_downloads_naming_no_work("downloadShards: async function(body) {").is_empty());
+}

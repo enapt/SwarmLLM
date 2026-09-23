@@ -457,8 +457,9 @@ pub async fn enable_model_privacy(
             "model_id": model_id,
             "status": "no_download_source",
             "message": "No HuggingFace source recorded for this model, so the missing pieces \
-                        cannot be fetched directly. They may still arrive from peers; privacy \
-                        turns on by itself once both ends are present.",
+                        cannot be fetched directly. They may still arrive from peers; starting \
+                        and finishing on this computer turns on by itself once both ends are \
+                        present.",
             "needed_shards": needed,
             "cleared_explicit_off": had_explicit_off,
         })));
@@ -475,6 +476,7 @@ pub async fn enable_model_privacy(
             // have, not a new download.
             model_id: Some(model_id.clone()),
             peer_fair_share: false,
+            all_shards: false,
         }),
     )
     .await?;

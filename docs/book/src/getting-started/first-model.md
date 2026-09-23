@@ -44,7 +44,13 @@ button starts the download.
 ## Download via CLI
 
 ```bash
-# This computer downloads its fair share of the parts; other computers pick up the rest
+# Every part, so this computer can answer on its own
+curl -X POST http://localhost:8800/api/admin/hf/download-shards \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"repo_id": "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF", "filename": "qwen2.5-coder-7b-instruct-q4_k_m.gguf", "all_shards": true}'
+
+# Or one part as this computer's share; other computers may pick up the rest
 curl -X POST http://localhost:8800/api/admin/hf/download-shards \
   -H "Authorization: Bearer YOUR_API_KEY" \
   -H "Content-Type: application/json" \

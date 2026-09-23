@@ -249,6 +249,14 @@ pub async fn hf_search(
                 "variants": variants,
                 "recommended_variant": recommended_variant,
                 "fits_vram": fits_vram,
+                // Whether the WHOLE recommended file fits this node's memory
+                // budget — the only fit that makes "Runs locally" true, and
+                // the one that decides whether Download fetches every part.
+                // The budget itself is sent too (null when unknown, which
+                // counts as fitting, as above), so the browser can judge a
+                // variant the user picks instead of the recommended one.
+                "fits_full": fits_full,
+                "memory_budget_bytes": node_budget_bytes,
                 "fits_boomerang": fits_boomerang,
                 "fits_shard": fits_shard,
                 "est_shard_size": est_shard_size,

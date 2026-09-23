@@ -464,10 +464,12 @@
     if (_localHfRepos.has((repo.repo_id || '').toLowerCase())) {
       return { key: 'already', text: I18n.t('browse.fit_already') };
     }
-    if (repo.fits_boomerang) {
+    // "Runs locally" only when the WHOLE file fits — it used to follow the
+    // first-and-last-parts estimate, which leaves the middle to other computers.
+    if (repo.fits_full) {
       return { key: 'run', text: I18n.t('browse.fit_run_local') };
     }
-    if (repo.fits_shard) {
+    if (repo.fits_shard || repo.fits_boomerang) {
       return { key: 'host', text: I18n.t('browse.fit_host_shards') };
     }
     if (repo.network_replicas > 0) {
@@ -667,13 +669,19 @@
     main.appendChild(author);
     row.appendChild(main);
 
+    var fit = _fitPill(repo);
+
+    // The size is what Download will fetch: the whole file when it runs here,
+    // otherwise one part. It showed the first-and-last-parts estimate before,
+    // which is neither.
     var sizeEl = document.createElement('div');
     sizeEl.className = 'browse-result-size';
-    var sizeBytes = repo.est_boomerang_size || repo.est_shard_size || 0;
+    var recommended = _browseVariant(repo, null);
+    var sizeBytes = fit.key === 'run'
+      ? ((recommended && recommended.size_bytes) || 0)
+      : (repo.est_shard_size || 0);
     sizeEl.textContent = sizeBytes ? U.formatBytes(sizeBytes) : '—';
     row.appendChild(sizeEl);
-
-    var fit = _fitPill(repo);
     var pill = document.createElement('span');
     pill.className = 'browse-fit-pill browse-fit-pill-' + fit.key;
     pill.textContent = fit.text;
@@ -700,9 +708,10 @@
         // Add to wishlist (aspirational). Use the existing wishlist endpoint.
         _browseAddToWishlist(repo);
       } else {
-        var variants = repo.variants || [];
-        var pick = variants.length > 0 ? (variants.find(function (v) { return v.quant === repo.recommended_variant; }) || variants[0]) : null;
-        _browseDownload(repo, pick);
+        // The variant the user chose in the size dropdown, if they opened it —
+        // this read only the recommended one, so the dropdown did nothing.
+        var chosen = row.querySelector('.browse-quant-row select');
+        _browseDownload(repo, _browseVariant(repo, chosen ? chosen.value : null));
       }
     });
     row.appendChild(actionBtn);
@@ -771,15 +780,38 @@
     return row;
   }
 
+  // The variant a download is for: the one with this filename, else the
+  // recommended one, else the first.
+  function _browseVariant(repo, filename) {
+    var variants = repo.variants || [];
+    return variants.find(function (v) { return filename && v.filename === filename; }) ||
+      variants.find(function (v) { return v.quant === repo.recommended_variant; }) ||
+      variants[0] || null;
+  }
+
   function _browseDownload(repo, variant) {
     if (!App.hf || !App.hf.downloadShards) return;
-    var filename = variant ? variant.filename : (repo.variants && repo.variants[0] && repo.variants[0].filename);
+    var filename = variant ? variant.filename : null;
     if (!filename) {
       App.notifications && App.notifications.showToast &&
         App.notifications.showToast(I18n.t('browse.error_no_variant'), 'error');
       return;
     }
-    App.hf.downloadShards({ repo_id: repo.repo_id, filename: filename }).then(function (result) {
+    // Every part when this file fits here — someone who clicks Download on a
+    // model marked "Runs locally" wants to chat with it, and a share cannot
+    // answer anything alone. Otherwise one share, which is what "Host parts"
+    // offers. This request named neither until 2026-09-23, so the server
+    // refused every click (400 "shards array is required").
+    //
+    // An unknown budget counts as fitting, the same rule the search applies.
+    var budget = repo.memory_budget_bytes;
+    var whole = !budget || !variant.size_bytes || variant.size_bytes < budget;
+    App.hf.downloadShards({
+      repo_id: repo.repo_id,
+      filename: filename,
+      all_shards: whole,
+      peer_fair_share: !whole,
+    }).then(function (result) {
       if (result.ok) {
         App.notifications && App.notifications.showToast &&
           App.notifications.showToast(I18n.t('browse.download_started', { name: _prettyRepoName(repo.repo_id) }), 'success');

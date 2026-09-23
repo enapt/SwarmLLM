@@ -15,8 +15,9 @@ pub struct HfShardDownloadRequest {
     pub filename: String,
     /// Which shard indices to download (e.g. [0,1,2] for the first 3 shards).
     ///
-    /// Required unless `peer_fair_share` is set — an empty list with no fair
-    /// share is a `Validation` error, because it names no work to do. To learn a
+    /// Required unless `peer_fair_share` or `all_shards` is set — a request
+    /// naming none of the three is a `Validation` error, because it names no
+    /// work to do (`validate_shard_selection`). To learn a
     /// file's shard layout first, call `GET /api/admin/hf/probe`, which answers
     /// `shard_count`, `total_size` and `architecture` without downloading
     /// anything.
@@ -31,9 +32,10 @@ pub struct HfShardDownloadRequest {
     /// If omitted, a new model_id is derived from the filename.
     #[serde(default)]
     pub model_id: Option<String>,
-    /// When true AND `shards` is empty: compute a deterministic fair share of shards
-    /// based on the node's identity and peer count. Each node claims `ceil(shard_count / (peers + 1))`
-    /// shards, with assignment determined by BLAKE3(node_id || model_id) for consistency.
+    /// When true AND `shards` is empty: download ONE seed shard, chosen by
+    /// BLAKE3(node_id || model_id) so different nodes seed different shards.
+    /// (This said each node claims `ceil(shard_count / (peers + 1))` shards; the
+    /// handler has only ever taken one — see the `peer_fair_share` arm below.)
     ///
     /// Peers with auto-manage enabled then acquire the rest — **but only once the
     /// model clears the auto-manage trust gate** (`ModelTrustLevel::DemandVerified`),
@@ -51,6 +53,43 @@ pub struct HfShardDownloadRequest {
     /// which is the intended behaviour rather than a gap.
     #[serde(default)]
     pub peer_fair_share: bool,
+    /// When true AND `shards` is empty: every shard of the file, resolved from
+    /// the probe this handler runs anyway. What a person means by "Download" on
+    /// a model that fits this computer — they want to chat with it, and a share
+    /// of it cannot answer anything on its own.
+    ///
+    /// Exists so a caller that has only searched HuggingFace — and so does not
+    /// know the shard count — need not probe first: that is a second 16 MB
+    /// range fetch, ~25 s on a home connection, before this one repeats it.
+    /// Still shards, never the whole GGUF (CLAUDE.md "No full model download").
+    #[serde(default)]
+    pub all_shards: bool,
+}
+
+/// Which work a request names. Exactly one of an explicit list, a fair share
+/// or every shard — anything else is refused, because it names no work (the
+/// Models tab's Download button sent that for four months, 2026-05-11 →
+/// 2026-09-23, and every click was a 400) or two contradictory pieces of it.
+fn validate_shard_selection(
+    shards: &[u32],
+    peer_fair_share: bool,
+    all_shards: bool,
+) -> Result<(), crate::error::SwarmError> {
+    let named = [!shards.is_empty(), peer_fair_share, all_shards]
+        .iter()
+        .filter(|&&b| b)
+        .count();
+    match named {
+        1 => Ok(()),
+        0 => Err(crate::error::SwarmError::Validation(
+            "say which parts to download: a shards array (e.g. [0, 1, 2]), \
+             peer_fair_share=true, or all_shards=true"
+                .into(),
+        )),
+        _ => Err(crate::error::SwarmError::Validation(
+            "pass only one of: a shards array, peer_fair_share=true, all_shards=true".into(),
+        )),
+    }
 }
 
 pub async fn hf_download_shards(
@@ -59,30 +98,17 @@ pub async fn hf_download_shards(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let repo_id = body.repo_id;
     let filename = body.filename;
-    let shard_indices = body.shards;
+    let mut shard_indices = body.shards;
     let peer_fair_share = body.peer_fair_share;
+    let all_shards = body.all_shards;
 
     validate_hf_inputs(&repo_id, &filename)?;
 
-    if shard_indices.is_empty() && !peer_fair_share {
-        return Err(ApiError(crate::error::SwarmError::Validation(
-            "shards array is required (e.g. [0, 1, 2])".into(),
-        )));
-    }
-
-    // peer_fair_share is mutually exclusive with an explicit shards list —
-    // the fair-share assignment computation only runs when shards is empty
-    // (see `fair_share_peer_count` below). Mixing the two would silently
-    // ignore peer_fair_share and the dashboard would show a misleading
-    // "fair share mode" label on the resulting download.
-    if peer_fair_share && !shard_indices.is_empty() {
-        return Err(ApiError(crate::error::SwarmError::Validation(
-            "peer_fair_share is only meaningful when shards is empty — \
-             pass either an explicit shards array OR peer_fair_share=true, \
-             not both"
-                .into(),
-        )));
-    }
+    // Exactly one way of naming the work. peer_fair_share and all_shards are
+    // each resolved from the probe, so mixing either with an explicit list
+    // would silently ignore one of them — and the dashboard would label the
+    // download with a mode it is not in.
+    validate_shard_selection(&shard_indices, peer_fair_share, all_shards).map_err(ApiError)?;
 
     if shard_indices.len() > 256 {
         return Err(ApiError(crate::error::SwarmError::Validation(
@@ -95,6 +121,7 @@ pub async fn hf_download_shards(
         filename = %filename,
         shard_count = shard_indices.len(),
         peer_fair_share,
+        all_shards,
         "DIAG: hf_download_shards handler"
     );
 
@@ -267,6 +294,13 @@ pub async fn hf_download_shards(
         );
         tracing::warn!(%arch_str, "Refusing download: unsupported architecture");
         return Err(ApiError(crate::error::SwarmError::Validation(msg)));
+    }
+
+    // all_shards is resolved here, from the probe that has just run, so every
+    // step below — progress entries, the response, the download loop — sees
+    // the explicit list exactly as if the caller had sent it.
+    if all_shards {
+        shard_indices = (0..info.shard_count()).collect();
     }
 
     // Create initial acquisition progress entry with per-shard progress so that
@@ -1019,4 +1053,40 @@ fn generate_manifest_from_header(params: &ManifestGenParams<'_>) -> Result<(), S
     );
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A request must name exactly one kind of work. The empty case is the
+    /// Models tab's Download button as it shipped: `{repo_id, filename}` and
+    /// nothing else, refused on every click for four months.
+    #[test]
+    fn a_download_request_names_exactly_one_kind_of_work() {
+        assert!(validate_shard_selection(&[], false, false).is_err());
+
+        assert!(validate_shard_selection(&[0, 1], false, false).is_ok());
+        assert!(validate_shard_selection(&[], true, false).is_ok());
+        assert!(validate_shard_selection(&[], false, true).is_ok());
+
+        assert!(validate_shard_selection(&[0], true, false).is_err());
+        assert!(validate_shard_selection(&[0], false, true).is_err());
+        assert!(validate_shard_selection(&[], true, true).is_err());
+    }
+
+    /// `all_shards` reaches the handler from the JSON a browser sends, with
+    /// the other two left to their defaults.
+    #[test]
+    fn a_whole_model_request_parses_without_a_shard_list() {
+        let body: HfShardDownloadRequest = serde_json::from_str(
+            r#"{"repo_id": "a/b-GGUF", "filename": "b-Q4_K_M.gguf", "all_shards": true}"#,
+        )
+        .unwrap();
+        assert!(body.all_shards);
+        assert!(body.shards.is_empty() && !body.peer_fair_share);
+        assert!(
+            validate_shard_selection(&body.shards, body.peer_fair_share, body.all_shards).is_ok()
+        );
+    }
 }
