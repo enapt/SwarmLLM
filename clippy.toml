@@ -1,0 +1,30 @@
+# A DashMap guard is a shard LOCK, and clippy's `await_holding_lock` does not
+# know that — it covers std/parking_lot/tokio guards only. Holding one across
+# an `.await` holds that shard for as long as the await takes, and dashmap 6's
+# writer then PARKS ITS OS THREAD with no timeout until every reader on the
+# shard is gone (`lock_exclusive_slow`, `parking_lot_core::park(.., None)`), so
+# an `insert` elsewhere does not wait asynchronously — it stops a Tokio worker.
+#
+# Found 2026-09-24: an `hf_sources` `Ref` was held across HuggingFace probe and
+# header-download calls (minutes, with retries), and the message dispatcher —
+# the network's only inbound consumer — inserts into that map inline. That is
+# `docs/FUTURE_WORK.md` #90's signature exactly: the dispatcher takes nothing,
+# every other task carries on.
+#
+# Clone what you need out of the guard (`.map(|r| r.value().clone())`) before
+# awaiting, or scope the guard to a block that ends first.
+await-holding-invalid-types = [
+    { path = "dashmap::mapref::one::Ref", reason = "a DashMap shard read lock; a writer to that shard parks its OS thread until it is dropped" },
+    { path = "dashmap::mapref::one::RefMut", reason = "a DashMap shard write lock; every reader and writer of that shard blocks its OS thread until it is dropped" },
+    { path = "dashmap::mapref::one::MappedRef", reason = "a DashMap shard read lock" },
+    { path = "dashmap::mapref::one::MappedRefMut", reason = "a DashMap shard write lock" },
+    { path = "dashmap::mapref::multiple::RefMulti", reason = "an iterator item holds its shard's read lock" },
+    { path = "dashmap::mapref::multiple::RefMutMulti", reason = "an iterator item holds its shard's write lock" },
+    { path = "dashmap::mapref::entry::Entry", reason = "a DashMap shard write lock" },
+    { path = "dashmap::mapref::entry::OccupiedEntry", reason = "a DashMap shard write lock" },
+    { path = "dashmap::mapref::entry::VacantEntry", reason = "a DashMap shard write lock" },
+    { path = "dashmap::iter::Iter", reason = "a DashMap iterator holds the current shard's read lock" },
+    { path = "dashmap::iter::IterMut", reason = "a DashMap iterator holds the current shard's write lock" },
+    { path = "dashmap::setref::one::Ref", reason = "a DashSet shard read lock" },
+    { path = "dashmap::setref::multiple::RefMulti", reason = "a DashSet iterator item holds its shard's read lock" },
+]

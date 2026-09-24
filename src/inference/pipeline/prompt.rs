@@ -478,8 +478,20 @@ impl PipelineExecutor {
                     }
                 }
             } else {
-                // No header on disk — try fetching from HuggingFace on-demand
-                if let Some(hf_source) = self.shared_state.models.hf_sources.get(model_id) {
+                // No header on disk — try fetching from HuggingFace on-demand.
+                //
+                // CLONED out of the map, never borrowed: the two calls below
+                // retry for minutes, and a DashMap `Ref` held that long blocks
+                // any writer to its shard — including the message dispatcher's
+                // `hf_sources.insert`, which parks its OS thread until the
+                // guard drops (see clippy.toml).
+                let hf_source = self
+                    .shared_state
+                    .models
+                    .hf_sources
+                    .get(model_id)
+                    .map(|s| s.value().clone());
+                if let Some(hf_source) = hf_source {
                     let model_dir = crate::model::shard::model_dir(
                         &self.shared_state.config.node.data_dir,
                         &model_id.0,

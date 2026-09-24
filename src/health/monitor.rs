@@ -1194,8 +1194,17 @@ impl HealthMonitor {
             );
             sent += 1;
 
-            // Also broadcast HfSourceGossip so late-joining peers discover the HF source
-            if let Some(hf_source) = self.shared_state.models.hf_sources.get(&manifest.id) {
+            // Also broadcast HfSourceGossip so late-joining peers discover the HF source.
+            // Cloned out before the send: `network_tx.send` waits whenever the
+            // network loop is busy, and a `Ref` held across it blocks the
+            // dispatcher's `hf_sources.insert` on the same shard (clippy.toml).
+            let hf_source = self
+                .shared_state
+                .models
+                .hf_sources
+                .get(&manifest.id)
+                .map(|s| s.value().clone());
+            if let Some(hf_source) = hf_source {
                 let gossip = crate::types::HfSourceGossip {
                     model_id: manifest.id.clone(),
                     repo_id: hf_source.repo_id.clone(),
@@ -1398,9 +1407,17 @@ impl HealthMonitor {
         // at all, each round refreshing timestamps that should have been
         // ageing out. GossipSub already carries the originator's message to
         // every node; re-originating it was never what made it travel.
-        for entry in self.shared_state.local_region_demand.iter() {
-            let model_id = entry.key();
-            let rate = *entry.value();
+        //
+        // Snapshotted before sending: an iterator holds its shard's read lock,
+        // and each send below can wait on the network loop.
+        let local_demand: Vec<(crate::types::ModelId, f64)> = self
+            .shared_state
+            .local_region_demand
+            .iter()
+            .map(|e| (e.key().clone(), *e.value()))
+            .collect();
+        for (model_id, rate) in local_demand {
+            let model_id = &model_id;
             if rate < 0.01 {
                 continue; // Don't gossip negligible demand
             }

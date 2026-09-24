@@ -408,9 +408,17 @@ pub async fn try_proxy_openai(
     let provider = match resolve_provider(model, &config) {
         Some(p) if !p.is_anthropic => p,
         _ => {
-            // Fallback: check provider_model_map (populated by list_provider_models)
-            if let Some(entry) = state.shared_state.metrics.provider_model_map.get(model) {
-                let provider_name = entry.value().clone();
+            // Fallback: check provider_model_map (populated by list_provider_models).
+            // The name is cloned out: the proxied request below runs for as long
+            // as the provider takes to answer, and a `Ref` held across it blocks
+            // the catalog refresh's writes to that shard (clippy.toml).
+            let mapped = state
+                .shared_state
+                .metrics
+                .provider_model_map
+                .get(model)
+                .map(|e| e.value().clone());
+            if let Some(provider_name) = mapped {
                 match resolve_by_name(&provider_name, &config) {
                     Some(p) if !p.is_anthropic => {
                         drop(config);

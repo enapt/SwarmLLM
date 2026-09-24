@@ -67,6 +67,8 @@ with a type-tag byte for tensor payloads.
 Subsystems talk over `tokio::sync::mpsc`; SharedState uses `DashMap` for
 concurrent reads and `RwLock` for single values; shutdown is a
 `tokio::sync::watch`, awaited beside task exit in `daemon/mod.rs`'s `select!`.
+**A DashMap guard never lives across `.await`** — its writer parks an OS thread
+until readers leave (#90's shape); `clippy.toml` fails the build on one.
 
 ### Logging
 `tracing`, structured spans carrying request_id / model_id / peer_count, target

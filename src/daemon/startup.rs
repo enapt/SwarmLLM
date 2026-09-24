@@ -531,7 +531,14 @@ pub(super) async fn restore_persistent_state(
                     }
                     let model_id_str = entry.file_name().to_string_lossy().to_string();
                     let mid = crate::types::ModelId(model_id_str.clone());
-                    if let Some(hf_src) = shared_state.models.hf_sources.get(&mid) {
+                    // Cloned out: the probe and download below retry for
+                    // minutes, and no shard guard may live across them.
+                    let hf_src = shared_state
+                        .models
+                        .hf_sources
+                        .get(&mid)
+                        .map(|s| s.value().clone());
+                    if let Some(hf_src) = hf_src {
                         tracing::info!(
                             model = %model_id_str,
                             repo = %hf_src.repo_id,

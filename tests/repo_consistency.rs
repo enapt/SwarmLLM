@@ -2500,6 +2500,47 @@ fn the_dispatch_db_scan_catches_a_planted_blocking_call() {
     );
 }
 
+/// No DashMap guard may be held across an `.await`, and clippy is what enforces
+/// it — so the configuration that makes clippy able to must stay in place.
+///
+/// A DashMap guard is a shard lock that clippy's `await_holding_lock` does not
+/// recognise, and dashmap 6's writer PARKS ITS OS THREAD, with no timeout, until
+/// every reader of the shard is gone. Nine sites held one across an await
+/// (2026-09-24), among them `hf_sources` `Ref`s across HuggingFace calls that
+/// retry for minutes while the message dispatcher — the network's only inbound
+/// consumer — inserts into that map inline: `docs/FUTURE_WORK.md` #90's
+/// signature. `clippy.toml`'s `await-holding-invalid-types` found all nine the
+/// moment it was configured (checked by planting a violation, which it
+/// reported); CI's clippy runs `-D warnings`, so a tenth fails the build.
+#[test]
+fn clippy_refuses_a_dashmap_guard_held_across_an_await() {
+    let config = std::fs::read_to_string(repo_root().join("clippy.toml"))
+        .expect("clippy.toml is gone — the DashMap await lint went with it");
+    let listed = config
+        .split("await-holding-invalid-types")
+        .nth(1)
+        .expect("clippy.toml no longer configures await-holding-invalid-types");
+    for guard in [
+        "dashmap::mapref::one::Ref",
+        "dashmap::mapref::one::RefMut",
+        "dashmap::mapref::multiple::RefMulti",
+        "dashmap::mapref::entry::Entry",
+        "dashmap::iter::Iter",
+        "dashmap::setref::one::Ref",
+    ] {
+        assert!(
+            listed.contains(&format!("\"{guard}\"")),
+            "clippy.toml no longer forbids holding `{guard}` across an await"
+        );
+    }
+    let ci =
+        std::fs::read_to_string(repo_root().join(".github/workflows/ci.yml")).expect("read ci.yml");
+    assert!(
+        ci.contains("cargo clippy") && ci.contains("-D warnings"),
+        "CI no longer runs clippy with -D warnings, so clippy.toml's lint enforces nothing"
+    );
+}
+
 /// The `RUSTFLAGS` every `cargo build` in a Dockerfile runs under, in order.
 ///
 /// Follows the three ways a Dockerfile sets it: `ENV RUSTFLAGS=` (the default

@@ -306,8 +306,16 @@ pub(crate) async fn resolve_chat_template(
         }
     }
 
-    // 3. HuggingFace metadata probe
-    if let Some(hf_src) = state.shared_state.models.hf_sources.get(&mid) {
+    // 3. HuggingFace metadata probe. The source is CLONED out: holding the
+    // map's `Ref` across these minutes-long calls blocks every writer to its
+    // shard, the message dispatcher included (see clippy.toml).
+    let hf_src = state
+        .shared_state
+        .models
+        .hf_sources
+        .get(&mid)
+        .map(|s| s.value().clone());
+    if let Some(hf_src) = hf_src {
         let model_dir = state.shared_state.model_dir(model_name);
         let shard_size = state.shared_state.config.model.shard_size_bytes();
         if let Ok(info) = crate::model::huggingface::probe_gguf_file(

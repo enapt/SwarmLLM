@@ -98,10 +98,10 @@ impl PipelineStreamClient {
         payload: Vec<u8>,
         shared_state: Arc<SharedState>,
     ) -> Result<(), SwarmError> {
-        // Fast path: stream already open.
-        if let Some(entry) = self.streams.get(&request_id) {
-            let handle = entry.value().clone();
-            drop(entry);
+        // Fast path: stream already open. The handle is cloned out so no shard
+        // guard is alive at the send's `.await` (clippy.toml).
+        let open = self.streams.get(&request_id).map(|e| e.value().clone());
+        if let Some(handle) = open {
             return handle
                 .tx
                 .send(payload)

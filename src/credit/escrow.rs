@@ -406,7 +406,14 @@ impl EscrowManager {
 
         let mut count = 0;
         for id in expired_ids {
-            if let Some(mut entry) = self.entries.get_mut(&id) {
+            // The shard write guard lives only inside this block, which ends
+            // before the `.await` below — the lint in clippy.toml cannot see a
+            // `drop(entry)` release it, only a scope. (It was released at
+            // runtime either way; this is so the lint can prove it.)
+            let amount = {
+                let Some(mut entry) = self.entries.get_mut(&id) else {
+                    continue;
+                };
                 if entry.status != EscrowStatus::Pending {
                     continue; // Already released/refunded by another path
                 }
@@ -421,72 +428,71 @@ impl EscrowManager {
                 if let Err(e) = self.db.put_json(TREE_ESCROW, &id.to_string(), &*entry) {
                     tracing::error!(escrow_id = %id, error = %e, "Failed to persist escrow expiry — reverting to Pending");
                     entry.status = EscrowStatus::Pending;
-                    drop(entry);
                     continue;
                 }
-                drop(entry);
-                // Do NOT remove from in-memory map yet — the balance persist below
-                // may fail, in which case we need the entry present to revert it
-                // back to Pending for retry. Remove only after the refund succeeds.
+                amount
+            };
+            // Do NOT remove from in-memory map yet — the balance persist below
+            // may fail, in which case we need the entry present to revert it
+            // back to Pending for retry. Remove only after the refund succeeds.
 
-                // Refund the expired amount. We deliberately DO NOT use
-                // `apply_credit_direct_noted(..., CreditDelta::Refund, "escrow_expire_refund")` here even
-                // though the accounting semantics match — `cleanup_expired`
-                // requires strict crash-safety to support its retry loop:
-                // on persist failure, the in-memory balance MUST be reverted
-                // and the escrow status MUST go back to Pending so the next
-                // tick retries. `apply_credit_direct` deliberately doesn't
-                // revert in-memory on persist failure (small crash window
-                // is acceptable for hot-path callers), so reusing it here
-                // would let the retry tick double-credit when it succeeds.
-                let balance_persisted = {
-                    let mut bal = balance.write().await;
-                    let old_balance = bal.balance;
-                    bal.balance = bal.balance.saturating_add(amount);
-                    bal.last_updated = chrono::Utc::now();
-                    if let Err(e) = self.db.put_json(
-                        crate::credit::ledger::TREE_CREDITS,
-                        crate::credit::ledger::KEY_BALANCE,
-                        &*bal,
-                    ) {
-                        // Revert in-memory balance to match DB state
-                        bal.balance = old_balance;
-                        // Also revert escrow back to Pending so next cleanup retries the refund
-                        if let Some(mut esc) = self.entries.get_mut(&id) {
-                            esc.status = EscrowStatus::Pending;
-                            if let Err(e2) = self.db.put_json(TREE_ESCROW, &id.to_string(), &*esc) {
-                                tracing::error!(
-                                    escrow_id = %id,
-                                    error = %e2,
-                                    "Failed to persist escrow revert to Pending — escrow state diverged from DB"
-                                );
-                            }
+            // Refund the expired amount. We deliberately DO NOT use
+            // `apply_credit_direct_noted(..., CreditDelta::Refund, "escrow_expire_refund")` here even
+            // though the accounting semantics match — `cleanup_expired`
+            // requires strict crash-safety to support its retry loop:
+            // on persist failure, the in-memory balance MUST be reverted
+            // and the escrow status MUST go back to Pending so the next
+            // tick retries. `apply_credit_direct` deliberately doesn't
+            // revert in-memory on persist failure (small crash window
+            // is acceptable for hot-path callers), so reusing it here
+            // would let the retry tick double-credit when it succeeds.
+            let balance_persisted = {
+                let mut bal = balance.write().await;
+                let old_balance = bal.balance;
+                bal.balance = bal.balance.saturating_add(amount);
+                bal.last_updated = chrono::Utc::now();
+                if let Err(e) = self.db.put_json(
+                    crate::credit::ledger::TREE_CREDITS,
+                    crate::credit::ledger::KEY_BALANCE,
+                    &*bal,
+                ) {
+                    // Revert in-memory balance to match DB state
+                    bal.balance = old_balance;
+                    // Also revert escrow back to Pending so next cleanup retries the refund
+                    if let Some(mut esc) = self.entries.get_mut(&id) {
+                        esc.status = EscrowStatus::Pending;
+                        if let Err(e2) = self.db.put_json(TREE_ESCROW, &id.to_string(), &*esc) {
+                            tracing::error!(
+                                escrow_id = %id,
+                                error = %e2,
+                                "Failed to persist escrow revert to Pending — escrow state diverged from DB"
+                            );
                         }
-                        tracing::error!(
-                            escrow_id = %id,
-                            error = %e,
-                            "Failed to persist credit balance after escrow expiry — reverted escrow to Pending for retry"
-                        );
-                        false
-                    } else {
-                        true
                     }
-                };
-
-                if balance_persisted {
-                    // Refund completed successfully — safe to remove from in-memory map
-                    self.entries.remove(&id);
-                    count += 1;
-                    // Log ONLY on successful refund. Logging unconditionally
-                    // makes the failure path log "refunded" while leaving the
-                    // escrow Pending — operator audits via grep see false
-                    // positives.
-                    tracing::info!(
+                    tracing::error!(
                         escrow_id = %id,
-                        amount,
-                        "Expired escrow — refunded"
+                        error = %e,
+                        "Failed to persist credit balance after escrow expiry — reverted escrow to Pending for retry"
                     );
+                    false
+                } else {
+                    true
                 }
+            };
+
+            if balance_persisted {
+                // Refund completed successfully — safe to remove from in-memory map
+                self.entries.remove(&id);
+                count += 1;
+                // Log ONLY on successful refund. Logging unconditionally
+                // makes the failure path log "refunded" while leaving the
+                // escrow Pending — operator audits via grep see false
+                // positives.
+                tracing::info!(
+                    escrow_id = %id,
+                    amount,
+                    "Expired escrow — refunded"
+                );
             }
         }
 
