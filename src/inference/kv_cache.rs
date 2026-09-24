@@ -161,12 +161,12 @@ impl KvCacheManager {
                     .multi_turn_sessions
                     .iter()
                     .min_by_key(|(_, id)| {
-                        self.sessions
-                            .get(id)
-                            .map(|s| s.last_accessed)
-                            // Orphans (session evicted but multi_turn entry remains) should
-                            // sort first (oldest) so they get evicted before valid sessions.
-                            .unwrap_or(Instant::now() - std::time::Duration::from_secs(86400))
+                        // Orphans (session evicted but multi_turn entry remains) sort
+                        // first (oldest) so they get evicted before valid sessions:
+                        // `None` orders before every `Some`. (This used to stand in
+                        // `now - 1 day`, which panics on Windows during a machine's
+                        // first day up.)
+                        self.sessions.get(id).map(|s| s.last_accessed)
                     })
                     .map(|(k, _)| k.clone())
                 {

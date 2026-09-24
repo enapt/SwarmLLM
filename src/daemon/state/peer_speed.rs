@@ -770,7 +770,9 @@ mod ranking_staleness_tests {
     #[test]
     fn a_stale_observation_stops_ranking_so_the_peer_is_repriced() {
         let mut s = measured_slow();
-        s.updated_at = Instant::now() - (RANKING_STALE_AFTER + Duration::from_secs(1));
+        s.updated_at = Instant::now()
+            .checked_sub(RANKING_STALE_AFTER + Duration::from_secs(1))
+            .expect("up for longer than the staleness window");
         assert!(
             s.ranking_ms_per_layer().is_none(),
             "a stale measurement must stop pricing the peer — otherwise one bad \
@@ -783,7 +785,9 @@ mod ranking_staleness_tests {
     #[test]
     fn re_measuring_restores_ranking() {
         let mut s = measured_slow();
-        s.updated_at = Instant::now() - (RANKING_STALE_AFTER + Duration::from_secs(1));
+        s.updated_at = Instant::now()
+            .checked_sub(RANKING_STALE_AFTER + Duration::from_secs(1))
+            .expect("up for longer than the staleness window");
         assert!(s.ranking_ms_per_layer().is_none());
         s.observe(WorkKind::Decode, 30, 22, 4096, true);
         assert!(
@@ -1060,7 +1064,9 @@ mod two_term_tests {
         let mut s = PeerSpeed::default();
         observe_synthetic(&mut s, 1000, 5, &[32, 16, 24, 8]);
         assert!(s.decode_terms().is_some());
-        s.updated_at = Instant::now() - (RANKING_STALE_AFTER + Duration::from_secs(1));
+        s.updated_at = Instant::now()
+            .checked_sub(RANKING_STALE_AFTER + Duration::from_secs(1))
+            .expect("up for longer than the staleness window");
         assert!(
             s.decode_terms().is_none(),
             "a stale fit must fall back like a stale EMA does"

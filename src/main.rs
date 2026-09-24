@@ -1,3 +1,6 @@
+// See src/lib.rs: `Instant - Duration` can panic on Windows shortly after boot.
+#![warn(clippy::unchecked_time_subtraction)]
+
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};

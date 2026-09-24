@@ -198,10 +198,9 @@ impl NetworkManager {
             // SEC: Cap ping_sent_times to prevent unbounded growth from connection storms.
             // Prune stale entries before inserting.
             if self.ping_sent_times.len() >= MAX_PING_ENTRIES {
-                let cutoff = std::time::Instant::now()
-                    - std::time::Duration::from_secs(PING_SENT_TIMES_CUTOFF_SECS);
+                let stale = std::time::Duration::from_secs(PING_SENT_TIMES_CUTOFF_SECS);
                 self.ping_sent_times
-                    .retain(|_, (_, sent_at)| *sent_at > cutoff);
+                    .retain(|_, (_, sent_at)| sent_at.elapsed() < stale);
             }
             let req = SwarmRequest::Message(Box::new(SwarmMessage::PeerExchangeRequest));
             let outbound_id = self

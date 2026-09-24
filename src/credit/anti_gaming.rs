@@ -130,18 +130,21 @@ impl AntiGaming {
     /// SEC-M15: Should be called periodically (every health-monitor tick)
     /// to prevent unbounded memory growth in the rate_limits HashMap.
     pub fn cleanup(&mut self) {
-        let cutoff = Instant::now() - self.window_duration;
+        // Ages, not `now - window`: that subtraction panics on Windows while the
+        // machine has been up for less than the window.
+        let now = Instant::now();
+        let window = self.window_duration;
         self.rate_limits.retain(|_, timestamps| {
-            timestamps.retain(|t| *t > cutoff);
+            timestamps.retain(|t| now.duration_since(*t) < window);
             !timestamps.is_empty()
         });
         // Evict subnet registrations older than SUBNET_EVICTION_SECS to prevent
         // unbounded growth from nodes that connect but never transact.
-        let subnet_cutoff = Instant::now() - Duration::from_secs(SUBNET_EVICTION_SECS);
+        let subnet_max_age = Duration::from_secs(SUBNET_EVICTION_SECS);
         let mut evicted: Vec<NodeId> = Vec::new();
         self.subnet_counts.retain(|_, nodes| {
             nodes.retain(|(n, ts)| {
-                let keep = *ts > subnet_cutoff;
+                let keep = now.duration_since(*ts) < subnet_max_age;
                 if !keep {
                     evicted.push(n.clone());
                 }
@@ -170,10 +173,11 @@ impl AntiGaming {
 
     /// Check rate limit for a node. Returns true if within limits.
     fn check_rate_limit(&mut self, node: &NodeId) -> bool {
-        let cutoff = Instant::now() - self.window_duration;
+        let now = Instant::now();
+        let window = self.window_duration;
 
         let entries = self.rate_limits.entry(node.clone()).or_default();
-        entries.retain(|t| *t > cutoff);
+        entries.retain(|t| now.duration_since(*t) < window);
 
         entries.len() < self.max_tx_per_window
     }

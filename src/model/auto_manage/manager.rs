@@ -268,9 +268,13 @@ impl AutoShardManager {
         request_reset_interval.tick().await; // skip first tick
 
         // Cooldown: minimum time between evaluations triggered by notify.
-        // Start back-dated so the first notify after launch isn't throttled.
+        // `None` until the first one, so the first notify after launch isn't
+        // throttled. This used to back-date an `Instant` by two cooldowns, which
+        // panics on Windows when the machine has been up for less than that —
+        // an `Instant` there is time since boot — and a panic in this task
+        // shuts the daemon down, so a node started at login could die at startup.
         let notify_cooldown = Duration::from_secs(AUTO_MANAGE_NOTIFY_COOLDOWN_SECS);
-        let mut last_notify_eval = std::time::Instant::now() - (notify_cooldown * 2);
+        let mut last_notify_eval: Option<std::time::Instant> = None;
 
         let mut config_watch_rx = self.shared_state.config_watch_rx();
 
@@ -365,18 +369,18 @@ impl AutoShardManager {
                     // re-evaluations from shard progress gossip between peers).
                     // Exception: bypass when P2P has exhausted for one or more
                     // shards — those need HF fallback picked up ASAP, not in 45s.
-                    let since_last = last_notify_eval.elapsed();
+                    let since_last = last_notify_eval.map_or(Duration::MAX, |t| t.elapsed());
                     let has_p2p_failures = !self.shared_state.models.shard_p2p_failed.is_empty();
                     if since_last < notify_cooldown && !has_p2p_failures {
                         tracing::debug!(
-                            remaining_secs = (notify_cooldown - since_last).as_secs(),
+                            remaining_secs = notify_cooldown.saturating_sub(since_last).as_secs(),
                             "AutoShardManager: notify cooldown active, skipping evaluation"
                         );
                         continue;
                     }
                     if self.shared_state.models.auto_manage_enabled.load(std::sync::atomic::Ordering::Acquire) {
                         tracing::info!("AutoShardManager: triggered by new HF source or manifest");
-                        last_notify_eval = std::time::Instant::now();
+                        last_notify_eval = Some(std::time::Instant::now());
                         self.evaluate().await;
                     }
                 }

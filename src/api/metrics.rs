@@ -515,11 +515,13 @@ pub(crate) fn compute_latency_stats(shared: &crate::daemon::SharedState) -> Opti
         .metrics
         .inference_requests_total
         .load(std::sync::atomic::Ordering::Relaxed);
-    let cutoff = std::time::Instant::now() - LATENCY_SAMPLE_MAX_AGE;
+    // An AGE comparison, never `now - MAX_AGE`: on Windows an `Instant` is time
+    // since the machine started, and subtracting more than that panics.
+    let now = std::time::Instant::now();
     let mut latencies: Vec<f64> = match shared.metrics.inference_latency_samples.read() {
         Ok(s) => s
             .iter()
-            .filter(|(t, _)| *t >= cutoff)
+            .filter(|(t, _)| now.duration_since(*t) <= LATENCY_SAMPLE_MAX_AGE)
             .map(|(_, v)| *v)
             .collect(),
         Err(_) => {
@@ -577,11 +579,11 @@ fn write_latency_histogram(buf: &mut String, shared: &crate::daemon::SharedState
     const BUCKETS: &[f64] = &[0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0];
     let name = "swarmllm_inference_latency_seconds";
 
-    let cutoff = std::time::Instant::now() - LATENCY_SAMPLE_MAX_AGE;
+    let now = std::time::Instant::now();
     let fresh_latencies: Vec<f64> = match shared.metrics.inference_latency_samples.read() {
         Ok(g) => g
             .iter()
-            .filter(|(t, _)| *t >= cutoff)
+            .filter(|(t, _)| now.duration_since(*t) <= LATENCY_SAMPLE_MAX_AGE)
             .map(|(_, v)| *v)
             .collect(),
         Err(_) => {
@@ -734,11 +736,11 @@ fn write_genai_histogram(
     total_count: u64,
     total_micros: u64,
 ) {
-    let cutoff = std::time::Instant::now() - LATENCY_SAMPLE_MAX_AGE;
+    let now = std::time::Instant::now();
     let fresh: Vec<f64> = match samples.read() {
         Ok(g) => g
             .iter()
-            .filter(|(t, _)| *t >= cutoff)
+            .filter(|(t, _)| now.duration_since(*t) <= LATENCY_SAMPLE_MAX_AGE)
             .map(|(_, v)| *v)
             .collect(),
         Err(_) => {
@@ -872,16 +874,19 @@ mod tests {
     /// SharedState construction.
     #[test]
     fn latency_age_filter_drops_old_entries() {
-        let now = std::time::Instant::now();
-        let cutoff = now - LATENCY_SAMPLE_MAX_AGE;
-        // Use a clearly stale instant — older than the freshness window.
-        let stale = cutoff - Duration::from_secs(60);
-        let fresh = cutoff + Duration::from_secs(60);
+        // Samples are stamped first and the filter's `now` taken after, as in
+        // production; the stale one is aged by sleeping-free construction.
+        let recorded = std::time::Instant::now();
+        let stale = recorded
+            .checked_sub(LATENCY_SAMPLE_MAX_AGE + Duration::from_secs(60))
+            .expect("this machine has been up longer than the sample window");
+        let fresh = recorded;
         let samples: Vec<(std::time::Instant, f64)> =
             vec![(stale, 9.5), (fresh, 0.1), (fresh, 0.3)];
+        let now = std::time::Instant::now();
         let kept: Vec<f64> = samples
             .iter()
-            .filter(|(t, _)| *t >= cutoff)
+            .filter(|(t, _)| now.duration_since(*t) <= LATENCY_SAMPLE_MAX_AGE)
             .map(|(_, v)| *v)
             .collect();
         // Stale 9.5s entry must be filtered; only the two fresh values remain.

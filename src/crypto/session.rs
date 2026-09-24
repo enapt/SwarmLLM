@@ -1340,7 +1340,9 @@ mod tests {
         {
             let mut session = sm_b.sessions.get_mut(&node_a).unwrap();
             let previous = session.previous.as_mut().expect("previous key present");
-            previous.retired_at = Instant::now() - (PREVIOUS_KEY_GRACE + Duration::from_secs(1));
+            previous.retired_at = Instant::now()
+                .checked_sub(PREVIOUS_KEY_GRACE + Duration::from_secs(1))
+                .expect("up for longer than the grace window");
         }
 
         assert!(
@@ -1775,7 +1777,9 @@ mod disconnect_retirement_tests {
         let sealed = a.seal(&nb, b"late", aad).unwrap();
         b.remove_session(&na);
         if let Some(mut k) = b.retired.get_mut(&na) {
-            k.retired_at = Instant::now() - (PREVIOUS_KEY_GRACE + Duration::from_secs(1));
+            k.retired_at = Instant::now()
+                .checked_sub(PREVIOUS_KEY_GRACE + Duration::from_secs(1))
+                .expect("up for longer than the grace window");
         }
         assert!(
             b.open(&na, &sealed, aad).is_err(),

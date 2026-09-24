@@ -768,8 +768,13 @@ fn record_duration_sample(
     count.fetch_add(1, Ordering::Relaxed);
     micros.fetch_add((secs * 1_000_000.0).round() as u64, Ordering::Relaxed);
     if let Ok(mut ring) = ring.write() {
-        let cutoff = Instant::now() - crate::api::metrics::LATENCY_SAMPLE_MAX_AGE;
-        while ring.front().is_some_and(|(t, _)| *t < cutoff) {
+        // Compared by AGE: `now - MAX_AGE` panics on Windows for the first ten
+        // minutes after the machine starts (an `Instant` there is time since
+        // boot), and this runs on every request that succeeds.
+        let now = Instant::now();
+        while ring.front().is_some_and(|(t, _)| {
+            now.duration_since(*t) > crate::api::metrics::LATENCY_SAMPLE_MAX_AGE
+        }) {
             ring.pop_front();
         }
         if ring.len() >= 1000 {

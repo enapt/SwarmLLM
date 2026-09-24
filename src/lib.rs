@@ -20,6 +20,16 @@
 //! Treat their contents as unstable: they may change in any release.
 //! Downstream consumers should not depend on them.
 
+// `Instant - Duration` panics on Windows whenever the result would fall before
+// the machine started — an `Instant` there is time since boot, and Rust 1.94's
+// std (read, 2026-09-24) has no guard; later ones add an offset. On such a build
+// a cutoff like `now - 10 min` panics every successful request for the first
+// ten minutes after power-on, and a back-dated timer in auto-manage takes the
+// daemon down if it starts within two minutes of boot. Compare ages
+// (`now.duration_since(t) > max_age`) or use `checked_sub`; CI's clippy runs
+// `-D warnings`, so this fails the build on a new one.
+#![warn(clippy::unchecked_time_subtraction)]
+
 /// mimalloc for every binary built from this crate. The CPU inference path
 /// allocates a fresh buffer per tensor op, so the allocator is on the hot path
 /// of every layer of every token; measured on llama-3.2-3b decode (see

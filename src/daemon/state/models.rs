@@ -1331,7 +1331,9 @@ mod tests {
             s.clone(),
             ShardDownloadBackoff {
                 fail_count: 2,
-                retry_after: std::time::Instant::now() - std::time::Duration::from_secs(10),
+                retry_after: std::time::Instant::now()
+                    .checked_sub(std::time::Duration::from_secs(10))
+                    .expect("up for more than 10 s"),
             },
         );
         assert!(!m.shard_in_backoff(&s), "expired entry is not blocking");
@@ -1353,7 +1355,10 @@ mod tests {
             ShardDownloadBackoff {
                 fail_count: 3,
                 retry_after: std::time::Instant::now()
-                    - std::time::Duration::from_secs(SHARD_BACKOFF_FORGET_SECS + 60),
+                    .checked_sub(std::time::Duration::from_secs(
+                        SHARD_BACKOFF_FORGET_SECS + 60,
+                    ))
+                    .expect("up for longer than the forget window"),
             },
         );
         assert!(!m.shard_in_backoff(&s));

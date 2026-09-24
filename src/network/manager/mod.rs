@@ -1434,9 +1434,9 @@ impl NetworkManager {
                         );
                     } else {
                         // Clean up stale ping_sent_times (response never arrived)
-                        let cutoff = std::time::Instant::now()
-                            - std::time::Duration::from_secs(PEX_PING_STALENESS_SECS);
-                        self.ping_sent_times.retain(|_, (_, sent_at)| *sent_at > cutoff);
+                        let stale = std::time::Duration::from_secs(PEX_PING_STALENESS_SECS);
+                        self.ping_sent_times
+                            .retain(|_, (_, sent_at)| sent_at.elapsed() < stale);
 
                         let peers: Vec<libp2p::PeerId> = self.swarm.connected_peers().cloned().collect();
                         if !peers.is_empty() {

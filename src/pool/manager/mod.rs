@@ -2584,8 +2584,8 @@ mod tests {
         // multi-second sleep in the test.
         pm.last_pool_gossip_at = Some(
             std::time::Instant::now()
-                - POOL_GOSSIP_MIN_INTERVAL
-                - std::time::Duration::from_secs(1),
+                .checked_sub(POOL_GOSSIP_MIN_INTERVAL + std::time::Duration::from_secs(1))
+                .expect("up for longer than the gossip interval"),
         );
 
         pm.maybe_gossip_pool_state().await;
