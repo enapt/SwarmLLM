@@ -2,14 +2,28 @@
 pub(crate) fn scrub_truncate_error(body: &str) -> String {
     let scrubbed = crate::crypto::scrub_api_keys(body);
     if scrubbed.len() > 512 {
-        let mut idx = 512;
-        while !scrubbed.is_char_boundary(idx) {
-            idx -= 1;
-        }
-        format!("{}…[truncated]", &scrubbed[..idx])
+        format!("{}…[truncated]", prefix_within_bytes(&scrubbed, 512))
     } else {
         scrubbed
     }
+}
+
+/// The longest prefix of `s` that is at most `max_bytes` long and ends on a
+/// character boundary — the one way to shorten text for display here.
+///
+/// `&s[..n]` panics when `n` falls inside a multi-byte character, and the text
+/// these callers shorten is someone else's: a GGUF's metadata (a chat template
+/// written in Chinese), an upstream provider's error body. Two handlers did
+/// exactly that and failed their panel for every such model or provider.
+pub(crate) fn prefix_within_bytes(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut idx = max_bytes;
+    while !s.is_char_boundary(idx) {
+        idx -= 1;
+    }
+    &s[..idx]
 }
 
 /// Strip the `Bearer` scheme from an `Authorization` header value.
@@ -815,5 +829,29 @@ mod tests {
         let (tx, rx) = tokio::sync::mpsc::channel::<u8>(4);
         drop(rx);
         assert!(!sse_send_live(&tx, 7u8).await);
+    }
+}
+
+#[cfg(test)]
+mod prefix_within_bytes_tests {
+    use super::prefix_within_bytes;
+
+    /// Every cut point across a run of 3- and 4-byte characters lands on a
+    /// boundary and never exceeds the limit — the byte slice it replaced
+    /// panicked on two of every three limits here.
+    #[test]
+    fn a_limit_inside_a_character_backs_off_to_the_boundary() {
+        let s = "a用户💬é".repeat(20);
+        for max in 0..=s.len() + 1 {
+            let got = prefix_within_bytes(&s, max);
+            assert!(got.len() <= max, "max {max}: got {} bytes", got.len());
+            assert!(s.starts_with(got));
+            assert!(
+                got.len() + 4 > max.min(s.len()),
+                "max {max}: backed off further than one character ({} bytes)",
+                got.len()
+            );
+        }
+        assert_eq!(prefix_within_bytes("short", 200), "short");
     }
 }

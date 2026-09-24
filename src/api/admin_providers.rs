@@ -774,11 +774,7 @@ async fn probe_provider_health(state: &AppState) -> Vec<serde_json::Value> {
                             let body_text = resp.text().await.unwrap_or_default();
                             // SEC: Scrub potential API keys from upstream error responses
                             let scrubbed = crate::crypto::scrub_api_keys(&body_text);
-                            let short = if scrubbed.len() > 100 {
-                                scrubbed[..100].to_string()
-                            } else {
-                                scrubbed
-                            };
+                            let short = crate::api::prefix_within_bytes(&scrubbed, 100).to_string();
                             (format!("error_{}", status_code), short)
                         };
                         serde_json::json!({

@@ -67,9 +67,18 @@ pub const FINISH_REASON_INTERRUPTED: &str = "error";
 /// (e.g. "<|user" when the stop is "<|user|>"). This trims at most one such
 /// prefix — once a trim happens we return immediately so later stops can't
 /// cascade across the already-truncated text.
+///
+/// A prefix ends on a CHARACTER boundary, never a byte offset. The byte form
+/// panicked on any stop ending in a multi-byte character — `"。"`, `"\n用户"` —
+/// and every reply on every path is finalised through here, so a caller's own
+/// non-ASCII `stop` killed the request after its whole reply had been
+/// generated. A byte-level partial could not match anyway: `text` is valid
+/// UTF-8 and cannot end halfway through a character.
 pub(crate) fn trim_trailing_partial_stop(text: &mut String, stops: &[String]) {
     for stop in stops {
-        for end_len in (1..stop.len()).rev() {
+        // Byte lengths of every non-empty proper prefix, longest first: the
+        // start of each character after the first is where a prefix ends.
+        for end_len in stop.char_indices().map(|(i, _)| i).filter(|&i| i > 0).rev() {
             let prefix = &stop[..end_len];
             if text.ends_with(prefix) {
                 text.truncate(text.len() - end_len);
@@ -630,6 +639,26 @@ mod stop_trim_tests {
         let mut text = "<|im_end|".to_string();
         trim_trailing_partial_stop(&mut text, &[]);
         assert_eq!(text, "<|im_end|");
+    }
+
+    /// A caller's stop in any script is trimmed as a partial by CHARACTERS,
+    /// and a reply that merely shares no prefix with it is left alone. The byte
+    /// version sliced `"。"` (3 bytes) at 2 and panicked, on every path, after
+    /// the whole reply had been generated.
+    #[test]
+    fn a_stop_ending_in_a_multibyte_character_neither_panics_nor_over_trims() {
+        let stops = vec!["\n用户".to_string(), "。".to_string(), "Ende💬".to_string()];
+        for (reply, want) in [
+            ("回答\n用", "回答"),
+            ("回答\n", "回答"),
+            ("Tschüss Ende", "Tschüss "),
+            ("回答完成", "回答完成"),
+            ("plain ascii", "plain ascii"),
+        ] {
+            let mut text = reply.to_string();
+            trim_trailing_partial_stop(&mut text, &stops);
+            assert_eq!(text, want, "reply {reply:?}");
+        }
     }
 }
 

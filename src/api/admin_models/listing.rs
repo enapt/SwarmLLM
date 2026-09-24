@@ -1138,7 +1138,7 @@ pub async fn model_metadata(
                 candle_core::quantized::gguf_file::Value::Bool(b) => format!("{b}"),
                 candle_core::quantized::gguf_file::Value::String(s) => {
                     if s.len() > 200 {
-                        format!("{}...", &s[..200])
+                        format!("{}...", crate::api::prefix_within_bytes(s, 200))
                     } else {
                         s.clone()
                     }
