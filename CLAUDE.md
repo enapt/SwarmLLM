@@ -88,8 +88,8 @@ until readers leave (#90's shape); `clippy.toml` fails the build on one.
 ## Testing
 
 **Always say which feature set a count came from.** With
-`--features dev,claude-subscription`: **2912 lib** (+14 ignored),
-79 integration (31 + 34 + 14 `yamux_substream`), **166 repo-consistency**,
+`--features dev,claude-subscription`: **2922 lib** (+14 ignored),
+79 integration (31 + 34 + 14 `yamux_substream`), **169 repo-consistency**,
 1 `api_key_side_effects`, 55 `swarmllm-types`, and 11 in the vendored
 request-response patch — plus 15 in the `swarmllm` BIN target (`cli::*`, counted
 nowhere else). Clippy clean. The types crate and the vendored patch are **not**
@@ -162,7 +162,11 @@ since .191), a settings save no longer undoing `--anchor` / `--no-update-check`
 (#107), and ⛔ **Docker images publishing on the release's UN-DRAFT, not the
 tag** — every tag used to publish an image and move `latest`, which leaked the
 withdrawn .199 and the unsigned .202/.203 (gotcha #701). The next CHANGELOG must
-name all four. **Next** → `memory/next_up.md`.
+name all four, **and the 2026-09-24 round on `claude/ecstatic-dijkstra-qc9c3x`**:
+Docker images on x86-64-v3 (~3x), sampler on top-k candidates (~15x), split
+replies' history and emoji, non-Latin `stop` panic, DashMap guards across
+`.await` (a #90-shaped stall; `clippy.toml`), Windows `Instant` underflow,
+#105, nickname persist. **Next** → `memory/next_up.md`.
 
 ⚠ **Behaviour gate = `reply_ab.sh` + `split_rig.sh`**, not conformance alone —
 `family_conformance.sh` pins `gpu_layers = 0` and never splits, so it could not
