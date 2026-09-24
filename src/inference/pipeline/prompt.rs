@@ -57,6 +57,27 @@ impl CachedDecoder {
         }
     }
 
+    /// Decode the NEXT tokens of a reply, holding back a character whose bytes
+    /// have not all arrived yet (`carry` keeps them between calls).
+    ///
+    /// Decoding a token on its own is wrong for streaming: emoji and most
+    /// non-Latin scripts reach byte-level vocabularies as one token per BYTE,
+    /// and `from_utf8_lossy` turns each of those bytes into U+FFFD — the worker
+    /// learned this on 2026-08-05 (three emoji came back as nine replacement
+    /// characters) and the coordinator's own paths kept doing it. Paths without
+    /// a tokenizer have no byte-level decode to split, and decode as before.
+    pub(super) fn decode_tokens_streaming(&self, token_ids: &[u32], carry: &mut Vec<u8>) -> String {
+        if !self.has_tokenizer {
+            return self.decode_tokens(token_ids);
+        }
+        for &id in token_ids {
+            if let Some(token_str) = self.vocab.get(id as usize) {
+                carry.extend(self.decode_token_bytes(token_str));
+            }
+        }
+        crate::inference::tokenizer::take_complete_utf8(carry)
+    }
+
     fn decode_token_bytes(&self, token_str: &str) -> Vec<u8> {
         // Delegate to the shared decode logic in BpeTokenizer::decode_token_impl.
         crate::inference::tokenizer::decode_token_impl(
@@ -762,7 +783,7 @@ mod loaded_info_tests {
 }
 
 #[cfg(test)]
-mod decoder_tests {
+pub(super) mod decoder_tests {
     use super::CachedDecoder;
     use std::collections::HashMap;
 
@@ -792,6 +813,53 @@ mod decoder_tests {
             "U+2581 must never reach the reply, got {out:?}"
         );
         assert_eq!(out, " Hello world", "got {out:?}");
+    }
+
+    /// A vocabulary with byte-fallback tokens, and "🎉" (F0 9F 8E 89) spelt
+    /// one byte per token — how emoji and most non-Latin scripts reach a
+    /// SentencePiece or byte-level vocabulary.
+    pub(in crate::inference::pipeline) fn byte_fallback_decoder() -> CachedDecoder {
+        CachedDecoder {
+            vocab: [
+                "<unk>",
+                "\u{2581}Party",
+                "<0xF0>",
+                "<0x9F>",
+                "<0x8E>",
+                "<0x89>",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+            byte_decoder: HashMap::new(),
+            is_sentencepiece: true,
+            has_tokenizer: true,
+        }
+    }
+
+    /// Streamed token by token, a character whose bytes span several tokens
+    /// arrives WHOLE — held back until its last byte, never emitted as U+FFFD.
+    /// The control is the per-token decode the coordinator used to do, which
+    /// must show the defect or this test proves nothing.
+    #[test]
+    fn a_character_split_across_tokens_streams_whole() {
+        let d = byte_fallback_decoder();
+        let ids = [1u32, 2, 3, 4, 5];
+        let alone: String = ids.iter().map(|&t| d.decode_tokens(&[t])).collect();
+        assert!(
+            alone.contains('\u{FFFD}'),
+            "control: decoding each token alone mangles it, got {alone:?}"
+        );
+        let mut carry = Vec::new();
+        let pieces: Vec<String> = ids
+            .iter()
+            .map(|&t| d.decode_tokens_streaming(&[t], &mut carry))
+            .collect();
+        assert_eq!(pieces, [" Party", "", "", "", "\u{1F389}"]);
+        assert!(
+            carry.is_empty(),
+            "nothing left pending once the character is whole"
+        );
     }
 }
 

@@ -158,6 +158,11 @@ impl PipelineExecutor {
         let stop_strings = self.reply_stops().await.to_vec();
         // Accumulate decoded text for stop-string matching (both streaming and non-streaming)
         let mut accumulated_text = String::new();
+        // Bytes of a character the tokens so far have not finished — see
+        // `CachedDecoder::decode_tokens_streaming`. Both the streamed text AND
+        // the final reply are built from per-token pieces here, so decoding
+        // each token alone put U+FFFD in both for every split character.
+        let mut utf8_carry: Vec<u8> = Vec::new();
 
         // T14: Pre-compute vision embeddings before the token generation loop.
         // This decouples vision encoding from the text pipeline — any node with
@@ -406,7 +411,7 @@ impl PipelineExecutor {
                     for &tid in &result.token_ids {
                         if !eos.contains(&tid) {
                             let text = match decoder {
-                                Some(d) => d.decode_tokens(&[tid]),
+                                Some(d) => d.decode_tokens_streaming(&[tid], &mut utf8_carry),
                                 None => format!("[{tid}]"),
                             };
                             accumulated_text.push_str(&text);
@@ -620,6 +625,18 @@ impl PipelineExecutor {
         // the client handle which aborts the per-stream reader/writer tasks.
         if let Some(client) = self.shared_state.pipeline_stream_client.get() {
             client.close(request_id);
+        }
+
+        // A reply that ended part-way through a character (cut by `max_tokens`)
+        // renders that fragment as a whole-reply decode would: U+FFFD. After a
+        // stop sequence the text was truncated before it, so there is nothing
+        // to add.
+        let tail = crate::inference::tokenizer::flush_utf8_carry(&mut utf8_carry);
+        if !tail.is_empty() && !hit_stop_string_outer {
+            accumulated_text.push_str(&tail);
+            if let Some(ref mut st) = streamed_text {
+                st.push_str(&tail);
+            }
         }
 
         // Strip EOS tokens before decoding (loaded from GGUF metadata)

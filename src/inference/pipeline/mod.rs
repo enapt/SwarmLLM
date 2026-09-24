@@ -588,13 +588,13 @@ pub(super) fn build_kv_truncate_forward(
 /// coordinator inherits it. Read at one choke point,
 /// `PipelineExecutor::keeping_the_partial`.
 ///
-/// The text is accumulated per emitted BATCH rather than decoded once at the
-/// end, because the reader of a salvage has no decoder in hand. That is the
-/// same granularity a streaming client already receives, so the salvaged reply
-/// is exactly what a streaming caller would have seen — with the same edge: a
-/// multi-byte character split across a batch boundary decodes to a replacement
-/// character. Acceptable on a path that exists to return something rather than
-/// nothing, and not worth carrying a vocabulary around for.
+/// The text is accumulated as it is emitted rather than decoded once at the
+/// end, because the reader of a salvage has no decoder in hand — so the
+/// salvaged reply is exactly what a streaming caller was shown. **It also holds
+/// the UTF-8 carry** (`decode_next`) that every emitted token is decoded
+/// through: a character whose bytes span several tokens is held back until it
+/// is whole, instead of streaming as U+FFFD once per byte, which is what
+/// decoding each token on its own did on all three speculative coordinators.
 ///
 /// The token ids are kept beside the text for two different jobs: they are the
 /// honest `completion_tokens` (the trace logged `tokens=0` for these failures
@@ -609,9 +609,19 @@ struct PartialReplyState {
     text: String,
     ids: Vec<u32>,
     prompt_tokens: u32,
+    /// Bytes of a character not yet completed by the tokens emitted so far.
+    utf8_carry: Vec<u8>,
 }
 
 impl PartialReply {
+    /// The text the client should be shown for the next emitted token, decoded
+    /// through this reply's UTF-8 carry. Empty while a character is still
+    /// arriving; every consumer of a streamed event already skips empty text.
+    fn decode_next(&self, decoder: &prompt::CachedDecoder, token: u32) -> String {
+        let mut state = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        decoder.decode_tokens_streaming(&[token], &mut state.utf8_carry)
+    }
+
     /// Add an emitted batch. `text` is what the client was shown for it.
     fn record(&self, text: &str, ids: &[u32]) {
         let mut state = self.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -662,7 +672,7 @@ pub(in crate::inference::pipeline) async fn emit_first_streaming_token(
     if eos.contains(&token) {
         return;
     }
-    let text = decoder.decode_tokens(&[token]);
+    let text = partial.decode_next(decoder, token);
     // Recorded BEFORE the streaming check, and whatever the channel does with
     // it: a salvage is for the NON-streamed request, so the one case that
     // needs this is the one where `token_tx` is `None` and the old code
@@ -697,16 +707,21 @@ pub(in crate::inference::pipeline) async fn emit_streaming_batch(
     // is the one that used to leave here having recorded nothing. EOS is
     // dropped from the text for the same reason it is dropped from the wire,
     // and kept among the ids so the count matches what the decode produced.
-    let kept: Vec<u32> = tokens
+    //
+    // Each kept token is decoded ONCE, through the reply's UTF-8 carry, and
+    // the same pieces are both recorded and streamed — a character split
+    // across tokens (or across two batches) arrives whole in either.
+    let pieces: Vec<String> = tokens
         .iter()
-        .copied()
         .filter(|t| !eos.contains(t))
+        .map(|&t| partial.decode_next(decoder, t))
         .collect();
-    partial.record(&decoder.decode_tokens(&kept), tokens);
+    partial.record(&pieces.concat(), tokens);
     let tx = match token_tx {
         Some(tx) => tx,
         None => return false,
     };
+    let mut pieces = pieces.into_iter();
     for &t in tokens {
         // End-of-turn is a CONTROL token: it ends the reply, it is not part of
         // it. Every caller keeps it in its own `emitted` vector so the decode
@@ -723,7 +738,7 @@ pub(in crate::inference::pipeline) async fn emit_streaming_batch(
         if eos.contains(&t) {
             continue;
         }
-        let text = decoder.decode_tokens(&[t]);
+        let text = pieces.next().unwrap_or_default();
         if tx
             .send(crate::inference::router::StreamingTokenEvent {
                 text,
@@ -1587,6 +1602,36 @@ mod tests {
             now_serving, c,
             "the segment is re-pointed at the standby that answered"
         );
+    }
+
+    /// The shared emit helper streams a character split across tokens — and
+    /// across TWO emitted batches — whole, and records the same text for a
+    /// salvage. All three speculative coordinators stream through it, and it
+    /// used to decode each token on its own: "🎉" arrived as four U+FFFD.
+    #[tokio::test]
+    async fn a_character_split_across_two_batches_streams_whole() {
+        let decoder = super::prompt::decoder_tests::byte_fallback_decoder();
+        let partial = PartialReply::default();
+        let (tx, mut rx) = crate::inference::router::StreamingTokenTx::channel(16);
+        let token_tx = Some(tx);
+        let eos = std::collections::HashSet::new();
+        let mut finish = String::new();
+        // " Party", then the emoji's first two bytes | its last two.
+        for batch in [&[1u32, 2, 3][..], &[4, 5][..]] {
+            assert!(
+                !emit_streaming_batch(&partial, &token_tx, &decoder, batch, &eos, &mut finish)
+                    .await
+            );
+        }
+        drop(token_tx);
+        let mut streamed = String::new();
+        while let Some(ev) = rx.recv().await {
+            streamed.push_str(&ev.text);
+        }
+        assert_eq!(streamed, " Party\u{1F389}", "streamed");
+        let (recorded, ids, _) = partial.taken().expect("recorded");
+        assert_eq!(recorded, " Party\u{1F389}", "recorded for a salvage");
+        assert_eq!(ids, vec![1, 2, 3, 4, 5]);
     }
 
     /// The reply so far travels to the peer that samples only when its sampler

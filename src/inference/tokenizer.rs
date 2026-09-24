@@ -574,6 +574,67 @@ enum TokenizerKind {
     SentencePiece(SpmTokenizer),
 }
 
+/// Emit the longest complete UTF-8 prefix of `carry`, keeping any incomplete
+/// trailing sequence for the next token.
+///
+/// The ONE streaming detokenizer step: the worker's `decode_token` and the
+/// coordinator's `CachedDecoder::decode_tokens_streaming` both go through it,
+/// because the coordinator went on decoding each token on its own — every
+/// split character streamed as U+FFFD — after the worker was fixed (2026-08-05).
+///
+/// **A codepoint can span several tokens.** Emoji and most non-Latin scripts are
+/// emitted as byte-fallback tokens — one token per BYTE — so converting each
+/// token to text on its own turns every one of those bytes into U+FFFD. Asking
+/// llama-3.2-3b for three emoji returned nine replacement characters,
+/// deterministically, 3 runs out of 3 (2026-08-05).
+///
+/// Buffering the tail is what every streaming detokenizer does for this reason
+/// (llama.cpp's examples accumulate bytes; HuggingFace `tokenizers` ships a
+/// `DecodeStream` for it).
+pub(crate) fn take_complete_utf8(carry: &mut Vec<u8>) -> String {
+    let mut out = String::new();
+    loop {
+        match std::str::from_utf8(carry) {
+            Ok(s) => {
+                out.push_str(s);
+                carry.clear();
+                return out;
+            }
+            Err(e) => {
+                let good = e.valid_up_to();
+                if good > 0 {
+                    // Valid by construction — `valid_up_to` is a UTF-8 boundary.
+                    out.push_str(std::str::from_utf8(&carry[..good]).unwrap_or_default());
+                }
+                match e.error_len() {
+                    // Truncated at the end: the rest of this codepoint is in the
+                    // next token. Keep it rather than corrupting it.
+                    None => {
+                        carry.drain(..good);
+                        return out;
+                    }
+                    // Genuinely invalid bytes. Emit one replacement and skip
+                    // them, or we would spin on the same bytes forever.
+                    Some(bad) => {
+                        out.push('\u{FFFD}');
+                        carry.drain(..good + bad);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Whatever is left in `carry` when a reply ends, as text: an incomplete
+/// character becomes U+FFFD, exactly as a whole-reply decode renders it, so a
+/// reply cut part-way through a character by `max_tokens` reads the same
+/// streamed or not.
+pub(crate) fn flush_utf8_carry(carry: &mut Vec<u8>) -> String {
+    let out = String::from_utf8_lossy(carry).into_owned();
+    carry.clear();
+    out
+}
+
 /// Decode a BPE token string back to UTF-8 bytes (shared logic for BpeTokenizer and CachedDecoder).
 /// For GPT-2: reverses the GPT-2 unicode byte encoding.
 /// For SentencePiece: converts ▁ back to space, handles <0xNN> byte tokens.

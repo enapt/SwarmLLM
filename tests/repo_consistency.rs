@@ -5590,6 +5590,58 @@ fn the_eos_lookback_sees_a_real_guard_and_not_a_distant_one() {
     assert!(!eos_guarded(&none, 1));
 }
 
+/// Offenders against "a token is turned into reply text through the UTF-8
+/// carry": a `decode_tokens(&[…])` call — decoding a single token, or a literal
+/// handful, on its own — in the production part of a pipeline source file.
+fn single_token_decodes(src: &str) -> Vec<String> {
+    let production = &src[..src.find("#[cfg(test)]").unwrap_or(src.len())];
+    statements(production)
+        .into_iter()
+        .filter(|(_, stmt)| stmt.contains("decode_tokens(&["))
+        .map(|(line, stmt)| format!("line {line}: {}", stmt.trim()))
+        .collect()
+}
+
+/// A token becomes reply text through `CachedDecoder::decode_tokens_streaming`
+/// (the coordinator) or the worker's `decode_token`, both of which carry the
+/// bytes of a character that the token so far has not finished. Decoding each
+/// token on its own turns every byte of a split character into U+FFFD — emoji
+/// and most non-Latin scripts reach byte-level vocabularies one byte per
+/// token. The worker was fixed on 2026-08-05; the coordinator's standard loop
+/// (streamed AND final text) and the shared emit helpers all three speculative
+/// coordinators stream through kept doing it until 2026-09-24.
+#[test]
+fn a_streamed_token_is_decoded_through_the_utf8_carry() {
+    assert!(
+        !single_token_decodes("fn f() {\n    let t = d.decode_tokens(&[tid]);\n}\n").is_empty(),
+        "the scan no longer sees a single-token decode"
+    );
+    assert!(
+        single_token_decodes(
+            "fn f() {}\n#[cfg(test)]\nmod t { fn g() { d.decode_tokens(&[1]); } }\n"
+        )
+        .is_empty(),
+        "test code may decode a token alone, to show the defect as a control"
+    );
+    let mut offenders = Vec::new();
+    for entry in std::fs::read_dir("src/inference/pipeline").expect("pipeline dir") {
+        let path = entry.expect("entry").path();
+        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+            continue;
+        }
+        let src = std::fs::read_to_string(&path).expect("read");
+        for hit in single_token_decodes(&src) {
+            offenders.push(format!("{}: {hit}", path.display()));
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "decode streamed tokens with `decode_tokens_streaming` and the reply's carry \
+         (or through `emit_streaming_batch`), never one token at a time:\n{}",
+        offenders.join("\n")
+    );
+}
+
 /// `emit_streaming_batch` / `emit_first_streaming_token` own the end-of-turn
 /// filter. A coordinator that builds its own event with decoded text bypasses
 /// that filter, which is how `<|eot_id|>` reached clients as reply text from

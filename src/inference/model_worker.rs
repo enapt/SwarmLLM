@@ -4,6 +4,7 @@
 //! reclaims ALL GPU memory immediately — solving the "memory doesn't drop
 //! on unload" problem and keeping inference off the main daemon's Tokio runtime.
 
+use crate::inference::tokenizer::take_complete_utf8;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -4451,52 +4452,6 @@ fn export_snapshot_for_hash(
         }
     }
     None
-}
-
-/// Emit the longest complete UTF-8 prefix of `carry`, keeping any incomplete
-/// trailing sequence for the next token.
-///
-/// **A codepoint can span several tokens.** Emoji and most non-Latin scripts are
-/// emitted as byte-fallback tokens — one token per BYTE — so converting each
-/// token to text on its own turns every one of those bytes into U+FFFD. Asking
-/// llama-3.2-3b for three emoji returned nine replacement characters,
-/// deterministically, 3 runs out of 3 (2026-08-05).
-///
-/// Buffering the tail is what every streaming detokenizer does for this reason
-/// (llama.cpp's examples accumulate bytes; HuggingFace `tokenizers` ships a
-/// `DecodeStream` for it).
-fn take_complete_utf8(carry: &mut Vec<u8>) -> String {
-    let mut out = String::new();
-    loop {
-        match std::str::from_utf8(carry) {
-            Ok(s) => {
-                out.push_str(s);
-                carry.clear();
-                return out;
-            }
-            Err(e) => {
-                let good = e.valid_up_to();
-                if good > 0 {
-                    // Valid by construction — `valid_up_to` is a UTF-8 boundary.
-                    out.push_str(std::str::from_utf8(&carry[..good]).unwrap_or_default());
-                }
-                match e.error_len() {
-                    // Truncated at the end: the rest of this codepoint is in the
-                    // next token. Keep it rather than corrupting it.
-                    None => {
-                        carry.drain(..good);
-                        return out;
-                    }
-                    // Genuinely invalid bytes. Emit one replacement and skip
-                    // them, or we would spin on the same bytes forever.
-                    Some(bad) => {
-                        out.push('\u{FFFD}');
-                        carry.drain(..good + bad);
-                    }
-                }
-            }
-        }
-    }
 }
 
 /// Decide how many tokens this reply may actually use, against the model's real
