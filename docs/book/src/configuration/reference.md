@@ -9,14 +9,13 @@ Settings changed through the dashboard (or by editing this file and calling
 not need to restart for a resource limit, a contribution level, an auto-manage
 threshold, or a batching setting to matter.
 
-Three things are decided once, when the node starts, and keep their startup
+Two things are decided once, when the node starts, and keep their startup
 value until it starts again:
 
 | Setting | Why |
 |---|---|
 | `[network] max_peers` (and the contribution level it derives from) | Connection limits are fixed when the peer-to-peer network is built |
 | `[resources] max_cpu_threads` for an **already-loaded** model | Threads are handed to a model's worker when it loads; taking them back would interrupt whatever it is answering. The next model to load uses the new value |
-| `[updates] mode` | The update checker is started, or not, at launch |
 
 Everything else is live. Before v0.3.88 none of it was: a setting would save,
 report success, show its new value, and leave the running node on the value it
@@ -318,10 +317,16 @@ what gets *stored* where, not about how work is distributed.
 
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `mode` | string | *(unset → `"install"`)* | What the node does when a newer release exists: `"off"` (never checks), `"notify"` (tells you), `"download"` (downloads; you click to install), `"install"` (downloads, installs and restarts itself when idle). Updates are signed, and a node refuses one it cannot verify. Decided at start-up — see above |
+| `mode` | string | *(unset → `"install"`)* | What the node does when a newer release exists: `"off"` (never checks), `"notify"` (tells you), `"download"` (downloads; you click to install), `"install"` (downloads, installs and restarts itself when idle). Updates are signed, and a node refuses one it cannot verify. Applies without a restart: the running node reads it before every check, so a change lands within `check_interval_hours` (**Check now** in Settings acts at once) |
 | `auto_update` | string | `"disabled"` | Legacy setting kept so old config files load. **It no longer changes anything** — unless `mode` is set, every value means `mode = "install"`. Use `mode` |
 | `check_interval_hours` | integer | `1` | Update check frequency |
 | `include_prereleases` | boolean | `true` | Offer pre-release builds. Defaults on because every release so far is tagged `-alpha`, so excluding them would mean never seeing an update at all |
+
+**`swarmllm run --no-update-check`** turns update checking off for that run,
+whatever `mode` says, and nothing — a settings save included — switches it back
+on; start the node without the flag to restore it. (Until v0.3.205 the flag
+changed nothing: it set the legacy `auto_update`, which no longer decides
+anything.)
 
 ## `[identity]` — Your Identity
 

@@ -60,6 +60,21 @@ pub struct UpdateConfig {
     /// `auto_update = "stable"` came to be a setting that silently did nothing.
     #[serde(default = "default_true")]
     pub include_prereleases: bool,
+    /// `swarmllm run --no-update-check`: this PROCESS never contacts GitHub,
+    /// whatever any file says.
+    ///
+    /// A fact about how the process was started, so no file can carry it —
+    /// `serde(skip)` — and [`crate::daemon::SharedState::apply_live_config`]
+    /// carries it across every live-config swap, because a settings save
+    /// rebuilds the live config from `config.toml` and would otherwise drop it
+    /// at the first click. Command line beats file, as everywhere else.
+    ///
+    /// The flag used to set the legacy `auto_update = "disabled"`, which
+    /// [`UpdateConfig::effective_mode`] has resolved to `Install` since
+    /// v0.3.191 — so the one switch that promised no updates changed nothing,
+    /// and a node started with it updated and restarted itself anyway.
+    #[serde(skip)]
+    pub off_for_this_process: bool,
 }
 
 /// What a node does when a newer release exists.
@@ -115,6 +130,9 @@ impl UpdateConfig {
     /// an explicit `mode` still wins — `off`, `notify` and `download` are how
     /// you opt out, in increasing order of what you keep.
     pub fn effective_mode(&self) -> UpdateMode {
+        if self.off_for_this_process {
+            return UpdateMode::Off;
+        }
         match self.mode {
             Some(m) => m,
             None => match self.auto_update {
@@ -149,6 +167,7 @@ impl Default for UpdateConfig {
             auto_update: AutoUpdateMode::Disabled,
             check_interval_hours: default_check_interval_hours(),
             include_prereleases: true,
+            off_for_this_process: false,
         }
     }
 }
@@ -293,6 +312,43 @@ mod update_mode_tests {
         let cfg: UpdateConfig = toml::from_str("auto_update = \"disabled\"").unwrap();
         assert_eq!(cfg.mode, None, "old configs have no mode key");
         assert_eq!(cfg.effective_mode(), UpdateMode::Install);
+    }
+
+    /// `swarmllm run --no-update-check` set `auto_update = "disabled"`, and the
+    /// test above is exactly why that did nothing: the legacy value resolves
+    /// to `Install`. The flag has its own field now, which must beat every mode
+    /// a file can hold — and which no file can hold.
+    #[test]
+    fn the_command_line_switch_turns_updates_off_whatever_the_file_says() {
+        for mode in [
+            None,
+            Some(UpdateMode::Install),
+            Some(UpdateMode::Download),
+            Some(UpdateMode::Notify),
+            Some(UpdateMode::Off),
+        ] {
+            let cfg = UpdateConfig {
+                mode,
+                off_for_this_process: true,
+                ..Default::default()
+            };
+            assert_eq!(cfg.effective_mode(), UpdateMode::Off, "file mode {mode:?}");
+        }
+
+        let cfg = UpdateConfig {
+            off_for_this_process: true,
+            ..Default::default()
+        };
+        let written = toml::to_string(&cfg).unwrap();
+        assert!(
+            !written.contains("off_for_this_process"),
+            "a command-line fact must not be written into config.toml"
+        );
+        let read: UpdateConfig = toml::from_str("off_for_this_process = true\n").unwrap();
+        assert!(
+            !read.off_for_this_process,
+            "and a file must not be able to claim it"
+        );
     }
 
     /// A legacy opt-in must never come out as LESS than a config that chose

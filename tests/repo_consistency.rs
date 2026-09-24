@@ -2121,7 +2121,10 @@ fn frontend_payload_stays_within_budget() {
 ///
 /// Only leaf scalars are checked: section structs are documented as headings,
 /// and `OperationalParams` is a derived view rather than something anyone writes
-/// in a file.
+/// in a file. A field marked `#[serde(skip)]` is not a setting either — no file
+/// can hold it (`UpdateConfig::off_for_this_process`, the `--no-update-check`
+/// flag, is the example) — so it is skipped, and listing it in a table of
+/// file options would tell a reader to write something that is ignored.
 #[test]
 fn every_config_setting_is_documented() {
     let root = repo_root();
@@ -2147,12 +2150,25 @@ fn every_config_setting_is_documented() {
         };
         let mut current = String::new();
         let mut in_tests = false;
+        // Set by a `#[serde(skip)]` above the next field: not a file setting.
+        let mut not_in_files = false;
         for line in text.lines() {
             let l = line.trim();
             if l.starts_with("#[cfg(test)]") {
                 in_tests = true;
             }
             if in_tests {
+                continue;
+            }
+            if let Some(attr) = l.strip_prefix("#[serde(") {
+                // Exact arguments: `skip_serializing_if` still reads the file.
+                if attr
+                    .trim_end_matches(")]")
+                    .split(',')
+                    .any(|a| matches!(a.trim(), "skip" | "skip_deserializing"))
+                {
+                    not_in_files = true;
+                }
                 continue;
             }
             if let Some(rest) = l.strip_prefix("pub struct ") {
@@ -2171,6 +2187,9 @@ fn every_config_setting_is_documented() {
             };
             let name = name.trim();
             let ty = ty.trim().trim_end_matches(',');
+            if std::mem::take(&mut not_in_files) {
+                continue;
+            }
             if current.is_empty() || skip_structs.contains(&current.as_str()) {
                 continue;
             }
@@ -4247,6 +4266,51 @@ fn the_boot_snapshot_check_is_not_pinned_to_one_formatting() {
     assert!(body.contains("shared.config.resources"));
     assert!(reads_the_boot_snapshot(body));
     assert!(fn_body(src, "pub fn absent").is_none());
+}
+
+/// Does this code decide something from the BOOT snapshot's update mode?
+fn reads_the_boot_update_mode(text: &str) -> bool {
+    statements(text)
+        .iter()
+        .any(|(_, s)| s.contains(".config.updates.effective_mode()"))
+}
+
+/// #281's shape one level up — not a setting read from the snapshot, but
+/// whether the code that READS it exists at all. A daemon started with
+/// `[updates] mode = "off"` never spawned the update checker, because the
+/// spawn was decided on the boot value; turning updates on in Settings then
+/// saved, answered "ok", and nothing existed to act on it — although the
+/// checker's own loop re-reads the live mode every pass precisely so that
+/// switch works without a restart. Only the command-line flag, which no
+/// settings save can change, may decide the spawn.
+#[test]
+fn the_update_checker_exists_unless_the_command_line_forbids_it() {
+    let text =
+        std::fs::read_to_string(repo_root().join("src/daemon/mod.rs")).expect("daemon/mod.rs");
+    assert!(
+        !reads_the_boot_update_mode(&text),
+        "src/daemon/mod.rs decides something from the boot snapshot's update \
+         mode — the update checker's existence must follow the command line \
+         (`off_for_this_process`), never a value Settings can change"
+    );
+    assert!(
+        statements(&text)
+            .iter()
+            .any(|(_, s)| s.contains(".config.updates.off_for_this_process")),
+        "the update checker's spawn must be decided on the process flag"
+    );
+
+    // The scan must see the violation it exists for, in the shapes rustfmt
+    // produces, and must not fire on a comment.
+    assert!(reads_the_boot_update_mode(
+        "if self.config.updates.effective_mode() != UpdateMode::Off {"
+    ));
+    assert!(reads_the_boot_update_mode(
+        "if self\n    .config\n    .updates\n    .effective_mode()\n    != UpdateMode::Off\n{"
+    ));
+    assert!(!reads_the_boot_update_mode(
+        "// self.config.updates.effective_mode() was the old test\nlet x = 1;"
+    ));
 }
 
 /// The VRAM budget decides whether a model runs on the graphics card or crawls

@@ -509,10 +509,23 @@ impl Daemon {
             });
         }
 
-        // Spawn UpdateChecker (11th subsystem task — optional, runs only if not disabled).
-        // When disabled, skip the spawn entirely — otherwise the supervisor logs a
-        // misleading "Subsystem exited unexpectedly with Ok" warning at startup.
-        if self.config.updates.effective_mode() != crate::config::UpdateMode::Off {
+        // Spawn UpdateChecker (11th subsystem task) unless this PROCESS was
+        // started with `--no-update-check`.
+        //
+        // Decided on the command-line flag, never on the boot mode. A FILE saying
+        // `mode = "off"` still gets the task: its loop re-reads the live mode each
+        // pass and sleeps while it is off, which is what lets turning updates on
+        // in Settings work without a restart. Skipping the spawn on the boot
+        // value silently broke that promise — the setting saved and nothing
+        // existed to act on it (#281's shape). The skip once avoided a
+        // supervisor warning about a task that returned when off; the loop no
+        // longer returns.
+        if self.config.updates.off_for_this_process {
+            tracing::info!(
+                "Update checking is off for this run (--no-update-check) — start \
+                 without it to turn updates back on"
+            );
+        } else {
             let update_config = self.config.updates.clone();
             let update_state = shared_state.events.update_state.clone();
             let dash_tx = shared_state.events.dashboard_tx.clone();

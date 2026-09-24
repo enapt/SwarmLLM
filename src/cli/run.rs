@@ -78,9 +78,11 @@ pub async fn run_daemon(args: DaemonArgs) -> anyhow::Result<()> {
         }
     }
 
-    // CLI --no-update-check overrides config
+    // CLI --no-update-check overrides config — through the process-level flag,
+    // which no file and no settings save can undo. It used to set the legacy
+    // `auto_update = "disabled"`, which resolves to `install` since v0.3.191.
     if args.no_update_check {
-        config.updates.auto_update = swarmllm::config::AutoUpdateMode::Disabled;
+        config.updates.off_for_this_process = true;
     }
 
     // --anchor makes the flag self-sufficient: a bootstrap/relay node that

@@ -864,7 +864,13 @@ impl SharedState {
     ///
     /// Called by `PUT /api/admin/config` alongside writing the file. Persisting
     /// alone is durability, not effect.
-    pub fn apply_live_config(&self, config: Config) {
+    ///
+    /// What the PROCESS was started with survives the swap: the new config is
+    /// rebuilt from `config.toml`, which cannot hold a command-line flag, so a
+    /// settings save would otherwise quietly undo `--no-update-check`
+    /// (`UpdateConfig::off_for_this_process`).
+    pub fn apply_live_config(&self, mut config: Config) {
+        config.updates.off_for_this_process |= self.cfg().updates.off_for_this_process;
         self.live_config.store(std::sync::Arc::new(config));
     }
 
@@ -4583,6 +4589,12 @@ mod pending_layer_result_tests {
 #[cfg(test)]
 mod live_config_tests {
     fn test_state() -> std::sync::Arc<crate::daemon::SharedState> {
+        state_started_with(crate::config::Config::default())
+    }
+
+    fn state_started_with(
+        config: crate::config::Config,
+    ) -> std::sync::Arc<crate::daemon::SharedState> {
         use crate::identity::Identity;
         use crate::inference::executor::ModelExecutor;
         use crate::storage::db::Database;
@@ -4592,14 +4604,34 @@ mod live_config_tests {
         let temp = tempfile::tempdir().unwrap();
         let db = Database::open(temp.path()).unwrap();
         let executor = std::sync::Arc::new(Mutex::new(ModelExecutor::new()));
-        let (state, _, _) = crate::daemon::SharedState::new(
-            crate::config::Config::default(),
-            identity,
-            db,
-            executor,
-            None,
-        );
+        let (state, _, _) = crate::daemon::SharedState::new(config, identity, db, executor, None);
         state
+    }
+
+    /// A settings save rebuilds the live config from `config.toml`, and a file
+    /// cannot hold a command-line flag — so without the carry in
+    /// `apply_live_config`, the first click in Settings would quietly turn
+    /// updates back on for a node started with `--no-update-check`.
+    #[test]
+    fn a_settings_save_does_not_undo_the_no_update_check_flag() {
+        use crate::config::UpdateMode;
+        let mut started = crate::config::Config::default();
+        started.updates.off_for_this_process = true;
+        let state = state_started_with(started);
+        assert_eq!(state.cfg().updates.effective_mode(), UpdateMode::Off);
+
+        // What `PUT /api/admin/config` applies: the FILE, plus the change.
+        let mut from_file: crate::config::Config =
+            toml::from_str("[updates]\nmode = \"install\"\n").unwrap();
+        from_file.resources.max_disk_mb += 1;
+        state.apply_live_config(from_file);
+
+        assert_eq!(
+            state.cfg().updates.effective_mode(),
+            UpdateMode::Off,
+            "the command line outranks the file, before and after a save"
+        );
+        assert_eq!(state.cfg().updates.mode, Some(UpdateMode::Install));
     }
 
     /// The whole point: a setting changed while the node runs must be visible to
