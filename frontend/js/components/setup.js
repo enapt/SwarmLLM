@@ -207,6 +207,9 @@
         // (report #019), on the first screen anyone sees.
         var backendCanUseTheGpu = App.setup.gpuIsUsable();
         var usableVramMb = backendCanUseTheGpu ? vramMb : 0;
+        // What each contribution level uses depends on which of the two runs
+        // the models — say it for this machine, as Settings does.
+        U.labelContributionLevels('.setup-contribution-segmented', usableVramMb > 0);
         if (gpuName && vramMb > 0) {
           gpuEl.textContent = gpuName;
           vramEl.textContent = backendCanUseTheGpu

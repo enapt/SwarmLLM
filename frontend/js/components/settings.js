@@ -121,7 +121,6 @@
       if (hw && typeof hw.gpu_inference === 'boolean') isGpu = hw.gpu_inference;
       else isGpu = !!(App.state && App.state._gpuInference);
       var backend = (hw && hw.inference_backend) || 'GPU';
-      var unit = isGpu ? 'GPU' : 'CPU';
 
       var badge = document.getElementById('settings-mode-badge');
       if (badge) {
@@ -136,13 +135,9 @@
         }
       }
 
-      // Update contribution sub-labels to show only the relevant resource
-      var subs = { minimal: '≤ 25%', moderate: '≤ 50%', maximum: '≤ 75%+' };
-      document.querySelectorAll('.segmented[data-bound-select="settings-contribution"] .segmented-btn').forEach(function(btn) {
-        var v = btn.getAttribute('data-value');
-        var sub = btn.querySelector('.segmented-sub');
-        if (sub && subs[v]) sub.textContent = subs[v] + ' ' + unit;
-      });
+      // Each level's sub-label says what it actually uses on THIS kind of
+      // machine — see App.utils.labelContributionLevels.
+      U.labelContributionLevels('.segmented[data-bound-select="settings-contribution"]', isGpu);
 
       // Update contribution hint + compute memory label
       var hint = document.querySelector('#settings-contribution ~ .field-hint, .form-group .field-hint[data-i18n="settings.contribution_hint"]');

@@ -1304,7 +1304,29 @@
     applyVisualViewportHeight();
   }
 
+  // Label each contribution level with what it actually uses on this kind of
+  // machine (src/config/node.rs): on a processor-only machine a share of the
+  // cores and system memory, on one whose graphics card runs the models how
+  // much of the card it always leaves free. One wording cannot be true of both
+  // — the old "≤ 25% CPU / GPU" was true of neither, and Settings overwrote it
+  // with untranslated English.
+  //
+  // The key goes on the element as well as the text, so a language switch
+  // (`I18n.translatePage` re-applies `data-i18n`) keeps this machine's wording.
+  function labelContributionLevels(segmentedSelector, isGpu) {
+    var suffix = isGpu ? '_gpu' : '_cpu';
+    document.querySelectorAll(segmentedSelector + ' .segmented-btn').forEach(function(btn) {
+      var level = btn.getAttribute('data-value');
+      var sub = btn.querySelector('.segmented-sub');
+      if (!sub || !level) return;
+      var key = 'settings.contrib_' + level + suffix;
+      sub.setAttribute('data-i18n', key);
+      sub.textContent = I18n.t(key);
+    });
+  }
+
   App.utils = {
+    labelContributionLevels: labelContributionLevels,
     clientAddr: clientAddr,
     clientTrust: clientTrust,
     isTrustedOrigin: isTrustedOrigin,

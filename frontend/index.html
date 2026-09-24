@@ -96,15 +96,15 @@
           <div class="segmented setup-contribution-segmented" data-bound-select="setup-contribution" role="radiogroup" data-i18n-aria-label="setup.contribution_aria" aria-label="Resource contribution level">
             <button type="button" class="segmented-btn" data-value="minimal" role="radio" aria-checked="false">
               <span class="segmented-title" data-i18n="setup.contrib_minimal">Minimal</span>
-              <span class="segmented-sub" data-i18n="setup.contrib_minimal_short">≤ 25%</span>
+              <span class="segmented-sub" data-i18n="settings.contrib_minimal_cpu">Up to half the cores and memory</span>
             </button>
             <button type="button" class="segmented-btn active" data-value="moderate" role="radio" aria-checked="true">
               <span class="segmented-title" data-i18n="setup.contrib_moderate">Moderate</span>
-              <span class="segmented-sub" data-i18n="setup.contrib_moderate_short">≤ 50%</span>
+              <span class="segmented-sub" data-i18n="settings.contrib_moderate_cpu">Up to 75% of cores, 65% of memory</span>
             </button>
             <button type="button" class="segmented-btn" data-value="maximum" role="radio" aria-checked="false">
               <span class="segmented-title" data-i18n="setup.contrib_maximum">Maximum</span>
-              <span class="segmented-sub" data-i18n="setup.contrib_maximum_short">≤ 75%+</span>
+              <span class="segmented-sub" data-i18n="settings.contrib_maximum_cpu">Up to all cores, 80% of memory</span>
             </button>
           </div>
           <select id="setup-contribution" class="visually-hidden">
@@ -112,7 +112,7 @@
             <option value="moderate" selected data-i18n="setup.contrib_moderate">Moderate</option>
             <option value="maximum" data-i18n="setup.contrib_maximum">Maximum</option>
           </select>
-          <div class="setup-contribution-callout" id="contribution-desc" data-i18n="setup.contrib_moderate_desc">Balanced: ~25% CPU, moderate storage. Good for most users.</div>
+          <div class="setup-contribution-callout" id="contribution-desc" data-i18n="setup.contrib_moderate_desc">Balanced — your computer will still feel fast during normal use. Best for most people.</div>
         </div>
 
         <!-- Contribution mode: Auto (recommended) / Manual -->
@@ -430,15 +430,15 @@
         <div class="segmented" data-bound-select="settings-contribution">
           <button type="button" class="segmented-btn" data-value="minimal">
             <span class="segmented-title" data-i18n="setup.contrib_minimal">Minimal</span>
-            <span class="segmented-sub" data-i18n="settings.contrib_minimal_hw">≤ 25% CPU / GPU</span>
+            <span class="segmented-sub" data-i18n="settings.contrib_minimal_cpu">Up to half the cores and memory</span>
           </button>
           <button type="button" class="segmented-btn active" data-value="moderate">
             <span class="segmented-title" data-i18n="setup.contrib_moderate">Moderate</span>
-            <span class="segmented-sub" data-i18n="settings.contrib_moderate_hw">≤ 50% CPU / GPU</span>
+            <span class="segmented-sub" data-i18n="settings.contrib_moderate_cpu">Up to 75% of cores, 65% of memory</span>
           </button>
           <button type="button" class="segmented-btn" data-value="maximum">
             <span class="segmented-title" data-i18n="setup.contrib_maximum">Maximum</span>
-            <span class="segmented-sub" data-i18n="settings.contrib_maximum_hw">≤ 75%+ CPU / GPU</span>
+            <span class="segmented-sub" data-i18n="settings.contrib_maximum_cpu">Up to all cores, 80% of memory</span>
           </button>
         </div>
         <select id="settings-contribution" class="visually-hidden">
@@ -446,7 +446,7 @@
           <option value="moderate" selected data-i18n="setup.contrib_moderate">Moderate</option>
           <option value="maximum" data-i18n="setup.contrib_maximum">Maximum</option>
         </select>
-        <span class="text-muted field-hint" data-i18n="settings.contribution_hint">How much of your computer (CPU in CPU mode, GPU when available) can be used to serve swarm inference.</span>
+        <span class="text-muted field-hint" data-i18n="settings.contribution_hint">How much of your computer SwarmLLM may use to answer requests from the swarm.</span>
         <span class="text-muted field-hint" data-i18n="settings.contribution_restart_note">Takes effect right away. Two things only change when SwarmLLM next starts: how many computers you connect to, and the processor cores a running model has already reserved.</span>
       </div>
       <div class="form-group">
