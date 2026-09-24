@@ -1,5 +1,49 @@
 # Changelog
 
+## [0.3.204-alpha] — 2026-09-24
+
+**Settings now tell you what each contribution level really uses, the Models
+tab has the same name in every language, and Qwen2.5, Llama-3, Mistral and
+Phi-3.5 get their prompts and replies the way they were built for.** Includes
+everything in 0.3.203-alpha and 0.3.202-alpha below.
+
+**Fixed: the contribution levels described the wrong numbers.** Minimal,
+Moderate and Maximum were labelled "≤ 25% / 50% / 75%+ CPU / GPU", which was
+wrong on every row, and the Settings page then showed that label in English
+whatever your language. They now say what each level actually uses on your
+kind of computer. If the processor runs the models, the levels allow up to
+half the processor and memory, 75% of the cores and 65% of memory, or all
+cores and 80% of memory - never memory that is already in use. If a graphics
+card runs them, SwarmLLM uses the card's free memory while it has work and
+gives it back when idle, always keeping 10%, 7% or 5% of the card free for you.
+
+**Fixed: the Models tab was called "the swarm" in 20 languages.** English
+calls it Models; the other languages had translated its internal name instead
+("Der Schwarm", "L'essaim", …), so instructions that name the tab pointed at a
+word you would not find. It is now each language's word for models.
+
+**Fixed: Qwen2.5 and Llama-3 were given our system prompt instead of their
+own.** When you send no system message, these models' own chat formats
+already say who they are - "You are Qwen, created by Alibaba Cloud…", or
+Llama's knowledge-date header - and SwarmLLM replaced that with a generic
+"You are a helpful assistant.". It no longer does; the model gets exactly the
+prompt its own format writes, matching llama.cpp token for token on the models
+we checked. Models whose format has no default (TinyLlama, Phi-3.5) still get
+one. Replies from these families may be worded a little differently.
+
+**Fixed: replies from Mistral and Phi-3.5 started with a space.** Every
+answer began " The…" instead of "The…". Streamed and complete replies now
+start the same, without it.
+
+**Removed: request hedging** (`inference.hedge_enabled`, off by default). It
+sent a slow step of a reply to a second computer that had never seen the
+conversation, so its answer could not be right. Nothing changes for anyone who
+never turned it on; a config file that still mentions it keeps working.
+
+**Also:** the README now states how much internet a running computer uses,
+measured on the current release: about 110 MB an hour received and 130 MB
+sent while idle.
+
 ## [0.3.203-alpha] — 2026-09-24
 
 **Phi-3.5 reads its prompts the way it was trained to and no longer wanders off
