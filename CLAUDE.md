@@ -88,7 +88,7 @@ until readers leave (#90's shape); `clippy.toml` fails the build on one.
 ## Testing
 
 **Always say which feature set a count came from.** With
-`--features dev,claude-subscription`: **2922 lib** (+14 ignored),
+`--features dev,claude-subscription`: **2923 lib** (+14 ignored),
 79 integration (31 + 34 + 14 `yamux_substream`), **169 repo-consistency**,
 1 `api_key_side_effects`, 55 `swarmllm-types`, and 11 in the vendored
 request-response patch — plus 15 in the `swarmllm` BIN target (`cli::*`, counted
@@ -162,7 +162,7 @@ since .191), a settings save no longer undoing `--anchor` / `--no-update-check`
 (#107), and ⛔ **Docker images publishing on the release's UN-DRAFT, not the
 tag** — every tag used to publish an image and move `latest`, which leaked the
 withdrawn .199 and the unsigned .202/.203 (gotcha #701). The next CHANGELOG must
-name all four, **and the 2026-09-24 round on `claude/ecstatic-dijkstra-qc9c3x`**:
+name all four, **and the 2026-09-24 round (merged to `main`, unreleased)**:
 Docker images on x86-64-v3 (~3x), sampler on top-k candidates (~15x), split
 replies' history and emoji, non-Latin `stop` panic, DashMap guards across
 `.await` (a #90-shaped stall; `clippy.toml`), Windows `Instant` underflow,

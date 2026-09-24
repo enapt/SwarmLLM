@@ -645,6 +645,11 @@ impl PartialReply {
         if state.ids.is_empty() {
             return None;
         }
+        // A character the last tokens did not finish is rendered as a
+        // whole-reply decode renders it, U+FFFD — never dropped. The standard
+        // loop flushes its own carry the same way when a reply ends.
+        let tail = crate::inference::tokenizer::flush_utf8_carry(&mut state.utf8_carry);
+        state.text.push_str(&tail);
         Some((
             std::mem::take(&mut state.text),
             std::mem::take(&mut state.ids),
@@ -1632,6 +1637,67 @@ mod tests {
         let (recorded, ids, _) = partial.taken().expect("recorded");
         assert_eq!(recorded, " Party\u{1F389}", "recorded for a salvage");
         assert_eq!(ids, vec![1, 2, 3, 4, 5]);
+
+        // Cut two bytes into the next emoji: the fragment is not lost from
+        // the salvage — it is the U+FFFD a whole-reply decode would show.
+        let (tx, _rx) = crate::inference::router::StreamingTokenTx::channel(16);
+        let token_tx = Some(tx);
+        assert!(
+            !emit_streaming_batch(&partial, &token_tx, &decoder, &[1, 2, 3], &eos, &mut finish)
+                .await
+        );
+        let (recorded, ids, _) = partial.taken().expect("recorded");
+        assert_eq!(
+            recorded, " Party\u{FFFD}",
+            "a cut character is rendered, not dropped"
+        );
+        assert_eq!(ids, vec![1, 2, 3]);
+    }
+
+    /// A registry entry for `node` advertising exactly `features` — what the
+    /// sender-side trailer gates read.
+    fn peer_advertising(node: &NodeId, features: u64) -> PeerInfo {
+        PeerInfo {
+            node_id: node.clone(),
+            addresses: vec![],
+            capability: Some(NodeCapability {
+                coord: None,
+                node_id: node.clone(),
+                gpu: None,
+                cpu: None,
+                ram_total_mb: 0,
+                ram_available_mb: 0,
+                ram_model_budget_mb: None,
+                disk_available_mb: 0,
+                bandwidth_mbps: 0.0,
+                hosted_shards: vec![],
+                max_contribution: ContributionLevel::Moderate,
+                uptime_seconds: 0,
+                version: String::new(),
+                region: None,
+                est_tokens_per_sec_7b: 0.0,
+                os: None,
+                observed_latencies: vec![],
+                relay_capable: false,
+                protocol_version: 0,
+                features,
+                relay_reservations: vec![],
+                anchor_mode: false,
+                can_serve_inference: true,
+                resident_layers: Vec::new(),
+            }),
+            last_seen: chrono::Utc::now(),
+            latency_ms: Some(10),
+            trust_score: 0.9,
+            peer_id_bytes: None,
+            ack_srtt_ms: None,
+            active_request_count: 0,
+            first_seen: 0,
+            verified_transaction_count: 0,
+            is_lan_peer: false,
+            goodput_bytes_per_sec: None,
+            goodput_samples: 0,
+        }
     }
 
     /// The reply so far travels to the peer that samples only when its sampler
@@ -1658,47 +1724,7 @@ mod tests {
                 // the feature gate is not what keeps it off the wire.
                 state.peer_registry.insert(
                     node.clone(),
-                    PeerInfo {
-                        node_id: node.clone(),
-                        addresses: vec![],
-                        capability: Some(NodeCapability {
-                            coord: None,
-                            node_id: node.clone(),
-                            gpu: None,
-                            cpu: None,
-                            ram_total_mb: 0,
-                            ram_available_mb: 0,
-                            ram_model_budget_mb: None,
-                            disk_available_mb: 0,
-                            bandwidth_mbps: 0.0,
-                            hosted_shards: vec![],
-                            max_contribution: ContributionLevel::Moderate,
-                            uptime_seconds: 0,
-                            version: String::new(),
-                            region: None,
-                            est_tokens_per_sec_7b: 0.0,
-                            os: None,
-                            observed_latencies: vec![],
-                            relay_capable: false,
-                            protocol_version: 0,
-                            features: swarmllm_types::node::features::FORWARD_GENERATED_IDS,
-                            relay_reservations: vec![],
-                            anchor_mode: false,
-                            can_serve_inference: true,
-                            resident_layers: Vec::new(),
-                        }),
-                        last_seen: chrono::Utc::now(),
-                        latency_ms: Some(10),
-                        trust_score: 0.9,
-                        peer_id_bytes: None,
-                        ack_srtt_ms: None,
-                        active_request_count: 0,
-                        first_seen: 0,
-                        verified_transaction_count: 0,
-                        is_lan_peer: false,
-                        goodput_bytes_per_sec: None,
-                        goodput_samples: 0,
-                    },
+                    peer_advertising(node, swarmllm_types::node::features::FORWARD_GENERATED_IDS),
                 );
             }
             let assignment = PipelineAssignment {
@@ -1769,6 +1795,118 @@ mod tests {
         assert!(
             history_sent_to_the_sampling_peer(0.0).await.is_empty(),
             "with no penalty the sampler never reads the history, so it must not be sent"
+        );
+    }
+
+    /// A standby that takes over the sampling segment is a DIFFERENT peer from
+    /// the one planned, so the `0x08` trailer is gated on the standby's own
+    /// features — the ordinary send checks the planned peer's. The failover
+    /// forward carried the history blind: an older standby rebuilds the seal's
+    /// AAD from the trailers it parses, so every encrypted forward to it failed
+    /// to open, and the failover failed too.
+    ///
+    /// Staged on the prompt pass, where a stand-in takes the segment over
+    /// without a replay (mid-reply it needs the retained history, which this
+    /// harness does not encode); the history is passed as a decode step passes
+    /// it, and the gate is the same expression on either.
+    #[tokio::test]
+    async fn a_standby_is_sent_the_reply_so_far_only_when_it_can_read_it() {
+        async fn history_sent_to_the_standby(standby_features: u64) -> Vec<u32> {
+            use swarmllm_types::node::features::FORWARD_GENERATED_IDS;
+            let state = make_test_state();
+            let (tx, mut rx) = mpsc::channel::<NetworkCommand>(64);
+            let mut request = make_test_request(&state);
+            request.sampling_params.frequency_penalty = 0.5;
+            let request_id = request.id;
+            let (a, c, d) = (NodeId([0xA1; 32]), NodeId([0xC3; 32]), NodeId([0xD4; 32]));
+            let mut peers = std::collections::HashMap::new();
+            for (node, byte, features) in [
+                (&a, 0xA1u8, FORWARD_GENERATED_IDS),
+                (&d, 0xD4, FORWARD_GENERATED_IDS),
+                (&c, 0xC3, standby_features),
+            ] {
+                state.peer_id_map.insert(node.clone(), vec![byte]);
+                peers.insert(vec![byte], node.clone());
+                state
+                    .peer_registry
+                    .insert(node.clone(), peer_advertising(node, features));
+            }
+            let assignment = PipelineAssignment {
+                request_id,
+                segments: vec![remote_segment(&a, (0, 16)), remote_segment(&d, (16, 32))],
+                standbys: vec![remote_segment(&c, (16, 32))],
+                tp_groups: vec![],
+                supports_speculative: false,
+            };
+            let mut executor = PipelineExecutor::new(state.clone(), tx, request, assignment);
+            let (planned_sampler, standby) = (d.clone(), c.clone());
+            let harness_state = state.clone();
+            let harness = tokio::spawn(async move {
+                let mut to_standby = None;
+                while let Some(cmd) = rx.recv().await {
+                    let NetworkCommand::SendTensor {
+                        target_peer_bytes,
+                        forward,
+                    } = cmd
+                    else {
+                        continue;
+                    };
+                    let node = peers[&target_peer_bytes].clone();
+                    let base = LayerResult {
+                        locally_constructed: false,
+                        ..LayerResult::error(forward.request_id, "")
+                    };
+                    let result = if node == planned_sampler {
+                        LayerResult {
+                            locally_constructed: false,
+                            ..LayerResult::error(
+                                forward.request_id,
+                                "Worker: Service unavailable: out of memory",
+                            )
+                        }
+                    } else if node == standby {
+                        to_standby = Some(forward.generated_ids.clone());
+                        LayerResult {
+                            token_ids: vec![7],
+                            finish_reason: None,
+                            ..base
+                        }
+                    } else {
+                        LayerResult {
+                            activations: forward.activations.clone(),
+                            finish_reason: None,
+                            ..base
+                        }
+                    };
+                    assert!(harness_state.resolve_pending_layer_result(Some(&node), result));
+                }
+                to_standby.expect("the standby was sent a forward")
+            });
+            executor
+                .forward_through_segments(
+                    request_id,
+                    0,
+                    0,
+                    vec![0x11; 64],
+                    None,
+                    false,
+                    &[5, 6, 7, 8],
+                )
+                .await
+                .expect("the standby answered");
+            drop(executor);
+            harness.await.unwrap()
+        }
+
+        assert_eq!(
+            history_sent_to_the_standby(swarmllm_types::node::features::FORWARD_GENERATED_IDS)
+                .await,
+            vec![5, 6, 7, 8],
+            "control: a standby that reads the trailer is sent the history"
+        );
+        assert!(
+            history_sent_to_the_standby(0).await.is_empty(),
+            "a standby that cannot parse the `0x08` trailer must not be sent one"
         );
     }
 

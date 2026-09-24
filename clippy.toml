@@ -13,6 +13,12 @@
 #
 # Clone what you need out of the guard (`.map(|r| r.value().clone())`) before
 # awaiting, or scope the guard to a block that ends first.
+#
+# ⚠ The lint sees a guard bound DIRECTLY — `let r = map.get(k).unwrap()` or
+# `if let Some(r) = map.get(k)` — and NOT one still inside its `Option`:
+# `let r = map.get(k); ….await; if let Some(r) = r` passes it (planted
+# 2026-09-24: two of three shapes reported, that one silent). Bind the guard,
+# or clone out of it, before the await; never park an `Option<Ref>` across one.
 await-holding-invalid-types = [
     { path = "dashmap::mapref::one::Ref", reason = "a DashMap shard read lock; a writer to that shard parks its OS thread until it is dropped" },
     { path = "dashmap::mapref::one::RefMut", reason = "a DashMap shard write lock; every reader and writer of that shard blocks its OS thread until it is dropped" },

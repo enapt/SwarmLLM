@@ -2275,6 +2275,17 @@ impl PipelineExecutor {
             // Send to backup node via directed tensor protocol. Rebuildable
             // for the same reason as the main loop's (`ResendOnRefusal`): a
             // standby that could not open it never ran it either.
+            // The history rides in the `0x08` trailer, which a standby predating
+            // it cannot parse — and it rebuilds the seal's AAD from the trailers
+            // it did parse, so one sent blind makes every encrypted forward to
+            // it fail to open. Gated on the STANDBY's features: the ordinary
+            // send checks the planned peer's, and this is a different peer.
+            let standby_reads_history = is_last
+                && !generated_ids.is_empty()
+                && self.shared_state.peer_advertises_feature(
+                    &backup.node_id,
+                    swarmllm_types::node::features::FORWARD_GENERATED_IDS,
+                );
             let rebuild_forward = || LayerForward {
                 request_id,
                 sequence_num,
@@ -2300,7 +2311,7 @@ impl PipelineExecutor {
                 // older standby does not expect.
                 requester_node_id: None,
                 pre_embedded: pre_embedded && failed_idx == 0,
-                generated_ids: if is_last {
+                generated_ids: if standby_reads_history {
                     generated_ids.to_vec()
                 } else {
                     Vec::new()
