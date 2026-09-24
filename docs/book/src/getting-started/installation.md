@@ -159,6 +159,13 @@ Pre-built images on GHCR:
 | `ghcr.io/enapt/swarmllm:<version>` | A pinned release, e.g. `0.3.200-alpha` (CPU) |
 | `ghcr.io/enapt/swarmllm:<version>-cuda` | A pinned release (GPU) |
 
+The CPU image carries two builds and starts the faster one your processor can
+run: the AVX2 build on anything from 2013 on, a slower build that runs anywhere
+otherwise. Images before the first release after 0.3.204-alpha carried only the
+slow build, so a container ran models about 3x slower than the downloadable
+program on the same machine, and read prompts about 8x slower. The GPU image
+needs an AVX2 processor, like the GPU downloads.
+
 An image is published when its release is — after the release has been checked
 and signed, the same moment the built-in updater can see it. (Before this rule,
 images for `0.3.199-alpha`, which was withdrawn, and for `0.3.202-alpha` and

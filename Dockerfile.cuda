@@ -34,9 +34,20 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 # Override the workspace's `.cargo/config.toml` `target-cpu=native` so the
 # image is portable across CPUs other than the build runner. Without this
 # the binary SIGILLs on machines whose microarchitecture differs from the
-# CI runner that built the image. See gotcha #39 in memory/MEMORY.md and
-# the matching `RUSTFLAGS: ""` in `.github/workflows/{ci,release}.yml`.
-ENV RUSTFLAGS=""
+# CI runner that built the image. See gotcha #39 in memory/MEMORY.md.
+#
+# x86-64-v3 (AVX2), the same target as release.yml's `Linux x86_64 CUDA`
+# asset — NOT an empty RUSTFLAGS, which is what this line was until
+# 2026-09-24. candle compiles its quantized CPU kernels only under
+# `target_feature = "avx2"`, and a GPU node runs them whenever a model or a
+# range of layers is placed on the processor (a card too small for it, or
+# `gpu_layers = 0`): the empty target made every such matmul a scalar
+# fallback, 2.8-3.7x slower per generated word and 7-8.7x on the prompt
+# (examples/qmatmul_bench). No baseline build here, for the reason release.yml
+# publishes no `-cuda-baseline`: a pre-2013 processor beside a card this image
+# supports is vanishingly rare. Guarded by
+# `every_docker_image_builds_the_release_cpu_target`.
+ENV RUSTFLAGS="-C target-cpu=x86-64-v3"
 
 WORKDIR /build
 

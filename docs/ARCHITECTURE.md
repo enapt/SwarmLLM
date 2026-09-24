@@ -56,6 +56,7 @@ swarmllm/
 ├── integrations/openclaw/  (OpenClaw provider plugin, TypeScript — `npm test`; built on OpenClaw's own self-hosted-provider SDK helper; see its README)
 ├── monitoring/    (Grafana + Prometheus + docker-compose)
 ├── deploy/anchor/ (R143 — hardened bootstrap/relay anchor kit: setup-anchor.sh, systemd unit, config.toml, runbook)
+├── deploy/docker/select-cpu-build.sh (the CPU image's `swarmllm`: execs its x86-64-v3 build or its baseline build by asking glibc-hwcaps, which reads CPUID and so answers correctly under emulation; guard `every_docker_image_builds_the_release_cpu_target`)
 ├── packaging/     (swarmllm.service + aur/, homebrew/, rpm/ + deb/{postinst,prerm} maintainer scripts — prerm acts on $1: an upgrade must never `systemctl disable`, gotcha #313)
 ├── docs/          (ARCHITECTURE, CREDITS_DESIGN, FUTURE_WORK, DIAGNOSTICS, REFERENCE_MODELS,
 │                 NETWORKING, NETWORKING_PLAN, TESTING)

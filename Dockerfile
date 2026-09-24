@@ -27,7 +27,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # the binary SIGILLs on machines whose microarchitecture differs from the
 # CI runner that built the image. See gotcha #39 in memory/MEMORY.md and
 # the matching `RUSTFLAGS: ""` in `.github/workflows/{ci,release}.yml`.
+#
+# ⚠ `RUSTFLAGS=""` alone is the PORTABLE build, and it is the slow one: candle
+# compiles its quantized kernels only under `target_feature = "avx2"`. Until
+# 2026-09-24 it was the only build in this image, so every container ran every
+# quantized matmul through a scalar fallback while the release binaries — built
+# for x86-64-v3 since v0.3.79 — did not. The image now carries both builds and
+# `deploy/docker/select-cpu-build.sh` runs the one the processor can execute.
+# The v3 flags must match release.yml's `Linux x86_64` cell; guarded by
+# `every_docker_image_builds_the_release_cpu_target`.
 ENV RUSTFLAGS=""
+ARG FAST_RUSTFLAGS="-C target-cpu=x86-64-v3"
 
 WORKDIR /build
 
@@ -49,7 +59,8 @@ RUN mkdir -p src crates/swarmllm-frontend/src crates/swarmllm-types/src && \
     echo '' > src/lib.rs && \
     echo '' > crates/swarmllm-frontend/src/lib.rs && \
     echo '' > crates/swarmllm-types/src/lib.rs && \
-    cargo build --release 2>/dev/null || true && \
+    { RUSTFLAGS="$FAST_RUSTFLAGS" CARGO_TARGET_DIR=target/x86-64-v3 cargo build --release 2>/dev/null || true; } && \
+    { CARGO_TARGET_DIR=target/baseline cargo build --release 2>/dev/null || true; } && \
     rm -rf src crates/swarmllm-frontend/src crates/swarmllm-types/src
 
 # Copy full source and build the real binary.
@@ -66,7 +77,8 @@ COPY src/ src/
 COPY crates/ crates/
 COPY frontend/ frontend/
 COPY config/ config/
-RUN cargo build --release
+RUN RUSTFLAGS="$FAST_RUSTFLAGS" CARGO_TARGET_DIR=target/x86-64-v3 cargo build --release && \
+    CARGO_TARGET_DIR=target/baseline cargo build --release
 
 # ---------------------------------------------------------------------------
 # Stage 2: Runtime
@@ -86,8 +98,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Create non-root user
 RUN useradd --create-home --shell /bin/bash swarmllm
 
-# Copy binary from builder (already stripped via profile.release.strip = true)
-COPY --from=builder /build/target/release/swarmllm /usr/local/bin/swarmllm
+# Copy both builds (already stripped via profile.release.strip = true). The
+# `swarmllm` on PATH is the selector, which execs the one this processor runs.
+COPY --from=builder /build/target/x86-64-v3/release/swarmllm /usr/local/lib/swarmllm/x86-64-v3/swarmllm
+COPY --from=builder /build/target/baseline/release/swarmllm /usr/local/lib/swarmllm/baseline/swarmllm
+COPY deploy/docker/select-cpu-build.sh /usr/local/bin/swarmllm
+RUN chmod 0755 /usr/local/bin/swarmllm
 COPY config/default.toml /etc/swarmllm/default.toml
 
 # Create data directory and set ownership

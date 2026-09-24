@@ -2500,6 +2500,195 @@ fn the_dispatch_db_scan_catches_a_planted_blocking_call() {
     );
 }
 
+/// The `RUSTFLAGS` every `cargo build` in a Dockerfile runs under, in order.
+///
+/// Follows the three ways a Dockerfile sets it: `ENV RUSTFLAGS=` (the default
+/// for every later `RUN`), `ARG NAME="…"` (expanded where a `RUN` names
+/// `$NAME`), and an inline `RUSTFLAGS="…"` prefix on the command itself, which
+/// wins. Continuation lines are joined first, so a build split across
+/// `\`-continued lines is one statement, and each `&&` segment is judged on its
+/// own — one `RUN` can carry two builds with different flags.
+fn dockerfile_cargo_build_rustflags(dockerfile: &str) -> Vec<String> {
+    let mut statements: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for line in dockerfile.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') {
+            continue;
+        }
+        if let Some(body) = trimmed.strip_suffix('\\') {
+            current.push_str(body);
+            current.push(' ');
+        } else {
+            current.push_str(trimmed);
+            statements.push(std::mem::take(&mut current));
+        }
+    }
+
+    let unquote = |v: &str| v.trim().trim_matches('"').to_string();
+    let mut args: std::collections::HashMap<String, String> = Default::default();
+    let mut env_flags = String::new();
+    let mut builds = Vec::new();
+    for stmt in statements {
+        if let Some(rest) = stmt.strip_prefix("ARG ") {
+            if let Some((name, value)) = rest.split_once('=') {
+                args.insert(name.trim().to_string(), unquote(value));
+            }
+        } else if let Some(rest) = stmt.strip_prefix("ENV RUSTFLAGS=") {
+            env_flags = unquote(rest);
+        } else if let Some(rest) = stmt.strip_prefix("RUN ") {
+            for segment in rest.split("&&") {
+                if !segment.contains("cargo build") {
+                    continue;
+                }
+                let flags = match segment.split_once("RUSTFLAGS=\"") {
+                    Some((_, after)) => {
+                        let value = after.split('"').next().unwrap_or_default();
+                        match value.strip_prefix('$') {
+                            Some(name) => args.get(name).cloned().unwrap_or_default(),
+                            None => value.to_string(),
+                        }
+                    }
+                    None => env_flags.clone(),
+                };
+                builds.push(flags);
+            }
+        }
+    }
+    builds
+}
+
+/// What is wrong with one Dockerfile's CPU target, measured against the flags
+/// release.yml builds its x86-64 binaries with. Empty means nothing.
+fn docker_cpu_target_problems(name: &str, dockerfile: &str, release_flags: &str) -> Vec<String> {
+    let builds = dockerfile_cargo_build_rustflags(dockerfile);
+    let mut problems = Vec::new();
+    if builds.is_empty() {
+        problems.push(format!(
+            "{name}: found no `cargo build` at all — the parser has stopped matching \
+             the file, so this guard is no longer checking it"
+        ));
+        return problems;
+    }
+    if !builds.iter().any(|f| f == release_flags) {
+        problems.push(format!(
+            "{name}: no build uses the release's CPU target `{release_flags}` (builds \
+             use {builds:?}). Without it candle's quantized kernels, gated on \
+             `target_feature = \"avx2\"`, are compiled out and every container runs \
+             a scalar fallback — 2.8-3.7x slower per word, 7-8.7x on the prompt"
+        ));
+    }
+    // A second, slower build is only acceptable beside something that chooses
+    // between them at start; without it, which one runs is an accident of the
+    // COPY line.
+    // An INSTALLING line, not a mention: the Dockerfile's own comments name the
+    // script, and a file-level `contains` read that as the selector being there.
+    let installs_selector = dockerfile.lines().any(|l| {
+        l.trim_start()
+            .starts_with("COPY deploy/docker/select-cpu-build.sh /usr/local/bin/swarmllm")
+    });
+    let has_other = builds.iter().any(|f| f != release_flags);
+    if has_other && !installs_selector {
+        problems.push(format!(
+            "{name}: builds with more than one CPU target ({builds:?}) but does not \
+             install deploy/docker/select-cpu-build.sh to choose between them"
+        ));
+    }
+    problems
+}
+
+/// Every Docker image is built for the CPU target the release binaries are.
+///
+/// v0.3.79 moved every x86-64 release asset to `-C target-cpu=x86-64-v3`
+/// because candle compiles its hand-written quantized kernels only under
+/// `target_feature = "avx2"` — measured 3.09x end to end. Both Dockerfiles kept
+/// `ENV RUSTFLAGS=""` (set by an earlier fix, to stop them inheriting the build
+/// runner's `target-cpu=native`), so from then on every container ran every
+/// quantized matmul through the scalar fallback while the release binaries did
+/// not. Re-measured 2026-09-24 with `examples/qmatmul_bench` at
+/// 3B shapes: 2.8-3.7x slower per generated word, 7-8.7x on the prompt.
+///
+/// Nothing noticed because a slow build is still a correct build — the same
+/// reason `cache_warm_mirrors_the_release_matrix` exists. The CPU image carries
+/// a baseline build too, for processors (and emulators) without AVX2, and must
+/// then install the selector that picks between them.
+#[test]
+fn every_docker_image_builds_the_release_cpu_target() {
+    let release = workflow_matrix("release.yml");
+    let release_flags = release
+        .get("Linux x86_64")
+        .and_then(|cell| cell.iter().find(|(k, _)| k == "rustflags"))
+        .map(|(_, v)| v.clone())
+        .expect(
+            "release.yml's `Linux x86_64` cell has no `rustflags` — if the release \
+             target moved, move the Docker images with it and update this guard",
+        );
+    assert!(
+        release_flags.contains("target-cpu="),
+        "unexpected release flags {release_flags:?}"
+    );
+
+    // Self-test: the pre-2026-09-24 shape must be caught, or a parser that has
+    // stopped matching would read as a pass.
+    let planted = "ENV RUSTFLAGS=\"\"\nRUN mkdir -p src && \\\n    cargo build --release 2>/dev/null || true\nRUN cargo build --release\n";
+    assert!(
+        !docker_cpu_target_problems("planted", planted, &release_flags).is_empty(),
+        "the guard no longer notices an image built with no CPU target"
+    );
+    // And both builds with no selector installed, where a comment still names
+    // the script — the shape that first slipped past this guard.
+    let two_builds_unselected = format!(
+        "ENV RUSTFLAGS=\"\"\nARG FAST_RUSTFLAGS=\"{release_flags}\"\n\
+         # deploy/docker/select-cpu-build.sh chooses between them\n\
+         RUN RUSTFLAGS=\"$FAST_RUSTFLAGS\" cargo build --release && \\\n    cargo build --release\n\
+         COPY --from=builder /build/target/baseline/release/swarmllm /usr/local/bin/swarmllm\n"
+    );
+    assert!(
+        !docker_cpu_target_problems("planted", &two_builds_unselected, &release_flags).is_empty(),
+        "the guard no longer notices two builds with nothing choosing between them"
+    );
+
+    let mut dockerfiles: Vec<String> = std::fs::read_dir(repo_root())
+        .expect("read repo root")
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .filter(|n| n.starts_with("Dockerfile"))
+        .collect();
+    dockerfiles.sort();
+    assert!(
+        dockerfiles.len() >= 2,
+        "expected Dockerfile and Dockerfile.cuda, found {dockerfiles:?}"
+    );
+
+    let mut problems = Vec::new();
+    for name in &dockerfiles {
+        let text = std::fs::read_to_string(repo_root().join(name))
+            .unwrap_or_else(|e| panic!("read {name}: {e}"));
+        problems.extend(docker_cpu_target_problems(name, &text, &release_flags));
+    }
+
+    // The selector execs `/usr/local/lib/swarmllm/<level>/swarmllm`; every level
+    // it can choose must be a path the image actually installs.
+    let selector = std::fs::read_to_string(repo_root().join("deploy/docker/select-cpu-build.sh"))
+        .expect("read deploy/docker/select-cpu-build.sh");
+    let cpu_image =
+        std::fs::read_to_string(repo_root().join("Dockerfile")).expect("read Dockerfile");
+    for level in ["x86-64-v3", "baseline"] {
+        assert!(
+            selector.contains(&format!("level={level}")),
+            "the selector no longer chooses `{level}` — update this guard with it"
+        );
+        let installed = format!("/usr/local/lib/swarmllm/{level}/swarmllm");
+        if !cpu_image.contains(&installed) {
+            problems.push(format!(
+                "Dockerfile: the selector can exec {installed}, which the image does not install"
+            ));
+        }
+    }
+
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+}
+
 /// Everything the build compiles IN must exist in the Docker build context.
 ///
 /// `include_str!` / `include_bytes!` read files at compile time, and the
