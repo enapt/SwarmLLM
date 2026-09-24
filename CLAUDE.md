@@ -153,55 +153,48 @@ UNDETERMINED and never a fix — use it BEFORE blaming a change, especially your
 ## Status
 
 **v0.3.204-alpha is the live release (2026-09-24), signed and on both nodes.**
-It carries #95 (a split's second request refused for memory), **#96** (GLM-4's
-RoPE layout — every long GLM-4 reply was broken in every release), #97 (the
-tokenizer checked against llama.cpp), #99, #100 and #103. .201's #93 (a split
-reply decoded from an EMPTY cache) stays fixed three ways. **Next** →
+**`main` is ahead by three UNRELEASED fixes** — #92 (a peer that cannot decrypt
+a forward is sent it again once the link re-keys: `0x06` result trailer,
+`features::FORWARD_REFUSAL_REASON`), `--no-update-check` working again (a no-op
+since .191), and a settings save no longer undoing `--anchor` /
+`--no-update-check` (#107). The next CHANGELOG must name all three. **Next** →
 `memory/next_up.md`.
 
-⚠ **Behaviour gate = `reply_ab.sh` + a SPLIT**, not conformance alone:
+⚠ **Behaviour gate = `reply_ab.sh` + `split_rig.sh`**, not conformance alone —
 `family_conformance.sh` pins `gpu_layers = 0` and never splits, so it could not
-see #93. Scripts + recipe: `memory/gate_result_0201.md`.
+see #93. Recipe: `memory/release_gate.md`.
 
 ⛔ **v0.3.199-alpha SHIPPED BROKEN and was WITHDRAWN** — cleared under
 `--features candle-cuda` (no flash-attn, no llama backend) while the release is
-`--features cuda`. **Match the feature gate to a change's blast radius; a BUILD
-gate is not a BEHAVIOUR gate** (#683, #677). The release gate now verifies the
-ARTIFACT before signing.
+`--features cuda`. **A BUILD gate is not a BEHAVIOUR gate** (#683); the gate
+verifies the downloaded ARTIFACT before signing.
 
-**Local GPU decode is bound by SUBMISSION COUNT** — layer count predicts decode
-cost. Our own CUDA kernels live in `kernels/*.cu` (PTX via `build.rs`); write
-each bit-identical to the candle ops it replaces. ⚠ **ONE CUDA stream per
-device**; `SWARMLLM_CUDA_OWN_STREAM=1` stays opt-in and OFF. Next moves:
+**Local GPU decode is bound by SUBMISSION COUNT** — layer count predicts cost.
+Our kernels live in `kernels/*.cu` (PTX via `build.rs`), each bit-identical to
+the candle ops it replaces. ⚠ **ONE CUDA stream per device**;
+`SWARMLLM_CUDA_OWN_STREAM=1` stays opt-in and OFF. Plan:
 `docs/plans/local_decode_submissions.md`.
 
-⚠ **The privacy mode is STRUCTURAL.** In the UI it is "Start and finish on this
-computer" — never "end-to-end", "encrypted pipeline" or "private" (#185 is
-superseded). ⚠ **"At this machine" is `RequestOrigin::is_this_machine`**, never
-`is_loopback()` — a same-host proxy is loopback for everyone (#689).
+⚠ **The privacy mode is STRUCTURAL** — in the UI "Start and finish on this
+computer", never "end-to-end", "encrypted pipeline" or "private". **"At this
+machine" is `RequestOrigin::is_this_machine`**, never `is_loopback()` (#689).
 
-⚠ **A new wire trailer is NOT a no-op for an older peer** — feature-gate every
-optional trailer at the SENDER. ⚠ **Gossip says what CHANGED, to everyone; what
-ONE peer lacks, to that peer** — and find the counter you are not reading
-before estimating a total (#673). `.195`'s trailers `0x08`/`0x09` have still
-never run in the field.
-
-**A split is only fast when the machines are CLOSE** (0.35 tok/s Thailand↔Italy
-vs 6.76 at 18 ms). Nothing routes on coordinates yet →
+⚠ **A new wire trailer is NOT a no-op for an older peer** — gate it at the
+SENDER. **Gossip says what CHANGED, to everyone; what ONE peer lacks, to that
+peer** (#673). **A split is only fast when the machines are CLOSE** (0.35 tok/s
+Thailand↔Italy vs 6.76 at 18 ms); nothing routes on coordinates yet →
 `docs/plans/regional_pipelines.md`.
 
-**Releases are SIGNED; CI leaves a DRAFT.** ⚠ The signing script takes the WRONG
-tag silently — confirm `draft=false`, `.minisig` count (7 vs 9 `.sha256` is
-correct) and the version in the trusted comment → `memory/release_gate.md`.
+**Releases are SIGNED; CI leaves a DRAFT.** ⚠ The signing script can take the
+WRONG tag silently — confirm `draft=false`, 7 `.minisig` (against 9 `.sha256` is
+correct) and `rsign verify` naming the version → `memory/release_gate.md`.
 
-⚠ **#90's cause is unknown** (dispatcher stall, twice). ⚠ **#17 has never run on
-a live failover** — needs four daemons. ⚠ **`gossip_network_id` is NOT
-isolation** — a scratch node with bootstrap and mDNS off still found public
-peers within 20 s; only pool + `private_mode` + `private_mode_allow_lan = false`
-isolates (#352).
+⚠ **#90's cause is unknown** (dispatcher stall, twice); **#17 has never run on a
+live failover** (needs four daemons); **#106** (a split reply flipped twice, then
+never in 26 runs) is unexplained. ⚠ **`gossip_network_id` is NOT isolation** —
+only pool + `private_mode` + `private_mode_allow_lan = false` isolates (#352).
 
-⛔ **Nothing may block compaction, so commit as you go** — a PreCompact "commit
-first" hook deadlocked a full context and lost a session (#687).
+⛔ **Nothing may block compaction, so commit as you go** (#687).
 
 `memory/` is `~/.claude/projects/-home-user-SwarmLLM/memory/` — `MEMORY.md`
 indexes it. **Read `open_cautions.md` and `next_up.md` at session start**, and

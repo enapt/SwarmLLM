@@ -258,7 +258,8 @@ broadcast, so the withdrawal reverses itself when the condition clears. Guard:
 11. Create mpsc channels (network, router, rebalance, acquisition, pool)
 12. Spawn all tasks (12 tasks: NetworkManager, InferenceRouter, MessageDispatcher,
     HealthMonitor, ShardRebalancer, CreditLedger, AcquisitionManager, ApiServer,
-    PoolManager, AutoShardManager, HfWatcher (R112), UpdateChecker)
+    PoolManager, AutoShardManager, HfWatcher (R112), UpdateChecker — the last
+    skipped only for `run --no-update-check`; a file `mode = "off"` still gets it)
 13. Open browser if ui.open_browser_on_start is true (setup wizard or admin)
 14. tokio::select! on Ctrl+C signal or any task exit
 15. Signal graceful shutdown via watch channel, save peer cache, flush redb database
