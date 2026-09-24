@@ -377,11 +377,46 @@ async fn handle_inbound_stream(
         // Decode + decrypt (mirrors the handle_tensor_payload logic for
         // TENSOR_TAG_FORWARD / TENSOR_TAG_ENCRYPTED).
         let tag = frame.first().copied().unwrap_or(0);
-        let (forward, request_id) =
-            match decode_inbound_forward(&frame, tag, &peer_id, &shared_state) {
-                Some(pair) => pair,
-                None => continue,
-            };
+        let (forward, request_id) = match decode_inbound_forward(
+            &frame,
+            tag,
+            &peer_id,
+            &shared_state,
+        ) {
+            InboundForward::Decoded(forward, request_id) => (forward, request_id),
+            // Answer it, as the request-response path has since 2026-08-02:
+            // dropping it cost the coordinator the whole segment deadline
+            // (30-600 s) before it failed over, while `open` had already
+            // armed the repair that makes the same forward work a round
+            // trip later (FUTURE_WORK #105).
+            InboundForward::Undecryptable { forward, node_id } => {
+                let reads_reason = shared_state.peer_advertises_feature(
+                    &node_id,
+                    swarmllm_types::node::features::FORWARD_REFUSAL_REASON,
+                );
+                if let Some(refusal) = refusal_for_undecryptable(&forward, reads_reason) {
+                    // The resend repeats EVERY chunk, so no partial
+                    // assembly may survive to collide with it.
+                    shared_state
+                        .pending_activation_chunks
+                        .remove(&forward.request_id);
+                    match protocol::encode_layer_result(&refusal) {
+                        Ok(bytes) => {
+                            if let Err(e) = write_frame(&mut write, &bytes).await {
+                                tracing::debug!(%peer_id, error = %e, "pipeline stream write failed");
+                                let _ = write.close().await;
+                                return;
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "encode_layer_result failed for a refusal");
+                        }
+                    }
+                }
+                continue;
+            }
+            InboundForward::Dropped => continue,
+        };
 
         // R139 Tier 4K — if this is a chunked transfer, route the chunk
         // through the assembly state. Only the final-chunk completion
@@ -482,24 +517,38 @@ async fn handle_inbound_stream(
     }
 }
 
+/// What an inbound forward frame turned out to be.
+enum InboundForward {
+    /// Decoded (and opened, if sealed): ready to dispatch.
+    Decoded(LayerForward, Uuid),
+    /// Sealed, from a known peer, and the seal did not open. `open` has already
+    /// armed the repair, so the sender is owed an answer, not silence.
+    Undecryptable {
+        forward: LayerForward,
+        node_id: crate::types::NodeId,
+    },
+    /// Malformed, or from nobody we can name: nothing to answer. Logged.
+    Dropped,
+}
+
 /// Decode an inbound forward frame (plaintext TENSOR_TAG_FORWARD or sealed
-/// TENSOR_TAG_ENCRYPTED). Returns `None` and logs on decode errors.
+/// TENSOR_TAG_ENCRYPTED).
 fn decode_inbound_forward(
     frame: &[u8],
     tag: u8,
     peer_id: &PeerId,
     shared_state: &SharedState,
-) -> Option<(LayerForward, Uuid)> {
+) -> InboundForward {
     match tag {
         TENSOR_TAG_FORWARD => match protocol::decode_layer_forward(frame) {
             Ok(mut forward) => {
                 let rid = forward.request_id;
                 forward.sender_peer_bytes = Some(peer_id.to_bytes());
-                Some((forward, rid))
+                InboundForward::Decoded(forward, rid)
             }
             Err(e) => {
                 tracing::warn!(%peer_id, error = %e, "decode_layer_forward failed");
-                None
+                InboundForward::Dropped
             }
         },
         TENSOR_TAG_ENCRYPTED => {
@@ -507,28 +556,59 @@ fn decode_inbound_forward(
                 Ok(v) => v,
                 Err(e) => {
                     tracing::warn!(%peer_id, error = %e, "decode_layer_forward_encrypted failed");
-                    return None;
+                    return InboundForward::Dropped;
                 }
             };
-            let node_id = shared_state.peer_to_node_id_from_registry(peer_id)?;
+            let Some(node_id) = shared_state.peer_to_node_id_from_registry(peer_id) else {
+                return InboundForward::Dropped;
+            };
             match shared_state.session_manager.open(&node_id, &sealed, &aad) {
                 Ok(plaintext) => {
                     let rid = forward.request_id;
                     forward.activations = plaintext;
                     forward.sender_peer_bytes = Some(peer_id.to_bytes());
-                    Some((forward, rid))
+                    InboundForward::Decoded(forward, rid)
                 }
                 Err(e) => {
                     tracing::warn!(%peer_id, %node_id, error = %e, "session open() failed on pipeline stream");
-                    None
+                    InboundForward::Undecryptable { forward, node_id }
                 }
             }
         }
         other => {
             tracing::warn!(%peer_id, tag = other, "unexpected forward frame tag");
-            None
+            InboundForward::Dropped
         }
     }
+}
+
+/// The answer to a forward whose seal did not open — the one construction both
+/// transports use (`network::manager::tensors` for request-response, this
+/// module's stream handler) — or `None` when this frame must not be answered.
+///
+/// The reason is deliberately generic: a rotation race and a forged
+/// ciphertext look the same, and saying which would tell a forger whether it
+/// had the right key. It is TYPED as `Undecryptable` only for a sender that
+/// advertises `features::FORWARD_REFUSAL_REASON`, which is what tells it that
+/// nothing ran and the same forward can be sent again once the link re-keys.
+///
+/// **One answer per forward, not per chunk.** A key that does not open one
+/// chunk opens none of them, so answering each would send K refusals, and the
+/// ones arriving after the coordinator's resend would be taken as that
+/// resend's result. The first chunk answers for the forward.
+pub(crate) fn refusal_for_undecryptable(
+    forward: &LayerForward,
+    sender_reads_reason: bool,
+) -> Option<LayerResult> {
+    if forward.chunk_meta.is_some_and(|m| m.chunk_idx != 0) {
+        return None;
+    }
+    let refusal = LayerResult::error(forward.request_id, "Could not decrypt forward");
+    Some(if sender_reads_reason {
+        refusal.with_refusal(crate::types::ForwardRefusal::Undecryptable)
+    } else {
+        refusal
+    })
 }
 
 /// R139 Tier 4K — split a `LayerForward` carrying a large activation tensor
@@ -646,6 +726,76 @@ async fn read_frame<R: futures::AsyncRead + Unpin>(r: &mut R) -> std::io::Result
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_state() -> Arc<SharedState> {
+        let temp = tempfile::tempdir().unwrap();
+        let db = crate::storage::db::Database::open(temp.path()).unwrap();
+        let executor = Arc::new(Mutex::new(crate::inference::executor::ModelExecutor::new()));
+        let (state, _, _) = SharedState::new(
+            crate::config::Config::default(),
+            crate::identity::Identity::generate(),
+            db,
+            executor,
+            None,
+        );
+        state
+    }
+
+    /// A sealed forward from a known peer whose seal does not open is
+    /// UNDECRYPTABLE — answered — not dropped. Dropping it was FUTURE_WORK
+    /// #105: the coordinator heard nothing and waited out the whole segment
+    /// deadline, while the request-response path answered at once.
+    #[test]
+    fn a_forward_whose_seal_does_not_open_is_answered_not_dropped() {
+        let state = test_state();
+        let peer = PeerId::random();
+        let node = crate::types::NodeId([0x7A; 32]);
+        state.peer_id_map.insert(node.clone(), peer.to_bytes());
+        // No session exists for `node`, so nothing this node holds opens it.
+        let forward = base_layer_forward(vec![1u8; 64]);
+        let frame = protocol::encode_layer_forward_encrypted(&forward, vec![0xEE; 96]).unwrap();
+        match decode_inbound_forward(&frame, TENSOR_TAG_ENCRYPTED, &peer, &state) {
+            InboundForward::Undecryptable {
+                forward: got,
+                node_id,
+            } => {
+                assert_eq!(got.request_id, forward.request_id);
+                assert_eq!(node_id, node);
+            }
+            InboundForward::Decoded(..) => panic!("a seal with no session opened"),
+            InboundForward::Dropped => panic!("an undecryptable forward was dropped unanswered"),
+        }
+        // From a peer nobody can name there is no one to answer.
+        let stranger = PeerId::random();
+        assert!(matches!(
+            decode_inbound_forward(&frame, TENSOR_TAG_ENCRYPTED, &stranger, &state),
+            InboundForward::Dropped
+        ));
+    }
+
+    /// One answer per forward: a key that does not open one chunk opens none,
+    /// and a refusal for every chunk would reach the coordinator after its
+    /// resend and be taken as the resend's result. Typed only for a sender
+    /// that can read the reason.
+    #[test]
+    fn an_undecryptable_forward_is_refused_once_and_typed_only_for_a_reader() {
+        let whole = base_layer_forward(vec![0u8; 16]);
+        let plain = refusal_for_undecryptable(&whole, false).expect("unchunked is answered");
+        assert_eq!(plain.request_id, whole.request_id);
+        assert_eq!(plain.refusal, None, "an older sender is not sent the type");
+        let typed = refusal_for_undecryptable(&whole, true).expect("answered");
+        assert_eq!(
+            typed.refusal,
+            Some(crate::types::ForwardRefusal::Undecryptable)
+        );
+
+        let chunks = chunk_layer_forward(&base_layer_forward(vec![0u8; 8 * 1024]), 2048);
+        let answered: Vec<bool> = chunks
+            .iter()
+            .map(|c| refusal_for_undecryptable(c, true).is_some())
+            .collect();
+        assert_eq!(answered, vec![true, false, false, false]);
+    }
 
     #[tokio::test]
     async fn frame_roundtrip() {

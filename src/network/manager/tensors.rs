@@ -702,17 +702,21 @@ impl NetworkManager {
                             // link is re-keyed (FUTURE_WORK #92). Only for a
                             // sender that advertises it can read that — see
                             // `features::FORWARD_REFUSAL_REASON`.
-                            let mut refusal = crate::types::LayerResult::error(
-                                request_id,
-                                "Could not decrypt forward".to_string(),
-                            );
-                            if shared_state.peer_advertises_feature(
-                                &node_id,
-                                swarmllm_types::node::features::FORWARD_REFUSAL_REASON,
-                            ) {
-                                refusal = refusal
-                                    .with_refusal(crate::types::ForwardRefusal::Undecryptable);
-                            }
+                            // `refusal_for_undecryptable` is the one construction,
+                            // shared with the persistent-stream path; request-
+                            // response forwards are never chunked, so it always
+                            // answers here.
+                            let Some(refusal) =
+                                crate::network::pipeline_stream::refusal_for_undecryptable(
+                                    &forward,
+                                    shared_state.peer_advertises_feature(
+                                        &node_id,
+                                        swarmllm_types::node::features::FORWARD_REFUSAL_REASON,
+                                    ),
+                                )
+                            else {
+                                return;
+                            };
                             let _ = self_command_tx
                                 .send(crate::types::NetworkCommand::SendTensorResult {
                                     target_peer_bytes: peer_bytes.clone(),
