@@ -2405,6 +2405,13 @@ fn inline_db_calls(body: &str) -> Vec<String> {
             }
             from = at;
         }
+        // A store wrapped around the database is database I/O too: its only
+        // methods are reads and writes. `NicknameStore::new(shared_state.db
+        // .clone())` then `store.put_record(..)` ran inline for months because
+        // the `.db.` scan above sees only `clone` in it (2026-09-24).
+        if flat.contains("Store::new(") && flat.contains(".db.clone()") {
+            hits.push(format!("line {line}: a database-backed store used inline"));
+        }
     }
     hits
 }
@@ -2479,6 +2486,22 @@ fn the_dispatch_db_scan_catches_a_planted_blocking_call() {
         1,
         "a rustfmt-wrapped chain must be caught — this is the shape that has \
          blinded guards before"
+    );
+
+    // A store wrapped around the database — the nickname persist's shape,
+    // which the `.db.` scan alone read as a harmless `clone`.
+    let wrapped_store = r#"
+    loop {
+        let store = crate::identity::nickname::NicknameStore::new(
+            shared_state.db.clone(),
+        );
+        let _ = store.put_record(record);
+    }
+"#;
+    assert_eq!(
+        inline_db_calls(wrapped_store).len(),
+        1,
+        "a database-backed store built and used inline must be caught"
     );
 
     // Spawned work is fine, and must NOT be reported.

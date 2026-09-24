@@ -1530,13 +1530,18 @@ pub(crate) async fn dispatch_network_messages(
                                                 shared_state
                                                     .nickname_registry
                                                     .insert(record.node_id.clone(), record.clone());
-                                                // Persist
-                                                let store = crate::identity::nickname::NicknameStore::new(
-                                                    shared_state.db.clone(),
-                                                );
-                                                if let Err(e) = store.put_record(record) {
-                                                    tracing::warn!(error = %e, "Failed to persist nickname");
-                                                }
+                                                // Persist OFF the loop — a redb write waits for
+                                                // any other writer, in the only consumer of
+                                                // `network_out` (#90). The registry insert above
+                                                // is what readers consult.
+                                                let db = shared_state.db.clone();
+                                                let record = record.clone();
+                                                tokio::task::spawn_blocking(move || {
+                                                    let store = crate::identity::nickname::NicknameStore::new(db);
+                                                    if let Err(e) = store.put_record(&record) {
+                                                        tracing::warn!(error = %e, "Failed to persist nickname");
+                                                    }
+                                                });
                                             }
                                         }
                                     }
