@@ -588,6 +588,26 @@ especially when the claim is "there are other callers", which is a grep.
   crash mid-save left a file the daemon refuses to start on) was fixed earlier
   and is separate; keep both.
 
+### The exception: how the process was started (2026-09-24, FUTURE_WORK #107)
+
+"No runtime state lives outside the document" was false in one respect: the
+command line. Config priority is CLI > env > file, and `run.rs` applies the
+flags to the config before `SharedState` exists — so both the boot snapshot and
+the first live config carry them, and the first save, rebuilt from a file that
+cannot hold them, dropped them. Two were exposed, because they touch settings
+the dashboard can switch: `--no-update-check` (which had done nothing at all
+since v0.3.191, for a separate reason — gotcha #699) and `--anchor`, whose
+`apply_anchor_mode` forces auto-manage and `contribution_auto` off. The
+environment overrides were audited and all target startup-only settings.
+
+**What changed**: `SharedState::apply_live_config` — the one writer — re-applies
+both from the BOOT snapshot, which is the right source precisely because these
+are facts about how the process started. Tests:
+`a_settings_save_does_not_undo_the_no_update_check_flag` and
+`a_settings_save_does_not_turn_an_anchor_back_into_a_model_host`, each red with
+its re-apply removed. **A new command-line override of a live setting must be
+added to `apply_live_config`**, or it lasts until the first click in Settings.
+
 ## A platform predicate answers "what kernel is this", not "where am I running"
 
 (2026-09-17, field report #003 against v0.3.182, gotcha #640.)

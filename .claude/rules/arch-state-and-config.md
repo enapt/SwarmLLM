@@ -160,6 +160,14 @@ the only way file and live config diverge is an edit worth keeping. A second
 production writer would break that argument: add one and this rule needs
 revisiting, not just extending.
 
+**The one exception is how the PROCESS was started**, which no file holds:
+command-line flags outrank the file, and a save rebuilt from the file drops
+them — it would undo `--no-update-check` and turn `--anchor`'s forced-off
+auto-manage back on (FUTURE_WORK #107). `apply_live_config`
+re-applies both from the boot snapshot; **a new command-line override of a live
+setting must be added there**. Every environment override targets a
+startup-only setting today, so none is needed for them.
+
 → `docs/invariants/state-and-config.md`
 
 ## Single-source-of-truth helpers — SharedState, live config and credits

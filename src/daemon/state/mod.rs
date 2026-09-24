@@ -865,12 +865,27 @@ impl SharedState {
     /// Called by `PUT /api/admin/config` alongside writing the file. Persisting
     /// alone is durability, not effect.
     ///
-    /// What the PROCESS was started with survives the swap: the new config is
-    /// rebuilt from `config.toml`, which cannot hold a command-line flag, so a
-    /// settings save would otherwise quietly undo `--no-update-check`
-    /// (`UpdateConfig::off_for_this_process`).
+    /// What the PROCESS was started as survives the swap. The new config is
+    /// rebuilt from `config.toml` plus the one change, and command-line flags
+    /// outrank the file (the documented priority), so without this a settings
+    /// save would quietly undo them:
+    ///
+    /// - `--no-update-check` (`UpdateConfig::off_for_this_process`), which no
+    ///   file can hold at all;
+    /// - `--anchor` / `[node] anchor_mode`, whose knobs `apply_anchor_mode`
+    ///   forces at start — auto-manage and `contribution_auto` among them,
+    ///   which Settings can switch, so one save would set an anchor fetching
+    ///   models.
+    ///
+    /// Both are read from the boot snapshot deliberately: they are facts about
+    /// how this process started, which is what that snapshot is for. The
+    /// environment overrides need nothing here — every one of them targets a
+    /// startup-only setting (FUTURE_WORK #107).
     pub fn apply_live_config(&self, mut config: Config) {
-        config.updates.off_for_this_process |= self.cfg().updates.off_for_this_process;
+        config.updates.off_for_this_process |= self.config.updates.off_for_this_process;
+        if self.config.node.anchor_mode {
+            config.apply_anchor_mode();
+        }
         self.live_config.store(std::sync::Arc::new(config));
     }
 
@@ -4632,6 +4647,40 @@ mod live_config_tests {
             "the command line outranks the file, before and after a save"
         );
         assert_eq!(state.cfg().updates.mode, Some(UpdateMode::Install));
+    }
+
+    /// An anchor is a relay that must never fetch models, and `--anchor` forces
+    /// auto-manage off at start. Auto-manage is also a Settings switch, so a
+    /// save rebuilt from a file that does not repeat it would turn it back on.
+    #[test]
+    fn a_settings_save_does_not_turn_an_anchor_back_into_a_model_host() {
+        let mut started = crate::config::Config::default();
+        started.apply_anchor_mode();
+        let state = state_started_with(started);
+
+        let from_file: crate::config::Config =
+            toml::from_str("[auto_manage]\nenabled = true\n\n[node]\ncontribution_auto = true\n")
+                .unwrap();
+        assert!(
+            from_file.auto_manage.enabled,
+            "the file really does ask for it"
+        );
+        state.apply_live_config(from_file);
+
+        let live = state.cfg();
+        assert!(live.node.anchor_mode);
+        assert!(
+            !live.auto_manage.enabled,
+            "an anchor must not start fetching models"
+        );
+        assert!(!live.node.contribution_auto);
+
+        // And an ordinary node is left exactly as the file says.
+        let plain = test_state();
+        let mut wants = (**plain.cfg()).clone();
+        wants.auto_manage.enabled = true;
+        plain.apply_live_config(wants);
+        assert!(plain.cfg().auto_manage.enabled);
     }
 
     /// The whole point: a setting changed while the node runs must be visible to
