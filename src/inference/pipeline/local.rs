@@ -316,10 +316,12 @@ impl PipelineExecutor {
         // presence_penalty is non-zero. Otherwise the worker silently
         // ignores it but we still pay for the per-segment Vec<u32> copy
         // and the JSON-array serialization (the field is annotated
-        // `skip_serializing_if = "Vec::is_empty"`). The distributed path
-        // already gates this; the local path was unconditional.
-        let needs_generated_ids = self.request.sampling_params.frequency_penalty != 0.0
-            || self.request.sampling_params.presence_penalty != 0.0;
+        // `skip_serializing_if = "Vec::is_empty"`). This comment used to say
+        // "the distributed path already gates this" — it had stopped doing so,
+        // and shipped the whole history to remote peers on every step until
+        // both paths were made to ask the same predicate (2026-09-24).
+        let needs_generated_ids =
+            crate::inference::sampling::sampler_reads_history(&self.request.sampling_params);
         let generated_ids_for_worker = if needs_generated_ids {
             generated_ids.to_vec()
         } else {

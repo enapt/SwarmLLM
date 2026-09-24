@@ -53,6 +53,24 @@ impl SamplingContext {
     }
 }
 
+fn penalties_active(frequency_penalty: f32, presence_penalty: f32) -> bool {
+    frequency_penalty != 0.0 || presence_penalty != 0.0
+}
+
+/// Does sampling for these parameters read the reply's token history at all?
+///
+/// The history exists for ONE consumer, the repetition penalties, and they
+/// return before reading it when both are zero — the default. So this is the
+/// single answer to "must the tokens generated so far travel with a forward",
+/// asked by every path that ships them: the local worker path, the
+/// distributed send and its failover (`pipeline::distributed`). Shipping them
+/// anyway cost 4 bytes a token on the wire plus ~7 as a JSON array into the
+/// peer's worker, on EVERY step — 8 KB per forward by token 2000, more than
+/// the hidden state it rides with.
+pub(crate) fn sampler_reads_history(params: &SamplingParams) -> bool {
+    penalties_active(params.frequency_penalty, params.presence_penalty)
+}
+
 /// Apply OpenAI-style frequency + presence penalties in-place.
 ///
 /// Formula (per OpenAI API spec): for each vocab token j,
@@ -78,7 +96,7 @@ pub(crate) fn apply_repetition_penalties(
     ctx: &mut SamplingContext,
 ) {
     if generated_ids.is_empty()
-        || (frequency_penalty == 0.0 && presence_penalty == 0.0)
+        || !penalties_active(frequency_penalty, presence_penalty)
         || logits.is_empty()
     {
         return;

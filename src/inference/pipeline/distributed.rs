@@ -826,6 +826,20 @@ impl PipelineExecutor {
         pre_embedded: bool,
         generated_ids: &[u32],
     ) -> Result<LayerResult, SwarmError> {
+        // The reply's history rides with a forward only when the sampler at the
+        // far end will READ it (`sampling::sampler_reads_history`). Decided once,
+        // here, because every send below — the ordinary forward, all three
+        // failover arms, the local segment — takes it from this binding. The
+        // caller always passes the whole completion so far, so without this the
+        // default request (no penalties) shipped every token id generated so
+        // far on every decode step: the `0x08` trailer plus the worker's JSON,
+        // ~8 KB a forward by token 2000, bigger than the hidden state itself.
+        let generated_ids: &[u32] =
+            if crate::inference::sampling::sampler_reads_history(&self.request.sampling_params) {
+                generated_ids
+            } else {
+                &[]
+            };
         let mut activations = initial_activations;
         // Read LIVE, never cached across the loop.
         //
@@ -1095,8 +1109,9 @@ impl PipelineExecutor {
                 // only reason this exists. What matters is whether the sampler
                 // will NEED those ids, which is the condition
                 // `apply_repetition_penalties` itself uses.
-                let needs_generated_ids = self.request.sampling_params.frequency_penalty != 0.0
-                    || self.request.sampling_params.presence_penalty != 0.0;
+                let needs_generated_ids = crate::inference::sampling::sampler_reads_history(
+                    &self.request.sampling_params,
+                );
                 let chain: Vec<crate::types::ChainHop> =
                     if self.shared_state.cfg().inference.pipeline_chaining
                         && !needs_generated_ids
@@ -1166,8 +1181,8 @@ impl PipelineExecutor {
                     // Only the LAST segment samples — others just propagate
                     // hidden state. Sending generated_ids to intermediate
                     // segments is wasted bytes. Send empty for non-last
-                    // segments and when the caller passed an empty slice
-                    // (penalties == 0 fast path; no wire bloat).
+                    // segments, and it is already empty when the sampler will
+                    // not read it (gated at the top of this function).
                     //
                     // ⚠ **And only to a peer that can read them.** These ride in
                     // the `0x08` trailer, which a node predating it does not
@@ -2452,7 +2467,8 @@ struct FailoverInput<'a> {
     pre_embedded: bool,
     /// Tokens generated so far, for the repetition penalties the LAST segment
     /// applies when it samples. Empty everywhere else, and empty when the
-    /// caller has no penalties configured.
+    /// caller has no penalties configured — `forward_through_segments_inner`
+    /// empties it at its top, and this is taken from there.
     generated_ids: &'a [u32],
     /// Whether the failed segment is the one that samples.
     is_last: bool,

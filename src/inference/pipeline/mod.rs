@@ -1589,6 +1589,144 @@ mod tests {
         );
     }
 
+    /// The reply so far travels to the peer that samples only when its sampler
+    /// will READ it — i.e. when a repetition penalty is set. With the default
+    /// (none) it was shipped on every decode step anyway: the caller always
+    /// passes the whole completion, and the send gated only on "is it
+    /// non-empty", which is true for every step after the first. The positive
+    /// control — penalties on, history arrives — is what proves the harness
+    /// can see the field at all.
+    #[tokio::test]
+    async fn a_forward_carries_the_reply_so_far_only_when_penalties_will_read_it() {
+        async fn history_sent_to_the_sampling_peer(frequency_penalty: f32) -> Vec<u32> {
+            let state = make_test_state();
+            let (tx, mut rx) = mpsc::channel::<NetworkCommand>(64);
+            let mut request = make_test_request(&state);
+            request.sampling_params.frequency_penalty = frequency_penalty;
+            let request_id = request.id;
+            let (a, d) = (NodeId([0xA1; 32]), NodeId([0xD4; 32]));
+            let mut peers = std::collections::HashMap::new();
+            for (node, byte) in [(&a, 0xA1u8), (&d, 0xD4)] {
+                state.peer_id_map.insert(node.clone(), vec![byte]);
+                peers.insert(vec![byte], node.clone());
+                // A peer that CAN read the history (the `0x08` trailer), so
+                // the feature gate is not what keeps it off the wire.
+                state.peer_registry.insert(
+                    node.clone(),
+                    PeerInfo {
+                        node_id: node.clone(),
+                        addresses: vec![],
+                        capability: Some(NodeCapability {
+                            coord: None,
+                            node_id: node.clone(),
+                            gpu: None,
+                            cpu: None,
+                            ram_total_mb: 0,
+                            ram_available_mb: 0,
+                            ram_model_budget_mb: None,
+                            disk_available_mb: 0,
+                            bandwidth_mbps: 0.0,
+                            hosted_shards: vec![],
+                            max_contribution: ContributionLevel::Moderate,
+                            uptime_seconds: 0,
+                            version: String::new(),
+                            region: None,
+                            est_tokens_per_sec_7b: 0.0,
+                            os: None,
+                            observed_latencies: vec![],
+                            relay_capable: false,
+                            protocol_version: 0,
+                            features: swarmllm_types::node::features::FORWARD_GENERATED_IDS,
+                            relay_reservations: vec![],
+                            anchor_mode: false,
+                            can_serve_inference: true,
+                            resident_layers: Vec::new(),
+                        }),
+                        last_seen: chrono::Utc::now(),
+                        latency_ms: Some(10),
+                        trust_score: 0.9,
+                        peer_id_bytes: None,
+                        ack_srtt_ms: None,
+                        active_request_count: 0,
+                        first_seen: 0,
+                        verified_transaction_count: 0,
+                        is_lan_peer: false,
+                        goodput_bytes_per_sec: None,
+                        goodput_samples: 0,
+                    },
+                );
+            }
+            let assignment = PipelineAssignment {
+                request_id,
+                segments: vec![remote_segment(&a, (0, 16)), remote_segment(&d, (16, 32))],
+                standbys: vec![],
+                tp_groups: vec![],
+                supports_speculative: false,
+            };
+            let mut executor = PipelineExecutor::new(state.clone(), tx, request, assignment);
+            let sampling_peer = d.clone();
+            let harness_state = state.clone();
+            let harness = tokio::spawn(async move {
+                let mut to_sampler = None;
+                while let Some(cmd) = rx.recv().await {
+                    let NetworkCommand::SendTensor {
+                        target_peer_bytes,
+                        forward,
+                    } = cmd
+                    else {
+                        continue;
+                    };
+                    let node = peers[&target_peer_bytes].clone();
+                    let base = LayerResult {
+                        locally_constructed: false,
+                        ..LayerResult::error(forward.request_id, "")
+                    };
+                    let result = if node == sampling_peer {
+                        to_sampler = Some(forward.generated_ids.clone());
+                        LayerResult {
+                            token_ids: vec![7],
+                            finish_reason: None,
+                            ..base
+                        }
+                    } else {
+                        LayerResult {
+                            activations: forward.activations.clone(),
+                            finish_reason: None,
+                            ..base
+                        }
+                    };
+                    assert!(harness_state.resolve_pending_layer_result(Some(&node), result));
+                }
+                to_sampler.expect("the sampling peer was sent a forward")
+            });
+            // A decode step four tokens into the reply.
+            executor
+                .forward_through_segments(
+                    request_id,
+                    4,
+                    9,
+                    vec![0x11; 64],
+                    None,
+                    false,
+                    &[5, 6, 7, 8],
+                )
+                .await
+                .expect("both segments answered");
+            drop(executor);
+            harness.await.unwrap()
+        }
+
+        assert_eq!(
+            history_sent_to_the_sampling_peer(0.5).await,
+            vec![5, 6, 7, 8],
+            "control: with a penalty set, the sampling peer must still get the reply so far"
+        );
+        assert!(
+            history_sent_to_the_sampling_peer(0.0).await.is_empty(),
+            "with no penalty the sampler never reads the history, so it must not be sent"
+        );
+    }
+
     /// R137 (closes R136 test-coverage deferral, partial): the wire-format
     /// helpers `pack_verify_tokens_to_le_bytes`, `build_spec_verify_forward`,
     /// and `build_kv_truncate_forward` are pure and unit-testable. Full
