@@ -2936,6 +2936,64 @@ fn the_release_workflow_refuses_to_publish_without_signatures() {
     );
 }
 
+/// What in a Docker workflow would publish an image before the release is.
+fn docker_publish_violations(yaml: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    // The `on:` block: from `on:` to the next top-level key.
+    let on_block: String = yaml
+        .lines()
+        .skip_while(|l| l.trim_end() != "on:")
+        .skip(1)
+        .take_while(|l| l.is_empty() || l.starts_with(' ') || l.starts_with('#'))
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if !(on_block.contains("release:") && on_block.contains("published")) {
+        out.push("not triggered by a PUBLISHED release".into());
+    }
+    if on_block.contains("push:") {
+        out.push("triggered by a push — a tag push is not a release".into());
+    }
+    for l in yaml.lines().filter(|l| l.contains("value=latest")) {
+        if !l.contains("github.event_name == 'release'") {
+            out.push(format!(
+                "`latest` not gated on the release event: {}",
+                l.trim()
+            ));
+        }
+    }
+    out
+}
+
+/// A Docker image is a release, so it is published when the release is — after
+/// the gate and the signature — never when the tag is pushed.
+///
+/// `docker.yml` ran on `push: tags: v*`, and a tag is step 7a of the gate, not a
+/// release. So the WITHDRAWN v0.3.199-alpha (garbage on every GPU model) and the
+/// never-signed .202 and .203 were all published as images and each was
+/// `latest` until the next tag; a container node that pulled `latest` in the
+/// ~10 h between the .203 and .204 tags came up on an unsigned build
+/// (2026-09-24). `latest` was also unconditional, so a manual dispatch from
+/// `main` would have published unreleased code under it.
+#[test]
+fn docker_images_are_published_with_the_release_not_the_tag() {
+    let wf = std::fs::read_to_string(repo_root().join(".github/workflows/docker.yml"))
+        .expect("docker.yml");
+    let bad = docker_publish_violations(&wf);
+    assert!(bad.is_empty(), "docker.yml: {}", bad.join("; "));
+
+    // The check must see the shape that shipped the incident.
+    let old = "on:\n  push:\n    tags:\n      - \"v*\"\n  workflow_dispatch:\n\njobs:\n  x:\n    steps:\n            type=raw,value=latest\n";
+    let found = docker_publish_violations(old);
+    assert_eq!(
+        found.len(),
+        3,
+        "the tag trigger, the missing release trigger and the unguarded latest: {found:?}"
+    );
+    let good = "on:\n  release:\n    types: [published]\n  workflow_dispatch:\n\njobs:\n            type=raw,value=latest,enable=${{ github.event_name == 'release' }}\n";
+    assert!(docker_publish_violations(good).is_empty());
+}
+
 /// What a node REPORTS about updates must be what it DOES.
 ///
 /// `updates.auto_update` is the legacy field. It defaults to `Disabled`, and

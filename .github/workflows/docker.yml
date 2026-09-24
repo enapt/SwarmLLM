@@ -1,13 +1,29 @@
 name: Docker
 
+# Images are published when a release is PUBLISHED — i.e. when
+# `examples/sign_release.sh` un-drafts it after signing — never on a tag push.
+#
+# A tag is step 7a of the release gate, not a release: the draft it produces is
+# verified on the downloaded artifact and only then signed and published. This
+# workflow used to run on the tag, so every tag was a Docker release at once —
+# no gate, no signature — and `latest` moved with it. That published the
+# WITHDRAWN v0.3.199-alpha (garbage on every GPU model) and the never-signed
+# .202 and .203 drafts, and a container node that pulled `latest` in the ~10 h
+# between the .203 and .204 tags came up on an unsigned build (2026-09-24).
+#
+# `published` fires on the draft → published edit. The script runs `gh` with
+# the maintainer's own credentials; an edit made with a workflow's
+# GITHUB_TOKEN would NOT start this workflow, so do not move the un-drafting
+# into a workflow without replacing this trigger. On a release event
+# `github.ref` is `refs/tags/<tag>`, which is what metadata-action's
+# `type=semver` reads (it tests the ref, not the event name).
 on:
-  push:
-    tags:
-      - "v*"
+  release:
+    types: [published]
   workflow_dispatch:
     inputs:
       tag:
-        description: "Image tag (e.g., latest, dev)"
+        description: "Extra image tag for a manual build (e.g., dev). `latest` comes only from a published release."
         required: false
         default: "dev"
 
@@ -57,15 +73,16 @@ jobs:
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          # `latest` is unconditional: this workflow only runs on release tags,
-          # and on a tag-push event {{is_default_branch}} is NEVER true (the ref
-          # is refs/tags/…), so the previous enable= guard meant no release ever
-          # published a `latest` tag — the README's `docker run …:latest` failed
-          # for everyone, on all 199 tags, until 2026-08-16.
+          # `latest` follows a PUBLISHED release and nothing else. It is not
+          # guarded by {{is_default_branch}}: that is never true when the ref is
+          # a tag, which is how no release published `latest` at all until
+          # 2026-08-16. It IS guarded by the event, because a manual dispatch
+          # builds whatever ref it was started on — usually `main`, i.e.
+          # unreleased code — and must never become the image people pull.
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest
+            type=raw,value=latest,enable=${{ github.event_name == 'release' }}
             type=raw,value=${{ github.event.inputs.tag || '' }},enable=${{ github.event_name == 'workflow_dispatch' }}
 
       - name: Build and push CPU image
@@ -132,7 +149,7 @@ jobs:
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest
+            type=raw,value=latest,enable=${{ github.event_name == 'release' }}
             type=raw,value=${{ github.event.inputs.tag || '' }},enable=${{ github.event_name == 'workflow_dispatch' }}
 
       - name: Build and push CUDA image

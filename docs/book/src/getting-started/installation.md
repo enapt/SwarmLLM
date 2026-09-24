@@ -159,6 +159,12 @@ Pre-built images on GHCR:
 | `ghcr.io/enapt/swarmllm:<version>` | A pinned release, e.g. `0.3.200-alpha` (CPU) |
 | `ghcr.io/enapt/swarmllm:<version>-cuda` | A pinned release (GPU) |
 
+An image is published when its release is — after the release has been checked
+and signed, the same moment the built-in updater can see it. Don't pin
+`0.3.199-alpha`: that release was withdrawn, and before this rule its image was
+published anyway (as were `0.3.202-alpha` and `0.3.203-alpha`, which were never
+released).
+
 Data is persisted in Docker volumes. Model shards are stored in the `swarmllm-models` volume (or bind-mount a host directory via `SWARMLLM_MODELS_DIR` in `.env`).
 
 View logs with `docker compose logs -f`. The API key is printed on first startup.
