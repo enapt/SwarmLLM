@@ -45,7 +45,10 @@ and `establish_session` is idempotent — nothing repairs the mismatch.
 `request_rekey` (inside `open`, so every decrypt site inherits it) and
 `key_rotation` performs one rate-limited ephemeral exchange — including when
 this node holds NO session for that peer, which is the same dead link, not a
-milder one.
+milder one. **The forward it refused is sent again once that repair lands**:
+the refusal carries `ForwardRefusal::Undecryptable` (the `0x06` result
+trailer, gated on `features::FORWARD_REFUSAL_REASON`) and the coordinator's
+`wait_for_result` resends on `rekeyed_since` — `arch-scheduling.md`.
 
 → `docs/invariants/network.md`
 

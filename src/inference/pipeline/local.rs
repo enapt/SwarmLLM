@@ -64,6 +64,10 @@ pub(super) enum ActivationUnits {
 /// bare `Duration` so that a new call site cannot invent its own deadline and
 /// quietly bypass measured-speed sizing — the recurring failure mode described
 /// in `.claude/rules/architecture.md` § "One invariant, N paths".
+///
+/// `Copy` so a resend after a repaired link (`ResendOnRefusal`) waits under the
+/// same deadline as the forward it replaces; still constructible only here.
+#[derive(Clone, Copy)]
 pub(super) struct SegmentBudget {
     duration: Duration,
     /// Why this budget is what it is — logged so an operator can tell a
@@ -451,10 +455,101 @@ impl PipelineExecutor {
     /// remote segment's outcome is observed, and the reliability figure it
     /// feeds is worthless if a call site can decline to report. See the
     /// recording arms below.
-    // Eight primitives that name one wait; a struct would rename them at the
-    // five call sites without saying anything new.
+    ///
+    /// `resend` is what this wait may do when the peer refuses the forward
+    /// before any of it ran (`ForwardRefusal`) — see [`ResendOnRefusal`]. It is
+    /// here, in the one wait every remote segment goes through, so that no
+    /// path can be the one that forgot: that is FUTURE_WORK #92, a request lost
+    /// to a link that had repaired itself a second later.
+    // Nine primitives that name one wait; a struct would rename them at the
+    // eight call sites without saying anything new.
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn wait_for_result(
+        state: &SharedState,
+        rx: tokio::sync::oneshot::Receiver<LayerResult>,
+        request_id: uuid::Uuid,
+        segment_idx: usize,
+        node_id: &crate::types::NodeId,
+        num_layers: u32,
+        activation_bytes: usize,
+        budget: SegmentBudget,
+        cancel: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
+        resend: ResendOnRefusal<'_>,
+    ) -> Result<LayerResult, SwarmError> {
+        let mut rx = rx;
+        // No later than the refused forward was sealed: the caller has handed
+        // it to the network task already, and sealing happens there.
+        let mut sent_at = std::time::Instant::now();
+        let mut resent = false;
+        loop {
+            let result = Self::wait_for_one_result(
+                state,
+                rx,
+                request_id,
+                segment_idx,
+                node_id,
+                num_layers,
+                activation_bytes,
+                budget,
+                cancel,
+            )
+            .await?;
+            if result.refusal != Some(crate::types::ForwardRefusal::Undecryptable) {
+                return Ok(result);
+            }
+            let (network_tx, target_peer_bytes, rebuild) = match resend {
+                ResendOnRefusal::SameForward {
+                    network_tx,
+                    target_peer_bytes,
+                    rebuild,
+                } if !resent => (network_tx, target_peer_bytes, rebuild),
+                ResendOnRefusal::SameForward { .. } => {
+                    tracing::warn!(
+                        request_id = %request_id,
+                        segment = segment_idx,
+                        node = %node_id,
+                        "DIAG: peer could not decrypt the forward AGAIN after the link was \
+                         re-keyed — not resending a second time"
+                    );
+                    return Ok(result);
+                }
+                ResendOnRefusal::Never(why) => {
+                    tracing::info!(
+                        request_id = %request_id,
+                        segment = segment_idx,
+                        node = %node_id,
+                        why,
+                        "DIAG: peer could not decrypt the forward — this path does not resend"
+                    );
+                    return Ok(result);
+                }
+            };
+            let Some(new_rx) = resend_after_link_repair(
+                state,
+                request_id,
+                segment_idx,
+                node_id,
+                sent_at,
+                cancel,
+                network_tx,
+                target_peer_bytes,
+                rebuild,
+            )
+            .await
+            else {
+                return Ok(result);
+            };
+            rx = new_rx;
+            sent_at = std::time::Instant::now();
+            resent = true;
+        }
+    }
+
+    /// One wait on one forward — the body `wait_for_result` had before it could
+    /// resend. Separate so a resend waits under exactly the same rules,
+    /// recording and deadline as the first attempt.
+    #[allow(clippy::too_many_arguments)]
+    async fn wait_for_one_result(
         state: &SharedState,
         rx: tokio::sync::oneshot::Receiver<LayerResult>,
         request_id: uuid::Uuid,
@@ -610,6 +705,139 @@ impl PipelineExecutor {
             }
         }
     }
+}
+
+/// What [`PipelineExecutor::wait_for_result`] may do when the peer refuses a
+/// forward before any of it ran ([`crate::types::ForwardRefusal`]).
+///
+/// Required, not an `Option` that defaults to "never": a wait that must not
+/// resend says so at its call site, with the reason in words
+/// (`architecture.md`, "make the wrong call unrepresentable").
+///
+/// **Why the same node, and why that is safe.** A forward the peer could not
+/// decrypt never reached its worker, so the peer's KV cache for the
+/// conversation is exactly as it was — sending the same step again is correct
+/// at any point in a reply, where handing the segment to ANOTHER machine is
+/// not (`failover_can_restore_state`). gRPC makes the same call for an RPC the
+/// server application never saw (gRFC A6, "transparent retries": retried once,
+/// outside the retry policy, not counted as a failure). And the refusing node
+/// has already armed the repair, so the one thing that made the forward fail
+/// is being fixed as we wait — WireGuard likewise holds a packet it cannot
+/// send until the handshake completes, then sends it (`staged_packet_queue`).
+pub(crate) enum ResendOnRefusal<'a> {
+    /// Build the same forward again and send it to the same node, once, when
+    /// the link has been re-keyed. A closure rather than a stored copy so the
+    /// forward is rebuilt from what the caller already holds and nothing is
+    /// spent on the path where no refusal ever comes.
+    SameForward {
+        network_tx: &'a tokio::sync::mpsc::Sender<crate::types::NetworkCommand>,
+        target_peer_bytes: &'a [u8],
+        rebuild: &'a (dyn Fn() -> crate::types::LayerForward + Send + Sync),
+    },
+    /// This wait must not resend; the reason is logged if a refusal arrives.
+    Never(&'static str),
+}
+
+/// Floor on how long to wait for a refusing peer's repair to land. The repair
+/// is one ephemeral exchange plus its confirmation — a round trip and a half
+/// — started by the peer's rotation task the moment the refusal armed it.
+const LINK_REPAIR_WAIT_MIN: Duration = Duration::from_secs(2);
+/// Ceiling on the same wait. Past it the link is not repairing, and the
+/// refusal goes to the caller's ordinary handling, which is where it went
+/// before any of this existed.
+const LINK_REPAIR_WAIT_MAX: Duration = Duration::from_secs(10);
+/// The wait when we have no round-trip figure for the peer at all.
+const LINK_REPAIR_WAIT_UNMEASURED: Duration = Duration::from_secs(5);
+/// How often the wait looks for the new key.
+const LINK_REPAIR_POLL: Duration = Duration::from_millis(20);
+
+/// How long to wait for the link to `node` to be re-keyed.
+///
+/// Scaled by the peer's measured round trip rather than fixed (`architecture.md`
+/// § Timeouts, "bound what actually varies"): the repair costs round trips, and
+/// this fleet spans ~1 ms LAN links and ~350 ms intercontinental ones.
+fn link_repair_wait(state: &SharedState, node: &crate::types::NodeId) -> Duration {
+    let srtt_ms = state.peer_registry.get(node).and_then(|p| p.ack_srtt_ms);
+    match srtt_ms {
+        Some(ms) => (LINK_REPAIR_WAIT_MIN + Duration::from_millis(4 * u64::from(ms)))
+            .min(LINK_REPAIR_WAIT_MAX),
+        None => LINK_REPAIR_WAIT_UNMEASURED,
+    }
+}
+
+/// Wait for the link to `node_id` to be re-keyed, then send the refused
+/// forward to it again. `Some` is the new result channel, registered before the
+/// send; `None` means nothing was sent and the refusal stands.
+#[allow(clippy::too_many_arguments)]
+async fn resend_after_link_repair(
+    state: &SharedState,
+    request_id: uuid::Uuid,
+    segment_idx: usize,
+    node_id: &crate::types::NodeId,
+    sent_at: std::time::Instant,
+    cancel: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    network_tx: &tokio::sync::mpsc::Sender<crate::types::NetworkCommand>,
+    target_peer_bytes: &[u8],
+    rebuild: &(dyn Fn() -> crate::types::LayerForward + Send + Sync),
+) -> Option<tokio::sync::oneshot::Receiver<LayerResult>> {
+    let wait = link_repair_wait(state, node_id);
+    // Tokio's clock, so a test can run the whole bound in paused time.
+    let started = tokio::time::Instant::now();
+    tracing::info!(
+        request_id = %request_id,
+        segment = segment_idx,
+        node = %node_id,
+        wait_ms = wait.as_millis() as u64,
+        "DIAG: peer could not decrypt the forward — waiting for the link repair to send it again"
+    );
+    // Sealed after this, the forward goes out under the key the peer just
+    // agreed; sealed before, under the one it refused (`rekeyed_since`).
+    while !state.session_manager.rekeyed_since(node_id, sent_at) {
+        if cancel.is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed)) {
+            return None;
+        }
+        if started.elapsed() >= wait {
+            tracing::warn!(
+                request_id = %request_id,
+                segment = segment_idx,
+                node = %node_id,
+                waited_ms = started.elapsed().as_millis() as u64,
+                "DIAG: link to the peer was not re-keyed in time — not resending"
+            );
+            return None;
+        }
+        tokio::time::sleep(LINK_REPAIR_POLL).await;
+    }
+    // The refusal consumed the caller's waiter. Pinned to the same node, as
+    // the caller's was: this forward is for it and for nobody else.
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    state.pending_layer_results.insert(
+        request_id,
+        crate::daemon::state::PendingLayerResult {
+            tx,
+            awaiting: Some(node_id.clone()),
+            chain_members: Vec::new(),
+        },
+    );
+    if network_tx
+        .send(crate::types::NetworkCommand::SendTensor {
+            target_peer_bytes: target_peer_bytes.to_vec(),
+            forward: rebuild(),
+        })
+        .await
+        .is_err()
+    {
+        state.pending_layer_results.remove(&request_id);
+        return None;
+    }
+    tracing::info!(
+        request_id = %request_id,
+        segment = segment_idx,
+        node = %node_id,
+        repaired_after_ms = started.elapsed().as_millis() as u64,
+        "DIAG: link re-keyed — sent the refused forward again to the same node"
+    );
+    Some(rx)
 }
 
 /// Record what one remote segment outcome says about a peer's link, if
@@ -815,7 +1043,19 @@ mod segment_budget_tests {
             // the peer's fault.
             None => std::mem::forget(tx),
         }
-        PipelineExecutor::wait_for_result(state, rx, request_id, 0, node, 1, 8, budget, None).await
+        PipelineExecutor::wait_for_result(
+            state,
+            rx,
+            request_id,
+            0,
+            node,
+            1,
+            8,
+            budget,
+            None,
+            ResendOnRefusal::Never("test"),
+        )
+        .await
     }
 
     /// The defect this pins: `record_peer_delivery` was called ONLY from
@@ -1011,10 +1251,20 @@ mod segment_budget_tests {
 
         let (tx, rx) = tokio::sync::oneshot::channel::<LayerResult>();
         drop(tx);
-        let err =
-            PipelineExecutor::wait_for_result(&state, rx, request_id, 0, &node, 1, 8, budget, None)
-                .await
-                .expect_err("the sender was dropped");
+        let err = PipelineExecutor::wait_for_result(
+            &state,
+            rx,
+            request_id,
+            0,
+            &node,
+            1,
+            8,
+            budget,
+            None,
+            ResendOnRefusal::Never("test"),
+        )
+        .await
+        .expect_err("the sender was dropped");
         assert!(!matches!(err, SwarmError::PeerUnresponsive(_)));
         assert!(
             !state.holder_blacklisted_for_request(request_id, &node),
@@ -1065,6 +1315,7 @@ mod segment_budget_tests {
             8,
             budget,
             None,
+            ResendOnRefusal::Never("test"),
         )
         .await
         .expect_err("a dropped sender is still a failure for this request");
@@ -1410,6 +1661,293 @@ mod segment_budget_tests {
             ActivationUnits::HiddenStates,
         );
         assert!(b.duration() >= Duration::from_secs(SEGMENT_TIMEOUT_MIN_SECS));
+    }
+
+    // ── A forward the peer could not open (FUTURE_WORK #92) ──────────────────
+
+    use crate::crypto::session::{KeyAdoption, SessionManager, SESSION_CONFIRM_MARKER};
+    use crate::types::{ForwardRefusal, LayerForward, NetworkCommand, TensorFormat};
+
+    fn a_forward(request_id: uuid::Uuid) -> LayerForward {
+        LayerForward {
+            request_id,
+            sequence_num: 7,
+            index_pos: 41,
+            activations: vec![4, 2, 4, 2],
+            format: TensorFormat::FP32,
+            model_id: ModelId("m".into()),
+            layer_range: (0, 8),
+            tp_meta: None,
+            vision_embeddings: None,
+            chain: Vec::new(),
+            sender_peer_bytes: None,
+            requester_node_id: None,
+            pre_embedded: false,
+            generated_ids: Vec::new(),
+            adapter_id: None,
+            draft_tokens: Vec::new(),
+            spec_logits_requested: false,
+            truncate_kv_to: None,
+            chunk_meta: None,
+            sampling: None,
+        }
+    }
+
+    fn refused(request_id: uuid::Uuid) -> LayerResult {
+        as_if_from_the_peer(
+            LayerResult::error(request_id, "Could not decrypt forward")
+                .with_refusal(ForwardRefusal::Undecryptable),
+        )
+    }
+
+    /// This node and `node` with a session each way, as a coordinator and the
+    /// peer it forwards to.
+    fn linked(state: &SharedState, node: &NodeId) -> (SessionManager, NodeId) {
+        let peer = SessionManager::from_ed25519_key(&[5u8; 32]);
+        let us = state.identity.node_id().clone();
+        assert!(state
+            .session_manager
+            .establish_session(node, *peer.local_public_key()));
+        assert!(peer.establish_session(&us, *state.session_manager.local_public_key()));
+        (peer, us)
+    }
+
+    /// The repair a refusal arms, carried out as it is live: the refusing peer
+    /// initiates, this node answers, and the peer's confirmation opens here.
+    fn repair(state: &SharedState, peer: &SessionManager, node: &NodeId, us: &NodeId) {
+        let theirs = peer.initiate_ephemeral_exchange(us);
+        let ours = state.session_manager.accept_ephemeral_exchange(
+            node,
+            &theirs,
+            KeyAdoption::OnConfirmation,
+        );
+        let confirm = peer.complete_ephemeral_session(us, &ours).unwrap();
+        state
+            .session_manager
+            .open(node, &confirm, SESSION_CONFIRM_MARKER)
+            .unwrap();
+    }
+
+    /// The request #92 lost: the peer could not open a forward, armed the
+    /// repair, and the link was fine a round trip later — but the coordinator
+    /// failed over, found no standby, and ended the request. Now the same
+    /// forward goes to the same peer once the link is re-keyed, and not before.
+    #[tokio::test]
+    async fn a_forward_the_peer_could_not_open_goes_to_it_again_once_the_link_is_rekeyed() {
+        let state = test_state();
+        let node = NodeId([7u8; 32]);
+        let (peer, us) = linked(&state, &node);
+        let request_id = uuid::Uuid::new_v4();
+        let b = budget(&state, &node, &ModelId("m".into()), WorkKind::Decode);
+        let (net_tx, mut net_rx) = tokio::sync::mpsc::channel(4);
+        let sent = a_forward(request_id);
+        let rebuild = || sent.clone();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tx.send(refused(request_id)).unwrap();
+
+        let peer_side = async {
+            tokio::time::sleep(Duration::from_millis(60)).await;
+            assert!(
+                net_rx.try_recv().is_err(),
+                "nothing may be resent before the link is re-keyed — it would go out \
+                 under the key the peer just refused"
+            );
+            repair(&state, &peer, &node, &us);
+            let Ok(Some(NetworkCommand::SendTensor {
+                target_peer_bytes,
+                forward,
+            })) = tokio::time::timeout(Duration::from_secs(20), net_rx.recv()).await
+            else {
+                panic!("the refused forward must be sent again");
+            };
+            assert_eq!(target_peer_bytes, vec![9, 9], "to the same peer");
+            assert_eq!(
+                (
+                    forward.index_pos,
+                    forward.sequence_num,
+                    &forward.activations
+                ),
+                (41, 7, &vec![4, 2, 4, 2]),
+                "the SAME step — the peer never ran it"
+            );
+            let mut answer = LayerResult::error(request_id, "");
+            answer.finish_reason = None;
+            answer.activations = vec![1, 2, 3];
+            assert!(state.resolve_pending_layer_result(Some(&node), as_if_from_the_peer(answer)));
+        };
+        let (got, ()) = tokio::join!(
+            PipelineExecutor::wait_for_result(
+                &state,
+                rx,
+                request_id,
+                0,
+                &node,
+                1,
+                8,
+                b,
+                None,
+                ResendOnRefusal::SameForward {
+                    network_tx: &net_tx,
+                    target_peer_bytes: &[9, 9],
+                    rebuild: &rebuild,
+                },
+            ),
+            peer_side
+        );
+        let got = got.unwrap();
+        assert_eq!(got.refusal, None);
+        assert_eq!(
+            got.activations,
+            vec![1, 2, 3],
+            "the resend's answer is the result"
+        );
+        assert!(net_rx.try_recv().is_err(), "sent again exactly once");
+    }
+
+    /// Where the link does not repair, nothing is resent and the refusal goes to
+    /// the caller's ordinary handling — exactly where it went before.
+    #[tokio::test(start_paused = true)]
+    async fn a_link_that_is_never_rekeyed_gets_no_resend_and_the_refusal_stands() {
+        let state = test_state();
+        let node = NodeId([8u8; 32]);
+        let _link = linked(&state, &node);
+        let request_id = uuid::Uuid::new_v4();
+        let b = budget(&state, &node, &ModelId("m".into()), WorkKind::Decode);
+        let (net_tx, mut net_rx) = tokio::sync::mpsc::channel(4);
+        let sent = a_forward(request_id);
+        let rebuild = || sent.clone();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tx.send(refused(request_id)).unwrap();
+
+        let got = PipelineExecutor::wait_for_result(
+            &state,
+            rx,
+            request_id,
+            0,
+            &node,
+            1,
+            8,
+            b,
+            None,
+            ResendOnRefusal::SameForward {
+                network_tx: &net_tx,
+                target_peer_bytes: &[9, 9],
+                rebuild: &rebuild,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(got.refusal, Some(ForwardRefusal::Undecryptable));
+        assert!(net_rx.try_recv().is_err());
+        assert!(
+            !state.pending_layer_results.contains_key(&request_id),
+            "no waiter is left behind for a forward that was never sent"
+        );
+    }
+
+    /// The resend is for the TYPED refusal on a path that allows it, once. The
+    /// link IS repaired during each of these waits, so the only thing standing
+    /// between them and a resend is the rule under test — a wrong resend would
+    /// find the new key and send, rather than time out and look correct.
+    #[tokio::test]
+    async fn only_a_typed_refusal_on_a_path_that_allows_it_is_resent_and_only_once() {
+        let state = test_state();
+        let node = NodeId([9u8; 32]);
+        let (peer, us) = linked(&state, &node);
+        let b = budget(&state, &node, &ModelId("m".into()), WorkKind::Decode);
+        let (net_tx, mut net_rx) = tokio::sync::mpsc::channel(4);
+
+        // (1) The same words with no type: a peer on an older build, or any
+        //     other error. Handled as before.
+        // (2) The type, on a path that has said it must not resend.
+        for (label, answer, may) in [
+            (
+                "untyped",
+                as_if_from_the_peer(LayerResult::error(
+                    uuid::Uuid::nil(),
+                    "Could not decrypt forward",
+                )),
+                true,
+            ),
+            ("never", refused(uuid::Uuid::nil()), false),
+        ] {
+            let request_id = uuid::Uuid::new_v4();
+            let mut answer = answer;
+            answer.request_id = request_id;
+            let sent = a_forward(request_id);
+            let rebuild = || sent.clone();
+            let resend = if may {
+                ResendOnRefusal::SameForward {
+                    network_tx: &net_tx,
+                    target_peer_bytes: &[9, 9],
+                    rebuild: &rebuild,
+                }
+            } else {
+                ResendOnRefusal::Never("test: this path must not resend")
+            };
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            tx.send(answer).unwrap();
+            let (got, ()) = tokio::join!(
+                PipelineExecutor::wait_for_result(
+                    &state, rx, request_id, 0, &node, 1, 8, b, None, resend
+                ),
+                async {
+                    tokio::time::sleep(Duration::from_millis(30)).await;
+                    repair(&state, &peer, &node, &us);
+                }
+            );
+            assert!(
+                matches!(
+                    got.unwrap().finish_reason,
+                    Some(crate::types::NetworkFinishReason::Error(_))
+                ),
+                "{label}: the error is handed back as it came"
+            );
+            assert!(net_rx.try_recv().is_err(), "{label}: nothing is resent");
+        }
+
+        // (3) Refused, resent, refused AGAIN: the second refusal stands — with
+        //     the link repaired a second time, so a second resend would happen
+        //     if the rule allowed one.
+        let request_id = uuid::Uuid::new_v4();
+        let sent = a_forward(request_id);
+        let rebuild = || sent.clone();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tx.send(refused(request_id)).unwrap();
+        let (got, ()) = tokio::join!(
+            PipelineExecutor::wait_for_result(
+                &state,
+                rx,
+                request_id,
+                0,
+                &node,
+                1,
+                8,
+                b,
+                None,
+                ResendOnRefusal::SameForward {
+                    network_tx: &net_tx,
+                    target_peer_bytes: &[9, 9],
+                    rebuild: &rebuild,
+                },
+            ),
+            async {
+                tokio::time::sleep(Duration::from_millis(30)).await;
+                repair(&state, &peer, &node, &us);
+                assert!(matches!(
+                    tokio::time::timeout(Duration::from_secs(20), net_rx.recv()).await,
+                    Ok(Some(NetworkCommand::SendTensor { .. }))
+                ));
+                assert!(state.resolve_pending_layer_result(Some(&node), refused(request_id)));
+                tokio::time::sleep(Duration::from_millis(30)).await;
+                repair(&state, &peer, &node, &us);
+            }
+        );
+        assert_eq!(got.unwrap().refusal, Some(ForwardRefusal::Undecryptable));
+        assert!(
+            net_rx.try_recv().is_err(),
+            "one resend per forward, never two"
+        );
     }
 }
 

@@ -1003,6 +1003,7 @@ impl PipelineExecutor {
                         matched_stop_sequence: None,
                         token_logprobs: Vec::new(),
                         locally_constructed: false,
+                        refusal: None,
                     });
                 } else {
                     // Intermediate segment: strip the 0x00 tag and continue
@@ -1133,7 +1134,10 @@ impl PipelineExecutor {
                 } else {
                     None
                 };
-                let forward = LayerForward {
+                // A closure so the SAME forward can be built again if the peer
+                // refuses it unopened (`ResendOnRefusal`), from what this loop
+                // already holds; called once on every other path.
+                let rebuild_forward = || LayerForward {
                     request_id,
                     sequence_num,
                     index_pos: index_pos as u32,
@@ -1141,7 +1145,7 @@ impl PipelineExecutor {
                     format: TensorFormat::FP32,
                     model_id: segment.shard_id.model_id.clone(),
                     layer_range: segment.layer_range,
-                    vision_embeddings: vision_for_wire,
+                    vision_embeddings: vision_for_wire.clone(),
                     chain: chain.clone(),
                     sender_peer_bytes: None,
                     tp_meta: None,
@@ -1194,6 +1198,7 @@ impl PipelineExecutor {
                     chunk_meta: None,
                     sampling: None,
                 };
+                let forward = rebuild_forward();
 
                 let target_peer_bytes = self
                     .shared_state
@@ -1402,6 +1407,21 @@ impl PipelineExecutor {
                     activations.len(),
                     budget,
                     self.request.cancel.as_ref(),
+                    if chain.is_empty() {
+                        super::local::ResendOnRefusal::SameForward {
+                            network_tx: &self.network_tx,
+                            target_peer_bytes: &target_peer_bytes,
+                            rebuild: &rebuild_forward,
+                        }
+                    } else {
+                        // Any hop of a chain may be the one that refused, and
+                        // the hops before it have already run this step. The
+                        // chained branch below re-runs the segment unchained,
+                        // with a KV rewind, and THAT send may resend.
+                        super::local::ResendOnRefusal::Never(
+                            "chained run — re-run unchained instead",
+                        )
+                    },
                 )
                 .await;
 
@@ -2220,8 +2240,10 @@ impl PipelineExecutor {
                 request_id,
             );
 
-            // Send to backup node via directed tensor protocol
-            let forward = LayerForward {
+            // Send to backup node via directed tensor protocol. Rebuildable
+            // for the same reason as the main loop's (`ResendOnRefusal`): a
+            // standby that could not open it never ran it either.
+            let rebuild_forward = || LayerForward {
                 request_id,
                 sequence_num,
                 // 0 when replaying: the stand-in holds no cache for this
@@ -2258,6 +2280,7 @@ impl PipelineExecutor {
                 chunk_meta: None,
                 sampling: None,
             };
+            let forward = rebuild_forward();
 
             let Some(target_peer_bytes) = self.shared_state.resolve_peer_id_bytes(&backup.node_id)
             else {
@@ -2279,7 +2302,7 @@ impl PipelineExecutor {
             if self
                 .network_tx
                 .send(NetworkCommand::SendTensor {
-                    target_peer_bytes,
+                    target_peer_bytes: target_peer_bytes.clone(),
                     forward,
                 })
                 .await
@@ -2315,6 +2338,11 @@ impl PipelineExecutor {
                 activations.len(),
                 budget,
                 self.request.cancel.as_ref(),
+                super::local::ResendOnRefusal::SameForward {
+                    network_tx: &self.network_tx,
+                    target_peer_bytes: &target_peer_bytes,
+                    rebuild: &rebuild_forward,
+                },
             )
             .await;
 

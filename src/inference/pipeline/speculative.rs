@@ -127,11 +127,14 @@ impl PipelineExecutor {
                 Some(segment.node_id.clone()),
             )?;
 
-            let forward = LayerForward {
+            // Rebuildable for a resend after a repaired link
+            // (`local::ResendOnRefusal`). Costs one copy of the prompt TEXT per
+            // request — bytes of text, not hidden states.
+            let rebuild_forward = || LayerForward {
                 request_id,
                 sequence_num: 0,
                 index_pos: 0,
-                activations: prompt_bytes,
+                activations: prompt_bytes.clone(),
                 format: TensorFormat::FP32,
                 model_id: segment.shard_id.model_id.clone(),
                 layer_range: segment.layer_range,
@@ -152,6 +155,7 @@ impl PipelineExecutor {
                 chunk_meta: None,
                 sampling: None,
             };
+            let forward = rebuild_forward();
             if self
                 .network_tx
                 .send(NetworkCommand::SendTensor {
@@ -193,6 +197,11 @@ impl PipelineExecutor {
                 prompt_byte_len,
                 budget,
                 self.request.cancel.as_ref(),
+                super::local::ResendOnRefusal::SameForward {
+                    network_tx: &self.network_tx,
+                    target_peer_bytes: &target_peer_bytes,
+                    rebuild: &rebuild_forward,
+                },
             )
             .await?;
             // Result delivered (the dispatcher already removed the entry when
@@ -649,14 +658,18 @@ pub(super) async fn send_verify_batch(
     // multi-token decode branch, which reads γ token IDs from `activations`
     // (γ × 8 bytes LE). Pack all verify_tokens, not just the first.
     let activations = super::pack_verify_tokens_to_le_bytes(verify_tokens);
-    let forward = super::build_spec_verify_forward(
-        request_id,
-        index_pos,
-        activations,
-        segment,
-        shared_state.identity.node_id().0,
-        truncate_kv_to,
-    );
+    // Rebuildable for a resend after a repaired link (`local::ResendOnRefusal`).
+    let rebuild_forward = || {
+        super::build_spec_verify_forward(
+            request_id,
+            index_pos,
+            activations.clone(),
+            segment,
+            shared_state.identity.node_id().0,
+            truncate_kv_to,
+        )
+    };
+    let forward = rebuild_forward();
     if network_tx
         .send(NetworkCommand::SendTensor {
             target_peer_bytes: target_peer_bytes.to_vec(),
@@ -691,6 +704,11 @@ pub(super) async fn send_verify_batch(
         // A verify round is a few tokens' work; the loop that issues it reads
         // the cancel flag between rounds.
         None,
+        super::local::ResendOnRefusal::SameForward {
+            network_tx,
+            target_peer_bytes,
+            rebuild: &rebuild_forward,
+        },
     )
     .await?;
     // Result delivered (the dispatcher already removed the entry); disarm

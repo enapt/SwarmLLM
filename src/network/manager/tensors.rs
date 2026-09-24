@@ -45,6 +45,28 @@ fn fault_drop_stream_token() -> Option<u32> {
     })
 }
 
+/// `SWARMLLM_FAULT_REFUSE_DECRYPT=<n>`: this node treats the `n`th encrypted
+/// forward it receives (counting from 1) as one whose seal did not open, once,
+/// and arms the repair handshake exactly as a real failure does. The
+/// network-level test for a coordinator sending a refused forward again once
+/// the link is re-keyed (`examples/split_rig.sh`, `FAULT=refuse_decrypt`) — the
+/// only way to fail a decrypt on demand without breaking a key. Unset in
+/// production; read once.
+fn fault_refuse_decrypt_now() -> bool {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::OnceLock;
+    static N: OnceLock<Option<u64>> = OnceLock::new();
+    static SEEN: AtomicU64 = AtomicU64::new(0);
+    let Some(n) = *N.get_or_init(|| {
+        std::env::var("SWARMLLM_FAULT_REFUSE_DECRYPT")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+    }) else {
+        return false;
+    };
+    SEEN.fetch_add(1, Ordering::Relaxed) + 1 == n
+}
+
 impl NetworkManager {
     /// Send a tensor forward to a specific peer via the unified binary tensor protocol.
     /// Uses WIRE_TAG_TENSOR (0x01) framing. Encrypts activations when an encryption
@@ -630,8 +652,20 @@ impl NetworkManager {
                 let peer_bytes = peer.to_bytes();
                 tokio::spawn(async move {
                     let mut forward = forward;
-                    let plaintext = match shared_state.session_manager.open(&node_id, &sealed, &aad)
-                    {
+                    let opened = if fault_refuse_decrypt_now() {
+                        tracing::warn!(
+                            %request_id,
+                            %node_id,
+                            "FAULT: treating this forward as undecryptable (SWARMLLM_FAULT_REFUSE_DECRYPT)"
+                        );
+                        // What a real failure does inside `open`, so the repair
+                        // the coordinator waits for actually happens.
+                        shared_state.session_manager.request_rekey(&node_id);
+                        Err(crate::error::SwarmError::DecryptionFailed)
+                    } else {
+                        shared_state.session_manager.open(&node_id, &sealed, &aad)
+                    };
+                    let plaintext = match opened {
                         Ok(p) => p,
                         Err(e) => {
                             crate::log_failure!(
@@ -661,13 +695,28 @@ impl NetworkManager {
                             // a rotation race from a tampered ciphertext, and
                             // saying which would tell an attacker whether their
                             // forgery had the right key.
+                            //
+                            // What it DOES say, as a type, is that nothing ran:
+                            // `open` has just armed the repair, so the sender's
+                            // right move is this same forward again once the
+                            // link is re-keyed (FUTURE_WORK #92). Only for a
+                            // sender that advertises it can read that — see
+                            // `features::FORWARD_REFUSAL_REASON`.
+                            let mut refusal = crate::types::LayerResult::error(
+                                request_id,
+                                "Could not decrypt forward".to_string(),
+                            );
+                            if shared_state.peer_advertises_feature(
+                                &node_id,
+                                swarmllm_types::node::features::FORWARD_REFUSAL_REASON,
+                            ) {
+                                refusal = refusal
+                                    .with_refusal(crate::types::ForwardRefusal::Undecryptable);
+                            }
                             let _ = self_command_tx
                                 .send(crate::types::NetworkCommand::SendTensorResult {
                                     target_peer_bytes: peer_bytes.clone(),
-                                    result: crate::types::LayerResult::error(
-                                        request_id,
-                                        "Could not decrypt forward".to_string(),
-                                    ),
+                                    result: refusal,
                                 })
                                 .await;
                             return;

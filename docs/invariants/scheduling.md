@@ -1972,6 +1972,100 @@ the score an unknown peer starts on. See `docs/FUTURE_WORK.md` § "The
 plaintext-prompt trust bar sits exactly at the score an unknown peer starts on".
 
 
+## A forward the peer could not open goes to it again, once the link is re-keyed
+
+(2026-09-24, FUTURE_WORK #92.) A node that cannot open a forward's seal
+answers `LayerResult::error("Could not decrypt forward")` at once and, inside
+`SessionManager::open`, arms a repair handshake that completes in about a
+round trip and fixes the link for every later request. The request in front of
+it never got that far: the coordinator treated the refusal like any other
+error, `failover_segment` looked for a standby, single-peer delegation has none
+by design, and the caller got `Segment 0 failed with no standby available (last
+failure: Could not decrypt forward)` — both of the reporter's traces on
+v0.3.193. The router's retry could not help either, because the failover bars
+the node it just tried, so with one holder there was nowhere to go.
+
+**The decision.** A decrypt failure is not what `blacklist_holder_for_request`
+exists for. Envoy's `previous_hosts` rule — a host that just failed is likely
+to fail again — is what justifies barring a peer, and it does not hold for a
+failure whose fix is already under way. And sending the same step AGAIN to the
+SAME peer is safe where failing over is not: the worker never saw the forward,
+so the peer's KV cache for the conversation is exactly as it was, at any point
+in a reply.
+
+**Research (rule 0).** gRPC's gRFC A6 names it: a *transparent retry* is one
+for an RPC that "has never been seen by the server application logic" — "the
+client library will immediately retry it once", and transparent retries "do
+not count toward the limit of configured RPC attempts" nor as failures for
+throttling. WireGuard holds a packet it cannot yet send in a staged queue while
+the handshake runs and sends it once the keypair exists. Both fix the same two
+details this needed: retry ONCE, and only after the thing that made it fail
+has changed.
+
+**What changed.**
+
+- `ForwardRefusal::Undecryptable` on `LayerResult::refusal`, as the `0x06`
+  result trailer — LAST in the frame, because an older decoder reads 0x03-0x05
+  in order and stops at the first marker it does not know. A result's seal
+  does not depend on its trailers (a forward's does), so an older coordinator
+  skips it harmlessly; the serving node still sends it only to a coordinator
+  advertising `features::FORWARD_REFUSAL_REASON`. The message stays generic —
+  it must not tell an attacker whether a forgery had the right key — and
+  nothing matches on it (#295).
+- `SessionManager::rekeyed_since(peer, t)`: was the key this node SEALS with
+  installed after `t`? The node that failed to decrypt INITIATES the repair,
+  so the coordinator is its responder, and a responder's new key waits in
+  `unconfirmed` — still sealing with the old one — until the peer's
+  confirmation opens. Resending on "the exchange was answered" would go out
+  under the key the peer just refused.
+- `pipeline::local::wait_for_result` takes a required `ResendOnRefusal`. On
+  the typed refusal it polls `rekeyed_since(sent_at)` for
+  `2 s + 4 × ack SRTT` (capped 10 s; 5 s with no SRTT — the repair costs round
+  trips and this fleet spans ~1 ms to ~350 ms), re-registers the waiter pinned
+  to the same node, rebuilds the forward through the caller's closure and
+  sends it. At most once per forward; a second refusal, a wait that expires,
+  or a cancelled request hands the refusal to the caller's ordinary handling —
+  where it went before.
+- Every coordinator wait passes it: the main loop, the failover standby loop,
+  `forward_verify_through_segments` (ngram and DSD), the speculative prefill
+  and `send_verify_batch`. A CHAINED forward passes `Never` — the refusal may
+  come from any hop, the hops before it have already appended this step, and
+  the chain branch already re-runs the segment unchained with a KV rewind.
+- The forward is REBUILT by a closure rather than kept, so nothing is copied
+  on the path where no refusal comes; the main loop already holds the input
+  for failover.
+- `SWARMLLM_FAULT_REFUSE_DECRYPT=<n>` makes a serving node refuse its `n`th
+  encrypted forward, once, and arm the repair — the only way to exercise this
+  on demand.
+
+**Verified live** (2026-09-24, `split_rig.sh split`, TinyLlama A=[0] B=[1],
+CPU release build, B wrapped with the fault switch): every fault run logged
+`link re-keyed — sent the refused forward again to the same node` with
+`repaired_after_ms` 21-23, zero failovers, 200. The refused request's reply —
+refusal landing mid-reply, on a verify round — matched the unfaulted run in all
+17 fault runs (the whole of the first question's reply; the first 90 characters
+where the refusal landed in the second). Two early runs showed the NEXT
+request's reply flipped at a near-tie; 26 later runs (13 with the fault) did
+not, so the refusal is not a sufficient cause — FUTURE_WORK #106 holds that
+evidence and the instrumentation that localises it.
+
+**What a change here must keep.**
+
+- `a_forward_the_peer_could_not_open_goes_to_it_again_once_the_link_is_rekeyed`
+  — same step, same node, not before the re-key; goes red with the resend off
+  and with the re-key wait skipped.
+- `a_link_that_is_never_rekeyed_gets_no_resend_and_the_refusal_stands` — goes
+  red if the resend does not wait for the re-key.
+- `only_a_typed_refusal_on_a_path_that_allows_it_is_resent_and_only_once` —
+  the untyped words, a `Never` path, and a second refusal are not resent, with
+  the link repaired during each wait so a wrong resend would actually send.
+- `a_link_reads_as_rekeyed_once_a_resend_would_open_and_not_before` —
+  answering the exchange is not adopting its key.
+- `the_refusal_trailer_is_the_last_thing_in_the_frame` — what makes the
+  trailer safe for older decoders.
+- **Not covered: the opt-in persistent pipeline stream**, whose receiver drops
+  a forward it cannot open without answering at all → FUTURE_WORK #105.
+
 ## A peer that went silent is barred from the retry, and the retry happens
 
 (2026-09-12.) Three producers of `SwarmError::PeerUnresponsive`: the ACK

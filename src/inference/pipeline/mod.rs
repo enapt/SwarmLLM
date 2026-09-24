@@ -359,14 +359,19 @@ pub(super) async fn forward_verify_through_segments(
         };
         let target_peer_bytes = target_peer_bytes.as_ref();
 
-        let forward = build_spec_verify_forward(
-            request_id,
-            index_pos,
-            activation_bytes.clone(),
-            segment,
-            shared_state.identity.node_id().0,
-            truncate_kv_to,
-        );
+        // Rebuildable: a peer that refuses this unopened is sent it again once
+        // the link is re-keyed (`local::ResendOnRefusal`).
+        let rebuild_forward = || {
+            build_spec_verify_forward(
+                request_id,
+                index_pos,
+                activation_bytes.clone(),
+                segment,
+                shared_state.identity.node_id().0,
+                truncate_kv_to,
+            )
+        };
+        let forward = rebuild_forward();
 
         let result = if let Some(peer_bytes) = target_peer_bytes {
             let (rx, mut pending_guard) = register_pending_layer_result(
@@ -423,6 +428,11 @@ pub(super) async fn forward_verify_through_segments(
                 // A verify step is a few tokens' work; the loop that issues it
                 // reads the cancel flag between steps.
                 None,
+                local::ResendOnRefusal::SameForward {
+                    network_tx,
+                    target_peer_bytes: peer_bytes,
+                    rebuild: &rebuild_forward,
+                },
             )
             .await?;
             pending_guard.disarm();
@@ -2252,6 +2262,7 @@ mod peer_error_recovery_tests {
             matched_stop_sequence: None,
             token_logprobs: Vec::new(),
             locally_constructed: false,
+            refusal: None,
         }
     }
 

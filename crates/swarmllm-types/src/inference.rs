@@ -685,6 +685,56 @@ pub struct LayerResult {
     /// skips it; see `network::protocol::decode_layer_result`.
     #[serde(skip)]
     pub locally_constructed: bool,
+    /// Set when the peer turned the forward away WITHOUT running it, for a
+    /// reason that changes what the sender should do next. `None` for every
+    /// other result — a success, an ordinary error, and anything from a peer
+    /// on a build that predates the field.
+    ///
+    /// A type rather than a phrase in `finish_reason`: the message is prose a
+    /// person reads, and routing that switches on reworded prose is gotcha
+    /// #295. Travels as the `0x06` trailer; see [`ForwardRefusal`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refusal: Option<ForwardRefusal>,
+}
+
+/// Why a peer refused a forward before any of it ran.
+///
+/// The distinction is the one gRPC draws for a *transparent* retry (gRFC A6):
+/// an RPC the server library received but its application logic never saw may
+/// be retried at once, outside the retry policy and without counting as a
+/// failure, because nothing was done that a second attempt could duplicate.
+/// For a pipeline forward that is exact — the worker never saw it, so the
+/// peer's KV cache for the conversation is as it was, and sending the same
+/// step again is correct even in the middle of a reply, where handing the
+/// segment to ANOTHER machine is not.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ForwardRefusal {
+    /// The forward's seal did not open. The refusing node has already armed a
+    /// repair handshake for the link (`SessionManager::request_rekey`), which
+    /// completes in about a round trip — so the right next step is the same
+    /// forward, to the same node, once the link has been re-keyed. Barring the
+    /// node instead (Envoy's `previous_hosts` reasoning) is wrong here: it just
+    /// failed for a reason that is already being fixed.
+    Undecryptable,
+}
+
+impl ForwardRefusal {
+    /// The byte this reason travels as in the `0x06` trailer.
+    pub fn wire_code(self) -> u8 {
+        match self {
+            ForwardRefusal::Undecryptable => 1,
+        }
+    }
+
+    /// The reason a trailer byte names. `None` for a code this build does not
+    /// know — a newer peer's reason is read as no reason, which is today's
+    /// behaviour, rather than as a malformed result.
+    pub fn from_wire_code(code: u8) -> Option<Self> {
+        match code {
+            1 => Some(ForwardRefusal::Undecryptable),
+            _ => None,
+        }
+    }
 }
 
 /// A single token's log-probability info for distributed inference responses.
@@ -727,7 +777,15 @@ impl LayerResult {
             // process, and `true` is what stops a manufactured failure being
             // read as the peer having answered.
             locally_constructed: true,
+            refusal: None,
         }
+    }
+
+    /// This error, marked as a refusal the sender can act on. See
+    /// [`ForwardRefusal`] for which refusals exist and what each asks for.
+    pub fn with_refusal(mut self, refusal: ForwardRefusal) -> Self {
+        self.refusal = Some(refusal);
+        self
     }
 }
 

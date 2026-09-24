@@ -122,6 +122,19 @@ pub mod features {
     /// rather than silently sending tokens the caller asked to keep private.
     pub const FORWARD_PRE_EMBEDDED: u64 = 1 << 9;
 
+    /// Understands the refusal trailer (`0x06`) on a `LayerResult`: a typed
+    /// reason a forward was turned away before any of it ran
+    /// (`ForwardRefusal`). A coordinator with this bit sends a forward its
+    /// peer could not decrypt AGAIN, to the same peer, once the repair
+    /// handshake the refusal armed has re-keyed the link — instead of failing
+    /// over, which with one holder meant failing the request.
+    ///
+    /// An older coordinator would skip the trailer harmlessly (a result's seal
+    /// does not depend on its trailers, unlike a forward's), but the serving
+    /// node still only sends it to a peer advertising this bit, so the
+    /// additive-protocol rule holds without an argument about each decoder.
+    pub const FORWARD_REFUSAL_REASON: u64 = 1 << 10;
+
     /// The full feature set THIS build implements. Advertised by every node.
     pub const ALL: u64 = RELAY
         | TENSOR_RELAY
@@ -132,7 +145,8 @@ pub mod features {
         | NETWORK_COORDS
         | SESSION_KEY_CONFIRM
         | FORWARD_GENERATED_IDS
-        | FORWARD_PRE_EMBEDDED;
+        | FORWARD_PRE_EMBEDDED
+        | FORWARD_REFUSAL_REASON;
 
     /// Does `advertised` include every bit in `needed`?
     pub fn supports(advertised: u64, needed: u64) -> bool {

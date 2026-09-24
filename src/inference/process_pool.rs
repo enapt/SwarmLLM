@@ -5155,6 +5155,7 @@ impl ModelProcessPool {
                                 matched_stop_sequence: r.matched_stop_sequence,
                                 token_logprobs: r.logprobs.unwrap_or_default(),
                                 locally_constructed: false,
+                                refusal: None,
                             });
                         }
                         WorkerMsg::Error {
@@ -5339,6 +5340,7 @@ impl ModelProcessPool {
                             matched_stop_sequence: r.matched_stop_sequence,
                             token_logprobs: r.logprobs.unwrap_or_default(),
                             locally_constructed: false,
+                            refusal: None,
                         });
                         break;
                     }

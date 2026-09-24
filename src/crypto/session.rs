@@ -666,6 +666,21 @@ impl SessionManager {
         self.sessions.contains_key(peer)
     }
 
+    /// Was the key this node SEALS with for `peer` installed after `t`?
+    ///
+    /// The coordinator's signal that a forward `peer` could not open is worth
+    /// sending again: sealed before the re-key it went out under the key the
+    /// peer could not use, sealed after it goes out under the one the repair
+    /// just agreed. The repair is initiated by the node that failed to decrypt,
+    /// so here we are its RESPONDER — and a responder's new key waits in
+    /// `unconfirmed`, still sealing with the old one, until the peer's
+    /// confirmation opens. That promotion installs the key, so this reads
+    /// `true` exactly when a resend would go out on the new key and not a
+    /// moment before.
+    pub fn rekeyed_since(&self, peer: &NodeId, t: Instant) -> bool {
+        self.sessions.get(peer).is_some_and(|s| s.created_at > t)
+    }
+
     /// Seal (encrypt) data for a specific peer.
     /// `aad` is additional authenticated data (e.g., the cleartext header).
     pub fn seal(&self, peer: &NodeId, plaintext: &[u8], aad: &[u8]) -> Result<Vec<u8>, SwarmError> {
@@ -1826,6 +1841,47 @@ mod disconnect_retirement_tests {
         rekey(&a, &b, &na, &nb);
         let sealed = a.seal(&nb, b"activations", aad).unwrap();
         assert_eq!(b.open(&na, &sealed, aad).unwrap(), b"activations");
+    }
+
+    /// `rekeyed_since` is what tells a coordinator to send a refused forward
+    /// again, so it must turn true when a resend would open — and not while
+    /// the coordinator is still sealing with the key the peer just refused.
+    /// In a real repair the node that failed initiates, so the coordinator is
+    /// the RESPONDER, and answering the exchange is not yet adopting its key.
+    #[test]
+    fn a_link_reads_as_rekeyed_once_a_resend_would_open_and_not_before() {
+        let (a, b, na, nb) = pair();
+        let aad = b"header";
+        rekey(&a, &b, &na, &nb);
+        b.remove_session(&na);
+        b.retired.clear();
+        assert!(b.establish_session(&na, a.local_public));
+
+        let sent_at = Instant::now();
+        let sealed = a.seal(&nb, b"activations", aad).unwrap();
+        assert!(
+            b.open(&na, &sealed, aad).is_err(),
+            "the desync must reproduce"
+        );
+        assert!(!a.rekeyed_since(&nb, sent_at));
+
+        // B performs the repair its failure armed: B initiates, A answers.
+        let b_pub = b.initiate_ephemeral_exchange(&na);
+        let a_pub = a.accept_ephemeral_exchange(&nb, &b_pub, KeyAdoption::OnConfirmation);
+        assert!(
+            !a.rekeyed_since(&nb, sent_at),
+            "answering is not adopting: A still seals with the key B refused"
+        );
+        let resealed_too_early = a.seal(&nb, b"activations", aad).unwrap();
+        let confirm = b.complete_ephemeral_session(&na, &a_pub).unwrap();
+        a.open(&nb, &confirm, SESSION_CONFIRM_MARKER).unwrap();
+        assert!(a.rekeyed_since(&nb, sent_at));
+
+        // What the signal promises: sealed now, the same forward opens.
+        let resealed = a.seal(&nb, b"activations", aad).unwrap();
+        assert_eq!(b.open(&na, &resealed, aad).unwrap(), b"activations");
+        // And why waiting for it matters: one sealed a moment earlier did not.
+        assert!(b.open(&na, &resealed_too_early, aad).is_err());
     }
 
     /// A broken session fails every forward of every request routed through the

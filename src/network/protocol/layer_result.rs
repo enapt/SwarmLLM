@@ -110,6 +110,17 @@ pub fn encode_layer_result(result: &LayerResult) -> Result<Vec<u8>, SwarmError> 
         buf.extend_from_slice(&json);
     }
 
+    // Optional: refusal trailer (marker 0x06 + one reason byte), see
+    // `ForwardRefusal`. LAST, and it must stay last: an older decoder reads
+    // the trailers above in order and stops at the first marker it does not
+    // know, so one appended here is skipped whole — where one placed before
+    // 0x05 would hide the logprobs behind it. The serving node only sets it
+    // for a coordinator advertising `features::FORWARD_REFUSAL_REASON`.
+    if let Some(refusal) = result.refusal {
+        buf.push(0x06);
+        buf.push(refusal.wire_code());
+    }
+
     Ok(buf)
 }
 
@@ -360,6 +371,19 @@ pub fn decode_layer_result(data: &[u8]) -> Result<LayerResult, SwarmError> {
         })?;
         pos += len;
     }
+
+    // Optional: refusal trailer (marker 0x06 + one reason byte). A code this
+    // build does not know reads as no refusal — the behaviour of every build
+    // before the trailer existed — rather than failing the whole result.
+    let mut refusal = None;
+    if pos < data.len() && data[pos] == 0x06 {
+        pos += 1;
+        let Some(&code) = data.get(pos) else {
+            return Err(SwarmError::Network("refusal trailer truncated".into()));
+        };
+        refusal = crate::types::ForwardRefusal::from_wire_code(code);
+        pos += 1;
+    }
     // Suppress unused-assignment warning on the last pos += that has no
     // subsequent reader.
     let _ = pos;
@@ -378,6 +402,7 @@ pub fn decode_layer_result(data: &[u8]) -> Result<LayerResult, SwarmError> {
         // binary one, and the two must agree or the answer would depend on
         // which codec carried the result.
         locally_constructed: false,
+        refusal,
     })
 }
 

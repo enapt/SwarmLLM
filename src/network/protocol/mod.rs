@@ -1385,6 +1385,7 @@ mod tests {
             matched_stop_sequence: None,
             token_logprobs: Vec::new(),
             locally_constructed: false,
+            refusal: None,
         };
 
         let encoded = encode_layer_result(&result).unwrap();
@@ -1410,6 +1411,7 @@ mod tests {
             matched_stop_sequence: None,
             token_logprobs: Vec::new(),
             locally_constructed: false,
+            refusal: None,
         };
 
         let encoded = encode_layer_result(&result).unwrap();
@@ -1429,6 +1431,7 @@ mod tests {
             matched_stop_sequence: None,
             token_logprobs: Vec::new(),
             locally_constructed: false,
+            refusal: None,
         };
 
         let encoded = encode_layer_result(&result).unwrap();
@@ -1687,6 +1690,7 @@ mod tests {
             matched_stop_sequence: None,
             token_logprobs: Vec::new(),
             locally_constructed: false,
+            refusal: None,
         };
         let encoded = encode_layer_result(&result).unwrap();
         let decoded = decode_layer_result(&encoded).unwrap();
@@ -1708,6 +1712,7 @@ mod tests {
             matched_stop_sequence: Some("\n\nHuman:".to_string()),
             token_logprobs: Vec::new(),
             locally_constructed: false,
+            refusal: None,
         };
         let encoded = encode_layer_result(&result).unwrap();
         let decoded = decode_layer_result(&encoded).unwrap();
@@ -1738,6 +1743,7 @@ mod tests {
             matched_stop_sequence: None,
             token_logprobs: entries.clone(),
             locally_constructed: false,
+            refusal: None,
         };
         let encoded = encode_layer_result(&result).unwrap();
         let decoded = decode_layer_result(&encoded).unwrap();
@@ -1749,6 +1755,78 @@ mod tests {
             vec![("hi".to_string(), -1.2)]
         );
         assert_eq!(decoded.token_logprobs[1].token, " world");
+    }
+
+    /// The coordinator decides whether to send a forward again by the TYPE of
+    /// the refusal, never by its message — so the type has to survive the
+    /// wire, and an ordinary error must not come back wearing one.
+    #[test]
+    fn a_refusal_crosses_the_wire_as_a_type() {
+        let id = uuid::Uuid::new_v4();
+        let refused = LayerResult::error(id, "Could not decrypt forward")
+            .with_refusal(swarmllm_types::ForwardRefusal::Undecryptable);
+        let decoded = decode_layer_result(&encode_layer_result(&refused).unwrap()).unwrap();
+        assert_eq!(
+            decoded.refusal,
+            Some(swarmllm_types::ForwardRefusal::Undecryptable)
+        );
+        assert!(matches!(
+            decoded.finish_reason,
+            Some(NetworkFinishReason::Error(ref m)) if m == "Could not decrypt forward"
+        ));
+
+        let plain = LayerResult::error(id, "Could not decrypt forward");
+        let decoded = decode_layer_result(&encode_layer_result(&plain).unwrap()).unwrap();
+        assert_eq!(
+            decoded.refusal, None,
+            "the same words without the type are no refusal"
+        );
+    }
+
+    /// An older decoder reads 0x03, 0x04, 0x05 in order and stops at the first
+    /// marker it does not know. So the refusal is harmless to it only while it
+    /// is the LAST thing in the frame; placed any earlier it would hide the
+    /// trailers after it. Pinned on the richest frame there is.
+    #[test]
+    fn the_refusal_trailer_is_the_last_thing_in_the_frame() {
+        let mut result = LayerResult::error(uuid::Uuid::new_v4(), "refused")
+            .with_refusal(swarmllm_types::ForwardRefusal::Undecryptable);
+        result.spec_logits = vec![vec![1.0, 2.0]];
+        result.matched_stop_sequence = Some("stop".into());
+        result.token_logprobs = vec![swarmllm_types::TokenLogProbEntry {
+            token: "x".into(),
+            logprob: -1.0,
+            top_logprobs: Vec::new(),
+        }];
+        let encoded = encode_layer_result(&result).unwrap();
+        assert!(
+            encoded.ends_with(&[0x06, 1]),
+            "the refusal must close the frame"
+        );
+
+        // What a decoder without the trailer sees: everything before it, intact.
+        let without = decode_layer_result(&encoded[..encoded.len() - 2]).unwrap();
+        assert_eq!(without.refusal, None);
+        assert_eq!(without.spec_logits, result.spec_logits);
+        assert_eq!(without.matched_stop_sequence.as_deref(), Some("stop"));
+        assert_eq!(without.token_logprobs.len(), 1);
+    }
+
+    /// A reason a newer peer knows and this build does not is read as no
+    /// reason — the behaviour before the trailer existed — not as a broken
+    /// result that loses the error it carries.
+    #[test]
+    fn an_unknown_refusal_code_reads_as_no_refusal() {
+        let refused = LayerResult::error(uuid::Uuid::new_v4(), "refused")
+            .with_refusal(swarmllm_types::ForwardRefusal::Undecryptable);
+        let mut encoded = encode_layer_result(&refused).unwrap();
+        *encoded.last_mut().unwrap() = 0xEE;
+        let decoded = decode_layer_result(&encoded).unwrap();
+        assert_eq!(decoded.refusal, None);
+        assert!(matches!(
+            decoded.finish_reason,
+            Some(NetworkFinishReason::Error(_))
+        ));
     }
 
     #[test]
@@ -1770,6 +1848,7 @@ mod tests {
                 top_logprobs: Vec::new(),
             }],
             locally_constructed: false,
+            refusal: None,
         };
         let encoded = encode_layer_result(&result).unwrap();
         let decoded = decode_layer_result(&encoded).unwrap();

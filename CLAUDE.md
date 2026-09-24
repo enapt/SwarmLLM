@@ -86,7 +86,7 @@ concurrent reads and `RwLock` for single values; shutdown is a
 ## Testing
 
 **Always say which feature set a count came from.** With
-`--features dev,claude-subscription`: **2902 lib** (+14 ignored),
+`--features dev,claude-subscription`: **2909 lib** (+14 ignored),
 79 integration (31 + 34 + 14 `yamux_substream`), **164 repo-consistency**,
 1 `api_key_side_effects`, 55 `swarmllm-types`, and 11 in the vendored
 request-response patch — plus 15 in the `swarmllm` BIN target (`cli::*`, counted
@@ -152,12 +152,12 @@ UNDETERMINED and never a fix — use it BEFORE blaming a change, especially your
 
 ## Status
 
-**v0.3.201-alpha is the live release (2026-09-23), signed and on both nodes.**
-Its headline is **#93**: a split reply decoded from an EMPTY cache — promotion
-retired a pinned worker once per token — now fixed three ways
-(`WorkerHandle::in_use`, the pin check, and a worker that REFUSES a forward
-whose conversation is gone). **Next: FUTURE_WORK #95** (the second request for a
-split model is refused for memory) → `memory/next_up.md`.
+**v0.3.204-alpha is the live release (2026-09-24), signed and on both nodes.**
+It carries #95 (a split's second request refused for memory), **#96** (GLM-4's
+RoPE layout — every long GLM-4 reply was broken in every release), #97 (the
+tokenizer checked against llama.cpp), #99, #100 and #103. .201's #93 (a split
+reply decoded from an EMPTY cache) stays fixed three ways. **Next** →
+`memory/next_up.md`.
 
 ⚠ **Behaviour gate = `reply_ab.sh` + a SPLIT**, not conformance alone:
 `family_conformance.sh` pins `gpu_layers = 0` and never splits, so it could not

@@ -212,6 +212,20 @@ model alone.
 
 → `docs/invariants/scheduling.md`
 
+## A forward the peer could not OPEN goes to it again, once the link is re-keyed
+
+The exception to "a host that just failed is barred": a peer that could not
+decrypt a forward never ran it, and has already armed the repair.
+**`pipeline::local::wait_for_result` takes a REQUIRED `ResendOnRefusal`**, and
+on `ForwardRefusal::Undecryptable` (a TYPE on `LayerResult`, never the
+message) it waits for `SessionManager::rekeyed_since`, then rebuilds the same
+forward and sends it to the same node, once — correct even mid-reply, since
+the peer's KV is untouched (gRFC A6 "transparent retries"). A chained forward
+passes `Never`: the refusal may come from any hop. A new wait on a remote
+segment gets this by construction; do not add a second resend beside it.
+
+→ `docs/invariants/scheduling.md` § "A forward the peer could not open"
+
 ## A reply under way is never moved to a machine that cannot continue it
 
 `distributed::failover_can_restore_state(sequence_num)` — true only on the
