@@ -3,7 +3,7 @@ paths:
   - "src/inference/scheduler/**"
   - "src/inference/router/**"
   - "src/inference/pipeline/**"
-  - "src/inference/hedging.rs"
+  - "src/inference/segment_latency.rs"
   - "src/inference/prefetch.rs"
   - "src/inference/dsd_controller.rs"
   - "src/inference/trace.rs"

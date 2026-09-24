@@ -180,19 +180,19 @@ const PING_INTERVAL: Duration = Duration::from_secs(30);
 /// Number of missed pings before a peer is considered dead.
 const MAX_MISSED_PINGS: u32 = 3;
 
-/// Drop `HedgeTracker.stats` entries that haven't seen a new observation
+/// Drop `SegmentLatencyTracker` entries that haven't seen a new observation
 /// in this many ms. Departed peers leave dead entries that would otherwise
 /// accumulate one per (model × segment) they ever served. 1h matches the
 /// scale at which a peer being gone is treated as "really gone" by the
 /// scheduler — short reconnects don't lose useful latency history.
-const HEDGE_STATS_MAX_AGE_MS: u64 = 3_600_000;
+const SEGMENT_LATENCY_MAX_AGE_MS: u64 = 3_600_000;
 
 /// Drop a peer's measured speed after this long without a fresh observation.
 ///
 /// Serves two purposes: departed peers stop accumulating (three dead entries
 /// were live on 2026-08-01), and a peer whose estimate made it un-routable
 /// gets a clean slate rather than being permanently de-ranked by a figure that
-/// can only be refreshed by routing to it. Matches the hedge-tracker horizon.
+/// can only be refreshed by routing to it. Matches the segment-latency horizon.
 const PEER_SPEED_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(3_600);
 
 /// Drop `PrefetchOrchestrator.histories` entries whose last activity is
@@ -487,24 +487,24 @@ impl HealthMonitor {
                     // unbounded under peer churn.
                     self.shared_state.sweep_stale_relay_state();
                     // R142 — bound SWARM-SPEC Layer 2/3 in-memory state.
-                    // `HedgeTracker.stats` accumulates one entry per
+                    // `SegmentLatencyTracker` accumulates one entry per
                     // (model × segment × holder) triple ever observed; peers
                     // that have left the swarm stop receiving observations
                     // but their entries stick. `PrefetchOrchestrator.histories`
                     // grows one entry per unique session id (UUID — unbounded
                     // cardinality). Both have eviction methods; wire them here.
                     let now_ms = crate::types::unix_now_secs().saturating_mul(1000);
-                    let hedge_evicted = self
+                    let latency_evicted = self
                         .shared_state
                         .metrics
-                        .hedge_tracker
-                        .evict_stale(now_ms, HEDGE_STATS_MAX_AGE_MS);
-                    if hedge_evicted > 0 {
+                        .segment_latency
+                        .evict_stale(now_ms, SEGMENT_LATENCY_MAX_AGE_MS);
+                    if latency_evicted > 0 {
                         tracing::debug!(
                             target: "swarmllm::health::monitor",
-                            evicted = hedge_evicted,
-                            max_age_ms = HEDGE_STATS_MAX_AGE_MS,
-                            "Evicted stale hedge-tracker entries"
+                            evicted = latency_evicted,
+                            max_age_ms = SEGMENT_LATENCY_MAX_AGE_MS,
+                            "Evicted stale segment-latency entries"
                         );
                     }
                     // Take a traffic reading. Here rather than at the stats

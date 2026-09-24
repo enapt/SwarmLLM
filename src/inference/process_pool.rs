@@ -114,7 +114,7 @@ type ResponseTx = mpsc::Sender<(WorkerMsg, Vec<u8>)>;
 /// `request_id` here to route the reply.
 ///
 /// The token exists because a `request_id` is NOT unique across concurrent
-/// attempts: a router retry (and a hedge race) re-sends the *same* id while the
+/// attempts: a router retry re-sends the *same* id while the
 /// original is still in flight. Keyed by id alone, the retry's insert silently
 /// dropped the original's sender and the original's cleanup then removed the
 /// retry's — killing both. See `WorkerHandle::register_response`.
@@ -1168,7 +1168,7 @@ impl WorkerHandle {
             tracing::warn!(
                 %request_id,
                 "Second in-flight generate for this request_id — superseding \
-                 the earlier attempt (router retry or hedge race)"
+                 the earlier attempt (router retry)"
             );
         }
         (
@@ -1221,8 +1221,8 @@ impl Drop for ResponseGuard {
             .remove_if(&self.request_id, |_, (tok, _)| *tok == self.token);
 
         // Still armed → the caller went away before a terminal reply arrived:
-        // client disconnected, `tokio::select!` timeout fired, or a hedge race
-        // resolved and this was the loser. Tell the worker to stop; otherwise
+        // client disconnected, or a `tokio::select!` timeout fired. Tell the
+        // worker to stop; otherwise
         // it computes to completion and the reader actor silently discards the
         // result. For a `Generate` that is the whole remaining token budget of
         // GPU time spent on output nobody will read.

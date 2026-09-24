@@ -194,12 +194,10 @@ pub struct MetricsProviders {
     /// dashboard render and we don't want to gate it behind the same lock
     /// tree the writers contend for. R110.
     pub swarm_capacity: ArcSwap<SwarmCapacity>,
-    /// SWARM-SPEC Layer 2: per-(model, segment, holder) latency EWMA
-    /// tracker, used to decide when to fire a duplicate forward to
-    /// the second-best holder. Lock-free reads/writes via DashMap.
-    /// Always present; `hedge_enabled` config flag gates whether the
-    /// decision actually fires a hedge.
-    pub hedge_tracker: Arc<crate::inference::hedging::HedgeTracker>,
+    /// Per-(model, segment, holder) forward latency, as a moving average —
+    /// what the peer performance table reports per computer. Written by
+    /// `SharedState::record_segment_latency`, swept by the health monitor.
+    pub segment_latency: Arc<crate::inference::segment_latency::SegmentLatencyTracker>,
     /// SWARM-SPEC Layer 3: conversation-level prefetch orchestrator.
     /// Tracks per-session first-token histograms + idle time; emits
     /// candidate first-tokens to prefetch when the predicted next

@@ -572,17 +572,16 @@ pub(crate) async fn dispatch_network_messages(
                                                 "DIAG: LayerResult delivered to pipeline"
                                             );
                                         } else {
-                                            // Hedge losers (R136 L2) and genuine timeouts both
-                                            // arrive here. Hedge-loser is normal operation under
-                                            // hedge_enabled, so debug-level — the rare genuine
-                                            // timeout case loses some signal but operators can
-                                            // still see it via -v.
+                                            // A result that outlived its waiter — a timeout,
+                                            // or a duplicate after a retry. Debug-level: it is
+                                            // expected under retries, and operators can still
+                                            // see it via -v.
                                             tracing::debug!(
                                                 request_id = %result.request_id,
                                                 tokens = result.token_ids.len(),
                                                 finish = ?result.finish_reason,
                                                 pending_count = shared_state.pending_layer_results.len(),
-                                                "DIAG: No pending channel for LayerResult — timed out, duplicate, or hedge loser"
+                                                "DIAG: No pending channel for LayerResult — timed out or duplicate"
                                             );
                                         }
                                     }
@@ -2779,9 +2778,7 @@ pub(crate) async fn dispatch_network_messages(
                                         // cases need this beyond the abort
                                         // handle above:
                                         //   - a LayerForward already dispatched
-                                        //     to the worker (e.g. we are the
-                                        //     losing holder of a hedge race)
-                                        //     has no abort handle — the
+                                        //     to the worker has no abort handle — the
                                         //     coordinator simply stopped
                                         //     waiting, and without this the
                                         //     worker computes a reply nobody

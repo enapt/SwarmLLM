@@ -691,9 +691,8 @@ pub async fn diagnostics(
         }
     }
 
-    // Per-peer serving performance. `hedge_tracker` has carried EWMA latency
-    // with variance per (model, segment, holder) since R136 and nothing could
-    // read it; this is the first surface that does. Answers "which peer is
+    // Per-peer serving performance. `segment_latency` carries EWMA latency per
+    // (model, segment, holder), and this is the surface that reads it. Answers "which peer is
     // dragging the pipeline" directly instead of by inference from failures.
     {
         let rows = ss.peer_performance_rows();
@@ -1152,9 +1151,8 @@ pub async fn stats(State(state): State<AppState>) -> Json<serde_json::Value> {
         }),
     };
 
-    // SWARM-SPEC layer metrics (R136): hedge + prefetch tracker
-    // snapshots. Empty / zero counters until those layers see real
-    // traffic with their feature flags enabled.
+    // SWARM-SPEC layer metrics (R136): segment-latency + prefetch tracker
+    // snapshots. Empty / zero until those layers see real traffic.
     // R137: + L1 n-gram hit/miss lifetime counters so operators can
     // tell whether the cascade is actually firing on their workload mix.
     let ngram_hits = state
@@ -1174,7 +1172,7 @@ pub async fn stats(State(state): State<AppState>) -> Json<serde_json::Value> {
         0.0
     };
     let swarm_spec_metrics = serde_json::json!({
-        "hedge": state.shared_state.metrics.hedge_tracker.metrics(),
+        "segment_latency": state.shared_state.metrics.segment_latency.metrics(),
         "prefetch": state.shared_state.metrics.prefetch_orchestrator.metrics(),
         "ngram": {
             "hits": ngram_hits,

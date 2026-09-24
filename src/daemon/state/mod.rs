@@ -111,7 +111,7 @@ pub struct RequestFailure {
 }
 
 /// One peer's serving performance, joined from the health-ping RTT, the
-/// per-layer EMA and the hedge tracker's EWMA. Rendered by
+/// per-layer EMA and the segment-latency EWMA. Rendered by
 /// `GET /api/admin/diagnostics` and the swarm dashboard.
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct PeerPerformanceRow {
@@ -1045,7 +1045,9 @@ impl SharedState {
                 peer_speed: DashMap::new(),
                 peer_model_warm_at: DashMap::new(),
                 swarm_capacity: arc_swap::ArcSwap::from_pointee(SwarmCapacity::default()),
-                hedge_tracker: Arc::new(crate::inference::hedging::HedgeTracker::new()),
+                segment_latency: Arc::new(
+                    crate::inference::segment_latency::SegmentLatencyTracker::new(),
+                ),
                 prefetch_orchestrator: Arc::new(
                     crate::inference::prefetch::PrefetchOrchestrator::new(),
                 ),
@@ -1521,7 +1523,7 @@ impl SharedState {
                 true
             }
             None => {
-                // Either nothing is waiting (timed out / hedge loser), or a
+                // Either nothing is waiting (timed out), or a
                 // waiter is present but pinned to a different node — the
                 // stale-forward case this pinning exists to reject.
                 if let Some(entry) = self.pending_layer_results.get(&request_id) {
@@ -2255,67 +2257,26 @@ impl SharedState {
         }
     }
 
-    /// SWARM-SPEC Layer 2: record a successful forward observation
-    /// against the hedge tracker. Keyed on (model, segment, holder)
-    /// rather than just holder because different models/segments have
-    /// very different latency profiles on the same physical peer.
-    /// `latency_ms` is the wall-clock time the forward took
-    /// end-to-end (not per-layer).
-    ///
-    /// Also performs a post-hoc "would have hedged" dry-run check: if
-    /// the latency exceeded the configured hedge threshold AND the
-    /// rate budget allowed it, increments the would-fire counter and
-    /// emits a tracing::info event. Lets operators see hedge potential
-    /// even when running with `hedge_enabled = false`. True duplicate
-    /// dispatch (race-then-discard) ships in
-    /// `pipeline/hedge_dispatch.rs::forward_verify_with_hedge` for
-    /// single-segment pipelines without a wire-format change — uses a
-    /// fresh Uuid for the hedge so `pending_layer_results` doesn't
-    /// collide with the primary. Multi-segment hedging remains deferred.
-    pub fn record_hedge_observation(
+    /// Record how long a successful segment forward took, end to end, against
+    /// the (model, segment, holder) it ran on — what the peer performance table
+    /// reports per holder (`peer_performance_rows`). Keyed on the triple because
+    /// different models and segments have very different latency on the same
+    /// computer.
+    pub fn record_segment_latency(
         &self,
         model_id: &crate::types::ModelId,
         segment_idx: u8,
         holder: &crate::types::NodeId,
         latency_ms: f32,
     ) {
-        let key = crate::inference::hedging::HedgeKey {
-            model_id: model_id.clone(),
-            segment_idx,
-            holder: holder.clone(),
-        };
-        // Post-hoc dry-run hedge decision: would we have fired a hedge
-        // for this forward if dispatch were wired? Check BEFORE the
-        // observe call so the EWMA reflects the same baseline the
-        // pre-completion decision would have used.
-        let cfg = crate::inference::hedging::HedgeConfig {
-            enabled: true, // always evaluate the would-have-fired branch
-            after_factor: self.config.inference.hedge_after_factor,
-            max_rate: self.config.inference.hedge_max_rate,
-            min_samples: self.config.inference.hedge_min_samples,
-        };
-        if self
-            .metrics
-            .hedge_tracker
-            .should_hedge(&key, latency_ms, cfg)
-        {
-            tracing::info!(
-                model_id = %model_id.0,
+        self.metrics.segment_latency.observe(
+            crate::inference::segment_latency::SegmentKey {
+                model_id: model_id.clone(),
                 segment_idx,
-                holder = %holder,
-                latency_ms,
-                p99_estimate = ?self.metrics.hedge_tracker.get(&key).map(|s| s.p99_estimate_ms()),
-                hedge_dispatch_enabled = self.config.inference.hedge_enabled,
-                "DIAG: hedge would have fired (dry-run; dispatch needs wire-format follow-up)"
-            );
-            // Count the decision so operators can compute the would-hedge
-            // rate. record_decision(true, false) increments hedges_fired;
-            // when actual dispatch lands, the winner-flag will be wired.
-            self.metrics.hedge_tracker.record_decision(true, false);
-        } else {
-            self.metrics.hedge_tracker.record_decision(false, false);
-        }
-        self.metrics.hedge_tracker.observe(key, latency_ms);
+                holder: holder.clone(),
+            },
+            latency_ms,
+        );
     }
 
     /// Read the observed per-layer latency EMA for a peer. Returns None when

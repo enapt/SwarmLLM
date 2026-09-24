@@ -7,7 +7,6 @@
 
 pub(crate) mod distributed;
 mod dsd;
-mod hedge_dispatch;
 mod local;
 mod local_generate;
 mod ngram_only_spec;
@@ -387,8 +386,7 @@ pub(super) async fn forward_verify_through_segments(
                 // Disarm BEFORE the inline remove so the guard's Drop
                 // doesn't double-remove on return (the guard would
                 // otherwise fire its own remove when this stack frame
-                // unwinds). Exposed by L2 hedging which doubles the
-                // call rate through this function.
+                // unwinds).
                 pending_guard.disarm();
                 shared_state.pending_layer_results.remove(&request_id);
                 return Err(SwarmError::Network(
@@ -431,8 +429,7 @@ pub(super) async fn forward_verify_through_segments(
             // A SINGLE-token verify is an ordinary decode step wearing a
             // verify's name — `ngram_only_spec` sends `vec![last_token]` on a
             // cascade MISS — so it is exactly the sample `peer_speed` wants,
-            // and this is the one place both verify callers funnel through
-            // (`hedge_dispatch` reaches it on all five of its return paths).
+            // and this is the one place both verify callers funnel through.
             //
             // Without it the scheduler learned NOTHING from a speculative
             // request, however long it took. Measured 2026-08-30: four

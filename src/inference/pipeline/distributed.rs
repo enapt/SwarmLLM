@@ -1558,11 +1558,9 @@ impl PipelineExecutor {
                                 seg_layers,
                                 result.activations.len(),
                             );
-                            // SWARM-SPEC Layer 2: also record against the
-                            // hedge tracker. Keyed on (model, segment_idx,
-                            // holder) so different models / segments on the
-                            // same physical peer get distinct EWMAs.
-                            self.shared_state.record_hedge_observation(
+                            // Per (model, segment, holder), for the peer
+                            // performance table.
+                            self.shared_state.record_segment_latency(
                                 &self.request.model_id,
                                 idx as u8,
                                 &segment.node_id,
@@ -1772,8 +1770,8 @@ impl PipelineExecutor {
             })
             .await;
         // info!, not debug!. The receiving side logs this at debug when it
-        // finds nothing to abort (the normal case today, and normal for
-        // hedge losers), so at default verbosity there is otherwise NO
+        // finds nothing to abort (the normal case today), so at default
+        // verbosity there is otherwise NO
         // record anywhere that the cancel was sent — which made the send
         // unverifiable in exactly the situation an operator cares about.
         tracing::info!(

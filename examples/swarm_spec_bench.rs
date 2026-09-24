@@ -14,7 +14,6 @@
 
 use std::time::Instant;
 
-use swarmllm::inference::hedging::{HedgeConfig, HedgeKey, HedgeTracker};
 use swarmllm::inference::ngram_lookup::{
     cascade_find_candidate, find_candidate, NgramHitSource, NgramLookupConfig,
 };
@@ -22,15 +21,13 @@ use swarmllm::inference::prefetch::{PrefetchConfig, PrefetchOrchestrator};
 use swarmllm::inference::quant::{dequantize_q8_0, quantize_q8_0};
 use swarmllm::network::pipeline_stream::chunk_layer_forward;
 use swarmllm::network::protocol::{decode_layer_forward, encode_layer_forward};
-use swarmllm::types::{ChunkAssemblyState, LayerForward, ModelId, NodeId, TensorFormat};
+use swarmllm::types::{ChunkAssemblyState, LayerForward, ModelId, TensorFormat};
 
 fn main() {
     println!("=== SWARM-SPEC microbenchmark harness ===\n");
     bench_q8_0_roundtrip();
     println!();
     bench_ngram_lookup();
-    println!();
-    bench_hedge_decision();
     println!();
     bench_prefetch_history();
     println!();
@@ -152,80 +149,6 @@ fn bench_ngram_lookup() {
         "REVIEW (over 100µs adds noticeable overhead per spec round)"
     };
     println!("  Verdict: {}", verdict);
-}
-
-// ─── Layer 2: Hedge decision ───────────────────────────────────────────────
-
-fn bench_hedge_decision() {
-    println!("--- Layer 2: Hedge decision ---");
-
-    let tracker = HedgeTracker::new();
-    let model_id = ModelId("bench-model".into());
-    let cfg = HedgeConfig {
-        enabled: true,
-        after_factor: 1.5,
-        max_rate: 0.05,
-        // Matches production default (`HedgeConfig::default().min_samples`)
-        // bumped from 5 to 20 after the warm-up over-firing review; bench
-        // should reflect production thresholds.
-        min_samples: 20,
-    };
-
-    // Populate observations across 100 distinct (segment, holder) keys.
-    let n_keys = 100;
-    for k in 0..n_keys {
-        let key = HedgeKey {
-            model_id: model_id.clone(),
-            segment_idx: (k % 8) as u8,
-            holder: NodeId([(k % 256) as u8; 32]),
-        };
-        for _ in 0..20 {
-            tracker.observe(key.clone(), 100.0);
-        }
-    }
-
-    let iters = 100_000;
-    let t0 = Instant::now();
-    let mut hedge_count = 0;
-    for i in 0..iters {
-        let key = HedgeKey {
-            model_id: model_id.clone(),
-            segment_idx: ((i % n_keys) % 8) as u8,
-            holder: NodeId([((i % n_keys) % 256) as u8; 32]),
-        };
-        // Half below threshold (no hedge), half above (would hedge).
-        let elapsed = if i % 2 == 0 { 100.0 } else { 250.0 };
-        if tracker.should_hedge(&key, elapsed, cfg) {
-            hedge_count += 1;
-        }
-    }
-    let dur = t0.elapsed();
-    let ns_per_iter = dur.as_nanos() as f64 / iters as f64;
-    println!(
-        "  should_hedge: {:.1} ns/iter ({} hedge decisions in {} runs)",
-        ns_per_iter, hedge_count, iters
-    );
-
-    let t1 = Instant::now();
-    for i in 0..iters {
-        let key = HedgeKey {
-            model_id: model_id.clone(),
-            segment_idx: ((i % n_keys) % 8) as u8,
-            holder: NodeId([((i % n_keys) % 256) as u8; 32]),
-        };
-        tracker.observe(key, 100.0 + (i as f32 % 10.0));
-    }
-    let dur = t1.elapsed();
-    let obs_ns = dur.as_nanos() as f64 / iters as f64;
-    println!("  observe: {:.1} ns/iter", obs_ns);
-    println!(
-        "  Verdict: {}",
-        if obs_ns < 5000.0 {
-            "FAST (< 5µs — negligible overhead per forward)"
-        } else {
-            "REVIEW (lock contention may be limiting throughput)"
-        }
-    );
 }
 
 // ─── Layer 3: Prefetch history ─────────────────────────────────────────────

@@ -146,14 +146,10 @@ booted with.
 | `ngram_max_size` | integer | `4` | Longest n-gram matched against the prompt |
 | `ngram_num_pred_tokens` | integer | `10` | Tokens proposed per n-gram hit |
 
-### `[inference]` — SWARM-SPEC hedging and prefetch
+### `[inference]` — SWARM-SPEC prefetch
 
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `hedge_enabled` | boolean | `false` | Layer 2: race a duplicate forward to an alternate shard holder when the primary looks slow, take the winner, discard the loser. Costs bandwidth to cut tail latency |
-| `hedge_after_factor` | float | `1.5` | Fire the duplicate once elapsed time exceeds this multiple of the estimated p99 for that (model, segment, holder) |
-| `hedge_min_samples` | integer | `20` | Latency samples required before hedging engages. At α=0.2 the variance EWMA only reaches ~90% of its true value by 20 samples; lower values collapse the p99 estimate toward the mean and over-fire after a restart |
-| `hedge_max_rate` | float | `0.05` | Ceiling on the fraction of forwards that may be hedged |
 | `prefetch_enabled` | boolean | `false` | Layer 3: predict the next turn in a conversation and warm state during idle time |
 | `prefetch_min_turns_for_prediction` | integer | `2` | Turns observed before a session is predictable enough to prefetch for |
 | `prefetch_min_idle_ms` | integer | `2000` | Idle time before prefetch may use the device |

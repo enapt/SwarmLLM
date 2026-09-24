@@ -474,8 +474,8 @@ impl super::SharedState {
     /// Per-peer serving performance, worst first.
     ///
     /// Joins the three places peer speed is already known — the health-ping
-    /// round trip, the per-layer EMA the Parallax router uses, and the hedge
-    /// tracker's EWMA — into the single table an operator actually wants. Each
+    /// round trip, the per-layer EMA the Parallax router uses, and the
+    /// segment-latency EWMA — into the single table an operator actually wants. Each
     /// existed before this; none was readable from outside the scheduler.
     ///
     /// Only peers that have actually served something appear: a row of dashes
@@ -515,23 +515,23 @@ impl super::SharedState {
     }
 
     pub fn peer_performance_rows(&self) -> Vec<super::PeerPerformanceRow> {
-        let hedge: std::collections::HashMap<crate::types::NodeId, (f32, u32)> = self
+        let latency: std::collections::HashMap<crate::types::NodeId, (f32, u32)> = self
             .metrics
-            .hedge_tracker
+            .segment_latency
             .latency_by_holder()
             .into_iter()
             .map(|(n, ewma, samples)| (n, (ewma, samples)))
             .collect();
 
         let mut ids: std::collections::HashSet<crate::types::NodeId> =
-            hedge.keys().cloned().collect();
+            latency.keys().cloned().collect();
         ids.extend(self.metrics.peer_speed.iter().map(|e| e.key().clone()));
 
         let mut rows: Vec<super::PeerPerformanceRow> = ids
             .into_iter()
             .map(|node| {
                 let peer = self.peer_registry.get(&node);
-                let (ewma_ms, samples) = hedge
+                let (ewma_ms, samples) = latency
                     .get(&node)
                     .map(|(e, s)| (Some(*e), *s))
                     .unwrap_or((None, 0));

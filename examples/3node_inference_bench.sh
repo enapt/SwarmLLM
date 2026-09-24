@@ -66,7 +66,7 @@ bench_one "free-form chat" \
 80
 
 echo
-echo "=== Hedge tracker dry-run + prefetch metrics ==="
+echo "=== Segment-latency + prefetch metrics ==="
 curl -s -H "Authorization: Bearer $API_KEY_A" \
     "http://localhost:$PORT/api/admin/stats" 2>&1 | \
     python3 -c "

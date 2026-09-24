@@ -245,14 +245,13 @@ async fn reader_task_outbound<R>(
             Ok(result) => {
                 let rid = result.request_id;
                 if !shared_state.resolve_pending_layer_result(sender.as_ref(), result) {
-                    // Common after R136 L2 hedging — when a hedge race
-                    // resolves, the loser's response arrives here with no
-                    // pending oneshot (the guard drop already evicted the
-                    // map entry). Trace-level so it doesn't pollute -v / -vv
+                    // A late result — its waiter timed out or a retry
+                    // replaced it, and the guard drop already evicted the
+                    // map entry. Trace-level so it doesn't pollute -v / -vv
                     // logs with what is normal operation.
                     tracing::trace!(
                         %rid,
-                        "pipeline stream reader: no pending oneshot (late result or hedge loser)"
+                        "pipeline stream reader: no pending oneshot (late result)"
                     );
                 }
             }

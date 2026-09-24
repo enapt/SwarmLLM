@@ -462,23 +462,7 @@ impl PipelineExecutor {
             verify_tokens.extend_from_slice(&drafts);
 
             let truncate_for_this_round = pending_truncate.take();
-            // SWARM-SPEC Layer 2: route through hedge wrapper. On
-            // single-segment pipelines with hedge_enabled, races the
-            // primary against a duplicate to alt holder; on
-            // multi-segment, falls back to direct forward.
-            let hedge_key = crate::inference::hedging::HedgeKey {
-                model_id: self.request.model_id.clone(),
-                segment_idx: 0,
-                holder: self.assignment.segments[0].node_id.clone(),
-            };
-            let hedge_live = self.shared_state.cfg();
-            let hedge_cfg = crate::inference::hedging::HedgeConfig {
-                enabled: hedge_live.inference.hedge_enabled,
-                after_factor: hedge_live.inference.hedge_after_factor,
-                max_rate: hedge_live.inference.hedge_max_rate,
-                min_samples: hedge_live.inference.hedge_min_samples,
-            };
-            let spec_logits = super::hedge_dispatch::forward_verify_with_hedge(
+            let spec_logits = super::forward_verify_through_segments(
                 &self.shared_state,
                 &self.network_tx,
                 request_id,
@@ -486,8 +470,6 @@ impl PipelineExecutor {
                 &self.assignment.segments,
                 &verify_tokens,
                 truncate_for_this_round,
-                hedge_key,
-                hedge_cfg,
             )
             .await?;
             if spec_logits.len() < drafts.len() + 1 {

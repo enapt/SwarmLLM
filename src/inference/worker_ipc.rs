@@ -72,8 +72,8 @@ pub enum DaemonMsg {
     /// Abandon a request the daemon no longer wants a reply for.
     ///
     /// Sent when a `forward` / `generate` future is dropped before it
-    /// completes: the client disconnected, a `tokio::select!` timeout fired, or
-    /// a hedge race resolved and this is the loser. Without it the worker keeps
+    /// completes: the client disconnected, or a `tokio::select!` timeout fired.
+    /// Without it the worker keeps
     /// computing — for a `Generate` that means generating hundreds of tokens
     /// nobody will read, at full GPU cost.
     ///

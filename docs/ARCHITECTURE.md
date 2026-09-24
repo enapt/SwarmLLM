@@ -36,10 +36,10 @@ swarmllm/
 │   ├── model/     (manifest, shard, distribution, registry, acquisition, reference (R150 get-model), huggingface/, auto_manage/, lora)
 │   │   ├── auto_manage/  (mod, manager, scoring, download, prune, scan, vram, parallax, wishlist, quant (R133 recommender))
 │   │   └── huggingface/  (mod, download, private_types, probe, search, shards, watcher, tests)
-│   ├── inference/ (executor, sampling, kv_cache, speculative, swift, dsd_controller, quant, tokenizer, tensor_util, shard_layout, model_arch, vision, allreduce, attn_kernel, attn_softmax (fused scale+softcap+mask+softmax CPU kernel), decode_attn (single-position CPU attention straight over the KV cache — +24% decode), fast_math (AVX2 expf + fused SiLU×up), residual_norm (the residual stream carried between norm points; residual add + RMS norm as ONE CUDA kernel), cpu_pools (per-phase rayon pools: prefill wide, decode narrow), local_embedder, mem_bandwidth (measured memory bandwidth — what a CPU node advertises as its speed, replacing a hardcoded 50 GB/s assumption), model_worker, process_pool, slot_table, worker_ipc, ngram_lookup (R136 L1), hedging (R136 L2), prefetch (R136 L3), trace (per-request route + timing record), prof (SWARMLLM_PROFILE=1 per-stage forward-pass profiler), cancel (the one cancellation signal), prefill_pacer, thermal)
+│   ├── inference/ (executor, sampling, kv_cache, speculative, swift, dsd_controller, quant, tokenizer, tensor_util, shard_layout, model_arch, vision, allreduce, attn_kernel, attn_softmax (fused scale+softcap+mask+softmax CPU kernel), decode_attn (single-position CPU attention straight over the KV cache — +24% decode), fast_math (AVX2 expf + fused SiLU×up), residual_norm (the residual stream carried between norm points; residual add + RMS norm as ONE CUDA kernel), cpu_pools (per-phase rayon pools: prefill wide, decode narrow), local_embedder, mem_bandwidth (measured memory bandwidth — what a CPU node advertises as its speed, replacing a hardcoded 50 GB/s assumption), model_worker, process_pool, slot_table, worker_ipc, ngram_lookup (R136 L1), segment_latency (per-peer forward latency for the performance table; hedged dispatch removed 2026-09-24, FUTURE_WORK #94), prefetch (R136 L3), trace (per-request route + timing record), prof (SWARMLLM_PROFILE=1 per-stage forward-pass profiler), cancel (the one cancellation signal), prefill_pacer, thermal)
 │   │   ├── router/       (mod, types, batch, local_exec, distributed_exec, spot_check, tests)
 │   │   ├── scheduler/    (mod, parallax, parallax_allocator, tests)
-│   │   ├── pipeline/     (mod, distributed, dsd, local, local_generate (a plan that names this node is run as the local generation it is), prompt, remote_generate, speculative, tensor_parallel, vision, hedge_dispatch (R136 L2), ngram_only_spec (R136 L1))
+│   │   ├── pipeline/     (mod, distributed, dsd, local, local_generate (a plan that names this node is run as the local generation it is), prompt, remote_generate, speculative, tensor_parallel, vision, ngram_only_spec (R136 L1))
 │   │   ├── split/        (mod, model, loader, executor, kv_cache, kv_budget, entry, gguf_meta, shard_reader, rope, prefix_cache, hybrid (which layers of a segment go on the card — .145, #431), token_embedding, tests/)
 │   │   │   └── tests/    (mod, common, core, gqa, gemma2, moe_mla, llama4_glm4)
 │   │   ├── chat_template/ (mod, fallbacks, tojson (the `transformers` signature, not minijinja's), tests, fixtures/{llama3_official,qwen3_official,qwen3_gguf_shipped,glm4_gguf_shipped}.jinja — rendering is `minijinja` + `minijinja-contrib` pycompat, the engine HF's TGI and SGLang use; the hand-rolled parser/eval subset was retired 2026-09-10)
@@ -156,7 +156,7 @@ Single Rust binary, three simultaneous functions:
 │  │  │  channel_metrics, inference_latency_samples    │ │  │
 │  │  │  providers_config, provider_model_map          │ │  │
 │  │  │  swarm_capacity (R110)                         │ │  │
-│  │  │  hedge_tracker (R136 L2)                       │ │  │
+│  │  │  segment_latency                               │ │  │
 │  │  │  prefetch_orchestrator (R136 L3)               │ │  │
 │  │  │  ngram_hits / ngram_misses (R137 L1 telemetry) │ │  │
 │  │  │  inference_latency_samples (R137: (Instant,f64))│ │  │
@@ -2661,9 +2661,8 @@ benefits from the extra detail.
 `SharedState::peer_performance_rows` joins the three places peer speed was
 already known and none of which was readable from outside the scheduler: the
 health-ping round trip (`PeerInfo.latency_ms`), the per-layer EMA the Parallax
-router uses (`peer_segment_latency_ms_per_layer`), and `hedge_tracker`'s
-per-(model, segment, holder) EWMA with variance and sample counts — collected
-since R136 with zero consumers until this. Sorted slowest first; only peers that
+router uses (`peer_segment_latency_ms_per_layer`), and `segment_latency`'s
+per-(model, segment, holder) EWMA and sample counts. Sorted slowest first; only peers that
 have actually served something appear.
 
 ### "Tokens per second per node" is not directly measurable
