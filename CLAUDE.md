@@ -153,12 +153,14 @@ UNDETERMINED and never a fix — use it BEFORE blaming a change, especially your
 ## Status
 
 **v0.3.204-alpha is the live release (2026-09-24), signed and on both nodes.**
-**`main` is ahead by three UNRELEASED fixes** — #92 (a peer that cannot decrypt
+**`main` is ahead by four UNRELEASED fixes** — #92 (a peer that cannot decrypt
 a forward is sent it again once the link re-keys: `0x06` result trailer,
 `features::FORWARD_REFUSAL_REASON`), `--no-update-check` working again (a no-op
-since .191), and a settings save no longer undoing `--anchor` /
-`--no-update-check` (#107). The next CHANGELOG must name all three. **Next** →
-`memory/next_up.md`.
+since .191), a settings save no longer undoing `--anchor` / `--no-update-check`
+(#107), and ⛔ **Docker images publishing on the release's UN-DRAFT, not the
+tag** — every tag used to publish an image and move `latest`, which leaked the
+withdrawn .199 and the unsigned .202/.203 (gotcha #701). The next CHANGELOG must
+name all four. **Next** → `memory/next_up.md`.
 
 ⚠ **Behaviour gate = `reply_ab.sh` + `split_rig.sh`**, not conformance alone —
 `family_conformance.sh` pins `gpu_layers = 0` and never splits, so it could not
