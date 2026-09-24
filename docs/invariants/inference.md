@@ -1488,3 +1488,56 @@ That was the CPU backend, reached from a different direction. Both backends are
 dispatch-bound per layer, and on both the arithmetic is a minority of the
 token. Treat "per-layer dispatch" as this project's standing first suspect for
 a decode number that will not move.
+
+## Top-k shrinks the candidate set before anything else runs (2026-09-24)
+
+`inference::sampling::sample_among_top_k` is the sampler whenever top-k is on —
+which is every request that does not turn it off, since `api::DEFAULT_TOP_K` is
+40 on all four surfaces. It selects the `k` largest logits in one pass, then
+applies temperature, top-p and the draw to those `k` alone. llama.cpp's chain
+has the same shape (`llama_sampler_top_k` shrinks `cur_p->size`; every later
+sampler sees the shrunken array).
+
+**What it replaced**: top-k copied the whole vocabulary into `(usize, f32)`
+pairs to partition it; top-p then ran a softmax over all 152k entries and a
+partial sort of 4096 of them, though only 40 were finite; the draw ran a third
+vocabulary-wide `exp` and walk. Greedy computed a vocabulary-wide `exp` into a
+buffer nothing read. And every call built a fresh `SamplingContext` with
+vocabulary-sized buffers. Nothing had ever measured it, because
+`SWARMLLM_PROFILE` brackets the forward pass alone.
+
+**Measured** (min-of-7x40, x86-64-v3 and mimalloc as the release has them,
+per token, a fresh context and the logits copy included as production does;
+`sampling.rs` compiled standalone against both versions, interleaved runs):
+
+| vocab | default (t 0.7, k 40, p 0.9) | greedy | + frequency penalty, 2000-token history |
+|---|---|---|---|
+| 32k | 329 → 26 µs | 122 → 43 µs | 349 → 46 µs |
+| 128k | 1472 → 95 µs | 541 → 172 µs | 1566 → 157 µs |
+| 152k | 1765 → 113 µs | 605 → 206 µs | 1879 → 206 µs |
+| 262k | 3587 → 210 µs | 1088 → 384 µs | 3602 → 393 µs |
+
+(Under glibc malloc the old default was ~1.8x worse again — 3205 µs at 152k —
+because of the per-call vocabulary-sized context; the new one is unchanged.)
+At ~0.5 ms per layer on the GPU, the old default was about a tenth of a
+decoded token on 0.5-3B models with 150k+ vocabularies, and the n-gram verify
+path paid it once per verified position. On the processor it is ~2% of a 7B
+token.
+
+**What a change must keep: the SAME token, not merely the same distribution.**
+A masked entry's `exp(-inf - max)` is exactly `+0.0`, and adding `+0.0` to an
+f32 sum changes nothing — so summing only the candidates IN INDEX ORDER gives
+the vocabulary-wide sum bit for bit, and walking them in index order stops
+where the full walk stopped. That is why the candidates are kept sorted by
+index, not by value. `a_top_k_sample_is_the_same_token_the_full_vocabulary_path_picks`
+compares the two paths token for token over 3,600 draws; it goes red if the
+candidates are walked by value, or if temperature is not applied to them.
+Two degenerate cases differ, both previously wrong: a uniform draw of exactly
+`0.0` returned index 0 even when masked, and the rounding fallback returned
+the last vocabulary entry; both now land on a candidate.
+
+⚠ **Greedy is now `argmax` and nothing else**, ~200 µs at 152k. Its
+`max_by` returns the LAST of equal maxima; do not swap it for a faster loop
+with different tie-breaking without re-running the reply A/B, which compares
+greedy replies across releases.
+

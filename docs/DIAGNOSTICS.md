@@ -1499,6 +1499,11 @@ submission COUNT, not bandwidth".
    forward pass, and its `total` brackets `SplitModel::forward` alone — no IPC,
    sampling or HTTP. **If `ms/layer` is flat while bytes/token moves, the cost
    is per-layer dispatch and model size is not the variable.**
+   ⚠ Because sampling is OUTSIDE that bracket, no profile ever showed it — and
+   until 2026-09-24 it cost ~1.8 ms a token at a 152k vocabulary (default
+   top-k 40 / top-p 0.9), about a tenth of a GPU token on the small models. Price it
+   separately: `docs/invariants/inference.md` § "Top-k shrinks the candidate
+   set before anything else runs".
 2. **GPU or CPU?** `examples/decode_bound_by.py`. Costs nothing and rules out
    half the hypotheses.
 3. **How many submissions?** `examples/decode_submissions.sh`.

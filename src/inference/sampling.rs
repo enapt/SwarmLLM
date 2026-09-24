@@ -21,15 +21,21 @@ pub struct SamplingContext {
 }
 
 impl SamplingContext {
-    /// Create a new SamplingContext pre-allocated for the given vocab size.
-    pub fn new(vocab_size: usize) -> Self {
+    /// Create an empty SamplingContext; every buffer grows on first use.
+    ///
+    /// Deliberately NOT sized to the vocabulary up front. Most callers build
+    /// one per sampled token (`tensor_util::sample_token_with_*`), and the
+    /// default top-k path touches only O(k) of it — so eager vocab-sized
+    /// buffers were ~4 MB of fresh allocation and page faults per token at a
+    /// 152k vocabulary, for nothing. `vocab_size` is kept for the call sites.
+    pub fn new(_vocab_size: usize) -> Self {
         Self {
-            indexed_logits: Vec::with_capacity(vocab_size),
-            keep_mask: vec![false; vocab_size],
-            probs: Vec::with_capacity(vocab_size),
-            indices: Vec::with_capacity(vocab_size),
-            raw_logits: Vec::with_capacity(vocab_size),
-            penalty_counts: Vec::with_capacity(vocab_size),
+            indexed_logits: Vec::new(),
+            keep_mask: Vec::new(),
+            probs: Vec::new(),
+            indices: Vec::new(),
+            raw_logits: Vec::new(),
+            penalty_counts: Vec::new(),
         }
     }
 
@@ -327,14 +333,12 @@ fn sample_token_with_ctx(
         ctx,
     );
 
-    // Greedy decoding when temperature is 0
+    // Greedy decoding when temperature is 0. Nothing else to compute: logprobs
+    // are taken from `ctx.raw_logits` by the caller that wants them, so the
+    // vocab-wide `exp` pass that used to fill `ctx.probs` here was read by
+    // nothing — about two-thirds of a greedy token's sampling time at 152k.
     if params.temperature <= 0.0 {
         let token = argmax(logits);
-        // Populate probs buffer from raw logits so logprob computation works for greedy
-        let max_logit = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-        ctx.probs.clear();
-        ctx.probs
-            .extend(logits.iter().map(|l| (l - max_logit).exp()));
         tracing::trace!(
             token,
             vocab_size = logits.len(),
@@ -344,6 +348,200 @@ fn sample_token_with_ctx(
         return token;
     }
 
+    let k = params.top_k as usize;
+    if k > 0 && k < logits.len() {
+        sample_among_top_k(logits, params, k, ctx, simple_random)
+    } else {
+        sample_full_vocab(logits, params, ctx, simple_random)
+    }
+}
+
+/// The `k` highest logits as `(index, logit)`, returned sorted by INDEX.
+///
+/// One pass with a rising floor: a logit is kept only if it beats the k-th
+/// best seen so far, and the buffer is cut back to `k` whenever it reaches
+/// twice that. On a real distribution the floor settles within the first few
+/// thousand entries and the rest of the vocabulary costs one comparison each —
+/// where the version this replaced copied the whole vocabulary into
+/// `(usize, f32)` pairs (2.4 MB at 152k) to partition it.
+///
+/// `-inf` and NaN are never candidates (`>` is false for both): a `-inf` logit
+/// has probability exactly zero, and a NaN one has no probability at all.
+/// Ties at the k-th place are resolved arbitrarily, as the partition did.
+fn select_top_k_candidates(logits: &[f32], k: usize, out: &mut Vec<(usize, f32)>) {
+    let desc = |a: &(usize, f32), b: &(usize, f32)| {
+        b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+    };
+    out.clear();
+    let cap = k.saturating_mul(2).max(k + 16);
+    out.reserve(cap);
+    let mut floor = f32::NEG_INFINITY;
+    for (i, &l) in logits.iter().enumerate() {
+        if l > floor {
+            out.push((i, l));
+            if out.len() >= cap {
+                out.select_nth_unstable_by(k - 1, desc);
+                out.truncate(k);
+                floor = out[k - 1].1;
+            }
+        }
+    }
+    if out.len() > k {
+        out.select_nth_unstable_by(k - 1, desc);
+        out.truncate(k);
+    }
+    out.sort_unstable_by_key(|&(i, _)| i);
+}
+
+/// Sample with top-k active, touching only the `k` candidates after selection.
+///
+/// llama.cpp's chain does the same (`llama_sampler_top_k` shrinks
+/// `cur_p->size`, and top-p and the draw then run on what is left). The
+/// vocabulary-wide path below computed softmax twice more over all 152k
+/// entries — once for top-p, once for the draw — when every entry outside the
+/// top `k` is `-inf` and contributes exactly nothing.
+///
+/// **It picks the same token as [`sample_full_vocab`] for the same uniform
+/// draw**, not merely from the same distribution, because it is the same
+/// arithmetic on the same values:
+/// - a masked entry's `exp(-inf - max)` is exactly `+0.0`, and adding `+0.0`
+///   leaves an f32 sum unchanged, so summing only the candidates, IN INDEX
+///   ORDER, gives the full-vocabulary sum bit for bit — which is why the
+///   candidates are kept sorted by index rather than by value;
+/// - the maximum over candidates IS the maximum over the masked vocabulary;
+/// - the final walk visits candidates in index order, as the full walk did,
+///   and only ever stops on a non-zero entry.
+///
+/// Two degenerate cases differ, both previously wrong: a uniform draw of
+/// exactly `0.0` (probability 2^-24 per token) made the full walk return
+/// index 0 even when index 0 was masked, and its rounding fallback returned
+/// the LAST VOCABULARY ENTRY; here both land on a candidate. And a NaN logit,
+/// which sent the full path to an argmax, is simply never a candidate.
+/// `a_top_k_sample_is_the_same_token_the_full_vocabulary_path_picks` pins the
+/// equivalence against `sample_full_vocab` itself.
+fn sample_among_top_k(
+    logits: &[f32],
+    params: &SamplingParams,
+    k: usize,
+    ctx: &mut SamplingContext,
+    uniform: impl FnOnce() -> f32,
+) -> u32 {
+    select_top_k_candidates(logits, k, &mut ctx.indexed_logits);
+    let cands = &mut ctx.indexed_logits;
+
+    // Temperature on the candidates only — the same division
+    // `apply_temperature` performs, and it cannot reorder them.
+    if params.temperature != 1.0 {
+        for c in cands.iter_mut() {
+            c.1 /= params.temperature;
+        }
+    }
+
+    // Top-p over the candidates, exactly as `apply_top_p_with_ctx` computes it
+    // over the masked vocabulary.
+    if params.top_p < 1.0 && !cands.is_empty() {
+        let max_logit = cands.iter().map(|c| c.1).fold(f32::NEG_INFINITY, f32::max);
+        ctx.probs.clear();
+        ctx.probs
+            .extend(cands.iter().map(|c| (c.1 - max_logit).exp()));
+        let sum: f32 = ctx.probs.iter().sum();
+        if sum > 0.0 && sum.is_finite() {
+            let inv_sum = 1.0 / sum;
+            for prob in ctx.probs.iter_mut() {
+                *prob *= inv_sum;
+            }
+            let probs: &[f32] = &ctx.probs;
+            ctx.indices.clear();
+            ctx.indices.extend(0..cands.len());
+            ctx.indices.sort_unstable_by(|&a, &b| {
+                probs[b]
+                    .partial_cmp(&probs[a])
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            if ctx.keep_mask.len() < cands.len() {
+                ctx.keep_mask.resize(cands.len(), false);
+            }
+            let keep = &mut ctx.keep_mask[..cands.len()];
+            keep.fill(false);
+            let mut cumulative = 0.0;
+            let mut reached = false;
+            for &pos in &ctx.indices {
+                cumulative += probs[pos];
+                keep[pos] = true;
+                if cumulative >= params.top_p {
+                    reached = true;
+                    break;
+                }
+            }
+            if reached {
+                let mut pos = 0;
+                cands.retain(|_| {
+                    let kept = keep[pos];
+                    pos += 1;
+                    kept
+                });
+            }
+        }
+    }
+
+    // The draw: unnormalised softmax over the survivors, walked in index order.
+    let max_logit = cands.iter().map(|c| c.1).fold(f32::NEG_INFINITY, f32::max);
+    ctx.probs.clear();
+    ctx.probs
+        .extend(cands.iter().map(|c| (c.1 - max_logit).exp()));
+    let sum: f32 = ctx.probs.iter().sum();
+    if !sum.is_finite() || sum == 0.0 {
+        // Same fallback as the full path: the first highest logit, or index 0
+        // when nothing is finite at all.
+        let mut best_i = 0u32;
+        let mut best_v = f32::NEG_INFINITY;
+        for &(i, l) in cands.iter() {
+            if l > best_v {
+                best_v = l;
+                best_i = i as u32;
+            }
+        }
+        tracing::warn!(
+            vocab_size = logits.len(),
+            sum,
+            "DIAG: sampling softmax collapsed — falling back to argmax"
+        );
+        return best_i;
+    }
+    let r: f32 = uniform() * sum;
+    let mut cumulative = 0.0;
+    for (&(i, _), &p) in cands.iter().zip(ctx.probs.iter()) {
+        cumulative += p;
+        if cumulative >= r {
+            tracing::trace!(
+                token = i as u32,
+                vocab_size = logits.len(),
+                temperature = params.temperature,
+                top_k = params.top_k,
+                top_p = params.top_p,
+                mode = "stochastic",
+                "DIAG: sample_token complete"
+            );
+            return i as u32;
+        }
+    }
+    tracing::warn!(
+        vocab_size = logits.len(),
+        sum,
+        "DIAG: sampling fallback — cumulative probability didn't reach threshold"
+    );
+    cands.last().map(|&(i, _)| i as u32).unwrap_or(0)
+}
+
+/// Sample over the whole vocabulary: temperature, top-k mask, top-p mask, then
+/// a softmax draw. The path for requests with top-k off, and the reference
+/// [`sample_among_top_k`] is tested against.
+fn sample_full_vocab(
+    logits: &mut [f32],
+    params: &SamplingParams,
+    ctx: &mut SamplingContext,
+    uniform: impl FnOnce() -> f32,
+) -> u32 {
     apply_temperature(logits, params.temperature);
     apply_top_k_with_ctx(logits, params.top_k, ctx);
     apply_top_p_with_ctx(logits, params.top_p, ctx);
@@ -379,7 +577,7 @@ fn sample_token_with_ctx(
     }
 
     // Weighted random selection
-    let r: f32 = simple_random() * sum;
+    let r: f32 = uniform() * sum;
     let mut cumulative = 0.0;
     for (i, &p) in ctx.probs.iter().enumerate() {
         cumulative += p;
@@ -771,6 +969,102 @@ mod tests {
         assert!((logits2[0] - 10.0).abs() < f32::EPSILON);
         assert!((logits2[2] - 8.0).abs() < f32::EPSILON);
         assert!(logits2[1].is_infinite() && logits2[1] < 0.0);
+    }
+
+    /// The top-k path must pick the SAME token as the full-vocabulary path for
+    /// the same uniform draw — same arithmetic, not just the same distribution
+    /// (see `sample_among_top_k`). Varies vocabulary size, spread, k, p,
+    /// temperature and the draw, and reuses both contexts across cases the way
+    /// a decode loop does.
+    #[test]
+    fn a_top_k_sample_is_the_same_token_the_full_vocabulary_path_picks() {
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let mut ctx_full = SamplingContext::new(0);
+        let mut ctx_fast = SamplingContext::new(0);
+        let mut differing_tokens = std::collections::HashSet::new();
+        for case in 0..600usize {
+            let vocab = 300 + (next() % 6000) as usize;
+            let spread = [1.0f32, 6.0, 20.0][case % 3];
+            let logits: Vec<f32> = (0..vocab)
+                .map(|_| ((next() >> 11) as f64 / (1u64 << 53) as f64 - 0.5) as f32 * spread)
+                .collect();
+            let params = SamplingParams {
+                temperature: [0.7f32, 1.0, 1.3, 0.2][(case / 3) % 4],
+                top_k: [1u32, 2, 40, 64, 250][(case / 12) % 5],
+                top_p: [0.9f32, 1.0, 0.5, 0.99, 0.05][(case / 60) % 5],
+                ..Default::default()
+            };
+            for u in [1e-6f32, 0.1, 0.37, 0.5, 0.83, 0.999_999] {
+                let mut full = logits.clone();
+                let want = sample_full_vocab(&mut full, &params, &mut ctx_full, || u);
+                let got = sample_among_top_k(
+                    &logits,
+                    &params,
+                    params.top_k as usize,
+                    &mut ctx_fast,
+                    || u,
+                );
+                assert_eq!(
+                    got, want,
+                    "case {case}: vocab {vocab}, k {}, p {}, t {}, u {u}",
+                    params.top_k, params.top_p, params.temperature
+                );
+                differing_tokens.insert(got);
+            }
+        }
+        // The draws must actually have exercised the walk, not all landed on
+        // the argmax.
+        assert!(differing_tokens.len() > 500, "{}", differing_tokens.len());
+    }
+
+    /// The selector returns exactly the k largest, in index order, whatever
+    /// order the vocabulary presents them in — including more candidates than
+    /// its compaction buffer and a vocabulary with fewer finite entries than k.
+    #[test]
+    fn the_top_k_selector_keeps_the_k_largest_in_index_order() {
+        let mut out = Vec::new();
+        let rising: Vec<f32> = (0..10_000).map(|i| i as f32).collect();
+        select_top_k_candidates(&rising, 40, &mut out);
+        assert_eq!(
+            out.iter().map(|c| c.0).collect::<Vec<_>>(),
+            (9_960..10_000).collect::<Vec<_>>()
+        );
+        let falling: Vec<f32> = rising.iter().rev().copied().collect();
+        select_top_k_candidates(&falling, 3, &mut out);
+        assert_eq!(out, vec![(0, 9999.0), (1, 9998.0), (2, 9997.0)]);
+
+        let mut sparse = vec![f32::NEG_INFINITY; 1000];
+        sparse[7] = 1.0;
+        sparse[900] = 2.0;
+        sparse[500] = f32::NAN;
+        select_top_k_candidates(&sparse, 40, &mut out);
+        assert_eq!(out, vec![(7, 1.0), (900, 2.0)]);
+    }
+
+    /// Every logit masked: the same fallback as the full path — index 0 —
+    /// rather than a panic on an empty candidate list.
+    #[test]
+    fn a_top_k_sample_over_nothing_finite_falls_back_like_the_full_path() {
+        let logits = vec![f32::NEG_INFINITY; 100];
+        let params = SamplingParams {
+            temperature: 0.7,
+            top_k: 40,
+            top_p: 0.9,
+            ..Default::default()
+        };
+        let mut ctx = SamplingContext::new(0);
+        assert_eq!(
+            sample_among_top_k(&logits, &params, 40, &mut ctx, || 0.5),
+            0
+        );
+        let mut full = logits.clone();
+        assert_eq!(sample_full_vocab(&mut full, &params, &mut ctx, || 0.5), 0);
     }
 
     #[test]
