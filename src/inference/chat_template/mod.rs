@@ -462,7 +462,7 @@ fn fallback_by_model_name(
 }
 
 /// System message supplied when the caller sends none and the model's template
-/// shows it expects one.
+/// shows it expects one but writes none of its own.
 pub const DEFAULT_SYSTEM_PROMPT: &str = "You are a helpful assistant.";
 
 /// Whether this template has a system-role branch it will actually honour.
@@ -527,6 +527,99 @@ fn fold_system_into_first_user(messages: &[ChatMessage]) -> Option<Vec<ChatMessa
     Some(out)
 }
 
+/// Does this template write a system turn of its own when the caller sends none?
+///
+/// **Measured, not guessed from the template's text.** Rendered once with a
+/// sentinel system message, the text in front of the sentinel is exactly how
+/// this template opens a system turn — `<|im_start|>system\n` for Qwen, the
+/// header plus its knowledge-date lines for Llama-3.x. If the render WITHOUT a
+/// system message starts with that same opening, the template supplies its own
+/// system turn: Qwen2.5's "You are Qwen, created by Alibaba Cloud. You are a
+/// helpful assistant.", Llama-3.x's date header. TinyLlama's Zephyr template and
+/// Phi-3.5's open with the user turn instead, and still get ours.
+///
+/// Why it matters (FUTURE_WORK #100): Hugging Face's `apply_chat_template`,
+/// llama.cpp, vLLM and Ollama never inject a system prompt — the template
+/// decides — so injecting ours REPLACED the default each of those families was
+/// trained and shipped with. Qwen2.5-Coder-7B was prompted with 31 tokens where
+/// llama.cpp gives it 41.
+///
+/// A render that fails either way answers `false`, which keeps the old
+/// behaviour: injecting is what TinyLlama needs to answer at all.
+fn template_writes_its_own_system_turn(
+    template: &str,
+    messages: &[ChatMessage],
+    bos_token: &str,
+    eos_token: &str,
+    tools: Option<&[serde_json::Value]>,
+) -> bool {
+    // Private-use characters: no real message or template contains them.
+    const SENTINEL: &str = "\u{E000}swarmllm-system-probe\u{E000}";
+    let without: Vec<ChatMessage> = messages
+        .iter()
+        .filter(|m| !matches!(m.role, Role::System))
+        .cloned()
+        .collect();
+    let mut probe = Vec::with_capacity(without.len() + 1);
+    probe.push(ChatMessage {
+        role: Role::System,
+        content: SENTINEL.to_string(),
+        images: Vec::new(),
+    });
+    probe.extend(without.iter().cloned());
+    let Some(with_sentinel) =
+        apply_chat_template(template, &probe, bos_token, eos_token, true, tools)
+    else {
+        return false;
+    };
+    let Some(at) = with_sentinel.find(SENTINEL) else {
+        return false;
+    };
+    let opening = &with_sentinel[..at];
+    // No opening at all means the system text is the first thing rendered, so
+    // "starts with the opening" would be vacuously true.
+    if opening.trim().is_empty() {
+        return false;
+    }
+    apply_chat_template(template, &without, bos_token, eos_token, true, tools)
+        .is_some_and(|bare| bare.starts_with(opening))
+}
+
+/// The messages to render: the caller's, or with a system turn supplied or
+/// cleared — `None` when they are to be rendered exactly as sent.
+///
+/// - A caller's real system message is never touched.
+/// - A template that shows no system role gets nothing (`template_expects_system`).
+/// - A template that writes its OWN system turn gets its own: a blank system
+///   message is dropped so the template's default applies, rather than
+///   rendering an empty turn in its place.
+/// - Any other template gets [`DEFAULT_SYSTEM_PROMPT`] (`with_system_message`).
+fn system_turn_for_template(
+    template: &str,
+    messages: &[ChatMessage],
+    bos_token: &str,
+    eos_token: &str,
+    tools: Option<&[serde_json::Value]>,
+) -> Option<Vec<ChatMessage>> {
+    let caller_set_one = messages
+        .iter()
+        .any(|m| matches!(m.role, Role::System) && !m.content.trim().is_empty());
+    if caller_set_one || !template_expects_system(template) {
+        return None;
+    }
+    if template_writes_its_own_system_turn(template, messages, bos_token, eos_token, tools) {
+        let has_blank = messages.iter().any(|m| matches!(m.role, Role::System));
+        return has_blank.then(|| {
+            messages
+                .iter()
+                .filter(|m| !matches!(m.role, Role::System))
+                .cloned()
+                .collect()
+        });
+    }
+    with_system_message(messages)
+}
+
 /// Ensure a usable system turn, returning an owned list only when one is needed.
 ///
 /// A blank system message is treated as absent — it renders an empty system
@@ -559,11 +652,13 @@ fn with_system_message(messages: &[ChatMessage]) -> Option<Vec<ChatMessage>> {
 
 /// Build prompt with optional model name hint for fallback template selection.
 ///
-/// When the model's template shows it expects a system turn and the caller sent
-/// none, a neutral default is supplied. TinyLlama-1.1B-Chat answers a bare user
-/// question with nothing but a `<|user|>` turn marker — stop-truncation strips
-/// it and the user sees a blank reply reported as a successful completion. The
-/// same question with a system message is answered normally.
+/// When the model's template shows it expects a system turn, the caller sent
+/// none, AND the template writes none of its own, a neutral default is
+/// supplied. TinyLlama-1.1B-Chat answers a bare user question with nothing but a
+/// `<|user|>` turn marker — stop-truncation strips it and the user sees a blank
+/// reply reported as a successful completion. The same question with a system
+/// message is answered normally. A template with its own default — Qwen2.5's,
+/// Llama-3.x's — keeps it (`template_writes_its_own_system_turn`).
 pub fn build_prompt_with_model(
     messages: &[ChatMessage],
     template: Option<&str>,
@@ -841,9 +936,9 @@ fn build_prompt_attempt(
     let messages: &[ChatMessage] = described.as_deref().unwrap_or(messages);
     let tools_for_render = if renders_tools { tools } else { None };
 
-    let injected = template
-        .filter(|t| template_expects_system(t))
-        .and_then(|_| with_system_message(messages));
+    let injected = template.and_then(|t| {
+        system_turn_for_template(t, messages, bos_token, eos_token, tools_for_render)
+    });
     let messages: &[ChatMessage] = injected.as_deref().unwrap_or(messages);
 
     if let Some(tmpl) = template {

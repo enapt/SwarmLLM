@@ -1388,6 +1388,88 @@ fn blank_system_message_is_replaced() {
     assert!(out.contains(DEFAULT_SYSTEM_PROMPT), "got: {out:?}");
 }
 
+/// Qwen2.5's real template, no-tools path: it writes its OWN system turn when
+/// the caller sends none.
+const QWEN25_TMPL: &str = concat!(
+    "{%- if tools %}\n",
+    "    {{- 'TOOLS_BLOCK' }}\n",
+    "{%- else %}\n",
+    "    {%- if messages[0]['role'] == 'system' %}\n",
+    "        {{- '<|im_start|>system\\n' + messages[0]['content'] + '<|im_end|>\\n' }}\n",
+    "    {%- else %}\n",
+    "        {{- '<|im_start|>system\\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.<|im_end|>\\n' }}\n",
+    "    {%- endif %}\n",
+    "{%- endif %}\n",
+    "{%- for message in messages %}\n",
+    "    {%- if (message.role == \"user\") or (message.role == \"system\" and not loop.first) or (message.role == \"assistant\" and not message.tool_calls) %}\n",
+    "        {{- '<|im_start|>' + message.role + '\\n' + message.content + '<|im_end|>' + '\\n' }}\n",
+    "    {%- endif %}\n",
+    "{%- endfor %}\n",
+    "{%- if add_generation_prompt %}\n",
+    "    {{- '<|im_start|>assistant\\n' }}\n",
+    "{%- endif %}\n",
+);
+
+/// **FUTURE_WORK #100: a template's own default system prompt is not ours to
+/// replace.** Hugging Face's `apply_chat_template`, llama.cpp, vLLM and Ollama
+/// inject none; the template decides. Ours replaced Qwen2.5's "You are Qwen,
+/// created by Alibaba Cloud" with a bare "You are a helpful assistant." on
+/// every request that sent no system message — 31 prompt tokens where llama.cpp
+/// gives the same model 41.
+#[test]
+fn a_template_that_writes_its_own_system_turn_keeps_it() {
+    let qwen = build_prompt_with_model(&bare_user(), Some(QWEN25_TMPL), "", "", None, None);
+    assert!(
+        qwen.starts_with(
+            "<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful \
+             assistant.<|im_end|>\n<|im_start|>user\n"
+        ),
+        "Qwen2.5 must be given its own default, once: {qwen:?}"
+    );
+    assert_eq!(qwen.matches("<|im_start|>system").count(), 1, "{qwen:?}");
+
+    // A blank system message is treated as absent here too — the template's
+    // default, not an empty system turn.
+    let blank = vec![
+        ChatMessage {
+            role: Role::System,
+            content: " ".into(),
+            images: vec![],
+        },
+        bare_user().remove(0),
+    ];
+    let qwen_blank = build_prompt_with_model(&blank, Some(QWEN25_TMPL), "", "", None, None);
+    assert!(
+        qwen_blank.contains("You are Qwen, created by Alibaba Cloud."),
+        "{qwen_blank:?}"
+    );
+
+    // Llama-3.x writes its knowledge-date header on its own; ours used to be
+    // appended inside it.
+    let llama = build_prompt_with_model(
+        &bare_user(),
+        Some(include_str!("fixtures/llama3_official.jinja")),
+        "<|begin_of_text|>",
+        "<|eot_id|>",
+        None,
+        None,
+    );
+    assert!(llama.contains("Cutting Knowledge Date"), "{llama:?}");
+    assert!(!llama.contains(DEFAULT_SYSTEM_PROMPT), "{llama:?}");
+
+    // THE CONTROL — a template with no default of its own still gets ours,
+    // which is what stops TinyLlama answering a bare question with nothing.
+    let tiny = build_prompt_with_model(
+        &bare_user(),
+        Some(TINYLLAMA_TMPL),
+        "<s>",
+        "</s>",
+        None,
+        None,
+    );
+    assert!(tiny.contains(DEFAULT_SYSTEM_PROMPT), "{tiny:?}");
+}
+
 /// TinyLlama's name matches none of the other families, so without a Zephyr
 /// entry it reached ChatML and was asked a ChatML question — which it answered
 /// with a stray `<|user|>` marker and an unrelated question.
