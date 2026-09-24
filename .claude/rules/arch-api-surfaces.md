@@ -45,6 +45,13 @@ nothing decisive has been seen yet — and treating it as decisive latched
 user (report #031). A lone leading space as its own chunk is ordinary: a BPE
 tokenizer decodes its word-boundary marker to one.
 
+**What a reply may not OPEN with is one rule too** —
+`inference::REPLY_LEADING_WHITESPACE` (newlines and spaces), read by the
+finaliser and by the streaming buffer, including its end-of-stream flush. A
+SentencePiece model's first token decodes to " The"; the halves used to
+disagree about it (FUTURE_WORK #103). The agreement test compares the stream
+against the WHOLE finaliser, never one step of it.
+
 → `docs/invariants/api-surfaces.md`
 
 ## A reply budget the caller did not choose is a ceiling, not a demand

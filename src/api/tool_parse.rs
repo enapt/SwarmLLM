@@ -508,6 +508,16 @@ impl StreamingToolText {
                 if undecidable {
                     true
                 } else {
+                    // Nothing has been released yet, so the reply's opening
+                    // whitespace can still be dropped — by the same rule the
+                    // non-streamed finaliser applies, so a reply does not open
+                    // differently when streamed (FUTURE_WORK #103).
+                    let opening = self.text.len()
+                        - self
+                            .text
+                            .trim_start_matches(crate::inference::REPLY_LEADING_WHITESPACE)
+                            .len();
+                    self.emitted = self.emitted.max(opening);
                     self.reasoning = Reasoning::Absent;
                     false
                 }
@@ -571,6 +581,17 @@ impl StreamingToolText {
     /// Everything not yet emitted — the fallback for a reply that turned out
     /// to be ordinary text after all (a model given tools may simply answer).
     pub fn pending_all(&mut self) -> Option<String> {
+        // Nothing released yet means the reply's opening has not been dropped
+        // — a reply that never left `Undecided`, e.g. one that was only
+        // whitespace. Drop it here by the same rule, or the stream would end
+        // with text the non-streamed reply does not have (#103).
+        if self.emitted == 0 {
+            self.emitted = self.text.len()
+                - self
+                    .text
+                    .trim_start_matches(crate::inference::REPLY_LEADING_WHITESPACE)
+                    .len();
+        }
         (self.emitted < self.text.len()).then(|| {
             let out = self.text[self.emitted..].to_string();
             self.emitted = self.text.len();
@@ -2207,10 +2228,18 @@ mod streaming_reasoning_tests {
             &[" ", "Just an answer"],
             &["<thi", "nking about it"],
             &["<think>", "never closed"],
+            // A SentencePiece reply's first token decodes to " The" (#103).
+            &[" The", " capital", " is Paris."],
+            &[" ", " ", "Two spaces first"],
+            &["\n", " Mixed opening"],
+            &[" ", "\n"],
         ];
         for chunks in replies {
+            // The reference is the non-streamed finaliser itself, not one step
+            // of it: comparing against the reasoning step alone let the opening
+            // whitespace differ between the two halves unnoticed.
             let mut whole: String = chunks.concat();
-            crate::inference::take_leading_reasoning_block(&mut whole);
+            crate::inference::finalize_reply_text(&mut whole, &[]);
 
             // BOTH ways round. A reply's content must not depend on whether the
             // caller asked to stream it, and it must not depend on whether the
@@ -2273,19 +2302,27 @@ mod streaming_reasoning_tests {
         assert_eq!(deltas, "{\"name\": \"x\"}");
     }
 
-    /// The control: whitespace that is NOT followed by a preamble must still
-    /// reach the user, and must not be withheld for ever. Without this the fix
-    /// above passes on code that simply never decides.
+    /// The control: text after a leading whitespace token that is NOT followed
+    /// by a preamble must still stream, and must not be withheld for ever.
+    /// Without this the fix above passes on code that simply never decides.
+    ///
+    /// The opening whitespace itself is dropped, exactly as the non-streamed
+    /// finaliser drops it (`REPLY_LEADING_WHITESPACE`, #103): a SentencePiece
+    /// model's first token decodes to " The".
     #[test]
     fn a_leading_whitespace_token_before_ordinary_text_still_streams() {
         let (out, mut b) = stream(&[" ", "Ciao", "!"]);
-        let all = out + &b.pending_all().unwrap_or_default();
-        assert_eq!(all, " Ciao!");
+        assert_eq!(
+            out, "Ciao!",
+            "released as it arrives, not held for the flush"
+        );
+        assert!(b.pending_all().is_none());
 
-        // And a reply that is nothing BUT whitespace is released by the flush
-        // every streaming surface already runs at the end.
+        // And a reply that is nothing BUT whitespace is not held for ever: the
+        // flush every streaming surface runs at the end finds nothing to show,
+        // which is what the non-streamed reply says too.
         let (out, mut b) = stream(&[" ", "\n"]);
-        assert_eq!(out + &b.pending_all().unwrap_or_default(), " \n");
+        assert_eq!(out + &b.pending_all().unwrap_or_default(), "");
     }
 
     /// A reasoning model's scratchpad must not stream to the user as the reply.

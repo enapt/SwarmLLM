@@ -109,6 +109,27 @@ const CONTROL_TOKEN_NAMES: &[&str] = &[
     "system",
 ];
 
+/// What a reply may not OPEN with: newlines, and spaces.
+///
+/// The newlines are what a control marker removed in front of the answer
+/// leaves behind. The space is a SentencePiece model's first token: after a
+/// turn marker it generates `▁The`, which decodes to " The", so Mistral's
+/// replies — and Phi-3.5's, once its prompt matched its own tokenizer — began
+/// with a space (FUTURE_WORK #103). Hugging Face's decoder drops it
+/// (`Strip(start=1)`); llama.cpp, vLLM and TGI pass it through; OpenAI's API
+/// never returns one. A reply here always opens a fresh assistant turn — there
+/// is no continuation of a partial assistant message, where a leading space
+/// would carry meaning — so it is always noise.
+///
+/// ALL of them, not exactly one as Hugging Face strips: `finalize_reply_text`
+/// must stay idempotent, and stripping one would take another on each call.
+///
+/// **The one rule for both halves**: `finalize_reply_text` (non-streamed) and
+/// `api::tool_parse::StreamingToolText` (every streamed reply, on all four API
+/// surfaces) both read it, so a reply cannot open differently depending on
+/// whether it was streamed.
+pub(crate) const REPLY_LEADING_WHITESPACE: [char; 3] = ['\n', '\r', ' '];
+
 /// Put generated text into its final, user-facing form.
 ///
 /// **Every source of reply text must end by calling this, and must not perform
@@ -129,7 +150,9 @@ const CONTROL_TOKEN_NAMES: &[&str] = &[
 ///    stops, on what survived step 1.
 /// 3. **Trim a trailing partial stop.** A marker decodes across several tokens
 ///    and the leading pieces match nothing, so they are already emitted.
-/// 4. **Drop newlines stranded at the front** by a marker removed in step 1.
+/// 4. **Drop the whitespace a reply opens with** — newlines stranded by a
+///    marker removed in step 1, and the space a SentencePiece reply starts
+///    with ([`REPLY_LEADING_WHITESPACE`]).
 ///
 /// Before this existed the three sources ran different subsets in different
 /// orders: the distributed path trimmed before scrubbing and never did step 4,
@@ -164,7 +187,7 @@ pub(crate) fn finalize_reply_text(text: &mut String, stops: &[String]) -> Option
         }
     }
     trim_trailing_partial_stop(text, stops);
-    let start = text.len() - text.trim_start_matches(['\n', '\r']).len();
+    let start = text.len() - text.trim_start_matches(REPLY_LEADING_WHITESPACE).len();
     if start > 0 {
         text.drain(..start);
     }
