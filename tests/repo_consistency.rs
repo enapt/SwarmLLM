@@ -8040,6 +8040,56 @@ fn the_english_ui_uses_one_word_for_a_model_part_and_one_for_a_machine() {
     );
 }
 
+/// The Models tab is called "Models" in every language, not "the swarm".
+///
+/// Its key is `nav.swarm` — the tab's old name — and twenty of the twenty-one
+/// locales had translated the KEY ("Der Schwarm", "L'essaim", "群组") rather
+/// than the English text, so everyone outside English was told to look for a
+/// tab called "the swarm" that English users knew as "Models", and instructions
+/// naming the tab pointed at the wrong word (2026-09-24). The page title
+/// (`swarm.title`) followed it. Both must read exactly what the locale already
+/// calls models on the Dashboard (`dashboard.models_title`).
+#[test]
+fn the_models_tab_is_called_models_in_every_language() {
+    let dir = repo_root().join("frontend/i18n");
+    let mut wrong = Vec::new();
+    let mut seen = 0;
+    for entry in std::fs::read_dir(&dir).expect("read i18n dir") {
+        let path = entry.expect("dir entry").path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        seen += 1;
+        let map: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read locale"))
+                .expect("locale is an object");
+        let get = |k: &str| {
+            map.get(k)
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string()
+        };
+        let models = get("dashboard.models_title");
+        for key in ["nav.swarm", "swarm.title"] {
+            if get(key) != models {
+                wrong.push(format!(
+                    "{}: {key} = {:?}, but models are {:?}",
+                    path.file_name().unwrap().to_string_lossy(),
+                    get(key),
+                    models
+                ));
+            }
+        }
+    }
+    assert_eq!(seen, 21, "expected 21 locales in {}", dir.display());
+    assert!(
+        wrong.is_empty(),
+        "the Models tab has another name:\n{}",
+        wrong.join("\n")
+    );
+}
+
 /// Whole-word match without pulling in a regex engine: the surrounding bytes
 /// must not be alphanumeric, so `shard` does not match inside `shard_label`.
 fn regex_lite_word(haystack: &str, needle: &str) -> bool {
