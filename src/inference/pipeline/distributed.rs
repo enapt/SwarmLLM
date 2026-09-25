@@ -1228,7 +1228,23 @@ impl PipelineExecutor {
                         .filter(|(first, last, _)| idx >= *first && idx <= *last)
                         .map(|(_, _, pos)| pos),
                     chunk_meta: None,
-                    sampling: None,
+                    // The caller's temperature, top-p, top-k and penalties, for the
+                    // segment that SAMPLES — or for a chain's head, which hands
+                    // them down to the tail that does (`plan_chain` only
+                    // chains through peers that can). ⚠ Only to a peer that
+                    // reads the `0x0A` trailer: an older one rebuilds the
+                    // seal's AAD from the trailers it parsed. Without it a
+                    // remote last segment sampled at 0.7 whatever was asked
+                    // (FUTURE_WORK #106).
+                    sampling: if run_is_last
+                        && self.shared_state.peer_advertises_feature(
+                            &segment.node_id,
+                            swarmllm_types::node::features::FORWARD_SAMPLING,
+                        ) {
+                        Some(self.request.sampling_params.clone())
+                    } else {
+                        None
+                    },
                 };
                 let forward = rebuild_forward();
 
@@ -2327,7 +2343,17 @@ impl PipelineExecutor {
                 spec_logits_requested: false,
                 truncate_kv_to: None,
                 chunk_meta: None,
-                sampling: None,
+                // Same rule as the planned send, asked of the STAND-IN — a
+                // different peer with its own features (gotcha #703).
+                sampling: if is_last
+                    && self.shared_state.peer_advertises_feature(
+                        &backup.node_id,
+                        swarmllm_types::node::features::FORWARD_SAMPLING,
+                    ) {
+                    Some(self.request.sampling_params.clone())
+                } else {
+                    None
+                },
             };
             let forward = rebuild_forward();
 

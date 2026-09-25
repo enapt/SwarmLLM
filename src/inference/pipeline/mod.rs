@@ -1978,6 +1978,149 @@ mod tests {
         );
     }
 
+    /// Every hop of a chain builds the NEXT hop's forward, so a hop that cannot
+    /// read and hand down the `0x0A` trailer leaves the tail sampling at its
+    /// defaults — #106 one hop removed. Such a peer is never put in a chain.
+    #[test]
+    fn a_hop_that_cannot_hand_down_the_callers_sampling_is_never_chained() {
+        use swarmllm_types::node::features::{FORWARD_SAMPLING, PIPELINE_CHAIN_V2};
+        let state = make_test_state();
+        let (old, new) = (NodeId([0x01; 32]), NodeId([0x02; 32]));
+        state
+            .peer_registry
+            .insert(old.clone(), peer_advertising(&old, PIPELINE_CHAIN_V2));
+        state.peer_registry.insert(
+            new.clone(),
+            peer_advertising(&new, PIPELINE_CHAIN_V2 | FORWARD_SAMPLING),
+        );
+        assert!(!state.peer_supports_pipeline_chain(&old));
+        assert!(state.peer_supports_pipeline_chain(&new));
+    }
+
+    /// FUTURE_WORK #106: a REMOTE sampling segment used the worker's defaults
+    /// (0.7 / 0.9 / 40) whatever the caller asked, because `sampling` never
+    /// reached the wire. Now the caller's parameters go to the segment that
+    /// samples — only to one that reads the `0x0A` trailer, and not to a
+    /// segment that does not sample. Both sends are gated: the planned peer's
+    /// and, on failover, the stand-in's own features (gotcha #703).
+    #[tokio::test]
+    async fn the_callers_sampling_reaches_the_segment_that_samples_when_it_can_read_it() {
+        use swarmllm_types::node::features::FORWARD_SAMPLING;
+        use swarmllm_types::SamplingParams;
+        // (planned sampler fails?, sampler/stand-in features) ->
+        //     (sent to segment 0, sent to whoever sampled)
+        async fn sent(
+            fail_planned: bool,
+            sampler_features: u64,
+        ) -> (Option<SamplingParams>, Option<SamplingParams>) {
+            let state = make_test_state();
+            let (tx, mut rx) = mpsc::channel::<NetworkCommand>(64);
+            let mut request = make_test_request(&state);
+            request.sampling_params.temperature = 0.0;
+            request.sampling_params.top_k = 1;
+            request.sampling_params.presence_penalty = 0.5;
+            let request_id = request.id;
+            let (a, c, d) = (NodeId([0xA1; 32]), NodeId([0xC3; 32]), NodeId([0xD4; 32]));
+            let mut peers = std::collections::HashMap::new();
+            let planned_features = if fail_planned {
+                FORWARD_SAMPLING
+            } else {
+                sampler_features
+            };
+            for (node, byte, features) in [
+                (&a, 0xA1u8, FORWARD_SAMPLING),
+                (&d, 0xD4, planned_features),
+                (&c, 0xC3, sampler_features),
+            ] {
+                state.peer_id_map.insert(node.clone(), vec![byte]);
+                peers.insert(vec![byte], node.clone());
+                state
+                    .peer_registry
+                    .insert(node.clone(), peer_advertising(node, features));
+            }
+            let assignment = PipelineAssignment {
+                request_id,
+                segments: vec![remote_segment(&a, (0, 16)), remote_segment(&d, (16, 32))],
+                standbys: vec![remote_segment(&c, (16, 32))],
+                tp_groups: vec![],
+                supports_speculative: false,
+            };
+            let mut executor = PipelineExecutor::new(state.clone(), tx, request, assignment);
+            let (first, planned, standby) = (a.clone(), d.clone(), c.clone());
+            let harness_state = state.clone();
+            let harness = tokio::spawn(async move {
+                let (mut to_first, mut to_sampler) = (None, None);
+                while let Some(cmd) = rx.recv().await {
+                    let NetworkCommand::SendTensor {
+                        target_peer_bytes,
+                        forward,
+                    } = cmd
+                    else {
+                        continue;
+                    };
+                    let node = peers[&target_peer_bytes].clone();
+                    let base = LayerResult {
+                        locally_constructed: false,
+                        ..LayerResult::error(forward.request_id, "")
+                    };
+                    let result = if node == first {
+                        to_first = Some(forward.sampling.clone());
+                        LayerResult {
+                            activations: forward.activations.clone(),
+                            finish_reason: None,
+                            ..base
+                        }
+                    } else if node == planned && fail_planned {
+                        LayerResult {
+                            locally_constructed: false,
+                            ..LayerResult::error(
+                                forward.request_id,
+                                "Worker: Service unavailable: out of memory",
+                            )
+                        }
+                    } else {
+                        assert!(node == planned || node == standby);
+                        to_sampler = Some(forward.sampling.clone());
+                        LayerResult {
+                            token_ids: vec![7],
+                            finish_reason: None,
+                            ..base
+                        }
+                    };
+                    assert!(harness_state.resolve_pending_layer_result(Some(&node), result));
+                }
+                (
+                    to_first.flatten(),
+                    to_sampler.expect("a sampler was sent a forward"),
+                )
+            });
+            executor
+                .forward_through_segments(request_id, 0, 0, vec![0x11; 64], None, false, &[])
+                .await
+                .expect("the sampling segment answered");
+            drop(executor);
+            harness.await.unwrap()
+        }
+
+        for fail_planned in [false, true] {
+            let (to_first, to_sampler) = sent(fail_planned, FORWARD_SAMPLING).await;
+            let got = to_sampler.expect("a sampler that reads the trailer is sent the sampling");
+            assert_eq!(
+                (got.temperature, got.top_k, got.presence_penalty),
+                (0.0, 1, 0.5),
+                "the CALLER's parameters, not the worker's 0.7 / 0.9 / 40 (failover: {fail_planned})"
+            );
+            assert!(
+                to_first.is_none(),
+                "a segment that does not sample is not sent them"
+            );
+            assert!(
+                sent(fail_planned, 0).await.1.is_none(),
+                "an older peer is never sent a trailer it cannot parse (failover: {fail_planned})"
+            );
+        }
+    }
+
     /// R137 (closes R136 test-coverage deferral, partial): the wire-format
     /// helpers `pack_verify_tokens_to_le_bytes`, `build_spec_verify_forward`,
     /// and `build_kv_truncate_forward` are pure and unit-testable. Full

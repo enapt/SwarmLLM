@@ -117,8 +117,76 @@ pub fn encode_layer_forward(forward: &LayerForward) -> Result<Vec<u8>, SwarmErro
     append_chain_trailers(&mut buf, forward);
     append_generated_ids_trailer(&mut buf, forward);
     append_pre_embedded_trailer(&mut buf, forward);
+    append_sampling_trailer(&mut buf, forward);
 
     Ok(buf)
+}
+
+/// Write the sampling trailer: `0x0A | temperature f32 | top_p f32 | top_k u32 |
+/// frequency_penalty f32 | presence_penalty f32 | flags u8 | top_logprobs u8`,
+/// every number little-endian — 23 bytes.
+///
+/// **What it fixes.** `LayerForward.sampling` was in-process only, so a REMOTE
+/// segment that samples used the worker's defaults — temperature 0.7, top-p
+/// 0.9, top-k 40, no penalties — whatever the caller asked. Measured
+/// 2026-09-25 on a two-node split of llama-3.2-3b: three greedy requests came
+/// back as three different replies, choosing tokens llama.cpp ranks 3rd by up
+/// to 2 logits (`docs/FUTURE_WORK.md` #106). It also left the `0x08` trailer's
+/// penalties inert: the history arrived, the penalty VALUES did not.
+///
+/// Emitted whenever the forward carries `sampling`, which the coordinator sets
+/// only for a peer advertising `features::FORWARD_SAMPLING` — an older peer
+/// rebuilds the seal's AAD from the trailers it parsed, so an unknown one would
+/// fail every encrypted forward. `stop` and `max_tokens` are the coordinator's
+/// to apply and are not sent. Flags: bit 0 = `logprobs`.
+pub(crate) fn append_sampling_trailer(buf: &mut Vec<u8>, forward: &LayerForward) {
+    let Some(s) = forward.sampling.as_ref() else {
+        return;
+    };
+    buf.push(0x0A);
+    buf.extend_from_slice(&s.temperature.to_le_bytes());
+    buf.extend_from_slice(&s.top_p.to_le_bytes());
+    buf.extend_from_slice(&s.top_k.to_le_bytes());
+    buf.extend_from_slice(&s.frequency_penalty.to_le_bytes());
+    buf.extend_from_slice(&s.presence_penalty.to_le_bytes());
+    buf.push(u8::from(s.logprobs));
+    buf.push(s.top_logprobs.min(u8::MAX as u32) as u8);
+}
+
+/// Length of the sampling trailer, marker included.
+const SAMPLING_TRAILER_LEN: usize = 23;
+
+/// Read the sampling trailer (`0x0A`) at `cursor`, if present — RAW.
+///
+/// These numbers come from a peer, so every decoder must run them through
+/// `crate::api::clamp_peer_sampling` (gotcha #96) — but only AFTER it has
+/// rebuilt the seal's AAD from them: clamping first would make any value
+/// outside the clamp's range rebuild different bytes and fail the seal, which
+/// reads as a key problem rather than a bad number. The two decoders in
+/// `protocol` are the only callers. Absent means the sender predates it or had
+/// no request context, and the worker keeps its defaults.
+pub(crate) fn read_sampling_trailer(
+    data: &[u8],
+    cursor: &mut usize,
+) -> Option<crate::types::SamplingParams> {
+    if data.len() < *cursor + SAMPLING_TRAILER_LEN || data[*cursor] != 0x0A {
+        return None;
+    }
+    let at = *cursor + 1;
+    let f32_at = |o: usize| f32::from_le_bytes([data[o], data[o + 1], data[o + 2], data[o + 3]]);
+    let u32_at = |o: usize| u32::from_le_bytes([data[o], data[o + 1], data[o + 2], data[o + 3]]);
+    let params = crate::types::SamplingParams {
+        temperature: f32_at(at),
+        top_p: f32_at(at + 4),
+        top_k: u32_at(at + 8),
+        frequency_penalty: f32_at(at + 12),
+        presence_penalty: f32_at(at + 16),
+        logprobs: data[at + 20] & 0x01 != 0,
+        top_logprobs: u32::from(data[at + 21]),
+        ..Default::default()
+    };
+    *cursor += SAMPLING_TRAILER_LEN;
+    Some(params)
 }
 
 /// Write the decoded-so-far trailer: `0x08 | n(2 LE) | n × id(4 LE)`.
@@ -129,6 +197,11 @@ pub fn encode_layer_forward(forward: &LayerForward) -> Result<Vec<u8>, SwarmErro
 /// SAMPLING segment was remote had its penalties silently dropped:
 /// `sampling::apply_repetition_penalties` returns immediately on an empty list.
 /// The caller asked for less repetition, got none, and nothing reported it.
+///
+/// ⚠ **This trailer alone did not fix that.** The penalty VALUES live in
+/// `LayerForward.sampling`, which did not reach the wire either — so a remote
+/// sampler got the history and applied a penalty of zero to it — until the
+/// sampling trailer (`0x0A`, `append_sampling_trailer`) on 2026-09-25.
 ///
 /// Only the last segment samples, so only it is ever sent these — see
 /// `PipelineExecutor::forward_through_segments`. Empty means no trailer, so
@@ -557,6 +630,11 @@ pub fn decode_layer_forward(data: &[u8]) -> Result<LayerForward, SwarmError> {
     // Either source may carry it: `0x02` for a tensor-parallel frame, `0x09`
     // for an ordinary one. Read both so neither shape can lose it.
     let pre_embedded_trailer = read_pre_embedded_trailer(data, &mut cursor);
+    // No AAD on a plain frame, so the clamp runs at once.
+    let sampling = read_sampling_trailer(data, &mut cursor).map(|mut s| {
+        crate::api::clamp_peer_sampling(&mut s);
+        s
+    });
     let _ = cursor;
 
     Ok(LayerForward {
@@ -579,7 +657,7 @@ pub fn decode_layer_forward(data: &[u8]) -> Result<LayerForward, SwarmError> {
         spec_logits_requested,
         truncate_kv_to,
         chunk_meta,
-        sampling: None,
+        sampling,
     })
 }
 
@@ -706,6 +784,35 @@ mod tests {
             let decoded = decode_layer_forward(&bytes).unwrap();
             assert_eq!(decoded.tp_meta.as_ref().unwrap().phase, phase);
         }
+    }
+
+    /// The plain frame carries the caller's sampling too, and clamps a peer's
+    /// numbers on the way in — a NaN temperature from a peer poisons every
+    /// probability after it (gotcha #96).
+    #[test]
+    fn roundtrip_with_sampling_and_a_peers_nan_is_neutralised() {
+        let mut orig = base_forward();
+        orig.sampling = Some(crate::types::SamplingParams {
+            temperature: 0.0,
+            top_k: 1,
+            ..Default::default()
+        });
+        let decoded = decode_layer_forward(&encode_layer_forward(&orig).unwrap()).unwrap();
+        let got = decoded.sampling.expect("the trailer round-trips");
+        assert_eq!((got.temperature, got.top_k), (0.0, 1));
+
+        orig.sampling.as_mut().unwrap().temperature = f32::NAN;
+        let decoded = decode_layer_forward(&encode_layer_forward(&orig).unwrap()).unwrap();
+        assert!(decoded.sampling.unwrap().temperature.is_finite());
+
+        orig.sampling = None;
+        assert!(
+            decode_layer_forward(&encode_layer_forward(&orig).unwrap())
+                .unwrap()
+                .sampling
+                .is_none(),
+            "absent stays absent — the worker keeps its defaults"
+        );
     }
 
     #[test]

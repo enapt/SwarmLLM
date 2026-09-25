@@ -39,7 +39,7 @@ peer-to-peer communication:
 - Replay protection: RFC 6479 sliding window (128-bit bitmap) — allows packet reordering within window while rejecting duplicates
 - Nonce state updated only after successful decryption (prevents DoS)
 - Pending ephemeral keys expire after 60 seconds (prevents memory exhaustion from unanswered re-keys)
-- AAD covers the cleartext header AND every optional trailer it emits (tensor-parallel, spec, kv-truncate, chunk-meta, chain next-hop/reply-to, generated-ids, pre-embedded — markers `0x02`–`0x09`) via `build_layer_forward_aad` — flipping cleartext metadata on the wire fails Poly1305
+- AAD covers the cleartext header AND every optional trailer it emits (tensor-parallel, spec, kv-truncate, chunk-meta, chain next-hop/reply-to, generated-ids, pre-embedded, sampling — markers `0x02`–`0x0A`) via `build_layer_forward_aad` — flipping cleartext metadata on the wire fails Poly1305
 - Wire tag: `TENSOR_TAG_ENCRYPTED = 0x10` — a session-sealed `LayerForward` (activations sealed; header and trailers travel in cleartext, bound as AAD)
 
 ### Tier 2: Pipeline Sealing (Inference)

@@ -34,13 +34,20 @@
 #          reply without the takeover ever having run (gotcha #706). Whether the
 #          reply is the MODEL's is judged against llama.cpp, not byte-equality
 #          with the control: examples/score_against_reference.py.
+#   repeat REPEAT=N (default 3) greedy runs of the long prompt through A's
+#          split, saved to $OUT/repeat.jsonl with $OUT/prompt.txt, for scoring
+#          against llama.cpp (FUTURE_WORK #106). The FIRST request takes the
+#          n-gram-only path and the rest the standard loop (it self-disables
+#          per process), so one arm yields both. Vary one thing per arm with
+#          EXTRA_TOML, e.g. EXTRA_TOML=$'[inference]\nactivation_compression = false'.
 #
-# usage: split_rig.sh split|kill|failover <binary> [<binary for B>]
+# usage: split_rig.sh split|kill|failover|repeat <binary> [<binary for B>]
 #   MODEL      model id (default: tinyllama for split, llama-3.2-3b for kill
 #              and failover)
 #   SHARDS_A   shard indices A holds, comma-separated (default 0; kill: 0,LAST)
 #   SHARDS_B   shard indices B holds (default: every shard A lacks; kill: all)
 #   GPU_A/B    SWARMLLM_INFERENCE_GPU_LAYERS for each node ("" = auto)
+#   EXTRA_TOML appended to EVERY node's config.toml (default: nothing)
 #   MODELS_DIR where the shards come from (default: the live node's)
 #   OUT        where logs and replies go (default: a temp dir, printed)
 #
@@ -52,10 +59,10 @@
 # isolation (#352).
 set -u
 
-MODE="${1:?usage: split_rig.sh split|kill|failover <binary> [<binary for B>]}"
+MODE="${1:?usage: split_rig.sh split|kill|failover|repeat <binary> [<binary for B>]}"
 BIN_A="${2:?binary}"
 BIN_B="${3:-$BIN_A}"
-case "$MODE" in split|kill|failover) ;; *) echo "mode must be split, kill or failover"; exit 2 ;; esac
+case "$MODE" in split|kill|failover|repeat) ;; *) echo "mode must be split, kill, failover or repeat"; exit 2 ;; esac
 [ -x "$BIN_A" ] && [ -x "$BIN_B" ] || { echo "binary not executable"; exit 2; }
 if [ "$MODE" = split ]; then
   MODEL="${MODEL:-tinyllama-1.1b-chat-v1.0.q4-k-m}"
@@ -69,9 +76,11 @@ SHARDS=$(ls "$SRC" | sed -n 's/^shard_\([0-9]*\)\.bin$/\1/p' | sed 's/^0*\([0-9]
 LAST=$(echo "$SHARDS" | tail -1)
 N=$(echo "$SHARDS" | wc -l)
 [ "$N" -ge 2 ] || { echo "$MODEL has $N shard file(s) here; a split needs at least 2"; exit 2; }
-if [ "$MODE" = split ]; then
+if [ "$MODE" = split ] || [ "$MODE" = repeat ]; then
   SHARDS_A="${SHARDS_A:-0}"
   SHARDS_B="${SHARDS_B:-$(echo "$SHARDS" | grep -vxF -f <(echo "$SHARDS_A" | tr ',' '\n') | paste -sd,)}"
+  # Processor unless asked otherwise: the reference is scored on the processor.
+  [ "$MODE" = repeat ] && { GPU_A="${GPU_A:-0}"; GPU_B="${GPU_B:-0}"; }
 elif [ "$MODE" = failover ]; then
   # B's range must need TWO nodes to cover it, so C stops one shard short.
   [ "$N" -ge 3 ] || { echo "failover needs a model with at least 3 shard files here; $MODEL has $N"; exit 2; }
@@ -130,6 +139,8 @@ mode = "off"
 [ui]
 open_browser_on_start = false
 CFG
+  [ -n "${EXTRA_TOML:-}" ] && printf '\n%s\n' "$EXTRA_TOML" >> "$d/config.toml"
+  return 0
 }
 start() { # dir port bin gpu
   if [ -n "$4" ]; then
@@ -226,6 +237,21 @@ if [ "$MODE" = split ]; then
   exit 0
 fi
 
+# ~560 prompt tokens: long enough to catch a prompt pass mid-way (failover), and
+# the prompt the #106 reference scores were taken on (repeat).
+PROMPT="Here are some notes on household appliances. $(for i in $(seq 1 12); do printf 'A refrigerator moves heat from its inside to the room using a refrigerant that evaporates in the cold coils and condenses in the warm ones; the compressor drives the cycle and the thermostat decides when it runs. '; done)Using only these notes, explain step by step how a refrigerator keeps food cold."
+
+if [ "$MODE" = repeat ]; then
+  printf '%s' "$PROMPT" > "$OUT/prompt.txt"
+  : > "$OUT/repeat.jsonl"
+  for i in $(seq 1 "${REPEAT:-3}"); do
+    ask "$PROMPT" 120 "repeat$i" | tee -a "$OUT/repeat.jsonl" | cut -c1-160
+  done
+  echo "repeat: n-gram path taken by $(grep -c 'try_ngram_only_distributed ELIGIBLE' "$BASE/A/node.log") of ${REPEAT:-3} requests (expected: the first)"
+  echo "repeat: score with examples/score_against_reference.py <model.gguf> $OUT/repeat.jsonl $OUT/prompt.txt"
+  exit 0
+fi
+
 if [ "$MODE" = failover ]; then
   node_id() { # port -> the 16-hex-digit id a plan prints
     curl -s -m 5 -H "Authorization: Bearer $(cat "$1")" "localhost:$2/api/admin/stats" \
@@ -251,8 +277,6 @@ sys.exit(0 if ok else 1)' "$1" "$IB" "$IC" "$ID"
     for _ in $(seq 1 60); do plan_is "$1" 2>/dev/null && { plan_is "$1"; return 0; }; sleep 3; done
     echo "failover: the plan never became '$1':"; plan_is "$1"; return 1
   }
-  # ~500 prompt tokens, so B's prompt pass is long enough to be caught mid-way.
-  PROMPT="Here are some notes on household appliances. $(for i in $(seq 1 12); do printf 'A refrigerator moves heat from its inside to the room using a refrigerant that evaporates in the cold coils and condenses in the warm ones; the compressor drives the cycle and the thermostat decides when it runs. '; done)Using only these notes, explain step by step how a refrigerator keeps food cold."
   wait_plan healthy || exit 1
   echo "failover: plan is A→B with C+D covering B's range between them"
 

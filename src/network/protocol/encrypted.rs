@@ -144,6 +144,10 @@ pub fn build_layer_forward_aad(forward: &LayerForward) -> Vec<u8> {
     // the receiver reads the payload as a tensor or tokenises it as text, so
     // flipping it turns a reply into nonsense without touching the seal.
     super::layer_forward::append_pre_embedded_trailer(&mut aad, forward);
+    // The sampling trailer (0x0A). Bound like the rest: it decides how the
+    // last segment turns logits into a token — rewriting a temperature is
+    // steering the reply.
+    super::layer_forward::append_sampling_trailer(&mut aad, forward);
 
     aad
 }
@@ -251,6 +255,7 @@ pub fn encode_layer_forward_encrypted(
     super::layer_forward::append_chain_trailers(&mut buf, forward);
     super::layer_forward::append_generated_ids_trailer(&mut buf, forward);
     super::layer_forward::append_pre_embedded_trailer(&mut buf, forward);
+    super::layer_forward::append_sampling_trailer(&mut buf, forward);
 
     Ok(buf)
 }
@@ -468,9 +473,11 @@ pub fn decode_layer_forward_encrypted(
     let requester_node_id = super::layer_forward::read_reply_to_trailer(data, &mut cursor);
     let generated_ids = super::layer_forward::read_generated_ids_trailer(data, &mut cursor);
     let pre_embedded_trailer = super::layer_forward::read_pre_embedded_trailer(data, &mut cursor);
+    // RAW until the AAD below is rebuilt from it — see `read_sampling_trailer`.
+    let sampling = super::layer_forward::read_sampling_trailer(data, &mut cursor);
     let _ = cursor;
 
-    let forward = LayerForward {
+    let mut forward = LayerForward {
         request_id,
         sequence_num,
         index_pos,
@@ -490,7 +497,7 @@ pub fn decode_layer_forward_encrypted(
         spec_logits_requested,
         truncate_kv_to,
         chunk_meta,
-        sampling: None,
+        sampling,
     };
 
     // Reconstruct AAD from the parsed forward via the helper. This MUST
@@ -499,6 +506,10 @@ pub fn decode_layer_forward_encrypted(
     // `truncate_kv_to`) are now authenticated — flipping them on the wire
     // invalidates Poly1305 even though they ride as cleartext metadata.
     let aad = build_layer_forward_aad(&forward);
+    // Now, and not before: the AAD must be rebuilt from the bytes as SENT.
+    if let Some(s) = forward.sampling.as_mut() {
+        crate::api::clamp_peer_sampling(s);
+    }
 
     Ok((forward, sealed, aad))
 }
@@ -898,6 +909,88 @@ mod tests {
         let mut b = a.clone();
         b.pre_embedded = false;
         assert_ne!(build_layer_forward_aad(&a), build_layer_forward_aad(&b));
+    }
+
+    fn sampling(temperature: f32) -> crate::types::SamplingParams {
+        crate::types::SamplingParams {
+            temperature,
+            top_p: 0.5,
+            top_k: 1,
+            frequency_penalty: 0.25,
+            presence_penalty: -0.5,
+            logprobs: true,
+            top_logprobs: 3,
+            ..Default::default()
+        }
+    }
+
+    /// FUTURE_WORK #106: the caller's sampling reaches a remote sampling
+    /// segment — through the sealed frame, which is how pipeline forwards go.
+    #[test]
+    fn encrypted_envelope_carries_the_callers_sampling() {
+        let mut orig = base_forward();
+        orig.sampling = Some(sampling(0.0));
+        let bytes = encode_layer_forward_encrypted(&orig, vec![0u8; 64]).unwrap();
+        let (decoded, _sealed, aad) = decode_layer_forward_encrypted(&bytes).unwrap();
+        let got = decoded.sampling.expect("the trailer survives the envelope");
+        assert_eq!(
+            (
+                got.temperature,
+                got.top_p,
+                got.top_k,
+                got.frequency_penalty,
+                got.presence_penalty
+            ),
+            (0.0, 0.5, 1, 0.25, -0.5)
+        );
+        assert!(got.logprobs && got.top_logprobs == 3);
+        assert_eq!(
+            aad,
+            build_layer_forward_aad(&orig),
+            "the receiver rebuilds the SAME AAD"
+        );
+    }
+
+    /// Bound into the AAD — a rewritten temperature is a steered reply — and
+    /// absent means byte-identical: a forward with no sampling is exactly the
+    /// frame an older build sends and parses.
+    #[test]
+    fn aad_authenticates_sampling_and_its_absence_changes_nothing() {
+        let mut a = base_forward();
+        a.sampling = Some(sampling(0.0));
+        let mut b = a.clone();
+        b.sampling = Some(sampling(1.0));
+        assert_ne!(build_layer_forward_aad(&a), build_layer_forward_aad(&b));
+        let without = base_forward();
+        assert!(without.sampling.is_none());
+        assert_eq!(
+            build_layer_forward_aad(&without).len() + 23,
+            build_layer_forward_aad(&a).len(),
+            "the trailer is exactly its 23 bytes and nothing else moved"
+        );
+    }
+
+    /// A peer's numbers are clamped (gotcha #96) — but only AFTER the AAD is
+    /// rebuilt from them as sent. Clamping first would rebuild different bytes
+    /// for any out-of-range value and fail the seal, which reads as a key
+    /// problem instead of a bad number.
+    #[test]
+    fn a_peers_sampling_is_clamped_after_the_seal_is_checked() {
+        let mut orig = base_forward();
+        orig.sampling = Some(crate::types::SamplingParams {
+            top_logprobs: 200,
+            ..sampling(9.0)
+        });
+        let bytes = encode_layer_forward_encrypted(&orig, vec![0u8; 16]).unwrap();
+        let (decoded, _sealed, aad) = decode_layer_forward_encrypted(&bytes).unwrap();
+        assert_eq!(
+            aad,
+            build_layer_forward_aad(&orig),
+            "AAD from the bytes as sent"
+        );
+        let got = decoded.sampling.unwrap();
+        assert_eq!(got.temperature, 2.0, "clamped to [0, 2]");
+        assert_eq!(got.top_logprobs, 20, "clamped to 20");
     }
 
     #[test]

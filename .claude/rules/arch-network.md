@@ -367,7 +367,12 @@ silently break at the wire if duplicated:
   RELAY node forwarding tensor payloads for others is a legitimate endpoint that
   can flip it. The failure is a silently WRONG AllReduce contribution, not a
   rejected request. Extending the AAD only affects forwards that carry the
-  trailer, which is the compatibility argument each bump rests on. Post-R100,
+  trailer, which is the compatibility argument each bump rests on.
+  ⚠ **A trailer a receiver CLAMPS is clamped AFTER the AAD is rebuilt**, from the
+  bytes as sent — `0x0A`, the caller's sampling (gated on `FORWARD_SAMPLING`,
+  → `docs/invariants/network.md` § "The caller's sampling reaches a remote
+  sampler"), is the worked example; clamping first fails the seal for any
+  out-of-range value and reads as a key problem. Post-R100,
   the helper covers the cleartext header AND the spec/kv-truncate
   trailer fields; the decoder reconstructs AAD via the helper after
   parsing trailers (since trailer bytes don't appear contiguously

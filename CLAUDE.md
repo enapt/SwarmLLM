@@ -88,7 +88,7 @@ until readers leave (#90's shape); `clippy.toml` fails the build on one.
 ## Testing
 
 **Always say which feature set a count came from.** With
-`--features dev,claude-subscription`: **2929 lib** (+14 ignored),
+`--features dev,claude-subscription`: **2935 lib** (+14 ignored),
 79 integration (31 + 34 + 14 `yamux_substream`), **169 repo-consistency**,
 1 `api_key_side_effects`, 55 `swarmllm-types`, and 11 in the vendored
 request-response patch — plus 15 in the `swarmllm` BIN target (`cli::*`, counted
@@ -157,7 +157,9 @@ UNDETERMINED and never a fix — use it BEFORE blaming a change, especially your
 **v0.3.205-alpha is the live release (2026-09-25), signed and on both nodes.**
 `main` is AHEAD of it (unreleased, 2026-09-25): #17's composite failover fixed
 after its first live run (#706/#707), per-version Trickle (#91's residue),
-model-browser Chat-not-Download, `SWARMLLM_LOGGING_LEVEL`, #107's residual.
+model-browser Chat-not-Download, `SWARMLLM_LOGGING_LEVEL`, #107's residual, and
+**a remote last segment now samples as the caller asked** (`0x0A` trailer, #106 —
+it sampled at 0.7 whatever was requested).
 **Next** → `memory/next_up.md`.
 
 ⚠ **Behaviour gate = `reply_ab.sh` + `split_rig.sh`** (incl. `failover`), not

@@ -104,6 +104,9 @@ pub mod features {
     /// advertising this bit, because an older peer does not merely ignore an
     /// unknown trailer: it rebuilds the seal's AAD from the trailers it parsed,
     /// so an unrecognised one makes every encrypted forward fail to open.
+    ///
+    /// ⚠ The history alone did not make penalties work remotely: the penalty
+    /// VALUES arrive only with `FORWARD_SAMPLING`'s trailer (2026-09-25).
     pub const FORWARD_GENERATED_IDS: u64 = 1 << 8;
 
     /// Understands the pre-embedded trailer (`0x09`) on a `LayerForward`: the
@@ -135,6 +138,21 @@ pub mod features {
     /// additive-protocol rule holds without an argument about each decoder.
     pub const FORWARD_REFUSAL_REASON: u64 = 1 << 10;
 
+    /// Understands the sampling trailer (`0x0A`) on a `LayerForward`: the
+    /// caller's temperature, top-p, top-k, penalties and logprobs, for the
+    /// segment that turns logits into a token.
+    ///
+    /// `LayerForward.sampling` was in-process only, so a REMOTE last segment
+    /// sampled with the worker's defaults (0.7 / 0.9 / 40, no penalties)
+    /// whatever the caller asked: a request for temperature 0 came back
+    /// sampled, differently each run, whenever the model was split and its
+    /// last part was on another computer — the usual shape of a split
+    /// (measured 2026-09-25, `docs/FUTURE_WORK.md` #106). Gated like the
+    /// trailers before it: an older peer rebuilds the seal's AAD from the
+    /// trailers it parsed, so one it does not know fails every encrypted
+    /// forward.
+    pub const FORWARD_SAMPLING: u64 = 1 << 11;
+
     /// The full feature set THIS build implements. Advertised by every node.
     pub const ALL: u64 = RELAY
         | TENSOR_RELAY
@@ -146,7 +164,8 @@ pub mod features {
         | SESSION_KEY_CONFIRM
         | FORWARD_GENERATED_IDS
         | FORWARD_PRE_EMBEDDED
-        | FORWARD_REFUSAL_REASON;
+        | FORWARD_REFUSAL_REASON
+        | FORWARD_SAMPLING;
 
     /// Does `advertised` include every bit in `needed`?
     pub fn supports(advertised: u64, needed: u64) -> bool {

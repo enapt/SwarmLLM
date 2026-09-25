@@ -144,6 +144,8 @@ pub(super) async fn handle_layer_forward(
     // request. Captured here for the same reason as the two above: `forward` is
     // moved into the worker pool below.
     let chain = std::mem::take(&mut forward.chain);
+    // The caller's sampling, to hand down a chain to the segment that samples.
+    let sampling = forward.sampling.clone();
     let sequence_num = forward.sequence_num;
     let index_pos = forward.index_pos;
 
@@ -336,15 +338,23 @@ pub(super) async fn handle_layer_forward(
                         // builds the chain, stated here because this is where
                         // it would silently go wrong.
                         generated_ids: Vec::new(),
-                        // The coordinator sends `None` to every segment, so a
-                        // chained hop does the same. LoRA requests do not take
-                        // this path at all.
+                        // LoRA requests do not take this path at all.
                         adapter_id: None,
                         draft_tokens: Vec::new(),
                         spec_logits_requested: false,
                         truncate_kv_to: None,
                         chunk_meta: None,
-                        sampling: None,
+                        // Handed down so the TAIL samples as the caller asked —
+                        // only to a hop that reads the `0x0A` trailer. The
+                        // coordinator only chains through such peers
+                        // (`peer_supports_pipeline_chain`), so an older hop is
+                        // the case that cannot arise, not one that is ignored.
+                        sampling: sampling.clone().filter(|_| {
+                            shared_state.peer_advertises_feature(
+                                &next.node_id,
+                                swarmllm_types::node::features::FORWARD_SAMPLING,
+                            )
+                        }),
                     };
                     tracing::info!(
                         request_id = %request_id,

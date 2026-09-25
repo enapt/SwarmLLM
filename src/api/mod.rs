@@ -199,6 +199,28 @@ pub(crate) fn build_sampling_params(
     }
 }
 
+/// Clamp sampling parameters that arrived from a PEER to the ranges
+/// [`build_sampling_params`] enforces for our own callers, and replace
+/// anything non-finite with a neutral value.
+///
+/// Every wire-arrived `SamplingParams` goes through here (gotcha #96): the
+/// `RemoteGenerateRequest` a peer hands us, and the sampling trailer (`0x0A`)
+/// on a `LayerForward`. A peer is not a caller we validated — `max_tokens =
+/// u32::MAX` pins a worker for hours, and a NaN temperature poisons every
+/// probability after it.
+pub(crate) fn clamp_peer_sampling(s: &mut crate::types::SamplingParams) {
+    let finite_or = |v: f32, fallback: f32| if v.is_finite() { v } else { fallback };
+    s.temperature = finite_or(s.temperature, 1.0).clamp(0.0, 2.0);
+    s.top_p = finite_or(s.top_p, 1.0).clamp(f32::EPSILON, 1.0);
+    s.frequency_penalty = finite_or(s.frequency_penalty, 0.0).clamp(-2.0, 2.0);
+    s.presence_penalty = finite_or(s.presence_penalty, 0.0).clamp(-2.0, 2.0);
+    s.max_tokens = s.max_tokens.clamp(1, DEFAULT_MAX_TOKENS);
+    s.top_logprobs = s.top_logprobs.min(20);
+    if s.stop.len() > MAX_STOP_SEQUENCES {
+        s.stop.truncate(MAX_STOP_SEQUENCES);
+    }
+}
+
 /// Attach routing + timing headers to a response.
 ///
 /// The single place any response path adds them, so all four (OpenAI,

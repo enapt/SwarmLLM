@@ -2057,3 +2057,44 @@ coordinator.
 "a result goes to whoever is waiting, not whoever handed you the work" was
 written down (gotcha #354) for the success path and implemented on three of
 seven.
+
+## The caller's sampling reaches a remote sampler (2026-09-25)
+
+**What was wrong.** `LayerForward.sampling` was `#[serde(skip)]`: it carried the
+request's temperature, top-p, top-k and penalties to a LOCAL last segment and
+nothing to a remote one, whose worker then sampled at `SamplingParams::default()`
+— 0.7 / 0.9 / 40, no penalties. Gotcha #399 had fixed the in-process half and
+called the remote half "the honest state for a segment served on behalf of a
+REMOTE coordinator"; that is the usual shape of a split (your computer holds the
+first part, peers hold the rest), not an edge case.
+
+**How it was found.** Not by reading: by scoring replies against llama.cpp
+(`examples/score_against_reference.py`) on `examples/split_rig.sh repeat`. Four
+greedy requests through one warm two-node split of llama-3.2-3b: the first takes
+the n-gram path, which samples on the COORDINATOR, and was exact and repeatable;
+the other three take the standard loop, which samples on the remote last segment,
+and came back as three different replies with tokens the reference ranks 3rd or
+4th by up to 2.05 logits. Reassociation (gotcha #370) is deterministic and moves
+logits by hundredths — non-determinism plus off-rank choices is SAMPLING. A
+teacher-forced rank is what separates "a near-tie flipped" from "this was
+sampled", which #106 had been read as for a day.
+
+**The fix.** A `0x0A` trailer (23 bytes) bound into the AAD through
+`build_layer_forward_aad`, like every trailer before it. Gated on
+`features::FORWARD_SAMPLING` at EVERY sender — the planned send, the failover
+stand-in (gotcha #703: a second gate), and a chain head handing it to the next
+hop; `peer_supports_pipeline_chain` requires the bit, so an older hop is never in
+a chain where it would drop the parameters. The receiver clamps with
+`api::clamp_peer_sampling` (gotcha #96's helper, extracted now that there are two
+wire sources) — **after** rebuilding the AAD from the bytes as sent, because
+clamping first rebuilds different bytes for any out-of-range value and fails the
+seal, which reads as a key problem rather than a bad number.
+
+**After.** The standard loop's three replies byte-identical, worst rank 2, largest
+gap 0.41 logits. Remote `frequency_penalty` / `presence_penalty` work for the
+first time: `0x08` (2026-09-21) shipped the history, but the values never arrived.
+Tests: `the_callers_sampling_reaches_the_segment_that_samples_when_it_can_read_it`,
+`a_hop_that_cannot_hand_down_the_callers_sampling_is_never_chained`,
+`encrypted_envelope_carries_the_callers_sampling`,
+`a_peers_sampling_is_clamped_after_the_seal_is_checked` — each red with its half
+of the fix removed.

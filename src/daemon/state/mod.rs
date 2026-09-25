@@ -2588,9 +2588,14 @@ impl SharedState {
             .map(|f| {
                 // V2, not v1: a v1 peer never learns who the coordinator is
                 // and answers its predecessor (see `features::PIPELINE_CHAIN_V2`).
+                // And the sampling trailer: every hop builds the next hop's
+                // forward, so one that cannot read and hand down the caller's
+                // sampling leaves the TAIL sampling at its defaults — the
+                // FUTURE_WORK #106 defect, one hop removed.
                 swarmllm_types::node::features::supports(
                     f,
-                    swarmllm_types::node::features::PIPELINE_CHAIN_V2,
+                    swarmllm_types::node::features::PIPELINE_CHAIN_V2
+                        | swarmllm_types::node::features::FORWARD_SAMPLING,
                 )
             })
             .unwrap_or(false)
