@@ -10725,6 +10725,94 @@ fn the_gossip_counters_come_from_the_same_crate_libp2p_uses() {
     );
 }
 
+/// The oldest quinn-proto whose stream receive assembler does not refuse a
+/// stream that has no gaps in it (quinn-rs/quinn#2809, fixed by #2814).
+const QUINN_PROTO_FIXED: (u64, u64, u64) = (0, 11, 18);
+
+/// The resolved quinn-proto versions older than [`QUINN_PROTO_FIXED`].
+/// Pure, so the planted violation below can check the comparison itself.
+fn quinn_proto_versions_with_the_gap_regression<'a>(
+    versions: impl IntoIterator<Item = &'a str>,
+) -> Vec<String> {
+    versions
+        .into_iter()
+        .filter(|v| {
+            let mut parts = v
+                .split(['.', '-', '+'])
+                .map(|p| p.parse::<u64>().unwrap_or(0));
+            let parsed = (
+                parts.next().unwrap_or(0),
+                parts.next().unwrap_or(0),
+                parts.next().unwrap_or(0),
+            );
+            parsed < QUINN_PROTO_FIXED
+        })
+        .map(str::to_string)
+        .collect()
+}
+
+/// **No build of this node may carry a quinn-proto that closes a connection
+/// over a stream with no gaps in it.**
+///
+/// 0.11.17 — in every release from v0.3.148 to v0.3.205 — refused any stream
+/// whose reader fell ~2048 packets behind, however contiguous the data, and the
+/// refusal is `INTERNAL_ERROR "too many gaps in stream buffer"`, which closes the
+/// whole CONNECTION with every request on it. The receiving side raises it, so
+/// a node running the bad version kills transfers sent TO it. Measured on the
+/// live node: 99 such closes between 2026-09-17 and 2026-09-25, most during
+/// shard transfers, and one of them lost a computed 28.8 MB prompt-pass result
+/// on its way back to the coordinator, which then waited out its client (field
+/// report, 2026-09-25). The 2026-09-06 shard chunk-size cut was a mitigation of
+/// this written before the cause was known.
+///
+/// Reads the RESOLVED tree, because a `cargo update` that walks it back is how
+/// the regression would return — no manifest names quinn-proto directly.
+#[test]
+fn the_quic_library_is_past_the_stream_buffer_regression() {
+    let out = std::process::Command::new(env!("CARGO"))
+        .args(["metadata", "--format-version", "1"])
+        .current_dir(repo_root())
+        .output()
+        .expect("cargo metadata");
+    assert!(out.status.success(), "cargo metadata failed");
+    let meta: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("cargo metadata is not JSON");
+    let versions: Vec<&str> = meta["packages"]
+        .as_array()
+        .expect("packages array")
+        .iter()
+        .filter(|p| p["name"].as_str() == Some("quinn-proto"))
+        .filter_map(|p| p["version"].as_str())
+        .collect();
+    assert!(
+        !versions.is_empty(),
+        "quinn-proto is not in the resolved tree at all — if QUIC moved to another \
+         library, re-point this guard rather than deleting it"
+    );
+    let bad = quinn_proto_versions_with_the_gap_regression(versions.iter().copied());
+    assert!(
+        bad.is_empty(),
+        "the resolved tree carries quinn-proto {bad:?}, older than {QUINN_PROTO_FIXED:?}. \
+         Those builds close a whole QUIC connection when a stream's reader falls behind \
+         (quinn-rs/quinn#2809), which drops shard transfers and computed pipeline \
+         results in flight. `cargo update -p quinn-proto --precise 0.11.18` or later."
+    );
+}
+
+/// The planted violation: the comparison fires on the version that shipped the
+/// regression and on anything older, and not on the fix or later.
+#[test]
+fn the_quic_version_guard_fires_on_the_regressed_build() {
+    assert_eq!(
+        quinn_proto_versions_with_the_gap_regression(["0.11.17", "0.11.15", "0.10.9"]),
+        vec!["0.11.17", "0.11.15", "0.10.9"]
+    );
+    assert!(quinn_proto_versions_with_the_gap_regression([
+        "0.11.18", "0.11.19", "0.12.0", "1.0.0"
+    ])
+    .is_empty());
+}
+
 /// What this node GOSSIPS as demand must be what it MEASURED, never the merged
 /// view it assembled from everyone else.
 ///

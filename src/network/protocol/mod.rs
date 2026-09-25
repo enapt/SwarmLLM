@@ -103,17 +103,17 @@ const MAX_JSON_MSG_SIZE: usize = 4 * 1024 * 1024;
 /// fixed-size transfer dying at a reproducible point rather than a flaky link.
 /// Six peers, one of them on the LAN.
 ///
-/// **What this does NOT do.** It does not bound the gap count. quinn's
-/// `MAX_CHUNKS = 1024` is checked against the DISCONTIGUOUS buffers held
-/// between `bytes_read` and `end`, and that region is bounded by the stream
-/// receive window (libp2p-quic defaults `max_stream_data` to 10 MB, which this
-/// project does not override), not by how large one message is. What it bounds
-/// is the number of DRAWS: failure probability scales with packets sent, so
-/// this is roughly a 4x reduction in the chance any one transfer dies. A
-/// structural fix means shrinking the receive window, which caps a single
-/// stream at `window / RTT` and so trades against WAN throughput — measured
-/// work, deliberately not done here. Do not describe this constant as the
-/// bound.
+/// **The cause was never the link, and this constant is not the fix.** It was
+/// a regression in quinn-proto 0.11.17 (quinn-rs/quinn#2809, fixed by #2814 in
+/// 0.11.18): the receive assembler's defragment left contiguous buffers as
+/// separate entries and its 1024-entry guard counted THOSE, so a stream with no
+/// gap at all was refused once its reader fell ~2048 packets behind — and the
+/// refusal closes the whole CONNECTION, with every request on it. That is why
+/// the kills clustered at a fixed point in a transfer and why a LAN peer hit
+/// it. It also dropped a computed 28.8 MB prompt-pass result on its way back to
+/// a coordinator (2026-09-25), which then waited out the client. 0.11.18 is
+/// pinned in `Cargo.lock` and `the_quic_library_is_past_the_stream_buffer_regression`
+/// keeps it there. A smaller chunk only meant fewer draws.
 ///
 /// It is independently worth having: 32 MiB was held in memory on both sides,
 /// gave no progress within a chunk, and a peer retry restarts at offset 0
