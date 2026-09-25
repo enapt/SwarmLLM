@@ -154,19 +154,13 @@ UNDETERMINED and never a fix — use it BEFORE blaming a change, especially your
 
 ## Status
 
-**v0.3.204-alpha is the live release (2026-09-24), signed and on both nodes.**
-**`main` is ahead by four UNRELEASED fixes** — #92 (a peer that cannot decrypt
-a forward is sent it again once the link re-keys: `0x06` result trailer,
-`features::FORWARD_REFUSAL_REASON`), `--no-update-check` working again (a no-op
-since .191), a settings save no longer undoing `--anchor` / `--no-update-check`
-(#107), and ⛔ **Docker images publishing on the release's UN-DRAFT, not the
-tag** — every tag used to publish an image and move `latest`, which leaked the
-withdrawn .199 and the unsigned .202/.203 (gotcha #701). The next CHANGELOG must
-name all four, **and the 2026-09-24 round (merged to `main`, unreleased)**:
-Docker images on x86-64-v3 (~3x), sampler on top-k candidates (~15x), split
-replies' history and emoji, non-Latin `stop` panic, DashMap guards across
-`.await` (a #90-shaped stall; `clippy.toml`), Windows `Instant` underflow,
-#105, nickname persist. **Next** → `memory/next_up.md`.
+**v0.3.205-alpha is the live release (2026-09-25), signed and on both nodes.**
+`main` is at the release. It carries the 2026-09-24 round (Docker images on
+x86-64-v3, sampling on top-k candidates, split replies' history and emoji,
+non-Latin `stop` panic, DashMap guards across `.await` via `clippy.toml`,
+Windows `Instant` underflow, #105, nickname persist), its review fixes, #92,
+`--no-update-check`, #107 and Docker images publishing on the release's
+un-draft (#701). **Next** → `memory/next_up.md`.
 
 ⚠ **Behaviour gate = `reply_ab.sh` + `split_rig.sh`**, not conformance alone —
 `family_conformance.sh` pins `gpu_layers = 0` and never splits, so it could not
