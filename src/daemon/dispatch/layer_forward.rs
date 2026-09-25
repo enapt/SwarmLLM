@@ -437,6 +437,16 @@ pub(super) async fn handle_layer_forward(
     // across disconnects, so the ungated one hands back targets the send path
     // can only drop (gotcha #220). Not connected means fall back to the sender,
     // which is correct for every unchained forward and no worse than before.
+    //
+    // Timed, because a computed result once sat 39 s between the worker
+    // finishing and the network manager sending it, with nothing in the log to
+    // say where (FUTURE_WORK #113). The two candidates are a full command queue
+    // (this `send` waits) and a queue that accepts at once but is drained late
+    // (the depth is high); the line below names which.
+    let queued_ahead = network_tx
+        .max_capacity()
+        .saturating_sub(network_tx.capacity());
+    let send_started = std::time::Instant::now();
     if let Err(e) = network_tx
         .send(NetworkCommand::SendTensorResult {
             target_peer_bytes: reply_to().0,
@@ -446,7 +456,22 @@ pub(super) async fn handle_layer_forward(
     {
         tracing::warn!(error = %e, "Failed to send LayerResult back to peer");
     }
+    let send_waited = send_started.elapsed();
+    if send_waited >= RESULT_HANDOFF_SLOW || queued_ahead >= RESULT_HANDOFF_BACKLOG {
+        tracing::warn!(
+            %request_id,
+            waited_ms = send_waited.as_millis() as u64,
+            queued_ahead,
+            "DIAG: a computed segment result waited to reach the network manager"
+        );
+    }
 }
+
+/// A result handoff slower than this is worth a line (#113's 39 s gap).
+const RESULT_HANDOFF_SLOW: std::time::Duration = std::time::Duration::from_secs(1);
+/// Commands queued ahead of a result that are worth a line — an eighth of the
+/// network command channel's 1024.
+const RESULT_HANDOFF_BACKLOG: usize = 128;
 
 /// Who should receive this segment's result?
 ///
