@@ -51,6 +51,13 @@
 #          that names the other machines' limit instead of telling the caller
 #          to raise their own. Run BIN_B = an older release to see the refusal
 #          path, and BIN_A = an older release for the baseline (it gives up).
+#   failover_mid  FIVE nodes: #17's composite stand-in in the MIDDLE of a
+#          pipeline, which the four-node `failover` cannot make (its B runs to
+#          the last layer). A holds shard 0 and coordinates, B the middle
+#          shards, C all of B's but its last, D B's last, E the model's last —
+#          so the plan is A→B→E and C+D is the only cover for B. Same three
+#          arms and PASS rule as `failover`; the control plan is A→C→D→E.
+#          Needs a model with at least 4 shard files here.
 #   whole  #111's WHOLE-MODEL half. A holds none of the model (so every plan is
 #          one peer running all of it, `remote_generate`), B holds every part
 #          but serves a SHORTER conversation than the long prompt (CEIL_B,
@@ -67,7 +74,7 @@
 #          of a downloaded part ran ON the event loop until FUTURE_WORK #108
 #          (~229 ms per 512 MB part, over the loop's 100 ms tripwire).
 #
-# usage: split_rig.sh split|kill|failover|context|whole|repeat|fetch <binary> [<binary for B>]
+# usage: split_rig.sh split|kill|failover|failover_mid|context|whole|repeat|fetch <binary> [<binary for B>]
 #   MODEL      model id (default: tinyllama for split, llama-3.2-3b for kill
 #              and failover)
 #   SHARDS_A   shard indices A holds, comma-separated (default 0; kill: 0,LAST)
@@ -88,7 +95,7 @@ set -u
 MODE="${1:?usage: split_rig.sh split|kill|failover|context|repeat|fetch <binary> [<binary for B>]}"
 BIN_A="${2:?binary}"
 BIN_B="${3:-$BIN_A}"
-case "$MODE" in split|kill|failover|context|whole|repeat|fetch) ;; *) echo "mode must be split, kill, failover, context, whole, repeat or fetch"; exit 2 ;; esac
+case "$MODE" in split|kill|failover|failover_mid|context|whole|repeat|fetch) ;; *) echo "mode must be split, kill, failover, failover_mid, context, whole, repeat or fetch"; exit 2 ;; esac
 if { [ "$MODE" = context ] || [ "$MODE" = whole ]; } && printf '%s' "${EXTRA_TOML:-}" | grep -q '^\[inference\]'; then
   echo "$MODE: EXTRA_TOML may not open [inference] — B's ceiling is written there"; exit 2
 fi
@@ -125,6 +132,17 @@ elif [ "$MODE" = failover ] || [ "$MODE" = context ]; then
   SHARDS_B=$(echo "$SHARDS" | grep -vx 0 | paste -sd,)
   SHARDS_C=$(echo "$SHARDS" | grep -vx 0 | grep -vx "$LAST" | paste -sd,)
   SHARDS_D=$LAST
+  GPU_A="${GPU_A:-0}"; GPU_B="${GPU_B:-0}"
+elif [ "$MODE" = failover_mid ]; then
+  # B's range must be neither the first nor the last, and need TWO nodes.
+  [ "$N" -ge 4 ] || { echo "failover_mid needs a model with at least 4 shard files here; $MODEL has $N"; exit 2; }
+  SHARDS_A=0
+  MID=$(echo "$SHARDS" | grep -vx 0 | grep -vx "$LAST")
+  MID_LAST=$(echo "$MID" | tail -1)
+  SHARDS_B=$(echo "$MID" | paste -sd,)
+  SHARDS_C=$(echo "$MID" | grep -vx "$MID_LAST" | paste -sd,)
+  SHARDS_D=$MID_LAST
+  SHARDS_E=$LAST
   GPU_A="${GPU_A:-0}"; GPU_B="${GPU_B:-0}"
 elif [ "$MODE" = whole ]; then
   # A holds the header only, so it knows the model's declared context but can
@@ -203,9 +221,9 @@ up() { # dir port
 }
 # Kill only what this script started (gotcha #283), and keep the logs.
 cleanup() {
-  kill ${PA:-} ${PB:-} ${PC:-} ${PD:-} 2>/dev/null; sleep 3
-  for n in A B C D; do cp "$BASE/$n/node.log" "$OUT/$n.log" 2>/dev/null; done
-  rm -rf "$BASE/A" "$BASE/B" "$BASE/C" "$BASE/D"
+  kill ${PA:-} ${PB:-} ${PC:-} ${PD:-} ${PE:-} 2>/dev/null; sleep 3
+  for n in A B C D E; do cp "$BASE/$n/node.log" "$OUT/$n.log" 2>/dev/null; done
+  rm -rf "$BASE/A" "$BASE/B" "$BASE/C" "$BASE/D" "$BASE/E"
   [ "$OUT" = "$BASE/out" ] || rmdir "$BASE" 2>/dev/null
   echo "rig: logs and replies in $OUT"
 }
@@ -234,7 +252,7 @@ make_node "$BASE/B" "$SHARDS_B" "\"$ADDR\""
 PB=$(start "$BASE/B" 8920 "$BIN_B" "${GPU_B:-}")
 up "$BASE/B" 8920 || exit 1
 PEERS_EXPECTED=1
-if [ "$MODE" = failover ] || [ "$MODE" = context ]; then
+if [ "$MODE" = failover ] || [ "$MODE" = context ] || [ "$MODE" = failover_mid ]; then
   # Processor only unless asked otherwise (all four nodes): four daemons on
   # one card is #104's setup, and a KV refusal there would read as a failover
   # result.
@@ -246,6 +264,13 @@ if [ "$MODE" = failover ] || [ "$MODE" = context ]; then
   up "$BASE/D" 8960 || exit 1
   PEERS_EXPECTED=3
   echo "rig: C=[$SHARDS_C] D=[$SHARDS_D] gpu=${GPU_C:-0}/${GPU_D:-0}"
+  if [ "$MODE" = failover_mid ]; then
+    make_node "$BASE/E" "$SHARDS_E" "\"$ADDR\""
+    PE=$(start "$BASE/E" 8980 "$BIN_A" "${GPU_E:-0}")
+    up "$BASE/E" 8980 || exit 1
+    PEERS_EXPECTED=4
+    echo "rig: E=[$SHARDS_E] gpu=${GPU_E:-0}"
+  fi
 fi
 
 echo "rig: $MODEL  A=[$SHARDS_A] $("$BIN_A" --version) gpu=${GPU_A:-auto}  B=[$SHARDS_B] $("$BIN_B" --version) gpu=${GPU_B:-auto}"
@@ -360,26 +385,28 @@ PY
   exit $?
 fi
 
-if [ "$MODE" = failover ] || [ "$MODE" = context ]; then
+if [ "$MODE" = failover ] || [ "$MODE" = context ] || [ "$MODE" = failover_mid ]; then
   node_id() { # port -> the 16-hex-digit id a plan prints
     curl -s -m 5 -H "Authorization: Bearer $(cat "$1")" "localhost:$2/api/admin/stats" \
       | python3 -c 'import sys,json; print(json.load(sys.stdin)["node_id"][:16])'
   }
   IB=$(node_id "$BASE/B/api_key" 8920); IC=$(node_id "$BASE/C/api_key" 8940); ID=$(node_id "$BASE/D/api_key" 8960)
+  IE=none; [ "$MODE" = failover_mid ] && IE=$(node_id "$BASE/E/api_key" 8980)
   # plan_is <want>: A's route preview is A→B with a composite C+D behind B
   # ("healthy"), or A→C→D ("control").
   plan_is() {
     curl -s -m 10 -H "Authorization: Bearer $KA" "localhost:8900/api/admin/models/$MODEL/pipeline-plan" \
       | python3 -c 'import sys,json
-want,b,c,d=sys.argv[1:5]
+want,b,c,d,e=sys.argv[1:6]
 try: p=json.load(sys.stdin)
 except Exception: sys.exit(1)
 seg=[s["node_id"] for s in p.get("segments",[])]
 sb={s["node_id"] for s in p.get("standbys",[])}
 show=lambda k: " ".join("%s%s" % (s["node_id"][:8], s["layer_range"]) for s in p.get(k,[]))
 print("  plan:", show("segments"), "| standbys:", show("standbys"), file=sys.stderr)
-ok = (len(seg)==2 and seg[1]==b and {c,d} <= sb and b not in sb) if want=="healthy" else (seg[1:]==[c,d])
-sys.exit(0 if ok else 1)' "$1" "$IB" "$IC" "$ID"
+tail = [] if e == "none" else [e]
+ok = (len(seg)==2+len(tail) and seg[1]==b and seg[2:]==tail and {c,d} <= sb and b not in sb) if want=="healthy" else (seg[1:]==[c,d]+tail)
+sys.exit(0 if ok else 1)' "$1" "$IB" "$IC" "$ID" "$IE"
   }
   wait_plan() { # want
     for _ in $(seq 1 60); do plan_is "$1" 2>/dev/null && { plan_is "$1"; return 0; }; sleep 3; done
@@ -421,9 +448,17 @@ PY
   exit $?
 fi
 
-if [ "$MODE" = failover ]; then
+if [ "$MODE" = failover ] || [ "$MODE" = failover_mid ]; then
 
-  ask "$PROMPT" 120 healthy | tee "$OUT/failover.jsonl"
+  # failover_mid takes over the FIRST request, whose plan was just checked:
+  # once the planner has measured B it may route the next one A→C→D→E and
+  # never touch B (seen 2026-09-25 — a kill that hit nothing and a PASS-shaped
+  # 200 with no takeover). The healthy reply is judged by the control instead.
+  if [ "$MODE" = failover ]; then
+    ask "$PROMPT" 120 healthy | tee "$OUT/failover.jsonl"
+  else
+    : > "$OUT/failover.jsonl"
+  fi
 
   # Kill B's worker the moment it starts computing: B's own processes' CPU time
   # rising above what they had at the start is the prompt pass arriving. That
@@ -454,15 +489,17 @@ if [ "$MODE" = failover ]; then
   # Control: B gone, so the plan itself is A→C→D — the shape the takeover
   # should have spliced in.
   kill "$PB"; PB=""
-  for _ in $(seq 1 30); do [ "$(peers)" -eq 2 ] && break; sleep 2; done
+  for _ in $(seq 1 30); do [ "$(peers)" -eq $((PEERS_EXPECTED - 1)) ] && break; sleep 2; done
   wait_plan control || exit 1
   ask "$PROMPT" 120 control >> "$OUT/failover.jsonl"
   printf '%s' "$PROMPT" > "$OUT/prompt.txt"
 
-  python3 - "$OUT/failover.jsonl" "$taken" "$retried" <<'PY'
+  python3 - "$OUT/failover.jsonl" "$taken" "$retried" "$MODE" <<'PY'
 import json, sys
 rows = [json.loads(l) for l in open(sys.argv[1])]
 taken, retried = int(sys.argv[2]), int(sys.argv[3])
+if sys.argv[4] == "failover_mid":
+    rows = [{"content": None, "status": "(no healthy arm) 200 ok"}] + rows
 h, t, c = (r.get("content") for r in rows[:3])
 print(f"failover: takeover logged {taken} time(s), router retries {retried}; statuses", [r["status"] for r in rows])
 same = t is not None and t == c
@@ -473,7 +510,7 @@ print(f"failover: takeover reply {'==' if same else '!='} A→C→D control; hea
 # show a broken takeover is the REFERENCE model ranking its tokens badly:
 #   examples/score_against_reference.py <model.gguf> $OUT/failover.jsonl <prompt>
 # (the takeover and the control should score alike).
-ok = taken >= 1 and retried == 0 and all(r["status"].endswith("200 ok") and r.get("content") for r in rows)
+ok = taken >= 1 and retried == 0 and all(r["status"].endswith("200 ok") and r.get("content") for r in rows if r.get("content") is not None or not r["status"].startswith("(no"))
 print("failover: PASS" if ok else "failover: FAIL")
 sys.exit(0 if ok else 1)
 PY

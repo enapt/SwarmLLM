@@ -195,8 +195,9 @@ Thailand↔Italy vs 6.76 at 18 ms); nothing routes on coordinates yet →
 WRONG tag silently — confirm `draft=false`, 7 `.minisig` (against 9 `.sha256` is
 correct) and `rsign verify` naming the version → `memory/release_gate.md`.
 
-⚠ **#90's cause is unknown** (dispatcher stall, twice); **#17's MIDDLE-segment
-composite has never run live** (the last-segment case has, `split_rig.sh failover`). ⚠ **`gossip_network_id` is NOT isolation** —
+⚠ **#90's cause is unknown** (no genuine recurrence since v0.3.204 — the two
+later firings were a PC freeze and a network outage). #17's composite has run live
+at the END and in the MIDDLE (`split_rig.sh failover`, `failover_mid`). ⚠ **`gossip_network_id` is NOT isolation** —
 only pool + `private_mode` + `private_mode_allow_lan = false` isolates (#352).
 
 ⛔ **Nothing may block compaction, so commit as you go** (#687).
