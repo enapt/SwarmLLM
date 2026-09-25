@@ -395,19 +395,27 @@ impl NetworkManager {
                 // Log result-send fallback failures with UUID context.
                 // We can't notify the upstream requester from here — their pipeline
                 // has its own timeout via their pending_tensor_outbound watchdog.
-                if let Some((result_uuid, _)) =
-                    self.pending_tensor_result_outbound.remove(&request_id)
-                {
-                    // Mirrors the rr-message branch below: this is the best-effort
-                    // result-fallback path, and the upstream pipeline's own
-                    // pending_tensor_outbound watchdog handles the user-visible
-                    // failure. warn! is enough; error! would page on every retry.
-                    tracing::warn!(
-                        %peer,
-                        inference_request_id = %result_uuid,
-                        %error,
-                        "Tensor result fallback OutboundFailure — upstream will timeout"
-                    );
+                if let Some(in_flight) = self.pending_tensor_result_outbound.remove(&request_id) {
+                    match in_flight.resend {
+                        // The coordinator can tell this from a stale copy:
+                        // send it once more rather than let it wait out its
+                        // segment deadline (#113).
+                        Some(payload) => self.resend_lost_result(
+                            peer,
+                            in_flight.request_id,
+                            payload,
+                            "OutboundFailure",
+                        ),
+                        // An older coordinator (or this was already the
+                        // resend): its own deadline handles the failure.
+                        // warn! is enough; error! would page on every retry.
+                        None => tracing::warn!(
+                            %peer,
+                            inference_request_id = %in_flight.request_id,
+                            %error,
+                            "Tensor result fallback OutboundFailure — upstream will timeout"
+                        ),
+                    }
                 }
                 if let Some(pending) = self.pending_rr_observability.remove(&request_id) {
                     let label = pending.label;

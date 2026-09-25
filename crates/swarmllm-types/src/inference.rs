@@ -695,6 +695,20 @@ pub struct LayerResult {
     /// #295. Travels as the `0x06` trailer; see [`ForwardRefusal`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refusal: Option<ForwardRefusal>,
+    /// The `index_pos` of the forward this result answers — which STEP of the
+    /// request it is. `None` from a build that predates it, and on every
+    /// result a coordinator manufactures for itself.
+    ///
+    /// A request's forwards to one segment all carry its id, so without this a
+    /// result can only be matched to a request, not to a step: a copy of step
+    /// N that arrives after the coordinator has moved on would answer step
+    /// N+1 with N's activations — a silently wrong reply. Within one attempt a
+    /// segment's `index_pos` only ever grows (prompt pass, then one decode or
+    /// verify step after another), so it names the step exactly. It is what
+    /// makes a serving node's RESEND of a result it could not deliver safe
+    /// (`docs/FUTURE_WORK.md` #113). Travels as the `0x07` trailer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answers_index_pos: Option<u32>,
 }
 
 /// Why a peer refused a forward before any of it ran.
@@ -778,7 +792,14 @@ impl LayerResult {
             // read as the peer having answered.
             locally_constructed: true,
             refusal: None,
+            answers_index_pos: None,
         }
+    }
+
+    /// Mark this result as the answer to the forward at `index_pos`.
+    pub fn answering(mut self, index_pos: u32) -> Self {
+        self.answers_index_pos = Some(index_pos);
+        self
     }
 
     /// This error, marked as a refusal the sender can act on. See

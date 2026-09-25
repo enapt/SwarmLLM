@@ -224,15 +224,32 @@ pub struct PendingLayerResult {
     /// Empty for every unchained request, which is every request unless
     /// `inference.pipeline_chaining` is on.
     pub chain_members: Vec<crate::types::NodeId>,
+    /// The `index_pos` of the forward this waiter was registered for — the STEP
+    /// it is waiting on. A result naming a different step
+    /// (`LayerResult::answers_index_pos`) is a stale copy and must not resolve
+    /// it; a result naming none (an older peer, or one we built ourselves) is
+    /// matched by request and node as before. `None` only where no single
+    /// forward stands behind the wait. `docs/FUTURE_WORK.md` #113.
+    pub expects_index_pos: Option<u32>,
 }
 
 impl PendingLayerResult {
-    /// May a `LayerResult` attributed to `sender` resolve this waiter?
+    /// May a `LayerResult` attributed to `sender`, answering the step at
+    /// `answers_index_pos`, resolve this waiter?
     ///
     /// An unauthenticated result (`sender: None`) is accepted only by a waiter
     /// that is not pinned to a node; pinning exists precisely so an
     /// unattributable payload cannot satisfy it.
-    pub fn accepts(&self, sender: Option<&crate::types::NodeId>) -> bool {
+    pub fn accepts(
+        &self,
+        sender: Option<&crate::types::NodeId>,
+        answers_index_pos: Option<u32>,
+    ) -> bool {
+        if let (Some(expected), Some(answered)) = (self.expects_index_pos, answers_index_pos) {
+            if expected != answered {
+                return false;
+            }
+        }
         match (&self.awaiting, sender) {
             (None, _) => true,
             (Some(expected), Some(actual)) => {
@@ -1561,9 +1578,10 @@ impl SharedState {
         result: crate::types::LayerResult,
     ) -> bool {
         let request_id = result.request_id;
+        let answers = result.answers_index_pos;
         match self
             .pending_layer_results
-            .remove_if(&request_id, |_, pending| pending.accepts(sender))
+            .remove_if(&request_id, |_, pending| pending.accepts(sender, answers))
         {
             Some((_, pending)) => {
                 if pending.tx.send(result).is_err() {
@@ -1579,13 +1597,25 @@ impl SharedState {
                 // waiter is present but pinned to a different node — the
                 // stale-forward case this pinning exists to reject.
                 if let Some(entry) = self.pending_layer_results.get(&request_id) {
-                    tracing::info!(
-                        %request_id,
-                        from = ?sender.map(|n| n.to_string()),
-                        expecting = ?entry.awaiting.as_ref().map(|n| n.to_string()),
-                        "DIAG: ignoring LayerResult from a node this request is no longer \
-                         waiting on — the pipeline has already failed over"
-                    );
+                    if entry.accepts(sender, None) {
+                        // The right node, the wrong step: a resent or late copy
+                        // of a step this request has moved past (#113).
+                        tracing::info!(
+                            %request_id,
+                            answers_step = ?answers,
+                            waiting_on_step = ?entry.expects_index_pos,
+                            "DIAG: ignoring a copy of an earlier step's result — this request \
+                             has moved on"
+                        );
+                    } else {
+                        tracing::info!(
+                            %request_id,
+                            from = ?sender.map(|n| n.to_string()),
+                            expecting = ?entry.awaiting.as_ref().map(|n| n.to_string()),
+                            "DIAG: ignoring LayerResult from a node this request is no longer \
+                             waiting on — the pipeline has already failed over"
+                        );
+                    }
                 }
                 false
             }
@@ -1617,7 +1647,9 @@ impl SharedState {
         let ids: Vec<uuid::Uuid> = self
             .pending_layer_results
             .iter()
-            .filter(|e| e.value().awaiting.is_some() && e.value().accepts(Some(node)))
+            // A synthetic failure names no step: it is about the NODE, which
+            // is gone, whatever step the waiter was on.
+            .filter(|e| e.value().awaiting.is_some() && e.value().accepts(Some(node), None))
             .map(|e| *e.key())
             .collect();
         ids.into_iter()
@@ -4640,6 +4672,7 @@ mod pending_layer_result_tests {
                 tx: tx1,
                 awaiting: Some(gone.clone()),
                 chain_members: Vec::new(),
+                expects_index_pos: None,
             },
         );
         let (tx2, mut rx_healthy) = tokio::sync::oneshot::channel();
@@ -4649,6 +4682,7 @@ mod pending_layer_result_tests {
                 tx: tx2,
                 awaiting: Some(healthy.clone()),
                 chain_members: Vec::new(),
+                expects_index_pos: None,
             },
         );
         let (tx3, mut rx_unpinned) = tokio::sync::oneshot::channel();
@@ -4658,6 +4692,7 @@ mod pending_layer_result_tests {
                 tx: tx3,
                 awaiting: None,
                 chain_members: Vec::new(),
+                expects_index_pos: None,
             },
         );
 
@@ -4702,6 +4737,7 @@ mod pending_layer_result_tests {
                 tx,
                 awaiting: Some(tail.clone()),
                 chain_members: vec![head, hop.clone(), tail],
+                expects_index_pos: None,
             },
         );
         assert_eq!(
@@ -4734,6 +4770,7 @@ mod pending_layer_result_tests {
                 tx,
                 awaiting: Some(node_b.clone()),
                 chain_members: Vec::new(),
+                expects_index_pos: None,
             },
         );
 
@@ -4777,6 +4814,7 @@ mod pending_layer_result_tests {
                 tx,
                 awaiting: Some(node.clone()),
                 chain_members: Vec::new(),
+                expects_index_pos: None,
             },
         );
 
@@ -4797,9 +4835,10 @@ mod pending_layer_result_tests {
             tx,
             awaiting: None,
             chain_members: Vec::new(),
+            expects_index_pos: None,
         };
-        assert!(pending.accepts(None));
-        assert!(pending.accepts(Some(&NodeId([1u8; 32]))));
+        assert!(pending.accepts(None, None));
+        assert!(pending.accepts(Some(&NodeId([1u8; 32])), None));
     }
 
     /// A pinned waiter is not satisfiable by an unattributable result —
@@ -4811,10 +4850,11 @@ mod pending_layer_result_tests {
             tx,
             awaiting: Some(NodeId([2u8; 32])),
             chain_members: Vec::new(),
+            expects_index_pos: None,
         };
-        assert!(!pending.accepts(None));
-        assert!(!pending.accepts(Some(&NodeId([3u8; 32]))));
-        assert!(pending.accepts(Some(&NodeId([2u8; 32]))));
+        assert!(!pending.accepts(None, None));
+        assert!(!pending.accepts(Some(&NodeId([3u8; 32])), None));
+        assert!(pending.accepts(Some(&NodeId([2u8; 32])), None));
     }
     /// A chained run is pinned to its tail, because that is who normally
     /// answers. But a hop part-way along that cannot reach its own successor
@@ -4831,26 +4871,87 @@ mod pending_layer_result_tests {
             tx,
             awaiting: Some(tail.clone()),
             chain_members: vec![head.clone(), middle.clone(), tail.clone()],
+            expects_index_pos: None,
         };
-        assert!(pending.accepts(Some(&tail)), "the tail answers normally");
         assert!(
-            pending.accepts(Some(&middle)),
+            pending.accepts(Some(&tail), None),
+            "the tail answers normally"
+        );
+        assert!(
+            pending.accepts(Some(&middle), None),
             "and a hop along the way can report a failure"
         );
         assert!(
-            pending.accepts(Some(&head)),
+            pending.accepts(Some(&head), None),
             "and so can the head, which `awaiting` no longer covers once a \
              chain is planned — leaving it out would keep the hang for a run \
              of two, which is the most common chain there is"
         );
         assert!(
-            !pending.accepts(Some(&NodeId([7u8; 32]))),
+            !pending.accepts(Some(&NodeId([7u8; 32])), None),
             "but a node with no part in this run still cannot"
         );
         assert!(
-            !pending.accepts(None),
+            !pending.accepts(None, None),
             "and an unattributable payload still cannot"
         );
+    }
+
+    /// A result names the step it answers, and a waiter refuses a copy of a
+    /// DIFFERENT step from the very node it is pinned to — the case a resend
+    /// creates (#113): the first copy arrived, only its acknowledgement was
+    /// lost, and the coordinator has moved on to the next step. Taking it would
+    /// answer step 41 with step 40's activations, silently. The stale copy
+    /// must leave the waiter in place for the real answer.
+    #[test]
+    fn a_copy_of_an_earlier_step_cannot_answer_the_current_one() {
+        let state = test_state();
+        let node = NodeId([4u8; 32]);
+        let rid = uuid::Uuid::new_v4();
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+        state.pending_layer_results.insert(
+            rid,
+            PendingLayerResult {
+                tx,
+                awaiting: Some(node.clone()),
+                chain_members: Vec::new(),
+                expects_index_pos: Some(41),
+            },
+        );
+        let mut stale = crate::types::LayerResult::error(rid, "x").answering(40);
+        stale.finish_reason = None;
+        stale.activations = vec![40];
+        assert!(
+            !state.resolve_pending_layer_result(Some(&node), stale),
+            "a copy of step 40 must not resolve the wait on step 41"
+        );
+        assert!(rx.try_recv().is_err(), "nothing delivered");
+        assert!(
+            state.pending_layer_results.contains_key(&rid),
+            "the waiter stays for the real answer"
+        );
+
+        // An older peer names no step: matched by request and node, as before.
+        let mut legacy = crate::types::LayerResult::error(rid, "x");
+        legacy.finish_reason = None;
+        legacy.activations = vec![0];
+        let mut unnamed = legacy.clone();
+        unnamed.answers_index_pos = None;
+        assert!(
+            PendingLayerResult {
+                tx: tokio::sync::oneshot::channel().0,
+                awaiting: Some(node.clone()),
+                chain_members: Vec::new(),
+                expects_index_pos: Some(41),
+            }
+            .accepts(Some(&node), unnamed.answers_index_pos),
+            "no step named is not a mismatch"
+        );
+
+        let mut current = legacy.answering(41);
+        current.activations = vec![41];
+        assert!(state.resolve_pending_layer_result(Some(&node), current));
+        assert_eq!(rx.try_recv().unwrap().activations, vec![41]);
     }
 
     /// A request that fails and is retried keeps its id, so routing reply

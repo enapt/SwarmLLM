@@ -13,6 +13,10 @@ pub(super) async fn handle_layer_forward(
     mut forward: crate::types::LayerForward,
 ) {
     let request_id = forward.request_id;
+    // The step this forward is. Every result it produces names it
+    // (`LayerResult::answers_index_pos`), failures included, so the coordinator
+    // can tell this answer from a late copy of an earlier one (#113).
+    let index_pos = forward.index_pos;
     let sender_peer_bytes = match forward.sender_peer_bytes {
         Some(ref bytes) => bytes.clone(),
         None => {
@@ -70,6 +74,7 @@ pub(super) async fn handle_layer_forward(
                 &network_tx,
                 &reply_to(),
                 request_id,
+                index_pos,
                 "No manifest for model",
             )
             .await;
@@ -88,6 +93,7 @@ pub(super) async fn handle_layer_forward(
             &network_tx,
             &reply_to(),
             request_id,
+            index_pos,
             "No local shards for model",
         )
         .await;
@@ -106,6 +112,7 @@ pub(super) async fn handle_layer_forward(
             &network_tx,
             &reply_to(),
             request_id,
+            index_pos,
             &format!(
                 "Invalid layer range [{layer_start}..{layer_end}) for model with {total_layers} layers"
             ),
@@ -147,7 +154,6 @@ pub(super) async fn handle_layer_forward(
     // The caller's sampling, to hand down a chain to the segment that samples.
     let sampling = forward.sampling.clone();
     let sequence_num = forward.sequence_num;
-    let index_pos = forward.index_pos;
 
     // Mark the model busy for as long as this segment is computing.
     //
@@ -172,6 +178,7 @@ pub(super) async fn handle_layer_forward(
                 &network_tx,
                 &reply_to(),
                 request_id,
+                index_pos,
                 &format!("Worker: {e}"),
             )
             .await;
@@ -289,6 +296,7 @@ pub(super) async fn handle_layer_forward(
     if is_last {
         seal_layer_result(&mut result, None);
     }
+    result.answers_index_pos = Some(index_pos);
 
     // Direct peer chaining: hand our output to the next segment instead of
     // returning it to the coordinator.
@@ -381,6 +389,7 @@ pub(super) async fn handle_layer_forward(
                             &network_tx,
                             &reply_to(),
                             request_id,
+                            index_pos,
                             "chained forward could not be sent",
                         )
                         .await;
@@ -408,6 +417,7 @@ pub(super) async fn handle_layer_forward(
                         &network_tx,
                         &reply_to(),
                         request_id,
+                        index_pos,
                         "chained run could not reach the next segment",
                     )
                     .await;
@@ -545,10 +555,12 @@ async fn send_error_result(
     network_tx: &mpsc::Sender<NetworkCommand>,
     reply_to: &ReplyTo,
     request_id: uuid::Uuid,
+    index_pos: u32,
     error: &str,
 ) {
     tracing::warn!(request_id = %request_id, error, "LayerForward processing failed");
-    let result = crate::types::LayerResult::error(request_id, sanitize_peer_facing_error(error));
+    let result = crate::types::LayerResult::error(request_id, sanitize_peer_facing_error(error))
+        .answering(index_pos);
     let _ = network_tx
         .send(NetworkCommand::SendTensorResult {
             target_peer_bytes: reply_to.0.clone(),

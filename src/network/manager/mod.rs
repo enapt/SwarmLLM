@@ -397,13 +397,18 @@ pub struct NetworkManager {
     /// deadline (56 s measured against a 10 s ACK deadline, 2026-08-21).
     /// Entries clear on the forward's ACK and in the stale sweep.
     hop_reply_to: HashMap<uuid::Uuid, crate::types::NodeId>,
-    /// Maps OutboundRequestId → inference UUID for tensor *results* sent via the
-    /// fallback request path (`send_tensor_result_as_request`). Used purely for
-    /// observability: on OutboundFailure we can log which result UUID failed
-    /// to reach the upstream requester. We cannot notify the upstream's
-    /// pipeline from here (it lives on the other peer) — it handles its own
-    /// timeout via its own `pending_tensor_outbound` watchdog.
-    pending_tensor_result_outbound: HashMap<OutboundRequestId, (uuid::Uuid, std::time::Instant)>,
+    /// Tensor *results* in flight to their coordinator, each sent as its own
+    /// request (`send_tensor_result_as_request`). On an OutboundFailure the
+    /// entry names the result that did not arrive — and, where the coordinator
+    /// can tell a resend from a stale copy (`features::RESULT_STEP`), carries
+    /// the encoded result so it is sent once more (`resend_lost_result`, #113)
+    /// instead of leaving the coordinator to wait out its segment deadline.
+    pending_tensor_result_outbound: HashMap<OutboundRequestId, tensors::ResultInFlight>,
+    /// Results `SWARMLLM_FAULT_RESULT` held back, resent on the sweep tick.
+    /// Always empty in production.
+    parked_result_resends: Vec<tensors::ParkedResultResend>,
+    /// `SWARMLLM_FAULT_RESULT=lose` has already lost its one result.
+    result_fault_fired: bool,
     /// Track outbound rr-message sends. Three uses:
     /// 1. Attribute OutboundFailure events to a label for logging.
     /// 2. Stale-sweep: an entry older than its ACK deadline indicates libp2p
@@ -788,6 +793,8 @@ impl NetworkManager {
             peer_goodput: HashMap::new(),
             hop_reply_to: HashMap::new(),
             pending_tensor_result_outbound: HashMap::new(),
+            parked_result_resends: Vec::new(),
+            result_fault_fired: false,
             pending_rr_observability: HashMap::new(),
             resent_stream_tokens: std::collections::HashSet::new(),
             faulted_stream_tokens: std::collections::HashSet::new(),
@@ -1484,10 +1491,14 @@ impl NetworkManager {
                 _ = stale_tensor_interval.tick() => {
                     last_arm = "stale_tensor_interval".into();
                     arm_started = std::time::Instant::now();
-                    // Also sweep the observability-only result-fallback map.
-                    self.pending_tensor_result_outbound.retain(|_id, (_, inserted)| {
-                        inserted.elapsed().as_secs() < MAX_TENSOR_FORWARD_SECS
+                    // Also sweep the results-in-flight map.
+                    self.pending_tensor_result_outbound.retain(|_id, in_flight| {
+                        in_flight.sent_at.elapsed().as_secs() < MAX_TENSOR_FORWARD_SECS
                     });
+                    // Fault injection only (#113's rig test): what it held back.
+                    if !self.parked_result_resends.is_empty() {
+                        self.resend_parked_results();
+                    }
                     // Streaming-tracked entries (`delivery_request_id = Some`)
                     // get the much shorter `RR_ACK_TIMEOUT_SECS` window so the
                     // remote-generate fast path fails fast on libp2p rr

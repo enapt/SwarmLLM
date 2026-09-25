@@ -125,6 +125,8 @@ impl PipelineExecutor {
                 &self.shared_state.pending_layer_results,
                 request_id,
                 Some(segment.node_id.clone()),
+                // The prompt pass, which `rebuild_forward` sends at position 0.
+                Some(0),
             )?;
 
             // Rebuildable for a resend after a repaired link
@@ -651,6 +653,7 @@ pub(super) async fn send_verify_batch(
         &shared_state.pending_layer_results,
         request_id,
         Some(segment.node_id.clone()),
+        Some(index_pos),
     )?;
 
     // Build the LayerForward. As of DSD Phase 4 (Item 12) the worker

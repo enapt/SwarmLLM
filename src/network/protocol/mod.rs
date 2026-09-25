@@ -1386,6 +1386,7 @@ mod tests {
             token_logprobs: Vec::new(),
             locally_constructed: false,
             refusal: None,
+            answers_index_pos: None,
         };
 
         let encoded = encode_layer_result(&result).unwrap();
@@ -1412,6 +1413,7 @@ mod tests {
             token_logprobs: Vec::new(),
             locally_constructed: false,
             refusal: None,
+            answers_index_pos: None,
         };
 
         let encoded = encode_layer_result(&result).unwrap();
@@ -1432,6 +1434,7 @@ mod tests {
             token_logprobs: Vec::new(),
             locally_constructed: false,
             refusal: None,
+            answers_index_pos: None,
         };
 
         let encoded = encode_layer_result(&result).unwrap();
@@ -1691,6 +1694,7 @@ mod tests {
             token_logprobs: Vec::new(),
             locally_constructed: false,
             refusal: None,
+            answers_index_pos: None,
         };
         let encoded = encode_layer_result(&result).unwrap();
         let decoded = decode_layer_result(&encoded).unwrap();
@@ -1713,6 +1717,7 @@ mod tests {
             token_logprobs: Vec::new(),
             locally_constructed: false,
             refusal: None,
+            answers_index_pos: None,
         };
         let encoded = encode_layer_result(&result).unwrap();
         let decoded = decode_layer_result(&encoded).unwrap();
@@ -1744,6 +1749,7 @@ mod tests {
             token_logprobs: entries.clone(),
             locally_constructed: false,
             refusal: None,
+            answers_index_pos: None,
         };
         let encoded = encode_layer_result(&result).unwrap();
         let decoded = decode_layer_result(&encoded).unwrap();
@@ -1812,6 +1818,39 @@ mod tests {
         assert_eq!(without.token_logprobs.len(), 1);
     }
 
+    /// The step a result answers (#113) crosses the wire, and a frame carrying
+    /// it is EXACTLY the frame without it plus five trailing bytes — which is
+    /// what makes it harmless to a coordinator that predates it: its decoder
+    /// returns after the last trailer it knows and never reads further, with or
+    /// without a refusal in front.
+    #[test]
+    fn the_step_a_result_answers_rides_after_everything_an_older_decoder_reads() {
+        let rid = uuid::Uuid::new_v4();
+        for refused in [false, true] {
+            let mut plain = LayerResult::error(rid, "x");
+            if refused {
+                plain = plain.with_refusal(swarmllm_types::ForwardRefusal::Undecryptable);
+            }
+            plain.activations = vec![1, 2, 3, 4];
+            let stepped = plain.clone().answering(0x01020304);
+            let without = encode_layer_result(&plain).unwrap();
+            let with = encode_layer_result(&stepped).unwrap();
+            assert_eq!(&with[..without.len()], &without[..], "refused={refused}");
+            assert_eq!(&with[without.len()..], &[0x07, 0x04, 0x03, 0x02, 0x01]);
+
+            let back = decode_layer_result(&with).unwrap();
+            assert_eq!(back.answers_index_pos, Some(0x01020304));
+            assert_eq!(back.refusal.is_some(), refused);
+            assert_eq!(back.activations, vec![1, 2, 3, 4]);
+            assert_eq!(
+                decode_layer_result(&without).unwrap().answers_index_pos,
+                None
+            );
+            // A truncated trailer is refused, not read as some other step.
+            assert!(decode_layer_result(&with[..with.len() - 1]).is_err());
+        }
+    }
+
     /// A reason a newer peer knows and this build does not is read as no
     /// reason — the behaviour before the trailer existed — not as a broken
     /// result that loses the error it carries.
@@ -1849,6 +1888,7 @@ mod tests {
             }],
             locally_constructed: false,
             refusal: None,
+            answers_index_pos: None,
         };
         let encoded = encode_layer_result(&result).unwrap();
         let decoded = decode_layer_result(&encoded).unwrap();

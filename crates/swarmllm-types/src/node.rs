@@ -153,6 +153,19 @@ pub mod features {
     /// forward.
     pub const FORWARD_SAMPLING: u64 = 1 << 11;
 
+    /// Matches a `LayerResult` to the STEP it answers (`answers_index_pos`,
+    /// the `0x07` result trailer), not only to the request — so a stale copy of
+    /// an earlier step is discarded rather than taken as the current one.
+    ///
+    /// What a serving node needs to know before it may RESEND a result it
+    /// could not deliver (#113): to a coordinator without this bit, a resend
+    /// that lands after the first copy was in fact received — only its
+    /// acknowledgement lost — would answer the NEXT step with this one's
+    /// activations. The trailer itself is harmless to an older coordinator (a
+    /// result is not sealed, and its decoder stops at the first marker it does
+    /// not know), so only the resend is gated.
+    pub const RESULT_STEP: u64 = 1 << 12;
+
     /// The full feature set THIS build implements. Advertised by every node.
     pub const ALL: u64 = RELAY
         | TENSOR_RELAY
@@ -165,7 +178,8 @@ pub mod features {
         | FORWARD_GENERATED_IDS
         | FORWARD_PRE_EMBEDDED
         | FORWARD_REFUSAL_REASON
-        | FORWARD_SAMPLING;
+        | FORWARD_SAMPLING
+        | RESULT_STEP;
 
     /// Does `advertised` include every bit in `needed`?
     pub fn supports(advertised: u64, needed: u64) -> bool {

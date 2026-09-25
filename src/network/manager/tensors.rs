@@ -67,7 +67,126 @@ fn fault_refuse_decrypt_now() -> bool {
     SEEN.fetch_add(1, Ordering::Relaxed) + 1 == n
 }
 
+/// `SWARMLLM_FAULT_RESULT=lose|duplicate` — the network-level test for a
+/// serving node resending a result it could not deliver (#113), the only way to
+/// lose one on demand without a lossy network. Inert unless set; read once.
+///
+/// - `lose`: the FIRST result this node would send to a coordinator that
+///   matches results to steps is not sent, and is resent on the next sweep
+///   tick exactly as an `OutboundFailure` would resend it.
+/// - `duplicate`: every such result is sent AND resent on the next tick — the
+///   dangerous case the step check exists for (the first copy arrived, only
+///   its acknowledgement was lost, and the coordinator has moved on).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ResultFault {
+    Lose,
+    Duplicate,
+}
+
+fn fault_result() -> Option<ResultFault> {
+    use std::sync::OnceLock;
+    static F: OnceLock<Option<ResultFault>> = OnceLock::new();
+    *F.get_or_init(
+        || match std::env::var("SWARMLLM_FAULT_RESULT").ok()?.trim() {
+            "lose" => Some(ResultFault::Lose),
+            "duplicate" => Some(ResultFault::Duplicate),
+            _ => None,
+        },
+    )
+}
+
+/// A computed result on its way to the coordinator, sent as its own request.
+pub(super) struct ResultInFlight {
+    pub(super) request_id: uuid::Uuid,
+    pub(super) sent_at: std::time::Instant,
+    /// The encoded result, kept only while ONE resend is still allowed — a
+    /// coordinator that matches results to steps (`features::RESULT_STEP`), and
+    /// this copy not itself a resend. Freed with the entry on the response.
+    pub(super) resend: Option<Vec<u8>>,
+}
+
+/// A result held back by `SWARMLLM_FAULT_RESULT`, resent on the sweep tick.
+pub(super) struct ParkedResultResend {
+    pub(super) peer: libp2p::PeerId,
+    pub(super) request_id: uuid::Uuid,
+    pub(super) payload: Vec<u8>,
+}
+
 impl NetworkManager {
+    /// Does the coordinator behind `peer` match a result to the step it
+    /// answers? Only then may a result it did not acknowledge be sent again —
+    /// to one that matches by request alone, a resend landing after the first
+    /// copy was in fact received would answer its NEXT step (#113).
+    fn coordinator_matches_result_steps(&self, peer: &libp2p::PeerId) -> bool {
+        self.peer_to_node
+            .get(peer)
+            .map(|n| n.clone())
+            .is_some_and(|node| {
+                self.shared_state
+                    .peer_advertises_feature(&node, crate::types::features::RESULT_STEP)
+            })
+    }
+
+    /// Send, once more, a computed result whose delivery failed (#113).
+    ///
+    /// The serving node KNOWS when a result did not arrive — its send fails —
+    /// and the coordinator does not: it waits out the whole segment deadline,
+    /// minutes on a prompt pass, before failing over. The peer is often still
+    /// connected over another link, so one resend delivers it. Safe only
+    /// because the result names its step and the coordinator refuses a copy
+    /// of a step it has moved past; the caller checks it may. Never repeated:
+    /// the resend is tracked with nothing to resend.
+    pub(super) fn resend_lost_result(
+        &mut self,
+        peer: libp2p::PeerId,
+        request_id: uuid::Uuid,
+        payload: Vec<u8>,
+        why: &'static str,
+    ) {
+        if !self.swarm.is_connected(&peer) {
+            tracing::warn!(
+                %peer,
+                inference_request_id = %request_id,
+                why,
+                "A computed segment result did not reach the coordinator and it is no longer \
+                 connected — it will time out and fail over"
+            );
+            return;
+        }
+        tracing::info!(
+            %peer,
+            inference_request_id = %request_id,
+            why,
+            payload_len = payload.len(),
+            "Resending a computed segment result the coordinator may not have received"
+        );
+        let outbound_id = self
+            .swarm
+            .behaviour_mut()
+            .request_response
+            .send_request(&peer, SwarmRequest::TensorPayload(payload));
+        self.pending_tensor_result_outbound.insert(
+            outbound_id,
+            ResultInFlight {
+                request_id,
+                sent_at: std::time::Instant::now(),
+                resend: None,
+            },
+        );
+    }
+
+    /// Resend what `SWARMLLM_FAULT_RESULT` parked. Called on the sweep tick.
+    pub(super) fn resend_parked_results(&mut self) {
+        for parked in std::mem::take(&mut self.parked_result_resends) {
+            self.resend_lost_result(
+                parked.peer,
+                parked.request_id,
+                parked.payload,
+                "fault injection",
+            );
+        }
+    }
+
     /// Send a tensor forward to a specific peer via the unified binary tensor protocol.
     /// Uses WIRE_TAG_TENSOR (0x01) framing. Encrypts activations when an encryption
     /// session exists, falls back to plaintext.
@@ -479,15 +598,52 @@ impl NetworkManager {
         match protocol::encode_layer_result(result) {
             Ok(payload) => {
                 let payload_len = payload.len();
+                // Keep a copy for ONE resend where that is safe (#113).
+                let may_resend = result.answers_index_pos.is_some()
+                    && self.coordinator_matches_result_steps(peer_id);
+                if may_resend {
+                    match fault_result() {
+                        Some(ResultFault::Lose) if !self.result_fault_fired => {
+                            self.result_fault_fired = true;
+                            tracing::warn!(
+                                %peer_id,
+                                request_id = %result.request_id,
+                                "FAULT INJECTION: not sending this result (SWARMLLM_FAULT_RESULT=lose)"
+                            );
+                            self.parked_result_resends.push(ParkedResultResend {
+                                peer: *peer_id,
+                                request_id: result.request_id,
+                                payload,
+                            });
+                            return;
+                        }
+                        Some(ResultFault::Duplicate) => {
+                            self.parked_result_resends.push(ParkedResultResend {
+                                peer: *peer_id,
+                                request_id: result.request_id,
+                                payload: payload.clone(),
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+                let resend = may_resend.then(|| payload.clone());
                 let req = SwarmRequest::TensorPayload(payload);
                 let outbound_id = self
                     .swarm
                     .behaviour_mut()
                     .request_response
                     .send_request(peer_id, req);
-                // Track for observability so OutboundFailure can log the result UUID.
-                self.pending_tensor_result_outbound
-                    .insert(outbound_id, (result.request_id, std::time::Instant::now()));
+                // Tracked so an OutboundFailure can name the result — and
+                // resend it, where the coordinator can tell it from a stale copy.
+                self.pending_tensor_result_outbound.insert(
+                    outbound_id,
+                    ResultInFlight {
+                        request_id: result.request_id,
+                        sent_at: std::time::Instant::now(),
+                        resend,
+                    },
+                );
                 tracing::info!(
                     %peer_id,
                     request_id = %result.request_id,

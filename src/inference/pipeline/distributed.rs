@@ -1035,6 +1035,7 @@ impl PipelineExecutor {
                         token_logprobs: Vec::new(),
                         locally_constructed: false,
                         refusal: None,
+                        answers_index_pos: None,
                     });
                 } else {
                     // Intermediate segment: strip the 0x00 tag and continue
@@ -1336,6 +1337,9 @@ impl PipelineExecutor {
                         chain_members: std::iter::once(segment.node_id.clone())
                             .chain(chain.iter().map(|h| h.node_id.clone()))
                             .collect(),
+                        // Every hop of a chain forwards this same position, so
+                        // the tail's answer names it too.
+                        expects_index_pos: Some(forward.index_pos),
                     },
                 );
                 // NOTE: the dsd.rs / speculative.rs PendingLayerResultGuard
@@ -2459,6 +2463,9 @@ impl PipelineExecutor {
                     // discarding the standby's real result.
                     awaiting: Some(backup.node_id.clone()),
                     chain_members: Vec::new(),
+                    // The position the standby is SENT (0 for a replay), not
+                    // the step the pipeline is on — that is what it answers.
+                    expects_index_pos: Some(replay_index_pos),
                 },
             );
             let mut pending_guard = super::PendingLayerResultGuard::new(

@@ -816,6 +816,7 @@ async fn resend_after_link_repair(
     }
     // The refusal consumed the caller's waiter. Pinned to the same node, as
     // the caller's was: this forward is for it and for nobody else.
+    let forward = rebuild();
     let (tx, rx) = tokio::sync::oneshot::channel();
     state.pending_layer_results.insert(
         request_id,
@@ -823,12 +824,13 @@ async fn resend_after_link_repair(
             tx,
             awaiting: Some(node_id.clone()),
             chain_members: Vec::new(),
+            expects_index_pos: Some(forward.index_pos),
         },
     );
     if network_tx
         .send(crate::types::NetworkCommand::SendTensor {
             target_peer_bytes: target_peer_bytes.to_vec(),
-            forward: rebuild(),
+            forward,
         })
         .await
         .is_err()

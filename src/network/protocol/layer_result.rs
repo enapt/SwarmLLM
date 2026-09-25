@@ -121,6 +121,15 @@ pub fn encode_layer_result(result: &LayerResult) -> Result<Vec<u8>, SwarmError> 
         buf.push(refusal.wire_code());
     }
 
+    // Optional: the step this result answers (marker 0x07 + index_pos u32 LE),
+    // see `LayerResult::answers_index_pos`. After 0x06 for the same reason 0x06
+    // is after 0x05: an older decoder stops at the first marker it does not
+    // know, so this is skipped whole by it and hides nothing behind it.
+    if let Some(index_pos) = result.answers_index_pos {
+        buf.push(0x07);
+        buf.extend_from_slice(&index_pos.to_le_bytes());
+    }
+
     Ok(buf)
 }
 
@@ -384,6 +393,20 @@ pub fn decode_layer_result(data: &[u8]) -> Result<LayerResult, SwarmError> {
         refusal = crate::types::ForwardRefusal::from_wire_code(code);
         pos += 1;
     }
+
+    // Optional: the step this result answers (marker 0x07 + index_pos u32 LE).
+    let mut answers_index_pos = None;
+    if pos < data.len() && data[pos] == 0x07 {
+        pos += 1;
+        let Some(bytes) = data.get(pos..pos + 4) else {
+            return Err(SwarmError::Network("step trailer truncated".into()));
+        };
+        answers_index_pos =
+            Some(u32::from_le_bytes(bytes.try_into().map_err(|_| {
+                SwarmError::Network("Invalid step trailer".into())
+            })?));
+        pos += 4;
+    }
     // Suppress unused-assignment warning on the last pos += that has no
     // subsequent reader.
     let _ = pos;
@@ -403,6 +426,7 @@ pub fn decode_layer_result(data: &[u8]) -> Result<LayerResult, SwarmError> {
         // which codec carried the result.
         locally_constructed: false,
         refusal,
+        answers_index_pos,
     })
 }
 

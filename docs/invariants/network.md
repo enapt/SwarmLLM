@@ -2142,3 +2142,56 @@ writer means no concurrent pair; reading at write time means whichever update
 came last is what the next write reads. With no runtime (a synchronous caller)
 it still writes inline — there is no loop to stall. The same shape as the
 nickname persist on 2026-09-24.
+
+## A result names the step it answers (2026-09-25, #113)
+
+**The failure.** A serving node computed a 28.8 MB prompt-pass result and its send
+failed (`Tensor result fallback OutboundFailure — upstream will timeout`, field
+report 3 of 2026-09-25, then quinn#2809's connection killer). The node KNEW; the
+coordinator did not, and waited out its segment deadline before failing over.
+The peer was still connected over another link, so one resend would have
+delivered it.
+
+**Why a plain resend was unsafe.** Every forward of a request to one segment
+carries the same request id and the waiter was keyed by id and pinned node only.
+If the first copy HAD arrived and only its acknowledgement was lost, the
+coordinator would already be waiting on the next step — and the resend would
+resolve that wait with the previous step's activations. No error; a wrong reply.
+This is the at-least-once delivery problem, and the fix is the one idempotent
+producers use (Kafka's producer id + sequence number): the receiver matches on
+(request, step) and drops a copy of a step it has passed.
+
+**What the step is.** `index_pos`, not `sequence_num`: `sequence_num` is 0 on the
+prompt pass and 1 on every forward after it (`work_kind_for`), while within one
+attempt a segment's `index_pos` only grows — prompt pass at 0, then each decode or
+verify step at its position. A KV-truncate forward is fire-and-forget (no waiter).
+A router retry restarts at 0 with the same id, but a copy from the abandoned
+attempt at a matching position carries the same computation. The failover replay
+is sent at 0 and its waiter expects 0.
+
+**Wire.** `0x07 | index_pos u32 LE` after `0x06`, set on every result a forward
+produces, failures included. Harmless to an older coordinator without a gate: a
+result is not sealed, and its decoder returns after the last trailer it knows and
+never reads further — pinned by
+`the_step_a_result_answers_rides_after_everything_an_older_decoder_reads` (frame
+with = frame without + 5 bytes). The RESEND is gated
+(`features::RESULT_STEP`), because only a coordinator that checks the step may be
+sent a copy.
+
+**Verified on the rig** (`split_rig.sh repeat`, llama-3.2-3b, A holds shard 0 and
+coordinates, B the rest; B wrapped with `SWARMLLM_FAULT_RESULT`, which parks a
+result and resends it on the 10 s sweep through the same `resend_lost_result` an
+`OutboundFailure` calls):
+
+| arm | B resends | A refused as an earlier step | router retries | reply vs control |
+|---|---|---|---|---|
+| control | 0 | 0 | 0 | — |
+| `duplicate` (every result also resent ~10 s late) | 71 | 70 | 0 | byte-identical |
+| `lose` (first eligible result withheld) | 1 (2 s later) | 0 | 0 | byte-identical |
+
+Mixed versions through `split_rig.sh split`: a v0.3.206 coordinator with this
+server, and this coordinator with a v0.3.206 server, both 200 across two segments.
+
+**Limit.** The serving node arms a resend only once the coordinator's capability
+gossip has arrived, so the first results of a pair that just met are unprotected
+— the same limit as every feature gate in this protocol.

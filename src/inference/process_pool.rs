@@ -5172,6 +5172,7 @@ impl ModelProcessPool {
                                 token_logprobs: r.logprobs.unwrap_or_default(),
                                 locally_constructed: false,
                                 refusal: None,
+                                answers_index_pos: None,
                             });
                         }
                         WorkerMsg::Error {
@@ -5357,6 +5358,7 @@ impl ModelProcessPool {
                             token_logprobs: r.logprobs.unwrap_or_default(),
                             locally_constructed: false,
                             refusal: None,
+                            answers_index_pos: None,
                         });
                         break;
                     }

@@ -154,10 +154,15 @@ impl<'a> PendingLayerResultGuard<'a> {
 /// late notification about a DIFFERENT node's forward for the same
 /// `request_id` cannot resolve it. Pass `Some(node)` whenever the target is
 /// known; `None` accepts a result from any sender.
+///
+/// `expects_index_pos` is the `index_pos` of the forward about to be sent: a
+/// result naming a different step is a stale copy and cannot resolve this
+/// waiter (#113). Required, so a new caller has to say which step it waits on.
 pub(super) fn register_pending_layer_result(
     map: &dashmap::DashMap<uuid::Uuid, crate::daemon::state::PendingLayerResult>,
     request_id: uuid::Uuid,
     awaiting: Option<crate::types::NodeId>,
+    expects_index_pos: Option<u32>,
 ) -> Result<
     (
         tokio::sync::oneshot::Receiver<crate::types::LayerResult>,
@@ -179,6 +184,7 @@ pub(super) fn register_pending_layer_result(
             // This helper serves the speculative and DSD paths, which never
             // chain — they build their own forwards and drive them per token.
             chain_members: Vec::new(),
+            expects_index_pos,
         },
     );
     let guard = PendingLayerResultGuard::new(map, request_id);
@@ -398,6 +404,7 @@ pub(super) async fn forward_verify_through_segments(
                 &shared_state.pending_layer_results,
                 request_id,
                 Some(segment.node_id.clone()),
+                Some(index_pos),
             )?;
 
             if network_tx
@@ -2835,6 +2842,7 @@ mod peer_error_recovery_tests {
             token_logprobs: Vec::new(),
             locally_constructed: false,
             refusal: None,
+            answers_index_pos: None,
         }
     }
 
