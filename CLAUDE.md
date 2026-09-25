@@ -161,7 +161,9 @@ shorter context is skipped or failed over from** (#111, `split_rig.sh context`);
 stay quantized** and `qwen3moe`/`qwen2moe` load (#114 — tiny models vs llama.cpp only; no real
 30B-A3B run yet); **LoRA applied again** (#110, now checked on CUDA too); #17's last-segment
 failover; per-version Trickle (#91); #108a/b. Gemma 4 scoped, not built (#115).
-**`main` is ahead of it** — CHANGELOG `[Unreleased]` (#104, #111 whole-model, #113 resend, MoE routing). **Next** → `memory/next_up.md`.
+**`main` is ahead of it** — CHANGELOG `[Unreleased]` (#104, #111 whole-model, #113 resend, MoE routing,
+Llama 4 fixed vs llama.cpp; DeepSeek-2 / Qwen 3.5 / StarCoder2 REFUSED — no real file loaded, #116-118).
+⚠ **A family in `supported_list` is a claim: check it against a REAL file's header** (gotcha #715). **Next** → `memory/next_up.md`.
 
 ⚠ **Behaviour gate = `reply_ab.sh` + `split_rig.sh`** (incl. `failover`), not
 conformance alone — `family_conformance.sh` pins `gpu_layers = 0` and never
