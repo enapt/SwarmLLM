@@ -488,7 +488,11 @@
     var fresh = new Set();
     var models = App.data.cache.models || [];
     models.forEach(function (m) {
-      var src = m && m.hf_source;
+      // `local` — this computer holds at least one part. The list also carries
+      // every model the SWARM holds, with its source, so without this a model
+      // a peer downloaded read "★ You host this" beside a disabled button on a
+      // node holding nothing — hiding exactly the models it could chat with.
+      var src = m && m.local && m.hf_source;
       if (src && src.repo_id) fresh.add(String(src.repo_id).toLowerCase());
     });
     _localHfRepos = fresh;
