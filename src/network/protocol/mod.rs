@@ -1386,7 +1386,7 @@ mod tests {
             token_logprobs: Vec::new(),
             locally_constructed: false,
             refusal: None,
-            answers_index_pos: None,
+            answers_step: None,
         };
 
         let encoded = encode_layer_result(&result).unwrap();
@@ -1413,7 +1413,7 @@ mod tests {
             token_logprobs: Vec::new(),
             locally_constructed: false,
             refusal: None,
-            answers_index_pos: None,
+            answers_step: None,
         };
 
         let encoded = encode_layer_result(&result).unwrap();
@@ -1434,7 +1434,7 @@ mod tests {
             token_logprobs: Vec::new(),
             locally_constructed: false,
             refusal: None,
-            answers_index_pos: None,
+            answers_step: None,
         };
 
         let encoded = encode_layer_result(&result).unwrap();
@@ -1694,7 +1694,7 @@ mod tests {
             token_logprobs: Vec::new(),
             locally_constructed: false,
             refusal: None,
-            answers_index_pos: None,
+            answers_step: None,
         };
         let encoded = encode_layer_result(&result).unwrap();
         let decoded = decode_layer_result(&encoded).unwrap();
@@ -1717,7 +1717,7 @@ mod tests {
             token_logprobs: Vec::new(),
             locally_constructed: false,
             refusal: None,
-            answers_index_pos: None,
+            answers_step: None,
         };
         let encoded = encode_layer_result(&result).unwrap();
         let decoded = decode_layer_result(&encoded).unwrap();
@@ -1749,7 +1749,7 @@ mod tests {
             token_logprobs: entries.clone(),
             locally_constructed: false,
             refusal: None,
-            answers_index_pos: None,
+            answers_step: None,
         };
         let encoded = encode_layer_result(&result).unwrap();
         let decoded = decode_layer_result(&encoded).unwrap();
@@ -1832,20 +1832,26 @@ mod tests {
                 plain = plain.with_refusal(swarmllm_types::ForwardRefusal::Undecryptable);
             }
             plain.activations = vec![1, 2, 3, 4];
-            let stepped = plain.clone().answering(0x01020304);
+            let stepped = plain.clone().answering(0x01020304, (3, 9));
             let without = encode_layer_result(&plain).unwrap();
             let with = encode_layer_result(&stepped).unwrap();
             assert_eq!(&with[..without.len()], &without[..], "refused={refused}");
-            assert_eq!(&with[without.len()..], &[0x07, 0x04, 0x03, 0x02, 0x01]);
+            assert_eq!(
+                &with[without.len()..],
+                &[0x07, 0x04, 0x03, 0x02, 0x01, 3, 0, 0, 0, 9, 0, 0, 0]
+            );
 
             let back = decode_layer_result(&with).unwrap();
-            assert_eq!(back.answers_index_pos, Some(0x01020304));
+            assert_eq!(
+                back.answers_step,
+                Some(crate::types::ResultStep {
+                    index_pos: 0x01020304,
+                    layer_range: (3, 9)
+                })
+            );
             assert_eq!(back.refusal.is_some(), refused);
             assert_eq!(back.activations, vec![1, 2, 3, 4]);
-            assert_eq!(
-                decode_layer_result(&without).unwrap().answers_index_pos,
-                None
-            );
+            assert_eq!(decode_layer_result(&without).unwrap().answers_step, None);
             // A truncated trailer is refused, not read as some other step.
             assert!(decode_layer_result(&with[..with.len() - 1]).is_err());
         }
@@ -1888,7 +1894,7 @@ mod tests {
             }],
             locally_constructed: false,
             refusal: None,
-            answers_index_pos: None,
+            answers_step: None,
         };
         let encoded = encode_layer_result(&result).unwrap();
         let decoded = decode_layer_result(&encoded).unwrap();

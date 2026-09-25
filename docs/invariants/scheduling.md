@@ -2228,7 +2228,7 @@ replaced by a frozen literal of the two released wordings (v0.3.183+).
 - **Reported** as the original refusal when the re-plan fails too, unless the
   re-plan's own error is a 4xx — this node's worker refusing at ITS limit, whose
   advice to raise the setting here is then correct
-  (`router::report_after_a_context_replan`, the `memory_shortfall` rule's twin).
+  (`router::report_after_a_replan` — ONE "first informative refusal" slot shared with the local memory shortfall, so the two cannot stack).
 
 **Still not done, deliberately:** `delegation_target` does not read the
 advertised ceiling. A delegate refuses in milliseconds (tokenize, compare) and

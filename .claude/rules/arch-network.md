@@ -247,11 +247,12 @@ retired the chain-specific addressing branches from earlier the same day
 
 A request's forwards to one segment share its id, so a result matched by id alone
 cannot tell step N from N+1 — a late or resent copy would answer the NEXT step,
-silently. `LayerResult::answers_index_pos` (the `0x07` trailer, always LAST) names
-the step; `PendingLayerResult::expects_index_pos` refuses any other. **Every
-registration sets it from the forward it actually sends** (a failover replay waits
-on 0). `index_pos` is the step because positions only grow within an attempt —
-`sequence_num` is a prompt-pass flag, not a counter. Only then may a serving node
+silently. `LayerResult::answers_step` (the `0x07` trailer, always LAST) names the
+forward — position AND layer range, because one node can serve two segments at
+one position; `PendingLayerResult::expects_step` (`ExpectedStep`) refuses any
+other. **Every registration sets it from the forward it actually sends** (every
+hop's range for a chain; a failover replay waits on 0). `sequence_num` is a
+prompt-pass flag, not a counter. Only then may a serving node
 resend a result on `OutboundFailure` (`resend_lost_result`, gated on the
 coordinator's `features::RESULT_STEP`, once). Test with `SWARMLLM_FAULT_RESULT=lose|duplicate`.
 

@@ -599,8 +599,8 @@ impl NetworkManager {
             Ok(payload) => {
                 let payload_len = payload.len();
                 // Keep a copy for ONE resend where that is safe (#113).
-                let may_resend = result.answers_index_pos.is_some()
-                    && self.coordinator_matches_result_steps(peer_id);
+                let may_resend =
+                    result.answers_step.is_some() && self.coordinator_matches_result_steps(peer_id);
                 if may_resend {
                     match fault_result() {
                         Some(ResultFault::Lose) if !self.result_fault_fired => {

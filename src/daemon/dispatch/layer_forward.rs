@@ -13,10 +13,15 @@ pub(super) async fn handle_layer_forward(
     mut forward: crate::types::LayerForward,
 ) {
     let request_id = forward.request_id;
-    // The step this forward is. Every result it produces names it
-    // (`LayerResult::answers_index_pos`), failures included, so the coordinator
-    // can tell this answer from a late copy of an earlier one (#113).
+    // The forward this is — position and layers. Every result it produces
+    // names it (`LayerResult::answers_step`), failures included, so the
+    // coordinator can tell this answer from a late copy of an earlier one, or
+    // from this node's answer for another segment at the same position (#113).
     let index_pos = forward.index_pos;
+    let answering = crate::types::ResultStep {
+        index_pos,
+        layer_range: forward.layer_range,
+    };
     let sender_peer_bytes = match forward.sender_peer_bytes {
         Some(ref bytes) => bytes.clone(),
         None => {
@@ -74,7 +79,7 @@ pub(super) async fn handle_layer_forward(
                 &network_tx,
                 &reply_to(),
                 request_id,
-                index_pos,
+                answering,
                 "No manifest for model",
             )
             .await;
@@ -93,7 +98,7 @@ pub(super) async fn handle_layer_forward(
             &network_tx,
             &reply_to(),
             request_id,
-            index_pos,
+            answering,
             "No local shards for model",
         )
         .await;
@@ -112,7 +117,7 @@ pub(super) async fn handle_layer_forward(
             &network_tx,
             &reply_to(),
             request_id,
-            index_pos,
+            answering,
             &format!(
                 "Invalid layer range [{layer_start}..{layer_end}) for model with {total_layers} layers"
             ),
@@ -178,7 +183,7 @@ pub(super) async fn handle_layer_forward(
                 &network_tx,
                 &reply_to(),
                 request_id,
-                index_pos,
+                answering,
                 &format!("Worker: {e}"),
             )
             .await;
@@ -296,7 +301,7 @@ pub(super) async fn handle_layer_forward(
     if is_last {
         seal_layer_result(&mut result, None);
     }
-    result.answers_index_pos = Some(index_pos);
+    result.answers_step = Some(answering);
 
     // Direct peer chaining: hand our output to the next segment instead of
     // returning it to the coordinator.
@@ -389,7 +394,7 @@ pub(super) async fn handle_layer_forward(
                             &network_tx,
                             &reply_to(),
                             request_id,
-                            index_pos,
+                            answering,
                             "chained forward could not be sent",
                         )
                         .await;
@@ -417,7 +422,7 @@ pub(super) async fn handle_layer_forward(
                         &network_tx,
                         &reply_to(),
                         request_id,
-                        index_pos,
+                        answering,
                         "chained run could not reach the next segment",
                     )
                     .await;
@@ -447,19 +452,32 @@ pub(super) async fn handle_layer_forward(
     // across disconnects, so the ungated one hands back targets the send path
     // can only drop (gotcha #220). Not connected means fall back to the sender,
     // which is correct for every unchained forward and no worse than before.
-    //
-    // Timed, because a computed result once sat 39 s between the worker
-    // finishing and the network manager sending it, with nothing in the log to
-    // say where (FUTURE_WORK #113). The two candidates are a full command queue
-    // (this `send` waits) and a queue that accepts at once but is drained late
-    // (the depth is high); the line below names which.
+    send_result_timed(&network_tx, &reply_to(), result).await;
+}
+
+/// Hand a result to the network manager — the ONE place this handler does it,
+/// success and failure alike.
+///
+/// Timed, because a computed result once sat 39 s between the worker finishing
+/// and the network manager sending it, with nothing in the log to say where
+/// (FUTURE_WORK #113). The two candidates are a full command queue (this `send`
+/// waits) and a queue that accepts at once but is drained late (the depth is
+/// high); the line below names which. The error replies share it: a congested
+/// queue is exactly when the early failures fire, and a diagnostic on one path
+/// reads the other as clean (review, 2026-09-25).
+async fn send_result_timed(
+    network_tx: &mpsc::Sender<NetworkCommand>,
+    reply_to: &ReplyTo,
+    result: crate::types::LayerResult,
+) {
+    let request_id = result.request_id;
     let queued_ahead = network_tx
         .max_capacity()
         .saturating_sub(network_tx.capacity());
     let send_started = std::time::Instant::now();
     if let Err(e) = network_tx
         .send(NetworkCommand::SendTensorResult {
-            target_peer_bytes: reply_to().0,
+            target_peer_bytes: reply_to.0.clone(),
             result,
         })
         .await
@@ -555,18 +573,13 @@ async fn send_error_result(
     network_tx: &mpsc::Sender<NetworkCommand>,
     reply_to: &ReplyTo,
     request_id: uuid::Uuid,
-    index_pos: u32,
+    answering: crate::types::ResultStep,
     error: &str,
 ) {
     tracing::warn!(request_id = %request_id, error, "LayerForward processing failed");
     let result = crate::types::LayerResult::error(request_id, sanitize_peer_facing_error(error))
-        .answering(index_pos);
-    let _ = network_tx
-        .send(NetworkCommand::SendTensorResult {
-            target_peer_bytes: reply_to.0.clone(),
-            result,
-        })
-        .await;
+        .answering(answering.index_pos, answering.layer_range);
+    send_result_timed(network_tx, reply_to, result).await;
 }
 
 /// What a peer is allowed to be told about a failure here.

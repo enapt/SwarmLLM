@@ -126,7 +126,10 @@ impl PipelineExecutor {
                 request_id,
                 Some(segment.node_id.clone()),
                 // The prompt pass, which `rebuild_forward` sends at position 0.
-                Some(0),
+                Some(crate::daemon::state::ExpectedStep::one(
+                    0,
+                    segment.layer_range,
+                )),
             )?;
 
             // Rebuildable for a resend after a repaired link
@@ -653,7 +656,10 @@ pub(super) async fn send_verify_batch(
         &shared_state.pending_layer_results,
         request_id,
         Some(segment.node_id.clone()),
-        Some(index_pos),
+        Some(crate::daemon::state::ExpectedStep::one(
+            index_pos,
+            segment.layer_range,
+        )),
     )?;
 
     // Build the LayerForward. As of DSD Phase 4 (Item 12) the worker

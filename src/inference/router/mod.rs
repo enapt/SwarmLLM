@@ -190,15 +190,19 @@ fn peer_serves_shorter_context(err: &SwarmError) -> bool {
     matches!(err, SwarmError::LongerThanPeerServes(_))
 }
 
-/// What the caller hears when a re-plan after a peer's context refusal failed
-/// too: the RE-PLAN's own answer when it is one the caller can act on (a 4xx —
-/// typically this node's worker refusing at ITS limit, whose advice to raise
-/// `max_seq_len_override` here is then correct), otherwise the original
-/// refusal. A "no route" 503 from the re-plan is a true statement about a search
-/// the caller never asked for; the 400 names the limit that stopped them. The
-/// `memory_shortfall` rule above, for the same reason.
-fn report_after_a_context_replan(first: SwarmError, later: SwarmError) -> SwarmError {
-    if crate::error::classify_error(&later).0.is_client_error() {
+/// What the caller hears when a re-plan after an informative refusal failed
+/// too — `first` is our own memory shortfall or a peer's context limit.
+///
+/// A peer's context refusal yields to the re-plan's own answer when that is
+/// one the caller can act on (a 4xx — typically this node's worker refusing at
+/// ITS limit, whose advice to raise `max_seq_len_override` here is then
+/// correct). Otherwise, and always for a memory shortfall, the original
+/// refusal: a "no route" 503 from the re-plan is a true statement about a
+/// search the caller never asked for, while the refusal names what stopped them.
+fn report_after_a_replan(first: SwarmError, later: SwarmError) -> SwarmError {
+    if peer_serves_shorter_context(&first)
+        && crate::error::classify_error(&later).0.is_client_error()
+    {
         later
     } else {
         first
@@ -1263,15 +1267,16 @@ impl InferenceRouter {
                 attempt_took = started.elapsed();
                 out
             };
-            // Our own loader's memory shortfall, kept from the FIRST time it is
-            // seen so a re-plan that finds nothing better can report the number
-            // the user can act on — it names the model's footprint, the budget
-            // and what to raise — rather than the re-plan's "no route", which is
-            // a true statement about a search the user never asked for and can
-            // do nothing with.
-            let mut memory_shortfall: Option<SwarmError> = None;
-            // A peer's context refusal, kept for the same reason (#111).
-            let mut context_refusal: Option<SwarmError> = None;
+            // The FIRST refusal that told the caller something it can act on —
+            // our own loader's memory shortfall (it names the footprint, the
+            // budget and what to raise) or a peer's context limit (#111) — kept
+            // so a re-plan that finds nothing better reports THAT rather than
+            // its own "no route", a true statement about a search the user never
+            // asked for. ONE slot, not one per kind: two slots each overwrote
+            // the final answer in turn, so a request refused for memory, then
+            // for length, then failing a third way reported the second refusal
+            // whatever really stopped it (review of #111, 2026-09-25).
+            let mut first_refusal: Option<SwarmError> = None;
             let mut replans = 0;
             while replans < MAX_REPLANS {
                 // A peer reporting it cannot serve is retryable, but only when a
@@ -1325,13 +1330,11 @@ impl InferenceRouter {
                 // state when the request ends.
                 if local_memory {
                     shared_state.note_local_memory_refusal(request.id);
-                    if memory_shortfall.is_none() {
-                        memory_shortfall = output.err();
-                    }
-                } else if context_refusal.is_none()
-                    && output.as_ref().is_err_and(peer_serves_shorter_context)
+                }
+                if first_refusal.is_none()
+                    && (local_memory || output.as_ref().is_err_and(peer_serves_shorter_context))
                 {
-                    context_refusal = output.err();
+                    first_refusal = output.err();
                 }
                 replans += 1;
                 let started = std::time::Instant::now();
@@ -1347,27 +1350,19 @@ impl InferenceRouter {
                 .await;
                 attempt_took = started.elapsed();
             }
-            // Nowhere else could serve it either — report the shortfall that
+            // Nowhere else could serve it either — report the refusal that
             // actually stopped the request.
-            if let (Some(first), Err(_)) = (memory_shortfall, &output) {
-                tracing::info!(
-                    request_id = %request.id,
-                    "DIAG: re-plan after a local memory refusal found no other route \
-                     — reporting the original shortfall"
-                );
-                output = Err(first);
-            }
-            if let Some(first) = context_refusal {
+            if let Some(first) = first_refusal {
                 output = match output {
                     Err(later) => {
                         let re_plan_error = later.to_string();
-                        let reported = report_after_a_context_replan(first, later);
+                        let reported = report_after_a_replan(first, later);
                         tracing::info!(
                             request_id = %request.id,
                             %re_plan_error,
                             reported = %reported,
-                            "DIAG: re-plan after a peer's context refusal found no machine \
-                             to serve it"
+                            "DIAG: re-plan after a refusal found no other route — reporting \
+                             the refusal the caller can act on"
                         );
                         Err(reported)
                     }

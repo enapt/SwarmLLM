@@ -824,7 +824,10 @@ async fn resend_after_link_repair(
             tx,
             awaiting: Some(node_id.clone()),
             chain_members: Vec::new(),
-            expects_index_pos: Some(forward.index_pos),
+            expects_step: Some(crate::daemon::state::ExpectedStep::one(
+                forward.index_pos,
+                forward.layer_range,
+            )),
         },
     );
     if network_tx

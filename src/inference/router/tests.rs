@@ -487,16 +487,29 @@ fn a_failed_re_plan_after_a_context_refusal_reports_the_limit_not_the_search() {
     // "No route" is about a search the caller never asked for.
     let no_route = SwarmError::SegmentFailoverExhausted("no standby".into());
     assert!(matches!(
-        super::report_after_a_context_replan(first(), no_route),
+        super::report_after_a_replan(first(), no_route),
         SwarmError::LongerThanPeerServes(_)
     ));
     // This node's own worker refusing at ITS limit is the better answer: its
     // advice to raise the setting here is then correct.
     let ours = SwarmError::Validation("too long for m … against a limit of 8192".into());
     assert!(matches!(
-        super::report_after_a_context_replan(first(), ours),
+        super::report_after_a_replan(first(), ours),
         SwarmError::Validation(_)
     ));
+    // Our own memory shortfall is always what is reported: it names the
+    // footprint and what to raise, whatever the re-plan then hit.
+    let shortfall = || SwarmError::LocalMemoryUnavailable("short by 900 MB".into());
+    for later in [
+        SwarmError::SegmentFailoverExhausted("no standby".into()),
+        SwarmError::Validation("some 400".into()),
+        SwarmError::LongerThanPeerServes("a peer's limit".into()),
+    ] {
+        assert!(matches!(
+            super::report_after_a_replan(shortfall(), later),
+            SwarmError::LocalMemoryUnavailable(_)
+        ));
+    }
 }
 
 /// This node's own memory refusal is re-planned with no remote segment

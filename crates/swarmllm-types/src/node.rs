@@ -153,7 +153,7 @@ pub mod features {
     /// forward.
     pub const FORWARD_SAMPLING: u64 = 1 << 11;
 
-    /// Matches a `LayerResult` to the STEP it answers (`answers_index_pos`,
+    /// Matches a `LayerResult` to the forward it answers (`answers_step`,
     /// the `0x07` result trailer), not only to the request — so a stale copy of
     /// an earlier step is discarded rather than taken as the current one.
     ///

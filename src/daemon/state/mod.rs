@@ -224,18 +224,45 @@ pub struct PendingLayerResult {
     /// Empty for every unchained request, which is every request unless
     /// `inference.pipeline_chaining` is on.
     pub chain_members: Vec<crate::types::NodeId>,
-    /// The `index_pos` of the forward this waiter was registered for — the STEP
-    /// it is waiting on. A result naming a different step
-    /// (`LayerResult::answers_index_pos`) is a stale copy and must not resolve
-    /// it; a result naming none (an older peer, or one we built ourselves) is
-    /// matched by request and node as before. `None` only where no single
-    /// forward stands behind the wait. `docs/FUTURE_WORK.md` #113.
-    pub expects_index_pos: Option<u32>,
+    /// The forward this waiter was registered for — its position and the
+    /// layer ranges whose answer is this wait's. A result naming anything else
+    /// (`LayerResult::answers_step`) is a stale copy, or another segment's
+    /// answer from the same node, and must not resolve it; a result naming
+    /// none (an older peer, or one we built ourselves) is matched by request
+    /// and node as before. `docs/FUTURE_WORK.md` #113.
+    pub expects_step: Option<ExpectedStep>,
+}
+
+/// What a waiter will take an answer for: ONE position, and the layer ranges
+/// whose result is this wait's — the segment sent, plus each hop of a chained
+/// run, any of which may report a failure (the tail's success names its own
+/// range). A (position, range) pair names one forward within an attempt; the
+/// position alone did not, because one node can serve two segments at the
+/// same position (review of #113, 2026-09-25).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExpectedStep {
+    pub index_pos: u32,
+    pub layer_ranges: Vec<(u32, u32)>,
+}
+
+impl ExpectedStep {
+    /// The wait on one forward.
+    pub fn one(index_pos: u32, layer_range: (u32, u32)) -> Self {
+        Self {
+            index_pos,
+            layer_ranges: vec![layer_range],
+        }
+    }
+
+    /// Is `step` an answer to this wait?
+    pub fn admits(&self, step: &crate::types::ResultStep) -> bool {
+        step.index_pos == self.index_pos && self.layer_ranges.contains(&step.layer_range)
+    }
 }
 
 impl PendingLayerResult {
-    /// May a `LayerResult` attributed to `sender`, answering the step at
-    /// `answers_index_pos`, resolve this waiter?
+    /// May a `LayerResult` attributed to `sender`, answering `answers_step`,
+    /// resolve this waiter?
     ///
     /// An unauthenticated result (`sender: None`) is accepted only by a waiter
     /// that is not pinned to a node; pinning exists precisely so an
@@ -243,10 +270,10 @@ impl PendingLayerResult {
     pub fn accepts(
         &self,
         sender: Option<&crate::types::NodeId>,
-        answers_index_pos: Option<u32>,
+        answers_step: Option<crate::types::ResultStep>,
     ) -> bool {
-        if let (Some(expected), Some(answered)) = (self.expects_index_pos, answers_index_pos) {
-            if expected != answered {
+        if let (Some(expected), Some(answered)) = (&self.expects_step, answers_step) {
+            if !expected.admits(&answered) {
                 return false;
             }
         }
@@ -1578,7 +1605,7 @@ impl SharedState {
         result: crate::types::LayerResult,
     ) -> bool {
         let request_id = result.request_id;
-        let answers = result.answers_index_pos;
+        let answers = result.answers_step;
         match self
             .pending_layer_results
             .remove_if(&request_id, |_, pending| pending.accepts(sender, answers))
@@ -1603,7 +1630,7 @@ impl SharedState {
                         tracing::info!(
                             %request_id,
                             answers_step = ?answers,
-                            waiting_on_step = ?entry.expects_index_pos,
+                            waiting_on_step = ?entry.expects_step,
                             "DIAG: ignoring a copy of an earlier step's result — this request \
                              has moved on"
                         );
@@ -4672,7 +4699,7 @@ mod pending_layer_result_tests {
                 tx: tx1,
                 awaiting: Some(gone.clone()),
                 chain_members: Vec::new(),
-                expects_index_pos: None,
+                expects_step: None,
             },
         );
         let (tx2, mut rx_healthy) = tokio::sync::oneshot::channel();
@@ -4682,7 +4709,7 @@ mod pending_layer_result_tests {
                 tx: tx2,
                 awaiting: Some(healthy.clone()),
                 chain_members: Vec::new(),
-                expects_index_pos: None,
+                expects_step: None,
             },
         );
         let (tx3, mut rx_unpinned) = tokio::sync::oneshot::channel();
@@ -4692,7 +4719,7 @@ mod pending_layer_result_tests {
                 tx: tx3,
                 awaiting: None,
                 chain_members: Vec::new(),
-                expects_index_pos: None,
+                expects_step: None,
             },
         );
 
@@ -4737,7 +4764,7 @@ mod pending_layer_result_tests {
                 tx,
                 awaiting: Some(tail.clone()),
                 chain_members: vec![head, hop.clone(), tail],
-                expects_index_pos: None,
+                expects_step: None,
             },
         );
         assert_eq!(
@@ -4770,7 +4797,7 @@ mod pending_layer_result_tests {
                 tx,
                 awaiting: Some(node_b.clone()),
                 chain_members: Vec::new(),
-                expects_index_pos: None,
+                expects_step: None,
             },
         );
 
@@ -4814,7 +4841,7 @@ mod pending_layer_result_tests {
                 tx,
                 awaiting: Some(node.clone()),
                 chain_members: Vec::new(),
-                expects_index_pos: None,
+                expects_step: None,
             },
         );
 
@@ -4835,7 +4862,7 @@ mod pending_layer_result_tests {
             tx,
             awaiting: None,
             chain_members: Vec::new(),
-            expects_index_pos: None,
+            expects_step: None,
         };
         assert!(pending.accepts(None, None));
         assert!(pending.accepts(Some(&NodeId([1u8; 32])), None));
@@ -4850,7 +4877,7 @@ mod pending_layer_result_tests {
             tx,
             awaiting: Some(NodeId([2u8; 32])),
             chain_members: Vec::new(),
-            expects_index_pos: None,
+            expects_step: None,
         };
         assert!(!pending.accepts(None, None));
         assert!(!pending.accepts(Some(&NodeId([3u8; 32])), None));
@@ -4871,7 +4898,7 @@ mod pending_layer_result_tests {
             tx,
             awaiting: Some(tail.clone()),
             chain_members: vec![head.clone(), middle.clone(), tail.clone()],
-            expects_index_pos: None,
+            expects_step: None,
         };
         assert!(
             pending.accepts(Some(&tail), None),
@@ -4908,6 +4935,7 @@ mod pending_layer_result_tests {
         let state = test_state();
         let node = NodeId([4u8; 32]);
         let rid = uuid::Uuid::new_v4();
+        // Waiting on node's segment 15..20 at position 41.
         let (tx, mut rx) = tokio::sync::oneshot::channel();
         state.pending_layer_results.insert(
             rid,
@@ -4915,15 +4943,25 @@ mod pending_layer_result_tests {
                 tx,
                 awaiting: Some(node.clone()),
                 chain_members: Vec::new(),
-                expects_index_pos: Some(41),
+                expects_step: Some(super::ExpectedStep::one(41, (15, 20))),
             },
         );
-        let mut stale = crate::types::LayerResult::error(rid, "x").answering(40);
-        stale.finish_reason = None;
-        stale.activations = vec![40];
+        let result = |pos: u32, range: (u32, u32), tag: u8| {
+            let mut r = crate::types::LayerResult::error(rid, "x").answering(pos, range);
+            r.finish_reason = None;
+            r.activations = vec![tag];
+            r
+        };
         assert!(
-            !state.resolve_pending_layer_result(Some(&node), stale),
+            !state.resolve_pending_layer_result(Some(&node), result(40, (15, 20), 40)),
             "a copy of step 40 must not resolve the wait on step 41"
+        );
+        // The review's case: the planner gave this node ANOTHER segment too
+        // (0..10), and a resend of THAT answer, at the same position, arrives.
+        assert!(
+            !state.resolve_pending_layer_result(Some(&node), result(41, (0, 10), 0)),
+            "the same node's answer for a different segment at the same position \
+             must not complete this one"
         );
         assert!(rx.try_recv().is_err(), "nothing delivered");
         assert!(
@@ -4932,26 +4970,42 @@ mod pending_layer_result_tests {
         );
 
         // An older peer names no step: matched by request and node, as before.
-        let mut legacy = crate::types::LayerResult::error(rid, "x");
-        legacy.finish_reason = None;
-        legacy.activations = vec![0];
-        let mut unnamed = legacy.clone();
-        unnamed.answers_index_pos = None;
+        let mut unnamed = result(41, (15, 20), 1);
+        unnamed.answers_step = None;
         assert!(
             PendingLayerResult {
                 tx: tokio::sync::oneshot::channel().0,
                 awaiting: Some(node.clone()),
                 chain_members: Vec::new(),
-                expects_index_pos: Some(41),
+                expects_step: Some(super::ExpectedStep::one(41, (15, 20))),
             }
-            .accepts(Some(&node), unnamed.answers_index_pos),
+            .accepts(Some(&node), unnamed.answers_step),
             "no step named is not a mismatch"
         );
 
-        let mut current = legacy.answering(41);
-        current.activations = vec![41];
-        assert!(state.resolve_pending_layer_result(Some(&node), current));
+        assert!(state.resolve_pending_layer_result(Some(&node), result(41, (15, 20), 41)));
         assert_eq!(rx.try_recv().unwrap().activations, vec![41]);
+    }
+
+    /// A chained run is answered by its TAIL, and any hop may report a failure:
+    /// the waiter admits each hop's range at the run's position, and only those.
+    #[test]
+    fn a_chained_wait_admits_every_hop_of_its_run_and_nothing_else() {
+        let expected = super::ExpectedStep {
+            index_pos: 7,
+            layer_ranges: vec![(0, 10), (10, 20), (20, 28)],
+        };
+        let step = |pos, range| crate::types::ResultStep {
+            index_pos: pos,
+            layer_range: range,
+        };
+        assert!(expected.admits(&step(7, (20, 28))), "the tail's answer");
+        assert!(
+            expected.admits(&step(7, (10, 20))),
+            "a middle hop's refusal"
+        );
+        assert!(!expected.admits(&step(6, (20, 28))), "an earlier step");
+        assert!(!expected.admits(&step(7, (0, 28))), "a range no hop ran");
     }
 
     /// A request that fails and is retried keeps its id, so routing reply

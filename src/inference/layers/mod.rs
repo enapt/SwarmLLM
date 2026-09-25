@@ -962,13 +962,19 @@ impl MoeFfn {
             }
         }
 
-        // Phase 2: each expert's weighted output is ADDED into its tokens' rows
-        // with one `index_add` — never row by row. The accumulation order per
-        // token is unchanged (experts in index order, starting from zero, and
-        // `0 + x == x` exactly), so this is the same sum; the row-by-row form
-        // was two launches per token per chosen expert and a cat over every
-        // token at the end.
-        let mut output = Tensor::zeros((num_tokens, hidden), dtype, device)?;
+        // Phase 2: every expert's weighted rows, gathered in EXPERT order, are
+        // added into their tokens' rows by ONE `index_add` — never row by row,
+        // and not once per expert either: candle's `index_add` copies the whole
+        // accumulator before adding, so one call per expert copied it up to
+        // once per expert hit (128 on Qwen3-30B-A3B; review of #114d). Both
+        // backends add a repeated index in the order the indices are listed
+        // (the CUDA kernel walks them serially per output column), so each
+        // token still sums its experts in index order from zero — `0 + x == x`
+        // exactly — the same sum the row-by-row form computed with two launches
+        // per token per chosen expert and a cat over every token.
+        let output = Tensor::zeros((num_tokens, hidden), dtype, device)?;
+        let mut routed_rows: Vec<i64> = Vec::with_capacity(num_tokens * self.n_experts_used);
+        let mut weighted_parts: Vec<Tensor> = Vec::new();
 
         for (eidx, batch) in expert_batches.iter().enumerate() {
             if batch.is_empty() {
@@ -993,12 +999,19 @@ impl MoeFfn {
             let weight_vec: Vec<f32> = batch.iter().map(|&(_, w)| w).collect();
             let weight_tensor =
                 Tensor::from_vec(weight_vec, (batch.len(), 1), device)?.to_dtype(dtype)?;
-            let weighted = expert_out.broadcast_mul(&weight_tensor)?;
-
-            // A token appears at most once per expert (top-k picks distinct
-            // experts), so no index repeats within one add.
-            output = output.index_add(&idx_tensor, &weighted, 0)?;
+            weighted_parts.push(expert_out.broadcast_mul(&weight_tensor)?);
+            routed_rows.extend(batch.iter().map(|&(pos, _)| pos as i64));
         }
+        let mut output = if weighted_parts.is_empty() {
+            output
+        } else {
+            let rows = routed_rows.len();
+            output.index_add(
+                &Tensor::from_vec(routed_rows, (rows,), device)?,
+                &Tensor::cat(&weighted_parts, 0)?,
+                0,
+            )?
+        };
 
         // Add shared expert output if present
         if let (Some(ref sg), Some(ref sd), Some(ref su)) =

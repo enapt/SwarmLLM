@@ -695,20 +695,32 @@ pub struct LayerResult {
     /// #295. Travels as the `0x06` trailer; see [`ForwardRefusal`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refusal: Option<ForwardRefusal>,
-    /// The `index_pos` of the forward this result answers — which STEP of the
-    /// request it is. `None` from a build that predates it, and on every
-    /// result a coordinator manufactures for itself.
+    /// The forward this result answers: its position AND the layers it ran.
+    /// `None` from a build that predates it, and on every result a coordinator
+    /// manufactures for itself.
     ///
-    /// A request's forwards to one segment all carry its id, so without this a
-    /// result can only be matched to a request, not to a step: a copy of step
-    /// N that arrives after the coordinator has moved on would answer step
-    /// N+1 with N's activations — a silently wrong reply. Within one attempt a
-    /// segment's `index_pos` only ever grows (prompt pass, then one decode or
-    /// verify step after another), so it names the step exactly. It is what
-    /// makes a serving node's RESEND of a result it could not deliver safe
-    /// (`docs/FUTURE_WORK.md` #113). Travels as the `0x07` trailer.
+    /// A request's forwards all carry its id, so without this a result can only
+    /// be matched to a request: a copy of step N arriving after the coordinator
+    /// moved on would answer step N+1 with N's activations — a silently wrong
+    /// reply. The position alone is not enough either: one node can serve two
+    /// segments of a pipeline at the SAME position (the planner may return to a
+    /// node — A for 0..10, B, A again for 15..20 — and every failover replay is
+    /// sent at position 0), so a copy of one segment's answer could complete
+    /// the other's. Within one attempt a (position, layer range) pair names ONE
+    /// forward. It is what makes a serving node's RESEND of a result it could
+    /// not deliver safe (`docs/FUTURE_WORK.md` #113). Travels as the `0x07`
+    /// trailer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub answers_index_pos: Option<u32>,
+    pub answers_step: Option<ResultStep>,
+}
+
+/// Which forward a [`LayerResult`] answers — see `LayerResult::answers_step`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResultStep {
+    /// The forward's `index_pos`: the position its first token occupies.
+    pub index_pos: u32,
+    /// The forward's `layer_range`, start inclusive, end exclusive.
+    pub layer_range: (u32, u32),
 }
 
 /// Why a peer refused a forward before any of it ran.
@@ -792,13 +804,17 @@ impl LayerResult {
             // read as the peer having answered.
             locally_constructed: true,
             refusal: None,
-            answers_index_pos: None,
+            answers_step: None,
         }
     }
 
-    /// Mark this result as the answer to the forward at `index_pos`.
-    pub fn answering(mut self, index_pos: u32) -> Self {
-        self.answers_index_pos = Some(index_pos);
+    /// Mark this result as the answer to the forward at `index_pos` over
+    /// `layer_range`.
+    pub fn answering(mut self, index_pos: u32, layer_range: (u32, u32)) -> Self {
+        self.answers_step = Some(ResultStep {
+            index_pos,
+            layer_range,
+        });
         self
     }
 

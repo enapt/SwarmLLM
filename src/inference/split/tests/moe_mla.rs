@@ -617,10 +617,25 @@ fn the_batched_moe_forward_is_bit_identical_to_routing_token_by_token() {
         }
         let zero = Tensor::zeros((1, hidden), DType::F32, device).unwrap();
         let rows: Vec<&Tensor> = acc.iter().map(|o| o.as_ref().unwrap_or(&zero)).collect();
-        Tensor::cat(&rows, 0)
-            .unwrap()
-            .reshape((b, s, hidden))
-            .unwrap()
+        let mut output = Tensor::cat(&rows, 0).unwrap();
+        // The shared expert, as the old path added it (unchanged by the batching).
+        if let (Some(sg), Some(sd), Some(su)) = (&moe.shared_gate, &moe.shared_down, &moe.shared_up)
+        {
+            let combined = crate::inference::fast_math::silu_mul(
+                &sg.forward(&x_flat).unwrap(),
+                &su.forward(&x_flat).unwrap(),
+            )
+            .unwrap();
+            let mut shared = sd.forward(&combined).unwrap();
+            if let Some(w) = &moe.shared_gate_inp {
+                let logit = x_flat.matmul(&w.reshape((hidden, 1)).unwrap()).unwrap();
+                shared = shared
+                    .broadcast_mul(&candle_nn::ops::sigmoid(&logit).unwrap())
+                    .unwrap();
+            }
+            output = (output + shared).unwrap();
+        }
+        output.reshape((b, s, hidden)).unwrap()
     }
 
     let device = Device::Cpu;
@@ -640,50 +655,60 @@ fn the_batched_moe_forward_is_bit_identical_to_routing_token_by_token() {
             renormalize_weights: false,
         },
     ];
-    for routing in policies {
-        for k in [1usize, 2, 3] {
-            let stack = |o, i| Tensor::randn(0f32, 0.05, (n_experts, o, i), &device).unwrap();
-            let moe = MoeFfn {
-                gate: Tensor::randn(0f32, 0.3, (n_experts, hidden), &device).unwrap(),
-                experts: ExpertFfn::from_stacked(
-                    &stack(intermediate, hidden),
-                    &stack(intermediate, hidden),
-                    &stack(hidden, intermediate),
-                )
-                .unwrap(),
-                shared_gate: None,
-                shared_down: None,
-                shared_up: None,
-                shared_gate_inp: None,
-                n_experts_used: k,
-                routing,
-            };
-            // A prompt-sized batch and a single decode token.
-            for tokens in [37usize, 1] {
-                let x = Tensor::randn(0f32, 1.0, (1, tokens, hidden), &device).unwrap();
-                let got: Vec<f32> = moe
-                    .forward(&x)
-                    .unwrap()
-                    .flatten_all()
-                    .unwrap()
-                    .to_vec1()
-                    .unwrap();
-                let want: Vec<f32> = per_token_reference(&moe, &x)
-                    .flatten_all()
-                    .unwrap()
-                    .to_vec1()
-                    .unwrap();
-                let differing = got
-                    .iter()
-                    .zip(&want)
-                    .filter(|(a, b)| a.to_bits() != b.to_bits() && !(**a == 0.0 && **b == 0.0))
-                    .count();
-                assert_eq!(
-                    differing,
-                    0,
-                    "{routing:?} k={k} tokens={tokens}: {differing} of {} values differ",
-                    got.len()
-                );
+    let dense = |o: usize, i: usize| {
+        QMatMul::from_dense(Tensor::randn(0f32, 0.05, (o, i), &device).unwrap())
+    };
+    // No shared expert (DeepSeek-free families), an ungated one (Llama 4,
+    // DeepSeek) and a sigmoid-gated one (Qwen2-MoE) — the batched scatter must
+    // be the same sum beside each.
+    for shared in 0..3 {
+        for routing in policies {
+            for k in [1usize, 2, 3] {
+                let stack = |o, i| Tensor::randn(0f32, 0.05, (n_experts, o, i), &device).unwrap();
+                let moe = MoeFfn {
+                    gate: Tensor::randn(0f32, 0.3, (n_experts, hidden), &device).unwrap(),
+                    experts: ExpertFfn::from_stacked(
+                        &stack(intermediate, hidden),
+                        &stack(intermediate, hidden),
+                        &stack(hidden, intermediate),
+                    )
+                    .unwrap(),
+                    shared_gate: (shared > 0).then(|| dense(intermediate, hidden)),
+                    shared_down: (shared > 0).then(|| dense(hidden, intermediate)),
+                    shared_up: (shared > 0).then(|| dense(intermediate, hidden)),
+                    shared_gate_inp: (shared == 2)
+                        .then(|| Tensor::randn(0f32, 0.3, (hidden,), &device).unwrap()),
+                    n_experts_used: k,
+                    routing,
+                };
+                // A prompt-sized batch, a single decode token, and two sequences.
+                for (batch, tokens) in [(1usize, 37usize), (1, 1), (2, 5)] {
+                    let x = Tensor::randn(0f32, 1.0, (batch, tokens, hidden), &device).unwrap();
+                    let got: Vec<f32> = moe
+                        .forward(&x)
+                        .unwrap()
+                        .flatten_all()
+                        .unwrap()
+                        .to_vec1()
+                        .unwrap();
+                    let want: Vec<f32> = per_token_reference(&moe, &x)
+                        .flatten_all()
+                        .unwrap()
+                        .to_vec1()
+                        .unwrap();
+                    let differing = got
+                        .iter()
+                        .zip(&want)
+                        .filter(|(a, b)| a.to_bits() != b.to_bits() && !(**a == 0.0 && **b == 0.0))
+                        .count();
+                    assert_eq!(
+                        differing,
+                        0,
+                        "{routing:?} k={k} batch={batch} tokens={tokens} shared={shared}: \
+                     {differing} of {} values differ",
+                        got.len()
+                    );
+                }
             }
         }
     }

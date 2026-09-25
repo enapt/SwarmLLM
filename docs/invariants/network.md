@@ -2161,20 +2161,26 @@ This is the at-least-once delivery problem, and the fix is the one idempotent
 producers use (Kafka's producer id + sequence number): the receiver matches on
 (request, step) and drops a copy of a step it has passed.
 
-**What the step is.** `index_pos`, not `sequence_num`: `sequence_num` is 0 on the
-prompt pass and 1 on every forward after it (`work_kind_for`), while within one
-attempt a segment's `index_pos` only grows — prompt pass at 0, then each decode or
-verify step at its position. A KV-truncate forward is fire-and-forget (no waiter).
+**What the step is.** `(index_pos, layer_range)`, not `sequence_num`:
+`sequence_num` is 0 on the prompt pass and 1 on every forward after it
+(`work_kind_for`), while within one attempt a segment's `index_pos` only grows —
+prompt pass at 0, then each decode or verify step at its position. The position
+ALONE was the first cut, and a reviewer found the hole the same night: the
+planner may give one node two segments of one pipeline (A 0..10, B, A again
+15..20), and every failover replay is sent at 0, so a resent copy of one
+segment's answer could complete the other segment's wait at the same position.
+The range closes it; a chained run's waiter admits every hop's range, since the
+tail answers with its own and any hop may refuse with its own. A KV-truncate forward is fire-and-forget (no waiter).
 A router retry restarts at 0 with the same id, but a copy from the abandoned
 attempt at a matching position carries the same computation. The failover replay
 is sent at 0 and its waiter expects 0.
 
-**Wire.** `0x07 | index_pos u32 LE` after `0x06`, set on every result a forward
+**Wire.** `0x07 | index_pos, layer_start, layer_end` (u32 LE each) after `0x06`, set on every result a forward
 produces, failures included. Harmless to an older coordinator without a gate: a
 result is not sealed, and its decoder returns after the last trailer it knows and
 never reads further — pinned by
 `the_step_a_result_answers_rides_after_everything_an_older_decoder_reads` (frame
-with = frame without + 5 bytes). The RESEND is gated
+with = frame without + 13 bytes). The RESEND is gated
 (`features::RESULT_STEP`), because only a coordinator that checks the step may be
 sent a copy.
 

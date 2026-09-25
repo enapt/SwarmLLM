@@ -563,7 +563,7 @@ machines' limit (`longer_than_the_swarm_serves`), never the 503 "too few machine
 the declared context the coordinator bars the peer and returns
 `SwarmError::LongerThanPeerServes` — 400-shaped, its own variant only so the
 router re-plans it (`peer_serves_shorter_context`); a failed re-plan reports it
-unless the re-plan's own answer is a 4xx (`report_after_a_context_replan`).
+unless the re-plan's own answer is a 4xx (`report_after_a_replan`, one slot shared with the memory shortfall).
 
 → `docs/invariants/scheduling.md` § "A prompt longer than one peer serves"
 
