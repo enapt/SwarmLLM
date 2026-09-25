@@ -13431,6 +13431,14 @@ Harness and raw data: https://github.com/NidhalxMRR/netem-lab-swarmllm
 
 ## A multi-megabyte forward over ONE QUIC stream can kill the connection (measured 2026-09-03, gotcha #446)
 
+> **Superseded — read this first (2026-09-25).** The cause was never payload size
+> or the link: it was quinn-proto 0.11.17's own regression (quinn-rs/quinn#2809,
+> fixed in 0.11.18 by #2814) — its receive guard counted retained buffers, not
+> gaps, so a lossless stream whose reader fell ~2048 packets behind closed the
+> whole connection. That is why the kills sat at a reproducible point in a
+> transfer and hit a LAN peer. Fixed by the dependency bump (`f7ec41ac`, index
+> #112, gotcha #712); the reasoning below is kept for the measurements.
+
 **What was seen.** On the live pair — Proxmox (processor) coordinating,
 the WSL card holding gemma shards 0-1 — an 8,111-token prompt produced a
 19.9 MB hidden-state forward for the card's segment. 152 ms into the send the
@@ -13480,6 +13488,14 @@ worse peer.
 
 
 ### The same failure is hitting SHARD TRANSFERS, and there it is routine (observed live 2026-09-05)
+
+> **Superseded — read this first (2026-09-25).** The cause was never payload size
+> or the link: it was quinn-proto 0.11.17's own regression (quinn-rs/quinn#2809,
+> fixed in 0.11.18 by #2814) — its receive guard counted retained buffers, not
+> gaps, so a lossless stream whose reader fell ~2048 packets behind closed the
+> whole connection. That is why the kills sat at a reproducible point in a
+> transfer and hit a LAN peer. Fixed by the dependency bump (`f7ec41ac`, index
+> #112, gotcha #712); the reasoning below is kept for the measurements.
 
 The entry above is scoped to inference forwards, which is where it was first
 measured. The live node's log says the more frequent trigger is a **shard

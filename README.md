@@ -273,7 +273,9 @@ ANTHROPIC_BASE_URL=http://localhost:8800 ANTHROPIC_AUTH_TOKEN="$SWARMLLM_KEY" \
 Also included: tool calling with local models, streaming, an MCP server, and
 optional routing to 12 cloud providers with your own keys. Agents send long
 prompts, so raise the context size first (`max_seq_len_override = 32768`
-under `[inference]` in `config.toml`).
+under `[inference]` in `config.toml`). That setting covers the parts of a model
+your computer runs; a part running on another computer follows that computer's
+own setting, and the swarm routes around one that is set too short.
 
 - **[API reference](https://enapt.github.io/SwarmLLM/api/openai.html)** — OpenAI, Anthropic, Responses and MCP
 - **[OpenClaw setup](integrations/openclaw/)** — a plugin that adds SwarmLLM to OpenClaw's setup wizard

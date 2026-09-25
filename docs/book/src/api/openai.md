@@ -157,6 +157,13 @@ first is the name vLLM clients read, the second the name OpenClaw's model
 discovery reads. Both are omitted when the model's declared context cannot be
 read (a model no part of which is on this machine), rather than guessed.
 
+It is THIS node's limit. When a model is split, each computer applies its own,
+and each advertises it: a prompt is not sent to a computer that has said it
+serves less, and one that refuses is failed over from. If no computer that could
+run some part of the model serves the length, the request fails with a 400 that
+says the limit is set on those computers — raising your own setting does not
+change it.
+
 ## GET /v1/status
 
 Node status (SwarmLLM extension).

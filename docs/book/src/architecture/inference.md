@@ -103,18 +103,28 @@ Hard constraints (pinning, trust gates, VRAM caps) always win.
 
 The SplitModel loader reads `general.architecture` from GGUF metadata and applies per-architecture handling:
 
+The RoPE column is llama.cpp's per-architecture choice (`llama_model_rope_type`), which `ModelArch::use_rope_contiguous` copies arch by arch — it is not inferred.
+
 | Architecture | RoPE | QKV Biases | Special Handling |
 |---|---|---|---|
 | **Llama** | Interleaved | No | Default EOS=2 |
-| **Llama 4** | iRoPE (NoPE every 4th) | No | MoE FFN |
-| **Qwen2** | Contiguous | Yes | EOS 151643+151645 |
+| **Llama 4** | Interleaved; iRoPE (NoPE every 4th) | No | MoE FFN |
+| **Qwen2 / Qwen3** | Contiguous | Yes (Qwen2) | EOS 151643+151645; per-head q/k norm (Qwen3) |
+| **Qwen2-MoE / Qwen3-MoE** | Contiguous | Yes (Qwen2-MoE) | The same layout with routed experts per layer; Qwen2-MoE adds a gated shared expert and does not renormalise its top-k weights |
 | **Qwen 3.5** | Contiguous | No | Hybrid SSM+attention (Gated Delta Networks) |
-| **Gemma/Gemma2** | Interleaved | No | Embedding scaling (sqrt(d)), Gemma RmsNorm (+1), EOS 107, attention + final logit softcapping, Gemma chat template fallback |
-| **Phi-3** | Su/YaRN | Yes | Fused QKV/FFN tensors |
+| **Gemma/Gemma2** | Contiguous | No | Embedding scaling (sqrt(d)), Gemma RmsNorm (+1), EOS 107, attention + final logit softcapping, Gemma chat template fallback |
+| **Phi-3** | Contiguous, Su/YaRN scaling | Yes | Fused QKV/FFN tensors |
 | **Mistral** | Interleaved | No | GQA |
-| **DeepSeek-V2/V3** | Contiguous | No | MLA attention + MoE FFN |
-| **GLM-4** | Contiguous | No | Partial RoPE, extreme GQA (16:1) |
-| **Starcoder2** | Interleaved | Yes | Code-optimized |
+| **DeepSeek-V2/V3** | Interleaved | No | MLA attention + MoE FFN |
+| **GLM-4** | Interleaved | No | Partial RoPE, extreme GQA (16:1) |
+| **Starcoder2** | Contiguous | Yes | Code-optimized |
+
+**Mixture-of-experts layers keep every expert quantized**, one matrix per
+expert cut from the GGUF's stacked tensor, the way llama.cpp runs them — so a
+MoE model needs about its file's size in memory, and it is planned at its
+full size (every expert is resident; nothing pages experts in and out).
+Models quantized with the `IQ*` family (IQ1_S, IQ3_XXS, …) cannot be read by
+this engine and are refused with a message naming the type; choose a K-quant.
 
 ## KV-Cache Management
 
