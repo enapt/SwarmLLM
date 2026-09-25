@@ -112,8 +112,12 @@ impl SplitModel {
             let mmap = unsafe { memmap2::Mmap::map(&file) }
                 .map_err(|e| SwarmError::Internal(format!("Failed to mmap GGUF: {e}")))?;
             let mut cursor = std::io::Cursor::new(mmap.as_ref());
-            let ct = gguf_file::Content::read(&mut cursor)
-                .map_err(|e| SwarmError::Internal(format!("Failed to read GGUF: {e}")))?;
+            let ct = gguf_file::Content::read(&mut cursor).map_err(|e| {
+                SwarmError::Internal(format!(
+                    "Failed to read GGUF: {}",
+                    crate::inference::split::explain_gguf_parse_error(&e)
+                ))
+            })?;
             let device = if force_cpu {
                 Device::Cpu
             } else {
@@ -139,8 +143,12 @@ impl SplitModel {
         let header_bytes = std::fs::read(&header_path).map_err(SwarmError::Io)?;
         let (tensor_data_offset, tied_output) = {
             let mut cursor = std::io::Cursor::new(&header_bytes);
-            let ct = gguf_file::Content::read(&mut cursor)
-                .map_err(|e| SwarmError::Internal(format!("Failed to parse GGUF header: {e}")))?;
+            let ct = gguf_file::Content::read(&mut cursor).map_err(|e| {
+                SwarmError::Internal(format!(
+                    "Failed to parse GGUF header: {}",
+                    crate::inference::split::explain_gguf_parse_error(&e)
+                ))
+            })?;
             // Resolution needs the arch metadata block. If that can't be parsed
             // the model won't load anyway, so don't fail *here* — a non-tied
             // model on a node holding shard 0 loads fine without any of this.

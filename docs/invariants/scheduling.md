@@ -2155,3 +2155,52 @@ same shape (per-attempt exclusion, not a global mark against the host).
   mid-request failover of its own (the KV-state question in that entry
   stands). What it gains is that a non-streaming request whose peer goes
   quiet is re-planned once on a different holder instead of ending.
+
+## A prompt longer than one peer serves is that peer's limit
+
+Field report 2026-09-25: an 8560-token agent prompt was planned through a peer
+serving 8192 (the shipped default). The peer checked length one 128-token chunk
+at a time (`forward_prompt_in_chunks`), so it computed 8192 positions through its
+layers and refused 177 s after dispatch as "8320 tokens" — the chunk boundary, not
+the prompt. The coordinator's `every_holder_would_refuse` read every `Validation`
+as the request's own mistake and returned it, although the segment had a standby
+and the coordinator itself served 65536. The message told the user to raise
+`max_seq_len_override` — their own, which cannot change another machine's.
+
+The 2026-08-30 rule that `Validation` never fails over was right for what it was
+written against (a malformed argument is reproduced by every holder) and wrong
+for this one case, because a node's served context is a property of the NODE.
+
+**Four parts, each checkable alone:**
+
+1. **The peer refuses the whole prompt before any layer runs** —
+   `model_worker::refuse_a_prompt_past_the_served_context`, beside the
+   whole-prompt KV admission. Rig: 3 ms after the model loaded, where v0.3.205
+   computed 512 positions first.
+2. **The refusal is read back with its numbers** — `error::longer_than_served`
+   writes it, `error::served_context_refusal` reads it. The opening sentence is
+   the wording every release since v0.3.101 sends, pinned by a frozen v0.3.205
+   literal, so older peers are understood and older coordinators relay it as
+   before. At the model's declared limit (`SharedState::model_declared_context`)
+   it is still every holder's answer.
+3. **Peers advertise their ceiling** (`NodeCapability::context_ceiling_tokens`,
+   additive, `None` = unknown = still a candidate). The coordinator does not send
+   a prompt pass to a peer that advertised too short
+   (`distributed::advertised_context_refusal`, exact positions read off the
+   hidden-state header) and `failover_segment` skips such standbys.
+4. **Running out of machines is the caller's 400 naming whose limit it is**
+   (`longer_than_the_swarm_serves`), never `SegmentFailoverExhausted` — whose
+   "too few machines hold this model" advice is #295's trap.
+
+**Deliberately not at plan time.** Routing sees only `estimate_prompt_tokens`
+(bytes/4), which over-counts English prose by ~10% and would exclude peers that
+could serve; the send-time check uses exact positions.
+
+**Verified** on `examples/split_rig.sh context` (four nodes, llama-3.2-3b, a
+563-token prompt, the middle holder at 512): all-v0.3.205 reproduces the report
+(400, "Raise it in Settings", standbys unused); new coordinator + old peer fails
+over from the refusal to the C+D composite, 200; new + new never sends to the
+peer, 200; with no cover, the new 400.
+
+**Not covered:** the whole-model path (`remote_generate`, "too long for {model}"
+from `resolve_max_new_tokens`) and `delegation_target`. FUTURE_WORK #111.

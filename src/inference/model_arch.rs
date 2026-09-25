@@ -7,7 +7,7 @@
 pub enum ModelArch {
     /// Llama family (Llama 1/2/3, CodeLlama, Yi, Mistral 7B)
     Llama,
-    /// Qwen2 / Qwen2.5 / Qwen3
+    /// Qwen2 / Qwen2.5 / Qwen3, and their MoE variants (Qwen2-MoE, Qwen3-MoE)
     Qwen2,
     /// Google Gemma 1
     Gemma,
@@ -38,7 +38,10 @@ impl ModelArch {
     pub fn from_gguf_arch(arch: &str) -> Self {
         match arch {
             "llama" => ModelArch::Llama,
-            "qwen2" | "qwen3" | "qwen2moe" => ModelArch::Qwen2,
+            // The MoE members are the same layout with routed experts in place
+            // of the feed-forward, which the loader finds per layer
+            // (`split::loader::load_moe_ffn`).
+            "qwen2" | "qwen3" | "qwen2moe" | "qwen3moe" => ModelArch::Qwen2,
             "gemma" => ModelArch::Gemma,
             "gemma2" => ModelArch::Gemma2,
             "phi3" => ModelArch::Phi3,
@@ -108,6 +111,7 @@ impl ModelArch {
             "qwen2",
             "qwen3",
             "qwen2moe",
+            "qwen3moe",
             "gemma",
             "gemma2",
             "phi3",

@@ -1510,10 +1510,7 @@ impl AutoShardManager {
                 continue; // Can't narrow below 2 shards
             }
 
-            let model_vram = super::vram::estimate_model_vram_mb_arch(
-                manifest.total_size_bytes,
-                &manifest.architecture,
-            );
+            let model_vram = super::vram::estimate_model_vram_mb(manifest.total_size_bytes);
             let shard_vram_each = model_vram / manifest.shard_count as u64;
 
             if shard_vram_each == 0 {

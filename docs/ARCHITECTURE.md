@@ -102,6 +102,10 @@ swarmllm/
 │                 request MUST split; `split` asks through it, `kill` breaks one side
 │                 mid-reply (KILL=A|B|B_UNLOAD) — the release gate's split check (#93);
 │                 `failover` runs FOUR nodes for #17's composite stand-in (gotchas #706-708);
+│                 `context` gives that middle holder a SHORTER context than the prompt (#111);
+│                 logits_reference_probe.rs + compare_logits_reference.py — our logits at
+│                 every position of a GGUF (one segment or split) against llama.cpp's, by
+│                 VALUE: how an architecture is verified on a tiny random model (#114);
 │                 score_against_reference.py — a reply teacher-forced through llama.cpp, rank
 │                 of every token: the test for a split reply where byte-equality is not;
 │                 `--lora` scores against llama.cpp applying an adapter, which
@@ -2933,10 +2937,11 @@ Workers load only a subset of on-disk shards into GPU memory. Shards stay on dis
 - Gossiped via `NodeCapability.est_tokens_per_sec_7b`
 - Used as scheduler tie-breaker (after latency, region, load, trust)
 
-### MoE-Aware VRAM Accounting
-- `estimate_model_vram_mb_arch()`: `active_fraction = 0.40 + 0.60 * (experts_per_token / num_experts)`
-- Supports Mixtral, DeepSeek, Llama4, Qwen35Moe architectures
-- Used in auto-manage scoring for accurate VRAM fitness
+### MoE VRAM Accounting
+- A mixture-of-experts model is charged its FULL size (`estimate_model_vram_mb`): every
+  expert is resident, held quantized, one matrix per expert (`split::loader::load_moe_ffn`).
+- The "active experts only" discount (`estimate_model_vram_mb_arch`) was removed 2026-09-25:
+  it priced Qwen3-30B-A3B at ~44% of what loading it takes (FUTURE_WORK #114).
 
 ### Pre-Scored HF Model Browsing
 - `composite_score = quality × fit × demand × size × 100` (0–150 range)

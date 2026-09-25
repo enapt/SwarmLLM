@@ -163,12 +163,16 @@ fn test_moe_forward_single_expert() {
 
     let moe = MoeFfn {
         gate,
-        gate_exps,
-        down_exps,
-        up_exps,
+        experts: crate::inference::layers::ExpertFfn::from_stacked(
+            &(gate_exps),
+            &(up_exps),
+            &(down_exps),
+        )
+        .unwrap(),
         shared_gate: None,
         shared_down: None,
         shared_up: None,
+        shared_gate_inp: None,
         n_experts_used: 1,
         routing: MoeRoutingConfig::default(),
     };
@@ -195,12 +199,16 @@ fn test_moe_forward_multi_expert() {
 
     let moe = MoeFfn {
         gate,
-        gate_exps,
-        down_exps,
-        up_exps,
+        experts: crate::inference::layers::ExpertFfn::from_stacked(
+            &(gate_exps),
+            &(up_exps),
+            &(down_exps),
+        )
+        .unwrap(),
         shared_gate: None,
         shared_down: None,
         shared_up: None,
+        shared_gate_inp: None,
         n_experts_used: 2,
         routing: MoeRoutingConfig::default(),
     };
@@ -237,12 +245,16 @@ fn test_shared_expert_integration() {
     // MoE without shared experts
     let moe_no_shared = MoeFfn {
         gate: gate.clone(),
-        gate_exps: gate_exps.clone(),
-        down_exps: down_exps.clone(),
-        up_exps: up_exps.clone(),
+        experts: crate::inference::layers::ExpertFfn::from_stacked(
+            &(gate_exps.clone()),
+            &(up_exps.clone()),
+            &(down_exps.clone()),
+        )
+        .unwrap(),
         shared_gate: None,
         shared_down: None,
         shared_up: None,
+        shared_gate_inp: None,
         n_experts_used: 1,
         routing: MoeRoutingConfig::default(),
     };
@@ -250,12 +262,16 @@ fn test_shared_expert_integration() {
     // MoE with shared experts
     let moe_with_shared = MoeFfn {
         gate,
-        gate_exps,
-        down_exps,
-        up_exps,
+        experts: crate::inference::layers::ExpertFfn::from_stacked(
+            &(gate_exps),
+            &(up_exps),
+            &(down_exps),
+        )
+        .unwrap(),
         shared_gate: Some(make_qmatmul(hidden, intermediate)),
         shared_down: Some(make_qmatmul(intermediate, hidden)),
         shared_up: Some(make_qmatmul(hidden, intermediate)),
+        shared_gate_inp: None,
         n_experts_used: 1,
         routing: MoeRoutingConfig::default(),
     };

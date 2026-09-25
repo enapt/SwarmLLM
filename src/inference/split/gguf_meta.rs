@@ -43,8 +43,52 @@ pub const TIED_OUTPUT_FILENAME: &str = "tied_output_weight.bin";
 pub fn read_gguf_header(path: &Path) -> Result<gguf_file::Content, SwarmError> {
     let file = std::fs::File::open(path).map_err(SwarmError::Io)?;
     let mut reader = std::io::BufReader::with_capacity(GGUF_HEADER_READ_BUFFER_BYTES, file);
-    gguf_file::Content::read(&mut reader)
-        .map_err(|e| SwarmError::Internal(format!("Failed to read GGUF header: {e}")))
+    gguf_file::Content::read(&mut reader).map_err(|e| {
+        SwarmError::Internal(format!(
+            "Failed to read GGUF header: {}",
+            explain_gguf_parse_error(&e)
+        ))
+    })
+}
+
+/// What a failure to parse a GGUF header means, in words a person can act on.
+///
+/// The case that needs it: a file whose tensors use a quantization type this
+/// engine does not implement. candle refuses it as `unknown dtype for tensor
+/// 18`, which says nothing to someone who picked `IQ3_XXS` off a model page —
+/// and the popular MoE uploads (Qwen3-30B-A3B's smallest builds) are exactly
+/// the `IQ*` family. Every other failure is passed through as it was.
+pub fn explain_gguf_parse_error(e: &candle_core::Error) -> String {
+    let text = e.to_string();
+    let Some(code) = text
+        .split("unknown dtype for tensor ")
+        .nth(1)
+        .and_then(|rest| rest.split(|c: char| !c.is_ascii_digit()).next())
+        .and_then(|n| n.parse::<u32>().ok())
+    else {
+        return text;
+    };
+    // ggml's type numbers (`ggml.h`, `enum ggml_type`) for the ones people meet.
+    let name = match code {
+        16 => "IQ2_XXS",
+        17 => "IQ2_XS",
+        18 => "IQ3_XXS",
+        19 => "IQ1_S",
+        20 => "IQ4_NL",
+        21 => "IQ3_S",
+        22 => "IQ2_S",
+        23 => "IQ4_XS",
+        29 => "IQ1_M",
+        34 => "TQ1_0",
+        35 => "TQ2_0",
+        39 => "MXFP4",
+        _ => "a type this build does not know",
+    };
+    format!(
+        "this GGUF stores its weights as {name} (ggml type {code}), a quantization this \
+         engine cannot read. Choose a K-quant build of the model instead — Q2_K, Q3_K_M, \
+         Q4_K_M, Q5_K_M, Q6_K or Q8_0"
+    )
 }
 
 /// Read-ahead window for [`read_gguf_header`]. See that function for why.
@@ -802,6 +846,27 @@ pub fn ensure_gguf_header(model_dir: &Path) -> Result<(), SwarmError> {
         "Cannot create gguf_header.bin: no shard_000.bin or source GGUF found in {}",
         model_dir.display()
     )))
+}
+
+#[cfg(test)]
+mod gguf_parse_error_tests {
+    use super::explain_gguf_parse_error;
+
+    /// An `IQ*` file is named for what it is and what to pick instead; the
+    /// number alone told a reader nothing.
+    #[test]
+    fn an_unreadable_quantization_is_named_with_the_way_out() {
+        let e = candle_core::Error::Msg("unknown dtype for tensor 18".into());
+        let msg = explain_gguf_parse_error(&e);
+        assert!(msg.contains("IQ3_XXS") && msg.contains("Q4_K_M"), "{msg}");
+    }
+
+    /// Any other failure is left exactly as candle said it.
+    #[test]
+    fn other_parse_failures_pass_through() {
+        let e = candle_core::Error::Msg("invalid magic 0x0".into());
+        assert_eq!(explain_gguf_parse_error(&e), "invalid magic 0x0");
+    }
 }
 
 #[cfg(test)]

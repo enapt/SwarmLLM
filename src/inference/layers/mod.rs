@@ -71,6 +71,28 @@ impl QMatMul {
         })
     }
 
+    /// Over a plain (already dequantized) weight matrix, `[out, in]`.
+    #[cfg(test)]
+    pub(crate) fn from_dense(weight: Tensor) -> Self {
+        Self {
+            inner: QMatMulInner::Standard(candle_core::quantized::QMatMul::Tensor(weight)),
+        }
+    }
+
+    /// How many outputs this projection produces — the weight's dim 0.
+    pub(crate) fn out_features(&self) -> CandleResult<usize> {
+        match &self.inner {
+            QMatMulInner::Standard(candle_core::quantized::QMatMul::QTensor(q)) => {
+                Ok(q.shape().dims()[0])
+            }
+            QMatMulInner::Standard(
+                candle_core::quantized::QMatMul::Tensor(t)
+                | candle_core::quantized::QMatMul::TensorF16(t),
+            ) => t.dim(0),
+            QMatMulInner::FusedSlice { len, .. } => Ok(*len),
+        }
+    }
+
     /// Create a shared fused QMatMul that can be used by multiple FusedSlice variants.
     pub(crate) fn make_fused(
         qtensor: QTensor,
@@ -629,20 +651,63 @@ impl Default for MoeRoutingConfig {
     }
 }
 
-/// Mixture-of-Experts FFN for DeepSeek-V2/V3.
+/// One routed expert's SiLU-gated feed-forward, held as the model stores it.
+///
+/// **Quantized, never dequantized at load.** The experts ARE a mixture-of-
+/// experts model's size: Qwen3-30B-A3B is ~29B parameters of experts against
+/// ~1B of everything else, so the old stacked f32 tensors made a 11 GB Q2_K file
+/// need ~116 GB to load — every MoE family here was unloadable at any real size,
+/// and the capacity planner, which sizes by bytes on disk, could not see it.
+/// Each expert is its own slice of the GGUF's stacked tensor
+/// (`split::loader::load_routed_experts`), multiplied by `QMatMul` as a dense
+/// layer is — which is also how llama.cpp runs them (`mul_mat_id`).
+#[derive(Debug, Clone)]
+pub(crate) struct ExpertFfn {
+    pub(crate) gate: QMatMul, // [intermediate, hidden]
+    pub(crate) up: QMatMul,   // [intermediate, hidden]
+    pub(crate) down: QMatMul, // [hidden, intermediate]
+}
+
+impl ExpertFfn {
+    /// Every expert of three stacked `[n_experts, out, in]` tensors, as plain
+    /// matrices. For tests and for any producer already holding f32 weights;
+    /// the loader slices the quantized bytes instead.
+    #[cfg(test)]
+    pub(crate) fn from_stacked(
+        gate: &Tensor,
+        up: &Tensor,
+        down: &Tensor,
+    ) -> CandleResult<Vec<Self>> {
+        (0..gate.dim(0)?)
+            .map(|e| {
+                Ok(Self {
+                    gate: QMatMul::from_dense(gate.get(e)?),
+                    up: QMatMul::from_dense(up.get(e)?),
+                    down: QMatMul::from_dense(down.get(e)?),
+                })
+            })
+            .collect()
+    }
+}
+
+/// Mixture-of-Experts FFN (DeepSeek-V2/V3, Llama 4, Qwen2/Qwen3-MoE, Qwen 3.5).
 ///
 /// Router selects top-k experts per token, runs SiLU-gated FFN for each,
 /// and sums the weighted outputs. Shared experts (always active) are added.
 #[derive(Debug, Clone)]
 pub(crate) struct MoeFfn {
     pub(crate) gate: Tensor, // router weights: [n_experts, hidden] (dequantized)
-    pub(crate) gate_exps: Tensor, // stacked expert gate: [n_experts, intermediate, hidden]
-    pub(crate) down_exps: Tensor, // stacked expert down: [n_experts, hidden, intermediate]
-    pub(crate) up_exps: Tensor, // stacked expert up: [n_experts, intermediate, hidden]
+    /// The routed experts, in router order — `experts[i]` answers router row `i`.
+    pub(crate) experts: Vec<ExpertFfn>,
     // Shared experts (always active, optional)
     pub(crate) shared_gate: Option<QMatMul>,
     pub(crate) shared_down: Option<QMatMul>,
     pub(crate) shared_up: Option<QMatMul>,
+    /// A per-token gate on the shared expert's output, `[hidden]`: the shared
+    /// expert is scaled by `sigmoid(x · w)` before it is added (Qwen2-MoE's
+    /// `ffn_gate_inp_shexp`, llama.cpp `qwen2moe.cpp`). `None` adds it ungated,
+    /// as Llama 4 and DeepSeek do.
+    pub(crate) shared_gate_inp: Option<Tensor>,
     pub(crate) n_experts_used: usize, // top-k
     /// R132: per-architecture routing policy (gating function + weight
     /// normalization). Defaults to softmax + renormalize — the historical
@@ -786,15 +851,10 @@ pub(crate) fn topk_cpu(
 ///
 /// Exact for the same reason: every step here treats each token independently,
 /// so splitting rows changes only how many are materialised at once.
-fn expert_ffn(
-    batch_input: &Tensor,
-    gate_w: &Tensor,
-    up_w: &Tensor,
-    down_w: &Tensor,
-) -> CandleResult<Tensor> {
+fn expert_ffn(batch_input: &Tensor, expert: &ExpertFfn) -> CandleResult<Tensor> {
     let tokens = batch_input.dim(0)?;
-    // `gate_w` is [intermediate, hidden]; the projection widens to its dim 0.
-    let intermediate = gate_w.dim(0)?;
+    // The gate is [intermediate, hidden]; the projection widens to its dim 0.
+    let intermediate = expert.gate.out_features()?;
     let block = if tokens < MLP_MIN_TOKENS_TO_BLOCK || intermediate == 0 {
         tokens
     } else {
@@ -802,10 +862,11 @@ fn expert_ffn(
     };
 
     let run = |input: &Tensor| -> CandleResult<Tensor> {
-        let gate_out = input.matmul(&gate_w.t()?)?;
-        let up_out = input.matmul(&up_w.t()?)?;
-        let combined = crate::inference::fast_math::silu_mul(&gate_out, &up_out)?;
-        combined.matmul(&down_w.t()?)
+        // Gate and up read the same activation: quantize it once, as the
+        // dense `Mlp` does (`QMatMul::forward_shared`).
+        let gate_up = QMatMul::forward_shared(input, &[&expert.gate, &expert.up])?;
+        let combined = crate::inference::fast_math::silu_mul(&gate_up[0], &gate_up[1])?;
+        expert.down.forward(&combined)
     };
 
     if block >= tokens {
@@ -868,11 +929,13 @@ impl MoeFfn {
             let batch_input = x_flat.index_select(&idx_tensor, 0)?; // [batch_tokens, hidden]
 
             // Batched SiLU-gated FFN: silu(x @ gate.t) * (x @ up.t) @ down.t
-            let gate_w = self.gate_exps.get(eidx)?;
-            let up_w = self.up_exps.get(eidx)?;
-            let down_w = self.down_exps.get(eidx)?;
-
-            let expert_out = expert_ffn(&batch_input, &gate_w, &up_w, &down_w)?; // [batch_tokens, hidden]
+            let expert = self.experts.get(eidx).ok_or_else(|| {
+                candle_core::Error::Msg(format!(
+                    "router chose expert {eidx} of a layer holding {}",
+                    self.experts.len()
+                ))
+            })?;
+            let expert_out = expert_ffn(&batch_input, expert)?; // [batch_tokens, hidden]
 
             // Apply per-token weights
             let weight_vec: Vec<f32> = batch.iter().map(|&(_, w)| w).collect();
@@ -907,6 +970,14 @@ impl MoeFfn {
             let shared_combined =
                 crate::inference::fast_math::silu_mul(&shared_gate_out, &shared_up_out)?;
             let shared_out = sd.forward(&shared_combined)?;
+            let shared_out = match &self.shared_gate_inp {
+                // sigmoid(x · w) per token, as llama.cpp's qwen2moe does it.
+                Some(w) => {
+                    let logit = x_flat.matmul(&w.reshape((hidden, 1))?)?; // [tokens, 1]
+                    shared_out.broadcast_mul(&candle_nn::ops::sigmoid(&logit)?)?
+                }
+                None => shared_out,
+            };
             output = (output + shared_out)?;
         }
 
@@ -3654,7 +3725,12 @@ mod blocked_expert_ffn_tests {
 
         // The real budget leaves this unblocked; compare against an explicit
         // single-shot run of the same arithmetic.
-        let blocked = expert_ffn(&input, &g, &u, &d).unwrap();
+        let expert = ExpertFfn {
+            gate: QMatMul::from_dense(g.clone()),
+            up: QMatMul::from_dense(u.clone()),
+            down: QMatMul::from_dense(d.clone()),
+        };
+        let blocked = expert_ffn(&input, &expert).unwrap();
         let whole = {
             let gate_out = input.matmul(&g.t().unwrap()).unwrap();
             let up_out = input.matmul(&u.t().unwrap()).unwrap();
@@ -3688,7 +3764,12 @@ mod blocked_expert_ffn_tests {
         )
         .unwrap();
 
-        let out = expert_ffn(&input, &g, &u, &d).unwrap();
+        let expert = ExpertFfn {
+            gate: QMatMul::from_dense(g),
+            up: QMatMul::from_dense(u),
+            down: QMatMul::from_dense(d),
+        };
+        let out = expert_ffn(&input, &expert).unwrap();
         assert_eq!(out.dims(), &[tokens, hidden]);
     }
 }

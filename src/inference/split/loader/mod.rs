@@ -201,6 +201,148 @@ fn load_qkv_weights<R: std::io::Read + std::io::Seek>(
     Ok((wqkv, wq, wk, wv))
 }
 
+/// One of a GGUF's stacked expert tensors (`ffn_{gate,up,down}_exps`), cut into
+/// one QUANTIZED matrix per expert and placed on `device`.
+///
+/// The stack is `[n_experts, rows, cols]` (candle's order — ggml's `ne`
+/// reversed) and stored expert-major, so expert `e` is the contiguous
+/// `rows × cols` block at byte `e × per_expert`, made of whole quantization
+/// blocks because every row is. It is read on the processor, sliced, and only
+/// the slices go to `device`; nothing is dequantized (`layers::ExpertFfn`).
+fn split_expert_stack<R: std::io::Read + std::io::Seek>(
+    ct: &gguf_file::Content,
+    reader: &mut R,
+    name: &str,
+    device: &Device,
+) -> Result<Vec<QTensor>, SwarmError> {
+    let stacked = ct
+        .tensor(reader, name, &Device::Cpu)
+        .map_err(|e| SwarmError::Internal(format!("{name}: {e}")))?;
+    let (n, rows, cols) = match *stacked.shape().dims() {
+        [n, rows, cols] => (n, rows, cols),
+        ref dims => {
+            return Err(SwarmError::Internal(format!(
+                "{name}: an expert stack has 3 dimensions, this one {dims:?}"
+            )))
+        }
+    };
+    let dtype = stacked.dtype();
+    let data = stacked
+        .data()
+        .map_err(|e| SwarmError::Internal(format!("{name}: {e}")))?;
+    let per_expert = rows * cols / dtype.block_size() * dtype.type_size();
+    if n == 0 || per_expert.checked_mul(n) != Some(data.len()) {
+        return Err(SwarmError::Internal(format!(
+            "{name}: {} bytes is not {n} experts of {rows}x{cols} {dtype:?}",
+            data.len()
+        )));
+    }
+    (0..n)
+        .map(|e| {
+            candle_core::quantized::ggml_file::qtensor_from_ggml(
+                dtype,
+                &data[e * per_expert..(e + 1) * per_expert],
+                vec![rows, cols],
+                device,
+            )
+            .map_err(|err| SwarmError::Internal(format!("{name} expert {e}: {err}")))
+        })
+        .collect()
+}
+
+/// A layer's mixture-of-experts feed-forward, loaded the one way every MoE
+/// family here shares: the router dequantized (`[n_experts, hidden]`, small),
+/// each routed expert kept QUANTIZED as its own matrix, and the shared expert —
+/// with its sigmoid gate, where the model has one — when present.
+///
+/// One function because the three per-family copies it replaces each
+/// dequantized every expert to f32, which made every real-sized MoE model
+/// unloadable (`layers::ExpertFfn`); a family added later inherits the right
+/// behaviour by calling it.
+fn load_moe_ffn<R: std::io::Read + std::io::Seek>(
+    ct: &gguf_file::Content,
+    reader: &mut R,
+    prefix: &str,
+    device: &Device,
+    n_experts_used: usize,
+    routing: MoeRoutingConfig,
+) -> Result<MoeFfn, SwarmError> {
+    let name = |t: &str| format!("{prefix}.{t}.weight");
+    let router = ct
+        .tensor(reader, &name("ffn_gate_inp"), device)
+        .and_then(|t| t.dequantize(device))
+        .map_err(|e| SwarmError::Internal(format!("{prefix}.ffn_gate_inp: {e}")))?;
+    let gate = split_expert_stack(ct, reader, &name("ffn_gate_exps"), device)?;
+    let up = split_expert_stack(ct, reader, &name("ffn_up_exps"), device)?;
+    let down = split_expert_stack(ct, reader, &name("ffn_down_exps"), device)?;
+    let n_router = router.dim(0).map_err(SwarmError::internal)?;
+    if gate.len() != n_router || up.len() != n_router || down.len() != n_router {
+        return Err(SwarmError::Internal(format!(
+            "{prefix}: the router chooses among {n_router} experts, the stacks hold {}/{}/{}",
+            gate.len(),
+            up.len(),
+            down.len()
+        )));
+    }
+    let experts = gate
+        .into_iter()
+        .zip(up)
+        .zip(down)
+        .map(|((g, u), d)| {
+            Ok(super::ExpertFfn {
+                gate: QMatMul::from_qtensor(g)?,
+                up: QMatMul::from_qtensor(u)?,
+                down: QMatMul::from_qtensor(d)?,
+            })
+        })
+        .collect::<Result<Vec<_>, candle_core::Error>>()
+        .map_err(SwarmError::internal)?;
+
+    // Present or absent as a whole in every family; a present tensor that
+    // fails to read is an error, not an absence.
+    let mut optional = |t: &str| -> Result<Option<QTensor>, SwarmError> {
+        let n = name(t);
+        if !ct.tensor_infos.contains_key(&n) {
+            return Ok(None);
+        }
+        ct.tensor(reader, &n, device)
+            .map(Some)
+            .map_err(|e| SwarmError::Internal(format!("{n}: {e}")))
+    };
+    let shared = |t: Option<QTensor>| {
+        t.map(QMatMul::from_qtensor)
+            .transpose()
+            .map_err(SwarmError::internal)
+    };
+    let shared_gate = shared(optional("ffn_gate_shexp")?)?;
+    let shared_up = shared(optional("ffn_up_shexp")?)?;
+    let shared_down = shared(optional("ffn_down_shexp")?)?;
+    let shared_gate_inp = optional("ffn_gate_inp_shexp")?
+        .map(|t| t.dequantize(device))
+        .transpose()
+        .map_err(SwarmError::internal)?;
+
+    Ok(MoeFfn {
+        gate: router,
+        experts,
+        shared_gate,
+        shared_down,
+        shared_up,
+        shared_gate_inp,
+        n_experts_used,
+        routing,
+    })
+}
+
+/// Whether a family's router renormalizes its top-k weights when the GGUF does
+/// not say (`{arch}.expert_weights_norm` absent). llama.cpp hardcodes this in
+/// each family's graph rather than writing a key, so the answer is per family:
+/// `qwen2moe.cpp` passes `norm_w = false` and `qwen3moe.cpp` `true` (read
+/// 2026-09-25). Everything else keeps the long-standing default of `true`.
+fn moe_renormalizes_by_default(arch: &str) -> bool {
+    arch != "qwen2moe"
+}
+
 impl SplitModel {
     /// Load a partial model from a GGUF file, only loading the specified layer range.
     ///
@@ -238,8 +380,12 @@ impl SplitModel {
         let mmap = unsafe { memmap2::Mmap::map(&file) }
             .map_err(|e| SwarmError::Internal(format!("Failed to mmap GGUF: {e}")))?;
         let mut file = std::io::Cursor::new(mmap.as_ref());
-        let ct = gguf_file::Content::read(&mut file)
-            .map_err(|e| SwarmError::Internal(format!("Failed to read GGUF: {e}")))?;
+        let ct = gguf_file::Content::read(&mut file).map_err(|e| {
+            SwarmError::Internal(format!(
+                "Failed to read GGUF: {}",
+                super::explain_gguf_parse_error(&e)
+            ))
+        })?;
 
         let device = if force_cpu {
             Device::Cpu
@@ -346,7 +492,7 @@ impl SplitModel {
                 .unwrap_or(MoeGatingFunc::Softmax),
             renormalize_weights: md_get("expert_weights_norm")
                 .and_then(|v| v.to_bool().map_err(SwarmError::internal))
-                .unwrap_or(true),
+                .unwrap_or_else(|_| moe_renormalizes_by_default(&arch_str)),
         };
         tracing::debug!(
             gating_func = ?moe_routing.gating_func,
@@ -913,88 +1059,14 @@ impl SplitModel {
 
                     // FFN: MoE or dense
                     let ffn = if has_moe {
-                        let gate_inp = ct
-                            .tensor(&mut file, &format!("{prefix}.ffn_gate_inp.weight"), &device)
-                            .map_err(|e| {
-                                SwarmError::Internal(format!("{prefix}.ffn_gate_inp: {e}"))
-                            })?;
-                        let gate_exps = ct
-                            .tensor(
-                                &mut file,
-                                &format!("{prefix}.ffn_gate_exps.weight"),
-                                &device,
-                            )
-                            .map_err(|e| {
-                                SwarmError::Internal(format!("{prefix}.ffn_gate_exps: {e}"))
-                            })?;
-                        let down_exps = ct
-                            .tensor(
-                                &mut file,
-                                &format!("{prefix}.ffn_down_exps.weight"),
-                                &device,
-                            )
-                            .map_err(|e| {
-                                SwarmError::Internal(format!("{prefix}.ffn_down_exps: {e}"))
-                            })?;
-                        let up_exps = ct
-                            .tensor(&mut file, &format!("{prefix}.ffn_up_exps.weight"), &device)
-                            .map_err(|e| {
-                                SwarmError::Internal(format!("{prefix}.ffn_up_exps: {e}"))
-                            })?;
-
-                        // Dequantize stacked expert tensors for index_select routing
-                        let gate_inp_t = gate_inp
-                            .dequantize(&device)
-                            .map_err(|e| SwarmError::Internal(format!("gate_inp dequant: {e}")))?;
-                        let gate_exps_t = gate_exps
-                            .dequantize(&device)
-                            .map_err(|e| SwarmError::Internal(format!("gate_exps dequant: {e}")))?;
-                        let down_exps_t = down_exps
-                            .dequantize(&device)
-                            .map_err(|e| SwarmError::Internal(format!("down_exps dequant: {e}")))?;
-                        let up_exps_t = up_exps
-                            .dequantize(&device)
-                            .map_err(|e| SwarmError::Internal(format!("up_exps dequant: {e}")))?;
-
-                        // Shared experts (optional)
-                        let shared_gate = ct
-                            .tensor(
-                                &mut file,
-                                &format!("{prefix}.ffn_gate_shexp.weight"),
-                                &device,
-                            )
-                            .ok()
-                            .map(QMatMul::from_qtensor)
-                            .transpose()
-                            .map_err(|e| SwarmError::Internal(format!("shared gate: {e}")))?;
-                        let shared_down = ct
-                            .tensor(
-                                &mut file,
-                                &format!("{prefix}.ffn_down_shexp.weight"),
-                                &device,
-                            )
-                            .ok()
-                            .map(QMatMul::from_qtensor)
-                            .transpose()
-                            .map_err(|e| SwarmError::Internal(format!("shared down: {e}")))?;
-                        let shared_up = ct
-                            .tensor(&mut file, &format!("{prefix}.ffn_up_shexp.weight"), &device)
-                            .ok()
-                            .map(QMatMul::from_qtensor)
-                            .transpose()
-                            .map_err(|e| SwarmError::Internal(format!("shared up: {e}")))?;
-
-                        FfnVariant::MoE(MoeFfn {
-                            gate: gate_inp_t,
-                            gate_exps: gate_exps_t,
-                            down_exps: down_exps_t,
-                            up_exps: up_exps_t,
-                            shared_gate,
-                            shared_down,
-                            shared_up,
-                            n_experts_used: ds_meta.n_experts_used,
-                            routing: moe_routing,
-                        })
+                        FfnVariant::MoE(load_moe_ffn(
+                            &ct,
+                            &mut file,
+                            &prefix,
+                            &device,
+                            ds_meta.n_experts_used,
+                            moe_routing,
+                        )?)
                     } else {
                         // Dense FFN for early DeepSeek layers
                         let ffn_gate = ct
@@ -1178,83 +1250,14 @@ impl SplitModel {
                     .contains_key(&format!("{prefix}.ffn_gate_exps.weight"));
 
                 let ffn = if has_moe && n_experts > 0 {
-                    let gate_inp = ct
-                        .tensor(&mut file, &format!("{prefix}.ffn_gate_inp.weight"), &device)
-                        .map_err(|e| SwarmError::Internal(format!("{prefix}.ffn_gate_inp: {e}")))?;
-                    let gate_exps = ct
-                        .tensor(
-                            &mut file,
-                            &format!("{prefix}.ffn_gate_exps.weight"),
-                            &device,
-                        )
-                        .map_err(|e| {
-                            SwarmError::Internal(format!("{prefix}.ffn_gate_exps: {e}"))
-                        })?;
-                    let down_exps = ct
-                        .tensor(
-                            &mut file,
-                            &format!("{prefix}.ffn_down_exps.weight"),
-                            &device,
-                        )
-                        .map_err(|e| {
-                            SwarmError::Internal(format!("{prefix}.ffn_down_exps: {e}"))
-                        })?;
-                    let up_exps = ct
-                        .tensor(&mut file, &format!("{prefix}.ffn_up_exps.weight"), &device)
-                        .map_err(|e| SwarmError::Internal(format!("{prefix}.ffn_up_exps: {e}")))?;
-
-                    let gate_inp_t = gate_inp
-                        .dequantize(&device)
-                        .map_err(|e| SwarmError::Internal(format!("gate_inp dequant: {e}")))?;
-                    let gate_exps_t = gate_exps
-                        .dequantize(&device)
-                        .map_err(|e| SwarmError::Internal(format!("gate_exps dequant: {e}")))?;
-                    let down_exps_t = down_exps
-                        .dequantize(&device)
-                        .map_err(|e| SwarmError::Internal(format!("down_exps dequant: {e}")))?;
-                    let up_exps_t = up_exps
-                        .dequantize(&device)
-                        .map_err(|e| SwarmError::Internal(format!("up_exps dequant: {e}")))?;
-
-                    // Shared experts (optional for Llama 4)
-                    let shared_gate = ct
-                        .tensor(
-                            &mut file,
-                            &format!("{prefix}.ffn_gate_shexp.weight"),
-                            &device,
-                        )
-                        .ok()
-                        .map(QMatMul::from_qtensor)
-                        .transpose()
-                        .map_err(|e| SwarmError::Internal(format!("shared gate: {e}")))?;
-                    let shared_down = ct
-                        .tensor(
-                            &mut file,
-                            &format!("{prefix}.ffn_down_shexp.weight"),
-                            &device,
-                        )
-                        .ok()
-                        .map(QMatMul::from_qtensor)
-                        .transpose()
-                        .map_err(|e| SwarmError::Internal(format!("shared down: {e}")))?;
-                    let shared_up = ct
-                        .tensor(&mut file, &format!("{prefix}.ffn_up_shexp.weight"), &device)
-                        .ok()
-                        .map(QMatMul::from_qtensor)
-                        .transpose()
-                        .map_err(|e| SwarmError::Internal(format!("shared up: {e}")))?;
-
-                    FfnVariant::MoE(MoeFfn {
-                        gate: gate_inp_t,
-                        gate_exps: gate_exps_t,
-                        down_exps: down_exps_t,
-                        up_exps: up_exps_t,
-                        shared_gate,
-                        shared_down,
-                        shared_up,
+                    FfnVariant::MoE(load_moe_ffn(
+                        &ct,
+                        &mut file,
+                        &prefix,
+                        &device,
                         n_experts_used,
-                        routing: moe_routing,
-                    })
+                        moe_routing,
+                    )?)
                 } else {
                     // Dense FFN — gate is optional (absent in Starcoder2's 2-layer MLP)
                     let ffn_gate_t = ct
@@ -1396,89 +1399,19 @@ impl SplitModel {
                         .contains_key(&format!("{prefix}.ffn_gate_exps.weight"))
                 {
                     // MoE FFN
-                    let gate_inp = ct
-                        .tensor(&mut file, &format!("{prefix}.ffn_gate_inp.weight"), &device)
-                        .map_err(|e| SwarmError::Internal(format!("{prefix}.ffn_gate_inp: {e}")))?;
-                    let gate_exps = ct
-                        .tensor(
-                            &mut file,
-                            &format!("{prefix}.ffn_gate_exps.weight"),
-                            &device,
-                        )
-                        .map_err(|e| {
-                            SwarmError::Internal(format!("{prefix}.ffn_gate_exps: {e}"))
-                        })?;
-                    let down_exps = ct
-                        .tensor(
-                            &mut file,
-                            &format!("{prefix}.ffn_down_exps.weight"),
-                            &device,
-                        )
-                        .map_err(|e| {
-                            SwarmError::Internal(format!("{prefix}.ffn_down_exps: {e}"))
-                        })?;
-                    let up_exps = ct
-                        .tensor(&mut file, &format!("{prefix}.ffn_up_exps.weight"), &device)
-                        .map_err(|e| SwarmError::Internal(format!("{prefix}.ffn_up_exps: {e}")))?;
-
                     let n_experts_used = ct
                         .metadata
                         .get(&format!("{arch}.expert_used_count"))
                         .and_then(|v| v.to_u32().ok())
                         .unwrap_or(2) as usize;
-
-                    // Shared experts (optional for MoE)
-                    let shared_gate = ct
-                        .tensor(
-                            &mut file,
-                            &format!("{prefix}.ffn_gate_shexp.weight"),
-                            &device,
-                        )
-                        .ok()
-                        .map(|t| {
-                            QMatMul::from_qtensor(t).map_err(|e| {
-                                SwarmError::Internal(format!("QMatMul load failed: {e}"))
-                            })
-                        })
-                        .transpose()?;
-                    let shared_down = ct
-                        .tensor(
-                            &mut file,
-                            &format!("{prefix}.ffn_down_shexp.weight"),
-                            &device,
-                        )
-                        .ok()
-                        .map(|t| {
-                            QMatMul::from_qtensor(t).map_err(|e| {
-                                SwarmError::Internal(format!("QMatMul load failed: {e}"))
-                            })
-                        })
-                        .transpose()?;
-                    let shared_up = ct
-                        .tensor(&mut file, &format!("{prefix}.ffn_up_shexp.weight"), &device)
-                        .ok()
-                        .map(|t| {
-                            QMatMul::from_qtensor(t).map_err(|e| {
-                                SwarmError::Internal(format!("QMatMul load failed: {e}"))
-                            })
-                        })
-                        .transpose()?;
-
-                    FfnVariant::MoE(MoeFfn {
-                        gate: gate_inp.dequantize(&device).map_err(SwarmError::internal)?,
-                        gate_exps: gate_exps
-                            .dequantize(&device)
-                            .map_err(SwarmError::internal)?,
-                        down_exps: down_exps
-                            .dequantize(&device)
-                            .map_err(SwarmError::internal)?,
-                        up_exps: up_exps.dequantize(&device).map_err(SwarmError::internal)?,
-                        shared_gate,
-                        shared_down,
-                        shared_up,
+                    FfnVariant::MoE(load_moe_ffn(
+                        &ct,
+                        &mut file,
+                        &prefix,
+                        &device,
                         n_experts_used,
-                        routing: moe_routing,
-                    })
+                        moe_routing,
+                    )?)
                 } else {
                     // Dense FFN
                     let ffn_gate = ct
@@ -1623,6 +1556,22 @@ impl SplitModel {
             }
         } else {
             // ── Standard dense architecture loading (Llama, Qwen2, Gemma, GLM-4, etc.) ──
+            //
+            // Qwen2-MoE and Qwen3-MoE (`qwen2moe`, `qwen3moe`) are this layout
+            // with the feed-forward swapped for routed experts: a layer holding
+            // `ffn_gate_exps` loads one through `load_moe_ffn`, every other
+            // layer is dense exactly as before. Until 2026-09-25 this branch
+            // required `ffn_down` of every layer, so `qwen2moe` — listed as
+            // supported — failed to load, and `qwen3moe` was refused outright.
+            let experts_used = ct
+                .metadata
+                .get(&format!("{arch}.expert_used_count"))
+                .and_then(|v| v.to_u32().ok())
+                .unwrap_or(0) as usize;
+            let is_moe_layer = |prefix: &str| {
+                ct.tensor_infos
+                    .contains_key(&format!("{prefix}.ffn_gate_exps.weight"))
+            };
             if let Some(mmap_ref) = parallel_data {
                 // Parallel layer loading: each thread gets its own Cursor into mmap'd data.
                 // ~N× speedup for N layers on NVMe/SSD.
@@ -1763,76 +1712,94 @@ impl SplitModel {
                                             ))
                                         })?;
 
-                                    // FFN: try separate gate/up first; fall back to fused gate_up
-                                    // (Phi-3 uses combined ffn_up = gate || up, no separate ffn_gate)
-                                    let has_ffn_gate = ct_ref
-                                        .tensor_infos
-                                        .contains_key(&format!("{prefix}.ffn_gate.weight"));
-                                    let ffn_down_qt = ct_ref
-                                        .tensor(
+                                    let ffn = if is_moe_layer(&prefix) {
+                                        FfnVariant::MoE(load_moe_ffn(
+                                            ct_ref,
                                             &mut cursor,
-                                            &format!("{prefix}.ffn_down.weight"),
+                                            &prefix,
                                             device_ref,
-                                        )
-                                        .map_err(|e| {
-                                            SwarmError::Internal(format!(
-                                                "Failed to load {prefix}.ffn_down: {e}"
-                                            ))
-                                        })?;
-                                    let (ffn_gate_mm, ffn_down_mm, ffn_up_mm) = if has_ffn_gate {
-                                        let gate = ct_ref
-                                            .tensor(
-                                                &mut cursor,
-                                                &format!("{prefix}.ffn_gate.weight"),
-                                                device_ref,
-                                            )
-                                            .map_err(|e| {
-                                                SwarmError::Internal(format!(
-                                                    "Failed to load {prefix}.ffn_gate: {e}"
-                                                ))
-                                            })?;
-                                        let up = ct_ref
-                                            .tensor(
-                                                &mut cursor,
-                                                &format!("{prefix}.ffn_up.weight"),
-                                                device_ref,
-                                            )
-                                            .map_err(|e| {
-                                                SwarmError::Internal(format!(
-                                                    "Failed to load {prefix}.ffn_up: {e}"
-                                                ))
-                                            })?;
-                                        (
-                                            QMatMul::from_qtensor(gate)
-                                                .map_err(SwarmError::internal)?,
-                                            QMatMul::from_qtensor(ffn_down_qt)
-                                                .map_err(SwarmError::internal)?,
-                                            QMatMul::from_qtensor(up)
-                                                .map_err(SwarmError::internal)?,
-                                        )
+                                            experts_used,
+                                            moe_routing,
+                                        )?)
                                     } else {
-                                        // Fused gate+up: use FusedSlice to avoid re-quantization
-                                        let fused_qt = ct_ref
+                                        // FFN: try separate gate/up first; fall back to fused gate_up
+                                        // (Phi-3 uses combined ffn_up = gate || up, no separate ffn_gate)
+                                        let has_ffn_gate = ct_ref
+                                            .tensor_infos
+                                            .contains_key(&format!("{prefix}.ffn_gate.weight"));
+                                        let ffn_down_qt = ct_ref
                                             .tensor(
                                                 &mut cursor,
-                                                &format!("{prefix}.ffn_up.weight"),
+                                                &format!("{prefix}.ffn_down.weight"),
                                                 device_ref,
                                             )
                                             .map_err(|e| {
                                                 SwarmError::Internal(format!(
-                                                    "Failed to load {prefix}.ffn_up: {e}"
+                                                    "Failed to load {prefix}.ffn_down: {e}"
                                                 ))
                                             })?;
-                                        let fused_shape = fused_qt.shape();
-                                        let half = fused_shape.dims()[0] / 2;
-                                        let fused = QMatMul::make_fused(fused_qt)
-                                            .map_err(SwarmError::internal)?;
-                                        (
-                                            QMatMul::from_fused_slice(fused.clone(), 0, half),
-                                            QMatMul::from_qtensor(ffn_down_qt)
-                                                .map_err(SwarmError::internal)?,
-                                            QMatMul::from_fused_slice(fused, half, half),
-                                        )
+                                        let (ffn_gate_mm, ffn_down_mm, ffn_up_mm) = if has_ffn_gate
+                                        {
+                                            let gate = ct_ref
+                                                .tensor(
+                                                    &mut cursor,
+                                                    &format!("{prefix}.ffn_gate.weight"),
+                                                    device_ref,
+                                                )
+                                                .map_err(|e| {
+                                                    SwarmError::Internal(format!(
+                                                        "Failed to load {prefix}.ffn_gate: {e}"
+                                                    ))
+                                                })?;
+                                            let up = ct_ref
+                                                .tensor(
+                                                    &mut cursor,
+                                                    &format!("{prefix}.ffn_up.weight"),
+                                                    device_ref,
+                                                )
+                                                .map_err(|e| {
+                                                    SwarmError::Internal(format!(
+                                                        "Failed to load {prefix}.ffn_up: {e}"
+                                                    ))
+                                                })?;
+                                            (
+                                                QMatMul::from_qtensor(gate)
+                                                    .map_err(SwarmError::internal)?,
+                                                QMatMul::from_qtensor(ffn_down_qt)
+                                                    .map_err(SwarmError::internal)?,
+                                                QMatMul::from_qtensor(up)
+                                                    .map_err(SwarmError::internal)?,
+                                            )
+                                        } else {
+                                            // Fused gate+up: use FusedSlice to avoid re-quantization
+                                            let fused_qt = ct_ref
+                                                .tensor(
+                                                    &mut cursor,
+                                                    &format!("{prefix}.ffn_up.weight"),
+                                                    device_ref,
+                                                )
+                                                .map_err(|e| {
+                                                    SwarmError::Internal(format!(
+                                                        "Failed to load {prefix}.ffn_up: {e}"
+                                                    ))
+                                                })?;
+                                            let fused_shape = fused_qt.shape();
+                                            let half = fused_shape.dims()[0] / 2;
+                                            let fused = QMatMul::make_fused(fused_qt)
+                                                .map_err(SwarmError::internal)?;
+                                            (
+                                                QMatMul::from_fused_slice(fused.clone(), 0, half),
+                                                QMatMul::from_qtensor(ffn_down_qt)
+                                                    .map_err(SwarmError::internal)?,
+                                                QMatMul::from_fused_slice(fused, half, half),
+                                            )
+                                        };
+                                        FfnVariant::Dense(Mlp {
+                                            ffn_gate: Some(ffn_gate_mm),
+                                            ffn_down: ffn_down_mm,
+                                            ffn_up: ffn_up_mm,
+                                            activation,
+                                        })
                                     };
                                     let attn_norm = ct_ref
                                         .tensor(
@@ -1915,12 +1882,7 @@ impl SplitModel {
                                         attention_norm: make_norm(attn_norm, rms_norm_eps)?,
                                         attn_q_norm,
                                         attn_k_norm,
-                                        ffn: FfnVariant::Dense(Mlp {
-                                            ffn_gate: Some(ffn_gate_mm),
-                                            ffn_down: ffn_down_mm,
-                                            ffn_up: ffn_up_mm,
-                                            activation,
-                                        }),
+                                        ffn,
                                         ffn_norm: make_norm(ffn_norm, rms_norm_eps)?,
                                         post_attention_norm,
                                         post_ffw_norm,
@@ -2030,15 +1992,24 @@ impl SplitModel {
                         .tensor(file, &format!("{prefix}.post_ffw_norm.weight"), &device)
                         .ok();
 
-                    // FFN: try separate gate/up first, fall back to fused gate_up (Phi-3)
-                    // (MoE models hit their architecture-specific branches above, not here)
+                    // FFN: routed experts (Qwen2/Qwen3-MoE), else separate
+                    // gate/up, else fused gate_up (Phi-3).
                     let has_ffn_gate = ct
                         .tensor_infos
                         .contains_key(&format!("{prefix}.ffn_gate.weight"));
-                    let ffn_down_qt = ct
-                        .tensor(file, &format!("{prefix}.ffn_down.weight"), &device)
-                        .map_err(|e| SwarmError::Internal(format!("{prefix}.ffn_down: {e}")))?;
-                    let ffn = if has_ffn_gate {
+                    let ffn = if is_moe_layer(&prefix) {
+                        FfnVariant::MoE(load_moe_ffn(
+                            &ct,
+                            file,
+                            &prefix,
+                            &device,
+                            experts_used,
+                            moe_routing,
+                        )?)
+                    } else if has_ffn_gate {
+                        let ffn_down_qt = ct
+                            .tensor(file, &format!("{prefix}.ffn_down.weight"), &device)
+                            .map_err(|e| SwarmError::Internal(format!("{prefix}.ffn_down: {e}")))?;
                         let gate = ct
                             .tensor(file, &format!("{prefix}.ffn_gate.weight"), &device)
                             .map_err(|e| SwarmError::Internal(format!("{prefix}.ffn_gate: {e}")))?;
@@ -2056,6 +2027,9 @@ impl SplitModel {
                         })
                     } else {
                         // Fused gate+up (Phi-3): ffn_up = gate || up combined
+                        let ffn_down_qt = ct
+                            .tensor(file, &format!("{prefix}.ffn_down.weight"), &device)
+                            .map_err(|e| SwarmError::Internal(format!("{prefix}.ffn_down: {e}")))?;
                         let fused_qt = ct
                             .tensor(file, &format!("{prefix}.ffn_up.weight"), &device)
                             .map_err(|e| SwarmError::Internal(format!("{prefix}.ffn_up: {e}")))?;
@@ -2251,5 +2225,125 @@ mod embedding_dtype_tests {
             EMBEDDING_DTYPE.size_in_bytes(),
             EMBEDDING_TABLE_BYTES_PER_ELEMENT
         );
+    }
+}
+
+#[cfg(test)]
+mod expert_stack_tests {
+    use super::{load_moe_ffn, split_expert_stack, MoeRoutingConfig};
+    use candle_core::quantized::{gguf_file, GgmlDType, QTensor};
+    use candle_core::{Device, Tensor};
+
+    /// A GGUF holding one layer's router and three `[n, rows, cols]` Q8_0
+    /// expert stacks, written and parsed in memory.
+    fn moe_gguf(
+        n: usize,
+        hidden: usize,
+        inter: usize,
+    ) -> (gguf_file::Content, std::io::Cursor<Vec<u8>>) {
+        let dev = Device::Cpu;
+        let q = |shape: (usize, usize, usize), seed: f32| {
+            let v: Vec<f32> = (0..shape.0 * shape.1 * shape.2)
+                .map(|i| ((i as f32 * seed).sin()) * 0.5)
+                .collect();
+            QTensor::quantize(&Tensor::from_vec(v, shape, &dev).unwrap(), GgmlDType::Q8_0).unwrap()
+        };
+        let router = QTensor::quantize(
+            &Tensor::from_vec(
+                (0..n * hidden)
+                    .map(|i| (i as f32 * 0.37).cos())
+                    .collect::<Vec<f32>>(),
+                (n, hidden),
+                &dev,
+            )
+            .unwrap(),
+            GgmlDType::F32,
+        )
+        .unwrap();
+        let gate = q((n, inter, hidden), 0.013);
+        let up = q((n, inter, hidden), 0.029);
+        let down = q((n, hidden, inter), 0.041);
+        let mut buf = std::io::Cursor::new(Vec::new());
+        gguf_file::write(
+            &mut buf,
+            &[],
+            &[
+                ("blk.0.ffn_gate_inp.weight", &router),
+                ("blk.0.ffn_gate_exps.weight", &gate),
+                ("blk.0.ffn_up_exps.weight", &up),
+                ("blk.0.ffn_down_exps.weight", &down),
+            ],
+        )
+        .unwrap();
+        buf.set_position(0);
+        let ct = gguf_file::Content::read(&mut buf).unwrap();
+        (ct, buf)
+    }
+
+    /// Each expert is its own slice of the stack, still QUANTIZED, and holds
+    /// exactly that slice's values. The dtype check is the point: dequantizing
+    /// the stacks made a 30B-A3B model need ~116 GB where its file is 11 GB.
+    #[test]
+    fn an_expert_stack_is_cut_into_quantized_experts_holding_their_own_slice() {
+        let (n, hidden, inter) = (4, 64, 96);
+        let (ct, mut reader) = moe_gguf(n, hidden, inter);
+        let experts =
+            split_expert_stack(&ct, &mut reader, "blk.0.ffn_gate_exps.weight", &Device::Cpu)
+                .unwrap();
+        assert_eq!(experts.len(), n);
+        let whole = ct
+            .tensor(&mut reader, "blk.0.ffn_gate_exps.weight", &Device::Cpu)
+            .unwrap()
+            .dequantize(&Device::Cpu)
+            .unwrap();
+        for (e, q) in experts.iter().enumerate() {
+            assert_eq!(q.dtype(), GgmlDType::Q8_0, "expert {e} was dequantized");
+            assert_eq!(q.shape().dims(), &[inter, hidden]);
+            let got = q.dequantize(&Device::Cpu).unwrap();
+            let want = whole.get(e).unwrap();
+            let diff = (got - want)
+                .unwrap()
+                .abs()
+                .unwrap()
+                .max_all()
+                .unwrap()
+                .to_scalar::<f32>()
+                .unwrap();
+            assert_eq!(diff, 0.0, "expert {e} holds someone else's rows");
+        }
+    }
+
+    /// The whole feed-forward: one expert per router row, every one quantized,
+    /// and no shared expert invented where the file has none.
+    #[test]
+    fn a_moe_layer_loads_with_every_expert_quantized() {
+        let (n, hidden, inter) = (3, 64, 32);
+        let (ct, mut reader) = moe_gguf(n, hidden, inter);
+        let moe = load_moe_ffn(
+            &ct,
+            &mut reader,
+            "blk.0",
+            &Device::Cpu,
+            2,
+            MoeRoutingConfig::default(),
+        )
+        .unwrap();
+        assert_eq!(moe.experts.len(), n);
+        for e in &moe.experts {
+            for m in [&e.gate, &e.up, &e.down] {
+                assert!(
+                    matches!(
+                        &m.inner,
+                        crate::inference::layers::QMatMulInner::Standard(
+                            candle_core::quantized::QMatMul::QTensor(_)
+                        )
+                    ),
+                    "an expert matrix was dequantized"
+                );
+            }
+        }
+        assert!(moe.shared_gate.is_none() && moe.shared_gate_inp.is_none());
+        let x = Tensor::ones((1, 5, hidden), candle_core::DType::F32, &Device::Cpu).unwrap();
+        assert_eq!(moe.forward(&x).unwrap().dims(), &[1, 5, hidden]);
     }
 }

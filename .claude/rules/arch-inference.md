@@ -351,6 +351,21 @@ single-character early return and the output walk — and **both were
 
 → `docs/invariants/inference.md`
 
+## A mixture-of-experts layer keeps its experts QUANTIZED (2026-09-25)
+
+**`split::loader::load_moe_ffn` is the one way a MoE feed-forward is loaded** —
+router dequantized, each routed expert sliced out of the GGUF's stack as its own
+QUANTIZED matrix (`split_expert_stack`), shared expert and its sigmoid gate when
+present. The three per-family copies it replaced dequantized every expert to f32:
+an 11 GB Qwen3-30B-A3B needed ~116 GB, invisible to a capacity planner that sizes
+by bytes on disk. A new MoE family calls it. **Routing defaults are per family**
+(`moe_renormalizes_by_default` — llama.cpp hardcodes `norm_w` per graph): read the
+family's llama.cpp file, never assume. Verify with `examples/logits_reference_probe.rs`
++ `compare_logits_reference.py` on a tiny model; ONE isolated outlier position is a
+router near-tie, a shift at every position is a bug.
+
+→ `docs/invariants/inference.md` § "A mixture-of-experts layer keeps its experts quantized"
+
 ## Single-source-of-truth helpers — Inference kernels, caches and the tokenizer
 
 Each names the ONE place a decision is made. A second implementation of any of

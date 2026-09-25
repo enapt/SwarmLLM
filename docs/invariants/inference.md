@@ -1599,3 +1599,47 @@ its q/k, not from its RoPE type. Tests:
 permutation, k over the KV heads), `an_adapter_is_refused_where_it_cannot_all_be_applied`,
 `an_adapter_on_fused_projections_is_refused` — each red with its check removed.
 
+
+## A mixture-of-experts layer keeps its experts quantized
+
+Found 2026-09-25 answering a field report asking for Qwen3-30B-A3B (`qwen3moe`).
+
+**What it replaced.** DeepSeek-2, Llama-4 and Qwen 3.5-MoE each loaded their
+routed experts with `ct.tensor(..).dequantize(..)` on the stacked
+`ffn_{gate,up,down}_exps` tensors — the WHOLE `[n_experts, rows, cols]` stack in
+f32. Experts are nearly all of a MoE model (Qwen3-30B-A3B: ~29B of ~30B
+parameters), so the loaded size was ~4 bytes per parameter whatever the file's
+quantization: 11 GB on disk, ~116 GB in memory. No real-sized MoE model could
+load, and the capacity planner — which sizes by manifest bytes — under-priced
+them by ~10x. The forward already ran one expert at a time on only its routed
+tokens (`expert_ffn`), so nothing needed the stack.
+
+**What replaced it.** `split_expert_stack` reads the stack on the processor,
+cuts it at `rows × cols / block × type_size` bytes per expert (expert-major,
+whole blocks because every row is), and builds each slice with candle's
+`ggml_file::qtensor_from_ggml` on the target device. `ExpertFfn` holds three
+`QMatMul`s; `expert_ffn` runs them with `QMatMul::forward_shared` for gate/up,
+as the dense `Mlp` does. This is also how llama.cpp runs experts (`mul_mat_id`
+over the quantized stack), so it moves the numerics TOWARD the reference.
+
+**One loader.** `load_moe_ffn` replaced three near-identical per-family blocks
+and is what the Qwen2 family (`qwen2moe`, `qwen3moe`) calls per layer from the
+dense branch. Qwen2-MoE needed two things llama.cpp hardcodes in
+`qwen2moe.cpp`: `norm_w = false` (`moe_renormalizes_by_default`) and a shared
+expert scaled by `sigmoid(x · ffn_gate_inp_shexp)` (`MoeFfn::shared_gate_inp`).
+`qwen2moe` had been in `supported_list` while the dense branch required
+`ffn_down` of every layer — it could never load.
+
+**Verified** against llama-cpp-python 0.3.16 with `logits_reference_probe.rs`
+(prefill at every position + decode steps against the cache, one segment or
+split): tiny qwen2moe (Q5_0/F16/Q5_1/Q8_0 mixed) 24/24 positions at cosine ≥
+0.99994, whole and split; tiny qwen3moe 99 of 100 at median 0.99995, one
+position at 0.99778 — the same token each run, a router near-tie (a systematic
+error moves every position). Controls: dense Qwen3-1.7B agrees (worst 0.99987);
+the same logits against shifted tokens DISAGREE (worst 0.877). Tests:
+`an_expert_stack_is_cut_into_quantized_experts_holding_their_own_slice` (dtype
+kept, each expert equals its slice exactly), `a_moe_layer_loads_with_every_expert_quantized`.
+
+**Not verified:** a real-sized MoE model on this box; DeepSeek-2 and Llama-4
+routing defaults against llama.cpp's per-model files; Qwen 3.5-MoE's shared
+gate (now applied when the GGUF carries it, as Qwen3-Next does). FUTURE_WORK #114.

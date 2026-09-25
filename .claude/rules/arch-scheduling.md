@@ -545,6 +545,21 @@ where an unfinished thought ends.
 
 → `docs/invariants/api-surfaces.md` § "A reply is finalised on the coordinator"
 
+## A prompt longer than ONE peer serves is that peer's limit, not the request's (2026-09-25)
+
+What a node serves is the model's context capped by ITS ceiling
+(`max_seq_len_override`, else 8192), so peers disagree. `every_holder_would_refuse`
+treats a length refusal as the request's own only at the MODEL's declared limit;
+below it the coordinator bars the peer and fails over. **`error::longer_than_served`
+writes the refusal and `error::served_context_refusal` reads it** — the wording is
+wire format (every release since v0.3.101). Peers advertise
+`NodeCapability::context_ceiling_tokens`; `SharedState::peer_served_context` is the
+one reading, and a coordinator does not SEND a prompt pass to a peer that advertised
+too short, nor pick such a standby. Running out ends on a 400 naming the other
+machines' limit (`longer_than_the_swarm_serves`), never the 503 "too few machines".
+
+→ `docs/invariants/scheduling.md` § "A prompt longer than one peer serves"
+
 ## Single-source-of-truth helpers — Scheduling, routing and failover
 
 Each names the ONE place a decision is made. A second implementation of any of

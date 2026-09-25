@@ -154,8 +154,12 @@ pub async fn probe_gguf_file(
 
     // Parse the GGUF header to get tensor_data_offset and tensor metadata
     let mut cursor = Cursor::new(&probe_bytes[..]);
-    let ct = candle_core::quantized::gguf_file::Content::read(&mut cursor)
-        .map_err(|e| format!("Failed to parse GGUF header from probe: {e}"))?;
+    let ct = candle_core::quantized::gguf_file::Content::read(&mut cursor).map_err(|e| {
+        format!(
+            "Failed to parse GGUF header from probe: {}",
+            crate::inference::split::explain_gguf_parse_error(&e)
+        )
+    })?;
 
     let header_size = ct.tensor_data_offset;
 

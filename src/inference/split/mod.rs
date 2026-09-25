@@ -22,8 +22,8 @@ mod token_embedding;
 
 // Re-export types from extracted modules so external `crate::inference::split::X` paths still work.
 pub(crate) use super::layers::{
-    DeepSeekMeta, DeltaNetWeights, FfnVariant, LayerVariant, LayerWeights, MlaWeights, Mlp, MoeFfn,
-    MoeGatingFunc, MoeRoutingConfig, QMatMul, Qwen35AttnWeights, SsmState,
+    DeepSeekMeta, DeltaNetWeights, ExpertFfn, FfnVariant, LayerVariant, LayerWeights, MlaWeights,
+    Mlp, MoeFfn, MoeGatingFunc, MoeRoutingConfig, QMatMul, Qwen35AttnWeights, SsmState,
 };
 pub(crate) use super::model_arch::Activation;
 pub use super::model_arch::ModelArch;
@@ -41,8 +41,8 @@ pub use super::tokenizer::{BpeTokenizer, SplitTokenizer, SpmTokenizer};
 pub use self::entry::BatchItem;
 pub use self::entry::{trim_split_model_cache, SplitModelEntry, SplitModelKey};
 pub use self::gguf_meta::{
-    ensure_gguf_header, gguf_arch_str, read_gguf_header, save_gguf_header, GgufTensorMeta,
-    GgufTokenizerMeta, TensorLocation, TIED_OUTPUT_FILENAME,
+    ensure_gguf_header, explain_gguf_parse_error, gguf_arch_str, read_gguf_header,
+    save_gguf_header, GgufTensorMeta, GgufTokenizerMeta, TensorLocation, TIED_OUTPUT_FILENAME,
 };
 pub use self::kv_cache::{KvCacheStore, KvOccupancy};
 pub use self::model::SplitModel;

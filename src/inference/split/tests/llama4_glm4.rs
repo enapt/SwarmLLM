@@ -180,12 +180,16 @@ fn test_ffn_variant_moe_forward() {
 
     let moe = MoeFfn {
         gate,
-        gate_exps,
-        down_exps,
-        up_exps,
+        experts: crate::inference::layers::ExpertFfn::from_stacked(
+            &(gate_exps),
+            &(up_exps),
+            &(down_exps),
+        )
+        .unwrap(),
         shared_gate: None,
         shared_down: None,
         shared_up: None,
+        shared_gate_inp: None,
         n_experts_used,
         routing: MoeRoutingConfig::default(),
     };
@@ -239,25 +243,19 @@ fn test_llama4_moe_layer_forward() {
             // MoE layers on odd indices
             FfnVariant::MoE(MoeFfn {
                 gate: Tensor::randn(0f32, 0.1, (n_experts, hidden_dim), &device).unwrap(),
-                gate_exps: Tensor::randn(
-                    0f32,
-                    0.02,
-                    (n_experts, intermediate, hidden_dim),
-                    &device,
+                experts: crate::inference::layers::ExpertFfn::from_stacked(
+                    &(Tensor::randn(0f32, 0.02, (n_experts, intermediate, hidden_dim), &device)
+                        .unwrap()),
+                    &(Tensor::randn(0f32, 0.02, (n_experts, intermediate, hidden_dim), &device)
+                        .unwrap()),
+                    &(Tensor::randn(0f32, 0.02, (n_experts, hidden_dim, intermediate), &device)
+                        .unwrap()),
                 )
                 .unwrap(),
-                down_exps: Tensor::randn(
-                    0f32,
-                    0.02,
-                    (n_experts, hidden_dim, intermediate),
-                    &device,
-                )
-                .unwrap(),
-                up_exps: Tensor::randn(0f32, 0.02, (n_experts, intermediate, hidden_dim), &device)
-                    .unwrap(),
                 shared_gate: None,
                 shared_down: None,
                 shared_up: None,
+                shared_gate_inp: None,
                 n_experts_used,
                 routing: MoeRoutingConfig::default(),
             })

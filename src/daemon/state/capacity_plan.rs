@@ -81,10 +81,8 @@ pub fn compute_capacity_plan(state: &SharedState) -> CapacityPlan {
     // distribution detail) and call out the deficit.
     let mut largest_by_vram: Option<(crate::types::ModelId, String, u64, u64)> = None;
     for manifest in state.model_registry.models() {
-        let vram_required = crate::model::auto_manage::vram::estimate_model_vram_mb_arch(
-            manifest.total_size_bytes,
-            &manifest.architecture,
-        );
+        let vram_required =
+            crate::model::auto_manage::vram::estimate_model_vram_mb(manifest.total_size_bytes);
         // Skip models we already serve.
         let already_serveable = current
             .serveable_models
@@ -257,10 +255,8 @@ fn scenario(
     // Registry models — concrete unlocks. Same logic as before: skip
     // already-serveable, skip still-doesn't-fit.
     for manifest in state.model_registry.models() {
-        let vram_required = crate::model::auto_manage::vram::estimate_model_vram_mb_arch(
-            manifest.total_size_bytes,
-            &manifest.architecture,
-        );
+        let vram_required =
+            crate::model::auto_manage::vram::estimate_model_vram_mb(manifest.total_size_bytes);
         if vram_required <= current.total_vram_mb {
             continue;
         }

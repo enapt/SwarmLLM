@@ -351,14 +351,16 @@ pub(super) fn make_deepseek_test_model(hidden_dim: usize) -> SplitModel {
 
     let moe = MoeFfn {
         gate: Tensor::randn(0f32, 0.1, (n_experts, hidden_dim), &device).unwrap(),
-        gate_exps: Tensor::randn(0f32, 0.02, (n_experts, intermediate, hidden_dim), &device)
-            .unwrap(),
-        down_exps: Tensor::randn(0f32, 0.02, (n_experts, hidden_dim, intermediate), &device)
-            .unwrap(),
-        up_exps: Tensor::randn(0f32, 0.02, (n_experts, intermediate, hidden_dim), &device).unwrap(),
+        experts: crate::inference::layers::ExpertFfn::from_stacked(
+            &(Tensor::randn(0f32, 0.02, (n_experts, intermediate, hidden_dim), &device).unwrap()),
+            &(Tensor::randn(0f32, 0.02, (n_experts, intermediate, hidden_dim), &device).unwrap()),
+            &(Tensor::randn(0f32, 0.02, (n_experts, hidden_dim, intermediate), &device).unwrap()),
+        )
+        .unwrap(),
         shared_gate: None,
         shared_down: None,
         shared_up: None,
+        shared_gate_inp: None,
         n_experts_used,
         routing: MoeRoutingConfig::default(),
     };

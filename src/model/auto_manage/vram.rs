@@ -1,5 +1,4 @@
 use crate::daemon::SharedState;
-use crate::types::ModelArchitecture;
 
 /// Estimate VRAM required to run a model based on size and quantization.
 ///
@@ -7,6 +6,13 @@ use crate::types::ModelArchitecture;
 /// - The model weights need ~model_size_bytes of VRAM (already quantized)
 /// - KV cache overhead adds ~10-20% on top depending on context length
 /// - We use 1.15x multiplier as a conservative estimate
+///
+/// **A mixture-of-experts model is charged for EVERY expert.** Every expert is
+/// resident: nothing here pages experts in and out, and neither llama.cpp (its
+/// `--n-cpu-moe` moves experts to system memory, it does not drop them) nor vLLM
+/// does. A discount for "only the active experts" (`estimate_model_vram_mb_arch`,
+/// removed 2026-09-25) priced Qwen3-30B-A3B at ~44% of what it takes, so
+/// auto-manage chose models the loader's own admission then refused.
 pub fn estimate_model_vram_mb(total_size_bytes: u64) -> u64 {
     // Quantized model weights are already compressed; VRAM ~= file size + ~15% overhead
     (total_size_bytes as f64 * 1.15 / (1024.0 * 1024.0)) as u64
@@ -618,44 +624,6 @@ impl RamBudget {
     }
 }
 
-/// MoE-aware VRAM estimation. For Mixture-of-Experts models, only a fraction
-/// of expert weights are active at any time, so the actual VRAM requirement
-/// is much lower than the total file size.
-///
-/// Formula:
-///   active_fraction = 0.40 (attention/embeddings, always loaded)
-///                   + 0.60 * (experts_per_token / num_experts)
-///   effective_vram = total_size * active_fraction * 1.15 (KV overhead)
-pub fn estimate_model_vram_mb_arch(total_size_bytes: u64, arch: &ModelArchitecture) -> u64 {
-    let (num_experts, experts_per_token) = match arch {
-        ModelArchitecture::Mixtral {
-            num_experts,
-            experts_per_token,
-        }
-        | ModelArchitecture::DeepSeek {
-            num_experts,
-            experts_per_token,
-        }
-        | ModelArchitecture::Llama4 {
-            num_experts,
-            experts_per_token,
-        }
-        | ModelArchitecture::Qwen35Moe {
-            num_experts,
-            experts_per_token,
-        } => (*num_experts, *experts_per_token),
-        // Dense architectures — all weights active
-        _ => return estimate_model_vram_mb(total_size_bytes),
-    };
-
-    if num_experts == 0 || experts_per_token >= num_experts {
-        return estimate_model_vram_mb(total_size_bytes);
-    }
-
-    let active_fraction = 0.40 + 0.60 * (experts_per_token as f64 / num_experts as f64);
-    (total_size_bytes as f64 * active_fraction * 1.15 / (1024.0 * 1024.0)) as u64
-}
-
 /// This node's memory bandwidth in GB/s — the figure every "how fast is this
 /// machine" answer is derived from.
 ///
@@ -1238,38 +1206,13 @@ pub fn ram_budget_now(shared: &crate::daemon::SharedState) -> Option<RamBudget> 
 mod tests {
     use super::*;
 
+    /// A mixture-of-experts model needs memory for every expert, not the few a
+    /// token uses: they are all resident. Pinned against the discount this
+    /// replaced, which put Mixtral 8x7B at ~55% of its size.
     #[test]
-    fn moe_vram_lower_than_dense() {
-        // Mixtral 8x7B ≈ 47GB on disk
-        let total_bytes = 47u64 * 1024 * 1024 * 1024;
-        let dense_vram = estimate_model_vram_mb(total_bytes);
-        let moe_vram = estimate_model_vram_mb_arch(
-            total_bytes,
-            &ModelArchitecture::Mixtral {
-                num_experts: 8,
-                experts_per_token: 2,
-            },
-        );
-        // MoE should be significantly less than dense
-        assert!(
-            moe_vram < dense_vram,
-            "MoE={moe_vram} should be < dense={dense_vram}"
-        );
-        // Mixtral 8x7B with 2/8 experts: active_fraction = 0.40 + 0.60*0.25 = 0.55
-        // So MoE VRAM should be ~55% of dense
-        // active_fraction = 0.40 + 0.60*0.25 = 0.55, so ~55% of dense ≈ 30GB
-        assert!(
-            moe_vram < 31 * 1024,
-            "MoE 8x7B should fit in <31GB, got {moe_vram}MB"
-        );
-    }
-
-    #[test]
-    fn dense_arch_unchanged() {
-        let total_bytes = 4u64 * 1024 * 1024 * 1024;
-        let dense = estimate_model_vram_mb(total_bytes);
-        let llama = estimate_model_vram_mb_arch(total_bytes, &ModelArchitecture::Llama);
-        assert_eq!(dense, llama);
+    fn a_moe_model_is_charged_for_every_expert() {
+        let total_bytes = 47u64 * 1024 * 1024 * 1024; // Mixtral 8x7B on disk
+        assert!(estimate_model_vram_mb(total_bytes) >= 47 * 1024);
     }
 
     #[test]
