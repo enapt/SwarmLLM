@@ -155,13 +155,14 @@ UNDETERMINED and never a fix — use it BEFORE blaming a change, especially your
 ## Status
 
 **v0.3.205-alpha is the live release (2026-09-25), signed and on both nodes.**
-`main` is AHEAD of it (unreleased, 2026-09-25): #17's composite failover fixed
-after its first live run (#706/#707), per-version Trickle (#91's residue),
-model-browser Chat-not-Download, `SWARMLLM_LOGGING_LEVEL`, #107's residual, and
-**a remote last segment now samples as the caller asked** (`0x0A` trailer, #106 —
-it sampled at 0.7 whatever was requested), and **LoRA adapters are applied again**
-(#110 — local-only; Llama/Mistral q/k rows permuted as llama.cpp's converter does,
-gotcha #710; not yet run on a CUDA build).
+`main` (`c06c489a`) is 15 commits AHEAD of it, unreleased — the user wants more
+before .206: #17's last-segment failover fixed after its first live run
+(#706/#707), per-version Trickle (#91), #108a/b, model-browser Chat-not-Download,
+`SWARMLLM_LOGGING_LEVEL`, **a remote last segment samples as the caller asked**
+(`0x0A`, #106 — it sampled at 0.7 whatever was requested), and **LoRA adapters
+are applied again** (#110 — local-only, verified against llama.cpp; Llama/Mistral
+q/k rows permuted as its converter does, #710; three singleton-executor gates now
+ask one predicate, #711; ⚠ CPU only — the .206 gate runs it on CUDA).
 **Next** → `memory/next_up.md`.
 
 ⚠ **Behaviour gate = `reply_ab.sh` + `split_rig.sh`** (incl. `failover`), not
@@ -196,9 +197,8 @@ Thailand↔Italy vs 6.76 at 18 ms); nothing routes on coordinates yet →
 WRONG tag silently — confirm `draft=false`, 7 `.minisig` (against 9 `.sha256` is
 correct) and `rsign verify` naming the version → `memory/release_gate.md`.
 
-⚠ **#90's cause is unknown** (dispatcher stall, twice); **#17 has never run on a
-live failover** (needs four daemons); **#106** (a split reply flipped twice, then
-never in 26 runs) is unexplained. ⚠ **`gossip_network_id` is NOT isolation** —
+⚠ **#90's cause is unknown** (dispatcher stall, twice); **#17's MIDDLE-segment
+composite has never run live** (the last-segment case has, `split_rig.sh failover`). ⚠ **`gossip_network_id` is NOT isolation** —
 only pool + `private_mode` + `private_mode_allow_lan = false` isolates (#352).
 
 ⛔ **Nothing may block compaction, so commit as you go** (#687).
