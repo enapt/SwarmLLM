@@ -1389,20 +1389,49 @@ impl SharedState {
         // boot. Without this, every restart went back to having nothing to
         // check a P2P download against. `Weak`, because the registry lives
         // inside the state.
+        //
+        // The write is NOT made here when a runtime is running (#108b): this
+        // hook runs inside `register_manifest`, which the message dispatcher
+        // calls for every gossiped manifest, and a redb commit fsyncs — the
+        // dispatcher is the only consumer of everything the network delivers
+        // and it has stalled twice for reasons still unknown (#90). The model is
+        // marked dirty and ONE background task writes the registry's CURRENT
+        // record for it: a single writer, reading the latest state at write
+        // time, so a burst of updates coalesces into one write and a late write
+        // can never be older than the registry. With no runtime (a synchronous
+        // caller) there is no loop to stall, and it writes inline as before.
         {
             let weak = Arc::downgrade(&state);
+            let dirty = Arc::new(dashmap::DashSet::<crate::types::ModelId>::new());
+            let wake = Arc::new(tokio::sync::Notify::new());
+            let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
             state
                 .model_registry
                 .set_persist_hook(Box::new(move |manifest, persist, recheck| {
                     let Some(s) = weak.upgrade() else { return };
                     if persist {
-                        if let Err(e) = s.model_registry.persist_manifest(&s.db, manifest) {
-                            tracing::warn!(
-                                model = %manifest.id,
-                                error = %e,
-                                "Could not persist recovered shard hashes — they will \
-                                 have to be relearned by gossip after a restart"
-                            );
+                        match tokio::runtime::Handle::try_current() {
+                            Ok(rt) => {
+                                dirty.insert(manifest.id.clone());
+                                if !started.swap(true, std::sync::atomic::Ordering::AcqRel) {
+                                    rt.spawn(persist_dirty_manifests(
+                                        weak.clone(),
+                                        dirty.clone(),
+                                        wake.clone(),
+                                    ));
+                                }
+                                wake.notify_one();
+                            }
+                            Err(_) => {
+                                if let Err(e) = s.model_registry.persist_manifest(&s.db, manifest) {
+                                    tracing::warn!(
+                                        model = %manifest.id,
+                                        error = %e,
+                                        "Could not persist recovered shard hashes — they will \
+                                         have to be relearned by gossip after a restart"
+                                    );
+                                }
+                            }
                         }
                     }
                     // A shard we hold now has a different expected hash than the
@@ -3659,6 +3688,131 @@ impl SharedState {
             return None;
         }
         self.resolve_peer_id_bytes(node_id)
+    }
+}
+
+/// The one writer of manifests the persist hook marked dirty (#108b): it writes
+/// the registry's CURRENT record for each, on the blocking pool, one at a time.
+/// Reading at write time is what makes the order safe — whichever update came
+/// last, the write that follows it reads it — and one writer means no older
+/// record can land after a newer one.
+async fn persist_dirty_manifests(
+    state: std::sync::Weak<SharedState>,
+    dirty: Arc<dashmap::DashSet<crate::types::ModelId>>,
+    wake: Arc<tokio::sync::Notify>,
+) {
+    loop {
+        wake.notified().await;
+        let ids: Vec<crate::types::ModelId> = dirty.iter().map(|id| id.clone()).collect();
+        for id in ids {
+            dirty.remove(&id);
+            let Some(s) = state.upgrade() else { return };
+            let Some(manifest) = s.model_registry.get_manifest(&id) else {
+                continue;
+            };
+            let written = tokio::task::spawn_blocking(move || {
+                s.model_registry.persist_manifest(&s.db, &manifest)
+            })
+            .await;
+            match written {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => tracing::warn!(
+                    model = %id,
+                    error = %e,
+                    "Could not persist recovered shard hashes — they will have to be \
+                     relearned by gossip after a restart"
+                ),
+                Err(e) => tracing::warn!(model = %id, error = %e, "manifest persist task failed"),
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod manifest_persist_tests {
+    use crate::types::*;
+
+    fn manifest(hash: [u8; 32]) -> ModelManifest {
+        ModelManifest {
+            id: ModelId("m".into()),
+            name: "M".into(),
+            architecture: ModelArchitecture::Llama,
+            num_layers: 2,
+            num_params_billions: 0.001,
+            quantization: Quantization::Q4KM,
+            total_size_bytes: 1024,
+            shard_count: 1,
+            shards: vec![ShardInfo {
+                index: 0,
+                layer_range: (0, 1),
+                size_bytes: 512,
+                hash,
+                tensors: vec![],
+            }],
+            tokenizer_hash: [0u8; 32],
+            manifest_hash: [0u8; 32],
+            publisher: NodeId([0u8; 32]),
+            publish_date: chrono::Utc::now(),
+            license: "MIT".into(),
+            mmproj: None,
+        }
+    }
+
+    /// #108(b): the persist hook runs inside `register_manifest`, which the
+    /// message dispatcher calls for every gossiped manifest — so the database
+    /// write (a redb commit, fsync included) must not happen THERE. It must
+    /// still happen, off the caller, and write the registry's current record.
+    /// On a single-threaded runtime a spawned writer cannot have run before
+    /// `register_manifest` returns, which is what makes "not inline" checkable.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_recovered_manifest_is_persisted_off_the_caller() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = crate::storage::db::Database::open(temp.path()).unwrap();
+        let executor = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::inference::executor::ModelExecutor::new(),
+        ));
+        let (state, _, _) = crate::daemon::SharedState::new(
+            crate::config::Config::default(),
+            crate::identity::Identity::generate(),
+            db,
+            executor,
+            None,
+        );
+        state.model_registry.register_manifest(manifest([7u8; 32]));
+        // A copy that leaves the hash blank: the registry recovers it, which is
+        // the change worth persisting (the registry's own persist-once test).
+        state.model_registry.register_manifest(manifest([0u8; 32]));
+        let stored = |s: &crate::daemon::SharedState| {
+            s.db.get_json::<ModelManifest>("model_meta", "m")
+                .ok()
+                .flatten()
+        };
+        assert!(
+            stored(&state).is_none(),
+            "the write must not have run inside register_manifest, i.e. on the dispatcher"
+        );
+        let mut written = None;
+        for _ in 0..200 {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            written = stored(&state);
+            if written.is_some() {
+                break;
+            }
+        }
+        let written = written.expect("the background writer persisted it");
+        assert_eq!(
+            written.shards[0].hash, [7u8; 32],
+            "the recovered hash, not the blank"
+        );
+        assert_eq!(
+            written.manifest_hash,
+            state
+                .model_registry
+                .get_manifest(&ModelId("m".into()))
+                .unwrap()
+                .manifest_hash,
+            "the registry's CURRENT record"
+        );
     }
 }
 

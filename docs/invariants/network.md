@@ -2130,3 +2130,15 @@ and a hashing task that fails is our fault, never the peer's.
 **After.** The same rig logs no stall. Guard:
 `the_network_loop_never_hashes_a_shard_inline`, which flattens whitespace so a
 rustfmt-wrapped call is seen, and was checked against a planted stray file.
+
+**Its sibling on the DISPATCHER (#108b).** The manifest persist hook ran inside
+`register_manifest`, which the dispatcher calls for every gossiped manifest, so
+a redb commit — fsync included — ran on the only consumer of everything the
+network delivers. The entry warned that a spawned write needs per-model
+ordering: two quick updates must not land out of order. The answer is not to
+order the writes but to make order irrelevant: the hook marks the model dirty,
+and one background writer writes the registry's CURRENT record for it. One
+writer means no concurrent pair; reading at write time means whichever update
+came last is what the next write reads. With no runtime (a synchronous caller)
+it still writes inline — there is no loop to stall. The same shape as the
+nickname persist on 2026-09-24.
