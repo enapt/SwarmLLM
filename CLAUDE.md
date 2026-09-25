@@ -163,6 +163,10 @@ before .206: #17's last-segment failover fixed after its first live run
 are applied again** (#110 — local-only, verified against llama.cpp; Llama/Mistral
 q/k rows permuted as its converter does, #710; three singleton-executor gates now
 ask one predicate, #711; ⚠ CPU only — the .206 gate runs it on CUDA).
+Then (`220fc901`, from four field reports): **quinn-proto 0.11.18** — 0.11.17 closed whole
+QUIC connections mid-transfer since v0.3.148 (#112); **a peer serving a shorter context is
+skipped or failed over from** (#111, `split_rig.sh context`); **MoE experts stay quantized** and
+`qwen3moe`/`qwen2moe` load, verified vs llama.cpp on tiny models only (#114). Gemma 4 scoped (#115).
 **Next** → `memory/next_up.md`.
 
 ⚠ **Behaviour gate = `reply_ab.sh` + `split_rig.sh`** (incl. `failover`), not
