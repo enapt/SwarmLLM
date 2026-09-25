@@ -155,16 +155,17 @@ UNDETERMINED and never a fix — use it BEFORE blaming a change, especially your
 ## Status
 
 **v0.3.205-alpha is the live release (2026-09-25), signed and on both nodes.**
-`main` is at the release. It carries the 2026-09-24 round (Docker images on
-x86-64-v3, sampling on top-k candidates, split replies' history and emoji,
-non-Latin `stop` panic, DashMap guards across `.await` via `clippy.toml`,
-Windows `Instant` underflow, #105, nickname persist), its review fixes, #92,
-`--no-update-check`, #107 and Docker images publishing on the release's
-un-draft (#701). **Next** → `memory/next_up.md`.
+`main` is AHEAD of it (unreleased, 2026-09-25): #17's composite failover fixed
+after its first live run (#706/#707), per-version Trickle (#91's residue),
+model-browser Chat-not-Download, `SWARMLLM_LOGGING_LEVEL`, #107's residual.
+**Next** → `memory/next_up.md`.
 
-⚠ **Behaviour gate = `reply_ab.sh` + `split_rig.sh`**, not conformance alone —
-`family_conformance.sh` pins `gpu_layers = 0` and never splits, so it could not
-see #93. Recipe: `memory/release_gate.md`.
+⚠ **Behaviour gate = `reply_ab.sh` + `split_rig.sh`** (incl. `failover`), not
+conformance alone — `family_conformance.sh` pins `gpu_layers = 0` and never
+splits, so it could not see #93. Recipe: `memory/release_gate.md`. ⛔ A rig
+shares the machine with NOTHING — every node's loopback probe finds it (#708).
+Judge a split reply against llama.cpp (`examples/score_against_reference.py`),
+never by byte-equality.
 
 ⛔ **v0.3.199-alpha SHIPPED BROKEN and was WITHDRAWN** — cleared under
 `--features candle-cuda` (no flash-attn, no llama backend) while the release is
