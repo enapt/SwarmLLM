@@ -1023,221 +1023,57 @@ impl NetworkManager {
                                  against — it stays unchecked until a hash arrives"
                             );
                         }
-                        if let Some(info) = shard_info.filter(|_| manifest_has_hash) {
-                            // The accept gate for untrusted bytes: these have
-                            // just arrived from a peer and nothing else holds
-                            // them, so bytes that are not what was asked for
-                            // are discarded rather than kept.
-                            if let Err(e) = self.shard_store.verify_shard(
-                                &shard_id.model_id,
-                                &info,
-                                crate::model::shard::OnMismatch::Quarantine,
-                            ) {
-                                // An INCOMPLETE transfer is not evidence about
-                                // the sender: the bytes that did arrive may be
-                                // perfectly good and the connection simply
-                                // dropped. Only bytes that arrived in FULL and
-                                // still hash wrong implicate the peer.
-                                //
-                                // Observed 2026-07-29: one peer produced four
-                                // failures whose computed hash differed every
-                                // time for the same shard — the signature of a
-                                // truncated transfer, not corrupt storage —
-                                // while also timing out constantly. Penalising
-                                // trust there lowers the reputation of an
-                                // honest node on a bad link.
-                                let incomplete =
-                                    matches!(e, crate::error::SwarmError::ShardIncomplete { .. });
-                                // `incomplete` decides ATTRIBUTION (whether the
-                                // sender's trust is docked, below) and must stay.
-                                // The SEVERITY is a separate question and is
-                                // derived, so a third `verify_shard` outcome —
-                                // `ShardNotFound` is a 404, i.e. nobody's fault —
-                                // does not inherit this branch's ERROR.
-                                if incomplete {
-                                    crate::log_failure!(
-                                        &e,
-                                        model = %shard_id.model_id,
-                                        shard = shard_id.index,
-                                        peer = %peer,
-                                        error = %e,
-                                        "P2P shard transfer incomplete — discarding and retrying, \
-                                         NOT penalising the sender"
-                                    );
-                                } else {
-                                    crate::log_failure!(
-                                        &e,
-                                        model = %shard_id.model_id,
-                                        shard = shard_id.index,
-                                        peer = %peer,
-                                        error = %e,
-                                        "P2P shard failed hash verification — quarantining, not announcing"
-                                    );
-                                }
-                                let _ = self
-                                    .shard_store
-                                    .delete_shard(&shard_id.model_id, shard_id.index);
-                                self.shared_state
-                                    .models
-                                    .shard_p2p_failed
-                                    .insert(shard_id.clone());
-                                // Ask for a good copy, not just discard the bad
-                                // one. Shares the one repair path with the
-                                // background sweep and the rescan.
-                                self.shared_state.mark_shard_for_repair(&shard_id);
-                                if !incomplete {
-                                    if let Some(node) =
-                                        self.peer_to_node.get(&peer).map(|n| n.clone())
-                                    {
-                                        self.shared_state.credits.trust_manager.update_trust(
-                                            &self.shared_state.peer_registry,
-                                            &node,
-                                            crate::credit::trust::TrustEvent::ShardVerificationFail,
-                                        );
-                                    }
-                                }
-                                self.shared_state.emit_activity(
-                                    crate::daemon::state::ActivityEvent::new(
-                                        "download",
-                                        "shard_verification_failed",
-                                        format!(
-                                            "Part {} of {} did not arrive intact and will be fetched again",
-                                            crate::types::ShardId::display_index_short(
-                                                shard_id.index
-                                            ),
-                                            shard_id.model_id
-                                        ),
-                                    )
-                                    .with_model(shard_id.model_id.0.clone())
-                                    .with_detail_num(shard_id.index as i64)
-                                    .with_toast("warn", 6000),
-                                );
-                                return;
+                        // #108: the hash is a single-threaded BLAKE3 pass over
+                        // the whole file — 229 ms for a 512 MB shard from page
+                        // cache — and it ran HERE, on the swarm event loop, over
+                        // the loop's own 100 ms stall tripwire, with every ping,
+                        // gossip message and tensor forward of any split this
+                        // node serves waiting behind it. It runs on the blocking
+                        // pool now and the verdict comes back through
+                        // `shard_verdict_tx`; `finish_p2p_shard` does the rest ON
+                        // the loop, because what follows mutates state only the
+                        // loop may touch. The download's claim stays parked until
+                        // then, so nothing else can start writing this shard.
+                        // libtorrent draws the same line: pieces are hashed on
+                        // dedicated threads and the verdict is posted back to the
+                        // network thread.
+                        match shard_info.filter(|_| manifest_has_hash) {
+                            Some(info) => {
+                                let store = self.shard_store.clone();
+                                let verdict_tx = self.shard_verdict_tx.clone();
+                                let model_id = shard_id.model_id.clone();
+                                tokio::spawn(async move {
+                                    let outcome = tokio::task::spawn_blocking(move || {
+                                        // The accept gate for untrusted bytes:
+                                        // these have just arrived from a peer and
+                                        // nothing else holds them, so bytes that
+                                        // are not what was asked for are
+                                        // discarded rather than kept.
+                                        store.verify_shard(
+                                            &model_id,
+                                            &info,
+                                            crate::model::shard::OnMismatch::Quarantine,
+                                        )
+                                    })
+                                    .await
+                                    .unwrap_or_else(|e| {
+                                        Err(crate::error::SwarmError::Internal(format!(
+                                            "shard verification task failed: {e}"
+                                        )))
+                                    });
+                                    let _ = verdict_tx
+                                        .send(ShardVerdict {
+                                            shard_id,
+                                            peer,
+                                            outcome,
+                                        })
+                                        .await;
+                                });
                             }
+                            // Nothing to check against and no origin to fetch
+                            // from: accepted unchecked, as logged just above.
+                            None => self.finish_p2p_shard(shard_id, peer, Ok(())),
                         }
-
-                        // Mark acquisition as complete so frontend clears the download bar
-                        if let Some(mut entry) = self
-                            .shared_state
-                            .models
-                            .acquisition_progress
-                            .get_mut(&shard_id.model_id)
-                        {
-                            let was_complete = entry
-                                .shard_progress
-                                .get(&shard_id.index)
-                                .map(|sp| {
-                                    matches!(
-                                        sp.state,
-                                        crate::model::acquisition::ShardState::Complete
-                                    )
-                                })
-                                .unwrap_or(false);
-                            if let Some(sp) = entry.shard_progress.get_mut(&shard_id.index) {
-                                sp.state = crate::model::acquisition::ShardState::Complete;
-                                sp.downloaded_bytes = sp.total_bytes;
-                            }
-                            if !was_complete {
-                                entry.downloaded_shards = entry.downloaded_shards.saturating_add(1);
-                            }
-                            if entry.total_shards > 0
-                                && entry.downloaded_shards >= entry.total_shards
-                            {
-                                entry.state = crate::model::acquisition::AcquisitionState::Complete;
-                                entry.downloaded_bytes = entry.total_bytes;
-                            }
-                        }
-                        // Remove the acquisition entry after a delay only when the
-                        // entire model is done — not after each individual shard.
-                        let model_done = self
-                            .shared_state
-                            .models
-                            .acquisition_progress
-                            .get(&shard_id.model_id)
-                            .map(|e| {
-                                matches!(
-                                    e.state,
-                                    crate::model::acquisition::AcquisitionState::Complete
-                                )
-                            })
-                            .unwrap_or(false);
-                        if model_done {
-                            self.shared_state
-                                .schedule_acquisition_cleanup(shard_id.model_id.clone());
-                        }
-
-                        // Register ourselves as a holder of this shard
-                        let local_node_id = self.shared_state.identity.node_id().clone();
-                        self.shared_state
-                            .model_registry
-                            .record_shard_holder(shard_id.clone(), local_node_id.clone());
-
-                        // Queue shard announce — can't call handle_broadcast inline
-                        // because we're inside a swarm event handler (causes re-entrant panic).
-                        // The announce will be sent on the next event loop iteration.
-                        self.deferred_broadcasts
-                            .push(crate::types::SwarmMessage::ShardAnnounce(
-                                // One shard we just fetched — incremental.
-                                crate::model::manifest::shard_announce(
-                                    &self.shared_state.model_registry,
-                                    local_node_id,
-                                    vec![shard_id.clone()],
-                                    Vec::new(),
-                                ),
-                            ));
-
-                        // Load the model with the new shard (spawned async — can't block event loop)
-                        crate::model::auto_manage::spawn_check_and_load(
-                            self.shared_state.clone(),
-                            shard_id.model_id.clone(),
-                        );
-                        self.shared_state.models.auto_manage_notify.notify_one();
-
-                        // Release the P2P download semaphore permit parked by
-                        // AutoShardManager::trigger_download. The shard is
-                        // verified on disk; the slot is free for the next one.
-                        self.shared_state
-                            .models
-                            .p2p_download_permits
-                            .remove(&shard_id);
-
-                        tracing::info!(
-                            model = %shard_id.model_id,
-                            index = shard_id.index,
-                            "P2P shard download complete — registered and announced"
-                        );
-                        let mname = self
-                            .shared_state
-                            .model_registry
-                            .get_manifest(&shard_id.model_id)
-                            .map(|m| m.name.clone());
-                        let peer_node_id = self.peer_to_node.get(&peer).map(|r| r.clone());
-                        // Nickname-or-short-id via the canonical helper when we know the
-                        // NodeId; fall back to the libp2p peer id only when we don't.
-                        let peer_label = peer_node_id
-                            .as_ref()
-                            .map(|nid| {
-                                crate::identity::nickname::short_display_name(
-                                    nid,
-                                    &self.shared_state.nickname_registry,
-                                )
-                            })
-                            .unwrap_or_else(|| format!("{}", peer).chars().take(12).collect());
-                        self.shared_state.emit_activity(
-                            crate::daemon::state::ActivityEvent::new(
-                                "download",
-                                "shard_p2p_complete",
-                                format!(
-                                    "Part {} of {} downloaded from computer {}",
-                                    crate::types::ShardId::display_index_short(shard_id.index),
-                                    mname.as_deref().unwrap_or(&shard_id.model_id.0),
-                                    peer_label
-                                ),
-                            )
-                            .with_model(shard_id.model_id.0.clone())
-                            .with_node(format!("{}", peer))
-                            .with_detail_num(shard_id.index as i64),
-                        );
                     }
                 } else {
                     tracing::warn!(
@@ -1298,5 +1134,242 @@ impl NetworkManager {
                 }
             }
         }
+    }
+}
+
+/// A peer-served shard's hash verdict, computed off the event loop (#108).
+pub(super) struct ShardVerdict {
+    pub(super) shard_id: crate::types::ShardId,
+    pub(super) peer: libp2p::PeerId,
+    pub(super) outcome: Result<(), crate::error::SwarmError>,
+}
+
+impl NetworkManager {
+    /// The rest of a peer-served shard's arrival, once its hash verdict is in:
+    /// quarantine and re-fetch on a failure, or register, announce and load on
+    /// success. Runs ON the event loop (`shard_verdict_rx`), because both halves
+    /// touch state only the loop may — the hash itself does not, and runs on the
+    /// blocking pool (FUTURE_WORK #108).
+    pub(super) fn finish_p2p_shard(
+        &mut self,
+        shard_id: crate::types::ShardId,
+        peer: libp2p::PeerId,
+        outcome: Result<(), crate::error::SwarmError>,
+    ) {
+        // The model may have been deleted while the hash ran off the loop, and
+        // registering a shard that is no longer on disk would advertise bytes
+        // this node cannot serve.
+        if outcome.is_ok()
+            && !self
+                .shard_store
+                .shard_path(&shard_id.model_id, shard_id.index)
+                .exists()
+        {
+            tracing::info!(
+                model = %shard_id.model_id,
+                shard = shard_id.index,
+                "A downloaded shard was removed while it was being checked — not registering it"
+            );
+            self.shared_state
+                .models
+                .p2p_download_permits
+                .remove(&shard_id);
+            return;
+        }
+        if let Err(e) = outcome {
+            // An INCOMPLETE transfer is not evidence about
+            // the sender: the bytes that did arrive may be
+            // perfectly good and the connection simply
+            // dropped. Only bytes that arrived in FULL and
+            // still hash wrong implicate the peer.
+            //
+            // Observed 2026-07-29: one peer produced four
+            // failures whose computed hash differed every
+            // time for the same shard — the signature of a
+            // truncated transfer, not corrupt storage —
+            // while also timing out constantly. Penalising
+            // trust there lowers the reputation of an
+            // honest node on a bad link.
+            let incomplete = matches!(e, crate::error::SwarmError::ShardIncomplete { .. });
+            // `incomplete` decides ATTRIBUTION (whether the
+            // sender's trust is docked, below) and must stay.
+            // The SEVERITY is a separate question and is
+            // derived, so a third `verify_shard` outcome —
+            // `ShardNotFound` is a 404, i.e. nobody's fault —
+            // does not inherit this branch's ERROR.
+            if incomplete {
+                crate::log_failure!(
+                    &e,
+                    model = %shard_id.model_id,
+                    shard = shard_id.index,
+                    peer = %peer,
+                    error = %e,
+                    "P2P shard transfer incomplete — discarding and retrying, \
+                     NOT penalising the sender"
+                );
+            } else {
+                crate::log_failure!(
+                    &e,
+                    model = %shard_id.model_id,
+                    shard = shard_id.index,
+                    peer = %peer,
+                    error = %e,
+                    "P2P shard failed hash verification — quarantining, not announcing"
+                );
+            }
+            let _ = self
+                .shard_store
+                .delete_shard(&shard_id.model_id, shard_id.index);
+            self.shared_state
+                .models
+                .shard_p2p_failed
+                .insert(shard_id.clone());
+            // Ask for a good copy, not just discard the bad
+            // one. Shares the one repair path with the
+            // background sweep and the rescan.
+            self.shared_state.mark_shard_for_repair(&shard_id);
+            // Our own hashing task failing is nobody's fault but ours.
+            let ours = matches!(e, crate::error::SwarmError::Internal(_));
+            if !incomplete && !ours {
+                if let Some(node) = self.peer_to_node.get(&peer).map(|n| n.clone()) {
+                    self.shared_state.credits.trust_manager.update_trust(
+                        &self.shared_state.peer_registry,
+                        &node,
+                        crate::credit::trust::TrustEvent::ShardVerificationFail,
+                    );
+                }
+            }
+            self.shared_state.emit_activity(
+                crate::daemon::state::ActivityEvent::new(
+                    "download",
+                    "shard_verification_failed",
+                    format!(
+                        "Part {} of {} did not arrive intact and will be fetched again",
+                        crate::types::ShardId::display_index_short(shard_id.index),
+                        shard_id.model_id
+                    ),
+                )
+                .with_model(shard_id.model_id.0.clone())
+                .with_detail_num(shard_id.index as i64)
+                .with_toast("warn", 6000),
+            );
+            return;
+        }
+
+        // Mark acquisition as complete so frontend clears the download bar
+        if let Some(mut entry) = self
+            .shared_state
+            .models
+            .acquisition_progress
+            .get_mut(&shard_id.model_id)
+        {
+            let was_complete = entry
+                .shard_progress
+                .get(&shard_id.index)
+                .map(|sp| matches!(sp.state, crate::model::acquisition::ShardState::Complete))
+                .unwrap_or(false);
+            if let Some(sp) = entry.shard_progress.get_mut(&shard_id.index) {
+                sp.state = crate::model::acquisition::ShardState::Complete;
+                sp.downloaded_bytes = sp.total_bytes;
+            }
+            if !was_complete {
+                entry.downloaded_shards = entry.downloaded_shards.saturating_add(1);
+            }
+            if entry.total_shards > 0 && entry.downloaded_shards >= entry.total_shards {
+                entry.state = crate::model::acquisition::AcquisitionState::Complete;
+                entry.downloaded_bytes = entry.total_bytes;
+            }
+        }
+        // Remove the acquisition entry after a delay only when the
+        // entire model is done — not after each individual shard.
+        let model_done = self
+            .shared_state
+            .models
+            .acquisition_progress
+            .get(&shard_id.model_id)
+            .map(|e| {
+                matches!(
+                    e.state,
+                    crate::model::acquisition::AcquisitionState::Complete
+                )
+            })
+            .unwrap_or(false);
+        if model_done {
+            self.shared_state
+                .schedule_acquisition_cleanup(shard_id.model_id.clone());
+        }
+
+        // Register ourselves as a holder of this shard
+        let local_node_id = self.shared_state.identity.node_id().clone();
+        self.shared_state
+            .model_registry
+            .record_shard_holder(shard_id.clone(), local_node_id.clone());
+
+        // Queue shard announce — can't call handle_broadcast inline
+        // because we're inside a swarm event handler (causes re-entrant panic).
+        // The announce will be sent on the next event loop iteration.
+        self.deferred_broadcasts
+            .push(crate::types::SwarmMessage::ShardAnnounce(
+                // One shard we just fetched — incremental.
+                crate::model::manifest::shard_announce(
+                    &self.shared_state.model_registry,
+                    local_node_id,
+                    vec![shard_id.clone()],
+                    Vec::new(),
+                ),
+            ));
+
+        // Load the model with the new shard (spawned async — can't block event loop)
+        crate::model::auto_manage::spawn_check_and_load(
+            self.shared_state.clone(),
+            shard_id.model_id.clone(),
+        );
+        self.shared_state.models.auto_manage_notify.notify_one();
+
+        // Release the P2P download semaphore permit parked by
+        // AutoShardManager::trigger_download. The shard is
+        // verified on disk; the slot is free for the next one.
+        self.shared_state
+            .models
+            .p2p_download_permits
+            .remove(&shard_id);
+
+        tracing::info!(
+            model = %shard_id.model_id,
+            index = shard_id.index,
+            "P2P shard download complete — registered and announced"
+        );
+        let mname = self
+            .shared_state
+            .model_registry
+            .get_manifest(&shard_id.model_id)
+            .map(|m| m.name.clone());
+        let peer_node_id = self.peer_to_node.get(&peer).map(|r| r.clone());
+        // Nickname-or-short-id via the canonical helper when we know the
+        // NodeId; fall back to the libp2p peer id only when we don't.
+        let peer_label = peer_node_id
+            .as_ref()
+            .map(|nid| {
+                crate::identity::nickname::short_display_name(
+                    nid,
+                    &self.shared_state.nickname_registry,
+                )
+            })
+            .unwrap_or_else(|| format!("{}", peer).chars().take(12).collect());
+        self.shared_state.emit_activity(
+            crate::daemon::state::ActivityEvent::new(
+                "download",
+                "shard_p2p_complete",
+                format!(
+                    "Part {} of {} downloaded from computer {}",
+                    crate::types::ShardId::display_index_short(shard_id.index),
+                    mname.as_deref().unwrap_or(&shard_id.model_id.0),
+                    peer_label
+                ),
+            )
+            .with_model(shard_id.model_id.0.clone())
+            .with_node(format!("{}", peer))
+            .with_detail_num(shard_id.index as i64),
+        );
     }
 }

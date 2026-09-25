@@ -89,6 +89,10 @@ pub fn model_dir(data_dir: &std::path::Path, model_id: &str) -> std::path::PathB
 }
 
 /// Manages shard files on disk — loading, verification, and storage.
+///
+/// `Clone` because it is only a path: the network loop hands a copy to a
+/// blocking task to hash a downloaded shard off the loop (FUTURE_WORK #108).
+#[derive(Clone)]
 pub struct ShardStore {
     data_dir: PathBuf,
 }

@@ -557,6 +557,14 @@ pub struct NetworkManager {
     /// block.
     internal_cmd_tx: mpsc::Sender<NetworkCommand>,
     internal_cmd_rx: mpsc::Receiver<NetworkCommand>,
+    /// Hash verdicts for peer-served shards, computed on the blocking pool so
+    /// a BLAKE3 pass over a whole shard never runs on this loop
+    /// (`docs/FUTURE_WORK.md` #108). Its own channel rather than
+    /// `internal_cmd_tx` because the verdict carries a `SwarmError` — whether a
+    /// failure implicates the sender depends on which error it is — and
+    /// `NetworkCommand` lives in the types crate, which cannot name it.
+    shard_verdict_tx: mpsc::Sender<requests::ShardVerdict>,
+    shard_verdict_rx: mpsc::Receiver<requests::ShardVerdict>,
 }
 
 /// Build the startup error for a failed `listen_on`.
@@ -753,6 +761,9 @@ impl NetworkManager {
 
         let shard_store = ShardStore::new(&config.node.data_dir);
         let (internal_cmd_tx, internal_cmd_rx) = mpsc::channel::<NetworkCommand>(256);
+        // One verdict per in-flight shard download, and those are bounded by the
+        // download permits — 64 is headroom, not a limit anyone reaches.
+        let (shard_verdict_tx, shard_verdict_rx) = mpsc::channel::<requests::ShardVerdict>(64);
 
         Ok(Self {
             shared_state,
@@ -800,6 +811,8 @@ impl NetworkManager {
             pending_shard_responses: HashMap::new(),
             internal_cmd_tx,
             internal_cmd_rx,
+            shard_verdict_tx,
+            shard_verdict_rx,
             // Pre-allocate at the rate-limit cap so the Vec never grows past
             // PEX_MAX_PER_WINDOW (R93 — capacity creep otherwise persists
             // across bursts).
@@ -1822,6 +1835,21 @@ impl NetworkManager {
                     last_arm = "internal_cmd".into();
                     arm_started = std::time::Instant::now();
                     self.handle_outbound_command(cmd).await;
+                }
+                // A peer-served shard's hash verdict (#108): the hash ran on the
+                // blocking pool; registering or rejecting it happens here.
+                Some(verdict) = self.shard_verdict_rx.recv() => {
+                    last_arm = "shard_verdict".into();
+                    arm_started = std::time::Instant::now();
+                    self.finish_p2p_shard(verdict.shard_id, verdict.peer, verdict.outcome);
+                    // The success path queues its ShardAnnounce here, as it
+                    // did inside a swarm event; flush it the same way.
+                    if !self.deferred_broadcasts.is_empty() {
+                        let msgs = std::mem::take(&mut self.deferred_broadcasts);
+                        for msg in msgs {
+                            self.handle_broadcast(msg).await;
+                        }
+                    }
                 }
                 // Swarm events from the network
                 event = self.swarm.select_next_some() => {

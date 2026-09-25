@@ -2450,6 +2450,66 @@ fn the_dispatch_loop_never_waits_on_the_database() {
     );
 }
 
+/// `verify_shard` calls in `src` that do not sit inside a `spawn_blocking`
+/// closure. Works on whitespace-flattened text, so a call rustfmt wrapped onto
+/// its own line (`self.shard_store\n    .verify_shard(`) is still seen.
+fn verify_shard_calls_outside_the_blocking_pool(src: &str) -> Vec<String> {
+    let flat = src.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut hits = Vec::new();
+    let mut from = 0;
+    while let Some(at) = flat[from..].find(".verify_shard(") {
+        let at = from + at;
+        from = at + 1;
+        let window = &flat[at.saturating_sub(800)..at];
+        if !window.contains("spawn_blocking(") {
+            hits.push(flat[at.saturating_sub(80)..(at + 40).min(flat.len())].to_string());
+        }
+    }
+    hits
+}
+
+/// Hashing a whole shard is a single-threaded BLAKE3 pass over hundreds of MB.
+/// On the network event loop it stalls every ping, gossip message and tensor
+/// forward of any split this node serves: 206 ms for a 533 MB part, measured
+/// with `examples/split_rig.sh fetch` against v0.3.205 (FUTURE_WORK #108). The
+/// network manager hashes on the blocking pool and posts the verdict back.
+#[test]
+fn the_network_loop_never_hashes_a_shard_inline() {
+    let mut hits = Vec::new();
+    for path in walk_rs_files("src/network/manager") {
+        let src = std::fs::read_to_string(&path).unwrap();
+        for hit in verify_shard_calls_outside_the_blocking_pool(&src) {
+            hits.push(format!("{path}: …{hit}…"));
+        }
+    }
+    assert!(
+        hits.is_empty(),
+        "a shard is hashed on the network event loop — move it into \
+         `tokio::task::spawn_blocking` and post the verdict back \
+         (`requests.rs::finish_p2p_shard`):\n  {}",
+        hits.join("\n  ")
+    );
+}
+
+#[test]
+fn the_inline_hash_scan_catches_a_planted_call() {
+    let inline =
+        "if let Err(e) = self.shard_store.verify_shard(&m, &info, OnMismatch::Quarantine) {";
+    assert_eq!(
+        verify_shard_calls_outside_the_blocking_pool(inline).len(),
+        1
+    );
+    let wrapped =
+        "if let Err(e) = self\n        .shard_store\n        .verify_shard(\n            &m,";
+    assert_eq!(
+        verify_shard_calls_outside_the_blocking_pool(wrapped).len(),
+        1,
+        "the rustfmt-wrapped shape must be seen too (gotcha #413)"
+    );
+    let off_loop = "let outcome = tokio::task::spawn_blocking(move || {\n    store.verify_shard(&m, &info, q)\n});";
+    assert!(verify_shard_calls_outside_the_blocking_pool(off_loop).is_empty());
+}
+
 /// The scanner above finds nothing today, which is indistinguishable from a
 /// scanner that cannot find anything — so plant the violation it exists to
 /// catch, including the rustfmt-wrapped shape that blinded six earlier guards

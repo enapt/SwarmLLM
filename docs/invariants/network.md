@@ -2098,3 +2098,35 @@ Tests: `the_callers_sampling_reaches_the_segment_that_samples_when_it_can_read_i
 `encrypted_envelope_carries_the_callers_sampling`,
 `a_peers_sampling_is_clamped_after_the_seal_is_checked` — each red with its half
 of the fix removed.
+
+## A downloaded shard is hashed off the event loop (2026-09-25)
+
+**What was wrong.** When a peer-served shard finished, `requests.rs` ran
+`ShardStore::verify_shard` — a single-threaded BLAKE3 pass over the whole file —
+inline, on the swarm event loop, which is the only consumer of every ping,
+gossip message and tensor forward. `examples/split_rig.sh fetch` measured it on
+v0.3.205: a 533 MB part of llama-3.2-3b logged `network event loop stalled …
+arm=swarm_event:RequestResponse took_ms=206` at the moment it completed. Every
+split this node was serving waited those 206 ms, once per part, and every
+latency the node measured over that window carried them (`docs/FUTURE_WORK.md`
+#108).
+
+**Why it was not a one-line `spawn_blocking`.** It is the accept gate for
+untrusted bytes, and both of its outcomes mutate state only the loop may touch:
+quarantine, re-fetch, trust penalty and repair on a failure; holder
+registration, the `ShardAnnounce`, the model reload and releasing the
+download's claim on success.
+
+**The shape.** libtorrent draws the same line: pieces are hashed on dedicated
+threads and the verdict is posted back to the network thread. Here the hash runs
+on the blocking pool and the verdict comes back through `shard_verdict_tx` — its
+own channel, because the verdict carries a `SwarmError` (only a COMPLETE transfer
+that hashes wrong implicates the sender) and `NetworkCommand` lives in the types
+crate. `finish_p2p_shard` runs the rest on the loop. Three details the move
+created: the download's claim stays parked until the verdict, so nothing else can
+start writing the shard; a shard deleted while it was hashed is not registered;
+and a hashing task that fails is our fault, never the peer's.
+
+**After.** The same rig logs no stall. Guard:
+`the_network_loop_never_hashes_a_shard_inline`, which flattens whitespace so a
+rustfmt-wrapped call is seen, and was checked against a planted stray file.

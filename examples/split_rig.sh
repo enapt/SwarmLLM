@@ -40,8 +40,13 @@
 #          n-gram-only path and the rest the standard loop (it self-disables
 #          per process), so one arm yields both. Vary one thing per arm with
 #          EXTRA_TOML, e.g. EXTRA_TOML=$'[inference]\nactivation_compression = false'.
+#   fetch  A holds every part, B only part 0; B is asked to download part
+#          FETCH_SHARD (default 1) from A over P2P. Prints whether it landed and
+#          every `network event loop stalled` line B logged meanwhile — the hash
+#          of a downloaded part ran ON the event loop until FUTURE_WORK #108
+#          (~229 ms per 512 MB part, over the loop's 100 ms tripwire).
 #
-# usage: split_rig.sh split|kill|failover|repeat <binary> [<binary for B>]
+# usage: split_rig.sh split|kill|failover|repeat|fetch <binary> [<binary for B>]
 #   MODEL      model id (default: tinyllama for split, llama-3.2-3b for kill
 #              and failover)
 #   SHARDS_A   shard indices A holds, comma-separated (default 0; kill: 0,LAST)
@@ -59,10 +64,10 @@
 # isolation (#352).
 set -u
 
-MODE="${1:?usage: split_rig.sh split|kill|failover|repeat <binary> [<binary for B>]}"
+MODE="${1:?usage: split_rig.sh split|kill|failover|repeat|fetch <binary> [<binary for B>]}"
 BIN_A="${2:?binary}"
 BIN_B="${3:-$BIN_A}"
-case "$MODE" in split|kill|failover|repeat) ;; *) echo "mode must be split, kill, failover or repeat"; exit 2 ;; esac
+case "$MODE" in split|kill|failover|repeat|fetch) ;; *) echo "mode must be split, kill, failover, repeat or fetch"; exit 2 ;; esac
 [ -x "$BIN_A" ] && [ -x "$BIN_B" ] || { echo "binary not executable"; exit 2; }
 if [ "$MODE" = split ]; then
   MODEL="${MODEL:-tinyllama-1.1b-chat-v1.0.q4-k-m}"
@@ -81,6 +86,14 @@ if [ "$MODE" = split ] || [ "$MODE" = repeat ]; then
   SHARDS_B="${SHARDS_B:-$(echo "$SHARDS" | grep -vxF -f <(echo "$SHARDS_A" | tr ',' '\n') | paste -sd,)}"
   # Processor unless asked otherwise: the reference is scored on the processor.
   [ "$MODE" = repeat ] && { GPU_A="${GPU_A:-0}"; GPU_B="${GPU_B:-0}"; }
+elif [ "$MODE" = fetch ]; then
+  SHARDS_A=$(echo "$SHARDS" | paste -sd,)
+  SHARDS_B=0
+  GPU_A="${GPU_A:-0}"; GPU_B="${GPU_B:-0}"
+  # Shard SERVING is throttled by the contribution level (~10 Mbit/s by
+  # default here, 7 s an 8 MiB chunk), which is a rig measuring the hash's
+  # cost, not the link's, waiting minutes for nothing.
+  EXTRA_TOML="${EXTRA_TOML:-$'[resources]\nmax_bandwidth_mbps = 10000'}"
 elif [ "$MODE" = failover ]; then
   # B's range must need TWO nodes to cover it, so C stops one shard short.
   [ "$N" -ge 3 ] || { echo "failover needs a model with at least 3 shard files here; $MODEL has $N"; exit 2; }
@@ -240,6 +253,23 @@ fi
 # ~560 prompt tokens: long enough to catch a prompt pass mid-way (failover), and
 # the prompt the #106 reference scores were taken on (repeat).
 PROMPT="Here are some notes on household appliances. $(for i in $(seq 1 12); do printf 'A refrigerator moves heat from its inside to the room using a refrigerant that evaporates in the cold coils and condenses in the warm ones; the compressor drives the cycle and the thermostat decides when it runs. '; done)Using only these notes, explain step by step how a refrigerator keeps food cold."
+
+if [ "$MODE" = fetch ]; then
+  KB=$(cat "$BASE/B/api_key")
+  FETCH_SHARD="${FETCH_SHARD:-1}"
+  since=$(date -u +%Y-%m-%dT%H:%M:%S)
+  echo "fetch: asking B for part $FETCH_SHARD: $(curl -s -m 30 -X POST -H "Authorization: Bearer $KB" \
+    "localhost:8920/api/admin/models/$MODEL/shards/$FETCH_SHARD/download")"
+  for _ in $(seq 1 600); do
+    grep -qE "P2P shard download complete|did not arrive intact|failed hash verification" "$BASE/B/node.log" && break
+    sleep 1
+  done
+  grep -E "P2P shard download complete|failed hash verification|did not arrive intact|removed while it was being checked" "$BASE/B/node.log" | cut -c1-200
+  echo "fetch: event-loop stalls on B since the request:"
+  awk -v t="$since" '$1 >= t' "$BASE/B/node.log" | grep "network event loop stalled" | cut -c1-220 || true
+  echo "fetch: $(awk -v t="$since" '$1 >= t' "$BASE/B/node.log" | grep -c "network event loop stalled") stall line(s)"
+  exit 0
+fi
 
 if [ "$MODE" = repeat ]; then
   printf '%s' "$PROMPT" > "$OUT/prompt.txt"

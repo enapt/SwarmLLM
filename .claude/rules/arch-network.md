@@ -71,6 +71,16 @@ the same reason.
 
 → `docs/invariants/network.md`
 
+## A downloaded shard is hashed OFF the event loop
+
+`verify_shard` on a whole shard is ~200 ms of BLAKE3 for 500 MB; on the swarm
+event loop it stalls every ping, gossip message and tensor forward (#108). The
+network manager hashes on the blocking pool and posts the verdict back
+(`shard_verdict_tx` → `requests.rs::finish_p2p_shard`, ON the loop). Guard:
+`the_network_loop_never_hashes_a_shard_inline`.
+
+→ `docs/invariants/network.md` § "A downloaded shard is hashed off the event loop"
+
 ## One writer per shard file, and finishing one shard says nothing about the others
 
 Every fetch of shard N writes the same `shard_NNN.bin.tmp`, and the HuggingFace
