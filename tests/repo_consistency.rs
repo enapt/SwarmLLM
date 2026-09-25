@@ -9837,11 +9837,14 @@ fn the_dispatcher_liveness_marker_is_written_before_the_match_and_watched_elsewh
         "HealthMonitor must check the marker on its tick — it is the task the          failure cannot reach"
     );
     assert!(
-        monitor.contains("dispatch_idle_for()"),
-        "the stall report must read the marker rather than re-derive liveness"
+        monitor.contains("dispatch_stalled_for()"),
+        "the stall report must read the marker rather than re-derive liveness \
+         — and through `dispatch_stalled_for`, which asks whether anything was \
+         WAITING: idle time alone fired for 52 minutes on a node whose host had \
+         simply lost its network"
     );
     assert!(
-        !dispatch.contains("dispatch_idle_for()"),
+        !dispatch.contains("dispatch_idle_for()") && !dispatch.contains("dispatch_stalled_for()"),
         "the dispatcher must not watch itself — a loop parked in one of its own          arms cannot report that it is parked"
     );
 }

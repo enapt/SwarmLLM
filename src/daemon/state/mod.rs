@@ -1038,6 +1038,8 @@ impl SharedState {
                 channel_metrics: ChannelMetricsSet::new(),
                 last_dispatch_at_ms: std::sync::atomic::AtomicI64::new(0),
                 last_dispatch_kind: parking_lot::Mutex::new("none"),
+                dispatch_queue: std::sync::OnceLock::new(),
+                dispatch_queue_seen_empty_at_ms: std::sync::atomic::AtomicI64::new(0),
                 ws_connection_count: std::sync::atomic::AtomicUsize::new(0),
                 providers_config: RwLock::new({
                     let stored = db
@@ -2472,10 +2474,11 @@ impl SharedState {
         if crate::daemon::gpu_support::gpu_runtime_has_failed() {
             return Some(InferenceOutage::GraphicsRuntimeGone);
         }
-        match self.metrics.dispatch_idle_for() {
+        match self.metrics.dispatch_stalled_for() {
             // A zero marker means nothing has been dispatched yet, which is a
-            // young node rather than a stalled one.
-            Some((idle, _)) if idle >= DISPATCH_STALL_AFTER => {
+            // young node rather than a stalled one; an empty queue means
+            // nothing arrived to take, which is a quiet one (no peers).
+            Some((stalled, _)) if stalled >= DISPATCH_STALL_AFTER => {
                 Some(InferenceOutage::DispatcherStalled)
             }
             _ => None,
@@ -4043,6 +4046,76 @@ mod split_model_cache_tests {
             "past the threshold the node is not receiving from the swarm at \
              all, whatever its health endpoint says"
         );
+    }
+
+    /// Idle is not stalled: with the queue registered, a stall needs a message
+    /// WAITING, and it is timed from the last moment the queue was seen empty.
+    ///
+    /// The field case (2026-09-25): the host lost its network for 52 minutes,
+    /// no peer could send anything, and the idle-time rule withdrew inference
+    /// and logged "restart the node" every 30 s on a node that reconnected all
+    /// seven peers five seconds after the address came back.
+    #[tokio::test]
+    async fn an_idle_dispatcher_with_nothing_waiting_is_not_a_stall() {
+        use std::sync::atomic::Ordering::Relaxed;
+
+        let state = test_state();
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::types::AuthenticatedMessage>(4);
+        state.metrics.dispatch_queue.set(tx.downgrade()).unwrap();
+
+        let now = chrono::Utc::now().timestamp_millis();
+        let stall_ms = super::DISPATCH_STALL_AFTER.as_millis() as i64;
+        state
+            .metrics
+            .last_dispatch_at_ms
+            .store(now - 50 * 60_000, Relaxed);
+        assert_eq!(state.metrics.dispatch_backlog(), Some(0));
+        assert_eq!(
+            state.inference_outage(),
+            None,
+            "50 minutes with NOTHING queued is a node with no peers, not a \
+             wedged dispatcher"
+        );
+
+        // The first message after the outage: queued, but the queue was seen
+        // empty an instant ago, so it cannot have waited 50 minutes.
+        let msg = crate::types::AuthenticatedMessage {
+            sender: None,
+            message: crate::types::SwarmMessage::HealthPing {
+                nonce: 1,
+                timestamp: 0,
+                node_id: None,
+                active_request_count: 0,
+            },
+            transport: crate::types::MessageTransport::Direct,
+        };
+        tx.try_send(msg).unwrap();
+        assert_eq!(state.metrics.dispatch_backlog(), Some(1));
+        assert_eq!(
+            state.inference_outage(),
+            None,
+            "a message queued for an instant after a long quiet is a node \
+             coming back, and withdrawing here would go out in the very \
+             capability broadcast the reconnecting swarm reads"
+        );
+
+        // The same message still waiting, and the queue last seen empty past
+        // the threshold: that IS a stall.
+        state
+            .metrics
+            .dispatch_queue_seen_empty_at_ms
+            .store(now - (stall_ms + 1_000), Relaxed);
+        assert_eq!(
+            state.inference_outage(),
+            Some(super::InferenceOutage::DispatcherStalled),
+            "a message that has waited past the threshold while the \
+             dispatcher took nothing is the #90 stall"
+        );
+
+        // Taking it clears the backlog, and with it the outage.
+        rx.recv().await.unwrap();
+        assert_eq!(state.inference_outage(), None);
+        drop(tx);
     }
 
     /// The sibling half: a metadata entry is not memory, in EITHER scope.

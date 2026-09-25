@@ -338,6 +338,12 @@ impl Daemon {
         //
         let (network_tx, network_rx) = mpsc::channel::<NetworkCommand>(1024);
         let (network_out_tx, mut network_out_rx) = mpsc::channel::<AuthenticatedMessage>(1024);
+        // So the stall report can tell a wedged dispatcher from an idle one
+        // (`MetricsProviders::dispatch_stalled_for`).
+        let _ = shared_state
+            .metrics
+            .dispatch_queue
+            .set(network_out_tx.downgrade());
         let (router_cmd_tx, router_cmd_rx) = mpsc::channel::<RouterCommand>(256);
         let (rebalance_tx, rebalance_rx) = mpsc::channel::<RebalanceEvent>(64);
         let (acquisition_tx, acquisition_rx) = mpsc::channel::<AcquisitionCommand>(64);

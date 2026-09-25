@@ -139,6 +139,19 @@ pub struct MetricsProviders {
     /// Uncontended, never held across an await, ~15 ns on a path that peaks
     /// around 100 messages a second.
     pub last_dispatch_kind: parking_lot::Mutex<&'static str>,
+    /// A weak handle on `network_out`, so a DIFFERENT task can ask how many
+    /// messages are waiting in it. Set once, in `daemon/mod.rs`, where the
+    /// channel is made; weak so it never keeps the channel open at shutdown.
+    ///
+    /// Idle time alone cannot tell a wedged dispatcher from one with nothing
+    /// to take: on 2026-09-25 the host lost its network for 52 minutes, no
+    /// peer could send anything, and the stall report fired every 30 s telling
+    /// the user to restart a node that was fine (`dispatch_stalled_for`).
+    pub dispatch_queue:
+        std::sync::OnceLock<tokio::sync::mpsc::WeakSender<crate::types::AuthenticatedMessage>>,
+    /// Epoch millis at which `dispatch_stalled_for` last found `network_out`
+    /// EMPTY. `0` before the first look.
+    pub dispatch_queue_seen_empty_at_ms: AtomicI64,
     pub ws_connection_count: std::sync::atomic::AtomicUsize,
     pub node_stats: RwLock<NodeStats>,
     pub providers_config: RwLock<crate::config::ProvidersConfig>,
@@ -369,6 +382,53 @@ impl MetricsProviders {
             std::time::Duration::from_millis(idle_ms.max(0) as u64),
             *self.last_dispatch_kind.lock(),
         ))
+    }
+
+    /// Messages waiting in `network_out` right now, or `None` when the queue
+    /// was never registered (unit tests) or has closed (shutdown).
+    pub fn dispatch_backlog(&self) -> Option<usize> {
+        let tx = self.dispatch_queue.get()?.upgrade()?;
+        Some(tx.max_capacity().saturating_sub(tx.capacity()))
+    }
+
+    /// How long the dispatcher has taken nothing WHILE a message waited for
+    /// it, and the last message it did take. `None` when nothing is waiting
+    /// or nothing has ever been dispatched.
+    ///
+    /// **This is the stall, not `dispatch_idle_for`.** A node with no peers
+    /// receives nothing, so its dispatcher goes idle and is not stuck; the
+    /// signal a queue consumer is wedged is the AGE OF THE OLDEST WAITING
+    /// MESSAGE — what queue systems alarm on (SQS's
+    /// `ApproximateAgeOfOldestMessage`, a Kafka consumer's lag), never the time
+    /// since the consumer last took something. That age is bounded here from
+    /// below by two things a monitor can see without timestamping every
+    /// message: the dispatcher's last take, and the last time this method
+    /// found the queue empty. A message cannot have waited since before
+    /// either.
+    ///
+    /// The second bound matters on the way BACK from an outage: the first
+    /// gossip after 50 quiet minutes is queued for microseconds, and a check
+    /// landing in that instant must not call it 50 minutes of stall — the
+    /// withdrawal would go out in the very capability broadcast that tells the
+    /// reconnecting swarm what this node can do.
+    ///
+    /// With no registered queue it answers the idle time, as before.
+    pub fn dispatch_stalled_for(&self) -> Option<(std::time::Duration, &'static str)> {
+        let (idle, kind) = self.dispatch_idle_for()?;
+        let now = chrono::Utc::now().timestamp_millis();
+        let seen_empty_at = match self.dispatch_backlog() {
+            Some(0) => {
+                self.dispatch_queue_seen_empty_at_ms
+                    .store(now, std::sync::atomic::Ordering::Relaxed);
+                return None;
+            }
+            Some(_) => self
+                .dispatch_queue_seen_empty_at_ms
+                .load(std::sync::atomic::Ordering::Relaxed),
+            None => 0,
+        };
+        let waited_ms = now.saturating_sub(seen_empty_at).max(0) as u64;
+        Some((idle.min(std::time::Duration::from_millis(waited_ms)), kind))
     }
 }
 

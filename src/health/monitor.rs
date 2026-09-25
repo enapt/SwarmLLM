@@ -570,8 +570,14 @@ impl HealthMonitor {
     /// on any node with a peer. Naming the last message's KIND is the point —
     /// it says which arm to look at, which is the question a recurrence has to
     /// answer.
+    ///
+    /// "Stopped consuming" means messages WAITED and were not taken — not that
+    /// none arrived. A node with no peers has nothing to take; on 2026-09-25 a
+    /// 52-minute host network outage fired this every 30 s, telling the user to
+    /// restart a node that recovered all seven peers within five seconds of the
+    /// address coming back (`MetricsProviders::dispatch_stalled_for`).
     fn report_dispatcher_stall(&self) {
-        let Some((idle, kind)) = self.shared_state.metrics.dispatch_idle_for() else {
+        let Some((idle, kind)) = self.shared_state.metrics.dispatch_stalled_for() else {
             return;
         };
         if idle < crate::daemon::state::DISPATCH_STALL_AFTER {
@@ -581,9 +587,11 @@ impl HealthMonitor {
             target: "swarmllm::health::monitor",
             idle_secs = idle.as_secs(),
             last_message = kind,
+            waiting = self.shared_state.metrics.dispatch_backlog(),
             peers = self.shared_state.peer_registry.len(),
             "The message dispatcher has taken nothing off its channel for \
-             {}s — this node is not receiving from the swarm at all, whatever \
+             {}s while messages waited in it — this node is not receiving from \
+             the swarm at all, whatever \
              its health endpoint says. The kind above is the last message it \
              accepted, and so the handler to suspect. Inference has been \
              withdrawn from what this node advertises so peers stop routing \
