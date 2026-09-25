@@ -14,7 +14,7 @@ the differences are less obvious.
 | **Can the computers doing the work read your request?** | Yes, in the public swarm — so SwarmLLM has **Private Mode**, which keeps requests on your own devices (and, by default, other SwarmLLM computers on your local network) | Yes ([Petals' own wiki](https://github.com/bigscience-workshop/petals/wiki/Security,-privacy,-and-AI-safety)) | Yes (they are yours) | Yes |
 | **Rewards** | None — no token, no payment, no blockchain | Name on a monitor page | None | TAO token (real money) |
 | **How a model is split** | Pipeline (tensor parallelism exists for fast local networks but is off by default) | Pipeline | Tensor + pipeline | Subnet routing |
-| **Model families verified on real models** | Llama, Qwen 2/3, Mistral, Gemma 2, Phi-3/4, GLM-4 (checked at every release). Llama 4 and Qwen 3.5 are implemented but not yet verified on a real model; DeepSeek is not supported yet | Llama, Mixtral, Falcon, BLOOM | Llama, Mistral, Qwen, DeepSeek, LLaVA | Any (subnet-defined) |
+| **Model families verified on real models** | Llama, Qwen 2/3, Mistral, Gemma 2, Phi-3/4, GLM-4 (checked at every release). Llama 4 is checked against llama.cpp on small test models only; Qwen 3.5, StarCoder2 and DeepSeek are not supported yet | Llama, Mixtral, Falcon, BLOOM | Llama, Mistral, Qwen, DeepSeek, LLaVA | Any (subnet-defined) |
 | **Needs the whole model file?** | No — each computer downloads only its parts | Loads whole blocks | Yes | N/A |
 | **Cloud fallback** | Optional, 12 providers with your own keys | No | No | No |
 | **Images and adapters** | Vision models (LLaVA verified) and per-request LoRA on a model held whole | LoRA | Vision experimental | Subnet-specific |

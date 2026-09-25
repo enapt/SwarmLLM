@@ -640,7 +640,7 @@ The SplitModel loader detects the model architecture from GGUF metadata
 | FFN | Dense | Dense + MoE (mixed) | Dense | Dense | Dense | Dense | Dense | Dense | MoE (top-k) + shared | Dense |
 | Context length | 4096 (default) | 131072 | 32768 | 131072 | 8192 | 4096 | 32768 | 16384 | 163840 | 131072 |
 | Special | — | NoPE every 4th layer; Q/K RMS-normalised after RoPE; sigmoid top-k, expert weighted on its INPUT | — | Hybrid SSM+attention | Embedding scaling (sqrt(d)), Gemma RmsNorm (+1), attn + final logit softcap, EOS 107, Gemma chat template | Fused QKV/FFN | — | — | Per-layer dense/MLA | Partial RoPE (50%) |
-| E2E verified | ✅ | tiny random model vs llama.cpp only (#114) | ✅ | — | ✅ (Gemma2) | ✅ | — | — | ⛔ not supported (#116) | ✅ |
+| E2E verified | ✅ | tiny random model vs llama.cpp only (#114) | ✅ | ⛔ not supported (#117) | ✅ (Gemma2) | ✅ | — | ⛔ not supported (#118) | ⛔ not supported (#116) | ✅ |
 
 > **Phi-3 fused tensors**: Phi-3 GGUF models store `attn_qkv.weight` (Q+K+V concatenated) and `ffn_up.weight` (gate+up concatenated, no `ffn_gate.weight`). The loader dequantizes on CPU, splits by head dimensions, and re-quantizes to Q4_0 on the target device.
 
@@ -680,6 +680,13 @@ Llama 4 introduces two novel mechanisms within the standard dense `LayerVariant`
 - **Mixed Dense+MoE FFN** — `FfnVariant` enum (`Dense(Mlp)` | `MoE(MoeFfn)`) allows individual layers to use either dense or MoE FFN within the same model. Top-k expert routing reuses the same `MoeFfn` struct as DeepSeek
 
 ### Qwen 3.5 Hybrid SSM+Attention Support
+
+⛔ **Recognised, NOT supported** (`docs/FUTURE_WORK.md` #117) — refused by the loader,
+shard downloads and auto-manage. The code below was written against a guessed tensor
+layout and loads no real file: real Qwen 3.5 GGUFs carry `post_attention_norm` (we ask
+`attn_post_norm`), `attn_qkv` + `ssm_a` + `ssm_dt.bias` in their DeltaNet layers, fold
+the attention output gate into `attn_q` (we ask a separate `attn_gate`), and rotate by
+`rope.dimension_sections`. Kept as the starting point; what follows describes it.
 
 Qwen 3.5 introduces a hybrid architecture combining SSM (Gated Delta Networks) with standard attention:
 
@@ -2871,6 +2878,10 @@ Single-node inference performance, measured with `swarmllm bench` (100 output to
 The list is split into **open** (will be addressed) and **won't fix unless a concrete caller appears** (the work is understood but not justified by current demand). Per-finding history (status, resolution, deferral) is tracked in `.claude/sweep-log.jsonl`.
 
 ### Open
+
+- **StarCoder2 — recognised, refused** — `docs/FUTURE_WORK.md` #118: a LayerNorm model with biases the loader does not read, and a metadata key (`layer_norm_epsilon`) the shared parser does not accept.
+
+- **Qwen 3.5 (dense `qwen35`, MoE `qwen35moe`) — recognised, refused, code kept** — `docs/FUTURE_WORK.md` #117. `layers/qwen35.rs` and the loader's hybrid-SSM branch are unreachable until `ModelArch::is_supported` admits the family; they need rewriting against a real file and a llama.cpp new enough to know the architecture (0.3.16 does not).
 
 - **DeepSeek-2 (V2/V2-Lite/V3, Kimi-K2, GLM-4.7-Flash) — recognised, refused, code kept** — see `docs/FUTURE_WORK.md` #116 for the list of what a real file needs. The loader's MLA branch, `MlaWeights` and `LayerVariant::DeepSeek` stay as its starting point and are unreachable until `ModelArch::is_supported` admits the family again.
 

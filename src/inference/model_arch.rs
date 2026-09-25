@@ -111,27 +111,38 @@ impl ModelArch {
     /// engine does not implement. Checked 2026-09-25 against the real header of
     /// DeepSeek-Coder-V2-Lite-Instruct. Claiming it let a user, or auto-manage,
     /// fetch gigabytes of a model that then could not load.
+    ///
+    /// **Qwen 3.5 likewise** (FUTURE_WORK #117): the loader was written against
+    /// a guessed layout. Every layer of a real file (unsloth Qwen3.5-4B, header
+    /// read 2026-09-25) carries `post_attention_norm` where the loader asks for
+    /// `attn_post_norm`; its DeltaNet layers carry `attn_qkv`, `ssm_a` and
+    /// `ssm_dt.bias` (the loader asks `ssm_dt.weight` and neither of the
+    /// others); its attention layers fold the output gate into `attn_q` (the
+    /// loader asks for a separate `attn_gate`); and it rotates by sections
+    /// (`rope.dimension_sections`). None of it loads.
+    ///
+    /// **And StarCoder2** (FUTURE_WORK #118): it is a LayerNorm model — its
+    /// files carry `attention.layer_norm_epsilon` and a bias on every norm, on
+    /// `attn_output`, `ffn_up` and `ffn_down` (starcoder2-3b header, read
+    /// 2026-09-25). The shared metadata parser REQUIRES
+    /// `attention.layer_norm_rms_epsilon`, so no file gets past it, and the
+    /// loader reads none of those biases and normalises by RMS.
     pub fn is_supported(&self) -> bool {
-        !matches!(self, ModelArch::Unknown(_) | ModelArch::DeepSeek2)
+        !matches!(
+            self,
+            ModelArch::Unknown(_)
+                | ModelArch::DeepSeek2
+                | ModelArch::Qwen35
+                | ModelArch::Qwen35Moe
+                | ModelArch::Starcoder2
+        )
     }
 
     /// List of GGUF architecture strings supported by the split inference engine.
     pub fn supported_list() -> &'static [&'static str] {
         &[
-            "llama",
-            "qwen2",
-            "qwen3",
-            "qwen2moe",
-            "qwen3moe",
-            "gemma",
-            "gemma2",
-            "phi3",
-            "mistral",
-            "starcoder2",
-            "glm4",
-            "llama4",
-            "qwen35",
-            "qwen35moe",
+            "llama", "qwen2", "qwen3", "qwen2moe", "qwen3moe", "gemma", "gemma2", "phi3",
+            "mistral", "glm4", "llama4",
         ]
     }
 

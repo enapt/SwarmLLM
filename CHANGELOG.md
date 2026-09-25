@@ -64,12 +64,12 @@ pick the same word at every position and agree to within a few millionths,
 split across two computers too. (No full-size
 Llama 4 has been run here; the smallest is 40 GB.)
 
-**Changed: DeepSeek models are no longer offered.** DeepSeek-V2 and V3 (and
-models built the same way) were listed as supported, but no DeepSeek file
-actually in circulation could load: a node, or its automatic model manager,
-could download many gigabytes of one and then fail to start it. They are now
-refused up front with a message naming the model family, until they genuinely
-work.
+**Changed: DeepSeek, Qwen 3.5 and StarCoder2 models are no longer offered.**
+All three were listed as supported, but no such file actually in circulation
+could load: a node, or its automatic model manager, could download many
+gigabytes of one and then fail to start it. They are now refused up front with
+a message naming the model family, until they genuinely work. Qwen 3.5 support
+is high on the list.
 
 Also: `swarmllm test-split --gpu-layers N` checks a card/processor split
 without starting a node; a computed result that waits more than a second to be sent now says so in
