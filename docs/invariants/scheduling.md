@@ -1628,9 +1628,43 @@ by re-introducing the cached binding in the real source) and
 composite-backed segment as bare — gotcha #451's shape, a count contradicting
 what failover then does with the same plan.
 
-⚠ **Verified by unit test and guard, NOT on a live multi-node failover.** The
-two-node rig in `docs/FUTURE_WORK.md` #85 is the cheapest end-to-end exercise
-and has not been run against this.
+**Run live 2026-09-25 (`examples/split_rig.sh failover`), and the first run
+found what the unit tests and the guard could not.** Four CPU nodes on
+llama-3.2-3b: A holds part 0 and coordinates, B holds the rest, C all of B's
+range but the last part, D the last part — so B's segment has no single
+standby. B's worker is killed the moment its prompt pass starts.
+
+1. **The takeover of a LAST segment returned its first part's output as the
+   answer.** The guard pins the loop bound and `is_last`; all three callers of
+   `failover_segment` returned BEFORE the loop re-read anything, on an
+   `is_last`/`run_is_last` computed before the splice. C's hidden states for
+   layers 3-21 came back as the pipeline's result, D never saw the prompt, and
+   the next token failed on D with "no longer holds the conversation" — the
+   #93 check turning a would-be wrong reply into a refusal, then the router's
+   retry through B. **A guard on the loop does not cover an early return out of
+   it.** `failover_segment` now returns `Takeover::{Finished, Continue}`, so
+   the function that splices is the one that says whether the pipeline is
+   done. Test:
+   `a_failed_last_segment_taken_over_by_several_nodes_runs_every_part_before_answering`,
+   red with the old meaning restored.
+2. **That refusal cost 290 s, because it went to the wrong node** — see
+   `docs/invariants/network.md` and gotcha #707: four of `layer_forward.rs`'s
+   seven reply paths answered the previous hop of a chain.
+
+After both fixes: the takeover is logged, the router does not retry, the prompt
+pass runs through both parts in 4.4 s including D's cold load, decode continues
+at ~130 ms a token, and the reply — scored against llama.cpp by
+`examples/score_against_reference.py` — ranks exactly like a same-topology run
+with no failover (109 of 120 tokens at the reference's rank 1 in each). A
+broken cache state would not: `failover_kv_probe.rs` measured the right token's
+probability at 0.005 for a stand-in missing half the context. **Byte-equality
+with the control is the wrong test** — two greedy runs of one topology split at
+the same near-tie (`docs/FUTURE_WORK.md` #106 carries that lead).
+
+⚠ Still not run live: a composite in the MIDDLE of a pipeline (unit-tested by
+`a_takeover_installs_one_segment_or_the_whole_cover_in_its_place`; the rig's
+shape fails the last segment), and a mid-reply composite, which is not offered
+by design.
 
 ## A standby is a capacity commitment, not just a coverage claim
 

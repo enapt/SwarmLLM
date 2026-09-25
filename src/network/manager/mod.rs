@@ -1181,9 +1181,14 @@ impl NetworkManager {
                 discovery::trigger_bootstrap(&mut self.swarm)?;
             }
 
-            // Loopback probe: find same-host peers when mDNS is off
-            // (WSL2 default) and the peer cache / bootstrap list is empty.
+            // Loopback probe: find same-host peers, which mDNS cannot on WSL2.
             // Cheap — only fires a handful of TCP dials on 127.0.0.1.
+            // ⚠ UNCONDITIONAL: it runs whatever the peer cache, bootstrap list
+            // or `enable_mdns` say (an earlier comment here claimed otherwise),
+            // and it covers the 8800/8900/… bases — so NO same-host node is
+            // isolated from another, and peer exchange then shares whatever
+            // either knows. `examples/split_rig.sh` refuses to run beside any
+            // other SwarmLLM process for this reason (gotcha #708).
             discovery::probe_loopback_peers(
                 &mut self.swarm,
                 self.shared_state.config.node.listen_port,

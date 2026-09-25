@@ -20,9 +20,24 @@
 #          the Dashboard would). The .201/.202 gate expectation for B_UNLOAD: B
 #          refuses the next forward ("no longer holds the conversation"), one
 #          retry, 200, no garbled text.
+#   failover  FOUR nodes, for #17's composite stand-in (a failed segment taken
+#          over by several nodes that cover its layers between them). A holds
+#          shard 0 and coordinates, B holds every other shard, C holds all of
+#          those but the last and D holds the last — so B's segment has no
+#          single standby and C+D is the only cover. Three greedy runs of one
+#          long prompt: B healthy; B's worker killed the moment it starts the
+#          PROMPT pass (the only pass a composite is offered on); B stopped, so
+#          the plan itself is A→C→D. PASS = the coordinator logged the
+#          composite takeover, the router did NOT retry, and every request
+#          answered. The first two are not optional: a failed takeover falls
+#          through to the router's retry, which re-plans and produces a correct
+#          reply without the takeover ever having run (gotcha #706). Whether the
+#          reply is the MODEL's is judged against llama.cpp, not byte-equality
+#          with the control: examples/score_against_reference.py.
 #
-# usage: split_rig.sh split|kill <binary> [<binary for B>]
-#   MODEL      model id (default: tinyllama for split, llama-3.2-3b for kill)
+# usage: split_rig.sh split|kill|failover <binary> [<binary for B>]
+#   MODEL      model id (default: tinyllama for split, llama-3.2-3b for kill
+#              and failover)
 #   SHARDS_A   shard indices A holds, comma-separated (default 0; kill: 0,LAST)
 #   SHARDS_B   shard indices B holds (default: every shard A lacks; kill: all)
 #   GPU_A/B    SWARMLLM_INFERENCE_GPU_LAYERS for each node ("" = auto)
@@ -37,10 +52,10 @@
 # isolation (#352).
 set -u
 
-MODE="${1:?usage: split_rig.sh split|kill <binary> [<binary for B>]}"
+MODE="${1:?usage: split_rig.sh split|kill|failover <binary> [<binary for B>]}"
 BIN_A="${2:?binary}"
 BIN_B="${3:-$BIN_A}"
-case "$MODE" in split|kill) ;; *) echo "mode must be split or kill"; exit 2 ;; esac
+case "$MODE" in split|kill|failover) ;; *) echo "mode must be split, kill or failover"; exit 2 ;; esac
 [ -x "$BIN_A" ] && [ -x "$BIN_B" ] || { echo "binary not executable"; exit 2; }
 if [ "$MODE" = split ]; then
   MODEL="${MODEL:-tinyllama-1.1b-chat-v1.0.q4-k-m}"
@@ -57,9 +72,30 @@ N=$(echo "$SHARDS" | wc -l)
 if [ "$MODE" = split ]; then
   SHARDS_A="${SHARDS_A:-0}"
   SHARDS_B="${SHARDS_B:-$(echo "$SHARDS" | grep -vxF -f <(echo "$SHARDS_A" | tr ',' '\n') | paste -sd,)}"
+elif [ "$MODE" = failover ]; then
+  # B's range must need TWO nodes to cover it, so C stops one shard short.
+  [ "$N" -ge 3 ] || { echo "failover needs a model with at least 3 shard files here; $MODEL has $N"; exit 2; }
+  SHARDS_A=0
+  SHARDS_B=$(echo "$SHARDS" | grep -vx 0 | paste -sd,)
+  SHARDS_C=$(echo "$SHARDS" | grep -vx 0 | grep -vx "$LAST" | paste -sd,)
+  SHARDS_D=$LAST
+  GPU_A="${GPU_A:-0}"; GPU_B="${GPU_B:-0}"
 else
   SHARDS_A="${SHARDS_A:-0,$LAST}"
   SHARDS_B="${SHARDS_B:-$(echo "$SHARDS" | paste -sd,)}"
+fi
+# ANY other SwarmLLM process on this machine joins the rig, whatever either
+# side's config says: every node dials 127.0.0.1 on the ports within ±10 of its
+# own and on the 8800/8900/9000/… bases at startup
+# (`network::discovery::probe_loopback_peers`), and peer exchange then brings
+# in everything THAT node knows — the public swarm included. mDNS off and a
+# private gossip id stop none of it. A probe node on 8970 (D's range) put
+# nine peers in front of A on 2026-09-25.
+OTHERS=$(ps -eo pid,comm | awk '$2 ~ /swarmllm/ {print $1}' | paste -sd' ')
+if [ -n "$OTHERS" ]; then
+  echo "rig: other SwarmLLM processes are running (pids: $OTHERS). Stop them first —"
+  echo "     any node on this machine finds the rig through its loopback probe."
+  exit 2
 fi
 BASE=$(mktemp -d "$HOME/.split-rig.XXXXXX")
 OUT="${OUT:-$BASE/out}"
@@ -112,9 +148,9 @@ up() { # dir port
 }
 # Kill only what this script started (gotcha #283), and keep the logs.
 cleanup() {
-  kill ${PA:-} ${PB:-} 2>/dev/null; sleep 3
-  cp "$BASE/A/node.log" "$OUT/A.log" 2>/dev/null; cp "$BASE/B/node.log" "$OUT/B.log" 2>/dev/null
-  rm -rf "$BASE/A" "$BASE/B"
+  kill ${PA:-} ${PB:-} ${PC:-} ${PD:-} 2>/dev/null; sleep 3
+  for n in A B C D; do cp "$BASE/$n/node.log" "$OUT/$n.log" 2>/dev/null; done
+  rm -rf "$BASE/A" "$BASE/B" "$BASE/C" "$BASE/D"
   [ "$OUT" = "$BASE/out" ] || rmdir "$BASE" 2>/dev/null
   echo "rig: logs and replies in $OUT"
 }
@@ -135,6 +171,20 @@ ADDR=$(echo "$ADDRS" | grep -v "10\.255\.255\.254" | head -1)
 make_node "$BASE/B" "$SHARDS_B" "\"$ADDR\""
 PB=$(start "$BASE/B" 8920 "$BIN_B" "${GPU_B:-}")
 up "$BASE/B" 8920 || exit 1
+PEERS_EXPECTED=1
+if [ "$MODE" = failover ]; then
+  # Processor only unless asked otherwise (all four nodes): four daemons on
+  # one card is #104's setup, and a KV refusal there would read as a failover
+  # result.
+  make_node "$BASE/C" "$SHARDS_C" "\"$ADDR\""
+  PC=$(start "$BASE/C" 8940 "$BIN_A" "${GPU_C:-0}")
+  make_node "$BASE/D" "$SHARDS_D" "\"$ADDR\""
+  PD=$(start "$BASE/D" 8960 "$BIN_A" "${GPU_D:-0}")
+  up "$BASE/C" 8940 || exit 1
+  up "$BASE/D" 8960 || exit 1
+  PEERS_EXPECTED=3
+  echo "rig: C=[$SHARDS_C] D=[$SHARDS_D] gpu=${GPU_C:-0}/${GPU_D:-0}"
+fi
 
 echo "rig: $MODEL  A=[$SHARDS_A] $("$BIN_A" --version) gpu=${GPU_A:-auto}  B=[$SHARDS_B] $("$BIN_B" --version) gpu=${GPU_B:-auto}"
 peers() {
@@ -143,15 +193,16 @@ try:
   d=json.load(sys.stdin); p=d if isinstance(d,list) else d.get("peers",[]); print(len(p))
 except Exception: print(0)'
 }
-for _ in $(seq 1 60); do n=$(peers); [ "${n:-0}" -ge 1 ] && break; sleep 2; done
+for _ in $(seq 1 60); do n=$(peers); [ "${n:-0}" -ge "$PEERS_EXPECTED" ] && break; sleep 2; done
 sleep 5
 n=$(peers)
-if [ "${n:-0}" -ne 1 ]; then
-  echo "rig: A sees $n peers, not 1 — something else on this machine or LAN is reachable and"
-  echo "     the planner may route through it. Stop the live node and try again."
+if [ "${n:-0}" -ne "$PEERS_EXPECTED" ]; then
+  echo "rig: A sees $n peers, not $PEERS_EXPECTED — something else on this machine or LAN is"
+  echo "     reachable (or a rig node is not), and the planner may route through it."
+  echo "     Stop every other SwarmLLM process on this machine and try again."
   exit 1
 fi
-echo "rig: A sees exactly B"
+echo "rig: A sees exactly its $PEERS_EXPECTED rig peer(s)"
 
 ask() { # prompt max_tokens label  (writes $OUT/<label>.{hdr,body}, prints a JSON line)
   local body
@@ -173,6 +224,93 @@ if [ "$MODE" = split ]; then
   ask "What is the capital of France? Answer in one sentence." 64 q1 | tee "$OUT/replies.jsonl"
   ask "Write a short Python function that returns the factorial of n." 64 q2 | tee -a "$OUT/replies.jsonl"
   exit 0
+fi
+
+if [ "$MODE" = failover ]; then
+  node_id() { # port -> the 16-hex-digit id a plan prints
+    curl -s -m 5 -H "Authorization: Bearer $(cat "$1")" "localhost:$2/api/admin/stats" \
+      | python3 -c 'import sys,json; print(json.load(sys.stdin)["node_id"][:16])'
+  }
+  IB=$(node_id "$BASE/B/api_key" 8920); IC=$(node_id "$BASE/C/api_key" 8940); ID=$(node_id "$BASE/D/api_key" 8960)
+  # plan_is <want>: A's route preview is A→B with a composite C+D behind B
+  # ("healthy"), or A→C→D ("control").
+  plan_is() {
+    curl -s -m 10 -H "Authorization: Bearer $KA" "localhost:8900/api/admin/models/$MODEL/pipeline-plan" \
+      | python3 -c 'import sys,json
+want,b,c,d=sys.argv[1:5]
+try: p=json.load(sys.stdin)
+except Exception: sys.exit(1)
+seg=[s["node_id"] for s in p.get("segments",[])]
+sb={s["node_id"] for s in p.get("standbys",[])}
+show=lambda k: " ".join("%s%s" % (s["node_id"][:8], s["layer_range"]) for s in p.get(k,[]))
+print("  plan:", show("segments"), "| standbys:", show("standbys"), file=sys.stderr)
+ok = (len(seg)==2 and seg[1]==b and {c,d} <= sb and b not in sb) if want=="healthy" else (seg[1:]==[c,d])
+sys.exit(0 if ok else 1)' "$1" "$IB" "$IC" "$ID"
+  }
+  wait_plan() { # want
+    for _ in $(seq 1 60); do plan_is "$1" 2>/dev/null && { plan_is "$1"; return 0; }; sleep 3; done
+    echo "failover: the plan never became '$1':"; plan_is "$1"; return 1
+  }
+  # ~500 prompt tokens, so B's prompt pass is long enough to be caught mid-way.
+  PROMPT="Here are some notes on household appliances. $(for i in $(seq 1 12); do printf 'A refrigerator moves heat from its inside to the room using a refrigerant that evaporates in the cold coils and condenses in the warm ones; the compressor drives the cycle and the thermostat decides when it runs. '; done)Using only these notes, explain step by step how a refrigerator keeps food cold."
+  wait_plan healthy || exit 1
+  echo "failover: plan is A→B with C+D covering B's range between them"
+
+  ask "$PROMPT" 120 healthy | tee "$OUT/failover.jsonl"
+
+  # Kill B's worker the moment it starts computing: B's own processes' CPU time
+  # rising above what they had at the start is the prompt pass arriving. That
+  # is the only pass a composite stand-in is offered on.
+  cpu_of_children() { local t=0; for p in $(pgrep -P "$PB"); do
+      t=$((t + $(awk '{print $14+$15}' "/proc/$p/stat" 2>/dev/null || echo 0))); done; echo $t; }
+  taken0=$(grep -c 'segment taken over by several nodes' "$BASE/A/node.log")
+  retried0=$(grep -c 'retrying with fresh pipeline' "$BASE/A/node.log")
+  base=$(cpu_of_children)
+  ask "$PROMPT" 120 takeover >> "$OUT/failover.jsonl" &
+  ASK=$!
+  until [ $(( $(cpu_of_children) - base )) -ge 30 ]; do
+    kill -0 $ASK 2>/dev/null || { echo "failover: the reply finished before B started computing"; break; }
+    sleep 0.02
+  done
+  WORKERS=$(pgrep -P "$PB")
+  echo "failover: killing B's worker ${WORKERS:-<none>} at the start of its prompt pass"
+  [ -n "$WORKERS" ] && kill -9 $WORKERS
+  wait $ASK
+  taken=$(( $(grep -c 'segment taken over by several nodes' "$BASE/A/node.log") - taken0 ))
+  # A takeover that fails is rescued by the router's retry on a fresh plan —
+  # through B again once its worker respawns — and THAT reply is correct. It
+  # passed for a takeover that never ran its second part (gotcha #706), so a
+  # retry during this arm is a failure, whatever the reply says.
+  retried=$(( $(grep -c 'retrying with fresh pipeline' "$BASE/A/node.log") - retried0 ))
+  grep -E 'segment taken over by several nodes|failing over to standby node' "$BASE/A/node.log" | tail -3
+
+  # Control: B gone, so the plan itself is A→C→D — the shape the takeover
+  # should have spliced in.
+  kill "$PB"; PB=""
+  for _ in $(seq 1 30); do [ "$(peers)" -eq 2 ] && break; sleep 2; done
+  wait_plan control || exit 1
+  ask "$PROMPT" 120 control >> "$OUT/failover.jsonl"
+  printf '%s' "$PROMPT" > "$OUT/prompt.txt"
+
+  python3 - "$OUT/failover.jsonl" "$taken" "$retried" <<'PY'
+import json, sys
+rows = [json.loads(l) for l in open(sys.argv[1])]
+taken, retried = int(sys.argv[2]), int(sys.argv[3])
+h, t, c = (r.get("content") for r in rows[:3])
+print(f"failover: takeover logged {taken} time(s), router retries {retried}; statuses", [r["status"] for r in rows])
+same = t is not None and t == c
+print(f"failover: takeover reply {'==' if same else '!='} A→C→D control; healthy A→B reply {'==' if h == c else '!='} control")
+# Byte-equality is information, not the verdict. Two greedy runs of ONE
+# topology split at the same near-tie on 2026-09-25 (cold vs warm stand-ins,
+# the prompt relayed vs chained), so '!=' says nothing by itself. What would
+# show a broken takeover is the REFERENCE model ranking its tokens badly:
+#   examples/score_against_reference.py <model.gguf> $OUT/failover.jsonl <prompt>
+# (the takeover and the control should score alike).
+ok = taken >= 1 and retried == 0 and all(r["status"].endswith("200 ok") and r.get("content") for r in rows)
+print("failover: PASS" if ok else "failover: FAIL")
+sys.exit(0 if ok else 1)
+PY
+  exit $?
 fi
 
 # kill: a long reply, broken well into its decode steps.

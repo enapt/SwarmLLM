@@ -1573,10 +1573,14 @@ impl PipelineExecutor {
                                     },
                                 )
                                 .await?;
-                            if run_is_last {
-                                return Ok(failover_result);
+                            // Whether this finished the pipeline is the
+                            // failover's answer, not `run_is_last`'s: a
+                            // composite takeover of the last segment leaves
+                            // parts behind this one still to run.
+                            match failover_result {
+                                Takeover::Finished(result) => return Ok(result),
+                                Takeover::Continue(next) => activations = next,
                             }
-                            activations = failover_result.activations;
                         } else {
                             let seg_elapsed_ms = segment_start.elapsed().as_millis() as u64;
                             // A chained run answered for every segment it
@@ -1698,13 +1702,12 @@ impl PipelineExecutor {
                                     .await?;
                                 // The standby covered THIS segment only, so
                                 // the rest of the run still has to be done. Do
-                                // not commit the skip, and ask the ordinary
-                                // per-segment question about finishing rather
-                                // than the run's.
-                                if is_last {
-                                    return Ok(failover_result);
+                                // not commit the skip, and let the failover say
+                                // whether it finished — see `Takeover`.
+                                match failover_result {
+                                    Takeover::Finished(result) => return Ok(result),
+                                    Takeover::Continue(next) => activations = next,
                                 }
-                                activations = failover_result.activations;
                             } else {
                                 // The chain's answer is accepted, so the
                                 // segments it covered are genuinely done.
@@ -1758,10 +1761,10 @@ impl PipelineExecutor {
                                 },
                             )
                             .await?;
-                        if is_last {
-                            return Ok(failover_result);
+                        match failover_result {
+                            Takeover::Finished(result) => return Ok(result),
+                            Takeover::Continue(next) => activations = next,
                         }
-                        activations = failover_result.activations;
                     }
                 }
             }
@@ -1876,7 +1879,10 @@ impl PipelineExecutor {
     ///
     /// The caller's loop re-reads `segments.len()` every iteration, so it walks
     /// into the spliced parts and recomputes `is_last` against the new length.
-    /// That is load-bearing: `is_last` decides which segment samples.
+    /// That is load-bearing: `is_last` decides which segment samples. But the
+    /// loop only gets there if the caller does not RETURN first — which is why
+    /// `failover_segment` says whether it finished (`Takeover`) rather than
+    /// leaving that to an `is_last` computed before this splice (gotcha #706).
     fn install_takeover(
         assignment: &mut crate::types::PipelineAssignment,
         failed_idx: usize,
@@ -1905,7 +1911,7 @@ impl PipelineExecutor {
         failed_idx: usize,
         request_id: uuid::Uuid,
         input: FailoverInput<'_>,
-    ) -> Result<LayerResult, SwarmError> {
+    ) -> Result<Takeover, SwarmError> {
         let FailoverInput {
             sequence_num,
             index_pos,
@@ -2227,7 +2233,7 @@ impl PipelineExecutor {
                             cover.as_deref().unwrap_or_default(),
                             request_id,
                         );
-                        return Ok(result);
+                        return Ok(Takeover::of(result, is_last));
                     }
                     Err(e) => {
                         // Our own failure is a failure of this standby like any
@@ -2454,7 +2460,9 @@ impl PipelineExecutor {
                 request_id,
             );
 
-            return Ok(result);
+            // `is_last` here is the one shadowed above: the failed segment was
+            // the last AND nothing was spliced in behind this part.
+            return Ok(Takeover::of(result, is_last));
         }
     }
 }
@@ -2472,6 +2480,35 @@ const EXHAUSTED_REASON_MAX_CHARS: usize = 200;
 /// single-peer delegation, by design — the reason carried is the ORIGINAL
 /// segment failure, and calling that a standby's words would be a lie about
 /// which machine said it.
+/// What a failover hands back, and whether it finishes the pipeline.
+///
+/// Decided in `failover_segment`, where the takeover is installed, because only
+/// there is it known whether the failed segment went to ONE stand-in or was
+/// spliced into SEVERAL. The callers used to ask their own `is_last` — computed
+/// before the splice — so when the failed segment was the last one, a composite
+/// takeover returned its FIRST part's hidden states as the pipeline's answer:
+/// the parts spliced in behind it never ran the prompt, and the next token
+/// failed on a node holding no conversation. Found by the first live run of
+/// `docs/FUTURE_WORK.md` #17 (`examples/split_rig.sh failover`, 2026-09-25);
+/// the unit tests and the segment-count guard all passed.
+enum Takeover {
+    /// The stand-in ran the model's last layers and sampled: the answer.
+    Finished(LayerResult),
+    /// Hidden states for the next segment — after a composite splice, the next
+    /// PART of the cover, which the caller's loop runs next.
+    Continue(Vec<u8>),
+}
+
+impl Takeover {
+    fn of(result: LayerResult, finishes_pipeline: bool) -> Self {
+        if finishes_pipeline {
+            Takeover::Finished(result)
+        } else {
+            Takeover::Continue(result.activations)
+        }
+    }
+}
+
 /// Everything a failover needs to reproduce the forward the failed segment was
 /// given.
 ///

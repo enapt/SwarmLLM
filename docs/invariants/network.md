@@ -1986,3 +1986,39 @@ round came up the same second, had already heard A's, and stayed quiet. Every
 other round on both nodes (144 of 146) logged `sent=0 suppressed=1`, so the
 mechanism fired rather than the outcome changing for some other reason.
 Scripts: `trickle_ab_v2.sh` (session e3b7669c scratchpad).
+
+## A chained hop's refusal goes to the coordinator (2026-09-25)
+
+**What happened.** The first live run of a composite failover
+(`examples/split_rig.sh failover`) spliced C and D in for a failed last
+segment, then — through a separate defect (`docs/invariants/scheduling.md`,
+gotcha #706) — sent D a decode step for a conversation D had never been given.
+D refused in 5 s ("no longer holds the conversation"). The coordinator heard
+nothing and waited out the segment deadline, 290 s. D's log shows the refusal
+sent; C's log shows it RECEIVED — by C, the previous hop of the chain, which had
+no waiter and dropped it.
+
+**Why.** `layer_forward.rs` has seven places that send a `LayerResult`. The
+success path and the two chained-send failures computed `reply_target` — the
+coordinator when the forward names one (`requester_node_id`, the `0x07`
+trailer), the sender otherwise. The four early failures — no manifest, no local
+shards, an invalid layer range, and the WORKER ERROR that carries every refusal
+the worker makes — answered `sender_peer_bytes`. On an unchained forward those
+are the same node, which is why nothing noticed; in a chain they are not. The
+coordinator was ready for it: `PendingLayerResult::chain_members` accepts an
+error from any hop of the run. Only the address was wrong.
+
+**The fix, at the type.** `reply_target` returns a `ReplyTo` newtype that
+nothing else constructs, and `send_error_result` takes one — so a reply
+addressed to the raw sender no longer compiles. The handler resolves it through
+one closure at every send, as the success path always did, so a connection made
+while the worker computed is still used. Test:
+`a_chained_hop_that_fails_tells_the_coordinator_not_its_predecessor` (red with
+the closure returning the sender). The tensor-parallel partial is the one
+deliberate exception: a TP forward is never chained, so its sender IS the
+coordinator.
+
+"One invariant, N paths" (`architecture.md`), in the network layer: the rule
+"a result goes to whoever is waiting, not whoever handed you the work" was
+written down (gotcha #354) for the success path and implemented on three of
+seven.

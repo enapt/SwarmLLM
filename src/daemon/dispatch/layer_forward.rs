@@ -20,6 +20,25 @@ pub(super) async fn handle_layer_forward(
             return;
         }
     };
+    // Whoever is WAITING for our answer — see `reply_target`. EVERY reply this
+    // handler sends goes through it, failures included. The early failures
+    // (no manifest, no shards, a bad range, the worker refusing) used to answer
+    // `sender_peer_bytes`, which in a chain is the PREVIOUS HOP: it is not
+    // waiting and drops the refusal, and the coordinator sat out its whole
+    // segment deadline — 290 s on the 2026-09-25 composite-failover run — for
+    // an answer the tail had given in milliseconds. Resolved at each send, as
+    // the success path always was, so a connection made meanwhile is used.
+    let reply_to = {
+        let requester = forward.requester_node_id;
+        let sender = sender_peer_bytes.clone();
+        let local = shared_state.identity.node_id().clone();
+        let state = shared_state.clone();
+        move || {
+            reply_target(requester, &local, sender.clone(), |n| {
+                state.resolve_connected_peer_id_bytes(n)
+            })
+        }
+    };
 
     // Estimate token count for credit accounting: prefill carries many tokens,
     // decode carries 1. For prefill (seq==0), estimate from activation bytes
@@ -49,7 +68,7 @@ pub(super) async fn handle_layer_forward(
         None => {
             send_error_result(
                 &network_tx,
-                &sender_peer_bytes,
+                &reply_to(),
                 request_id,
                 "No manifest for model",
             )
@@ -67,7 +86,7 @@ pub(super) async fn handle_layer_forward(
     if local_shard_indices.is_empty() {
         send_error_result(
             &network_tx,
-            &sender_peer_bytes,
+            &reply_to(),
             request_id,
             "No local shards for model",
         )
@@ -85,7 +104,7 @@ pub(super) async fn handle_layer_forward(
     if !layer_range_is_valid(layer_start, layer_end, total_layers) {
         send_error_result(
             &network_tx,
-            &sender_peer_bytes,
+            &reply_to(),
             request_id,
             &format!(
                 "Invalid layer range [{layer_start}..{layer_end}) for model with {total_layers} layers"
@@ -149,7 +168,7 @@ pub(super) async fn handle_layer_forward(
         Err(e) => {
             send_error_result(
                 &network_tx,
-                &sender_peer_bytes,
+                &reply_to(),
                 request_id,
                 &format!("Worker: {e}"),
             )
@@ -348,15 +367,9 @@ pub(super) async fn handle_layer_forward(
                         // To the COORDINATOR, not to whoever handed us the
                         // work: mid-chain our predecessor is not waiting for
                         // anything and would simply drop this.
-                        let reply_to = reply_target(
-                            requester_node_id,
-                            &local_node_id,
-                            sender_peer_bytes,
-                            |n| shared_state.resolve_connected_peer_id_bytes(n),
-                        );
                         send_error_result(
                             &network_tx,
-                            &reply_to,
+                            &reply_to(),
                             request_id,
                             "chained forward could not be sent",
                         )
@@ -381,13 +394,9 @@ pub(super) async fn handle_layer_forward(
                         next = %next.node_id,
                         "next hop unreachable — failing the chained run"
                     );
-                    let reply_to =
-                        reply_target(requester_node_id, &local_node_id, sender_peer_bytes, |n| {
-                            shared_state.resolve_connected_peer_id_bytes(n)
-                        });
                     send_error_result(
                         &network_tx,
-                        &reply_to,
+                        &reply_to(),
                         request_id,
                         "chained run could not reach the next segment",
                     )
@@ -418,13 +427,9 @@ pub(super) async fn handle_layer_forward(
     // across disconnects, so the ungated one hands back targets the send path
     // can only drop (gotcha #220). Not connected means fall back to the sender,
     // which is correct for every unchained forward and no worse than before.
-    let reply_to = reply_target(requester_node_id, &local_node_id, sender_peer_bytes, |n| {
-        shared_state.resolve_connected_peer_id_bytes(n)
-    });
-
     if let Err(e) = network_tx
         .send(NetworkCommand::SendTensorResult {
-            target_peer_bytes: reply_to,
+            target_peer_bytes: reply_to().0,
             result,
         })
         .await
@@ -448,13 +453,22 @@ fn reply_target(
     local_node_id: &crate::types::NodeId,
     sender_peer_bytes: Vec<u8>,
     resolve: impl Fn(&crate::types::NodeId) -> Option<Vec<u8>>,
-) -> Vec<u8> {
-    requester_node_id
-        .map(crate::types::NodeId)
-        .filter(|n| n != local_node_id)
-        .and_then(|n| resolve(&n))
-        .unwrap_or(sender_peer_bytes)
+) -> ReplyTo {
+    ReplyTo(
+        requester_node_id
+            .map(crate::types::NodeId)
+            .filter(|n| n != local_node_id)
+            .and_then(|n| resolve(&n))
+            .unwrap_or(sender_peer_bytes),
+    )
 }
+
+/// The peer a `LayerResult` goes to — only ever built by [`reply_target`], so a
+/// reply cannot be addressed to the raw sender by accident. That is exactly how
+/// four of the seven reply paths here came to answer the previous hop of a
+/// chain instead of the coordinator.
+#[derive(Debug, PartialEq)]
+struct ReplyTo(Vec<u8>);
 
 /// Should this segment hand its output onward rather than return it?
 ///
@@ -492,9 +506,9 @@ fn chaining_applies(
 /// Send a sanitized error `LayerResult` back to the originating peer when
 /// `LayerForward` processing fails locally. The error message is scrubbed
 /// before transmission to avoid leaking internal layer topology or paths.
-pub(super) async fn send_error_result(
+async fn send_error_result(
     network_tx: &mpsc::Sender<NetworkCommand>,
-    target_peer_bytes: &[u8],
+    reply_to: &ReplyTo,
     request_id: uuid::Uuid,
     error: &str,
 ) {
@@ -502,7 +516,7 @@ pub(super) async fn send_error_result(
     let result = crate::types::LayerResult::error(request_id, sanitize_peer_facing_error(error));
     let _ = network_tx
         .send(NetworkCommand::SendTensorResult {
-            target_peer_bytes: target_peer_bytes.to_vec(),
+            target_peer_bytes: reply_to.0.clone(),
             result,
         })
         .await;
@@ -731,7 +745,7 @@ mod chaining_tests {
         let to = reply_target(Some(coordinator.0), &me, predecessor_bytes.clone(), |n| {
             (n == &coordinator).then(|| b"coordinator".to_vec())
         });
-        assert_eq!(to, b"coordinator".to_vec());
+        assert_eq!(to.0, b"coordinator".to_vec());
     }
 
     /// An unchained forward is unaffected: sender and requester are the same
@@ -744,7 +758,7 @@ mod chaining_tests {
             Some(b"coordinator".to_vec())
         });
         // Same node either way — the point is that resolving does not break it.
-        assert_eq!(to, b"coordinator".to_vec());
+        assert_eq!(to.0, b"coordinator".to_vec());
     }
 
     /// A coordinator we have no live route to falls back to the sender, which
@@ -753,11 +767,85 @@ mod chaining_tests {
     fn an_unreachable_requester_falls_back_to_the_sender() {
         let me = NodeId([3u8; 32]);
         let to = reply_target(Some([9u8; 32]), &me, b"sender".to_vec(), |_| None);
-        assert_eq!(to, b"sender".to_vec());
+        assert_eq!(to.0, b"sender".to_vec());
 
         // And a forward with no requester at all — an older node — is unchanged.
         let to = reply_target(None, &me, b"sender".to_vec(), |_| Some(b"x".to_vec()));
-        assert_eq!(to, b"sender".to_vec());
+        assert_eq!(to.0, b"sender".to_vec());
+    }
+
+    /// A chained hop that FAILS answers the coordinator, exactly as its result
+    /// would have. The early failures answered the sender — in a chain the
+    /// previous hop, which is not waiting and drops it — so the coordinator sat
+    /// out its whole segment deadline (290 s on the 2026-09-25 composite-
+    /// failover run) for a refusal the tail had sent within milliseconds.
+    #[tokio::test]
+    async fn a_chained_hop_that_fails_tells_the_coordinator_not_its_predecessor() {
+        let identity = crate::identity::Identity::generate();
+        let temp = tempfile::tempdir().unwrap();
+        let db = crate::storage::db::Database::open(temp.path()).unwrap();
+        let executor = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::inference::executor::ModelExecutor::new(),
+        ));
+        let (state, _, _) = crate::daemon::SharedState::new(
+            crate::config::Config::default(),
+            identity,
+            db,
+            executor,
+            None,
+        );
+        let coordinator = NodeId([9u8; 32]);
+        state
+            .peer_id_map
+            .insert(coordinator.clone(), b"coordinator".to_vec());
+        state.connected_node_ids.insert(coordinator.clone());
+
+        // A model this node knows nothing about: the first early failure.
+        let forward = crate::types::LayerForward {
+            request_id: uuid::Uuid::from_u128(7),
+            sequence_num: 1,
+            index_pos: 40,
+            activations: vec![0u8; 16],
+            format: crate::types::TensorFormat::FP32,
+            model_id: crate::types::ModelId("not-held-here".into()),
+            layer_range: (21, 28),
+            tp_meta: None,
+            vision_embeddings: None,
+            chain: Vec::new(),
+            sender_peer_bytes: Some(b"previous-hop".to_vec()),
+            requester_node_id: Some(coordinator.0),
+            pre_embedded: false,
+            generated_ids: Vec::new(),
+            adapter_id: None,
+            draft_tokens: Vec::new(),
+            spec_logits_requested: false,
+            truncate_kv_to: None,
+            chunk_meta: None,
+            sampling: None,
+        };
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        super::handle_layer_forward(state, tx, forward).await;
+
+        match rx.recv().await {
+            Some(crate::types::NetworkCommand::SendTensorResult {
+                target_peer_bytes,
+                result,
+            }) => {
+                assert_eq!(
+                    target_peer_bytes,
+                    b"coordinator".to_vec(),
+                    "the refusal must reach the node that is waiting for it"
+                );
+                assert!(
+                    matches!(
+                        result.finish_reason,
+                        Some(crate::types::NetworkFinishReason::Error(_))
+                    ),
+                    "and it must be a refusal"
+                );
+            }
+            _ => panic!("a failed forward must be answered"),
+        }
     }
 
     /// Never address ourselves. A forward claiming we are our own coordinator
@@ -768,7 +856,7 @@ mod chaining_tests {
         let to = reply_target(Some(me.0), &me, b"sender".to_vec(), |_| {
             Some(b"self".to_vec())
         });
-        assert_eq!(to, b"sender".to_vec());
+        assert_eq!(to.0, b"sender".to_vec());
     }
 }
 

@@ -433,6 +433,14 @@ SEGMENT SAMPLES. `install_takeover` splices only AFTER the first part answers,
 so an unreachable cover leaves the assignment untouched. Guard:
 `the_pipelines_segment_count_is_never_cached_across_the_forward_loop`.
 
+**Whether a failover FINISHED the pipeline is `failover_segment`'s answer**
+(`Takeover::{Finished, Continue}`), never the caller's `is_last` — that was
+computed before the splice. The three callers returned part 1's hidden states
+as the answer whenever the LAST segment was taken over by several nodes: the
+loop guard cannot see an early return out of the loop. Found by the first live
+run (`split_rig.sh failover`, gotcha #706); test
+`a_failed_last_segment_taken_over_by_several_nodes_runs_every_part_before_answering`.
+
 → `docs/invariants/scheduling.md`
 
 ## A count and an outcome that disagree are two different questions

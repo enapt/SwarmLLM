@@ -101,6 +101,9 @@ swarmllm/
 │                 split_rig.sh — two isolated nodes holding chosen shards of one model, so a
 │                 request MUST split; `split` asks through it, `kill` breaks one side
 │                 mid-reply (KILL=A|B|B_UNLOAD) — the release gate's split check (#93);
+│                 `failover` runs FOUR nodes for #17's composite stand-in (gotchas #706-708);
+│                 score_against_reference.py — a reply teacher-forced through llama.cpp, rank
+│                 of every token: the test for a split reply where byte-equality is not;
 │                 smoke_test.sh, release_shapes.sh, family_conformance.sh — the release gate's three)
 ├── kernels/       (SwarmLLM's own CUDA kernels, compiled to PTX by build.rs under
 │                 `candle-cuda` and loaded via candle's `get_or_load_custom_func`.

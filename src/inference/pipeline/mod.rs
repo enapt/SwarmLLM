@@ -1422,6 +1422,74 @@ mod tests {
         );
     }
 
+    /// The first live run of a composite takeover (`split_rig.sh failover`,
+    /// 2026-09-25) found this: the LAST segment fails on the prompt pass, no
+    /// single standby holds its layers, and two cover them between them. The
+    /// first part answered, and its hidden states came back as the pipeline's
+    /// ANSWER — the caller's `is_last` was computed before the splice — so the
+    /// second part never saw the prompt and the next token failed on it.
+    #[tokio::test]
+    async fn a_failed_last_segment_taken_over_by_several_nodes_runs_every_part_before_answering() {
+        let state = make_test_state();
+        let (tx, rx) = mpsc::channel::<NetworkCommand>(64);
+        let request = make_test_request(&state);
+        let request_id = request.id;
+        let (a, b, c, d) = (
+            NodeId([0xA1; 32]),
+            NodeId([0xB2; 32]),
+            NodeId([0xC3; 32]),
+            NodeId([0xD4; 32]),
+        );
+        let mut peers = std::collections::HashMap::new();
+        for (node, byte) in [(&a, 0xA1u8), (&b, 0xB2), (&c, 0xC3), (&d, 0xD4)] {
+            state.peer_id_map.insert(node.clone(), vec![byte]);
+            peers.insert(vec![byte], node.clone());
+        }
+        let assignment = PipelineAssignment {
+            request_id,
+            segments: vec![remote_segment(&a, (0, 16)), remote_segment(&b, (16, 32))],
+            // Neither holds all of B's range; together they cover it.
+            standbys: vec![remote_segment(&c, (16, 24)), remote_segment(&d, (24, 32))],
+            tp_groups: vec![],
+            supports_speculative: false,
+        };
+        let mut executor = PipelineExecutor::new(state.clone(), tx, request, assignment);
+        let c_out = vec![0xCC; 64];
+        let (a2, b2, c2, c_out2) = (a.clone(), b.clone(), c.clone(), c_out.clone());
+        let peers_task = spawn_peers(state.clone(), rx, peers, move |node| {
+            if *node == a2 {
+                PeerReply::Activations(vec![0xAA; 64])
+            } else if *node == b2 {
+                PeerReply::Error(
+                    "Worker: Service unavailable: worker closed connection before reply",
+                )
+            } else if *node == c2 {
+                PeerReply::Activations(c_out2.clone())
+            } else {
+                PeerReply::Token(7)
+            }
+        });
+
+        let result = executor
+            .forward_through_segments(request_id, 0, 0, b"hello".to_vec(), None, false, &[])
+            .await;
+        drop(executor);
+        let sent = peers_task.await.unwrap();
+
+        let result = result.expect("the cover covers the whole range, so the prompt pass succeeds");
+        assert_eq!(
+            result.token_ids,
+            vec![7],
+            "the answer must come from the part that SAMPLES — the last one — not the first \
+             part's hidden states"
+        );
+        assert!(
+            sent.iter().any(|(n, act)| *n == d && *act == c_out),
+            "the second part must be sent the first part's output on the prompt pass: {:?}",
+            sent.iter().map(|(n, _)| n.to_string()).collect::<Vec<_>>()
+        );
+    }
+
     /// With no standby at all — which is every single-peer delegation, by
     /// design — the failure must still say WHY the segment failed.
     ///

@@ -233,6 +233,21 @@ as a request, an old server is never held to the ACK deadline. This also
 retired the chain-specific addressing branches from earlier the same day
 (gotcha #354): one rule now covers chained and unchained results.
 
+## Every reply a serving node sends goes to whoever is WAITING — failures included
+
+**`layer_forward::reply_target` is the single answer**, and it returns a
+`ReplyTo` nothing else can build, so `send_error_result` cannot be handed the
+raw sender. In a chain the sender is the previous hop, which is not waiting:
+four of the handler's seven reply paths (no manifest, no shards, bad range, the
+worker refusing) answered it, it dropped the refusal, and the coordinator sat
+out its whole segment deadline — 290 s on the first live composite failover
+(gotcha #707) — for a refusal the tail gave in milliseconds. The coordinator's
+waiter already accepted an error from any `chain_members` hop; only the address
+was wrong. The tensor-parallel partial still goes to the sender, correctly: a
+TP forward is never chained.
+
+→ `docs/invariants/network.md` § "A chained hop's refusal goes to the coordinator"
+
 ## "Is this connection direct?" — `network::relay::addr_is_direct_transport`
 
 The single answer, for BOTH layers that choose a connection. A relay-carried
