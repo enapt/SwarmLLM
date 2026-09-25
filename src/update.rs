@@ -30,6 +30,20 @@ const UPDATE_DOWNLOAD_STALL_SECS: u64 = 120;
 /// Delay between daemon start and the first update check — lets the rest of
 /// the node finish initializing before we touch the network.
 const UPDATE_STARTUP_DELAY_SECS: u64 = 30;
+/// How often a node with updates OFF looks again at whether they still are.
+///
+/// It slept a whole `check_interval_hours` instead, so someone who turned
+/// updates on in Settings waited up to that long for anything to happen (#107's
+/// residual; "Check now" was immediate, which made the wait look like a bug in
+/// the setting). Nothing signals a settings save to this task, and re-reading
+/// the live config is a memory read, so a short poll is the whole fix.
+const UPDATE_OFF_RECHECK: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// How long the loop sleeps before re-reading its settings while updates are
+/// off: the check interval, but never longer than [`UPDATE_OFF_RECHECK`].
+fn sleep_while_off(interval: std::time::Duration) -> std::time::Duration {
+    interval.min(UPDATE_OFF_RECHECK)
+}
 
 static UPDATE_CHECK_CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
     crate::http::build_client(|b| {
@@ -1390,7 +1404,7 @@ impl UpdateChecker {
 
             if mode == UpdateMode::Off {
                 tokio::select! {
-                    _ = tokio::time::sleep(interval) => continue,
+                    _ = tokio::time::sleep(sleep_while_off(interval)) => continue,
                     _ = shutdown_rx.changed() => {
                         if *shutdown_rx.borrow() { return; }
                         continue;
@@ -2049,6 +2063,20 @@ mod tests {
             prerelease,
             draft,
         }
+    }
+
+    /// #107's residual: with updates off, turning them on must be noticed in
+    /// about a minute, not after a whole check interval.
+    #[test]
+    fn turning_updates_on_is_noticed_within_a_minute_whatever_the_interval() {
+        let hour = std::time::Duration::from_secs(3600);
+        for hours in [1u64, 6, 24] {
+            assert_eq!(sleep_while_off(hour * hours as u32), UPDATE_OFF_RECHECK);
+        }
+        assert!(UPDATE_OFF_RECHECK <= std::time::Duration::from_secs(60));
+        // Never LONGER than the interval the node was configured with.
+        let short = std::time::Duration::from_secs(10);
+        assert_eq!(sleep_while_off(short), short);
     }
 
     #[test]
