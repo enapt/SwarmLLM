@@ -17,9 +17,23 @@ while a correct one is rank 1 almost everywhere, with the odd rank-2 pick by a
 small margin. Compare replies by their SCORES: a takeover should score like a
 same-topology control.
 
-usage: score_against_reference.py [--lora adapter.gguf] <model.gguf> <replies.jsonl> <prompt-file> [label ...]
+usage: score_against_reference.py [--lora adapter.gguf] [--system TEXT] <model.gguf> <replies.jsonl> <prompt-file> [label ...]
   --lora         score against the model WITH this adapter applied by llama.cpp
                  (`peft_lora_to_gguf.py` makes one from a PEFT adapter).
+  --system       render a system turn first. The node supplies
+                 `chat_template::DEFAULT_SYSTEM_PROMPT` ("You are a helpful
+                 assistant.") to a template that expects a system turn and writes
+                 none of its own — TinyLlama, Phi-3.5 — so scoring their replies
+                 without it scores them against a prompt they were never given.
+                 Check: "prompt tokens" must equal the node's `usage.prompt_tokens`.
+
+A reply is scored as llama.cpp re-tokenizes its TEXT. For a SentencePiece model
+(TinyLlama, Mistral, Phi-3.5) llama.cpp's tokenizer is no authority on whitespace
+and word splits: on TinyLlama it splits "Yellow" into " Ye"+"ll"+"ow" and puts a
+leading space marker on the first word, so those positions rank in the hundreds
+for ANY reply, correct or not (measured 2026-09-25). Judge a SentencePiece
+family by rank-2 near-ties only, or use a BPE model (Llama-3.x, Qwen) where the
+re-tokenization is exact.
   replies.jsonl  one JSON object per line with a "content" field (what
                  `split_rig.sh` writes); labels default to the line number.
   The prompt is rendered with the GGUF's own chat template, as the node renders
@@ -45,6 +59,11 @@ def main():
         i = args.index("--lora")
         lora = args[i + 1]
         del args[i:i + 2]
+    system = None
+    if "--system" in args:
+        i = args.index("--system")
+        system = args[i + 1]
+        del args[i:i + 2]
     if len(args) < 3:
         sys.exit(__doc__)
     gguf, replies_path, prompt_path = args[:3]
@@ -62,7 +81,8 @@ def main():
 
     env.globals["raise_exception"] = raise_exception
     rendered = env.from_string(llm.metadata["tokenizer.chat_template"]).render(
-        messages=[{"role": "user", "content": prompt}],
+        messages=([{"role": "system", "content": system}] if system else [])
+        + [{"role": "user", "content": prompt}],
         add_generation_prompt=True,
         bos_token=llm.detokenize([llm.token_bos()], special=True).decode(),
         eos_token=llm.detokenize([llm.token_eos()], special=True).decode())
