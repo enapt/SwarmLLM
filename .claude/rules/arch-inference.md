@@ -362,7 +362,9 @@ by bytes on disk. A new MoE family calls it. **Routing defaults are per family**
 (`moe_renormalizes_by_default` — llama.cpp hardcodes `norm_w` per graph): read the
 family's llama.cpp file, never assume. Verify with `examples/logits_reference_probe.rs`
 + `compare_logits_reference.py` on a tiny model; ONE isolated outlier position is a
-router near-tie, a shift at every position is a bug.
+router near-tie, a shift at every position is a bug. **Routing is one host copy of
+the layer's scores and one `index_add` per expert** (`topk_host`) — never per token,
+which was ~3 syncs and ~k+5 launches per token per layer on a card.
 
 → `docs/invariants/inference.md` § "A mixture-of-experts layer keeps its experts quantized"
 

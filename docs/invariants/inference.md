@@ -1643,3 +1643,33 @@ kept, each expert equals its slice exactly), `a_moe_layer_loads_with_every_exper
 **Not verified:** a real-sized MoE model on this box; DeepSeek-2 and Llama-4
 routing defaults against llama.cpp's per-model files; Qwen 3.5-MoE's shared
 gate (now applied when the GGUF carries it, as Qwen3-Next does). FUTURE_WORK #114.
+
+### Routing is one host copy per layer, and the scatter is one add per expert (2026-09-25)
+
+`MoeFfn::forward` routed token by token: per token a `get` of the scores row, a
+device→host copy, two host→device copies (indices, weights) and, on the default
+policy, a five-op softmax on the device — then scattered per token AND chosen
+expert with a `narrow` and an add, and finished with a `cat` over every token.
+On a card each of those is a launch and the copies are syncs, so a 1000-token
+prompt on Qwen3-30B-A3B (48 layers, top-8) paid on the order of ten thousand
+small submissions and ~3000 syncs per layer.
+
+Now: ONE `to_vec1` of the layer's `[tokens, experts]` scores, `topk_host` per row
+on the host (the default policy's softmax over the k picks done the way
+`candle_nn::ops::softmax` does it — max, `exp(x - max)`, in-order sum, divide),
+and ONE `index_add` per chosen expert into a zeroed `[tokens, hidden]`
+accumulator. The per-token accumulation order is unchanged (experts in index
+order from zero, and `0 + x == x`), so it is the same sum.
+
+**Verified bit-identical**, not just close: the unit test
+`the_batched_moe_forward_is_bit_identical_to_routing_token_by_token` keeps the
+old algorithm verbatim as its reference and compares `to_bits` for all four
+routing policies, k ∈ {1,2,3}, a 37-token batch and a single decode token; and
+`logits_reference_probe` on the tiny qwen3moe (whole and split) and qwen2moe
+fixtures wrote BYTE-IDENTICAL logit files before and after (60.7 MB each, `cmp`).
+Their agreement with llama.cpp is therefore exactly as recorded above.
+
+**Not measured:** wall-clock on a card — no real MoE model here and no CUDA build
+of this change at the time. The claim is the operation count, which is exact.
+llama.cpp keeps routing ON the device (`argsort_top_k` + `mul_mat_id`); a device
+top-k is the next step if one host copy per layer ever shows up in a profile.

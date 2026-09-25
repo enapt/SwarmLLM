@@ -552,3 +552,139 @@ fn test_deepseek_mixed_layers_forward() {
         "DeepSeek decode NaN/Inf"
     );
 }
+
+/// The batched MoE forward (one host copy of the router scores per layer, one
+/// `index_add` per expert) computes the SAME bits as the per-token algorithm it
+/// replaced, on the processor, for every routing policy — FUTURE_WORK #114d.
+///
+/// The reference below is the old algorithm kept verbatim: per token, the
+/// scores row copied to the host, top-k picked, the default policy's weights
+/// softmaxed by the candle op on the device, and every weighted row added into
+/// its token one `narrow` at a time, then a `cat` over all tokens.
+#[test]
+fn the_batched_moe_forward_is_bit_identical_to_routing_token_by_token() {
+    use crate::inference::layers::{topk_host, ExpertFfn};
+
+    fn per_token_reference(moe: &MoeFfn, x: &Tensor) -> Tensor {
+        let (b, s, hidden) = x.dims3().unwrap();
+        let n = b * s;
+        let x_flat = x.reshape((n, hidden)).unwrap();
+        let device = x.device();
+        let scores = x_flat.matmul(&moe.gate.t().unwrap()).unwrap();
+        let n_experts = moe.gate.dim(0).unwrap();
+        let mut batches: Vec<Vec<(usize, f32)>> = vec![vec![]; n_experts];
+        for pos in 0..n {
+            let row: Vec<f32> = scores.get(pos).unwrap().to_vec1().unwrap();
+            let (idx, w) = topk_host(&row, moe.n_experts_used, moe.routing);
+            let w: Vec<f32> = if moe.routing == MoeRoutingConfig::default() {
+                let raw: Vec<f32> = idx.iter().map(|&i| row[i]).collect();
+                let k = raw.len();
+                candle_nn::ops::softmax(&Tensor::from_vec(raw, (k,), device).unwrap(), 0)
+                    .unwrap()
+                    .to_vec1()
+                    .unwrap()
+            } else {
+                w
+            };
+            for (e, w) in idx.into_iter().zip(w) {
+                batches[e].push((pos, w));
+            }
+        }
+        let mut acc: Vec<Option<Tensor>> = vec![None; n];
+        for (e, batch) in batches.iter().enumerate() {
+            if batch.is_empty() {
+                continue;
+            }
+            let ids: Vec<i64> = batch.iter().map(|&(p, _)| p as i64).collect();
+            let ids = Tensor::from_vec(ids, (batch.len(),), device).unwrap();
+            let input = x_flat.index_select(&ids, 0).unwrap();
+            let gu = QMatMul::forward_shared(&input, &[&moe.experts[e].gate, &moe.experts[e].up])
+                .unwrap();
+            let out = moe.experts[e]
+                .down
+                .forward(&crate::inference::fast_math::silu_mul(&gu[0], &gu[1]).unwrap())
+                .unwrap();
+            let w: Vec<f32> = batch.iter().map(|&(_, w)| w).collect();
+            let w = Tensor::from_vec(w, (batch.len(), 1), device).unwrap();
+            let weighted = out.broadcast_mul(&w).unwrap();
+            for (i, &(pos, _)) in batch.iter().enumerate() {
+                let c = weighted.narrow(0, i, 1).unwrap();
+                acc[pos] = Some(match acc[pos].take() {
+                    Some(e) => (e + c).unwrap(),
+                    None => c,
+                });
+            }
+        }
+        let zero = Tensor::zeros((1, hidden), DType::F32, device).unwrap();
+        let rows: Vec<&Tensor> = acc.iter().map(|o| o.as_ref().unwrap_or(&zero)).collect();
+        Tensor::cat(&rows, 0)
+            .unwrap()
+            .reshape((b, s, hidden))
+            .unwrap()
+    }
+
+    let device = Device::Cpu;
+    let (hidden, intermediate, n_experts) = (32, 48, 8);
+    let policies = [
+        MoeRoutingConfig::default(),
+        MoeRoutingConfig {
+            gating_func: MoeGatingFunc::Softmax,
+            renormalize_weights: false,
+        },
+        MoeRoutingConfig {
+            gating_func: MoeGatingFunc::Sigmoid,
+            renormalize_weights: true,
+        },
+        MoeRoutingConfig {
+            gating_func: MoeGatingFunc::Sigmoid,
+            renormalize_weights: false,
+        },
+    ];
+    for routing in policies {
+        for k in [1usize, 2, 3] {
+            let stack = |o, i| Tensor::randn(0f32, 0.05, (n_experts, o, i), &device).unwrap();
+            let moe = MoeFfn {
+                gate: Tensor::randn(0f32, 0.3, (n_experts, hidden), &device).unwrap(),
+                experts: ExpertFfn::from_stacked(
+                    &stack(intermediate, hidden),
+                    &stack(intermediate, hidden),
+                    &stack(hidden, intermediate),
+                )
+                .unwrap(),
+                shared_gate: None,
+                shared_down: None,
+                shared_up: None,
+                shared_gate_inp: None,
+                n_experts_used: k,
+                routing,
+            };
+            // A prompt-sized batch and a single decode token.
+            for tokens in [37usize, 1] {
+                let x = Tensor::randn(0f32, 1.0, (1, tokens, hidden), &device).unwrap();
+                let got: Vec<f32> = moe
+                    .forward(&x)
+                    .unwrap()
+                    .flatten_all()
+                    .unwrap()
+                    .to_vec1()
+                    .unwrap();
+                let want: Vec<f32> = per_token_reference(&moe, &x)
+                    .flatten_all()
+                    .unwrap()
+                    .to_vec1()
+                    .unwrap();
+                let differing = got
+                    .iter()
+                    .zip(&want)
+                    .filter(|(a, b)| a.to_bits() != b.to_bits() && !(**a == 0.0 && **b == 0.0))
+                    .count();
+                assert_eq!(
+                    differing,
+                    0,
+                    "{routing:?} k={k} tokens={tokens}: {differing} of {} values differ",
+                    got.len()
+                );
+            }
+        }
+    }
+}

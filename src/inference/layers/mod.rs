@@ -744,6 +744,11 @@ pub(crate) struct MoeFfn {
 /// (`llama_expert_gating_func_type` + `norm_topk_prob`),
 /// `transformers` `modeling_deepseek_v3.py::topk_weights`, Mixtral
 /// `modeling_mixtral.py::sparse_mixtral_block`.
+///
+/// Test-only since 2026-09-25: the forward routes a whole layer from one host
+/// copy through [`topk_host`]; this tensor-in, tensor-out form is what the
+/// routing-policy tests were written against.
+#[cfg(test)]
 pub(crate) fn topk_cpu(
     scores: &Tensor,
     k: usize,
@@ -751,6 +756,33 @@ pub(crate) fn topk_cpu(
 ) -> CandleResult<(Tensor, Tensor)> {
     let device = scores.device();
     let scores_vec: Vec<f32> = scores.to_vec1()?;
+    let (indices, weights) = topk_host(&scores_vec, k, config);
+    let k = indices.len();
+    let idx_i64: Vec<i64> = indices.iter().map(|&i| i as i64).collect();
+    Ok((
+        Tensor::from_vec(idx_i64, (k,), device)?,
+        Tensor::from_vec(weights, (k,), device)?,
+    ))
+}
+
+/// [`topk_cpu`]'s routing on a host slice of one token's raw router logits: the
+/// chosen experts, best first, and their FINAL weights.
+///
+/// Host-side because the choice is data-dependent control flow, and
+/// [`MoeFfn::forward`] copies a whole layer's router scores off the device ONCE
+/// and routes every token here — it used to call `topk_cpu` per token, which
+/// is a device→host copy, two host→device copies and a softmax launch per
+/// token per layer.
+///
+/// The softmax-over-k of the default policy is computed here the way
+/// `candle_nn::ops::softmax` computes it (max, `exp(x - max)` in order, an
+/// in-order sum, divide), so on the processor the weights are the bits the
+/// candle op produced.
+pub(crate) fn topk_host(
+    scores_vec: &[f32],
+    k: usize,
+    config: MoeRoutingConfig,
+) -> (Vec<usize>, Vec<f32>) {
     let n = scores_vec.len();
     let k = k.min(n);
 
@@ -785,7 +817,7 @@ pub(crate) fn topk_cpu(
     // Pick top-k by the (raw or sigmoid) score — sort is the same in
     // either case because both are monotonic in `raw`.
     let mut indices: Vec<usize> = (0..n).collect();
-    let sort_key: &[f32] = gated_all.as_deref().unwrap_or(&scores_vec);
+    let sort_key: &[f32] = gated_all.as_deref().unwrap_or(scores_vec);
     indices.sort_by(|&a, &b| {
         sort_key[b]
             .partial_cmp(&sort_key[a])
@@ -823,20 +855,29 @@ pub(crate) fn topk_cpu(
         }
     };
 
-    let idx_i64: Vec<i64> = indices.iter().map(|&i| i as i64).collect();
-    let idx_tensor = Tensor::from_vec(idx_i64, (k,), device)?;
-    let w_tensor = Tensor::from_vec(weights, (k,), device)?;
-    // Only the Softmax+renorm fast path still needs a candle softmax —
-    // the others already produced final weights on CPU.
-    let w_tensor = if matches!(
+    // Only the Softmax+renorm fast path still needs its softmax over the k
+    // picks — the others already produced final weights.
+    let weights = if matches!(
         (config.gating_func, config.renormalize_weights),
         (MoeGatingFunc::Softmax, true)
     ) {
-        candle_nn::ops::softmax(&w_tensor, 0)?
+        softmax_like_candle(&weights)
     } else {
-        w_tensor
+        weights
     };
-    Ok((idx_tensor, w_tensor))
+    (indices, weights)
+}
+
+/// `candle_nn::ops::softmax` over a short host vector, in its order of
+/// operations: max, `exp(x - max)`, an in-order sum, divide.
+fn softmax_like_candle(xs: &[f32]) -> Vec<f32> {
+    let max = xs.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let num: Vec<f32> = xs.iter().map(|&x| (x - max).exp()).collect();
+    let mut den = 0f32;
+    for &v in &num {
+        den += v;
+    }
+    num.iter().map(|&v| v / den).collect()
 }
 
 /// One expert's gated feed-forward over the tokens routed to it, blocked on the
@@ -903,20 +944,31 @@ impl MoeFfn {
         let router_scores = x_flat.matmul(&self.gate.t()?)?;
         let n_experts = self.gate.dim(0)?;
 
-        // Phase 1: Route all tokens — collect (token_position, weight) per expert
+        // Phase 1: route every token from ONE host copy of the layer's scores.
+        // Per token this was a device→host copy, two host→device copies and a
+        // softmax launch — a long prompt on a card paid each of them per token
+        // per layer (FUTURE_WORK #114d). llama.cpp keeps routing on the device
+        // (`argsort_top_k` + `mul_mat_id`); one copy per layer is the step that
+        // needs no new kernel.
+        let scores_host: Vec<f32> = router_scores
+            .to_dtype(candle_core::DType::F32)?
+            .flatten_all()?
+            .to_vec1()?;
         let mut expert_batches: Vec<Vec<(usize, f32)>> = vec![vec![]; n_experts];
-        for pos in 0..num_tokens {
-            let token_scores = router_scores.get(pos)?;
-            let (indices, weights) = topk_cpu(&token_scores, self.n_experts_used, self.routing)?;
-            let indices_vec: Vec<i64> = indices.to_vec1()?;
-            let weights_vec: Vec<f32> = weights.to_vec1()?;
-            for (i, &expert_idx) in indices_vec.iter().enumerate() {
-                expert_batches[expert_idx as usize].push((pos, weights_vec[i]));
+        for (pos, token_scores) in scores_host.chunks_exact(n_experts).enumerate() {
+            let (indices, weights) = topk_host(token_scores, self.n_experts_used, self.routing);
+            for (expert_idx, w) in indices.into_iter().zip(weights) {
+                expert_batches[expert_idx].push((pos, w));
             }
         }
 
-        // Phase 2: Per-position accumulator for weighted expert outputs
-        let mut pos_accum: Vec<Option<Tensor>> = vec![None; num_tokens];
+        // Phase 2: each expert's weighted output is ADDED into its tokens' rows
+        // with one `index_add` — never row by row. The accumulation order per
+        // token is unchanged (experts in index order, starting from zero, and
+        // `0 + x == x` exactly), so this is the same sum; the row-by-row form
+        // was two launches per token per chosen expert and a cat over every
+        // token at the end.
+        let mut output = Tensor::zeros((num_tokens, hidden), dtype, device)?;
 
         for (eidx, batch) in expert_batches.iter().enumerate() {
             if batch.is_empty() {
@@ -943,23 +995,10 @@ impl MoeFfn {
                 Tensor::from_vec(weight_vec, (batch.len(), 1), device)?.to_dtype(dtype)?;
             let weighted = expert_out.broadcast_mul(&weight_tensor)?;
 
-            // Scatter weighted results back to position accumulators
-            for (local_idx, &(pos, _)) in batch.iter().enumerate() {
-                let contrib = weighted.narrow(0, local_idx, 1)?;
-                pos_accum[pos] = Some(match pos_accum[pos].take() {
-                    Some(existing) => (existing + contrib)?,
-                    None => contrib,
-                });
-            }
+            // A token appears at most once per expert (top-k picks distinct
+            // experts), so no index repeats within one add.
+            output = output.index_add(&idx_tensor, &weighted, 0)?;
         }
-
-        // Assemble output: cat all position results
-        let zero = Tensor::zeros((1, hidden), dtype, device)?;
-        let slices: Vec<&Tensor> = pos_accum
-            .iter()
-            .map(|opt| opt.as_ref().unwrap_or(&zero))
-            .collect();
-        let mut output = Tensor::cat(&slices, 0)?;
 
         // Add shared expert output if present
         if let (Some(ref sg), Some(ref sd), Some(ref su)) =
