@@ -150,17 +150,19 @@ fn validate_chat_request(
         )?;
     }
 
-    if let Some(ref adapter) = req.lora_adapter {
-        if adapter.len() > 256 {
-            return Err(ApiError(crate::error::SwarmError::Validation(
-                "lora_adapter name too long (max 256 bytes)".into(),
-            )));
-        }
-        if adapter.contains("..") || adapter.contains('/') || adapter.contains('\\') {
-            return Err(ApiError(crate::error::SwarmError::Validation(
-                "lora_adapter contains invalid characters".into(),
-            )));
-        }
+    // LoRA adapters are REGISTERED (the admin API) but never APPLIED: no
+    // inference path hands a request's adapter to a worker, and the worker
+    // looks for a directory layout registration does not create. So a request
+    // naming one was answered by the BASE model while the caller believed
+    // otherwise — found 2026-09-25, `docs/FUTURE_WORK.md` #110. Refused until
+    // it is restored: a wrong answer that looks right is the worst outcome.
+    if req.lora_adapter.is_some() {
+        return Err(ApiError(crate::error::SwarmError::Validation(
+            "lora_adapter is not supported in this version: the adapter would not be \
+             applied, and the reply would come from the base model. Leave the field out, \
+             or use a model with the adapter merged into it."
+                .into(),
+        )));
     }
 
     // Parsed HERE rather than at the scheduler so a mistyped scenario comes
@@ -1003,6 +1005,24 @@ pub async fn status(State(state): State<AppState>) -> Json<serde_json::Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A request naming a LoRA adapter was answered by the BASE model: the
+    /// adapter was accepted and applied nowhere (FUTURE_WORK #110). Until it is
+    /// restored it is refused as a 400, and one without it still passes.
+    #[test]
+    fn a_lora_adapter_is_refused_rather_than_silently_ignored() {
+        let with =
+            r#"{"model":"m","messages":[{"role":"user","content":"hi"}],"lora_adapter":"coder"}"#;
+        let mut req: ChatCompletionRequest = serde_json::from_str(with).unwrap();
+        let err = validate_chat_request(&mut req, &axum::http::HeaderMap::new())
+            .expect_err("an adapter that would be ignored must be refused");
+        assert!(matches!(err.0, crate::error::SwarmError::Validation(_)));
+        assert!(err.0.to_string().contains("base model"), "{}", err.0);
+
+        let without = r#"{"model":"m","messages":[{"role":"user","content":"hi"}]}"#;
+        let mut req: ChatCompletionRequest = serde_json::from_str(without).unwrap();
+        assert!(validate_chat_request(&mut req, &axum::http::HeaderMap::new()).is_ok());
+    }
 
     /// OpenClaw's self-hosted discovery reads `context_length`; vLLM-style
     /// clients read `max_model_len`. Both must carry the one effective figure,

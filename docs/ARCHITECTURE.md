@@ -1241,14 +1241,18 @@ with no floor, because the model left on the processor was slower at every turn
 than the reload it was spared. `examples/swap_patience.sh` is the harness;
 `SWARMLLM_VRAM_SWAP_MIN_IDLE_SECS` pins the value for A/B.
 
-### LoRA Adapter Support
+### LoRA Adapter Support — NOT APPLIED; requests naming one are refused (2026-09-25)
 
-LoRA (Low-Rank Adaptation) adapters are supported via `src/model/lora.rs`:
-- Per-request adapter loading from safetensors files
-- Low-rank weight updates applied at inference time without modifying base model weights
-- Multiple adapters can be loaded simultaneously and selected per request
-- Adapter files stored alongside model shards in the model directory
-- **Verified** with Qwen2.5-Coder-7B + rank-16 LoRA adapter; output distribution changes confirmed
+`src/model/lora.rs` can load an adapter and apply low-rank deltas, adapters can
+be registered (`/api/admin/adapters`), and the worker has an adapter-loading
+path — but **no inference path hands a request's adapter to a worker**: nothing
+sets `LayerForward.adapter_id` from `InferenceRequest.lora_adapter`, and the
+worker looks for `adapters/<id>/adapter_config.json`, a layout registration
+does not create. A request naming an adapter was therefore answered by the BASE
+model. It is refused with a 400 (`api::openai::validate_chat_request`) until
+restored — `docs/FUTURE_WORK.md` #110 has the trace and the plan. (The March
+2026 "verified with Qwen2.5-Coder-7B" predates the move of all inference into
+worker subprocesses, which is where the chain most likely broke.)
 
 ## Credit System
 

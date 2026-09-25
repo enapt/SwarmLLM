@@ -17,7 +17,7 @@ the differences are less obvious.
 | **Model families verified on real models** | Llama, Qwen 2/3, Mistral, Gemma 2, Phi-3/4, GLM-4 (checked at every release). Llama 4, DeepSeek and Qwen 3.5 are implemented but not yet verified on a real model | Llama, Mixtral, Falcon, BLOOM | Llama, Mistral, Qwen, DeepSeek, LLaVA | Any (subnet-defined) |
 | **Needs the whole model file?** | No — each computer downloads only its parts | Loads whole blocks | Yes | N/A |
 | **Cloud fallback** | Optional, 12 providers with your own keys | No | No | No |
-| **Images and adapters** | Vision models (LLaVA verified) and per-request LoRA | LoRA | Vision experimental | Subnet-specific |
+| **Images and adapters** | Vision models (LLaVA verified); LoRA adapters not yet applied | LoRA | Vision experimental | Subnet-specific |
 | **API** | OpenAI + Anthropic + MCP (works as a Claude Code backend) | PyTorch / Transformers | OpenAI + Claude + Ollama | Subnet-defined |
 | **Built-in app** | Dashboard, chat, setup wizard; 21 languages | Basic chatbot | Dashboard | None |
 | **SDKs** | Python and JavaScript clients in the repo (with LangChain and LlamaIndex adapters); not yet on PyPI/npm | Python | — | Python |

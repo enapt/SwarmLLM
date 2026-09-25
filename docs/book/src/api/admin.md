@@ -234,6 +234,10 @@ Cancel an in-progress download.
 
 ## LoRA Adapters
 
+> ⚠ Registering an adapter works, but inference does not apply adapters yet — a
+> chat request naming one is refused with 400 rather than answered by the base
+> model. Tracked as FUTURE_WORK #110.
+
 ### GET /api/admin/adapters
 List all registered LoRA adapters with their metadata (id, name, base model, rank, alpha, path).
 
