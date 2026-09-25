@@ -115,7 +115,7 @@ The RoPE column is llama.cpp's per-architecture choice (`llama_model_rope_type`)
 | **Gemma/Gemma2** | Contiguous | No | Embedding scaling (sqrt(d)), Gemma RmsNorm (+1), EOS 107, attention + final logit softcapping, Gemma chat template fallback |
 | **Phi-3** | Contiguous, Su/YaRN scaling | Yes | Fused QKV/FFN tensors |
 | **Mistral** | Interleaved | No | GQA |
-| **DeepSeek-V2/V3** | Interleaved | No | MLA attention + MoE FFN |
+| **DeepSeek-V2/V3** | Interleaved | No | Not supported yet — recognised and refused (no real file loads; needs YaRN and the current MLA tensor layout) |
 | **GLM-4** | Interleaved | No | Partial RoPE, extreme GQA (16:1) |
 | **Starcoder2** | Contiguous | Yes | Code-optimized |
 

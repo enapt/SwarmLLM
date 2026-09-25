@@ -54,6 +54,13 @@ to answer requests. With nobody connected there is nothing to receive; the
 check now looks for messages actually left waiting, which is what a stuck node
 shows.
 
+**Changed: DeepSeek models are no longer offered.** DeepSeek-V2 and V3 (and
+models built the same way) were listed as supported, but no DeepSeek file
+actually in circulation could load: a node, or its automatic model manager,
+could download many gigabytes of one and then fail to start it. They are now
+refused up front with a message naming the model family, until they genuinely
+work.
+
 Also: `swarmllm test-split --gpu-layers N` checks a card/processor split
 without starting a node; a computed result that waits more than a second to be sent now says so in
 the log, with how many messages were ahead of it, to explain a 39-second delay

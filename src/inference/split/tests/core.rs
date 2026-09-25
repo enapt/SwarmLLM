@@ -1072,7 +1072,8 @@ fn model_arch_properties() {
     assert!(ModelArch::Qwen2.is_supported());
     assert!(ModelArch::Gemma2.is_supported());
     assert!(ModelArch::Phi3.is_supported());
-    assert!(ModelArch::DeepSeek2.is_supported());
+    // Recognised, not supported: no real DeepSeek-2 file loads (#116).
+    assert!(!ModelArch::DeepSeek2.is_supported());
     assert!(ModelArch::Qwen35.is_supported());
     assert!(ModelArch::Qwen35Moe.is_supported());
     assert!(ModelArch::Qwen35.is_hybrid_ssm());

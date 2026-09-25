@@ -11,9 +11,18 @@ use crate::inference::residual_norm::RmsNorm;
 use candle_core::quantized::QTensor;
 use candle_core::{DType, Device, Tensor};
 
+/// DeepSeek-2 is RECOGNISED — so a refusal can name it — and not offered:
+/// no file llama.cpp's converter writes loads here (FUTURE_WORK #116). The
+/// list the refusal quotes must agree with the predicate the loader and the
+/// download paths ask.
 #[test]
-fn test_deepseek_arch_supported() {
-    assert!(ModelArch::DeepSeek2.is_supported());
+fn deepseek2_is_recognised_but_not_offered() {
+    assert_eq!(ModelArch::from_gguf_arch("deepseek2"), ModelArch::DeepSeek2);
+    assert!(!ModelArch::DeepSeek2.is_supported());
+    for arch in ModelArch::supported_list() {
+        assert!(ModelArch::from_gguf_arch(arch).is_supported(), "{arch}");
+    }
+    assert!(!ModelArch::supported_list().contains(&"deepseek2"));
     // llama.cpp: LLAMA_ROPE_TYPE_NORM (interleaved) — see `use_rope_contiguous`.
     assert!(!ModelArch::DeepSeek2.use_rope_contiguous());
     assert_eq!(ModelArch::DeepSeek2.default_activation(), Activation::SiLU);

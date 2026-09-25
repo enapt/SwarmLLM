@@ -99,9 +99,20 @@ impl ModelArch {
         matches!(self, ModelArch::Gemma | ModelArch::Gemma2)
     }
 
-    /// Whether this architecture is supported for split inference.
+    /// Whether this architecture is supported for split inference — what the
+    /// loader accepts, what a shard download and auto-manage will fetch.
+    ///
+    /// **DeepSeek-2 is recognised, not supported** (FUTURE_WORK #116). No file
+    /// llama.cpp's converter writes can load here: every one names its KV
+    /// down-projection `attn_kv_a_mqa` (the loader asks for `attn_kv_a`); a
+    /// V2-Lite layer has `attn_q` and no `attn_q_a` (the loader then asks for
+    /// `attn_k`/`attn_v`); files since mid-2025 split `attn_kv_b` into
+    /// `attn_k_b`/`attn_v_b`; and every DeepSeek-V2/V3 file uses YaRN, which the
+    /// engine does not implement. Checked 2026-09-25 against the real header of
+    /// DeepSeek-Coder-V2-Lite-Instruct. Claiming it let a user, or auto-manage,
+    /// fetch gigabytes of a model that then could not load.
     pub fn is_supported(&self) -> bool {
-        !matches!(self, ModelArch::Unknown(_))
+        !matches!(self, ModelArch::Unknown(_) | ModelArch::DeepSeek2)
     }
 
     /// List of GGUF architecture strings supported by the split inference engine.
@@ -117,7 +128,6 @@ impl ModelArch {
             "phi3",
             "mistral",
             "starcoder2",
-            "deepseek2",
             "glm4",
             "llama4",
             "qwen35",

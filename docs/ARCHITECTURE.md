@@ -633,17 +633,26 @@ The SplitModel loader detects the model architecture from GGUF metadata
 
 | Feature | Llama | Llama 4 | Qwen2 | Qwen 3.5 | Gemma/Gemma2 | Phi-3 | Mistral | Starcoder2 | DeepSeek-V2/V3 | GLM-4 |
 |---------|-------|---------|-------|-----------|--------------|-------|---------|------------|----------------|-------|
-| RoPE variant | Interleaved (`rope_i`) | Contiguous (iRoPE) | Contiguous (`rope`) | Partial (25% head_dim) | Interleaved | Su/YaRN | Interleaved | Contiguous | Contiguous (MLA split) | Contiguous (partial) |
+| RoPE variant | Interleaved (`rope_i`) | Interleaved (iRoPE) | Contiguous (`rope`) | Partial (25% head_dim) | Interleaved | Su/YaRN | Interleaved | Contiguous | Interleaved (MLA split; YaRN NOT implemented) | Interleaved (partial) |
 | QKV biases | None | None | Yes | Yes | None | Yes | None | Yes | None (MLA projections) | Yes |
 | Attention | Standard MHA/GQA | Standard GQA | Standard MHA | Standard + output gate | Standard MHA | Standard MHA | Standard GQA | Standard MHA | MLA (low-rank Q/KV) | Extreme GQA (16:1) |
 | FFN | Dense | Dense + MoE (mixed) | Dense | Dense | Dense | Dense | Dense | Dense | MoE (top-k) + shared | Dense |
 | Context length | 4096 (default) | 131072 | 32768 | 131072 | 8192 | 4096 | 32768 | 16384 | 163840 | 131072 |
 | Special | — | NoPE every 4th layer | — | Hybrid SSM+attention | Embedding scaling (sqrt(d)), Gemma RmsNorm (+1), attn + final logit softcap, EOS 107, Gemma chat template | Fused QKV/FFN | — | — | Per-layer dense/MLA | Partial RoPE (50%) |
-| E2E verified | ✅ | — | ✅ | — | ✅ (Gemma2) | ✅ | — | — | — | — |
+| E2E verified | ✅ | — | ✅ | — | ✅ (Gemma2) | ✅ | — | — | ⛔ not supported (#116) | ✅ |
 
 > **Phi-3 fused tensors**: Phi-3 GGUF models store `attn_qkv.weight` (Q+K+V concatenated) and `ffn_up.weight` (gate+up concatenated, no `ffn_gate.weight`). The loader dequantizes on CPU, splits by head dimensions, and re-quantizes to Q4_0 on the target device.
 
 ### DeepSeek-V2/V3 MoE + MLA Support
+
+⛔ **Recognised, NOT supported** (`ModelArch::is_supported` is false, so the loader,
+shard downloads and auto-manage all refuse it — `docs/FUTURE_WORK.md` #116). No
+file llama.cpp's converter writes loads with the code below: it asks for
+`attn_kv_a` where every file has `attn_kv_a_mqa`, treats a V2-Lite layer (which
+has `attn_q`, no `attn_q_a`) as plain attention, reads neither `attn_k_b`/`attn_v_b`
+(files since mid-2025) nor YaRN, and routes experts without llama.cpp's defaults.
+The code is kept as the starting point for #116 (its MLA math is unit-tested); what
+follows describes it, not a working model.
 
 DeepSeek models use two specialized mechanisms that differ from standard transformers:
 
@@ -2861,6 +2870,8 @@ Single-node inference performance, measured with `swarmllm bench` (100 output to
 The list is split into **open** (will be addressed) and **won't fix unless a concrete caller appears** (the work is understood but not justified by current demand). Per-finding history (status, resolution, deferral) is tracked in `.claude/sweep-log.jsonl`.
 
 ### Open
+
+- **DeepSeek-2 (V2/V2-Lite/V3, Kimi-K2, GLM-4.7-Flash) — recognised, refused, code kept** — see `docs/FUTURE_WORK.md` #116 for the list of what a real file needs. The loader's MLA branch, `MlaWeights` and `LayerVariant::DeepSeek` stay as its starting point and are unreachable until `ModelArch::is_supported` admits the family again.
 
 - **Split-KV (FlashDecoding) kernels for CUDA decode** — `candle-flash-attn` 0.10.1 ships none, so a single-token decode launches a grid of only `(1 × n_head × batch)` blocks and cannot fill the card. Measured on an RTX 3070: flash is **4x-25x slower than `standard_attention` for MHA decode** at every KV length, which is why `cuda_decode_prefers_standard` routes MHA decode away from it. (GQA decode was routed to flash between 2026-08-08 and 2026-08-23; a re-measurement after `grouped_gqa_decode_attention` removed the `repeat_kv` cost put every `q_len == 1` decode back on standard, whatever the head geometry.) With split-KV, MHA decode could take the fused path too. Upstream flash-attention has the kernels (`flash_fwd_splitkv_*`); adding them to `vendor/candle-flash-attn` is the highest-value follow-on in this area. Full measurement table in `docs/FUTURE_WORK.md`.
 
