@@ -20,6 +20,7 @@ from the tree itself; the annotations are what is worth keeping).
 ```
 swarmllm/
 ├── Cargo.toml / Cargo.lock / build.rs
+├── clippy.toml (`await-holding-invalid-types` = dashmap 6 guard types: a shard guard across `.await` fails the build; it sees a guard bound directly, NOT one parked in its `Option` — gotcha #705; guard `clippy_refuses_a_dashmap_guard_held_across_an_await`)
 ├── .env.example                       (env var template for Docker deployments)
 ├── config/default.toml, docker-cluster.toml
 ├── crates/
