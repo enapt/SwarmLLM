@@ -573,10 +573,25 @@ impl SplitModel {
         //    setting wins, and the load-time OOM fallback to CPU backstops it.
         let mut kv_budget_bytes: Option<u64> = None;
         let mut kv_bytes_per_token: u64 = 0;
-        // KV bytes per position is a property of the model, needed by both
-        // devices' guards below.
+        // How many of this segment's layers `device` holds — every one, unless
+        // the pool placed part of the segment on the processor (hybrid). The
+        // SAME answer the placement below acts on (`hybrid::layers_on_device`):
+        // the budget must charge the card for what it holds, not for the whole
+        // segment, or a 36-of-40 placement is told it has 15 MB for
+        // conversations (#104).
+        let hybrid_ok = super::hybrid::arch_supports_hybrid(&model_arch);
+        let segment_layer_count = layer_end.min(block_count).saturating_sub(layer_start);
+        let device_layers = super::hybrid::layers_on_device(
+            gpu_layers,
+            hybrid_ok,
+            device.is_cuda(),
+            segment_layer_count,
+        );
+        // KV bytes per position ON `device`, needed by both devices' guards
+        // below — a card's guard must not count the cache of layers it
+        // does not hold.
         let per_token = {
-            let seg_layers = layer_end.min(block_count).saturating_sub(layer_start);
+            let seg_layers = device_layers;
             let (k_elems, v_elems) = if matches!(model_arch, ModelArch::DeepSeek2) {
                 let key_length = md_get("attention.key_length")
                     .and_then(|v| v.to_u32().map_err(SwarmError::internal))
@@ -609,10 +624,13 @@ impl SplitModel {
                         info.shape.dims(),
                     )
                 });
+            // The weights THE CARD holds: its layers, plus the embedding and
+            // head this segment carries (both load on `device` in a hybrid
+            // split too).
             let weight_bytes = segment_weight_bytes(
                 &ct,
                 layer_start,
-                layer_end,
+                layer_start + device_layers,
                 is_first,
                 is_last,
                 rows_on_demand,
@@ -786,7 +804,6 @@ impl SplitModel {
         // not a card, every layer goes on `device` exactly as before — so a
         // model that fits, and every processor-only node, takes an unchanged
         // path.
-        let hybrid_ok = super::hybrid::arch_supports_hybrid(&model_arch);
         if gpu_layers.is_some() && device.is_cuda() && !hybrid_ok {
             tracing::warn!(
                 arch = %model_arch,
@@ -795,8 +812,9 @@ impl SplitModel {
                  hybrid::arch_supports_hybrid"
             );
         }
-        let placement = match (gpu_layers.filter(|_| hybrid_ok), device.is_cuda()) {
-            (Some(n), true) if n < layer_end.saturating_sub(layer_start) => {
+        let placement = match device_layers < segment_layer_count {
+            true => {
+                let n = device_layers;
                 tracing::info!(
                     gpu_layers = n,
                     segment_layers = layer_end - layer_start,
@@ -811,7 +829,7 @@ impl SplitModel {
                 )
                 .map_err(SwarmError::internal)?
             }
-            _ => super::hybrid::LayerPlacement::uniform(
+            false => super::hybrid::LayerPlacement::uniform(
                 layer_start,
                 device.clone(),
                 cos.clone(),

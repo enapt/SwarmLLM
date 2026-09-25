@@ -111,6 +111,33 @@ pub(crate) fn plan_gpu_layers(
     )
 }
 
+/// How many of a segment's `segment_layers` go on the loader's `device` (the card): the pool's
+/// `gpu_layers` when a hybrid placement applies, otherwise all of them.
+///
+/// **The one reading of the placement**, for the two places that must agree:
+/// [`LayerPlacement`], which puts the layers there, and the loader's KV budget,
+/// which subtracts what the card holds from what it has free. They disagreed
+/// until 2026-09-25: the budget charged the WHOLE segment's weights and its
+/// whole KV to the card while only `gpu_layers` of them went there, so a model
+/// placed 36-of-40 on an 8 GB card was told it had 15 MB for conversations and
+/// refused a 20-token prompt, again on the re-plan (#104, GLM-4-9B, card empty).
+///
+/// Mirrors the placement's own rule exactly: a count below the segment's size,
+/// on a card, for an architecture whose layers may be split. Anything else —
+/// no count, a count covering the segment, the processor, an unverified
+/// architecture — loads every layer on `device`.
+pub(crate) fn layers_on_device(
+    gpu_layers: Option<usize>,
+    arch_splits: bool,
+    device_is_cuda: bool,
+    segment_layers: usize,
+) -> usize {
+    match gpu_layers {
+        Some(n) if arch_splits && device_is_cuda && n < segment_layers => n,
+        _ => segment_layers,
+    }
+}
+
 /// May this architecture's layers be split across two devices?
 ///
 /// **Deny by default, and a new architecture is denied until someone checks
@@ -287,6 +314,31 @@ mod tests {
         assert!(
             n as u64 * (per_layer + kv) + FORWARD_BUFFER_RESERVE_BYTES <= 4990 * MB,
             "the plan overcommits the card"
+        );
+    }
+
+    /// What the card holds is the pool's count when a hybrid split applies, and
+    /// the whole segment otherwise — one answer for the placement AND the
+    /// loader's KV budget (#104: the budget charged all 40 layers of a 36-of-40
+    /// placement to the card and left 15 MB for conversations).
+    #[test]
+    fn the_card_holds_the_split_count_and_only_when_a_split_applies() {
+        assert_eq!(layers_on_device(Some(36), true, true, 40), 36, "hybrid");
+        assert_eq!(layers_on_device(None, true, true, 40), 40, "fits whole");
+        assert_eq!(
+            layers_on_device(Some(40), true, true, 40),
+            40,
+            "a count covering the segment is not a split"
+        );
+        assert_eq!(
+            layers_on_device(Some(36), false, true, 40),
+            40,
+            "an architecture that may not be split loads whole on the card"
+        );
+        assert_eq!(
+            layers_on_device(Some(36), true, false, 40),
+            40,
+            "on the processor there is nothing to split off"
         );
     }
 
