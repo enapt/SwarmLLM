@@ -144,6 +144,23 @@ impl SplitModel {
         &self.device
     }
 
+    /// The order this model keeps query and key rows in, for an adapter's
+    /// `B` matrices to be put into — see `lora::QkRowOrder`. Read off the
+    /// first dense layer; a model with none has no layer an adapter reaches.
+    pub fn lora_qk_row_order(&self) -> crate::model::lora::QkRowOrder {
+        self.layers
+            .iter()
+            .find_map(|l| match l {
+                LayerVariant::Dense(w) => Some(crate::model::lora::QkRowOrder::for_arch(
+                    &self.arch,
+                    w.n_head,
+                    w.n_kv_head,
+                )),
+                _ => None,
+            })
+            .unwrap_or(crate::model::lora::QkRowOrder::AsTrained)
+    }
+
     /// Record one `forward_batch` call and periodically report how much of the
     /// batching is real.
     ///

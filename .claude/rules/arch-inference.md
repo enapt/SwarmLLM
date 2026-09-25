@@ -14,6 +14,7 @@ paths:
   - "src/inference/speculative.rs"
   - "src/inference/quant.rs"
   - "src/inference/model_arch.rs"
+  - "src/model/lora.rs"
   - "src/inference/tensor_util.rs"
   - "src/inference/mem_bandwidth.rs"
   - "src/inference/vision.rs"
@@ -309,6 +310,20 @@ in `model_arch_properties` from llama.cpp's list, never from this function.**
 Byte-identical replies across releases prove no REGRESSION, never correctness.
 
 → `docs/invariants/inference.md`
+
+## An adapter meets the model in the model's row order (2026-09-25)
+
+**`lora::QkRowOrder`** is the single answer to "what order are this model's
+q/k rows in, against the checkpoint an adapter was trained on" — a REQUIRED
+argument of the worker's adapter loader. Llama and Mistral are reordered by
+llama.cpp's converter (`LlamaModel.permute`) and so must an adapter's `B` be;
+applied in checkpoint order the adapter runs without error and answers
+wrongly. **`lora::check_fits`** refuses what the executor would silently skip
+(non-`Dense` layers, MoE feed-forwards) — half an adapter is #110 again.
+Verify with `examples/peft_lora_to_gguf.py` + `score_against_reference.py
+--lora`, on an adapter whose B is NOT zero.
+
+→ `docs/invariants/inference.md` § "An adapter meets the model in the model's row order"
 
 ## A special token is what the vocabulary says it is, and a prompt gets ONE BOS
 

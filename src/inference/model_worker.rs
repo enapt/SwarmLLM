@@ -1619,48 +1619,27 @@ async fn handle_forward(
         }
     };
 
-    // Load LoRA adapter if requested.
+    // The LoRA adapter this request asked for, if any — loaded from its
+    // registration (`<data_dir>/adapters/<id>.adapter.json`) and cached for
+    // this worker's life, so a reply does not re-read the file per token.
     //
-    // SEC: `adapter_id` rides peer-controlled `LayerForward.adapter_id`. A naive
-    // `data_dir.join("adapters").join(adapter_id)` lets a malicious peer escape
-    // the adapters/ directory via `..`, absolute paths, or NUL bytes. Reject
-    // anything that isn't a single, plain filename component before joining.
-    let lora_adapter = if let Some(ref adapter_id) = fwd.adapter_id {
-        let is_safe_id = !adapter_id.is_empty()
-            && !adapter_id.contains('/')
-            && !adapter_id.contains('\\')
-            && !adapter_id.contains('\0')
-            && adapter_id != "."
-            && adapter_id != ".."
-            && !adapter_id.starts_with('.')
-            && std::path::Path::new(adapter_id).components().count() == 1;
-        if !is_safe_id {
-            tracing::warn!(
+    // A failure is the REQUEST's failure, never a quiet fallback: this used to
+    // log "proceeding without" and answer from the base model, which is the
+    // exact outcome of `docs/FUTURE_WORK.md` #110. The id is checked as a safe
+    // file name inside `lora` (gotcha #94) — a peer's forward never carries
+    // one (both binary decoders set `adapter_id: None`), but the check does
+    // not rely on that.
+    let lora_adapter = match fwd.adapter_id.as_deref() {
+        Some(adapter_id) => Some(
+            crate::model::lora::cached_registered_adapter(
+                &data_dir.join("adapters"),
                 adapter_id,
-                "Rejecting LoRA adapter_id with unsafe path components"
-            );
-            return Err(SwarmError::Validation(
-                "adapter_id must be a single safe filename component".into(),
-            ));
-        }
-        let adapter_dir = data_dir.join("adapters").join(adapter_id);
-        if adapter_dir.exists() {
-            match crate::model::lora::load_adapter_from_dir(&adapter_dir) {
-                Ok(adapter) => {
-                    tracing::debug!(adapter_id, "Loaded LoRA adapter for inference");
-                    Some(adapter)
-                }
-                Err(e) => {
-                    tracing::warn!(adapter_id, error = %e, "Failed to load LoRA adapter, proceeding without");
-                    None
-                }
-            }
-        } else {
-            tracing::warn!(adapter_id, "LoRA adapter directory not found");
-            None
-        }
-    } else {
-        None
+                model.device(),
+                model.lora_qk_row_order(),
+            )
+            .map_err(|e| SwarmError::Validation(format!("LoRA adapter '{adapter_id}': {e}")))?,
+        ),
+        None => None,
     };
 
     // Whole-prompt admission for a SEGMENT's prompt pass (gotcha #447).
@@ -1798,7 +1777,7 @@ async fn handle_forward(
                         fwd.index_pos as usize,
                         kv_store,
                         &req_id_str,
-                        lora_adapter.as_ref(),
+                        lora_adapter.as_deref(),
                         false,
                         prefill_chunk_tokens,
                     )

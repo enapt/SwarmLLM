@@ -40,7 +40,7 @@ curl http://localhost:8800/v1/chat/completions \
 | `logprobs` | boolean | no | `false` | Log probabilities per output token. **Cloud models only** — a request for these against a model running locally is refused with a 400 explaining why, rather than answered without them |
 | `top_logprobs` | integer | no | — | Number of top log probabilities per token (0-20, requires `logprobs: true`). Cloud models only, as above |
 | `session_id` | string | no | — | Reuse KV-cache from a previous request |
-| `lora_adapter` | string | no | — | **Refused with 400 in this version** — adapters are registered but not yet applied to inference, so the reply would come from the base model |
+| `lora_adapter` | string | no | — | The id of an adapter registered on this computer (`POST /api/admin/adapters`). The reply is computed on this computer alone, so it must hold the whole model; a 400 says why when it cannot be used (not registered, model not whole here, or made for a different model) |
 
 ### Response (non-streaming)
 

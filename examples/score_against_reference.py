@@ -17,7 +17,9 @@ while a correct one is rank 1 almost everywhere, with the odd rank-2 pick by a
 small margin. Compare replies by their SCORES: a takeover should score like a
 same-topology control.
 
-usage: score_against_reference.py <model.gguf> <replies.jsonl> <prompt-file> [label ...]
+usage: score_against_reference.py [--lora adapter.gguf] <model.gguf> <replies.jsonl> <prompt-file> [label ...]
+  --lora         score against the model WITH this adapter applied by llama.cpp
+                 (`peft_lora_to_gguf.py` makes one from a PEFT adapter).
   replies.jsonl  one JSON object per line with a "content" field (what
                  `split_rig.sh` writes); labels default to the line number.
   The prompt is rendered with the GGUF's own chat template, as the node renders
@@ -37,15 +39,21 @@ from llama_cpp import Llama
 
 
 def main():
-    if len(sys.argv) < 4:
+    args = sys.argv[1:]
+    lora = None
+    if "--lora" in args:
+        i = args.index("--lora")
+        lora = args[i + 1]
+        del args[i:i + 2]
+    if len(args) < 3:
         sys.exit(__doc__)
-    gguf, replies_path, prompt_path = sys.argv[1:4]
+    gguf, replies_path, prompt_path = args[:3]
     prompt = open(prompt_path).read()
     rows = [json.loads(line) for line in open(replies_path) if line.strip()]
-    labels = sys.argv[4:] or [f"reply {i + 1}" for i in range(len(rows))]
+    labels = args[3:] or [f"reply {i + 1}" for i in range(len(rows))]
 
     llm = Llama(model_path=gguf, n_ctx=4096, n_gpu_layers=0, n_threads=8,
-                logits_all=True, verbose=False, seed=0)
+                logits_all=True, verbose=False, seed=0, lora_path=lora)
     env = Environment(trim_blocks=True, lstrip_blocks=True)
     env.globals["strftime_now"] = lambda f: datetime.datetime.now().strftime(f)
 
@@ -56,7 +64,8 @@ def main():
     rendered = env.from_string(llm.metadata["tokenizer.chat_template"]).render(
         messages=[{"role": "user", "content": prompt}],
         add_generation_prompt=True,
-        bos_token=llm.detokenize([llm.token_bos()], special=True).decode())
+        bos_token=llm.detokenize([llm.token_bos()], special=True).decode(),
+        eos_token=llm.detokenize([llm.token_eos()], special=True).decode())
     ptoks = llm.tokenize(rendered.encode(), add_bos=False, special=True)
     print(f"prompt tokens: {len(ptoks)}")
 

@@ -988,13 +988,12 @@ impl PipelineExecutor {
         // singleton executor without consulting `request.model_id`, so testing
         // only the global `model_loaded` flag here served requests for other
         // models from whichever one was resident. Same defect, same fix as
-        // `router::batch::execute_batch`.
+        // `router::batch::execute_batch`. And it is asked with the REQUEST:
+        // a LoRA plan is exactly "one segment, on this node", and
+        // `execute_local` applies no adapter (#110).
         if num_segments == 1
             && self.assignment.segments[0].node_id == *self.shared_state.identity.node_id()
-            && self
-                .shared_state
-                .local_executor_serves(&self.request.model_id)
-                .await
+            && self.shared_state.local_executor_serves(&self.request).await
         {
             return self.execute_local().await;
         }
@@ -1070,13 +1069,21 @@ mod tests {
     /// `request.model_id`, so gating them on the bare flag answered a request
     /// for one model with a different model's weights and chat template, and
     /// reported it as a success. These pin the identity check that replaced it.
+    /// A request for `model`, as the router would hand it over.
+    fn request_for(state: &SharedState, model: &str) -> InferenceRequest {
+        InferenceRequest {
+            model_id: ModelId(model.into()),
+            ..make_test_request(state)
+        }
+    }
+
     #[tokio::test]
     async fn local_executor_serves_requires_the_flag() {
         let state = make_test_state();
         // Nothing loaded: the flag is false and no info is cached.
         assert!(
             !state
-                .local_executor_serves(&ModelId("anything".into()))
+                .local_executor_serves(&request_for(&state, "anything"))
                 .await
         );
     }
@@ -1101,16 +1108,26 @@ mod tests {
         // either one.
         assert!(
             state
-                .local_executor_serves(&ModelId("Qwen2.5 Coder 7B Instruct".into()))
+                .local_executor_serves(&request_for(&state, "Qwen2.5 Coder 7B Instruct"))
                 .await
         );
         assert!(
             state
-                .local_executor_serves(&ModelId(crate::types::slugify_model_name(
-                    "Qwen2.5 Coder 7B Instruct"
-                )))
+                .local_executor_serves(&request_for(
+                    &state,
+                    &crate::types::slugify_model_name("Qwen2.5 Coder 7B Instruct")
+                ))
                 .await
         );
+
+        // The RIGHT model, but naming a LoRA adapter: the singleton executor
+        // applies none, so it must not answer — all three gates that hand it
+        // work ask this one predicate (#110).
+        let with_adapter = InferenceRequest {
+            lora_adapter: Some("coder-v1".into()),
+            ..request_for(&state, "Qwen2.5 Coder 7B Instruct")
+        };
+        assert!(!state.local_executor_serves(&with_adapter).await);
 
         // A DIFFERENT model must not be served by this executor, however
         // plausible the name. This is the whole point: before the fix every
@@ -1123,7 +1140,9 @@ mod tests {
             "",
         ] {
             assert!(
-                !state.local_executor_serves(&ModelId(other.into())).await,
+                !state
+                    .local_executor_serves(&request_for(&state, other))
+                    .await,
                 "{other} must not be served by the resident Qwen executor"
             );
         }
@@ -1222,7 +1241,7 @@ mod tests {
         assert!(state.loaded_model_info.read().await.is_none());
         assert!(
             !state
-                .local_executor_serves(&ModelId("anything".into()))
+                .local_executor_serves(&request_for(&state, "anything"))
                 .await
         );
     }

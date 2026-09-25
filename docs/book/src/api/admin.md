@@ -234,9 +234,14 @@ Cancel an in-progress download.
 
 ## LoRA Adapters
 
-> ⚠ Registering an adapter works, but inference does not apply adapters yet — a
-> chat request naming one is refused with 400 rather than answered by the base
-> model. Tracked as FUTURE_WORK #110.
+A registered adapter is applied to any chat request that names it in
+`lora_adapter`. It runs only on the computer it was registered on, and only for
+a model that computer holds whole — a request that cannot use it is refused
+with a 400 saying why, never answered by the base model.
+
+Registration is recorded in `<data_dir>/adapters/<id>.adapter.json` and
+survives a restart. If you replace the adapter file, unregister and register it
+again: a file whose contents changed since registration is refused.
 
 ### GET /api/admin/adapters
 List all registered LoRA adapters with their metadata (id, name, base model, rank, alpha, path).
@@ -244,11 +249,11 @@ List all registered LoRA adapters with their metadata (id, name, base model, ran
 Response: `{ "adapters": [ { "id": "...", "name": "...", "base_model": "...", "rank": 16, "alpha": 32.0, "path": "..." } ] }`
 
 ### POST /api/admin/adapters
-Register a LoRA adapter from a safetensors file. Bearer auth required. Path traversal is blocked. If `id` is omitted, a UUID is generated.
+Register a LoRA adapter from a safetensors file (PEFT naming, `…layers.N.self_attn.q_proj.lora_A.weight`; F32, F16 or BF16). Bearer auth required. The file must be inside `<data_dir>/adapters/`. `id` must be a plain name (no `/`, `\` or leading `.`); if omitted, a UUID is generated. `rank` must match the file's matrices.
 
 Request body:
 ```json
-{ "id": "my-adapter", "name": "My Adapter", "base_model": "tinyllama-...", "rank": 16, "alpha": 32.0, "path": "adapters/my-adapter.safetensors" }
+{ "id": "my-adapter", "name": "My Adapter", "base_model": "tinyllama-...", "rank": 16, "alpha": 32.0, "path": "my-adapter.safetensors" }
 ```
 
 `path` may be absolute or relative to `<data_dir>/adapters/`.

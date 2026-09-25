@@ -88,8 +88,8 @@ until readers leave (#90's shape); `clippy.toml` fails the build on one.
 ## Testing
 
 **Always say which feature set a count came from.** With
-`--features dev,claude-subscription`: **2937 lib** (+14 ignored),
-79 integration (31 + 34 + 14 `yamux_substream`), **171 repo-consistency**,
+`--features dev,claude-subscription`: **2946 lib** (+14 ignored),
+79 integration (31 + 34 + 14 `yamux_substream`), **173 repo-consistency**,
 1 `api_key_side_effects`, 55 `swarmllm-types`, and 11 in the vendored
 request-response patch — plus 15 in the `swarmllm` BIN target (`cli::*`, counted
 nowhere else). Clippy clean. The types crate and the vendored patch are **not**
@@ -159,7 +159,9 @@ UNDETERMINED and never a fix — use it BEFORE blaming a change, especially your
 after its first live run (#706/#707), per-version Trickle (#91's residue),
 model-browser Chat-not-Download, `SWARMLLM_LOGGING_LEVEL`, #107's residual, and
 **a remote last segment now samples as the caller asked** (`0x0A` trailer, #106 —
-it sampled at 0.7 whatever was requested).
+it sampled at 0.7 whatever was requested), and **LoRA adapters are applied again**
+(#110 — local-only; Llama/Mistral q/k rows permuted as llama.cpp's converter does,
+gotcha #710; not yet run on a CUDA build).
 **Next** → `memory/next_up.md`.
 
 ⚠ **Behaviour gate = `reply_ab.sh` + `split_rig.sh`** (incl. `failover`), not

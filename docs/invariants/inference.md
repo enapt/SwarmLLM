@@ -1541,3 +1541,61 @@ the last vocabulary entry; both now land on a candidate.
 with different tie-breaking without re-running the reply A/B, which compares
 greedy replies across releases.
 
+## An adapter meets the model in the model's row order (2026-09-25)
+
+**What it replaced.** Restoring LoRA (FUTURE_WORK #110) first added each
+adapter's deltas exactly as PEFT stored them. On TinyLlama the live check
+passed every way — replies changed, repeats identical, alpha=0 matched
+alpha=16 — and proved nothing: the test adapter was a fresh PEFT init whose
+B matrices are all zero. alpha=0 matching alpha=16 is what gave it away.
+
+**The detail research found.** llama.cpp's `convert_hf_to_gguf.py` reorders a
+Llama/Mistral checkpoint's q and k rows for its interleaved RoPE
+(`LlamaModel.permute`: rows viewed as `[heads, 2, rows/heads/2]`, middle axes
+swapped — k over the KV head count). `convert_lora_to_gguf.py` runs the SAME
+`modify_tensors` over an adapter, and its `LoraTorchTensor` routes the reshape
+and swap onto `B` (the output rows). A GGUF therefore holds q/k in an order a
+PEFT adapter does not, and adding the adapter's delta without the same
+reordering puts each head's change on the wrong rotary dimensions. GLM-4,
+Llama-4 and DeepSeek-2 rotate interleaved too, but their checkpoints are
+already in that order (Llama-4 sets `undo_permute = False`) — so "NORM rope"
+is NOT the test; "the converter permuted it" is.
+
+**Measured** (`examples/peft_lora_to_gguf.py`, `score_against_reference.py
+--lora`, Llama-3.2-3B, a random rank-8 q/k/v/o adapter, 60 greedy tokens):
+
+| reply | vs llama.cpp + adapter (converter's layout) | vs + adapter NOT permuted |
+|---|---|---|
+| before the fix | 58/60 rank-1, gap 0.357 | 59/60, gap 0.010 |
+| after | **60/60, gap 0.000** | 55/60, gap 0.414 |
+
+Both base replies scored 59/60 against plain llama.cpp and were identical
+across the two builds. Qwen2.5-Coder-7B (no permutation) with a real rank-16
+adapter on all seven projections: base and LoRA replies byte-identical to
+llama.cpp's.
+
+**Half an adapter is the same bug.** The split executor hands an adapter to
+`LayerVariant::Dense` layers and `FfnVariant::Dense` feed-forwards only;
+DeepSeek-2's MLA, Qwen 3.5's layers and every MoE FFN ignore it. `check_fits`
+refuses those (and fused `qkv_proj`/`gate_up_proj` adapters are refused at
+registration, because `qkv_proj` CONTAINS `v_proj` and would be filed under
+it).
+
+**Three gates to the other executor.** The singleton executor (a whole GGUF on
+the legacy path) applies no adapter, and three places hand it work. Two asked
+`local_executor_serves(model_id)` — an id cannot carry the adapter, and a LoRA
+plan is exactly the "one segment, on this node" shape one of them tests for;
+the batch gate asked about the FIRST request of a batch grouped by model only.
+The third read the bare `model_loaded` flag and would answer any model from the
+resident one. Found by review, not by the tests: every test here went through
+the split path. The predicate takes the REQUEST now, so a new request-scoped
+feature cannot be invisible to it.
+
+**What a change must keep.** The row order stays a required parameter, read
+off the loaded model (`SplitModel::lora_qk_row_order`); a new architecture
+gets its `QkRowOrder::for_arch` row from what llama.cpp's converter does to
+its q/k, not from its RoPE type. Tests:
+`llama_q_and_k_rows_are_reordered_as_llama_cpp_reorders_them` (hand-worked
+permutation, k over the KV heads), `an_adapter_is_refused_where_it_cannot_all_be_applied`,
+`an_adapter_on_fused_projections_is_refused` — each red with its check removed.
+

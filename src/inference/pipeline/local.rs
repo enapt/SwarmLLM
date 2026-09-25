@@ -344,7 +344,11 @@ impl PipelineExecutor {
             requester_node_id: None,
             pre_embedded,
             generated_ids: generated_ids_for_worker,
-            adapter_id: None,
+            // The request's LoRA adapter, which only ever runs HERE: a LoRA
+            // request is planned as one local segment over every layer
+            // (`router::distributed_exec::lora_local_assignment`), because the
+            // adapter is registered on this computer alone.
+            adapter_id: self.request.lora_adapter.clone(),
             draft_tokens: Vec::new(),
             spec_logits_requested: false,
             truncate_kv_to: None,

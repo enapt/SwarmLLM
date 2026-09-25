@@ -3020,13 +3020,25 @@ impl SharedState {
     /// trip through the distributed path, which handles a locally-complete
     /// model perfectly well. Answering "yes" wrongly produces a confident
     /// wrong answer. When in doubt, say no.
-    pub async fn local_executor_serves(&self, model_id: &crate::types::ModelId) -> bool {
+    ///
+    /// **It takes the REQUEST, not its model id**, because the singleton
+    /// executor applies no LoRA adapter: a request naming one is never its to
+    /// answer (`docs/FUTURE_WORK.md` #110). Three gates hand work to that
+    /// executor — `router::batch::execute_batch`, `PipelineExecutor::execute`
+    /// and `router::distributed_exec::execute_request` — and with the id as
+    /// the parameter the two that asked this question could not see the
+    /// adapter, while the third asked only the bare flag and served any model
+    /// from the resident one.
+    pub async fn local_executor_serves(&self, request: &crate::types::InferenceRequest) -> bool {
+        if request.lora_adapter.is_some() {
+            return false;
+        }
         if !self.model_loaded.load(std::sync::atomic::Ordering::Acquire) {
             return false;
         }
         let info = self.loaded_model_info.read().await;
         info.as_ref()
-            .is_some_and(|loaded| self.model_id_names(model_id, &loaded.name))
+            .is_some_and(|loaded| self.model_id_names(&request.model_id, &loaded.name))
     }
 
     /// Does the in-memory `loaded_model_info` describe THIS model?

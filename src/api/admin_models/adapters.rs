@@ -63,16 +63,26 @@ pub async fn register_adapter(
         )));
     }
 
-    let device = candle_core::Device::Cpu;
-    let metadata = state.shared_state.adapter_registry.register(
-        &adapter_id,
-        &body.name,
-        &body.base_model,
-        body.rank,
-        body.alpha,
-        &resolved,
-        &device,
-    )?;
+    // Registration reads and parses the whole file (up to 2 GB) — off the
+    // async workers.
+    let registry = state.shared_state.adapter_registry.clone();
+    let metadata = tokio::task::spawn_blocking(move || {
+        registry.register(
+            &adapter_id,
+            &body.name,
+            &body.base_model,
+            body.rank,
+            body.alpha,
+            &resolved,
+            &candle_core::Device::Cpu,
+        )
+    })
+    .await
+    .map_err(|e| {
+        ApiError(crate::error::SwarmError::Internal(format!(
+            "adapter registration task: {e}"
+        )))
+    })??;
 
     Ok(Json(serde_json::json!({
         "status": "ok",

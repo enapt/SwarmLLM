@@ -104,6 +104,8 @@ swarmllm/
 │                 `failover` runs FOUR nodes for #17's composite stand-in (gotchas #706-708);
 │                 score_against_reference.py — a reply teacher-forced through llama.cpp, rank
 │                 of every token: the test for a split reply where byte-equality is not;
+│                 `--lora` scores against llama.cpp applying an adapter, which
+│                 peft_lora_to_gguf.py converts from PEFT (with the converter's q/k permute, #110);
 │                 smoke_test.sh, release_shapes.sh, family_conformance.sh — the release gate's three)
 ├── kernels/       (SwarmLLM's own CUDA kernels, compiled to PTX by build.rs under
 │                 `candle-cuda` and loaded via candle's `get_or_load_custom_func`.
@@ -1241,18 +1243,55 @@ with no floor, because the model left on the processor was slower at every turn
 than the reload it was spared. `examples/swap_patience.sh` is the harness;
 `SWARMLLM_VRAM_SWAP_MIN_IDLE_SECS` pins the value for A/B.
 
-### LoRA Adapter Support — NOT APPLIED; requests naming one are refused (2026-09-25)
+### LoRA Adapter Support (restored 2026-09-25)
 
-`src/model/lora.rs` can load an adapter and apply low-rank deltas, adapters can
-be registered (`/api/admin/adapters`), and the worker has an adapter-loading
-path — but **no inference path hands a request's adapter to a worker**: nothing
-sets `LayerForward.adapter_id` from `InferenceRequest.lora_adapter`, and the
-worker looks for `adapters/<id>/adapter_config.json`, a layout registration
-does not create. A request naming an adapter was therefore answered by the BASE
-model. It is refused with a 400 (`api::openai::validate_chat_request`) until
-restored — `docs/FUTURE_WORK.md` #110 has the trace and the plan. (The March
-2026 "verified with Qwen2.5-Coder-7B" predates the move of all inference into
-worker subprocesses, which is where the chain most likely broke.)
+A chat request may name a registered adapter (`lora_adapter`); its low-rank
+deltas (`base + B·A·x · alpha/rank`, `src/model/lora.rs::apply_lora`) are added
+to the attention and feed-forward projections of every layer it covers, in the
+model worker, on every forward of the reply.
+
+- **Registration** (`POST /api/admin/adapters`) loads the file once to validate
+  it — rank matches the matrices, at least one A/B pair — and writes
+  `<data_dir>/adapters/<id>.adapter.json`: rank, alpha, file, BLAKE3, and each
+  projection's shape. That record is what survives a restart
+  (`AdapterRegistry::new` re-reads them) and what a worker reads, since a
+  worker is a separate process with no registry.
+- **The worker** loads by id (`lora::cached_registered_adapter`): the file must
+  sit inside `adapters/` and still hash to the record, and it is cached per
+  (id, record hash, device, row order), so a reply does not re-read it per token and a
+  re-registered file is never served stale. A load failure fails the request —
+  it never answers from the base model.
+- **Llama and Mistral q/k rows are reordered.** llama.cpp's converter permutes
+  those models' query/key rows for interleaved RoPE (`LlamaModel.permute`), and
+  its LoRA converter applies the same permutation to an adapter's B. A PEFT
+  adapter is in checkpoint order, so the worker permutes B for `attn_q` /
+  `attn_k` the same way (`lora::QkRowOrder`, a REQUIRED argument of the worker's
+  loader — applied without it, the adapter runs without error and answers
+  wrongly). GLM-4, Llama-4, DeepSeek-2 rotate interleaved too but their
+  checkpoints are already in that order.
+- **Routing**: an adapter exists only on the computer it was registered on, so
+  the router plans ONE local segment over every layer
+  (`router::distributed_exec::lora_local_assignment`) and refuses with 400 when
+  the model is not whole here, or when `lora::check_fits` says the adapter
+  cannot ALL be applied: an architecture whose layers the executor does not
+  hand an adapter (DeepSeek-2 MLA, Qwen 3.5), feed-forward changes on a
+  mixture-of-experts model, or shapes that do not match the GGUF header. Fused
+  `qkv_proj` / `gate_up_proj` adapters (Phi-3, GLM-4) are refused at
+  registration. Every fast path is skipped (`fastpath_request_disqualified`,
+  the API's local fast path) because none carries an adapter, and so is the
+  singleton executor (a whole GGUF): `SharedState::local_executor_serves` takes
+  the REQUEST and says no to one naming an adapter, and all three gates that
+  hand that executor work — `router::batch::execute_batch` (every request in
+  the batch), `PipelineExecutor::execute`, `execute_request` — ask it. Guard:
+  `the_singleton_executor_is_handed_a_request_only_through_one_predicate`.
+- **Verified against llama.cpp applying the same adapter**
+  (`examples/peft_lora_to_gguf.py` + `score_against_reference.py --lora`):
+  see `docs/FUTURE_WORK.md` #110 for the runs.
+- The id is one plain file name everywhere (`lora::is_safe_adapter_id`), checked
+  by the API, the registry and the worker.
+
+It was accepted but applied nowhere from the move of inference into worker
+subprocesses until 2026-09-25 — `docs/FUTURE_WORK.md` #110 has the trace.
 
 ## Credit System
 

@@ -454,6 +454,100 @@ fn assembly_failed_for_lack_of_holders(err: &SwarmError) -> bool {
     msg.contains("No node available") || msg.contains("No shard holders")
 }
 
+/// The plan for a request naming a LoRA adapter: ONE segment, on this node,
+/// over every layer — or a refusal saying why there cannot be one.
+///
+/// An adapter is registered on the computer it was added to and nowhere else,
+/// so no peer can apply it, and a plan that mixed adapted local layers with
+/// plain remote ones would answer from neither model. The scheduler is not
+/// asked: it would price peers this request can never use. The adapter's
+/// shapes are checked against the model's geometry here, so one made for a
+/// different model is refused with a reason rather than failing inside a
+/// matmul (`docs/FUTURE_WORK.md` #110).
+fn lora_local_assignment(
+    shared_state: &SharedState,
+    model_id: &crate::types::ModelId,
+    local_node_id: &crate::types::NodeId,
+    request_id: uuid::Uuid,
+    adapter_id: &str,
+) -> Result<PipelineAssignment, SwarmError> {
+    let meta = shared_state
+        .adapter_registry
+        .get(adapter_id)
+        .ok_or_else(|| {
+            SwarmError::Validation(format!(
+                "LoRA adapter '{adapter_id}' is not registered on this computer"
+            ))
+        })?;
+    if !shared_state.has_complete_split_model(model_id) {
+        return Err(SwarmError::Validation(format!(
+            "LoRA adapters run only on the computer they were added to, and it must hold ALL \
+             of the model — {model_id} is not complete here. Download every part of it, or \
+             leave out lora_adapter."
+        )));
+    }
+    // Copied out at once: the header is a map guard, not to be held. No
+    // header, no plan — the fit check is what keeps a half-applied adapter
+    // from answering, so it is not skipped for want of one.
+    let (architecture, block_count, embedding_length, q_width, kv_width, moe) = shared_state
+        .gguf_meta_for(model_id)
+        .map(|g| {
+            (
+                g.architecture.clone(),
+                g.block_count,
+                g.embedding_length,
+                g.head_count * g.head_dim,
+                g.head_count_kv * g.head_dim,
+                g.expert_count > 0 || g.tensors.keys().any(|k| k.contains("_exps")),
+            )
+        })
+        .ok_or_else(|| {
+            SwarmError::Validation(format!(
+                "LoRA adapter '{adapter_id}': {model_id}'s header is not readable here yet — \
+                 try again once the model has finished loading"
+            ))
+        })?;
+    let target = crate::model::lora::AdapterTarget {
+        architecture: &architecture,
+        block_count,
+        embedding_length,
+        q_width,
+        kv_width,
+        moe,
+    };
+    crate::model::lora::check_fits(&meta, &target).map_err(|why| {
+        SwarmError::Validation(format!(
+            "LoRA adapter '{adapter_id}' cannot be used with {model_id}: {why}."
+        ))
+    })?;
+    let num_layers = shared_state
+        .model_registry
+        .get_manifest(model_id)
+        .map(|m| m.num_layers)
+        .unwrap_or(block_count as u32);
+    tracing::info!(
+        request_id = %request_id,
+        model = %model_id,
+        adapter = adapter_id,
+        num_layers,
+        "LoRA request — planned as one local segment over every layer"
+    );
+    Ok(PipelineAssignment {
+        request_id,
+        segments: vec![crate::types::PipelineSegment {
+            node_id: local_node_id.clone(),
+            shard_id: crate::types::ShardId {
+                model_id: model_id.clone(),
+                index: 0,
+            },
+            layer_range: (0, num_layers),
+        }],
+        standbys: Vec::new(),
+        tp_groups: Vec::new(),
+        supports_speculative: false,
+    })
+}
+
 pub(super) async fn execute_request(
     shared_state: Arc<SharedState>,
     network_tx: mpsc::Sender<NetworkCommand>,
@@ -485,19 +579,14 @@ pub(super) async fn execute_request(
         }
     }
 
-    // Check if we can handle this entirely locally.
-    // Use the atomic flag to avoid locking the executor mutex just to check readiness.
-    // Skip the llama.cpp path when a LoRA adapter is requested — LoRA is only
-    // supported on the split model (candle) path via forward_with_lora().
+    // Check if we can handle this entirely locally, on the singleton executor.
+    // `local_executor_serves` is the one answer: it holds THIS model (the bare
+    // `model_loaded` flag asked here served any model from the resident one —
+    // the bug `e9806ded` fixed at the other two gates) and the request names
+    // no LoRA adapter, which this executor cannot apply (#110).
     let local_node_id = shared_state.identity.node_id().clone();
     let is_split_mode = shared_state.config.inference.shard_range.is_some();
-    let has_lora = request.lora_adapter.is_some();
-    if shared_state
-        .model_loaded
-        .load(std::sync::atomic::Ordering::Acquire)
-        && !is_split_mode
-        && !has_lora
-    {
+    if !is_split_mode && shared_state.local_executor_serves(&request).await {
         // Local-only inference path (single node has the model loaded)
         let mut executor = shared_state.executor.lock().await;
         tracing::info!(
@@ -688,7 +777,15 @@ pub(super) async fn execute_request(
     // decode. An estimate is enough — see `estimate_prompt_tokens`.
     let prompt_tokens_hint = Some(crate::inference::estimate_prompt_tokens(&request.messages));
 
-    let assignment = if let Some(prev) = preferred_pipeline {
+    let assignment = if let Some(adapter_id) = request.lora_adapter.as_deref() {
+        lora_local_assignment(
+            &shared_state,
+            model_id,
+            &local_node_id,
+            request.id,
+            adapter_id,
+        )?
+    } else if let Some(prev) = preferred_pipeline {
         let all_connected = prev.segments.iter().all(|seg| {
             seg.node_id == local_node_id || shared_state.connected_node_ids.contains(&seg.node_id)
         });

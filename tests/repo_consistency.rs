@@ -1390,6 +1390,85 @@ fn the_geometry_accessor_guard_catches_a_wrapped_read() {
     );
 }
 
+/// Statements that decide to hand a request to the singleton executor on the
+/// bare `model_loaded` flag, in a file that hands requests to it. Production
+/// code only (cut at the first `#[cfg(test)]`, where tests SET the flag).
+fn bare_executor_gates(text: &str) -> Vec<usize> {
+    let prod = text.split("#[cfg(test)]").next().unwrap_or(text);
+    // Statements on both halves: rustfmt wraps `shared_state\n.executor\n.lock()`
+    // as readily as the flag read.
+    let stmts = statements(prod);
+    let hands_work_over = stmts.iter().any(|(_, l)| {
+        l.contains("execute_local_batch(")
+            || l.contains("execute_local()")
+            || l.contains("executor.lock()")
+    });
+    if !hands_work_over {
+        return Vec::new();
+    }
+    stmts
+        .into_iter()
+        .filter(|(_, l)| l.contains("model_loaded.load("))
+        .map(|(n, _)| n)
+        .collect()
+}
+
+/// The singleton executor (a whole GGUF, the legacy path) applies no LoRA
+/// adapter and generates from whatever model it holds, so ONE predicate —
+/// `SharedState::local_executor_serves`, which takes the whole REQUEST — says
+/// whether it may answer one. Three gates hand it work; two asked that
+/// predicate with a bare model id (so a LoRA request was answered by the base
+/// model) and the third read the bare flag and served any model from the
+/// resident one (#110, and the bug `e9806ded` fixed at the other two).
+#[test]
+fn the_singleton_executor_is_handed_a_request_only_through_one_predicate() {
+    let root = repo_root();
+    let mut stack = vec![root.join("src/inference")];
+    let mut offenders: Vec<String> = Vec::new();
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for e in rd.filter_map(|e| e.ok()) {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+                continue;
+            }
+            if !p.extension().is_some_and(|x| x == "rs") {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&p) else {
+                continue;
+            };
+            let rel = p.strip_prefix(&root).unwrap_or(&p).display().to_string();
+            for line in bare_executor_gates(&text) {
+                offenders.push(format!("{rel}:{line}"));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "ask `SharedState::local_executor_serves(&request)` before handing a \
+         request to the singleton executor — the bare `model_loaded` flag says \
+         neither WHICH model it holds nor that it cannot apply the request's \
+         LoRA adapter:\n{}",
+        offenders.join("\n")
+    );
+}
+
+/// The scan above must catch the shape `execute_request` had — a wrapped flag
+/// read beside the executor lock — or it asserts nothing.
+#[test]
+fn the_executor_gate_guard_catches_the_pre_fix_shape() {
+    let pre_fix = "fn f() {\n    if shared_state\n        .model_loaded\n        .load(Ordering::Acquire)\n        && !is_split_mode\n    {\n        let mut executor = shared_state\n            .executor\n            .lock()\n            .await;\n    }\n}\n";
+    assert_eq!(bare_executor_gates(pre_fix).len(), 1);
+    // A file that never hands work to the executor may ask whether a model
+    // is loaded (the router's model-exists check does).
+    let existence_check = "fn g() {\n    let loaded = s.model_loaded.load(Ordering::Relaxed);\n}\n";
+    assert!(bare_executor_gates(existence_check).is_empty());
+}
+
 #[test]
 fn serving_is_counted_and_paid_in_exactly_one_place() {
     let root = repo_root();
