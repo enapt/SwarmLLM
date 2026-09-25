@@ -79,6 +79,23 @@ sigmoid(gate); attn_output.
 7. `out = RMSNorm(o, ssm_norm) · silu(z)` per head (`build_norm_gated`), then
    `ssm_out`.
 
+**The recurrence** (`build_delta_net_autoregressive`, one token; the chunked
+form must equal it), per v-head with state `S` [v_dim × k_dim]:
+
+```
+q  = q / sqrt(k_dim)                 (after the L2 norm)
+S  = S * exp(g)                      (g ≤ 0: softplus(α + dt_bias) · ssm_a)
+e  = (v − S·k) * beta                (beta = sigmoid(ssm_beta·x), a scalar per head)
+S  = S + e ⊗ k                       (row j gains k · e_j)
+o  = S·q
+```
+
+⚠ The description of the current `layers/qwen35.rs` (ARCHITECTURE § Qwen 3.5)
+differs from this in three places: it decays by `exp(-softplus(α + dt))` with no
+`ssm_a` factor, it applies beta to k AND v separately (`β_v·v − g·S@(β_k·k)`)
+where llama.cpp scales the error once, and it names no `1/sqrt(k_dim)` on q.
+Check each against the code, not the description.
+
 State per sequence: the conv tail (kernel−1 rows of `qkv_mixed`) and the
 [v_dim × v_dim] recurrent state per v-head — the existing `SsmState` is the
 place, but check its shapes against these.
