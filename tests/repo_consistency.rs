@@ -11020,3 +11020,88 @@ fn the_loopback_guard_sees_a_check_and_skips_a_comment() {
     let comment = "    // used to be `addr.ip().is_loopback()`, which a proxy satisfies";
     assert!(socket_loopback_checks(comment).is_empty());
 }
+
+/// Every per-layer loop in the split loader, and whether it asks the placement
+/// where its layer goes: `(line, places_its_layer)`.
+///
+/// A loop is a `for layer_idx in layer_start..layer_end` or a
+/// `(layer_start..layer_end)` range mapped `|layer_idx|` (the parallel mmap
+/// load spawns a thread per layer); it places its layer when
+/// `placement.device_for(layer_idx)` appears in the lines that open its body —
+/// 20 lines, against 4 to 12 in today's five loops.
+fn loader_layer_loops(src: &str) -> Vec<(String, bool)> {
+    let lines: Vec<&str> = src.lines().collect();
+    let mut out = Vec::new();
+    for (i, l) in lines.iter().enumerate() {
+        let t = l.trim_start();
+        if t.starts_with("//") || !t.contains("layer_start..layer_end") {
+            continue;
+        }
+        let head = lines[i..(i + 3).min(lines.len())].join("\n");
+        if !(t.starts_with("for layer_idx in") || head.contains(".map(|layer_idx|")) {
+            continue;
+        }
+        let opening = lines[i..(i + 20).min(lines.len())].join("\n");
+        out.push((
+            format!("line {}: {}", i + 1, t),
+            opening.contains("placement.device_for(layer_idx)"),
+        ));
+    }
+    out
+}
+
+/// Every per-layer loop in the split loader puts its layer where the
+/// placement says.
+///
+/// A card/processor split is applied by SHADOWING `device`, `cos` and `sin` at
+/// the head of each per-layer loop (`split::hybrid::LayerPlacement`), and a loop
+/// that does not is invisible until runtime — or, as here, invisible
+/// altogether: the parallel whole-file loop took the segment's device for every
+/// layer, so a split model loaded WHOLE on the card on that path while the
+/// model and the KV budget counted only the first n there (review of #104,
+/// 2026-09-25). The gotcha recording the shadowing design counted four loops;
+/// there were five.
+#[test]
+fn every_layer_loop_in_the_loader_places_its_layer() {
+    let loops: Vec<(String, bool)> = walk_rs_files("src/inference/split/loader")
+        .into_iter()
+        .flat_map(|p| {
+            let src = std::fs::read_to_string(repo_root().join(&p)).unwrap_or_default();
+            loader_layer_loops(&src)
+                .into_iter()
+                .map(move |(l, ok)| (format!("{p}: {l}"), ok))
+        })
+        .collect();
+    // A scan that finds no loop proves nothing; five exist today.
+    assert!(
+        loops.len() >= 5,
+        "found only {} layer loops: {loops:?}",
+        loops.len()
+    );
+    let offenders: Vec<&String> = loops.iter().filter(|(_, ok)| !ok).map(|(l, _)| l).collect();
+    assert!(
+        offenders.is_empty(),
+        "shadow `let device = placement.device_for(layer_idx);` and \
+         `let (cos, sin) = placement.rope_for(layer_idx);` at the head of each:\n  {offenders:?}"
+    );
+}
+
+#[test]
+fn the_layer_placement_guard_sees_both_loop_forms() {
+    let sequential =
+        "for layer_idx in layer_start..layer_end {\n    let w = ct.tensor(f, n, &device)?;\n}";
+    assert_eq!(
+        loader_layer_loops(sequential),
+        vec![(
+            "line 1: for layer_idx in layer_start..layer_end {".to_string(),
+            false
+        )]
+    );
+    let parallel = "let handles: Vec<_> = (layer_start..layer_end)\n    .map(|layer_idx| {\n        s.spawn(move || load(device_ref))\n    })";
+    assert_eq!(loader_layer_loops(parallel).len(), 1);
+    assert!(!loader_layer_loops(parallel)[0].1, "unplaced parallel loop");
+    let placed = "for layer_idx in layer_start..layer_end {\n    let device = placement.device_for(layer_idx);\n}";
+    assert!(loader_layer_loops(placed)[0].1);
+    // A range test that is not a loop is not counted.
+    assert!(loader_layer_loops("Some(idx) => (layer_start..layer_end).contains(&idx),").is_empty());
+}

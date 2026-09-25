@@ -6,6 +6,7 @@ pub async fn test_split_inference(
     model_path: Option<PathBuf>,
     max_tokens: u32,
     prompt: &str,
+    gpu_layers: Option<i32>,
 ) -> anyhow::Result<()> {
     use swarmllm::inference::split::{sample_token, SplitModel};
 
@@ -16,9 +17,19 @@ pub async fn test_split_inference(
     })?;
     println!("Loading full model from: {}", model_path.display());
 
-    // Load as a single split covering ALL layers (0..N, is_first=true, is_last=true)
-    // Diagnostic command — always auto-select the device (force_cpu = false).
-    let mut model = SplitModel::load_from_gguf(&model_path, 0, 999, true, true, false)?;
+    // Load as a single split covering ALL layers (0..N, is_first=true, is_last=true).
+    // `--gpu-layers` is read exactly as a model worker reads it: 0 means the
+    // processor only, N > 0 the card/processor split through the same
+    // `GPU_LAYER_LIMIT` the worker sets. It checks the whole-file (mmap) load
+    // path's split placement on a card without a daemon — the path a worker
+    // takes for an imported model (`model.gguf` / `source_path`).
+    let force_cpu = gpu_layers == Some(0);
+    if let Some(n) = gpu_layers.filter(|&n| n > 0) {
+        let n = n as usize;
+        swarmllm::inference::split::GPU_LAYER_LIMIT.store(n, std::sync::atomic::Ordering::Relaxed);
+        println!("Placing the first {n} layers on the graphics card, the rest on the processor");
+    }
+    let mut model = SplitModel::load_from_gguf(&model_path, 0, 999, true, true, force_cpu)?;
     let total_layers = model.total_layers;
     println!(
         "Model loaded: {} layers, hidden_dim={}",

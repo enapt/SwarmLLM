@@ -96,6 +96,12 @@ pub struct VramFootprintInputs {
     /// would have fitted or is admitted and then runs out of memory — the same
     /// trap `EMBEDDING_TABLE_BYTES_PER_ELEMENT` already carries a test for.
     pub embedding_gatherable: bool,
+    /// May the loader split this architecture's segment between the card and
+    /// the processor? `hybrid::arch_supports_hybrid`, the loader's own
+    /// predicate — it loads any other architecture WHOLE on the card, so a
+    /// split offered for one puts a model that does not fit onto the card
+    /// anyway.
+    pub splits_across_devices: bool,
 }
 
 /// Bytes a CUDA worker process costs beyond its tensors: driver context, cuBLAS
@@ -1410,6 +1416,7 @@ mod footprint_tests {
             effective_context: 2048,
             is_first: true,
             embedding_gatherable: true,
+            splits_across_devices: true,
         }
     }
 
@@ -1429,6 +1436,7 @@ mod footprint_tests {
             effective_context: 4096,
             is_first: true,
             embedding_gatherable: true,
+            splits_across_devices: true,
         }
     }
 
@@ -1448,6 +1456,7 @@ mod footprint_tests {
             effective_context: 4096,
             is_first: true,
             embedding_gatherable: true,
+            splits_across_devices: true,
         }
     }
 
@@ -1660,6 +1669,7 @@ mod footprint_tests {
             effective_context,
             is_first: true,
             embedding_gatherable: true,
+            splits_across_devices: true,
         }
     }
 
@@ -1713,6 +1723,7 @@ mod footprint_tests {
             rope_dim: 0,
             effective_context: 0,
             embedding_gatherable: false,
+            splits_across_devices: true,
             is_first: true,
         };
         // Just the process overhead.
@@ -1732,6 +1743,7 @@ mod footprint_tests {
             rope_dim: u64::MAX,
             effective_context: u64::MAX,
             embedding_gatherable: false,
+            splits_across_devices: true,
             is_first: true,
         };
         let _ = estimate_worker_vram_mb(&huge); // must not panic
@@ -1802,6 +1814,7 @@ mod footprint_tests {
             effective_context: 4096,
             is_first: true,
             embedding_gatherable: false,
+            splits_across_devices: true,
         }
     }
 
@@ -1925,6 +1938,7 @@ mod footprint_tests {
             effective_context: 32768,
             is_first: true,
             embedding_gatherable: true,
+            splits_across_devices: true,
         };
         let f = cpu_footprint(&i);
         assert_eq!(f.weights_bytes / (1024 * 1024), 2284);

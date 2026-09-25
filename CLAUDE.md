@@ -88,10 +88,10 @@ until readers leave (#90's shape); `clippy.toml` fails the build on one.
 ## Testing
 
 **Always say which feature set a count came from.** With
-`--features dev,claude-subscription`: **2969 lib** (+14 ignored),
-79 integration (31 + 34 + 14 `yamux_substream`), **175 repo-consistency**,
+`--features dev,claude-subscription`: **2970 lib** (+14 ignored),
+79 integration (31 + 34 + 14 `yamux_substream`), **177 repo-consistency**,
 1 `api_key_side_effects`, 55 `swarmllm-types`, and 11 in the vendored
-request-response patch — plus 15 in the `swarmllm` BIN target (`cli::*`, counted
+request-response patch — plus 16 in the `swarmllm` BIN target (`cli::*`, counted
 nowhere else). Clippy clean. The types crate and the vendored patch are **not**
 run by a bare `cargo test`:
 `cargo test --manifest-path vendor/libp2p-request-response/Cargo.toml --lib`.

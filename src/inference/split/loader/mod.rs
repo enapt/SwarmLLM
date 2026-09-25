@@ -817,7 +817,7 @@ impl SplitModel {
                 let n = device_layers;
                 tracing::info!(
                     gpu_layers = n,
-                    segment_layers = layer_end - layer_start,
+                    segment_layers = segment_layer_count,
                     "Hybrid placement: first {n} layers on the graphics card, rest on the processor"
                 );
                 super::hybrid::LayerPlacement::split(
@@ -1594,14 +1594,24 @@ impl SplitModel {
                 // Parallel layer loading: each thread gets its own Cursor into mmap'd data.
                 // ~N× speedup for N layers on NVMe/SSD.
                 let ct_ref = &ct;
-                let device_ref = &device;
                 let layer_results: Vec<Result<LayerVariant, SwarmError>> =
                     std::thread::scope(|s| {
                         let handles: Vec<_> = (layer_start..layer_end)
                             .map(|layer_idx| {
-                                let cos = cos.clone();
-                                let sin = sin.clone();
+                                // Each layer on the device its placement names,
+                                // with that device's RoPE tables — the SHADOWING
+                                // the other per-layer loops do (see the sequential
+                                // loop below). This loop took the segment's
+                                // `device` for every layer, so a hybrid split
+                                // loaded WHOLE on the card on this (mmap) path
+                                // while the model recorded (`placement.devices`)
+                                // and the KV budget charged
+                                // (`hybrid::layers_on_device`) only the first n
+                                // there (review of #104, 2026-09-25).
+                                let layer_device = placement.device_for(layer_idx);
+                                let (cos, sin) = placement.rope_for(layer_idx);
                                 s.spawn(move || -> Result<LayerVariant, SwarmError> {
+                                    let device_ref = &layer_device;
                                     let mut cursor = std::io::Cursor::new(mmap_ref);
                                     let prefix = format!("blk.{layer_idx}");
 

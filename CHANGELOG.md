@@ -16,7 +16,11 @@ on an 8 GB card was told it had almost no room and refused even a one-line
 question, every time, with nothing else to try on a computer alone. The check
 now counts only what is on the card, and the split between card and processor
 leaves room for the model's whole conversation length: that model now answers
-conversations up to its full 8,192 tokens.
+conversations up to its full 8,192 tokens. The same split now also holds for a
+model kept as one single file (before, all of it went on the card anyway), and
+a model whose design cannot yet be split between the two (Qwen 3.5, DeepSeek-2)
+now runs on the processor instead of being loaded whole onto a card too small
+for it.
 
 **Fixed: a split model's reply could stall for minutes when one computed step
 was lost in transit.** When a computer running part of a model finished its
@@ -50,7 +54,8 @@ to answer requests. With nobody connected there is nothing to receive; the
 check now looks for messages actually left waiting, which is what a stuck node
 shows.
 
-Also: a computed result that waits more than a second to be sent now says so in
+Also: `swarmllm test-split --gpu-layers N` checks a card/processor split
+without starting a node; a computed result that waits more than a second to be sent now says so in
 the log, with how many messages were ahead of it, to explain a 39-second delay
 seen in a field report; the reply-scoring tool can score against the prompt the
 node really sends; and a failed middle part of a split model taken over by two

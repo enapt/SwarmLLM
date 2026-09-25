@@ -1673,3 +1673,40 @@ Their agreement with llama.cpp is therefore exactly as recorded above.
 of this change at the time. The claim is the operation count, which is exact.
 llama.cpp keeps routing ON the device (`argsort_top_k` + `mul_mat_id`); a device
 top-k is the next step if one host copy per layer ever shows up in a profile.
+
+## A card/processor split is placed in every per-layer loop (2026-09-25)
+
+When a model does not fit the card whole, `ModelProcessPool::partial_gpu_layers`
+chooses n, the worker is started with `--gpu-layers n`, and the loader puts the
+segment's first n layers on the card and the rest on the processor. Three things
+must agree about n, and on 2026-09-25 each disagreed once:
+
+1. **The KV budget** charged the whole segment's weights and cache to the card
+   (#104: GLM-4-9B at 36/40 was told it had 15 MB, 136 tokens, and refused every
+   request). `hybrid::layers_on_device` is now the one count, read by the budget
+   and by the placement.
+2. **The loader's parallel whole-file path** (`parallel_data`, a thread per
+   layer over the mmap) took the segment's device for every layer, so a split
+   loaded whole on the card there while `placement.devices()` and the budget
+   counted n. The other four per-layer loops shadow `device`/`cos`/`sin` from
+   `placement.device_for`/`rope_for` on their first line (gotcha #714); the
+   parallel one now does too. Verified on an RTX 3070 with
+   `swarmllm test-split --gpu-layers N` on Llama-3.2-3B Q4_K_M: the card grew
+   +779 / +1387 / +2123 MiB for 4 / 14 / 28 layers, and all three runs picked
+   llama.cpp's first choice at every one of 40 tokens (`score_ids.py`, worst gap
+   0.00000). Only a single-file model or a legacy `model.gguf`/`source_path`
+   reaches this path, which is why no rig saw it; a reviewer reading the loader
+   did.
+3. **The pool** offered a split for architectures the loader refuses to split
+   (`arch_supports_hybrid`: Qwen 3.5 builds its RoPE outside the loop,
+   DeepSeek-2 is unverified MLA), and the loader then loaded them whole on a card
+   they do not fit. `split_for_card` reads the same predicate through
+   `VramFootprintInputs::splits_across_devices`; such a model goes to the
+   processor. Test: `a_model_the_loader_cannot_split_is_not_offered_a_split`
+   (with a splittable control).
+
+**Guard:** `every_layer_loop_in_the_loader_places_its_layer` finds the per-layer
+loops (both the `for layer_idx in layer_start..layer_end` and the
+`(layer_start..layer_end).map(|layer_idx| …)` form), requires at least five, and
+requires `placement.device_for(layer_idx)` in the opening 20 lines of each. Red
+with the parallel fix undone, naming that loop.

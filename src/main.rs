@@ -163,6 +163,9 @@ enum Commands {
         /// Prompt text
         #[arg(long, default_value = "Hello, how are you?")]
         prompt: String,
+        // `--gpu-layers` is the GLOBAL option above, not one of this
+        // command's own: a same-named arg of another type panics clap on
+        // access (the `model` comment above; `the_split_test_reads_the_global_gpu_layers`).
     },
     /// [Internal] Run a model worker subprocess (managed by daemon, not for direct use)
     #[command(hide = true)]
@@ -540,6 +543,7 @@ async fn async_main(mut cli: Cli) -> anyhow::Result<()> {
                 cli.model.clone().map(PathBuf::from),
                 max_tokens,
                 &prompt,
+                cli.gpu_layers,
             )
             .await
         }
@@ -609,4 +613,23 @@ fn init_tracing(verbose: u8) {
         .with_thread_ids(false)
         .with_ansi(use_ansi)
         .init();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `test-split --gpu-layers N` reaches the command as the GLOBAL option.
+    ///
+    /// A subcommand that declares its own `gpu_layers` of a different type
+    /// than the global one parses and then panics clap on access ("Mismatch
+    /// between definition and access") — the first version of this flag did,
+    /// as `chat --model` once did. Parsing is where that surfaces, so parse.
+    #[test]
+    fn the_split_test_reads_the_global_gpu_layers() {
+        let cli =
+            Cli::try_parse_from(["swarmllm", "test-split", "--gpu-layers", "14"]).expect("parses");
+        assert_eq!(cli.gpu_layers, Some(14));
+        assert!(matches!(cli.command, Some(Commands::TestSplit { .. })));
+    }
 }

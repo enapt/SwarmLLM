@@ -368,6 +368,19 @@ which was ~3 syncs and ~k+5 launches per token per layer on a card.
 
 → `docs/invariants/inference.md` § "A mixture-of-experts layer keeps its experts quantized"
 
+## A card/processor split is placed in EVERY per-layer loop, and offered only where the loader makes it (2026-09-25)
+
+**`split::hybrid::LayerPlacement` says where each layer goes; every per-layer loop in
+`split/loader/` shadows `device`, `cos` and `sin` from it on its first line** —
+five loops, one of them the PARALLEL whole-file load, which was missed and put a
+split model whole on the card. `hybrid::layers_on_device` is the one count the KV
+budget charges, and `hybrid::arch_supports_hybrid` is an allowlist the POOL reads
+too (`process_pool::split_for_card`): never offer a split the loader will not
+make. Guard: `every_layer_loop_in_the_loader_places_its_layer`. Check on a card
+with `swarmllm test-split --gpu-layers N` + `score_ids.py`.
+
+→ `docs/invariants/inference.md` § "A card/processor split is placed in every per-layer loop"
+
 ## Single-source-of-truth helpers — Inference kernels, caches and the tokenizer
 
 Each names the ONE place a decision is made. A second implementation of any of

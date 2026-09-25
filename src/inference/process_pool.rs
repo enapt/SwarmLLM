@@ -1603,6 +1603,53 @@ pub struct WorkerSummary {
     pub layers_total: Option<u32>,
 }
 
+/// How many of a segment's layers go on the card when the whole segment does
+/// not fit in `available_bytes`: `(on the card, in total)`, or `None` to leave
+/// the model to the processor.
+///
+/// **Only for an architecture the loader will split.** It loads any other one
+/// WHOLE on the card (`hybrid::arch_supports_hybrid`, with a warning), so a
+/// split offered here put a model that does not fit onto the card anyway — a
+/// failed load and a respawn on the processor at best. Qwen 3.5 and
+/// DeepSeek-2 are the two today (review of #104, 2026-09-25).
+fn split_for_card(
+    inputs: &crate::model::auto_manage::vram::VramFootprintInputs,
+    available_bytes: u64,
+) -> Option<(usize, usize)> {
+    if !inputs.splits_across_devices {
+        return None;
+    }
+    let layers = inputs.segment_layers as usize;
+    if layers == 0 {
+        return None;
+    }
+    // KV geometry per layer, in the units `kv_bytes_per_token` takes.
+    let kv_elems = (inputs.head_count_kv * inputs.head_dim) as usize;
+    // The card also holds the flash-attention f16 mirror of that cache for
+    // a grouped-query model — the loader charges it (`split::loader`, its
+    // KV budget), so the split must, or it leaves the card less room for a
+    // conversation than the model serves: GLM-4-9B split 36/40 on an 8 GB
+    // card covered ~5,300 of its 8,192 tokens (#104's follow-up). Same
+    // predicate the loader asks; a hybrid split is always on a card. The
+    // loader's one other condition — MLA (DeepSeek-2) never mirrors — cannot
+    // arise here: that architecture is refused above.
+    let mirrored = cfg!(feature = "flash-attn")
+        && crate::inference::layers::model_wants_kv_mirror(
+            inputs.head_count as usize,
+            inputs.head_count_kv as usize,
+        );
+    let n = crate::inference::split::hybrid::plan_gpu_layers(
+        available_bytes,
+        inputs.quantized_weight_bytes,
+        layers,
+        kv_elems,
+        kv_elems,
+        mirrored,
+        inputs.effective_context,
+    );
+    (n > 0).then_some((n, layers))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CpuReason {
     /// `inference.gpu_layers = 0` — the user asked for CPU.
@@ -2228,33 +2275,7 @@ impl ModelProcessPool {
             return None;
         }
         let inputs = self.footprint_inputs(model_id, segment)?;
-        let layers = inputs.segment_layers as usize;
-        if layers == 0 {
-            return None;
-        }
-        // KV geometry per layer, in the units `kv_bytes_per_token` takes.
-        let kv_elems = (inputs.head_count_kv * inputs.head_dim) as usize;
-        // The card also holds the flash-attention f16 mirror of that cache for
-        // a grouped-query model — the loader charges it (`split::loader`, its
-        // KV budget), so the split must, or it leaves the card less room for a
-        // conversation than the model serves: GLM-4-9B split 36/40 on an 8 GB
-        // card covered ~5,300 of its 8,192 tokens (#104's follow-up). Same
-        // predicate the loader asks; a hybrid split is always on a card.
-        let mirrored = cfg!(feature = "flash-attn")
-            && crate::inference::layers::model_wants_kv_mirror(
-                inputs.head_count as usize,
-                inputs.head_count_kv as usize,
-            );
-        let n = crate::inference::split::hybrid::plan_gpu_layers(
-            available_mb.saturating_mul(1024 * 1024),
-            inputs.quantized_weight_bytes,
-            layers,
-            kv_elems,
-            kv_elems,
-            mirrored,
-            inputs.effective_context,
-        );
-        (n > 0).then_some((n, layers))
+        split_for_card(&inputs, available_mb.saturating_mul(1024 * 1024))
     }
 
     fn effective_gpu_layers(&self, model_id: &ModelId) -> i32 {
@@ -2575,6 +2596,9 @@ impl ModelProcessPool {
             rope_dim: tensor_meta.rope_dim as u64,
             effective_context: effective_ctx,
             is_first,
+            splits_across_devices: crate::inference::split::hybrid::arch_supports_hybrid(
+                &crate::inference::model_arch::ModelArch::from_gguf_arch(&arch),
+            ),
         })
     }
 
@@ -8081,6 +8105,46 @@ mod admission_tests {
 
     fn pool() -> ModelProcessPool {
         ModelProcessPool::new(std::path::PathBuf::from("/tmp/swarmllm-admission-test"))
+    }
+
+    /// A model the loader will not split is never offered a split.
+    ///
+    /// The loader loads an architecture outside `hybrid::arch_supports_hybrid`
+    /// WHOLE on the card, so a split offered for one sent a model that does not
+    /// fit onto the card anyway. The same geometry is split when the
+    /// architecture allows it — the control, so this is not red for some other
+    /// reason (review of #104, 2026-09-25).
+    #[test]
+    fn a_model_the_loader_cannot_split_is_not_offered_a_split() {
+        use crate::inference::model_arch::ModelArch;
+        use crate::inference::split::hybrid::arch_supports_hybrid;
+        // A 7B-shaped segment: 28 layers, ~4.4 GB of weights, GQA 28/4.
+        let splittable = crate::model::auto_manage::vram::VramFootprintInputs {
+            quantized_weight_bytes: 4_400 * 1024 * 1024,
+            unquantized_bytes_per_element: None,
+            vocab_size: 152_064,
+            embedding_length: 3584,
+            segment_layers: 28,
+            head_count_kv: 4,
+            head_count: 28,
+            head_dim: 128,
+            rope_dim: 128,
+            effective_context: 8192,
+            is_first: true,
+            embedding_gatherable: true,
+            splits_across_devices: arch_supports_hybrid(&ModelArch::Qwen2),
+        };
+        let three_gb = 3 * 1024 * 1024 * 1024;
+        let (n, total) = split_for_card(&splittable, three_gb).expect("Qwen2 splits");
+        assert!(n > 0 && n < total, "{n} of {total}");
+
+        for arch in [ModelArch::Qwen35, ModelArch::DeepSeek2] {
+            let unsplittable = crate::model::auto_manage::vram::VramFootprintInputs {
+                splits_across_devices: arch_supports_hybrid(&arch),
+                ..splittable
+            };
+            assert_eq!(split_for_card(&unsplittable, three_gb), None, "{arch}");
+        }
     }
 
     /// The combined accessor and the single-answer methods must agree.
