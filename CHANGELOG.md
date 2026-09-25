@@ -1,5 +1,60 @@
 # Changelog
 
+## [Unreleased]
+
+**A model too big for your graphics card now answers instead of refusing
+every request, a split model no longer stalls for minutes when one piece of an
+answer is lost on the way back, a long conversation refused by one computer is
+now tried on another, and mixture-of-experts models do far less work per
+prompt.**
+
+**Fixed: a model that fits the graphics card only in part refused every
+request.** When a model is a little too big for the card, most of it goes on
+the card and the rest on the processor. The card's room for conversations was
+then worked out as though the whole model were on it, so, for example, GLM-4-9B
+on an 8 GB card was told it had almost no room and refused even a one-line
+question, every time, with nothing else to try on a computer alone. The check
+now counts only what is on the card, and that model answers, with room for
+about 5,300 tokens of conversation.
+
+**Fixed: a split model's reply could stall for minutes when one computed step
+was lost in transit.** When a computer running part of a model finished its
+step but the connection dropped before the result arrived, the computer
+coordinating the request did not know and waited out a long deadline before
+trying elsewhere. The sending computer did know, and was usually still
+connected over another link. It now sends that result once more. Every result
+now names the step it answers, so a late copy can never be mistaken for the
+next step's answer. Older versions ignore the new marker, and a resend only goes
+to computers that check it.
+
+**Fixed: a long conversation refused by the one computer running the whole
+model ended the request.** Each computer serves conversations up to its own
+limit (8,192 tokens unless raised). When a request went to a single computer
+running the whole model and the conversation was longer than that computer
+serves, its refusal came straight back as "too long", even when the model
+supports far more and another computer, or yours, could have answered. The
+request is now tried elsewhere. If nothing can serve the length, the message
+says whose limit it met. This completes the fix for split models in 0.3.206.
+
+**Faster: mixture-of-experts models (Qwen3-30B-A3B and similar) route a prompt
+in one pass per layer.** Routing each word of a prompt to its experts used to
+take several separate trips to the graphics card per word, per layer, and
+thousands for a long prompt. It now takes one per layer. The answers are
+byte-for-byte the same.
+
+**Fixed: a computer that lost its network reported itself broken.** During a
+Wi-Fi or network outage the node logged an error every 30 seconds saying it had
+stopped receiving from the swarm and should be restarted, and stopped offering
+to answer requests. With nobody connected there is nothing to receive; the
+check now looks for messages actually left waiting, which is what a stuck node
+shows.
+
+Also: a computed result that waits more than a second to be sent now says so in
+the log, with how many messages were ahead of it, to explain a 39-second delay
+seen in a field report; the reply-scoring tool can score against the prompt the
+node really sends; and a failed middle part of a split model taken over by two
+machines has now been tested live, and passes.
+
 ## [0.3.206-alpha] — 2026-09-25
 
 **Connections between computers stop dropping in the middle of large
