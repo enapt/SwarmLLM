@@ -1640,9 +1640,51 @@ the same logits against shifted tokens DISAGREE (worst 0.877). Tests:
 `an_expert_stack_is_cut_into_quantized_experts_holding_their_own_slice` (dtype
 kept, each expert equals its slice exactly), `a_moe_layer_loads_with_every_expert_quantized`.
 
-**Not verified:** a real-sized MoE model on this box; DeepSeek-2 and Llama-4
-routing defaults against llama.cpp's per-model files; Qwen 3.5-MoE's shared
+**Not verified:** a real-sized MoE model on this box; Qwen 3.5-MoE's shared
 gate (now applied when the GGUF carries it, as Qwen3-Next does). FUTURE_WORK #114.
+Llama-4 IS verified on tiny models (next section); DeepSeek-2 is refused (#116).
+
+### Llama 4 routes like llama.cpp hardcodes it, and normalises Q/K after RoPE (2026-09-25)
+
+llama.cpp's Llama 4 graph reads NO routing key: `build_moe_ffn(..., norm_w =
+false, ..., LLAMA_EXPERT_GATING_FUNC_TYPE_SIGMOID)`, selects on the raw logits
+(the same top-k, sigmoid being monotonic and there being no bias), and — the
+part a generic MoE gets wrong — multiplies each chosen expert's INPUT by its
+weight (`weight_before_ffn = arch == LLM_ARCH_LLAMA4`). We applied softmax +
+renormalize to the OUTPUT, which on the top-1 Scout weighs every expert 1.0.
+The loader now forces `MoeRoutingConfig { Sigmoid, no renorm, weight_before_ffn }`
+for Llama 4 whatever the GGUF says.
+
+The same check found the second difference: on every RoPE layer llama.cpp
+applies `ggml_rms_norm` (no weight, `f_norm_rms_eps`) to Q and K AFTER RoPE —
+`use_kq_norm`, true unless the model is the 128-expert Maverick. It lives in
+`LayerWeights::apply_rotary_emb`, the one place every attention path ropes Q
+and K, as `qk_rms_norm_after_rope`.
+
+**Verified** with `examples/make_tiny_llama4_gguf.py` (4 layers, layer 3 NoPE,
+4 experts + a shared one, SPM vocabulary) through `logits_reference_probe` +
+`compare_logits_reference.py` against llama-cpp-python 0.3.16:
+
+| fixture (unquantized) | before | after |
+|---|---|---|
+| top-1, whole | median cos 0.40 (Q8), top-1 2/24 | ≥ 0.999998, 24/24 |
+| top-2, whole | — | ≥ 0.999996, 24/24 |
+| top-2, split at layer 2 | — | ≥ 0.999996, 24/24 |
+| all-dense (attention only) | 0.60 median | 0.999999 |
+
+How it was found, which is the part worth keeping: the first "fix" changed
+nothing measurable, and comparing the all-dense fixture at `expert_count` 4 and
+128 (identical weights; only the Q/K-norm switch differs) showed llama.cpp's
+logits move while ours were bit-identical — the new field had never been set,
+because an edit script matched `is_nope` against a captured `is_nope,`.
+**Toggle the reference's switch and check that YOUR output moves too.** And
+judge on UNQUANTIZED weights: with Q8_0 both engines quantize activations and
+agree only to ~0.9994, and a top-1 router near-tie at one position then
+propagates through the KV cache and looks like a bug.
+
+Not implemented, both past 8,191 tokens: `attn_temperature_tuning` (Q scaled on
+NoPE layers by `log(floor((pos + 1) / 8192) + 1) * 0.1 + 1`) and chunked
+attention in 8,192-token blocks on three of every four layers.
 
 ### Routing is one host copy per layer, and the scatter is one add per expert (2026-09-25)
 

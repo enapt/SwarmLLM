@@ -478,21 +478,36 @@ impl SplitModel {
         // matches Mixtral / Qwen3-MoE with `norm_topk_prob=true` /
         // Llama 4 default. Differentiates DeepSeek-V2 strict (no
         // renorm) and DeepSeek-V3 (sigmoid gate).
-        let moe_routing = MoeRoutingConfig {
-            gating_func: md_get("expert_gating_func")
-                .and_then(|v| v.to_u32().map_err(SwarmError::internal))
-                .ok()
-                .map(|n| {
-                    if n == 2 {
-                        MoeGatingFunc::Sigmoid
-                    } else {
-                        MoeGatingFunc::Softmax
-                    }
-                })
-                .unwrap_or(MoeGatingFunc::Softmax),
-            renormalize_weights: md_get("expert_weights_norm")
-                .and_then(|v| v.to_bool().map_err(SwarmError::internal))
-                .unwrap_or_else(|_| moe_renormalizes_by_default(&arch_str)),
+        let moe_routing = if matches!(model_arch, ModelArch::Llama4) {
+            // llama.cpp's Llama 4 graph reads NO routing key: it passes sigmoid
+            // gating and `norm_w = false`, and applies each weight to the
+            // expert's INPUT (`models/llama4.cpp` + `build_moe_ffn`'s
+            // `weight_before_ffn`; the same in master and in 0.3.16, read
+            // 2026-09-25). Our generic softmax + renormalize gave every token
+            // of the top-1 Scout a weight of 1.0 on the output.
+            MoeRoutingConfig {
+                gating_func: MoeGatingFunc::Sigmoid,
+                renormalize_weights: false,
+                weight_before_ffn: true,
+            }
+        } else {
+            MoeRoutingConfig {
+                gating_func: md_get("expert_gating_func")
+                    .and_then(|v| v.to_u32().map_err(SwarmError::internal))
+                    .ok()
+                    .map(|n| {
+                        if n == 2 {
+                            MoeGatingFunc::Sigmoid
+                        } else {
+                            MoeGatingFunc::Softmax
+                        }
+                    })
+                    .unwrap_or(MoeGatingFunc::Softmax),
+                renormalize_weights: md_get("expert_weights_norm")
+                    .and_then(|v| v.to_bool().map_err(SwarmError::internal))
+                    .unwrap_or_else(|_| moe_renormalizes_by_default(&arch_str)),
+                weight_before_ffn: false,
+            }
         };
         tracing::debug!(
             gating_func = ?moe_routing.gating_func,
@@ -1194,6 +1209,7 @@ impl SplitModel {
                         attn_logit_softcap,
                         rope_dim,
                         skip_rope: false,
+                        qk_rms_norm_after_rope: None,
                     }));
                 }
             }
@@ -1329,6 +1345,9 @@ impl SplitModel {
                     attn_logit_softcap,
                     rope_dim,
                     skip_rope: is_nope,
+                    // llama.cpp `use_kq_norm`: on for every Llama 4 but the
+                    // 128-expert Maverick, and only where RoPE runs.
+                    qk_rms_norm_after_rope: (!is_nope && n_experts != 128).then_some(rms_norm_eps),
                 }));
             }
         } else if model_arch.is_hybrid_ssm() {
@@ -1923,6 +1942,7 @@ impl SplitModel {
                                         attn_logit_softcap,
                                         rope_dim,
                                         skip_rope: false,
+                                        qk_rms_norm_after_rope: None,
                                     }))
                                 })
                             })
@@ -2112,6 +2132,7 @@ impl SplitModel {
                         attn_logit_softcap,
                         rope_dim,
                         skip_rope: false,
+                        qk_rms_norm_after_rope: None,
                     }));
                 }
             }

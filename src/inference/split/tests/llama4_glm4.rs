@@ -4,7 +4,7 @@
 
 use super::super::rope::precompute_freqs_cis;
 use super::super::*;
-use super::common::{make_qmatmul, make_rms_norm, make_rms_norm_dim};
+use super::common::{assert_tensors_close, make_qmatmul, make_rms_norm, make_rms_norm_dim};
 use candle_core::{DType, Device, Tensor};
 
 #[test]
@@ -25,6 +25,92 @@ fn test_llama4_arch_supported() {
     assert_eq!(ModelArch::Llama4.default_activation(), Activation::SiLU);
     assert!(!ModelArch::Llama4.use_gemma_norm());
     assert_eq!(ModelArch::from_gguf_arch("llama4"), ModelArch::Llama4);
+}
+
+/// Llama 4 normalises Q and K per head by their RMS, with no weight, AFTER
+/// RoPE, on the layers that rope (llama.cpp `use_kq_norm` → `ggml_rms_norm`
+/// after `ggml_rope_ext`); a NoPE layer is left alone. Without it every
+/// position past the first disagreed with llama.cpp (median cosine 0.60 on a
+/// dense tiny Llama 4; 0.999999 with it).
+#[test]
+fn llama4_normalises_q_and_k_after_rope_where_rope_runs() {
+    let device = Device::Cpu;
+    let (head_dim, n_head, seq_len) = (16, 2, 5);
+    let (cos, sin) = precompute_freqs_cis(head_dim, 500000.0, 32, &device).unwrap();
+    let norm_w = Tensor::ones((n_head * head_dim,), DType::F32, &device).unwrap();
+    let dim = n_head * head_dim;
+    let plain = LayerWeights {
+        attention_wq: make_qmatmul(dim, dim, &device),
+        attention_wk: make_qmatmul(dim, dim, &device),
+        attention_wv: make_qmatmul(dim, dim, &device),
+        attention_wo: make_qmatmul(dim, dim, &device),
+        attention_bq: None,
+        attention_bk: None,
+        attention_bv: None,
+        attention_norm: make_rms_norm(&norm_w),
+        attn_q_norm: None,
+        attn_k_norm: None,
+        ffn: FfnVariant::Dense(Mlp {
+            ffn_gate: Some(make_qmatmul(dim, dim * 4, &device)),
+            ffn_down: make_qmatmul(dim * 4, dim, &device),
+            ffn_up: make_qmatmul(dim, dim * 4, &device),
+            activation: Activation::SiLU,
+        }),
+        ffn_norm: make_rms_norm(&norm_w),
+        post_attention_norm: None,
+        post_ffw_norm: None,
+        n_head,
+        n_kv_head: n_head,
+        head_dim,
+        cos,
+        sin,
+        use_rope_contiguous: false,
+        attn_logit_softcap: None,
+        rope_dim: head_dim,
+        skip_rope: false,
+        qk_rms_norm_after_rope: None,
+    };
+    let eps = 1e-5;
+    let normed = LayerWeights {
+        qk_rms_norm_after_rope: Some(eps),
+        ..plain.clone()
+    };
+    let x = Tensor::randn(0f32, 3.0, (1, n_head, seq_len, head_dim), &device).unwrap();
+
+    // RoPE first, then x / sqrt(mean(x²) + eps) over each head.
+    let roped = plain.apply_rotary_emb(&x, 2).unwrap();
+    let ms = roped
+        .sqr()
+        .unwrap()
+        .mean_keepdim(candle_core::D::Minus1)
+        .unwrap();
+    let want = roped
+        .broadcast_div(&(ms + eps).unwrap().sqrt().unwrap())
+        .unwrap();
+    let got = normed.apply_rotary_emb(&x, 2).unwrap();
+    assert_tensors_close(&got, &want, 1e-6, "Q/K normalised after RoPE");
+    let rms: Vec<f32> = got
+        .sqr()
+        .unwrap()
+        .mean_keepdim(candle_core::D::Minus1)
+        .unwrap()
+        .flatten_all()
+        .unwrap()
+        .to_vec1()
+        .unwrap();
+    assert!(rms.iter().all(|r| (r - 1.0).abs() < 1e-3), "{rms:?}");
+
+    // A NoPE layer neither ropes nor normalises.
+    let nope = LayerWeights {
+        skip_rope: true,
+        ..normed
+    };
+    assert_tensors_close(
+        &nope.apply_rotary_emb(&x, 2).unwrap(),
+        &x,
+        1e-7,
+        "NoPE untouched",
+    );
 }
 
 #[test]
@@ -74,6 +160,7 @@ fn test_partial_rope_glm4_style() {
         attn_logit_softcap: None,
         rope_dim,
         skip_rope: false,
+        qk_rms_norm_after_rope: None,
     };
 
     // Test that apply_rotary_emb handles partial RoPE
@@ -143,6 +230,7 @@ fn test_nope_skip_rope() {
         attn_logit_softcap: None,
         rope_dim: head_dim,
         skip_rope: true, // NoPE layer
+        qk_rms_norm_after_rope: None,
     };
 
     let x = Tensor::randn(0f32, 0.1, (1, n_head, seq_len, head_dim), &device).unwrap();
@@ -293,6 +381,7 @@ fn test_llama4_moe_layer_forward() {
             attn_logit_softcap: None,
             rope_dim,
             skip_rope: is_nope,
+            qk_rms_norm_after_rope: None,
         }));
     }
 

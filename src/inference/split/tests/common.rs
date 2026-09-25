@@ -145,6 +145,7 @@ fn make_test_split_model_impl(
             attn_logit_softcap: None,
             rope_dim,
             skip_rope: false,
+            qk_rms_norm_after_rope: None,
         }));
     }
 
@@ -231,6 +232,7 @@ pub(super) fn make_gqa_test_model(
             attn_logit_softcap,
             rope_dim,
             skip_rope: false,
+            qk_rms_norm_after_rope: None,
         }));
     }
 
@@ -329,6 +331,7 @@ pub(super) fn make_deepseek_test_model(hidden_dim: usize) -> SplitModel {
         attn_logit_softcap: None,
         rope_dim: head_dim,
         skip_rope: false,
+        qk_rms_norm_after_rope: None,
     });
 
     // Layer 1: DeepSeek MLA + MoE

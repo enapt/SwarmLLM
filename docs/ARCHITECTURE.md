@@ -106,6 +106,7 @@ swarmllm/
 │                 logits_reference_probe.rs + compare_logits_reference.py — our logits at
 │                 every position of a GGUF (one segment or split) against llama.cpp's, by
 │                 VALUE: how an architecture is verified on a tiny random model (#114);
+│                 make_tiny_llama4_gguf.py writes one where none exists (Llama 4, gguf-py);
 │                 score_against_reference.py — a reply teacher-forced through llama.cpp, rank
 │                 of every token: the test for a split reply where byte-equality is not;
 │                 `--lora` scores against llama.cpp applying an adapter, which
@@ -638,8 +639,8 @@ The SplitModel loader detects the model architecture from GGUF metadata
 | Attention | Standard MHA/GQA | Standard GQA | Standard MHA | Standard + output gate | Standard MHA | Standard MHA | Standard GQA | Standard MHA | MLA (low-rank Q/KV) | Extreme GQA (16:1) |
 | FFN | Dense | Dense + MoE (mixed) | Dense | Dense | Dense | Dense | Dense | Dense | MoE (top-k) + shared | Dense |
 | Context length | 4096 (default) | 131072 | 32768 | 131072 | 8192 | 4096 | 32768 | 16384 | 163840 | 131072 |
-| Special | — | NoPE every 4th layer | — | Hybrid SSM+attention | Embedding scaling (sqrt(d)), Gemma RmsNorm (+1), attn + final logit softcap, EOS 107, Gemma chat template | Fused QKV/FFN | — | — | Per-layer dense/MLA | Partial RoPE (50%) |
-| E2E verified | ✅ | — | ✅ | — | ✅ (Gemma2) | ✅ | — | — | ⛔ not supported (#116) | ✅ |
+| Special | — | NoPE every 4th layer; Q/K RMS-normalised after RoPE; sigmoid top-k, expert weighted on its INPUT | — | Hybrid SSM+attention | Embedding scaling (sqrt(d)), Gemma RmsNorm (+1), attn + final logit softcap, EOS 107, Gemma chat template | Fused QKV/FFN | — | — | Per-layer dense/MLA | Partial RoPE (50%) |
+| E2E verified | ✅ | tiny random model vs llama.cpp only (#114) | ✅ | — | ✅ (Gemma2) | ✅ | — | — | ⛔ not supported (#116) | ✅ |
 
 > **Phi-3 fused tensors**: Phi-3 GGUF models store `attn_qkv.weight` (Q+K+V concatenated) and `ffn_up.weight` (gate+up concatenated, no `ffn_gate.weight`). The loader dequantizes on CPU, splits by head dimensions, and re-quantizes to Q4_0 on the target device.
 

@@ -54,6 +54,16 @@ to answer requests. With nobody connected there is nothing to receive; the
 check now looks for messages actually left waiting, which is what a stuck node
 shows.
 
+**Fixed: Llama 4 models computed a different model from the one they are.**
+Two details of how Llama 4 works were missing: how it weighs its chosen expert
+(it scales what goes INTO the expert, by a different formula, where we scaled
+what came out) and a normalisation it applies to every attention step. Checked
+against llama.cpp, the reference implementation, on small test models built
+for the purpose: before, the two disagreed from the second word on; now they
+pick the same word at every position and agree to within a few millionths,
+split across two computers too. (No full-size
+Llama 4 has been run here; the smallest is 40 GB.)
+
 **Changed: DeepSeek models are no longer offered.** DeepSeek-V2 and V3 (and
 models built the same way) were listed as supported, but no DeepSeek file
 actually in circulation could load: a node, or its automatic model manager,

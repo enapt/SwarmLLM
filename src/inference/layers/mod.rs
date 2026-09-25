@@ -640,6 +640,10 @@ pub(crate) enum MoeGatingFunc {
 pub(crate) struct MoeRoutingConfig {
     pub(crate) gating_func: MoeGatingFunc,
     pub(crate) renormalize_weights: bool,
+    /// Scale each routed expert's INPUT by its weight instead of its output —
+    /// Llama 4, llama.cpp `build_moe_ffn`'s `weight_before_ffn`. An expert is
+    /// nonlinear, so `f(w·x)` and `w·f(x)` are two different models.
+    pub(crate) weight_before_ffn: bool,
 }
 
 impl Default for MoeRoutingConfig {
@@ -647,6 +651,7 @@ impl Default for MoeRoutingConfig {
         Self {
             gating_func: MoeGatingFunc::Softmax,
             renormalize_weights: true,
+            weight_before_ffn: false,
         }
     }
 }
@@ -993,13 +998,17 @@ impl MoeFfn {
                     self.experts.len()
                 ))
             })?;
-            let expert_out = expert_ffn(&batch_input, expert)?; // [batch_tokens, hidden]
-
-            // Apply per-token weights
+            // Per-token weights: on the expert's output, or — Llama 4 — on its
+            // input (`MoeRoutingConfig::weight_before_ffn`).
             let weight_vec: Vec<f32> = batch.iter().map(|&(_, w)| w).collect();
             let weight_tensor =
                 Tensor::from_vec(weight_vec, (batch.len(), 1), device)?.to_dtype(dtype)?;
-            weighted_parts.push(expert_out.broadcast_mul(&weight_tensor)?);
+            let weighted = if self.routing.weight_before_ffn {
+                expert_ffn(&batch_input.broadcast_mul(&weight_tensor)?, expert)?
+            } else {
+                expert_ffn(&batch_input, expert)?.broadcast_mul(&weight_tensor)?
+            }; // [batch_tokens, hidden]
+            weighted_parts.push(weighted);
             routed_rows.extend(batch.iter().map(|&(pos, _)| pos as i64));
         }
         let mut output = if weighted_parts.is_empty() {
@@ -1205,6 +1214,12 @@ pub(crate) struct LayerWeights {
     pub(crate) rope_dim: usize,
     /// If true, skip RoPE entirely for this layer (Llama 4 NoPE layers).
     pub(crate) skip_rope: bool,
+    /// Normalise Q and K over each head by their RMS, with NO weight, AFTER
+    /// RoPE, with this epsilon — Llama 4's `Llama4TextL2Norm` on its RoPE
+    /// layers (llama.cpp `use_kq_norm`, `ggml_rms_norm` after `ggml_rope_ext`;
+    /// off for the 128-expert Maverick). Not `attn_q_norm`/`attn_k_norm`, which
+    /// carry weights and run BEFORE RoPE (Qwen 3, Gemma 3).
+    pub(crate) qk_rms_norm_after_rope: Option<f64>,
 }
 
 impl LayerWeights {
@@ -2309,6 +2324,13 @@ pub(crate) fn run_attention(
     }
 }
 
+/// `x / sqrt(mean(x²) + eps)` over the last dimension, with no weight —
+/// `ggml_rms_norm` (llama.cpp), which Llama 4 applies to Q and K per head.
+fn rms_over_last_dim(x: &Tensor, eps: f64) -> CandleResult<Tensor> {
+    let mean_sq = x.sqr()?.mean_keepdim(candle_core::D::Minus1)?;
+    x.broadcast_div(&(mean_sq + eps)?.sqrt()?)
+}
+
 impl LayerWeights {
     pub(crate) fn apply_rotary_emb(&self, x: &Tensor, index_pos: usize) -> CandleResult<Tensor> {
         // Llama 4 NoPE layers: skip RoPE entirely
@@ -2319,7 +2341,13 @@ impl LayerWeights {
         let (_b_sz, _n_head, seq_len, _head_dim) = x.dims4()?;
         let cos = self.cos.narrow(0, index_pos, seq_len)?;
         let sin = self.sin.narrow(0, index_pos, seq_len)?;
-        rope_over_heads(x, &cos, &sin, self.rope_dim, self.use_rope_contiguous)
+        let roped = rope_over_heads(x, &cos, &sin, self.rope_dim, self.use_rope_contiguous)?;
+        // Here, not in the attention paths, so every path that ropes Q and K
+        // — prefill, decode, batched — also normalises them.
+        match self.qk_rms_norm_after_rope {
+            Some(eps) => rms_over_last_dim(&roped, eps),
+            None => Ok(roped),
+        }
     }
 
     // Eight arguments, like `forward_attn_batched`: the cache's shape,
@@ -2779,6 +2807,7 @@ mod batched_attention_tests {
             attn_logit_softcap: None,
             rope_dim,
             skip_rope: false,
+            qk_rms_norm_after_rope: None,
         }
     }
 

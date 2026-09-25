@@ -362,7 +362,10 @@ by bytes on disk. A new MoE family calls it. **Routing defaults are per family**
 (`moe_renormalizes_by_default` — llama.cpp hardcodes `norm_w` per graph): read the
 family's llama.cpp file, never assume. Verify with `examples/logits_reference_probe.rs`
 + `compare_logits_reference.py` on a tiny model; ONE isolated outlier position is a
-router near-tie, a shift at every position is a bug. **Routing is one host copy of
+router near-tie, a shift at every position is a bug — and judge a top-1 model on
+UNQUANTIZED weights (Q8 activation rounding flips near-ties). **Llama 4 is hardcoded in
+llama.cpp** (sigmoid, no renorm, weight on the expert's INPUT, Q/K RMS-norm after RoPE);
+`examples/make_tiny_llama4_gguf.py` builds the fixture. **Routing is one host copy of
 the layer's scores and one `index_add` per expert** (`topk_host`) — never per token,
 which was ~3 syncs and ~k+5 launches per token per layer on a card.
 

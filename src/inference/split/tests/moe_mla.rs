@@ -87,6 +87,7 @@ fn r132_softmax_no_renorm_weights_sum_below_one() {
     let cfg = MoeRoutingConfig {
         gating_func: MoeGatingFunc::Softmax,
         renormalize_weights: false,
+        weight_before_ffn: false,
     };
     let (indices, weights) = topk_cpu(&scores, 2, cfg).unwrap();
     let idx_vec: Vec<i64> = indices.to_vec1().unwrap();
@@ -115,6 +116,7 @@ fn r132_sigmoid_renorm_weights_sum_to_one() {
     let cfg = MoeRoutingConfig {
         gating_func: MoeGatingFunc::Sigmoid,
         renormalize_weights: true,
+        weight_before_ffn: false,
     };
     let (indices, weights) = topk_cpu(&scores, 2, cfg).unwrap();
     let idx_vec: Vec<i64> = indices.to_vec1().unwrap();
@@ -137,6 +139,7 @@ fn r132_sigmoid_no_renorm_weights_are_raw_sigmoids() {
     let cfg = MoeRoutingConfig {
         gating_func: MoeGatingFunc::Sigmoid,
         renormalize_weights: false,
+        weight_before_ffn: false,
     };
     let (indices, weights) = topk_cpu(&scores, 2, cfg).unwrap();
     let idx_vec: Vec<i64> = indices.to_vec1().unwrap();
@@ -654,14 +657,17 @@ fn the_batched_moe_forward_is_bit_identical_to_routing_token_by_token() {
         MoeRoutingConfig {
             gating_func: MoeGatingFunc::Softmax,
             renormalize_weights: false,
+            weight_before_ffn: false,
         },
         MoeRoutingConfig {
             gating_func: MoeGatingFunc::Sigmoid,
             renormalize_weights: true,
+            weight_before_ffn: false,
         },
         MoeRoutingConfig {
             gating_func: MoeGatingFunc::Sigmoid,
             renormalize_weights: false,
+            weight_before_ffn: false,
         },
     ];
     let dense = |o: usize, i: usize| {
@@ -721,4 +727,71 @@ fn the_batched_moe_forward_is_bit_identical_to_routing_token_by_token() {
             }
         }
     }
+}
+
+/// Llama 4 weights each chosen expert's INPUT by `sigmoid(router logit)`
+/// (llama.cpp `build_moe_ffn`'s `weight_before_ffn`), not its output.
+///
+/// With top-1, `x` and any positive multiple of it choose the same expert, and
+/// softmax + renormalize over one pick weighs it exactly 1.0 — so the Llama 4
+/// layer on `x` must equal the plain layer on `sigmoid(l)·x`, and must NOT
+/// equal `sigmoid(l)` times the plain layer on `x` (the expert is nonlinear).
+/// Checked end to end against llama.cpp on tiny Llama 4 GGUFs (FUTURE_WORK #114).
+#[test]
+fn a_llama4_expert_is_weighted_on_its_input() {
+    let device = Device::Cpu;
+    let (hidden, intermediate, n_experts) = (16, 24, 4);
+    let stack = |o, i| Tensor::randn(0f32, 0.3, (n_experts, o, i), &device).unwrap();
+    let (g, u, d) = (
+        stack(intermediate, hidden),
+        stack(intermediate, hidden),
+        stack(hidden, intermediate),
+    );
+    let gate = Tensor::randn(0f32, 0.5, (n_experts, hidden), &device).unwrap();
+    let moe = |routing| MoeFfn {
+        gate: gate.clone(),
+        experts: ExpertFfn::from_stacked(&g, &u, &d).unwrap(),
+        shared_gate: None,
+        shared_down: None,
+        shared_up: None,
+        shared_gate_inp: None,
+        n_experts_used: 1,
+        routing,
+    };
+    let llama4 = moe(MoeRoutingConfig {
+        gating_func: MoeGatingFunc::Sigmoid,
+        renormalize_weights: false,
+        weight_before_ffn: true,
+    });
+    let plain = moe(MoeRoutingConfig::default());
+
+    let x = Tensor::randn(0f32, 2.0, (1, 1, hidden), &device).unwrap();
+    let logits: Vec<f32> = x
+        .reshape((1, hidden))
+        .unwrap()
+        .matmul(&gate.t().unwrap())
+        .unwrap()
+        .flatten_all()
+        .unwrap()
+        .to_vec1()
+        .unwrap();
+    let top = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let w = 1.0 / (1.0 + (-top).exp());
+
+    let got = llama4.forward(&x).unwrap();
+    let on_input = plain.forward(&(&x * w as f64).unwrap()).unwrap();
+    assert_tensors_close(&got, &on_input, 1e-5, "Llama 4 = expert(sigmoid(l) * x)");
+    let on_output = (plain.forward(&x).unwrap() * w as f64).unwrap();
+    let gap: f32 = (&got - &on_output)
+        .unwrap()
+        .abs()
+        .unwrap()
+        .max_all()
+        .unwrap()
+        .to_scalar()
+        .unwrap();
+    assert!(
+        gap > 1e-3,
+        "weighting the input must differ from weighting the output: {gap}"
+    );
 }
