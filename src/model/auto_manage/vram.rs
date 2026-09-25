@@ -70,6 +70,10 @@ pub struct VramFootprintInputs {
     pub segment_layers: u64,
     /// `{arch}.attention.head_count_kv`.
     pub head_count_kv: u64,
+    /// `{arch}.attention.head_count` — with `head_count_kv`, whether the cache
+    /// carries the flash-attention f16 mirror on a card
+    /// (`layers::model_wants_kv_mirror`: grouped-query attention).
+    pub head_count: u64,
     /// `{arch}.attention.key_length`, or `embedding_length / head_count`.
     pub head_dim: u64,
     /// `{arch}.rope.dimension_count`.
@@ -1400,6 +1404,7 @@ mod footprint_tests {
             embedding_length: 2048,
             segment_layers: 22,
             head_count_kv: 4,
+            head_count: 4,
             head_dim: 64,
             rope_dim: 64,
             effective_context: 2048,
@@ -1418,6 +1423,7 @@ mod footprint_tests {
             embedding_length: 2048,
             segment_layers: 16,
             head_count_kv: 8,
+            head_count: 8,
             head_dim: 64,
             rope_dim: 64,
             effective_context: 4096,
@@ -1436,6 +1442,7 @@ mod footprint_tests {
             embedding_length: 3072,
             segment_layers: 32,
             head_count_kv: 32,
+            head_count: 32,
             head_dim: 96,
             rope_dim: 96,
             effective_context: 4096,
@@ -1647,6 +1654,7 @@ mod footprint_tests {
             embedding_length: 2304,
             segment_layers: 26,
             head_count_kv: 4,
+            head_count: 4,
             head_dim: 256,
             rope_dim: 256,
             effective_context,
@@ -1700,6 +1708,7 @@ mod footprint_tests {
             embedding_length: 0,
             segment_layers: 0,
             head_count_kv: 0,
+            head_count: 0,
             head_dim: 0,
             rope_dim: 0,
             effective_context: 0,
@@ -1718,6 +1727,7 @@ mod footprint_tests {
             embedding_length: u64::MAX,
             segment_layers: u64::MAX,
             head_count_kv: u64::MAX,
+            head_count: u64::MAX,
             head_dim: u64::MAX,
             rope_dim: u64::MAX,
             effective_context: u64::MAX,
@@ -1786,6 +1796,7 @@ mod footprint_tests {
             embedding_length: 896,
             segment_layers: 24,
             head_count_kv: 2,
+            head_count: 2,
             head_dim: 64,
             rope_dim: 64,
             effective_context: 4096,
@@ -1908,6 +1919,7 @@ mod footprint_tests {
             embedding_length: 3072,
             segment_layers: 32,
             head_count_kv: 32,
+            head_count: 32,
             head_dim: 96,
             rope_dim: 96,
             effective_context: 32768,

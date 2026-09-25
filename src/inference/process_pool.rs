@@ -2234,13 +2234,24 @@ impl ModelProcessPool {
         }
         // KV geometry per layer, in the units `kv_bytes_per_token` takes.
         let kv_elems = (inputs.head_count_kv * inputs.head_dim) as usize;
+        // The card also holds the flash-attention f16 mirror of that cache for
+        // a grouped-query model — the loader charges it (`split::loader`, its
+        // KV budget), so the split must, or it leaves the card less room for a
+        // conversation than the model serves: GLM-4-9B split 36/40 on an 8 GB
+        // card covered ~5,300 of its 8,192 tokens (#104's follow-up). Same
+        // predicate the loader asks; a hybrid split is always on a card.
+        let mirrored = cfg!(feature = "flash-attn")
+            && crate::inference::layers::model_wants_kv_mirror(
+                inputs.head_count as usize,
+                inputs.head_count_kv as usize,
+            );
         let n = crate::inference::split::hybrid::plan_gpu_layers(
             available_mb.saturating_mul(1024 * 1024),
             inputs.quantized_weight_bytes,
             layers,
             kv_elems,
             kv_elems,
-            false,
+            mirrored,
             inputs.effective_context,
         );
         (n > 0).then_some((n, layers))
@@ -2559,6 +2570,7 @@ impl ModelProcessPool {
             embedding_length: tensor_meta.embedding_length as u64,
             segment_layers,
             head_count_kv: tensor_meta.head_count_kv as u64,
+            head_count: tensor_meta.head_count as u64,
             head_dim: tensor_meta.head_dim as u64,
             rope_dim: tensor_meta.rope_dim as u64,
             effective_context: effective_ctx,

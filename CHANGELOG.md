@@ -14,8 +14,9 @@ the card and the rest on the processor. The card's room for conversations was
 then worked out as though the whole model were on it, so, for example, GLM-4-9B
 on an 8 GB card was told it had almost no room and refused even a one-line
 question, every time, with nothing else to try on a computer alone. The check
-now counts only what is on the card, and that model answers, with room for
-about 5,300 tokens of conversation.
+now counts only what is on the card, and the split between card and processor
+leaves room for the model's whole conversation length: that model now answers
+conversations up to its full 8,192 tokens.
 
 **Fixed: a split model's reply could stall for minutes when one computed step
 was lost in transit.** When a computer running part of a model finished its
