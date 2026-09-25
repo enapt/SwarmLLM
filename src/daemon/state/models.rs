@@ -128,8 +128,8 @@ pub struct ModelMgmt {
     /// Written only by `SharedState::ensure_model_geometry`. Absent means
     /// "never tried"; `Instant` is when another attempt is allowed.
     pub geometry_probe_retry_after: DashMap<crate::types::ModelId, std::time::Instant>,
-    /// The last manifest the WHOLE SWARM was handed for each model, and when:
-    /// `model → (manifest_hash, at)`.
+    /// Every manifest VERSION the WHOLE SWARM was handed recently, and when:
+    /// `(model, manifest_hash) → at`.
     ///
     /// This is what lets a holder stay quiet. Every holder of a model
     /// re-announces its manifest on the periodic full round, so a model held
@@ -143,7 +143,17 @@ pub struct ModelMgmt {
     /// manifest and from `HealthMonitor::broadcast_manifests` for our own
     /// broadcast; read by `manifest_heard_within`. Only a GOSSIPED arrival
     /// counts — see `MessageTransport`.
-    pub manifest_heard: DashMap<crate::types::ModelId, ([u8; 32], std::time::Instant)>,
+    ///
+    /// **Keyed by VERSION, not by model.** It held only the LAST hash heard per
+    /// model, so where holders disagree about a part (#61 — measured
+    /// 2026-09-25: 9 of 18 models in 2-5 versions) each holder always last
+    /// heard someone ELSE's version and re-announced its own every full round,
+    /// for ever: those nine were ~90% of the manifests a probe node received,
+    /// while every model whose holders agree arrived 0-2 times in ten minutes.
+    /// RFC 6206 leaves "consistent" to the protocol; here it is per version, so
+    /// each distinct version goes out once per window across the swarm — the
+    /// disagreement is still published, just not every five minutes.
+    pub manifest_heard: DashMap<(crate::types::ModelId, [u8; 32]), std::time::Instant>,
     pub model_request_counts: DashMap<crate::types::ModelId, AtomicU64>,
     pub resource_schedule: RwLock<crate::config::ResourceSchedule>,
     pub prune_history: RwLock<VecDeque<crate::types::PruneEvent>>,
@@ -561,13 +571,14 @@ impl ModelMgmt {
             return;
         }
         self.manifest_heard
-            .insert(model.clone(), (manifest_hash, std::time::Instant::now()));
+            .insert((model.clone(), manifest_hash), std::time::Instant::now());
     }
 
     /// Has the swarm been handed exactly this manifest within `window`?
     ///
     /// A DIFFERENT hash does not count: two holders disagreeing is information
-    /// the swarm needs, and suppressing it would hide the disagreement.
+    /// the swarm needs, and suppressing it would hide the disagreement. But a
+    /// different version heard SINCE does not un-hear this one — see the field.
     pub fn manifest_heard_within(
         &self,
         model: &crate::types::ModelId,
@@ -575,16 +586,15 @@ impl ModelMgmt {
         window: std::time::Duration,
     ) -> bool {
         self.manifest_heard
-            .get(model)
-            .is_some_and(|entry| &entry.0 == manifest_hash && entry.1.elapsed() < window)
+            .get(&(model.clone(), *manifest_hash))
+            .is_some_and(|at| at.elapsed() < window)
     }
 
     /// Drop every record older than `window`, which can no longer suppress
     /// anything. Called once per broadcast round, so the map holds at most
     /// the models the swarm heard about in the last window.
     pub fn forget_manifests_heard_before(&self, window: std::time::Duration) {
-        self.manifest_heard
-            .retain(|_, (_, at)| at.elapsed() < window);
+        self.manifest_heard.retain(|_, at| at.elapsed() < window);
     }
 
     /// Mutate a model's AcquisitionStatus if present. No-op if the model has
@@ -931,6 +941,30 @@ mod tests {
         assert!(
             state.manifest_heard.is_empty(),
             "an expired record is swept"
+        );
+    }
+
+    /// The live shape found 2026-09-25: two holders disagree about a part, so
+    /// the model exists in two versions. Remembering only the LAST hash heard
+    /// made each holder forget its own version the moment the other arrived,
+    /// and both re-announced every round for ever.
+    #[test]
+    fn hearing_another_version_does_not_unhear_this_one() {
+        let state = make_mgmt();
+        let model = ModelId("llama-3.2-3b".to_string());
+        let (ours, theirs) = ([1u8; 32], [2u8; 32]);
+        let window = std::time::Duration::from_secs(30 * 60);
+
+        state.note_manifest_heard(&model, ours, crate::types::MessageTransport::Gossip);
+        state.note_manifest_heard(&model, theirs, crate::types::MessageTransport::Gossip);
+        assert!(
+            state.manifest_heard_within(&model, &ours, window),
+            "the swarm heard our version; hearing theirs after it changes nothing about that"
+        );
+        assert!(state.manifest_heard_within(&model, &theirs, window));
+        assert!(
+            !state.manifest_heard_within(&model, &[3u8; 32], window),
+            "a version nobody has heard is still never suppressed"
         );
     }
 

@@ -88,7 +88,7 @@ until readers leave (#90's shape); `clippy.toml` fails the build on one.
 ## Testing
 
 **Always say which feature set a count came from.** With
-`--features dev,claude-subscription`: **2928 lib** (+14 ignored),
+`--features dev,claude-subscription`: **2929 lib** (+14 ignored),
 79 integration (31 + 34 + 14 `yamux_substream`), **169 repo-consistency**,
 1 `api_key_side_effects`, 55 `swarmllm-types`, and 11 in the vendored
 request-response patch — plus 15 in the `swarmllm` BIN target (`cli::*`, counted

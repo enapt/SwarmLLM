@@ -1987,6 +1987,41 @@ other round on both nodes (144 of 146) logged `sent=0 suppressed=1`, so the
 mechanism fired rather than the outcome changing for some other reason.
 Scripts: `trickle_ab_v2.sh` (session e3b7669c scratchpad).
 
+### Re-measured once the fleet carried it — and why it only half worked (2026-09-25)
+
+Every connected peer ran ≥ v0.3.201. The release node, 57-85 min up, idle,
+1660 s window:
+
+```
+                   v0.3.200 (09-23)          fleet on Trickle (09-25)
+transport          42.2 in / 41.9 out KB/s   31.3 in / 23.5 out KB/s
+gossip (mesh)      39.9 KB/s                 26.0 KB/s
+ModelManifest      0.22 msg/s, 86.8%         0.083 msg/s, 74.9%, 40.6 KB each
+```
+
+2.6x fewer manifests, but 138 in 28 minutes where 19 known models predict ~19.
+A probe node logging every received manifest (`DIAG: manifest received`,
+debug, with each part's hash prefix) settled it: **every model had ONE
+publisher, and 9 of 18 arrived in 2-5 VERSIONS** — the same parts carrying
+different real hashes (no placeholders): holders that disagree about a part's
+bytes, `docs/FUTURE_WORK.md` #61. Those nine were 100 of 111 and 63 of 64
+gossiped copies in two windows (~90%); every model whose holders agree arrived
+0-2 times in ten minutes.
+
+**Mechanism.** `manifest_heard` held only the LAST hash per model. With two
+versions in the swarm each holder's last-heard hash was always the other's, so
+its own never counted as heard and it re-announced every full round, for ever —
+the disagreement re-published every five minutes although receivers keep their
+own hashes over a stranger's (`keep_known_hashes_over_contradicting_ones`) and
+learn nothing from the repeat. RFC 6206 leaves "consistent" for the protocol to
+define (its §6); here consistency is per VERSION. Keyed by `(model, hash)`,
+each version goes out once per window swarm-wide and a disagreement is still
+published. Test: `hearing_another_version_does_not_unhear_this_one` (red with
+the old last-hash-only behaviour). **Expected after the fleet updates:** about
+one manifest per version per window, ~0.02 msg/s where 0.083 was measured —
+to be re-measured, not assumed. The tensor-table redesign stays deferred: it
+would shrink each copy, while this removes the copies.
+
 ## A chained hop's refusal goes to the coordinator (2026-09-25)
 
 **What happened.** The first live run of a composite failover

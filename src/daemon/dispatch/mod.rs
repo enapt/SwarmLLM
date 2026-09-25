@@ -1301,6 +1301,29 @@ pub(crate) async fn dispatch_network_messages(
                                         // reject zero-hash to prevent gossip poisoning.
                                         match manifest.verify_hash_strict() {
                                             Ok(()) => {
+                                                // Which copy of which model, from whom. Trickle
+                                                // suppresses only an EXACT hash, and the hash
+                                                // covers `publisher` and `publish_date`, so
+                                                // counting distinct hashes per model here is how
+                                                // to see whether holders' copies can ever agree
+                                                // (FUTURE_WORK #91, 2026-09-25 re-measure).
+                                                tracing::debug!(
+                                                    model = %manifest.id,
+                                                    manifest_hash = %hex::encode(&manifest.manifest_hash[..8]),
+                                                    // Per part, the first 2 bytes of its hash;
+                                                    // `0000` is a placeholder for a part the
+                                                    // publisher's copy does not know.
+                                                    shard_hashes = %manifest
+                                                        .shards
+                                                        .iter()
+                                                        .map(|s| hex::encode(&s.hash[..2]))
+                                                        .collect::<Vec<_>>()
+                                                        .join(","),
+                                                    publisher = %manifest.publisher,
+                                                    sender = ?authenticated_sender.as_ref().map(|s| s.to_string()),
+                                                    ?transport,
+                                                    "DIAG: manifest received"
+                                                );
                                                 // Recorded only once verified, so a forged copy
                                                 // carrying a real hash cannot silence the holders
                                                 // who would otherwise re-announce it. And only for

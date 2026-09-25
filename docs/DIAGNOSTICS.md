@@ -565,6 +565,7 @@ histograms. Adding a field means adding it there once, not at each surface.
 | WARN  | `DIAG: InboundFailure` — `pending_channels` | manager/events.rs |
 | DEBUG | `DIAG: remote-generate stream complete` — `streamed_count`, the number the done token carries so the coordinator can tell a finished stream from one whose end overtook its middle | daemon/dispatch/remote_generate.rs |
 | DEBUG | `DIAG: ResponseSent event` — confirms response written to wire. Per-message, so `-v`: at info these were three quarters of an idle node's log, and one line per streamed token under load | manager/events.rs |
+| DEBUG | `DIAG: manifest received` — every VERIFIED manifest: `model`, `manifest_hash`, each part's hash prefix (`0000` = a part the sender's copy does not know), `publisher`, `sender`, `transport`. Count distinct hashes per model to see how many VERSIONS of a model the swarm is carrying — the reading that found #91's remaining traffic (#61's disagreements re-announced every round). Run it on a throwaway probe with `SWARMLLM_LOGGING_LEVEL=debug`, never by raising the live node's level | daemon/dispatch/mod.rs |
 
 ### Failure Paths
 

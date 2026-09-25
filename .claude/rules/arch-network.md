@@ -520,13 +520,17 @@ and served nothing while spending ~2.6 Mbit/s.
   Every holder re-announced its manifests on its own full round, so a model
   held by *k* nodes went out *k* times per round — **87% of an idle node's
   received gossip** (2026-09-23), none of it news. `state.models.manifest_heard`
-  holds the last hash the whole swarm was gossiped per model;
+  holds every `(model, hash)` the whole swarm was gossiped in the window;
   `broadcast_manifests` stays quiet about that exact hash for
   `MANIFEST_QUIET_WINDOW`. ⚠ **Only a GOSSIPED arrival counts** — a point-to-point
   catch-up reached one node, and counting it lets reconnects silence every
   holder. `AuthenticatedMessage.transport` is required for that reason, and
   `note_manifest_heard` ignores `Direct`. ⚠ Record only AFTER verification, and
-  never suppress a DIFFERENT hash — a disagreement is information.
+  never suppress a DIFFERENT hash — a disagreement is information. ⚠ **Keyed
+  by VERSION**: remembering only the last hash per model let two disagreeing
+  versions (#61) un-hear each other, and ~90% of manifest gossip was holders
+  of 9 disputed models re-announcing every round (2026-09-25). Each version
+  now goes out once per window, swarm-wide.
 
 ## A counter named for an outcome may only be counting the attempt
 
