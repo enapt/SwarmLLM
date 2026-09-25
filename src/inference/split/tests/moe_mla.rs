@@ -742,61 +742,98 @@ fn the_batched_moe_forward_is_bit_identical_to_routing_token_by_token() {
 /// layer on `x` must equal the plain layer on `sigmoid(l)·x`, and must NOT
 /// equal `sigmoid(l)` times the plain layer on `x` (the expert is nonlinear).
 /// Checked end to end against llama.cpp on tiny Llama 4 GGUFs (FUTURE_WORK #114).
+///
+/// Deterministic, and `x` is scaled so the chosen expert's logit is 0.5
+/// (`sigmoid` ≈ 0.62): with unseeded random weights a large top logit made
+/// `sigmoid` ≈ 1, where the two weightings nearly coincide and the gap check
+/// failed about one run in seven.
 #[test]
 fn a_llama4_expert_is_weighted_on_its_input() {
     let device = Device::Cpu;
-    let (hidden, intermediate, n_experts) = (16, 24, 4);
-    let stack = |o, i| Tensor::randn(0f32, 0.3, (n_experts, o, i), &device).unwrap();
-    let (g, u, d) = (
-        stack(intermediate, hidden),
-        stack(intermediate, hidden),
-        stack(hidden, intermediate),
-    );
-    let gate = Tensor::randn(0f32, 0.5, (n_experts, hidden), &device).unwrap();
-    let moe = |routing| MoeFfn {
-        gate: gate.clone(),
-        experts: ExpertFfn::from_stacked(&g, &u, &d).unwrap(),
-        shared_gate: None,
-        shared_down: None,
-        shared_up: None,
-        shared_gate_inp: None,
-        n_experts_used: 1,
-        routing,
+    let (hidden, intermediate, n_experts) = (16usize, 24usize, 4usize);
+    // A small deterministic generator: values in [-scale, scale].
+    let det = |seed: u64, len: usize, scale: f32| -> Vec<f32> {
+        let mut state = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (0..len)
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                ((state >> 40) as f32 / (1u64 << 24) as f32 * 2.0 - 1.0) * scale
+            })
+            .collect()
     };
-    let llama4 = moe(MoeRoutingConfig {
-        gating_func: MoeGatingFunc::Sigmoid,
-        renormalize_weights: false,
-        weight_before_ffn: true,
-    });
-    let plain = moe(MoeRoutingConfig::default());
+    let mut checked = 0;
+    for seed in 1..=8u64 {
+        let t = |salt: u64, dims: &[usize], scale: f32| {
+            let len = dims.iter().product();
+            Tensor::from_vec(det(seed * 31 + salt, len, scale), dims, &device).unwrap()
+        };
+        let (g, u, d) = (
+            t(1, &[n_experts, intermediate, hidden], 0.5),
+            t(2, &[n_experts, intermediate, hidden], 0.5),
+            t(3, &[n_experts, hidden, intermediate], 0.5),
+        );
+        let gate = t(4, &[n_experts, hidden], 0.8);
+        let moe = |routing| MoeFfn {
+            gate: gate.clone(),
+            experts: ExpertFfn::from_stacked(&g, &u, &d).unwrap(),
+            shared_gate: None,
+            shared_down: None,
+            shared_up: None,
+            shared_gate_inp: None,
+            n_experts_used: 1,
+            routing,
+        };
+        let llama4 = moe(MoeRoutingConfig {
+            gating_func: MoeGatingFunc::Sigmoid,
+            renormalize_weights: false,
+            weight_before_ffn: true,
+        });
+        let plain = moe(MoeRoutingConfig::default());
 
-    let x = Tensor::randn(0f32, 2.0, (1, 1, hidden), &device).unwrap();
-    let logits: Vec<f32> = x
-        .reshape((1, hidden))
-        .unwrap()
-        .matmul(&gate.t().unwrap())
-        .unwrap()
-        .flatten_all()
-        .unwrap()
-        .to_vec1()
-        .unwrap();
-    let top = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-    let w = 1.0 / (1.0 + (-top).exp());
+        let v = t(5, &[1, 1, hidden], 1.0);
+        let top_of = |x: &Tensor| -> f32 {
+            let logits: Vec<f32> = x
+                .reshape((1, hidden))
+                .unwrap()
+                .matmul(&gate.t().unwrap())
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .to_vec1()
+                .unwrap();
+            logits.iter().copied().fold(f32::NEG_INFINITY, f32::max)
+        };
+        let top = top_of(&v);
+        if top <= 0.05 {
+            continue; // scaling by a negative would change the chosen expert
+        }
+        let x = (&v * (0.5 / top) as f64).unwrap();
+        let w = 1.0 / (1.0 + (-top_of(&x)).exp());
 
-    let got = llama4.forward(&x).unwrap();
-    let on_input = plain.forward(&(&x * w as f64).unwrap()).unwrap();
-    assert_tensors_close(&got, &on_input, 1e-5, "Llama 4 = expert(sigmoid(l) * x)");
-    let on_output = (plain.forward(&x).unwrap() * w as f64).unwrap();
-    let gap: f32 = (&got - &on_output)
-        .unwrap()
-        .abs()
-        .unwrap()
-        .max_all()
-        .unwrap()
-        .to_scalar()
-        .unwrap();
+        let got = llama4.forward(&x).unwrap();
+        let on_input = plain.forward(&(&x * w as f64).unwrap()).unwrap();
+        assert_tensors_close(&got, &on_input, 1e-5, "Llama 4 = expert(sigmoid(l) * x)");
+        let on_output = (plain.forward(&x).unwrap() * w as f64).unwrap();
+        let gap: f32 = (&got - &on_output)
+            .unwrap()
+            .abs()
+            .unwrap()
+            .max_all()
+            .unwrap()
+            .to_scalar()
+            .unwrap();
+        assert!(
+            gap > 1e-3,
+            "seed {seed}: weighting the input must differ from weighting the output: {gap}"
+        );
+        checked += 1;
+    }
     assert!(
-        gap > 1e-3,
-        "weighting the input must differ from weighting the output: {gap}"
+        checked >= 3,
+        "only {checked} seeds had a positive top logit"
     );
 }
