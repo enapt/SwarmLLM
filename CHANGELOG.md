@@ -1,5 +1,92 @@
 # Changelog
 
+## [0.3.205-alpha] — 2026-09-25
+
+**Docker images run models about three times faster, every word of a reply
+is chosen faster, and emoji and non-Latin text survive a model split across
+computers.** Also the fixes that were waiting since 0.3.204: a computer that
+briefly cannot read a step of a split reply no longer fails the request,
+`--no-update-check` works again, and Docker images are published only once a
+release is signed.
+
+**Faster: Docker images now carry the same fast build the downloads use.**
+Every x86-64 download has been built for AVX2 since 0.3.79, but both Docker
+images were built without it, so a container ran every model 2.8 to 3.7 times
+slower per word and 7 to 8.7 times slower reading the prompt. The CPU image
+now carries both builds and picks the one your processor can run when it
+starts, so an older processor, or an Apple Silicon Mac whose emulation lacks
+AVX2, still works - slowly - instead of failing with "Illegal instruction".
+The CUDA image uses the fast build only, like the CUDA download.
+
+**Faster: choosing each word of a reply costs about 15 times less.** With the
+default settings the node went over a model's whole vocabulary - 32,000 to
+262,000 entries - three times for every word it generated, after already
+ruling out all but 40 of them. It now works on those 40 only. On small models
+with large vocabularies (Qwen, Gemma) that was about a tenth of every word's
+time on a graphics card. Replies do not change: for the same random draw the
+same word is chosen.
+
+**Faster: a model split across computers no longer resends the whole reply so
+far with every word.** The computer that picks each word was sent every word
+generated so far on every step - about 8 KB a step by the two-thousandth
+word, more than the model's own data for that step - although it reads them
+only when a frequency or presence penalty is set. They are sent only then.
+
+**Fixed: emoji and Chinese, Japanese or Korean text turned into "�" in
+replies from a model split across computers.** Such characters arrive one
+byte at a time, and the computer coordinating a split reply converted each
+byte on its own, so "🎉" came out as "����" - in streamed and complete
+replies alike. Characters are now held back until they are whole, on every
+path. A reply cut off part-way through a character by its length limit shows
+one "�" for the fragment, the same as a reply that was not streamed.
+
+**Fixed: a stop sequence ending in a non-Latin character crashed the reply
+after it had been written.** Asking for a reply to stop at "。" or "\n用户"
+made the node fail the request once the whole reply had been generated, on
+every retry. The same fault made the model details panel fail for any model
+whose chat template has Chinese text at a certain point, and the provider
+health panel fail on some upstream error messages.
+
+**Fixed: a slow HuggingFace download could stop a node receiving anything
+from the swarm.** While a node fetched a model's details from HuggingFace -
+minutes, with retries - it held a lock that the part of the node receiving
+messages from other computers also needs, so one message about that model
+stopped it taking any message at all while everything else carried on and the
+node still reported itself healthy. This matches the unexplained 45-minute
+stall reported earlier, though it is not confirmed as that stall's cause. Nine
+such places were fixed, and the build now refuses a new one.
+
+**Fixed, Windows: a node could fail every request, or shut itself down, in
+the first minutes after the PC starts.** On Windows the clock the node uses
+counts from when the machine started, and depending on the version of Rust a
+release was built with, looking further back than that could crash. Every
+successful request looked ten minutes back, so each one crashed for the first
+ten minutes after power-on, and the model manager looked two minutes back at
+startup, which stopped the whole node - a node set to start at login could
+die at startup. All 23 places are rewritten and the build now refuses a new
+one. Linux and macOS were never affected.
+
+**Fixed: a computer that briefly cannot decrypt a step of a split reply no
+longer fails the request.** After the connection between two computers
+re-keys, the step the other side could not read is sent again and the reply
+carries on. Before, the request failed. With the persistent pipeline stream
+turned on (off by default) such a step used to wait out the whole deadline
+instead of being answered at once; it is answered at once now.
+
+**Fixed: `swarmllm run --no-update-check` did nothing since 0.3.191.** It
+stops update checks again. And saving a setting on the dashboard no longer
+undoes how the node was started: `--anchor` stays on and `--no-update-check`
+stays off.
+
+**Fixed: Docker images were published, and `latest` moved, the moment a tag
+was pushed - before the release was signed.** That is how images for the
+withdrawn 0.3.199 and the unsigned 0.3.202 and 0.3.203 went out; those have
+been removed. Images now publish only once a release is signed.
+
+**Also:** saving a peer's nickname no longer briefly pauses everything the
+node receives from the swarm, and a stand-in computer that takes over the last
+part of a split reply is only sent data it can read.
+
 ## [0.3.204-alpha] — 2026-09-24
 
 **Settings now tell you what each contribution level really uses, the Models
