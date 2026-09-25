@@ -40,13 +40,24 @@
 #          n-gram-only path and the rest the standard loop (it self-disables
 #          per process), so one arm yields both. Vary one thing per arm with
 #          EXTRA_TOML, e.g. EXTRA_TOML=$'[inference]\nactivation_compression = false'.
+#   context  the FAILOVER topology, but B serves a SHORTER conversation than the
+#          long prompt (CEIL_B, default 512, as B's own max_seq_len_override) —
+#          the field report of 2026-09-25, where an 8192-token peer refused an
+#          8560-token prompt the coordinator served at 65536 and the request
+#          was abandoned although a standby existed. Two asks: with C and D up,
+#          PASS = A either skipped B (it ADVERTISES its ceiling) or failed over
+#          from B's refusal, C+D took the segment over, no router retry, 200;
+#          then with D stopped, nobody can serve the length, and PASS = a 400
+#          that names the other machines' limit instead of telling the caller
+#          to raise their own. Run BIN_B = an older release to see the refusal
+#          path, and BIN_A = an older release for the baseline (it gives up).
 #   fetch  A holds every part, B only part 0; B is asked to download part
 #          FETCH_SHARD (default 1) from A over P2P. Prints whether it landed and
 #          every `network event loop stalled` line B logged meanwhile — the hash
 #          of a downloaded part ran ON the event loop until FUTURE_WORK #108
 #          (~229 ms per 512 MB part, over the loop's 100 ms tripwire).
 #
-# usage: split_rig.sh split|kill|failover|repeat|fetch <binary> [<binary for B>]
+# usage: split_rig.sh split|kill|failover|context|repeat|fetch <binary> [<binary for B>]
 #   MODEL      model id (default: tinyllama for split, llama-3.2-3b for kill
 #              and failover)
 #   SHARDS_A   shard indices A holds, comma-separated (default 0; kill: 0,LAST)
@@ -64,10 +75,13 @@
 # isolation (#352).
 set -u
 
-MODE="${1:?usage: split_rig.sh split|kill|failover|repeat|fetch <binary> [<binary for B>]}"
+MODE="${1:?usage: split_rig.sh split|kill|failover|context|repeat|fetch <binary> [<binary for B>]}"
 BIN_A="${2:?binary}"
 BIN_B="${3:-$BIN_A}"
-case "$MODE" in split|kill|failover|repeat|fetch) ;; *) echo "mode must be split, kill, failover, repeat or fetch"; exit 2 ;; esac
+case "$MODE" in split|kill|failover|context|repeat|fetch) ;; *) echo "mode must be split, kill, failover, context, repeat or fetch"; exit 2 ;; esac
+if [ "$MODE" = context ] && printf '%s' "${EXTRA_TOML:-}" | grep -q '^\[inference\]'; then
+  echo "context: EXTRA_TOML may not open [inference] — B's ceiling is written there"; exit 2
+fi
 [ -x "$BIN_A" ] && [ -x "$BIN_B" ] || { echo "binary not executable"; exit 2; }
 if [ "$MODE" = split ]; then
   MODEL="${MODEL:-tinyllama-1.1b-chat-v1.0.q4-k-m}"
@@ -94,7 +108,7 @@ elif [ "$MODE" = fetch ]; then
   # default here, 7 s an 8 MiB chunk), which is a rig measuring the hash's
   # cost, not the link's, waiting minutes for nothing.
   EXTRA_TOML="${EXTRA_TOML:-$'[resources]\nmax_bandwidth_mbps = 10000'}"
-elif [ "$MODE" = failover ]; then
+elif [ "$MODE" = failover ] || [ "$MODE" = context ]; then
   # B's range must need TWO nodes to cover it, so C stops one shard short.
   [ "$N" -ge 3 ] || { echo "failover needs a model with at least 3 shard files here; $MODEL has $N"; exit 2; }
   SHARDS_A=0
@@ -193,10 +207,12 @@ ADDR=$(echo "$ADDRS" | grep -v "10\.255\.255\.254" | head -1)
 [ -z "$ADDR" ] && ADDR=$(echo "$ADDRS" | head -1)
 [ -n "$ADDR" ] || { echo "A published no address to dial"; exit 1; }
 make_node "$BASE/B" "$SHARDS_B" "\"$ADDR\""
+# B alone serves a conversation shorter than the long prompt.
+[ "$MODE" = context ] && printf '\n[inference]\nmax_seq_len_override = %s\n' "${CEIL_B:-512}" >> "$BASE/B/config.toml"
 PB=$(start "$BASE/B" 8920 "$BIN_B" "${GPU_B:-}")
 up "$BASE/B" 8920 || exit 1
 PEERS_EXPECTED=1
-if [ "$MODE" = failover ]; then
+if [ "$MODE" = failover ] || [ "$MODE" = context ]; then
   # Processor only unless asked otherwise (all four nodes): four daemons on
   # one card is #104's setup, and a KV refusal there would read as a failover
   # result.
@@ -282,7 +298,7 @@ if [ "$MODE" = repeat ]; then
   exit 0
 fi
 
-if [ "$MODE" = failover ]; then
+if [ "$MODE" = failover ] || [ "$MODE" = context ]; then
   node_id() { # port -> the 16-hex-digit id a plan prints
     curl -s -m 5 -H "Authorization: Bearer $(cat "$1")" "localhost:$2/api/admin/stats" \
       | python3 -c 'import sys,json; print(json.load(sys.stdin)["node_id"][:16])'
@@ -309,6 +325,41 @@ sys.exit(0 if ok else 1)' "$1" "$IB" "$IC" "$ID"
   }
   wait_plan healthy || exit 1
   echo "failover: plan is A→B with C+D covering B's range between them"
+fi
+
+if [ "$MODE" = context ]; then
+  retried0=$(grep -c 'retrying with fresh pipeline' "$BASE/A/node.log")
+  ask "$PROMPT" 120 context_takeover | tee "$OUT/context.jsonl"
+  skipped=$(grep -c 'not sending the prompt to a peer that serves a shorter' "$BASE/A/node.log")
+  refused=$(grep -c 'remote segment serves a shorter conversation than this' "$BASE/A/node.log")
+  taken=$(grep -c 'segment taken over by several nodes' "$BASE/A/node.log")
+  gave_up=$(grep -c 'Remote segment refused the request itself' "$BASE/A/node.log")
+  retried=$(( $(grep -c 'retrying with fresh pipeline' "$BASE/A/node.log") - retried0 ))
+  echo "context: A skipped B $skipped time(s), failed over from B's refusal $refused, composite takeover $taken, gave up $gave_up, router retries $retried"
+  grep -E 'This conversation is [0-9]+ tokens' "$BASE/B/node.log" | head -2 | cut -c1-260
+  # Nobody left who serves the length: D stopped, so B's range has no cover.
+  kill "$PD"; PD=""
+  for _ in $(seq 1 30); do [ "$(peers)" -eq 2 ] && break; sleep 2; done
+  ask "$PROMPT" 120 context_nobody | tee -a "$OUT/context.jsonl"
+  printf '%s' "$PROMPT" > "$OUT/prompt.txt"
+  python3 - "$OUT/context.jsonl" "$skipped" "$refused" "$taken" "$retried" <<'PY'
+import json, sys
+rows = [json.loads(l) for l in open(sys.argv[1])]
+skipped, refused, taken, retried = map(int, sys.argv[2:6])
+first, second = rows[0], rows[1]
+ok1 = (skipped + refused) >= 1 and taken >= 1 and retried == 0 \
+    and first["status"].endswith("200 ok") and bool(first.get("content"))
+msg = second.get("content") or ""
+ok2 = " 400 " in second["status"] + " " and "serve at most" in msg and "Raise it in Settings" not in msg
+print(f"context: with C+D up -> {first['status']}  {'PASS' if ok1 else 'FAIL'}")
+print(f"context: nobody serves it -> {second['status']}  {'PASS' if ok2 else 'FAIL'}: {msg[:220]}")
+print("context: PASS" if ok1 and ok2 else "context: FAIL")
+sys.exit(0 if ok1 and ok2 else 1)
+PY
+  exit $?
+fi
+
+if [ "$MODE" = failover ]; then
 
   ask "$PROMPT" 120 healthy | tee "$OUT/failover.jsonl"
 

@@ -504,14 +504,13 @@ impl SplitModel {
             // Name the setting. "Reduce your prompt" is not an action the
             // caller can always take — an agentic client's prompt is its tool
             // schema, sent before the user has typed anything — and it points
-            // away from the one thing that does fix it.
-            return Err(SwarmError::Validation(format!(
-                "This conversation is {total_seq} tokens, longer than the {} this model \
-                 is currently set to serve. Raise it in Settings → Advanced → \
-                 max_seq_len_override (the model itself supports more), or send a \
-                 shorter prompt or a smaller max_tokens.",
-                self.max_seq_len
-            )));
+            // away from the one thing that does fix it. The wording is wire
+            // format: a coordinator reads the numbers back to tell this node's
+            // limit from the model's (`error::served_context_refusal`).
+            return Err(crate::error::longer_than_served(
+                total_seq,
+                self.max_seq_len,
+            ));
         }
 
         // Head-Room Admission: refuse before claiming GPU memory we do not

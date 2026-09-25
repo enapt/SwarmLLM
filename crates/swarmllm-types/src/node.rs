@@ -358,6 +358,23 @@ pub struct NodeCapability {
     /// an older build, which is the failure the additive rule exists to prevent.
     #[serde(default)]
     pub resident_layers: Vec<ResidentModelLayers>,
+
+    /// The longest conversation this node serves for ANY model, before each
+    /// model's own declared limit: its `inference.max_seq_len_override`, or the
+    /// shipped default cap when that is unset. What it serves for a given model
+    /// is this capped by the model's declared context
+    /// (`split::effective_context_length_with`).
+    ///
+    /// Exists so a coordinator can know, before sending a prompt, that a peer
+    /// will refuse it. Without it the limit was known only to the peer, which
+    /// refused minutes into the prompt pass — and the coordinator read the
+    /// refusal as the request's own fault and gave up on a segment that had a
+    /// standby (field report, 2026-09-25).
+    ///
+    /// `None` from a node predating the field, and `None` must mean UNKNOWN:
+    /// such a node is still a candidate, exactly as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_ceiling_tokens: Option<u32>,
 }
 
 /// The serde default for [`NodeCapability::can_serve_inference`].

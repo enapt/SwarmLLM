@@ -1110,6 +1110,7 @@ mod tests {
             anchor_mode: false,
             can_serve_inference: true,
             resident_layers: Vec::new(),
+            context_ceiling_tokens: None,
         }
     }
 

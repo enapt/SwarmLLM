@@ -2212,6 +2212,43 @@ impl SharedState {
         self.gguf_meta.get(model_id)
     }
 
+    /// The longest conversation `node` serves for `model_id`, when it has said.
+    ///
+    /// The peer's advertised ceiling (`NodeCapability::context_ceiling_tokens`)
+    /// capped by the model's declared context — the rule every worker applies
+    /// to itself (`split::effective_context_length_with`), so this is the number
+    /// that peer's worker would refuse above. Without the model's header the
+    /// ceiling alone is still an upper bound.
+    ///
+    /// `None` for a peer that advertises nothing — an older build — and `None`
+    /// is UNKNOWN: never a reason to skip it.
+    pub fn peer_served_context(
+        &self,
+        node: &crate::types::NodeId,
+        model_id: &crate::types::ModelId,
+    ) -> Option<usize> {
+        let ceiling = self
+            .peer_registry
+            .get(node)?
+            .capability
+            .as_ref()?
+            .context_ceiling_tokens? as usize;
+        let declared = self.model_declared_context(model_id);
+        Some(match declared {
+            Some(d) => crate::inference::split::effective_context_length_with(d, Some(ceiling)),
+            None => ceiling,
+        })
+    }
+
+    /// The context `model_id` itself declares, when this node has its header.
+    /// No node serves more than this, whatever its ceiling — so a refusal at
+    /// this limit is one every holder would give.
+    pub fn model_declared_context(&self, model_id: &crate::types::ModelId) -> Option<usize> {
+        self.gguf_meta_for(model_id)
+            .map(|m| m.context_length)
+            .filter(|&c| c > 0)
+    }
+
     /// Make a model's geometry available to the ROUTER, fetching the header
     /// if this node holds no part of the model. **Best effort, and silent.**
     ///

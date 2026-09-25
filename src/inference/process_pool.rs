@@ -3847,6 +3847,22 @@ impl ModelProcessPool {
         );
     }
 
+    /// The longest conversation this node's workers serve for any model, before
+    /// each model's own declared limit — what `NodeCapability::context_ceiling_tokens`
+    /// advertises. Read from the atomic the workers are spawned with, so the
+    /// advertisement cannot describe a ceiling they do not apply; unset means
+    /// the shipped default, which is the same rule `effective_context_length_with`
+    /// applies to `None`.
+    pub fn served_context_ceiling(&self) -> u32 {
+        match self
+            .max_seq_len_override
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            0 => crate::inference::split::DEFAULT_MAX_SEQ_LEN as u32,
+            cap => cap,
+        }
+    }
+
     /// Apply SWIFT self-speculative decoding settings to future-spawned workers.
     pub fn set_swift_config(
         &self,

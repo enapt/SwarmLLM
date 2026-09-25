@@ -983,6 +983,14 @@ impl HealthMonitor {
             // node serve the model recently", which cannot say how much of it
             // is resident. See `NodeCapability::resident_layers`.
             resident_layers: self.shared_state.model_process_pool.resident_model_layers(),
+            // How long a conversation we serve, so a coordinator can skip us
+            // for a prompt we would refuse instead of finding out minutes into
+            // its prompt pass. See `NodeCapability::context_ceiling_tokens`.
+            context_ceiling_tokens: Some(
+                self.shared_state
+                    .model_process_pool
+                    .served_context_ceiling(),
+            ),
             // Advertise the protocol epoch + the optional features this build
             // implements, so peers negotiate new message types additively.
             protocol_version: swarmllm_types::PROTOCOL_VERSION,

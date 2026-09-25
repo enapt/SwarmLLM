@@ -397,6 +397,67 @@ pub fn describe_missing_layers(from: u32, to_exclusive: u32) -> String {
     }
 }
 
+/// A prompt longer than the context ONE node serves for a model: how long the
+/// conversation was when it was refused, and that node's limit.
+///
+/// **A property of the node, not of the request.** What a node serves is the
+/// model's declared context capped by that node's own ceiling
+/// (`inference.max_seq_len_override`, else the shipped default), so a machine
+/// on the default refuses what another, raised to 65536, would run. Reading the
+/// refusal as the caller's mistake is what made a coordinator give up on a
+/// segment that had a standby (field report, 2026-09-25) — see
+/// `pipeline::every_holder_would_refuse`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ServedContextRefusal {
+    /// Positions the conversation reached when the node refused it.
+    pub tokens: usize,
+    /// The longest conversation that node serves for this model.
+    pub limit: usize,
+}
+
+/// The fixed half of [`longer_than_served`]'s wording, which
+/// [`served_context_refusal`] reads back.
+const SERVED_CONTEXT_OPENING: &str = "This conversation is ";
+const SERVED_CONTEXT_MIDDLE: &str = " tokens, longer than the ";
+const SERVED_CONTEXT_CLOSING: &str = " this model is currently set to serve.";
+
+/// The refusal a node gives a prompt longer than the context it serves.
+///
+/// **The wording is wire format.** It crosses the worker IPC hop and the
+/// network hop as text, and every release since v0.3.101 sends exactly this
+/// opening sentence — so an older coordinator relays it unchanged and a newer
+/// one recovers the numbers with [`served_context_refusal`]. Change it and a
+/// peer on the old wording stops being recognised; the round-trip test and the
+/// frozen v0.3.205 literal beside it fail first.
+pub fn longer_than_served(tokens: usize, limit: usize) -> SwarmError {
+    SwarmError::Validation(format!(
+        "{SERVED_CONTEXT_OPENING}{tokens}{SERVED_CONTEXT_MIDDLE}{limit}{SERVED_CONTEXT_CLOSING} \
+         Raise it in Settings → Advanced → max_seq_len_override (the model itself supports \
+         more), or send a shorter prompt or a smaller max_tokens."
+    ))
+}
+
+/// Recover a [`longer_than_served`] refusal from a message that crossed a
+/// boundary as text — a peer's `LayerResult` error, a worker's reply, or a
+/// `Validation` detail — or `None` if it is anything else.
+///
+/// The sibling of [`reclassify_flattened_error`] and held to the same rule: it
+/// reads only a sentence this module WRITES, whose wording the constructor
+/// above fixes and a test pins. The innermost occurrence wins, as there.
+pub fn served_context_refusal(message: &str) -> Option<ServedContextRefusal> {
+    let start = message.rfind(SERVED_CONTEXT_OPENING)? + SERVED_CONTEXT_OPENING.len();
+    let rest = &message[start..];
+    let (tokens, rest) = rest.split_once(SERVED_CONTEXT_MIDDLE)?;
+    let (limit, rest) = rest.split_once(' ')?;
+    if !(String::from(" ") + rest).starts_with(SERVED_CONTEXT_CLOSING) {
+        return None;
+    }
+    Some(ServedContextRefusal {
+        tokens: tokens.trim().parse().ok()?,
+        limit: limit.trim().parse().ok()?,
+    })
+}
+
 #[cfg(test)]
 mod missing_layer_span_tests {
     use super::*;
@@ -415,6 +476,65 @@ mod missing_layer_span_tests {
         // producing "layers 5-4".
         assert_eq!(describe_missing_layers(5, 5), "layer 5");
         assert_eq!(describe_missing_layers(5, 4), "layer 5");
+    }
+
+    /// What a node writes when a prompt is longer than it serves is read back
+    /// with its numbers, from anywhere it may have been wrapped.
+    #[test]
+    fn a_served_context_refusal_survives_the_wire_with_its_numbers() {
+        let err = longer_than_served(8560, 8192);
+        assert!(matches!(err, SwarmError::Validation(_)));
+        let want = Some(ServedContextRefusal {
+            tokens: 8560,
+            limit: 8192,
+        });
+        assert_eq!(served_context_refusal(&err.to_string()), want);
+        // As a coordinator receives it: the worker's prefix, then the peer's.
+        assert_eq!(
+            served_context_refusal(&format!("Worker: {err}")),
+            want,
+            "wrapped once"
+        );
+        // Still the caller-facing class it always was.
+        assert!(matches!(
+            reclassify_flattened_error(&format!("Worker: {err}")),
+            Some(SwarmError::Validation(_))
+        ));
+    }
+
+    /// **Frozen: the refusal as a v0.3.205 peer actually sent it** (field
+    /// report, 2026-09-25). Released peers keep sending this, so the reader must
+    /// keep understanding it whatever the constructor says later.
+    #[test]
+    fn a_released_peers_context_refusal_is_still_recognised() {
+        let from_v0_3_205 = "Worker: Validation error: This conversation is 8320 tokens, \
+             longer than the 8192 this model is currently set to serve. Raise it in Settings → \
+             Advanced → max_seq_len_override (the model itself supports more), or send a \
+             shorter prompt or a smaller max_tokens.";
+        assert_eq!(
+            served_context_refusal(from_v0_3_205),
+            Some(ServedContextRefusal {
+                tokens: 8320,
+                limit: 8192
+            })
+        );
+    }
+
+    /// Other refusals — including the whole-model path's differently worded
+    /// "too long", which already says the model's own limit — are not this.
+    #[test]
+    fn other_refusals_are_not_read_as_a_served_context_limit() {
+        for msg in [
+            "Validation error: This conversation is too long for m: 9020 tokens of prompt \
+             plus 20 reserved for the reply is 9040, and the model's limit is 4096.",
+            "Validation error: This conversation is 12041 tokens, longer than the model's \
+             limit of 8192",
+            "Service unavailable: out of memory",
+            "This conversation is many tokens, longer than the 8192 this model is currently \
+             set to serve.",
+        ] {
+            assert_eq!(served_context_refusal(msg), None, "{msg}");
+        }
     }
 
     /// The whole message a caller sees names the model and the span.

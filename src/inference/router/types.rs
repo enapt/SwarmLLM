@@ -286,16 +286,31 @@ pub(super) fn deliver_result(
     if let Ok(ref mut result) = output {
         result.trace = Some(trace.snapshot());
     }
-    if result_tx.send(output).is_ok() {
-        return;
-    }
+    let undelivered = match result_tx.send(output) {
+        Ok(()) => return,
+        Err(undelivered) => undelivered,
+    };
     if request.is_cancelled() {
-        tracing::warn!(
-            request_id = %request.id,
-            path,
-            "DIAG: result_tx receiver dropped after the client disconnected — \
-             the answer was computed and had nowhere to go"
-        );
+        // What was lost depends on what was being delivered. An ANSWER that
+        // nobody collects is work thrown away and worth a warning; an error is
+        // usually the cancellation itself, and saying "the answer was computed"
+        // about it told a tester reading the log that a segment had finished
+        // when it had just been told to stop (field report, 2026-09-25).
+        match undelivered {
+            Ok(_) => tracing::warn!(
+                request_id = %request.id,
+                path,
+                "DIAG: result_tx receiver dropped after the client disconnected — \
+                 the answer was computed and had nowhere to go"
+            ),
+            Err(e) => tracing::info!(
+                request_id = %request.id,
+                path,
+                error = %e,
+                "DIAG: result_tx receiver dropped after the client disconnected — \
+                 the request ended without an answer, so nothing was lost"
+            ),
+        }
     } else {
         tracing::debug!(
             request_id = %request.id,
@@ -387,6 +402,14 @@ mod deliver_result_tests {
     }
 
     fn levels_when(cancelled: bool, take_the_result: bool) -> Vec<tracing::Level> {
+        levels_delivering(cancelled, take_the_result, false)
+    }
+
+    fn levels_delivering(
+        cancelled: bool,
+        take_the_result: bool,
+        answered: bool,
+    ) -> Vec<tracing::Level> {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let sub = Levels(seen.clone());
         let req = request(cancelled);
@@ -402,7 +425,22 @@ mod deliver_result_tests {
         };
         tracing::subscriber::with_default(sub, || {
             let trace = crate::inference::trace::RequestTrace::new(req.id, "m".to_string(), "chat");
-            deliver_result(&req, tx, Err(SwarmError::NoModelLoaded), &trace, "test");
+            let output = if answered {
+                Ok(InferenceOutput {
+                    request_id: req.id,
+                    content: "hi".into(),
+                    prompt_tokens: 1,
+                    completion_tokens: 1,
+                    finish_reason: "stop".into(),
+                    session_id: None,
+                    token_logprobs: Vec::new(),
+                    matched_stop_sequence: None,
+                    trace: None,
+                })
+            } else {
+                Err(SwarmError::NoModelLoaded)
+            };
+            deliver_result(&req, tx, output, &trace, "test");
         });
         drop(held);
         let out = seen.lock().unwrap().clone();
@@ -424,8 +462,18 @@ mod deliver_result_tests {
     /// line at the same level, which is exactly the defect.
     #[test]
     fn a_result_that_had_nowhere_to_go_because_the_client_left_still_warns() {
-        let levels = levels_when(true, false);
+        let levels = levels_delivering(true, false, true);
         assert_eq!(levels, vec![tracing::Level::WARN], "{levels:?}");
+    }
+
+    /// An ERROR that nobody collects after the client left is the ordinary end
+    /// of a cancelled request, not a computed answer thrown away — the warning
+    /// said "the answer was computed" of a segment that had just been told to
+    /// stop (field report, 2026-09-25).
+    #[test]
+    fn a_cancelled_request_that_ended_in_error_does_not_claim_an_answer_was_lost() {
+        let levels = levels_delivering(true, false, false);
+        assert_eq!(levels, vec![tracing::Level::INFO], "{levels:?}");
     }
 
     /// The common path stays silent — nothing is logged when the result is

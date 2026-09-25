@@ -70,9 +70,29 @@ pub use prompt::template_from_header;
 /// Deliberately narrow: only `Validation` is provably the caller's own input.
 /// A missing shard or an unresponsive worker says nothing about the next
 /// holder, and those must still fail over.
-pub(super) fn every_holder_would_refuse(err_msg: &str) -> Option<SwarmError> {
+///
+/// **Except a prompt longer than THAT node serves.** How long a conversation a
+/// node serves is the model's declared context capped by the node's OWN
+/// ceiling (`max_seq_len_override`, else the shipped 8192), so a machine on the
+/// default refuses what one raised to 65536 would run. Reported from the field
+/// 2026-09-25: a segment with a standby was abandoned because an 8192 peer
+/// refused an 8560-token prompt the coordinator itself served at 65536. Such a
+/// refusal is one only when its limit is the MODEL's (`declared_context`) — no
+/// node serves more than that — and when the model's limit is unknown it is
+/// given the benefit of the doubt: a standby that refuses the same way costs a
+/// round trip, and `failover_segment` still ends on the caller's own 400 rather
+/// than the "too few machines" 503 this function exists to prevent.
+pub(super) fn every_holder_would_refuse(
+    err_msg: &str,
+    declared_context: Option<usize>,
+) -> Option<SwarmError> {
     match crate::error::reclassify_flattened_error(err_msg) {
-        Some(e @ SwarmError::Validation(_)) => Some(e),
+        Some(e @ SwarmError::Validation(_)) => {
+            match crate::error::served_context_refusal(err_msg) {
+                Some(refusal) if declared_context.is_none_or(|d| refusal.limit < d) => None,
+                _ => Some(e),
+            }
+        }
         _ => None,
     }
 }
@@ -1772,6 +1792,7 @@ mod tests {
                 anchor_mode: false,
                 can_serve_inference: true,
                 resident_layers: Vec::new(),
+                context_ceiling_tokens: None,
             }),
             last_seen: chrono::Utc::now(),
             latency_ms: Some(10),
@@ -2872,7 +2893,7 @@ mod peer_error_recovery_tests {
     fn a_refusal_of_the_request_itself_does_not_fail_over() {
         let from_peer = "Worker: Validation error: This conversation is 12041 tokens, \
                          longer than the model's limit of 8192";
-        let err = every_holder_would_refuse(from_peer)
+        let err = every_holder_would_refuse(from_peer, Some(32768))
             .expect("a peer's Validation must stop the failover search");
         assert!(matches!(err, SwarmError::Validation(_)), "got {err:?}");
         assert_eq!(
@@ -2895,10 +2916,33 @@ mod peer_error_recovery_tests {
             "Model not available: llama-3.2-3b",
         ] {
             assert!(
-                every_holder_would_refuse(from_peer).is_none(),
+                every_holder_would_refuse(from_peer, Some(32768)).is_none(),
                 "{from_peer:?} must remain failover-eligible"
             );
         }
+    }
+
+    /// A prompt longer than ONE peer serves is that peer's limit, and another
+    /// holder may serve more — the field report of 2026-09-25, where an 8192
+    /// peer's refusal ended a request the coordinator itself served at 65536.
+    /// Only at the MODEL's own limit is it every holder's answer.
+    #[test]
+    fn a_prompt_longer_than_one_peer_serves_fails_over() {
+        let from_peer = format!("Worker: {}", crate::error::longer_than_served(8560, 8192));
+        assert!(
+            every_holder_would_refuse(&from_peer, Some(32768)).is_none(),
+            "8192 is the peer's ceiling, not the model's 32768: another holder may serve it"
+        );
+        assert!(
+            every_holder_would_refuse(&from_peer, None).is_none(),
+            "an unknown model limit must not end the search on one peer's say-so"
+        );
+        let at_the_models_limit = every_holder_would_refuse(&from_peer, Some(8192))
+            .expect("no node serves more than the model declares");
+        assert_eq!(
+            crate::error::classify_error(&at_the_models_limit).0,
+            axum::http::StatusCode::BAD_REQUEST
+        );
     }
 
     /// An error whose class cannot be recovered still surfaces the peer's own

@@ -1109,6 +1109,55 @@ impl PipelineExecutor {
                 // Use hidden-state activations for the next segment
                 activations = result.activations;
             } else {
+                // A prompt this peer has already told us it would refuse is
+                // not sent to it: uploading the hidden states and waiting for
+                // its cold load buys nothing but the refusal. Decided on what
+                // the peer ADVERTISES (`peer_served_context`) against the
+                // positions the input carries, so a peer that says nothing, or
+                // a first segment handed prompt text, is sent to as before.
+                if let Some((positions, limit)) = self.advertised_context_refusal(
+                    segment,
+                    sequence_num,
+                    index_pos,
+                    idx,
+                    pre_embedded,
+                    &activations,
+                ) {
+                    tracing::info!(
+                        request_id = %request_id,
+                        segment = idx,
+                        node = %segment.node_id,
+                        tokens = positions,
+                        peer_limit = limit,
+                        "DIAG: not sending the prompt to a peer that serves a shorter \
+                         conversation than this one — trying a standby"
+                    );
+                    self.shared_state
+                        .blacklist_holder_for_request(request_id, &segment.node_id);
+                    let refusal = crate::error::longer_than_served(positions, limit).to_string();
+                    let failover_result = self
+                        .failover_segment(
+                            idx,
+                            request_id,
+                            FailoverInput {
+                                sequence_num,
+                                index_pos,
+                                activations: &activations,
+                                pre_embedded,
+                                generated_ids,
+                                is_last,
+                                precomputed_vision: precomputed_vision.as_deref(),
+                                original_failure: &refusal,
+                            },
+                        )
+                        .await?;
+                    match failover_result {
+                        Takeover::Finished(result) => return Ok(result),
+                        Takeover::Continue(next) => activations = next,
+                    }
+                    idx += 1;
+                    continue;
+                }
                 // Only clone activations when sending over the network
                 // T17: Attach vision embeddings on first forward (seq_num==0, first segment)
                 // Direct peer chaining: how many segments after this one can
@@ -1536,7 +1585,10 @@ impl PipelineExecutor {
                             // TO. Return it as the caller's own error instead of
                             // spending a standby per peer and then reporting the
                             // model as under-replicated.
-                            if let Some(err) = super::every_holder_would_refuse(err_msg) {
+                            let declared = self
+                                .shared_state
+                                .model_declared_context(&segment.shard_id.model_id);
+                            if let Some(err) = super::every_holder_would_refuse(err_msg, declared) {
                                 tracing::info!(
                                     request_id = %request_id,
                                     segment = idx,
@@ -1546,6 +1598,24 @@ impl PipelineExecutor {
                                 );
                                 self.shared_state.pending_layer_results.remove(&request_id);
                                 return Err(err);
+                            }
+                            // A prompt longer than THIS peer serves: its own
+                            // limit, not the model's, so a standby may serve
+                            // more. Barred for the request either way — it
+                            // will refuse this length again on any re-plan.
+                            if let Some(refusal) = crate::error::served_context_refusal(err_msg) {
+                                tracing::info!(
+                                    request_id = %request_id,
+                                    segment = idx,
+                                    node = %segment.node_id,
+                                    tokens = refusal.tokens,
+                                    peer_limit = refusal.limit,
+                                    model_limit = ?declared,
+                                    "DIAG: remote segment serves a shorter conversation than this \
+                                     one — trying a standby that may serve more"
+                                );
+                                self.shared_state
+                                    .blacklist_holder_for_request(request_id, &segment.node_id);
                             }
                             tracing::warn!(
                                 request_id = %request_id,
@@ -1922,6 +1992,46 @@ impl PipelineExecutor {
             .splice(failed_idx..=failed_idx, cover.iter().cloned());
     }
 
+    /// How far into the conversation a forward's input reaches — `index_pos`
+    /// plus the positions it carries — when that can be read off the input.
+    /// Hidden states declare their shape; a first segment handed prompt TEXT
+    /// does not, and answers `None` rather than a guess.
+    fn conversation_positions(
+        input: &[u8],
+        index_pos: usize,
+        input_is_hidden_state: bool,
+    ) -> Option<usize> {
+        if !input_is_hidden_state {
+            return None;
+        }
+        crate::inference::tensor_util::activation_positions(input)
+            .map(|p| index_pos.saturating_add(p as usize))
+    }
+
+    /// `(positions, peer_limit)` when `segment`'s node has ADVERTISED that it
+    /// serves a shorter conversation than this prompt pass carries, i.e. it
+    /// would refuse it. `None` whenever either number is unknown — a peer on an
+    /// older build, or prompt text — which sends the forward as before.
+    fn advertised_context_refusal(
+        &self,
+        segment: &crate::types::PipelineSegment,
+        sequence_num: u32,
+        index_pos: usize,
+        idx: usize,
+        pre_embedded: bool,
+        activations: &[u8],
+    ) -> Option<(usize, usize)> {
+        if sequence_num != 0 {
+            return None;
+        }
+        let positions =
+            Self::conversation_positions(activations, index_pos, idx > 0 || pre_embedded)?;
+        let limit = self
+            .shared_state
+            .peer_served_context(&segment.node_id, &segment.shard_id.model_id)?;
+        (positions > limit).then_some((positions, limit))
+    }
+
     async fn failover_segment(
         &mut self,
         failed_idx: usize,
@@ -2088,6 +2198,54 @@ impl PipelineExecutor {
         };
         let send_activations: &[u8] = replay_payload.as_deref().unwrap_or(activations);
 
+        // The widest refusal for LENGTH met while placing this segment — the
+        // original failure's, a stand-in's, or one a stand-in advertised — so
+        // that running out of stand-ins ends on the caller's own 400 naming
+        // the limit, never on "too few machines hold this model", the advice
+        // `every_holder_would_refuse` exists to keep away from a length.
+        let mut context_refusal = crate::error::served_context_refusal(original_failure);
+        // Stand-ins that have ADVERTISED a shorter context than this input are
+        // not asked, as the primary is not sent to (`advertised_context_refusal`).
+        let positions = Self::conversation_positions(
+            send_activations,
+            replay_index_pos as usize,
+            failed_idx > 0 || pre_embedded,
+        );
+        if let Some(positions) = positions {
+            for standby in &self.assignment.standbys {
+                if tried.contains(&standby.node_id) {
+                    continue;
+                }
+                let Some(limit) = self
+                    .shared_state
+                    .peer_served_context(&standby.node_id, &standby.shard_id.model_id)
+                else {
+                    continue;
+                };
+                if positions > limit {
+                    tracing::info!(
+                        request_id = %request_id,
+                        segment = failed_idx,
+                        standby = %standby.node_id,
+                        tokens = positions,
+                        standby_limit = limit,
+                        "DIAG: skipping a standby that serves a shorter conversation than this one"
+                    );
+                    tried.push(standby.node_id.clone());
+                    context_refusal = widest_context_refusal(
+                        context_refusal,
+                        crate::error::ServedContextRefusal {
+                            tokens: positions,
+                            limit,
+                        },
+                    );
+                }
+            }
+        }
+        let declared = self
+            .shared_state
+            .model_declared_context(&failed_segment.shard_id.model_id);
+
         loop {
             self.cancel_segment_on(&abandoned, request_id, failed_idx)
                 .await;
@@ -2178,6 +2336,17 @@ impl PipelineExecutor {
                     self.shared_state
                         .blacklist_holder_for_request(request_id, node);
                 }
+                // Nobody left could take it, and at least one machine said the
+                // conversation is longer than it serves: that is the caller's
+                // answer, as a 400 naming the limit. "Too few machines" would
+                // send them to fetch a model that is not what is missing.
+                if let Some(refusal) = context_refusal {
+                    return Err(longer_than_the_swarm_serves(
+                        refusal.tokens.max(positions.unwrap_or(0)),
+                        refusal.limit,
+                        failed_segment.layer_range,
+                    ));
+                }
                 // `SegmentFailoverExhausted`, not `PipelineError`: 503, so
                 // the caller learns nothing is wrong with their request or
                 // this node — there was simply nobody free to take the
@@ -2261,6 +2430,9 @@ impl PipelineExecutor {
                             error = %e,
                             "Local standby could not run the segment — trying the next standby"
                         );
+                        if let Some(r) = crate::error::served_context_refusal(&e.to_string()) {
+                            context_refusal = widest_context_refusal(context_refusal, r);
+                        }
                         last_failure = Some(e.to_string());
                         tried.push(backup.node_id.clone());
                         abandoned = backup.node_id;
@@ -2444,7 +2616,7 @@ impl PipelineExecutor {
             };
 
             if let Some(NetworkFinishReason::Error(ref err_msg)) = result.finish_reason {
-                if let Some(err) = super::every_holder_would_refuse(err_msg) {
+                if let Some(err) = super::every_holder_would_refuse(err_msg, declared) {
                     tracing::info!(
                         request_id = %request_id,
                         segment = failed_idx,
@@ -2463,6 +2635,9 @@ impl PipelineExecutor {
                     );
                     self.shared_state
                         .blacklist_holder_for_request(request_id, &backup.node_id);
+                }
+                if let Some(r) = crate::error::served_context_refusal(err_msg) {
+                    context_refusal = widest_context_refusal(context_refusal, r);
                 }
                 tracing::warn!(
                     request_id = %request_id,
@@ -2498,6 +2673,45 @@ impl PipelineExecutor {
 /// run to several hundred characters; the caller needs the reason, not the
 /// arithmetic.
 const EXHAUSTED_REASON_MAX_CHARS: usize = 200;
+
+/// Two refusals for length folded into one that covers both: the longest
+/// conversation refused, and the most any refusing machine serves — the figure
+/// the caller would have to get under.
+fn widest_context_refusal(
+    seen: Option<crate::error::ServedContextRefusal>,
+    new: crate::error::ServedContextRefusal,
+) -> Option<crate::error::ServedContextRefusal> {
+    Some(match seen {
+        Some(s) => crate::error::ServedContextRefusal {
+            tokens: s.tokens.max(new.tokens),
+            limit: s.limit.max(new.limit),
+        },
+        None => new,
+    })
+}
+
+/// The caller's answer when every machine that could run `layer_range` serves
+/// a shorter conversation than this one.
+///
+/// A 400, like the local refusal it replaces here — the conversation is too
+/// long for what the swarm can run right now, and an agent client reads a 400
+/// about length as "compact and retry". But NOT that refusal's advice: a peer's
+/// message tells its reader to raise `max_seq_len_override`, which here is
+/// another computer's setting (field report, 2026-09-25). This names whose
+/// limit it is and the two things the caller can actually do.
+fn longer_than_the_swarm_serves(
+    tokens: usize,
+    limit: usize,
+    layer_range: (u32, u32),
+) -> SwarmError {
+    SwarmError::Validation(format!(
+        "This conversation is {tokens} tokens, but the computers that could run {span} of \
+         this model right now serve at most {limit}. That limit is set on those computers, \
+         so changing max_seq_len_override here does not raise it. Shorten the conversation, \
+         or download that part of the model so this computer runs it under its own limit.",
+        span = crate::error::describe_missing_layers(layer_range.0, layer_range.1),
+    ))
+}
 
 /// The message a request fails with when every standby for `segment` has been
 /// tried, carrying the last stated reason.
@@ -3109,6 +3323,79 @@ mod salvage_tests {
         let out = exec.keeping_the_partial(Ok(None), None).await;
         assert!(matches!(out, Ok(None)));
         assert!(state.take_salvaged_reply(id).is_none());
+    }
+}
+
+#[cfg(test)]
+mod served_context_tests {
+    use super::{longer_than_the_swarm_serves, widest_context_refusal, PipelineExecutor};
+    use crate::error::ServedContextRefusal;
+
+    /// The answer when nobody can serve the length is the caller's 400, and it
+    /// does NOT repeat the peer's advice to raise a setting on THIS computer —
+    /// the thing the field report (2026-09-25) said could not help.
+    #[test]
+    fn the_swarms_limit_is_named_as_someone_elses_setting() {
+        let err = longer_than_the_swarm_serves(8560, 8192, (1, 13));
+        let (status, msg, _) = crate::error::classify_error(&err);
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+        assert!(msg.contains("8560") && msg.contains("8192"), "{msg}");
+        assert!(msg.contains("layers 1-12"), "names the part: {msg}");
+        assert!(
+            !msg.contains("Raise it in Settings"),
+            "must not tell the caller to change their own limit: {msg}"
+        );
+        // And it is NOT read back as one node's refusal — it is the final word,
+        // and a coordinator further up must not fail over on it.
+        assert_eq!(crate::error::served_context_refusal(&err.to_string()), None);
+    }
+
+    /// Folding refusals keeps the longest conversation and the most any
+    /// machine serves — the figure the caller would have to get under.
+    #[test]
+    fn refusals_fold_to_the_widest() {
+        let a = ServedContextRefusal {
+            tokens: 8320,
+            limit: 8192,
+        };
+        let b = ServedContextRefusal {
+            tokens: 8560,
+            limit: 4096,
+        };
+        assert_eq!(
+            widest_context_refusal(Some(a), b),
+            Some(ServedContextRefusal {
+                tokens: 8560,
+                limit: 8192
+            })
+        );
+        assert_eq!(widest_context_refusal(None, b), Some(b));
+    }
+
+    /// Positions are read only off hidden states, and counted from the start
+    /// of the conversation; prompt text answers `None`, never a guess.
+    #[test]
+    fn positions_are_read_off_hidden_states_only() {
+        // [1, 7, 4] f32 hidden states, as `tensor_to_bytes` writes them.
+        let t = candle_core::Tensor::zeros(
+            (1, 7, 4),
+            candle_core::DType::F32,
+            &candle_core::Device::Cpu,
+        )
+        .unwrap();
+        let bytes = crate::inference::tensor_util::tensor_to_bytes(&t).unwrap();
+        assert_eq!(
+            PipelineExecutor::conversation_positions(&bytes, 0, true),
+            Some(7)
+        );
+        assert_eq!(
+            PipelineExecutor::conversation_positions(&bytes, 100, true),
+            Some(107)
+        );
+        assert_eq!(
+            PipelineExecutor::conversation_positions(b"hello world", 0, false),
+            None
+        );
     }
 }
 

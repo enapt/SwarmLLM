@@ -340,6 +340,7 @@ mod tests {
                     anchor_mode: false,
                     can_serve_inference: true,
                     resident_layers: Vec::new(),
+                    context_ceiling_tokens: None,
                 }),
                 last_seen: chrono::Utc::now(),
                 latency_ms: Some(10),

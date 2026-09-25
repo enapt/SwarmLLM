@@ -1662,6 +1662,11 @@ async fn handle_forward(
     if fwd.sequence_num == 0 && tp_meta.is_none() && !want_spec_output {
         let positions = input_tensor.dims().get(1).copied().unwrap_or(0);
         if positions > 0 {
+            refuse_a_prompt_past_the_served_context(
+                model.context_window(),
+                fwd.index_pos as usize,
+                positions,
+            )?;
             ensure_room_for_prompt(model, kv_store, prefix_cache, &req_id_str, positions)?;
         }
     }
@@ -2523,6 +2528,29 @@ fn snapshot_positions_that_fit(
 /// and decoded at 3-5 tok/s where an empty card did 19-33. A refusal here
 /// is a 503 the coordinator can route elsewhere, at token 0, with nothing
 /// half-built.
+/// Refuse a segment's prompt pass that is longer than this node serves —
+/// the WHOLE prompt, before any layer runs.
+///
+/// The executor's own guard sees one chunk at a time (`forward_prompt_in_chunks`,
+/// 128 positions), so an over-long prompt was computed through every layer of
+/// this segment up to the limit and only then refused, naming the chunk
+/// boundary rather than the prompt: measured on the live swarm 2026-09-25, an
+/// 8560-token prompt on a peer serving 8192 was refused as "8320 tokens" 177 s
+/// after it was sent, with 8192 positions of work thrown away. Here it costs
+/// nothing and names the real length, which the coordinator reads to decide
+/// whether another machine could serve it (`error::served_context_refusal`).
+fn refuse_a_prompt_past_the_served_context(
+    context_window: usize,
+    index_pos: usize,
+    positions: usize,
+) -> Result<(), SwarmError> {
+    let total = index_pos.saturating_add(positions);
+    if total > context_window {
+        return Err(crate::error::longer_than_served(total, context_window));
+    }
+    Ok(())
+}
+
 fn ensure_room_for_prompt(
     model: &SplitModel,
     kv_store: &KvCacheStore,
@@ -4596,6 +4624,35 @@ mod decode_raw_vocab_tests {
         // Not a byte-fallback token despite the shape — left alone.
         assert_eq!(decode_raw_vocab_entry("<0xZZ>"), "<0xZZ>");
         assert_eq!(decode_raw_vocab_entry("<s>"), "<s>");
+    }
+}
+
+#[cfg(test)]
+mod served_context_tests {
+    use super::refuse_a_prompt_past_the_served_context;
+
+    /// The whole prompt is weighed, and the refusal names ITS length — not the
+    /// chunk boundary the executor's per-chunk guard would have reported.
+    #[test]
+    fn a_prompt_past_the_window_is_refused_whole_with_its_real_length() {
+        let err = refuse_a_prompt_past_the_served_context(8192, 0, 8560)
+            .expect_err("8560 positions do not fit 8192");
+        assert_eq!(
+            crate::error::served_context_refusal(&err.to_string()),
+            Some(crate::error::ServedContextRefusal {
+                tokens: 8560,
+                limit: 8192
+            })
+        );
+    }
+
+    /// The boundary: a prompt that exactly fills the window is served, as the
+    /// executor's `total_seq > max_seq_len` guard serves it.
+    #[test]
+    fn a_prompt_that_fills_the_window_exactly_is_served() {
+        assert!(refuse_a_prompt_past_the_served_context(8192, 0, 8192).is_ok());
+        assert!(refuse_a_prompt_past_the_served_context(8192, 100, 8092).is_ok());
+        assert!(refuse_a_prompt_past_the_served_context(8192, 100, 8093).is_err());
     }
 }
 

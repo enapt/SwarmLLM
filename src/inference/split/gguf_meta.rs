@@ -86,6 +86,12 @@ pub struct GgufTensorMeta {
     /// Raw GGUF architecture string (e.g. "llama", "qwen2", "qwen35").
     #[serde(default)]
     pub architecture: String,
+    /// The context the model DECLARES (`<arch>.context_length`), 0 when the
+    /// header does not say. What a given node serves is this capped by that
+    /// node's ceiling — `split::effective_context_length_with` — so this is the
+    /// half a coordinator can know about a peer from the header alone.
+    #[serde(default)]
+    pub context_length: usize,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -234,6 +240,11 @@ impl GgufTensorMeta {
             .get(&format!("{arch}.expert_count"))
             .and_then(|v| v.to_u32().ok())
             .unwrap_or(0) as usize;
+        let context_length = ct
+            .metadata
+            .get(&format!("{arch}.context_length"))
+            .and_then(|v| v.to_u32().ok())
+            .unwrap_or(0) as usize;
 
         Ok(GgufTensorMeta {
             tensors,
@@ -249,6 +260,7 @@ impl GgufTensorMeta {
             rms_norm_eps,
             expert_count,
             architecture: arch,
+            context_length,
         })
     }
 }

@@ -690,6 +690,7 @@ fn slow_peer_capability(node: &NodeId) -> crate::types::NodeCapability {
         anchor_mode: false,
         can_serve_inference: true,
         resident_layers: Vec::new(),
+        context_ceiling_tokens: None,
     }
 }
 
@@ -3021,6 +3022,7 @@ fn capability_with_gpu(free_mb: Option<u64>) -> crate::types::NodeCapability {
         anchor_mode: false,
         can_serve_inference: true,
         resident_layers: Vec::new(),
+        context_ceiling_tokens: None,
     }
 }
 
@@ -3551,6 +3553,7 @@ fn a_prompt_position_is_priced_like_the_worker_charges_it() {
         rms_norm_eps: 1e-6,
         expert_count: 0,
         architecture: "gemma2".into(),
+        context_length: 8192,
     };
     // GQA on a card: f32 + f16 mirror → 6 bytes per element.
     assert_eq!(
