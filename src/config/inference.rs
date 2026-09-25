@@ -540,8 +540,9 @@ pub struct InferenceConfig {
     /// activation spikes (GLU-style FFN intermediates) don't degrade
     /// neighbouring values. Published perplexity delta vs. FP16: < 1% on
     /// standard benchmarks (Wikitext-2: 7.49 baseline). If you observe
-    /// quality regression on a specific model, override to `false` via
-    /// config.toml or `--no-activation-compression` CLI flag.
+    /// quality regression on a specific model, set
+    /// `[inference] activation_compression = false` in config.toml — there is
+    /// no command-line flag for it.
     #[serde(default = "default_activation_compression")]
     pub activation_compression: bool,
     /// Replace the greedy pipeline assembler with a Parallax-inspired
