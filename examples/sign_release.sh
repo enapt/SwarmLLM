@@ -40,14 +40,24 @@ if [ -z "$TAG" ]; then
   echo "  env SWARMLLM_RELEASE_SECRET_KEY   path to the offline secret key" >&2
   echo "      --verify-artifacts            also download each binary and" >&2
   echo "                                    re-check its hash before signing" >&2
+  echo "      --sign-only                   upload the signatures but leave the" >&2
+  echo "                                    release a DRAFT; publish it later with" >&2
+  echo "                                    gh release edit <tag> --draft=false" >&2
   exit 2
 fi
 shift || true
 
 VERIFY_ARTIFACTS=0
+# Signing needs the maintainer and publishing does not, so they need not happen
+# at the same moment: with --sign-only the key holder can sign as soon as every
+# platform's build exists and walk away, and the release is published — needing
+# no password — only once the downloaded artifact has passed the release gate.
+# Publishing first is how v0.3.199 reached the swarm broken (gotcha #683).
+SIGN_ONLY=0
 for arg in "$@"; do
   case "$arg" in
     --verify-artifacts) VERIFY_ARTIFACTS=1 ;;
+    --sign-only) SIGN_ONLY=1 ;;
     *) echo "unknown option: $arg" >&2; exit 2 ;;
   esac
 done
@@ -162,6 +172,14 @@ cargo run --quiet --manifest-path "$ROOT/Cargo.toml" \
 echo
 echo "Uploading ${#ASSETS[@]} signatures…"
 gh release upload "$TAG" --repo "$REPO" --clobber "$WORK"/*.minisig
+
+if [ "$SIGN_ONLY" -eq 1 ]; then
+  echo
+  echo "Signed; $TAG is still a DRAFT (--sign-only). Publish it once the release"
+  echo "gate has passed:"
+  echo "    gh release edit $TAG --repo $REPO --draft=false"
+  exit 0
+fi
 
 echo
 echo "Publishing $TAG"

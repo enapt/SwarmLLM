@@ -154,19 +154,13 @@ UNDETERMINED and never a fix — use it BEFORE blaming a change, especially your
 
 ## Status
 
-**v0.3.205-alpha is the live release (2026-09-25), signed and on both nodes.**
-`main` (`c06c489a`) is 15 commits AHEAD of it, unreleased — the user wants more
-before .206: #17's last-segment failover fixed after its first live run
-(#706/#707), per-version Trickle (#91), #108a/b, model-browser Chat-not-Download,
-`SWARMLLM_LOGGING_LEVEL`, **a remote last segment samples as the caller asked**
-(`0x0A`, #106 — it sampled at 0.7 whatever was requested), and **LoRA adapters
-are applied again** (#110 — local-only, verified against llama.cpp; Llama/Mistral
-q/k rows permuted as its converter does, #710; three singleton-executor gates now
-ask one predicate, #711; ⚠ CPU only — the .206 gate runs it on CUDA).
-Then (`220fc901`, from four field reports): **quinn-proto 0.11.18** — 0.11.17 closed whole
-QUIC connections mid-transfer since v0.3.148 (#112); **a peer serving a shorter context is
-skipped or failed over from** (#111, `split_rig.sh context`); **MoE experts stay quantized** and
-`qwen3moe`/`qwen2moe` load, verified vs llama.cpp on tiny models only (#114). Gemma 4 scoped (#115).
+**v0.3.206-alpha is the live release (2026-09-25), signed and on both nodes.** It carries:
+**quinn-proto 0.11.18** (0.11.17 closed whole QUIC connections mid-transfer since v0.3.148,
+#112); **a remote last segment samples as the caller asked** (`0x0A`, #106); **a peer serving a
+shorter context is skipped or failed over from** (#111, `split_rig.sh context`); **MoE experts
+stay quantized** and `qwen3moe`/`qwen2moe` load (#114 — tiny models vs llama.cpp only; no real
+30B-A3B run yet); **LoRA applied again** (#110, now checked on CUDA too); #17's last-segment
+failover; per-version Trickle (#91); #108a/b. Gemma 4 scoped, not built (#115).
 **Next** → `memory/next_up.md`.
 
 ⚠ **Behaviour gate = `reply_ab.sh` + `split_rig.sh`** (incl. `failover`), not
