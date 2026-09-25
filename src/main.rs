@@ -572,39 +572,31 @@ async fn async_main(mut cli: Cli) -> anyhow::Result<()> {
 
 fn init_tracing(verbose: u8) {
     swarmllm::DAEMON_VERBOSITY.store(verbose, std::sync::atomic::Ordering::Relaxed);
-    // CLI verbose flags override any config file setting
-    let filter = if verbose > 0 {
-        match verbose {
-            1 => "swarmllm=debug".to_string(),
-            2 => "swarmllm=debug,libp2p=info,libp2p_request_response=debug,libp2p_swarm=debug,yamux=debug,multistream_select=debug,tower_http=debug".to_string(),
-            _ => "trace".to_string(),
-        }
+    // Read logging.level from the resolved data dir, NOT a hardcoded default.
+    // resolve_data_dir() picks up SWARMLLM_NODE_DATA_DIR so a multi-node setup
+    // gets each node's own log level. Without this, node2 silently inherited
+    // node1's config (or fell through to "info"). Note: this runs before CLI
+    // parsing, so a `--data-dir` flag isn't available yet — we accept that
+    // limitation for the bootstrap log filter; the env-var case (which is the
+    // common multi-node testing pattern) is what matters here.
+    let config_level = if verbose > 0 {
+        None
     } else {
-        // Read logging.level from the resolved data dir, NOT a hardcoded
-        // default. resolve_data_dir() picks up SWARMLLM_NODE_DATA_DIR so a
-        // multi-node setup gets each node's own log level. Without this,
-        // node2 silently inherited node1's config (or fell through to "info").
-        // Note: this runs before CLI parsing, so a `--data-dir` flag isn't
-        // available yet — we accept that limitation for the bootstrap log
-        // filter; the env-var case (which is the common multi-node testing
-        // pattern) is what matters here.
-        let config_level =
-            std::fs::read_to_string(swarmllm::config::resolve_data_dir(None).join("config.toml"))
-                .ok()
-                .and_then(|contents| toml::from_str::<toml::Value>(&contents).ok())
-                .and_then(|v| {
-                    v.get("logging")
-                        .and_then(|l| l.get("level"))
-                        .and_then(|l| l.as_str().map(String::from))
-                });
-        match config_level.as_deref() {
-            Some("debug") => "swarmllm=debug".to_string(),
-            Some("trace") => "trace".to_string(),
-            Some("warn") => "swarmllm=warn".to_string(),
-            Some("error") => "swarmllm=error".to_string(),
-            _ => "swarmllm=info".to_string(),
-        }
+        std::fs::read_to_string(swarmllm::config::resolve_data_dir(None).join("config.toml"))
+            .ok()
+            .and_then(|contents| toml::from_str::<toml::Value>(&contents).ok())
+            .and_then(|v| {
+                v.get("logging")
+                    .and_then(|l| l.get("level"))
+                    .and_then(|l| l.as_str().map(String::from))
+            })
     };
+    let env_level = std::env::var("SWARMLLM_LOGGING_LEVEL").ok();
+    let filter = swarmllm::config::log_filter_directive(
+        verbose,
+        env_level.as_deref(),
+        config_level.as_deref(),
+    );
 
     // Respect NO_COLOR (https://no-color.org/) and also disable ANSI
     // when stdout is not a terminal (piped/redirected to file)

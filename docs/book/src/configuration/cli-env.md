@@ -89,7 +89,7 @@ is ignored. Everything else is set in `config.toml` or from the dashboard.
 |---|---|---|
 | `node.listen_port` | `SWARMLLM_NODE_LISTEN_PORT` | |
 | `node.data_dir` | `SWARMLLM_NODE_DATA_DIR` | |
-| `logging.level` | `SWARMLLM_LOGGING_LEVEL` | Accepted, but currently does not change what is logged — use `-v`/`-vv`, or `[logging] level` in `config.toml` |
+| `logging.level` | `SWARMLLM_LOGGING_LEVEL` | `trace`, `debug`, `info`, `warn` or `error`; `-v`/`-vv` still take precedence |
 | `inference.model_path` | `SWARMLLM_INFERENCE_MODEL_PATH` | |
 | `inference.gpu_layers` | `SWARMLLM_INFERENCE_GPU_LAYERS` | `0` = processor only |
 | `api.api_key` | `SWARMLLM_API_KEY` | a deterministic key for Docker; empty means unset |

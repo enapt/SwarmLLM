@@ -333,6 +333,43 @@ pub fn hf_api_token() -> Option<String> {
         .filter(|t| !t.is_empty())
 }
 
+/// The values `logging.level` and `SWARMLLM_LOGGING_LEVEL` accept.
+const LOG_LEVELS: [&str; 5] = ["trace", "debug", "info", "warn", "error"];
+
+/// The tracing filter a process starts with: its `-v` count, then
+/// `SWARMLLM_LOGGING_LEVEL`, then `[logging] level` from its config file, then
+/// `info` — the priority every other setting follows (CLI > env > file >
+/// default). An invalid environment value is skipped, as the config loader
+/// skips it, rather than silencing the file's.
+///
+/// `main::init_tracing` read only the file, so the environment variable was
+/// validated, stored in the config and then never consulted — the book had to
+/// document it as accepted but ignored. Model workers are spawned from the same
+/// binary with the same environment, so they follow it too.
+pub fn log_filter_directive(
+    verbose: u8,
+    env_level: Option<&str>,
+    file_level: Option<&str>,
+) -> String {
+    match verbose {
+        0 => {}
+        1 => return "swarmllm=debug".to_string(),
+        2 => {
+            return "swarmllm=debug,libp2p=info,libp2p_request_response=debug,libp2p_swarm=debug,yamux=debug,multistream_select=debug,tower_http=debug".to_string()
+        }
+        _ => return "trace".to_string(),
+    }
+    let level = env_level.filter(|l| LOG_LEVELS.contains(l)).or(file_level);
+    match level {
+        Some("trace") => "trace",
+        Some("debug") => "swarmllm=debug",
+        Some("warn") => "swarmllm=warn",
+        Some("error") => "swarmllm=error",
+        _ => "swarmllm=info",
+    }
+    .to_string()
+}
+
 pub(super) fn default_true() -> bool {
     true
 }
@@ -454,7 +491,7 @@ impl Config {
         }
         if let Ok(val) = std::env::var("SWARMLLM_LOGGING_LEVEL") {
             match val.as_str() {
-                "trace" | "debug" | "info" | "warn" | "error" => config.logging.level = val,
+                v if LOG_LEVELS.contains(&v) => config.logging.level = val,
                 _ => tracing::warn!(
                     value = %val,
                     "Ignoring invalid SWARMLLM_LOGGING_LEVEL (expected: trace/debug/info/warn/error)"
@@ -763,6 +800,34 @@ mod tests {
         assert_eq!(config.node.listen_port, 8800);
         assert_eq!(config.resources.max_disk_mb, 50_000);
         assert_eq!(config.inference.session_timeout_seconds, 600);
+    }
+
+    /// `SWARMLLM_LOGGING_LEVEL` was accepted and never consulted: the log
+    /// filter read the config file alone. Flags > env > file > default.
+    #[test]
+    fn the_log_level_follows_flags_then_environment_then_file() {
+        // The environment outranks the file, in both directions.
+        assert_eq!(
+            log_filter_directive(0, Some("debug"), Some("warn")),
+            "swarmllm=debug"
+        );
+        assert_eq!(
+            log_filter_directive(0, Some("error"), Some("debug")),
+            "swarmllm=error"
+        );
+        // A value the loader would reject does not silence the file's.
+        assert_eq!(
+            log_filter_directive(0, Some("loud"), Some("warn")),
+            "swarmllm=warn"
+        );
+        assert_eq!(log_filter_directive(0, None, Some("trace")), "trace");
+        assert_eq!(log_filter_directive(0, None, None), "swarmllm=info");
+        // `-v` outranks both.
+        assert_eq!(
+            log_filter_directive(1, Some("error"), Some("error")),
+            "swarmllm=debug"
+        );
+        assert_eq!(log_filter_directive(3, Some("error"), None), "trace");
     }
 
     #[test]
