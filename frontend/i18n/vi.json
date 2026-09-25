@@ -88,6 +88,7 @@
   "activity.storage_over_budget": "Dung lượng đã vượt giới hạn bạn đặt, nhưng không thể xoá gì mà không khiến mạng lưới thiếu bản sao của một mô hình. Hãy tăng giới hạn hoặc tự xoá một mô hình.",
   "activity.upnp_mapped": "Bộ định tuyến của bạn đã mở một địa chỉ công khai ({detail}) — máy tính này giờ có thể truy cập được từ internet.",
   "activity.vram_soft_unload": "Bộ nhớ GPU thấp: đã giảm {model} xuống {count} phần để giải phóng dung lượng",
+  "browse.action_chat": "Trò chuyện",
   "browse.action_download": "Tải về",
   "browse.action_hosting": "Đang lưu trữ",
   "browse.download_failed": "Tải xuống thất bại.",

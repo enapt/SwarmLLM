@@ -88,6 +88,7 @@
   "activity.storage_over_budget": "Penyimpanan melebihi batas yang Anda tetapkan, tetapi tidak ada yang bisa dihapus tanpa membuat jaringan kekurangan salinan sebuah model. Naikkan batasnya atau hapus sendiri sebuah model.",
   "activity.upnp_mapped": "Router Anda membuka alamat publik ({detail}) — komputer ini kini dapat dijangkau melalui internet.",
   "activity.vram_soft_unload": "Memori GPU rendah: {model} dikurangi jadi {count} bagian untuk membebaskan ruang",
+  "browse.action_chat": "Mulai obrolan",
   "browse.action_download": "Unduh",
   "browse.action_hosting": "Sedang Di-host",
   "browse.download_failed": "Pengunduhan gagal.",

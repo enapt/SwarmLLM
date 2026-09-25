@@ -88,6 +88,7 @@
   "activity.storage_over_budget": "Хранилище превышает заданный лимит, но ничего нельзя удалить, не оставив сеть без копий модели. Увеличьте лимит или удалите модель вручную.",
   "activity.upnp_mapped": "Ваш роутер открыл публичный адрес ({detail}) — этот компьютер теперь доступен из интернета.",
   "activity.vram_soft_unload": "Мало памяти GPU: {model} уменьшено до {count} частей, чтобы освободить место",
+  "browse.action_chat": "Начать чат",
   "browse.action_download": "Скачать",
   "browse.action_hosting": "Размещение",
   "browse.download_failed": "Ошибка загрузки.",

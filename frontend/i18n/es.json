@@ -88,6 +88,7 @@
   "activity.storage_over_budget": "El almacenamiento supera tu límite configurado, pero no se puede eliminar nada sin dejar a la red sin copias suficientes de un modelo. Aumenta el límite o elimina un modelo tú mismo.",
   "activity.upnp_mapped": "Tu router abrió una dirección pública ({detail}); este ordenador ya es accesible desde internet.",
   "activity.vram_soft_unload": "Memoria de GPU baja: se redujo {model} a {count} partes para liberar espacio",
+  "browse.action_chat": "Chatear",
   "browse.action_download": "Descargar",
   "browse.action_hosting": "Alojando",
   "browse.download_failed": "Descarga fallida.",

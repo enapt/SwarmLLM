@@ -33,8 +33,11 @@ terminal, the same thing is:
 **Any other model:** open the **Models** tab and choose **Search HuggingFace**
 (or click **Find Models** on the Dashboard), search for a model — try
 `TinyLlama` for a small, fast one — and check its badge: **✓ Runs locally**,
-**○ Swarm computers only** or **⚠ Too large for your swarm**. The **Download**
-button starts the download.
+**↗ Host parts**, **○ Swarm computers only** or **⚠ Too large for your swarm**.
+The **Download** button starts the download. A model marked **Swarm computers
+only** is too big for this computer to hold even a part of, but other
+computers hold all of it — its button is **Chat**, which opens a conversation
+with it straight away.
 
 > **Heads-up**: models from well-known publishers (meta-llama, mistralai,
 > Qwen, bartowski, unsloth, …) spread across the swarm faster than models

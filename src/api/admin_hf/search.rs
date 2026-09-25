@@ -192,6 +192,22 @@ pub async fn hf_search(
                 .collect();
             let network_replicas =
                 count_unique_shard_holders(&state.shared_state.model_registry, &variant_ids);
+            // The variant the swarm can RUN right now — every part held by a
+            // computer that can serve it — preferring the recommended one.
+            // `network_replicas` counts copies of any part, which is not that:
+            // one computer holding a model's first part is a copy, and nothing
+            // anyone can chat with. The browser offers "Chat" on this, where it
+            // offered Download to a node that cannot hold even one part.
+            let registry = &state.shared_state.model_registry;
+            let swarm_model_id = recommended
+                .map(|f| crate::types::ModelId(gguf_filename_to_model_id(&f.filename)))
+                .into_iter()
+                .chain(variant_ids.iter().cloned())
+                .find(|id| {
+                    registry
+                        .get_manifest(id)
+                        .is_some_and(|m| registry.every_shard_has_a_holder(&m))
+                });
 
             // Composite score: surfaces small, popular, scarce, VRAM-fitting models
             let quality = (downloads as f64 + 10.0).log10() / 7.0; // 0-1 popularity proxy
@@ -221,13 +237,12 @@ pub async fn hf_search(
             // (Hosting / Serveable / Aspirational / Unreachable / Blocked)
             // so non-technical users see consistent language across views.
             //
-            // Bug fix (multi-node test): when the local node can't fit *any*
-            // shard but peers host the model, the old logic flagged it as
-            // "unreachable" — which is wrong. If `network_replicas > 0` the
-            // model IS reachable via remote inference through those peers,
-            // so report `swarm_serveable` instead.
+            // When the local node can't fit *any* shard, the model is still
+            // reachable through remote inference — but only if the swarm holds
+            // EVERY part of some variant. Holders of some parts
+            // (`network_replicas > 0`) were read as that, and are not.
             let status = if !fits_full && !fits_boomerang && !fits_shard {
-                if network_replicas > 0 {
+                if swarm_model_id.is_some() {
                     "swarm_serveable"
                 } else {
                     "unreachable"
@@ -262,6 +277,7 @@ pub async fn hf_search(
                 "est_shard_size": est_shard_size,
                 "est_boomerang_size": est_boomerang_size,
                 "network_replicas": network_replicas,
+                "swarm_model_id": swarm_model_id.map(|m| m.0),
                 "composite_score": composite_score,
                 "score_breakdown": {
                     "quality": (quality * 100.0) as u32,

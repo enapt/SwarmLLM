@@ -88,6 +88,7 @@
   "activity.storage_over_budget": "Le stockage dépasse la limite que vous avez définie, mais rien ne peut être supprimé sans priver le réseau d'un modèle. Augmentez la limite ou supprimez un modèle vous-même.",
   "activity.upnp_mapped": "Votre routeur a ouvert une adresse publique ({detail}) — cet ordinateur est désormais accessible depuis Internet.",
   "activity.vram_soft_unload": "Mémoire GPU faible : {model} réduit à {count} parties pour libérer de l'espace",
+  "browse.action_chat": "Discuter",
   "browse.action_download": "Télécharger",
   "browse.action_hosting": "En cours d'hébergement",
   "browse.download_failed": "Téléchargement échoué.",

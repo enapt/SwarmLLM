@@ -79,7 +79,7 @@ until readers leave (#90's shape); `clippy.toml` fails the build on one.
 - Vanilla HTML/CSS/JS — no framework, no build step, embedded via `include_dir!`.
   Detail in `.claude/rules/arch-frontend.md`, which loads when you open `frontend/`.
 - **5** WS message types, **2** broadcast channels. Do not add to either set.
-- i18n: **1394 translation keys** (**1396 entries per locale** incl. `_lang` + `_dir`) × 21,
+- i18n: **1395 translation keys** (**1397 entries per locale** incl. `_lang` + `_dir`) × 21,
   sorted. Counts asserted — **update BOTH CLAUDE.md and `docs/ARCHITECTURE.md`**.
   A new key MUST be translated into all 21; **no English fallback.**
 - Payload ~1196 KB, capped by `frontend_payload_stays_within_budget` — a
@@ -88,7 +88,7 @@ until readers leave (#90's shape); `clippy.toml` fails the build on one.
 ## Testing
 
 **Always say which feature set a count came from.** With
-`--features dev,claude-subscription`: **2923 lib** (+14 ignored),
+`--features dev,claude-subscription`: **2926 lib** (+14 ignored),
 79 integration (31 + 34 + 14 `yamux_substream`), **169 repo-consistency**,
 1 `api_key_side_effects`, 55 `swarmllm-types`, and 11 in the vendored
 request-response patch — plus 15 in the `swarmllm` BIN target (`cli::*`, counted

@@ -472,7 +472,9 @@
     if (repo.fits_shard || repo.fits_boomerang) {
       return { key: 'host', text: I18n.t('browse.fit_host_shards') };
     }
-    if (repo.network_replicas > 0) {
+    // Only when the swarm holds EVERY part of some variant. Holders of some
+    // parts (`network_replicas`) are copies, not something anyone can run.
+    if (repo.swarm_model_id) {
       return { key: 'swarm', text: I18n.t('browse.fit_swarm_only') };
     }
     return { key: 'too-large', text: I18n.t('browse.fit_too_large') };
@@ -621,8 +623,11 @@
     var filtered = data || [];
     var totalRaw = filtered.length;
     if (_browseState.fitOnly) {
+      // The same question the pill asks: a model the swarm holds only SOME
+      // parts of passed this filter and then rendered as too large, with no
+      // button — shown by the toggle that promises to hide exactly that.
       filtered = filtered.filter(function (r) {
-        return r.fits_shard || r.fits_boomerang || r.network_replicas > 0;
+        return r.fits_shard || r.fits_boomerang || !!r.swarm_model_id;
       });
     }
 
@@ -673,11 +678,12 @@
 
     // The size is what Download will fetch: the whole file when it runs here,
     // otherwise one part. It showed the first-and-last-parts estimate before,
-    // which is neither.
+    // which is neither. A swarm-only row fetches nothing — its button is Chat —
+    // so it shows the model's own size.
     var sizeEl = document.createElement('div');
     sizeEl.className = 'browse-result-size';
     var recommended = _browseVariant(repo, null);
-    var sizeBytes = fit.key === 'run'
+    var sizeBytes = (fit.key === 'run' || fit.key === 'swarm')
       ? ((recommended && recommended.size_bytes) || 0)
       : (repo.est_shard_size || 0);
     sizeEl.textContent = sizeBytes ? U.formatBytes(sizeBytes) : '—';
@@ -700,6 +706,12 @@
         actionBtn.textContent = I18n.t('browse.action_hosting');
         actionBtn.classList.add('browse-result-action-disabled');
         actionBtn.disabled = true;
+      } else if (fit.key === 'swarm') {
+        // This computer cannot hold even one part, so Download fetched parts
+        // it could never run; the swarm can run the whole model, so the thing
+        // to offer is using it.
+        actionBtn.textContent = I18n.t('browse.action_chat');
+        actionBtn.classList.add('browse-result-action-primary');
       } else {
         actionBtn.textContent = I18n.t('browse.action_download');
         actionBtn.classList.add('browse-result-action-primary');
@@ -707,6 +719,12 @@
       actionBtn.addEventListener('click', function (e) {
         e.stopPropagation();
         if (actionBtn.disabled) return;
+        if (fit.key === 'swarm') {
+          App.models.selectDropdown(repo.swarm_model_id);
+          App.chat.newSession();
+          App.ui.switchTab('chat');
+          return;
+        }
         // The variant the user chose in the size dropdown, if they opened it —
         // this read only the recommended one, so the dropdown did nothing.
         var chosen = row.querySelector('.browse-quant-row select');

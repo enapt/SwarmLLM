@@ -183,26 +183,6 @@ pub fn apply_quant_auto_action(state: &SharedState) -> usize {
     promotions
 }
 
-/// Whether some node in the swarm holds every shard of `manifest` — i.e. the
-/// model can actually be served right now.
-///
-/// This backs `QuantVariantInfo::serveable`, which was constructed as `false`
-/// with a "filled below" comment describing code that was never written, so the
-/// field read `false` for every variant on every response, including models the
-/// asking node was hosting itself.
-fn every_shard_has_a_holder(state: &SharedState, manifest: &ModelManifest) -> bool {
-    !manifest.shards.is_empty()
-        && manifest.shards.iter().all(|s| {
-            !state
-                .model_registry
-                .shard_holders(&crate::types::ShardId {
-                    model_id: manifest.id.clone(),
-                    index: s.index,
-                })
-                .is_empty()
-        })
-}
-
 fn hosts_any_shard(
     state: &SharedState,
     model_id: &crate::types::ModelId,
@@ -325,7 +305,10 @@ fn build_family(
                 quality_score: q.quality_score(),
                 size_mb,
                 vram_required_mb,
-                serveable: every_shard_has_a_holder(state, manifest),
+                // Was constructed as `false` with a "filled below" comment
+                // describing code that was never written, so it read `false`
+                // for every variant, including models this node was hosting.
+                serveable: state.model_registry.every_shard_has_a_holder(manifest),
             }
         })
         .collect();

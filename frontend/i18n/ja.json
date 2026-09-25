@@ -88,6 +88,7 @@
   "activity.storage_over_budget": "ストレージが設定した上限を超えていますが、ネットワークからモデルの複製が失われるため何も削除できません。上限を引き上げるか、ご自身でモデルを削除してください。",
   "activity.upnp_mapped": "ルーターが公開アドレス（{detail}）を開きました。このコンピューターはインターネットから到達可能になりました。",
   "activity.vram_soft_unload": "GPU メモリが不足しています：空きを作るため {model} を {count} パーツに減らしました",
+  "browse.action_chat": "チャット",
   "browse.action_download": "ダウンロード",
   "browse.action_hosting": "ホスト中",
   "browse.download_failed": "ダウンロードに失敗しました。",

@@ -935,6 +935,25 @@ impl ModelRegistry {
             .unwrap_or_default()
     }
 
+    /// Can the swarm, between its computers, run this model right now — does
+    /// every shard of `manifest` have at least one holder that can serve it?
+    ///
+    /// Asked through [`Self::shard_holders`], so a holder of another build does
+    /// not count. The raw holder map answers a different question — does anyone
+    /// hold any part — and a count built from it told the model browser a model
+    /// was usable through the swarm when one computer held only its first part.
+    pub fn every_shard_has_a_holder(&self, manifest: &ModelManifest) -> bool {
+        !manifest.shards.is_empty()
+            && manifest.shards.iter().all(|s| {
+                !self
+                    .shard_holders(&ShardId {
+                        model_id: manifest.id.clone(),
+                        index: s.index,
+                    })
+                    .is_empty()
+            })
+    }
+
     /// Holders of `shard_id` that positively claim a DIFFERENT build from ours.
     ///
     /// Exists so the filter above is observable: a peer silently dropped from
@@ -1517,6 +1536,41 @@ mod tests {
             license: "MIT".into(),
             mmproj: None,
         }
+    }
+
+    /// "Does anyone hold a part" is not "can the swarm run it": the model
+    /// browser offered Download to a node that could hold no part at all, on
+    /// the strength of one peer holding a model's first part.
+    #[test]
+    fn a_model_is_runnable_through_the_swarm_only_when_every_part_is_held() {
+        let registry = ModelRegistry::new();
+        let mut m = test_manifest("m", "M");
+        m.shard_count = 2;
+        m.shards = vec![test_shard(0, [1u8; 32]), test_shard(1, [2u8; 32])];
+        registry.register_manifest(m.clone());
+        let part = |index| ShardId {
+            model_id: ModelId("m".into()),
+            index,
+        };
+
+        assert!(
+            !registry.every_shard_has_a_holder(&m),
+            "nobody holds anything"
+        );
+        registry.record_shard_holder(part(0), NodeId([5u8; 32]));
+        assert!(
+            !registry.every_shard_has_a_holder(&m),
+            "one part held is a copy, not a model anyone can run"
+        );
+        registry.record_shard_holder(part(1), NodeId([6u8; 32]));
+        assert!(
+            registry.every_shard_has_a_holder(&m),
+            "two computers holding a part each run it between them"
+        );
+        assert!(
+            !registry.every_shard_has_a_holder(&test_manifest("empty", "E")),
+            "a manifest listing no parts describes nothing that can run"
+        );
     }
 
     /// A shard hash may go from unknown to known, never back to unknown.

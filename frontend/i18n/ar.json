@@ -88,6 +88,7 @@
   "activity.storage_over_budget": "تجاوزت مساحة التخزين الحد الذي حددته، لكن لا يمكن حذف أي شيء دون أن تفقد الشبكة نسخة من أحد النماذج. ارفع الحد أو احذف نموذجًا بنفسك.",
   "activity.upnp_mapped": "فتح جهاز التوجيه عنوانًا عامًا ({detail}) — أصبح هذا الحاسوب الآن قابلًا للوصول عبر الإنترنت.",
   "activity.vram_soft_unload": "ذاكرة GPU منخفضة: تم تقليل {model} إلى {count} أجزاء لتوفير مساحة",
+  "browse.action_chat": "ابدأ محادثة",
   "browse.action_download": "تنزيل",
   "browse.action_hosting": "استضافة",
   "browse.download_failed": "فشل التنزيل.",

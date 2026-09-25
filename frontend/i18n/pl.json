@@ -88,6 +88,7 @@
   "activity.storage_over_budget": "Zajęte miejsce przekracza ustawiony limit, ale nic nie da się usunąć bez pozbawienia sieci kopii modelu. Zwiększ limit lub sam usuń model.",
   "activity.upnp_mapped": "Router otworzył adres publiczny ({detail}) — ten komputer jest teraz osiągalny z internetu.",
   "activity.vram_soft_unload": "Mało pamięci GPU: zmniejszono {model} do {count} części, aby zwolnić miejsce",
+  "browse.action_chat": "Czatuj",
   "browse.action_download": "Pobierz",
   "browse.action_hosting": "Hostowanie",
   "browse.download_failed": "Pobieranie nie powiodło się.",
