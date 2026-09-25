@@ -1,5 +1,82 @@
 # Changelog
 
+## [0.3.206-alpha] — 2026-09-25
+
+**Connections between computers stop dropping in the middle of large
+transfers, a model split across computers now answers at the temperature you
+asked for, and Qwen3 mixture-of-experts models load.** Also: a computer set to
+a shorter conversation length no longer sinks a long request, and LoRA
+adapters are applied again.
+
+**Fixed: connections dropped in the middle of large transfers, losing
+downloads and finished answers.** Every release since 0.3.148 carried a
+version of the QUIC networking library that closed a whole connection when
+the receiving side fell behind on a large transfer, even with no data missing
+("too many gaps in stream buffer" in the log). It cut model downloads short
+and, in one reported case, lost a finished 28 MB answer on its way back to the
+computer that asked for it, which then waited until the chat program gave up.
+Our own node logged 99 such drops in eight days. The fixed library version is
+in this release. The computer RECEIVING a transfer is the one that drops it,
+so the improvement arrives as computers update.
+
+**Fixed: a model split across computers ignored the temperature you asked
+for.** When the last part of a split model ran on another computer — the usual
+shape of a split — that computer chose each word with its own defaults
+(temperature 0.7), whatever the request said. A request at temperature 0 came
+back different each time, and frequency and presence penalties did nothing.
+It now chooses with your settings, on every path a split can take.
+
+**Fixed: a computer set to serve shorter conversations could sink a long
+request.** Each computer serves conversations up to its own limit (8,192 tokens
+unless raised). A long prompt — an agent's instructions, say — planned through
+a computer with a lower limit was refused minutes later, after that computer
+had worked through most of it, and the request failed although another
+computer could have taken over. Now every computer says what length it serves;
+a prompt is not sent to one that would refuse it, a refusal hands the work to
+a standby, and a computer checks the whole prompt before starting rather than
+partway through. If no computer that could run some part of the model serves
+the length, the message says the limit is set on those computers — it no
+longer tells you to raise a setting on yours that cannot change theirs.
+
+**New: Qwen3 mixture-of-experts models load (Qwen3-30B-A3B,
+Qwen3-Coder-30B-A3B), and every mixture-of-experts model needs about its
+file's size in memory instead of about ten times it.** Models of this kind were
+expanded to full precision while loading, so an 11 GB file needed more than
+100 GB and none of them could load at a realistic size. They now stay
+compressed, as llama.cpp keeps them, and Qwen2-MoE — listed as supported but
+unable to load — loads too. Checked against llama.cpp's own numbers on small
+test models. Two limits: long prompts on these models are slow in this
+version, and files quantized as `IQ*` (IQ1_S, IQ3_XXS…) cannot be read — they
+are now refused with a message naming the type, where the error used to be
+"unknown dtype".
+
+**Fixed: LoRA adapters are applied again.** A chat request naming a registered
+adapter (`lora_adapter`) was answered by the plain base model with nothing to
+say so. Adapters are now applied, on the computer they were registered on,
+checked against llama.cpp on Llama and Qwen models; one that cannot be applied
+in full is refused with the reason instead.
+
+**Fixed: when the last computer in a split failed, the request stalled for
+minutes.** The computers that take over a failed part between them now both
+run; the first live test of that path found the second never did, and the
+request waited out a five-minute deadline before starting over.
+
+**Model search: a model too big for this computer that the swarm can run now
+offers Chat, not Download**, and "You host this" appears only on models this
+computer actually holds a part of. Before, a new user on a small machine was
+offered downloads of parts it could never run, and every model a peer held
+read as already hosted here, hiding Chat.
+
+**Quieter and steadier:**
+- A model the swarm holds in two versions is announced once per half hour,
+  not by every holder every five minutes — most of an idle computer's traffic.
+- Checking a downloaded model part no longer pauses everything the computer is
+  serving for a moment; nor does saving a peer's model details.
+- Turning updates back on in Settings takes effect within a minute.
+- `SWARMLLM_LOGGING_LEVEL` now sets the log level, as the documentation said.
+- The monitoring guide's setup, scrape authentication and latency alert are
+  corrected.
+
 ## [0.3.205-alpha] — 2026-09-25
 
 **Docker images run models about three times faster, every word of a reply
