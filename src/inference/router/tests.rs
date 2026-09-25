@@ -439,6 +439,66 @@ fn a_segment_deadline_is_retried_only_with_a_remote_segment_involved() {
     assert!(!super::should_retry_after(&silent, true, true, false));
 }
 
+/// A whole-model peer refusing a conversation longer than IT serves is
+/// re-planned — by type, with a remote segment involved — and a plain
+/// `Validation` (the caller's own mistake, or a refusal at the model's declared
+/// limit, which never takes the variant) is not. #111's whole-model half.
+#[test]
+fn a_peers_context_refusal_is_re_planned_and_the_callers_own_mistake_is_not() {
+    use crate::error::SwarmError;
+    let peer_limit = SwarmError::LongerThanPeerServes("9000 tokens, at most 8192".into());
+    assert!(super::should_retry_after(&peer_limit, true, false, false));
+    assert!(
+        !super::should_retry_after(&peer_limit, false, false, false),
+        "only a remote peer produces it; nothing local to route around"
+    );
+    assert!(!super::should_retry_after(&peer_limit, true, false, true));
+    assert!(!super::should_retry_after(&peer_limit, true, true, false));
+    // A fast, explicit refusal whose peer is barred earns the further re-plan a
+    // second short-context holder would need.
+    let quick = std::time::Duration::from_millis(300);
+    assert!(super::a_further_replan_is_earned(&peer_limit, true, quick));
+
+    let callers_own = SwarmError::Validation(
+        "This conversation is too long for m: 40000 tokens of prompt against a limit of \
+         32768, which leaves no room for a reply."
+            .into(),
+    );
+    assert!(!super::should_retry_after(&callers_own, true, false, false));
+    assert!(!super::a_further_replan_is_earned(
+        &callers_own,
+        true,
+        quick
+    ));
+
+    // To the caller it is still a 400 about length.
+    assert_eq!(
+        crate::error::classify_error(&peer_limit).0,
+        axum::http::StatusCode::BAD_REQUEST
+    );
+}
+
+/// When the re-plan after a peer's context refusal fails too, the caller hears
+/// the re-plan's own answer only if it is one they can act on.
+#[test]
+fn a_failed_re_plan_after_a_context_refusal_reports_the_limit_not_the_search() {
+    use crate::error::SwarmError;
+    let first = || SwarmError::LongerThanPeerServes("the peer's limit".into());
+    // "No route" is about a search the caller never asked for.
+    let no_route = SwarmError::SegmentFailoverExhausted("no standby".into());
+    assert!(matches!(
+        super::report_after_a_context_replan(first(), no_route),
+        SwarmError::LongerThanPeerServes(_)
+    ));
+    // This node's own worker refusing at ITS limit is the better answer: its
+    // advice to raise the setting here is then correct.
+    let ours = SwarmError::Validation("too long for m … against a limit of 8192".into());
+    assert!(matches!(
+        super::report_after_a_context_replan(first(), ours),
+        SwarmError::Validation(_)
+    ));
+}
+
 /// This node's own memory refusal is re-planned with no remote segment
 /// involved — the one local failure that is.
 ///

@@ -51,13 +51,23 @@
 #          that names the other machines' limit instead of telling the caller
 #          to raise their own. Run BIN_B = an older release to see the refusal
 #          path, and BIN_A = an older release for the baseline (it gives up).
+#   whole  #111's WHOLE-MODEL half. A holds none of the model (so every plan is
+#          one peer running all of it, `remote_generate`), B holds every part
+#          but serves a SHORTER conversation than the long prompt (CEIL_B,
+#          default 512) and has the graphics card (so it is priced first), C
+#          holds every part at the default ceiling on the processor. Ask 1,
+#          with C not yet started: nobody can serve the length, and PASS = a
+#          400 naming B's limit ("serve at most"), not the peer's own advice
+#          and not a 503. Ask 2, with C up: PASS = 200, and when A's plan tried
+#          B first, A logged B's refusal and re-planned onto C. Run BIN_A = an
+#          older release for the baseline (B's refusal comes back as the 400).
 #   fetch  A holds every part, B only part 0; B is asked to download part
 #          FETCH_SHARD (default 1) from A over P2P. Prints whether it landed and
 #          every `network event loop stalled` line B logged meanwhile — the hash
 #          of a downloaded part ran ON the event loop until FUTURE_WORK #108
 #          (~229 ms per 512 MB part, over the loop's 100 ms tripwire).
 #
-# usage: split_rig.sh split|kill|failover|context|repeat|fetch <binary> [<binary for B>]
+# usage: split_rig.sh split|kill|failover|context|whole|repeat|fetch <binary> [<binary for B>]
 #   MODEL      model id (default: tinyllama for split, llama-3.2-3b for kill
 #              and failover)
 #   SHARDS_A   shard indices A holds, comma-separated (default 0; kill: 0,LAST)
@@ -78,9 +88,9 @@ set -u
 MODE="${1:?usage: split_rig.sh split|kill|failover|context|repeat|fetch <binary> [<binary for B>]}"
 BIN_A="${2:?binary}"
 BIN_B="${3:-$BIN_A}"
-case "$MODE" in split|kill|failover|context|repeat|fetch) ;; *) echo "mode must be split, kill, failover, context, repeat or fetch"; exit 2 ;; esac
-if [ "$MODE" = context ] && printf '%s' "${EXTRA_TOML:-}" | grep -q '^\[inference\]'; then
-  echo "context: EXTRA_TOML may not open [inference] — B's ceiling is written there"; exit 2
+case "$MODE" in split|kill|failover|context|whole|repeat|fetch) ;; *) echo "mode must be split, kill, failover, context, whole, repeat or fetch"; exit 2 ;; esac
+if { [ "$MODE" = context ] || [ "$MODE" = whole ]; } && printf '%s' "${EXTRA_TOML:-}" | grep -q '^\[inference\]'; then
+  echo "$MODE: EXTRA_TOML may not open [inference] — B's ceiling is written there"; exit 2
 fi
 [ -x "$BIN_A" ] && [ -x "$BIN_B" ] || { echo "binary not executable"; exit 2; }
 if [ "$MODE" = split ]; then
@@ -116,6 +126,13 @@ elif [ "$MODE" = failover ] || [ "$MODE" = context ]; then
   SHARDS_C=$(echo "$SHARDS" | grep -vx 0 | grep -vx "$LAST" | paste -sd,)
   SHARDS_D=$LAST
   GPU_A="${GPU_A:-0}"; GPU_B="${GPU_B:-0}"
+elif [ "$MODE" = whole ]; then
+  # A holds the header only, so it knows the model's declared context but can
+  # run none of it; B and C each hold all of it.
+  SHARDS_A=""
+  SHARDS_B=$(echo "$SHARDS" | paste -sd,)
+  SHARDS_C=$SHARDS_B
+  GPU_A="${GPU_A:-0}"
 else
   SHARDS_A="${SHARDS_A:-0,$LAST}"
   SHARDS_B="${SHARDS_B:-$(echo "$SHARDS" | paste -sd,)}"
@@ -195,6 +212,11 @@ cleanup() {
 trap cleanup EXIT
 
 make_node "$BASE/A" "$SHARDS_A" ""
+# The n-gram-only path takes every request a coordinator holding the header can
+# tokenize, and it is a SEGMENT path (its own failover covers #111 there). The
+# whole-model path under test is what a coordinator runs once that path is off
+# for it — no header, or its payoff check has switched it off.
+[ "$MODE" = whole ] && printf '\n[inference]\nngram_lookup_enabled = false\n' >> "$BASE/A/config.toml"
 PA=$(start "$BASE/A" 8900 "$BIN_A" "${GPU_A:-}")
 up "$BASE/A" 8900 || exit 1
 KA=$(cat "$BASE/A/api_key")
@@ -208,7 +230,7 @@ ADDR=$(echo "$ADDRS" | grep -v "10\.255\.255\.254" | head -1)
 [ -n "$ADDR" ] || { echo "A published no address to dial"; exit 1; }
 make_node "$BASE/B" "$SHARDS_B" "\"$ADDR\""
 # B alone serves a conversation shorter than the long prompt.
-[ "$MODE" = context ] && printf '\n[inference]\nmax_seq_len_override = %s\n' "${CEIL_B:-512}" >> "$BASE/B/config.toml"
+{ [ "$MODE" = context ] || [ "$MODE" = whole ]; } && printf '\n[inference]\nmax_seq_len_override = %s\n' "${CEIL_B:-512}" >> "$BASE/B/config.toml"
 PB=$(start "$BASE/B" 8920 "$BIN_B" "${GPU_B:-}")
 up "$BASE/B" 8920 || exit 1
 PEERS_EXPECTED=1
@@ -296,6 +318,46 @@ if [ "$MODE" = repeat ]; then
   echo "repeat: n-gram path taken by $(grep -c 'try_ngram_only_distributed ELIGIBLE' "$BASE/A/node.log") of ${REPEAT:-3} requests (expected: the first)"
   echo "repeat: score with examples/score_against_reference.py <model.gguf> $OUT/repeat.jsonl $OUT/prompt.txt"
   exit 0
+fi
+
+if [ "$MODE" = whole ]; then
+  # Ask 1 — B alone: it refuses the length, A bars it, and the re-plan finds
+  # nobody. The caller must hear B's limit as a 400.
+  ask "$PROMPT" 120 whole_nobody | tee "$OUT/whole.jsonl"
+  refused1=$(grep -c 're-planning without it' "$BASE/A/node.log")
+  grep -E 'too long for|tokens, longer than' "$BASE/B/node.log" | head -1 | cut -c1-260
+  # Ask 2 — C up at the default ceiling: whatever A tries first, it answers.
+  make_node "$BASE/C" "$SHARDS_C" "\"$ADDR\""
+  PC=$(start "$BASE/C" 8940 "$BIN_A" "${GPU_C:-0}")
+  up "$BASE/C" 8940 || exit 1
+  for _ in $(seq 1 60); do [ "$(peers)" -ge 2 ] && break; sleep 2; done
+  sleep 5
+  echo "rig: A sees $(peers) peers"
+  retried0=$(grep -c 'retrying with fresh pipeline' "$BASE/A/node.log")
+  ask "$PROMPT" 120 whole_takeover | tee -a "$OUT/whole.jsonl"
+  refused2=$(( $(grep -c 're-planning without it' "$BASE/A/node.log") - refused1 ))
+  retried=$(( $(grep -c 'retrying with fresh pipeline' "$BASE/A/node.log") - retried0 ))
+  echo "whole: ask 1 — A re-planned after B's refusal $refused1 time(s); ask 2 — $refused2 refusal(s), $retried router retr(ies)"
+  printf '%s' "$PROMPT" > "$OUT/prompt.txt"
+  python3 - "$OUT/whole.jsonl" "$refused1" "$refused2" "$retried" <<'PY'
+import json, sys
+rows = [json.loads(l) for l in open(sys.argv[1])]
+refused1, refused2, retried = map(int, sys.argv[2:5])
+first, second = rows[0], rows[1]
+msg = first.get("content") or ""
+ok1 = " 400 " in first["status"] + " " and "serve at most" in msg \
+    and "Raise it in Settings" not in msg and refused1 >= 1
+ok2 = second["status"].endswith("200 ok") and bool(second.get("content")) \
+    and retried == refused2
+print(f"whole: nobody serves it -> {first['status']}  {'PASS' if ok1 else 'FAIL'}: {msg[:220]}")
+tried = "B first, re-planned onto C" if refused2 else (
+    "C first (B's refusal not exercised on this ask)" if second["status"].endswith("200 ok")
+    else "no re-plan logged")
+print(f"whole: with C up -> {second['status']}  {'PASS' if ok2 else 'FAIL'} ({tried})")
+print("whole: PASS" if ok1 and ok2 else "whole: FAIL")
+sys.exit(0 if ok1 and ok2 else 1)
+PY
+  exit $?
 fi
 
 if [ "$MODE" = failover ] || [ "$MODE" = context ]; then

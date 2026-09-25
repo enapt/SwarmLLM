@@ -1092,6 +1092,9 @@ fn failure_is_penalty_worthy(err: &SwarmError, had_remote_segment: bool) -> bool
         | SwarmError::LocalOnly(_)
         | SwarmError::Internal(_)
         | SwarmError::Validation(_)
+        // A peer's own configured context ceiling, honestly stated. Not a
+        // fault, and the retry already routes around it.
+        | SwarmError::LongerThanPeerServes(_)
         | SwarmError::Config(_)
         | SwarmError::NotFound(_)
         | SwarmError::Unauthorized(_)

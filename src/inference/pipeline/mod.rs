@@ -2902,6 +2902,30 @@ mod peer_error_recovery_tests {
         );
     }
 
+    /// The whole-model worker's refusal is judged by the same rule (#111): its
+    /// "limit" is the window THAT node loaded, so below the model's declared
+    /// context it is the peer's and another machine may serve it — and AT the
+    /// declared context every holder would refuse, so it stays the caller's.
+    #[test]
+    fn a_whole_model_refusal_below_the_models_own_limit_is_the_peers() {
+        let from_delegate = "Validation error: This conversation is too long for \
+             qwen2.5-coder-7b: 9000 tokens of prompt against a limit of 8192, which leaves \
+             no room for a reply. Shorten it by at least 808 tokens (roughly 606 words), or \
+             start a new conversation.";
+        assert!(
+            every_holder_would_refuse(from_delegate, Some(32768)).is_none(),
+            "8192 on a model declaring 32768 is that peer's ceiling"
+        );
+        assert!(
+            every_holder_would_refuse(from_delegate, None).is_none(),
+            "a coordinator without the header cannot rule another holder out"
+        );
+        assert!(
+            every_holder_would_refuse(from_delegate, Some(8192)).is_some(),
+            "at the model's own limit no machine serves more"
+        );
+    }
+
     /// The control, and the more important half: a peer that is missing the
     /// shard or has died says NOTHING about the next holder, so those must
     /// still fail over. Narrowing this predicate too far would disable

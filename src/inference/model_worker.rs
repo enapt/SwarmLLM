@@ -4531,6 +4531,19 @@ fn resolve_max_new_tokens(
     )))
 }
 
+/// [`resolve_max_new_tokens`] for tests outside this module — the coordinator
+/// reads this refusal back (`error::served_context_refusal`), so its wording is
+/// checked against the constructor that writes it, not only a frozen copy.
+#[cfg(test)]
+pub(crate) fn resolve_max_new_tokens_for_test(
+    prompt_tokens: usize,
+    params: &SamplingParams,
+    window: usize,
+    model_id: &str,
+) -> Result<u32, SwarmError> {
+    resolve_max_new_tokens(prompt_tokens, params, window, model_id)
+}
+
 /// Decode a single token to text using the model's vocabulary.
 ///
 /// `carry` holds bytes left over from a codepoint that was not finished by the

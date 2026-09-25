@@ -2704,13 +2704,28 @@ fn longer_than_the_swarm_serves(
     limit: usize,
     layer_range: (u32, u32),
 ) -> SwarmError {
-    SwarmError::Validation(format!(
+    SwarmError::Validation(longer_than_the_swarm_serves_text(
+        tokens,
+        limit,
+        layer_range,
+    ))
+}
+
+/// The words of [`longer_than_the_swarm_serves`], shared with the whole-model
+/// path (`remote_generate`), whose refusal says the same thing about the same
+/// kind of limit and must not say it differently.
+pub(super) fn longer_than_the_swarm_serves_text(
+    tokens: usize,
+    limit: usize,
+    layer_range: (u32, u32),
+) -> String {
+    format!(
         "This conversation is {tokens} tokens, but the computers that could run {span} of \
          this model right now serve at most {limit}. That limit is set on those computers, \
          so changing max_seq_len_override here does not raise it. Shorten the conversation, \
          or download that part of the model so this computer runs it under its own limit.",
         span = crate::error::describe_missing_layers(layer_range.0, layer_range.1),
-    ))
+    )
 }
 
 /// The message a request fails with when every standby for `segment` has been

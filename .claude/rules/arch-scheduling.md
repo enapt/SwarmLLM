@@ -558,6 +558,13 @@ one reading, and a coordinator does not SEND a prompt pass to a peer that advert
 too short, nor pick such a standby. Running out ends on a 400 naming the other
 machines' limit (`longer_than_the_swarm_serves`), never the 503 "too few machines".
 
+**The whole-model path too** (`remote_generate`): its worker's "too long for
+{model} … limit of W" names the window THAT node loaded, not the model's. Below
+the declared context the coordinator bars the peer and returns
+`SwarmError::LongerThanPeerServes` — 400-shaped, its own variant only so the
+router re-plans it (`peer_serves_shorter_context`); a failed re-plan reports it
+unless the re-plan's own answer is a 4xx (`report_after_a_context_replan`).
+
 → `docs/invariants/scheduling.md` § "A prompt longer than one peer serves"
 
 ## Single-source-of-truth helpers — Scheduling, routing and failover

@@ -384,6 +384,50 @@ impl PipelineExecutor {
     /// Try the remote-generate fast path. Returns `Ok(None)` if preconditions
     /// aren't met (caller falls back to `execute_distributed`'s standard
     /// loop). Returns `Ok(Some(_))` on success.
+    /// The peer running the whole model refused `err_msg` as longer than the
+    /// context it serves — and that is below the model's own, so another
+    /// machine, this one included, may serve it: bar the peer from this
+    /// request and answer the variant the router re-plans. `None` for any other
+    /// error, and for a refusal at the model's declared limit, which every
+    /// holder would give (`every_holder_would_refuse` decides both, for
+    /// segments and here).
+    ///
+    /// The whole-model half of #111. A delegate on the shipped 8192 default
+    /// answered a 9000-token prompt with its own ceiling, the coordinator
+    /// returned it as the request's 400, and a model that declares 32768 was
+    /// never tried anywhere else.
+    fn longer_than_this_peer_serves(
+        &self,
+        err_msg: &str,
+        segment: &crate::types::PipelineSegment,
+    ) -> Option<SwarmError> {
+        let refusal = crate::error::served_context_refusal(err_msg)?;
+        let declared = self
+            .shared_state
+            .model_declared_context(&segment.shard_id.model_id);
+        if super::every_holder_would_refuse(err_msg, declared).is_some() {
+            return None;
+        }
+        self.shared_state
+            .blacklist_holder_for_request(self.request.id, &segment.node_id);
+        tracing::info!(
+            request_id = %self.request.id,
+            peer = %segment.node_id,
+            tokens = refusal.tokens,
+            peer_limit = refusal.limit,
+            declared = ?declared,
+            "remote-generate: the peer serves a shorter conversation than this one \
+             — re-planning without it"
+        );
+        Some(SwarmError::LongerThanPeerServes(
+            super::distributed::longer_than_the_swarm_serves_text(
+                refusal.tokens,
+                refusal.limit,
+                segment.layer_range,
+            ),
+        ))
+    }
+
     pub(super) async fn try_remote_generate_fastpath(
         &mut self,
         token_tx: Option<StreamingTokenTx>,
@@ -732,6 +776,13 @@ impl PipelineExecutor {
                                 .blacklist_holder_for_request(request_id, &segment.node_id);
                         }
                         self.shared_state.streaming_token_txs.remove(&request_id);
+                        // A conversation longer than THIS peer serves is its
+                        // limit, not the request's, unless it is the model's own
+                        // (#111): bar it and let the router re-plan, as a
+                        // segment would fail over.
+                        if let Some(err) = self.longer_than_this_peer_serves(e, &segment) {
+                            return Err(err);
+                        }
                         // A peer's error arrives as text, so its class is
                         // gone unless we recover it. Without this a prompt too
                         // long for a peer-held model answered 500

@@ -2202,5 +2202,38 @@ could serve; the send-time check uses exact positions.
 over from the refusal to the C+D composite, 200; new + new never sends to the
 peer, 200; with no cover, the new 400.
 
-**Not covered:** the whole-model path (`remote_generate`, "too long for {model}"
-from `resolve_max_new_tokens`) and `delegation_target`. FUTURE_WORK #111.
+### The whole-model half (2026-09-25, night)
+
+The path where ONE peer runs the whole model (`remote_generate`, including a
+delegation) returned the peer's refusal as the request's 400 and never tried
+another machine. Its refusal comes from `model_worker::resolve_max_new_tokens`,
+worded "…too long for {model}: N tokens of prompt against a limit of W…" (or
+"…plus the reply you asked to reserve is M, and the model's limit is W"), and
+**`W` is the window that worker LOADED** (`SplitModel::context_window` =
+`max_seq_len`, capped at the node's ceiling by the loader) — so "the model's
+limit" was the node's limit whenever the model declares more. A test had pinned
+the opposite premise ("already says the model's own limit"); it was wrong and was
+replaced by a frozen literal of the two released wordings (v0.3.183+).
+
+- **Read back** by `error::served_context_refusal`, which now recognises both
+  wordings; the numbers are the conversation (prompt, or prompt + the explicit
+  reply budget — what another machine needs room for) and the window.
+- **Decided** by the same `every_holder_would_refuse` as segments: below the
+  model's declared context it is the peer's limit.
+- **Acted on** by `remote_generate::longer_than_this_peer_serves`: bar the peer
+  (`blacklist_holder_for_request`) and return `SwarmError::LongerThanPeerServes`
+  — worded and classified like `Validation` (400), its own variant for ONE
+  decision: the router re-plans it (`peer_serves_shorter_context`, gated on a
+  remote segment, and a further re-plan is earned like a memory refusal's).
+- **Reported** as the original refusal when the re-plan fails too, unless the
+  re-plan's own error is a 4xx — this node's worker refusing at ITS limit, whose
+  advice to raise the setting here is then correct
+  (`router::report_after_a_context_replan`, the `memory_shortfall` rule's twin).
+
+**Still not done, deliberately:** `delegation_target` does not read the
+advertised ceiling. A delegate refuses in milliseconds (tokenize, compare) and
+the re-plan follows at once, while the plan-time estimate over-counts ~10% and
+would hand work that a delegate could serve to this node's processor instead.
+
+Rig: `examples/split_rig.sh whole` (A holds only the header, B all of it at 512,
+C all of it at the default).

@@ -261,6 +261,22 @@ pub enum SwarmError {
     #[error("Service unavailable: {0}")]
     LocalMemoryUnavailable(String),
 
+    /// The peer handed the WHOLE model refused the conversation as longer than
+    /// the context IT serves, and that is less than the model's own — so a
+    /// different machine, this one included, may serve it.
+    ///
+    /// **Deliberately shares `Validation`'s wording and its (400,
+    /// `invalid_request_error`) classification**: if nothing else can serve the
+    /// length, it IS the caller's conversation that is too long, and the message
+    /// says whose limit it met. The variant exists for one decision, as
+    /// `LocalMemoryUnavailable` does: the router re-plans this, with the peer
+    /// barred, and re-plans no other `Validation`. Without it a delegate on the
+    /// shipped 8192 default sank a 9000-token prompt that the model (32768) and
+    /// another holder would have served — `docs/FUTURE_WORK.md` #111, the
+    /// whole-model half of what `every_holder_would_refuse` fixed for segments.
+    #[error("Validation error: {0}")]
+    LongerThanPeerServes(String),
+
     /// Generation ran into the model's context window.
     ///
     /// **Not a validation failure, and the difference is the whole point.** A
@@ -445,6 +461,15 @@ pub fn longer_than_served(tokens: usize, limit: usize) -> SwarmError {
 /// reads only a sentence this module WRITES, whose wording the constructor
 /// above fixes and a test pins. The innermost occurrence wins, as there.
 pub fn served_context_refusal(message: &str) -> Option<ServedContextRefusal> {
+    // The whole-model path words it differently (`resolve_max_new_tokens`), and
+    // its "limit" is the same thing: the window THAT worker loaded, which the
+    // loader caps at the node's ceiling exactly as a segment's (the loaded
+    // `max_seq_len`, never the GGUF's declared figure). It once read "the
+    // model's limit" and was taken for one; it is the node's unless it equals
+    // the model's, which only the reader holding the header can tell.
+    if let Some(r) = whole_model_context_refusal(message) {
+        return Some(r);
+    }
     let start = message.rfind(SERVED_CONTEXT_OPENING)? + SERVED_CONTEXT_OPENING.len();
     let rest = &message[start..];
     let (tokens, rest) = rest.split_once(SERVED_CONTEXT_MIDDLE)?;
@@ -456,6 +481,43 @@ pub fn served_context_refusal(message: &str) -> Option<ServedContextRefusal> {
         tokens: tokens.trim().parse().ok()?,
         limit: limit.trim().parse().ok()?,
     })
+}
+
+/// The whole-model worker's two refusals (`model_worker::resolve_max_new_tokens`),
+/// as every release since v0.3.183 sends them:
+///
+/// - `…too long for {model}: {prompt} tokens of prompt against a limit of {window}, …`
+/// - `…too long for {model}: {prompt} tokens of prompt plus {asked} you asked to
+///   reserve for the reply is {needed}, and the model's limit is {window}. …`
+///
+/// The conversation's length is the prompt in the first and the prompt plus the
+/// reply the caller insisted on in the second — what another machine would
+/// need room for. Anchored on the number before " tokens of prompt", because a
+/// model id may itself contain ": ".
+fn whole_model_context_refusal(message: &str) -> Option<ServedContextRefusal> {
+    const OPENING: &str = "This conversation is too long for ";
+    const PROMPT: &str = " tokens of prompt";
+    let rest = &message[message.rfind(OPENING)? + OPENING.len()..];
+    let at = rest.find(PROMPT)?;
+    let prompt: usize = rest[..at].rsplit(' ').next()?.parse().ok()?;
+    let tail = &rest[at + PROMPT.len()..];
+    if let Some(after) = tail.strip_prefix(" against a limit of ") {
+        return Some(ServedContextRefusal {
+            tokens: prompt,
+            limit: leading_number(after)?,
+        });
+    }
+    let (_, after_needed) = tail.split_once(" for the reply is ")?;
+    let (_, after_limit) = after_needed.split_once(" limit is ")?;
+    Some(ServedContextRefusal {
+        tokens: leading_number(after_needed)?,
+        limit: leading_number(after_limit)?,
+    })
+}
+
+fn leading_number(s: &str) -> Option<usize> {
+    let end = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
+    s[..end].parse().ok()
 }
 
 #[cfg(test)]
@@ -520,13 +582,64 @@ mod missing_layer_span_tests {
         );
     }
 
-    /// Other refusals — including the whole-model path's differently worded
-    /// "too long", which already says the model's own limit — are not this.
+    /// **Frozen: the whole-model worker's two refusals as v0.3.183 → v0.3.206
+    /// send them.** Their "limit" is the window that worker LOADED — capped at
+    /// its node's ceiling like any segment's — so it is read exactly as the
+    /// segment wording is, and the reader holding the header decides whether it
+    /// was the model's own limit (#111's whole-model half).
+    #[test]
+    fn a_whole_model_peers_context_refusal_is_read_with_its_numbers() {
+        let no_room = "Worker: Validation error: This conversation is too long for \
+             qwen2.5-coder-7b-instruct-q4-k-m: 9000 tokens of prompt against a limit of \
+             8192, which leaves no room for a reply. Shorten it by at least 808 tokens \
+             (roughly 606 words), or start a new conversation.";
+        assert_eq!(
+            served_context_refusal(no_room),
+            Some(ServedContextRefusal {
+                tokens: 9000,
+                limit: 8192
+            })
+        );
+        // The caller named a reply budget: what another machine needs room for
+        // is the prompt PLUS that budget. A model id with ": " in it must not
+        // move the anchor.
+        let explicit = "Validation error: This conversation is too long for org/m: v2: 8000 \
+             tokens of prompt plus 400 you asked to reserve for the reply is 8400, and the \
+             model's limit is 8192. Ask for at most 192 reply tokens, or shorten the \
+             conversation.";
+        assert_eq!(
+            served_context_refusal(explicit),
+            Some(ServedContextRefusal {
+                tokens: 8400,
+                limit: 8192
+            })
+        );
+        // The worker's own constructor, so the frozen literals above cannot
+        // drift from what is sent today without this failing too.
+        let params = crate::types::SamplingParams {
+            max_tokens: 400,
+            max_tokens_explicit: true,
+            ..Default::default()
+        };
+        let live = crate::inference::model_worker::resolve_max_new_tokens_for_test(
+            8000, &params, 8192, "m",
+        )
+        .unwrap_err();
+        assert_eq!(
+            served_context_refusal(&live.to_string()),
+            Some(ServedContextRefusal {
+                tokens: 8400,
+                limit: 8192
+            })
+        );
+    }
+
+    /// Other refusals are not this.
     #[test]
     fn other_refusals_are_not_read_as_a_served_context_limit() {
         for msg in [
-            "Validation error: This conversation is too long for m: 9020 tokens of prompt \
-             plus 20 reserved for the reply is 9040, and the model's limit is 4096.",
+            "Validation error: This conversation is too long for m: many tokens of prompt \
+             against a limit of 4096.",
             "Validation error: This conversation is 12041 tokens, longer than the model's \
              limit of 8192",
             "Service unavailable: out of memory",
@@ -715,7 +828,10 @@ pub fn classify_error(err: &SwarmError) -> (StatusCode, String, &'static str) {
         // this variant existed.
         SwarmError::ContextWindowReached { .. }
         | SwarmError::InvalidNickname(_)
-        | SwarmError::Validation(_) => (
+        | SwarmError::Validation(_)
+        // A routing distinction only: when no other machine could serve the
+        // length, the caller's conversation is too long for the swarm.
+        | SwarmError::LongerThanPeerServes(_) => (
             StatusCode::BAD_REQUEST,
             err.to_string(),
             "invalid_request_error",

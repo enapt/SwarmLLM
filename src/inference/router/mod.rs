@@ -178,6 +178,33 @@ pub(crate) fn local_memory_refused_the_load(err: &SwarmError) -> bool {
     matches!(err, SwarmError::LocalMemoryUnavailable(_))
 }
 
+/// Did the peer running the whole model refuse the conversation as longer than
+/// the context IT serves, below the model's own (#111)?
+///
+/// Retryable for the same reason a peer's memory refusal is: the producer
+/// (`remote_generate::longer_than_this_peer_serves`) bars that peer from this
+/// request first, so the re-plan is handed a fact and cannot come back to it —
+/// and a refusal at the MODEL's limit never takes this variant, so a request no
+/// machine could serve is not re-planned for nothing.
+fn peer_serves_shorter_context(err: &SwarmError) -> bool {
+    matches!(err, SwarmError::LongerThanPeerServes(_))
+}
+
+/// What the caller hears when a re-plan after a peer's context refusal failed
+/// too: the RE-PLAN's own answer when it is one the caller can act on (a 4xx —
+/// typically this node's worker refusing at ITS limit, whose advice to raise
+/// `max_seq_len_override` here is then correct), otherwise the original
+/// refusal. A "no route" 503 from the re-plan is a true statement about a search
+/// the caller never asked for; the 400 names the limit that stopped them. The
+/// `memory_shortfall` rule above, for the same reason.
+fn report_after_a_context_replan(first: SwarmError, later: SwarmError) -> SwarmError {
+    if crate::error::classify_error(&later).0.is_client_error() {
+        later
+    } else {
+        first
+    }
+}
+
 /// May this failed attempt be run again through a freshly assembled pipeline?
 ///
 /// The single answer, so the four terms can be tested rather than only read.
@@ -208,7 +235,8 @@ fn should_retry_after(
         || (used_remote_segment
             && (remote_peer_could_not_serve(err)
                 || segment_ran_out_of_machines(err)
-                || peer_went_silent(err)))
+                || peer_went_silent(err)
+                || peer_serves_shorter_context(err)))
 }
 
 /// How many times one request may be re-planned onto a different route.
@@ -270,7 +298,7 @@ fn a_further_replan_is_earned(
     attempt_took: std::time::Duration,
 ) -> bool {
     used_remote_segment
-        && remote_peer_could_not_serve(err)
+        && (remote_peer_could_not_serve(err) || peer_serves_shorter_context(err))
         && attempt_took < A_REFUSAL_THIS_FAST_COSTS_NOTHING_TO_RETRY
 }
 
@@ -1242,6 +1270,8 @@ impl InferenceRouter {
             // a true statement about a search the user never asked for and can
             // do nothing with.
             let mut memory_shortfall: Option<SwarmError> = None;
+            // A peer's context refusal, kept for the same reason (#111).
+            let mut context_refusal: Option<SwarmError> = None;
             let mut replans = 0;
             while replans < MAX_REPLANS {
                 // A peer reporting it cannot serve is retryable, but only when a
@@ -1298,6 +1328,10 @@ impl InferenceRouter {
                     if memory_shortfall.is_none() {
                         memory_shortfall = output.err();
                     }
+                } else if context_refusal.is_none()
+                    && output.as_ref().is_err_and(peer_serves_shorter_context)
+                {
+                    context_refusal = output.err();
                 }
                 replans += 1;
                 let started = std::time::Instant::now();
@@ -1322,6 +1356,23 @@ impl InferenceRouter {
                      — reporting the original shortfall"
                 );
                 output = Err(first);
+            }
+            if let Some(first) = context_refusal {
+                output = match output {
+                    Err(later) => {
+                        let re_plan_error = later.to_string();
+                        let reported = report_after_a_context_replan(first, later);
+                        tracing::info!(
+                            request_id = %request.id,
+                            %re_plan_error,
+                            reported = %reported,
+                            "DIAG: re-plan after a peer's context refusal found no machine \
+                             to serve it"
+                        );
+                        Err(reported)
+                    }
+                    ok => ok,
+                };
             }
 
             // The attempt is over — the retry above has either not applied or
