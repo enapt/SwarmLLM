@@ -1976,7 +1976,7 @@ impl ModelProcessPool {
             kv_cache_ttl_secs: std::sync::atomic::AtomicU64::new(DEFAULT_KV_CACHE_TTL_SECS),
             prefix_cache_enabled: std::sync::atomic::AtomicBool::new(true),
             prefix_cache_max_entries: std::sync::atomic::AtomicU32::new(16),
-            prefix_cache_max_prompt_tokens: std::sync::atomic::AtomicU32::new(8192),
+            prefix_cache_max_prompt_tokens: std::sync::atomic::AtomicU32::new(0),
             prefix_cache_max_mb: std::sync::atomic::AtomicU32::new(2048),
             prefix_cache_block_tokens: std::sync::atomic::AtomicU32::new(64),
             prefix_cache_min_tokens: std::sync::atomic::AtomicU32::new(32),
@@ -3956,6 +3956,15 @@ impl ModelProcessPool {
             .store(block_tokens, Ordering::Relaxed);
         self.prefix_cache_min_tokens
             .store(min_tokens, Ordering::Relaxed);
+    }
+
+    /// The block size workers chain-hash their cached prompts at — the unit
+    /// of every manifest they report. The router hashes a prompt at the same
+    /// size to find how much of it our worker holds (`scheduler::cached_prefix`);
+    /// hashed at any other size, nothing would ever match.
+    pub fn prefix_cache_block_tokens(&self) -> usize {
+        self.prefix_cache_block_tokens
+            .load(std::sync::atomic::Ordering::Relaxed) as usize
     }
 
     /// Set the activity event sender (called once after SharedState is created).

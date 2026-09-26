@@ -201,6 +201,16 @@ struct NodeCandidate {
     /// costs this prompt. `Some` only for a peer that published its ranges;
     /// see [`PublishedRoom`].
     published_room: Option<PublishedRoom>,
+    /// Leading tokens of THIS request's prompt that this candidate's worker
+    /// already holds in its prefix cache. Non-zero only for the LOCAL node
+    /// (`cached_prefix::plan_prompt`).
+    ///
+    /// `parallax::vertex_cost` takes it off the prompt a WHOLE-MODEL run
+    /// reads, and off nothing else: a whole-model run here goes through
+    /// `Generate`, the one path that looks the cache up, and a segment of a
+    /// split never does. **Never set it for a peer** — `cached_prefix`'s module
+    /// doc says why a peer's cache would be priced and not delivered.
+    cached_prefix_tokens: u32,
 }
 
 /// How much a peer that PUBLISHED its resident ranges can take on, in the
@@ -2044,11 +2054,15 @@ impl PipelineScheduler {
         // explained. See `Purpose`.
         purpose: Purpose,
         // Roughly how many tokens of prompt this request carries, when the
-        // caller knows. `None` prices the request exactly as this scheduler did
-        // before prompt length was threaded through, so a caller with no prompt
-        // in hand loses nothing.
-        prompt_tokens: Option<u32>,
+        // caller knows, and how much of it this node's worker already holds
+        // (`cached_prefix::PromptPlan`). A bare `Option<u32>` converts with no
+        // cache credit, and `None` prices the request exactly as this scheduler
+        // did before prompt length was threaded through, so a caller with no
+        // prompt in hand loses nothing.
+        prompt: impl Into<cached_prefix::PromptPlan>,
     ) -> Result<PipelineAssignment, SwarmError> {
+        let prompt = prompt.into();
+        let prompt_tokens = prompt.tokens;
         let manifest = self
             .shared_state
             .model_registry
@@ -2101,7 +2115,7 @@ impl PipelineScheduler {
             &manifest,
             local_node_id,
             request_id,
-            prompt_tokens,
+            prompt,
             purpose,
             &local_on_processor,
         );
@@ -2996,7 +3010,11 @@ impl PipelineScheduler {
                 .shared_state
                 .peer_registry
                 .get(&seg.node_id)
-                .is_some_and(|p| p.capability.as_ref().is_some_and(|c| c.gpu.is_some()));
+                .is_some_and(|p| {
+                    p.capability
+                        .as_ref()
+                        .is_some_and(|c| c.models_run_on_card())
+                });
             let kv_per_layer = match (prompt_tokens, meta.as_ref()) {
                 (Some(tokens), Some(m)) => {
                     kv_bytes_per_position_per_layer(m, has_gpu).saturating_mul(u64::from(tokens))
@@ -3061,7 +3079,7 @@ impl PipelineScheduler {
         manifest: &ModelManifest,
         local_node_id: &NodeId,
         request_id: uuid::Uuid,
-        prompt_tokens: Option<u32>,
+        prompt: cached_prefix::PromptPlan,
         purpose: Purpose,
         // Would a request for this model run on the local node's PROCESSOR?
         // Consulted only if the local node holds any of the model, hence a
@@ -3069,6 +3087,7 @@ impl PipelineScheduler {
         // which reads its header off disk for a model with no worker resident.
         local_runs_on_processor: &dyn Fn() -> bool,
     ) -> Vec<NodeCandidate> {
+        let prompt_tokens = prompt.tokens;
         // Private mode: compute allowed node set (None = unrestricted).
         // R134.7: when `allow_cross_pool_inference` is on and the local pool
         // can't serve this model, union the cross-pool extras into the
@@ -3410,7 +3429,11 @@ impl PipelineScheduler {
                 self.shared_state
                     .peer_registry
                     .get(&node_id)
-                    .is_some_and(|p| p.capability.as_ref().is_some_and(|c| c.gpu.is_some()))
+                    .is_some_and(|p| {
+                        p.capability
+                            .as_ref()
+                            .is_some_and(|c| c.models_run_on_card())
+                    })
             };
             // The local node is bounded by asking OUR OWN loader, which is the
             // authority on what we can fit and knows what is already committed
@@ -3547,15 +3570,20 @@ impl PipelineScheduler {
                 None
             } else {
                 self.shared_state.peer_registry.get(&node_id).and_then(|p| {
-                    p.capability.as_ref().and_then(|c| {
-                        c.gpu.as_ref().map(|g| {
-                            // Same deduction as the bound above, for the same
-                            // reason: this figure is a snapshot the peer sends
-                            // every 30 s, and it cannot know what this node
-                            // booked onto it since.
-                            g.vram_available_mb.saturating_sub(committed_mb)
+                    // A card the peer's models do not run on is no room for
+                    // this model — `NodeCapability::models_run_on_card`.
+                    p.capability
+                        .as_ref()
+                        .filter(|c| c.models_run_on_card())
+                        .and_then(|c| {
+                            c.gpu.as_ref().map(|g| {
+                                // Same deduction as the bound above, for the same
+                                // reason: this figure is a snapshot the peer sends
+                                // every 30 s, and it cannot know what this node
+                                // booked onto it since.
+                                g.vram_available_mb.saturating_sub(committed_mb)
+                            })
                         })
-                    })
                 })
             };
             candidates.push(NodeCandidate {
@@ -3593,6 +3621,8 @@ impl PipelineScheduler {
                 has_gpu,
                 held_ranges,
                 published_room,
+                // Ours only — see the field.
+                cached_prefix_tokens: if is_local { prompt.cached_locally } else { 0 },
             });
         }
 
@@ -4691,6 +4721,7 @@ impl PipelineScheduler {
     }
 }
 
+pub(crate) mod cached_prefix;
 mod parallax;
 pub mod parallax_allocator;
 

@@ -2,6 +2,29 @@
 
 ## [Unreleased]
 
+**Fixed: an agent's next turn could leave a computer that had already read
+most of its prompt.** On a computer without a graphics card, the network
+decides where each request runs, and it priced running here as if the whole
+prompt had to be read again, even when the last turn had just read almost all of it.
+A later turn of an agent conversation could therefore be sent through other
+machines and take longer than the first — in one report 847 seconds, against a
+few seconds to read only what was new. The price now counts only the part of
+the prompt this computer has not already read. It is still a price, not a rule:
+a much faster route still wins.
+
+**Fixed: long agent prompts were never kept for reuse.** A prompt over 8,192
+tokens was not stored at all, and agent tools send 4,000 to 14,000 tokens a
+turn. The store is now sized by the memory set aside for it, and a longer
+prompt keeps its opening (the instructions and tool list every turn repeats)
+instead of nothing.
+
+**Fixed: a computer told not to use its graphics card was treated as if it
+did.** Other machines priced it as reading prompts about nine times faster
+than it can, which could send long prompts its way.
+
+The length of a request's prompt is now counted with its tool definitions,
+which agent tools send many of and which were counted as nothing.
+
 **Fixed: agent programs hung up while a slow computer read a long prompt.**
 Agent tools such as nanobot send a prompt of several thousand words on every
 turn, and on a computer without a graphics card reading it can take minutes.

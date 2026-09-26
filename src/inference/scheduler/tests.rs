@@ -358,6 +358,7 @@ fn simple_candidate(byte: u8, ranges: Vec<(u32, u32)>) -> NodeCandidate {
         has_gpu: false,
         held_ranges: Vec::new(),
         published_room: None,
+        cached_prefix_tokens: 0,
         goodput_bytes_per_sec: None,
     }
 }
@@ -475,6 +476,7 @@ fn greedy_assign_multi_range_candidate() {
             has_gpu: false,
             held_ranges: Vec::new(),
             published_room: None,
+            cached_prefix_tokens: 0,
             goodput_bytes_per_sec: None,
         },
         NodeCandidate {
@@ -504,6 +506,7 @@ fn greedy_assign_multi_range_candidate() {
             has_gpu: false,
             held_ranges: Vec::new(),
             published_room: None,
+            cached_prefix_tokens: 0,
             goodput_bytes_per_sec: None,
         },
     ];
@@ -1469,6 +1472,7 @@ fn cost_cand(
         has_gpu: false,
         held_ranges: Vec::new(),
         published_room: None,
+        cached_prefix_tokens: 0,
         goodput_bytes_per_sec: None,
     }
 }
@@ -2737,6 +2741,7 @@ fn one_node_is_not_made_standby_for_more_layers_than_it_can_run() {
         has_gpu: false,
         held_ranges: Vec::new(),
         published_room: None,
+        cached_prefix_tokens: 0,
         goodput_bytes_per_sec: None,
     };
 
@@ -2829,6 +2834,7 @@ fn a_node_with_room_still_stands_in_for_every_segment() {
         has_gpu: false,
         held_ranges: Vec::new(),
         published_room: None,
+        cached_prefix_tokens: 0,
         goodput_bytes_per_sec: None,
     };
     let seg = |byte: u8, r: (u32, u32)| PipelineSegment {
@@ -2921,6 +2927,7 @@ fn a_standby_is_chosen_by_cost_not_by_ping() {
         has_gpu: gpu,
         held_ranges: Vec::new(),
         published_room: None,
+        cached_prefix_tokens: 0,
         goodput_bytes_per_sec: None,
     };
 
@@ -3142,7 +3149,7 @@ fn a_peer_that_publishes_its_ranges_is_priced_by_them() {
         &manifest,
         &local,
         uuid::Uuid::new_v4(),
-        None,
+        None.into(),
         super::Purpose::Route,
         &|| false,
     );
@@ -3757,6 +3764,140 @@ fn a_processor_bound_holder_hands_a_long_prompt_to_a_pipeline_of_faster_cards() 
     );
 }
 
+/// The field report of 2026-09-26, on the fixture above: the SAME long prompt,
+/// but this node's worker already holds all of it but the last block — an
+/// agent's second turn. Running it here re-reads a few dozen tokens; the cards
+/// would read all 14,000. Priced cold, the request went to a chain and took
+/// 847 s against a cache hit. It must stay here, as a whole-model run, the one
+/// shape that goes through the cache.
+///
+/// Fails without the credit in `vertex_cost`: the plan is the four-segment
+/// boomerang of the test above.
+#[test]
+fn a_processor_holder_keeps_a_prompt_its_worker_already_holds() {
+    let (state, local, _b, _c) = processor_holder_beside_two_gpu_halves(5, 20.0);
+    let scheduler = PipelineScheduler::with_local_processor_speed(state, LOCAL_PROCESSOR_TPS);
+    let assignment = scheduler
+        .assemble_pipeline_for(
+            &ModelId("split-14b".into()),
+            &local,
+            uuid::Uuid::new_v4(),
+            super::Purpose::Route,
+            super::cached_prefix::PromptPlan {
+                tokens: Some(14_000),
+                cached_locally: 13_952,
+            },
+        )
+        .unwrap();
+    let shape: Vec<(NodeId, (u32, u32))> = assignment
+        .segments
+        .iter()
+        .map(|s| (s.node_id.clone(), s.layer_range))
+        .collect();
+    assert_eq!(
+        shape,
+        vec![(local, (0, 32))],
+        "a warm prompt is read here, whole-model, through the cache; got {:?}",
+        assignment.segments
+    );
+}
+
+/// The control: a cache hit is a PRICE, never a pin. Holding only the opening
+/// 1,024 tokens of that prompt still leaves ~13,000 to read on the processor,
+/// and the cards are still the faster route — SGLang's lesson that affinity
+/// must stay overridable (their `cache_threshold` + balance thresholds).
+#[test]
+fn a_small_cached_prefix_does_not_keep_a_long_prompt_off_faster_cards() {
+    let (state, local, b, c) = processor_holder_beside_two_gpu_halves(5, 20.0);
+    let scheduler = PipelineScheduler::with_local_processor_speed(state, LOCAL_PROCESSOR_TPS);
+    let assignment = scheduler
+        .assemble_pipeline_for(
+            &ModelId("split-14b".into()),
+            &local,
+            uuid::Uuid::new_v4(),
+            super::Purpose::Route,
+            super::cached_prefix::PromptPlan {
+                tokens: Some(14_000),
+                cached_locally: 1_024,
+            },
+        )
+        .unwrap();
+    let nodes: Vec<NodeId> = assignment
+        .segments
+        .iter()
+        .map(|s| s.node_id.clone())
+        .collect();
+    assert_eq!(
+        nodes,
+        vec![local.clone(), b, c, local],
+        "{:?}",
+        assignment.segments
+    );
+}
+
+/// The credit applies to a WHOLE-MODEL run and nothing else. A segment of a
+/// split never looks the cache up, so pricing one as warm would promise a
+/// saving the chain cannot deliver.
+#[test]
+fn a_cached_prefix_is_credited_only_to_a_whole_model_run() {
+    let mut warm = local_full_coverage();
+    let local = warm.node_id.clone();
+    let cold = warm.clone();
+    warm.cached_prefix_tokens = 8_000;
+    let price = |c: &NodeCandidate, range: (u32, u32)| {
+        super::parallax::vertex_cost(c, range, &local, 32, Some(10_000)).prefill_ms
+    };
+    assert!(
+        price(&warm, (0, 32)) < price(&cold, (0, 32)) / 4.0,
+        "a whole-model run here reads only the 2,000 tokens it does not hold"
+    );
+    assert_eq!(
+        price(&warm, (0, 16)),
+        price(&cold, (0, 16)),
+        "a segment of a split reads the whole prompt whatever the worker holds"
+    );
+}
+
+/// A peer that owns a card but runs its models on its processor
+/// (`gpu_layers = 0`) still gossips the card, and says where its models go by
+/// stating a system-memory budget. Priced by the card, it read prompts ~9x
+/// faster than it can and was offered card memory it never uses; it must be
+/// priced as the processor it runs on. Fails with `has_gpu` read off
+/// `gpu.is_some()`.
+#[test]
+fn a_peer_running_on_its_processor_is_not_priced_as_its_card() {
+    let (state, local, b, c) = processor_holder_beside_two_gpu_halves(5, 20.0);
+    if let Some(mut peer) = state.peer_registry.get_mut(&b) {
+        if let Some(cap) = peer.capability.as_mut() {
+            cap.ram_model_budget_mb = Some(8_000);
+        }
+    }
+    let manifest = state
+        .model_registry
+        .get_manifest(&ModelId("split-14b".into()))
+        .unwrap();
+    let scheduler = PipelineScheduler::new(state);
+    let cands = scheduler.gather_candidates(
+        &manifest,
+        &local,
+        uuid::Uuid::new_v4(),
+        Some(14_000).into(),
+        super::Purpose::Route,
+        &|| true,
+    );
+    let find = |n: &NodeId| cands.iter().find(|x| &x.node_id == n).unwrap();
+    assert!(!find(&b).has_gpu, "B runs its models on its processor");
+    assert_eq!(
+        find(&b).gpu_vram_available_mb,
+        None,
+        "and its card is no room for this model"
+    );
+    assert!(
+        find(&c).has_gpu,
+        "C states no RAM budget: its card is where it runs"
+    );
+}
+
 /// The same node with prompt privacy switched off hands the two cards a half
 /// each and keeps nothing.
 #[test]
@@ -4114,7 +4255,7 @@ fn the_local_candidate_is_priced_by_the_device_the_request_would_use() {
         &manifest,
         &local,
         uuid::Uuid::new_v4(),
-        None,
+        None.into(),
         super::Purpose::Route,
         &|| false,
     ));
@@ -4122,7 +4263,7 @@ fn the_local_candidate_is_priced_by_the_device_the_request_would_use() {
         &manifest,
         &local,
         uuid::Uuid::new_v4(),
-        None,
+        None.into(),
         super::Purpose::Route,
         &|| true,
     ));

@@ -437,6 +437,20 @@ pub(super) fn vertex_cost(
     // Kept as a separate term rather than folded into `compute_ms` so the two
     // can be reported and reasoned about apart — they scale with different
     // things and a future measurement will want to check them separately.
+    // A whole-model run reads only what its worker's prefix cache does not
+    // already hold — the one shape that goes through `Generate`, the path that
+    // looks the cache up. Every other vertex reads the whole prompt. Without
+    // this a warm processor node was priced as a cold one, and an agent's
+    // second turn left a 9,200-token cache hit for an 847 s chain (field report
+    // 2026-09-26, `cached_prefix`). Only the local candidate ever carries a
+    // credit, so a delegated whole model is unaffected.
+    let prompt_tokens = prompt_tokens.map(|tokens| {
+        if covers_whole_model {
+            tokens.saturating_sub(c.cached_prefix_tokens)
+        } else {
+            tokens
+        }
+    });
     let prefill_ms = match prompt_tokens {
         None => 0.0,
         Some(0) => 0.0,
@@ -1309,6 +1323,7 @@ mod tests {
             has_gpu: false,
             held_ranges: Vec::new(),
             published_room: None,
+            cached_prefix_tokens: 0,
             goodput_bytes_per_sec: None,
         }
     }
@@ -3385,6 +3400,7 @@ mod transfer_cost_tests {
             has_gpu: true,
             held_ranges: Vec::new(),
             published_room: None,
+            cached_prefix_tokens: 0,
         }
     }
 

@@ -1752,3 +1752,27 @@ loops (both the `for layer_idx in layer_start..layer_end` and the
 `(layer_start..layer_end).map(|layer_idx| …)` form), requires at least five, and
 requires `placement.device_for(layer_idx)` in the opening 20 lines of each. Red
 with the parallel fix undone, naming that loop.
+
+## One prefix-cache snapshot is sized by bytes, and keeps the opening (2026-09-26)
+
+`PrefixCache::positions_ceiling` is the most positions one snapshot keeps: the
+explicit `prefix_cache_max_prompt_tokens` when set, never more than
+`prefix_cache_max_mb / bytes_per_position` — the latter read off the live KV's
+views (`bytes_per_position`, no copy). **A longer prompt keeps its OPENING** —
+the system prompt and tools every later turn repeats — rather than nothing.
+
+It replaced a fixed 8,192-token ceiling that REFUSED every longer prompt
+outright. Agent harnesses send 4,100-14,400 tokens a turn (PicoClaw ~4.1K,
+nanobot 7.3-9.2K, Hermes ~9.3K, ZeroClaw ~14.4K — field report 2026-09-26), so
+by default most agent prompts were never cached. The constant protected no
+memory: a snapshot is also held to the room beside the live cache
+(`snapshot_positions_that_fit`, gotcha #440) and admission evicts cached prompts
+before refusing a request. Default now 0 (no token ceiling). What a position
+weighs varies ~3x between 3B models (73.7 KB qwen2.5-3b, 229 KB llama-3.2-3b),
+which is why the ceiling is derived, not raised.
+
+Sizing BEFORE the copy also retired "keep one entry over budget": that existed
+because the whole prompt had already been copied, and discarding it wasted the
+copy. Tests: `a_prompt_over_the_token_ceiling_keeps_its_opening`,
+`with_no_token_ceiling_the_byte_budget_sizes_the_snapshot`,
+`a_budget_smaller_than_one_prompt_keeps_the_opening_that_fits`.

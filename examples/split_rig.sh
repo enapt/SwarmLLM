@@ -73,8 +73,19 @@
 #          every `network event loop stalled` line B logged meanwhile — the hash
 #          of a downloaded part ran ON the event loop until FUTURE_WORK #108
 #          (~229 ms per 512 MB part, over the loop's 100 ms tripwire).
+#   cache  the field report of 2026-09-26: an agent's SECOND turn on a node
+#          that runs the model on its processor. A and B each hold every part
+#          (processor by default, so A's router is consulted and nothing
+#          touches the card); two turns of an agent-shaped conversation — a
+#          long system prompt, tool definitions, then the same plus a reply and
+#          a new question — go to A. PASS = on turn 2 A's planner logged how
+#          much of the prompt its worker holds, the plan was the single local
+#          segment, and the worker's `prefix-cache HIT` matched at least that
+#          much. Default model qwen2.5-0.5b (it renders tools natively, like
+#          the reporter's Qwen-based xLAM). Run BIN_A = an older release for
+#          the baseline: no planner line, and the route is decided cold.
 #
-# usage: split_rig.sh split|kill|failover|failover_mid|context|whole|repeat|fetch <binary> [<binary for B>]
+# usage: split_rig.sh split|kill|failover|failover_mid|context|whole|repeat|fetch|cache <binary> [<binary for B>]
 #   MODEL      model id (default: tinyllama for split, llama-3.2-3b for kill
 #              and failover)
 #   SHARDS_A   shard indices A holds, comma-separated (default 0; kill: 0,LAST)
@@ -95,13 +106,15 @@ set -u
 MODE="${1:?usage: split_rig.sh split|kill|failover|context|repeat|fetch <binary> [<binary for B>]}"
 BIN_A="${2:?binary}"
 BIN_B="${3:-$BIN_A}"
-case "$MODE" in split|kill|failover|failover_mid|context|whole|repeat|fetch) ;; *) echo "mode must be split, kill, failover, failover_mid, context, whole, repeat or fetch"; exit 2 ;; esac
+case "$MODE" in split|kill|failover|failover_mid|context|whole|repeat|fetch|cache) ;; *) echo "mode must be split, kill, failover, failover_mid, context, whole, repeat, fetch or cache"; exit 2 ;; esac
 if { [ "$MODE" = context ] || [ "$MODE" = whole ]; } && printf '%s' "${EXTRA_TOML:-}" | grep -q '^\[inference\]'; then
   echo "$MODE: EXTRA_TOML may not open [inference] — B's ceiling is written there"; exit 2
 fi
 [ -x "$BIN_A" ] && [ -x "$BIN_B" ] || { echo "binary not executable"; exit 2; }
 if [ "$MODE" = split ]; then
   MODEL="${MODEL:-tinyllama-1.1b-chat-v1.0.q4-k-m}"
+elif [ "$MODE" = cache ]; then
+  MODEL="${MODEL:-qwen2.5-0.5b-instruct-fp16}"
 else
   MODEL="${MODEL:-llama-3.2-3b-instruct-q4-k-m}"
 fi
@@ -117,6 +130,10 @@ if [ "$MODE" = split ] || [ "$MODE" = repeat ]; then
   SHARDS_B="${SHARDS_B:-$(echo "$SHARDS" | grep -vxF -f <(echo "$SHARDS_A" | tr ',' '\n') | paste -sd,)}"
   # Processor unless asked otherwise: the reference is scored on the processor.
   [ "$MODE" = repeat ] && { GPU_A="${GPU_A:-0}"; GPU_B="${GPU_B:-0}"; }
+elif [ "$MODE" = cache ]; then
+  SHARDS_A=$(echo "$SHARDS" | paste -sd,)
+  SHARDS_B=$SHARDS_A
+  GPU_A="${GPU_A:-0}"; GPU_B="${GPU_B:-0}"
 elif [ "$MODE" = fetch ]; then
   SHARDS_A=$(echo "$SHARDS" | paste -sd,)
   SHARDS_B=0
@@ -316,6 +333,64 @@ fi
 # ~560 prompt tokens: long enough to catch a prompt pass mid-way (failover), and
 # the prompt the #106 reference scores were taken on (repeat).
 PROMPT="Here are some notes on household appliances. $(for i in $(seq 1 12); do printf 'A refrigerator moves heat from its inside to the room using a refrigerant that evaporates in the cold coils and condenses in the warm ones; the compressor drives the cycle and the thermostat decides when it runs. '; done)Using only these notes, explain step by step how a refrigerator keeps food cold."
+
+if [ "$MODE" = cache ]; then
+  # Two turns of an agent conversation: a long system prompt and tool schemas
+  # sent unchanged every turn, then the history grows. Written to files and
+  # posted as-is, so the tools reach the template exactly as a harness sends
+  # them.
+  python3 - "$MODEL" "$OUT" <<'PY'
+import json, sys
+model, out = sys.argv[1], sys.argv[2]
+system = "You are a careful coding agent working in a user's repository. " + " ".join(
+    f"Rule {i}: read the file before you change it, keep every change small, run the tests after "
+    f"each change, and report exactly what you did and what you did not do." for i in range(1, 61))
+tools = [{"type": "function", "function": {"name": n, "description": d,
+          "parameters": {"type": "object", "properties": {"path": {"type": "string", "description": "file path"},
+                         "content": {"type": "string", "description": "text to write"}}, "required": ["path"]}}}
+         for n, d in [("read_file", "Read a file and return its text."),
+                      ("write_file", "Write text to a file, replacing it."),
+                      ("list_dir", "List the entries of a directory."),
+                      ("run_tests", "Run the project's test suite and return the summary.")]]
+turn1 = [{"role": "system", "content": system}, {"role": "user", "content": "Say hello in one sentence."}]
+turn2 = turn1 + [{"role": "assistant", "content": "Hello! I am ready to help with your repository."},
+                 {"role": "user", "content": "Create the file notes.txt containing the word done."}]
+for name, msgs in (("turn1", turn1), ("turn2", turn2)):
+    json.dump({"model": model, "max_tokens": 24, "temperature": 0, "messages": msgs, "tools": tools},
+              open(f"{out}/{name}.json", "w"))
+PY
+  for t in turn1 turn2; do
+    # Turn 2's lines are the ones after this — turn 1 logs a local plan too.
+    [ "$t" = turn2 ] && FROM=$(wc -l < "$BASE/A/node.log")
+    curl -s -m 900 -D "$OUT/$t.hdr" -H "Authorization: Bearer $KA" -H "Content-Type: application/json" \
+         -X POST localhost:8900/v1/chat/completions --data-binary "@$OUT/$t.json" -o "$OUT/$t.body"
+    echo "cache: $t -> $(head -1 "$OUT/$t.hdr" | tr -d '\r')  route=$(grep -i '^x-swarm-route' "$OUT/$t.hdr" | cut -d' ' -f2- | tr -d '\r')"
+  done
+  python3 - "$BASE/A/node.log" "$OUT" "$FROM" <<'PY'
+import json, re, sys
+log = open(sys.argv[1], errors="replace").read().splitlines()[int(sys.argv[3]):]
+out = sys.argv[2]
+body = json.load(open(f"{out}/turn2.body"))
+usage = body.get("usage", {})
+def last(pat):
+    hits = [l for l in log if re.search(pat, l)]
+    return hits[-1] if hits else ""
+credit = last(r"already holds the start of this prompt")
+local = last(r"single-segment plan names this node")
+# The worker's own line, from either admission path (`handle_generate` or the
+# batched slot) — both go through `PrefixCache::lookup`.
+hit = last(r"DIAG: prefix-cache HIT model_key")
+num = lambda line, key: int(m.group(1)) if (m := re.search(key + r"=(\d+)", line)) else None
+cached, matched = num(credit, "cached_locally"), num(hit, "matched_tokens")
+print(f"cache: turn 2 prompt_tokens={usage.get('prompt_tokens')}  planner credit={cached}  worker HIT matched={matched}")
+print(f"cache: planner line: {credit[:220] or '(none)'}")
+print(f"cache: local plan:   {local[:160] or '(none)'}")
+ok = bool(cached) and bool(local) and matched is not None and matched >= cached
+print("cache: PASS" if ok else "cache: FAIL")
+sys.exit(0 if ok else 1)
+PY
+  exit $?
+fi
 
 if [ "$MODE" = fetch ]; then
   KB=$(cat "$BASE/B/api_key")

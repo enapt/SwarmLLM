@@ -28,6 +28,7 @@ use crate::types::{
     PipelineAssignment, SwarmMessage,
 };
 
+pub(crate) use prompt::render_prompt_from_header;
 pub use prompt::template_from_header;
 
 /// Recover a peer's failure from a completed [`LayerResult`].

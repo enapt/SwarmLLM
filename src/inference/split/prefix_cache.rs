@@ -81,6 +81,29 @@ pub fn compute_block_hashes(tokens: &[u32], block_size: usize) -> Vec<PrefixBloc
     out
 }
 
+/// Bytes one position of `layers`' KV occupies, summed over layers — what a
+/// snapshot costs per token of prompt it keeps. 0 when nothing is populated.
+///
+/// Read off the live cache's views, so it is exact for this model on this
+/// device and copies nothing.
+fn bytes_per_position(layers: &[Option<LayerKv>]) -> usize {
+    layers
+        .iter()
+        .flatten()
+        .map(|kv| {
+            let positions = kv.current_seq_len();
+            if positions == 0 {
+                return 0;
+            }
+            [kv.k(), kv.v()]
+                .into_iter()
+                .filter_map(|t| t.ok().flatten())
+                .map(|t| t.elem_count() * t.dtype().size_in_bytes() / positions)
+                .sum::<usize>()
+        })
+        .sum()
+}
+
 /// Magic bytes identifying a serialized `KvSnapshot` on the wire.
 /// `SKVX` = "SwarmLLM KV eXchange". Helps early-reject garbled payloads.
 pub const KV_SNAPSHOT_MAGIC: &[u8; 4] = b"SKVX";
@@ -206,8 +229,11 @@ pub struct PrefixCache {
     /// Minimum prefix length (tokens) below which lookups return miss and
     /// inserts are skipped. Avoids caching trivial prompts.
     min_tokens: usize,
-    /// Prompts longer than this (in tokens) are not inserted — they'd blow
-    /// memory. Lookups against long prompts still walk the cache.
+    /// The most positions ONE snapshot keeps, or 0 for no token ceiling (the
+    /// byte budget then decides — see [`Self::positions_ceiling`]). A longer
+    /// prompt keeps its OPENING rather than nothing: that is the system prompt
+    /// and tool definitions every later turn repeats, which is the part worth
+    /// having.
     max_prompt_tokens: usize,
     /// Block granularity for the chained BLAKE3 manifest used by cross-node
     /// prefix sharing. Inserts always store ONE snapshot at the full prompt
@@ -253,6 +279,33 @@ impl PrefixCache {
 
     pub fn enabled(&self) -> bool {
         self.enabled
+    }
+
+    /// The most positions one snapshot may keep, given what a position of this
+    /// model's KV weighs: the explicit token ceiling when one is set, and
+    /// never more than the per-model byte budget holds.
+    ///
+    /// **Derived rather than a constant, because what a position costs varies
+    /// ~3x between models of one size** — 73.7 KB for qwen2.5-3b's two KV
+    /// heads, 229 KB for llama-3.2-3b's eight. The fixed 8,192-token ceiling
+    /// this replaced refused every longer prompt outright, and agent harnesses
+    /// send 4,100-14,400 tokens a turn (field report 2026-09-26), so by
+    /// default most agent prompts were never cached at all. Memory is not what
+    /// the constant protected: the snapshot is also held to the room beside
+    /// the live cache (`max_positions`, gotcha #440), and admission evicts
+    /// cached prompts before refusing a request.
+    fn positions_ceiling(&self, bytes_per_position: usize) -> usize {
+        let by_tokens = if self.max_prompt_tokens == 0 {
+            usize::MAX
+        } else {
+            self.max_prompt_tokens
+        };
+        let by_bytes = if self.max_bytes == 0 || bytes_per_position == 0 {
+            usize::MAX
+        } else {
+            self.max_bytes / bytes_per_position
+        };
+        by_tokens.min(by_bytes)
     }
 
     /// Block-size used to chunk prompt tokens into chained BLAKE3 hashes for
@@ -377,17 +430,13 @@ impl PrefixCache {
         // cross-node prefix-KV measurement undiagnosable: the producing node
         // simply never announced any blocks, with nothing in the log to say
         // which condition stopped it.
-        if !self.enabled
-            || prompt_tokens.len() < self.min_tokens
-            || prompt_tokens.len() > self.max_prompt_tokens
-        {
+        if !self.enabled || prompt_tokens.len() < self.min_tokens {
             tracing::debug!(
                 model_key,
                 enabled = self.enabled,
                 prompt_tokens = prompt_tokens.len(),
                 min_tokens = self.min_tokens,
-                max_prompt_tokens = self.max_prompt_tokens,
-                "prefix-cache: not snapshotting — disabled or prompt outside size bounds"
+                "prefix-cache: not snapshotting — disabled or prompt below the floor"
             );
             return Vec::new();
         }
@@ -422,9 +471,24 @@ impl PrefixCache {
         let dim = first_kv.k_cache().dim();
         let max_seq_len = first_kv.k_cache().max_seq_len();
         let available = first_kv.current_seq_len();
-        // Bound insertion points by what the KV actually holds, and by the
-        // room on the device.
-        let available = available.min(prompt_tokens.len()).min(max_positions);
+        // Bound insertion points by what the KV actually holds, by the room on
+        // the device, and by the ceiling — which keeps the opening of a longer
+        // prompt instead of refusing it.
+        let ceiling = self.positions_ceiling(bytes_per_position(&entry.layers));
+        if ceiling < prompt_tokens.len() {
+            tracing::info!(
+                model_key,
+                prompt_tokens = prompt_tokens.len(),
+                keeping = ceiling,
+                max_prompt_tokens = self.max_prompt_tokens,
+                max_mb = self.max_bytes / (1024 * 1024),
+                "prefix-cache: prompt longer than one snapshot may hold — keeping its opening"
+            );
+        }
+        let available = available
+            .min(prompt_tokens.len())
+            .min(max_positions)
+            .min(ceiling);
         if available < self.min_tokens {
             tracing::debug!(
                 model_key,
@@ -515,9 +579,10 @@ impl PrefixCache {
                 bucket.sort_by_key(|e| e.last_hit.load(Ordering::Relaxed));
                 // Never evict everything: the entry just inserted is the most
                 // recently used, and dropping it would mean this prefill paid
-                // to snapshot itself and kept nothing. A single entry over
-                // budget is a signal to lower `prefix_cache_max_prompt_tokens`,
-                // not a reason to hold nothing at all.
+                // to snapshot itself and kept nothing. `positions_ceiling`
+                // sizes one snapshot to fit the budget, so a single entry over
+                // it arises only where a position's weight could not be read —
+                // and then holding it beats holding nothing.
                 while total > self.max_bytes && bucket.len() > 1 {
                     let dropped = bucket.remove(0);
                     total = total.saturating_sub(dropped.snapshot.bytes());
@@ -1776,14 +1841,19 @@ mod tests {
         );
     }
 
-    /// Never evict down to nothing. The entry just inserted is the most
-    /// recently used, and dropping it would mean the prefill paid to snapshot
-    /// itself and kept nothing at all. A single entry over budget is a reason
-    /// to lower the insert ceiling, not to hold nothing.
+    /// `make_fake_kv`'s weight per position: two layers, K and V, four f32
+    /// each.
+    const FAKE_BYTES_PER_POSITION: usize = 2 * 2 * 4 * 4;
+
+    /// A budget smaller than one whole prompt keeps the OPENING that fits,
+    /// never nothing and never more than the budget. It used to snapshot the
+    /// whole prompt and keep it over budget, because the only alternative was
+    /// discarding a copy already paid for; sizing the copy first removes that
+    /// choice.
     #[test]
-    fn a_budget_smaller_than_one_entry_still_keeps_that_entry() {
+    fn a_budget_smaller_than_one_prompt_keeps_the_opening_that_fits() {
         let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
-        let pc = PrefixCache::new(true, 64, 0, 4, 8192, 1);
+        let pc = PrefixCache::new(true, 64, 0, 4, 8192, FAKE_BYTES_PER_POSITION * 5);
         make_fake_kv(&kv_store, "m", "r1", 2, 10);
         pc.insert_from_kv(
             "m",
@@ -1793,6 +1863,54 @@ mod tests {
             usize::MAX,
         );
         assert_eq!(pc.entry_count("m"), 1);
+        assert!(pc.bytes_held("m") <= FAKE_BYTES_PER_POSITION * 5);
+        let hit = pc.lookup("m", &(0u32..20).collect::<Vec<_>>()).unwrap();
+        assert_eq!(hit.token_count, 5, "the five positions the budget holds");
+    }
+
+    /// A prompt longer than the token ceiling keeps its OPENING — the system
+    /// prompt and tool definitions every later turn repeats. It was refused
+    /// outright, so by default no agent prompt over 8,192 tokens was ever
+    /// cached (field report 2026-09-26: harnesses send 4,100-14,400).
+    #[test]
+    fn a_prompt_over_the_token_ceiling_keeps_its_opening() {
+        let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
+        let pc = PrefixCache::new(true, 8, 0, 4, 6, 0);
+        make_fake_kv(&kv_store, "m", "r1", 2, 10);
+        pc.insert_from_kv(
+            "m",
+            "r1",
+            &kv_store,
+            &(0u32..10).collect::<Vec<_>>(),
+            usize::MAX,
+        );
+        assert_eq!(pc.entry_count("m"), 1, "the opening is kept, not refused");
+        let later: Vec<u32> = (0u32..10).chain(20..30).collect();
+        let hit = pc
+            .lookup("m", &later)
+            .expect("a later turn finds the opening");
+        assert_eq!(hit.token_count, 6);
+    }
+
+    /// With no token ceiling (0, the default) the byte budget alone decides
+    /// how much one snapshot keeps, from what a position of THIS model weighs —
+    /// and with neither bound the whole prompt is kept.
+    #[test]
+    fn with_no_token_ceiling_the_byte_budget_sizes_the_snapshot() {
+        let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
+        let tokens: Vec<u32> = (0u32..10).collect();
+        let probe: Vec<u32> = (0u32..20).collect();
+
+        let pc = PrefixCache::new(true, 8, 0, 4, 0, FAKE_BYTES_PER_POSITION * 7);
+        make_fake_kv(&kv_store, "m", "r1", 2, 10);
+        pc.insert_from_kv("m", "r1", &kv_store, &tokens, usize::MAX);
+        assert_eq!(pc.lookup("m", &probe).unwrap().token_count, 7);
+        assert_eq!(pc.bytes_held("m"), FAKE_BYTES_PER_POSITION * 7);
+
+        let unbounded = PrefixCache::new(true, 8, 0, 4, 0, 0);
+        make_fake_kv(&kv_store, "m", "r2", 2, 10);
+        unbounded.insert_from_kv("m", "r2", &kv_store, &tokens, usize::MAX);
+        assert_eq!(unbounded.lookup("m", &probe).unwrap().token_count, 10);
     }
 
     /// A zero budget means no byte bound, which is what every existing caller

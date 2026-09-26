@@ -58,6 +58,7 @@ This answers most questions on its own:
 | `predicted_ms` far from `total_ms` | the routing cost model is wrong about this shape — see below |
 | `assemblies=2` present | the request FAILED once and retried. Whatever else the line says, start here: the first attempt's cause is in the log just above |
 | `ttft_ms` large, `decode_ms` small | prefill or a cold model load, not the network |
+| a LATER turn of a conversation slow, on a node without a card | was the repeated prompt priced warm? `grep "already holds the start of this prompt"` (the planner's credit, `cached_locally=`) then `prefix-cache HIT` (what the worker matched). No credit line: the worker holds nothing for it — look for `prefix-cache inserted snapshot` / `keeping its opening` on the previous turn. A credit but a chain anyway: a faster route out-priced it, which is allowed |
 | `decode_ms` large, `tpot_ms` high | per-token cost — find the slow hop via `segN_ms` |
 | one `segN_ms` dominates | that peer is the bottleneck; cross-check its row in the peer table |
 | `route=relayed` | no direct path to a holder; ~1 extra RTT each way, see NAT section |

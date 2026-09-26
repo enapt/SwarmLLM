@@ -476,6 +476,23 @@ impl NodeCapability {
             },
         }
     }
+
+    /// Do this node's model layers run on its graphics card?
+    ///
+    /// **Not the same as having one**, for the reason above: a node told to
+    /// use its processor (`inference.gpu_layers = 0`) still gossips its card,
+    /// and says where its models go by stating a system-memory budget
+    /// (`ram_model_budget_mb`, which a node running on its card leaves `None`).
+    /// Reading the card alone priced such a node as reading a prompt ~40x
+    /// faster than it writes a reply — a processor manages ~4.5x — so a route
+    /// through it looked nine times cheaper to prefill than it was, and it was
+    /// booked KV at the card's size.
+    ///
+    /// A node predating the budget field states nothing, and a card then
+    /// means the card, exactly as before.
+    pub fn models_run_on_card(&self) -> bool {
+        self.gpu.is_some() && self.ram_model_budget_mb.is_none()
+    }
 }
 
 /// One entry in `NodeCapability::observed_latencies`: the sender observed
@@ -678,6 +695,37 @@ mod version_compat_tests {
         let cap: NodeCapability = serde_json::from_value(v).unwrap();
         assert!(cap.ram_model_budget_mb.is_none());
         assert_eq!(cap.memory_for_model_layers_mb(), 6000);
+    }
+
+    /// A card is where models run only when the node says so by stating NO
+    /// system-memory budget. One told to use its processor (`gpu_layers = 0`)
+    /// still gossips the card and must not be priced as reading prompts on
+    /// it; one predating the budget field is read as it always was.
+    #[test]
+    fn a_card_the_node_does_not_use_is_not_where_its_models_run() {
+        let card = serde_json::json!({
+            "name": "card",
+            "vram_total_mb": 8192u64,
+            "vram_available_mb": 6000u64,
+            "memory_bandwidth_gbps": 0.0f32,
+        });
+        let with = |fields: &[(&str, serde_json::Value)]| {
+            let mut v = base_fields();
+            for (k, val) in fields {
+                v.as_object_mut().unwrap().insert((*k).into(), val.clone());
+            }
+            serde_json::from_value::<NodeCapability>(v).unwrap()
+        };
+        assert!(with(&[("gpu", card.clone())]).models_run_on_card());
+        assert!(
+            !with(&[
+                ("gpu", card),
+                ("ram_model_budget_mb", serde_json::json!(4096u64))
+            ])
+            .models_run_on_card(),
+            "a card beside a stated RAM budget is a card the node does not use"
+        );
+        assert!(!with(&[]).models_run_on_card(), "no card, no card");
     }
 
     /// A node that HAS a card and has been told not to use it

@@ -74,7 +74,7 @@ impl Default for PrefixCacheConfig {
         Self {
             enabled: true,
             max_entries: 16,
-            max_prompt_tokens: 8192,
+            max_prompt_tokens: 0,
             max_bytes: 2048 * 1024 * 1024,
             block_tokens: 64,
             min_tokens: 32,

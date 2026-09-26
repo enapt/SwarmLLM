@@ -529,7 +529,17 @@ fn utf8_char_len(b: u8) -> usize {
 /// Images are counted at a fixed per-image cost: a CLIP-style encoder emits a
 /// fixed number of embeddings regardless of the picture's size, and 577 is what
 /// this project measures for LLaVA (see `inference::vision`).
-pub fn estimate_prompt_tokens(messages: &[crate::types::ChatMessage]) -> u32 {
+///
+/// **Tool definitions are part of the prompt.** Chat templates render them into
+/// it — as JSON, one per tool — and an agent harness sends dozens, so they can
+/// be the larger half of what the model reads. They were not counted until
+/// 2026-09-26, which priced every agent request as shorter than it is: its
+/// prefill, and the KV cache a peer is asked to hold for it. Measured at the
+/// same four bytes per token as the text, which is a fair rate for JSON.
+pub fn estimate_prompt_tokens(
+    messages: &[crate::types::ChatMessage],
+    tools: Option<&[serde_json::Value]>,
+) -> u32 {
     const BYTES_PER_TOKEN: usize = 4;
     const PER_MESSAGE_OVERHEAD_TOKENS: usize = 4;
     const TOKENS_PER_IMAGE: usize = 577;
@@ -539,6 +549,9 @@ pub fn estimate_prompt_tokens(messages: &[crate::types::ChatMessage]) -> u32 {
         total += m.content.len() / BYTES_PER_TOKEN;
         total += PER_MESSAGE_OVERHEAD_TOKENS;
         total += m.images.len() * TOKENS_PER_IMAGE;
+    }
+    for tool in tools.unwrap_or_default() {
+        total += tool.to_string().len() / BYTES_PER_TOKEN;
     }
     total.min(u32::MAX as usize) as u32
 }
@@ -561,8 +574,8 @@ mod prompt_estimate_tests {
     /// behaviour that matters.
     #[test]
     fn a_long_prompt_is_ordered_far_above_a_short_one() {
-        let short = estimate_prompt_tokens(&[msg("hi")]);
-        let agentic = estimate_prompt_tokens(&[msg(&"x".repeat(20_000))]);
+        let short = estimate_prompt_tokens(&[msg("hi")], None);
+        let agentic = estimate_prompt_tokens(&[msg(&"x".repeat(20_000))], None);
         assert!(short < 20, "a two-character prompt should be tiny: {short}");
         assert!(
             agentic > 20 * short,
@@ -575,7 +588,7 @@ mod prompt_estimate_tests {
     /// — `vertex_cost` reads zero as "no prefill to price".
     #[test]
     fn no_messages_is_zero() {
-        assert_eq!(estimate_prompt_tokens(&[]), 0);
+        assert_eq!(estimate_prompt_tokens(&[], None), 0);
     }
 
     /// An image carries real prefill cost even when its message has no text.
@@ -587,7 +600,33 @@ mod prompt_estimate_tests {
             width: 1,
             height: 1,
         });
-        assert!(estimate_prompt_tokens(&[with_image]) > 500);
+        assert!(estimate_prompt_tokens(&[with_image], None) > 500);
+    }
+
+    /// An agent's tool definitions are rendered into its prompt, so they are
+    /// counted — the field report's harnesses sent 4,100-14,400 tokens a turn,
+    /// much of it tool schemas the estimate used to ignore entirely.
+    #[test]
+    fn tool_definitions_count_toward_the_prompt() {
+        let tool = serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "write_file",
+                "description": "x".repeat(4_000),
+                "parameters": {"type": "object", "properties": {}}
+            }
+        });
+        let bare = estimate_prompt_tokens(&[msg("hi")], None);
+        let with_tools = estimate_prompt_tokens(&[msg("hi")], Some(&[tool.clone(), tool]));
+        assert!(
+            with_tools >= bare + 2_000,
+            "two 4 KB tool schemas are ~2,000 tokens of prompt: {with_tools} vs {bare}"
+        );
+        assert_eq!(
+            estimate_prompt_tokens(&[msg("hi")], Some(&[])),
+            bare,
+            "no tools and an empty list mean the same thing"
+        );
     }
 }
 

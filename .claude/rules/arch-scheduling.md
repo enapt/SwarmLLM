@@ -68,6 +68,22 @@ must not decide how work already assigned here is EXECUTED.**
 
 → `docs/invariants/scheduling.md`
 
+## A warm prompt is priced warm (2026-09-26)
+
+**`scheduler::cached_prefix::plan_prompt`** tokenizes the prompt the way the
+executor renders it (`pipeline::render_prompt_from_header` — never a second
+rendering) and counts the leading blocks our own worker holds
+(`models.peer_prefix_blocks[our id]`). `vertex_cost` takes that off a
+WHOLE-MODEL vertex only, via `NodeCandidate::cached_prefix_tokens` — LOCAL
+only: a peer's plan can be taken by the n-gram path, which never reads its
+cache. Priced cold, an agent's turn 2 left a 9,200-token hit for an 847 s chain.
+
+**`NodeCapability::models_run_on_card`** is "does this peer's work run on its
+card" — a card beside a stated `ram_model_budget_mb` (`gpu_layers = 0`) does
+not. Never `gpu.is_some()`.
+
+→ `docs/invariants/scheduling.md` § "A warm prompt is priced warm"
+
 ## The hand-off gate proposes; the priced search decides
 
 `assemble_pipeline_for` no longer RETURNS the whole-model hand-off. When the

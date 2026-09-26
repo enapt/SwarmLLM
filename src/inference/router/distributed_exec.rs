@@ -367,8 +367,9 @@ async fn assemble_awaiting_dht(
     model_id: &crate::types::ModelId,
     local_node_id: &crate::types::NodeId,
     request_id: uuid::Uuid,
-    prompt_tokens: Option<u32>,
+    prompt: crate::inference::scheduler::cached_prefix::PromptPlan,
 ) -> Result<PipelineAssignment, SwarmError> {
+    let prompt_tokens = prompt.tokens;
     // Learn the model's geometry BEFORE pricing anyone's memory, if this node
     // holds no part of it. `max_hostable_layers` charges a peer for the
     // prompt's KV cache from `head_count_kv` / `head_dim`, which live in the
@@ -394,7 +395,7 @@ async fn assemble_awaiting_dht(
         local_node_id,
         request_id,
         Purpose::Route,
-        prompt_tokens,
+        prompt,
     );
     let Err(err) = first else {
         if let Ok(ref a) = first {
@@ -418,7 +419,7 @@ async fn assemble_awaiting_dht(
             local_node_id,
             request_id,
             Purpose::Route,
-            prompt_tokens,
+            prompt,
         ) {
             scheduler.record_peer_commitments(&assignment, local_node_id, prompt_tokens);
             tracing::info!(
@@ -774,8 +775,31 @@ pub(super) async fn execute_request(
     // gate as scheduler::gather_candidates.
     // Routing has to be able to tell a short prompt from a long one: prefill is
     // linear in prompt length and the hardware spread on it is far wider than on
-    // decode. An estimate is enough — see `estimate_prompt_tokens`.
-    let prompt_tokens_hint = Some(crate::inference::estimate_prompt_tokens(&request.messages));
+    // decode. An estimate is enough — see `estimate_prompt_tokens` — EXCEPT when
+    // this node's worker already holds part of the prompt: then the prompt is
+    // tokenized so the local route is priced on what it will actually read
+    // (`cached_prefix`, field report 2026-09-26), and the exact length comes
+    // with it.
+    let prompt_plan =
+        crate::inference::scheduler::cached_prefix::plan_prompt_off_thread(&shared_state, &request)
+            .await
+            .unwrap_or_else(|| {
+                Some(crate::inference::estimate_prompt_tokens(
+                    &request.messages,
+                    request.tools.as_deref(),
+                ))
+                .into()
+            });
+    if prompt_plan.cached_locally > 0 {
+        tracing::info!(
+            request_id = %request.id,
+            model = %model_id,
+            prompt_tokens = ?prompt_plan.tokens,
+            cached_locally = prompt_plan.cached_locally,
+            "This node's worker already holds the start of this prompt — pricing a run \
+             here on the part it has not read"
+        );
+    }
 
     let assignment = if let Some(adapter_id) = request.lora_adapter.as_deref() {
         lora_local_assignment(
@@ -811,7 +835,7 @@ pub(super) async fn execute_request(
                 model_id,
                 &local_node_id,
                 request.id,
-                prompt_tokens_hint,
+                prompt_plan,
             )
             .await?
         }
@@ -821,7 +845,7 @@ pub(super) async fn execute_request(
             model_id,
             &local_node_id,
             request.id,
-            prompt_tokens_hint,
+            prompt_plan,
         )
         .await?
     };

@@ -19,6 +19,31 @@ pub fn template_from_header(
     Some((tok.chat_template, bos, eos))
 }
 
+/// The prompt text `request` renders to under its model's header template —
+/// what the worker is handed and tokenizes.
+///
+/// **The one rendering from header data, shared by the executor and the
+/// router.** The router tokenizes this same string before planning, to learn
+/// how much of it this node's worker already holds in its prefix cache
+/// (`scheduler::cached_prefix`). Two renderings would drift, and the drift
+/// would be silent: the planner's block hashes would simply stop matching and
+/// every warm prompt would be priced cold again, which is the field report of
+/// 2026-09-26 all over.
+pub(crate) fn render_prompt_from_header(
+    request: &crate::types::InferenceRequest,
+    header: &(Option<String>, String, String),
+) -> String {
+    let (tmpl, bos, eos) = header;
+    chat_template::build_prompt_with_model(
+        &request.messages,
+        tmpl.as_deref(),
+        bos,
+        eos,
+        Some(&request.model_id.0),
+        request.tools.as_deref(),
+    )
+}
+
 /// Cached vocabulary and tokenizer state for lock-free token decoding during streaming.
 /// Extracted once from the model under the mutex, then used for all subsequent decoding
 /// without re-acquiring the lock.
@@ -265,18 +290,11 @@ impl PipelineExecutor {
         header_data: Option<&(Option<String>, String, String)>,
     ) -> String {
         let model_id = &self.request.model_id;
-        if let Some((tmpl, bos, eos)) = header_data {
+        if let Some(header) = header_data {
             // The stops that end this reply are recorded from the template it
             // is being asked in — see `reply_stops`.
-            self.warm_reply_stops(tmpl.as_deref());
-            let prompt = chat_template::build_prompt_with_model(
-                &self.request.messages,
-                tmpl.as_deref(),
-                bos,
-                eos,
-                Some(&model_id.0),
-                self.request.tools.as_deref(),
-            );
+            self.warm_reply_stops(header.0.as_deref());
+            let prompt = render_prompt_from_header(&self.request, header);
             tracing::debug!(
                 model = %model_id,
                 prompt_len = prompt.len(),

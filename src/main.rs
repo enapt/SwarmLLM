@@ -193,8 +193,9 @@ enum Commands {
         /// Maximum cached prefix snapshots retained per model (default 16)
         #[arg(long, default_value = "16")]
         prefix_cache_max_entries: u32,
-        /// Prompts longer than this (tokens) are not inserted (default 8192)
-        #[arg(long, default_value = "8192")]
+        /// Most tokens of one prompt the prefix cache keeps; 0 = no token
+        /// ceiling, the byte budget decides (default 0)
+        #[arg(long, default_value = "0")]
         prefix_cache_max_prompt_tokens: u32,
         /// Max megabytes of prefix KV retained per model, 0 for no byte bound (default 2048)
         #[arg(long, default_value = "2048")]

@@ -2237,3 +2237,77 @@ would hand work that a delegate could serve to this node's processor instead.
 
 Rig: `examples/split_rig.sh whole` (A holds only the header, B all of it at 512,
 C all of it at the default).
+
+## A warm prompt is priced warm (2026-09-26)
+
+**Field report, v0.3.206** (CPU-only Ryzen 7 5700U, xlam-2-3b 4/4 shards, a
+GPU peer with ~2.4 GB free, agent harness nanobot, ~9.2K-token prompt a turn):
+turn 1 ran here in 677.8 s and cached its prompt; turn 2 — the first ~9,200
+tokens identical — went `7c10ea04,bf7b3263,7c10ea04` and took 847.1 s. The
+router had priced running here on all 9,280 tokens: nothing in the cost model
+knew what this node's worker held. On a node without a card
+`local_fast_path_allowed` stands aside whenever any peer is connected, so the
+router decides every request such a node makes, every turn.
+
+**The mechanism** (`scheduler::cached_prefix`): render the prompt exactly as the
+executor will (`pipeline::render_prompt_from_header` — one function, both
+callers), tokenize with the standalone tokenizer built from the same header as
+the worker's, chain-hash at the worker's block size
+(`ModelProcessPool::prefix_cache_block_tokens`), and count the LEADING blocks
+present in `models.peer_prefix_blocks[our id][model]` — the index the loopback
+forwarder rewrites from every worker insert (the full bucket's manifest, not
+just the new entry). That count is `PromptPlan::cached_locally`, carried on the
+LOCAL candidate as `NodeCandidate::cached_prefix_tokens`, and
+`parallax::vertex_cost` takes it off the prompt of a WHOLE-MODEL vertex only.
+Every price — the search, the hand-off gate (`costs_more_than_staying_here`),
+the logs and `note_route_prediction` — goes through `vertex_cost` with the
+candidate, so none can disagree. Tokenizing only happens when the worker has
+reported a cache for the model: the common request pays one map lookup.
+
+**Why only this node's cache.** A local whole-model plan runs through
+`try_local_generate_fastpath` → `Generate`, deterministically: DSD needs two
+segments, draft speculation a draft model, and the n-gram path declines a plan
+that is entirely local. A PEER's whole-model plan does not: the n-gram path runs
+BEFORE `remote_generate` for a remote single segment, and it sends forwards,
+which never look the cache up. A peer credit would be priced and not delivered
+whenever that path won — so peers get none until that is resolved (FUTURE_WORK #10).
+
+**What it keeps from SGLang** (v0.4 cache-aware routing, and
+sgl-project/sglang#26263): the key is the full rendered prefill input, tools
+included — keying on `messages[0]` made unrelated conversations collide — and a
+hit is a PRICE that load and a faster route can still beat, never a pin.
+
+**Errs toward cold.** Whole blocks only, and never the last token, so the credit
+never exceeds what `PrefixCache::lookup` hydrates. A stale self-entry (evicted,
+or lost with the worker) costs one uncached run — what the request cost before
+— and that run re-announces.
+
+**Measured** (`examples/split_rig.sh cache`, qwen2.5-0.5b, both nodes on the
+processor): turn 2 of 2,744 tokens — planner credit 2,688 (42 blocks), local
+plan, worker `prefix-cache HIT matched_tokens=2713`. Tests:
+`a_processor_holder_keeps_a_prompt_its_worker_already_holds` (the field shape;
+fails without the credit — the plan is the four-segment boomerang),
+`a_small_cached_prefix_does_not_keep_a_long_prompt_off_faster_cards` (the price,
+not a pin), `a_cached_prefix_is_credited_only_to_a_whole_model_run`.
+
+**Also fixed with it:** `estimate_prompt_tokens` now counts tool definitions — an
+agent sends dozens and they were priced at zero, in prefill and in the KV a peer
+is asked to hold.
+
+## Where a peer's models RUN is not whether it owns a card (2026-09-26)
+
+**`NodeCapability::models_run_on_card`** — a card AND no stated system-memory
+budget. A node told to use its processor (`gpu_layers = 0`) still gossips its
+card (the card is real) and states `ram_model_budget_mb`, which a node running
+on its card leaves `None`. `memory_for_model_layers_mb` already read it that way
+(the RAM budget first); the three routing readers that ask "does this peer's
+work run on its card" did not: the prefill prior (`has_gpu` → 40x vs 4.5x, so
+such a peer read prompts ~9x cheaper than it can), the KV booked by
+`record_peer_commitments` (card-sized, with the f16 mirror), and
+`gpu_vram_available_mb` (card room the hand-off gate would weigh). All three now
+ask the predicate. A node predating the budget field is read as before.
+Test: `a_peer_running_on_its_processor_is_not_priced_as_its_card`.
+
+Not established as the field report's cause — its peer's configuration is not
+known — but it is one way a chain is priced far below what it delivers, and
+847 s against a price that preferred the chain says something did.

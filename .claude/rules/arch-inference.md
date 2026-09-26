@@ -384,6 +384,16 @@ with `swarmllm test-split --gpu-layers N` + `score_ids.py`.
 
 → `docs/invariants/inference.md` § "A card/processor split is placed in every per-layer loop"
 
+## One prefix-cache snapshot is sized by bytes, and keeps the opening (2026-09-26)
+
+**`PrefixCache::positions_ceiling`** caps a snapshot BEFORE the copy: the
+explicit token ceiling if set, never more than the byte budget over what a
+position of this model weighs. A longer prompt keeps its opening — the system
+prompt and tools every turn repeats — never nothing. The fixed 8,192 it
+replaced refused most agent prompts outright.
+
+→ `docs/invariants/inference.md` § "One prefix-cache snapshot is sized by bytes"
+
 ## Single-source-of-truth helpers — Inference kernels, caches and the tokenizer
 
 Each names the ONE place a decision is made. A second implementation of any of

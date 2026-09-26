@@ -402,9 +402,16 @@ pub struct InferenceConfig {
     /// here to stop an unbounded case rather than to keep the cache small.
     #[serde(default = "default_prefix_cache_max_mb")]
     pub prefix_cache_max_mb: u32,
-    /// Prompts longer than this many tokens are NOT inserted into the
-    /// prefix cache (too memory-heavy). Lookups still run against the
-    /// existing cache. Default 8192.
+    /// The most tokens of one prompt the prefix cache keeps. A longer prompt
+    /// keeps its OPENING — the system prompt and tools an agent repeats every
+    /// turn — rather than nothing. **Default 0: no token ceiling, and
+    /// `prefix_cache_max_mb` alone decides**, from what a position of the
+    /// model actually weighs (~3x apart between 3B models). The old default,
+    /// 8192, refused every longer prompt outright, and agent harnesses send
+    /// 4,100-14,400 tokens a turn (field report 2026-09-26), so by default
+    /// most agent prompts were never cached. Memory is bounded without it: a
+    /// snapshot also fits beside the live cache, and admission evicts cached
+    /// prompts before refusing a request.
     #[serde(default = "default_prefix_cache_max_prompt_tokens")]
     pub prefix_cache_max_prompt_tokens: u32,
     /// Insertion block granularity. When a prefill completes with N tokens,
@@ -647,7 +654,7 @@ fn default_prefix_cache_max_entries() -> u32 {
 }
 
 fn default_prefix_cache_max_prompt_tokens() -> u32 {
-    8192
+    0
 }
 
 fn default_prefix_cache_block_tokens() -> u32 {
