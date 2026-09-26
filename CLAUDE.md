@@ -154,16 +154,17 @@ UNDETERMINED and never a fix — use it BEFORE blaming a change, especially your
 
 ## Status
 
-**v0.3.207-alpha is the live release (2026-09-26), signed and on both nodes.** It carries:
-**a model too big for the card answers** (#104 — the card/processor split's KV budget counted the
-whole model; GLM-4-9B alone on 8 GB now serves its full 8,192 context, whole-file models split too);
-**a lost split result is resent**, never mistaken for the next step (#113, `0x07`,
-`features::RESULT_STEP`); **a whole-model delegate's context refusal re-plans** (#111); MoE routing
-in one pass per layer; **Llama 4 fixed vs llama.cpp** (tiny fixtures only — no real Llama 4 run);
-DeepSeek-2 / Qwen 3.5 / StarCoder2 **REFUSED** everywhere incl. auto-manage's peer branch (#116-118).
-v0.3.206 before it: quinn-proto 0.11.18 (#112), remote sampling (#106), MoE quantized, LoRA (#110).
-Qwen 3.5 real support is on the local branch `qwen35-support` (#117). Gemma 4 scoped, not built (#115).
-⚠ **A family in `supported_list` is a claim: check it against a REAL file's header** (gotcha #715). **Next** → `memory/next_up.md`.
+**v0.3.207-alpha is the live release (2026-09-26), signed and on both nodes** — contents in
+`memory/round_history.md`. **`main` is AHEAD of it, unreleased** — agent workloads on processor-only
+nodes (field report 2026-09-26): SSE keep-alive data chunk, a warm prompt priced warm
+(`scheduler::cached_prefix`), prefix-cache ceiling derived from bytes, `models_run_on_card`, the
+owner's prompts on every core (`process_pool::Requester`), the GQA attention cliff past a 5,461-long
+cache. Qwen 3.5 is on local branch `qwen35-support` (#117); Gemma 4 scoped, not built (#115).
+⚠ **A family in `supported_list` is a claim: check it against a REAL file's header** (#715). **Next** → `memory/next_up.md`.
+
+⛔ **This PC had two unclean shutdowns on 2026-09-26 (#716 bluescreen, #718 hard hang), causes
+unknown.** Heavy CPU/GPU benches run only with the user present and the live node stopped — a bench
+beside the live node also reads about HALF (#119).
 
 ⚠ **Behaviour gate = `reply_ab.sh` + `split_rig.sh`** (incl. `failover`), not
 conformance alone — `family_conformance.sh` pins `gpu_layers = 0` and never
@@ -193,14 +194,9 @@ peer** (#673). **A split is only fast when the machines are CLOSE** (0.35 tok/s
 Thailand↔Italy vs 6.76 at 18 ms); nothing routes on coordinates yet →
 `docs/plans/regional_pipelines.md`.
 
-**Releases are SIGNED; CI leaves a DRAFT.** ⚠ The signing script can take the
-WRONG tag silently — confirm `draft=false`, 7 `.minisig` (against 9 `.sha256` is
-correct) and `rsign verify` naming the version → `memory/release_gate.md`.
-
-⚠ **#90's cause is unknown** (no genuine recurrence since v0.3.204 — the two
-later firings were a PC freeze and a network outage). #17's composite has run live
-at the END and in the MIDDLE (`split_rig.sh failover`, `failover_mid`). ⚠ **`gossip_network_id` is NOT isolation** —
-only pool + `private_mode` + `private_mode_allow_lan = false` isolates (#352).
+**Releases are SIGNED; CI leaves a DRAFT** — the signer can take the WRONG tag silently; the
+checks are in `memory/release_gate.md`. ⚠ **#90's cause is unknown.** ⚠ **`gossip_network_id` is
+NOT isolation** — only pool + `private_mode` + `private_mode_allow_lan = false` isolates (#352).
 
 ⛔ **Nothing may block compaction, so commit as you go** (#687).
 
