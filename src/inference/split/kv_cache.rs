@@ -827,7 +827,9 @@ impl KvCacheStore {
     }
 
     /// Is `request_id` the owner's own request? `false` for anything not
-    /// marked — work for the swarm, and every forward that is not a `Generate`.
+    /// marked — work for the swarm. Marked by the worker at a `Generate`
+    /// carrying `for_the_owner`, and at a `Forward` carrying it (the owner's
+    /// segment of a request this node coordinates).
     pub(crate) fn serves_the_owner(&self, request_id: &str) -> bool {
         self.owner_requests.contains_key(request_id)
     }

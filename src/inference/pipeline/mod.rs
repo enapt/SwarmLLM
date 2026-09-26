@@ -500,7 +500,15 @@ pub(super) async fn forward_verify_through_segments(
             }
             result
         } else {
-            shared_state.model_process_pool.forward(forward).await?
+            // A verify step of a request this node coordinates: ours.
+            shared_state
+                .model_process_pool
+                .forward_for_request(
+                    forward,
+                    None,
+                    crate::inference::process_pool::Requester::Owner,
+                )
+                .await?
         };
 
         if let Some(crate::types::NetworkFinishReason::Error(msg)) = &result.finish_reason {

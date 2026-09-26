@@ -298,6 +298,16 @@ pub struct IpcForward {
     /// partial-accept fixup.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub truncate_kv_to: Option<u32>,
+    /// This forward belongs to a request THIS machine's owner sent — the
+    /// segment of it this node runs inside a pipeline it coordinates — so its
+    /// prompt pass may read on the owner's width (`process_pool::Requester`).
+    /// The `Generate` path carries the same fact on `IpcGenerate::for_the_owner`;
+    /// without it here the owner's prompt fell back to the contribution width
+    /// whenever the request was split. Set only by the daemon from its own
+    /// call site, never read off the network: a peer's segment has no way to
+    /// set it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub for_the_owner: bool,
 }
 
 /// Forward-pass result header.
@@ -818,6 +828,7 @@ mod tests {
             generated_ids: vec![],
             spec_logits_requested: false,
             truncate_kv_to: None,
+            for_the_owner: false,
         };
         let json = serde_json::to_string(&fwd).unwrap();
         // When no vision payload, the field is elided to match pre-fix wire
@@ -827,6 +838,47 @@ mod tests {
             "expected vision_embeddings_len to be elided from JSON when zero, got: {json}"
         );
         assert!(!json.contains("vision_embeddings"));
+    }
+
+    /// The owner's segment of a split request reaches the worker marked as the
+    /// owner's, a peer's never does, and a frame written before the field
+    /// existed reads as the swarm's — never as the owner's.
+    #[test]
+    fn a_forward_says_whether_it_is_the_owners() {
+        use crate::types::{ModelId, TensorFormat};
+        use uuid::Uuid;
+        let fwd = |for_the_owner| IpcForward {
+            request_id: Uuid::nil(),
+            sequence_num: 0,
+            index_pos: 0,
+            format: TensorFormat::FP32,
+            model_id: ModelId("test".into()),
+            layer_range: (0, 4),
+            tp_meta: None,
+            vision_embeddings_len: 0,
+            requester_node_id: None,
+            pre_embedded: false,
+            sampling: Default::default(),
+            adapter_id: None,
+            draft_tokens: vec![],
+            generated_ids: vec![],
+            spec_logits_requested: false,
+            truncate_kv_to: None,
+            for_the_owner,
+        };
+        let owners = serde_json::to_string(&fwd(true)).unwrap();
+        let back: IpcForward = serde_json::from_str(&owners).unwrap();
+        assert!(
+            back.for_the_owner,
+            "lost on the way to the worker: {owners}"
+        );
+        let swarms = serde_json::to_string(&fwd(false)).unwrap();
+        assert!(
+            !swarms.contains("for_the_owner"),
+            "a peer's forward carries nothing new"
+        );
+        let back: IpcForward = serde_json::from_str(&swarms).unwrap();
+        assert!(!back.for_the_owner);
     }
 
     #[test]
@@ -850,6 +902,7 @@ mod tests {
             generated_ids: vec![],
             spec_logits_requested: false,
             truncate_kv_to: None,
+            for_the_owner: false,
         };
         let json = serde_json::to_string(&fwd).unwrap();
         assert!(json.contains("\"vision_embeddings_len\":12345"));

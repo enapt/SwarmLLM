@@ -79,7 +79,9 @@ Guard: `a_memory_budget_is_charged_by_the_pool_never_by_the_metadata_map`.
 ## The contribution level caps the SWARM's work, not the owner's prompt (2026-09-26)
 
 **`process_pool::Requester`** is a REQUIRED argument of `ModelProcessPool::generate`
-(`Owner` = this node's own API, `Swarm` = a peer's). The worker records it once, at
+AND of `forward_for_request` — the owner's own segment of a split request is
+the owner's too (`IpcForward::for_the_owner`) (`Owner` = this node's own API,
+`Swarm` = a peer's). The worker records it once, at
 its `Generate` entry (`KvCacheStore::mark_owner_request`), and `cpu_pools::in_phase_pool`
 reads it where every forward picks its pool: the owner's PROMPT reading runs on
 `ResourceConfig::owner_prefill_threads` (physical cores, or an explicit

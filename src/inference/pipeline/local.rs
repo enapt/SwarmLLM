@@ -366,7 +366,14 @@ impl PipelineExecutor {
         let layer_result = self
             .shared_state
             .model_process_pool
-            .forward_for_request(layer_forward, self.request.cancel.clone())
+            // Our own segment of a request this node coordinates — the router
+            // only ever receives this node's API requests — so its prompt pass
+            // reads on the owner's width, as the whole-model path's does.
+            .forward_for_request(
+                layer_forward,
+                self.request.cancel.clone(),
+                crate::inference::process_pool::Requester::Owner,
+            )
             .await?;
 
         // Deliberately NOT counted as a forward served. This is our own segment

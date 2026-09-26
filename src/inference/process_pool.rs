@@ -1335,7 +1335,10 @@ async fn dispatch_scheduler_group(pool: &Arc<ModelProcessPool>, msgs: Vec<BatchS
     if msgs.len() == 1 {
         let BatchSchedulerMsg::Forward { fwd, resp_tx } =
             msgs.into_iter().next().expect("len == 1 checked above");
-        let result = pool.forward_direct(fwd, None).await;
+        // Only decode steps are batch-scheduled, and decode keeps the
+        // contribution width whoever asked; an owner's mark made at its prompt
+        // pass stays on the request.
+        let result = pool.forward_direct(fwd, None, Requester::Swarm).await;
         let _ = resp_tx.send(result);
         return;
     }
@@ -1679,8 +1682,9 @@ impl CpuReason {
     }
 }
 
-/// Whose request a [`ModelProcessPool::generate`] serves — which decides how
-/// many cores may read its prompt (`cpu_pools::in_phase_pool`).
+/// Whose request a [`ModelProcessPool::generate`] — or a forward of a segment
+/// of it, [`ModelProcessPool::forward_for_request`] — serves, which decides
+/// how many cores may read its prompt (`cpu_pools::in_phase_pool`).
 ///
 /// The contribution level is how much of the computer SwarmLLM may use to
 /// answer requests FROM THE SWARM; it had been capping the owner's own
@@ -5017,11 +5021,15 @@ impl ModelProcessPool {
     /// through the auto-coalescing scheduler which collects concurrent
     /// arrivals within `batch_collection_ms` and dispatches via
     /// `forward_batch`. Otherwise goes direct.
+    ///
+    /// A forward with no request of ours behind it — a segment served for a
+    /// peer's pipeline, or a tensor-parallel phase — so it is the swarm's.
     pub async fn forward(
         &self,
         forward: crate::types::LayerForward,
     ) -> Result<crate::types::LayerResult, SwarmError> {
-        self.forward_for_request(forward, None).await
+        self.forward_for_request(forward, None, Requester::Swarm)
+            .await
     }
 
     /// [`Self::forward`] for a request THIS node coordinates: the wait for the
@@ -5043,10 +5051,18 @@ impl ModelProcessPool {
     /// `None` is a forward with no request of ours behind it — a segment served
     /// for a remote coordinator, whose cancel arrives over the network as
     /// `CancelInference` and reaches the worker through `cancel_request`.
+    ///
+    /// `requester` is REQUIRED for the same reason it is on
+    /// [`Self::generate`]: the owner's segment of a split request is read on
+    /// the owner's width only if the forward says whose it is. Carried to the
+    /// worker as `IpcForward::for_the_owner`, which it marks on the request;
+    /// before that only the `Generate` path marked anything, so a split plan
+    /// read the owner's prompt at the contribution width.
     pub async fn forward_for_request(
         &self,
         forward: crate::types::LayerForward,
         cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
+        requester: Requester,
     ) -> Result<crate::types::LayerResult, SwarmError> {
         if self
             .continuous_batching
@@ -5095,13 +5111,14 @@ impl ModelProcessPool {
                 ));
             }
         }
-        self.forward_direct(forward, cancel).await
+        self.forward_direct(forward, cancel, requester).await
     }
 
     async fn forward_direct(
         &self,
         forward: crate::types::LayerForward,
         cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
+        requester: Requester,
     ) -> Result<crate::types::LayerResult, SwarmError> {
         // `None` means the caller had no request context — a segment served
         // for a REMOTE coordinator, whose parameters are not on the wire.
@@ -5182,6 +5199,7 @@ impl ModelProcessPool {
             generated_ids,
             spec_logits_requested,
             truncate_kv_to,
+            for_the_owner: requester == Requester::Owner,
         };
 
         if handle.dead.load(Ordering::Acquire) {
@@ -5389,6 +5407,9 @@ impl ModelProcessPool {
                 generated_ids,
                 spec_logits_requested,
                 truncate_kv_to,
+                // Decode steps only (see `dispatch_scheduler_group`); the
+                // owner's mark, if any, was made at the prompt pass.
+                for_the_owner: false,
             });
         }
 
@@ -6389,7 +6410,7 @@ mod tests {
         // the test times out instead of returning.
         let outcome = tokio::time::timeout(
             std::time::Duration::from_secs(10),
-            pool.forward_for_request(forward, Some(cancel)),
+            pool.forward_for_request(forward, Some(cancel), Requester::Owner),
         )
         .await
         .expect("the wait must end when the request is abandoned, not hang");

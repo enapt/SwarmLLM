@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+**Fixed: a computer with a graphics card could turn away a long prompt it
+had room for.** After answering one long prompt, the next one of the same
+size could be refused as "not enough free memory" while nothing else was
+running — on an 8 GB card with an 8-billion-parameter model, every time. The
+memory the first request gave back reaches the graphics driver a moment
+later, and the free memory was read before it arrived, so the next request
+was judged against about half the real room. The reading now waits for it.
+With other computers online the refused request had been sent to one of
+them instead, usually slower; on its own the computer answered with an
+error.
+
+**More conversations at once on a graphics card.** Every conversation set
+aside room for a reply of about 500 tokens, even one that asked for far
+fewer, so an 8 GB card running an 8-billion-parameter model held three short
+conversations and refused a fourth. A conversation now sets aside room for
+the reply it asked for; on the same card four short conversations are
+answered side by side. When a prompt is refused because other conversations
+are using the memory, the message now says it will fit once they finish,
+instead of suggesting a shorter conversation, which could not help.
+
 **Fixed: an agent's next turn could leave a computer that had already read
 most of its prompt.** On a computer without a graphics card, the network
 decides where each request runs, and it priced running here as if the whole

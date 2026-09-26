@@ -11164,3 +11164,79 @@ fn the_free_memory_sync_guard_catches_an_unsynchronized_read() {
         None
     );
 }
+
+/// Does this call hand the pool the OWNER as its requester?
+fn forwards_as_the_owner(body: &str) -> bool {
+    let flat: String = body.chars().filter(|c| !c.is_whitespace()).collect();
+    flat.contains(".forward_for_request(") && flat.contains("Requester::Owner")
+}
+
+/// Does this worker handler mark a forward the daemon flagged as the owner's —
+/// AFTER the prompt pass clears the request's bookkeeping, which releases the
+/// mark? A mark made before the clear is wiped at every prompt pass.
+fn marks_an_owners_forward(body: &str) -> bool {
+    let flat: String = body.chars().filter(|c| !c.is_whitespace()).collect();
+    let Some(mark) = flat.find("iffwd.for_the_owner{") else {
+        return false;
+    };
+    if !flat[mark..].contains("mark_owner_request(") {
+        return false;
+    }
+    match flat.find("kv_store.clear_request(") {
+        Some(clear) => clear < mark,
+        None => true,
+    }
+}
+
+/// The owner's own segment of a split request is read on the owner's width
+/// (`process_pool::Requester`, FUTURE_WORK #119). Until the pre-release review
+/// of 2026-09-26 only the `Generate` path marked a request as the owner's, so
+/// a request the router split read its prompt at the contribution width — the
+/// "one invariant, N paths" shape. Both halves are pinned: the coordinator's
+/// local segment says whose it is, and the worker marks what it is told.
+#[test]
+fn the_owners_own_segment_is_forwarded_as_the_owners() {
+    let read = |p: &str| std::fs::read_to_string(repo_root().join(p)).expect(p);
+    let local = read("src/inference/pipeline/local.rs");
+    let body = fn_body(&local, "pub(super) async fn process_local_segment(")
+        .expect("process_local_segment moved — move this guard with it");
+    assert!(
+        forwards_as_the_owner(body),
+        "process_local_segment must forward with `Requester::Owner` — it runs this \
+         node's own segment of a request the router coordinates"
+    );
+    let worker = read("src/inference/model_worker.rs");
+    let body = fn_body(&worker, "async fn handle_forward(")
+        .expect("handle_forward moved — move this guard with it");
+    assert!(
+        marks_an_owners_forward(body),
+        "handle_forward must `mark_owner_request` when `fwd.for_the_owner` is set"
+    );
+}
+
+/// The guard above, against what it exists to catch — planted.
+#[test]
+fn the_owner_segment_guard_catches_a_forward_that_says_nothing() {
+    assert!(!forwards_as_the_owner(
+        ".forward_for_request(layer_forward, self.request.cancel.clone())"
+    ));
+    assert!(!forwards_as_the_owner(
+        ".forward_for_request(f, None, crate::inference::process_pool::Requester::Swarm)"
+    ));
+    assert!(forwards_as_the_owner(
+        ".forward_for_request(\n    f,\n    c,\n    crate::inference::process_pool::Requester::Owner,\n)"
+    ));
+    assert!(!marks_an_owners_forward("let request_id = fwd.request_id;"));
+    assert!(marks_an_owners_forward(
+        "if fwd.for_the_owner {\n    kv_store.mark_owner_request(&id);\n}"
+    ));
+    // The first version of this fix: marked, then wiped by the prompt pass's clear.
+    assert!(!marks_an_owners_forward(
+        "if fwd.for_the_owner { kv_store.mark_owner_request(&id); }\n\
+         if fwd.sequence_num == 0 { kv_store.clear_request(&key, &id); }"
+    ));
+    assert!(marks_an_owners_forward(
+        "if fwd.sequence_num == 0 { kv_store.clear_request(&key, &id); }\n\
+         if fwd.for_the_owner { kv_store.mark_owner_request(&id); }"
+    ));
+}

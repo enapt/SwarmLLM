@@ -1455,6 +1455,19 @@ async fn handle_forward(
         kv_store.clear_request(&model_key, &req_id_str);
     }
 
+    // The owner's own segment of a request this node coordinates is the
+    // owner's, as its `Generate` is: marked before any layer of it picks a
+    // thread pool, released with the rest of the request's bookkeeping. Only
+    // the daemon sets the flag; a peer's segment never carries it.
+    //
+    // AFTER the clear above, never before it: `clear_request` releases the
+    // request's bookkeeping, owner mark included, so a mark made first was
+    // wiped at every prompt pass — the only pass the owner's width is for.
+    // Found by running a split request, not by the tests (2026-09-26).
+    if fwd.for_the_owner {
+        kv_store.mark_owner_request(&req_id_str);
+    }
+
     // Speculative partial-accept KV fixup: coordinator may request truncation
     // of this request's KV cache to a specific length before the forward runs.
     // Discards trailing stale entries written during a prior verify round.
@@ -2414,15 +2427,35 @@ fn ngram_spec_round(
 /// known — a segment's prompt pass, which never sees `max_tokens`.
 const REPLY_RESERVE_POSITIONS: usize = crate::inference::layers::KV_CACHE_GROWTH_TOKENS;
 
-/// Positions a speculative round may write past the reply before it is
-/// truncated back: n-gram drafts (`--ngram-pred-tokens`, 10 by default) and
-/// SWIFT's gamma (4). A draft longer than this still works — the cache grows
-/// by the executor's guard, charged then — it is only not pre-reserved.
+/// The least a reply's reserve leaves for a speculative round to write past
+/// the reply before it is truncated back — n-gram drafts
+/// (`--ngram-pred-tokens`, 10 by default) and SWIFT's gamma (4) fit with room.
+/// [`draft_margin_positions`] raises it to whatever this worker is configured
+/// to draft.
 const DRAFT_MARGIN_POSITIONS: usize = 32;
 
+/// Positions this worker's speculative rounds may write past a reply: the
+/// larger of the configured draft lengths (plus the bonus token) and
+/// [`DRAFT_MARGIN_POSITIONS`].
+///
+/// `--ngram-pred-tokens` is an unbounded setting, and a fixed margin would let
+/// an operator who raised it draft past a short chat's reservation, growing
+/// the cache mid-reply — where the guard can refuse — at exactly the
+/// concurrency a smaller reserve admits (review of #122, 2026-09-26).
+fn draft_margin_positions(
+    ngram_cfg: &crate::inference::ngram_lookup::NgramLookupConfig,
+    swift_cfg: &SwiftConfig,
+) -> usize {
+    DRAFT_MARGIN_POSITIONS
+        .max(ngram_cfg.num_pred_tokens.saturating_add(1))
+        .max((swift_cfg.gamma as usize).saturating_add(1))
+}
+
 /// The reply reserve for a request whose granted budget is `max_new_tokens`
-/// (`resolve_max_new_tokens`, already assigned back): what the reply can
-/// actually occupy, never more than [`REPLY_RESERVE_POSITIONS`].
+/// (`resolve_max_new_tokens`, already assigned back), plus `draft_margin` for
+/// speculation ([`draft_margin_positions`]): what the reply can actually
+/// occupy, never more than [`REPLY_RESERVE_POSITIONS`] — so never more than
+/// the reservation before this existed, whatever the draft settings.
 ///
 /// A reply cannot outgrow its budget, so a quantum reserved for a 128-token
 /// answer was 384 positions nothing could ever write. It is not free: the
@@ -2432,9 +2465,9 @@ const DRAFT_MARGIN_POSITIONS: usize = 32;
 /// took 1,152 of a 1,336 MB conversation budget, and a fourth 45-token chat
 /// was refused (`docs/FUTURE_WORK.md` #122). Sized from the budget, a
 /// twenty-token chat asking for 128 tokens reserves one quantum instead of two.
-fn reply_reserve_positions(max_new_tokens: u32) -> usize {
+fn reply_reserve_positions(max_new_tokens: u32, draft_margin: usize) -> usize {
     (max_new_tokens as usize)
-        .saturating_add(DRAFT_MARGIN_POSITIONS)
+        .saturating_add(draft_margin)
         .min(REPLY_RESERVE_POSITIONS)
 }
 
@@ -2751,7 +2784,9 @@ mod reply_reserve_tests {
 
     /// What admission charges and every layer's first allocation covers.
     fn admitted_positions(prompt: usize, max_new_tokens: u32) -> usize {
-        kv_cache_reservation(prompt + reply_reserve_positions(max_new_tokens))
+        kv_cache_reservation(
+            prompt + reply_reserve_positions(max_new_tokens, DRAFT_MARGIN_POSITIONS),
+        )
     }
 
     /// #122's case: a 45-token chat asking for 128 tokens held two quanta,
@@ -2783,8 +2818,30 @@ mod reply_reserve_tests {
     /// speculative draft past it, rather than growing the cache mid-reply.
     #[test]
     fn the_reserve_leaves_room_for_a_speculative_draft() {
-        assert_eq!(reply_reserve_positions(100), 100 + DRAFT_MARGIN_POSITIONS);
+        assert_eq!(
+            reply_reserve_positions(100, DRAFT_MARGIN_POSITIONS),
+            100 + DRAFT_MARGIN_POSITIONS
+        );
         assert_eq!(admitted_positions(400, 100), 1024);
+    }
+
+    /// The draft margin follows what this worker is configured to draft, and
+    /// however large that is the reserve never exceeds the quantum the
+    /// reservation held before it was sized by the reply.
+    #[test]
+    fn the_draft_margin_follows_the_configured_draft_length() {
+        let swift = SwiftConfig::default();
+        let mut ngram = crate::inference::ngram_lookup::NgramLookupConfig::default();
+        assert_eq!(
+            draft_margin_positions(&ngram, &swift),
+            DRAFT_MARGIN_POSITIONS
+        );
+        ngram.num_pred_tokens = 64;
+        assert_eq!(draft_margin_positions(&ngram, &swift), 65);
+        assert_eq!(reply_reserve_positions(128, 65), 193);
+        ngram.num_pred_tokens = 100_000;
+        let huge = draft_margin_positions(&ngram, &swift);
+        assert_eq!(reply_reserve_positions(128, huge), REPLY_RESERVE_POSITIONS);
     }
 
     /// Opposite advice for opposite causes. A prompt that fits the budget on
@@ -2916,7 +2973,10 @@ async fn handle_generate(
         prefix_cache,
         &req_id_str,
         prompt_ids.len(),
-        reply_reserve_positions(gen.sampling.max_tokens),
+        reply_reserve_positions(
+            gen.sampling.max_tokens,
+            draft_margin_positions(ngram_cfg, swift_cfg),
+        ),
     )?;
     let mut prefix_len = match matched.as_ref() {
         Some(snap) => prefix_cache
@@ -3688,6 +3748,10 @@ async fn try_register_generate_slot(
     shard_window: &Option<Vec<u32>>,
     slot_table: &mut SlotTable,
     pending_fetches: &PrefixFetchWaiterMap,
+    // `draft_margin_positions` of this worker's settings. A batched slot is
+    // not speculated today (`slot_admission_eligible` sends those requests
+    // down the sequential path), but the reserve must not depend on that.
+    draft_margin: usize,
 ) -> Result<(), SlotAdmitError> {
     let request_id = gen.request_id;
     let model_id = gen.model_id.clone();
@@ -3752,7 +3816,7 @@ async fn try_register_generate_slot(
         prefix_cache,
         &req_id_str,
         prompt_ids.len(),
-        reply_reserve_positions(gen.sampling.max_tokens),
+        reply_reserve_positions(gen.sampling.max_tokens, draft_margin),
     )
     .map_err(SlotAdmitError::Fatal)?;
     let mut prefix_len = match matched.as_ref() {
@@ -4505,6 +4569,7 @@ async fn handle_daemon_msg(
                     shard_window,
                     slot_table,
                     pending_fetches,
+                    draft_margin_positions(ngram_cfg, swift_cfg),
                 )
                 .await
                 {

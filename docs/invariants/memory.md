@@ -1304,3 +1304,28 @@ Tests: `only_the_owners_prompt_is_read_on_the_owners_width` (asserts the pool
 the work RAN on; fails with the branch disabled),
 `an_owner_request_is_marked_per_request_and_released_with_it`,
 `the_owners_prompt_is_read_on_every_core_unless_the_operator_said_otherwise`.
+
+**The forward path too (pre-release review, 2026-09-26).** The change above
+marked only `Generate`, so when the router SPLIT the owner's request, this
+node's own segment — `PipelineExecutor::process_local_segment`, a `Forward` —
+read its prompt at the contribution width: the "one invariant, N paths" shape,
+found by a reviewer before it shipped. `ModelProcessPool::forward_for_request`
+now takes the `Requester` as a REQUIRED argument, as `generate` does;
+`IpcForward::for_the_owner` carries it and `handle_forward` marks the request —
+**after** the prompt pass's `clear_request`, which releases the owner mark with
+the rest of the request's bookkeeping. The first version of this fix marked at
+the top of the handler, so the clear wiped it on every prompt pass; the unit
+tests and the review passed it, and a split request run on the rig showed the
+owner's pool was never built. Verified on `split_rig.sh split` (llama-3.2-3b,
+both nodes on the processor, A holding parts 0-1): the coordinator's worker
+logs `This computer's own prompts are read on every core … owner_prefill_threads=8
+swarm_threads=4` for its own segment, and the node serving the peer's segment
+logs nothing — before the move, neither did.
+The plain `forward` (a peer's segment, a tensor-parallel phase) is the swarm's,
+the batch-scheduled decode steps carry `false` (decode keeps the contribution
+width whoever asked, and the prompt pass's mark persists), and the flag is set
+only by the daemon — `LayerForward`, the network form, has no such field, so a
+peer cannot claim the owner's width. Guard:
+`the_owners_own_segment_is_forwarded_as_the_owners` (planted forms in
+`the_owner_segment_guard_catches_a_forward_that_says_nothing`); round trip:
+`a_forward_says_whether_it_is_the_owners`.
