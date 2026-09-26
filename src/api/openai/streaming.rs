@@ -1392,125 +1392,159 @@ fn stream_events_to_sse(
     // `watch` rather than an `AtomicBool`: the ticker has to WAIT on this, not
     // merely read it — see `api::sse::progress_ticker`.
     let (finished_tx, finished_rx) = tokio::sync::watch::channel(false);
-    let stream = tokio_stream::wrappers::ReceiverStream::new(rx).map(move |event| match event {
-        StreamEvent::Delta {
-            content,
-            role,
-            finish_reason,
-        } => {
-            let sid = if finish_reason.is_some() {
-                session_id.clone()
-            } else {
-                None
-            };
-            let chunk = ChatCompletionChunk {
-                id: request_id.clone(),
-                object: "chat.completion.chunk",
-                created,
-                model: model_name.clone(),
-                choices: vec![ChunkChoice {
-                    index: 0,
-                    delta: Delta {
-                        role,
-                        content,
-                        tool_calls: None,
-                    },
-                    finish_reason,
-                    logprobs: None,
-                }],
-                session_id: sid,
-                usage: None,
-            };
-            json_buf.clear();
-            let json = if serde_json::to_writer(&mut json_buf, &chunk).is_ok() {
-                // R108: per-token. Move the buffer into String without
-                // copying; serde_json::to_writer guarantees valid UTF-8 so
-                // `from_utf8` cannot fail. Re-prime json_buf for the next
-                // event with the same starting capacity.
-                let taken = std::mem::take(&mut json_buf);
-                json_buf = Vec::with_capacity(512);
-                String::from_utf8(taken).unwrap_or_default()
-            } else {
-                String::new()
-            };
-            Ok::<_, Infallible>(Event::default().data(json))
-        }
-        StreamEvent::ToolCalls { calls } => {
-            // One chunk carrying the whole tool-call set, with content null —
-            // the shape a client expects alongside finish_reason "tool_calls".
-            let chunk = ChatCompletionChunk {
-                id: request_id.clone(),
-                object: "chat.completion.chunk",
-                created,
-                model: model_name.clone(),
-                choices: vec![ChunkChoice {
-                    index: 0,
-                    delta: Delta {
-                        role: None,
-                        content: None,
-                        tool_calls: Some(calls),
-                    },
-                    finish_reason: None,
-                    logprobs: None,
-                }],
-                session_id: None,
-                usage: None,
-            };
-            Ok::<_, Infallible>(
-                Event::default().data(serde_json::to_string(&chunk).unwrap_or_default()),
-            )
-        }
-        StreamEvent::Error {
-            message,
-            error_type,
-            hint,
-            hint_key,
-        } => {
-            let mut error_obj = serde_json::json!({
-                "message": message,
-                "type": error_type
-            });
-            // Same two additive fields, spelled the same way, as the
-            // non-streaming envelope in `error.rs` — `hint` is English prose
-            // for any client, `hint_key` is what the dashboard looks up to say
-            // it in the reader's own language. Omitted entirely when there is
-            // no advice, rather than sent as null.
-            if let Some(h) = hint {
-                error_obj["hint"] = serde_json::Value::String(h.to_string());
+    // Every event below is a `data:` event; the ticker sends OpenAI's opening
+    // chunk only after a stretch with none — see `api::sse::IdleKeepAlive`.
+    let activity = crate::api::sse::DataActivity::new();
+    let idle = crate::api::sse::IdleKeepAlive {
+        activity: activity.clone(),
+        event: {
+            let (id, model) = (request_id.clone(), model_name.clone());
+            Box::new(move || {
+                let chunk = ChatCompletionChunk {
+                    id: id.clone(),
+                    object: "chat.completion.chunk",
+                    created,
+                    model: model.clone(),
+                    choices: vec![ChunkChoice {
+                        index: 0,
+                        delta: Delta {
+                            role: Some("assistant".into()),
+                            content: Some(String::new()),
+                            tool_calls: None,
+                        },
+                        finish_reason: None,
+                        logprobs: None,
+                    }],
+                    session_id: None,
+                    usage: None,
+                };
+                Event::default().data(serde_json::to_string(&chunk).unwrap_or_default())
+            })
+        },
+    };
+    let stream =
+        futures::StreamExt::inspect(tokio_stream::wrappers::ReceiverStream::new(rx), move |_| {
+            activity.note()
+        })
+        .map(move |event| match event {
+            StreamEvent::Delta {
+                content,
+                role,
+                finish_reason,
+            } => {
+                let sid = if finish_reason.is_some() {
+                    session_id.clone()
+                } else {
+                    None
+                };
+                let chunk = ChatCompletionChunk {
+                    id: request_id.clone(),
+                    object: "chat.completion.chunk",
+                    created,
+                    model: model_name.clone(),
+                    choices: vec![ChunkChoice {
+                        index: 0,
+                        delta: Delta {
+                            role,
+                            content,
+                            tool_calls: None,
+                        },
+                        finish_reason,
+                        logprobs: None,
+                    }],
+                    session_id: sid,
+                    usage: None,
+                };
+                json_buf.clear();
+                let json = if serde_json::to_writer(&mut json_buf, &chunk).is_ok() {
+                    // R108: per-token. Move the buffer into String without
+                    // copying; serde_json::to_writer guarantees valid UTF-8 so
+                    // `from_utf8` cannot fail. Re-prime json_buf for the next
+                    // event with the same starting capacity.
+                    let taken = std::mem::take(&mut json_buf);
+                    json_buf = Vec::with_capacity(512);
+                    String::from_utf8(taken).unwrap_or_default()
+                } else {
+                    String::new()
+                };
+                Ok::<_, Infallible>(Event::default().data(json))
             }
-            if let Some(k) = hint_key {
-                error_obj["hint_key"] = serde_json::Value::String(k.to_string());
+            StreamEvent::ToolCalls { calls } => {
+                // One chunk carrying the whole tool-call set, with content null —
+                // the shape a client expects alongside finish_reason "tool_calls".
+                let chunk = ChatCompletionChunk {
+                    id: request_id.clone(),
+                    object: "chat.completion.chunk",
+                    created,
+                    model: model_name.clone(),
+                    choices: vec![ChunkChoice {
+                        index: 0,
+                        delta: Delta {
+                            role: None,
+                            content: None,
+                            tool_calls: Some(calls),
+                        },
+                        finish_reason: None,
+                        logprobs: None,
+                    }],
+                    session_id: None,
+                    usage: None,
+                };
+                Ok::<_, Infallible>(
+                    Event::default().data(serde_json::to_string(&chunk).unwrap_or_default()),
+                )
             }
-            let error_json = serde_json::json!({ "error": error_obj });
-            Ok(Event::default().data(serde_json::to_string(&error_json).unwrap_or_default()))
-        }
-        StreamEvent::Usage {
-            prompt_tokens,
-            completion_tokens,
-        } => {
-            // OpenAI 2024+ stream_options.include_usage: emit one extra
-            // chunk with empty `choices: []` and the usage object filled,
-            // immediately before `[DONE]`.
-            let chunk = ChatCompletionChunk {
-                id: request_id.clone(),
-                object: "chat.completion.chunk",
-                created,
-                model: model_name.clone(),
-                choices: Vec::new(),
-                session_id: None,
-                usage: Some(crate::api::openai::types::Usage::from_counts(
-                    prompt_tokens,
-                    completion_tokens,
-                )),
-            };
-            let json = serde_json::to_string(&chunk).unwrap_or_default();
-            Ok(Event::default().data(json))
-        }
-        StreamEvent::Done => {
-            let _ = finished_tx.send(true);
-            Ok(Event::default().data("[DONE]"))
-        }
-    });
+            StreamEvent::Error {
+                message,
+                error_type,
+                hint,
+                hint_key,
+            } => {
+                let mut error_obj = serde_json::json!({
+                    "message": message,
+                    "type": error_type
+                });
+                // Same two additive fields, spelled the same way, as the
+                // non-streaming envelope in `error.rs` — `hint` is English prose
+                // for any client, `hint_key` is what the dashboard looks up to say
+                // it in the reader's own language. Omitted entirely when there is
+                // no advice, rather than sent as null.
+                if let Some(h) = hint {
+                    error_obj["hint"] = serde_json::Value::String(h.to_string());
+                }
+                if let Some(k) = hint_key {
+                    error_obj["hint_key"] = serde_json::Value::String(k.to_string());
+                }
+                let error_json = serde_json::json!({ "error": error_obj });
+                Ok(Event::default().data(serde_json::to_string(&error_json).unwrap_or_default()))
+            }
+            StreamEvent::Usage {
+                prompt_tokens,
+                completion_tokens,
+            } => {
+                // OpenAI 2024+ stream_options.include_usage: emit one extra
+                // chunk with empty `choices: []` and the usage object filled,
+                // immediately before `[DONE]`.
+                let chunk = ChatCompletionChunk {
+                    id: request_id.clone(),
+                    object: "chat.completion.chunk",
+                    created,
+                    model: model_name.clone(),
+                    choices: Vec::new(),
+                    session_id: None,
+                    usage: Some(crate::api::openai::types::Usage::from_counts(
+                        prompt_tokens,
+                        completion_tokens,
+                    )),
+                };
+                let json = serde_json::to_string(&chunk).unwrap_or_default();
+                Ok(Event::default().data(json))
+            }
+            StreamEvent::Done => {
+                let _ = finished_tx.send(true);
+                Ok(Event::default().data("[DONE]"))
+            }
+        });
 
     // Interleave progress comments with the token stream. A merged ticker
     // rather than a timeout on the receiver, because it has to keep firing
@@ -1527,6 +1561,7 @@ fn stream_events_to_sse(
         progress,
         finished_rx,
         std::time::Duration::from_secs(SSE_KEEPALIVE_INTERVAL_SECS),
+        Some(idle),
     );
 
     Sse::new(StreamExt::merge(stream, ticker)).keep_alive(

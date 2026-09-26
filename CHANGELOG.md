@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased]
+
+**Fixed: agent programs hung up while a slow computer read a long prompt.**
+Agent tools such as nanobot send a prompt of several thousand words on every
+turn, and on a computer without a graphics card reading it can take minutes.
+During that time the reply stream carried only progress notes that such tools
+never see, so after 90 seconds of apparent silence they gave up. A stream that
+has sent nothing for fifteen seconds now carries an empty piece of the reply,
+the same kind every such stream begins with, so the tool knows the answer is
+still coming. A reply that is already streaming is unchanged.
+
 ## [0.3.207-alpha] — 2026-09-26
 
 **A model too big for your graphics card now answers instead of refusing

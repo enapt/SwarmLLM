@@ -220,6 +220,63 @@ fn keep_alive_lines(trace: Option<&crate::inference::trace::RequestTrace>) -> Ve
 
 // ---- Keep-alive / progress ticker ----
 
+/// When a stream last carried a `data:` event — the clock the idle keep-alive
+/// reads. The encoder calls [`DataActivity::note`] on every data event it
+/// emits; the ticker asks [`DataActivity::idle_for`].
+///
+/// Starts "idle since the stream opened", which is the case this exists for:
+/// a long prompt pass before the first token.
+#[derive(Clone)]
+pub(crate) struct DataActivity {
+    since: std::time::Instant,
+    last_ms: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl DataActivity {
+    pub(crate) fn new() -> Self {
+        Self {
+            since: std::time::Instant::now(),
+            last_ms: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        }
+    }
+
+    /// A `data:` event just went out.
+    pub(crate) fn note(&self) {
+        let now = self.since.elapsed().as_millis() as u64;
+        self.last_ms
+            .store(now, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn idle_for(&self) -> std::time::Duration {
+        let last = self.last_ms.load(std::sync::atomic::Ordering::Relaxed);
+        self.since
+            .elapsed()
+            .saturating_sub(std::time::Duration::from_millis(last))
+    }
+}
+
+/// A `data:` event a surface sends when its stream has carried no data for a
+/// while, so a client that counts EVENTS rather than bytes does not give up
+/// during a long prompt pass.
+///
+/// **Why comments are not enough.** The OpenAI Python SDK's SSE decoder drops a
+/// `:` line before it becomes a chunk (`_streaming.py`, `SSEDecoder.decode`), so
+/// a client timing the gap between chunks — nanobot 0.3.5 wraps each
+/// `__anext__()` in a 90 s `asyncio.wait_for` — saw ten minutes of silence on a
+/// CPU node reading a 9K-token agent prompt, and hung up (field report,
+/// 2026-09-26). The progress comments were arriving every 15 s the whole time.
+/// llama.cpp's `--sse-ping-interval` and OpenRouter's `: OPENROUTER PROCESSING`
+/// are comments too, with the same blind spot.
+///
+/// So the event must be one the surface's own clients already parse: OpenAI's
+/// opening chunk (`role: assistant`, `content: ""`), which every OpenAI stream
+/// begins with, and Anthropic's own `ping`. Sent only after a stretch with no
+/// data, so a stream that is producing tokens is byte-for-byte unchanged.
+pub(crate) struct IdleKeepAlive {
+    pub(crate) activity: DataActivity,
+    pub(crate) event: Box<dyn Fn() -> axum::response::sse::Event + Send + Sync>,
+}
+
 /// Interleaved keep-alive comments carrying the request's progress, for merging
 /// with a token stream.
 ///
@@ -248,34 +305,52 @@ pub(crate) fn progress_ticker(
     // millisecond scale and assert exactly, instead of either waiting out a
     // real interval or pulling in tokio's `test-util` clock.
     interval: std::time::Duration,
+    // REQUIRED, not defaulted: a surface decides whether it has a data event
+    // its clients can safely be sent, and says `None` if it has not.
+    idle: Option<IdleKeepAlive>,
 ) -> impl futures::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>
        + Send
        + 'static {
-    futures::stream::unfold((progress, finished), move |(p, mut finished)| async move {
-        tokio::select! {
-            _ = tokio::time::sleep(interval) => {}
-            changed = finished.changed() => {
-                // Err means the sender is gone with the token stream.
-                if changed.is_err() {
-                    return None;
+    futures::stream::unfold(
+        (progress, finished, idle),
+        move |(p, mut finished, idle)| async move {
+            tokio::select! {
+                _ = tokio::time::sleep(interval) => {}
+                changed = finished.changed() => {
+                    // Err means the sender is gone with the token stream.
+                    if changed.is_err() {
+                        return None;
+                    }
                 }
             }
-        }
-        if *finished.borrow() {
-            return None;
-        }
-        let trace = p
-            .as_ref()
-            .and_then(|(state, rid)| state.active_traces.get(rid).map(|t| t.clone()));
+            // Checked after the wait and before anything is built, with no
+            // await in between: a data keep-alive must never follow the
+            // terminal frame.
+            if *finished.borrow() {
+                return None;
+            }
+            let trace = p
+                .as_ref()
+                .and_then(|(state, rid)| state.active_traces.get(rid).map(|t| t.clone()));
 
-        let event = keep_alive_lines(trace.as_deref())
-            .into_iter()
-            .fold(axum::response::sse::Event::default(), |e, line| {
-                e.comment(line)
-            });
+            // Half an interval, not a whole one: the ticker's clock and the
+            // stream's are not aligned, so data sent a millisecond after the
+            // stream opened would otherwise postpone the first keep-alive to
+            // the SECOND tick. Tokens arriving faster than this never trigger it.
+            let base = match &idle {
+                Some(k) if k.activity.idle_for() >= interval / 2 => {
+                    k.activity.note();
+                    (k.event)()
+                }
+                _ => axum::response::sse::Event::default(),
+            };
+            let event = keep_alive_lines(trace.as_deref())
+                .into_iter()
+                .fold(base, |e, line| e.comment(line));
 
-        Some((Ok(event), (p, finished)))
-    })
+            Some((Ok(event), (p, finished, idle)))
+        },
+    )
 }
 
 #[cfg(test)]
@@ -424,7 +499,7 @@ mod ticker_tests {
         state.active_traces.insert(rid, trace);
 
         let (_tx, rx) = tokio::sync::watch::channel(false);
-        let ticker = progress_ticker(Some((state, rid)), rx, Duration::from_millis(5));
+        let ticker = progress_ticker(Some((state, rid)), rx, Duration::from_millis(5), None);
         futures::pin_mut!(ticker);
         let event = tokio::time::timeout(Duration::from_secs(5), ticker.next())
             .await
@@ -456,7 +531,7 @@ mod ticker_tests {
     #[tokio::test]
     async fn a_finished_response_ends_the_ticker_without_waiting_out_the_interval() {
         let (tx, rx) = tokio::sync::watch::channel(false);
-        let ticker = progress_ticker(None, rx, Duration::from_secs(3600));
+        let ticker = progress_ticker(None, rx, Duration::from_secs(3600), None);
         futures::pin_mut!(ticker);
 
         tx.send(true).expect("receiver is alive");
@@ -475,7 +550,7 @@ mod ticker_tests {
     #[tokio::test]
     async fn an_unfinished_response_still_gets_keep_alives() {
         let (_tx, rx) = tokio::sync::watch::channel(false);
-        let ticker = progress_ticker(None, rx, Duration::from_millis(20));
+        let ticker = progress_ticker(None, rx, Duration::from_millis(20), None);
         futures::pin_mut!(ticker);
         for i in 0..3 {
             let item = tokio::time::timeout(Duration::from_secs(5), ticker.next())
@@ -488,13 +563,86 @@ mod ticker_tests {
         }
     }
 
+    fn idle_keep_alive(activity: &DataActivity) -> IdleKeepAlive {
+        IdleKeepAlive {
+            activity: activity.clone(),
+            event: Box::new(|| axum::response::sse::Event::default().data("IDLE-KEEPALIVE")),
+        }
+    }
+
+    /// A client that times the gap between CHUNKS — nanobot, over the OpenAI
+    /// Python SDK, whose decoder drops `:` lines — must be sent a `data:` event
+    /// while a long prompt pass produces nothing, or it hangs up at 90 s
+    /// (field report, 2026-09-26). The comments still ride along with it.
+    #[tokio::test]
+    async fn a_silent_stream_is_sent_data_a_chunk_counting_client_can_see() {
+        let (_tx, rx) = tokio::sync::watch::channel(false);
+        let activity = DataActivity::new();
+        let ticker = progress_ticker(
+            None,
+            rx,
+            Duration::from_millis(20),
+            Some(idle_keep_alive(&activity)),
+        );
+        futures::pin_mut!(ticker);
+        for i in 0..2 {
+            let event = tokio::time::timeout(Duration::from_secs(5), ticker.next())
+                .await
+                .unwrap_or_else(|_| panic!("keep-alive {i} never arrived"))
+                .expect("stream must yield")
+                .expect("infallible");
+            let on_the_wire = format!("{event:?}");
+            assert!(
+                on_the_wire.contains("data: IDLE-KEEPALIVE"),
+                "tick {i}: a stream with no data must carry a data event: {on_the_wire}"
+            );
+        }
+    }
+
+    /// And a stream that IS producing data is left exactly as it was: the
+    /// keep-alive exists for silence, not as a second source of chunks.
+    #[tokio::test]
+    async fn a_stream_carrying_data_is_sent_no_data_keep_alive() {
+        let (_tx, rx) = tokio::sync::watch::channel(false);
+        let activity = DataActivity::new();
+        let producer = {
+            let activity = activity.clone();
+            tokio::spawn(async move {
+                loop {
+                    activity.note();
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+        };
+        let ticker = progress_ticker(
+            None,
+            rx,
+            Duration::from_millis(200),
+            Some(idle_keep_alive(&activity)),
+        );
+        futures::pin_mut!(ticker);
+        for i in 0..2 {
+            let event = tokio::time::timeout(Duration::from_secs(5), ticker.next())
+                .await
+                .unwrap_or_else(|_| panic!("keep-alive {i} never arrived"))
+                .expect("stream must yield")
+                .expect("infallible");
+            let on_the_wire = format!("{event:?}");
+            assert!(
+                !on_the_wire.contains("IDLE-KEEPALIVE"),
+                "tick {i}: tokens were flowing, so no data keep-alive: {on_the_wire}"
+            );
+        }
+        producer.abort();
+    }
+
     /// A token stream that goes away without a terminal frame — a client
     /// disconnecting mid-reply — must not leave the ticker running. Dropping the
     /// sender is that signal.
     #[tokio::test]
     async fn a_dropped_stream_ends_the_ticker() {
         let (tx, rx) = tokio::sync::watch::channel(false);
-        let ticker = progress_ticker(None, rx, Duration::from_secs(3600));
+        let ticker = progress_ticker(None, rx, Duration::from_secs(3600), None);
         futures::pin_mut!(ticker);
         drop(tx);
         let ended = tokio::time::timeout(Duration::from_millis(500), ticker.next())

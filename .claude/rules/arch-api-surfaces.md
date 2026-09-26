@@ -201,6 +201,15 @@ person watching a terminal, and `swarmllm-status ` + JSON
 reader drops a `:` line, while a `data:` frame carrying a non-chat-completion
 object is not safe and an `event:` name is invisible outside `EventSource`.
 
+**But a comment keeps nothing alive for a client that counts CHUNKS.** The
+OpenAI Python SDK drops `:` lines before they become chunks, so nanobot's 90 s
+per-chunk `asyncio.wait_for` hung up through a 10-minute CPU prefill while the
+comments flowed (field report 2026-09-26). So a surface passes the ticker a
+REQUIRED `Option<api::sse::IdleKeepAlive>`: a data event its own clients
+already parse — OpenAI's opening chunk (`role: assistant`, `content: ""`),
+Anthropic's `ping` — sent only after half an interval with no data
+(`DataActivity`), so a stream producing tokens is byte-for-byte unchanged.
+
 **A status is DERIVED from what the trace recorded, never cycled on a timer.**
 `RequestTrace::live_status` reads the marks — `mark_dequeued`, `mark_assembled`,
 `set_progress`, `mark_first_token` — so queued, planning and contacting-nodes

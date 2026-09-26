@@ -649,6 +649,43 @@ since the hold it produced is gone.
 Ask of any periodic task merged into a response stream: when the thing it is
 keeping alive finishes, how long until this notices?
 
+### A comment keeps a SOCKET alive, not a client that counts chunks (2026-09-26)
+
+**Field report** (v0.3.206, CPU-only Ryzen 7 5700U): nanobot 0.3.5 against a
+9,235-token agent prompt read at ~13.6 tok/s. The progress comments went out
+every 15 s for the whole 11-minute prefill, and nanobot hung up at 90 s:
+`Error calling LLM: stream stalled for more than 90 seconds`. The daemon side
+then read `Request abandoned by the client`.
+
+**Mechanism, read from source.** nanobot (`providers/openai_compat_provider.py`)
+wraps each `stream_iter.__anext__()` of the OpenAI Python SDK in
+`asyncio.wait_for(timeout=90)` (`NANOBOT_STREAM_IDLE_TIMEOUT_S`). The SDK's
+`SSEDecoder.decode` (`openai/_streaming.py`) returns `None` for a line starting
+with `:`, so a comment never becomes a chunk and never ends the wait. A byte-level
+timer (Node's undici `bodyTimeout`, the `pi` harness) IS reset by comments;
+a chunk-level one is not. Both kinds exist in agent harnesses.
+
+**What others do.** llama.cpp's `--sse-ping-interval` and OpenRouter's
+`: OPENROUTER PROCESSING` are comments, with the same blind spot; llama.cpp's
+`return_progress` puts `prompt_progress` inside data chunks but only on request;
+vLLM declined it (#40362); nobody was found sending an empty data chunk as a
+prefill keep-alive.
+
+**The shape chosen, and why it is safe.** OpenAI's own stream opens with
+`delta: {"role": "assistant", "content": ""}`, so every OpenAI-compatible client
+already parses exactly that; `ChoiceDelta` has every field optional, nanobot
+guards `if text:`, and our dashboard guards `if (delta.content)`. Anthropic's
+counterpart is its own `ping` event, sent after `message_start` (our preamble
+goes out before the prompt pass). Ollama's empty-`content` deltas DURING
+generation broke a tool-call decoder (vllm-project/semantic-router#4166), which
+is why this fires only after half an interval with no data at all — a stream
+producing tokens never carries one. The ticker checks the finish signal with no
+await before building the event, so a keep-alive cannot follow `[DONE]`.
+
+Tests: `a_silent_stream_is_sent_data_a_chunk_counting_client_can_see` and
+`a_stream_carrying_data_is_sent_no_data_keep_alive`, each red with its half of
+the condition inverted.
+
 ## A generation loop that blocks its thread must be told to, and a full buffer is not a departed client
 
 (2026-09-11, gotchas #555/#556, FUTURE_WORK #45.) Field-reported on v0.3.172:

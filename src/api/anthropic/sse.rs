@@ -218,7 +218,20 @@ pub(super) fn build_anthropic_sse_response(
     // `watch` rather than an `AtomicBool`: the ticker waits on this — see
     // `api::sse::progress_ticker`.
     let (finished_tx, finished_rx) = tokio::sync::watch::channel(false);
+    // Anthropic's own keep-alive is the `ping` event, which its API sends
+    // after `message_start` — the preamble has always gone out before the
+    // prompt pass begins. See `api::sse::IdleKeepAlive`.
+    let activity = crate::api::sse::DataActivity::new();
+    let idle = crate::api::sse::IdleKeepAlive {
+        activity: activity.clone(),
+        event: Box::new(|| {
+            Event::default()
+                .event("ping")
+                .data(serde_json::json!({ "type": "ping" }).to_string())
+        }),
+    };
     let stream = tokio_stream::wrappers::ReceiverStream::new(sse_rx).map(move |event| {
+        activity.note();
         let (event_type, data) = serialize_anthropic_event(&event);
         // `message_stop` is Anthropic's terminal frame; after it the ticker
         // must end or `merge` would hold the response open forever. `error` is
@@ -235,6 +248,7 @@ pub(super) fn build_anthropic_sse_response(
         progress,
         finished_rx,
         std::time::Duration::from_secs(SSE_KEEPALIVE_INTERVAL_SECS),
+        Some(idle),
     );
     Sse::new(tokio_stream::StreamExt::merge(stream, ticker))
         .keep_alive(
