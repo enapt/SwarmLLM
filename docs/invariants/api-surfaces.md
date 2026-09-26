@@ -1412,5 +1412,7 @@ a request's own model name; `auto` was the one reader using it to CHOOSE.
 directory — "held whole" checks shard files on disk.
 
 **Still open** (FUTURE_WORK #120 (b)): with nothing servable here, the planner's
-`PeersUnbounded` rung can still hand a whole model to a peer that published no
-capability yet, or one that advertised too little room.
+`PeersUnbounded` rung can still hand a whole model to a peer that advertised too
+little room — a recorded decision (report #025), not an oversight. The other half,
+a peer that had published no capability yet, is narrowed by sending ours on
+identify (`docs/invariants/network.md` § "A newcomer is told our capability").

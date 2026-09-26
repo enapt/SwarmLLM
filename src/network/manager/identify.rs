@@ -462,6 +462,24 @@ impl NetworkManager {
                 .with_node(format!("{}", node_id))
                 .with_detail_str(detail.to_string()),
             );
+
+            // Tell the newcomer what this node can do NOW, point to point. It
+            // otherwise learns it from our next capability broadcast, up to a
+            // health tick (30 s) away — and a coordinator that knows nothing
+            // about a peer prices it unbounded on every routing rung. Seen live
+            // (#120): a plan made 0.7 s after a connection handed a whole 14B
+            // to a peer that had published nothing yet; it refused for memory.
+            // Gossip says what CHANGED, to everyone; what one peer lacks goes to
+            // that peer (#673), as the manifest catch-up already does — an
+            // existing variant over the existing direct path, so no feature bit.
+            if let Some(cap) = self.shared_state.local_capability.load_full() {
+                self.handle_send_rr_message(
+                    peer_id.to_bytes(),
+                    crate::types::SwarmMessage::NodeCapabilityUpdate((*cap).clone()),
+                    "CapabilityCatchUp",
+                    None,
+                );
+            }
         }
         // R110: refresh swarm-capacity snapshot so the dashboard banner
         // reflects the new contributor without waiting for the next ~1.5s

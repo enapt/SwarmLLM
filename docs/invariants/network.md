@@ -2250,3 +2250,29 @@ refusing node barred.
 split request's later token steps compete with new requests on every step
 (`docs/FUTURE_WORK.md` #123). Incidence before the change: 0 refusals of any kind
 in 9 days of the live node's log.
+
+## A newcomer is told our capability when it is identified, not at the next broadcast (2026-09-26, #120)
+
+A coordinator that has heard no `NodeCapabilityUpdate` from a peer computes
+`max_hostable_layers = None` for it, which every routing rung treats as
+unbounded (`docs/invariants/scheduling.md` § "The relaxation is scoped"). A peer
+is in that state from the moment it connects until its capability first arrives
+— by broadcast on its own 30 s health tick, or relayed out of the gossip mesh's
+message cache once the mesh forms. Live, 2026-09-26 04:06: a plan made 0.7 s
+after a connection handed a whole 14B to such a peer (`max_hostable_layers=None`,
+`est_tokens_per_sec=0.0`), which refused it for memory.
+
+**Now** the identify handler, at the "Peer connected" transition, sends
+`state.local_capability` — the exact capability this node last broadcast — to the
+newcomer over request_response. An existing variant on the existing direct path
+(the manifest catch-up's route), so no feature bit; the receiver's handler is
+update-only, and our identify reaches it before this message does. If it does
+not, nothing is lost: the next broadcast covers it, as before.
+
+**Measured** (two throwaway dev nodes beside the swarm, no models, auto-manage and
+updates off, default gossip network so the live v0.3.208 node's broadcast is the
+control): between the two nodes carrying the change, the capability arrived
+**0.2 ms and 10 ms** after "Peer connected"; from the seven peers on v0.3.208 it
+arrived **4.9-5.4 s** after — all within one gossip heartbeat, i.e. from the mesh
+cache, not the 30 s broadcast. Cost: one message per new connection (~7 an hour
+on an 8-peer node).

@@ -557,6 +557,11 @@ and served nothing while spending ~2.6 Mbit/s.
   carries any `SwarmMessage` over request_response and the receiver dispatches
   it exactly as a gossiped one, so this needs no new variant and no feature
   bit. The periodic full round stays as the bound on a catch-up that failed.
+  **Our capability goes to a newcomer the moment it is identified**
+  (`identify.rs`, from `state.local_capability`), not on the manifest tick: a
+  peer with no capability is unbounded on every routing rung, and one was handed
+  a whole 14B 0.7 s after connecting (#120). Measured: 0.2-10 ms after
+  "Peer connected" between two nodes with it, ~5 s from peers without.
   BitTorrent draws the same line: BEP 3's bitfield goes to the peer that
   connected, and only per-piece `have` deltas go to everyone.
 - **What the swarm just HEARD is not repeated** (RFC 6206, Trickle, *k* = 1).
