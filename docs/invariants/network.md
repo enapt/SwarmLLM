@@ -2201,3 +2201,52 @@ server, and this coordinator with a v0.3.206 server, both 200 across two segment
 **Limit.** The serving node arms a resend only once the coordinator's capability
 gossip has arrived, so the first results of a pair that just met are unprotected
 — the same limit as every feature gate in this protocol.
+
+## Work a serving node will not run is refused OUT LOUD, and counted per peer whatever its kind (2026-09-26)
+
+**What it replaced.** The dispatcher bounds work for peers with a node-wide
+semaphore (8 / 24 / 64 by contribution level) and a per-peer count (half of it,
+floored at 4). Three defects in how:
+
+1. **A refused forward was dropped, silently.** `continue` after a `warn!` — but
+   the network manager had already answered the `LayerForward` with
+   `SwarmResponse::Ack` on arrival (§ "A tensor forward is acknowledged on
+   receipt"), so the coordinator knew the peer had it and waited for a RESULT: the
+   whole segment deadline, for a refusal made in microseconds. A refused
+   `RemoteGenerateRequest` cost the first-token wait the same way. The same shape
+   as #707 (a chained hop's refusal sent to the wrong node): the right decision,
+   never delivered.
+2. **Only `LayerForward` was counted per peer.** Whole-model generations and image
+   encodes took the node-wide semaphore alone — and a generation holds its permit
+   for the entire reply — so one peer could hold every permit for minutes.
+3. **The count's release removed its entry unconditionally** once it read ≤ 1, so
+   a slot taken between the decrement and the remove lost its count.
+
+**Now.** `PeerWorkSlot::try_take` (add, check, undo on overshoot) is taken by all
+three kinds of peer work and given back by `Drop`; its release removes the entry
+only while it still reads zero (`remove_if`, under the map's write lock). A
+refused forward is answered by `layer_forward::refuse_forward` — addressed through
+`reply_target` like every other reply, stamped with the step — and a refused
+generation by `remote_generate::refuse_request`, which repeats the terminal frame
+like every refusal on that path. The refusal carries only the address (never the
+forward's activations), since one is spawned per refusal.
+
+**The wording is the contract**: `peer_work_refusal()` renders through
+`SwarmError::ServiceUnavailable`'s Display, which the coordinator reads as "this
+peer cannot serve" (`router::message_means_peer_cannot_serve`) — bar it from this
+request's retry and re-plan — and does NOT read as a missing shard, so the peer's
+holder claims stay. Pinned by
+`a_refused_forward_is_answered_to_the_coordinator_naming_its_step` (red with the
+send removed).
+
+**Research.** Google's SRE book, "Handling Overload": an overloaded backend should
+reject cheaply and explicitly so the request is retried on another backend, and
+keep per-customer limits. Its "overloaded; don't retry" variant exists to stop
+retry storms; not needed here, where the coordinator re-plans once with the
+refusing node barred.
+
+**What is still open.** An image-encode refusal cannot be said —
+`VisionEncodeResponse` has no error field — and admission is per MESSAGE, so a
+split request's later token steps compete with new requests on every step
+(`docs/FUTURE_WORK.md` #123). Incidence before the change: 0 refusals of any kind
+in 9 days of the live node's log.

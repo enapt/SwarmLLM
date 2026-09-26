@@ -191,9 +191,11 @@ Showing a meaningless number is a smaller problem than *acting* on one. So:
 - `MIN_BALANCE_FOR_INFERENCE` → `0`, which the existing `!= 0` guard already
   treats as "no floor". No remote requester is refused over credits.
 - `calculate_tier` no longer reads the balance. Every requester gets the same
-  tier, so per-requester concurrency isolation is preserved (one peer still
-  cannot monopolise the queue) while the *advantage* from a minted number is
-  gone.
+  tier, so the *advantage* from a minted number is gone. (This section used to
+  add that the tier kept "per-requester concurrency isolation". It never did:
+  the router compares one node-wide count against the next request's tier,
+  and work for peers never enters the router. Isolation between requesters is
+  the dispatcher's per-peer cap — corrected 2026-09-26.)
 - The dashboard no longer presents a balance, a leaderboard, or "earn credits"
   copy as a headline feature.
 - **Nor does the command line.** `swarmllm pool status` went on printing
@@ -242,6 +244,12 @@ Credits do not become visible or enforcing again until all of these hold:
 - [ ] Settlement is off the hot path, with a measurement showing per-token
       latency is unchanged.
 - [ ] Migration decision (§5.1) made and implemented.
+- [ ] **Serving nodes enforce what a requester may take**, and the limit keys on
+      something that costs the requester to acquire. Today every serving-side
+      cap is concurrency per node key, and a node key is free — so a price with
+      no serving-side limit behind it only binds honest nodes, since a fork
+      removes any limit in the requester's own code. What exists and what does
+      not: `docs/book/src/architecture/security.md` § "Misuse of the Network".
 - [ ] The dashboard explains what the number means in one sentence a
       non-technical user can act on.
 

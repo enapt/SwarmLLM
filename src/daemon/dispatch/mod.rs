@@ -64,6 +64,89 @@ fn max_concurrent_forwards(contribution: &swarmllm_types::ContributionMode) -> u
 fn max_forwards_per_peer(contribution: &swarmllm_types::ContributionMode) -> usize {
     (max_concurrent_forwards(contribution) / 2).max(4)
 }
+/// Per-peer counts of work in flight here, keyed by the authenticated sender.
+type PeerWorkCounts = Arc<dashmap::DashMap<crate::types::NodeId, std::sync::atomic::AtomicUsize>>;
+
+/// One piece of work a peer has running on this node — a tensor forward, a
+/// whole-model generation or an image encode — counted against
+/// [`max_forwards_per_peer`]. Every kind of peer work takes one, so a single
+/// peer cannot hold the whole node-wide semaphore through whichever kind was
+/// left uncounted (until 2026-09-26 only `LayerForward` was, and one peer could
+/// take every permit with whole-model requests, each held for a full reply).
+///
+/// Given back by `Drop`, so an abort or a panic returns it as a normal finish does.
+struct PeerWorkSlot {
+    counts: PeerWorkCounts,
+    peer: crate::types::NodeId,
+}
+
+impl PeerWorkSlot {
+    /// A slot for `peer`, or `None` when it already holds `limit`.
+    ///
+    /// Add, then check, then undo on overshoot: load-then-check-then-add would
+    /// let two dispatch iterations both pass at `limit - 1` and admit one more
+    /// than the limit.
+    fn try_take(
+        counts: &PeerWorkCounts,
+        peer: &crate::types::NodeId,
+        limit: usize,
+    ) -> Option<Self> {
+        use std::sync::atomic::Ordering;
+        let count = counts
+            .entry(peer.clone())
+            .or_insert_with(|| std::sync::atomic::AtomicUsize::new(0));
+        if count.fetch_add(1, Ordering::Relaxed) >= limit {
+            count.fetch_sub(1, Ordering::Relaxed);
+            return None;
+        }
+        drop(count);
+        Some(Self {
+            counts: counts.clone(),
+            peer: peer.clone(),
+        })
+    }
+}
+
+impl Drop for PeerWorkSlot {
+    fn drop(&mut self) {
+        use std::sync::atomic::Ordering;
+        if let Some(c) = self.counts.get(&self.peer) {
+            c.fetch_sub(1, Ordering::Relaxed);
+        }
+        // Remove the entry only while it still reads zero, decided under the
+        // map's write lock: a slot taken between the decrement and here keeps
+        // it. An unconditional remove would drop that slot's count.
+        self.counts
+            .remove_if(&self.peer, |_, c| c.load(Ordering::Relaxed) == 0);
+    }
+}
+
+/// What a peer is told when this node is already doing as much work for other
+/// machines as its owner allows.
+///
+/// **Said, never dropped.** The network layer acknowledges a `LayerForward` the
+/// moment it arrives (`SwarmResponse::Ack`), so a forward refused here and not
+/// answered left the coordinator sitting out its whole segment deadline — and a
+/// whole-model request its first-token wait — for a decision made in
+/// microseconds. Google's SRE book gives the same rule for an overloaded
+/// backend: reject cheaply and explicitly, so the request is retried on another
+/// one ("Handling Overload"). Its "overloaded; don't retry" variant is not
+/// needed here: the coordinator re-plans once, with this node barred.
+///
+/// Worded through `ServiceUnavailable`'s Display on purpose: the coordinator
+/// reads that prefix as "this peer cannot serve"
+/// (`router::message_means_peer_cannot_serve`) — bar it from the request's
+/// retry, re-plan elsewhere — and NOT as a missing shard, so the peer's holder
+/// claims stay.
+pub(super) fn peer_work_refusal() -> String {
+    crate::error::SwarmError::ServiceUnavailable(
+        "this machine is already doing as much work for other machines as its owner \
+         allows — try another"
+            .into(),
+    )
+    .to_string()
+}
+
 /// What one inbound `LayerForward` has taken and must give back: its slot in
 /// the per-peer concurrency count, and its entry in the abort registry.
 ///
@@ -84,8 +167,8 @@ fn max_forwards_per_peer(contribution: &swarmllm_types::ContributionMode) -> usi
 /// "per-peer limit reached" while nothing at all is in flight. Reconnecting
 /// does not clear it; only a restart does.
 struct InboundForwardSlot {
-    counts: Arc<dashmap::DashMap<crate::types::NodeId, std::sync::atomic::AtomicUsize>>,
-    peer: crate::types::NodeId,
+    /// Given back when this struct's fields drop, after `Drop::drop` below.
+    _peer_slot: PeerWorkSlot,
     state: Arc<crate::daemon::SharedState>,
     request_id: uuid::Uuid,
     finished: Arc<std::sync::atomic::AtomicBool>,
@@ -95,13 +178,6 @@ impl Drop for InboundForwardSlot {
     fn drop(&mut self) {
         self.state
             .clear_inbound_forward_abort(&self.request_id, &self.finished);
-        if let Some(c) = self.counts.get(&self.peer) {
-            let prev = c.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-            drop(c); // release the DashMap ref before removing
-            if prev <= 1 {
-                self.counts.remove(&self.peer);
-            }
-        }
     }
 }
 
@@ -605,39 +681,42 @@ pub(crate) async fn dispatch_network_messages(
                                             has_sender = forward.sender_peer_bytes.is_some(),
                                             "DIAG: dispatcher received LayerForward, spawning handler"
                                         );
-                                        // SEC: Per-peer concurrent forward limit to prevent single-peer exhaustion.
-                                        // Use optimistic fetch_add, then revert on overshoot — load-then-check-then-add
-                                        // would let two concurrent dispatcher iterations both pass the check at
-                                        // MAX-1 and admit MAX+1 forwards from one peer.
+                                        // SEC: Per-peer concurrent forward limit to prevent single-peer exhaustion,
+                                        // inside the node-wide semaphore. A refusal is ANSWERED
+                                        // (`peer_work_refusal`): the forward was acknowledged on arrival.
                                         let peer_sender = authenticated_sender.clone().expect("guarded by Some check above");
-                                        let peer_count = peer_forward_counts
-                                            .entry(peer_sender.clone())
-                                            .or_insert_with(|| std::sync::atomic::AtomicUsize::new(0));
-                                        let prev = peer_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                        if prev >= per_peer_limit {
-                                            peer_count.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                                        let Some(peer_slot) =
+                                            PeerWorkSlot::try_take(&peer_forward_counts, &peer_sender, per_peer_limit)
+                                        else {
                                             tracing::warn!(
                                                 sender = %peer_sender,
-                                                current = prev,
                                                 max = per_peer_limit,
                                                 "LayerForward rejected — per-peer limit reached"
                                             );
+                                            tokio::spawn(layer_forward::refuse_forward(
+                                                shared_state.clone(),
+                                                network_tx.clone(),
+                                                layer_forward::RefusalAddress::of(&forward),
+                                                peer_work_refusal(),
+                                            ));
                                             continue;
-                                        }
+                                        };
                                         let permit = match forward_semaphore.clone().try_acquire_owned() {
                                             Ok(p) => p,
                                             Err(_) => {
-                                                // Decrement unconditionally — use the entry ref we already hold
-                                                // to avoid racing with concurrent DashMap removal
-                                                peer_count.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                                                drop(peer_slot);
                                                 tracing::warn!(sender = %peer_sender, "LayerForward rejected — forward semaphore full");
+                                                tokio::spawn(layer_forward::refuse_forward(
+                                                    shared_state.clone(),
+                                                    network_tx.clone(),
+                                                    layer_forward::RefusalAddress::of(&forward),
+                                                    peer_work_refusal(),
+                                                ));
                                                 continue;
                                             }
                                         };
                                         let ss = shared_state.clone();
                                         let ntx = network_tx.clone();
-                                        let pfc = peer_forward_counts.clone();
-                                        let ps = peer_sender;
                                         let forward_request_id = forward.request_id;
                                         let abort_registry = shared_state.clone();
                                         // The forward carries the authenticated sender's peer bytes
@@ -657,8 +736,7 @@ pub(crate) async fn dispatch_network_messages(
                                             // does. As plain statements after the await they were
                                             // skipped by both, and a skipped decrement is permanent.
                                             let _slot = InboundForwardSlot {
-                                                counts: pfc,
-                                                peer: ps,
+                                                _peer_slot: peer_slot,
                                                 state: ss.clone(),
                                                 request_id: forward_request_id,
                                                 finished: finished_in_task,
@@ -794,10 +872,28 @@ pub(crate) async fn dispatch_network_messages(
                                                     .map(|r| r.value().clone());
                                             }
                                         }
+                                        // The same two caps as a tensor forward, and one slot is held
+                                        // for the whole reply — which is exactly why this path needs the
+                                        // per-peer one: uncounted, one peer's generations could hold every
+                                        // permit for minutes. Refused out loud, like a forward.
+                                        let peer_sender = authenticated_sender.clone().expect("guarded by Some check above");
+                                        let Some(peer_slot) =
+                                            PeerWorkSlot::try_take(&peer_forward_counts, &peer_sender, per_peer_limit)
+                                        else {
+                                            tracing::warn!(
+                                                sender = %peer_sender,
+                                                max = per_peer_limit,
+                                                "RemoteGenerateRequest rejected — per-peer limit reached"
+                                            );
+                                            remote_generate::refuse_request(network_tx.clone(), &req, peer_work_refusal());
+                                            continue;
+                                        };
                                         let permit = match forward_semaphore.clone().try_acquire_owned() {
                                             Ok(p) => p,
                                             Err(_) => {
-                                                tracing::warn!(sender = %authenticated_sender.as_ref().map(|s| s.to_string()).unwrap_or_default(), "RemoteGenerateRequest rejected — forward semaphore full");
+                                                drop(peer_slot);
+                                                tracing::warn!(sender = %peer_sender, "RemoteGenerateRequest rejected — forward semaphore full");
+                                                remote_generate::refuse_request(network_tx.clone(), &req, peer_work_refusal());
                                                 continue;
                                             }
                                         };
@@ -805,6 +901,7 @@ pub(crate) async fn dispatch_network_messages(
                                         let ntx = network_tx.clone();
                                         tokio::spawn(async move {
                                             let _permit = permit;
+                                            let _peer_slot = peer_slot;
                                             remote_generate::handle_remote_generate_request(ss, ntx, req).await;
                                         });
                                     }
@@ -823,10 +920,27 @@ pub(crate) async fn dispatch_network_messages(
                                             tracing::warn!(msg_type = "VisionEncodeRequest", "message without authenticated sender — dropping");
                                             continue;
                                         }
+                                        // Counted per peer like every other kind of peer work. A refusal
+                                        // here is still SILENT: `VisionEncodeResponse` has no error
+                                        // field and the requester reads any response as embeddings, so
+                                        // saying no needs an additive field gated at the sender
+                                        // (`docs/FUTURE_WORK.md` #123). The requester times out.
+                                        let peer_sender = authenticated_sender.clone().expect("guarded by Some check above");
+                                        let Some(peer_slot) =
+                                            PeerWorkSlot::try_take(&peer_forward_counts, &peer_sender, per_peer_limit)
+                                        else {
+                                            tracing::warn!(
+                                                sender = %peer_sender,
+                                                max = per_peer_limit,
+                                                "VisionEncodeRequest rejected — per-peer limit reached"
+                                            );
+                                            continue;
+                                        };
                                         let permit = match forward_semaphore.clone().try_acquire_owned() {
                                             Ok(p) => p,
                                             Err(_) => {
-                                                tracing::warn!(sender = %authenticated_sender.as_ref().map(|s| s.to_string()).unwrap_or_default(), "VisionEncodeRequest rejected — forward semaphore full");
+                                                drop(peer_slot);
+                                                tracing::warn!(sender = %peer_sender, "VisionEncodeRequest rejected — forward semaphore full");
                                                 continue;
                                             }
                                         };
@@ -834,6 +948,7 @@ pub(crate) async fn dispatch_network_messages(
                                         let ntx = network_tx.clone();
                                         tokio::spawn(async move {
                                             let _permit = permit;
+                                            let _peer_slot = peer_slot;
                                             vision::handle_vision_encode_request(ss, ntx, req).await;
                                         });
                                     }
@@ -3082,7 +3197,7 @@ mod rejected_manifest_tests {
 
 #[cfg(test)]
 mod inbound_forward_slot_tests {
-    use super::InboundForwardSlot;
+    use super::{InboundForwardSlot, PeerWorkSlot};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
 
@@ -3128,8 +3243,10 @@ mod inbound_forward_slot_tests {
         let slot_state = state.clone();
         let handle = tokio::spawn(async move {
             let _slot = InboundForwardSlot {
-                counts: slot_counts,
-                peer: peer(),
+                _peer_slot: PeerWorkSlot {
+                    counts: slot_counts,
+                    peer: peer(),
+                },
                 state: slot_state,
                 request_id: uuid::Uuid::new_v4(),
                 finished: Arc::new(AtomicBool::new(false)),
@@ -3165,8 +3282,10 @@ mod inbound_forward_slot_tests {
 
         {
             let _slot = InboundForwardSlot {
-                counts: counts.clone(),
-                peer: peer(),
+                _peer_slot: PeerWorkSlot {
+                    counts: counts.clone(),
+                    peer: peer(),
+                },
                 state,
                 request_id: uuid::Uuid::new_v4(),
                 finished: Arc::new(AtomicBool::new(false)),
@@ -3182,6 +3301,46 @@ mod inbound_forward_slot_tests {
             counts.get(&other).map(|c| c.load(Ordering::Relaxed)),
             Some(1),
             "another peer's count must be untouched"
+        );
+    }
+
+    /// One peer holds at most its limit of work, whatever kind; the limit is its
+    /// own and not another peer's; and finished work gives its slot back, down
+    /// to removing the entry so the map does not grow with every peer ever seen.
+    #[test]
+    fn a_peer_holds_at_most_its_limit_and_gets_slots_back() {
+        let counts: super::PeerWorkCounts = Arc::new(dashmap::DashMap::new());
+        let limit = 4;
+        let mut held: Vec<PeerWorkSlot> = (0..limit)
+            .map(|i| {
+                PeerWorkSlot::try_take(&counts, &peer(), limit)
+                    .unwrap_or_else(|| panic!("slot {i} of {limit} refused"))
+            })
+            .collect();
+        assert!(
+            PeerWorkSlot::try_take(&counts, &peer(), limit).is_none(),
+            "a fifth piece of work from one peer must be refused"
+        );
+        assert_eq!(
+            counts.get(&peer()).map(|c| c.load(Ordering::Relaxed)),
+            Some(limit),
+            "a refusal must not leave its increment behind"
+        );
+        let other = crate::types::NodeId([9u8; 32]);
+        assert!(
+            PeerWorkSlot::try_take(&counts, &other, limit).is_some(),
+            "one peer at its limit must not refuse another"
+        );
+
+        held.pop();
+        assert!(
+            PeerWorkSlot::try_take(&counts, &peer(), limit).is_some(),
+            "finished work gives its slot back"
+        );
+        held.clear();
+        assert!(
+            counts.get(&peer()).is_none(),
+            "a peer with nothing in flight leaves no entry"
         );
     }
 }

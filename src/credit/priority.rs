@@ -2,11 +2,14 @@ use crate::types::PriorityTier;
 
 /// The tier every request gets while the credit economy is dormant.
 ///
-/// Silver rather than Gold deliberately: it keeps a per-requester concurrency
-/// cap (½ of `max_concurrent_requests`) so a single peer still cannot take the
-/// whole queue, which is the one thing the tier system was genuinely providing.
-/// Gold or Platinum would remove that isolation as a side effect of removing
-/// the economy.
+/// Silver holds the router at ½ of `max_concurrent_requests` running at once.
+/// **It isolates no requester**:
+/// `drain_queue` compares ONE node-wide count against the tier of whichever
+/// request is next, and work for peers never passes through the router at all.
+/// Isolation between requesters is the dispatcher's per-peer cap
+/// (`daemon::dispatch::max_forwards_per_peer`). Gold would double how many of
+/// this node's own requests run at once, which is a change of its own to make
+/// on evidence, not a side effect of removing the economy.
 pub const DORMANT_TIER: PriorityTier = PriorityTier::Silver;
 
 /// The priority tier for a node. **Currently the same for everyone.**
@@ -92,20 +95,18 @@ mod tests {
         }
     }
 
-    /// The dormant tier must still cap one requester below the whole queue.
-    ///
-    /// Flattening the tiers removed the credit advantage; it must not also
-    /// remove the per-requester isolation, which is the one thing the tier
-    /// system was really providing. Gold or Platinum would have done exactly
-    /// that as a side effect.
+    /// Flattening the tiers removed the credit advantage; it must not also move
+    /// how many requests the router runs at once, which is a separate decision.
+    /// (This is a node-wide ceiling, not isolation between requesters — see
+    /// `DORMANT_TIER`.)
     #[test]
-    fn the_dormant_tier_still_isolates_one_requester() {
+    fn the_dormant_tier_keeps_the_router_at_half_its_ceiling() {
         let base = 8;
         let cap = max_concurrent_for_tier(DORMANT_TIER, base);
         assert!(
             cap < base,
-            "the dormant tier ({DORMANT_TIER:?}) lets one requester take the \
-             entire queue ({cap} of {base}) — pick a tier that still caps"
+            "the dormant tier ({DORMANT_TIER:?}) runs {cap} of {base} at once — \
+             raising the router's ceiling is its own change, not this one's"
         );
         assert!(
             cap >= 1,

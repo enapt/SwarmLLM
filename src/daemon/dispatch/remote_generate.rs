@@ -99,6 +99,67 @@ fn resend_terminal_token(
     });
 }
 
+/// Tell the coordinator this node will not run its request, and why.
+///
+/// A refusal is the frame most worth repeating: it is the ONLY thing the
+/// coordinator will ever hear about this request, and losing it turns an
+/// immediate, precise "I cannot serve this" into a silence the caller waits out
+/// and then blames on the peer going offline.
+async fn send_refusal(
+    network_tx: &mpsc::Sender<NetworkCommand>,
+    sender_bytes: Vec<u8>,
+    request_id: uuid::Uuid,
+    reason: String,
+) {
+    let refusal = StreamingToken {
+        request_id,
+        token_id: 0,
+        finish_reason: Some(NetworkFinishReason::Error(reason)),
+        text: String::new(),
+        usage: None,
+        matched_stop_sequence: None,
+        logprob: None,
+    };
+    resend_terminal_token(network_tx.clone(), sender_bytes.clone(), refusal.clone());
+    if let Err(e) = network_tx
+        .send(NetworkCommand::SendStreamingToken {
+            target_peer_bytes: sender_bytes,
+            token: refusal,
+        })
+        .await
+    {
+        tracing::error!(
+            %request_id,
+            error = %e,
+            "DIAG: could not queue the rejection back to the coordinator — it will \
+             see a silent timeout instead of a reason"
+        );
+    }
+}
+
+/// Refuse a request the dispatcher's admission caps turned away, without
+/// waiting: the dispatch loop must never block on a send.
+///
+/// Copies only the address and the id, so a refused request's prompt is freed
+/// at once rather than held until the refusal is queued.
+pub(super) fn refuse_request(
+    network_tx: mpsc::Sender<NetworkCommand>,
+    req: &RemoteGenerateRequest,
+    reason: String,
+) {
+    let Some(sender_bytes) = req.sender_peer_bytes.clone() else {
+        tracing::warn!(
+            request_id = %req.request_id,
+            "refused RemoteGenerateRequest has no sender to answer"
+        );
+        return;
+    };
+    let request_id = req.request_id;
+    tokio::spawn(async move {
+        send_refusal(&network_tx, sender_bytes, request_id, reason).await;
+    });
+}
+
 pub(super) async fn handle_remote_generate_request(
     shared_state: Arc<SharedState>,
     network_tx: mpsc::Sender<NetworkCommand>,
@@ -149,36 +210,13 @@ pub(super) async fn handle_remote_generate_request(
             model = %model_id,
             "RemoteGenerateRequest for a layer range this node cannot serve — sending error"
         );
-        let refusal = StreamingToken {
+        send_refusal(
+            &network_tx,
+            sender_bytes,
             request_id,
-            token_id: 0,
-            finish_reason: Some(NetworkFinishReason::Error(
-                REMOTE_GENERATE_NOT_HOSTED.into(),
-            )),
-            text: String::new(),
-            usage: None,
-            matched_stop_sequence: None,
-            logprob: None,
-        };
-        // A refusal is the frame most worth repeating: it is the ONLY thing the
-        // coordinator will ever hear about this request, and losing it turns an
-        // immediate, precise "I cannot serve this" into a silence the caller
-        // waits out and then blames on the peer going offline.
-        resend_terminal_token(network_tx.clone(), sender_bytes.clone(), refusal.clone());
-        if let Err(e) = network_tx
-            .send(NetworkCommand::SendStreamingToken {
-                target_peer_bytes: sender_bytes,
-                token: refusal,
-            })
-            .await
-        {
-            tracing::error!(
-                %request_id,
-                error = %e,
-                "DIAG: could not queue the rejection back to the coordinator — it will \
-                 see a silent timeout instead of a reason"
-            );
-        }
+            REMOTE_GENERATE_NOT_HOSTED.into(),
+        )
+        .await;
         return;
     }
 

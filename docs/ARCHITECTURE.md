@@ -1981,10 +1981,10 @@ described signed capability/shard records under per-node keys
 ## Reputation & Trust
 
 - `TrustManager` in `src/credit/trust.rs` tracks per-peer trust scores (0.0–1.0, default 0.5)
-- Trust-affecting events: InferenceSuccess (+0.01), SpotCheckFail (-0.1), InvalidGossip (-0.05), ValidTransaction (+0.02), SignatureViolation (-0.2)
+- Trust-affecting events that fire: InferenceSuccess (+0.01, a well-formed distributed result), SpotCheckFail (-0.1, a malformed result from a single peer or a rejected prefix-KV snapshot), ShardVerificationFail (-0.2, a shard that failed BLAKE3). InvalidGossip, ValidTransaction, SignatureViolation and SubnetClustering are defined and applied nowhere
 - Decay toward 0.5 over time (1% per health ping cycle) — prevents permanent punishment
 - Persisted in redb `trust_scores` table, hydrated on startup
-- Trust factors into pipeline scheduling and credit tier weighting
+- Read only when choosing peers to SEND work to (pipeline scheduling, delegation, cross-node prefix fetches) — never when deciding whether to serve a requester. See `docs/book/src/architecture/security.md` § "Misuse of the Network"
 
 ## Credit Escrow
 
@@ -1998,8 +1998,7 @@ described signed capability/shard records under per-node keys
 - Balance reports are Ed25519-signed with timestamp freshness check (5 min window)
 - Only signed reports accepted; unsigned reports rejected outright
 - Stale/replayed reports rejected
-- Subnet clustering detection: >5 nodes per /24 → elevated spot-check rate (25% vs 5%)
-- SubnetClustering trust penalty (-0.03 per cycle while clustered)
+- Subnet clustering detection: >5 nodes per /24 → elevated spot-check rate (25% vs 5%) — applied only to inbound credit transactions, which no node sends while credits are dormant, so today it has no effect. No trust penalty is applied for clustering
 
 ## Credit System Security
 

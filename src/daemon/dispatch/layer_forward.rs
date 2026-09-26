@@ -582,6 +582,60 @@ async fn send_error_result(
     send_result_timed(network_tx, reply_to, result).await;
 }
 
+/// Who a refused forward is answered to, and which step the answer names —
+/// everything [`refuse_forward`] needs from a `LayerForward`, and nothing else.
+///
+/// The dispatcher spawns a refusal per refused forward, so it must not carry the
+/// forward itself: its activations can be 128 MB, and a burst of refusals would
+/// otherwise hold every one of them until its answer was queued.
+pub(super) struct RefusalAddress {
+    request_id: uuid::Uuid,
+    answering: crate::types::ResultStep,
+    requester_node_id: Option<[u8; 32]>,
+    sender_peer_bytes: Option<Vec<u8>>,
+}
+
+impl RefusalAddress {
+    pub(super) fn of(forward: &crate::types::LayerForward) -> Self {
+        Self {
+            request_id: forward.request_id,
+            answering: crate::types::ResultStep {
+                index_pos: forward.index_pos,
+                layer_range: forward.layer_range,
+            },
+            requester_node_id: forward.requester_node_id,
+            sender_peer_bytes: forward.sender_peer_bytes.clone(),
+        }
+    }
+}
+
+/// Answer a forward this node will not run, before running any of it.
+///
+/// For the dispatcher's admission caps. The network layer acknowledged the
+/// forward on arrival, so the coordinator is now waiting for a RESULT; a refusal
+/// that is not sent costs it the whole segment deadline. Addressed and stamped
+/// exactly as `handle_layer_forward`'s own failures are — through
+/// [`reply_target`], so in a chain it reaches the coordinator rather than the
+/// previous hop.
+pub(super) async fn refuse_forward(
+    shared_state: Arc<SharedState>,
+    network_tx: mpsc::Sender<NetworkCommand>,
+    to: RefusalAddress,
+    reason: String,
+) {
+    let Some(sender) = to.sender_peer_bytes else {
+        tracing::warn!(request_id = %to.request_id, "refused LayerForward has no sender to answer");
+        return;
+    };
+    let reply_to = reply_target(
+        to.requester_node_id,
+        shared_state.identity.node_id(),
+        sender,
+        |n| shared_state.resolve_connected_peer_id_bytes(n),
+    );
+    send_error_result(&network_tx, &reply_to, to.request_id, to.answering, &reason).await;
+}
+
 /// What a peer is allowed to be told about a failure here.
 ///
 /// Two jobs, and only one of them is truncation: replace anything that would
@@ -976,6 +1030,105 @@ mod tests {
             !sanitize_peer_facing_error("failed reading /home/user/.local/share/swarmllm/x.bin")
                 .contains('/'),
             "path separators must still be stripped"
+        );
+    }
+
+    fn test_state() -> Arc<SharedState> {
+        use crate::identity::Identity;
+        use crate::inference::executor::ModelExecutor;
+        use crate::storage::db::Database;
+
+        let temp = tempfile::tempdir().unwrap();
+        let db = Database::open(temp.path()).unwrap();
+        let (state, _, _) = SharedState::new(
+            crate::config::Config::default(),
+            Identity::generate(),
+            db,
+            Arc::new(tokio::sync::Mutex::new(ModelExecutor::new())),
+            None,
+        );
+        state
+    }
+
+    /// A forward the dispatcher's caps turned away is ANSWERED, where it used to
+    /// be dropped after the network layer had acknowledged it — so the
+    /// coordinator waited out its whole segment deadline for a refusal made in
+    /// microseconds. The answer goes to whoever is waiting (in a chain the
+    /// coordinator, not the previous hop), names the step, and says something
+    /// the coordinator re-plans on without retracting this node's shards.
+    #[tokio::test]
+    async fn a_refused_forward_is_answered_to_the_coordinator_naming_its_step() {
+        let state = test_state();
+        let coordinator = crate::types::NodeId([3u8; 32]);
+        state.connected_node_ids.insert(coordinator.clone());
+        state
+            .peer_id_map
+            .insert(coordinator.clone(), b"coordinator".to_vec());
+        let request_id = uuid::Uuid::new_v4();
+        let forward = crate::types::LayerForward {
+            request_id,
+            sequence_num: 0,
+            index_pos: 17,
+            activations: vec![0u8; 4096],
+            format: crate::types::TensorFormat::FP32,
+            model_id: crate::types::ModelId("m".into()),
+            layer_range: (4, 12),
+            vision_embeddings: None,
+            chain: Vec::new(),
+            sender_peer_bytes: Some(b"previous hop".to_vec()),
+            tp_meta: None,
+            requester_node_id: Some(coordinator.0),
+            pre_embedded: false,
+            generated_ids: Vec::new(),
+            adapter_id: None,
+            draft_tokens: Vec::new(),
+            spec_logits_requested: false,
+            truncate_kv_to: None,
+            chunk_meta: None,
+            sampling: None,
+        };
+        let (tx, mut rx) = mpsc::channel(4);
+        refuse_forward(
+            state,
+            tx,
+            RefusalAddress::of(&forward),
+            super::super::peer_work_refusal(),
+        )
+        .await;
+
+        let Ok(NetworkCommand::SendTensorResult {
+            target_peer_bytes,
+            result,
+        }) = rx.try_recv()
+        else {
+            panic!("a refused forward must be answered, not dropped");
+        };
+        assert_eq!(target_peer_bytes, b"coordinator".to_vec());
+        assert_eq!(result.request_id, request_id);
+        assert_eq!(
+            result.answers_step,
+            Some(crate::types::ResultStep {
+                index_pos: 17,
+                layer_range: (4, 12)
+            })
+        );
+        let Some(crate::types::NetworkFinishReason::Error(reason)) = result.finish_reason else {
+            panic!("the answer must carry the refusal");
+        };
+        assert!(
+            crate::inference::router::message_means_peer_cannot_serve(&reason),
+            "the coordinator must bar this node and re-plan: {reason}"
+        );
+        assert!(
+            matches!(
+                crate::error::reclassify_flattened_error(&reason),
+                Some(crate::error::SwarmError::ServiceUnavailable(_))
+            ),
+            "the class must survive the wire: {reason}"
+        );
+        assert!(
+            !crate::inference::pipeline::remote_error_means_missing_shard(&reason),
+            "busy is not a missing shard — the holder claims must stay: {reason}"
         );
     }
 }

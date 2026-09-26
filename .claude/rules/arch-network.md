@@ -273,6 +273,19 @@ TP forward is never chained.
 
 → `docs/invariants/network.md` § "A chained hop's refusal goes to the coordinator"
 
+## Work a serving node will not run is refused OUT LOUD, and counted per peer whatever its kind (2026-09-26)
+
+A forward was acknowledged on arrival, so dropping it at the dispatcher's caps
+cost the coordinator its whole segment deadline. **Every kind of peer work takes
+a `PeerWorkSlot`** (forwards, whole-model generations, image encodes — generations
+were uncounted and could hold every permit), and a refusal is **answered**:
+`layer_forward::refuse_forward` / `remote_generate::refuse_request`, worded by
+`peer_work_refusal()` so the coordinator bars the peer and re-plans without
+retracting its shards. A spawned refusal carries the ADDRESS, never the payload.
+An image-encode refusal still cannot be said (no error field; #123).
+
+→ `docs/invariants/network.md` § "Work a serving node will not run is refused OUT LOUD"
+
 ## "Is this connection direct?" — `network::relay::addr_is_direct_transport`
 
 The single answer, for BOTH layers that choose a connection. A relay-carried

@@ -34,6 +34,7 @@ nothing else in flight. Probes: unique prompts (so nothing is served from the pr
 | # | Item | Status |
 |---|---|---|
 | 121 | **A graphics-card node refuses a second long prompt it has room for.** llama-3.1-8b serves a 1,835-token prompt, then refuses the next one of the same size — "0 MB of conversation memory in use, 683 MB available" against a 1,336 MB budget — in 4 of 4 arms, with the prefix cache ON and OFF alike. Same shape on llama-3.2-3b (4,035 tokens, third request), qwen2.5-coder-7b (4,029, second — right after the loader logged that the budget "comfortably covers" 9,405 tokens), phi-3.5-mini (2,011) and qwen3-1.7b (3,619) | ✅ **FIXED 2026-09-26 (unreleased)** — `kv_budget::device_free_and_total_bytes` synchronizes the device's stream before `mem_get_info`. **Verified A/B/A/B inside one `--features cuda` build** (`SWARMLLM_KV_DEVICE_SYNC=0` = control, read back from the worker's own environment): with the synchronize, three 1,835-token prompts on the 8B all served with zero refusals, twice; without it the second was refused against 661 MB, twice. qwen2.5-coder-7b 3 × 4,029 and phi-3.5 3 × 2,011, each refused on v0.3.207, all served. Guard: `the_cards_free_memory_is_read_after_a_synchronize` (planted violation goes red). Evidence: `docs/invariants/memory.md` § "A card's free memory is read after a synchronize". The traced mechanism, as first recorded: cudarc 0.19.9 frees every `CudaSlice` with `cuMemFreeAsync` when the device supports memory pools (`driver/safe/core.rs`, `Drop for CudaSlice`, gated on `has_async_alloc`), and freed pool memory goes back to the device — the only point at which `cuMemGetInfo` counts it as free — at the next stream, event or context SYNCHRONIZE (release threshold 0; nothing here or in the vendored candle changes it). `kv_budget::device_free_and_total_bytes`, the one CUDA free-memory reading behind both admission (`model_worker::ensure_room_for_prompt`) and the executor's per-chunk growth guard, calls `mem_get_info()` with no sync. So memory the previous request released, or a prefix snapshot evicted a moment earlier, still reads as used, and the reconciled budget drops by exactly that much: 8B 1,336 → 683 MB (≈ the first request's 2,560-position cache); phi-3.5 2,197 → 780 (= minus the 1,417 MB just evicted, 674 µs earlier); qwen3 2,899 → 1,410 a full 1.4 s later (≈ 796 evicted + 598 released). `budget_reconciled_with_device`'s doc assumes an eviction "moves x from cached to free_now" — true only once something has synchronized. NVIDIA says as much for `cudaMemGetInfo` after `cudaFreeAsync` ("Using the CUDA Stream-Ordered Memory Allocator, Part 2"). **Fix to try:** synchronize the device's stream inside `device_free_and_total_bytes` before reading (every caller is already off the per-token path), behind an in-binary switch for the A/B; or add the pool's reserved-but-unused bytes (`CU_MEMPOOL_ATTR_RESERVED_MEM_CURRENT − USED_MEM_CURRENT`) to the free figure, which needs no sync. **Verify** with the same two-prompt probe on the 8B under `--features cuda` (#683): the second prompt must be served and the `KV admission` line must read `budget_mb` ≈ 1,336; toggle the switch off and watch it refuse again. Impact: a node on its own answers 503; with peers the refusal is `LocalMemoryUnavailable` and re-plans, so the request goes to a slower machine instead | Every graphics-card node, on the long prompt after another one |
+| 123 | **Work for peers is admitted per FORWARD, not per request** — under load a split request already under way can have its next token step refused, where a NEW request should have been turned away at its prompt pass | Open, latent: 0 refusals in 9 days of the live node's log. A refusal is now answered rather than dropped, and whole-model/image requests take the per-peer count (2026-09-26). Fix shape and its trap (a sender-chosen `sequence_num` must not bypass admission): body § "Work for peers is admitted per FORWARD" | Nodes serving several split requests at once |
 | 122 | **Four short chats at once: the fourth is refused, not queued.** llama-3.1-8b on 8 GB, four 45-token chats with `max_tokens` 128: one 503, "Not enough free memory on this node for a 45-token prompt (1152 MB of conversation memory in use … short by 199 MB). Shorter conversations still work…"; phi-3.5-mini the same at 3 × 768 MB | ✅ **(a) and the advice FIXED 2026-09-26 (unreleased); waiting is still open.** A reply now reserves what it can reach — `reply_reserve_positions(max_tokens)` (the granted budget + a 32-position draft margin, at most one quantum), a REQUIRED argument of `ensure_room_for_prompt`; a segment passes the full quantum since it never sees the budget. Verified on the new CUDA build: four chats at once served on the 8B and on phi-3.5, zero refusals (v0.3.207 refused the fourth on both). A refusal caused by OTHER live conversations now says to try again in a moment and that a shorter prompt will not help, at both refusal sites (`other_conversations_hold_the_room`, the executor's matching check). **Still open, deliberately:** queueing behind live requests instead of refusing — batched admission runs inside the worker's one message loop, so a wait there would stall every other chat's decode; it needs a deferred-admission queue, and in a swarm it trades against the re-plan to a peer the refusal already buys. As first recorded: each admitted request claims `kv_cache_reservation(prompt) + REPLY_RESERVE_POSITIONS`, at least 512 + 512 = 1,024 positions (`model_worker::ensure_room_for_prompt`), of the f32 cache (f32 by decision, `docs/invariants/inference.md`): 384 MB per chat on the 8B, 768 MB on phi-3.5 (full multi-head attention). That caps an 8 GB card at three chats of any length. (a) The refusal is immediate while the memory is held by requests that finish in seconds; vLLM's admission queues in that case, and a lone node here answers 503 (with peers it re-plans). (b) The message advises a 45-token prompt that "shorter conversations still work", which cannot help when the cause is other live requests — one message for two causes, the #309 shape. To decide: wait briefly behind live requests before refusing; size the reply reserve from `max_tokens` when the client sent one; word the concurrent case on its own | Anyone running an agent or several chats against one graphics-card node |
 
 ### 2026-09-25 — four field reports from one tester's node (v0.3.205-alpha)
@@ -15884,3 +15885,44 @@ most likely taken with the prompt pool at 8 and calibration choosing 4 for decod
 Forcing 8 doubles decode on this Ryzen and read the Qwen A/B as level. Evidence: `docs/invariants/inference.md`
 § "It read the cache once per QUERY head".
 
+
+## Work for peers is admitted per FORWARD, not per request (#123, open, 2026-09-26)
+
+Found while checking a tester's design report against the code (the swarm as a resource
+for a malicious actor; `docs/book/src/architecture/security.md` § "Misuse of the
+Network" is the resulting write-up).
+
+**What is true today.** The dispatcher bounds work for peers with a node-wide semaphore
+(8 / 24 / 64 by contribution level) and a per-peer count (half of it, floored at 4),
+both taken per inbound MESSAGE. A whole-model request (`RemoteGenerateRequest`) is one
+message for its whole reply, so for it the count is admission per request — correct. A
+split request is one `LayerForward` per token step, so for it the count is taken and
+given back on every step: a request already under way competes for a slot on each
+token with every new request, and under load its NEXT step can be the one refused.
+The request then ends mid-reply (a stand-in can take over only on the prompt pass or
+from retained history), where the right outcome was for the NEW request to be turned
+away at its prompt pass.
+
+**Measured incidence: none.** `grep -c "rejected — forward semaphore full\|rejected —
+per-peer limit reached"` over the live node's log (2026-09-17 → 09-26, Minimal, caps
+8 / 4) is 0. This is a latent ordering problem, not an observed one.
+
+**What shipped beside this entry (2026-09-26):** a refused tensor forward or
+whole-model request is now ANSWERED ("Service unavailable: …") instead of dropped
+after the network layer had already acknowledged it — the coordinator used to wait out
+its whole segment deadline (or a remote generation's first-token wait) for a refusal
+made in microseconds — and `RemoteGenerateRequest` / `VisionEncodeRequest` take the
+per-peer count too, where before only the node-wide semaphore bounded them, so one
+peer could hold every permit. ⚠ **An image-encoding refusal is still silent**:
+`VisionEncodeResponse` has no error field and the requester treats any response as
+embeddings, so saying no needs an additive field gated on a feature bit at the sender.
+The requester waits `VISION_ENCODE_TIMEOUT_SECS`, as before.
+
+**The fix shape, and the trap in it.** Admit at the prompt pass, keyed by request id
+(vLLM's shape: a running sequence is never evicted to admit a waiting one), and let
+later steps of an ADMITTED request through. ⚠ `sequence_num` is chosen by the sender,
+so "a later step" must mean "a request id this node admitted from this peer", never
+"a forward that says it is not a prompt pass" — otherwise a flood of self-declared
+decode steps walks past admission, each parked with up to 128 MB of activations. The
+admission then needs an end: the KV session's idle expiry (10 min) and
+`CancelInference` are the two signals that already exist.

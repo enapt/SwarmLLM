@@ -135,6 +135,7 @@ Scores decay toward 0.5 over time (1% per health cycle, default 30 seconds). Tru
 ## Rate Limiting & DoS Protection
 
 - Per-IP rate limiter with periodic cleanup (5 min intervals)
+- Work for peers: a node-wide and a per-requester concurrency cap (see [Misuse of the Network](#misuse-of-the-network))
 - Inference queue depth cap: 512 requests
 - HTTP timeout: 5 minutes (Slowloris protection via tower-http TimeoutLayer).
   Model-running routes sit outside it (generation is unbounded in time) but
@@ -260,9 +261,101 @@ No remote node handles the raw prompt tokens or samples the generated output —
 
 Relevant code: `src/inference/scheduler/mod.rs` (greedy_assign), `src/inference/pipeline/` (auto-enable local embedding), `src/api/admin_models/lifecycle.rs` (API endpoints), `src/daemon/state/mod.rs` (`encrypted_pipeline_models` DashMap).
 
+## Misuse of the Network
+
+Everything above protects the people using the swarm: who can read a prompt,
+who can fake a result. This section is about the swarm itself as something a
+bad actor can use, and states what is defended today and what is not.
+
+**The test applied here: a limit counts only if someone other than the party it
+is meant to stop enforces it.** A limit in a node's own code binds only honest
+operators, because a fork removes it. A limit that honest *serving* nodes apply
+to the nodes asking them for work survives any fork of the asking side.
+
+### A fork run as a private swarm
+
+SwarmLLM is Apache-2.0: anyone can build it, change it and run it as a private
+network — on machines they control, or on machines they do not, the way
+legitimate mining software ends up on botnets. No code in the official build
+can prevent that. What the project can do is keep the official build easy to
+recognise and never quiet:
+
+- **Signed releases.** Each release's SHA-256 checksum files are signed with the
+  project's offline minisign key (`release_pubkey.txt`, also compiled into every
+  binary). The executables themselves carry no Windows Authenticode or Apple
+  signature, so a security tool that checks those sees an unsigned program.
+- **Nothing hidden.** The process runs under its own name (`swarmllm`, or the
+  release asset's name such as `swarmllm-linux-x86_64-cuda`), prints its
+  dashboard address on start and opens the dashboard in a browser by default.
+  The Linux package does not enable its service on install, the Windows
+  installer script adds no autostart entry, and no code renames or hides the
+  process. (That installer script uses Inno Setup, which accepts its standard
+  `/SILENT` flags; it is not part of current releases.)
+- **A recognisable network footprint**, for defenders:
+
+| What | Value |
+|---|---|
+| Ports | TCP 8800 (HTTP API and dashboard), TCP 8810 (peer-to-peer, API port + 10), UDP 8800 (QUIC) |
+| libp2p protocols | `/swarmllm/1.0.0` (requests), `/swarmllm/kad/1.0.0` (DHT), `/swarmllm/pipeline/1.0.0` (tensor streams) |
+| Identify protocol version | `/swarmllm/id/1.0.0` |
+| Gossip topics | `swarm/models`, `swarm/credits`, `swarm/health`, `swarm/identity`, `swarm/pools`, `swarm/regions` — each suffixed `/<network_id>` on a private gossip network |
+| Default bootstrap | `swarmllm.duckdns.org` and `212.132.104.177` on TCP 8810 / UDP 8800, peer `12D3KooWNisnVha2jYj1gqqY5WP82vNQbRhFtBcKzj4XrYmGEn8G` |
+| HTTP response headers | `x-swarm-route`, `x-swarm-segments`, `x-swarm-peers`, `x-swarm-nodes`, `x-swarm-regions` |
+| Outbound user agent | `SwarmLLM/<version>` (update checks against GitHub) |
+
+A fork can change every one of these. They identify the official build and
+unmodified copies of it, which is what they are for.
+
+### A rogue consumer of the public swarm
+
+Anyone can run a node and ask the swarm for inference. There is no account and,
+while credits are dormant, no price, so capacity other people contribute can be
+consumed by one party. What serving nodes enforce on requesters today:
+
+- **Authentication, not identity.** Every peer request must come from a
+  transport-authenticated peer this node knows. A node key costs nothing to
+  make, so this names a requester; it does not limit one.
+- **A concurrency cap per requester** on every kind of work a peer can ask for —
+  tensor forwards, whole-model generation, image encoding — of half the node's
+  total, floored at 4, inside a node-wide cap set by the owner's contribution
+  level (8 / 24 / 64 at Minimal / Moderate / Maximum). A tensor forward or a
+  whole-model request over either cap is refused with a reply at once, so the
+  requester can go elsewhere (an image-encoding request cannot be told no yet;
+  its requester waits out a timeout).
+- **The owner's contribution level bounds what the swarm can take**: processor
+  threads and memory are capped by it, so demand from the swarm can keep this
+  node busy but cannot take more of the machine than its owner offered.
+
+What is **not** enforced today:
+
+- **No rate or quota over time**, only concurrency. A requester that stays
+  inside the concurrency cap can keep a node busy indefinitely.
+- **No reputation check on the requester.** Trust scores are read by a node
+  choosing peers to SEND work to, never by a node deciding whether to SERVE.
+- **Per-requester limits key on the node key, which is free.** A requester with
+  many keys (a Sybil) gets many allowances. Only a cost attached to an identity
+  — credits that actually move, or trust earned by serving — closes that, which
+  is why limits enforced by serving nodes are a precondition for credits going
+  live (`docs/CREDITS_DESIGN.md` § 6).
+- The HTTP API's rate limiter (per client IP, 60 requests a minute by default)
+  protects one node's own API. It does nothing for the swarm behind that node.
+
+### A rogue operator of many nodes
+
+Many nodes under one operator can bias DHT routing (an eclipse) and return
+fluent but wrong output. Both are listed under Known Limitations below.
+
+Nothing in this section is known to be happening. It is written down now
+because the levers that survive a fork — limits applied by serving nodes, and a
+cost on identity — are cheaper to design in than to retrofit.
+
 ## Known Limitations
 
 These are architectural properties that cannot be fully mitigated with code changes:
+
+- **Misuse of the network** — anyone can ask the swarm for work, and every limit
+  on a requester keys on an identity that costs nothing to make (see [Misuse of
+  the Network](#misuse-of-the-network)).
 
 - **Gossip epoch key is publicly derivable** — derived from "swarmllm-mainnet-v1". Gossip encryption is defense-in-depth; Ed25519 signing is the primary security mechanism.
 - **Final-segment output visibility** — the node running the last transformer layers sees all generated tokens. This is inherent to the architecture (see [Pipeline Privacy Model](#pipeline-privacy-model)).
