@@ -15854,3 +15854,17 @@ decode step at 2K and 6K context with `SWARMLLM_PROFILE=1` before changing anyth
 2,048-token run overlapped a filesystem-wide search and read 110.8 ms/token; the quiet re-run's
 two pairs agreed within 1% — take a context-scaling reading only on an idle box.
 
+**Profiled the same day (live node stopped, 8 threads, `SWARMLLM_PROFILE=1`, llama-3.2-3b):
+only attention grows.** Decode at 519 cached positions → 2,055: attention 8.5 → 28.4 ms per
+token; the matmuls (ffn 43.6 / 43.0, qkv 12.9 / 11.7, out 5.5 / 6.5 ms) and the rest are
+flat. That is ~13 ms per 1K cached positions, reading the f32 cache (K+V, 28 layers × 8 KV
+heads × 128 × 8 B = 229 KB a position; 471 MB a token at 2K) at an effective 14-17 GB/s.
+llama.cpp's f16 cache is half the bytes, and its growth (+7.3 ms over the same span) implies
+~24 GB/s. Two levers, in order: (1) **parallelism** — `decode_attn::gqa_decode_attention_cpu`
+runs one rayon task per (batch, KV head), so an 8-KV-head model uses at most 8 threads for
+decode attention whatever the pool holds; split each head's positions across tasks and
+reduce (flash-decoding's split-K) so every core streams part of the cache; (2) **bytes** —
+an f16 cache would halve the traffic but the f32 cache is a recorded precision decision
+(`docs/invariants/inference.md`), so it needs its own evidence first. Profiling inflates the
+total (103 ms profiled vs 84 unprofiled at 2K); read the stage split, not the sum.
+
