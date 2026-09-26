@@ -23,6 +23,7 @@
 //! python3 examples/compare_logits_reference.py <gguf> /tmp/q3moe
 //! ```
 //!
+//! `LOGITS_PROBE_IDS` (a JSON array of token ids) instead of the synthetic sequence;
 //! `LOGITS_PROBE_N` (default 24) tokens, `LOGITS_PROBE_DECODE` (default 4) of
 //! them as decode steps, `LOGITS_PROBE_SPLIT` the first layer of the second
 //! segment (default: one segment). Writes `<OUT>.f32` (`[N, vocab]`, little
@@ -53,7 +54,17 @@ fn main() -> anyhow::Result<()> {
             .map_err(|_| anyhow::anyhow!("set LOGITS_PROBE_GGUF to a whole .gguf file"))?,
     );
     let out = expand(&std::env::var("LOGITS_PROBE_OUT").unwrap_or_else(|_| "logits_probe".into()));
-    let n = env_usize("LOGITS_PROBE_N", 24);
+    // `LOGITS_PROBE_IDS=<file>`: a JSON array of token ids to use instead of the
+    // synthetic sequence — natural text, so a disagreement cannot be blamed on
+    // the input being nonsense (#124).
+    let given_ids: Option<Vec<i64>> = match std::env::var("LOGITS_PROBE_IDS") {
+        Ok(path) => Some(serde_json::from_slice(&std::fs::read(expand(&path))?)?),
+        Err(_) => None,
+    };
+    let n = given_ids
+        .as_ref()
+        .map(|v| v.len())
+        .unwrap_or_else(|| env_usize("LOGITS_PROBE_N", 24));
     let decode = env_usize("LOGITS_PROBE_DECODE", 4).min(n.saturating_sub(1));
     let layers = GgufTensorMeta::from_gguf_file(&gguf)?.block_count;
     let split = std::env::var("LOGITS_PROBE_SPLIT")
@@ -61,8 +72,10 @@ fn main() -> anyhow::Result<()> {
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|&k| k > 0 && k < layers);
 
-    // Arbitrary ids well inside any vocabulary and away from the specials.
-    let ids: Vec<i64> = (0..n).map(|i| ((i * 997) % 5000 + 100) as i64).collect();
+    // Arbitrary ids well inside any vocabulary and away from the specials,
+    // unless a real sequence was given.
+    let ids: Vec<i64> =
+        given_ids.unwrap_or_else(|| (0..n).map(|i| ((i * 997) % 5000 + 100) as i64).collect());
     let prefill = n - decode;
 
     let mut segments: Vec<SplitModel> = match split {
