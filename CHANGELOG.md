@@ -5,8 +5,8 @@
 **A model too big for your graphics card now answers instead of refusing
 every request, a split model no longer stalls for minutes when one piece of an
 answer is lost on the way back, a long conversation refused by one computer is
-now tried on another, and mixture-of-experts models do far less work per
-prompt.**
+now tried on another, Llama 4 models compute what they should, and
+mixture-of-experts models do far less work per prompt.**
 
 **Fixed: a model that fits the graphics card only in part refused every
 request.** When a model is a little too big for the card, most of it goes on
@@ -17,10 +17,7 @@ question, every time, with nothing else to try on a computer alone. The check
 now counts only what is on the card, and the split between card and processor
 leaves room for the model's whole conversation length: that model now answers
 conversations up to its full 8,192 tokens. The same split now also holds for a
-model kept as one single file (before, all of it went on the card anyway), and
-a model whose design cannot yet be split between the two (Qwen 3.5, DeepSeek-2)
-now runs on the processor instead of being loaded whole onto a card too small
-for it.
+model kept as one single file (before, all of it went on the card anyway).
 
 **Fixed: a split model's reply could stall for minutes when one computed step
 was lost in transit.** When a computer running part of a model finished its
@@ -68,7 +65,9 @@ Llama 4 has been run here; the smallest is 40 GB.)
 All three were listed as supported, but no such file actually in circulation
 could load: a node, or its automatic model manager, could download many
 gigabytes of one and then fail to start it. They are now refused up front with
-a message naming the model family, until they genuinely work. Qwen 3.5 support
+a message naming the model family, until they genuinely work, whether the
+model would come from HuggingFace or from another computer that already holds
+it. Qwen 3.5 support
 is high on the list.
 
 Also: `swarmllm test-split --gpu-layers N` checks a card/processor split

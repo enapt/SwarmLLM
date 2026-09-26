@@ -5,6 +5,31 @@ use super::manager::{AutoShardManager, ShardCandidate};
 use super::scan::check_and_load_model;
 use super::vram::compute_vram_budget;
 
+/// Say, once per decision, that a model was not acquired because this build
+/// cannot run its architecture. Both acquisition branches end here, so the
+/// refusal reads the same whichever source the shard would have come from.
+fn report_unsupported_architecture(
+    shared: &crate::daemon::state::SharedState,
+    model_id: &ModelId,
+    arch: &str,
+) {
+    tracing::warn!(
+        model = %model_id,
+        arch = %arch,
+        "AutoShardManager: skipping unsupported architecture"
+    );
+    shared.emit_activity(
+        crate::daemon::state::ActivityEvent::new(
+            "auto_manage",
+            "unsupported_architecture",
+            format!("Skipped {} — unsupported architecture: {}", model_id, arch),
+        )
+        .with_model(&model_id.0)
+        .with_detail_str(arch)
+        .with_toast("warning", 5000),
+    );
+}
+
 impl AutoShardManager {
     /// Trigger download of a single shard.
     ///
@@ -430,24 +455,7 @@ impl AutoShardManager {
                     let arch_str = &info.tensor_meta.architecture;
                     let arch = crate::inference::split::ModelArch::from_gguf_arch(arch_str);
                     if !arch.is_supported() {
-                        tracing::warn!(
-                            model = %model_id,
-                            arch = %arch_str,
-                            "AutoShardManager: skipping unsupported architecture"
-                        );
-                        shared.emit_activity(
-                            crate::daemon::state::ActivityEvent::new(
-                                "auto_manage",
-                                "unsupported_architecture",
-                                format!(
-                                    "Skipped {} — unsupported architecture: {}",
-                                    model_id, arch_str
-                                ),
-                            )
-                            .with_model(&model_id.0)
-                            .with_detail_str(arch_str)
-                            .with_toast("warning", 5000),
-                        );
+                        report_unsupported_architecture(&shared, &model_id, arch_str);
                         // SEC: same cleanup as GGUF probe failure — without it
                         // the shard's progress entry sits in `Downloading`
                         // forever, locking it out of future eval cycles.
@@ -841,6 +849,25 @@ impl AutoShardManager {
         } // end !has_peer_holders
 
         if has_peer_holders {
+            // A peer holding a shard says nothing about whether THIS build can
+            // run it: a node on an older release may hold parts of a family
+            // this one refuses (#116-#118). The HuggingFace branch learns the
+            // architecture from its probe; this one had nothing to learn it
+            // from, and moved the bytes regardless. Fetch the header first — a
+            // few MB, bounded, the same fetch routing makes, and one this node
+            // needs to serve the model anyway — and refuse before any shard
+            // moves. With no header and no HuggingFace source there is nothing
+            // to ask, and offline mode forbids asking; the loader still refuses
+            // such a model at load.
+            if !offline_mode {
+                self.shared_state
+                    .ensure_model_geometry(&candidate.model_id)
+                    .await;
+            }
+            if let Some(arch) = self.shared_state.refused_architecture(&candidate.model_id) {
+                report_unsupported_architecture(&self.shared_state, &candidate.model_id, &arch);
+                return;
+            }
             // P2P: download from peers who hold this shard.
             // Send AcquisitionCommand::Acquire to trigger P2P chunk-based transfer
             // via the AcquisitionManager, which handles retry logic and verification.

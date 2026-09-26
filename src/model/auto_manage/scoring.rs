@@ -145,6 +145,19 @@ impl AutoShardManager {
             if crate::model::manifest::is_backup_artifact_id(&manifest.id.0) {
                 continue;
             }
+            // Never acquire a family this build refuses to load (#116-#118),
+            // once its header has said so — from a peer or from HuggingFace.
+            // The first sighting is refused in `trigger_download`, which
+            // fetches the header to find out; this keeps every later cycle
+            // from trying again.
+            if let Some(arch) = self.shared_state.refused_architecture(&manifest.id) {
+                tracing::debug!(
+                    model = %manifest.id,
+                    arch = %arch,
+                    "Skipping model — this build cannot run its architecture"
+                );
+                continue;
+            }
             // -- Policy gate: skip models excluded from auto-manage --
             if let Some(policy) = self
                 .shared_state
@@ -967,6 +980,53 @@ mod tests {
         // a pin to this device all call this) restores the old behaviour.
         assert!(state.clear_shard_removed_by_user(&s1));
         assert!(wants_s1(&manager));
+    }
+
+    /// A peer holding shards of a family this build refuses (#116-#118) — an
+    /// older node may — used to be a candidate like any other, and the P2P
+    /// branch moved the bytes without ever asking the header. Once the header
+    /// has named the family, the model is not a candidate at all.
+    #[test]
+    fn a_family_this_build_refuses_is_never_a_candidate() {
+        let (state, manager) = make_test_manager();
+        let (local, _s0, s1) = split_model(&state);
+        let wants_s1 = |m: &super::AutoShardManager| {
+            m.gather_candidates(&local, 0)
+                .iter()
+                .any(|c| c.model_id == s1.model_id && c.shard_index == 1)
+        };
+        let header_says = |arch: &str| {
+            state.gguf_meta.insert(
+                s1.model_id.clone(),
+                crate::inference::split::GgufTensorMeta {
+                    tensors: Default::default(),
+                    tensor_data_offset: 0,
+                    model_name: None,
+                    head_count: 8,
+                    head_count_kv: 4,
+                    block_count: 16,
+                    embedding_length: 1024,
+                    head_dim: 128,
+                    rope_dim: 128,
+                    rope_freq_base: 10_000.0,
+                    rms_norm_eps: 1e-6,
+                    expert_count: 0,
+                    architecture: arch.into(),
+                    context_length: 8192,
+                },
+            );
+        };
+
+        assert!(wants_s1(&manager), "control: no header, the gap is filled");
+        for refused in ["deepseek2", "qwen35", "starcoder2"] {
+            header_says(refused);
+            assert!(
+                !wants_s1(&manager),
+                "{refused}: a family the loader refuses must not be acquired"
+            );
+        }
+        header_says("llama");
+        assert!(wants_s1(&manager), "a family that loads is still acquired");
     }
 
     #[test]

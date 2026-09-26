@@ -2310,6 +2310,21 @@ impl SharedState {
             .filter(|&c| c > 0)
     }
 
+    /// The GGUF architecture of `model_id` when this node KNOWS it and this
+    /// build cannot run it (`ModelArch::is_supported`); `None` when it can, or
+    /// when there is no header here to say.
+    ///
+    /// Read from the header, never from the manifest: the manifest's
+    /// `ModelArchitecture` records DeepSeek-2 and StarCoder2 as `Llama`
+    /// (`ModelArch::to_manifest_architecture`), so it cannot tell them apart
+    /// from a model that loads. Auto-manage asks this before acquiring a shard
+    /// from a PEER — an older node may hold parts of a family this build
+    /// refuses (#116-#118) — and while choosing candidates.
+    pub fn refused_architecture(&self, model_id: &crate::types::ModelId) -> Option<String> {
+        let arch = self.gguf_meta_for(model_id)?.architecture.clone();
+        (!crate::inference::split::ModelArch::from_gguf_arch(&arch).is_supported()).then_some(arch)
+    }
+
     /// Make a model's geometry available to the ROUTER, fetching the header
     /// if this node holds no part of the model. **Best effort, and silent.**
     ///
