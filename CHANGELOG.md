@@ -25,6 +25,13 @@ than it can, which could send long prompts its way.
 The length of a request's prompt is now counted with its tool definitions,
 which agent tools send many of and which were counted as nothing.
 
+**Faster: long prompts on a computer without a graphics card.** Once a
+conversation passed about 5,400 tokens, reading each further part of the prompt
+took twice as long, because the model's memory of the conversation was copied
+three times over on every step. It is now read where it lies. A 6,900-token
+prompt was read 20% faster on a test machine, and agent prompts, which run to
+several thousand tokens, spend most of their time past that point.
+
 **Faster: your own prompts are read with all of your processor's cores.** The
 contribution level decides how much of your computer SwarmLLM may use for
 other people's requests, but it was also limiting your own: at the default

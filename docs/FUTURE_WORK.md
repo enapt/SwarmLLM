@@ -15800,6 +15800,16 @@ same 4→8 threads** — our long-context attention looks memory-bound: GQA K/V 
 heads (`repeat_kv`) on every prompt chunk, contiguous copies of the cache views, and a full
 f32 scores matrix per layer per chunk, none of which llama.cpp does. That is the next move.
 
+**Done 2026-09-26 (unreleased): the attention CLIFF.** The per-chunk cost doubled past a
+5,461-long cache (24 heads x 128 queries crossing the 16Mi score budget), where the blocked path
+expanded K/V 8→24 every chunk. Now grouped per block of positions — 6,911 tokens at 8 threads:
+33.2 → 39.8 tok/s (+20%), attention 85.7 → 54.1 s (`docs/invariants/inference.md` § "A blocked
+GQA attention call is grouped per block"). **What is left for #119**: attention still runs at a
+fraction of f32 peak below the cliff (~270-300 ms per 1K cached positions per chunk at 8
+threads), and the quantized matmuls trail llama.cpp by ~1.3x. Next: measure the
+op split inside attention (score matmul vs fused softmax vs AV) at 6K context before changing
+anything, then re-measure against llama.cpp at 8 threads.
+
 **What that says.** (1) The report's "3x" (a DIFFERENT model on llama.cpp's side, 9.2K tokens,
 a 5700U) is chiefly the thread policy: `resources.inference_cpu_threads` gives Minimal 0.5,
 Moderate 0.75, Maximum 1.0 of PHYSICAL cores, so a default node reads prompts on half the

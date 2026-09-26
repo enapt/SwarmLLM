@@ -1776,3 +1776,33 @@ because the whole prompt had already been copied, and discarding it wasted the
 copy. Tests: `a_prompt_over_the_token_ceiling_keeps_its_opening`,
 `with_no_token_ceiling_the_byte_budget_sizes_the_snapshot`,
 `a_budget_smaller_than_one_prompt_keeps_the_opening_that_fits`.
+
+## A blocked GQA attention call is grouped per block, never expanded (2026-09-26)
+
+`standard_attention` groups a GQA call's query heads against the unexpanded
+cache whenever the scores fit `ATTN_SCORE_BUDGET_ELEMS` (16Mi) in one pass
+(`grouping_applies`). Past the budget it BLOCKED the query axis and, because a
+slice of the grouped axis would cut one position's repeats across two passes,
+expanded K and V with `repeat_kv` first. For a 128-token prompt chunk on a
+24-head model the budget is crossed at a 5,461-long cache, so from there EVERY
+chunk copied its layer's whole K and V three times over.
+
+The fix slices query POSITIONS first and groups each block
+(`grouped_gqa_attention` on `q.narrow(2, …)` with `mask_rows`): no boundary
+problem, and a grouped block holds exactly the score elements an ungrouped one
+does, so the budget still bounds memory. Only for no mask or a 2D mask — the
+shapes `grouped_gqa_attention` tiles itself; a 4D mask keeps the expanded path.
+A/B: `SWARMLLM_GROUPED_GQA_BLOCKED=0` (this only), and the older
+`SWARMLLM_GROUPED_GQA_DECODE_ONLY=1` still restores the expanded path.
+
+**Measured** (Ryzen 7 5800H, llama-3.2-3b Q4_K_M, a node reading a 6,911-token
+prompt on 8 threads, one binary): 208.12 → 173.80 s, 33.2 → 39.8 tok/s (+20%);
+total attention 85.7 → 54.1 s. Per 1K cached positions the expanded path cost
+303 ms at position 4096 and 309 at 5248, then 685 at 5376 — the crossing — and
+686-729 to the end; grouped, 270-317 throughout. Agent prompts run 4,100-14,400
+tokens (FUTURE_WORK #119), so most of an agent turn sits past the cliff.
+
+Test `a_blocked_gqa_call_is_grouped_not_expanded` asserts equality with the
+expanded unblocked pass (< 1e-5) AND that no expansion happened (a test-only
+`KV_EXPANSIONS` counter) — the values alone match either way, so the count is
+the part that fails without the fix.

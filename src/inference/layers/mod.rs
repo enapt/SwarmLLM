@@ -1643,6 +1643,49 @@ pub(crate) fn standard_attention(
         );
     }
 
+    // A GQA call too big for one pass: block over query POSITIONS, and group
+    // each block. It used to expand K and V to `n_head` instead, because the
+    // loop below slices the query axis and a slice of the GROUPED axis would
+    // cut one position's repeats across two passes — but slicing positions
+    // BEFORE grouping has no such boundary, and a grouped block holds exactly
+    // as many score elements as an ungrouped one, so the budget is unchanged.
+    //
+    // The cost it removes is a cliff, not a trend. A 128-token prompt chunk
+    // crosses the budget once its cache passes 16Mi / (heads x 128) — 5,461
+    // positions for a 24-head model — and from there EVERY chunk copied its
+    // layer's whole K and V three times over. Measured on llama-3.2-3b (5800H,
+    // 16 threads): attention per 1K cached positions 231 ms at a 5,376-long
+    // cache, 469 ms at 5,504, and it stayed doubled for the rest of the prompt
+    // (FUTURE_WORK #119). Agent prompts run 4,100-14,400 tokens.
+    //
+    // Both A/B switches hold: `SWARMLLM_GROUPED_GQA_DECODE_ONLY=1` (never group
+    // a prompt) and `SWARMLLM_GROUPED_GQA_BLOCKED=0` (only this one).
+    if n_rep > 1 && grouped_blocking_applies(mask) {
+        let q_len = q.dim(2)?;
+        let block = attention_query_block(q_len, k.dim(2)?, n_head);
+        // Settled once for every block, as the expanded loop below does.
+        let v = value_for_matmul(v)?;
+        let mut parts: Vec<Tensor> = Vec::with_capacity(q_len.div_ceil(block));
+        let mut start = 0usize;
+        while start < q_len {
+            let len = block.min(q_len - start);
+            parts.push(grouped_gqa_attention(
+                &q.narrow(2, start, len)?,
+                k,
+                &v,
+                mask_rows(mask, start, len)?.as_ref(),
+                head_dim,
+                n_head,
+                n_kv_head,
+                attn_logit_softcap,
+            )?);
+            start += len;
+        }
+        return Tensor::cat(&parts, 2);
+    }
+
+    #[cfg(test)]
+    KV_EXPANSIONS.with(|c| c.set(c.get() + 1));
     let k = candle_transformers::utils::repeat_kv(k.clone(), n_head / n_kv_head)?;
     let v = candle_transformers::utils::repeat_kv(v.clone(), n_head / n_kv_head)?;
     // `v` is used once per block; settle its layout here rather than inside
@@ -1671,24 +1714,7 @@ pub(crate) fn standard_attention(
         // so making it contiguous is cheap insurance against a device-specific
         // failure that would not show up on the CPU path used in tests.
         let q_blk = q.narrow(2, start, len)?.contiguous()?;
-        // The mask is [q_len, k_len] (2D, broadcast over batch/head) or already
-        // 4D. Either way the query axis is the second-from-last.
-        //
-        // `.contiguous()` is not cosmetic. A narrowed view keeps the parent's
-        // row pitch, and every consumer downstream is slower on one: the fused
-        // kernel declines strided operands outright, and `broadcast_add`
-        // measured 9.7 ms against 4.5 for the same data contiguous. The copy is
-        // one block of mask — kilobytes — against a score tensor of megabytes.
-        let mask_blk = match mask {
-            None => None,
-            Some(m) => Some(
-                match m.rank() {
-                    2 => m.narrow(0, start, len)?,
-                    r => m.narrow(r - 2, start, len)?,
-                }
-                .contiguous()?,
-            ),
-        };
+        let mask_blk = mask_rows(mask, start, len)?;
         parts.push(attention_scores_block(
             &q_blk,
             &kt,
@@ -1700,6 +1726,48 @@ pub(crate) fn standard_attention(
         start += len;
     }
     Tensor::cat(&parts, 2)
+}
+
+/// The mask rows for query positions `start..start + len`.
+///
+/// The mask is `[q_len, k_len]` (2D, broadcast over batch/head) or already 4D;
+/// either way the query axis is the second-from-last.
+///
+/// `.contiguous()` is not cosmetic. A narrowed view keeps the parent's row
+/// pitch, and every consumer downstream is slower on one: the fused kernel
+/// declines strided operands outright, and `broadcast_add` measured 9.7 ms
+/// against 4.5 for the same data contiguous. The copy is one block of mask —
+/// kilobytes — against a score tensor of megabytes.
+fn mask_rows(mask: Option<&Tensor>, start: usize, len: usize) -> CandleResult<Option<Tensor>> {
+    mask.map(|m| {
+        match m.rank() {
+            2 => m.narrow(0, start, len),
+            r => m.narrow(r - 2, start, len),
+        }
+        .and_then(|t| t.contiguous())
+    })
+    .transpose()
+}
+
+/// May a GQA call that is too big for one pass be grouped block by block?
+///
+/// Only with a mask [`grouped_gqa_attention`] tiles itself — none, or the
+/// ordinary 2D `[q_len, k_len]` — and not when either A/B switch asks for the
+/// expanded path.
+fn grouped_blocking_applies(mask: Option<&Tensor>) -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let off = *OFF.get_or_init(|| {
+        std::env::var("SWARMLLM_GROUPED_GQA_BLOCKED").as_deref() == Ok("0")
+            || std::env::var("SWARMLLM_GROUPED_GQA_DECODE_ONLY").as_deref() == Ok("1")
+    });
+    !off && mask.is_none_or(|m| m.rank() == 2)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many times `standard_attention` expanded K and V with `repeat_kv`
+    /// on this thread — so a test can assert the grouped paths never do.
+    static KV_EXPANSIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// GQA attention that reads the KV cache at its stored width, for any query
@@ -3652,11 +3720,67 @@ mod blocked_attention_tests {
         assert_eq!(max_abs_diff(&blocked, &unblocked), 0.0);
     }
 
-    /// GQA must keep working — `repeat_kv` happens once, before blocking.
+    /// GQA must keep working through the blocked path.
     #[test]
     fn grouped_query_attention_still_matches() {
         let out = run(2048, 2048, 8, 4, 16, None);
         assert_eq!(out.dims(), &[1, 8, 2048, 16]);
+    }
+
+    /// A GQA call too big for one pass is grouped block by block: it equals the
+    /// expanded, unblocked computation, and it never expands K and V — the copy
+    /// that doubled attention's cost for every prompt chunk past a 5,461-long
+    /// cache on a 24-head model (FUTURE_WORK #119). The expansion count is what
+    /// fails without the fix; the values would match either way.
+    #[test]
+    fn a_blocked_gqa_call_is_grouped_not_expanded() {
+        let (n_head, n_kv_head, q_len, k_len, d) = (8usize, 2usize, 512usize, 4608usize, 16usize);
+        assert!(
+            attention_query_block(q_len, k_len, n_head) < q_len,
+            "test must actually exercise the blocked path"
+        );
+        let before = KV_EXPANSIONS.with(|c| c.get());
+        let got = run(q_len, k_len, n_head, n_kv_head, d, None);
+        assert_eq!(
+            KV_EXPANSIONS.with(|c| c.get()),
+            before,
+            "a blocked GQA call must read the cache at its stored width"
+        );
+
+        // The reference: K and V expanded, every query in one pass.
+        let dev = Device::Cpu;
+        let mk = |h: usize, s: usize, seed: f32| {
+            let data: Vec<f32> = (0..h * s * d)
+                .map(|i| ((i as f32 * 0.7 + seed).sin()) * 0.5)
+                .collect();
+            Tensor::from_vec(data, (1, h, s, d), &dev).unwrap()
+        };
+        let q = mk(n_head, q_len, 0.0);
+        let n_rep = n_head / n_kv_head;
+        let ke = candle_transformers::utils::repeat_kv(mk(n_kv_head, k_len, 1.3), n_rep).unwrap();
+        let ve = candle_transformers::utils::repeat_kv(mk(n_kv_head, k_len, 2.9), n_rep)
+            .unwrap()
+            .contiguous()
+            .unwrap();
+        let offset = k_len - q_len;
+        let m: Vec<f32> = (0..q_len)
+            .flat_map(|i| {
+                (0..k_len).map(move |j| {
+                    if j > offset + i {
+                        f32::NEG_INFINITY
+                    } else {
+                        0.0
+                    }
+                })
+            })
+            .collect();
+        let mask = Tensor::from_vec(m, (q_len, k_len), &dev).unwrap();
+        let want = attention_scores_block(&q, &ke.t().unwrap(), &ve, Some(&mask), d, None).unwrap();
+        let diff = max_abs_diff(&got, &want);
+        assert!(
+            diff < 1e-5,
+            "grouped blocks diverge from the expanded pass: {diff}"
+        );
     }
 
     /// Decode and short prefills must take the original single-pass path, so

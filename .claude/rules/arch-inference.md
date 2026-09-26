@@ -238,6 +238,12 @@ Four helpers now own decisions that used to be spread across call sites. All
 four exist because a predicate that *reads* obviously correct was answering a
 different question than the one that mattered.
 
+**A GQA call too big for one pass is blocked over query POSITIONS and grouped
+per block** (`grouped_blocking_applies`, `mask_rows`) — it never expands K/V
+with `repeat_kv`. Expanding doubled attention for every prompt chunk past a
+5,461-long cache on a 24-head model (+20% on a 6.9K prompt once removed).
+Test `a_blocked_gqa_call_is_grouped_not_expanded` counts expansions.
+
 → `docs/invariants/inference.md`
 
 ## Local speculative decoding — `inference::model_worker::ngram_spec_eligible`
