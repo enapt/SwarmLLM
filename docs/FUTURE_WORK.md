@@ -24,6 +24,18 @@ Priority is user-visible impact x how many users x whether it fails silently.
 and 69's residual SHIPPED in v0.3.180-alpha.** The rows sit in the P-sections
 and in the two "2026-09-14" headings below; read the row, not just the number.
 
+### 2026-09-26 — benchmark pass on the released v0.3.207-alpha (graphics-card memory)
+
+Isolated node per model (private gossip id, no bootstrap, no mDNS, auto-manage off), the
+released CUDA binary, RTX 3070 Laptop 8 GB under WSL2, one model resident on a clean card,
+nothing else in flight. Probes: unique prompts (so nothing is served from the prefix cache),
+`max_tokens = 1` for prompt reading, four 128-token chats at once for concurrency.
+
+| # | Item | Status |
+|---|---|---|
+| 121 | **A graphics-card node refuses a second long prompt it has room for.** llama-3.1-8b serves a 1,835-token prompt, then refuses the next one of the same size — "0 MB of conversation memory in use, 683 MB available" against a 1,336 MB budget — in 4 of 4 arms, with the prefix cache ON and OFF alike. Same shape on llama-3.2-3b (4,035 tokens, third request), qwen2.5-coder-7b (4,029, second — right after the loader logged that the budget "comfortably covers" 9,405 tokens), phi-3.5-mini (2,011) and qwen3-1.7b (3,619) | OPEN — mechanism traced, not yet toggled. cudarc 0.19.9 frees every `CudaSlice` with `cuMemFreeAsync` when the device supports memory pools (`driver/safe/core.rs`, `Drop for CudaSlice`, gated on `has_async_alloc`), and freed pool memory goes back to the device — the only point at which `cuMemGetInfo` counts it as free — at the next stream, event or context SYNCHRONIZE (release threshold 0; nothing here or in the vendored candle changes it). `kv_budget::device_free_and_total_bytes`, the one CUDA free-memory reading behind both admission (`model_worker::ensure_room_for_prompt`) and the executor's per-chunk growth guard, calls `mem_get_info()` with no sync. So memory the previous request released, or a prefix snapshot evicted a moment earlier, still reads as used, and the reconciled budget drops by exactly that much: 8B 1,336 → 683 MB (≈ the first request's 2,560-position cache); phi-3.5 2,197 → 780 (= minus the 1,417 MB just evicted, 674 µs earlier); qwen3 2,899 → 1,410 a full 1.4 s later (≈ 796 evicted + 598 released). `budget_reconciled_with_device`'s doc assumes an eviction "moves x from cached to free_now" — true only once something has synchronized. NVIDIA says as much for `cudaMemGetInfo` after `cudaFreeAsync` ("Using the CUDA Stream-Ordered Memory Allocator, Part 2"). **Fix to try:** synchronize the device's stream inside `device_free_and_total_bytes` before reading (every caller is already off the per-token path), behind an in-binary switch for the A/B; or add the pool's reserved-but-unused bytes (`CU_MEMPOOL_ATTR_RESERVED_MEM_CURRENT − USED_MEM_CURRENT`) to the free figure, which needs no sync. **Verify** with the same two-prompt probe on the 8B under `--features cuda` (#683): the second prompt must be served and the `KV admission` line must read `budget_mb` ≈ 1,336; toggle the switch off and watch it refuse again. Impact: a node on its own answers 503; with peers the refusal is `LocalMemoryUnavailable` and re-plans, so the request goes to a slower machine instead | Every graphics-card node, on the long prompt after another one |
+| 122 | **Four short chats at once: the fourth is refused, not queued.** llama-3.1-8b on 8 GB, four 45-token chats with `max_tokens` 128: one 503, "Not enough free memory on this node for a 45-token prompt (1152 MB of conversation memory in use … short by 199 MB). Shorter conversations still work…"; phi-3.5-mini the same at 3 × 768 MB | OPEN — the arithmetic is the design; two halves of the behaviour are questionable. Each admitted request claims `kv_cache_reservation(prompt) + REPLY_RESERVE_POSITIONS`, at least 512 + 512 = 1,024 positions (`model_worker::ensure_room_for_prompt`), of the f32 cache (f32 by decision, `docs/invariants/inference.md`): 384 MB per chat on the 8B, 768 MB on phi-3.5 (full multi-head attention). That caps an 8 GB card at three chats of any length. (a) The refusal is immediate while the memory is held by requests that finish in seconds; vLLM's admission queues in that case, and a lone node here answers 503 (with peers it re-plans). (b) The message advises a 45-token prompt that "shorter conversations still work", which cannot help when the cause is other live requests — one message for two causes, the #309 shape. To decide: wait briefly behind live requests before refusing; size the reply reserve from `max_tokens` when the client sent one; word the concurrent case on its own | Anyone running an agent or several chats against one graphics-card node |
+
 ### 2026-09-25 — four field reports from one tester's node (v0.3.205-alpha)
 
 | # | Item | Status |
@@ -15818,4 +15830,27 @@ cores llama-server uses. (2) At equal threads the kernels trail by ~1.2x (4 thre
 order of what they are worth:** the owner's own requests and the thread cap (a product
 decision — the cap exists because one request once took every core of a Minimal node);
 then long-context CPU attention (it runs at ~12% of f32 peak); matmuls last.
+
+**Re-measured 2026-09-26 afternoon, `main` at `2a3a1da4` (both changes above in), 8 threads
+= physical cores, quiet box, ours and llama.cpp interleaved, min of 2.** The 16-thread arm was
+dropped: llama.cpp's decode fell to 262 ms/token there (55 at 8 threads) — its threads
+busy-wait, so at threads = logical cores any other process stalls it — and ours read ~20%
+under the morning's figures, so neither was a measurement.
+
+| llama-3.2-3b Q4_K_M, 8 threads | ours | llama.cpp | gap |
+|---|---|---|---|
+| read 512 tokens | 62.1 tok/s | 62.2 | 1.00x |
+| read 2,048 tokens | 45.9 | 58.7 | 1.28x |
+| decode at ~528 cached | 65.1 ms/token | 54.9 | 1.19x |
+| decode at ~2,064 cached | 84.2 ms/token | 62.2 | 1.35x |
+| tinyllama-1.1b: read 512 / decode | 151.5 tok/s / 20.9 ms | 161.4 / 19.1 | 1.07x / 1.09x |
+| qwen2.5-coder-7b: read 512 / decode | 27.9 tok/s / 125.1 ms | 29.3 / 111.4 | 1.05x / 1.12x |
+
+**New for #119: decode slows with context ~2.5x faster than llama.cpp's** — +19 ms per token
+from ~528 to ~2,064 cached positions against llama.cpp's +7.3. The short-context gap is small
+on every model (1.07-1.19x), so single-position attention over the cache
+(`decode_attn::gqa_decode_attention_cpu`) is the first suspect, not the matmuls; profile a
+decode step at 2K and 6K context with `SWARMLLM_PROFILE=1` before changing anything. ⚠ A first
+2,048-token run overlapped a filesystem-wide search and read 110.8 ms/token; the quiet re-run's
+two pairs agreed within 1% — take a context-scaling reading only on an idle box.
 
