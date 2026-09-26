@@ -1667,7 +1667,16 @@ async fn handle_forward(
                 fwd.index_pos as usize,
                 positions,
             )?;
-            ensure_room_for_prompt(model, kv_store, prefix_cache, &req_id_str, positions)?;
+            // A segment never sees the reply's budget, so it reserves the
+            // whole quantum it always did.
+            ensure_room_for_prompt(
+                model,
+                kv_store,
+                prefix_cache,
+                &req_id_str,
+                positions,
+                REPLY_RESERVE_POSITIONS,
+            )?;
         }
     }
 
@@ -2401,7 +2410,33 @@ fn ngram_spec_round(
 
 /// KV positions reserved for the reply when a prompt is admitted and when its
 /// snapshot is sized: one growth quantum, the least a decode needs to claim.
+/// The most a reply is reserved, and all of it when the reply's length is not
+/// known — a segment's prompt pass, which never sees `max_tokens`.
 const REPLY_RESERVE_POSITIONS: usize = crate::inference::layers::KV_CACHE_GROWTH_TOKENS;
+
+/// Positions a speculative round may write past the reply before it is
+/// truncated back: n-gram drafts (`--ngram-pred-tokens`, 10 by default) and
+/// SWIFT's gamma (4). A draft longer than this still works — the cache grows
+/// by the executor's guard, charged then — it is only not pre-reserved.
+const DRAFT_MARGIN_POSITIONS: usize = 32;
+
+/// The reply reserve for a request whose granted budget is `max_new_tokens`
+/// (`resolve_max_new_tokens`, already assigned back): what the reply can
+/// actually occupy, never more than [`REPLY_RESERVE_POSITIONS`].
+///
+/// A reply cannot outgrow its budget, so a quantum reserved for a 128-token
+/// answer was 384 positions nothing could ever write. It is not free: the
+/// reservation is each layer's FIRST allocation, so it is held from the first
+/// token. Measured 2026-09-26 on llama-3.1-8b on an 8 GB card: every short
+/// chat claimed 1,024 positions (384 MB with its f16 mirror), three of them
+/// took 1,152 of a 1,336 MB conversation budget, and a fourth 45-token chat
+/// was refused (`docs/FUTURE_WORK.md` #122). Sized from the budget, a
+/// twenty-token chat asking for 128 tokens reserves one quantum instead of two.
+fn reply_reserve_positions(max_new_tokens: u32) -> usize {
+    (max_new_tokens as usize)
+        .saturating_add(DRAFT_MARGIN_POSITIONS)
+        .min(REPLY_RESERVE_POSITIONS)
+}
 
 /// `SWARMLLM_KV_PREFIX_CHARGE=0` turns off the whole-prompt admission below,
 /// so the two arms can be compared inside ONE binary. Read once.
@@ -2554,19 +2589,28 @@ fn refuse_a_prompt_past_the_served_context(
     Ok(())
 }
 
+/// `reply_positions` is the reply's reserve — [`reply_reserve_positions`] of
+/// the granted budget where the worker knows it, [`REPLY_RESERVE_POSITIONS`]
+/// where it cannot (a segment's prompt pass). A required argument, so no
+/// entry point can fall back to the fixed quantum by omission.
 fn ensure_room_for_prompt(
     model: &SplitModel,
     kv_store: &KvCacheStore,
     prefix_cache: &PrefixCache,
     request_id: &str,
     prompt_tokens: usize,
+    reply_positions: usize,
 ) -> Result<(), SwarmError> {
-    // The prompt plus one growth quantum for the reply, so an admitted
-    // request can at least begin decoding without meeting the per-chunk
-    // guard at its first quantum boundary. A very long reply may still meet
-    // it later, which is the lazy charge that guard exists for.
-    let positions =
-        crate::inference::layers::kv_cache_reservation(prompt_tokens) + REPLY_RESERVE_POSITIONS;
+    // The prompt plus the reply's reserve, rounded to whole quanta, so an
+    // admitted request can decode its whole reply (or its first quantum, for
+    // a long one) without meeting the per-chunk guard. A reply longer than a
+    // quantum may still meet it later, which is the lazy charge that guard
+    // exists for. With the full quantum as the reserve this is exactly the
+    // figure it always was: rounding `p + 512` up equals rounding `p` up,
+    // plus 512.
+    let positions = crate::inference::layers::kv_cache_reservation(
+        prompt_tokens.saturating_add(reply_positions),
+    );
     // This is where the prompt's length is first known, so this is where its
     // caches learn how big to be born: every layer's first allocation covers
     // these positions, instead of being grown into a quantum at a time with
@@ -2679,15 +2723,121 @@ fn ensure_room_for_prompt(
     // identical to the peer-side refusal — see the variant's own doc — so the
     // class travels on `WorkerMsg::Error::local_memory_refusal` rather than in
     // the text.
-    Err(SwarmError::LocalMemoryUnavailable(format!(
-        "Not enough free memory on this node for a {prompt_tokens}-token prompt ({} MB of \
-         conversation memory in use, {} MB available for conversations once this model's \
-         weights are accounted for, short by {} MB). Shorter conversations still work; free \
-         memory on this node (close other programs, or raise its memory budget) to raise this.",
+    Err(SwarmError::LocalMemoryUnavailable(prompt_refusal_message(
+        prompt_tokens,
         mb(live),
         mb(budget),
         mb(short_by),
+        other_conversations_hold_the_room(live, budget, positions as u64 * per_token),
     )))
+}
+
+/// Is this refusal only because OTHER requests hold the memory — would the
+/// prompt fit if the conversations already live had finished?
+///
+/// Two situations share one refusal and need opposite advice (the #309
+/// shape): a prompt too long for this card is helped by a shorter one, while
+/// a short prompt that met three live chats is helped by nothing but waiting.
+/// Told "shorter conversations still work", the second reader shortens a
+/// 45-token prompt and is refused again (`docs/FUTURE_WORK.md` #122).
+fn other_conversations_hold_the_room(live: u64, budget: u64, needed: u64) -> bool {
+    live > 0 && needed <= budget
+}
+
+#[cfg(test)]
+mod reply_reserve_tests {
+    use super::*;
+    use crate::inference::layers::kv_cache_reservation;
+
+    /// What admission charges and every layer's first allocation covers.
+    fn admitted_positions(prompt: usize, max_new_tokens: u32) -> usize {
+        kv_cache_reservation(prompt + reply_reserve_positions(max_new_tokens))
+    }
+
+    /// #122's case: a 45-token chat asking for 128 tokens held two quanta,
+    /// 384 of them unreachable. It holds one now — half the memory, so an
+    /// 8 GB card with an 8B takes six such chats instead of three.
+    #[test]
+    fn a_short_chat_reserves_what_its_reply_can_reach() {
+        assert_eq!(admitted_positions(45, 128), 512);
+        assert_eq!(admitted_positions(20, 1), 512);
+    }
+
+    /// With a budget of a quantum or more the reserve is the quantum it always
+    /// was, so a long reply is admitted exactly as before — `round_up(p +
+    /// 512) == round_up(p) + 512` for every prompt length.
+    #[test]
+    fn a_long_reply_is_reserved_exactly_as_before() {
+        for prompt in [1, 45, 511, 512, 513, 1835, 4035] {
+            for budget in [480u32, 512, 4096, u32::MAX] {
+                assert_eq!(
+                    admitted_positions(prompt, budget),
+                    kv_cache_reservation(prompt) + REPLY_RESERVE_POSITIONS,
+                    "prompt {prompt}, budget {budget}"
+                );
+            }
+        }
+    }
+
+    /// A reply ending just short of a quantum boundary keeps room for a
+    /// speculative draft past it, rather than growing the cache mid-reply.
+    #[test]
+    fn the_reserve_leaves_room_for_a_speculative_draft() {
+        assert_eq!(reply_reserve_positions(100), 100 + DRAFT_MARGIN_POSITIONS);
+        assert_eq!(admitted_positions(400, 100), 1024);
+    }
+
+    /// Opposite advice for opposite causes. A prompt that fits the budget on
+    /// its own, refused because other chats are live, must never be told to
+    /// shorten itself; a prompt that does not fit even an empty cache must.
+    #[test]
+    fn a_refusal_names_the_cause_it_can_do_something_about() {
+        assert!(other_conversations_hold_the_room(1152, 1336, 192));
+        assert!(!other_conversations_hold_the_room(0, 683, 1000));
+        assert!(!other_conversations_hold_the_room(500, 1336, 2000));
+
+        let busy = prompt_refusal_message(45, 1152, 1336, 8, true);
+        assert!(busy.starts_with("Not enough free memory on this node for a 45-token prompt"));
+        assert!(busy.contains("try again in a moment"), "{busy}");
+        assert!(!busy.contains("Shorter conversations still work"), "{busy}");
+
+        let too_long = prompt_refusal_message(4035, 0, 1336, 400, false);
+        assert!(too_long.starts_with("Not enough free memory on this node for a 4035-token prompt"));
+        assert!(
+            too_long.contains("Shorter conversations still work"),
+            "{too_long}"
+        );
+    }
+}
+
+/// The words of a whole-prompt refusal, chosen by its cause. The opening —
+/// "Not enough free memory on this node for a N-token prompt" — is the same
+/// either way: it is how this refusal has always read in logs and on the
+/// wire, and the class travels as a flag, not in the text.
+fn prompt_refusal_message(
+    prompt_tokens: usize,
+    live_mb: u64,
+    budget_mb: u64,
+    short_by_mb: u64,
+    busy: bool,
+) -> String {
+    if busy {
+        format!(
+            "Not enough free memory on this node for a {prompt_tokens}-token prompt right now: \
+             other conversations on this node are using {live_mb} MB of the {budget_mb} MB \
+             available for conversations once this model's weights are accounted for, short by \
+             {short_by_mb} MB. It fits once they finish, so try again in a moment; a shorter \
+             prompt will not help."
+        )
+    } else {
+        format!(
+            "Not enough free memory on this node for a {prompt_tokens}-token prompt ({live_mb} MB \
+             of conversation memory in use, {budget_mb} MB available for conversations once this \
+             model's weights are accounted for, short by {short_by_mb} MB). Shorter conversations \
+             still work; free memory on this node (close other programs, or raise its memory \
+             budget) to raise this."
+        )
+    }
 }
 
 /// Handle a Generate IPC message — run a full tokenize+decode loop.
@@ -2760,7 +2910,14 @@ async fn handle_generate(
     // forward the suffix. Try local first (free); on miss, probe cross-node
     // (Item 8 Phase 2b).
     let matched = prefix_cache.lookup(&model_key_string, &prompt_ids);
-    ensure_room_for_prompt(model, kv_store, prefix_cache, &req_id_str, prompt_ids.len())?;
+    ensure_room_for_prompt(
+        model,
+        kv_store,
+        prefix_cache,
+        &req_id_str,
+        prompt_ids.len(),
+        reply_reserve_positions(gen.sampling.max_tokens),
+    )?;
     let mut prefix_len = match matched.as_ref() {
         Some(snap) => prefix_cache
             .hydrate_request_from_snapshot(kv_store, &model_key_string, &req_id_str, snap)
@@ -3589,8 +3746,15 @@ async fn try_register_generate_slot(
     // Prefix-cache lookup + per-request KV hydration if we hit. Cheap clone of
     // K/V tensors — no compute.
     let matched = prefix_cache.lookup(&model_key_string, &prompt_ids);
-    ensure_room_for_prompt(model, kv_store, prefix_cache, &req_id_str, prompt_ids.len())
-        .map_err(SlotAdmitError::Fatal)?;
+    ensure_room_for_prompt(
+        model,
+        kv_store,
+        prefix_cache,
+        &req_id_str,
+        prompt_ids.len(),
+        reply_reserve_positions(gen.sampling.max_tokens),
+    )
+    .map_err(SlotAdmitError::Fatal)?;
     let mut prefix_len = match matched.as_ref() {
         Some(snap) => prefix_cache
             .hydrate_request_from_snapshot(kv_store, &model_key_string, &req_id_str, snap)

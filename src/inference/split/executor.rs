@@ -569,6 +569,18 @@ impl SplitModel {
                     kv_cache_store.claim_room(budget, self.kv_bytes_per_token, claiming)
                 {
                     let in_use = refused.in_use_bytes;
+                    // Whether OTHER conversations hold the room this one needs
+                    // — read before `clear_request` below takes this request's
+                    // own entry away. The two causes need opposite advice
+                    // (`docs/FUTURE_WORK.md` #122): an over-long conversation
+                    // is helped by a shorter one, one that met other live
+                    // chats only by waiting.
+                    let own = (kv_cache_store.allocated_positions(&cache_key) as u64)
+                        .saturating_mul(self.kv_bytes_per_token);
+                    let others = refused.live_bytes.saturating_sub(own);
+                    let wanted = own
+                        .saturating_add((claiming as u64).saturating_mul(self.kv_bytes_per_token));
+                    let busy = others > 0 && wanted <= budget;
                     // Decomposed, because the total is store-wide and reads as
                     // if it were this request's. `entries > 1` says outright
                     // that it is not — the absence of that is what left ~1 GB
@@ -608,14 +620,26 @@ impl SplitModel {
                     // whole model again; a request that has already streamed is
                     // excluded by `should_retry_after`, so a refusal mid-reply
                     // still ends the reply rather than restarting it.
-                    return Err(SwarmError::LocalMemoryUnavailable(format!(
-                        "Not enough free memory on this node to continue this conversation \
-                         ({} MB of KV cache already in use, budget {} MB). Shorter \
-                         conversations still work; free memory on this node (close other \
-                         programs, or raise its memory budget) to raise this.",
-                        in_use / (1024 * 1024),
-                        budget / (1024 * 1024),
-                    )));
+                    let mb = |b: u64| b / (1024 * 1024);
+                    return Err(SwarmError::LocalMemoryUnavailable(if busy {
+                        format!(
+                            "Not enough free memory on this node to continue this conversation \
+                             right now: other conversations on this node are using {} MB of the \
+                             {} MB budget. It fits once they finish, so try again in a moment; a \
+                             shorter conversation will not help.",
+                            mb(others),
+                            mb(budget),
+                        )
+                    } else {
+                        format!(
+                            "Not enough free memory on this node to continue this conversation \
+                             ({} MB of KV cache already in use, budget {} MB). Shorter \
+                             conversations still work; free memory on this node (close other \
+                             programs, or raise its memory budget) to raise this.",
+                            mb(in_use),
+                            mb(budget),
+                        )
+                    }));
                 }
             }
         }

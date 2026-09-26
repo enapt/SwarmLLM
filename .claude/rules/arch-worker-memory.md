@@ -169,6 +169,27 @@ Sends run concurrently, so the fan-out costs one timeout, not one per worker.
 
 → `docs/invariants/memory.md`
 
+## A card's free memory is read after a synchronize (2026-09-26)
+
+**`kv_budget::device_free_and_total_bytes` synchronizes the device's stream
+before `mem_get_info`.** cudarc frees through the card's memory pool
+(`cuMemFreeAsync`), and the pool hands memory back to the device only at a
+synchronize, so an unsynchronized reading counts what the previous request just
+released as still in use — the next long prompt was refused against half its
+budget, every time, on the released v0.3.207 (#121). Every budget decision
+reaches the card through `SplitModel::kv_budget_now` → this one function; a new
+reading of device memory goes through it too. Guard:
+`the_cards_free_memory_is_read_after_a_synchronize`; A/B:
+`SWARMLLM_KV_DEVICE_SYNC=0`.
+
+**A reply is reserved by what it can reach** — `reply_reserve_positions(max_tokens)`,
+a REQUIRED argument of `ensure_room_for_prompt`; a segment's prompt pass, which
+never sees the budget, passes the full `REPLY_RESERVE_POSITIONS`. And a refusal
+caused by OTHER live conversations says to wait, never to shorten the prompt
+(`other_conversations_hold_the_room`, both refusal sites) (#122).
+
+→ `docs/invariants/memory.md` § "A card's free memory is read after a synchronize"
+
 ## Single-source-of-truth helpers — Worker memory: graphics, RAM and the KV cache
 
 Each names the ONE place a decision is made. A second implementation of any of

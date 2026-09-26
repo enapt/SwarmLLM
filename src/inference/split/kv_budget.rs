@@ -150,6 +150,14 @@ pub(crate) fn device_free_margin_bytes(total_bytes: u64) -> u64 {
 /// which is what lets [`admit_prompt`]'s evict-then-fit arithmetic hold
 /// against it exactly as it does against the load-time budget.
 ///
+/// ⚠ **On a card that holds only once the release has LANDED**, which is why
+/// [`device_free_and_total_bytes`] synchronizes before it reads. cudarc frees
+/// through the device's memory pool, and the pool hands memory back to the
+/// device only at a synchronize (`docs/FUTURE_WORK.md` #121): without one, the
+/// bytes left `cached` (or a finished request's live cache) and never reached
+/// `free_now`, and the next prompt was judged against a budget short by exactly
+/// what the last one released.
+///
 /// Never larger than the budget: the device having room does not license the
 /// cache to take more than the loader set aside for it.
 ///
@@ -189,11 +197,34 @@ pub(crate) fn budget_reconciled_with_device(
 /// budget was the load-time prediction for ever, which is precisely the
 /// failure `budget_reconciled_with_device` exists to prevent — see its own
 /// doc, and gotcha #462.
+///
+/// **The CUDA arm synchronizes the device's stream before it reads**
+/// (`docs/FUTURE_WORK.md` #121). cudarc frees every buffer with
+/// `cuMemFreeAsync` when the card supports memory pools, and a pool returns
+/// what was freed to the device — the only memory `cuMemGetInfo` counts as
+/// free — at the next stream, event or context synchronize: the pool's release
+/// threshold defaults to zero and nothing here raises it (CUDA Runtime API,
+/// "Stream Ordered Memory Allocator", `cudaMemPoolAttrReleaseThreshold`).
+/// Unsynchronized, the reading still counted as used the cache the previous
+/// request had just dropped and the prefix snapshots admission had just
+/// evicted. Measured on the released v0.3.207, llama-3.1-8b on an 8 GB card
+/// with nothing else in flight: a 1,835-token prompt served, and the next of
+/// the same size refused against 683 of the real 1,336 MB, four runs of four,
+/// the prefix cache on or off. Every caller is already off the per-token path
+/// (`ensure_room_for_prompt`, `snapshot_positions_that_fit`, the executor's
+/// guard on a growth boundary), so the wait is for work the next step would
+/// queue behind anyway. `SWARMLLM_KV_DEVICE_SYNC=0` reads without it, for the
+/// A/B inside one binary.
 pub(crate) fn device_free_and_total_bytes(device: &candle_core::Device) -> Option<(u64, u64)> {
     #[cfg(feature = "candle-cuda")]
     if let candle_core::Device::Cuda(dev) = device {
-        return dev
-            .cuda_stream()
+        let stream = dev.cuda_stream();
+        if device_read_synchronizes() {
+            // A failed synchronize leaves the reading as it was before this
+            // existed — conservative, never larger than the truth.
+            let _ = stream.synchronize();
+        }
+        return stream
             .context()
             .mem_get_info()
             .ok()
@@ -234,6 +265,24 @@ fn processor_reconciliation_enabled() -> bool {
 /// caches in a `OnceLock` and so cannot be exercised twice in one process.
 fn reconciliation_enabled_for(v: Option<&str>) -> bool {
     !matches!(v, Some("0") | Some("off"))
+}
+
+/// `SWARMLLM_KV_DEVICE_SYNC=0` → the card is read without synchronizing
+/// first, the behaviour before `docs/FUTURE_WORK.md` #121. The A/B switch for
+/// that fix, read once; on by default.
+#[cfg(feature = "candle-cuda")]
+fn device_read_synchronizes() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        device_sync_enabled_for(std::env::var("SWARMLLM_KV_DEVICE_SYNC").ok().as_deref())
+    })
+}
+
+/// The switch's reading of the variable, apart from its `OnceLock` so a test
+/// can ask it twice. Only the CUDA arm consults it.
+#[cfg(any(test, feature = "candle-cuda"))]
+fn device_sync_enabled_for(v: Option<&str>) -> bool {
+    !matches!(v, Some("0") | Some("off") | Some("false"))
 }
 
 /// How long a system-memory reading is reused before it is taken again.
@@ -850,6 +899,18 @@ mod tests {
         assert!(reconciliation_enabled_for(Some("1")));
         assert!(!reconciliation_enabled_for(Some("0")));
         assert!(!reconciliation_enabled_for(Some("off")));
+    }
+
+    /// #121's switch: the card is synchronized before its free memory is read
+    /// unless the A/B arm turns that off. Unset means ON — the fix is the
+    /// default, and a variable nobody sets must not undo it.
+    #[test]
+    fn the_card_is_synchronized_before_it_is_read_unless_switched_off() {
+        assert!(device_sync_enabled_for(None), "unset means on");
+        assert!(device_sync_enabled_for(Some("1")));
+        assert!(!device_sync_enabled_for(Some("0")));
+        assert!(!device_sync_enabled_for(Some("off")));
+        assert!(!device_sync_enabled_for(Some("false")));
     }
 
     /// Gotcha #462: the processor had no live reading, so a CPU worker's KV

@@ -725,6 +725,78 @@ invariant under evicting a cached prompt (bytes move from `cached` to
 valid against it. A device that cannot say (the processor) leaves the
 load-time figure alone; `None` still means unknown, never zero.
 
+## A card's free memory is read after a synchronize
+
+(2026-09-26, `docs/FUTURE_WORK.md` #121.) `kv_budget::device_free_and_total_bytes`
+synchronizes the device's stream before `mem_get_info`, and it is the only
+reading of device memory behind a budget decision (`SplitModel::kv_budget_now`
+→ admission, snapshot sizing, the executor's growth guard).
+
+**What it replaced.** The reconciliation above says an eviction "moves x from
+`cached` to `free_now`". On a card that was never true at the moment it was
+read. cudarc 0.19.9 frees every `CudaSlice` with `cuMemFreeAsync` when the
+device supports memory pools (`Drop for CudaSlice`, gated on `has_async_alloc`),
+and a pool returns freed memory to the device — the only memory `cuMemGetInfo`
+counts as free — at the next stream, event or context synchronize: its release
+threshold defaults to zero and nothing in this repo or the vendored candle
+raises it (CUDA Runtime API § Stream Ordered Memory Allocator,
+`cudaMemPoolAttrReleaseThreshold`). So the reading after an eviction, or after
+the previous request's cache was dropped, still counted those bytes as used.
+
+**Measured** on the released v0.3.207, isolated node, RTX 3070 Laptop 8 GB, one
+model, nothing else in flight. llama-3.1-8b: a 1,835-token prompt served, the
+next of the same size refused — "0 MB in use, 683 MB available" against a
+1,336 MB budget — four runs of four, with the prefix cache ON and OFF alike, so
+the cache was not the cause: the first request's own released cache was enough.
+The same shape on llama-3.2-3b, qwen2.5-coder-7b (right after the loader logged
+that the budget "comfortably covers" 9,405 tokens), phi-3.5-mini and
+qwen3-1.7b. The budget dropped by exactly what had just been released: phi
+2,197 → 780 MB (the 1,417 MB evicted 674 µs earlier); qwen3 2,899 → 1,410 MB a
+full 1.4 s later, so this is not a race to be waited out.
+
+**Verified**, A/B/A/B inside the new `--features cuda` build with
+`SWARMLLM_KV_DEVICE_SYNC=0` as the control, confirmed in the worker's own
+environment: with the synchronize, three 1,835-token prompts on the 8B all
+served, zero refusals, twice; without it the second was refused against
+661 MB, twice. qwen2.5-coder-7b's three 4,029-token prompts and phi-3.5's
+three 2,011-token prompts, each refused on v0.3.207, all served.
+
+**What a change here must keep.** The synchronize stays inside the one reading,
+not at its callers — every caller would otherwise have to remember it, and a
+new one would not (`.claude/rules/architecture.md` § "One invariant, N paths").
+It costs a wait for queued work, so the reading stays off the per-token path:
+admission, snapshot sizing and the guard on a growth boundary only. The
+loader's figure at load (`query_gpu_vram_free_mb`, before the model's weights
+exist) has nothing of ours to miss and is left alone. Guard:
+`the_cards_free_memory_is_read_after_a_synchronize`, with the unsynchronized
+source planted in `the_free_memory_sync_guard_catches_an_unsynchronized_read`
+— the arm is CUDA-gated, so no default build or test compiles it.
+
+### A reply is reserved by what it can reach (#122)
+
+`ensure_room_for_prompt` takes the reply's reserve as a REQUIRED argument:
+`reply_reserve_positions(max_tokens)` — the granted budget plus a 32-position
+speculative-draft margin, never more than one quantum — from both chat entry
+points; the full `REPLY_RESERVE_POSITIONS` from a segment's prompt pass, which
+never sees the budget. With the quantum as the reserve the figure is exactly the
+old one (`round_up(p + 512) == round_up(p) + 512`), so only a reply budgeted
+under a quantum changes. Before, every short chat held two quanta: on the 8B,
+f32 cache plus its f16 mirror, 384 MB a chat, and a fourth 45-token chat was
+refused against 1,152 of 1,336 MB. After, four chats at once served on the 8B
+and on phi-3.5 (768 MB a chat before, full multi-head attention). The item
+above this one — "a twenty-token prompt reserves two quanta … ~4 MB per
+request" on a 3B — was wrong by ~30x (a quantum there is ~117 MB f32); the
+reserve is now one quantum for such a chat.
+
+**Advice follows the cause.** A refusal where the prompt would fit an empty cache
+but other live conversations hold the room (`other_conversations_hold_the_room`,
+and the executor's matching check) says it fits once they finish; only a prompt
+too long for the card is told a shorter one will work. Still open: WAITING
+behind live requests instead of refusing. Batched admission runs inside the
+worker's one message loop, so a wait there would stall every other chat's
+decode; it needs a deferred-admission queue, and in a swarm it trades against
+the re-plan to a peer that the refusal already buys.
+
 ## `inference::split::kv_budget`
 
 (2026-08-08) — the KV memory budget and the
@@ -820,7 +892,10 @@ the same: allocate once, write in place, never `cat`.
   `REPLY_RESERVE_POSITIONS` since gotcha #440; the memory is now actually held
   from the first token rather than claimed at the first quantum boundary, so a
   twenty-token prompt reserves two quanta where it held one. On a 3B that is
-  ~4 MB per request; it is memory the budget already counted.
+  ~117 MB per request (one 512-position f32 quantum; this line first said
+  ~4 MB, wrong by ~30x), and on an 8 GB card it capped an 8B at three chats —
+  so since 2026-09-26 a reply budgeted under a quantum reserves only what it
+  can reach (§ "A reply is reserved by what it can reach", #122).
 - **Not reproduced here.** The card is 8 GB with ~3.6 GB in use, so admission
   refuses the prompt lengths that reach the failure; the mechanism is
   established by reading, arithmetic and the growth counter, not by observing

@@ -1608,8 +1608,15 @@ Two things that will otherwise be misread:
   `SWARMLLM_DECODE_ATTN=standard`, `SWARMLLM_FORCE_STANDARD_ATTN`,
   `SWARMLLM_DECODE_THREADS=0`, `SWARMLLM_VRAM_SWAP_MIN_IDLE_SECS`,
   `SWARMLLM_KV_RESERVE=0` (grow the KV cache into a prompt a quantum at a time,
-  as before 2026-09-12, instead of reserving its admitted length). Comparing two
-  builds compares two builds.
+  as before 2026-09-12, instead of reserving its admitted length),
+  `SWARMLLM_KV_DEVICE_SYNC=0` (read the card's free memory without synchronizing
+  first, as before 2026-09-26 — the second long prompt is then refused, #121).
+  Comparing two builds compares two builds.
+- **A switch reaches the WORKER only if the worker inherits it** — prove it from
+  `/proc/<worker pid>/environ`, not from the command you typed (gotcha #616).
+  And `SWARMLLM_<SECTION>_<KEY>` is not a generic config override: only nine
+  settings read the environment; switch anything else in the node's
+  `config.toml` and read the worker's command line back (gotcha #722).
 - **A one-shot benchmark cannot see a cost that only appears across turns.** The
   GPU swap floor was defended on the grounds that eviction discards a model's
   warm prefix cache — true, and it still lost 3.65x once measured in

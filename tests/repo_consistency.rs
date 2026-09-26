@@ -11105,3 +11105,62 @@ fn the_layer_placement_guard_sees_both_loop_forms() {
     // A range test that is not a loop is not counted.
     assert!(loader_layer_loops("Some(idx) => (layer_start..layer_end).contains(&idx),").is_empty());
 }
+
+/// Does a free-memory reading synchronize the card before it asks how much is
+/// free? `None` when the text has no CUDA reading at all. Whitespace-blind, so
+/// a reformat cannot retire it.
+fn cuda_free_reading_synchronizes_first(body: &str) -> Option<bool> {
+    let flat: String = body.chars().filter(|c| !c.is_whitespace()).collect();
+    let read = flat.find(".mem_get_info()")?;
+    Some(flat[..read].contains(".synchronize()"))
+}
+
+/// `docs/FUTURE_WORK.md` #121: cudarc frees through the card's memory pool, and
+/// the pool returns what was freed only at a synchronize — so a reading taken
+/// without one counts the cache the last request just dropped as still in use,
+/// and the next long prompt is refused against half its real budget (measured
+/// on the released v0.3.207, 4 runs of 4). The reading is CUDA-gated: no
+/// default build, test or clippy run compiles it, so the order is pinned here.
+#[test]
+fn the_cards_free_memory_is_read_after_a_synchronize() {
+    let src = std::fs::read_to_string(repo_root().join("src/inference/split/kv_budget.rs"))
+        .expect("read kv_budget.rs");
+    let body = fn_body(&src, "pub(crate) fn device_free_and_total_bytes(")
+        .expect("device_free_and_total_bytes moved — move this guard with it");
+    assert_eq!(
+        cuda_free_reading_synchronizes_first(body),
+        Some(true),
+        "the CUDA arm of `device_free_and_total_bytes` must synchronize the \
+         device's stream BEFORE `mem_get_info()`, or memory a finished request \
+         freed still reads as used (FUTURE_WORK #121)"
+    );
+}
+
+/// The guard above, against the forms it exists to catch — planted.
+#[test]
+fn the_free_memory_sync_guard_catches_an_unsynchronized_read() {
+    // The pre-fix source, as rustfmt laid it out.
+    assert_eq!(
+        cuda_free_reading_synchronizes_first(
+            "return dev\n    .cuda_stream()\n    .context()\n    .mem_get_info()\n    .ok()"
+        ),
+        Some(false)
+    );
+    // A synchronize AFTER the reading is no help.
+    assert_eq!(
+        cuda_free_reading_synchronizes_first(
+            "let r = stream.context().mem_get_info(); let _ = stream.synchronize();"
+        ),
+        Some(false)
+    );
+    assert_eq!(
+        cuda_free_reading_synchronizes_first(
+            "let stream = dev.cuda_stream();\nlet _ = stream.synchronize();\nreturn stream\n    .context()\n    .mem_get_info()"
+        ),
+        Some(true)
+    );
+    assert_eq!(
+        cuda_free_reading_synchronizes_first("fn nothing_to_read() {}"),
+        None
+    );
+}
