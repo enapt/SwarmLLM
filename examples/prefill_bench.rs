@@ -16,6 +16,9 @@
 //! Set `SWARMLLM_PROFILE=1` for the per-stage breakdown, `SWARM_BENCH_PROMPT`
 //! for the prompt length in tokens (default 896) and `SWARM_BENCH_DECODE` for
 //! how many tokens to generate afterwards (default 32).
+//! `SWARM_BENCH_CHUNK=128` reads the prompt in chunks the way a node's prefill
+//! pacer does — compare a node against the bench with it set, since one
+//! forward over the whole prompt is a different attention shape.
 //!
 //! **Min of N, not mean** — see the note on `bench` in
 //! `src/inference/layers/mod.rs`. Every source of error here is additive, so
@@ -149,9 +152,22 @@ fn main() -> anyhow::Result<()> {
         let req = format!("bench-{rep}");
 
         let t = Instant::now();
-        let logits = model
-            .forward(&input, 0, &store, &req)
-            .map_err(|e| anyhow::anyhow!("prefill: {e}"))?;
+        // `SWARM_BENCH_CHUNK=N` reads the prompt N tokens at a time, the way a
+        // node's prefill pacer serves it (up to 128). One forward over the
+        // whole prompt is a different attention shape — every query against a
+        // growing cache is what a node pays — so compare a node to this with
+        // the chunk set.
+        let chunk = env_usize("SWARM_BENCH_CHUNK", prompt_tokens).max(1);
+        let mut logits = None;
+        for start in (0..prompt_tokens).step_by(chunk) {
+            let n = chunk.min(prompt_tokens - start);
+            let part = input.narrow(1, start, n)?;
+            logits = Some(
+                model
+                    .forward(&part, start, &store, &req)
+                    .map_err(|e| anyhow::anyhow!("prefill: {e}"))?,
+            );
+        }
         // CUDA work is enqueued, not executed, by the time `forward` returns.
         // Without this the timer measures how long it takes to SUBMIT the
         // forward pass — which on a first attempt reported 3977 tok/s of

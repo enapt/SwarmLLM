@@ -5,6 +5,10 @@
 //! ```bash
 //! cargo run --release --no-default-features --features dev --example attn_bench
 //! ```
+//!
+//! `SWARM_ATTN_KV=2048,5000` instead times a grouped prompt chunk at long context:
+//! each op, the whole matmul path against `prefill_attn`'s key-tiled kernel, and
+//! what filling a score-sized buffer costs (#119).
 use candle_core::{DType, Device, Tensor};
 
 fn bench<F: Fn() -> candle_core::Result<Tensor>>(label: &str, macs: f64, f: F) {
@@ -24,7 +28,138 @@ fn bench<F: Fn() -> candle_core::Result<Tensor>>(label: &str, macs: f64, f: F) {
     );
 }
 
+/// A prompt chunk as `grouped_gqa_attention` runs it at LONG context (#119):
+/// llama-3.2-3b's 8 KV groups of 3 query heads x 128 positions = 384 rows per
+/// group, against K/V that are a `narrow` of a larger reserved buffer, the way
+/// the KV cache hands them out. `SWARM_ATTN_KV=2048,5000` picks the cache
+/// lengths (both stay under the 16 Mi score budget, so one pass, no blocking).
+fn grouped_long_context(kv_lens: &str) {
+    let (groups, rows, d) = (8usize, 3 * 128usize, 128usize);
+    let dev = Device::Cpu;
+    println!(
+        "grouped prompt chunk: {groups} groups x {rows} rows, d={d}, threads={}\n",
+        rayon::current_num_threads()
+    );
+    for kv in kv_lens
+        .split(',')
+        .filter_map(|s| s.trim().parse::<usize>().ok())
+    {
+        let q = Tensor::randn(0f32, 1., (1, groups, rows, d), &dev).unwrap();
+        let kbuf = Tensor::randn(0f32, 1., (1, groups, kv + 512, d), &dev).unwrap();
+        let vbuf = Tensor::randn(0f32, 1., (1, groups, kv + 512, d), &dev).unwrap();
+        let k = kbuf.narrow(2, 0, kv).unwrap();
+        let v = vbuf.narrow(2, 0, kv).unwrap();
+        let macs = (groups * rows * kv * d) as f64;
+        println!("kv = {kv}  ({:.2} GMAC per matmul)", macs / 1e9);
+        let kt = k.t().unwrap();
+        bench("q @ k^T   (cache view, transposed)", macs, || q.matmul(&kt));
+        let kt_c = k.t().unwrap().contiguous().unwrap();
+        bench("q @ k^T   (contiguous k^T)", macs, || q.matmul(&kt_c));
+        let qt = q.t().unwrap().contiguous().unwrap();
+        let kc = k.contiguous().unwrap();
+        bench("k @ q^T   (scores transposed: M=kv, N=rows)", macs, || {
+            kc.matmul(&qt)
+        });
+        let scores = q.matmul(&kt).unwrap();
+        bench("softmax_last_dim(scores)", 0.0, || {
+            candle_nn::ops::softmax_last_dim(&scores)
+        });
+        let p = candle_nn::ops::softmax_last_dim(&scores).unwrap();
+        bench("p @ v     (cache view)", macs, || p.matmul(&v));
+        let vc = v.contiguous().unwrap();
+        bench("p @ v     (contiguous v)", macs, || p.matmul(&vc));
+        let a = Tensor::randn(0f32, 1., (groups * rows, d), &dev).unwrap();
+        let b = Tensor::randn(0f32, 1., (d, kv), &dev).unwrap();
+        bench("reference 2D gemm (same MACs as q @ k^T)", macs, || {
+            a.matmul(&b)
+        });
+        // The whole attention for this chunk, both ways: the matmul composition
+        // (scores → softmax → · V, the score matrix written out) against the
+        // key-tiled kernel that never writes it (#119). Causal mask as served:
+        // the chunk's own positions are the cache's last 128.
+        let q_len = rows / 3;
+        let past = kv - q_len;
+        let causal: Vec<f32> = (0..q_len)
+            .flat_map(|i| {
+                (0..kv).map(move |j| {
+                    if j <= past + i {
+                        0.0
+                    } else {
+                        f32::NEG_INFINITY
+                    }
+                })
+            })
+            .collect();
+        let mask = Tensor::from_vec(causal, (q_len, kv), &dev).unwrap();
+        let mask_g = mask
+            .broadcast_as((3, q_len, kv))
+            .unwrap()
+            .reshape((rows, kv))
+            .unwrap()
+            .contiguous()
+            .unwrap();
+        let scale = 1.0 / (d as f64).sqrt();
+        bench(
+            "WHOLE: matmul path (scores written out)",
+            2.0 * macs,
+            || {
+                let att = (q.matmul(&kt)? * scale)?.broadcast_add(&mask_g)?;
+                candle_nn::ops::softmax_last_dim(&att)?.matmul(&v)
+            },
+        );
+        let q_heads = q.reshape((1, groups * 3, q_len, d)).unwrap();
+        bench("WHOLE: key-tiled kernel (prefill_attn)", 2.0 * macs, || {
+            Ok(
+                swarmllm::inference::prefill_attn::gqa_prefill_attention_cpu(
+                    &q_heads,
+                    &k,
+                    &v,
+                    Some(&mask),
+                    scale as f32,
+                    None,
+                )?
+                .expect("in scope"),
+            )
+        });
+        // What a fresh score-sized buffer costs before any arithmetic: every
+        // op above allocates its output anew, and first touch of freshly mapped
+        // pages faults once per page.
+        let elems = groups * rows * kv;
+        let fill = |buf: &mut Vec<f32>| {
+            use rayon::prelude::*;
+            buf.par_chunks_mut(64 * 1024).for_each(|c| c.fill(1.0));
+        };
+        let t = std::time::Instant::now();
+        let mut fresh = vec![0f32; elems];
+        fill(&mut fresh);
+        let fresh_ms = t.elapsed().as_secs_f64() * 1e3;
+        let mut warm_best = f64::INFINITY;
+        for _ in 0..5 {
+            let t = std::time::Instant::now();
+            fill(&mut fresh);
+            warm_best = warm_best.min(t.elapsed().as_secs_f64() * 1e3);
+        }
+        let mut fresh_best = fresh_ms;
+        for _ in 0..4 {
+            drop(std::mem::take(&mut fresh));
+            let t = std::time::Instant::now();
+            fresh = vec![0f32; elems];
+            fill(&mut fresh);
+            fresh_best = fresh_best.min(t.elapsed().as_secs_f64() * 1e3);
+        }
+        println!(
+            "  fill a FRESH {:.0} MB buffer                    {fresh_best:>8.1} ms\n  fill the SAME buffer again                      {warm_best:>8.1} ms",
+            (elems * 4) as f64 / 1e6
+        );
+        println!();
+    }
+}
+
 fn main() {
+    if let Ok(kv) = std::env::var("SWARM_ATTN_KV") {
+        grouped_long_context(&kv);
+        return;
+    }
     // llama-3.2-3b prefill chunk: 24 heads, 128 queries, 896 KV, head_dim 128.
     let (h, q_len, kv, d) = (24usize, 128usize, 896usize, 128usize);
     let dev = Device::Cpu;

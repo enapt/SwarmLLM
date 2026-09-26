@@ -246,6 +246,21 @@ Test `a_blocked_gqa_call_is_grouped_not_expanded` counts expansions.
 
 → `docs/invariants/inference.md`
 
+## Several query positions on the processor never write the score matrix (2026-09-26)
+
+**`inference::prefill_attn::gqa_prefill_attention_cpu`** answers a CPU
+attention call with `q_len >= 2` before any matmul path: tiled over fixed
+1,024-key chunks per KV group (online softmax, flash-decoding merge), so a
+group's K/V are read once and the `[rows, kv_len]` matrix never leaves the
+cache — +17% on a 6K-token prompt (#119). The matmul paths are now
+**`layers::matmul_attention`**, reached when a kernel declines and always on a
+card; **a test of blocking, grouping or in-place V calls `matmul_attention`** —
+through `standard_attention` it would pass without reaching them. Chunk, tile
+and row-block sizes stay constants (result independent of thread count).
+A/B: `SWARMLLM_PREFILL_ATTN=standard`.
+
+→ `docs/invariants/inference.md` § "Several query positions on the processor"
+
 ## Local speculative decoding — `inference::model_worker::ngram_spec_eligible`
 
 The single answer to "may this request be speculated?", consulted by BOTH the
@@ -410,6 +425,7 @@ Full evidence: `docs/invariants/inference.md`
 
 - **Vendored `GgmlType::vec_dot_rows` + the row-blocked tiled matmul** — `vendor/candle/candle-core/src/quantized/{k_quants,avx}.rs`.
 - **`inference::decode_attn::gqa_decode_attention_cpu`** — single-position attention straight over the KV cache in its stored `[b, kvh, S, d]` layout. **Each K/V row is read ONCE per group, never once per query head** (the per-head version was #119's long-context slowdown); tasks are (batch, kv head, fixed 256-position chunk) merged by flash-decoding's reduction — the chunk is a constant so the result never depends on the thread count. → `docs/invariants/inference.md` § "It read the cache once per QUERY head".
+- **`inference::prefill_attn::gqa_prefill_attention_cpu`** — the same idea for `q_len >= 2`: key-tiled, the score matrix never written out; the matmul paths it replaces on the CPU live on as `layers::matmul_attention`.
 - **`inference::fast_math`** — eight-lane AVX2 `expf` (`exp_inplace`, Cephes polynomial, ~2 ulp vs libm, pinned by `vectorised_exp_tracks_libm` over [-80, 80]) and the fused `silu_mul` CustomOp2. A new elementwise pass that calls `f32::exp` in a loop routes through here instead.
 - **`inference::cpu_pools::in_phase_pool`** — binds a forward pass to the CPU thread pool that suits its phase, at ONE choke point: `SplitModel::forward_inner_impl` and `forward_batch`.
 - **`inference::layers::new_kv_cache`** — the only way to construct a KV cache.

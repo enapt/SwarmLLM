@@ -1847,3 +1847,69 @@ Test `a_blocked_gqa_call_is_grouped_not_expanded` asserts equality with the
 expanded unblocked pass (< 1e-5) AND that no expansion happened (a test-only
 `KV_EXPANSIONS` counter) — the values alone match either way, so the count is
 the part that fails without the fix.
+
+**Superseded on the processor the same day** by `prefill_attn` (next section):
+the grouped and blocked matmul paths now run only where that kernel declines,
+and their tests call `matmul_attention` directly so they keep testing them.
+
+## Several query positions on the processor: tiled over the keys, the score matrix never written (2026-09-26, #119)
+
+**What the matmul path cost.** `attention_scores_block` writes the whole
+`[rows, kv_len]` score matrix, the softmax reads and rewrites it, the second
+matmul reads it again. For a 128-token chunk of llama-3.2-3b (8 groups × 384
+rows) at 5,000 cached positions that matrix is 61 MB per layer, and filling
+61 MB once took ~6 ms on the 5800H — about 250 MB of traffic per layer per
+chunk for arithmetic that ran at ~20% of f32 peak. Op split (`examples/attn_bench.rs`,
+`SWARM_ATTN_KV=5000`, 8 threads): scores matmul 25 ms at 78 GMAC/s (a 2D gemm
+of the same shape: the same 75), softmax 22 ms, P·V 11 ms at 175 GMAC/s. At one
+thread the scores matmul ran at 21 GMAC/s against P·V's 41: the matrix with the
+huge OUTPUT was the slow one. Fresh-page faults were ruled out (a fresh 61 MB
+buffer filled in 6.3 ms, a reused one in 5.8).
+
+**Now**: `inference::prefill_attn::gqa_prefill_attention_cpu`, dispatched at the
+top of `standard_attention` beside the decode kernel for `q_len >= 2` on the CPU.
+FlashAttention's tiling as PyTorch's CPU kernel does it
+(`aten/src/ATen/native/cpu/FlashAttentionKernel.cpp`: a gemm per key tile, an
+online softmax with a running max and sum per row, a gemm accumulating P·V) —
+but split over fixed CHUNKS OF KEYS (1,024) per KV group, every query row of the
+group in one task, merged by flash-decoding's reduction. PyTorch splits over
+query blocks one head at a time; with grouped heads that would re-read a group's
+K and V once per block. Tile 128 keys (the score tile beside the output fits L2),
+row blocks of 512 (bounded buffers for a whole prompt in one forward). All three
+sizes are constants, so the result does not depend on the thread count. q is
+pre-scaled once; the mask is read where it lies (rank 2 or `[1,1,q,S]`, unit inner
+stride); anything else declines to `matmul_attention`. `gemm` 0.19 is a direct
+dependency for this — the same version vendored candle resolves — because the
+per-tile products must reuse their buffers.
+
+**Measured**, one binary, `SWARMLLM_PREFILL_ATTN=standard` as the control, live
+node stopped, `examples/prefill_bench` reading the prompt in 128-token chunks as
+a node does (`SWARM_BENCH_CHUNK=128`), 8 threads, arms interleaved, best of 2:
+
+| | matmul path | tiled kernel |
+|---|---|---|
+| llama-3.2-3b, 2,048-token prompt | 53.9 tok/s | 56.3 (+4%) |
+| llama-3.2-3b, 6,144-token prompt | 43.7 tok/s (140.5 s) | **51.1** (120.4 s, +17%) |
+| Qwen2.5-7B, 2,048-token prompt (1 round) | 25.2 | 27.0 (+7%) |
+
+Kernel alone against the unfused candle composition (`attn_bench`): 2.2x at 512
+cached positions, 2.7x at 2,048, 3.7x at 5,000. The end-to-end gain is smaller
+because production's softmax was already fused and the quantized matmuls around
+attention are most of a forward. llama.cpp read a 6,911-token prompt at 49.9 tok/s
+on these 8 threads (§ #119 in FUTURE_WORK).
+
+**Correctness.** `prefill_kernel_matches_the_matmul_path` (< 1e-5 abs) across one
+tile, several tiles, several chunks, masks hiding whole tiles, soft-cap, MHA,
+batch 2 and four row blocks; breaking the chunk merge's weight makes it fail
+(0.24 abs at 2,100 keys). On a real model, `examples/logits_reference_probe.rs`
+over 1,100 tokens (a 1,096-token prompt pass: seven row blocks, two chunks) scored
+against llama-cpp-python 0.3.16: median cosine 0.99975 on both arms, top-1
+agreement 969/1100 tiled vs 966/1100 matmul. Both arms show the SAME isolated
+outliers (position 619 at cosine −0.07 / −0.04, 652 at 0.73 / 0.67) — pre-existing,
+on the probe's synthetic token sequence, not from this change (FUTURE_WORK #124).
+
+**What a change must keep.** The chunk, tile and row-block sizes stay constants.
+Tests of the matmul paths (blocking exact, grouping never expands K/V, the value
+cache read in place) call `matmul_attention`, never `standard_attention` — on the
+processor the latter answers from this kernel first, and a test through it
+passes without reaching the code it names.

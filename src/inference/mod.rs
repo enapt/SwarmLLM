@@ -17,6 +17,7 @@ pub mod model_worker;
 pub mod ngram_lookup;
 pub mod pipeline;
 pub mod prefetch;
+pub mod prefill_attn;
 pub mod prefill_pacer;
 pub mod process_pool;
 pub(crate) mod prof;

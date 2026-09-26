@@ -1610,7 +1610,10 @@ pub(crate) fn standard_attention(
     //
     // `SWARMLLM_GROUPED_GQA_DECODE_ONLY=1` restores the old gate for A/B inside
     // one binary.
-    let n_rep = n_head / n_kv_head;
+    //
+    // (That grouping now lives in `matmul_attention`, which runs once the
+    // processor kernels below have declined — on a card, always.)
+    //
     // Single-position decode on the CPU: a purpose-built kernel over the cache
     // in its stored layout. The two batched matmuls below cost 1.3 ms per
     // layer at ~920 KV for ~11 MFLOP (26% of a decode step on llama-3.2-3b) —
@@ -1630,6 +1633,57 @@ pub(crate) fn standard_attention(
             return Ok(out);
         }
     }
+    // Several query positions on the CPU — a prompt chunk, a speculative
+    // verify: tiled over the keys so the score matrix is never written out
+    // (#119). Declines what it cannot read (a per-head mask, a non-f32 cache)
+    // and the matmul paths below carry on. `SWARMLLM_PREFILL_ATTN=standard`
+    // forces them for A/B.
+    if q.dim(2)? > 1 && q.device().is_cpu() {
+        if let Some(out) = crate::inference::prefill_attn::gqa_prefill_attention_cpu(
+            q,
+            k,
+            v,
+            mask,
+            crate::inference::attn_softmax::scale_from_head_dim(head_dim) as f32,
+            attn_logit_softcap,
+        )? {
+            return Ok(out);
+        }
+    }
+    matmul_attention(
+        q,
+        k,
+        v,
+        mask,
+        head_dim,
+        n_head,
+        n_kv_head,
+        attn_logit_softcap,
+    )
+}
+
+/// Attention as batched matmuls around a score matrix — what runs on a card,
+/// and on the processor whenever the kernels above decline (a per-head mask, a
+/// non-f32 cache). Grouped when the scores fit one pass, blocked over query
+/// positions when they do not.
+///
+/// Separate from [`standard_attention`] so the properties of THIS path — that
+/// blocking is exact, that a grouped call never expands K and V, that the value
+/// cache is read in place — can be tested on it directly: on the processor,
+/// `standard_attention` now answers those calls from `prefill_attn` first, and a
+/// test through it would pass without ever reaching the code it names.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn matmul_attention(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    mask: Option<&Tensor>,
+    head_dim: usize,
+    n_head: usize,
+    n_kv_head: usize,
+    attn_logit_softcap: Option<f32>,
+) -> CandleResult<Tensor> {
+    let n_rep = n_head / n_kv_head;
     if n_rep > 1 && grouping_applies(q.dim(2)?, k.dim(2)?, n_head) {
         return grouped_gqa_attention(
             q,
@@ -3325,7 +3379,7 @@ mod blocked_attention_tests {
             })
             .collect();
         let mask = Tensor::from_vec(m, (q_len, k_len), &dev).unwrap();
-        standard_attention(
+        matmul_attention(
             &q,
             &k,
             &v,
@@ -3404,7 +3458,7 @@ mod blocked_attention_tests {
                 // Grouped path — what `standard_attention` takes whenever the
                 // score matrix fits in one pass.
                 let grouped =
-                    standard_attention(&q, &k, &v, Some(&m), head_dim, n_head, n_kv_head, None)
+                    matmul_attention(&q, &k, &v, Some(&m), head_dim, n_head, n_kv_head, None)
                         .unwrap();
 
                 // Expanded path, written out explicitly — the previous behaviour.
@@ -3567,9 +3621,9 @@ mod blocked_attention_tests {
                     let k = reserved_cache_view(b, n_kv_head, 64, len, head_dim, 1.1);
                     let v = reserved_cache_view(b, n_kv_head, 64, len, head_dim, 2.3);
                     let viewed =
-                        standard_attention(&q, &k, &v, None, head_dim, n_head, n_kv_head, None)
+                        matmul_attention(&q, &k, &v, None, head_dim, n_head, n_kv_head, None)
                             .unwrap();
-                    let copied = standard_attention(
+                    let copied = matmul_attention(
                         &q,
                         &k.contiguous().unwrap(),
                         &v.contiguous().unwrap(),

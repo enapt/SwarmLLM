@@ -57,14 +57,14 @@ pub fn decode_kernel_enabled() -> bool {
 }
 
 /// A borrowed f32 plane view: `base[offset + i*stride_i + j*stride_j + ...]`.
-struct Planes<'a> {
-    data: &'a [f32],
-    offset: usize,
+pub(crate) struct Planes<'a> {
+    pub(crate) data: &'a [f32],
+    pub(crate) offset: usize,
     /// strides for (b, h, s, d)
-    strides: [usize; 4],
+    pub(crate) strides: [usize; 4],
 }
 
-fn f32_planes<'a>(storage: &'a Storage, layout: &Layout) -> Option<Planes<'a>> {
+pub(crate) fn f32_planes<'a>(storage: &'a Storage, layout: &Layout) -> Option<Planes<'a>> {
     let data = match storage {
         Storage::Cpu(CpuStorage::F32(v)) => v.as_slice(),
         _ => return None,

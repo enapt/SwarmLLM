@@ -187,6 +187,10 @@ dashmap = "6"
 # inference SLOWER — see `ResourceConfig::inference_cpu_threads`.
 num_cpus = "1"
 parking_lot = "0.12"
+# Called directly by `inference::prefill_attn` for its per-tile products, which
+# must reuse their buffers; candle's matmul allocates a fresh output per call.
+# The version vendored candle-core resolves (0.19), so it is one copy.
+gemm = "0.19.0"
 async-trait = "0.1"
 # Lock-free atomic Arc swaps — used for hot-path read-mostly snapshots
 # like `peer_balances` where every inbound CreditGossip rebuilds the
