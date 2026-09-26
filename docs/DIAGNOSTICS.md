@@ -1552,6 +1552,15 @@ The dump is excluded from the `total` it reports, so per-forward figures stay
 clean — but end-to-end tok/s measured with it on is NOT comparable to a normal
 run. Take user-visible throughput with profiling off.
 
+⚠ **A processor decode A/B is taken at the DECODE width a node runs, not at the
+core count** (2026-09-26, #119). `examples/prefill_bench` with
+`RAYON_NUM_THREADS=8` leaves decode to calibration, which picks 4 on the Ryzen
+5800H; forcing `SWARMLLM_DECODE_THREADS=8` doubled every decode figure there
+(llama-3.2-3b at ~544 cached: 62 → 135-140 ms/token), swung ±10 ms between
+identical runs, and read a Qwen2.5-7B kernel A/B as level where the same pair at
+4 threads read 141.6 → 134.1. Pin the width explicitly for an A/B
+(`SWARMLLM_DECODE_THREADS=4` here) and say which one a figure came from.
+
 ### Current baseline — 2026-08-29, v0.3.132-alpha
 
 **Re-take with the same command before claiming a delta.** These were taken on

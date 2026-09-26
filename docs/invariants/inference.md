@@ -284,6 +284,47 @@ flagged fp32 noise on a near-zero output as a failure). The DRAM floor for the
 cache read at ~900 KV × 28 layers is ~7 ms/token on this box; the kernel sits at
 ~15 — the remainder is per-layer dispatch, not arithmetic.
 
+### It read the cache once per QUERY head, not once per group (fixed 2026-09-26, #119)
+
+The doc comment said a group's K and V were read once for all its query heads;
+the loop ran `for r in 0..n_rep` OUTSIDE the scan over positions, so each query
+head re-streamed the whole K plane and then the whole V plane — `n_rep` times the
+traffic (3x on llama-3.2-3b, 4x on Llama-3.1-8B, 7x on Qwen2.5-7B, 8x on
+TinyLlama). A per-head plane is ~1 MB at 2K positions against a 512 KB L2, so the
+repeats came from L3 or DRAM. That is what #119 measured as decode slowing with
+context ~2.5x faster than llama.cpp's while the matmuls stayed flat.
+
+**Now**: one task per (batch, kv head, [`CHUNK`] = 256 positions). A task reads
+each K row once and dots it with every query row of the group, then reads each V
+row once and accumulates every query row's output; chunks are merged by
+flash-decoding's reduction (`out = Σ e^(m_c−M) o_c / Σ e^(m_c−M) l_c`). The chunk
+size is a CONSTANT so the summation order — and the result — does not depend on
+the machine's thread count. A chunk fully masked for a head keeps max `-inf` and
+is skipped by the merge (`-inf − -inf` is NaN); every position masked leaves
+zeros where the reference would give NaN, which a decode position (it always
+sees itself) cannot reach. With one chunk the merge weight is exactly 1.
+
+**Measured** (A/B inside one binary via a temporary switch, `examples/prefill_bench`,
+live node stopped, min of 2 interleaved, `SWARMLLM_DECODE_THREADS=4` — the width
+calibration picks on the Ryzen):
+
+| | old | new |
+|---|---|---|
+| llama-3.2-3b, ~544 cached | 62.2 ms/token | 61.5 |
+| llama-3.2-3b, ~2,080 cached | 81.6 | **70.7** |
+| Qwen2.5-7B, ~2,080 cached | 141.6 | **134.1** |
+
+Growth from 544 to 2,080 cached: +19.1 → +8.2 ms (llama.cpp +7.3). ⚠ At 8 decode
+threads every figure roughly doubled and swung ±10 ms between rounds, and the
+Qwen A/B read level (209.3 / 208.2) — width noise swamps the kernel there; take
+decode A/Bs at the width a node actually runs.
+
+**Prior art**: llama.cpp's own CPU single-token flash-attention path had the same
+shape — "every KV row is loaded and converted from f16 once per q head sharing
+it" — and PrismML-Eng/llama.cpp PR #254 fixed it the same way (a tile of 16 KV
+rows shared by the group's heads, online softmax per tile): +15-30% at 8-16K
+context. The research changed nothing in the design; it confirmed the diagnosis.
+
 ## `inference::fast_math`
 
 ⚠ **`silu_mul` now fuses on CUDA as well as on the CPU (2026-09-22), and the two

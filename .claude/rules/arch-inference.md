@@ -409,7 +409,7 @@ them is this codebase's most-repeated defect — see `.claude/rules/architecture
 Full evidence: `docs/invariants/inference.md`
 
 - **Vendored `GgmlType::vec_dot_rows` + the row-blocked tiled matmul** — `vendor/candle/candle-core/src/quantized/{k_quants,avx}.rs`.
-- **`inference::decode_attn::gqa_decode_attention_cpu`** — single-position attention straight over the KV cache in its stored `[b, kvh, S, d]` layout, one rayon task per (batch, kv head).
+- **`inference::decode_attn::gqa_decode_attention_cpu`** — single-position attention straight over the KV cache in its stored `[b, kvh, S, d]` layout. **Each K/V row is read ONCE per group, never once per query head** (the per-head version was #119's long-context slowdown); tasks are (batch, kv head, fixed 256-position chunk) merged by flash-decoding's reduction — the chunk is a constant so the result never depends on the thread count. → `docs/invariants/inference.md` § "It read the cache once per QUERY head".
 - **`inference::fast_math`** — eight-lane AVX2 `expf` (`exp_inplace`, Cephes polynomial, ~2 ulp vs libm, pinned by `vectorised_exp_tracks_libm` over [-80, 80]) and the fused `silu_mul` CustomOp2. A new elementwise pass that calls `f32::exp` in a loop routes through here instead.
 - **`inference::cpu_pools::in_phase_pool`** — binds a forward pass to the CPU thread pool that suits its phase, at ONE choke point: `SplitModel::forward_inner_impl` and `forward_batch`.
 - **`inference::layers::new_kv_cache`** — the only way to construct a KV cache.
