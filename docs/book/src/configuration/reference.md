@@ -84,7 +84,7 @@ booted with.
 
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `default_model` | string | `""` | Default model. Empty = first available |
+| `default_model` | string | `""` | The model a request for `"auto"` gets. Empty = the model `auto` answered with last time (so a conversation stays on one model), else one this node holds whole, else one the swarm can serve; ties go alphabetically. Applies from v0.3.209 — earlier releases ignored it |
 | `session_timeout_seconds` | integer | `600` | Chat session memory lifetime (10 min) |
 | `max_concurrent_requests` | integer | `10` | Max parallel requests |
 | `model_path` | path | none | Path to a GGUF model file |

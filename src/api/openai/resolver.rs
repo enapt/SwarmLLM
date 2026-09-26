@@ -98,30 +98,94 @@ fn all_shards_available_inner(state: &AppState, model_name: &str) -> bool {
 
 /// Resolve a model name for inference: handles "auto" alias and display-name → registry-ID mapping.
 ///
-/// 1. If a local model is loaded and the request matches (by "auto", registry ID, or display name),
-///    returns the resolved registry ID.
-/// 2. For "auto" with no loaded model, falls back to the first model in the registry.
-/// 3. Otherwise returns the original model name unchanged.
+/// 1. `"auto"` → [`resolve_auto`].
+/// 2. The loaded model's display name or registry ID → its registry ID.
+/// 3. Otherwise the original model name, unchanged.
 pub async fn resolve_model_for_inference(state: &AppState, model: &str) -> String {
+    if model == "auto" {
+        return resolve_auto(state)
+            .await
+            .unwrap_or_else(|| model.to_string());
+    }
     let info = state.shared_state.loaded_model_info.read().await;
     if let Some(i) = info.as_ref() {
         let resolved = resolve_loaded_model_registry_id(state, &i.name);
-        if model == "auto" || model == resolved || model == i.name {
+        if model == resolved || model == i.name {
             return resolved;
         }
     }
-    if model == "auto" {
-        if let Some(m) = state
-            .shared_state
+    model.to_string()
+}
+
+/// What `auto` names: the model a caller with no preference gets.
+///
+/// In order — and past the first two, every step asks whether a model can be
+/// SERVED, never only whether it is listed:
+///
+/// 1. the owner's `inference.default_model`, when it names a model this node
+///    knows (documented as "Default model. Empty = first available", and read by
+///    nothing until 2026-09-26);
+/// 2. a whole model file this node was started with (`-m`), an owner's choice too;
+/// 3. the model `auto` answered with last time, while it can still be served —
+///    so a conversation held on `auto` stays on one model, and on its prefix cache;
+/// 4. a model this node holds whole;
+/// 5. a model the swarm can serve (every shard has a holder);
+/// 6. anything listed.
+///
+/// Ties go by model id, so the answer never depends on a map's iteration order.
+///
+/// **What it replaced** (#120): `auto` took `loaded_model_info`, which the shard
+/// scan overwrites with EVERY model it registers — partial holdings included —
+/// and before anything had loaded, the registry's first entry in map order. Four
+/// seconds after a restart it named a 14B this node held 14 of 48 layers of, and
+/// the request was handed to two peers in turn, both of which refused it for
+/// memory. The same overwrite could switch `auto` to another model between two
+/// turns of one conversation whenever a scan ran.
+pub async fn resolve_auto(state: &AppState) -> Option<String> {
+    auto_model_for(&state.shared_state).await
+}
+
+/// [`resolve_auto`] on the node's state alone, so it can be tested without a server.
+pub(crate) async fn auto_model_for(ss: &crate::daemon::SharedState) -> Option<String> {
+    let default = ss.cfg().inference.default_model.clone();
+    if !default.is_empty()
+        && ss
             .model_registry
-            .models()
-            .into_iter()
-            .next()
-        {
-            return m.id.0.clone();
+            .get_manifest(&crate::types::ModelId(default.clone()))
+            .is_some()
+    {
+        return Some(default);
+    }
+    if ss.model_loaded.load(std::sync::atomic::Ordering::Relaxed) {
+        let info = ss.loaded_model_info.read().await;
+        if let Some(i) = info.as_ref() {
+            return Some(registry_id_for_display_name(ss, &i.name));
         }
     }
-    model.to_string()
+
+    let whole_here = |id: &crate::types::ModelId| ss.has_complete_split_model(id);
+    let swarm_serves = |id: &crate::types::ModelId| ss.model_registry.model_is_servable(id);
+    let previous = ss.models.auto_model.lock().clone();
+    if let Some(prev) = previous {
+        if whole_here(&prev) || swarm_serves(&prev) {
+            return Some(prev.0);
+        }
+    }
+    let mut ids: Vec<crate::types::ModelId> = ss
+        .model_registry
+        .models()
+        .into_iter()
+        .map(|m| m.id)
+        .collect();
+    ids.sort_by(|a, b| a.0.cmp(&b.0));
+    let choice = ids
+        .iter()
+        .find(|id| whole_here(id))
+        .or_else(|| ids.iter().find(|id| swarm_serves(id)))
+        .or_else(|| ids.first())?
+        .clone();
+    *ss.models.auto_model.lock() = Some(choice.clone());
+    Some(choice.0)
 }
 
 /// Resolve a loaded model's display name to its registry ID.
@@ -129,16 +193,19 @@ pub async fn resolve_model_for_inference(state: &AppState, model: &str) -> Strin
 /// Looks up the model in the registry by slug, then by display name.
 /// Returns the registry ID if found, otherwise returns the slugified name.
 pub fn resolve_loaded_model_registry_id(state: &AppState, model_display_name: &str) -> String {
+    registry_id_for_display_name(&state.shared_state, model_display_name)
+}
+
+fn registry_id_for_display_name(
+    ss: &crate::daemon::SharedState,
+    model_display_name: &str,
+) -> String {
     let slug = crate::types::slugify_model_name(model_display_name);
-    state
-        .shared_state
-        .model_registry
+    ss.model_registry
         .get_manifest(&crate::types::ModelId(slug.clone()))
         .map(|m| m.id.0.clone())
         .or_else(|| {
-            state
-                .shared_state
-                .model_registry
+            ss.model_registry
                 .models()
                 .into_iter()
                 .find(|m| m.name == model_display_name)
@@ -348,5 +415,166 @@ mod tests {
             !state.split_models.iter().any(|e| e.key().0 == mid),
             "the stale entry should have been evicted, not merely ignored"
         );
+    }
+
+    /// A node whose data directory is its OWN. `Config::default()` points at the
+    /// real `~/.local/share/swarmllm`, and "does this node hold the model whole"
+    /// looks for shard files there.
+    fn node_with(
+        configure: impl FnOnce(&mut crate::config::Config),
+    ) -> std::sync::Arc<crate::daemon::SharedState> {
+        let temp = tempfile::tempdir().unwrap().keep();
+        let db = crate::storage::db::Database::open(&temp).unwrap();
+        let mut config = crate::config::Config::default();
+        config.node.data_dir = temp;
+        configure(&mut config);
+        let executor = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::inference::executor::ModelExecutor::new(),
+        ));
+        let (state, _, _) = crate::daemon::SharedState::new(
+            config,
+            crate::identity::Identity::generate(),
+            db,
+            executor,
+            None,
+        );
+        state
+    }
+
+    /// How much of a model a test node holds.
+    #[derive(Clone, Copy)]
+    enum Held {
+        /// Every shard here, registered whole — what the scan makes of it.
+        WholeHere,
+        /// Shard 0 here, the rest on a peer: servable by the swarm, not here.
+        PartHere,
+        /// Every shard on a peer.
+        OnPeer,
+        /// Shard 0 on a peer, the rest on nobody.
+        Unservable,
+    }
+
+    fn add_model(state: &crate::daemon::SharedState, id: &str, held: Held) -> ModelId {
+        let mid = ModelId(id.into());
+        let shards = 2u32;
+        state
+            .model_registry
+            .register_manifest(crate::types::ModelManifest {
+                id: mid.clone(),
+                name: id.into(),
+                architecture: crate::types::ModelArchitecture::Llama,
+                num_layers: 4,
+                num_params_billions: 1.0,
+                quantization: crate::types::Quantization::Q4KM,
+                total_size_bytes: 2,
+                shard_count: shards,
+                shards: (0..shards)
+                    .map(|i| swarmllm_types::ShardInfo {
+                        index: i,
+                        layer_range: (i * 2, i * 2 + 2),
+                        size_bytes: 1,
+                        hash: [0u8; 32],
+                        tensors: Vec::new(),
+                    })
+                    .collect(),
+                tokenizer_hash: [0u8; 32],
+                manifest_hash: [0u8; 32],
+                publisher: crate::types::NodeId([0u8; 32]),
+                publish_date: chrono::Utc::now(),
+                license: "MIT".into(),
+                mmproj: None,
+            });
+        let me = state.identity.node_id().clone();
+        let peer = crate::types::NodeId([9u8; 32]);
+        for i in 0..shards {
+            let sid = crate::types::ShardId {
+                model_id: mid.clone(),
+                index: i,
+            };
+            let holder = match (held, i) {
+                (Held::WholeHere, _) | (Held::PartHere, 0) => Some(me.clone()),
+                (Held::PartHere, _) | (Held::OnPeer, _) | (Held::Unservable, 0) => {
+                    Some(peer.clone())
+                }
+                (Held::Unservable, _) => None,
+            };
+            if let Some(h) = holder {
+                if h == me {
+                    let path = state.shard_store().shard_path(&mid, i);
+                    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                    std::fs::write(&path, b"x").unwrap();
+                }
+                state.model_registry.record_shard_holder(sid, h);
+            }
+        }
+        match held {
+            Held::WholeHere => {
+                state
+                    .split_models
+                    .insert((mid.clone(), 0, 4), entry(0, 4, true));
+            }
+            Held::PartHere => {
+                state
+                    .split_models
+                    .insert((mid.clone(), 0, 2), entry(0, 2, false));
+            }
+            Held::OnPeer | Held::Unservable => {}
+        }
+        mid
+    }
+
+    /// #120: the shard scan writes `loaded_model_info` for every model it
+    /// registers, a partial holding included, so the model it touched LAST was
+    /// what `auto` meant — seen live as a 14B held 14 of 48 layers, handed to two
+    /// peers that could not load it. A model this node can run whole wins.
+    #[tokio::test]
+    async fn auto_prefers_a_model_held_whole_over_the_last_one_the_scan_touched() {
+        let state = node_with(|_| {});
+        add_model(&state, "zzz-whole", Held::WholeHere);
+        let partial = add_model(&state, "aaa-partial", Held::PartHere);
+        *state.loaded_model_info.write().await = Some(crate::daemon::LoadedModelInfo {
+            name: partial.0.clone(),
+            size_bytes: 2,
+            eos_tokens: vec![],
+            chat_template: None,
+            bos_token: String::new(),
+            eos_token: String::new(),
+        });
+        assert_eq!(auto_model_for(&state).await.as_deref(), Some("zzz-whole"));
+    }
+
+    /// A conversation held on `auto` stays on one model: a model that becomes
+    /// available later — sorting first — does not take the next turn.
+    #[tokio::test]
+    async fn auto_keeps_answering_with_the_model_it_chose() {
+        let state = node_with(|_| {});
+        add_model(&state, "bbb", Held::WholeHere);
+        add_model(&state, "ccc", Held::WholeHere);
+        assert_eq!(auto_model_for(&state).await.as_deref(), Some("bbb"));
+        add_model(&state, "aaa", Held::WholeHere);
+        assert_eq!(
+            auto_model_for(&state).await.as_deref(),
+            Some("bbb"),
+            "the next turn must not switch model"
+        );
+    }
+
+    /// The owner's `inference.default_model` decides, when it names a known model.
+    #[tokio::test]
+    async fn auto_is_the_owners_default_model_when_one_is_set() {
+        let state = node_with(|c| c.inference.default_model = "ccc".into());
+        add_model(&state, "bbb", Held::WholeHere);
+        add_model(&state, "ccc", Held::OnPeer);
+        assert_eq!(auto_model_for(&state).await.as_deref(), Some("ccc"));
+    }
+
+    /// With nothing held whole here, a model the swarm can serve beats one it
+    /// cannot, whatever the order.
+    #[tokio::test]
+    async fn auto_falls_back_to_a_model_the_swarm_can_serve() {
+        let state = node_with(|_| {});
+        add_model(&state, "aaa-unservable", Held::Unservable);
+        add_model(&state, "bbb-on-peer", Held::OnPeer);
+        assert_eq!(auto_model_for(&state).await.as_deref(), Some("bbb-on-peer"));
     }
 }

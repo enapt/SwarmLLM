@@ -1373,3 +1373,44 @@ key once; failing closed there is the intended direction.
 Guard: `no_request_privilege_is_decided_by_a_bare_loopback_check` (with a
 planted self-test). Tests: `api::origin` (truth table incl. DNS rebinding and
 look-alike hosts), `a_proxied_request_is_never_trusted`.
+
+## `auto` names a model that can be served, and keeps naming it (2026-09-26, #120)
+
+**What it replaced.** `resolve_model_for_inference` answered `auto` with
+`loaded_model_info` when set, else the registry's first manifest in DashMap
+order. `loaded_model_info` is written by `auto_manage::scan::check_and_load_model`
+for the first range of EVERY model it registers (`any_loaded` is per call, i.e.
+per model), a partial holding included — so it named whichever model the scan
+touched last. Live, 2026-09-26 04:06: the node started at :37.9, the scan
+registered qwen2.5-14b's layers 4-12 at :41.539, and an `auto` request at :41.600
+resolved to that 14B, held 14 of 48 layers here. Three plans followed — two peers
+handed the whole model in turn, both refusing "needs about 10362 MB", then a
+seven-segment split — and the request failed after 16 s. The next `auto` answered
+from a local model. Same event 2026-09-21, 62 s after a start. The same overwrite
+could move `auto` to another model between two turns of one conversation.
+
+**Now** (`resolver::resolve_auto` → `auto_model_for`, both surfaces):
+
+1. `inference.default_model`, when it names a known model — documented since the
+   config reference existed ("Default model. Empty = first available") and read
+   by nothing;
+2. a `-m` whole-file model (`model_loaded`), which is also an owner's choice;
+3. `state.models.auto_model` — what `auto` answered last — while still servable;
+4. a model held whole here (`has_complete_split_model`, files checked on disk);
+5. a model the swarm can serve (`ModelRegistry::model_is_servable`);
+6. anything listed. Ties by model id: never map order.
+
+**Deliberately NOT changed**: what the scan writes into `loaded_model_info`. It
+has a dozen readers (templates, MCP status, listings), each matching it against
+a request's own model name; `auto` was the one reader using it to CHOOSE.
+
+**Tests**: `auto_prefers_a_model_held_whole_over_the_last_one_the_scan_touched`
+(red with the old rule: it answers the partial model),
+`auto_keeps_answering_with_the_model_it_chose`,
+`auto_is_the_owners_default_model_when_one_is_set`,
+`auto_falls_back_to_a_model_the_swarm_can_serve`. The fixture owns its data
+directory — "held whole" checks shard files on disk.
+
+**Still open** (FUTURE_WORK #120 (b)): with nothing servable here, the planner's
+`PeersUnbounded` rung can still hand a whole model to a peer that published no
+capability yet, or one that advertised too little room.

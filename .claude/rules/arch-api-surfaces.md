@@ -357,6 +357,19 @@ two send the reader after DIFFERENT parts, and one hint cannot do that.
 
 → `docs/invariants/api-surfaces.md`
 
+## `auto` names a model that can be SERVED, and keeps naming it (2026-09-26)
+
+**`api::openai::resolver::resolve_auto` is the single answer to "which model is
+`auto`"**, for both surfaces: the owner's `inference.default_model`, a `-m`
+model, the model `auto` last answered with while still servable
+(`state.models.auto_model`), one held whole here, one the swarm can serve — ties
+by id. It used to read `loaded_model_info`, which the shard scan overwrites with
+every model it registers, partial holdings included: four seconds after a
+restart `auto` named a 14B held 14 of 48 layers here and failed on two peers
+that could not load it (#120).
+
+→ `docs/invariants/api-surfaces.md` § "`auto` names a model that can be served"
+
 ## Single-source-of-truth helpers — API surfaces, errors and streaming
 
 Each names the ONE place a decision is made. A second implementation of any of

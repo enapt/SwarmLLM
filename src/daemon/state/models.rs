@@ -17,6 +17,12 @@ pub struct ModelMgmt {
     pub auto_manage_notify: Arc<tokio::sync::Notify>,
     pub auto_manage_enabled: std::sync::atomic::AtomicBool,
     pub auto_manage_default_model_cap: AtomicU32,
+    /// The model `auto` last resolved to. Read and written ONLY by
+    /// `api::openai::resolver::resolve_auto`, which keeps answering with it while
+    /// it can still be served — so a conversation held on `auto` stays on one
+    /// model (and its prefix cache) instead of following whichever model a
+    /// shard scan registered last.
+    pub auto_model: parking_lot::Mutex<Option<crate::types::ModelId>>,
     pub model_auto_manage_policies:
         DashMap<crate::types::ModelId, crate::config::ModelAutoManagePolicy>,
     pub hf_probe_cache: DashMap<crate::types::ModelId, HfProbeInfo>,
@@ -975,6 +981,7 @@ mod tests {
             auto_manage_notify: Arc::new(tokio::sync::Notify::new()),
             auto_manage_enabled: AtomicBool::new(false),
             auto_manage_default_model_cap: AtomicU32::new(0),
+            auto_model: parking_lot::Mutex::new(None),
             model_auto_manage_policies: DashMap::new(),
             hf_probe_cache: DashMap::new(),
             peer_shard_downloads: DashMap::new(),

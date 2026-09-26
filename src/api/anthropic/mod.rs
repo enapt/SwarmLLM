@@ -269,7 +269,7 @@ pub async fn messages(
     let internal_messages = to_internal_messages(&req);
     let sampling_params = to_sampling_params(&req);
 
-    // Resolve model alias (display name → registry ID, "auto" → first available).
+    // Resolve model alias (display name → registry ID, "auto" → `resolve_auto`).
     let model = crate::api::openai::resolve_model_for_inference(&state, &model).await;
 
     // Check if network has all shards for this model
