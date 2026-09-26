@@ -1679,6 +1679,21 @@ impl CpuReason {
     }
 }
 
+/// Whose request a [`ModelProcessPool::generate`] serves — which decides how
+/// many cores may read its prompt (`cpu_pools::in_phase_pool`).
+///
+/// The contribution level is how much of the computer SwarmLLM may use to
+/// answer requests FROM THE SWARM; it had been capping the owner's own
+/// prompts to half the cores as well (FUTURE_WORK #119).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Requester {
+    /// This machine's owner: a request made to this node's own API, whether it
+    /// ran straight to the worker or through the router and came back here.
+    Owner,
+    /// A peer's request this node serves for the swarm.
+    Swarm,
+}
+
 pub struct ModelProcessPool {
     workers: DashMap<ModelId, Arc<WorkerHandle>>,
     /// Serializes worker spawning to prevent TOCTOU races where two concurrent
@@ -1721,6 +1736,8 @@ pub struct ModelProcessPool {
     /// CPU threads each worker's rayon pool may use. 0 until set at startup,
     /// which the spawn path reads as "not configured" and leaves alone.
     cpu_threads: std::sync::atomic::AtomicUsize,
+    /// See [`Self::set_owner_prefill_threads`]. 0 = no wider owner pool.
+    owner_prefill_threads: std::sync::atomic::AtomicUsize,
     /// GPU memory charged to each live worker, in MB.
     ///
     /// Admission needs to know what is already committed, and it cannot ask the
@@ -1965,6 +1982,7 @@ impl ModelProcessPool {
             cpu_pinned_models: dashmap::DashSet::new(),
             vram_budget_mb: std::sync::atomic::AtomicU64::new(0),
             cpu_threads: std::sync::atomic::AtomicUsize::new(0),
+            owner_prefill_threads: std::sync::atomic::AtomicUsize::new(0),
             vram_reserved_mb: dashmap::DashMap::new(),
             ram_budget_mb: std::sync::atomic::AtomicU64::new(0),
             ram_budget_provider: std::sync::OnceLock::new(),
@@ -2615,6 +2633,14 @@ impl ModelProcessPool {
     /// `SharedState`, and this has to be readable from inside the spawn path.
     pub fn set_cpu_threads(&self, threads: usize) {
         self.cpu_threads
+            .store(threads.max(1), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Threads a worker reads the machine OWNER's own prompts on
+    /// (`ResourceConfig::owner_prefill_threads`), passed to each worker as
+    /// `SWARMLLM_OWNER_PREFILL_THREADS`. Swarm work stays at `set_cpu_threads`.
+    pub fn set_owner_prefill_threads(&self, threads: usize) {
+        self.owner_prefill_threads
             .store(threads.max(1), std::sync::atomic::Ordering::Relaxed);
     }
 
@@ -4846,6 +4872,14 @@ impl ModelProcessPool {
         if cpu_threads > 0 && std::env::var_os("RAYON_NUM_THREADS").is_none() {
             command.env("RAYON_NUM_THREADS", cpu_threads.to_string());
         }
+        // The width the machine owner's own prompts are read on, beside the
+        // swarm's. Same rule about an operator's own export.
+        let owner_threads = self
+            .owner_prefill_threads
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if owner_threads > 0 && std::env::var_os("SWARMLLM_OWNER_PREFILL_THREADS").is_none() {
+            command.env("SWARMLLM_OWNER_PREFILL_THREADS", owner_threads.to_string());
+        }
         let mut child = command
             .spawn()
             .map_err(|e| SwarmError::ServiceUnavailable(format!("spawn worker: {e}")))?;
@@ -5440,6 +5474,10 @@ impl ModelProcessPool {
     }
 
     /// Run full generation in the worker, streaming tokens back.
+    ///
+    /// `requester` says whose request this is — the machine owner's, read on
+    /// every core, or the swarm's, within the contribution level
+    /// ([`Requester`]). Required, so no caller can forget to say.
     #[allow(clippy::too_many_arguments)]
     pub async fn generate(
         &self,
@@ -5448,6 +5486,7 @@ impl ModelProcessPool {
         prompt: String,
         sampling: SamplingParams,
         request_id: uuid::Uuid,
+        requester: Requester,
         session_id: Option<String>,
         token_tx: Option<crate::inference::router::StreamingTokenTx>,
     ) -> Result<crate::inference::router::InferenceOutput, SwarmError> {
@@ -5462,6 +5501,7 @@ impl ModelProcessPool {
                 prompt.clone(),
                 sampling.clone(),
                 request_id,
+                requester,
                 session_id.clone(),
                 token_tx.clone(),
                 &emitted,
@@ -5493,6 +5533,7 @@ impl ModelProcessPool {
                         prompt,
                         sampling,
                         request_id,
+                        requester,
                         session_id,
                         token_tx,
                         &emitted_retry,
@@ -5513,6 +5554,7 @@ impl ModelProcessPool {
         prompt: String,
         sampling: SamplingParams,
         request_id: uuid::Uuid,
+        requester: Requester,
         session_id: Option<String>,
         token_tx: Option<crate::inference::router::StreamingTokenTx>,
         emitted: &std::sync::atomic::AtomicBool,
@@ -5534,6 +5576,7 @@ impl ModelProcessPool {
             prompt,
             sampling,
             session_id,
+            for_the_owner: requester == Requester::Owner,
         };
 
         if handle.dead.load(Ordering::Acquire) {

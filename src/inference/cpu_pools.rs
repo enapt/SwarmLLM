@@ -628,7 +628,69 @@ fn decode_pool() -> Option<&'static rayon::ThreadPool> {
     .as_ref()
 }
 
-/// Run one forward pass on the pool that suits its phase.
+/// How many threads the machine OWNER's own prompts are read on, in this
+/// worker: all physical cores, or the operator's explicit `max_cpu_threads`
+/// (`ResourceConfig::owner_prefill_threads`). Passed by the daemon in
+/// `SWARMLLM_OWNER_PREFILL_THREADS` beside `RAYON_NUM_THREADS`; 0 or unset
+/// means none wider than the global pool.
+static OWNER_PREFILL_THREADS: AtomicUsize = AtomicUsize::new(usize::MAX);
+
+fn owner_prefill_threads() -> usize {
+    let v = OWNER_PREFILL_THREADS.load(Ordering::Relaxed);
+    if v != usize::MAX {
+        return v;
+    }
+    let from_env = std::env::var("SWARMLLM_OWNER_PREFILL_THREADS")
+        .ok()
+        .and_then(|s| s.trim().parse::<usize>().ok())
+        .unwrap_or(0);
+    OWNER_PREFILL_THREADS.store(from_env, Ordering::Relaxed);
+    from_env
+}
+
+#[cfg(test)]
+pub(crate) fn set_owner_prefill_threads_for_test(threads: usize) {
+    OWNER_PREFILL_THREADS.store(threads, Ordering::Relaxed);
+}
+
+/// The pool the owner's prompt is read on, or `None` when it would be no
+/// wider than the global one — the case on a node at Maximum, where nothing
+/// extra is ever built.
+fn owner_prefill_pool() -> Option<Arc<rayon::ThreadPool>> {
+    let threads = owner_prefill_threads();
+    if threads <= rayon::current_num_threads() {
+        return None;
+    }
+    static POOLS: OnceLock<Mutex<HashMap<usize, Option<Arc<rayon::ThreadPool>>>>> = OnceLock::new();
+    let map = POOLS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = map.lock().ok()?;
+    guard
+        .entry(threads)
+        .or_insert_with(|| {
+            match rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .thread_name(move |i| format!("swarm-owner{threads}-{i}"))
+                .build()
+            {
+                Ok(p) => {
+                    tracing::info!(
+                        owner_prefill_threads = threads,
+                        swarm_threads = rayon::current_num_threads(),
+                        "This computer's own prompts are read on every core; the swarm's \
+                         stay within the contribution level"
+                    );
+                    Some(Arc::new(p))
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, threads, "Could not build the owner's prompt pool — using the global one");
+                    None
+                }
+            }
+        })
+        .clone()
+}
+
+/// Run one forward pass on the pool that suits its phase — and its owner.
 ///
 /// `seq_len` is the number of query positions: `1` is decode (one new token
 /// against the cache), anything more is prompt processing. That is the same
@@ -636,7 +698,15 @@ fn decode_pool() -> Option<&'static rayon::ThreadPool> {
 /// underlying reason — the two phases are different shapes of work.
 ///
 /// Prefill returns `f()` directly, so it keeps the global pool and pays
-/// nothing.
+/// nothing — UNLESS `for_the_owner`: a prompt this machine's owner sent is
+/// read on every physical core ([`owner_prefill_pool`]). The contribution
+/// level is "how much of your computer SwarmLLM may use to answer requests
+/// from the swarm" (the Settings page), and it had been capping the owner's
+/// own prompts too: a default node read them on half its cores, where
+/// llama.cpp uses all of them — most of a reported 3x gap (FUTURE_WORK #119:
+/// 28.8 → 41.6 tok/s at 6,911 tokens on a Ryzen 7 5800H). Decode is left
+/// alone: it is bandwidth-bound and its calibrated optimum sits at or below
+/// the cap. It is REQUIRED so no caller can forget whose request it is.
 ///
 /// `cpu_layers` is how many of the forward's layers run on the processor. It is
 /// what the decode pool is FOR — the quantized matmuls of those layers — so a
@@ -647,8 +717,14 @@ fn decode_pool() -> Option<&'static rayon::ThreadPool> {
 pub(crate) fn in_phase_pool<R: Send>(
     seq_len: usize,
     cpu_layers: usize,
+    for_the_owner: bool,
     f: impl FnOnce() -> R + Send,
 ) -> R {
+    if cpu_layers > 0 && seq_len > DECODE_SHAPED_MAX_TOKENS && for_the_owner {
+        if let Some(pool) = owner_prefill_pool() {
+            return pool.install(f);
+        }
+    }
     if seq_len > DECODE_SHAPED_MAX_TOKENS || cpu_layers == 0 {
         return f();
     }
@@ -1113,6 +1189,33 @@ mod tests {
             deep.chosen.load(Ordering::Relaxed),
             0,
             "the deep model's width was decided by another shape's tokens"
+        );
+    }
+
+    /// The owner's prompt is read on the owner's width; the swarm's prompt and
+    /// every decode step are not. Asserted on the pool the work RAN on
+    /// (`current_num_threads` inside it), not on a speed.
+    #[test]
+    fn only_the_owners_prompt_is_read_on_the_owners_width() {
+        let global = rayon::current_num_threads();
+        let wide = global + 2;
+        set_owner_prefill_threads_for_test(wide);
+        // A processor depth no other test uses: the decode-shaped call below
+        // touches that depth's calibration entry, which is shared state.
+        let width = |seq_len, for_owner| {
+            in_phase_pool(seq_len, 9_999, for_owner, rayon::current_num_threads)
+        };
+        assert_eq!(width(128, true), wide, "the owner's prompt: every core");
+        assert_eq!(
+            width(128, false),
+            global,
+            "the swarm's prompt: the contribution level"
+        );
+        assert_ne!(width(16, true), wide, "decode-shaped work is never widened");
+        assert_eq!(
+            in_phase_pool(128, 0, true, rayon::current_num_threads),
+            global,
+            "a forward with no processor layers has no prompt to read here"
         );
     }
 }

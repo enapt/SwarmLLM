@@ -25,6 +25,14 @@ than it can, which could send long prompts its way.
 The length of a request's prompt is now counted with its tool definitions,
 which agent tools send many of and which were counted as nothing.
 
+**Faster: your own prompts are read with all of your processor's cores.** The
+contribution level decides how much of your computer SwarmLLM may use for
+other people's requests, but it was also limiting your own: at the default
+level a prompt you sent was read on half your cores. Your own prompts now use
+all of them (on a test machine, 39% faster on a 2,400-token prompt). Work for
+other people still stays within your contribution level, and a thread limit you
+set yourself (`max_cpu_threads`) still applies to everything.
+
 **Fixed: agent programs hung up while a slow computer read a long prompt.**
 Agent tools such as nanobot send a prompt of several thousand words on every
 turn, and on a computer without a graphics card reading it can take minutes.

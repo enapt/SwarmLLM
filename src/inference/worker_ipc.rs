@@ -403,6 +403,12 @@ pub struct IpcGenerate {
     pub sampling: SamplingParams,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+    /// This machine's owner made the request (`process_pool::Requester`): its
+    /// prompt is read on every physical core rather than within the
+    /// contribution level. The worker records it on the request's KV
+    /// bookkeeping (`KvCacheStore::mark_owner_request`).
+    #[serde(default)]
+    pub for_the_owner: bool,
 }
 
 /// Send a DaemonMsg to the socket. Payload = raw bytes (e.g., activations).

@@ -4316,6 +4316,13 @@ async fn handle_daemon_msg(
         }
         DaemonMsg::Generate(gen) => {
             let request_id = gen.request_id;
+            // Recorded once, here, before either admission path: every forward
+            // of this request reads it where its thread pool is chosen
+            // (`cpu_pools::in_phase_pool`), and it is released with the rest
+            // of the request's bookkeeping.
+            if gen.for_the_owner {
+                kv_store.mark_owner_request(&request_id.to_string());
+            }
             let mut pending: Option<IpcGenerate> = Some(gen);
             if batch_generate
                 && pending

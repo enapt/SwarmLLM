@@ -1637,6 +1637,30 @@ max_concurrent_requests = 42
         }
     }
 
+    /// The owner's own prompt is read on every physical core whatever the
+    /// contribution level — that level governs work for the swarm — and never
+    /// past an explicit `max_cpu_threads`, which binds everything.
+    #[test]
+    fn the_owners_prompt_is_read_on_every_core_unless_the_operator_said_otherwise() {
+        let rc = ResourceConfig::default();
+        assert_eq!(rc.owner_prefill_threads(8, 16), 8, "physical, not logical");
+        assert!(
+            rc.owner_prefill_threads(8, 16)
+                > rc.inference_cpu_threads(8, 16, swarmllm_types::ContributionMode::Minimal),
+            "at the default level the owner reads wider than the swarm is served"
+        );
+        let capped = ResourceConfig {
+            max_cpu_threads: 3,
+            ..ResourceConfig::default()
+        };
+        assert_eq!(
+            capped.owner_prefill_threads(8, 16),
+            3,
+            "an explicit number wins"
+        );
+        assert_eq!(rc.owner_prefill_threads(0, 0), 1, "never 0");
+    }
+
     /// **No contribution level may exceed the physical core count.**
     ///
     /// Swept on a Ryzen 7 5800H (8 physical / 16 logical), phi-3.5 Q4_K_M:

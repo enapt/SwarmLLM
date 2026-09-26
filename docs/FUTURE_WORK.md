@@ -15792,6 +15792,14 @@ one 128-token chunk's attention at position ~6000-6650 costs 2.8-3.1 s over 28 l
 forward passes account for all but ~1 s of each request, and the one-forward bench and the
 chunked node agree at matched threads (57.8 at ~2.4K) — chunking costs nothing measurable.
 
+**Done 2026-09-26 (unreleased): the owner's own prompts are read on every physical core**
+(`process_pool::Requester`, `docs/invariants/memory.md` § "The contribution level caps the
+swarm's work"). A/B in one binary at Minimal: 2,427 tokens 35.5 → 49.5 tok/s (+39%); 6,911
+tokens 28.8 → 32.4 (+12%). **The long prompt barely scales where llama.cpp gains 49% for the
+same 4→8 threads** — our long-context attention looks memory-bound: GQA K/V expanded 8→24
+heads (`repeat_kv`) on every prompt chunk, contiguous copies of the cache views, and a full
+f32 scores matrix per layer per chunk, none of which llama.cpp does. That is the next move.
+
 **What that says.** (1) The report's "3x" (a DIFFERENT model on llama.cpp's side, 9.2K tokens,
 a 5700U) is chiefly the thread policy: `resources.inference_cpu_threads` gives Minimal 0.5,
 Moderate 0.75, Maximum 1.0 of PHYSICAL cores, so a default node reads prompts on half the

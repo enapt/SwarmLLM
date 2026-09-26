@@ -213,6 +213,8 @@ pub(super) async fn handle_remote_generate_request(
             req.prompt,
             req.sampling,
             request_id,
+            // A peer's request: served within the contribution level.
+            crate::inference::process_pool::Requester::Swarm,
             req.session_id,
             Some(token_tx),
         )

@@ -438,6 +438,27 @@ impl ResourceConfig {
         (((physical as f64) * fraction).round() as usize).clamp(1, physical)
     }
 
+    /// Threads the machine OWNER's own prompts are read on: every physical
+    /// core, or an explicit `max_cpu_threads` — a number the operator chose
+    /// binds their own requests too.
+    ///
+    /// The contribution level is "how much of your computer SwarmLLM may use
+    /// to answer requests from the swarm" (the Settings page), so it is not a
+    /// reason to read the owner's own prompt on half the machine — which is
+    /// what a default node did, and most of a reported 3x gap to llama.cpp
+    /// (FUTURE_WORK #119). Physical, not logical: the same plateau argument as
+    /// above, and llama.cpp's default. Only PROMPT READING takes this width
+    /// (`cpu_pools::in_phase_pool`); a reply is bandwidth-bound and keeps its
+    /// calibrated width.
+    pub fn owner_prefill_threads(&self, physical_cores: usize, logical_cores: usize) -> usize {
+        let physical = physical_cores.max(1);
+        let logical = logical_cores.max(physical);
+        if self.max_cpu_threads > 0 {
+            return (self.max_cpu_threads as usize).clamp(1, logical);
+        }
+        physical
+    }
+
     /// Physical and logical core counts, in that order.
     ///
     /// The two differ on any SMT machine and the difference is load-bearing —

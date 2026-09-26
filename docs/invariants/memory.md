@@ -1189,3 +1189,43 @@ the slice being requested now, so between requests a promotion can still cost
 one pointless reload (never a wrong answer). And a serving node could be told
 when a remote reply ends — a completion notice would release its cache and its
 protection at once instead of after the gap. `docs/FUTURE_WORK.md` #93.
+
+## The contribution level caps the swarm's work, not the owner's prompt (2026-09-26)
+
+The Settings page defines the contribution level as "how much of your computer
+SwarmLLM may use to answer requests from the swarm". Since #237 (2026-08-05) it
+sized the worker's whole rayon pool — `RAYON_NUM_THREADS = round(physical ×
+{0.5, 0.75, 1.0})` — so the owner's OWN prompts were read on half the physical
+cores at the default level: 4 threads on an 8-core machine where llama-server
+uses 8. That was most of a field report's "3x slower than llama.cpp"
+(FUTURE_WORK #119, measured: at matched threads the gap is 1.17x).
+
+**What changed.** `process_pool::Requester` (`Owner` / `Swarm`) is a required
+argument of `ModelProcessPool::generate`; the four callers are the API fast
+path (twice, streaming and not), the router's local plan (the router only ever
+receives this node's API requests — `api/mod.rs` and `api/openai/streaming.rs`
+are its only submitters) and the peer-serving `dispatch/remote_generate.rs`.
+`IpcGenerate::for_the_owner` carries it; the worker marks the request ONCE at
+its `DaemonMsg::Generate` entry, before either admission path, on the KV store
+(`mark_owner_request`) — released by `forget_request_bookkeeping` with the
+reservation and the admission claim, and swept by TTL like them. The two pool
+choke points (`forward_inner_impl`, `forward_batch`) ask `serves_the_owner`;
+one owner item makes a batch the owner's. The width comes from the daemon as
+`SWARMLLM_OWNER_PREFILL_THREADS` (an operator's own export wins, as for
+`RAYON_NUM_THREADS`).
+
+**What did not change, and why.** Decode keeps its calibrated width: it is
+bandwidth-bound and #237's sweep put its optimum at or below the cap (16 threads
+37% slower than 6). The swarm's prompts keep the cap — the case #237 was about
+(529-534% of 600% on a 6-core Minimal node). An explicit `max_cpu_threads` binds
+the owner too: a number the operator chose is not overridden. Physical, not
+logical cores: the plateau argument, and llama.cpp's default.
+
+**Measured** (Ryzen 7 5800H, llama-3.2-3b Q4_K_M, node at Minimal, one binary,
+control `SWARMLLM_OWNER_PREFILL_THREADS=0`): 2,427 tokens 35.5 → 49.5 tok/s
+(+39%); 6,911 tokens 28.8 → 32.4 (+12%). The long prompt barely scales where
+llama.cpp gains 49% for the same 4→8 — attention there is the next lever.
+Tests: `only_the_owners_prompt_is_read_on_the_owners_width` (asserts the pool
+the work RAN on; fails with the branch disabled),
+`an_owner_request_is_marked_per_request_and_released_with_it`,
+`the_owners_prompt_is_read_on_every_core_unless_the_operator_said_otherwise`.

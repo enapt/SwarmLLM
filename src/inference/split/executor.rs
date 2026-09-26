@@ -413,7 +413,10 @@ impl SplitModel {
         // both token ids [1, seq] and pre-embedded hidden states [1, seq, d].
         let seq_len = input.dim(1).unwrap_or(1);
         let cpu_layers = self.cpu_layer_count();
-        crate::inference::cpu_pools::in_phase_pool(seq_len, cpu_layers, || {
+        // Whose prompt this is decides how many cores may read it — the
+        // owner's on every one, the swarm's within the contribution level.
+        let for_the_owner = kv_cache_store.serves_the_owner(request_id);
+        crate::inference::cpu_pools::in_phase_pool(seq_len, cpu_layers, for_the_owner, || {
             self.forward_inner_body(
                 input,
                 index_pos,
@@ -1253,7 +1256,12 @@ impl SplitModel {
             .max()
             .unwrap_or(1);
         let cpu_layers = self.cpu_layer_count();
-        crate::inference::cpu_pools::in_phase_pool(seq_len, cpu_layers, || {
+        // One owner's prompt in the batch makes the call the owner's: the
+        // batch runs as one forward, so the swarm items ride along.
+        let for_the_owner = items
+            .iter()
+            .any(|i| kv_cache_store.serves_the_owner(i.request_id));
+        crate::inference::cpu_pools::in_phase_pool(seq_len, cpu_layers, for_the_owner, || {
             self.forward_batch_body(items, kv_cache_store)
         })
     }

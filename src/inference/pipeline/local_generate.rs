@@ -84,6 +84,9 @@ impl PipelineExecutor {
                 prompt,
                 sampling,
                 request_id,
+                // The router only plans requests made to this node's own API,
+                // so a plan that came back here is the owner's.
+                crate::inference::process_pool::Requester::Owner,
                 self.request.session_id.clone(),
                 token_tx,
             ),

@@ -523,6 +523,14 @@ pub struct KvCacheStore {
     /// a cache built before the worker saw the prompt, or the request of a
     /// build that never recorded one — means "grow as before".
     reserved_positions: dashmap::DashMap<String, (usize, std::time::Instant)>,
+    /// Requests this machine's OWNER made — `request_id -> when` — as opposed
+    /// to work served for the swarm. Set by the worker when a `Generate`
+    /// arrives marked so (`mark_owner_request`), read where a forward picks
+    /// its thread pool (`serves_the_owner`): the owner's prompt is read on
+    /// every physical core, the swarm's within the contribution level
+    /// (`cpu_pools::in_phase_pool`). Released with the rest of a request's
+    /// bookkeeping, and swept like it.
+    owner_requests: dashmap::DashMap<String, std::time::Instant>,
 }
 
 /// `SWARMLLM_KV_RESERVE=0` records no reservation, so a prompt grows into its
@@ -792,6 +800,7 @@ impl KvCacheStore {
             cancel_oracle: std::sync::Mutex::new(None),
             admitted_claims: dashmap::DashMap::new(),
             reserved_positions: dashmap::DashMap::new(),
+            owner_requests: dashmap::DashMap::new(),
         }
     }
 
@@ -808,6 +817,19 @@ impl KvCacheStore {
             request_id.to_string(),
             (positions, std::time::Instant::now()),
         );
+    }
+
+    /// Record that `request_id` is this machine's owner's own request — its
+    /// prompt is read on the owner's full width (`cpu_pools::in_phase_pool`).
+    pub(crate) fn mark_owner_request(&self, request_id: &str) {
+        self.owner_requests
+            .insert(request_id.to_string(), std::time::Instant::now());
+    }
+
+    /// Is `request_id` the owner's own request? `false` for anything not
+    /// marked — work for the swarm, and every forward that is not a `Generate`.
+    pub(crate) fn serves_the_owner(&self, request_id: &str) -> bool {
+        self.owner_requests.contains_key(request_id)
     }
 
     /// Positions reserved for this request's caches; 0 when nothing was
@@ -1086,6 +1108,7 @@ impl KvCacheStore {
             .retain(|_, (_, at)| at.elapsed() <= ttl);
         self.reserved_positions
             .retain(|_, (_, at)| at.elapsed() <= ttl);
+        self.owner_requests.retain(|_, at| at.elapsed() <= ttl);
         let before = self.caches.len();
         self.caches
             .retain(|_, entry| entry.last_accessed.elapsed() <= ttl);
@@ -1118,6 +1141,7 @@ impl KvCacheStore {
     fn forget_request_bookkeeping(&self, request_id: &str) {
         self.admitted_claims.remove(request_id);
         self.reserved_positions.remove(request_id);
+        self.owner_requests.remove(request_id);
     }
 
     /// Remove all cache entries for a given request_id (across all models).
@@ -1262,6 +1286,23 @@ mod tests {
         );
         // A model whose whole window is under one quantum reserves the window.
         assert_eq!(new_kv_cache(64, false, 0).k_cache().max_seq_len(), 64);
+    }
+
+    /// Whose request this is lives exactly as long as the request, like the
+    /// reservation: marked by the worker, read where a forward picks its
+    /// threads, gone with `clear_request` and with `cleanup_request_id`.
+    #[test]
+    fn an_owner_request_is_marked_per_request_and_released_with_it() {
+        let store = KvCacheStore::new(std::time::Duration::from_secs(60));
+        assert!(!store.serves_the_owner("r1"), "unmarked is the swarm's");
+        store.mark_owner_request("r1");
+        assert!(store.serves_the_owner("r1"));
+        assert!(!store.serves_the_owner("r2"), "another request is its own");
+        store.clear_request("m", "r1");
+        assert!(!store.serves_the_owner("r1"), "released with the request");
+        store.mark_owner_request("r3");
+        store.cleanup_request_id("r3");
+        assert!(!store.serves_the_owner("r3"), "and by the other cleanup");
     }
 
     /// The reservation lives exactly as long as the request: recorded by the

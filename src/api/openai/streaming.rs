@@ -311,6 +311,8 @@ pub fn spawn_split_stream(
             prompt,
             params,
             rid,
+            // Asked of this node's own API: the owner's request.
+            crate::inference::process_pool::Requester::Owner,
             None,
             Some(token_tx),
         );
@@ -488,7 +490,17 @@ pub async fn run_split_generate(
     let mut output = state
         .shared_state
         .model_process_pool
-        .generate(model_id, meta.layer_range, prompt, params, rid, None, None)
+        .generate(
+            model_id,
+            meta.layer_range,
+            prompt,
+            params,
+            rid,
+            // Asked of this node's own API: the owner's request.
+            crate::inference::process_pool::Requester::Owner,
+            None,
+            None,
+        )
         .await
         .map_err(ApiError)?;
 

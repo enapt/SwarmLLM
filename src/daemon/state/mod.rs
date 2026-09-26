@@ -1398,11 +1398,22 @@ impl SharedState {
                 state.config.node.contribution.clone(),
             );
             state.model_process_pool.set_cpu_threads(threads);
+            // The owner's own prompts are not the swarm's work: read on every
+            // physical core unless an explicit `max_cpu_threads` says otherwise
+            // (FUTURE_WORK #119, `cpu_pools::in_phase_pool`).
+            let owner_threads = state
+                .config
+                .resources
+                .owner_prefill_threads(physical_cores, logical_cores);
+            state
+                .model_process_pool
+                .set_owner_prefill_threads(owner_threads);
             tracing::info!(
                 contribution = ?state.config.node.contribution,
                 physical_cores,
                 logical_cores,
                 inference_cpu_threads = threads,
+                owner_prompt_threads = owner_threads,
                 "Inference CPU parallelism set from the contribution level"
             );
         }
