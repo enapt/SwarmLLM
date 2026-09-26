@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.3.207-alpha] — 2026-09-26
 
 **A model too big for your graphics card now answers instead of refusing
 every request, a split model no longer stalls for minutes when one piece of an
