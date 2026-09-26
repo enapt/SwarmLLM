@@ -1,6 +1,14 @@
 # Changelog
 
-## [Unreleased]
+## [0.3.208-alpha] — 2026-09-26
+
+**Agent programs work better on a computer without a graphics card, and a
+computer with one no longer turns away a long prompt it has room for.** Agent
+tools no longer hang up while a slow computer reads their prompt, a later turn
+stays on the computer that already read most of it, and your own prompts are
+read with all of your processor's cores. On a graphics card, a second long
+prompt is no longer refused for memory the first one had given back, and more
+conversations fit at once.
 
 **Fixed: a computer with a graphics card could turn away a long prompt it
 had room for.** After answering one long prompt, the next one of the same
