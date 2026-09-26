@@ -154,15 +154,15 @@ UNDETERMINED and never a fix — use it BEFORE blaming a change, especially your
 
 ## Status
 
-**v0.3.206-alpha is the live release (2026-09-25), signed and on both nodes.** It carries:
-**quinn-proto 0.11.18** (0.11.17 closed whole QUIC connections mid-transfer since v0.3.148,
-#112); **a remote last segment samples as the caller asked** (`0x0A`, #106); **a peer serving a
-shorter context is skipped or failed over from** (#111, `split_rig.sh context`); **MoE experts
-stay quantized** and `qwen3moe`/`qwen2moe` load (#114 — tiny models vs llama.cpp only; no real
-30B-A3B run yet); **LoRA applied again** (#110, now checked on CUDA too); #17's last-segment
-failover; per-version Trickle (#91); #108a/b. Gemma 4 scoped, not built (#115).
-**`main` is ahead of it** — CHANGELOG `[Unreleased]` (#104, #111 whole-model, #113 resend, MoE routing,
-Llama 4 fixed vs llama.cpp; DeepSeek-2 / Qwen 3.5 / StarCoder2 REFUSED — no real file loaded, #116-118).
+**v0.3.207-alpha is the live release (2026-09-26), signed and on both nodes.** It carries:
+**a model too big for the card answers** (#104 — the card/processor split's KV budget counted the
+whole model; GLM-4-9B alone on 8 GB now serves its full 8,192 context, whole-file models split too);
+**a lost split result is resent**, never mistaken for the next step (#113, `0x07`,
+`features::RESULT_STEP`); **a whole-model delegate's context refusal re-plans** (#111); MoE routing
+in one pass per layer; **Llama 4 fixed vs llama.cpp** (tiny fixtures only — no real Llama 4 run);
+DeepSeek-2 / Qwen 3.5 / StarCoder2 **REFUSED** everywhere incl. auto-manage's peer branch (#116-118).
+v0.3.206 before it: quinn-proto 0.11.18 (#112), remote sampling (#106), MoE quantized, LoRA (#110).
+Qwen 3.5 real support is on the local branch `qwen35-support` (#117). Gemma 4 scoped, not built (#115).
 ⚠ **A family in `supported_list` is a claim: check it against a REAL file's header** (gotcha #715). **Next** → `memory/next_up.md`.
 
 ⚠ **Behaviour gate = `reply_ab.sh` + `split_rig.sh`** (incl. `failover`), not
