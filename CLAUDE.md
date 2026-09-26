@@ -154,13 +154,11 @@ UNDETERMINED and never a fix — use it BEFORE blaming a change, especially your
 
 ## Status
 
-**v0.3.207-alpha is the live release (2026-09-26), signed and on both nodes** — contents in
-`memory/round_history.md`. **`main` is AHEAD of it, unreleased** — agent workloads on processor-only
-nodes (field report 2026-09-26): SSE keep-alive data chunk, a warm prompt priced warm
-(`scheduler::cached_prefix`), prefix-cache ceiling derived from bytes, `models_run_on_card`, the
-owner's prompts on every core (`process_pool::Requester`), the GQA attention cliff past a 5,461-long
-cache; and from the 2026-09-26 benchmark pass, the card's free memory read after a synchronize (#121)
-and a reply reserved by its `max_tokens` (#122). Qwen 3.5 is on local branch `qwen35-support` (#117); Gemma 4 scoped, not built (#115).
+**v0.3.208-alpha is the live release (2026-09-26), signed and on both nodes; `main` equals it** —
+contents in `memory/round_history.md`: agent workloads on processor-only nodes (SSE keep-alive data
+chunk, a warm prompt priced warm, the owner's prompts on every core — split requests included — the
+GQA attention cliff), and from the benchmark pass the card's free memory read after a synchronize
+(#121) and a reply reserved by its `max_tokens` (#122). Qwen 3.5 is on local branch `qwen35-support` (#117); Gemma 4 scoped, not built (#115).
 ⚠ **A family in `supported_list` is a claim: check it against a REAL file's header** (#715). **Next** → `memory/next_up.md`.
 
 ⛔ **This PC had two unclean shutdowns on 2026-09-26 (#716 bluescreen, #718 hard hang), causes
