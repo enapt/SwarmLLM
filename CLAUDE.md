@@ -88,7 +88,7 @@ until readers leave (#90's shape); `clippy.toml` fails the build on one.
 ## Testing
 
 **Always say which feature set a count came from.** With
-`--features dev,claude-subscription`: **3025 lib** (+14 ignored),
+`--features dev,claude-subscription`: **3027 lib** (+15 ignored),
 79 integration (31 + 34 + 14 `yamux_substream`), **182 repo-consistency**,
 1 `api_key_side_effects`, 56 `swarmllm-types`, and 11 in the vendored
 request-response patch — plus 16 in the `swarmllm` BIN target (`cli::*`, counted
@@ -154,10 +154,11 @@ UNDETERMINED and never a fix — use it BEFORE blaming a change, especially your
 
 ## Status
 
-**v0.3.209-alpha is the live release (2026-09-27), signed and on both nodes; `main` equals it** —
-contents in `memory/round_history.md`: processor attention kernels (#119), busy-node refusals said out
-loud with a per-peer cap and a reserve for running requests (#123), `auto` resolved to a servable model
-(#120), Llama 3.1/3.2 RoPE factors read at last — a `rope_freqs.bin` sidecar off shard 0 (#124).
+**v0.3.210-alpha is the live release (2026-09-27), signed and on both nodes** — a worker that cannot
+grow takes the spawn's ladder (#125), whole-model peers handed over from the first request (#126), own GPU
+ranked on warm work (#127). `main` is ahead: card/processor concurrent-request fix (#135), speculative
+verify walked at the tail (#134 Phase 1a). **Why split decode is slow and what beats it →
+`docs/plans/faster_than_local.md`** (the limit, and the per-situation plan).
 Qwen 3.5 is on local branch `qwen35-support` (#117); Gemma 4 scoped, not built (#115).
 ⚠ **A family in `supported_list` is a claim: check it against a REAL file's header** (#715). **Next** → `memory/next_up.md`.
 

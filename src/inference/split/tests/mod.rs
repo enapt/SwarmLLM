@@ -15,5 +15,6 @@ mod common;
 mod core;
 mod gemma2;
 mod gqa;
+mod kv_refresh;
 mod llama4_glm4;
 mod moe_mla;

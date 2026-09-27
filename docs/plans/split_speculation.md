@@ -221,6 +221,92 @@ alone. On a ~2,000-token prompt with healthy cards that is roughly
 6 s → 4 s. It also stops a prompt pass being one multi-megabyte frame, which is
 the frame `FUTURE_WORK.md` #133 saw a healthy peer never finish reading.
 
+### Phase 4 — a SHADOW of the far layers, and shared randomness
+
+**The limit every phase above works inside:** time per token ≈ 1/v + m·RTT,
+where v is how fast the near machine drafts and m how often the far machine
+disagrees. A small drafter keeps m high (26-33%), so no amount of structure gets
+past ~10-15 tok/s at 300 ms. The lever is m itself: draft with a near-copy of
+the WHOLE model.
+
+**The shadow.** The near machine keeps its real layers and a LOW-BIT copy of the
+far machine's layers (plus the output head at full precision). Its drafts come
+from nearly the real model; its errors cost speed, never correctness, because the
+far machine still runs the real layers on every token.
+
+**Shared randomness.** At temperature > 0 even a perfect copy "misses" whenever
+the real model draws a different token (a deterministic draft is accepted with
+probability p(draft)). Both sides sample by Gumbel-max with noise keyed by
+(seed, position, token id); each side still draws an exact sample of its own
+distribution, and a close copy draws the same token (Daliri et al., 2408.07978,
+"drafter-invariant speculative decoding").
+
+**Measured** (`~/swarmllm-ref/spec/coupling.py`, `coupling2.py`, `shadow.py`,
+Qwen2.5-Coder-7B Q4_K_M as the target, 720 positions of its own replies, shadows
+REQUANTIZED from the Q4 file — which is what a swarm that holds only Q4 shards
+could make):
+
+| predictor | greedy | T=1.0 deterministic draft | T=1.0 shared randomness | coupled top-2 |
+|---|---|---|---|---|
+| 0.5B drafter | 67.6% | 61.1% | 64.3% | — |
+| whole model Q2_K | 81.8% | 70.6% | 82.7% | — |
+| far half Q2_K | 84.0% / 86.8%* | 71.3% | 84.8% | 96.2% |
+| whole model Q3_K_S | 90.7% | 73.5% | 89.9% | — |
+| **far half Q3_K_S** | **93.8%** | — | **92.5%** | **98.7%** |
+
+\* the two runs used different system prompts (`coupling.py` vs `coupling2.py`).
+Shared randomness recovers ~19 points at T=1.0 for a close copy and ~3 for a
+dissimilar drafter, as the theory says (it tracks distribution distance).
+**Model size matters more than source precision:** Qwen3-1.7B's far half at Q3,
+made from a Q8 file, agrees only 82.5% — small models are fragile under low-bit
+copies, the large ones a split exists for are not.
+
+**Projected, v = 44 tok/s (this RTX 3070's local 7B decode), far half Q3:**
+
+| design | 300 ms (TH↔BE) | 30 ms |
+|---|---|---|
+| today, no speculation | 2.85 (measured) | ~13 |
+| rounds (DSD's loop, γ=8, shadow as its drafter) | ~12 | ~33 |
+| continuous stream, one draft line (m = 7.5% at T=1) | ~22 | ~40 |
+| continuous stream, extra lines where the shadow is unsure (m ≈ 1.7%, ~1.3 lines) | ~29 | ~42 |
+
+⚠ **Correction, same day:** an earlier projection counted the shadow's second
+choice as avoiding a stall. In a stream it does not unless that choice was also
+drafted ONWARD, which is what the extra lines are for — and they cost the head
+a batch of lines per step, not one.
+
+**What raises the ceiling beyond these:** v itself (the drafting engine is
+submission-bound: `docs/plans/local_decode_submissions.md`), and RTT (a nearer
+holder of the far half — `regional_pipelines.md`). As m·RTT shrinks the stream
+runs at v, the near machine's speed on the SHADOW, which can exceed the real
+model's local speed once decode is bound by bytes rather than submissions.
+
+**Stages, cheapest first:**
+- **4a. DSD with a shadow drafter** — config only once v0.3.211 reaches the far
+  node (the tail must walk): `draft_model_path` → a shadow GGUF. Measures the
+  round-based figure on the real link.
+- **4b. Rounds in flight.** Keep drafting while a verify is out; an EPOCH number
+  on every verify lets the tail drop work built on a prefix that just failed.
+  Reaches the one-line stream figure without forking any cache.
+- **4c. Shared randomness** in the worker's sampler and the drafter (counter-based
+  noise per (seed, position, token id)), so 4a/4b hold at T > 0.
+- **4d. Extra draft lines** — needs the tail's KV cache to fork per line.
+- **4e. The shadow from the swarm** — derived "shadow shards" (the far layers
+  requantized from the Q4 shard, deterministic, so any node of the same build can
+  check one by recomputing it), never an implicit full download.
+
+**KV refresh — measured, 39% fewer misses.** The tail computes the far layers'
+exact K/V for every confirmed token anyway; sent back (~28 KB/token for a 7B),
+the shadow attends over an EXACT history and approximates only the token being
+drafted, so its errors stop accumulating across the context. Probe
+(`split::tests::kv_refresh::kv_refresh_probe`, our own engine, CPU, the far
+layers' cache replaced before every token by an independent copy of the
+target's): Qwen3-1.7B Q8 target, far half at Q3_K_S, 400 positions over 4
+prompts — **own cache 86.5% → refreshed 91.75%** top-1 agreement (misses 13.5%
+→ 8.25%). Not yet run on the 7B (three 7B copies exceeded the build slice; the
+probe now shares one shadow between both arms). ~9 Mbit/s at 40 tok/s — cheap
+beside the hidden states already crossing.
+
 ## What the literature says (survey 2026-09-27)
 
 The survey found no method that makes a WAN split fast without speculation. It

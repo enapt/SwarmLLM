@@ -92,6 +92,18 @@ impl SeqCache {
         self.all_data = None;
     }
 
+    /// An independent copy — see [`KvPair::deep_copy`].
+    #[cfg(test)]
+    pub(crate) fn deep_copy(&self) -> candle_core::Result<Self> {
+        Ok(Self {
+            all_data: self.all_data.as_ref().map(|t| t.copy()).transpose()?,
+            dim: self.dim,
+            current_seq_len: self.current_seq_len,
+            grow_by: self.grow_by,
+            max_seq_len: self.max_seq_len,
+        })
+    }
+
     /// Keep the first `len` positions and forget the rest. O(1): no copy, no
     /// allocation, the buffer is untouched. A `len` at or past the current
     /// length is a no-op.
@@ -159,6 +171,17 @@ impl KvPair {
             k: SeqCache::with_capacity(dim, initial, grow_by),
             v: SeqCache::with_capacity(dim, initial, grow_by),
         }
+    }
+
+    /// An INDEPENDENT copy (probe/test use). `Clone` shares the tensors'
+    /// storage and the next `append` writes into that buffer in place, so a
+    /// cloned cache handed to a second model is silently rewritten by it.
+    #[cfg(test)]
+    pub(crate) fn deep_copy(&self) -> candle_core::Result<Self> {
+        Ok(Self {
+            k: self.k.deep_copy()?,
+            v: self.v.deep_copy()?,
+        })
     }
 
     pub(crate) fn k_cache(&self) -> &SeqCache {
@@ -269,6 +292,19 @@ pub(crate) struct LayerKv {
 }
 
 impl LayerKv {
+    /// An independent copy of this layer's cache, mirror included — see
+    /// [`KvPair::deep_copy`] for why `Clone` is not one.
+    #[cfg(test)]
+    pub(crate) fn deep_copy(&self) -> candle_core::Result<Self> {
+        Ok(Self {
+            main: self.main.deep_copy()?,
+            shadow: self.shadow.as_ref().map(KvPair::deep_copy).transpose()?,
+            growth: self.growth,
+            initial: self.initial,
+            mirrorable: self.mirrorable,
+        })
+    }
+
     /// Build with the first allocation sized to `initial` positions and
     /// growth of `growth` after that — how a prompt of known length is held in
     /// one allocation per layer. See [`SeqCache`]. `dim` is the sequence axis;
