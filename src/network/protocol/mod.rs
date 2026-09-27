@@ -138,7 +138,7 @@ pub(super) const MAX_RESULT_TOKENS: usize = 65536;
 /// 0x03 trailer. Defended in both the plaintext (`layer_forward.rs`) and
 /// encrypted (`encrypted.rs`) decoders; mirrored on the receive side by
 /// `layer_result.rs::MAX_SPEC_LOGITS_POSITIONS = 32`. Speculative γ is
-/// bounded by `GammaController::DEFAULT_GAMMA_MAX = 12`; the cap leaves
+/// bounded by `dsd_controller::BEST_GAMMA_MAX = 16`; the cap leaves
 /// generous headroom while keeping `Vec::with_capacity(num_drafts)`
 /// bounded against malicious peers (R107).
 pub(super) const MAX_DRAFT_TOKENS: usize = 32;

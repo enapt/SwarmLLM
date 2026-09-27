@@ -434,9 +434,13 @@ impl PipelineExecutor {
                     }),
                 )
                 .await?;
-                // An unusable reply ends the request with what it has, exactly
-                // as the hit arm below does — the same failure must not stream
-                // an error on a miss round and a clean finish on a hit round.
+                // An unusable reply fails the request, exactly as the hit arm
+                // below does and as a check that never came back does (the `?`
+                // above) — the same failure must not stream an error on a miss
+                // round and a clean finish on a hit round. `keeping_the_partial`
+                // hands back what was produced as the failure it is; ending
+                // with what it had here reported a truncated reply as a
+                // finished one (gotcha #746, review of 2026-09-28).
                 let (_, bonus, _) = match reply.accept(
                     &[],
                     &self.request.sampling_params,
@@ -445,8 +449,8 @@ impl PipelineExecutor {
                 ) {
                     Ok(decided) => decided,
                     Err(e) => {
-                        tracing::warn!(%request_id, error = %e, "ngram-only: unusable verify reply, returning partial");
-                        break;
+                        tracing::warn!(%request_id, error = %e, "ngram-only: unusable verify reply");
+                        return Err(e);
                     }
                 };
                 last_token = bonus;
@@ -509,8 +513,8 @@ impl PipelineExecutor {
             ) {
                 Ok(decided) => decided,
                 Err(e) => {
-                    tracing::warn!(%request_id, error = %e, "ngram-only: unusable verify reply, returning partial");
-                    break;
+                    tracing::warn!(%request_id, error = %e, "ngram-only: unusable verify reply");
+                    return Err(e);
                 }
             };
             let mut emitted: Vec<u32> = accepted

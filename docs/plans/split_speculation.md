@@ -196,7 +196,11 @@ reply where it happened. And a connection that dropped during the first check
 one-token reply with `finish_reason: stop`; the check's failure now propagates, as
 the n-gram loop's always has, so `keeping_the_partial` reports it and the router
 retries a request that has streamed nothing. The single-peer path (Item 2) had
-the same swallow and is fixed the same way.
+the same swallow and is fixed the same way. A review of that fix found the same silent `stop` one
+arm over, for a check reply that CANNOT BE READ (too few rows, non-finite logits,
+a walk claiming tokens never guessed): in DSD, in both arms of the default n-gram
+loop and in Item 2 — where non-finite logits went on to emit token id 0. All
+four now fail the request the same way.
 
 **The drafter reads the prompt while the target does** (2026-09-28): its first
 call (`engine_drafter::read_ahead`, a guess-free `DaemonMsg::Draft`) is spawned

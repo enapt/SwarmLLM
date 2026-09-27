@@ -464,10 +464,14 @@ impl PipelineExecutor {
                 noise.as_ref().map(|n| (n, current_pos as u64 + 1)),
             ) {
                 Ok(decided) => decided,
+                // A reply that cannot be read — too few rows, non-finite
+                // logits, a walk claiming tokens that were never guessed — is
+                // a failure of the check, reported as one exactly as a check
+                // that never came back (above): ending here with `stop` would
+                // hand the caller a truncated reply as a finished one.
                 Err(e) => {
-                    tracing::warn!(%request_id, error = %e, "DSD: unusable verify reply — returning partial");
-                    finish_reason = "stop".to_string();
-                    break;
+                    tracing::warn!(%request_id, error = %e, "DSD: unusable verify reply");
+                    return Err(e);
                 }
             };
 

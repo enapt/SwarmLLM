@@ -439,24 +439,26 @@ impl PipelineExecutor {
             // expected spec_logits.len() == γ+1. greedy_accept_reject indexes
             // `spec_logits[drafts.len()]` (= γ) on ALL-ACCEPTED, so we need
             // strict `< drafts.len() + 1` to avoid OOB on a corrupt response.
-            if spec_logits.len() < drafts.len() + 1 {
+            //
+            // An unusable reply — too few rows, or rows that are not finite —
+            // fails the request, as in the DSD and n-gram loops. It used to end
+            // with `stop` on too few rows, and on non-finite ones to go on:
+            // `greedy_accept_reject` answers those with bonus 0, which this
+            // loop then emitted as token id 0.
+            if spec_logits.len() < drafts.len() + 1
+                || !crate::inference::sampling::verify_rows_are_finite(drafts.len(), &spec_logits)
+            {
                 tracing::warn!(
                     %request_id,
                     got = spec_logits.len(),
                     want_min = drafts.len() + 1,
-                    "speculative: insufficient spec_logits — returning partial"
+                    "speculative: unusable verify reply"
                 );
-                return Ok(Some(
-                    self.finish_speculative(
-                        request_id,
-                        generated,
-                        &decoder,
-                        &eos_tokens,
-                        prompt_token_count as u32,
-                        "stop".into(),
-                    )
-                    .await,
-                ));
+                return Err(SwarmError::Inference(format!(
+                    "spec verify: {} usable logit rows for {} drafts",
+                    spec_logits.len(),
+                    drafts.len()
+                )));
             }
 
             // After this forward, remote KV was grown by verify_tokens.len().
