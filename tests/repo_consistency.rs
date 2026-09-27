@@ -11084,6 +11084,32 @@ fn loader_layer_loops(src: &str) -> Vec<(String, bool)> {
 /// model and the KV budget counted only the first n there (review of #104,
 /// 2026-09-25). The gotcha recording the shadowing design counted four loops;
 /// there were five.
+/// A model split between the card and the processor ends its last layers on the
+/// processor while the final norm and the output head sit on the card, so EVERY
+/// forward path must bring its output back through
+/// `SplitModel::output_on_primary_device` before either is applied. The single
+/// path did; the batched one did not, and every burst of concurrent requests to
+/// such a model failed with "final_norm: device mismatch" (a 500) on v0.3.209
+/// and earlier while each request alone was fine (found by the v0.3.210 gate,
+/// 2026-09-27). Neither CI nor any CPU test has a second device to see it.
+#[test]
+fn every_forward_path_brings_a_split_segments_output_back_to_the_card() {
+    let src = std::fs::read_to_string(repo_root().join("src/inference/split/executor.rs"))
+        .expect("executor.rs");
+    assert!(
+        src.contains("fn output_on_primary_device("),
+        "the one helper is gone"
+    );
+    for sig in ["fn forward_inner_body(", "fn forward_batch_body("] {
+        let body = method_body(&src, sig).unwrap_or_else(|| panic!("{sig} not found"));
+        assert!(
+            body.contains("output_on_primary_device("),
+            "{sig} applies the final norm without bringing a card/processor split's \
+             output back to the card first — call `self.output_on_primary_device(hidden)?`"
+        );
+    }
+}
+
 #[test]
 fn every_layer_loop_in_the_loader_places_its_layer() {
     let loops: Vec<(String, bool)> = walk_rs_files("src/inference/split/loader")

@@ -378,6 +378,32 @@ impl SplitModel {
         )
     }
 
+    /// Bring a segment's output back to the primary device — the ONE place
+    /// every forward path does it, single and batched alike.
+    ///
+    /// The final norm, the output head and the embedding table all live there,
+    /// and a caller that serialises this for the next node expects one known
+    /// device rather than "wherever the last layer happened to be". Costs
+    /// nothing when the segment was never split. The batched path used to
+    /// skip it, so a model split between the card and the processor answered
+    /// every burst of concurrent requests with "final_norm: device mismatch"
+    /// (a 500) while single requests were fine — its last layers ran on the
+    /// processor and the norm sat on the card.
+    ///
+    /// The KV caches are deliberately NOT moved: each one belongs to its layer
+    /// and must stay on that layer's device, which is what makes the
+    /// card-resident layers actually fast.
+    fn output_on_primary_device(&self, hidden: Residual) -> Result<Residual, SwarmError> {
+        if self.layer_devices.is_empty() || hidden.device().same_device(&self.device) {
+            return Ok(hidden);
+        }
+        hidden
+            .into_tensor()
+            .and_then(|t| t.to_device(&self.device))
+            .map(Residual::Ready)
+            .map_err(|e| SwarmError::Internal(format!("segment output to primary device: {e}")))
+    }
+
     /// Core forward pass. When `skip_embedding` is true, the input is treated as
     /// pre-embedded hidden states even if this segment has `tok_embeddings`.
     /// When `all_positions` is true AND this is the last segment, the logits
@@ -931,25 +957,7 @@ impl SplitModel {
             }
         }
 
-        // Bring the segment's output back to the primary device.
-        //
-        // The final norm, the output head and the embedding table all live
-        // there, and a caller that serialises this for the next node expects
-        // one known device rather than "wherever the last layer happened to
-        // be". Costs nothing when the segment was never split.
-        //
-        // The KV caches are deliberately NOT moved: each one belongs to its
-        // layer and must stay on that layer's device, which is what makes the
-        // card-resident layers actually fast.
-        if !self.layer_devices.is_empty() && !hidden.device().same_device(&self.device) {
-            let moved = hidden
-                .into_tensor()
-                .and_then(|t| t.to_device(&self.device))
-                .map_err(|e| {
-                    SwarmError::Internal(format!("segment output to primary device: {e}"))
-                })?;
-            hidden = Residual::Ready(moved);
-        }
+        let hidden = self.output_on_primary_device(hidden)?;
 
         // Write the updated KV-caches and SSM states back to the store.
         {
@@ -1723,7 +1731,10 @@ impl SplitModel {
         // The per-request split and final norm below read the whole batch, so
         // the last layer's closing add is taken here (once per forward, not
         // per layer — not worth a fused path of its own).
-        let batched = hidden.into_tensor().map_err(SwarmError::internal)?;
+        let batched = self
+            .output_on_primary_device(hidden)?
+            .into_tensor()
+            .map_err(SwarmError::internal)?;
 
         // Write updated KV-caches and SSM states back (take instead of clone to avoid copying)
         for (req_idx, item) in items.iter().enumerate() {
