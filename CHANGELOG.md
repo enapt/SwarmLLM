@@ -1,5 +1,48 @@
 # Changelog
 
+## [0.3.210-alpha] — 2026-09-27
+
+**A model you have downloaded no longer gets stuck refusing to answer because of
+what else is on your graphics card, and a model held by one other computer now
+answers at that computer's full speed from the very first request.** This
+release comes from the first benchmark of two graphics cards sharing one model
+across the internet (Thailand and Belgium).
+
+**Fixed: a model could get stuck refusing every chat message.** When your
+computer had run part of a model for a split request, and you then asked it for
+the whole model, it tried to grow the part it had loaded — and if the graphics
+card could not take the rest, it refused, every time, in a fraction of a second,
+until that part aged out minutes later. Loading a model from scratch has always
+tried harder first: taking the card back from models nobody is using, and
+putting part of the model on the processor if the card cannot hold it all.
+Growing one now does the same. The same fix stops an idle model from blocking
+one you want: with a small model idle on the card, asking for an 8B model this
+computer holds failed after 12 seconds instead of making room.
+
+**A model held whole by one other computer now streams at that computer's speed
+from the first request.** The first such request after every restart was being
+driven one token at a time across the network — 0.78 tokens per second between
+Thailand and Belgium — instead of letting the other computer write the whole
+reply on its own card and stream it back, which ran at 10.6-11.1. Your computer
+had also been timing its own graphics card by how long it took to load a model,
+which made it look up to 224 times slower than it is and could steer work away
+from it.
+
+**Planning counts graphics memory an idle model is holding.** The part of the
+program that decides which computers run which part of a model now knows that
+memory held by a model nobody is using can be freed, so it stops sending work
+across the world to avoid it.
+
+**For benchmarking:** a request can now ask to plan as though another computer
+held only some parts of a model (`swarm_route.pretend_peer_holds`), which is
+what makes a split between two computers that could each run the model
+measurable at all. `examples/spread_bench.py` is the benchmark: one model on
+this computer, on a named peer, and split across both, with the route each
+request actually took. Its first run measured a split across the internet at
+**2.4 times faster over the persistent pipeline stream** than over the default
+transport (1.19 → 2.85 tokens per second); that setting stays off by default
+until a stall it can cause in a four-computer failover test is explained.
+
 ## [0.3.209-alpha] — 2026-09-27
 
 **Llama 3 models now answer long conversations the way they were trained, and a
