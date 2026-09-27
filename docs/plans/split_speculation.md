@@ -183,8 +183,12 @@ and 4 (a drafter from the shard system, γ from the trip) remain.
    no new worker message is needed for a chain. Acquire it only for a family
    this node has actually coordinated a split for, and only within the storage
    budget.
-4. **γ from the trip, not a constant.** `GammaController` already adapts to
-   acceptance; add the trip time so a long link drafts deeper.
+4. **γ from the trip, not a constant — DONE 2026-09-27.** `dsd_controller::best_gamma`
+   maximizes `E(α, γ) / (fixed + γ·draft)` with both costs measured each round
+   and α estimated from whole rounds. `GammaController`'s multiplier could never
+   move γ off 4 (4 × 1.1 rounds back to 4). Rig (CPU drafts at ~200 ms each,
+   loopback verify ~170 ms): γ = 1, the right answer there; a 300 ms link with
+   25 ms GPU drafts at α = 0.92 gives ≈ 12.
 
 **Measure it:** `spread_bench.py` on the forced split
 (`pretend_peer_holds`), A/B inside one binary via an env switch. Prove the

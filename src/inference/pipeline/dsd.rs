@@ -63,7 +63,7 @@ use super::speculative::{
 };
 use super::PipelineExecutor;
 #[cfg(feature = "llama")]
-use crate::inference::dsd_controller::GammaController;
+use crate::inference::dsd_controller::{best_gamma, AcceptanceEstimate};
 
 /// Fast-path preconditions for the DSD coordinator loop.
 #[cfg(feature = "llama")]
@@ -118,8 +118,17 @@ impl PipelineExecutor {
 
         let request_id = self.request.id;
         let max_tokens = self.request.sampling_params.max_tokens;
-        let initial_gamma = self.shared_state.config.inference.speculative_gamma.max(2);
-        let mut controller = GammaController::new(initial_gamma);
+        let initial_gamma = self.shared_state.cfg().inference.speculative_gamma.max(2);
+        // γ is chosen each round from MEASURED costs (Leviathan et al. §3.4):
+        // the verify's fixed cost — its round trip and the far layers' pass — and
+        // the time per drafted guess, against the running acceptance. A long link
+        // makes long runs pay; a free round trip makes them waste drafting. The
+        // multiplicative controller this replaced could never leave γ = 4.
+        let mut acceptance = AcceptanceEstimate::new();
+        let mut round_fixed_ms: Option<f64> = None;
+        let mut draft_ms_each: Option<f64> = None;
+        let ema = |old: Option<f64>, new: f64| Some(old.map_or(new, |o| 0.7 * o + 0.3 * new));
+        let mut gamma_now = initial_gamma;
 
         // Resolve peer IDs upfront. Local segments push None and dispatch to
         // the worker subprocess in `forward_verify_through_segments`; remote
@@ -232,7 +241,11 @@ impl PipelineExecutor {
                 break;
             }
             let remaining = max_tokens - generated.len() as u32;
-            let gamma = controller.current_gamma().min(remaining).max(1);
+            if let (Some(fixed), Some(each)) = (round_fixed_ms, draft_ms_each) {
+                gamma_now = best_gamma(acceptance.alpha(), fixed, each);
+            }
+            let gamma = gamma_now.min(remaining).max(1);
+            let round_start = std::time::Instant::now();
 
             // Guess k lands at absolute position current_pos + 1 + k: the verify
             // writes `last_token` at `current_pos`, and its row k predicts the
@@ -315,6 +328,7 @@ impl PipelineExecutor {
                 break;
             }
 
+            let drafted_at = std::time::Instant::now();
             // verify_tokens = [bootstrap, q_1..q_γ]
             let mut verify_tokens: Vec<u32> = Vec::with_capacity(drafts.len() + 1);
             verify_tokens.push(last_token);
@@ -396,7 +410,7 @@ impl PipelineExecutor {
 
             // Bail before the per-round bookkeeping when the client has
             // disconnected. Mirrors speculative.rs — the inner `break` only
-            // exits the streaming for-loop, leaving `controller.record_round`
+            // exits the streaming for-loop, leaving the acceptance bookkeeping
             // and the synchronous `draft_sync_after_round` to run before the
             // outer `while` notices the disconnect.
             if !finish_reason.is_empty() {
@@ -418,8 +432,11 @@ impl PipelineExecutor {
             };
             expected_kv_len = new_expected_kv;
 
-            // Update γ controller for next round.
-            controller.record_round(accepted.len() as u32, drafts.len() as u32);
+            // What this round cost and kept, for the next round's γ.
+            acceptance.record(accepted.len() as u32, drafts.len() as u32);
+            let draft_ms = (drafted_at - round_start).as_secs_f64() * 1000.0;
+            draft_ms_each = ema(draft_ms_each, draft_ms / drafts.len().max(1) as f64);
+            round_fixed_ms = ema(round_fixed_ms, drafted_at.elapsed().as_secs_f64() * 1000.0);
 
             // Sync draft KV.
             tokio::task::block_in_place(|| {
@@ -462,8 +479,10 @@ impl PipelineExecutor {
             segments = self.assignment.segments.len(),
             proposed = acceptance_proposed,
             accepted = acceptance_accepted,
-            final_gamma = controller.current_gamma(),
-            accept_ema = format_args!("{:.2}", controller.accept_ema()),
+            final_gamma = gamma_now,
+            alpha = format_args!("{:.3}", acceptance.alpha()),
+            round_fixed_ms = format_args!("{:.1}", round_fixed_ms.unwrap_or(0.0)),
+            draft_ms_each = format_args!("{:.1}", draft_ms_each.unwrap_or(0.0)),
             "DSD: request complete"
         );
 

@@ -102,6 +102,11 @@ impl GammaController {
     }
 
     /// Override the smoothing constants — only used in benchmarks / tuning.
+    ///
+    /// (A note for anyone relying on the multiplier above: from γ = 4 it can
+    /// never grow — even perfect acceptance gives 4 × 1.1 = 4.4, which rounds back
+    /// to 4 — so a controller started there stays there. DSD sizes γ with
+    /// [`best_gamma`] instead.)
     #[cfg(test)]
     pub fn with_tuning(mut self, alpha: f32, beta: f32) -> Self {
         self.alpha = alpha.clamp(0.0, 1.0);
@@ -110,9 +115,110 @@ impl GammaController {
     }
 }
 
+/// The longest guess run [`best_gamma`] will propose.
+pub const BEST_GAMMA_MAX: u32 = 16;
+
+/// Expected tokens one round yields: `γ` drafts, each kept with probability `α`
+/// while every one before it was kept, plus the token sampled where they stop —
+/// `(1 - α^(γ+1)) / (1 - α)` (Leviathan et al., 2023, "Fast inference from
+/// transformers via speculative decoding", eq. 1).
+pub fn expected_tokens_per_round(alpha: f64, gamma: u32) -> f64 {
+    let a = alpha.clamp(0.0, 0.999_999);
+    (1.0 - a.powi(gamma as i32 + 1)) / (1.0 - a)
+}
+
+/// The guess-run length that maximizes tokens per SECOND for a round that costs
+/// `round_fixed_ms` (the verify: its round trip and the far layers' pass) plus
+/// `draft_ms_each` per guess drafted — Leviathan et al. §3.4's choice of γ, with
+/// the costs MEASURED rather than assumed. On a long link the fixed cost dominates
+/// and long runs pay (≈12 at a 300 ms trip, 25 ms drafts, α = 0.92); where the
+/// round trip is nearly free, drafting dominates and short runs win.
+pub fn best_gamma(alpha: f64, round_fixed_ms: f64, draft_ms_each: f64) -> u32 {
+    let fixed = round_fixed_ms.max(0.1);
+    let each = draft_ms_each.max(0.0);
+    (1..=BEST_GAMMA_MAX)
+        .map(|g| {
+            (
+                g,
+                expected_tokens_per_round(alpha, g) / (fixed + each * f64::from(g)),
+            )
+        })
+        .fold((1, f64::MIN), |best, c| if c.1 > best.1 { c } else { best })
+        .0
+}
+
+/// A running estimate of the per-token acceptance α from whole rounds: a round
+/// that keeps `k` of `γ` drafts saw `k` acceptances, and one rejection when
+/// `k < γ` — the maximum-likelihood estimate is acceptances over trials. Starts
+/// from a prior worth a few rounds, so the first round cannot swing γ to an end.
+#[derive(Debug, Clone)]
+pub struct AcceptanceEstimate {
+    accepted: f64,
+    trials: f64,
+}
+
+impl AcceptanceEstimate {
+    /// Prior: α = 0.7 over 10 trials.
+    pub fn new() -> Self {
+        Self {
+            accepted: 7.0,
+            trials: 10.0,
+        }
+    }
+
+    pub fn record(&mut self, accepted: u32, proposed: u32) {
+        self.accepted += f64::from(accepted);
+        self.trials += f64::from(accepted) + f64::from(u32::from(accepted < proposed));
+    }
+
+    pub fn alpha(&self) -> f64 {
+        self.accepted / self.trials
+    }
+}
+
+impl Default for AcceptanceEstimate {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expected_tokens_follow_the_closed_form() {
+        assert!((expected_tokens_per_round(0.0, 4) - 1.0).abs() < 1e-9);
+        assert!((expected_tokens_per_round(0.5, 1) - 1.5).abs() < 1e-9);
+        // α → 1 keeps every draft: γ + 1 tokens.
+        assert!((expected_tokens_per_round(1.0, 8) - 9.0).abs() < 1e-3);
+    }
+
+    /// A long link wants long runs, a free round trip short ones — the whole point
+    /// of measuring the costs instead of fixing γ.
+    #[test]
+    fn a_long_round_trip_buys_a_long_run_and_a_free_one_a_short_run() {
+        let wan = best_gamma(0.92, 300.0, 25.0);
+        assert!((10..=14).contains(&wan), "300 ms trip: {wan}");
+        let lan = best_gamma(0.92, 5.0, 40.0);
+        assert!(lan <= 2, "a 5 ms trip beside 40 ms drafts: {lan}");
+        // Poor agreement shortens the run whatever the link.
+        assert!(best_gamma(0.5, 300.0, 25.0) < wan);
+    }
+
+    #[test]
+    fn the_acceptance_estimate_counts_a_rejection_only_when_a_run_stopped_early() {
+        let mut e = AcceptanceEstimate::new();
+        for _ in 0..100 {
+            e.record(4, 4); // every draft kept: no rejection
+        }
+        assert!(e.alpha() > 0.99);
+        let mut e = AcceptanceEstimate::new();
+        for _ in 0..100 {
+            e.record(0, 4); // the first draft refused every time
+        }
+        assert!(e.alpha() < 0.1);
+    }
 
     #[test]
     fn initial_gamma_is_clamped_to_bounds() {
