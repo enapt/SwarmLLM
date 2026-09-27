@@ -204,6 +204,22 @@ pub(super) struct EngineDrafter {
     /// The last call, while its round's check is pending: the sequence length it
     /// read up to, and how many guesses it made.
     open: Option<(usize, usize)>,
+    calls: u32,
+}
+
+/// `SWARMLLM_FAULT_DRAFT_FAIL=<n>`: this node's in-engine drafter fails its
+/// `n`th call of every reply (counting from 1), as a drafter worker that cannot
+/// load or dies would. The test that a reply then finishes without guessing
+/// ahead instead of ending where the drafter broke (`pipeline::dsd`,
+/// `drafting_off`) — the only way to break a drafter on demand. Unset in
+/// production; read once.
+fn fault_draft_fail_at() -> Option<u32> {
+    static N: OnceLock<Option<u32>> = OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("SWARMLLM_FAULT_DRAFT_FAIL")
+            .ok()
+            .and_then(|v| v.trim().parse::<u32>().ok())
+    })
 }
 
 impl EngineDrafter {
@@ -217,6 +233,7 @@ impl EngineDrafter {
             seq: prompt_ids,
             valid: 0,
             open: None,
+            calls: 0,
         }
     }
 
@@ -241,6 +258,12 @@ impl EngineDrafter {
         coupling_seed: Option<u64>,
         cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     ) -> Result<Vec<u32>, SwarmError> {
+        self.calls += 1;
+        if fault_draft_fail_at() == Some(self.calls) {
+            return Err(SwarmError::ServiceUnavailable(
+                "SWARMLLM_FAULT_DRAFT_FAIL: this drafter call fails on purpose".into(),
+            ));
+        }
         if self.seq.len() <= self.valid {
             return Err(SwarmError::Internal(
                 "drafting with nothing new to read — the sequence was not advanced".into(),

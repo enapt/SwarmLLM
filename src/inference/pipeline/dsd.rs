@@ -260,6 +260,13 @@ impl PipelineExecutor {
         let mut acceptance_proposed: u32 = 0;
         let mut acceptance_accepted: u32 = 0;
         let mut finish_reason = String::new();
+        // Set when the drafter fails: the reply is finished with rounds that
+        // guess nothing — a check of the one token already sampled, which is a
+        // plain decode step through the same path — rather than ended where the
+        // drafter broke. A zero-guess round is walked at the tail like any
+        // other (`walk_verified_positions` with no drafts answers the sample),
+        // and an older tail answers one row of logits, which `accept` reads.
+        let mut drafting_off = false;
 
         if eos_set.contains(&first_token) {
             finish_reason = "stop".to_string();
@@ -322,6 +329,7 @@ impl PipelineExecutor {
                 )
             };
             let outcome: Result<Vec<u32>, SwarmError> = match &mut drafter {
+                _ if drafting_off => Ok(Vec::new()),
                 Drafter::Llama { exec, state } => {
                     let synced = if ngram_drafts.is_empty() {
                         None
@@ -359,14 +367,16 @@ impl PipelineExecutor {
             let drafts = match outcome {
                 Ok(d) => d,
                 Err(e) => {
-                    tracing::warn!(%request_id, error = %e, "DSD: draft step failed");
-                    finish_reason = "stop".to_string();
-                    break;
+                    tracing::warn!(
+                        %request_id,
+                        drafter = %drafter_name,
+                        error = %e,
+                        "DSD: the drafter failed — finishing this reply without guessing ahead"
+                    );
+                    drafting_off = true;
+                    Vec::new()
                 }
             };
-            if drafts.is_empty() {
-                break;
-            }
 
             let drafted_at = std::time::Instant::now();
             // verify_tokens = [bootstrap, q_1..q_γ]
@@ -396,10 +406,17 @@ impl PipelineExecutor {
             .await
             {
                 Ok(v) => v,
+                // A check that did not come back is the request's failure, as
+                // it is in the n-gram loop (`ngram_only_spec`, the default split
+                // path): `keeping_the_partial` hands back what was produced,
+                // reported as the failure it is, and the router retries a
+                // request that has streamed nothing. Ending the reply here with
+                // `stop` — as this did — reported a dropped connection as a
+                // finished one-token answer (2026-09-28, the far node's link
+                // dropping mid-reply on the TH↔BE split).
                 Err(e) => {
-                    tracing::warn!(%request_id, error = %e, "DSD: pipeline verify failed — returning partial");
-                    finish_reason = "stop".to_string();
-                    break;
+                    tracing::warn!(%request_id, error = %e, "DSD: pipeline verify failed");
+                    return Err(e);
                 }
             };
 
@@ -472,10 +489,13 @@ impl PipelineExecutor {
             };
             expected_kv_len = new_expected_kv;
 
-            // What this round cost and kept, for the next round's γ.
-            acceptance.record(accepted.len() as u32, drafts.len() as u32);
-            let draft_ms = (drafted_at - round_start).as_secs_f64() * 1000.0;
-            draft_ms_each = ema(draft_ms_each, draft_ms / drafts.len().max(1) as f64);
+            // What this round cost and kept, for the next round's γ. A round
+            // that guessed nothing says nothing about guessing.
+            if !drafts.is_empty() {
+                acceptance.record(accepted.len() as u32, drafts.len() as u32);
+                let draft_ms = (drafted_at - round_start).as_secs_f64() * 1000.0;
+                draft_ms_each = ema(draft_ms_each, draft_ms / drafts.len() as f64);
+            }
             check.record(
                 verify_tokens.len() as u32,
                 drafted_at.elapsed().as_secs_f64() * 1000.0,
@@ -483,6 +503,7 @@ impl PipelineExecutor {
 
             // Bring the drafter's cache in line with what the check kept.
             match &mut drafter {
+                _ if drafting_off => {}
                 Drafter::Llama { exec, state } => tokio::task::block_in_place(|| {
                     draft_sync_after_round(state, exec, &drafts, &accepted, bonus)
                 })?,

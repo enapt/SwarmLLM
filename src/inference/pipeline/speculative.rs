@@ -424,21 +424,15 @@ impl PipelineExecutor {
                 pending_truncate,
             )
             .await;
+            // A check that did not come back is the request's failure, exactly
+            // as in the n-gram loop and DSD: `keeping_the_partial` hands back
+            // what was produced as the failure it is. Finishing with `stop`
+            // here reported a lost peer as a completed answer.
             let spec_logits = match spec_result {
                 Ok(r) => r,
                 Err(e) => {
-                    tracing::warn!(%request_id, error = %e, "speculative: verify failed — returning partial");
-                    return Ok(Some(
-                        self.finish_speculative(
-                            request_id,
-                            generated,
-                            &decoder,
-                            &eos_tokens,
-                            prompt_token_count as u32,
-                            "stop".into(),
-                        )
-                        .await,
-                    ));
+                    tracing::warn!(%request_id, error = %e, "speculative: verify failed");
+                    return Err(e);
                 }
             };
             // Remote forwarded verify_tokens.len() = γ+1 positions →

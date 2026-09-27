@@ -185,6 +185,19 @@ requests failed, neither from this path: the far node's worker ran out of card
 memory on a prompt pass (`CUDA_ERROR_OUT_OF_MEMORY`, its own v0.3.211), and the
 connection to it dropped once in the last plain arm.
 
+**A drafter that fails finishes the reply without guessing, and a check that
+does not come back fails the request** (both 2026-09-28). Checked on the same link
+with `SWARMLLM_FAULT_DRAFT_FAIL=3` (the drafter fails its third call of every
+reply): 3/3 replies complete at 64 tokens, each logging `DSD: the drafter failed —
+finishing this reply without guessing ahead`, at 2.43 tok/s — plain-split speed
+— against 5.45 for the same binary unfaulted. Before, a drafter failure ended the
+reply where it happened. And a connection that dropped during the first check
+(the far node's link dropped four times tonight) was answered as a finished
+one-token reply with `finish_reason: stop`; the check's failure now propagates, as
+the n-gram loop's always has, so `keeping_the_partial` reports it and the router
+retries a request that has streamed nothing. The single-peer path (Item 2) had
+the same swallow and is fixed the same way.
+
 1. **Accept at the tail.** A verify forward carries its draft tokens. The last
    segment walks them with the request's own sampler: sample position i with
    `sample_token_with_params_history`, `generated_ids` extended by the tokens
