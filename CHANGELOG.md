@@ -1,5 +1,47 @@
 # Changelog
 
+## [0.3.211-alpha] — 2026-09-27
+
+**A model shared between computers answers noticeably faster, and a model that
+is too big for your graphics card no longer fails when several requests arrive
+at once.**
+
+**Fixed: several requests at once failed on a model split between your graphics
+card and your processor.** When a model does not fit the card whole, its first
+layers go on the card and the rest on the processor. One request at a time
+worked, but whenever several arrived together — a few chats, or an assistant
+making calls in parallel — every one of them failed with an error. This was in
+v0.3.209 and earlier. Measured with four chats at once on an 8B model placed 22
+of 32 layers on the card: all four failed before, all four answer now.
+
+**Every token of a split reply spends one network round trip less.** The
+computers exchanged a "which protocol are we speaking?" confirmation before
+every message, and a split reply sends a message per token. Messages now carry
+that proposal with them. Measured between Thailand and Belgium on the same
+split: **1.23 → 1.7 tokens per second**, and more once the other computer runs
+this version too, since its replies save a round trip as well. Nothing is
+needed from older computers. Because pings now take half as long, the check
+that decides whether a peer is on your local network — which private mode lets
+in by default — now converts the ping to a real distance first, so it admits
+exactly the same peers as before. For the same reason, tensor parallelism's
+`tp_max_latency_ms` is now a physical round trip, defaulting to 5 ms (the same
+boundary the old default of 10 drew).
+
+**Guessing ahead across computers no longer ships megabytes back.** When a split
+reply guesses several tokens and the computer holding the last layers checks
+them, it used to send back its full scores for every guessed position — 2.5 MB
+for five guesses — and over a long link that cost more than the guessing saved.
+It now checks the guesses itself, with your own sampling settings, and sends
+back the tokens it kept: under 60 bytes. Replies are unchanged. The draft-model
+form of this (off by default) also works at any temperature now, not only 0.
+
+**What is next for split speed**, measured and written up in
+`docs/plans/faster_than_local.md` and `docs/plans/split_speculation.md`: a
+low-bit copy of the far computer's layers guesses its next token 92-94% of the
+time on a 7B model, sharing the random numbers both sides sample with keeps that
+true at normal chat temperatures, and sending the far computer's exact cache
+back to the copy cut its misses by a further 39%.
+
 ## [0.3.210-alpha] — 2026-09-27
 
 **A model you have downloaded no longer gets stuck refusing to answer because of
