@@ -26,7 +26,7 @@ curl http://localhost:8800/v1/chat/completions \
 
 | Field | Type | Required | Default | Description |
 |---|---|---|---|---|
-| `model` | string | yes | — | Model name (or `"auto"` for first available) |
+| `model` | string | yes | — | Model name, or `"auto"`: the `inference.default_model` setting if set, else the model `auto` answered with last time, else one this node holds completely, else one the network can serve |
 | `messages` | array | yes | — | Chat messages (`role` + `content`). Roles: `system`, `user`, `assistant`, `tool` |
 | `stream` | boolean | no | `false` | Enable SSE streaming |
 | `max_tokens` | integer | no | `2048` | Max tokens to generate (clamped to 1–32768) |

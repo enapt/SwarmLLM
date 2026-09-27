@@ -1,5 +1,68 @@
 # Changelog
 
+## [0.3.209-alpha] — 2026-09-27
+
+**Llama 3 models now answer long conversations the way they were trained, and a
+computer without a graphics card reads long prompts and writes long replies
+faster.** Busy computers in the network now turn work away at once instead of
+leaving it waiting, and asking for the model "auto" picks one that can answer.
+
+**Fixed: Llama 3.1 and 3.2 models drifted from their training on long
+conversations.** Every Llama 3 model file carries a small table that says how
+to encode word positions — part of how these models were extended to long
+contexts. SwarmLLM never read it, so far-apart positions were encoded
+differently from how the model learned them. Short chats were barely affected;
+the difference grew with the length of the conversation. Checked against
+llama.cpp (the reference implementation) on 1,100 tokens of real text with
+Llama-3.2-3B, the two now pick the same next word at 1,075 of 1,100 positions,
+up from 1,059, and at 98 of the last 100 instead of 93. Computers that hold
+only later parts of a model get the table too.
+
+**Long prompts are read up to 17% faster without a graphics card.** Reading a
+prompt built a large table of "which earlier words matter to this one" and
+moved it through memory three times; at a few thousand words that movement cost
+more than the arithmetic. The work now goes through the conversation in small
+pieces that stay in the processor's cache. Llama-3.2-3B reading a
+6,000-token prompt: 43.7 → 51.1 tokens per second.
+
+**Replies slow down less as a conversation grows, without a graphics card.**
+Writing each word re-read the whole conversation memory several times over —
+three times on Llama-3.2-3B, seven on Qwen2.5-7B — where once was enough. Now
+once: at about 2,000 tokens of conversation, 81.6 → 70.7 ms per token on
+Llama-3.2-3B, and the slowdown from a short to a long conversation is now close
+to llama.cpp's.
+
+**A busy computer now says so at once.** When a computer was already doing as
+much work for others as its owner allows, it turned new work away silently, and
+the computer asking waited out its whole deadline before trying elsewhere. The
+refusal is now sent back immediately and the request moves on. Every kind of
+work a single computer can send now counts toward its share, so one computer can
+no longer occupy every slot. And a reply already running is no longer cut off
+because new requests arrived: the last quarter of a computer's slots is kept for
+work already under way.
+
+**Asking for the model "auto" picks one that can answer.** It used to pick
+whichever model a background scan had looked at last — even one this computer
+holds only part of. Right after a restart that sent a request for a large model
+to computers that did not have room for it. "auto" now uses your
+`default_model` setting if you set one (the setting existed but was ignored),
+then stays with the model it answered with last time, then prefers a model this
+computer holds completely.
+
+**Computers learn about each other within milliseconds of connecting**, instead
+of waiting for the next periodic announcement (about 5 seconds, up to 30). A
+request planned in that window no longer treats a computer it knows nothing
+about as having unlimited room.
+
+**Security documentation: "Misuse of the Network".** A new section of the
+security chapter says plainly what the network does and does not defend against
+when someone uses it as a free resource, and lists what identifies SwarmLLM
+traffic for network administrators. Two documents that described a per-requester
+limit the code did not have are corrected. From a tester's design report.
+
+Also: a node started with local embedding privacy now loads its local embedding
+table for every model at startup.
+
 ## [0.3.208-alpha] — 2026-09-26
 
 **Agent programs work better on a computer without a graphics card, and a

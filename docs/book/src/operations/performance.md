@@ -116,6 +116,24 @@ actually used without violating existing hard constraints.
   observed latency should beat a high-VRAM peer's big shard slot.
 - **Config:** default-on. Multi-pipeline concurrency is deferred.
 
+### Processor attention kernels
+
+On a computer without a graphics card, attention runs through two purpose-built
+kernels instead of generic matrix multiplies:
+
+- **One position (writing a reply):** each cached key/value row is read once for
+  every query head that shares it, in fixed 256-position chunks. Llama-3.2-3B at
+  ~2,080 cached positions: 81.6 → 70.7 ms/token (v0.3.209); the slowdown from a
+  short to a long conversation is close to llama.cpp's.
+- **Several positions (reading a prompt, a speculative check):** tiled over the
+  cached keys so the full score table is never written to memory
+  (FlashAttention's approach). A 6,144-token prompt on Llama-3.2-3B: 43.7 → 51.1
+  tokens/s, level with llama.cpp on the same threads.
+
+Both use fixed tile sizes, so a result does not depend on how many cores the
+machine has. `SWARMLLM_DECODE_ATTN=standard` and `SWARMLLM_PREFILL_ATTN=standard`
+switch back to the matrix-multiply path, for comparison.
+
 ## Flag-gated features
 
 Turn these on when you've measured that they match your workload.
