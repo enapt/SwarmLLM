@@ -313,6 +313,20 @@ fleet.
 
 ### Stage 4 — Speculation, to amortise whatever distance remains
 
+> ⚠ **Corrected 2026-09-27 — superseded by `docs/plans/split_speculation.md`.**
+> This stage said speculation is "only meaningful once Stage 2-3 have brought
+> RTT down". That was wrong. The DSD paper's `3t₀ < t₁ < 10t₀` is the range it
+> MEASURED, and its own speedup formula tends to *k* (tokens per round) as t₁
+> grows. A round saves trips, so a long trip makes speculation easier to pay
+> for, not harder. Measured replays put a drafter chain at ~2.8× on a 300 ms
+> link, the same factor as at 25 ms. Locality and speculation multiply;
+> neither waits for the other.
+>
+> Item 1 below is also wrong for a split. A layer-skipping self-drafter still
+> needs the tail's last layers and output head for every drafted token, so
+> every draft pays the trip it was meant to save. The rest of this section is
+> kept as written.
+
 Only meaningful once Stage 2-3 have brought RTT down: the DSD paper's own
 operating envelope is `3t₀ < t₁ < 10t₀`, and with t₀ ≈ 7 ms per segment that
 means t₁ ≈ 20-70 ms. Today's fleet sits at 40-85× t₀, far outside it.
