@@ -461,7 +461,11 @@ pub(crate) fn sampled_accept_reject(
     generated: &[u32],
     coupling: Option<(&CoupledNoise, u64)>,
 ) -> (Vec<u32>, u32, bool) {
-    if !verify_rows_are_finite(drafts.len(), spec_logits) {
+    // Too few rows is refused here, not only by the callers that check first:
+    // indexing row `drafts.len()` would panic on a short reply, and a rule every
+    // caller must remember to guard is one a new caller will not (gotcha #29 —
+    // the contract is γ+1 rows).
+    if spec_logits.len() < drafts.len() + 1 || !verify_rows_are_finite(drafts.len(), spec_logits) {
         return (Vec::new(), 0, false);
     }
     let vocab = spec_logits.first().map(|r| r.len()).unwrap_or(0);
@@ -1871,6 +1875,21 @@ mod coupled_sampling_tests {
         assert!(
             refused >= 18,
             "one position off should break agreement: {refused}/20 refused"
+        );
+    }
+
+    /// A reply with fewer rows than drafts + 1 is refused by the rule itself —
+    /// never an index panic, whichever caller forgot to check.
+    #[test]
+    fn too_few_rows_are_refused_not_indexed() {
+        let rows = vec![vec![0.1f32, 2.0], vec![1.0, 0.0]];
+        let params = SamplingParams {
+            temperature: 0.0,
+            ..Default::default()
+        };
+        assert_eq!(
+            sampled_accept_reject(&[1, 0, 1], &rows, &params, &[], None),
+            (Vec::new(), 0, false)
         );
     }
 }
