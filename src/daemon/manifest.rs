@@ -357,10 +357,18 @@ pub(super) fn regenerate_manifest_from_header(
 /// the tied output head, the RoPE frequency factors) out of a local
 /// `shard_000.bin`, so a later load without shard 0 can still read them.
 ///
-/// Skips a sidecar already on disk. `shard_000.bin` preserves the GGUF header, so
-/// a tensor's absolute offset in it is `tensor_data_offset + location.offset`.
+/// Skips a sidecar already on disk. **The tensor is found through shard 0's OWN
+/// tensor table** (`shard0_entries`, from the manifest), never at its GGUF
+/// offset: a shard file is PACKED tensor data (what `ShardReader` maps), so on
+/// llama-3.2-3b `rope_freqs.weight` sits at shard offset 0 while its GGUF offset
+/// is 7,837,984. This function's predecessor assumed "shard_000 preserves the
+/// header" and read the GGUF offset, which on a packed shard writes garbage — for
+/// the tied head, harmlessly only because a node holding shard 0 never reads
+/// the sidecar (2026-09-27). A tensor absent from the table, or whose size
+/// disagrees with the header, is refused rather than guessed at.
 pub(super) fn extract_sidecar_tensors(
     shard0_path: &std::path::Path,
+    shard0_entries: &[crate::types::ShardTensorEntry],
     model_dir: &std::path::Path,
     meta: &crate::inference::split::GgufTensorMeta,
 ) -> Result<(), String> {
@@ -376,9 +384,19 @@ pub(super) fn extract_sidecar_tensors(
         if dest_path.exists() {
             continue;
         }
-        let abs_offset = meta.tensor_data_offset + spec.location.offset;
         let size = spec.location.size;
         let result = (|| -> Result<usize, String> {
+            let entry = shard0_entries
+                .iter()
+                .find(|e| e.name == spec.tensor)
+                .ok_or_else(|| format!("{} is not in shard 0's tensor table", spec.tensor))?;
+            if entry.size != size {
+                return Err(format!(
+                    "shard 0 lists {} at {} bytes, the header says {size}",
+                    spec.tensor, entry.size
+                ));
+            }
+            let abs_offset = entry.shard_offset;
             if size > MAX_SIDECAR_SIZE {
                 return Err(format!("too large: {size} bytes (max {MAX_SIDECAR_SIZE})"));
             }
@@ -417,5 +435,83 @@ pub(super) fn extract_sidecar_tensors(
         Ok(())
     } else {
         Err(failures.join("; "))
+    }
+}
+
+#[cfg(test)]
+mod sidecar_extraction_tests {
+    use super::extract_sidecar_tensors;
+    use crate::inference::split::{GgufTensorMeta, ROPE_FREQS_FILENAME};
+
+    const HEADER_LEN: u64 = 4096;
+
+    /// A llama-3-shaped model: a real output head (so no tied sidecar) and a
+    /// 256-byte `rope_freqs.weight` first in the data, at GGUF offset
+    /// HEADER_LEN + 0.
+    fn meta() -> GgufTensorMeta {
+        serde_json::from_value(serde_json::json!({
+            "tensors": {
+                "rope_freqs.weight": { "offset": 0, "size": 256 },
+                "token_embd.weight": { "offset": 256, "size": 1024 },
+                "output.weight": { "offset": 1280, "size": 1024 },
+            },
+            "tensor_data_offset": HEADER_LEN,
+            "model_name": null,
+            "head_count": 8, "head_count_kv": 8, "block_count": 2,
+            "embedding_length": 64, "rope_dim": 128,
+            "rope_freq_base": 500000.0, "rms_norm_eps": 1e-5,
+        }))
+        .unwrap()
+    }
+
+    fn entry(
+        name: &str,
+        gguf_offset: u64,
+        shard_offset: u64,
+        size: u64,
+    ) -> crate::types::ShardTensorEntry {
+        crate::types::ShardTensorEntry {
+            name: name.into(),
+            gguf_offset,
+            shard_offset,
+            size,
+        }
+    }
+
+    /// A shard file is PACKED: `rope_freqs.weight` at shard offset 0, whatever
+    /// its GGUF offset. Reading the GGUF offset — what the tied-head extractor
+    /// this replaced did — lands in unrelated bytes. The factors must come from
+    /// the shard's own table.
+    #[test]
+    fn a_sidecar_is_cut_from_the_packed_shard_at_its_shard_offset() {
+        let dir = tempfile::tempdir().unwrap();
+        let shard0 = dir.path().join("shard_000.bin");
+        // Packed: factors (0x3F…) at 0, then the embedding (0x11…); nothing at
+        // the GGUF offset 4096 but the embedding's bytes.
+        let mut bytes = vec![0x3Fu8; 256];
+        bytes.extend(vec![0x11u8; 8192]);
+        std::fs::write(&shard0, &bytes).unwrap();
+        let entries = vec![
+            entry("rope_freqs.weight", HEADER_LEN, 0, 256),
+            entry("token_embd.weight", HEADER_LEN + 256, 256, 1024),
+        ];
+        extract_sidecar_tensors(&shard0, &entries, dir.path(), &meta()).unwrap();
+        let got = std::fs::read(dir.path().join(ROPE_FREQS_FILENAME)).unwrap();
+        assert_eq!(
+            got,
+            vec![0x3Fu8; 256],
+            "bytes from the shard offset, not the GGUF offset"
+        );
+    }
+
+    /// No table entry, no guess: nothing is written and the reason is returned.
+    #[test]
+    fn a_tensor_missing_from_the_shard_table_is_not_guessed_at() {
+        let dir = tempfile::tempdir().unwrap();
+        let shard0 = dir.path().join("shard_000.bin");
+        std::fs::write(&shard0, vec![0x3Fu8; 8192]).unwrap();
+        let err = extract_sidecar_tensors(&shard0, &[], dir.path(), &meta()).unwrap_err();
+        assert!(err.contains("not in shard 0's tensor table"), "{err}");
+        assert!(!dir.path().join(ROPE_FREQS_FILENAME).exists());
     }
 }

@@ -1947,7 +1947,9 @@ No drift with position remains; what is left is llama.cpp's own KV-precision noi
 prefix shard. `GgufTensorMeta::sidecar_tensors` is now the ONE list of shard-0
 tensors a later-layer node needs — the tied output head and these factors — and
 all three consumers walk it: `extract_sidecar_tensors` (cut from a local
-`shard_000.bin` at startup), `download_sidecar_tensors` (a ranged GET per tensor
+`shard_000.bin` at startup — located through shard 0's OWN tensor table, since a shard
+file is packed data and the tensor's GGUF offset is not its offset there; found at
+the gate when the GGUF offset read garbage), `download_sidecar_tensors` (a ranged GET per tensor
 on every HuggingFace path, skipping files already present), and
 `ShardReader::new(.., resolve_sidecars(..))`, which maps each file into the
 virtual GGUF so the loader's read is unchanged. A node with neither shard 0 nor

@@ -193,7 +193,10 @@ export LD_LIBRARY_PATH=/usr/local/cuda/lib64:/usr/lib/wsl/lib
 make_node() { # dir shards bootstrap
   local d="$1" m="$1/models/$MODEL"
   mkdir -p "$m"
-  for f in gguf_header.bin hf_source.json manifest.json tied_output_weight.bin; do
+  # The shard-0 sidecars travel with the header, as on a real node that fetched
+  # any shard from HuggingFace: a later-layer node needs rope_freqs.bin on a
+  # Llama 3 model (#124) and tied_output_weight.bin on a weight-tied one.
+  for f in gguf_header.bin hf_source.json manifest.json tied_output_weight.bin rope_freqs.bin; do
     [ -f "$SRC/$f" ] && ln "$SRC/$f" "$m/$f"
   done
   for i in $(echo "$2" | tr ',' ' '); do

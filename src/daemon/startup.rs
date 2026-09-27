@@ -352,10 +352,36 @@ pub(super) async fn restore_persistent_state(
                             // Cloned out: the geometry map's guard must not be held
                             // across the file I/O below (clippy.toml).
                             let meta = shared_state.gguf_meta_for(model_id).map(|m| m.clone());
+                            // Shard 0's own tensor table: the manifest's, or rebuilt
+                            // from the header and checked against the published
+                            // sizes when the manifest carries none.
+                            let shard0_entries = shared_state
+                                .model_registry
+                                .get_manifest(model_id)
+                                .and_then(|manifest| {
+                                    manifest
+                                        .shards
+                                        .iter()
+                                        .find(|s| s.index == 0)
+                                        .map(|s| s.tensors.clone())
+                                        .filter(|t| !t.is_empty())
+                                        .or_else(|| {
+                                            crate::daemon::shard_loader::derive_tensor_entries(
+                                                &model_dir,
+                                                &manifest,
+                                                &[(0, shard0_path.clone())],
+                                            )
+                                            .and_then(|mut v| (!v.is_empty()).then(|| v.remove(0)))
+                                        })
+                                })
+                                .unwrap_or_default();
                             if let Some(meta) = meta {
-                                if let Err(e) =
-                                    extract_sidecar_tensors(&shard0_path, &model_dir, &meta)
-                                {
+                                if let Err(e) = extract_sidecar_tensors(
+                                    &shard0_path,
+                                    &shard0_entries,
+                                    &model_dir,
+                                    &meta,
+                                ) {
                                     tracing::warn!(
                                         model = %model_id,
                                         error = %e,

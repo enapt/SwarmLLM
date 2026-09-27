@@ -716,7 +716,13 @@ pub(crate) async fn dispatch_network_messages(
                                             ));
                                             continue;
                                         };
+                                        // A tensor-parallel prompt pass keeps `sequence_num == 0`
+                                        // for EVERY layer, and its coordinator waits on the
+                                        // AllReduce, not on a LayerResult — a refusal here would be
+                                        // unread and cost a 10 s AllReduce timeout per layer. It is
+                                        // one request's layers, not new ones: never held back.
                                         if forward.sequence_num == 0
+                                            && forward.tp_meta.is_none()
                                             && !admits_a_new_request(forward_semaphore.available_permits(), forward_limit)
                                         {
                                             drop(peer_slot);

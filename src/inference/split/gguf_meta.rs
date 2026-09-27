@@ -33,6 +33,9 @@ pub struct SidecarSpec<'a> {
     pub filename: &'static str,
     /// What it is, for logs and errors.
     pub what: &'static str,
+    /// The GGUF tensor it carries — also how it is found in a PACKED shard's
+    /// own tensor table, where its offset is not its GGUF offset.
+    pub tensor: &'static str,
     /// Where the tensor sits in the GGUF.
     pub location: &'a TensorLocation,
 }
@@ -197,6 +200,7 @@ impl GgufTensorMeta {
             out.push(SidecarSpec {
                 filename: TIED_OUTPUT_FILENAME,
                 what: "tied output head (token_embd.weight)",
+                tensor: "token_embd.weight",
                 location,
             });
         }
@@ -204,6 +208,7 @@ impl GgufTensorMeta {
             out.push(SidecarSpec {
                 filename: ROPE_FREQS_FILENAME,
                 what: "RoPE frequency factors (rope_freqs.weight)",
+                tensor: ROPE_FREQS_TENSOR,
                 location,
             });
         }

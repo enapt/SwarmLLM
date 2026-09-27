@@ -206,7 +206,7 @@ pub fn try_load_from_shards(
 ///
 /// Returns `None` when no candidate reproduces the published sizes — never a
 /// partial or unverified table.
-fn derive_tensor_entries(
+pub(crate) fn derive_tensor_entries(
     model_dir: &std::path::Path,
     manifest: &crate::types::ModelManifest,
     shard_files: &[(u32, std::path::PathBuf)],
