@@ -210,6 +210,18 @@ target's prompt pass ending at 17:09:36 — the first round waited ~1.6 s for it
 instead of the whole load (9.4 s here, both workers loading from cold at once;
 4.4 s alone).
 
+**The drafter is a guest of this node's memory** (2026-09-28): it loads with
+`process_pool::Tenancy::Guest` — only memory that is free, never another
+model's — and reads ahead only once the target's own segments here are loaded.
+As an ordinary load it could evict the target's segment, idle between chat turns
+past the pool's 5 s reclaim floor, and push it onto the processor
+(`docs/invariants/memory.md` § "A model loaded for another model's request is a
+guest"). So on a card the target fills, the drafter runs on the processor: the
+default decision must be measured there too (gate step 12f). **And a drafter that
+has lost the reply's context says so**: `draft_after` refuses a cache shorter than
+the one the call continues (expired, worker replaced), and the reply finishes
+without guessing instead of guessing from a context never written.
+
 **An unsure guess ends the round** (2026-09-28): the drafter stops after a guess
 it gives less than 0.4 (`SplitModel::draft_after`, Hugging Face's
 `ConfidenceCriteria` / `assistant_confidence_threshold`; `SWARMLLM_DRAFT_CONFIDENCE`
