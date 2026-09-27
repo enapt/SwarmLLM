@@ -1329,3 +1329,63 @@ peer cannot claim the owner's width. Guard:
 `the_owners_own_segment_is_forwarded_as_the_owners` (planted forms in
 `the_owner_segment_guard_catches_a_forward_that_says_nothing`); round trip:
 `a_forward_says_whether_it_is_the_owners`.
+
+## A worker that cannot grow gets the spawn's ladder (2026-09-27)
+
+**`ModelProcessPool::grow_worker` is the one place a live worker is given a
+range it has not held**, called from `get_or_spawn`'s fast path. A spawn has
+always run a ladder — the whole model on the card, else reclaim the card from
+idle models (`free_vram_for_admission`), else part of the model on the card and
+the rest on the processor (`partial_gpu_layers`), else the processor. Growth
+(`charge_additional_segment`) had only the first rung and refused on the rest.
+
+### What it replaced, measured on the live node
+
+RTX 3070 Laptop, graphics budget 6019-6162 MB (Windows and a browser hold
+~1.3 GB of the card), v0.3.209, found by the GPU spread benchmark:
+
+- **An idle model blocked one the node holds whole.** An idle llama-3.2-3b held
+  3138 MB. A plain request for meta-llama-3.1-8b (6033 MB estimated) was
+  planned around it — a boomerang through a peer in Belgium — which left an 8B
+  worker holding one layer; every attempt to widen it was refused, and the
+  request 503'd after 11.8 s (`fb92fd13`). The reclaim that would have admitted
+  it existed, in the spawn path only; FUTURE_WORK had deferred it from growth
+  on 2026-09-04 "until a real workload shows this refusing ranges a reclaim
+  would have admitted". Root-caused CAUSED by a `root-cause` agent: the only
+  difference between this and three earlier clean 8B loads on the same node was
+  `committed_mb` 0 against 3138.
+- **A partial worker wedged the model.** After a split left the 8B worker
+  holding [0..1) and [26..32) (1570 MB), EVERY request for the whole model was
+  refused in ~50 ms — the streaming chat path included, which goes straight to
+  the local worker (`local_fast_path_for`) and never reaches the router. An 8B
+  14 MB over the budget can only run PART on the card; a fresh spawn would have
+  placed 31 of its 32 layers there, and growth could not.
+- **The same on the peer.** A partial 14B worker left on the peer by an earlier
+  failed plan refused the whole model three times in a row ("need about 10080 MB
+  more … its worker is already holding 2440 MB"), and each refusal touched the
+  worker's idle clock, so it never aged out while it was being asked.
+
+### The fix, and what it must keep
+
+1. **Reclaim first**, outside `spawn_lock` (the charge takes and releases it;
+   a reclaim waits for workers to exit), with the spawn's planner and guards:
+   the idle floor, never a busy worker, all-or-nothing.
+2. **Then replace, only an idle worker.** If the range still does not fit and
+   `WorkerHandle::in_use` is false, retire the worker and fall through to the
+   slow path, which places the range afresh. `in_use` is the single answer
+   because it sees a conversation between two forwards — retiring one of those
+   is #93's garbage-reply defect.
+3. **A worker in use keeps its refusal** (`LocalMemoryUnavailable`, which the
+   router re-plans). A worker charged against system memory also keeps it: both
+   extra rungs are about the card.
+4. **Retire the handle this call was given, never whichever the map holds** —
+   a concurrent spawn may already have replaced it (`Arc::ptr_eq`).
+
+Tests: `a_worker_that_cannot_grow_takes_the_card_back_from_an_idle_model`,
+`an_idle_worker_that_cannot_grow_on_the_card_is_replaced_not_refused`, and the
+control `a_worker_in_use_that_cannot_grow_keeps_its_refusal` — the first two go
+red with the reclaim, respectively the retirement, planted out. The admission
+guard (`an_admission_refusal_is_the_variant_the_router_re_plans`) was
+re-pointed: the growth refusal now carries its variant inside `GrowthRefused`,
+and the guard's needle `return Err(SwarmError::` counted one refusal where there
+are two. Its self-test now plants the wrapped spelling too.

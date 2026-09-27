@@ -174,6 +174,30 @@ fn plan_vram_reclaim(
     plan
 }
 
+/// A live worker's budget would not take a range it was asked to add
+/// (`ModelProcessPool::charge_additional_segment`), with what reclaiming room
+/// for it — or replacing the worker — needs to know.
+#[derive(Debug)]
+struct GrowthRefused {
+    /// What the range would ADD, net of the ranges it subsumes.
+    needed_mb: u64,
+    /// Which budget refused: the card, or system memory.
+    on_gpu: bool,
+    /// The refusal as the caller reports it.
+    error: SwarmError,
+}
+
+/// What [`ModelProcessPool::grow_worker`] did about a range a live worker had
+/// not held before.
+enum Growth {
+    /// The worker now holds it — use this handle.
+    Grown(Arc<WorkerHandle>),
+    /// The worker was idle and could not grow on the card, so it was retired:
+    /// spawn afresh for the range, where admission can place it part on the
+    /// card and part on the processor — a rung growth does not have.
+    Respawn,
+}
+
 /// How long a GPU-resident model must have gone unused before another model
 /// may take the card from it.
 ///
@@ -3419,7 +3443,7 @@ impl ModelProcessPool {
         model_id: &ModelId,
         segment: (u32, u32),
         handle: &Arc<WorkerHandle>,
-    ) -> Result<(), SwarmError> {
+    ) -> Result<(), GrowthRefused> {
         // Serialised against spawns for the same read-decide-charge atomicity
         // the admission gates already rely on.
         let _guard = self.spawn_lock.lock().await;
@@ -3489,12 +3513,16 @@ impl ModelProcessPool {
             .get(model_id)
             .map(|v| *v)
             .unwrap_or(0);
-            return Err(SwarmError::LocalMemoryUnavailable(format!(
-                "{} layers {}..{} of {} need about {} MB more than this node has left \
-                 (its worker is already holding {} MB) — another holder will have to \
-                 take that part",
-                layers, segment.0, segment.1, model_id.0, net_mb, held_mb,
-            )));
+            return Err(GrowthRefused {
+                needed_mb: net_mb,
+                on_gpu,
+                error: SwarmError::LocalMemoryUnavailable(format!(
+                    "{} layers {}..{} of {} need about {} MB more than this node has left \
+                     (its worker is already holding {} MB) — another holder will have to \
+                     take that part",
+                    layers, segment.0, segment.1, model_id.0, net_mb, held_mb,
+                )),
+            });
         }
         handle.record_charged_segment(segment, delta_mb);
         // The worker drops the ranges this one covers before loading it, so the
@@ -3525,6 +3553,99 @@ impl ModelProcessPool {
             "Charging an additional segment to a live worker"
         );
         Ok(())
+    }
+
+    /// Give a live worker a range it has not held before — and when the card
+    /// will not take it, do what a fresh spawn does before refusing.
+    ///
+    /// **The growth path used to refuse outright, and a spawn never does.** A
+    /// spawn runs a ladder — the whole model on the card, else reclaim the card
+    /// from idle models, else part of the model on the card and the rest on the
+    /// processor — and growth had only the first rung. Two live failures on
+    /// 2026-09-27 (RTX 3070 Laptop, budget ~6 GB) came from the missing rungs:
+    ///
+    /// - An idle 3B held 3138 MB when an 8B the node holds whole was asked for;
+    ///   the 8B's worker, spawned for one layer of a split, could not grow past
+    ///   it, and the request 503'd after 11.8 s. The reclaim was one call away —
+    ///   in the spawn path only (`free_vram_for_admission`), deferred from this
+    ///   one on 2026-09-04 "until a real workload shows this refusing ranges a
+    ///   reclaim would have admitted" (FUTURE_WORK). This is that workload.
+    /// - After a split left an 8B worker holding two ranges (1570 MB), EVERY
+    ///   request for the whole model — the dashboard chat's streaming path
+    ///   included — was refused in ~50 ms until the worker aged out, because an
+    ///   8B that is 14 MB larger than the budget can only run PART on the card,
+    ///   and growth cannot place part of a range on the processor.
+    ///
+    /// So: reclaim first (same guards as the spawn's — idle floor, never a busy
+    /// worker), and if the card still will not take the range and NOTHING is
+    /// using this worker ([`WorkerHandle::in_use`], the single answer), retire it
+    /// and let [`Self::get_or_spawn`]'s slow path place the range afresh. A
+    /// worker in use keeps the refusal it always got — retiring it would kill a
+    /// conversation mid-reply (#93) — and the router re-plans on it as before.
+    /// A worker charged against system memory also keeps it: both extra rungs
+    /// are about the card.
+    async fn grow_worker(
+        &self,
+        model_id: &ModelId,
+        segment: (u32, u32),
+        handle: Arc<WorkerHandle>,
+    ) -> Result<Growth, SwarmError> {
+        let mut refused = match self
+            .charge_additional_segment(model_id, segment, &handle)
+            .await
+        {
+            Ok(()) => return Ok(Growth::Grown(handle)),
+            Err(r) => r,
+        };
+        if !refused.on_gpu {
+            return Err(refused.error);
+        }
+        // Outside `spawn_lock` — the charge above took and released it — because
+        // a reclaim unloads workers and waits for their processes to exit.
+        let freed = self
+            .free_vram_for_admission(model_id, refused.needed_mb)
+            .await;
+        if freed > 0 {
+            tracing::info!(
+                model = %model_id,
+                freed_mb = freed,
+                layers = format!("[{}..{})", segment.0, segment.1),
+                "Reclaimed graphics memory from idle models so this model's worker can \
+                 take on the range asked for"
+            );
+            refused = match self
+                .charge_additional_segment(model_id, segment, &handle)
+                .await
+            {
+                Ok(()) => return Ok(Growth::Grown(handle)),
+                Err(r) => r,
+            };
+        }
+        if handle.in_use(self.conversation_window()) {
+            return Err(refused.error);
+        }
+        tracing::info!(
+            model = %model_id,
+            layers = format!("[{}..{})", segment.0, segment.1),
+            needed_mb = refused.needed_mb,
+            "This model's worker cannot take on the range asked for and nothing is using \
+             it — replacing it, so the range can be placed afresh (part of it on the \
+             processor if the card cannot hold it all)"
+        );
+        // Retire the worker THIS call was given, never whichever one the map
+        // holds by now: a concurrent spawn may already have replaced it, and
+        // the slow path will find that one.
+        let still_ours = self
+            .workers
+            .get(model_id)
+            .is_some_and(|w| Arc::ptr_eq(&w, &handle));
+        // Our clone must not outlive the retirement: dropping the last handle is
+        // what signals the process, and `unload_model` waits for it to exit.
+        drop(handle);
+        if still_ours {
+            self.unload_model(model_id).await;
+        }
+        Ok(Growth::Respawn)
     }
 
     /// `(fixed_mb, per_layer_mb)` for this model on the given device.
@@ -4047,10 +4168,14 @@ impl ModelProcessPool {
                     return Ok(handle);
                 }
                 // A range this worker has not been asked for before: it is
-                // about to load more weights, so weigh them first.
-                self.charge_additional_segment(model_id, segment, &handle)
-                    .await?;
-                return Ok(handle);
+                // about to load more weights, so weigh them first — and where
+                // the card will not take them, reclaim or replace the worker
+                // rather than refuse (`grow_worker`).
+                match self.grow_worker(model_id, segment, handle).await? {
+                    Growth::Grown(handle) => return Ok(handle),
+                    // Retired: fall through to the slow path, which spawns.
+                    Growth::Respawn => {}
+                }
             }
         }
 
@@ -6835,10 +6960,13 @@ mod tests {
         pool.set_ram_budget_mb(4000);
         let h = worker_holding_both_ends(&pool, &model).await;
 
-        let err = pool
+        let refused = pool
             .charge_additional_segment(&model, (0, 40), &h)
             .await
             .expect_err("2850 + 1400 > 4000");
+        assert!(!refused.on_gpu, "weighed by the budget its spawn charged");
+        assert_eq!(refused.needed_mb, 1400, "what the range would ADD");
+        let err = refused.error;
         assert!(
             matches!(err, SwarmError::LocalMemoryUnavailable(_)),
             "the variant the router re-plans on: {err}"
@@ -6849,6 +6977,128 @@ mod tests {
         );
         assert_eq!(pool.ram_committed_mb(), 2850, "nothing released");
         assert!(h.segment_is_charged((14, 40)) && h.segment_is_charged((0, 2)));
+    }
+
+    /// Admit `mb` against the CARD and insert a worker charged it — the
+    /// graphics sibling of `admit_and_insert_cpu_worker`.
+    async fn admit_and_insert_gpu_worker(
+        p: &ModelProcessPool,
+        m: &ModelId,
+        mb: u64,
+        idle_for: std::time::Duration,
+    ) -> Arc<WorkerHandle> {
+        assert!(
+            p.admit_to_gpu(m, mb),
+            "the model must be admitted to the card"
+        );
+        let spawned_at = std::time::Instant::now()
+            .checked_sub(idle_for)
+            .expect("a clock old enough to express the idle time");
+        let h = fake_worker_handle_spawned(false, None, false, spawned_at).await;
+        h.charged_mb.store(mb, Ordering::Release);
+        p.workers.insert(m.clone(), h.clone());
+        h
+    }
+
+    /// A card with an idle 3B on it (3138 MB) and an 8B worker spawned for one
+    /// layer of a split — the live node's state on 2026-09-27 when a request for
+    /// the whole 8B 503'd after 11.8 s.
+    async fn card_with_an_idle_model_and_a_one_layer_worker(
+        pool: &ModelProcessPool,
+        per_layer_mb: u64,
+    ) -> (ModelId, ModelId, Arc<WorkerHandle>) {
+        pool.set_gpu_layers(-1);
+        pool.set_vram_budget_mb(6000);
+        let idle = ModelId("idle-3b".into());
+        let wanted = ModelId("wanted-8b".into());
+        pool.test_cost_curve
+            .insert(wanted.clone(), (500, per_layer_mb));
+        // Idle for an hour — past the reclaim floor, so the pool may take it.
+        admit_and_insert_gpu_worker(pool, &idle, 3138, std::time::Duration::from_secs(3600)).await;
+        let h = admit_and_insert_gpu_worker(pool, &wanted, 500, std::time::Duration::ZERO).await;
+        // Its spawn's own range, recorded at zero exactly as `get_or_spawn` does.
+        h.record_charged_segment((0, 1), 0);
+        (idle, wanted, h)
+    }
+
+    /// **A worker that cannot grow takes the card back from an idle model** —
+    /// the reclaim a fresh spawn has always run, missing from growth until
+    /// 2026-09-27. 500 + 3138 committed, 32 x 170 = 5440 to add: refused as it
+    /// stands, and fits once the idle 3B is gone (500 + 5440 <= 6000).
+    #[tokio::test]
+    async fn a_worker_that_cannot_grow_takes_the_card_back_from_an_idle_model() {
+        let pool = ModelProcessPool::new(std::path::PathBuf::from("/tmp/swarmllm-grow-reclaim"));
+        let (idle, wanted, h) = card_with_an_idle_model_and_a_one_layer_worker(&pool, 170).await;
+
+        // The control: growth ALONE refuses — the live node's answer.
+        let refused = pool
+            .charge_additional_segment(&wanted, (0, 32), &h)
+            .await
+            .expect_err("3638 + 5440 > 6000 with the idle model still resident");
+        assert!(refused.on_gpu);
+
+        match pool
+            .grow_worker(&wanted, (0, 32), h.clone())
+            .await
+            .expect("the idle model's room is enough")
+        {
+            Growth::Grown(g) => assert!(Arc::ptr_eq(&g, &h), "the same worker, grown"),
+            Growth::Respawn => {
+                panic!("room could be made, so the worker should grow, not be replaced")
+            }
+        }
+        assert!(
+            pool.workers.get(&idle).is_none(),
+            "the idle model gave the card back"
+        );
+        assert!(h.segment_is_charged((0, 32)));
+        assert_eq!(pool.vram_committed_mb(), 500 + 5440);
+    }
+
+    /// **An idle worker that cannot grow on the card is replaced, not refused.**
+    /// 32 x 190 = 6080 is more than the whole budget, so no reclaim can make
+    /// room: the model can only ever run PART on the card, which a fresh spawn
+    /// can place (hybrid) and growth cannot. Before this, every request for the
+    /// whole model was refused until the worker aged out.
+    #[tokio::test]
+    async fn an_idle_worker_that_cannot_grow_on_the_card_is_replaced_not_refused() {
+        let pool = ModelProcessPool::new(std::path::PathBuf::from("/tmp/swarmllm-grow-respawn"));
+        let (_idle, wanted, h) = card_with_an_idle_model_and_a_one_layer_worker(&pool, 190).await;
+
+        let outcome = pool
+            .grow_worker(&wanted, (0, 32), h)
+            .await
+            .expect("an idle worker is replaced rather than refusing the request");
+        assert!(matches!(outcome, Growth::Respawn));
+        assert!(
+            pool.workers.get(&wanted).is_none(),
+            "retired, so `get_or_spawn` falls through to a fresh spawn"
+        );
+    }
+
+    /// The control for the two above: a worker holding a live conversation is
+    /// NEVER retired under it (#93) — the refusal it always got stands, and the
+    /// router re-plans on it.
+    #[tokio::test]
+    async fn a_worker_in_use_that_cannot_grow_keeps_its_refusal() {
+        let pool = ModelProcessPool::new(std::path::PathBuf::from("/tmp/swarmllm-grow-busy"));
+        let (_idle, wanted, h) = card_with_an_idle_model_and_a_one_layer_worker(&pool, 190).await;
+        h.note_conversation(Uuid::new_v4());
+
+        let err = match pool.grow_worker(&wanted, (0, 32), h.clone()).await {
+            Err(e) => e,
+            Ok(_) => panic!("a worker mid-conversation must not be replaced"),
+        };
+        assert!(
+            matches!(err, SwarmError::LocalMemoryUnavailable(_)),
+            "the variant the router re-plans on: {err}"
+        );
+        assert!(
+            pool.workers
+                .get(&wanted)
+                .is_some_and(|w| Arc::ptr_eq(&w, &h)),
+            "the worker stays"
+        );
     }
 
     /// What the planner is told this worker holds — and what each range would
@@ -7088,6 +7338,24 @@ mod tests {
         placed_on_cpu_because: Option<CpuReason>,
         charged_against_ram: bool,
     ) -> Arc<WorkerHandle> {
+        fake_worker_handle_spawned(
+            dead_now,
+            placed_on_cpu_because,
+            charged_against_ram,
+            std::time::Instant::now(),
+        )
+        .await
+    }
+
+    /// [`fake_worker_handle_on`] with the spawn time chosen: `idle_secs` counts
+    /// from it, so a worker "spawned an hour ago and never used" is idle past
+    /// the reclaim floor, where one spawned now is protected by it.
+    async fn fake_worker_handle_spawned(
+        dead_now: bool,
+        placed_on_cpu_because: Option<CpuReason>,
+        charged_against_ram: bool,
+        spawned_at: std::time::Instant,
+    ) -> Arc<WorkerHandle> {
         use interprocess::local_socket::{tokio::prelude::*, ListenerOptions};
         let name = format!(
             "/tmp/swarmllm-retire-test-{}.sock",
@@ -7125,7 +7393,7 @@ mod tests {
             #[cfg(unix)]
             socket_name: name,
             reader_handle,
-            spawned_at: std::time::Instant::now(),
+            spawned_at,
             last_used: AtomicU64::new(0),
             kv_holders: std::sync::Mutex::new(std::collections::HashMap::new()),
             charged_mb: AtomicU64::new(0),

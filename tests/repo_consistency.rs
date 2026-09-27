@@ -10270,8 +10270,14 @@ fn an_admission_refusal_is_the_variant_the_router_re_plans() {
     let mut refusals = 0;
     for (line, body) in blocks {
         // The arms that demote to the processor rather than refuse return no
-        // error at all, and are not what this guard is about.
-        if !body.contains("return Err(SwarmError::") {
+        // error at all, and are not what this guard is about. Matched on
+        // `return Err(` alone, not `return Err(SwarmError::`: since 2026-09-27
+        // the growth refusal returns the variant inside `GrowthRefused` (so
+        // `grow_worker` can reclaim or respawn before giving it up), and a
+        // needle naming the old spelling counted one refusal where there are
+        // two — the "spellings it knows" trap, caught here only because the
+        // count below is exact.
+        if !body.contains("return Err(") {
             continue;
         }
         refusals += 1;
@@ -10329,8 +10335,25 @@ fn the_admission_refusal_guard_catches_the_wrong_variant() {
     let blocks = admission_refusal_blocks(innocent);
     assert_eq!(blocks.len(), 1, "the arm is still found...");
     assert!(
-        !blocks[0].1.contains("return Err(SwarmError::"),
+        !blocks[0].1.contains("return Err("),
         "...but carries no refusal, so the guard skips it"
+    );
+
+    // The growth path's spelling: the variant travels inside `GrowthRefused`.
+    // A wrong variant there must be seen exactly as the bare one is.
+    let wrapped = "        if !admitted {\n\
+        \x20           return Err(GrowthRefused {\n\
+        \x20               needed_mb: net_mb,\n\
+        \x20               on_gpu,\n\
+        \x20               error: SwarmError::ServiceUnavailable(format!(\"short\")),\n\
+        \x20           });\n\
+        \x20       }\n";
+    let blocks = admission_refusal_blocks(wrapped);
+    assert_eq!(blocks.len(), 1);
+    assert!(
+        blocks[0].1.contains("return Err(")
+            && blocks[0].1.contains("SwarmError::ServiceUnavailable"),
+        "a wrapped refusal is a refusal, and its wrong variant is in the body the guard reads"
     );
 }
 

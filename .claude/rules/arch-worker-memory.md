@@ -148,6 +148,19 @@ decoded from nothing — whatever lost the worker.
 
 → `docs/invariants/memory.md` § "A reply between two forwards is in use"
 
+## A worker that cannot grow gets the spawn's ladder, not a refusal (2026-09-27)
+
+**`ModelProcessPool::grow_worker` is the one place a live worker takes on a new
+range.** Where the card will not take it: reclaim idle models' graphics memory
+(the spawn's `free_vram_for_admission`, outside `spawn_lock`), then — only if
+`WorkerHandle::in_use` is false — retire the worker so `get_or_spawn`'s slow
+path places the range afresh, part on the processor if need be. Growth used to
+refuse on the first rung, and a partial worker then wedged its model — every
+chat request refused in ~50 ms — until it aged out. A worker in use keeps the
+refusal; never retire one mid-conversation (#93).
+
+→ `docs/invariants/memory.md` § "A worker that cannot grow gets the spawn's ladder"
+
 ## A fan-out to every worker is bounded, and the two waits mean different things
 
 **`ModelProcessPool::notify_every_worker` is the one place a fire-and-forget
