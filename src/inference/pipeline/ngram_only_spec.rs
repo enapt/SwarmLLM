@@ -430,6 +430,7 @@ impl PipelineExecutor {
                         drafts: &[],
                         sampling: &self.request.sampling_params,
                         generated: &generated,
+                        coupling: None,
                     }),
                 )
                 .await?;
@@ -440,6 +441,7 @@ impl PipelineExecutor {
                     &[],
                     &self.request.sampling_params,
                     &generated,
+                    None,
                 ) {
                     Ok(decided) => decided,
                     Err(e) => {
@@ -495,6 +497,7 @@ impl PipelineExecutor {
                     drafts: &drafts,
                     sampling: &self.request.sampling_params,
                     generated: &generated,
+                    coupling: None,
                 }),
             )
             .await?;
@@ -502,6 +505,7 @@ impl PipelineExecutor {
                 &drafts,
                 &self.request.sampling_params,
                 &generated,
+                None,
             ) {
                 Ok(decided) => decided,
                 Err(e) => {

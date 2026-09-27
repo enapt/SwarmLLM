@@ -40,6 +40,8 @@
 #          n-gram-only path and the rest the standard loop (it self-disables
 #          per process), so one arm yields both. Vary one thing per arm with
 #          EXTRA_TOML, e.g. EXTRA_TOML=$'[inference]\nactivation_compression = false'.
+#          RIG_TEMPERATURE=0.7 asks every question at that temperature (default 0,
+#          greedy) — for speculation that must hold at the temperatures clients send.
 #   context  the FAILOVER topology, but B serves a SHORTER conversation than the
 #          long prompt (CEIL_B, default 512, as B's own max_seq_len_override) —
 #          the field report of 2026-09-25, where an 8192-token peer refused an
@@ -313,7 +315,7 @@ echo "rig: A sees exactly its $PEERS_EXPECTED rig peer(s)"
 
 ask() { # prompt max_tokens label  (writes $OUT/<label>.{hdr,body}, prints a JSON line)
   local body
-  body=$(python3 -c 'import json,sys; print(json.dumps({"model":sys.argv[1],"max_tokens":int(sys.argv[3]),"temperature":0,"messages":[{"role":"user","content":sys.argv[2]}]}))' "$MODEL" "$1" "$2")
+  body=$(python3 -c 'import json,os,sys; print(json.dumps({"model":sys.argv[1],"max_tokens":int(sys.argv[3]),"temperature":float(os.environ.get("RIG_TEMPERATURE","0")),"messages":[{"role":"user","content":sys.argv[2]}]}))' "$MODEL" "$1" "$2")
   curl -s -m 900 -D "$OUT/$3.hdr" -H "Authorization: Bearer $KA" -H "Content-Type: application/json" \
        -X POST localhost:8900/v1/chat/completions -d "$body" -o "$OUT/$3.body"
   python3 -c 'import json,sys

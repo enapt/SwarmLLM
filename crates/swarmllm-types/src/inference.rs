@@ -402,6 +402,13 @@ pub struct LayerForward {
     /// `sampling` beside it — the walk IS sampling.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub spec_walk_at_tail: bool,
+    /// The request's SHARED noise seed (`inference::coupled_noise`): the
+    /// segment that samples draws each token by Gumbel-max with noise keyed by
+    /// (this seed, the token's absolute position, its id), so a drafter holding
+    /// the same seed reproduces its draw at any temperature. Travels in the
+    /// `0x0B` trailer, only to a peer advertising `features::COUPLED_SAMPLING`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coupling_seed: Option<u64>,
     /// Speculative decoding KV-cache fixup: if `Some(L)`, the worker truncates
     /// the per-request KV cache to exactly L sequence positions BEFORE running
     /// this forward. Used after partial acceptance to discard the trailing γ-k
@@ -938,6 +945,7 @@ mod chunk_assembly_tests {
             draft_tokens: Vec::new(),
             spec_logits_requested: false,
             spec_walk_at_tail: false,
+            coupling_seed: None,
             truncate_kv_to: None,
             chunk_meta: None,
             // In-process only (`serde(skip)`): a decoded forward always has

@@ -2416,3 +2416,33 @@ by default) and the Vivaldi coordinate. Under V1Lazy the same 4 ms ping is one
 - Never compare a raw request-response sample to a distance constant.
 - The negotiation mode is read ONCE (`substream_negotiation`, a `OnceLock`) so the
   swarm and the conversion cannot disagree within a process.
+
+## Shared noise for a speculative walk (2026-09-27)
+
+**What it adds.** A walk accepts a FIXED draft with probability p(draft), which at
+temperature > 0 is well below how often a close drafter agrees with the target:
+for a 3-bit copy of Qwen2.5-Coder-7B's far half, 92.5% coupled vs 71.3% fixed at
+T=1.0 (`docs/plans/split_speculation.md` Phase 4). With the request's shared noise
+(`inference::coupled_noise`: Philox4x64-10 keyed by seed, absolute position and
+token id; Gumbel-max over each side's own filtered logits) each side still draws
+an exact sample of its own distribution, and a close drafter draws the same token
+(Daliri et al., arXiv 2408.07978).
+
+**Measured** (`split_rig.sh repeat`, llama-3.2-3b, DSD with a 3-bit far-half
+shadow as its drafter, γ=4, `RIG_TEMPERATURE=0.7`, n-gram lookup off, 3 requests
+per arm, one binary, `SWARMLLM_SPEC_COUPLING=0` for the fixed arm): guesses
+accepted **80.6% vs 70.0%**, tokens per round trip **4.11 vs 3.71**. With DSD's
+n-gram cascade tried first, the coupled arm fell to 3.47 — an n-gram guess is a
+fixed token — so DSD skips it whenever shared noise is on.
+
+**What a change must keep:**
+- Positions are ABSOLUTE: row i of a verify at `index_pos` samples position
+  `index_pos + 1 + i` (worker `walk_verified_positions`, coordinator
+  `VerifyReply::accept`), and DSD's `DraftPick::first` is `current_pos + 1`.
+- The seed goes only to a peer advertising `COUPLED_SAMPLING`; the pool keeps it
+  only beside a walk with the caller's sampling. A tail without it walks with its
+  own draw — still exact, just in agreement less often.
+- `0x0B` is written by `layer_forward::append_coupling_trailer` for the plaintext
+  frame, the encrypted frame and the AAD alike; absent, a frame is byte-identical.
+- Exactness is pinned by `a_coupled_sample_follows_the_ordinary_samplers_distribution`
+  (with its control) and pruning by `pruning_never_changes_the_coupled_pick`.

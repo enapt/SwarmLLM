@@ -286,6 +286,14 @@ and the AAD. A walk travels only with the caller's sampling beside it.
 
 → `docs/invariants/network.md` § "A speculative verify is walked where the logits are"
 
+**And it can walk with the request's SHARED noise** (`LayerForward::coupling_seed`,
+the `0x0B` trailer, gated on `features::COUPLED_SAMPLING`): Gumbel-max keyed by
+(seed, ABSOLUTE position, token id) — `inference::coupled_noise`. Row i of a
+verify at `index_pos` predicts position `index_pos + 1 + i`; a drafter keys guess
+k at `current_pos + 1 + k`. **Never a relative position** — the two sides then
+draw different noise for the same token and agreement collapses silently
+(`a_drafter_keyed_at_the_samplers_positions_is_accepted_and_one_off_is_not`).
+
 ## A result names the step it answers; one that did not arrive is sent again (2026-09-25)
 
 A request's forwards to one segment share its id, so a result matched by id alone

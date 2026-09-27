@@ -199,6 +199,18 @@ impl PipelineExecutor {
         )
         .await;
 
+        // Shared noise (`inference::coupled_noise`, split_speculation.md Phase 4c):
+        // the drafter draws each guess with the same noise the sampling segment
+        // will use, so a close drafter reproduces the target's SAMPLE, not just
+        // its argmax — at temperature 1.0 a 3-bit copy of a 7B's far half agreed
+        // 92.5% of the time this way against 71.3% for a fixed guess. Greedy
+        // requests need none: both sides take the argmax.
+        // `SWARMLLM_SPEC_COUPLING=0` drafts fixed guesses instead, for an A/B
+        // inside one binary.
+        let noise = (self.request.sampling_params.temperature > 0.0
+            && std::env::var("SWARMLLM_SPEC_COUPLING").as_deref() != Ok("0"))
+        .then(|| crate::inference::coupled_noise::CoupledNoise::new(rand::random::<u64>()));
+
         let mut acceptance_proposed: u32 = 0;
         let mut acceptance_accepted: u32 = 0;
         let mut finish_reason = String::new();
@@ -222,16 +234,36 @@ impl PipelineExecutor {
             let remaining = max_tokens - generated.len() as u32;
             let gamma = controller.current_gamma().min(remaining).max(1);
 
+            // Guess k lands at absolute position current_pos + 1 + k: the verify
+            // writes `last_token` at `current_pos`, and its row k predicts the
+            // token after it — the positions the sampling segment keys by.
+            let pick = noise.as_ref().map(|n| super::speculative::DraftPick {
+                noise: n,
+                first: current_pos as u64 + 1,
+                params: &self.request.sampling_params,
+                history: &generated,
+            });
+
             // SWARM-SPEC Layer 1 cascade (same pattern as single-segment
             // speculative.rs): try n-gram lookup first; on miss fall back
             // to the draft model. On hit, still sync draft KV via
             // draft_sync_tokens so subsequent rounds remain consistent.
-            let ngram_drafts = ngram_lookup_drafts(
-                &self.shared_state.config.inference,
-                &draft_state.prompt_tokens,
-                &generated,
-                gamma,
-            );
+            // Not with shared noise: an n-gram guess is a FIXED token, accepted
+            // with probability p(guess) at temperature > 0, while the drafter
+            // drawing with the shared noise reproduces the sample itself.
+            // Measured on the split rig (llama-3.2-3b, 3-bit far-half shadow,
+            // T=0.7, γ=4): 4.11 tokens per round with n-gram lookup skipped,
+            // 3.47 with it tried first.
+            let ngram_drafts = if pick.is_some() {
+                Vec::new()
+            } else {
+                ngram_lookup_drafts(
+                    &self.shared_state.config.inference,
+                    &draft_state.prompt_tokens,
+                    &generated,
+                    gamma,
+                )
+            };
             let drafts = if !ngram_drafts.is_empty() {
                 let sync_outcome = tokio::task::block_in_place(|| {
                     draft_sync_tokens(&mut draft_state, &mut draft, last_token, &ngram_drafts)
@@ -241,7 +273,13 @@ impl PipelineExecutor {
                     Err(e) => {
                         tracing::warn!(%request_id, error = %e, "DSD: ngram-sync failed — falling back to draft sample");
                         let draft_outcome = tokio::task::block_in_place(|| {
-                            draft_next_gamma(&mut draft_state, &mut draft, last_token, gamma)
+                            draft_next_gamma(
+                                &mut draft_state,
+                                &mut draft,
+                                last_token,
+                                gamma,
+                                pick.as_ref(),
+                            )
                         });
                         match draft_outcome {
                             Ok(d) => d,
@@ -256,7 +294,13 @@ impl PipelineExecutor {
             } else {
                 // Draft phase — sync, llama-cpp.
                 let draft_outcome = tokio::task::block_in_place(|| {
-                    draft_next_gamma(&mut draft_state, &mut draft, last_token, gamma)
+                    draft_next_gamma(
+                        &mut draft_state,
+                        &mut draft,
+                        last_token,
+                        gamma,
+                        pick.as_ref(),
+                    )
                 });
                 match draft_outcome {
                     Ok(d) => d,
@@ -292,6 +336,7 @@ impl PipelineExecutor {
                     drafts: &drafts,
                     sampling: &self.request.sampling_params,
                     generated: &generated,
+                    coupling: noise.map(|n| n.seed()),
                 }),
             )
             .await
@@ -314,6 +359,7 @@ impl PipelineExecutor {
                 &drafts,
                 &self.request.sampling_params,
                 &generated,
+                noise.as_ref().map(|n| (n, current_pos as u64 + 1)),
             ) {
                 Ok(decided) => decided,
                 Err(e) => {

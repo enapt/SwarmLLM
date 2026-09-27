@@ -297,6 +297,9 @@ pub struct IpcForward {
     /// (`LayerForward::spec_walk_at_tail`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub spec_walk_at_tail: bool,
+    /// The request's shared noise seed for the walk (`LayerForward::coupling_seed`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coupling_seed: Option<u64>,
     /// KV cache truncation: if `Some(L)`, worker truncates per-request KV to
     /// L sequence positions BEFORE running the forward. Used by speculative
     /// partial-accept fixup.
@@ -832,6 +835,7 @@ mod tests {
             generated_ids: vec![],
             spec_logits_requested: false,
             spec_walk_at_tail: false,
+            coupling_seed: None,
             truncate_kv_to: None,
             for_the_owner: false,
         };
@@ -869,6 +873,7 @@ mod tests {
             generated_ids: vec![],
             spec_logits_requested: false,
             spec_walk_at_tail: false,
+            coupling_seed: None,
             truncate_kv_to: None,
             for_the_owner,
         };
@@ -908,6 +913,7 @@ mod tests {
             generated_ids: vec![],
             spec_logits_requested: false,
             spec_walk_at_tail: false,
+            coupling_seed: None,
             truncate_kv_to: None,
             for_the_owner: false,
         };

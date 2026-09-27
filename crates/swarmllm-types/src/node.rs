@@ -181,6 +181,18 @@ pub mod features {
     /// fail every encrypted verify it was sent.
     pub const SPEC_WALK_AT_TAIL: u64 = 1 << 13;
 
+    /// Reads the coupling trailer (`0x0B`, `LayerForward::coupling_seed`) and
+    /// samples a verify's positions with the request's SHARED noise
+    /// (`inference::coupled_noise`): Gumbel-max keyed by (seed, absolute position,
+    /// token id). Each side still draws an exact sample of its own distribution;
+    /// with the noise shared, a close drafter draws the same token as the
+    /// sampler — 92.5% at temperature 1.0 for a 3-bit copy of a 7B's far half,
+    /// against 71.3% for a deterministic draft.
+    ///
+    /// Gated at the sender: an older peer rebuilds the seal's AAD from the
+    /// trailers it parsed, so an unknown one fails every encrypted forward.
+    pub const COUPLED_SAMPLING: u64 = 1 << 14;
+
     /// The full feature set THIS build implements. Advertised by every node.
     pub const ALL: u64 = RELAY
         | TENSOR_RELAY
@@ -195,7 +207,8 @@ pub mod features {
         | FORWARD_REFUSAL_REASON
         | FORWARD_SAMPLING
         | RESULT_STEP
-        | SPEC_WALK_AT_TAIL;
+        | SPEC_WALK_AT_TAIL
+        | COUPLED_SAMPLING;
 
     /// Does `advertised` include every bit in `needed`?
     pub fn supports(advertised: u64, needed: u64) -> bool {

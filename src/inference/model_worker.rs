@@ -1751,11 +1751,18 @@ async fn handle_forward(
                 // 152K), which on a long link cost more than the round trips
                 // speculation saved (`docs/plans/split_speculation.md`).
                 let token_ids = if fwd.spec_walk_at_tail {
+                    // Row i predicts the token at `index_pos + 1 + i` (the
+                    // verify's first token is written at `index_pos`) — the
+                    // absolute position the shared noise is keyed by.
+                    let noise = fwd
+                        .coupling_seed
+                        .map(crate::inference::coupled_noise::CoupledNoise::new);
                     crate::inference::sampling::walk_verified_positions(
                         &fwd.draft_tokens,
                         &spec_logits,
                         &fwd.sampling,
                         &fwd.generated_ids,
+                        noise.as_ref().map(|n| (n, u64::from(fwd.index_pos) + 1)),
                     )?
                 } else {
                     Vec::new()

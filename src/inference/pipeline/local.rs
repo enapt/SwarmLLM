@@ -352,6 +352,7 @@ impl PipelineExecutor {
             draft_tokens: Vec::new(),
             spec_logits_requested: false,
             spec_walk_at_tail: false,
+            coupling_seed: None,
             truncate_kv_to: None,
             chunk_meta: None,
             // The segment that samples needs the caller's parameters. Without
@@ -1707,6 +1708,7 @@ mod segment_budget_tests {
             draft_tokens: Vec::new(),
             spec_logits_requested: false,
             spec_walk_at_tail: false,
+            coupling_seed: None,
             truncate_kv_to: None,
             chunk_meta: None,
             sampling: None,

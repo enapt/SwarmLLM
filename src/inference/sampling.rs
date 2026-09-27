@@ -404,6 +404,7 @@ pub(crate) fn walk_verified_positions(
     rows: &[Vec<f32>],
     params: &SamplingParams,
     generated: &[u32],
+    coupling: Option<(&CoupledNoise, u64)>,
 ) -> Result<Vec<u32>, String> {
     if rows.len() != drafts.len() + 1 {
         return Err(format!(
@@ -415,7 +416,7 @@ pub(crate) fn walk_verified_positions(
     if !verify_rows_are_finite(drafts.len(), rows) {
         return Err("spec walk: non-finite logits".into());
     }
-    let (mut kept, next, _) = sampled_accept_reject(drafts, rows, params, generated);
+    let (mut kept, next, _) = sampled_accept_reject(drafts, rows, params, generated, coupling);
     kept.push(next);
     Ok(kept)
 }
@@ -458,6 +459,7 @@ pub(crate) fn sampled_accept_reject(
     spec_logits: &[Vec<f32>],
     params: &crate::types::SamplingParams,
     generated: &[u32],
+    coupling: Option<(&CoupledNoise, u64)>,
 ) -> (Vec<u32>, u32, bool) {
     if !verify_rows_are_finite(drafts.len(), spec_logits) {
         return (Vec::new(), 0, false);
@@ -467,9 +469,19 @@ pub(crate) fn sampled_accept_reject(
     let mut history: Vec<u32> = generated.to_vec();
     let mut accepted: Vec<u32> = Vec::with_capacity(drafts.len());
     let mut bonus: u32 = 0;
+    // Row i predicts the token at absolute position `first + i`; with shared
+    // noise that position keys the draw, so a drafter holding the same seed
+    // reproduces it (`coupled_noise`).
+    let draw =
+        |row: &mut [f32], history: &[u32], i: usize, ctx: &mut SamplingContext| match coupling {
+            Some((noise, first)) => {
+                sample_token_coupled(row, params, history, ctx, noise, first + i as u64)
+            }
+            None => sample_token_with_history(row, params, history, ctx),
+        };
     for (i, &q) in drafts.iter().enumerate() {
         let mut row = spec_logits[i].clone();
-        let pick = sample_token_with_history(&mut row, params, &history, &mut ctx);
+        let pick = draw(&mut row, &history, i, &mut ctx);
         if pick == q {
             accepted.push(q);
             history.push(q);
@@ -481,7 +493,7 @@ pub(crate) fn sampled_accept_reject(
     let all_accepted = accepted.len() == drafts.len();
     if all_accepted {
         let mut row = spec_logits[drafts.len()].clone();
-        bonus = sample_token_with_history(&mut row, params, &history, &mut ctx);
+        bonus = draw(&mut row, &history, drafts.len(), &mut ctx);
     }
     (accepted, bonus, all_accepted)
 }
@@ -1597,23 +1609,23 @@ mod speculative_acceptance_tests {
             vec![0.0, 0.1, 9.0],
         ];
         for drafts in [vec![1u32, 0], vec![1, 2], vec![0, 0]] {
-            let (mut want, next, _) = sampled_accept_reject(&drafts, &rows, &greedy, &[]);
+            let (mut want, next, _) = sampled_accept_reject(&drafts, &rows, &greedy, &[], None);
             want.push(next);
             assert_eq!(
-                walk_verified_positions(&drafts, &rows, &greedy, &[]).unwrap(),
+                walk_verified_positions(&drafts, &rows, &greedy, &[], None).unwrap(),
                 want,
                 "drafts {drafts:?}"
             );
         }
         assert_eq!(
-            walk_verified_positions(&[1, 0], &rows, &greedy, &[]).unwrap(),
+            walk_verified_positions(&[1, 0], &rows, &greedy, &[], None).unwrap(),
             vec![1, 0, 2],
             "every draft kept, then the bonus"
         );
-        assert!(walk_verified_positions(&[1], &rows, &greedy, &[]).is_err());
+        assert!(walk_verified_positions(&[1], &rows, &greedy, &[], None).is_err());
         let mut poisoned = rows;
         poisoned[2][1] = f32::INFINITY;
-        assert!(walk_verified_positions(&[1, 0], &poisoned, &greedy, &[]).is_err());
+        assert!(walk_verified_positions(&[1, 0], &poisoned, &greedy, &[], None).is_err());
     }
 }
 
@@ -1784,5 +1796,81 @@ mod coupled_sampling_tests {
                 argmax(&base)
             );
         }
+    }
+
+    /// **Positions must line up**, and this is the trap a relative key falls
+    /// into: a drafter with the SAME distribution, drawing with the same noise at
+    /// the positions the sampler keys by, has every draft accepted at
+    /// temperature 1.0 — and off by one position it is mostly refused.
+    #[test]
+    fn a_drafter_keyed_at_the_samplers_positions_is_accepted_and_one_off_is_not() {
+        let vocab = 48usize;
+        let rows: Vec<Vec<f32>> = (0..9)
+            .map(|r| {
+                (0..vocab)
+                    .map(|i| ((i * 7 + r * 3) as f32 * 0.29).sin() * 1.2)
+                    .collect()
+            })
+            .collect();
+        let params = SamplingParams {
+            temperature: 1.0,
+            top_k: 0,
+            top_p: 1.0,
+            ..Default::default()
+        };
+        let noise = CoupledNoise::new(0xABCD);
+        let first = 1000u64;
+        let draft_at = |offset: u64| -> Vec<u32> {
+            let mut ctx = SamplingContext::new(vocab);
+            let mut history = Vec::new();
+            (0..8)
+                .map(|j| {
+                    let mut row = rows[j].clone();
+                    let t = sample_token_coupled(
+                        &mut row,
+                        &params,
+                        &history,
+                        &mut ctx,
+                        &noise,
+                        first + offset + j as u64,
+                    );
+                    history.push(t);
+                    t
+                })
+                .collect()
+        };
+        let aligned = draft_at(0);
+        let (kept, _, all) =
+            sampled_accept_reject(&aligned, &rows, &params, &[], Some((&noise, first)));
+        assert!(
+            all && kept == aligned,
+            "aligned drafts must all be kept: kept {} of 8",
+            kept.len()
+        );
+
+        let mut refused = 0;
+        for trial in 0..20u64 {
+            let n = CoupledNoise::new(trial);
+            let mut ctx = SamplingContext::new(vocab);
+            let drafts: Vec<u32> = (0..8)
+                .map(|j| {
+                    sample_token_coupled(
+                        &mut rows[j].clone(),
+                        &params,
+                        &[],
+                        &mut ctx,
+                        &n,
+                        first + 1 + j as u64,
+                    )
+                })
+                .collect();
+            let (kept, _, _) =
+                sampled_accept_reject(&drafts, &rows, &params, &[], Some((&n, first)));
+            refused += usize::from(kept.len() < 8);
+        }
+        assert!(
+            refused >= 18,
+            "one position off should break agreement: {refused}/20 refused"
+        );
     }
 }

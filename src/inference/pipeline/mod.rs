@@ -281,10 +281,15 @@ pub(super) fn pack_verify_tokens_to_le_bytes(tokens: &[u32]) -> Vec<u8> {
 /// (`LayerForward::spec_walk_at_tail`): the drafts, the caller's sampler, and
 /// the history its penalties read. The walk IS sampling, so these travel
 /// together or not at all.
+#[derive(Clone, Copy)]
 pub(super) struct TailWalk<'a> {
     pub drafts: &'a [u32],
     pub sampling: &'a crate::types::SamplingParams,
     pub generated: &'a [u32],
+    /// The request's shared noise seed, when its drafts were drawn with it
+    /// (`inference::coupled_noise`); only a tail advertising
+    /// `features::COUPLED_SAMPLING` is sent it.
+    pub coupling: Option<u64>,
 }
 
 /// What a verify round came back with. A tail that could walk answers with
@@ -308,11 +313,15 @@ impl VerifyReply {
     /// are not finite (the rule used to hand back token 0 as the "bonus" and a
     /// caller streamed it), too few positions, or a walk that claims to have
     /// kept a token that was never drafted.
+    ///
+    /// `coupling` is the shared noise and the absolute position row 0 predicts,
+    /// for a reply whose logits are walked HERE — the same draw the tail makes.
     pub(super) fn accept(
         self,
         drafts: &[u32],
         sampling: &crate::types::SamplingParams,
         generated: &[u32],
+        coupling: Option<(&crate::inference::coupled_noise::CoupledNoise, u64)>,
     ) -> Result<(Vec<u32>, u32, bool), SwarmError> {
         match self {
             VerifyReply::Logits(rows) => {
@@ -329,7 +338,7 @@ impl VerifyReply {
                     ));
                 }
                 Ok(crate::inference::sampling::sampled_accept_reject(
-                    drafts, &rows, sampling, generated,
+                    drafts, &rows, sampling, generated, coupling,
                 ))
             }
             VerifyReply::Walked(tokens) => {
@@ -400,6 +409,7 @@ pub(super) fn build_spec_verify_forward(
         draft_tokens: walk.map(|w| w.drafts.to_vec()).unwrap_or_default(),
         spec_logits_requested: true,
         spec_walk_at_tail: walk.is_some(),
+        coupling_seed: walk.and_then(|w| w.coupling),
         truncate_kv_to,
         chunk_meta: None,
         sampling: walk.map(|w| w.sampling.clone()),
@@ -472,11 +482,21 @@ pub(super) async fn forward_verify_through_segments(
         // The sampler walks where the logits are — our own worker always can,
         // a peer only when it says so. Otherwise it sends every position's
         // vocabulary back and `VerifyReply::accept` walks them here.
-        let tail_walk = walk.as_ref().filter(|_| {
-            is_last
-                && (target_peer_bytes.is_none()
-                    || peer_walks_at_tail(shared_state, &segment.node_id))
-        });
+        let local = target_peer_bytes.is_none();
+        let tail_walk = walk
+            .filter(|_| is_last && (local || peer_walks_at_tail(shared_state, &segment.node_id)))
+            // The seed only to a tail that samples with it; any other walks with
+            // its own draw — still exact, just less often in agreement.
+            .map(|w| TailWalk {
+                coupling: w.coupling.filter(|_| {
+                    local
+                        || shared_state.peer_advertises_feature(
+                            &segment.node_id,
+                            swarmllm_types::node::features::COUPLED_SAMPLING,
+                        )
+                }),
+                ..w
+            });
 
         // Rebuildable: a peer that refuses this unopened is sent it again once
         // the link is re-keyed (`local::ResendOnRefusal`).
@@ -488,7 +508,7 @@ pub(super) async fn forward_verify_through_segments(
                 segment,
                 shared_state.identity.node_id().0,
                 truncate_kv_to,
-                tail_walk,
+                tail_walk.as_ref(),
             )
         };
         let forward = rebuild_forward();
@@ -742,6 +762,7 @@ pub(super) fn build_kv_truncate_forward(
         draft_tokens: Vec::new(),
         spec_logits_requested: false,
         spec_walk_at_tail: false,
+        coupling_seed: None,
         truncate_kv_to: Some(truncate_to),
         chunk_meta: None,
         sampling: None,
@@ -2755,6 +2776,7 @@ mod failover_retarget_tests {
                     drafts: &[8, 9],
                     sampling: &sampling,
                     generated: &[3, 7],
+                    coupling: Some(0x5EED),
                 }),
             )
             .await;
@@ -2796,6 +2818,10 @@ mod failover_retarget_tests {
         let fwd = verify_forward_sent_to(state, new_peer, penalised.clone()).await;
         assert!(fwd.spec_walk_at_tail && fwd.spec_logits_requested);
         assert_eq!(
+            fwd.coupling_seed, None,
+            "the seed only to a peer that samples with it"
+        );
+        assert_eq!(
             fwd.draft_tokens,
             vec![8, 9],
             "a tail past segment 0 sees no token ids"
@@ -2806,6 +2832,22 @@ mod failover_retarget_tests {
             vec![3, 7],
             "the penalties' history travels"
         );
+
+        // A peer that also samples with shared noise is sent the seed.
+        let state = super::tests::make_test_state();
+        let coupled = NodeId([5u8; 32]);
+        state.peer_registry.insert(
+            coupled.clone(),
+            super::tests::peer_advertising(
+                &coupled,
+                SPEC_WALK_AT_TAIL
+                    | FORWARD_SAMPLING
+                    | FORWARD_GENERATED_IDS
+                    | swarmllm_types::node::features::COUPLED_SAMPLING,
+            ),
+        );
+        let fwd = verify_forward_sent_to(state, coupled, penalised.clone()).await;
+        assert_eq!(fwd.coupling_seed, Some(0x5EED));
 
         // Sampling and history but not the walk bit: an older peer.
         let state = super::tests::make_test_state();
@@ -2840,22 +2882,22 @@ mod failover_retarget_tests {
         ];
         // The coordinator walking the logits and a tail that walked them agree.
         let here = VerifyReply::Logits(rows.clone())
-            .accept(&[1, 2], &greedy, &[])
+            .accept(&[1, 2], &greedy, &[], None)
             .unwrap();
         assert_eq!(here, (vec![1], 0, false));
         let (mut kept, next, _) =
-            crate::inference::sampling::sampled_accept_reject(&[1, 2], &rows, &greedy, &[]);
+            crate::inference::sampling::sampled_accept_reject(&[1, 2], &rows, &greedy, &[], None);
         kept.push(next);
         assert_eq!(
             VerifyReply::Walked(kept)
-                .accept(&[1, 2], &greedy, &[])
+                .accept(&[1, 2], &greedy, &[], None)
                 .unwrap(),
             here
         );
         // All kept: the bonus follows.
         assert_eq!(
             VerifyReply::Walked(vec![1, 2, 5])
-                .accept(&[1, 2], &greedy, &[])
+                .accept(&[1, 2], &greedy, &[], None)
                 .unwrap(),
             (vec![1, 2], 5, true)
         );
@@ -2864,21 +2906,21 @@ mod failover_retarget_tests {
         // drafted, an empty walk, too few rows, and non-finite logits — which
         // the rule used to answer with token 0 as the bonus.
         assert!(VerifyReply::Walked(vec![9, 4])
-            .accept(&[1, 2], &greedy, &[])
+            .accept(&[1, 2], &greedy, &[], None)
             .is_err());
         assert!(VerifyReply::Walked(vec![1, 2, 3, 4])
-            .accept(&[1, 2], &greedy, &[])
+            .accept(&[1, 2], &greedy, &[], None)
             .is_err());
         assert!(VerifyReply::Walked(vec![])
-            .accept(&[1, 2], &greedy, &[])
+            .accept(&[1, 2], &greedy, &[], None)
             .is_err());
         assert!(VerifyReply::Logits(rows[..2].to_vec())
-            .accept(&[1, 2], &greedy, &[])
+            .accept(&[1, 2], &greedy, &[], None)
             .is_err());
         let mut poisoned = rows;
         poisoned[1][0] = f32::NAN;
         assert!(VerifyReply::Logits(poisoned)
-            .accept(&[1, 2], &greedy, &[])
+            .accept(&[1, 2], &greedy, &[], None)
             .is_err());
     }
 }

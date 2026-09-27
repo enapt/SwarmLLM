@@ -163,6 +163,7 @@ impl PipelineExecutor {
                 draft_tokens: Vec::new(),
                 spec_logits_requested: false,
                 spec_walk_at_tail: false,
+                coupling_seed: None,
                 truncate_kv_to: None,
                 chunk_meta: None,
                 sampling: None,
@@ -347,7 +348,7 @@ impl PipelineExecutor {
                 if let Err(e) = sync_outcome {
                     tracing::warn!(%request_id, error = %e, "speculative: draft KV sync after n-gram lookup failed — falling back to draft sample");
                     let draft_outcome = tokio::task::block_in_place(|| {
-                        draft_next_gamma(&mut draft_state, &mut draft, last_token, this_gamma)
+                        draft_next_gamma(&mut draft_state, &mut draft, last_token, this_gamma, None)
                     });
                     match draft_outcome {
                         Ok(d) => (d, false),
@@ -372,7 +373,7 @@ impl PipelineExecutor {
             } else {
                 // Draft phase — sync, llama-cpp.
                 let draft_outcome = tokio::task::block_in_place(|| {
-                    draft_next_gamma(&mut draft_state, &mut draft, last_token, this_gamma)
+                    draft_next_gamma(&mut draft_state, &mut draft, last_token, this_gamma, None)
                 });
                 let d = match draft_outcome {
                     Ok(d) => d,
@@ -905,12 +906,29 @@ pub(super) fn draft_prefill(
 /// Advance the draft model by feeding `bootstrap` (the last accepted target
 /// token) then greedily sampling γ tokens from the draft. Returns the γ
 /// tokens. Draft KV ends γ+1 positions ahead of where it started.
+/// How a drafter picks each drafted token: its argmax (a deterministic draft,
+/// accepted with probability p(draft)), or a draw from the request's SHARED
+/// noise with the caller's own sampling parameters — the same draw the sampling
+/// segment makes, so a close drafter reproduces it at any temperature
+/// (`inference::coupled_noise`). `first` is the absolute position the first
+/// drafted token will occupy; `history` is what the penalties read, as the
+/// sampler sees it.
+// Built only by DSD, which needs the `llama` feature; Item 2 passes `None`.
+#[cfg_attr(not(feature = "llama"), allow(dead_code))]
+pub(super) struct DraftPick<'a> {
+    pub noise: &'a crate::inference::coupled_noise::CoupledNoise,
+    pub first: u64,
+    pub params: &'a crate::types::SamplingParams,
+    pub history: &'a [u32],
+}
+
 #[cfg(feature = "llama")]
 pub(super) fn draft_next_gamma(
     state: &mut DraftState,
     _draft: &mut crate::inference::executor::ModelExecutor,
     bootstrap: u32,
     gamma: u32,
+    pick: Option<&DraftPick<'_>>,
 ) -> Result<Vec<u32>, SwarmError> {
     use llama_cpp_2::token::LlamaToken;
 
@@ -927,9 +945,25 @@ pub(super) fn draft_next_gamma(
     state.pos += 1;
 
     let mut drafts = Vec::with_capacity(gamma as usize);
-    for _ in 0..gamma {
+    let mut ctx = crate::inference::sampling::SamplingContext::new(state.n_vocab);
+    let mut history: Vec<u32> = pick.map(|p| p.history.to_vec()).unwrap_or_default();
+    for j in 0..gamma {
         let logits: &[f32] = &state.ctx.get_logits()[..state.n_vocab];
-        let t = argmax(logits);
+        let t = match pick {
+            Some(p) => {
+                let mut row = logits.to_vec();
+                crate::inference::sampling::sample_token_coupled(
+                    &mut row,
+                    p.params,
+                    &history,
+                    &mut ctx,
+                    p.noise,
+                    p.first + u64::from(j),
+                )
+            }
+            None => argmax(logits),
+        };
+        history.push(t);
         drafts.push(t);
 
         state.batch.clear();
@@ -952,6 +986,7 @@ pub(super) fn draft_next_gamma(
     _draft: &mut crate::inference::executor::ModelExecutor,
     _bootstrap: u32,
     _gamma: u32,
+    _pick: Option<&DraftPick<'_>>,
 ) -> Result<Vec<u32>, SwarmError> {
     Err(SwarmError::Inference(
         "speculative requires llama feature".into(),
@@ -1132,7 +1167,7 @@ mod sampled_accept_reject_tests {
             vec![9],    // first draft mismatches
         ] {
             let want = greedy_accept_reject(&drafts, &rows);
-            let got = sampled_accept_reject(&drafts, &rows, &greedy_params(), &[]);
+            let got = sampled_accept_reject(&drafts, &rows, &greedy_params(), &[], None);
             assert_eq!(got, want, "drafts {drafts:?}");
         }
     }
@@ -1144,7 +1179,7 @@ mod sampled_accept_reject_tests {
     fn non_finite_logits_from_a_peer_reject_the_whole_round() {
         for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
             let rows = logits(&[&[0.1, bad, 0.2], &[1.0, 2.0, 3.0]]);
-            let got = sampled_accept_reject(&[1], &rows, &greedy_params(), &[]);
+            let got = sampled_accept_reject(&[1], &rows, &greedy_params(), &[], None);
             assert_eq!(got, (Vec::new(), 0, false), "value {bad}");
             // Same verdict as the greedy sibling, so the two cannot drift.
             assert_eq!(got, greedy_accept_reject(&[1], &rows));
@@ -1163,8 +1198,9 @@ mod sampled_accept_reject_tests {
         penalised.frequency_penalty = 2.0;
 
         let (_, unpenalised_bonus, _) =
-            sampled_accept_reject(&[], &rows, &greedy_params(), &[1, 1, 1]);
-        let (_, penalised_bonus, _) = sampled_accept_reject(&[], &rows, &penalised, &[1, 1, 1]);
+            sampled_accept_reject(&[], &rows, &greedy_params(), &[1, 1, 1], None);
+        let (_, penalised_bonus, _) =
+            sampled_accept_reject(&[], &rows, &penalised, &[1, 1, 1], None);
         assert_eq!(
             unpenalised_bonus, 1,
             "without a penalty the raw argmax wins"

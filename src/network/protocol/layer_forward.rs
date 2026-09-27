@@ -118,6 +118,7 @@ pub fn encode_layer_forward(forward: &LayerForward) -> Result<Vec<u8>, SwarmErro
     append_generated_ids_trailer(&mut buf, forward);
     append_pre_embedded_trailer(&mut buf, forward);
     append_sampling_trailer(&mut buf, forward);
+    append_coupling_trailer(&mut buf, forward);
 
     Ok(buf)
 }
@@ -208,6 +209,35 @@ pub(crate) fn read_sampling_trailer(
     };
     *cursor += SAMPLING_TRAILER_LEN;
     Some(params)
+}
+
+/// Write the coupling trailer: `0x0B | seed u64 LE` — 9 bytes, the request's
+/// shared noise seed (`LayerForward::coupling_seed`, `inference::coupled_noise`).
+/// Written after the sampling trailer, by the ONE function the plaintext frame,
+/// the encrypted frame and the AAD all call. Emitted only when the forward
+/// carries a seed, which the coordinator sets only for a peer advertising
+/// `features::COUPLED_SAMPLING`.
+pub(crate) fn append_coupling_trailer(buf: &mut Vec<u8>, forward: &LayerForward) {
+    let Some(seed) = forward.coupling_seed else {
+        return;
+    };
+    buf.push(0x0B);
+    buf.extend_from_slice(&seed.to_le_bytes());
+}
+
+/// Length of the coupling trailer, marker included.
+const COUPLING_TRAILER_LEN: usize = 9;
+
+/// Read the coupling trailer (`0x0B`) at `cursor`, if present. A seed needs no
+/// clamping — every value is a valid seed.
+pub(crate) fn read_coupling_trailer(data: &[u8], cursor: &mut usize) -> Option<u64> {
+    if data.len() < *cursor + COUPLING_TRAILER_LEN || data[*cursor] != 0x0B {
+        return None;
+    }
+    let mut seed = [0u8; 8];
+    seed.copy_from_slice(&data[*cursor + 1..*cursor + COUPLING_TRAILER_LEN]);
+    *cursor += COUPLING_TRAILER_LEN;
+    Some(u64::from_le_bytes(seed))
 }
 
 /// Write the decoded-so-far trailer: `0x08 | n(2 LE) | n × id(4 LE)`.
@@ -660,6 +690,7 @@ pub fn decode_layer_forward(data: &[u8]) -> Result<LayerForward, SwarmError> {
         crate::api::clamp_peer_sampling(&mut s);
         s
     });
+    let coupling_seed = read_coupling_trailer(data, &mut cursor);
     let _ = cursor;
 
     Ok(LayerForward {
@@ -681,6 +712,7 @@ pub fn decode_layer_forward(data: &[u8]) -> Result<LayerForward, SwarmError> {
         draft_tokens,
         spec_logits_requested,
         spec_walk_at_tail,
+        coupling_seed,
         truncate_kv_to,
         chunk_meta,
         sampling,
@@ -720,6 +752,7 @@ mod tests {
             draft_tokens: Vec::new(),
             spec_logits_requested: false,
             spec_walk_at_tail: false,
+            coupling_seed: None,
             truncate_kv_to: None,
             chunk_meta: None,
             sampling: None,
@@ -911,6 +944,26 @@ mod tests {
         let at = bytes.len() - (1 + 1 + 2 + 3 * 4);
         assert_eq!(&bytes[at..at + 2], &[0x03, SPEC_FLAG_LOGITS]);
         assert!(!decode_layer_forward(&bytes).unwrap().spec_walk_at_tail);
+    }
+
+    #[test]
+    fn a_coupling_seed_survives_the_wire_and_is_absent_when_unset() {
+        let mut f = base_forward();
+        f.coupling_seed = Some(0x0123_4567_89ab_cdef);
+        let bytes = encode_layer_forward(&f).unwrap();
+        assert_eq!(
+            &bytes[bytes.len() - 9..],
+            &[0x0B, 0xef, 0xcd, 0xab, 0x89, 0x67, 0x45, 0x23, 0x01]
+        );
+        assert_eq!(
+            decode_layer_forward(&bytes).unwrap().coupling_seed,
+            Some(0x0123_4567_89ab_cdef)
+        );
+        // Unset: the frame is exactly what it was before the field existed.
+        f.coupling_seed = None;
+        let plain = encode_layer_forward(&f).unwrap();
+        assert_eq!(plain.len(), bytes.len() - 9);
+        assert_eq!(decode_layer_forward(&plain).unwrap().coupling_seed, None);
     }
 
     #[test]

@@ -149,6 +149,8 @@ pub fn build_layer_forward_aad(forward: &LayerForward) -> Vec<u8> {
     // last segment turns logits into a token — rewriting a temperature is
     // steering the reply.
     super::layer_forward::append_sampling_trailer(&mut aad, forward);
+    // The coupling trailer (0x0B): which noise the sampler draws with.
+    super::layer_forward::append_coupling_trailer(&mut aad, forward);
 
     aad
 }
@@ -257,6 +259,7 @@ pub fn encode_layer_forward_encrypted(
     super::layer_forward::append_generated_ids_trailer(&mut buf, forward);
     super::layer_forward::append_pre_embedded_trailer(&mut buf, forward);
     super::layer_forward::append_sampling_trailer(&mut buf, forward);
+    super::layer_forward::append_coupling_trailer(&mut buf, forward);
 
     Ok(buf)
 }
@@ -480,6 +483,7 @@ pub fn decode_layer_forward_encrypted(
     let pre_embedded_trailer = super::layer_forward::read_pre_embedded_trailer(data, &mut cursor);
     // RAW until the AAD below is rebuilt from it — see `read_sampling_trailer`.
     let sampling = super::layer_forward::read_sampling_trailer(data, &mut cursor);
+    let coupling_seed = super::layer_forward::read_coupling_trailer(data, &mut cursor);
     let _ = cursor;
 
     let mut forward = LayerForward {
@@ -501,6 +505,7 @@ pub fn decode_layer_forward_encrypted(
         draft_tokens,
         spec_logits_requested,
         spec_walk_at_tail,
+        coupling_seed,
         truncate_kv_to,
         chunk_meta,
         sampling,
@@ -545,6 +550,7 @@ mod tests {
             draft_tokens: Vec::new(),
             spec_logits_requested: false,
             spec_walk_at_tail: false,
+            coupling_seed: None,
             truncate_kv_to: None,
             chunk_meta: None,
             sampling: None,
@@ -678,6 +684,23 @@ mod tests {
         assert_ne!(
             build_layer_forward_aad(&unwalked),
             build_layer_forward_aad(&orig)
+        );
+    }
+
+    #[test]
+    fn a_coupling_seed_is_sealed_and_survives_the_encrypted_frame() {
+        let mut orig = base_forward();
+        orig.coupling_seed = Some(42);
+        let bytes = encode_layer_forward_encrypted(&orig, vec![0u8; 32]).unwrap();
+        let (decoded, _sealed, aad) = decode_layer_forward_encrypted(&bytes).unwrap();
+        assert_eq!(decoded.coupling_seed, Some(42));
+        assert_eq!(aad, build_layer_forward_aad(&orig));
+        let mut other = orig.clone();
+        other.coupling_seed = Some(43);
+        assert_ne!(
+            build_layer_forward_aad(&other),
+            aad,
+            "a relay must not swap the noise"
         );
     }
 

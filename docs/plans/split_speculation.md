@@ -281,6 +281,14 @@ holder of the far half — `regional_pipelines.md`). As m·RTT shrinks the strea
 runs at v, the near machine's speed on the SHADOW, which can exceed the real
 model's local speed once decode is bound by bytes rather than submissions.
 
+**Built and measured on the split rig 2026-09-27** (llama-3.2-3b, A=[shard 0]
+coordinating, B=[1-3], DSD with the 3-bit far-half shadow as its drafter, γ=4):
+greedy **3.8 tokens per round trip** (replies 119/121 at llama.cpp's first choice,
+every tail answer ≤ 59 bytes); at T=0.7 with shared noise **4.11** against **3.71**
+for fixed guesses (80.6% vs 70.0% of guesses kept). Round trips on loopback cost
+nothing, so the rig measures tokens per trip, not speed; the WAN run needs the far
+node on this build.
+
 **Stages, cheapest first:**
 - **4a. DSD with a shadow drafter** — config only once v0.3.211 reaches the far
   node (the tail must walk): `draft_model_path` → a shadow GGUF. Measures the
