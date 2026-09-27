@@ -528,7 +528,7 @@ impl AutoShardManager {
                     }
 
                     // Download tied output weight for weight-tied models
-                    if let Err(e) = crate::model::huggingface::download_tied_output_weight(
+                    if let Err(e) = crate::model::huggingface::download_sidecar_tensors(
                         &repo_id,
                         &filename,
                         &dest,
@@ -536,7 +536,7 @@ impl AutoShardManager {
                     )
                     .await
                     {
-                        tracing::warn!(error = %e, "Tied output weight download failed (non-fatal)");
+                        tracing::warn!(error = %e, "Sidecar tensor download failed (non-fatal)");
                         shared.emit_activity(
                             crate::daemon::state::ActivityEvent::new(
                                 "auto_manage",

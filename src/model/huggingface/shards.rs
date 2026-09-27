@@ -1,6 +1,6 @@
 use std::time::SystemTime;
 
-use super::probe::{download_gguf_header, download_tied_output_weight};
+use super::probe::{download_gguf_header, download_sidecar_tensors};
 use super::{
     download_url, hf_headers, DownloadProgress, GgufFileInfo, BYTE_RANGE_COALESCE_GAP,
     HF_DOWNLOAD_CLIENT,
@@ -624,11 +624,10 @@ pub async fn download_shards(
     // Download the GGUF header
     download_gguf_header(repo_id, filename, dest_dir, info.header_size).await?;
 
-    // Download tied output weight for weight-tied models (no separate output.weight)
-    if let Err(e) =
-        download_tied_output_weight(repo_id, filename, dest_dir, &info.tensor_meta).await
-    {
-        tracing::warn!(error = %e, "Tied output weight download failed (non-fatal)");
+    // The shard-0 tensors a node without shard 0 still needs: the tied output
+    // head, the RoPE frequency factors.
+    if let Err(e) = download_sidecar_tensors(repo_id, filename, dest_dir, &info.tensor_meta).await {
+        tracing::warn!(error = %e, "Sidecar tensor download failed (non-fatal)");
     }
 
     let total_shard_bytes: u64 = shard_indices

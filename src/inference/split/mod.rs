@@ -42,7 +42,8 @@ pub use self::entry::BatchItem;
 pub use self::entry::{trim_split_model_cache, SplitModelEntry, SplitModelKey};
 pub use self::gguf_meta::{
     ensure_gguf_header, explain_gguf_parse_error, gguf_arch_str, read_gguf_header,
-    save_gguf_header, GgufTensorMeta, GgufTokenizerMeta, TensorLocation, TIED_OUTPUT_FILENAME,
+    save_gguf_header, GgufTensorMeta, GgufTokenizerMeta, SidecarSpec, TensorLocation,
+    ROPE_FREQS_FILENAME, TIED_OUTPUT_FILENAME,
 };
 pub use self::kv_cache::{KvCacheStore, KvOccupancy};
 pub use self::model::SplitModel;
@@ -51,7 +52,7 @@ pub use self::prefix_cache::{
     serialize_snapshot_with_block_size, snapshot_is_finite, verify_token_hash_chain, KvSnapshot,
     PrefixCache, KV_SNAPSHOT_MAGIC, KV_SNAPSHOT_VERSION,
 };
-pub use self::shard_reader::{resolve_tied_output, TiedOutputSource};
+pub use self::shard_reader::{resolve_sidecars, SidecarTensor};
 pub(crate) use self::token_embedding::table_supports_row_gather;
 
 /// Context length served by default, for a model that declares at least this

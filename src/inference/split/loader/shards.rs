@@ -141,7 +141,7 @@ impl SplitModel {
         // Read header to get tensor_data_offset, and — for a weight-tied model —
         // where its output head lives, so the sidecar can stand in for shard 0.
         let header_bytes = std::fs::read(&header_path).map_err(SwarmError::Io)?;
-        let (tensor_data_offset, tied_output) = {
+        let (tensor_data_offset, sidecars) = {
             let mut cursor = std::io::Cursor::new(&header_bytes);
             let ct = gguf_file::Content::read(&mut cursor).map_err(|e| {
                 SwarmError::Internal(format!(
@@ -152,14 +152,14 @@ impl SplitModel {
             // Resolution needs the arch metadata block. If that can't be parsed
             // the model won't load anyway, so don't fail *here* — a non-tied
             // model on a node holding shard 0 loads fine without any of this.
-            let tied = match crate::inference::split::GgufTensorMeta::from_content(&ct) {
-                Ok(meta) => crate::inference::split::resolve_tied_output(model_dir, &meta),
+            let sidecars = match crate::inference::split::GgufTensorMeta::from_content(&ct) {
+                Ok(meta) => crate::inference::split::resolve_sidecars(model_dir, &meta),
                 Err(e) => {
-                    tracing::debug!(error = %e, "Could not resolve tied output weight from header");
-                    None
+                    tracing::debug!(error = %e, "Could not resolve sidecar tensors from header");
+                    Vec::new()
                 }
             };
-            (ct.tensor_data_offset, tied)
+            (ct.tensor_data_offset, sidecars)
         };
 
         tracing::info!(
@@ -177,7 +177,7 @@ impl SplitModel {
             tensor_entries,
             total_gguf_size,
             tensor_data_offset,
-            tied_output,
+            sidecars,
         )?;
 
         // Use the same GGUF parsing path as load_from_gguf, but reading from ShardReader

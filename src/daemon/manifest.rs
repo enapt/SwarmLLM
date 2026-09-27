@@ -353,64 +353,69 @@ pub(super) fn regenerate_manifest_from_header(
     Some(manifest)
 }
 
-/// Extract `tied_output_weight.bin` from shard_000.bin for weight-tied models.
+/// Cut every sidecar tensor this model has (`GgufTensorMeta::sidecar_tensors`:
+/// the tied output head, the RoPE frequency factors) out of a local
+/// `shard_000.bin`, so a later load without shard 0 can still read them.
 ///
-/// Weight-tied models (like Gemma-2) reuse `token_embd.weight` as the output head.
-/// In distributed inference, a node may have the last shard but not shard_000.
-/// This function extracts the raw tensor bytes from shard_000 so any node can load it.
-pub(super) fn extract_tied_output_weight(
+/// Skips a sidecar already on disk. `shard_000.bin` preserves the GGUF header, so
+/// a tensor's absolute offset in it is `tensor_data_offset + location.offset`.
+pub(super) fn extract_sidecar_tensors(
     shard0_path: &std::path::Path,
     model_dir: &std::path::Path,
     meta: &crate::inference::split::GgufTensorMeta,
 ) -> Result<(), String> {
-    let embd_loc = meta
-        .tied_output_location()
-        .ok_or("model is not weight-tied — it has a separate output.weight")?;
-
-    // token_embd.weight is in shard_000 — its offset in the GGUF is tensor_data_offset + embd_loc.offset.
-    // In shard_000.bin, the header is preserved so the absolute offset is the same.
-    let abs_offset = meta.tensor_data_offset + embd_loc.offset;
-    let size = embd_loc.size;
-
     use std::io::{Read, Seek, SeekFrom};
 
-    let mut file = std::fs::File::open(shard0_path)
-        .map_err(|e| format!("Failed to open shard_000.bin: {e}"))?;
-    let file_len = file
-        .metadata()
-        .map_err(|e| format!("Failed to stat shard_000.bin: {e}"))?
-        .len();
+    // Cap a sidecar's size to prevent OOM from a crafted GGUF header. The tied
+    // head is the large one (a vocabulary's embedding table).
+    const MAX_SIDECAR_SIZE: u64 = 512 * 1024 * 1024; // 512 MB
 
-    let end = abs_offset + size;
-    if end > file_len {
-        return Err(format!(
-            "token_embd.weight extends beyond shard_000.bin (need {end} bytes, have {file_len})"
-        ));
+    let mut failures = Vec::new();
+    for spec in meta.sidecar_tensors() {
+        let dest_path = model_dir.join(spec.filename);
+        if dest_path.exists() {
+            continue;
+        }
+        let abs_offset = meta.tensor_data_offset + spec.location.offset;
+        let size = spec.location.size;
+        let result = (|| -> Result<usize, String> {
+            if size > MAX_SIDECAR_SIZE {
+                return Err(format!("too large: {size} bytes (max {MAX_SIDECAR_SIZE})"));
+            }
+            let mut file = std::fs::File::open(shard0_path)
+                .map_err(|e| format!("cannot open shard_000.bin: {e}"))?;
+            let file_len = file
+                .metadata()
+                .map_err(|e| format!("cannot stat shard_000.bin: {e}"))?
+                .len();
+            let end = abs_offset + size;
+            if end > file_len {
+                return Err(format!(
+                    "extends beyond shard_000.bin (need {end} bytes, have {file_len})"
+                ));
+            }
+            file.seek(SeekFrom::Start(abs_offset))
+                .map_err(|e| format!("cannot seek in shard_000.bin: {e}"))?;
+            let mut tensor_bytes = vec![0u8; size as usize];
+            file.read_exact(&mut tensor_bytes)
+                .map_err(|e| format!("cannot read shard_000.bin: {e}"))?;
+            std::fs::write(&dest_path, &tensor_bytes)
+                .map_err(|e| format!("cannot write {}: {e}", spec.filename))?;
+            Ok(tensor_bytes.len())
+        })();
+        match result {
+            Ok(len) => tracing::info!(
+                size = len,
+                path = %dest_path.display(),
+                what = spec.what,
+                "Extracted a sidecar tensor from shard_000.bin"
+            ),
+            Err(e) => failures.push(format!("{}: {e}", spec.what)),
+        }
     }
-
-    // Cap embedding tensor size to prevent OOM from crafted GGUF headers
-    const MAX_EMBEDDING_SIZE: u64 = 512 * 1024 * 1024; // 512 MB
-    if size > MAX_EMBEDDING_SIZE {
-        return Err(format!(
-            "token_embd.weight too large: {} bytes (max {} bytes)",
-            size, MAX_EMBEDDING_SIZE
-        ));
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("; "))
     }
-
-    file.seek(SeekFrom::Start(abs_offset))
-        .map_err(|e| format!("Failed to seek in shard_000.bin: {e}"))?;
-    let mut tensor_bytes = vec![0u8; size as usize];
-    file.read_exact(&mut tensor_bytes)
-        .map_err(|e| format!("Failed to read tensor from shard_000.bin: {e}"))?;
-
-    let dest_path = model_dir.join(crate::inference::split::TIED_OUTPUT_FILENAME);
-    std::fs::write(&dest_path, &tensor_bytes)
-        .map_err(|e| format!("Failed to write tied_output_weight.bin: {e}"))?;
-
-    tracing::info!(
-        size = tensor_bytes.len(),
-        path = %dest_path.display(),
-        "Extracted tied_output_weight.bin from shard_000.bin"
-    );
-    Ok(())
 }

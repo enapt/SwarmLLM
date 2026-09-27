@@ -469,7 +469,7 @@ pub async fn hf_download_shards(
 
         // Download tied output weight if model is weight-tied (no output.weight tensor).
         // This is needed by the last node in distributed inference for logit projection.
-        if let Err(e) = crate::model::huggingface::download_tied_output_weight(
+        if let Err(e) = crate::model::huggingface::download_sidecar_tensors(
             &repo_id,
             &filename,
             &dest_dir,
@@ -477,7 +477,7 @@ pub async fn hf_download_shards(
         )
         .await
         {
-            tracing::warn!(error = %e, "Tied output weight download failed (non-fatal)");
+            tracing::warn!(error = %e, "Sidecar tensor download failed (non-fatal)");
         }
 
         // Generate manifest from header BEFORE downloading shard data.

@@ -268,72 +268,75 @@ pub async fn download_gguf_header(
     Ok(dest_path)
 }
 
-/// Download `token_embd.weight` for weight-tied models (no separate `output.weight`).
+/// Fetch every sidecar tensor this model has (`GgufTensorMeta::sidecar_tensors`:
+/// the tied output head, the RoPE frequency factors) by byte range, so a node
+/// that holds no part of shard 0 can still load its layers. Each is its own
+/// ranged GET into its own file, written atomically; one already on disk is
+/// skipped.
 ///
-/// Weight-tied models reuse the embedding table as the output head. When shards are
-/// distributed across nodes, the last node needs this tensor but may not have shard 0.
-/// This downloads the tensor data separately and saves it as `tied_output_weight.bin`.
-///
-/// Returns `Ok(path)` if downloaded, `Ok(None)` if the model has a separate output.weight.
-pub async fn download_tied_output_weight(
+/// `Ok` names the files written; a model with none of these tensors writes
+/// nothing. One failure does not stop the others; every failure is in the `Err`.
+pub async fn download_sidecar_tensors(
     repo_id: &str,
     filename: &str,
     dest_dir: &std::path::Path,
     tensor_meta: &crate::inference::split::GgufTensorMeta,
-) -> Result<Option<std::path::PathBuf>, String> {
-    // Not weight-tied (or no embedding at all) — nothing to carry.
-    let Some(embd_loc) = tensor_meta.tied_output_location() else {
-        return Ok(None);
-    };
-    let abs_offset = tensor_meta.tensor_data_offset + embd_loc.offset;
-    let size = embd_loc.size;
-
-    tracing::info!(
-        repo = %repo_id,
-        size_mb = size / (1024 * 1024),
-        "Downloading tied output weight (token_embd.weight) for weight-tied model"
-    );
-
+) -> Result<Vec<std::path::PathBuf>, String> {
     let client = &*HF_DOWNLOAD_CLIENT;
-
     let url = download_url(repo_id, filename)?;
-    if size == 0 {
-        return Err("token_embd.weight has zero size — cannot download tied output weight".into());
+    let mut written = Vec::new();
+    let mut failures = Vec::new();
+    for spec in tensor_meta.sidecar_tensors() {
+        // Already here: the tied head can be hundreds of MB, and a restart
+        // must not fetch it again because the OTHER sidecar was missing.
+        if dest_dir.join(spec.filename).exists() {
+            continue;
+        }
+        let abs_offset = tensor_meta.tensor_data_offset + spec.location.offset;
+        let size = spec.location.size;
+        if size == 0 {
+            failures.push(format!("{} has zero size", spec.what));
+            continue;
+        }
+        tracing::info!(
+            repo = %repo_id,
+            size_kb = size / 1024,
+            what = spec.what,
+            "Downloading a sidecar tensor by byte range"
+        );
+        let range_end = abs_offset + size - 1;
+        let fetched = async {
+            let resp = hf_headers(client.get(&url))
+                .header("Range", format!("bytes={abs_offset}-{range_end}"))
+                .send()
+                .await
+                .map_err(|e| format!("download failed: {e}"))?;
+            if resp.status().as_u16() != 206 && !resp.status().is_success() {
+                return Err(format!("download returned {}", resp.status()));
+            }
+            let data = resp
+                .bytes()
+                .await
+                .map_err(|e| format!("cannot read bytes: {e}"))?;
+            if (data.len() as u64) != size {
+                return Err(format!("got {} bytes, expected {size}", data.len()));
+            }
+            atomic_write_blocking(dest_dir.to_path_buf(), spec.filename, data.to_vec()).await
+        }
+        .await;
+        match fetched {
+            Ok(path) => {
+                tracing::info!(path = %path.display(), what = spec.what, "Downloaded a sidecar tensor from HuggingFace");
+                written.push(path);
+            }
+            Err(e) => failures.push(format!("{}: {e}", spec.what)),
+        }
     }
-    let range_end = abs_offset + size - 1;
-
-    let resp = hf_headers(client.get(&url))
-        .header("Range", format!("bytes={abs_offset}-{range_end}"))
-        .send()
-        .await
-        .map_err(|e| format!("Tied output weight download failed: {e}"))?;
-
-    if resp.status().as_u16() != 206 && !resp.status().is_success() {
-        return Err(format!(
-            "Tied output weight download returned {}",
-            resp.status()
-        ));
+    if failures.is_empty() {
+        Ok(written)
+    } else {
+        Err(failures.join("; "))
     }
-
-    let data = resp
-        .bytes()
-        .await
-        .map_err(|e| format!("Failed to read tied output weight bytes: {e}"))?;
-
-    let dest_path = atomic_write_blocking(
-        dest_dir.to_path_buf(),
-        crate::inference::split::TIED_OUTPUT_FILENAME,
-        data.to_vec(),
-    )
-    .await?;
-
-    tracing::info!(
-        size = data.len(),
-        path = %dest_path.display(),
-        "Downloaded tied output weight from HuggingFace"
-    );
-
-    Ok(Some(dest_path))
 }
 
 #[cfg(test)]

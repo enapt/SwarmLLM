@@ -12,9 +12,30 @@ use crate::inference::tokenizer::{SpecialTokenSpacing, SplitTokenizer};
 /// A node serving the LAST pipeline segment needs the output head, but for a
 /// weight-tied model that tensor physically lives in shard 0 — which that node
 /// often does not hold. This file carries the raw tensor bytes so the head can
-/// be loaded without shard 0. Written by `extract_tied_output_weight` and
-/// `download_tied_output_weight`; read back by `ShardReader`.
+/// be loaded without shard 0. Written by `extract_sidecar_tensors` and
+/// `download_sidecar_tensors`; read back by `ShardReader`.
 pub const TIED_OUTPUT_FILENAME: &str = "tied_output_weight.bin";
+
+/// Sidecar file carrying `rope_freqs.weight` — Llama 3.1/3.2's per-dimension
+/// RoPE frequency divisors, 256 bytes. It lives in shard 0 like the tied head,
+/// and EVERY layer's rotation needs it, so a node serving later layers without
+/// shard 0 would otherwise rotate with plain RoPE and drift from the model the
+/// longer the conversation (#124).
+pub const ROPE_FREQS_FILENAME: &str = "rope_freqs.bin";
+
+/// The GGUF tensor carried by [`ROPE_FREQS_FILENAME`].
+pub const ROPE_FREQS_TENSOR: &str = "rope_freqs.weight";
+
+/// One tensor a node may need although it lives in shard 0, and the sidecar
+/// file that carries it for a node without shard 0.
+pub struct SidecarSpec<'a> {
+    /// File name inside the model directory.
+    pub filename: &'static str,
+    /// What it is, for logs and errors.
+    pub what: &'static str,
+    /// Where the tensor sits in the GGUF.
+    pub location: &'a TensorLocation,
+}
 
 /// Parse a GGUF header from a file on disk.
 ///
@@ -153,7 +174,7 @@ impl GgufTensorMeta {
     /// Weight tying means reusing `token_embd.weight` as the LM head, so the
     /// GGUF carries no `output.weight` at all. This is the single definition of
     /// "is this model weight-tied" — the two sidecar writers
-    /// (`extract_tied_output_weight`, `download_tied_output_weight`) and the
+    /// (`extract_sidecar_tensors`, `download_sidecar_tensors`) and the
     /// reader (`ShardReader`) all consult it, so a producer can never disagree
     /// with the consumer about which tensor the sidecar holds.
     pub fn tied_output_location(&self) -> Option<&TensorLocation> {
@@ -161,6 +182,32 @@ impl GgufTensorMeta {
             return None;
         }
         self.tensors.get("token_embd.weight")
+    }
+
+    /// Every shard-0 tensor this model has that a node WITHOUT shard 0 still
+    /// needs: the output head of a weight-tied model, and the RoPE frequency
+    /// factors of a model that ships them. **The single list** the producers
+    /// (`extract_sidecar_tensors`, `download_sidecar_tensors`) and the reader
+    /// (`resolve_sidecars`) all walk, so adding one here reaches all three — the
+    /// tied head was the only one until 2026-09-27, and the factors' absence
+    /// cost every Llama 3 model its long-context accuracy (#124).
+    pub fn sidecar_tensors(&self) -> Vec<SidecarSpec<'_>> {
+        let mut out = Vec::new();
+        if let Some(location) = self.tied_output_location() {
+            out.push(SidecarSpec {
+                filename: TIED_OUTPUT_FILENAME,
+                what: "tied output head (token_embd.weight)",
+                location,
+            });
+        }
+        if let Some(location) = self.tensors.get(ROPE_FREQS_TENSOR) {
+            out.push(SidecarSpec {
+                filename: ROPE_FREQS_FILENAME,
+                what: "RoPE frequency factors (rope_freqs.weight)",
+                location,
+            });
+        }
+        out
     }
 
     /// Extract tensor metadata from a GGUF file header on disk.

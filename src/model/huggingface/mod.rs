@@ -9,7 +9,7 @@ pub mod watcher;
 
 pub use download::{download_model, download_url};
 pub use probe::{
-    download_gguf_header, download_tied_output_weight, hf_failure_log_level,
+    download_gguf_header, download_sidecar_tensors, hf_failure_log_level,
     probe_failure_is_user_fixable, probe_gguf_file,
 };
 pub use search::{extract_quant_tag, search_gguf_models};

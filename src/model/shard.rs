@@ -666,7 +666,7 @@ impl ShardStore {
 ///
 /// Losing them is cheap where it is not free. `tied_output_weight.bin` — 95% of
 /// the gap measured on the live node — is extracted from `shard_000.bin` by
-/// `daemon::manifest::extract_tied_output_weight` and re-extracted automatically
+/// `daemon::manifest::extract_sidecar_tensors` and re-extracted automatically
 /// at startup, so for any model whose shard 0 comes back it costs nothing; the
 /// header is ~6 MB and re-fetched on the next attempt.
 ///
@@ -707,6 +707,7 @@ pub fn cleanup_orphaned_model_files(
         if name == HEADER_FILENAME
             || name == MMPROJ_FILENAME
             || name == crate::inference::split::TIED_OUTPUT_FILENAME
+            || name == crate::inference::split::ROPE_FREQS_FILENAME
         {
             derived.push(path);
         }

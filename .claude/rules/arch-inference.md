@@ -320,6 +320,19 @@ cannot bring the class back.
 
 → `docs/invariants/inference.md`
 
+## A GGUF tensor the loader ignores is a feature silently missing (2026-09-27)
+
+Llama 3.1/3.2 ship `rope_freqs.weight` and nothing read it, so every Llama 3
+rotated its slow RoPE pairs up to 32x too fast; agreement with llama.cpp drifted
+with conversation length (#124). Now applied as llama.cpp does. **Shard-0 tensors
+a later-layer node needs are ONE list** — `GgufTensorMeta::sidecar_tensors` (tied
+head, RoPE factors) — walked by `extract_sidecar_tensors`,
+`download_sidecar_tensors` and `resolve_sidecars`; add to the list, never a new
+producer. When checking an architecture, diff the file's tensor names against
+what the loader reads.
+
+→ `docs/invariants/inference.md` § "A model's RoPE frequency factors are applied"
+
 ## A RoPE layout is read off llama.cpp, per architecture
 
 **`ModelArch::use_rope_contiguous` is llama.cpp's `llama_model_rope_type`**

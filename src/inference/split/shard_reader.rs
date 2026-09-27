@@ -23,15 +23,17 @@ struct ShardFile {
     file_len: u64,
 }
 
-/// The `tied_output_weight.bin` sidecar, mapped into the virtual GGUF.
+/// A sidecar file mapped into the virtual GGUF: one shard-0 tensor a node
+/// without shard 0 still needs (`GgufTensorMeta::sidecar_tensors` lists them).
 ///
 /// On a weight-tied model the LM head *is* `token_embd.weight`, which lives in
-/// shard 0. A node serving the last segment needs that tensor but frequently
-/// does not hold shard 0 — so without this the output head is unreachable and
-/// the whole pipeline fails. Backing the tensor's gguf byte range with the
-/// sidecar makes `ct.tensor(&mut reader, "token_embd.weight", …)` resolve with
-/// no change at the call site.
-pub struct TiedOutputSource {
+/// shard 0; a node serving the last segment needs it but frequently does not
+/// hold shard 0, so without this the output head is unreachable and the whole
+/// pipeline fails. Llama 3's `rope_freqs.weight` is the same shape of problem
+/// for EVERY layer (#124). Backing the tensor's gguf byte range with the sidecar
+/// makes `ct.tensor(&mut reader, name, …)` resolve with no change at the call
+/// site.
+pub struct SidecarTensor {
     /// Path to the sidecar. Holds the raw tensor bytes at offset 0, nothing else.
     pub path: PathBuf,
     /// Absolute offset of the tensor in the virtual GGUF
@@ -40,6 +42,8 @@ pub struct TiedOutputSource {
     /// Tensor size in bytes, from the GGUF header — never the file length, so a
     /// truncated sidecar is caught rather than silently mapped short.
     pub size: u64,
+    /// What it carries, for logs and errors.
+    pub what: &'static str,
 }
 
 /// A reader that presents a GGUF header + layer-aligned shard files as a
@@ -64,27 +68,30 @@ pub struct ShardReader {
     current_shard: Option<(usize, std::fs::File)>,
 }
 
-/// Resolve the tied-output sidecar for a model directory.
+/// The sidecars on disk for a model directory — every entry of
+/// `GgufTensorMeta::sidecar_tensors` whose file is present.
 ///
-/// `Some` only when the model is weight-tied AND the sidecar is on disk. A
-/// model with a real `output.weight` returns `None` — it has no tied head to
-/// map. A weight-tied model whose sidecar is missing also returns `None`: if
-/// this node holds shard 0 the load still succeeds from the shard, and if it
-/// doesn't, the load fails with the missing-region error naming the offset.
-pub fn resolve_tied_output(
+/// A model with no such tensor (a real `output.weight`, no `rope_freqs`)
+/// contributes nothing. One whose sidecar is missing contributes nothing either:
+/// if this node holds shard 0 the load still reads the shard, and if it does not,
+/// the read fails with the missing-region error naming the offset — which the
+/// tied head treats as fatal and the RoPE factors as "serve plain RoPE and warn".
+pub fn resolve_sidecars(
     model_dir: &Path,
     meta: &crate::inference::split::GgufTensorMeta,
-) -> Option<TiedOutputSource> {
-    let loc = meta.tied_output_location()?;
-    let path = model_dir.join(crate::inference::split::TIED_OUTPUT_FILENAME);
-    if !path.exists() {
-        return None;
-    }
-    Some(TiedOutputSource {
-        path,
-        gguf_offset: meta.tensor_data_offset + loc.offset,
-        size: loc.size,
-    })
+) -> Vec<SidecarTensor> {
+    meta.sidecar_tensors()
+        .into_iter()
+        .filter_map(|spec| {
+            let path = model_dir.join(spec.filename);
+            path.exists().then(|| SidecarTensor {
+                path,
+                gguf_offset: meta.tensor_data_offset + spec.location.offset,
+                size: spec.location.size,
+                what: spec.what,
+            })
+        })
+        .collect()
 }
 
 impl ShardReader {
@@ -93,18 +100,17 @@ impl ShardReader {
     /// `shard_files` must be ordered by shard index.  Each shard's tensor entries
     /// describe which virtual-GGUF-offset ranges map to which shard-local offsets.
     ///
-    /// `tied_output` is REQUIRED rather than defaulted behind a convenience
+    /// `sidecars` is REQUIRED rather than defaulted behind a convenience
     /// wrapper: a caller that silently passes nothing is exactly how a
-    /// weight-tied model becomes unservable on any node lacking shard 0. Pass
-    /// `None` only when the model ships a real `output.weight`. Resolve it with
-    /// [`resolve_tied_output`] rather than assembling one by hand.
+    /// weight-tied model becomes unservable on any node lacking shard 0. Resolve
+    /// them with [`resolve_sidecars`] rather than assembling them by hand.
     pub fn new(
         header_path: &Path,
         shard_files: Vec<(u32, PathBuf)>,
         tensor_entries: &[Vec<crate::types::ShardTensorEntry>],
         total_gguf_size: u64,
         tensor_data_offset: u64,
-        tied_output: Option<TiedOutputSource>,
+        sidecars: Vec<SidecarTensor>,
     ) -> Result<Self, SwarmError> {
         let header = std::fs::read(header_path).map_err(SwarmError::Io)?;
         // SEC: Cap padding to prevent OOM from malicious tensor_data_offset
@@ -146,48 +152,53 @@ impl ShardReader {
             }
         }
 
-        // Map the tied output head from its sidecar, but ONLY where the shards
-        // present don't already cover it. A node holding shard 0 reads the
-        // tensor from the shard as before; adding a second entry at the same
-        // gguf_offset would make the binary search in `find_shard` ambiguous.
-        if let Some(tied) = tied_output {
+        // Map each sidecar, but ONLY where the shards present don't already
+        // cover it. A node holding shard 0 reads the tensor from the shard as
+        // before; adding a second entry at the same gguf_offset would make the
+        // binary search in `find_shard` ambiguous.
+        for sidecar in sidecars {
             let already_covered = tensor_map.iter().any(|e| {
-                tied.gguf_offset >= e.gguf_offset && tied.gguf_offset < e.gguf_offset + e.size
+                sidecar.gguf_offset >= e.gguf_offset && sidecar.gguf_offset < e.gguf_offset + e.size
             });
             if already_covered {
                 tracing::debug!(
-                    gguf_offset = tied.gguf_offset,
-                    "Tied output weight already covered by a local shard — using the shard"
+                    gguf_offset = sidecar.gguf_offset,
+                    what = sidecar.what,
+                    "Sidecar tensor already covered by a local shard — using the shard"
                 );
-            } else {
-                let file_len = std::fs::metadata(&tied.path).map_err(SwarmError::Io)?.len();
-                if file_len < tied.size {
-                    return Err(SwarmError::Internal(format!(
-                        "tied_output_weight.bin is short: {} bytes on disk, header says the tensor is {} \
-                         bytes. Delete {} so it can be re-fetched.",
-                        file_len,
-                        tied.size,
-                        tied.path.display()
-                    )));
-                }
-                shards.push(ShardFile {
-                    path: tied.path.clone(),
-                    file_len,
-                });
-                tensor_map.push(TensorMapEntry {
-                    gguf_offset: tied.gguf_offset,
-                    shard_idx: shards.len() - 1,
-                    // The sidecar holds this tensor and nothing else.
-                    shard_local_offset: 0,
-                    size: tied.size,
-                });
-                tracing::info!(
-                    path = %tied.path.display(),
-                    gguf_offset = tied.gguf_offset,
-                    size = tied.size,
-                    "Mapped tied output head from sidecar — shard 0 is not held locally"
-                );
+                continue;
             }
+            let file_len = std::fs::metadata(&sidecar.path)
+                .map_err(SwarmError::Io)?
+                .len();
+            if file_len < sidecar.size {
+                return Err(SwarmError::Internal(format!(
+                    "{} is short: {} bytes on disk, header says the tensor ({}) is {} bytes. \
+                     Delete it so it can be re-fetched.",
+                    sidecar.path.display(),
+                    file_len,
+                    sidecar.what,
+                    sidecar.size,
+                )));
+            }
+            shards.push(ShardFile {
+                path: sidecar.path.clone(),
+                file_len,
+            });
+            tensor_map.push(TensorMapEntry {
+                gguf_offset: sidecar.gguf_offset,
+                shard_idx: shards.len() - 1,
+                // The sidecar holds this tensor and nothing else.
+                shard_local_offset: 0,
+                size: sidecar.size,
+            });
+            tracing::info!(
+                path = %sidecar.path.display(),
+                gguf_offset = sidecar.gguf_offset,
+                size = sidecar.size,
+                what = sidecar.what,
+                "Mapped a shard-0 tensor from its sidecar — shard 0 is not held locally"
+            );
         }
 
         // Sort by gguf_offset for binary search
@@ -384,11 +395,12 @@ mod tests {
         dir
     }
 
-    fn tied_source(dir: &tempfile::TempDir, size: u64) -> TiedOutputSource {
-        TiedOutputSource {
+    fn tied_source(dir: &tempfile::TempDir, size: u64) -> SidecarTensor {
+        SidecarTensor {
             path: dir.path().join(TIED_OUTPUT_FILENAME),
             gguf_offset: EMBD_GGUF_OFFSET,
             size,
+            what: "tied output head",
         }
     }
 
@@ -442,7 +454,7 @@ mod tests {
             &entries,
             8192,
             HEADER_LEN,
-            Some(tied_source(&dir, EMBD_SIZE)),
+            vec![tied_source(&dir, EMBD_SIZE)],
         )
         .unwrap();
 
@@ -471,7 +483,7 @@ mod tests {
             &entries,
             8192,
             HEADER_LEN,
-            None,
+            vec![],
         )
         .unwrap();
 
@@ -499,7 +511,7 @@ mod tests {
             &entries,
             8192,
             HEADER_LEN,
-            Some(tied_source(&dir, EMBD_SIZE)),
+            vec![tied_source(&dir, EMBD_SIZE)],
         )
         .unwrap();
 
@@ -522,7 +534,7 @@ mod tests {
             &[],
             8192,
             HEADER_LEN,
-            Some(tied_source(&dir, EMBD_SIZE)),
+            vec![tied_source(&dir, EMBD_SIZE)],
         );
         let err = match result {
             Ok(_) => panic!("a short sidecar must not be accepted"),
@@ -534,20 +546,87 @@ mod tests {
     #[test]
     fn resolve_skips_models_with_a_real_output_weight() {
         let dir = model_dir_with_sidecar(EMBD_SIZE);
-        assert!(resolve_tied_output(dir.path(), &meta(false)).is_none());
+        assert!(resolve_sidecars(dir.path(), &meta(false)).is_empty());
     }
 
     #[test]
     fn resolve_finds_offset_and_size_for_a_tied_model() {
         let dir = model_dir_with_sidecar(EMBD_SIZE);
-        let got = resolve_tied_output(dir.path(), &meta(true)).expect("tied model with sidecar");
-        assert_eq!(got.gguf_offset, EMBD_GGUF_OFFSET);
-        assert_eq!(got.size, EMBD_SIZE);
+        let got = resolve_sidecars(dir.path(), &meta(true));
+        assert_eq!(got.len(), 1, "a tied model with its sidecar");
+        assert_eq!(got[0].gguf_offset, EMBD_GGUF_OFFSET);
+        assert_eq!(got[0].size, EMBD_SIZE);
     }
 
     #[test]
     fn resolve_returns_none_when_sidecar_is_missing() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(resolve_tied_output(dir.path(), &meta(true)).is_none());
+        assert!(resolve_sidecars(dir.path(), &meta(true)).is_empty());
+    }
+
+    /// #124: Llama 3's RoPE factors sit in shard 0 and every layer needs them.
+    /// A node holding only a late shard reads them from `rope_freqs.bin` — and
+    /// cannot without it, so the mapping is what makes the read succeed.
+    #[test]
+    fn rope_factors_readable_without_shard_zero_only_through_their_sidecar() {
+        const ROPE_OFFSET: u64 = 2048; // relative to the tensor data
+        const ROPE_SIZE: u64 = 256;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("gguf_header.bin"),
+            vec![0u8; HEADER_LEN as usize],
+        )
+        .unwrap();
+        let late_shard = dir.path().join("shard_002.bin");
+        std::fs::write(&late_shard, vec![0x11u8; 16]).unwrap();
+        let entries = vec![vec![crate::types::ShardTensorEntry {
+            name: "blk.3.attn_norm.weight".to_string(),
+            gguf_offset: 4096,
+            shard_offset: 0,
+            size: 16,
+        }]];
+        let mut m = meta(false);
+        m.tensors.insert(
+            crate::inference::split::gguf_meta::ROPE_FREQS_TENSOR.to_string(),
+            crate::inference::split::TensorLocation {
+                offset: ROPE_OFFSET,
+                size: ROPE_SIZE,
+            },
+        );
+        let reader = |sidecars| {
+            ShardReader::new(
+                &dir.path().join("gguf_header.bin"),
+                vec![(2, late_shard.clone())],
+                &entries,
+                8192,
+                HEADER_LEN,
+                sidecars,
+            )
+            .unwrap()
+        };
+        let at = HEADER_LEN + ROPE_OFFSET;
+
+        assert!(
+            resolve_sidecars(dir.path(), &m).is_empty(),
+            "no sidecar on disk yet"
+        );
+        assert!(read_at(
+            &mut reader(resolve_sidecars(dir.path(), &m)),
+            at,
+            ROPE_SIZE as usize
+        )
+        .is_err());
+
+        std::fs::write(
+            dir.path()
+                .join(crate::inference::split::gguf_meta::ROPE_FREQS_FILENAME),
+            vec![0x3Fu8; ROPE_SIZE as usize],
+        )
+        .unwrap();
+        let found = resolve_sidecars(dir.path(), &m);
+        assert_eq!(found.len(), 1);
+        let got =
+            read_at(&mut reader(found), at, ROPE_SIZE as usize).expect("factors via the sidecar");
+        assert_eq!(got, vec![0x3Fu8; ROPE_SIZE as usize]);
     }
 }

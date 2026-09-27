@@ -12,7 +12,7 @@ use crate::model::manifest::ModelManifestExt;
 use crate::storage::db::Database;
 use crate::types::ShardId;
 
-use super::manifest::{extract_tied_output_weight, regenerate_manifest_from_header};
+use super::manifest::{extract_sidecar_tensors, regenerate_manifest_from_header};
 use super::state::{HfSource, SharedState};
 
 /// Rehydrate SharedState from on-disk artifacts: DB-persisted manifests,
@@ -343,28 +343,29 @@ pub(super) async fn restore_persistent_state(
                         }
                     }
 
-                    // Auto-extract tied_output_weight.bin for weight-tied models.
-                    let tied_path = model_dir.join(crate::inference::split::TIED_OUTPUT_FILENAME);
-                    if !tied_path.exists() {
-                        if let Some(meta) = shared_state.gguf_meta_for(model_id) {
-                            let has_output = meta.tensors.contains_key("output.weight");
-                            let has_embd = meta.tensors.contains_key("token_embd.weight");
-                            if !has_output && has_embd {
-                                let shard0_path = model_dir.join("shard_000.bin");
-                                if shard0_path.exists() {
-                                    if let Err(e) =
-                                        extract_tied_output_weight(&shard0_path, &model_dir, &meta)
-                                    {
-                                        tracing::warn!(
-                                            model = %model_id,
-                                            error = %e,
-                                            "Failed to extract tied_output_weight.bin from shard_000"
-                                        );
-                                    }
+                    // Cut the sidecar tensors (tied output head, RoPE frequency
+                    // factors) out of shard 0 for later loads without it. Each is
+                    // skipped when already on disk.
+                    {
+                        let shard0_path = model_dir.join("shard_000.bin");
+                        if shard0_path.exists() {
+                            // Cloned out: the geometry map's guard must not be held
+                            // across the file I/O below (clippy.toml).
+                            let meta = shared_state.gguf_meta_for(model_id).map(|m| m.clone());
+                            if let Some(meta) = meta {
+                                if let Err(e) =
+                                    extract_sidecar_tensors(&shard0_path, &model_dir, &meta)
+                                {
+                                    tracing::warn!(
+                                        model = %model_id,
+                                        error = %e,
+                                        "Failed to extract sidecar tensors from shard_000"
+                                    );
                                 }
                             }
                         }
-
+                    }
+                    {
                         // Local embedding privacy: load embedding table from shard_000
                         // so the requesting node can embed locally before sending to peers.
                         if shared_state.config.inference.local_embedding_privacy
@@ -577,27 +578,23 @@ pub(super) async fn restore_persistent_state(
                                                 &mid, &model_dir, &meta, config,
                                             );
                                         }
-                                        let tied_path = model_dir
-                                            .join(crate::inference::split::TIED_OUTPUT_FILENAME);
-                                        if !tied_path.exists() {
-                                            let has_output =
-                                                meta.tensors.contains_key("output.weight");
-                                            let has_embd =
-                                                meta.tensors.contains_key("token_embd.weight");
-                                            if !has_output && has_embd {
-                                                if let Err(e) = crate::model::huggingface::download_tied_output_weight(
-                                                    &hf_src.repo_id,
-                                                    &hf_src.filename,
-                                                    &model_dir,
-                                                    &meta,
-                                                ).await {
-                                                    tracing::warn!(
-                                                        model = %model_id_str,
-                                                        error = %e,
-                                                        "Failed to download tied_output_weight"
-                                                    );
-                                                }
-                                            }
+                                        // The shard-0 tensors a node without shard 0
+                                        // still needs; each one already on disk is
+                                        // skipped.
+                                        if let Err(e) =
+                                            crate::model::huggingface::download_sidecar_tensors(
+                                                &hf_src.repo_id,
+                                                &hf_src.filename,
+                                                &model_dir,
+                                                &meta,
+                                            )
+                                            .await
+                                        {
+                                            tracing::warn!(
+                                                model = %model_id_str,
+                                                error = %e,
+                                                "Failed to download sidecar tensors"
+                                            );
                                         }
                                     }
                                 }

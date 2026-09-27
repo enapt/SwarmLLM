@@ -1913,3 +1913,50 @@ Tests of the matmul paths (blocking exact, grouping never expands K/V, the value
 cache read in place) call `matmul_attention`, never `standard_attention` — on the
 processor the latter answers from this kernel first, and a test through it
 passes without reaching the code it names.
+
+## A model's RoPE frequency factors are applied — and reach a node without shard 0 (2026-09-27, #124)
+
+**The defect.** Llama 3.1/3.2 GGUFs carry `rope_freqs.weight`: 64 per-pair
+divisors (1.0 for fast pairs up to the scaling factor, 32 on Llama 3.2, for slow
+ones), which is how llama.cpp's converter bakes the "llama3" RoPE scaling into
+the file (llama.cpp PR #8676). llama.cpp divides each pair's angle by its factor
+(`ggml_rope_ext`'s `freq_factors`). Our loader read only Phi-3's
+`rope_factors_long/short`, so every Llama 3 model rotated its slow pairs up to
+32x too fast — not what it was trained with — and the error grew with distance.
+
+**How it was found.** `logits_reference_probe` over 1,100 tokens scored against
+llama-cpp-python 0.3.16. On the probe's synthetic ids a few positions looked
+catastrophic (cosine −0.07) on BOTH attention paths; on natural text
+(`LOGITS_PROBE_IDS`, README prose tokenized by llama.cpp) those vanished but the
+median drifted 0.9982 → 0.9963 from the first 100 positions to the last. It was
+NOT llama.cpp's f16 KV cache: with `type_k = type_v = f32` the agreement was the
+same (0.99786), while llama.cpp f16-vs-f32 agree at 0.9994.
+
+**Measured fix** (llama-3.2-3b Q4_K_M, the same 1,100 natural tokens, vs llama.cpp):
+
+| | plain RoPE | with `rope_freqs` |
+|---|---|---|
+| median cosine | 0.99782 | **0.99939** |
+| worst position | 0.925 | **0.987** |
+| top-1 agreement | 1059/1100 | **1075/1100** |
+| positions 1000-1099 | 0.99629, 93/100 | **0.99943, 98/100** |
+
+No drift with position remains; what is left is llama.cpp's own KV-precision noise.
+
+**A node without shard 0.** The tensor is the first in the data region, in the
+prefix shard. `GgufTensorMeta::sidecar_tensors` is now the ONE list of shard-0
+tensors a later-layer node needs — the tied output head and these factors — and
+all three consumers walk it: `extract_sidecar_tensors` (cut from a local
+`shard_000.bin` at startup), `download_sidecar_tensors` (a ranged GET per tensor
+on every HuggingFace path, skipping files already present), and
+`ShardReader::new(.., resolve_sidecars(..))`, which maps each file into the
+virtual GGUF so the loader's read is unchanged. A node with neither shard 0 nor
+`rope_freqs.bin` serves with plain RoPE and logs a warning — the behaviour of
+every earlier release — rather than refusing layers a request may need.
+
+**What a change must keep.** A new shard-0 tensor a later layer needs is added to
+`sidecar_tensors`, never given its own producer. When checking an architecture,
+diff the GGUF's tensor names against what the loader reads: a tensor we ignore
+is a feature silently missing (gotcha #728). Tests: `unit_factors_are_plain_rope`,
+`a_factor_divides_its_pairs_angle`,
+`rope_factors_readable_without_shard_zero_only_through_their_sidecar`.

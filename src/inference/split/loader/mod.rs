@@ -808,6 +808,38 @@ impl SplitModel {
                 &device,
             )
             .map_err(SwarmError::internal)?
+        } else if let Some(factors) = match super::rope::load_rope_freqs(&ct, &mut file, rope_dim) {
+            Ok(f) => f,
+            // The factors exist but this node can read neither shard 0 nor the
+            // sidecar. Serve as every release before this one did — plain RoPE —
+            // and say so, rather than refuse layers a request may need: the
+            // drift is gradual (98 -> 93 of 100 top-1 by 1,000 positions on
+            // llama-3.2-3b), a refusal is total.
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "This model's RoPE frequency factors are not readable here (no shard 0, no \
+                     rope_freqs.bin) — serving with plain RoPE, which drifts from the model on \
+                     long conversations. Any shard fetched from HuggingFace brings the sidecar."
+                );
+                None
+            }
+        } {
+            // Llama 3.1/3.2's scaling, as llama.cpp applies it: each pair's
+            // angle divided by its factor, no attention scaling (#124).
+            tracing::info!(
+                factors_len = factors.len(),
+                "Using the model's RoPE frequency factors (rope_freqs)"
+            );
+            precompute_freqs_cis_longrope(
+                rope_dim,
+                rope_freq_base,
+                context_length,
+                &factors,
+                1.0,
+                &device,
+            )
+            .map_err(SwarmError::internal)?
         } else {
             precompute_freqs_cis(rope_dim, rope_freq_base, context_length, &device)
                 .map_err(SwarmError::internal)?
