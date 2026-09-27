@@ -154,11 +154,11 @@ UNDETERMINED and never a fix — use it BEFORE blaming a change, especially your
 
 ## Status
 
-**v0.3.208-alpha is the live release (2026-09-26), signed and on both nodes; `main` equals it** —
-contents in `memory/round_history.md`: agent workloads on processor-only nodes (SSE keep-alive data
-chunk, a warm prompt priced warm, the owner's prompts on every core — split requests included — the
-GQA attention cliff), and from the benchmark pass the card's free memory read after a synchronize
-(#121) and a reply reserved by its `max_tokens` (#122). Qwen 3.5 is on local branch `qwen35-support` (#117); Gemma 4 scoped, not built (#115).
+**v0.3.209-alpha is the live release (2026-09-27), signed and on both nodes; `main` equals it** —
+contents in `memory/round_history.md`: processor attention kernels (#119), busy-node refusals said out
+loud with a per-peer cap and a reserve for running requests (#123), `auto` resolved to a servable model
+(#120), Llama 3.1/3.2 RoPE factors read at last — a `rope_freqs.bin` sidecar off shard 0 (#124).
+Qwen 3.5 is on local branch `qwen35-support` (#117); Gemma 4 scoped, not built (#115).
 ⚠ **A family in `supported_list` is a claim: check it against a REAL file's header** (#715). **Next** → `memory/next_up.md`.
 
 ⛔ **This PC had two unclean shutdowns on 2026-09-26 (#716 bluescreen, #718 hard hang), causes
