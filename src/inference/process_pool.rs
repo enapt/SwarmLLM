@@ -153,7 +153,7 @@ fn plan_vram_reclaim(
     }
     let mut eligible: Vec<VramReclaimCandidate> = candidates
         .into_iter()
-        .filter(|c| !c.busy && c.charge_mb > 0 && c.idle_secs >= vram_make_room_min_idle_secs())
+        .filter(vram_reclaim_eligible)
         .collect();
     // Most idle first: `spawned_at` cannot tell a worker answering steadily for
     // an hour from one loaded an hour ago and never used since.
@@ -172,6 +172,16 @@ fn plan_vram_reclaim(
         return Vec::new();
     }
     plan
+}
+
+/// May the pool take the card back from this model for another one?
+///
+/// **The single answer**, read by the reclaim itself ([`plan_vram_reclaim`]) and
+/// by the planner's view of room ([`ModelProcessPool::max_local_hostable_layers`])
+/// — a planner that credited memory admission would then refuse to reclaim
+/// would plan a segment the loader turns down.
+fn vram_reclaim_eligible(c: &VramReclaimCandidate) -> bool {
+    !c.busy && c.charge_mb > 0 && c.idle_secs >= vram_make_room_min_idle_secs()
 }
 
 /// A live worker's budget would not take a range it was asked to add
@@ -3041,20 +3051,7 @@ impl ModelProcessPool {
 
         // Candidates: workers holding a VRAM charge that are neither the model
         // being loaded, nor busy, nor recently used.
-        let candidates: Vec<VramReclaimCandidate> = self
-            .vram_reserved_mb
-            .iter()
-            .filter(|e| e.key() != exclude && *e.value() > 0)
-            .filter_map(|e| {
-                let worker = self.workers.get(e.key())?;
-                Some(VramReclaimCandidate {
-                    model: e.key().clone(),
-                    charge_mb: *e.value(),
-                    idle_secs: worker.idle_secs(),
-                    busy: worker.in_use(self.conversation_window()),
-                })
-            })
-            .collect();
+        let candidates = self.vram_reclaim_candidates(exclude);
 
         let plan = plan_vram_reclaim(budget, committed, needed_mb, candidates);
         if plan.is_empty() {
@@ -3138,6 +3135,44 @@ impl ModelProcessPool {
         )
     }
 
+    /// Every OTHER model's worker holding a graphics charge, as the reclaim
+    /// planner sees it — read by the reclaim, its dry run, and the planner's
+    /// ceiling, so all three weigh the same set.
+    fn vram_reclaim_candidates(&self, exclude: &ModelId) -> Vec<VramReclaimCandidate> {
+        self.vram_reserved_mb
+            .iter()
+            .filter(|e| e.key() != exclude && *e.value() > 0)
+            .filter_map(|e| {
+                let worker = self.workers.get(e.key())?;
+                Some(VramReclaimCandidate {
+                    model: e.key().clone(),
+                    charge_mb: *e.value(),
+                    idle_secs: worker.idle_secs(),
+                    busy: worker.in_use(self.conversation_window()),
+                })
+            })
+            .collect()
+    }
+
+    /// The most graphics memory the pool would take back from idle models for
+    /// `exclude` — every charge [`vram_reclaim_eligible`] admits.
+    ///
+    /// **The planner's half of the reclaim.** `max_local_hostable_layers` used to
+    /// count an idle model's memory as spent, so with an idle 3B on the card the
+    /// planner offered this node 14 layers of an 8B it holds whole and sent the
+    /// rest to a peer in Belgium — while the spawn it would then run reclaims
+    /// that same memory in one call (2026-09-27, FUTURE_WORK #125). A ceiling,
+    /// not a plan: admission reclaims least-recently-used first and only what it
+    /// needs, from the same set under the same predicate, so it can always make
+    /// the room counted here.
+    fn idle_vram_reclaimable_mb(&self, exclude: &ModelId) -> u64 {
+        self.vram_reclaim_candidates(exclude)
+            .iter()
+            .filter(|c| vram_reclaim_eligible(c))
+            .map(|c| c.charge_mb)
+            .sum()
+    }
+
     /// A DRY RUN of [`ModelProcessPool::free_vram_for_admission`]: how much the
     /// pool would be willing to take from other models right now.
     ///
@@ -3160,20 +3195,7 @@ impl ModelProcessPool {
         if committed.saturating_add(needed_mb) <= budget_mb {
             return 0;
         }
-        let candidates: Vec<VramReclaimCandidate> = self
-            .vram_reserved_mb
-            .iter()
-            .filter(|e| e.key() != exclude && *e.value() > 0)
-            .filter_map(|e| {
-                let worker = self.workers.get(e.key())?;
-                Some(VramReclaimCandidate {
-                    model: e.key().clone(),
-                    charge_mb: *e.value(),
-                    idle_secs: worker.idle_secs(),
-                    busy: worker.in_use(self.conversation_window()),
-                })
-            })
-            .collect();
+        let candidates = self.vram_reclaim_candidates(exclude);
         plan_vram_reclaim(budget_mb, committed, needed_mb, candidates)
             .iter()
             .map(|(_model, mb)| *mb)
@@ -3864,7 +3886,13 @@ impl ModelProcessPool {
             if budget == 0 {
                 return None;
             }
-            budget.saturating_sub(self.vram_committed_mb())
+            // Room an idle model is holding counts: admission takes it back
+            // (`idle_vram_reclaimable_mb`), so a plan that stays within it is
+            // one the loader will accept.
+            budget
+                .saturating_sub(self.vram_committed_mb())
+                .saturating_add(self.idle_vram_reclaimable_mb(model_id))
+                .min(budget)
         } else {
             let budget = self.ram_budget_now()?;
             budget.headroom_after(self.ram_committed_mb(), 0)
@@ -7073,6 +7101,58 @@ mod tests {
         assert!(
             pool.workers.get(&wanted).is_none(),
             "retired, so `get_or_spawn` falls through to a fresh spawn"
+        );
+    }
+
+    /// **The planner is offered room an idle model holds** — the half of the
+    /// reclaim that decides whether a plan asks this node at all. With an idle 3B
+    /// on the card the planner offered 14 layers of an 8B the node holds whole
+    /// and sent the rest abroad (2026-09-27). Two controls: a model in use gives
+    /// nothing back, and neither does one used moments ago (the idle floor).
+    #[tokio::test]
+    async fn room_an_idle_model_holds_is_room_the_planner_may_use() {
+        let hour = std::time::Duration::from_secs(3600);
+        let per_layer = 170;
+        let setup = |name: &str| {
+            let pool = ModelProcessPool::new(std::path::PathBuf::from(format!(
+                "/tmp/swarmllm-plan-room-{name}"
+            )));
+            pool.set_gpu_layers(-1);
+            pool.set_vram_budget_mb(6000);
+            pool.test_cost_curve
+                .insert(ModelId("wanted-8b".into()), (500, per_layer));
+            pool
+        };
+        let wanted = ModelId("wanted-8b".into());
+        let other = ModelId("other-3b".into());
+        let with_it_resident = layers_that_fit(6000 - 3138, 500, per_layer);
+        let with_the_card_free = layers_that_fit(6000, 500, per_layer);
+        assert!(
+            with_the_card_free > with_it_resident,
+            "fixture: the idle model's room matters"
+        );
+
+        let idle = setup("idle");
+        admit_and_insert_gpu_worker(&idle, &other, 3138, hour).await;
+        assert_eq!(
+            idle.max_local_hostable_layers(&wanted, true),
+            with_the_card_free,
+            "idle for an hour: admission would take it back, so the planner may count it"
+        );
+
+        let busy = setup("busy");
+        let h = admit_and_insert_gpu_worker(&busy, &other, 3138, hour).await;
+        h.note_conversation(Uuid::new_v4());
+        assert_eq!(
+            busy.max_local_hostable_layers(&wanted, true),
+            with_it_resident
+        );
+
+        let recent = setup("recent");
+        admit_and_insert_gpu_worker(&recent, &other, 3138, std::time::Duration::ZERO).await;
+        assert_eq!(
+            recent.max_local_hostable_layers(&wanted, true),
+            with_it_resident
         );
     }
 

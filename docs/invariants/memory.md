@@ -1389,3 +1389,18 @@ guard (`an_admission_refusal_is_the_variant_the_router_re_plans`) was
 re-pointed: the growth refusal now carries its variant inside `GrowthRefused`,
 and the guard's needle `return Err(SwarmError::` counted one refusal where there
 are two. Its self-test now plants the wrapped spelling too.
+
+### The planner's half (added the same day)
+
+`max_local_hostable_layers` — this node's room for the search — counted an idle
+model's charge as spent, so the planner routed around memory the spawn would
+reclaim in one call: with an idle 3B on the card it offered 14 of an 8B's 32
+layers and sent 22 to Belgium. It now adds `idle_vram_reclaimable_mb`: every
+charge `vram_reclaim_eligible` admits — the ONE predicate the reclaim itself
+filters with, so the planner can never be promised room admission would refuse
+to make. A ceiling, not a plan: admission still frees least-recently-used first
+and only what it needs. Test: `room_an_idle_model_holds_is_room_the_planner_may_use`
+(controls: a model in use, and one used moments ago, give nothing back); red with
+the credit removed. ⚠ `max_local_hostable_layers` also feeds what this node
+ADVERTISES; peers now see the same room, and their segment triggers the same
+reclaim here — consistent with "graphics memory has ONE owner".
