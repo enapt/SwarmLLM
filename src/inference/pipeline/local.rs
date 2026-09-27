@@ -351,6 +351,7 @@ impl PipelineExecutor {
             adapter_id: self.request.lora_adapter.clone(),
             draft_tokens: Vec::new(),
             spec_logits_requested: false,
+            spec_walk_at_tail: false,
             truncate_kv_to: None,
             chunk_meta: None,
             // The segment that samples needs the caller's parameters. Without
@@ -1705,6 +1706,7 @@ mod segment_budget_tests {
             adapter_id: None,
             draft_tokens: Vec::new(),
             spec_logits_requested: false,
+            spec_walk_at_tail: false,
             truncate_kv_to: None,
             chunk_meta: None,
             sampling: None,

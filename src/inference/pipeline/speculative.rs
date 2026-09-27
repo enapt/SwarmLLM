@@ -55,12 +55,18 @@ use super::PipelineExecutor;
 
 /// Fast-path preconditions for the greedy distributed speculative loop.
 fn eligible(exec: &PipelineExecutor) -> bool {
-    // Path-specific flag.
-    if !exec.shared_state.config.inference.speculative_distributed {
+    // Path-specific flag — live, so turning it off in Settings takes effect.
+    if !exec.shared_state.cfg().inference.speculative_distributed {
         return false;
     }
-    // Common speculative-path baseline (greedy temp, draft model, etc.).
+    // Common speculative-path baseline (draft model, no vision/LoRA, etc.).
     if !super::speculative_common_eligible(exec) {
+        return false;
+    }
+    // This loop still accepts by ARGMAX (`greedy_accept_reject`), so it is
+    // exact only at temperature 0. DSD walks with the sampler and has no such
+    // limit; this one keeps it.
+    if exec.request.sampling_params.temperature != 0.0 {
         return false;
     }
     // Single segment only — multi-segment is DSD's path (Item 12).
@@ -156,6 +162,7 @@ impl PipelineExecutor {
                 adapter_id: None,
                 draft_tokens: Vec::new(),
                 spec_logits_requested: false,
+                spec_walk_at_tail: false,
                 truncate_kv_to: None,
                 chunk_meta: None,
                 sampling: None,
@@ -676,6 +683,8 @@ pub(super) async fn send_verify_batch(
             segment,
             shared_state.identity.node_id().0,
             truncate_kv_to,
+            // Item 2 accepts by argmax on the logits it gets back.
+            None,
         )
     };
     let forward = rebuild_forward();
@@ -794,80 +803,6 @@ pub(super) fn greedy_accept_reject(
     let all_accepted = accepted.len() == drafts.len();
     if all_accepted {
         bonus = argmax(&spec_logits[drafts.len()]);
-    }
-    (accepted, bonus, all_accepted)
-}
-
-/// Accept-reject for a DRAFT THAT CARRIES NO DISTRIBUTION, honouring the
-/// caller's sampling parameters.
-///
-/// An n-gram draft proposes a token with no probability behind it — `q = δ_x` —
-/// and speculative sampling then reduces to: accept with probability
-/// `min(1, p(x)/q(x)) = p(x)`, otherwise draw from the residual
-/// `norm((p − q)₊)`, i.e. `p` with `x` removed and renormalised. "Draw `t ~ p`;
-/// keep the draft iff `t == x`" has exactly those two branches, so sampling each
-/// position through the real sampler and keeping a match IS that rule — at any
-/// temperature, with no separate machinery.
-/// `accepting_only_on_a_match_preserves_the_sampled_distribution` in
-/// `inference::sampling` pins it, with a control that fails if the metric could
-/// not detect a bias.
-///
-/// **Why this exists beside `greedy_accept_reject`.** That one takes the raw
-/// argmax, which ignores temperature, top-k, top-p AND the repetition
-/// penalties. It is correct for the paths that are greedy-only by construction
-/// (a draft MODEL needs the draft's own probabilities to do this properly, which
-/// is a different algorithm), but it meant the same request got a different
-/// answer depending on whether it was served locally or across peers — the local
-/// worker has always sampled properly. It also meant n-gram speculation could
-/// only ever run at temperature 0, which is not what any client asks for: the
-/// OpenAI surface defaults to 0.7 and the Anthropic one to 1.0.
-///
-/// `generated` is the history the penalties apply against, and it grows as
-/// drafts are accepted, so each position sees what it would have seen had the
-/// tokens been produced one at a time.
-///
-/// The non-finite guard is NOT optional and is the reason this cannot simply
-/// call the sampler in a loop: a peer supplies these logits, and NaN comparisons
-/// are non-deterministic, so a malicious segment could otherwise steer which
-/// tokens get accepted. Same treatment as the greedy sibling — reject the whole
-/// round.
-pub(super) fn sampled_accept_reject(
-    drafts: &[u32],
-    spec_logits: &[Vec<f32>],
-    params: &crate::types::SamplingParams,
-    generated: &[u32],
-) -> (Vec<u32>, u32, bool) {
-    let nonfinite = spec_logits
-        .iter()
-        .take(drafts.len() + 1)
-        .any(|row| row.iter().any(|v| !v.is_finite()));
-    if nonfinite {
-        return (Vec::new(), 0, false);
-    }
-    let vocab = spec_logits.first().map(|r| r.len()).unwrap_or(0);
-    let mut ctx = crate::inference::sampling::SamplingContext::new(vocab);
-    let mut history: Vec<u32> = generated.to_vec();
-    let mut accepted: Vec<u32> = Vec::with_capacity(drafts.len());
-    let mut bonus: u32 = 0;
-    for (i, &q) in drafts.iter().enumerate() {
-        let mut row = spec_logits[i].clone();
-        let pick = crate::inference::sampling::sample_token_with_history(
-            &mut row, params, &history, &mut ctx,
-        );
-        if pick == q {
-            accepted.push(q);
-            history.push(q);
-        } else {
-            bonus = pick;
-            break;
-        }
-    }
-    let all_accepted = accepted.len() == drafts.len();
-    if all_accepted {
-        let mut row = spec_logits[drafts.len()].clone();
-        bonus = crate::inference::sampling::sample_token_with_history(
-            &mut row, params, &history, &mut ctx,
-        );
     }
     (accepted, bonus, all_accepted)
 }
@@ -1159,7 +1094,8 @@ pub(super) fn draft_sync_after_round(
 
 #[cfg(test)]
 mod sampled_accept_reject_tests {
-    use super::{greedy_accept_reject, sampled_accept_reject};
+    use super::greedy_accept_reject;
+    use crate::inference::sampling::sampled_accept_reject;
     use crate::types::SamplingParams;
 
     fn greedy_params() -> SamplingParams {

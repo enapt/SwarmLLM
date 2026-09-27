@@ -1276,6 +1276,7 @@ impl PipelineExecutor {
                     adapter_id: None,
                     draft_tokens: Vec::new(),
                     spec_logits_requested: false,
+                    spec_walk_at_tail: false,
                     // Rewind a segment a failed chained run already ran at this
                     // position (see `rewind`); `None` for every ordinary forward.
                     truncate_kv_to: rewind
@@ -2536,6 +2537,7 @@ impl PipelineExecutor {
                 adapter_id: None,
                 draft_tokens: Vec::new(),
                 spec_logits_requested: false,
+                spec_walk_at_tail: false,
                 truncate_kv_to: None,
                 chunk_meta: None,
                 // Same rule as the planned send, asked of the STAND-IN — a

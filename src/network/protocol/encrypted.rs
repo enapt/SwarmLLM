@@ -1,6 +1,7 @@
 use crate::error::SwarmError;
 use crate::types::{LayerForward, ModelId, TensorFormat};
 
+use super::layer_forward::{SPEC_FLAG_LOGITS, SPEC_FLAG_WALK_AT_TAIL};
 use super::TENSOR_TAG_ENCRYPTED;
 
 /// Build the AAD bytes for sealing/opening a `LayerForward` activation payload.
@@ -96,7 +97,7 @@ pub fn build_layer_forward_aad(forward: &LayerForward) -> Vec<u8> {
     // emission gate exactly — see `protocol/layer_forward.rs`).
     if !forward.draft_tokens.is_empty() || forward.spec_logits_requested {
         aad.push(0x03);
-        let flags: u8 = if forward.spec_logits_requested { 1 } else { 0 };
+        let flags = super::layer_forward::spec_trailer_flags(forward);
         aad.push(flags);
         // draft_tokens length is u16-bounded by the encoder. The encode
         // helpers reject overlong drafts before AAD is built; we trust
@@ -226,7 +227,7 @@ pub fn encode_layer_forward_encrypted(
             )));
         }
         buf.push(0x03);
-        let flags: u8 = if forward.spec_logits_requested { 1 } else { 0 };
+        let flags = super::layer_forward::spec_trailer_flags(forward);
         buf.push(flags);
         buf.extend_from_slice(&(forward.draft_tokens.len() as u16).to_le_bytes());
         for t in &forward.draft_tokens {
@@ -387,41 +388,45 @@ pub fn decode_layer_forward_encrypted(
         };
 
     // Optional: speculative trailer (marker 0x03)
-    let (draft_tokens, spec_logits_requested) = if data.len() >= cursor + 4 && data[cursor] == 0x03
-    {
-        let flags = data[cursor + 1];
-        let num_drafts = u16::from_le_bytes(
-            data[cursor + 2..cursor + 4]
-                .try_into()
-                .map_err(|_| SwarmError::Network("Invalid num_drafts".into()))?,
-        ) as usize;
-        cursor += 4;
-        // R107/R108: shared cap via `super::MAX_DRAFT_TOKENS` so plaintext
-        // and encrypted decoders enforce the same bound (see rationale in
-        // `network/protocol/mod.rs`).
-        if num_drafts > super::MAX_DRAFT_TOKENS {
-            return Err(SwarmError::Network(format!(
-                "num_drafts {num_drafts} > {}",
-                super::MAX_DRAFT_TOKENS
-            )));
-        }
-        if data.len() < cursor + num_drafts * 4 {
-            return Err(SwarmError::Network("draft_tokens truncated".into()));
-        }
-        let mut drafts = Vec::with_capacity(num_drafts);
-        for i in 0..num_drafts {
-            let off = cursor + i * 4;
-            drafts.push(u32::from_le_bytes(
-                data[off..off + 4]
+    let (draft_tokens, spec_logits_requested, spec_walk_at_tail) =
+        if data.len() >= cursor + 4 && data[cursor] == 0x03 {
+            let flags = data[cursor + 1];
+            let num_drafts = u16::from_le_bytes(
+                data[cursor + 2..cursor + 4]
                     .try_into()
-                    .map_err(|_| SwarmError::Network("Invalid draft token".into()))?,
-            ));
-        }
-        cursor += num_drafts * 4;
-        (drafts, flags & 0x01 != 0)
-    } else {
-        (Vec::new(), false)
-    };
+                    .map_err(|_| SwarmError::Network("Invalid num_drafts".into()))?,
+            ) as usize;
+            cursor += 4;
+            // R107/R108: shared cap via `super::MAX_DRAFT_TOKENS` so plaintext
+            // and encrypted decoders enforce the same bound (see rationale in
+            // `network/protocol/mod.rs`).
+            if num_drafts > super::MAX_DRAFT_TOKENS {
+                return Err(SwarmError::Network(format!(
+                    "num_drafts {num_drafts} > {}",
+                    super::MAX_DRAFT_TOKENS
+                )));
+            }
+            if data.len() < cursor + num_drafts * 4 {
+                return Err(SwarmError::Network("draft_tokens truncated".into()));
+            }
+            let mut drafts = Vec::with_capacity(num_drafts);
+            for i in 0..num_drafts {
+                let off = cursor + i * 4;
+                drafts.push(u32::from_le_bytes(
+                    data[off..off + 4]
+                        .try_into()
+                        .map_err(|_| SwarmError::Network("Invalid draft token".into()))?,
+                ));
+            }
+            cursor += num_drafts * 4;
+            (
+                drafts,
+                flags & SPEC_FLAG_LOGITS != 0,
+                flags & SPEC_FLAG_WALK_AT_TAIL != 0,
+            )
+        } else {
+            (Vec::new(), false, false)
+        };
 
     // Optional: KV truncation trailer (marker 0x04 + target_len(4 LE))
     let truncate_kv_to = if data.len() >= cursor + 5 && data[cursor] == 0x04 {
@@ -495,6 +500,7 @@ pub fn decode_layer_forward_encrypted(
         adapter_id: None,
         draft_tokens,
         spec_logits_requested,
+        spec_walk_at_tail,
         truncate_kv_to,
         chunk_meta,
         sampling,
@@ -538,6 +544,7 @@ mod tests {
             adapter_id: None,
             draft_tokens: Vec::new(),
             spec_logits_requested: false,
+            spec_walk_at_tail: false,
             truncate_kv_to: None,
             chunk_meta: None,
             sampling: None,
@@ -649,6 +656,28 @@ mod tests {
         assert!(
             decoded.spec_logits_requested,
             "spec_logits_requested must survive encrypted round-trip when draft_tokens is empty"
+        );
+    }
+
+    #[test]
+    fn a_walk_at_the_tail_is_sealed_and_survives_the_encrypted_frame() {
+        let mut orig = base_forward();
+        orig.draft_tokens = vec![7, 8];
+        orig.spec_logits_requested = true;
+        orig.spec_walk_at_tail = true;
+        let bytes = encode_layer_forward_encrypted(&orig, vec![0u8; 32]).unwrap();
+        let (decoded, _sealed, aad) = decode_layer_forward_encrypted(&bytes).unwrap();
+        assert!(decoded.spec_walk_at_tail);
+        // The receiver's AAD is rebuilt from what it parsed; it must equal the
+        // sender's, or the seal fails as if the key were wrong.
+        assert_eq!(aad, build_layer_forward_aad(&orig));
+        // And the bit is bound: the same forward without it has a different AAD,
+        // so a relay flipping it in the cleartext trailer breaks the seal.
+        let mut unwalked = orig.clone();
+        unwalked.spec_walk_at_tail = false;
+        assert_ne!(
+            build_layer_forward_aad(&unwalked),
+            build_layer_forward_aad(&orig)
         );
     }
 

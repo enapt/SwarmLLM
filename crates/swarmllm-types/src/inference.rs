@@ -393,6 +393,15 @@ pub struct LayerForward {
     /// the result. Ignored when `draft_tokens` is empty.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub spec_logits_requested: bool,
+    /// The last segment walks `draft_tokens` itself and answers with token ids
+    /// (`LayerResult::token_ids` = the drafts it kept + the token it sampled
+    /// where its own sample first disagreed, or the bonus) instead of
+    /// `spec_logits`. Meaningful only beside `spec_logits_requested`, whose
+    /// logits it consumes where they are computed. Sent only to a peer
+    /// advertising `features::SPEC_WALK_AT_TAIL`, and only with the caller's
+    /// `sampling` beside it — the walk IS sampling.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub spec_walk_at_tail: bool,
     /// Speculative decoding KV-cache fixup: if `Some(L)`, the worker truncates
     /// the per-request KV cache to exactly L sequence positions BEFORE running
     /// this forward. Used after partial acceptance to discard the trailing γ-k
@@ -928,6 +937,7 @@ mod chunk_assembly_tests {
             adapter_id: None,
             draft_tokens: Vec::new(),
             spec_logits_requested: false,
+            spec_walk_at_tail: false,
             truncate_kv_to: None,
             chunk_meta: None,
             // In-process only (`serde(skip)`): a decoded forward always has

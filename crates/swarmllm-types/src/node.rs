@@ -166,6 +166,21 @@ pub mod features {
     /// not know), so only the resend is gated.
     pub const RESULT_STEP: u64 = 1 << 12;
 
+    /// Walks a speculative verify's drafts where the logits are: the `0x03`
+    /// trailer's flag bit 1 (`LayerForward::spec_walk_at_tail`). The last
+    /// segment samples each drafted position with the caller's sampler, keeps
+    /// the drafts while its own sample agrees, and answers with those token ids
+    /// plus the one it sampled where they parted (SpecExec's walk, exact at any
+    /// temperature for a deterministic draft) — instead of a full-vocabulary
+    /// f32 vector per position, 608 KB each on a 152K-vocabulary model, which
+    /// cost more wire time than the round trips speculation saved
+    /// (`docs/plans/split_speculation.md`).
+    ///
+    /// Gated at the sender like every trailer change: an older peer rebuilds
+    /// the seal's AAD from the flags it parsed (`flags & 1`), so bit 1 would
+    /// fail every encrypted verify it was sent.
+    pub const SPEC_WALK_AT_TAIL: u64 = 1 << 13;
+
     /// The full feature set THIS build implements. Advertised by every node.
     pub const ALL: u64 = RELAY
         | TENSOR_RELAY
@@ -179,7 +194,8 @@ pub mod features {
         | FORWARD_PRE_EMBEDDED
         | FORWARD_REFUSAL_REASON
         | FORWARD_SAMPLING
-        | RESULT_STEP;
+        | RESULT_STEP
+        | SPEC_WALK_AT_TAIL;
 
     /// Does `advertised` include every bit in `needed`?
     pub fn supports(advertised: u64, needed: u64) -> bool {

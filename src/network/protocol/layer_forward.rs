@@ -87,7 +87,7 @@ pub fn encode_layer_forward(forward: &LayerForward) -> Result<Vec<u8>, SwarmErro
             )));
         }
         buf.push(0x03);
-        let flags: u8 = if forward.spec_logits_requested { 1 } else { 0 };
+        let flags = spec_trailer_flags(forward);
         buf.push(flags);
         buf.extend_from_slice(&(forward.draft_tokens.len() as u16).to_le_bytes());
         for t in &forward.draft_tokens {
@@ -120,6 +120,27 @@ pub fn encode_layer_forward(forward: &LayerForward) -> Result<Vec<u8>, SwarmErro
     append_sampling_trailer(&mut buf, forward);
 
     Ok(buf)
+}
+
+/// `0x03` flags bit 0: return one logit vector per verified position.
+pub(crate) const SPEC_FLAG_LOGITS: u8 = 0x01;
+/// `0x03` flags bit 1: walk the drafts at the sampler and return token ids
+/// (`features::SPEC_WALK_AT_TAIL`). An older peer reads only bit 0.
+pub(crate) const SPEC_FLAG_WALK_AT_TAIL: u8 = 0x02;
+
+/// The `0x03` trailer's flags byte — the ONE writer, for the plaintext frame,
+/// the encrypted frame and the AAD alike. A receiver rebuilds the AAD from the
+/// flags it parsed, so a bit written in one place and not another fails the
+/// seal as if the key were wrong.
+pub(crate) fn spec_trailer_flags(forward: &LayerForward) -> u8 {
+    let mut flags = 0;
+    if forward.spec_logits_requested {
+        flags |= SPEC_FLAG_LOGITS;
+    }
+    if forward.spec_walk_at_tail {
+        flags |= SPEC_FLAG_WALK_AT_TAIL;
+    }
+    flags
 }
 
 /// Write the sampling trailer: `0x0A | temperature f32 | top_p f32 | top_k u32 |
@@ -534,42 +555,46 @@ pub fn decode_layer_forward(data: &[u8]) -> Result<LayerForward, SwarmError> {
     // Optional: speculative trailer (marker 0x03 + flags(1) + num_drafts(2 LE) + drafts*4)
     // Unknown to older decoders — presence is required to be gated by
     // PipelineAssignment.supports_speculative on the sender.
-    let (draft_tokens, spec_logits_requested) = if data.len() >= cursor + 4 && data[cursor] == 0x03
-    {
-        let flags = data[cursor + 1];
-        let num_drafts = u16::from_le_bytes(
-            data[cursor + 2..cursor + 4]
-                .try_into()
-                .map_err(|_| SwarmError::Network("Invalid num_drafts".into()))?,
-        ) as usize;
-        cursor += 4;
-        // R107/R108: cap peer-controlled num_drafts to keep
-        // `Vec::with_capacity` and the subsequent loop bounded. Shared
-        // with `encrypted.rs` via `super::MAX_DRAFT_TOKENS` so the
-        // plaintext and encrypted decoders cannot drift apart.
-        if num_drafts > super::MAX_DRAFT_TOKENS {
-            return Err(SwarmError::Network(format!(
-                "num_drafts {num_drafts} > {}",
-                super::MAX_DRAFT_TOKENS
-            )));
-        }
-        if data.len() < cursor + num_drafts * 4 {
-            return Err(SwarmError::Network("draft_tokens truncated".into()));
-        }
-        let mut drafts = Vec::with_capacity(num_drafts);
-        for i in 0..num_drafts {
-            let off = cursor + i * 4;
-            drafts.push(u32::from_le_bytes(
-                data[off..off + 4]
+    let (draft_tokens, spec_logits_requested, spec_walk_at_tail) =
+        if data.len() >= cursor + 4 && data[cursor] == 0x03 {
+            let flags = data[cursor + 1];
+            let num_drafts = u16::from_le_bytes(
+                data[cursor + 2..cursor + 4]
                     .try_into()
-                    .map_err(|_| SwarmError::Network("Invalid draft token".into()))?,
-            ));
-        }
-        cursor += num_drafts * 4;
-        (drafts, flags & 0x01 != 0)
-    } else {
-        (Vec::new(), false)
-    };
+                    .map_err(|_| SwarmError::Network("Invalid num_drafts".into()))?,
+            ) as usize;
+            cursor += 4;
+            // R107/R108: cap peer-controlled num_drafts to keep
+            // `Vec::with_capacity` and the subsequent loop bounded. Shared
+            // with `encrypted.rs` via `super::MAX_DRAFT_TOKENS` so the
+            // plaintext and encrypted decoders cannot drift apart.
+            if num_drafts > super::MAX_DRAFT_TOKENS {
+                return Err(SwarmError::Network(format!(
+                    "num_drafts {num_drafts} > {}",
+                    super::MAX_DRAFT_TOKENS
+                )));
+            }
+            if data.len() < cursor + num_drafts * 4 {
+                return Err(SwarmError::Network("draft_tokens truncated".into()));
+            }
+            let mut drafts = Vec::with_capacity(num_drafts);
+            for i in 0..num_drafts {
+                let off = cursor + i * 4;
+                drafts.push(u32::from_le_bytes(
+                    data[off..off + 4]
+                        .try_into()
+                        .map_err(|_| SwarmError::Network("Invalid draft token".into()))?,
+                ));
+            }
+            cursor += num_drafts * 4;
+            (
+                drafts,
+                flags & SPEC_FLAG_LOGITS != 0,
+                flags & SPEC_FLAG_WALK_AT_TAIL != 0,
+            )
+        } else {
+            (Vec::new(), false, false)
+        };
 
     // Optional: KV truncation trailer (marker 0x04 + target_len(4 LE))
     let truncate_kv_to = if data.len() >= cursor + 5 && data[cursor] == 0x04 {
@@ -655,6 +680,7 @@ pub fn decode_layer_forward(data: &[u8]) -> Result<LayerForward, SwarmError> {
         adapter_id: None,
         draft_tokens,
         spec_logits_requested,
+        spec_walk_at_tail,
         truncate_kv_to,
         chunk_meta,
         sampling,
@@ -693,6 +719,7 @@ mod tests {
             adapter_id: None,
             draft_tokens: Vec::new(),
             spec_logits_requested: false,
+            spec_walk_at_tail: false,
             truncate_kv_to: None,
             chunk_meta: None,
             sampling: None,
@@ -862,6 +889,28 @@ mod tests {
             decoded.spec_logits_requested,
             "spec_logits_requested must survive cleartext round-trip when draft_tokens is empty"
         );
+    }
+
+    #[test]
+    fn a_walk_at_the_tail_survives_the_wire_and_changes_nothing_when_unset() {
+        let mut walk = base_forward();
+        walk.draft_tokens = vec![11, 22, 33];
+        walk.spec_logits_requested = true;
+        walk.spec_walk_at_tail = true;
+        let decoded = decode_layer_forward(&encode_layer_forward(&walk).unwrap()).unwrap();
+        assert!(decoded.spec_walk_at_tail && decoded.spec_logits_requested);
+        assert_eq!(decoded.draft_tokens, vec![11, 22, 33]);
+
+        // Unset, the frame is byte-for-byte what an older build writes: the
+        // flag must cost a peer that never asked for it nothing at all.
+        let mut plain = walk.clone();
+        plain.spec_walk_at_tail = false;
+        let bytes = encode_layer_forward(&plain).unwrap();
+        // The fixture sets no later trailer, so 0x03 is the frame's tail:
+        // marker, flags, u16 count, three u32 drafts.
+        let at = bytes.len() - (1 + 1 + 2 + 3 * 4);
+        assert_eq!(&bytes[at..at + 2], &[0x03, SPEC_FLAG_LOGITS]);
+        assert!(!decode_layer_forward(&bytes).unwrap().spec_walk_at_tail);
     }
 
     #[test]

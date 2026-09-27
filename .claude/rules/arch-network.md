@@ -254,6 +254,21 @@ on a REAL link, never loopback — and run the failover rigs before any default 
 
 → `docs/invariants/network.md` § "A split token crosses on the pipeline stream"
 
+## A speculative verify is walked where the logits are (2026-09-27)
+
+A verify's last segment walks the drafts with the caller's sampler and answers
+with token ids (`LayerForward::spec_walk_at_tail`, `0x03` flags bit 1, gated at
+the SENDER on `features::SPEC_WALK_AT_TAIL`) — 43-59 bytes back where an older
+tail sends 513 KB per position (2.5 MB for five on a 128K vocabulary).
+**`sampling::sampled_accept_reject` is the one rule** and runs on either side;
+**`pipeline::VerifyReply::accept` is the one place** a reply of either shape
+becomes accepted tokens, and it refuses what no honest tail sends (non-finite
+logits, a "kept" token never drafted). **`layer_forward::spec_trailer_flags` is
+the one writer of the flags byte** for the plaintext frame, the encrypted frame
+and the AAD. A walk travels only with the caller's sampling beside it.
+
+→ `docs/invariants/network.md` § "A speculative verify is walked where the logits are"
+
 ## A result names the step it answers; one that did not arrive is sent again (2026-09-25)
 
 A request's forwards to one segment share its id, so a result matched by id alone

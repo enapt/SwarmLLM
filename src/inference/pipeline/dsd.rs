@@ -27,18 +27,19 @@
 //!
 //! - `decentralized_spec_decoding && speculative_decoding` config flags both on
 //! - Pipeline has 2+ segments AND no TP groups (single-segment is Item 2's job)
-//! - Greedy temperature == 0
 //! - Draft model loaded
 //! - No vision or LoRA
 //!
 //! # Correctness
 //!
-//! This path is greedy-only on purpose — a draft MODEL has a real
-//! distribution `q`, so accepting it properly needs `min(1, p/q)` and a
-//! residual built from both, which is a different algorithm from the one the
-//! draft-free n-gram path uses. A draft token is accepted only when its id
-//! matches the target's argmax at the same position
-//! (`speculative::greedy_accept_reject`).
+//! A draft is kept only while the TARGET's own sample, drawn with the
+//! caller's sampling parameters, equals it — SpecExec's walk
+//! (arXiv 2406.02532), run by `sampling::sampled_accept_reject` at the last
+//! segment or, for a tail that cannot walk, here on the logits it returns.
+//! The drafter proposes its argmax: a draft with no distribution behind it,
+//! for which accepting with probability `p(x)` and otherwise drawing from the
+//! remainder IS the speculative-sampling rule. So this path is exact at any
+//! temperature; it was greedy-only while it compared argmaxes.
 //!
 //! **That is not the same as being bit-identical to non-speculative decoding,
 //! and this comment used to claim it was** (gotcha #370). A verify forward
@@ -70,13 +71,14 @@ fn eligible(exec: &PipelineExecutor) -> bool {
     // Path-specific flag.
     if !exec
         .shared_state
-        .config
+        .cfg()
         .inference
         .decentralized_spec_decoding
     {
         return false;
     }
-    // Common speculative-path baseline (greedy temp, draft model, etc.).
+    // Common speculative-path baseline (draft model, no vision/LoRA, etc.).
+    // Any temperature: acceptance walks with the caller's sampler.
     if !super::speculative_common_eligible(exec) {
         return false;
     }
@@ -274,9 +276,11 @@ impl PipelineExecutor {
             verify_tokens.push(last_token);
             verify_tokens.extend_from_slice(&drafts);
 
-            // Multi-segment verify forward. Returns γ+1 logit vectors from
-            // the LAST segment.
-            let spec_logits = match super::forward_verify_through_segments(
+            // Multi-segment verify forward. The last segment walks the drafts
+            // with the caller's sampler where it can and answers with the
+            // tokens it kept; otherwise it returns γ+1 logit vectors and
+            // `accept` walks them here — the same rule either way.
+            let reply = match super::forward_verify_through_segments(
                 &self.shared_state,
                 &self.network_tx,
                 request_id,
@@ -284,6 +288,11 @@ impl PipelineExecutor {
                 &self.assignment.segments,
                 &verify_tokens,
                 pending_truncate,
+                Some(super::TailWalk {
+                    drafts: &drafts,
+                    sampling: &self.request.sampling_params,
+                    generated: &generated,
+                }),
             )
             .await
             {
@@ -295,27 +304,24 @@ impl PipelineExecutor {
                 }
             };
 
-            // Need γ+1 logit vectors: γ for verifying drafts[i] vs target's
-            // pick at position i, plus the bonus at position γ for the
-            // ALL-ACCEPTED branch. greedy_accept_reject indexes
-            // `spec_logits[drafts.len()]` when all drafts accepted, so a
-            // strict `< drafts.len() + 1` guard is required to avoid OOB.
-            if spec_logits.len() < drafts.len() + 1 {
-                tracing::warn!(
-                    %request_id,
-                    got = spec_logits.len(),
-                    want_min = drafts.len() + 1,
-                    "DSD: insufficient spec_logits — returning partial"
-                );
-                finish_reason = "stop".to_string();
-                break;
-            }
-
             let kv_after_forward = expected_kv_len + verify_tokens.len() as u32;
 
-            // Greedy accept-reject — shared with Item 2 via `greedy_accept_reject`.
-            let (accepted, bonus, _all_accepted) =
-                super::speculative::greedy_accept_reject(&drafts, &spec_logits);
+            // SpecExec's walk: keep a draft while the target's own SAMPLE
+            // agrees. The drafter proposes its argmax, a draft with no
+            // distribution behind it, for which this is exactly the
+            // speculative-sampling rule at any temperature.
+            let (accepted, bonus, _all_accepted) = match reply.accept(
+                &drafts,
+                &self.request.sampling_params,
+                &generated,
+            ) {
+                Ok(decided) => decided,
+                Err(e) => {
+                    tracing::warn!(%request_id, error = %e, "DSD: unusable verify reply — returning partial");
+                    finish_reason = "stop".to_string();
+                    break;
+                }
+            };
 
             acceptance_proposed += drafts.len() as u32;
             acceptance_accepted += accepted.len() as u32;

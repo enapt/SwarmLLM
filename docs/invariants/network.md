@@ -2332,3 +2332,46 @@ registers the acceptor since v0.1.0-alpha.2); any send failure falls back to
 request-response for that forward and evicts the stream; a stream read error
 resolves the pending result with an error at once (faster than rr's ACK
 deadline for a peer that went away).
+
+## A speculative verify is walked where the logits are (2026-09-27)
+
+**What it replaced.** Every speculative verify — the n-gram loop's hits AND
+misses, and DSD's rounds — asked the last segment for `spec_logits`: one
+full-vocabulary f32 vector per verified position. The coordinator then ran the
+acceptance rule on them. On a 128K vocabulary that is 513 KB per position,
+2.5 MB for a five-position round (measured on `split_rig.sh repeat` with a
+v0.3.209 tail: 66 results of 513,070 bytes, 22 of 2,565,182). On a
+Thailand↔Belgium link at 20-50 Mbit/s that transfer costs more than the round
+trips speculation saves (`docs/plans/split_speculation.md` projects DSD as
+shipped at 1.8-3.4 tok/s against 2.85 with no speculation at all).
+
+**What it does now.** The last segment runs `sampling::sampled_accept_reject`
+itself — sample each position with the caller's sampler, keep the drafts while
+the sample agrees, stop at the first disagreement with the token it sampled
+there (or the bonus after all of them) — and answers with those ids. It is
+SpecExec's walk (arXiv 2406.02532); for a deterministic draft (an n-gram match,
+a drafter's argmax) it IS the speculative-sampling rule, so the path is exact at
+any temperature and DSD lost its greedy-only gate (the argmax-accepting
+single-segment Item 2 keeps it).
+
+**Measured** (`split_rig.sh repeat`, llama-3.2-3b, A=[shard 0], B=[1,2,3], both
+on the new build): all 273 results B sent were token ids of 43-59 bytes (237 ×
+one token, 12 × two, 9 × three, 15 × five), none a vocabulary. Replies scored
+against llama.cpp: 119 of 121 tokens rank 1, worst rank 2 by 0.130 logits,
+three runs identical. With B on v0.3.209 (the sender gate withholds the walk)
+the reply was byte-identical, from logits walked on the coordinator.
+
+**What a change must keep:**
+- **Gated at the SENDER** on `SPEC_WALK_AT_TAIL | FORWARD_SAMPLING |
+  FORWARD_GENERATED_IDS` (`pipeline::peer_walks_at_tail`). An older peer rebuilds
+  the seal's AAD from the flags it parsed (`flags & 1`), so bit 1 would fail
+  every encrypted verify it was sent. Our own worker always walks.
+- **One writer of the flags byte**, `layer_forward::spec_trailer_flags`, for the
+  plaintext frame, the encrypted frame and the AAD; an unwalked forward encodes
+  byte for byte as before (`a_walk_at_the_tail_survives_the_wire_and_changes_nothing_when_unset`).
+- **A walk travels with the caller's sampling or not at all** — the pool drops
+  the flag when `sampling` is absent rather than walk at the worker's defaults.
+- **`VerifyReply::accept` reads the shape the tail ANSWERED in**, not the one it
+  was asked for, and refuses non-finite logits, too few rows, an empty walk, or
+  a "kept" token that was never drafted. The old rule answered non-finite logits
+  with `(empty, 0, false)` and callers emitted token 0 as the "bonus".

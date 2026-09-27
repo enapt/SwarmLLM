@@ -328,6 +328,109 @@ pub fn sample_token_with_history(
     sample_token_with_ctx(logits, params, generated_ids, ctx)
 }
 
+/// Are the rows a verify of `n_drafts` drafts reads (γ+1 of them) all finite?
+/// A peer supplies them; see `sampled_accept_reject`'s non-finite guard.
+pub(crate) fn verify_rows_are_finite(n_drafts: usize, rows: &[Vec<f32>]) -> bool {
+    rows.iter()
+        .take(n_drafts + 1)
+        .all(|row| row.iter().all(|v| v.is_finite()))
+}
+
+/// The walk a verify's last segment runs when asked to
+/// (`LayerForward::spec_walk_at_tail`): the drafts it keeps, then the token it
+/// sampled where they parted (or the bonus after all of them) — what the
+/// coordinator would have derived from these rows with `sampled_accept_reject`,
+/// sent as token ids instead of a vocabulary per position.
+///
+/// Errs where the coordinator's `VerifyReply::accept` would: rows that do not
+/// number drafts + 1, or that are not finite.
+pub(crate) fn walk_verified_positions(
+    drafts: &[u32],
+    rows: &[Vec<f32>],
+    params: &SamplingParams,
+    generated: &[u32],
+) -> Result<Vec<u32>, String> {
+    if rows.len() != drafts.len() + 1 {
+        return Err(format!(
+            "spec walk: {} positions verified for {} drafts",
+            rows.len(),
+            drafts.len()
+        ));
+    }
+    if !verify_rows_are_finite(drafts.len(), rows) {
+        return Err("spec walk: non-finite logits".into());
+    }
+    let (mut kept, next, _) = sampled_accept_reject(drafts, rows, params, generated);
+    kept.push(next);
+    Ok(kept)
+}
+
+/// Accept-reject for a DRAFT THAT CARRIES NO DISTRIBUTION, honouring the
+/// caller's sampling parameters.
+///
+/// An n-gram draft proposes a token with no probability behind it — `q = δ_x` —
+/// and speculative sampling then reduces to: accept with probability
+/// `min(1, p(x)/q(x)) = p(x)`, otherwise draw from the residual
+/// `norm((p − q)₊)`, i.e. `p` with `x` removed and renormalised. "Draw `t ~ p`;
+/// keep the draft iff `t == x`" has exactly those two branches, so sampling each
+/// position through the real sampler and keeping a match IS that rule — at any
+/// temperature, with no separate machinery.
+/// `accepting_only_on_a_match_preserves_the_sampled_distribution` below pins
+/// it, with a control that fails if the metric could
+/// not detect a bias.
+///
+/// **Why this exists beside `greedy_accept_reject`.** That one takes the raw
+/// argmax, which ignores temperature, top-k, top-p AND the repetition
+/// penalties. It is correct for the paths that are greedy-only by construction
+/// (a draft MODEL needs the draft's own probabilities to do this properly, which
+/// is a different algorithm), but it meant the same request got a different
+/// answer depending on whether it was served locally or across peers — the local
+/// worker has always sampled properly. It also meant n-gram speculation could
+/// only ever run at temperature 0, which is not what any client asks for: the
+/// OpenAI surface defaults to 0.7 and the Anthropic one to 1.0.
+///
+/// `generated` is the history the penalties apply against, and it grows as
+/// drafts are accepted, so each position sees what it would have seen had the
+/// tokens been produced one at a time.
+///
+/// The non-finite guard is NOT optional and is the reason this cannot simply
+/// call the sampler in a loop: a peer supplies these logits, and NaN comparisons
+/// are non-deterministic, so a malicious segment could otherwise steer which
+/// tokens get accepted. Same treatment as the greedy sibling — reject the whole
+/// round.
+pub(crate) fn sampled_accept_reject(
+    drafts: &[u32],
+    spec_logits: &[Vec<f32>],
+    params: &crate::types::SamplingParams,
+    generated: &[u32],
+) -> (Vec<u32>, u32, bool) {
+    if !verify_rows_are_finite(drafts.len(), spec_logits) {
+        return (Vec::new(), 0, false);
+    }
+    let vocab = spec_logits.first().map(|r| r.len()).unwrap_or(0);
+    let mut ctx = SamplingContext::new(vocab);
+    let mut history: Vec<u32> = generated.to_vec();
+    let mut accepted: Vec<u32> = Vec::with_capacity(drafts.len());
+    let mut bonus: u32 = 0;
+    for (i, &q) in drafts.iter().enumerate() {
+        let mut row = spec_logits[i].clone();
+        let pick = sample_token_with_history(&mut row, params, &history, &mut ctx);
+        if pick == q {
+            accepted.push(q);
+            history.push(q);
+        } else {
+            bonus = pick;
+            break;
+        }
+    }
+    let all_accepted = accepted.len() == drafts.len();
+    if all_accepted {
+        let mut row = spec_logits[drafts.len()].clone();
+        bonus = sample_token_with_history(&mut row, params, &history, &mut ctx);
+    }
+    (accepted, bonus, all_accepted)
+}
+
 /// Sample a token index from logits using pre-allocated scratch buffers.
 ///
 /// Same behavior as `sample_token` but reuses buffers from `SamplingContext`,
@@ -1400,5 +1503,40 @@ mod speculative_acceptance_tests {
             tv > 0.3,
             "the metric cannot detect an obvious bias (total variation {tv:.4})"
         );
+    }
+
+    /// The walk a verify's last segment answers with is exactly what the
+    /// coordinator would have derived from the same rows, and it refuses what
+    /// the coordinator refuses — otherwise which side walked would change the
+    /// reply, or a tail would answer malformed rows with a token.
+    #[test]
+    fn the_tails_walk_is_the_coordinators_accept_sent_as_ids() {
+        let greedy = SamplingParams {
+            temperature: 0.0,
+            ..Default::default()
+        };
+        let rows = vec![
+            vec![0.1, 5.0, 0.2],
+            vec![7.0, 0.5, 0.3],
+            vec![0.0, 0.1, 9.0],
+        ];
+        for drafts in [vec![1u32, 0], vec![1, 2], vec![0, 0]] {
+            let (mut want, next, _) = sampled_accept_reject(&drafts, &rows, &greedy, &[]);
+            want.push(next);
+            assert_eq!(
+                walk_verified_positions(&drafts, &rows, &greedy, &[]).unwrap(),
+                want,
+                "drafts {drafts:?}"
+            );
+        }
+        assert_eq!(
+            walk_verified_positions(&[1, 0], &rows, &greedy, &[]).unwrap(),
+            vec![1, 0, 2],
+            "every draft kept, then the bonus"
+        );
+        assert!(walk_verified_positions(&[1], &rows, &greedy, &[]).is_err());
+        let mut poisoned = rows;
+        poisoned[2][1] = f32::INFINITY;
+        assert!(walk_verified_positions(&[1, 0], &poisoned, &greedy, &[]).is_err());
     }
 }

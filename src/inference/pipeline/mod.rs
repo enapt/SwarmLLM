@@ -277,12 +277,87 @@ pub(super) fn pack_verify_tokens_to_le_bytes(tokens: &[u32]) -> Vec<u8> {
     out
 }
 
+/// What the segment that samples needs to walk a verify's drafts itself
+/// (`LayerForward::spec_walk_at_tail`): the drafts, the caller's sampler, and
+/// the history its penalties read. The walk IS sampling, so these travel
+/// together or not at all.
+pub(super) struct TailWalk<'a> {
+    pub drafts: &'a [u32],
+    pub sampling: &'a crate::types::SamplingParams,
+    pub generated: &'a [u32],
+}
+
+/// What a verify round came back with. A tail that could walk answers with
+/// the tokens it kept; one that could not (an older peer, or a caller that
+/// asked for none) with a vocabulary per position. [`VerifyReply::accept`] is
+/// the one place either becomes accepted tokens.
+#[derive(Debug)]
+pub(super) enum VerifyReply {
+    Logits(Vec<Vec<f32>>),
+    /// The drafts the tail kept, then the token it sampled where its own
+    /// sample first disagreed (or the bonus after all of them).
+    Walked(Vec<u32>),
+}
+
+impl VerifyReply {
+    /// `(accepted drafts, next token, all accepted)` — by
+    /// `sampling::sampled_accept_reject` here for logits, or read off the
+    /// tail's walk, which ran that same function where the logits were.
+    ///
+    /// Refuses what no honest tail sends, rather than emitting it: logits that
+    /// are not finite (the rule used to hand back token 0 as the "bonus" and a
+    /// caller streamed it), too few positions, or a walk that claims to have
+    /// kept a token that was never drafted.
+    pub(super) fn accept(
+        self,
+        drafts: &[u32],
+        sampling: &crate::types::SamplingParams,
+        generated: &[u32],
+    ) -> Result<(Vec<u32>, u32, bool), SwarmError> {
+        match self {
+            VerifyReply::Logits(rows) => {
+                if rows.len() < drafts.len() + 1 {
+                    return Err(SwarmError::Inference(format!(
+                        "spec verify: {} logit rows for {} drafts",
+                        rows.len(),
+                        drafts.len()
+                    )));
+                }
+                if !crate::inference::sampling::verify_rows_are_finite(drafts.len(), &rows) {
+                    return Err(SwarmError::Inference(
+                        "spec verify: the last segment returned non-finite logits".into(),
+                    ));
+                }
+                Ok(crate::inference::sampling::sampled_accept_reject(
+                    drafts, &rows, sampling, generated,
+                ))
+            }
+            VerifyReply::Walked(tokens) => {
+                let Some((&next, kept)) = tokens.split_last() else {
+                    return Err(SwarmError::Inference(
+                        "spec verify: the last segment walked and returned no token".into(),
+                    ));
+                };
+                if kept.len() > drafts.len() || kept != &drafts[..kept.len()] {
+                    return Err(SwarmError::Inference(format!(
+                        "spec verify: the last segment kept {} tokens that were not the {} drafted",
+                        kept.len(),
+                        drafts.len()
+                    )));
+                }
+                Ok((kept.to_vec(), next, kept.len() == drafts.len()))
+            }
+        }
+    }
+}
+
 /// Build the `LayerForward` envelope for a speculative-verify send.
 /// Shared by `speculative.rs::send_verify_batch` (single-segment) and
 /// `super::forward_verify_through_segments` (multi-segment) so adding
 /// a `LayerForward` field can't drift between the two paths. The
 /// `spec_logits_requested` flag is set uniformly; the receiver gates
-/// emission on `is_last`.
+/// emission on `is_last`. `walk` is for the LAST segment only, and only one
+/// that can walk (`forward_verify_through_segments` decides).
 pub(super) fn build_spec_verify_forward(
     request_id: uuid::Uuid,
     index_pos: u32,
@@ -290,6 +365,7 @@ pub(super) fn build_spec_verify_forward(
     segment: &crate::types::PipelineSegment,
     _requester_node_id_bytes: [u8; 32],
     truncate_kv_to: Option<u32>,
+    walk: Option<&TailWalk<'_>>,
 ) -> crate::types::LayerForward {
     crate::types::LayerForward {
         request_id,
@@ -310,17 +386,23 @@ pub(super) fn build_spec_verify_forward(
         // not on the wire — so nothing is lost; `docs/FUTURE_WORK.md`.)
         requester_node_id: None,
         pre_embedded: false,
-        generated_ids: Vec::new(),
+        // The penalties' history, for a tail that samples — and only when the
+        // sampler reads it, so a request without penalties sends nothing.
+        generated_ids: walk
+            .filter(|w| crate::inference::sampling::sampler_reads_history(w.sampling))
+            .map(|w| w.generated.to_vec())
+            .unwrap_or_default(),
         adapter_id: None,
         // The receiver gates spec-logits emission on
         // `spec_logits_requested && is_last`, not on `draft_tokens`. The
-        // draft IDs are also already encoded in `activations`, so leaving
-        // this empty saves an allocation per spec round at no cost.
-        draft_tokens: Vec::new(),
+        // draft IDs are also already encoded in `activations` for segment 0,
+        // but a tail past it receives hidden states, so a walk names them.
+        draft_tokens: walk.map(|w| w.drafts.to_vec()).unwrap_or_default(),
         spec_logits_requested: true,
+        spec_walk_at_tail: walk.is_some(),
         truncate_kv_to,
         chunk_meta: None,
-        sampling: None,
+        sampling: walk.map(|w| w.sampling.clone()),
     }
 }
 
@@ -363,7 +445,8 @@ pub(super) async fn forward_verify_through_segments(
     segments: &[crate::types::PipelineSegment],
     verify_tokens: &[u32],
     truncate_kv_to: Option<u32>,
-) -> Result<Vec<Vec<f32>>, SwarmError> {
+    walk: Option<TailWalk<'_>>,
+) -> Result<VerifyReply, SwarmError> {
     let num_segments = segments.len();
     let local_node_id = shared_state.identity.node_id().clone();
 
@@ -386,6 +469,14 @@ pub(super) async fn forward_verify_through_segments(
             }
         };
         let target_peer_bytes = target_peer_bytes.as_ref();
+        // The sampler walks where the logits are — our own worker always can,
+        // a peer only when it says so. Otherwise it sends every position's
+        // vocabulary back and `VerifyReply::accept` walks them here.
+        let tail_walk = walk.as_ref().filter(|_| {
+            is_last
+                && (target_peer_bytes.is_none()
+                    || peer_walks_at_tail(shared_state, &segment.node_id))
+        });
 
         // Rebuildable: a peer that refuses this unopened is sent it again once
         // the link is re-keyed (`local::ResendOnRefusal`).
@@ -397,6 +488,7 @@ pub(super) async fn forward_verify_through_segments(
                 segment,
                 shared_state.identity.node_id().0,
                 truncate_kv_to,
+                tail_walk,
             )
         };
         let forward = rebuild_forward();
@@ -544,12 +636,17 @@ pub(super) async fn forward_verify_through_segments(
         }
 
         if is_last {
-            if result.spec_logits.is_empty() {
-                return Err(SwarmError::Inference(
-                    "spec verify: last segment returned no spec_logits".into(),
-                ));
+            // Read the shape the tail ANSWERED in, not the one we asked for:
+            // either is a correct reply, and `accept` handles both.
+            if !result.spec_logits.is_empty() {
+                return Ok(VerifyReply::Logits(result.spec_logits));
             }
-            return Ok(result.spec_logits);
+            if tail_walk.is_some() && !result.token_ids.is_empty() {
+                return Ok(VerifyReply::Walked(result.token_ids));
+            }
+            return Err(SwarmError::Inference(
+                "spec verify: last segment returned neither logits nor a walk".into(),
+            ));
         }
 
         // Intermediate: feed hidden state to next segment. SEC: validate
@@ -595,6 +692,20 @@ pub(super) async fn forward_verify_through_segments(
     unreachable!("loop returns on the last segment")
 }
 
+/// May this peer be asked to walk a verify's drafts itself? It must read the
+/// walk flag, and the trailers the walk samples with — the caller's sampling
+/// and the penalties' history. A peer with the walk bit is newer than both, but
+/// the three are asked together so no reading of this depends on that order.
+fn peer_walks_at_tail(shared_state: &SharedState, node_id: &crate::types::NodeId) -> bool {
+    use swarmllm_types::node::features::{
+        FORWARD_GENERATED_IDS, FORWARD_SAMPLING, SPEC_WALK_AT_TAIL,
+    };
+    shared_state.peer_advertises_feature(
+        node_id,
+        SPEC_WALK_AT_TAIL | FORWARD_SAMPLING | FORWARD_GENERATED_IDS,
+    )
+}
+
 /// Build the `LayerForward` envelope for a stop-sequence KV-truncate
 /// signal sent to a remote segment. Empty activations + no compute,
 /// `truncate_kv_to: Some(truncate_to)` is the only signal — the receiver
@@ -630,6 +741,7 @@ pub(super) fn build_kv_truncate_forward(
         adapter_id: None,
         draft_tokens: Vec::new(),
         spec_logits_requested: false,
+        spec_walk_at_tail: false,
         truncate_kv_to: Some(truncate_to),
         chunk_meta: None,
         sampling: None,
@@ -846,12 +958,15 @@ pub(super) fn fastpath_request_disqualified(exec: &PipelineExecutor) -> bool {
 /// (`speculative.rs`'s single-segment Item 2 and `dsd.rs`'s
 /// multi-segment Item 12). Returns `true` when the request is
 /// eligible *so far* — callers add their own segment-shape check on
-/// top. Greedy temperature, draft model availability, and the
-/// non-encryption / non-LoRA / non-vision baseline are required by
-/// both paths; the bool flag config is per-path so it stays inline.
+/// top. Draft model availability and the non-encryption / non-LoRA /
+/// non-vision baseline are required by both paths; the bool flag config
+/// is per-path so it stays inline. Temperature is NOT common: Item 2
+/// accepts by argmax and requires 0 itself, DSD walks with the sampler.
+/// Read live (`cfg()`), so a setting changed in Settings applies to the
+/// next request rather than the next restart (#281).
 pub(super) fn speculative_common_eligible(exec: &PipelineExecutor) -> bool {
-    let cfg = &exec.shared_state.config.inference;
-    if !cfg.speculative_decoding {
+    let cfg = exec.shared_state.cfg();
+    if !cfg.inference.speculative_decoding {
         return false;
     }
     if !exec.assignment.supports_speculative {
@@ -860,10 +975,7 @@ pub(super) fn speculative_common_eligible(exec: &PipelineExecutor) -> bool {
     if fastpath_request_disqualified(exec) {
         return false;
     }
-    if exec.request.sampling_params.temperature != 0.0 {
-        return false;
-    }
-    if cfg.draft_model_path.is_none() {
+    if cfg.inference.draft_model_path.is_none() {
         return false;
     }
     true
@@ -1802,7 +1914,7 @@ mod tests {
 
     /// A registry entry for `node` advertising exactly `features` — what the
     /// sender-side trailer gates read.
-    fn peer_advertising(node: &NodeId, features: u64) -> PeerInfo {
+    pub(super) fn peer_advertising(node: &NodeId, features: u64) -> PeerInfo {
         PeerInfo {
             node_id: node.clone(),
             addresses: vec![],
@@ -2289,6 +2401,7 @@ mod tests {
             &segment,
             requester,
             Some(100),
+            None,
         );
         assert_eq!(fwd.request_id, request_id);
         assert_eq!(fwd.index_pos, 42);
@@ -2385,6 +2498,7 @@ mod tests {
             &segments,
             &verify_tokens,
             None,
+            None,
         )
         .await;
         assert!(result.is_err(), "closed-channel send must surface as Err");
@@ -2413,8 +2527,17 @@ mod tests {
         let s2 = state.clone();
         let segs = segments.to_vec();
         let handle = tokio::spawn(async move {
-            forward_verify_through_segments(&s2, &tx, request_id, 0, &segs, &verify_tokens, None)
-                .await
+            forward_verify_through_segments(
+                &s2,
+                &tx,
+                request_id,
+                0,
+                &segs,
+                &verify_tokens,
+                None,
+                None,
+            )
+            .await
         });
 
         // The forward is dispatched, then the waiter blocks on its oneshot.
@@ -2585,6 +2708,7 @@ mod failover_retarget_tests {
                 &segments,
                 &[7u32],
                 None,
+                None,
             )
             .await;
         });
@@ -2608,6 +2732,154 @@ mod failover_retarget_tests {
             }
             other => panic!("expected SendTensor, got {other:?}"),
         }
+    }
+
+    /// The forward a one-segment verify round sends to `peer`, asked to walk.
+    async fn verify_forward_sent_to(
+        state: Arc<SharedState>,
+        peer: NodeId,
+        sampling: crate::types::SamplingParams,
+    ) -> crate::types::LayerForward {
+        state.peer_id_map.insert(peer.clone(), vec![0xAB]);
+        let (tx, mut rx) = mpsc::channel::<NetworkCommand>(8);
+        tokio::spawn(async move {
+            let _ = forward_verify_through_segments(
+                &state,
+                &tx,
+                uuid::Uuid::new_v4(),
+                0,
+                &[seg(peer)],
+                &[7u32, 8, 9],
+                None,
+                Some(TailWalk {
+                    drafts: &[8, 9],
+                    sampling: &sampling,
+                    generated: &[3, 7],
+                }),
+            )
+            .await;
+        });
+        match tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .expect("a forward must be dispatched")
+            .expect("channel open")
+        {
+            NetworkCommand::SendTensor { forward, .. } => forward,
+            other => panic!("expected SendTensor, got {other:?}"),
+        }
+    }
+
+    /// Only a peer that reads the walk flag AND the trailers the walk samples
+    /// with is asked to walk. An older peer rebuilds the seal's AAD from the
+    /// flags it parsed, so sending it bit 1 would fail every encrypted verify;
+    /// it gets today's logits request, byte for byte.
+    #[tokio::test]
+    async fn only_a_peer_that_can_walk_is_asked_to_and_it_gets_the_callers_sampler() {
+        use swarmllm_types::node::features::{
+            FORWARD_GENERATED_IDS, FORWARD_SAMPLING, SPEC_WALK_AT_TAIL,
+        };
+        let penalised = crate::types::SamplingParams {
+            temperature: 0.7,
+            frequency_penalty: 0.5,
+            ..Default::default()
+        };
+
+        let state = super::tests::make_test_state();
+        let new_peer = NodeId([3u8; 32]);
+        state.peer_registry.insert(
+            new_peer.clone(),
+            super::tests::peer_advertising(
+                &new_peer,
+                SPEC_WALK_AT_TAIL | FORWARD_SAMPLING | FORWARD_GENERATED_IDS,
+            ),
+        );
+        let fwd = verify_forward_sent_to(state, new_peer, penalised.clone()).await;
+        assert!(fwd.spec_walk_at_tail && fwd.spec_logits_requested);
+        assert_eq!(
+            fwd.draft_tokens,
+            vec![8, 9],
+            "a tail past segment 0 sees no token ids"
+        );
+        assert_eq!(fwd.sampling.as_ref().map(|s| s.temperature), Some(0.7));
+        assert_eq!(
+            fwd.generated_ids,
+            vec![3, 7],
+            "the penalties' history travels"
+        );
+
+        // Sampling and history but not the walk bit: an older peer.
+        let state = super::tests::make_test_state();
+        let old_peer = NodeId([4u8; 32]);
+        state.peer_registry.insert(
+            old_peer.clone(),
+            super::tests::peer_advertising(&old_peer, FORWARD_SAMPLING | FORWARD_GENERATED_IDS),
+        );
+        let fwd = verify_forward_sent_to(state, old_peer, penalised).await;
+        assert!(fwd.spec_logits_requested);
+        assert!(
+            !fwd.spec_walk_at_tail,
+            "an older peer must never see the walk bit"
+        );
+        assert!(
+            fwd.draft_tokens.is_empty() && fwd.sampling.is_none() && fwd.generated_ids.is_empty()
+        );
+    }
+
+    /// `accept` is the one place a verify reply becomes tokens, and what no
+    /// honest tail sends is refused rather than emitted.
+    #[test]
+    fn a_verify_reply_is_accepted_the_same_way_whichever_side_walked() {
+        let greedy = crate::types::SamplingParams {
+            temperature: 0.0,
+            ..Default::default()
+        };
+        let rows = vec![
+            vec![0.1, 5.0, 0.2],
+            vec![7.0, 0.5, 0.3],
+            vec![0.0, 0.1, 9.0],
+        ];
+        // The coordinator walking the logits and a tail that walked them agree.
+        let here = VerifyReply::Logits(rows.clone())
+            .accept(&[1, 2], &greedy, &[])
+            .unwrap();
+        assert_eq!(here, (vec![1], 0, false));
+        let (mut kept, next, _) =
+            crate::inference::sampling::sampled_accept_reject(&[1, 2], &rows, &greedy, &[]);
+        kept.push(next);
+        assert_eq!(
+            VerifyReply::Walked(kept)
+                .accept(&[1, 2], &greedy, &[])
+                .unwrap(),
+            here
+        );
+        // All kept: the bonus follows.
+        assert_eq!(
+            VerifyReply::Walked(vec![1, 2, 5])
+                .accept(&[1, 2], &greedy, &[])
+                .unwrap(),
+            (vec![1, 2], 5, true)
+        );
+
+        // Refused: a "kept" token that was never drafted, more kept than
+        // drafted, an empty walk, too few rows, and non-finite logits — which
+        // the rule used to answer with token 0 as the bonus.
+        assert!(VerifyReply::Walked(vec![9, 4])
+            .accept(&[1, 2], &greedy, &[])
+            .is_err());
+        assert!(VerifyReply::Walked(vec![1, 2, 3, 4])
+            .accept(&[1, 2], &greedy, &[])
+            .is_err());
+        assert!(VerifyReply::Walked(vec![])
+            .accept(&[1, 2], &greedy, &[])
+            .is_err());
+        assert!(VerifyReply::Logits(rows[..2].to_vec())
+            .accept(&[1, 2], &greedy, &[])
+            .is_err());
+        let mut poisoned = rows;
+        poisoned[1][0] = f32::NAN;
+        assert!(VerifyReply::Logits(poisoned)
+            .accept(&[1, 2], &greedy, &[])
+            .is_err());
     }
 }
 

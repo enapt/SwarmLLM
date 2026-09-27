@@ -23,7 +23,7 @@
 //!
 //! This path preserves the SAMPLED DISTRIBUTION, at any temperature. A
 //! draft position is sampled through the real sampler
-//! (`speculative::sampled_accept_reject`) and the draft is kept only
+//! (`sampling::sampled_accept_reject`) and the draft is kept only
 //! when the sampler independently produced the same token — which IS
 //! the speculative-sampling rejection rule for a draft with no
 //! distribution behind it, since accepting with probability `p(x)` and
@@ -41,14 +41,12 @@
 //!
 //! # Cost
 //!
-//! Every round asks the pipeline tail for `spec_logits` — a
-//! full-vocabulary f32 vector per position, ~513 KB on a 128k-vocab
-//! model — including a MISS round, which sends one token and gets a
-//! vocabulary back where an ordinary decode step returns a four-byte
-//! token id and can be chained. `payoff_justifies_the_wire` is what
-//! stops a workload that never hits from paying that indefinitely; the
-//! wire shape itself is still wrong for a miss round and is written up
-//! in `docs/FUTURE_WORK.md`.
+//! A tail that advertises `features::SPEC_WALK_AT_TAIL` walks the drafts
+//! where the logits are and answers with token ids, so a round — hit or
+//! miss — costs a few bytes back. An older tail still returns a
+//! full-vocabulary f32 vector per position (~513 KB on a 128k-vocab model),
+//! including on a MISS round; `payoff_justifies_the_wire` is what stops a
+//! workload that never hits from paying that to such a peer indefinitely.
 
 use crate::error::SwarmError;
 use crate::inference::router::{InferenceOutput, StreamingTokenEvent, StreamingTokenTx};
@@ -179,7 +177,7 @@ pub(super) fn eligible(exec: &PipelineExecutor) -> bool {
     // verifies nothing once sampling is on. It now samples every position through
     // the real sampler and keeps a draft only on a match, which IS the
     // speculative-sampling rejection rule for a draft with no distribution
-    // behind it — see `speculative::sampled_accept_reject`.
+    // behind it — see `sampling::sampled_accept_reject`.
     //
     // The gate mattered: no client asks for greedy by default (0.7 on the
     // OpenAI surface, 1.0 on the Anthropic one), so peer-served requests never
@@ -415,7 +413,12 @@ impl PipelineExecutor {
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let verify_tokens = vec![last_token];
                 let truncate_for_this_round = pending_truncate.take();
-                let spec_logits = super::forward_verify_through_segments(
+                // Sample, not argmax: this is an ordinary decode step that
+                // happens to have gone through the verify wire, and it must
+                // honour the same sampling parameters every other step does.
+                // Walked at the tail where it can be, so a miss round costs a
+                // token id on the wire, not a vocabulary.
+                let (_, bonus, _) = super::forward_verify_through_segments(
                     &self.shared_state,
                     &self.network_tx,
                     request_id,
@@ -423,21 +426,14 @@ impl PipelineExecutor {
                     &self.assignment.segments,
                     &verify_tokens,
                     truncate_for_this_round,
+                    Some(super::TailWalk {
+                        drafts: &[],
+                        sampling: &self.request.sampling_params,
+                        generated: &generated,
+                    }),
                 )
-                .await?;
-                if spec_logits.is_empty() {
-                    finish_reason = "stop".into();
-                    break;
-                }
-                // Sample, not argmax: this is an ordinary decode step that
-                // happens to have gone through the verify wire, and it must
-                // honour the same sampling parameters every other step does.
-                let (_, bonus, _) = super::speculative::sampled_accept_reject(
-                    &[],
-                    &spec_logits,
-                    &self.request.sampling_params,
-                    &generated,
-                );
+                .await?
+                .accept(&[], &self.request.sampling_params, &generated)?;
                 last_token = bonus;
                 generated.push(bonus);
                 current_pos += 1;
@@ -474,7 +470,7 @@ impl PipelineExecutor {
             verify_tokens.extend_from_slice(&drafts);
 
             let truncate_for_this_round = pending_truncate.take();
-            let spec_logits = super::forward_verify_through_segments(
+            let reply = super::forward_verify_through_segments(
                 &self.shared_state,
                 &self.network_tx,
                 request_id,
@@ -482,24 +478,24 @@ impl PipelineExecutor {
                 &self.assignment.segments,
                 &verify_tokens,
                 truncate_for_this_round,
+                Some(super::TailWalk {
+                    drafts: &drafts,
+                    sampling: &self.request.sampling_params,
+                    generated: &generated,
+                }),
             )
             .await?;
-            if spec_logits.len() < drafts.len() + 1 {
-                tracing::warn!(
-                    %request_id,
-                    got = spec_logits.len(),
-                    want = drafts.len() + 1,
-                    "ngram-only: insufficient spec_logits, returning partial"
-                );
-                break;
-            }
-
-            let (accepted, bonus, _all) = super::speculative::sampled_accept_reject(
+            let (accepted, bonus, _all) = match reply.accept(
                 &drafts,
-                &spec_logits,
                 &self.request.sampling_params,
                 &generated,
-            );
+            ) {
+                Ok(decided) => decided,
+                Err(e) => {
+                    tracing::warn!(%request_id, error = %e, "ngram-only: unusable verify reply, returning partial");
+                    break;
+                }
+            };
             let mut emitted: Vec<u32> = accepted
                 .iter()
                 .copied()

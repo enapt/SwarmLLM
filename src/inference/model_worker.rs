@@ -1745,9 +1745,29 @@ async fn handle_forward(
                 }
                 let spec_logits: Vec<Vec<f32>> =
                     flat.chunks_exact(vocab_size).map(<[f32]>::to_vec).collect();
+                // Walk the drafts HERE when asked: the coordinator gets the
+                // tokens it would have derived — by the same function — for a
+                // few bytes instead of a vocabulary per position (608 KB each at
+                // 152K), which on a long link cost more than the round trips
+                // speculation saved (`docs/plans/split_speculation.md`).
+                let token_ids = if fwd.spec_walk_at_tail {
+                    crate::inference::sampling::walk_verified_positions(
+                        &fwd.draft_tokens,
+                        &spec_logits,
+                        &fwd.sampling,
+                        &fwd.generated_ids,
+                    )?
+                } else {
+                    Vec::new()
+                };
+                let spec_logits = if fwd.spec_walk_at_tail {
+                    Vec::new()
+                } else {
+                    spec_logits
+                };
                 return Ok(crate::types::LayerResult {
                     request_id,
-                    token_ids: vec![],
+                    token_ids,
                     finish_reason: None,
                     activations: vec![],
                     sealed_token_ids: None,

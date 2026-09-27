@@ -5355,6 +5355,10 @@ impl ModelProcessPool {
         // Defaulting there preserves the previous behaviour; see the field's
         // documentation on `LayerForward`.
         let forward_sampling = forward.sampling.clone().unwrap_or_default();
+        // A walk IS sampling: without the caller's parameters it would walk
+        // with the defaults, so it is asked for only beside them, and a
+        // forward carrying one without the other gets logits back instead.
+        let walk_with_the_callers_sampler = forward.spec_walk_at_tail && forward.sampling.is_some();
         let model_id = forward.model_id.clone();
         // Loading a model is the long wait nothing was watching. Every cancel
         // checkpoint sat downstream of it, so a client that gave up while its
@@ -5392,6 +5396,7 @@ impl ModelProcessPool {
             adapter_id,
             draft_tokens,
             spec_logits_requested,
+            spec_walk_at_tail: _,
             truncate_kv_to,
             chunk_meta: _,
             sampling: _,
@@ -5428,6 +5433,7 @@ impl ModelProcessPool {
             draft_tokens,
             generated_ids,
             spec_logits_requested,
+            spec_walk_at_tail: walk_with_the_callers_sampler,
             truncate_kv_to,
             for_the_owner: requester == Requester::Owner,
         };
@@ -5610,6 +5616,7 @@ impl ModelProcessPool {
                 adapter_id,
                 draft_tokens,
                 spec_logits_requested,
+                spec_walk_at_tail,
                 truncate_kv_to,
                 chunk_meta: _,
                 // Per-item: a batch can carry forwards from different requests,
@@ -5636,6 +5643,7 @@ impl ModelProcessPool {
                 draft_tokens,
                 generated_ids,
                 spec_logits_requested,
+                spec_walk_at_tail,
                 truncate_kv_to,
                 // Decode steps only (see `dispatch_scheduler_group`); the
                 // owner's mark, if any, was made at the prompt pass.
@@ -6595,6 +6603,7 @@ mod tests {
             adapter_id: None,
             draft_tokens: Vec::new(),
             spec_logits_requested: false,
+            spec_walk_at_tail: false,
             truncate_kv_to: None,
             chunk_meta: None,
             sampling: None,

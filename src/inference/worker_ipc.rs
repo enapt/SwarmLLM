@@ -293,6 +293,10 @@ pub struct IpcForward {
     /// Coordinator wants per-position logit vectors populated on the result.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub spec_logits_requested: bool,
+    /// Walk `draft_tokens` against those logits here and answer with token ids
+    /// (`LayerForward::spec_walk_at_tail`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub spec_walk_at_tail: bool,
     /// KV cache truncation: if `Some(L)`, worker truncates per-request KV to
     /// L sequence positions BEFORE running the forward. Used by speculative
     /// partial-accept fixup.
@@ -827,6 +831,7 @@ mod tests {
             draft_tokens: vec![],
             generated_ids: vec![],
             spec_logits_requested: false,
+            spec_walk_at_tail: false,
             truncate_kv_to: None,
             for_the_owner: false,
         };
@@ -863,6 +868,7 @@ mod tests {
             draft_tokens: vec![],
             generated_ids: vec![],
             spec_logits_requested: false,
+            spec_walk_at_tail: false,
             truncate_kv_to: None,
             for_the_owner,
         };
@@ -901,6 +907,7 @@ mod tests {
             draft_tokens: vec![],
             generated_ids: vec![],
             spec_logits_requested: false,
+            spec_walk_at_tail: false,
             truncate_kv_to: None,
             for_the_owner: false,
         };

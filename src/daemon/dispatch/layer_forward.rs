@@ -355,6 +355,7 @@ pub(super) async fn handle_layer_forward(
                         adapter_id: None,
                         draft_tokens: Vec::new(),
                         spec_logits_requested: false,
+                        spec_walk_at_tail: false,
                         truncate_kv_to: None,
                         chunk_meta: None,
                         // Handed down so the TAIL samples as the caller asked —
@@ -933,6 +934,7 @@ mod chaining_tests {
             adapter_id: None,
             draft_tokens: Vec::new(),
             spec_logits_requested: false,
+            spec_walk_at_tail: false,
             truncate_kv_to: None,
             chunk_meta: None,
             sampling: None,
@@ -1083,6 +1085,7 @@ mod tests {
             adapter_id: None,
             draft_tokens: Vec::new(),
             spec_logits_requested: false,
+            spec_walk_at_tail: false,
             truncate_kv_to: None,
             chunk_meta: None,
             sampling: None,
