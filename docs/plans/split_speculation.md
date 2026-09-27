@@ -295,6 +295,65 @@ for fixed guesses (80.6% vs 70.0% of guesses kept). Round trips on loopback cost
 nothing, so the rig measures tokens per trip, not speed; the WAN run needs the far
 node on this build.
 
+**Measured on the real link 2026-09-28, both ends on v0.3.211** (qwen2.5-coder-7b,
+this RTX 3070 L0-14 in Thailand, bf7b3263's RTX 4050 laptop L14-28 in Belgium,
+min RTT 226-233 ms, forced split, n-gram loop off, 64-token replies, one binary;
+`~/swarmllm-bench-0928/run_wan.sh`, `wan.jsonl`):
+
+| arm | tok/s (median, min-max) | notes |
+|---|---|---|
+| plain split, request-response | **2.86** (2.78-2.99), again **2.78** | V1Lazy on BOTH ends now |
+| plain split, persistent stream | **2.81** (2.77-2.82) | no longer faster — see below |
+| DSD, 3-bit far-half shadow, greedy | **3.35** (2.78-3.48) | warm-up request 7.31 at γ=4; α 0.82-0.91 |
+| DSD, shadow, T=0.7, shared noise | **5.05** (4.91-7.34) | α 0.87-0.91 |
+| DSD, shadow, T=0.7, fixed guesses | **6.06** (4.67-6.50) | α 0.78-0.80 |
+
+- **The persistent stream's edge is gone.** #130 measured it at 351 vs 838
+  ms/token on request-response, then V1Lazy took rr to ~580 with only OUR end on
+  the build. With both ends negotiating V1Lazy, rr and the stream are equal: the
+  far side's REPLY substream paid the remaining round trip (gotcha #743). #133 is
+  now a robustness item only; the default path already runs at the stream's speed.
+- **The far node checked on its PROCESSOR, and γ ran away.** Its check of 15
+  positions cost 1.1-2.8 s a round in the greedy arm (a plain token's ~120 ms of
+  compute fits the same picture). `best_gamma` modelled the check as a constant,
+  saw a long round, and chose γ = 11-16 — making every round longer still: 3.35
+  tok/s against a 7.31 tok/s warm-up request that had run at γ = 4. **Fixed:**
+  `dsd_controller::CheckCost` fits the check as `fixed + per_position × positions`
+  from the rounds, and `best_gamma_for_check` moves γ at most 2 a round so the
+  positions spread enough to fit a slope (Dovetail, arXiv 2412.18934, keeps its
+  processor-side candidate count small for the same reason). Unit-tested against
+  the live shape (230 ms + 95 ms/position → γ settles 2-7, where the constant model
+  climbed past 12). Not yet re-measured on the link.
+- **The arms are not a clean A/B of shared noise.** The far node's check cost
+  drifted between arms (0.42-0.70 s a round in the T=0.7 arms against 1.1-2.8 s in
+  the greedy one — likely its worker moving between processor and card), so the
+  fixed-guess arm's higher speed is the far node, not the coupling. What the arms
+  DO show is the mechanism: guesses kept rose from 0.78-0.80 to 0.87-0.91 with
+  shared noise, as on the rig.
+
+**The shadow's memory — a premise to check before building 4e (2026-09-28).**
+A shadow of the far layers costs the near machine ~76% of those layers at Q4
+(Q3_K is 110 bytes per 256 weights against Q4_K's 144; Q2_K's mix ~66%) PLUS a
+cache for every one of them — full precision in this engine, 393 KB per token
+for a 14B's 48 layers. A machine with that much room could nearly hold the model
+itself, which is exactly what a split is for when it cannot. Modelled on
+consumer cards (card: 0.55 ms per layer, submission-bound; processor: layer bytes
+at 17 GB/s; `docs/plans/faster_than_local.md` §3.3), a shadow does not fit for a
+14B on 8 GB, an 8B on 6 GB, a 24B on 12 GB or a 32B on 16 GB, and every model
+where it does fit already runs mostly on the card. **The measurements above
+split a 7B that fits the 3070 alone** (`pretend_peer_holds`) — they show what a
+shadow buys a round trip, not a machine that has the room for one in the splits
+that happen. The same holds for the card+processor split of one machine, where
+the shadow was built first (engine pieces, tested, parked on local branch
+`shadow-drafter`: requantized far layers on the card sharing the real output
+head, a round of guess-then-one-check-pass, the shadow's cache refreshed from the
+real layers after every round). Before 4e: a shadow needs a cheaper cache (half
+precision, or a window of recent positions) and a regime where the near machine
+has spare memory for its OWN reasons — a split forced by shard availability
+rather than by memory, where fetching the missing shards and running locally is
+the competing answer. A small same-family drafter (Phase 1 item 3; 0.5 GB for a
+0.5B) has no such problem and is the broader lever.
+
 **Stages, cheapest first:**
 - **4a. DSD with a shadow drafter** — config only once v0.3.211 reaches the far
   node (the tail must walk): `draft_model_path` → a shadow GGUF. Measures the
@@ -339,7 +398,10 @@ from overlapping the round trip, so it grows with distance.
 
 Order: 4e before 4b — 4e is what makes shadow speculation usable without hand
 configuration, and it removes the duplicate near-half pass 4b would otherwise
-pay on every chunk.
+pay on every chunk. ⚠ **Revised 2026-09-28: see "The shadow's memory" above
+before building 4e** — the near machine of a split that exists for memory
+reasons has no room for a shadow, so 4b (which works with ANY drafter) and a
+small drafter from the shard system now come first.
 
 **KV refresh — measured: large for a small model, small for a 7B.** The tail
 computes the far layers' exact K/V for every confirmed token anyway; sent back

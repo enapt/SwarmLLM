@@ -106,7 +106,7 @@ impl GammaController {
     /// (A note for anyone relying on the multiplier above: from γ = 4 it can
     /// never grow — even perfect acceptance gives 4 × 1.1 = 4.4, which rounds back
     /// to 4 — so a controller started there stays there. DSD sizes γ with
-    /// [`best_gamma`] instead.)
+    /// [`best_gamma_for_check`] instead.)
     #[cfg(test)]
     pub fn with_tuning(mut self, alpha: f32, beta: f32) -> Self {
         self.alpha = alpha.clamp(0.0, 1.0);
@@ -115,7 +115,7 @@ impl GammaController {
     }
 }
 
-/// The longest guess run [`best_gamma`] will propose.
+/// The longest guess run [`best_gamma_for_check`] will propose.
 pub const BEST_GAMMA_MAX: u32 = 16;
 
 /// Expected tokens one round yields: `γ` drafts, each kept with probability `α`
@@ -127,23 +127,108 @@ pub fn expected_tokens_per_round(alpha: f64, gamma: u32) -> f64 {
     (1.0 - a.powi(gamma as i32 + 1)) / (1.0 - a)
 }
 
-/// The guess-run length that maximizes tokens per SECOND for a round that costs
-/// `round_fixed_ms` (the verify: its round trip and the far layers' pass) plus
-/// `draft_ms_each` per guess drafted — Leviathan et al. §3.4's choice of γ, with
-/// the costs MEASURED rather than assumed. On a long link the fixed cost dominates
-/// and long runs pay (≈12 at a 300 ms trip, 25 ms drafts, α = 0.92); where the
-/// round trip is nearly free, drafting dominates and short runs win.
-pub fn best_gamma(alpha: f64, round_fixed_ms: f64, draft_ms_each: f64) -> u32 {
-    let fixed = round_fixed_ms.max(0.1);
+/// What a check costs as a line in the positions it reads:
+/// `fixed + per_position × positions`, fitted from measured rounds.
+///
+/// **Why a line and not a constant.** The controller this replaced
+/// (`best_gamma`, Leviathan et al. §3.4 with the costs measured) treated the
+/// check as a fixed cost — right for a round trip beside a card that reads 15
+/// positions as fast as 5, wrong for a check that runs on a PROCESSOR, where
+/// reading more positions costs more. Measured on the live TH↔BE split 2026-09-28
+/// (`~/swarmllm-bench-0928`), the far node checking on its processor: the
+/// constant model saw a 1.4 s round, answered γ = 14-16, and every round then
+/// cost 1.1-2.8 s — 3.35 tok/s against a 7.3 tok/s warm-up that had run at
+/// γ = 4. Dovetail (arXiv 2412.18934) names the same trap for verifying on a
+/// processor and keeps its candidate count small for it.
+///
+/// Weighted least squares with forgetting (each new round weighs 1, older
+/// ones decay by [`CheckCost::DECAY`]), so a node whose load changes is
+/// re-learned in a few rounds. A slope needs rounds of DIFFERENT lengths:
+/// until the positions have spread, [`CheckCost::predict`] answers the mean
+/// cost — the constant model — and [`best_gamma_for_check`] moves γ at most
+/// [`GAMMA_STEP`] per round, which is what produces the spread.
+#[derive(Debug, Clone, Default)]
+pub struct CheckCost {
+    w: f64,
+    x: f64,
+    y: f64,
+    xx: f64,
+    xy: f64,
+}
+
+/// The most [`best_gamma_for_check`] moves γ in one round: far enough to
+/// learn the check's slope from the next round, near enough that a wrong
+/// guess about it costs one slow round, not a reply's worth.
+pub const GAMMA_STEP: u32 = 2;
+
+impl CheckCost {
+    const DECAY: f64 = 0.8;
+
+    pub fn record(&mut self, positions: u32, ms: f64) {
+        let d = Self::DECAY;
+        let x = f64::from(positions);
+        self.w = self.w * d + 1.0;
+        self.x = self.x * d + x;
+        self.y = self.y * d + ms;
+        self.xx = self.xx * d + x * x;
+        self.xy = self.xy * d + x * ms;
+    }
+
+    /// The fitted `(fixed, per_position)`, or `None` before any round. The
+    /// slope is 0 until the positions have spread (variance under a quarter of
+    /// a position squared) and never negative — a check that reads more cannot
+    /// cost less, and a noisy fit saying so must not make long runs look free.
+    pub fn fit(&self) -> Option<(f64, f64)> {
+        if self.w <= 0.0 {
+            return None;
+        }
+        let mx = self.x / self.w;
+        let my = self.y / self.w;
+        let var = self.xx / self.w - mx * mx;
+        if var < 0.25 {
+            return Some((my, 0.0));
+        }
+        let slope = ((self.xy / self.w - mx * my) / var).max(0.0);
+        Some(((my - slope * mx).max(0.0), slope))
+    }
+
+    /// Predicted cost of a check reading `positions`.
+    pub fn predict(&self, positions: u32) -> Option<f64> {
+        self.fit()
+            .map(|(fixed, slope)| fixed + slope * f64::from(positions))
+    }
+}
+
+/// The guess-run length that maximizes tokens per SECOND (Leviathan et al.
+/// §3.4's choice of γ, with the costs MEASURED rather than assumed) for a check
+/// whose cost is the fitted line in the positions it reads — γ guesses and the
+/// token they follow — plus `draft_ms_each` per guess, moved at most
+/// [`GAMMA_STEP`] from `current` (see [`CheckCost`]). A long link with a check
+/// that costs the same at any length climbs to long runs (≈12 at a 300 ms
+/// trip, 25 ms drafts, α = 0.92); a free round trip, or a check that grows
+/// with every position, settles short.
+pub fn best_gamma_for_check(
+    alpha: f64,
+    check: &CheckCost,
+    draft_ms_each: f64,
+    current: u32,
+    max: u32,
+) -> u32 {
+    let Some((fixed, slope)) = check.fit() else {
+        return current;
+    };
     let each = draft_ms_each.max(0.0);
-    (1..=BEST_GAMMA_MAX)
+    let lo = current.saturating_sub(GAMMA_STEP).max(1);
+    let hi = (current + GAMMA_STEP).min(max).max(lo);
+    (lo..=hi)
         .map(|g| {
-            (
-                g,
-                expected_tokens_per_round(alpha, g) / (fixed + each * f64::from(g)),
-            )
+            let cost = (fixed + slope * f64::from(g + 1)).max(0.1) + each * f64::from(g);
+            (g, expected_tokens_per_round(alpha, g) / cost)
         })
-        .fold((1, f64::MIN), |best, c| if c.1 > best.1 { c } else { best })
+        .fold(
+            (lo, f64::MIN),
+            |best, c| if c.1 > best.1 { c } else { best },
+        )
         .0
 }
 
@@ -194,16 +279,71 @@ mod tests {
         assert!((expected_tokens_per_round(1.0, 8) - 9.0).abs() < 1e-3);
     }
 
+    /// Where γ settles against a check costing `check_ms(positions)`, from 4.
+    fn settle(alpha: f64, check_ms: impl Fn(u32) -> f64, draft_ms: f64) -> u32 {
+        let mut check = CheckCost::default();
+        let mut g = 4;
+        for _ in 0..30 {
+            check.record(g + 1, check_ms(g + 1));
+            g = best_gamma_for_check(alpha, &check, draft_ms, g, BEST_GAMMA_MAX);
+        }
+        g
+    }
+
     /// A long link wants long runs, a free round trip short ones — the whole point
-    /// of measuring the costs instead of fixing γ.
+    /// of measuring the costs instead of fixing γ. A check that costs the same at
+    /// any length climbs there one step at a time.
     #[test]
     fn a_long_round_trip_buys_a_long_run_and_a_free_one_a_short_run() {
-        let wan = best_gamma(0.92, 300.0, 25.0);
+        let wan = settle(0.92, |_| 300.0, 25.0);
         assert!((10..=14).contains(&wan), "300 ms trip: {wan}");
-        let lan = best_gamma(0.92, 5.0, 40.0);
+        let lan = settle(0.92, |_| 5.0, 40.0);
         assert!(lan <= 2, "a 5 ms trip beside 40 ms drafts: {lan}");
         // Poor agreement shortens the run whatever the link.
-        assert!(best_gamma(0.5, 300.0, 25.0) < wan);
+        assert!(settle(0.5, |_| 300.0, 25.0) < wan);
+    }
+
+    /// The live case: a check on a processor, ~95 ms per position over a 230 ms
+    /// round trip. From γ = 4 the controller explores up, sees the rounds get
+    /// dearer, and settles short — never at the 14-16 the constant model chose.
+    #[test]
+    fn a_check_that_grows_with_its_positions_settles_on_a_short_run() {
+        let true_cost = |positions: u32| 230.0 + 95.0 * f64::from(positions);
+        let mut check = CheckCost::default();
+        let mut g = 4;
+        for _ in 0..30 {
+            check.record(g + 1, true_cost(g + 1));
+            g = best_gamma_for_check(0.9, &check, 20.0, g, BEST_GAMMA_MAX);
+        }
+        let (fixed, slope) = check.fit().unwrap();
+        assert!(
+            (slope - 95.0).abs() < 1.0 && (fixed - 230.0).abs() < 5.0,
+            "{fixed} + {slope}x"
+        );
+        assert!((2..=7).contains(&g), "settled at {g}");
+        // Read as a constant (the controller this replaced), the same first
+        // round's cost climbs to a long run.
+        assert!(settle(0.9, |_| true_cost(5), 20.0) >= 12);
+    }
+
+    #[test]
+    fn gamma_moves_at_most_one_step_per_round() {
+        // A dear check and cheap, good guesses: longer is better — one step.
+        let mut dear = CheckCost::default();
+        dear.record(5, 5000.0);
+        assert_eq!(
+            best_gamma_for_check(0.99, &dear, 1.0, 4, 16),
+            4 + GAMMA_STEP
+        );
+        // A cheap check and dear, poor guesses: shorter is better — one step,
+        // and never below one guess.
+        let mut cheap = CheckCost::default();
+        cheap.record(9, 5.0);
+        assert_eq!(
+            best_gamma_for_check(0.1, &cheap, 1000.0, 8, 16),
+            8 - GAMMA_STEP
+        );
+        assert_eq!(best_gamma_for_check(0.1, &cheap, 1000.0, 1, 16), 1);
     }
 
     #[test]

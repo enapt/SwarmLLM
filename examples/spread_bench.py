@@ -68,6 +68,7 @@ ap.add_argument("--order", choices=["interleave", "blocks"], default="interleave
 ap.add_argument("--rounds", type=int, default=1, help="--order blocks: repeat the block sequence")
 ap.add_argument("--log", default=os.path.expanduser("~/.local/share/swarmllm/node.log"))
 ap.add_argument("--unload-also", default="", help="--order blocks: other model ids to unload before each block")
+ap.add_argument("--temperature", type=float, default=0.0, help="sampling temperature sent with every request (default greedy)")
 args = ap.parse_args()
 
 KEY = open(os.environ.get("SWARMLLM_API_KEY_FILE", os.path.expanduser("~/.local/share/swarmllm/api_key"))).read().strip()
@@ -250,7 +251,7 @@ def unload_here():
 def one(route, prompt):
     start = log_size()
     body = {"model": args.model, "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": MAX_TOKENS, "temperature": 0, "stream": True,
+            "max_tokens": MAX_TOKENS, "temperature": args.temperature, "stream": True,
             "stream_options": {"include_usage": True}}
     if route:
         body["swarm_route"] = route

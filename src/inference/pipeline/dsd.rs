@@ -63,7 +63,9 @@ use super::speculative::{
 };
 use super::PipelineExecutor;
 #[cfg(feature = "llama")]
-use crate::inference::dsd_controller::{best_gamma, AcceptanceEstimate};
+use crate::inference::dsd_controller::{
+    best_gamma_for_check, AcceptanceEstimate, CheckCost, BEST_GAMMA_MAX,
+};
 
 /// Fast-path preconditions for the DSD coordinator loop.
 #[cfg(feature = "llama")]
@@ -120,12 +122,16 @@ impl PipelineExecutor {
         let max_tokens = self.request.sampling_params.max_tokens;
         let initial_gamma = self.shared_state.cfg().inference.speculative_gamma.max(2);
         // γ is chosen each round from MEASURED costs (Leviathan et al. §3.4):
-        // the verify's fixed cost — its round trip and the far layers' pass — and
-        // the time per drafted guess, against the running acceptance. A long link
-        // makes long runs pay; a free round trip makes them waste drafting. The
-        // multiplicative controller this replaced could never leave γ = 4.
+        // the verify's cost as a line in the positions it reads — its round
+        // trip, plus what the far layers charge per position, which is ~0 on a
+        // card and dominant on a processor (`CheckCost`) — and the time per
+        // drafted guess, against the running acceptance. A long link makes long
+        // runs pay; a free round trip, or a far node checking on its processor,
+        // makes them waste. The multiplicative controller this replaced could
+        // never leave γ = 4; the constant-cost one after it ran a processor
+        // check at γ = 14-16 and 1.1-2.8 s a round.
         let mut acceptance = AcceptanceEstimate::new();
-        let mut round_fixed_ms: Option<f64> = None;
+        let mut check = CheckCost::default();
         let mut draft_ms_each: Option<f64> = None;
         let ema = |old: Option<f64>, new: f64| Some(old.map_or(new, |o| 0.7 * o + 0.3 * new));
         let mut gamma_now = initial_gamma;
@@ -241,8 +247,14 @@ impl PipelineExecutor {
                 break;
             }
             let remaining = max_tokens - generated.len() as u32;
-            if let (Some(fixed), Some(each)) = (round_fixed_ms, draft_ms_each) {
-                gamma_now = best_gamma(acceptance.alpha(), fixed, each);
+            if let Some(each) = draft_ms_each {
+                gamma_now = best_gamma_for_check(
+                    acceptance.alpha(),
+                    &check,
+                    each,
+                    gamma_now,
+                    BEST_GAMMA_MAX,
+                );
             }
             let gamma = gamma_now.min(remaining).max(1);
             let round_start = std::time::Instant::now();
@@ -436,7 +448,10 @@ impl PipelineExecutor {
             acceptance.record(accepted.len() as u32, drafts.len() as u32);
             let draft_ms = (drafted_at - round_start).as_secs_f64() * 1000.0;
             draft_ms_each = ema(draft_ms_each, draft_ms / drafts.len().max(1) as f64);
-            round_fixed_ms = ema(round_fixed_ms, drafted_at.elapsed().as_secs_f64() * 1000.0);
+            check.record(
+                verify_tokens.len() as u32,
+                drafted_at.elapsed().as_secs_f64() * 1000.0,
+            );
 
             // Sync draft KV.
             tokio::task::block_in_place(|| {
@@ -481,7 +496,8 @@ impl PipelineExecutor {
             accepted = acceptance_accepted,
             final_gamma = gamma_now,
             alpha = format_args!("{:.3}", acceptance.alpha()),
-            round_fixed_ms = format_args!("{:.1}", round_fixed_ms.unwrap_or(0.0)),
+            check_fixed_ms = format_args!("{:.1}", check.fit().map_or(0.0, |f| f.0)),
+            check_ms_per_position = format_args!("{:.1}", check.fit().map_or(0.0, |f| f.1)),
             draft_ms_each = format_args!("{:.1}", draft_ms_each.unwrap_or(0.0)),
             "DSD: request complete"
         );
