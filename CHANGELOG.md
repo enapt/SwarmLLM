@@ -32,16 +32,32 @@ reply guesses several tokens and the computer holding the last layers checks
 them, it used to send back its full scores for every guessed position — 2.5 MB
 for five guesses — and over a long link that cost more than the guessing saved.
 It now checks the guesses itself, with your own sampling settings, and sends
-back the tokens it kept: under 60 bytes. Replies are unchanged. The draft-model
-form of this (off by default) also works at any temperature now, not only 0.
+back the tokens it kept: under 60 bytes. Replies are unchanged.
+
+**Guessing ahead now works at the temperatures chats actually use.** At
+temperature 0.7 or 1.0 a guess used to be accepted only when the checking
+computer's own random draw happened to land on it. For a request that guesses
+ahead, both computers now draw from one shared random stream (offered only to
+computers running this version), so a guesser close to the real model
+reproduces the real model's draw — while each still draws an exact sample of its
+own model, so replies are exactly as random as before. How far to guess is now
+chosen each round from what a round actually costs: far ahead across a slow
+link, little on a fast one (it used to be stuck at 4).
+
+**For people with a spare low-bit copy of a model** (off by default, set up by
+hand for now): the draft-model form of guessing ahead (`speculative_decoding`
+and `decentralized_spec_decoding`, with `draft_model_path`) works with a
+3-bit copy of the model itself as the guesser. On a two-computer test rig it
+produced 3.8 tokens per network round trip at temperature 0 and 4.1 at 0.7,
+where a split without it produces 1, with replies scored against llama.cpp
+unchanged. Across a long internet link each round trip saved is worth roughly
+a quarter to a third of a second.
 
 **What is next for split speed**, measured and written up in
 `docs/plans/faster_than_local.md` and `docs/plans/split_speculation.md`: a
-low-bit copy of the far computer's layers guesses its next token 92-94% of the
-time on a 7B model, and sharing the random numbers both sides sample with keeps
-that true at normal chat temperatures. Sending the far computer's exact cache
-back to the copy helps small models far more than large ones: 39% fewer misses
-on a 1.7B model, 8% on the 7B.
+3-bit copy of the far computer's layers guesses a 7B model's next token 92-94%
+of the time; the next step keeps guessing while an answer is still travelling,
+and then the copy arrives from the network instead of by hand.
 
 ## [0.3.210-alpha] — 2026-09-27
 
