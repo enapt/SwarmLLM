@@ -60,15 +60,19 @@ impl PipelineExecutor {
         }
 
         // SWARM-SPEC Layer 1 (R136): n-gram-only spec path, no draft
-        // model required. Runs BEFORE remote_generate fast path because
-        // n-gram hit-rate on code/RAG (99% / 96% from synthetic bench)
-        // accepts multiple tokens per round, which beats remote_generate's
-        // one-token-per-RTT throughput when the workload is
-        // input-grounded. Falls through (Ok(None)) when ngram is disabled, a
-        // draft model is configured, the assignment is empty or entirely
-        // local, the request is otherwise disqualified, no tokenizer is
-        // loaded, or — since the measurement below — the loop has not been
-        // accepting enough tokens per round to pay for the logits it returns.
+        // model required, for plans with more than one segment. A plan the
+        // remote_generate fast path below will take is NOT this path's: that
+        // hands the whole generation to the one peer holding the model, which
+        // decodes and speculates on its own card and streams the reply — it
+        // is not "one token per round trip", which is what this used to say,
+        // and running this loop first cost the first such request after every
+        // restart ~14x (0.78 vs 10.7-11.1 tok/s, one peer 443 ms away,
+        // 2026-09-27). Falls through (Ok(None)) when ngram is disabled, a
+        // draft model is configured, the assignment is empty, entirely local
+        // or remote_generate's, the request is otherwise disqualified, no
+        // tokenizer is loaded, or — since the measurement below — the loop has
+        // not been accepting enough tokens per round to pay for the logits it
+        // returns.
         //
         // This comment used to say it also fell through when "segments aren't
         // 1". It never did, and the difference is expensive: on a multi-segment

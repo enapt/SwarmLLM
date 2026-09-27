@@ -295,7 +295,10 @@ pub(super) fn hole_wait(peer_latency_ms: Option<u32>) -> Duration {
 }
 
 /// Preconditions for the fast path. All checks are local and cheap.
-fn eligible(exec: &PipelineExecutor) -> bool {
+/// Will the whole-model hand-off take this plan? The single answer — the n-gram
+/// loop, which runs earlier in `execute_distributed`, asks it too and stands
+/// aside for every plan this says yes to.
+pub(super) fn eligible(exec: &PipelineExecutor) -> bool {
     // Shared disqualifiers: TP, LoRA adapter, vision images.
     if super::fastpath_request_disqualified(exec) {
         return false;
@@ -314,7 +317,17 @@ fn eligible(exec: &PipelineExecutor) -> bool {
     // automatic case (`encrypted_pipeline_auto`, the default), so a model with
     // privacy in force did not disqualify the fast path here — the path that
     // puts the RAW PROMPT on the wire to a peer.
-    let encrypted_for_model = exec.shared_state.encrypted_pipeline_for(model_id);
+    //
+    // The REQUEST form, which is the one the scheduler planned with: under a
+    // `swarm_route` override that releases this node's shards, the automatic
+    // default steps aside (an explicit per-model or global setting still
+    // applies — `encrypted_pipeline_for_request`). Asking the model-only form
+    // here disagreed with the plan: the scheduler handed the whole model to one
+    // peer, and this refused the hand-off, so the request ran one round trip
+    // per token instead (2026-09-27, the spread benchmark's peer arm).
+    let encrypted_for_model = exec
+        .shared_state
+        .encrypted_pipeline_for_request(model_id, exec.request.id);
     // `encrypted_pipeline` forces local embedding (no raw tokens on wire).
     // `local_embedding_privacy` is similar. Both bypass the fast path.
     if encrypted_for_model || exec.shared_state.config.inference.local_embedding_privacy {

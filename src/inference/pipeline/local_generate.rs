@@ -238,6 +238,81 @@ mod tests {
         }
     }
 
+    /// **The whole-model hand-off and the n-gram loop agree about who runs a
+    /// single remote segment** — and the hand-off agrees with the scheduler about
+    /// privacy.
+    ///
+    /// The node holds both ends of `m`, so automatic prompt privacy is ON and the
+    /// hand-off — which puts the raw prompt on the wire — must refuse (control).
+    /// Under a `swarm_route` override releasing every shard, the scheduler plans
+    /// with privacy OFF (the automatic default steps aside), and the hand-off
+    /// must take the plan it was given: asking the model-only form refused it,
+    /// and the request ran one round trip per token (2026-09-27). Whenever the
+    /// hand-off takes a plan, the n-gram loop — which runs first — must not.
+    #[tokio::test]
+    async fn a_single_remote_segment_is_the_hand_offs_and_never_the_n_gram_loops() {
+        let state = crate::inference::pipeline::tests::make_test_state();
+        register_whole_model(&state, 32, 2);
+        // A tokenizer, so the n-gram loop's own preconditions pass and a refusal
+        // below is the hand-off check's, not "no tokenizer".
+        let tokenizer = crate::inference::split::GgufTokenizerMeta {
+            vocab: ["<unk>", "<s>", "</s>", "a", "b", "c"]
+                .map(String::from)
+                .to_vec(),
+            scores: vec![0.0; 6],
+            tokenizer_model: "llama".into(),
+            ..Default::default()
+        }
+        .build_tokenizer()
+        .expect("a sentencepiece vocabulary builds");
+        state
+            .standalone_tokenizers
+            .insert(ModelId("m".into()), Arc::new(tokenizer));
+        let peer = NodeId([7u8; 32]);
+        let local = state.identity.node_id().clone();
+
+        // The positive control for the n-gram assertion at the end: a SPLIT —
+        // which the hand-off never takes — is the loop's to run in this fixture.
+        let split = executor_for(
+            state.clone(),
+            vec![segment(local, (0, 16)), segment(peer.clone(), (16, 32))],
+        );
+        assert!(
+            crate::inference::pipeline::ngram_only_spec::eligible(&split),
+            "fixture: the n-gram loop's own preconditions are met"
+        );
+
+        let exec = executor_for(state.clone(), vec![segment(peer.clone(), (0, 32))]);
+        assert!(
+            state.encrypted_pipeline_for(&ModelId("m".into())),
+            "fixture: this node holds both ends, so automatic privacy is on"
+        );
+        assert!(
+            !crate::inference::pipeline::remote_generate::eligible(&exec),
+            "the control: with privacy on, the raw prompt must not be handed over"
+        );
+
+        let exec = executor_for(state.clone(), vec![segment(peer, (0, 32))]);
+        state.note_route_plan_override(
+            exec.request.id,
+            crate::inference::route_override::RoutePlanOverride {
+                pretend_local_holds: Some(
+                    crate::inference::route_override::PretendLocalHolds::Nothing,
+                ),
+                exclude_node_prefixes: vec![],
+            },
+        );
+        assert!(
+            crate::inference::pipeline::remote_generate::eligible(&exec),
+            "planned as if this node held nothing: the hand-off takes it, as the \
+             scheduler that planned it assumed"
+        );
+        assert!(
+            !crate::inference::pipeline::ngram_only_spec::eligible(&exec),
+            "a plan the hand-off takes is never the per-round-trip loop's"
+        );
+    }
+
     /// A plan that names this node for the whole model is a local generate.
     /// Before this, it was a `LayerForward` per token into our own worker —
     /// the one path that never consults the prefix cache (report #018).

@@ -160,7 +160,7 @@ fn record_payoff(accepted_tokens: u32, rounds: u32) {
 }
 
 /// Fast-path preconditions for the draft-free n-gram-only spec loop.
-fn eligible(exec: &PipelineExecutor) -> bool {
+pub(super) fn eligible(exec: &PipelineExecutor) -> bool {
     // The LIVE config, not the boot snapshot. Every read here used to come from
     // `shared_state.config`, so turning n-gram lookup off in Settings changed
     // nothing until the daemon was restarted (gotcha #281).
@@ -195,6 +195,18 @@ fn eligible(exec: &PipelineExecutor) -> bool {
         .iter()
         .all(|s| s.node_id == *local_node_id)
     {
+        return false;
+    }
+    // Nor a plan the whole-model hand-off will run. `remote_generate` gives the
+    // one peer holding the model the whole generation: it decodes on its own
+    // card — speculating there with its OWN n-gram lookup
+    // (`model_worker::ngram_spec_eligible`), where a miss costs nothing on the
+    // wire — and streams the reply back. This loop pays a round trip per round,
+    // so over a single remote segment it can only lose. Measured on the live
+    // node against one peer 443 ms away (2026-09-27): this loop 0.78 tok/s,
+    // the hand-off 10.7-11.1. Asked through the hand-off's own predicate, so
+    // the two cannot disagree about which plans it takes.
+    if super::remote_generate::eligible(exec) {
         return false;
     }
     if super::fastpath_request_disqualified(exec) {
