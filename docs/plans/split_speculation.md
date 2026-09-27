@@ -307,6 +307,38 @@ node on this build.
   requantized from the Q4 shard, deterministic, so any node of the same build can
   check one by recomputing it), never an implicit full download.
 
+**The next batch, designed 2026-09-27 (after v0.3.211):**
+
+*4e first — the drafter in OUR engine.* DSD drafts with llama.cpp from a whole
+GGUF file, which production must not assemble from shards (CLAUDE.md) and which
+duplicates the near layers in memory (the rig's 3-bit half-shadow of a 7B is
+3.6 GB beside the worker's own copy of the same near layers). In our engine the
+head worker already holds the REAL near layers; it adds the far layers at Q3
+(shadow shards, requantized from the Q4 shards — dequantize, then candle's
+k-quant quantizer) plus the final norm and output head, and one pass does both
+jobs: the real near layers produce the exact hidden state the tail needs, the
+shadow layers produce the guess. A guess and its verify input then cost ONE
+near-half pass, not two, and the near cache is written once — truncated on a
+rejection exactly as today. Worker op: "draft γ and hold" returning the guesses
+and their near-half hidden states; coordinator: send those states to the tail
+directly instead of re-running segment 0.
+
+*4b — the continuous stream.* Rounds in flight need several outstanding verifies
+per request, and `SharedState::pending_layer_results` is
+`DashMap<Uuid, PendingLayerResult>` — one waiter per request, ~55 references in 9
+files. Re-key it by (request, `ExpectedStep`) with a request-wide fallback for a
+result that names no step (an older peer), so a late result of a discarded chunk
+is refused by step, never by luck. Then chunks of a few guesses stream
+continuously; a chunk carries the hash of the path it assumes (FlowSpec's
+"continuous condition"), and both sides discard work built on a prefix the tail
+has rejected — no cancel message needed. Projected on the 300 ms link with the
+3-bit shadow: ~20 tok/s against ~14.5 for the best round-based γ; the gain comes
+from overlapping the round trip, so it grows with distance.
+
+Order: 4e before 4b — 4e is what makes shadow speculation usable without hand
+configuration, and it removes the duplicate near-half pass 4b would otherwise
+pay on every chunk.
+
 **KV refresh — measured: large for a small model, small for a 7B.** The tail
 computes the far layers' exact K/V for every confirmed token anyway; sent back
 (~28 KB/token for a 7B), the shadow attends over an EXACT history and
