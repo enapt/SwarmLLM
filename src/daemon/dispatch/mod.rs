@@ -64,6 +64,21 @@ fn max_concurrent_forwards(contribution: &swarmllm_types::ContributionMode) -> u
 fn max_forwards_per_peer(contribution: &swarmllm_types::ContributionMode) -> usize {
     (max_concurrent_forwards(contribution) / 2).max(4)
 }
+
+/// May a forward that STARTS a request (a prompt pass, `sequence_num == 0`) take
+/// a slot, with `available` of `total` node-wide slots free?
+///
+/// Only while a quarter of the slots (at least one) stays free: that reserve is
+/// for the next steps of requests already running here, which the node-wide cap
+/// used to refuse like any newcomer — so under load a reply that had been
+/// running for minutes could lose its next token to a request that had not
+/// started (#123). vLLM draws the same line: a running sequence is not evicted
+/// to admit a waiting one. A forward that claims to continue a request is
+/// sender-chosen, so claiming it only reaches the reserve; the per-peer cap and
+/// the node-wide cap still bound it.
+fn admits_a_new_request(available: usize, total: usize) -> bool {
+    available > (total / 4).max(1)
+}
 /// Per-peer counts of work in flight here, keyed by the authenticated sender.
 type PeerWorkCounts = Arc<dashmap::DashMap<crate::types::NodeId, std::sync::atomic::AtomicUsize>>;
 
@@ -701,6 +716,22 @@ pub(crate) async fn dispatch_network_messages(
                                             ));
                                             continue;
                                         };
+                                        if forward.sequence_num == 0
+                                            && !admits_a_new_request(forward_semaphore.available_permits(), forward_limit)
+                                        {
+                                            drop(peer_slot);
+                                            tracing::warn!(
+                                                sender = %peer_sender,
+                                                "LayerForward rejected — the rest is kept for requests already running here"
+                                            );
+                                            tokio::spawn(layer_forward::refuse_forward(
+                                                shared_state.clone(),
+                                                network_tx.clone(),
+                                                layer_forward::RefusalAddress::of(&forward),
+                                                peer_work_refusal(),
+                                            ));
+                                            continue;
+                                        }
                                         let permit = match forward_semaphore.clone().try_acquire_owned() {
                                             Ok(p) => p,
                                             Err(_) => {
@@ -888,6 +919,16 @@ pub(crate) async fn dispatch_network_messages(
                                             remote_generate::refuse_request(network_tx.clone(), &req, peer_work_refusal());
                                             continue;
                                         };
+                                        // A whole-model generation always starts a request.
+                                        if !admits_a_new_request(forward_semaphore.available_permits(), forward_limit) {
+                                            drop(peer_slot);
+                                            tracing::warn!(
+                                                sender = %peer_sender,
+                                                "RemoteGenerateRequest rejected — the rest is kept for requests already running here"
+                                            );
+                                            remote_generate::refuse_request(network_tx.clone(), &req, peer_work_refusal());
+                                            continue;
+                                        }
                                         let permit = match forward_semaphore.clone().try_acquire_owned() {
                                             Ok(p) => p,
                                             Err(_) => {
@@ -936,6 +977,14 @@ pub(crate) async fn dispatch_network_messages(
                                             );
                                             continue;
                                         };
+                                        if !admits_a_new_request(forward_semaphore.available_permits(), forward_limit) {
+                                            drop(peer_slot);
+                                            tracing::warn!(
+                                                sender = %peer_sender,
+                                                "VisionEncodeRequest rejected — the rest is kept for requests already running here"
+                                            );
+                                            continue;
+                                        }
                                         let permit = match forward_semaphore.clone().try_acquire_owned() {
                                             Ok(p) => p,
                                             Err(_) => {
@@ -3302,6 +3351,30 @@ mod inbound_forward_slot_tests {
             Some(1),
             "another peer's count must be untouched"
         );
+    }
+
+    /// A request that has not started yet may not take the slots that running
+    /// requests' next steps need (#123): a quarter of the node's slots, at least
+    /// one, stays free for them, at every contribution level.
+    #[test]
+    fn a_new_request_leaves_a_reserve_for_running_ones() {
+        use super::admits_a_new_request;
+        // Minimal: 8 slots, 2 kept.
+        assert!(admits_a_new_request(8, 8));
+        assert!(admits_a_new_request(3, 8));
+        assert!(
+            !admits_a_new_request(2, 8),
+            "the last two slots are for requests already running"
+        );
+        assert!(!admits_a_new_request(0, 8));
+        // Moderate: 24, 6 kept. Maximum: 64, 16 kept.
+        assert!(admits_a_new_request(7, 24));
+        assert!(!admits_a_new_request(6, 24));
+        assert!(admits_a_new_request(17, 64));
+        assert!(!admits_a_new_request(16, 64));
+        // A tiny node still keeps one.
+        assert!(admits_a_new_request(2, 2));
+        assert!(!admits_a_new_request(1, 2));
     }
 
     /// One peer holds at most its limit of work, whatever kind; the limit is its

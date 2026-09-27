@@ -318,8 +318,10 @@ consumed by one party. What serving nodes enforce on requesters today:
 - **A concurrency cap per requester** on every kind of work a peer can ask for —
   tensor forwards, whole-model generation, image encoding — of half the node's
   total, floored at 4, inside a node-wide cap set by the owner's contribution
-  level (8 / 24 / 64 at Minimal / Moderate / Maximum). A tensor forward or a
-  whole-model request over either cap is refused with a reply at once, so the
+  level (8 / 24 / 64 at Minimal / Moderate / Maximum). A request that has not
+  started yet may not take the last quarter of those slots — they are kept for
+  the next steps of requests already running. A tensor forward or a whole-model
+  request over any of these limits is refused with a reply at once, so the
   requester can go elsewhere (an image-encoding request cannot be told no yet;
   its requester waits out a timeout).
 - **The owner's contribution level bounds what the swarm can take**: processor

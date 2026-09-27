@@ -2276,3 +2276,14 @@ control): between the two nodes carrying the change, the capability arrived
 arrived **4.9-5.4 s** after — all within one gossip heartbeat, i.e. from the mesh
 cache, not the 30 s broadcast. Cost: one message per new connection (~7 an hour
 on an 8-peer node).
+
+### Running requests keep a reserve (2026-09-27, #123)
+
+`dispatch::admits_a_new_request(available, total)`: a forward that starts a
+request (`sequence_num == 0`), a whole-model generation or an image encode takes a
+slot only while more than `max(1, total / 4)` are free. Under load the node-wide
+cap used to refuse a running reply's next step like any newcomer. A sender can
+claim to be mid-request, and that only reaches the reserve — both caps still bound
+it. Per-request admission proper needs an end-of-request signal; why, and in what
+order, is in `docs/FUTURE_WORK.md` #123. Test:
+`a_new_request_leaves_a_reserve_for_running_ones`.

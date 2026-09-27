@@ -283,6 +283,9 @@ were uncounted and could hold every permit), and a refusal is **answered**:
 `peer_work_refusal()` so the coordinator bars the peer and re-plans without
 retracting its shards. A spawned refusal carries the ADDRESS, never the payload.
 An image-encode refusal still cannot be said (no error field; #123).
+**A request that has not started keeps its hands off the last quarter of the
+slots** (`admits_a_new_request`) — those are for running requests' next steps.
+Real per-request admission needs an end-of-request signal first (FUTURE_WORK #123).
 
 → `docs/invariants/network.md` § "Work a serving node will not run is refused OUT LOUD"
 
