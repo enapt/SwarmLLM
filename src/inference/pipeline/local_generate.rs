@@ -300,6 +300,7 @@ mod tests {
                     crate::inference::route_override::PretendLocalHolds::Nothing,
                 ),
                 exclude_node_prefixes: vec![],
+                peer_holds: vec![],
             },
         );
         assert!(

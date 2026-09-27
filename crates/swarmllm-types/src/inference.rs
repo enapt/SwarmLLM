@@ -1077,6 +1077,13 @@ pub struct RoutePlanOverride {
     /// the same short form the logs, the diagnostics report and the peer list
     /// all print, so a node can be excluded by copying it off a screen.
     pub exclude_node_prefixes: Vec<String>,
+    /// Per peer (a hex prefix, as above): plan as though that peer held only
+    /// these shards. The peer-side sibling of `pretend_local_holds`, and like it
+    /// only ever SHRINKS the candidate set — which is how a benchmark makes the
+    /// two-machine split it wants to measure the only plan there is, while the
+    /// plan itself is still the search's.
+    #[serde(default)]
+    pub peer_holds: Vec<(String, PretendLocalHolds)>,
 }
 
 impl RoutePlanOverride {
@@ -1085,7 +1092,9 @@ impl RoutePlanOverride {
     /// Checked before the map is consulted at all, so an override that parsed to
     /// no instruction costs the scheduler nothing.
     pub fn is_noop(&self) -> bool {
-        self.pretend_local_holds.is_none() && self.exclude_node_prefixes.is_empty()
+        self.pretend_local_holds.is_none()
+            && self.exclude_node_prefixes.is_empty()
+            && self.peer_holds.is_empty()
     }
 
     /// Should this node be treated as holding `shard_index` of the model?
@@ -1100,6 +1109,27 @@ impl RoutePlanOverride {
             Some(PretendLocalHolds::Nothing) => false,
             Some(PretendLocalHolds::Shards(start, end)) => {
                 shard_index >= start && shard_index <= end
+            }
+        }
+    }
+
+    /// Should `node_id` — a PEER — be treated as holding `shard_index`? True
+    /// unless a `peer_holds` entry names it; the first entry whose prefix
+    /// matches decides.
+    pub fn peer_holds_shard(&self, node_id: &NodeId, shard_index: u32) -> bool {
+        if self.peer_holds.is_empty() {
+            return true;
+        }
+        let hex = hex::encode(node_id.0);
+        match self
+            .peer_holds
+            .iter()
+            .find(|(prefix, _)| hex.starts_with(prefix.as_str()))
+        {
+            None | Some((_, PretendLocalHolds::Everything)) => true,
+            Some((_, PretendLocalHolds::Nothing)) => false,
+            Some((_, PretendLocalHolds::Shards(start, end))) => {
+                shard_index >= *start && shard_index <= *end
             }
         }
     }

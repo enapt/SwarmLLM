@@ -12,10 +12,11 @@ An ARM is `label[:key=val,...]`, turned into the request's `swarm_route` field:
   only=P1+P2           exclude EVERY other node that holds a part of MODEL or is
                        connected, so the planner can use only this node and P1, P2
   exclude=P1+P2        exclude just these (prefixes of node ids, >= 4 hex chars)
-`swarm_route` only ever makes the candidate set smaller (inference/route_override.rs),
-so an arm cannot force a shape the planner would not choose: a split arm needs
-`inference.parallax_partial_ranges = true` on the node when the peer holds the
-whole model (a whole holder otherwise offers one indivisible range).
+  peer=P:A-B           plan as though peer P held only shards A-B (`pretend_peer_holds`)
+                       — with holds=0-(A-1) this makes a two-machine split the ONLY plan
+`swarm_route` only ever makes the candidate set smaller (inference/route_override.rs).
+To measure a split between two machines that could each hold the model, restrict
+BOTH: `holds=0-3,only=P,peer=P:4-7` leaves the split as the only plan (#738).
 
 Method, and why each part is there:
 - Arms are INTERLEAVED, rotating the order every rep, so drift in the swarm or on
@@ -106,6 +107,9 @@ def parse_arm(spec, nodes):
             route["exclude_nodes"] = sorted(n[:16] for n in nodes if not any(n.startswith(p) for p in keep))
         elif k == "exclude":
             route["exclude_nodes"] = v.split("+")
+        elif k == "peer":
+            node, _, holds = v.partition(":")
+            route.setdefault("pretend_peer_holds", {})[node] = holds
         else:
             sys.exit(f"arm {spec!r}: unknown key {k!r}")
     return label, route

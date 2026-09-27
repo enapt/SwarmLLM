@@ -2378,3 +2378,22 @@ samples, which outrank the fallback.
 Test: `a_cold_prefill_sample_times_a_load_and_does_not_rank` (the live
 numbers; red with the fallback pointed back at the cold-inclusive coefficient),
 beside `a_cold_segment_still_sizes_the_timeout`, which keeps the timeout half.
+
+## A split between two machines that could each run the model is measured by restricting BOTH (2026-09-27)
+
+**`swarm_route.pretend_peer_holds` — `{"<prefix>": "4-7"}` — plans as though
+that peer held only those shards**, the peer-side sibling of
+`pretend_local_holds`, same grammar and 400s (`route_override::parse_holdings`,
+`parse_node_prefix`), applied in `gather_candidates` beside `excludes_peer`. It
+only SHRINKS the candidate set, so the override's contract holds: the plan is
+still the search's, over a smaller input.
+
+**Why it exists.** The spread benchmark had two GPUs (RTX 3070, RTX 4050) that
+could each hold a 7B/8B. Every unrestricted plan was one machine — the search is
+right to prefer that — so there was no split to measure, and `exclude_nodes`
+cannot help (excluding the peer removes it from the split too). Restricting us
+to shards 0-3 and the peer to 4-7 leaves the split as the only route. Test:
+`restricting_a_peer_to_the_upper_shards_forces_a_two_machine_split`, with the
+control that restricting only ourselves does NOT produce that split; red with
+the filter removed. ⚠ It is a measurement tool: a plan forced this way is
+evidence about what a split COSTS, never about what the router would choose.

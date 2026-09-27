@@ -33,6 +33,13 @@
 //! about routing. Excluding the peers that hold the whole model is the honest
 //! way to get a multi-hop route: the search then has to chain partial holders,
 //! and the plan it produces is a real one.
+//!
+//! **Restricting a peer (`pretend_peer_holds`) is the same move, one machine
+//! over**, and it is what measuring a split needs when every candidate could
+//! hold the model: two GPUs that can each run it will never be chained by a
+//! search that is free to use one (2026-09-27 — no exclusion could produce the
+//! split to measure). Ours restricted to shards 0-3 and the peer to 4-7, the
+//! search still chooses — over an input where the split is the only route.
 
 use serde::{Deserialize, Serialize};
 
@@ -48,6 +55,12 @@ pub struct SwarmRouteRequest {
     pub pretend_local_holds: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub exclude_nodes: Vec<String>,
+    /// Per peer, a node-id prefix mapped to what it may be asked for: `"none"`,
+    /// a shard index, or an inclusive range — the grammar of
+    /// `pretend_local_holds`, applied to someone else. `{"bf7b": "4-7"}` plans as
+    /// though that peer held shards 4-7 only.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub pretend_peer_holds: std::collections::BTreeMap<String, String>,
 }
 
 /// Longest node-id prefix a caller may give, in hex characters.
@@ -74,37 +87,52 @@ impl SwarmRouteRequest {
     pub fn parse(&self) -> Result<RoutePlanOverride, SwarmError> {
         let pretend_local_holds = match self.pretend_local_holds.as_deref() {
             None => None,
-            Some(s) => Some(parse_pretend_local_holds(s)?),
+            Some(s) => Some(parse_holdings(s, "pretend_local_holds")?),
         };
 
-        let mut exclude_node_prefixes = Vec::with_capacity(self.exclude_nodes.len());
-        for raw in &self.exclude_nodes {
-            let p = raw.trim().to_ascii_lowercase();
-            if p.len() < MIN_PREFIX_HEX || p.len() > MAX_PREFIX_HEX {
-                return Err(SwarmError::Validation(format!(
-                    "swarm_route.exclude_nodes: '{raw}' is {} characters; give between \
-                     {MIN_PREFIX_HEX} and {MAX_PREFIX_HEX} hex characters of a node id \
-                     (the peer list prints 16)",
-                    p.len()
-                )));
-            }
-            if !p.chars().all(|c| c.is_ascii_hexdigit()) {
-                return Err(SwarmError::Validation(format!(
-                    "swarm_route.exclude_nodes: '{raw}' is not hexadecimal — a node id is \
-                     hex, as printed by the peer list and the diagnostics report"
-                )));
-            }
-            exclude_node_prefixes.push(p);
+        let exclude_node_prefixes = self
+            .exclude_nodes
+            .iter()
+            .map(|raw| parse_node_prefix(raw, "exclude_nodes"))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut peer_holds = Vec::with_capacity(self.pretend_peer_holds.len());
+        for (raw_node, raw_holds) in &self.pretend_peer_holds {
+            peer_holds.push((
+                parse_node_prefix(raw_node, "pretend_peer_holds")?,
+                parse_holdings(raw_holds, "pretend_peer_holds")?,
+            ));
         }
 
         Ok(RoutePlanOverride {
             pretend_local_holds,
             exclude_node_prefixes,
+            peer_holds,
         })
     }
 }
 
-fn parse_pretend_local_holds(s: &str) -> Result<PretendLocalHolds, SwarmError> {
+/// A node-id prefix as the peer list prints it, or the reason it is not one.
+fn parse_node_prefix(raw: &str, field: &str) -> Result<String, SwarmError> {
+    let p = raw.trim().to_ascii_lowercase();
+    if p.len() < MIN_PREFIX_HEX || p.len() > MAX_PREFIX_HEX {
+        return Err(SwarmError::Validation(format!(
+            "swarm_route.{field}: '{raw}' is {} characters; give between \
+             {MIN_PREFIX_HEX} and {MAX_PREFIX_HEX} hex characters of a node id \
+             (the peer list prints 16)",
+            p.len()
+        )));
+    }
+    if !p.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(SwarmError::Validation(format!(
+            "swarm_route.{field}: '{raw}' is not hexadecimal — a node id is \
+             hex, as printed by the peer list and the diagnostics report"
+        )));
+    }
+    Ok(p)
+}
+
+fn parse_holdings(s: &str, field: &str) -> Result<PretendLocalHolds, SwarmError> {
     let t = s.trim().to_ascii_lowercase();
     match t.as_str() {
         "all" | "everything" => return Ok(PretendLocalHolds::Everything),
@@ -116,7 +144,7 @@ fn parse_pretend_local_holds(s: &str) -> Result<PretendLocalHolds, SwarmError> {
         if let (Ok(start), Ok(end)) = (a.trim().parse::<u32>(), b.trim().parse::<u32>()) {
             if start > end {
                 return Err(SwarmError::Validation(format!(
-                    "swarm_route.pretend_local_holds: '{s}' runs backwards — the range is \
+                    "swarm_route.{field}: '{s}' runs backwards — the range is \
                      inclusive and written low-high, as in '0-3'"
                 )));
             }
@@ -128,7 +156,7 @@ fn parse_pretend_local_holds(s: &str) -> Result<PretendLocalHolds, SwarmError> {
         return Ok(PretendLocalHolds::Shards(only, only));
     }
     Err(SwarmError::Validation(format!(
-        "swarm_route.pretend_local_holds: '{s}' is not one of 'all', 'none', a shard index \
+        "swarm_route.{field}: '{s}' is not one of 'all', 'none', a shard index \
          such as '2', or an inclusive range such as '0-3'"
     )))
 }
@@ -142,6 +170,7 @@ mod tests {
         SwarmRouteRequest {
             pretend_local_holds: holds.map(str::to_string),
             exclude_nodes: exclude.iter().map(|s| s.to_string()).collect(),
+            pretend_peer_holds: Default::default(),
         }
     }
 
@@ -216,6 +245,56 @@ mod tests {
         assert!(o.local_holds(2));
         assert!(o.local_holds(4), "the range is inclusive at the top");
         assert!(!o.local_holds(5));
+    }
+
+    /// **A peer restricted to a range is asked for that range only** — the
+    /// peer-side sibling of `pretend_local_holds`, same grammar, same 400s. It is
+    /// how a benchmark makes a two-machine split the ONLY plan: the search still
+    /// makes it, over a smaller input (2026-09-27 — with two cards that could each
+    /// hold the model, no other override could produce a split to measure).
+    #[test]
+    fn a_peer_can_be_restricted_to_a_range_of_shards() {
+        let mut bytes = [0u8; 32];
+        bytes[0] = 0xbf;
+        bytes[1] = 0x7b;
+        let peer = NodeId(bytes);
+        let other = NodeId([0x11u8; 32]);
+        let mut r = req(Some("0-3"), &[]);
+        r.pretend_peer_holds.insert("BF7B".into(), " 4-7 ".into());
+        let o = r.parse().unwrap();
+        assert!(!o.is_noop());
+        assert!(!o.peer_holds_shard(&peer, 3));
+        assert!(o.peer_holds_shard(&peer, 4));
+        assert!(o.peer_holds_shard(&peer, 7), "inclusive at the top");
+        assert!(!o.peer_holds_shard(&peer, 8));
+        assert!(
+            o.peer_holds_shard(&other, 0) && o.peer_holds_shard(&other, 15),
+            "a peer the override does not name is untouched"
+        );
+        // Restricting a peer says nothing about us.
+        assert!(o.local_holds(3) && !o.local_holds(4));
+
+        // Alone, it is still an instruction — the scheduler must not skip it.
+        let mut only = req(None, &[]);
+        only.pretend_peer_holds.insert("bf7b".into(), "none".into());
+        let o = only.parse().unwrap();
+        assert!(!o.is_noop() && !o.peer_holds_shard(&peer, 0));
+
+        for (node, holds) in [
+            ("zz", "4-7"),
+            ("bf7b", "7-4"),
+            ("bf7b", "sometimes"),
+            ("", "1"),
+        ] {
+            let mut bad = req(None, &[]);
+            bad.pretend_peer_holds.insert(node.into(), holds.into());
+            let err = bad.parse().unwrap_err();
+            assert!(
+                matches!(err, SwarmError::Validation(_))
+                    && err.to_string().contains("pretend_peer_holds"),
+                "'{node}': '{holds}' should be a 400 naming the field, got {err:?}"
+            );
+        }
     }
 
     /// The prefix is matched against the same hex spelling the peer list and

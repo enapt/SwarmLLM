@@ -3206,7 +3206,9 @@ impl PipelineScheduler {
                         if !o.local_holds(shard.index) {
                             continue;
                         }
-                    } else if o.excludes_peer(&node_id) {
+                    } else if o.excludes_peer(&node_id)
+                        || !o.peer_holds_shard(&node_id, shard.index)
+                    {
                         continue;
                     }
                 }

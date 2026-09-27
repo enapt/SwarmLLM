@@ -5532,3 +5532,108 @@ fn a_replan_after_a_local_refusal_does_not_plan_past_the_local_bound_again() {
         replan.map(|a| a.segments)
     );
 }
+
+/// **`pretend_peer_holds` makes a two-machine split the only plan there is.**
+/// Both this node and the peer hold every shard, so any unrestricted plan is one
+/// machine — and a benchmark of what a split COSTS had nothing to measure
+/// (2026-09-27, two GPUs each able to hold the model). Restricting us to shards
+/// 0-3 and the peer to 4-7 leaves exactly one route; the search still makes it.
+/// The control: with the peer unrestricted, the plan is not that split.
+#[test]
+fn restricting_a_peer_to_the_upper_shards_forces_a_two_machine_split() {
+    let state = make_shared_state();
+    let local_id = state.identity.node_id().clone();
+    let model = ModelId("split-me".into());
+    let shards: Vec<ShardInfo> = (0..8u32)
+        .map(|i| ShardInfo {
+            index: i,
+            layer_range: (i * 4, i * 4 + 4),
+            size_bytes: 500_000_000,
+            hash: [0u8; 32],
+            tensors: vec![],
+        })
+        .collect();
+    state
+        .model_registry
+        .register_manifest(make_manifest("split-me", 32, shards));
+    let mut peer_bytes = [0u8; 32];
+    peer_bytes[0] = 0xbf;
+    peer_bytes[1] = 0x7b;
+    let peer = NodeId(peer_bytes);
+    for i in 0..8u32 {
+        for holder in [&local_id, &peer] {
+            state.model_registry.record_shard_holder(
+                ShardId {
+                    model_id: model.clone(),
+                    index: i,
+                },
+                holder.clone(),
+            );
+        }
+    }
+    state.peer_registry.insert(
+        peer.clone(),
+        PeerInfo {
+            node_id: peer.clone(),
+            addresses: vec![],
+            capability: None,
+            last_seen: chrono::Utc::now(),
+            latency_ms: Some(40),
+            trust_score: 0.8,
+            peer_id_bytes: None,
+            ack_srtt_ms: None,
+            active_request_count: 0,
+            first_seen: 0,
+            verified_transaction_count: 0,
+            is_lan_peer: false,
+            goodput_bytes_per_sec: None,
+            goodput_samples: 0,
+        },
+    );
+    state.connected_node_ids.insert(peer.clone());
+    let scheduler = PipelineScheduler::new(state.clone());
+    let plan = |request_id: uuid::Uuid| {
+        scheduler
+            .assemble_pipeline_for(&model, &local_id, request_id, Purpose::Route, None)
+            .unwrap()
+            .segments
+            .iter()
+            .map(|s| (s.node_id.clone(), s.layer_range))
+            .collect::<Vec<_>>()
+    };
+    let forced_split = vec![(local_id.clone(), (0, 16)), (peer.clone(), (16, 32))];
+
+    // The control: we restrict only ourselves; the peer holds everything and
+    // the search is free to choose something other than the split.
+    let control = uuid::Uuid::new_v4();
+    state.note_route_plan_override(
+        control,
+        crate::inference::route_override::RoutePlanOverride {
+            pretend_local_holds: Some(crate::inference::route_override::PretendLocalHolds::Shards(
+                0, 3,
+            )),
+            ..Default::default()
+        },
+    );
+    assert_ne!(
+        plan(control),
+        forced_split,
+        "fixture: without restricting the peer, the split is not the only plan"
+    );
+
+    let request = uuid::Uuid::new_v4();
+    state.note_route_plan_override(
+        request,
+        crate::inference::route_override::RoutePlanOverride {
+            pretend_local_holds: Some(crate::inference::route_override::PretendLocalHolds::Shards(
+                0, 3,
+            )),
+            peer_holds: vec![(
+                "bf7b".into(),
+                crate::inference::route_override::PretendLocalHolds::Shards(4, 7),
+            )],
+            ..Default::default()
+        },
+    );
+    assert_eq!(plan(request), forced_split);
+}
