@@ -3438,7 +3438,9 @@ async fn handle_draft(
     let gamma = d.gamma as usize;
     if keep == 0 {
         // The first call reads the whole prompt: admit it as a prompt, with
-        // room for the reply's guesses, before any memory is claimed.
+        // room for the reply's guesses, before any memory is claimed. A later
+        // call is cut back to `keep` by `draft_after`, which refuses a cache
+        // holding less.
         ensure_room_for_prompt(
             model,
             kv_store,
@@ -3447,8 +3449,6 @@ async fn handle_draft(
             d.append.len(),
             reply_reserve_positions(d.sampling.max_tokens, gamma.saturating_add(1)),
         )?;
-    } else {
-        kv_store.truncate_request_to(model.kv_model_key(), &req, keep)?;
     }
     let noise = d
         .coupling_seed

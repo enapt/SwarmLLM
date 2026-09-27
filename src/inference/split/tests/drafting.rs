@@ -184,3 +184,63 @@ fn with_shared_noise_a_guess_is_the_draw_plain_sampling_makes() {
     }
     assert_eq!(guesses, drawn);
 }
+
+/// A call that continues a context this worker no longer holds is refused —
+/// the entry expired, or the worker was replaced — never read on top of an
+/// empty or shorter cache, which would guess from a context never written and
+/// fail nothing.
+#[test]
+fn a_call_continuing_a_context_the_cache_no_longer_holds_is_refused() {
+    let mut model = whole_model();
+    let kv = KvCacheStore::new(std::time::Duration::from_secs(60));
+    let seq: Vec<u32> = vec![3, 1, 4, 1, 5, 9, 2, 6];
+    let d1 = model
+        .draft_after(&kv, "g", 0, &seq, 3, &greedy(), &[], None, 0, None)
+        .unwrap();
+    // The check kept one guess and sampled the next token itself.
+    let valid = seq.len() + 1;
+    let append = [d1[1] ^ 1];
+
+    kv.truncate_request_to(model.kv_model_key(), "g", 4)
+        .unwrap();
+    let shorter = model.draft_after(&kv, "g", valid, &append, 2, &greedy(), &[], None, 0, None);
+    assert!(matches!(
+        shorter,
+        Err(crate::error::SwarmError::ServiceUnavailable(_))
+    ));
+
+    kv.clear_request(model.kv_model_key(), "g");
+    let gone = model.draft_after(&kv, "g", valid, &append, 2, &greedy(), &[], None, 0, None);
+    assert!(matches!(
+        gone,
+        Err(crate::error::SwarmError::ServiceUnavailable(_))
+    ));
+}
+
+/// A first read starts from nothing, whatever an earlier call that failed
+/// part-way left in the request's cache.
+#[test]
+fn a_first_read_starts_from_nothing_whatever_an_earlier_call_left() {
+    let mut model = whole_model();
+    let kv = KvCacheStore::new(std::time::Duration::from_secs(60));
+    model
+        .draft_after(
+            &kv,
+            "s",
+            0,
+            &[1, 2, 3, 4, 5],
+            4,
+            &greedy(),
+            &[],
+            None,
+            0,
+            None,
+        )
+        .unwrap();
+    let seq: Vec<u32> = vec![9, 8, 7, 6, 200, 17];
+    let again = model
+        .draft_after(&kv, "s", 0, &seq, 3, &greedy(), &[], None, 0, None)
+        .unwrap();
+    assert_eq!(again, fresh(&mut model, &seq, 3));
+    assert_eq!(cache_len(&model, &kv, "s"), seq.len() + 2);
+}

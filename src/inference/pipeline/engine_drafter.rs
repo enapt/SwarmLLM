@@ -205,7 +205,7 @@ pub(super) fn read_ahead(
     prompt_ids: Vec<u32>,
     sampling: &SamplingParams,
     cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
-) -> tokio::task::JoinHandle<Result<Vec<u32>, SwarmError>> {
+) -> ReadAhead {
     let d = IpcDraft {
         request_id,
         model_id: spec.model_id.clone(),
@@ -219,7 +219,74 @@ pub(super) fn read_ahead(
         for_the_owner: true,
         stop_below: None,
     };
-    tokio::spawn(async move { state.model_process_pool.draft(d, cancel).await })
+    let release = state.clone();
+    ReadAhead::new(
+        tokio::spawn(async move { state.model_process_pool.draft(d, cancel).await }),
+        Box::new(move || {
+            Box::pin(async move {
+                release
+                    .model_process_pool
+                    .release_request_kv(request_id)
+                    .await
+            })
+        }),
+    )
+}
+
+/// What a dropped [`ReadAhead`] runs once its call has finished.
+type Release = Box<dyn FnOnce() -> futures::future::BoxFuture<'static, ()> + Send>;
+
+/// A [`read_ahead`] in flight, owned by the request that started it.
+///
+/// Awaited by [`Self::finish`] on the path that uses it. On every other path —
+/// the prompt pass failing, a fallback to another loop — it is dropped, and a
+/// dropped `JoinHandle` detaches its task (gotcha #146): the call runs on, and
+/// the cache it leaves on the drafter's worker outlives the request, because
+/// the request's one `release_request_kv` goes only to the workers in the pool
+/// at that moment, which need not yet include the drafter's. So dropping this
+/// lets the call finish — not an abort, which part-way through the drafter's
+/// load would abandon a spawning worker (gotcha #459) — and then releases the
+/// request's cache itself. A type whose `Drop` runs, not a statement after an
+/// `.await` (gotcha #593).
+pub(super) struct ReadAhead {
+    handle: Option<tokio::task::JoinHandle<Result<Vec<u32>, SwarmError>>>,
+    release: Option<Release>,
+}
+
+impl ReadAhead {
+    fn new(
+        handle: tokio::task::JoinHandle<Result<Vec<u32>, SwarmError>>,
+        release: Release,
+    ) -> Self {
+        Self {
+            handle: Some(handle),
+            release: Some(release),
+        }
+    }
+
+    /// Wait for the read-ahead: `None` only if it has already been taken.
+    pub(super) async fn finish(
+        mut self,
+    ) -> Option<Result<Result<Vec<u32>, SwarmError>, tokio::task::JoinError>> {
+        match self.handle.take() {
+            Some(h) => Some(h.await),
+            None => None,
+        }
+    }
+}
+
+impl Drop for ReadAhead {
+    fn drop(&mut self) {
+        let (Some(h), Some(release)) = (self.handle.take(), self.release.take()) else {
+            return;
+        };
+        if let Ok(rt) = tokio::runtime::Handle::try_current() {
+            rt.spawn(async move {
+                let _ = h.await;
+                release().await;
+            });
+        }
+    }
 }
 
 /// One request's drafting state on this side of the worker IPC.
@@ -499,5 +566,66 @@ mod tests {
         d.push(&[9]);
         assert_eq!(d.valid(), 4);
         assert_eq!(&d.seq[d.valid..], &[9]);
+    }
+    fn flagged_release(flag: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Release {
+        Box::new(move || {
+            Box::pin(async move { flag.store(true, std::sync::atomic::Ordering::SeqCst) })
+        })
+    }
+
+    /// A read-ahead nobody waits for — the prompt pass failed, or the request
+    /// fell back to another loop — is left to FINISH (aborting it part-way
+    /// through a load abandons a spawning worker) and then releases the
+    /// request's cache on the drafter's worker, which the request's own
+    /// release may have missed.
+    #[tokio::test]
+    async fn a_read_ahead_nobody_waits_for_finishes_then_releases_the_cache() {
+        use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+        use std::sync::Arc;
+        let released = Arc::new(AtomicBool::new(false));
+        let finished = Arc::new(AtomicBool::new(false));
+        let (go, wait) = tokio::sync::oneshot::channel::<()>();
+        let done = finished.clone();
+        let ra = ReadAhead::new(
+            tokio::spawn(async move {
+                let _ = wait.await;
+                done.store(true, SeqCst);
+                Ok(Vec::new())
+            }),
+            flagged_release(released.clone()),
+        );
+        drop(ra);
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(
+            !released.load(SeqCst),
+            "not while its call is still running"
+        );
+        go.send(()).unwrap();
+        for _ in 0..100 {
+            if released.load(SeqCst) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            finished.load(SeqCst),
+            "the call ran to its end, not aborted"
+        );
+        assert!(released.load(SeqCst), "and the cache it left was released");
+    }
+
+    /// The path that uses the read-ahead waits for it and releases nothing —
+    /// the reply's own cache is the drafter's from then on.
+    #[tokio::test]
+    async fn a_read_ahead_that_was_waited_for_releases_nothing() {
+        use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+        let released = std::sync::Arc::new(AtomicBool::new(false));
+        let ra = ReadAhead::new(
+            tokio::spawn(async { Ok(vec![7]) }),
+            flagged_release(released.clone()),
+        );
+        assert!(matches!(ra.finish().await, Some(Ok(Ok(ref t))) if t == &vec![7]));
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(!released.load(SeqCst));
     }
 }

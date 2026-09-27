@@ -1103,6 +1103,22 @@ impl KvCacheStore {
             .is_some_and(|entry| entry.holds_state())
     }
 
+    /// How many positions a request's cache holds: the fewest any layer
+    /// holds, so a pass that stopped part-way never reads as whole. `0` when
+    /// there is no entry.
+    pub(crate) fn request_positions(&self, model_key: &str, request_id: &str) -> usize {
+        let key = Self::cache_key(model_key, request_id);
+        self.caches.get(key.as_str()).map_or(0, |entry| {
+            entry
+                .layers
+                .iter()
+                .flatten()
+                .map(|kv| kv.current_seq_len())
+                .min()
+                .unwrap_or(0)
+        })
+    }
+
     /// Truncate a request's KV cache (all layers) to `target_len`. No-op if
     /// no entry is present. Used by the speculative-decoding partial-accept
     /// fixup on the segment holder.

@@ -10,9 +10,15 @@ use super::model::SplitModel;
 impl SplitModel {
     /// Read `append` into this request's cache from position `keep`, then guess
     /// `gamma` tokens, reading each back in so the next can follow it — all but
-    /// the last, which nothing has followed yet. The caller has already cut the
-    /// cache back to `keep`; afterwards it holds `keep + append.len() + gamma - 1`
-    /// positions.
+    /// the last, which nothing has followed yet. The cache is cut back to `keep`
+    /// first; afterwards it holds `keep + append.len() + gamma - 1` positions.
+    ///
+    /// A cache holding FEWER than `keep` positions is refused, not read on top
+    /// of: the call continues a context this worker no longer has — the entry
+    /// expired while other rounds drafted, or the worker was replaced — and
+    /// reading `append` at position `keep` over it would guess from a context
+    /// that was never written, with nothing failing. Refused, the reply goes
+    /// on without guessing (`pipeline::dsd`, `drafting_off`).
     ///
     /// A guess is the token that will occupy position `keep + append.len() + j`.
     /// With `noise` it is drawn the way the target's sampler will draw that
@@ -44,6 +50,16 @@ impl SplitModel {
         prefill_chunk_tokens: usize,
         stop_below: Option<f32>,
     ) -> Result<Vec<u32>, SwarmError> {
+        let held = kv.request_positions(self.kv_model_key(), request_id);
+        if held < keep {
+            return Err(SwarmError::ServiceUnavailable(format!(
+                "the guessing model holds {held} positions of this reply, not the {keep} \
+                 this call continues from — its cache expired or its worker was replaced"
+            )));
+        }
+        // Also empties a first read's cache (`keep` 0) of whatever an earlier
+        // call that failed part-way left in it.
+        kv.truncate_request_to(self.kv_model_key(), request_id, keep)?;
         let first = keep + append.len();
         let input = self.tensor_from_ids(append)?;
         let mut logits = self.forward_prompt_in_chunks(

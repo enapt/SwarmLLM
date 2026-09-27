@@ -237,14 +237,15 @@ impl PipelineExecutor {
                     // On failure the first round reads the prompt instead; a
                     // drafter that cannot read at all is caught there, with
                     // the fallback.
-                    match h.await {
-                        Ok(Ok(_)) => e.prompt_read(),
-                        Ok(Err(err)) => tracing::debug!(
+                    match h.finish().await {
+                        None => {}
+                        Some(Ok(Ok(_))) => e.prompt_read(),
+                        Some(Ok(Err(err))) => tracing::debug!(
                             %request_id,
                             error = %err,
                             "DSD: the drafter's read-ahead failed — the first round reads the prompt"
                         ),
-                        Err(err) => tracing::debug!(
+                        Some(Err(err)) => tracing::debug!(
                             %request_id,
                             error = %err,
                             "DSD: the drafter's read-ahead task ended — the first round reads the prompt"
