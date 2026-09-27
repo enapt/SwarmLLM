@@ -95,7 +95,7 @@ impl PipelineExecutor {
 
         let request_id = self.request.id;
         let max_tokens = self.request.sampling_params.max_tokens;
-        let gamma = self.shared_state.config.inference.speculative_gamma.max(1);
+        let gamma = self.shared_state.config.inference.guesses_per_check();
 
         // Peer / segment info (single-segment path).
         let segment = self.assignment.segments[0].clone();

@@ -93,7 +93,7 @@ booted with.
 | `max_batch_size` | integer | `8` | How many requests run through the model together, amortising the weight reads that dominate a decode step. Measured on an RTX 3070 with llama-3.2-3b using per-request rates: no cost at any concurrency, about 3% at eight concurrent requests and about 16% at twelve — the gain grows with load. Neutral on a processor (6-core i5-10500T, llama-3.2-1b). Set to `1` to disable |
 | `batch_timeout_ms` | integer | `50` | Ms to wait for additional requests before dispatching a partial batch. `0` = dispatch immediately (purely opportunistic batching) |
 | `speculative_decoding` | boolean | `false` | Enable speculative decoding |
-| `speculative_gamma` | integer | `4` | Draft tokens per verification step |
+| `speculative_gamma` | integer | `4` | Draft tokens per verification step; values above 16 are treated as 16, the most another computer accepts in one check with room to spare. With a model split across computers this is only the starting point — the count is then chosen each round from what checks and guesses actually cost |
 | `draft_model_path` | path | none | Path to draft model |
 | `draft_model` | string | none | A model this node holds (its id) to guess ahead with when a request is split across computers (`decentralized_spec_decoding`), run from its own parts in SwarmLLM's engine. Unset: the largest held model that shares the target's vocabulary and is at most a quarter of its size |
 | `max_split_model_memory_mb` | integer | none | Max GPU memory for split model cache |

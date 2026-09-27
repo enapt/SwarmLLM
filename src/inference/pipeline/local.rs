@@ -215,7 +215,7 @@ impl PipelineExecutor {
         if self.shared_state.config.inference.speculative_decoding {
             let mut draft = self.shared_state.draft_executor.lock().await;
             if draft.is_loaded() {
-                let gamma = self.shared_state.config.inference.speculative_gamma;
+                let gamma = self.shared_state.config.inference.guesses_per_check();
                 let mut executor = self.shared_state.executor.lock().await;
                 if !executor.is_loaded() {
                     return Err(SwarmError::NoModelLoaded);

@@ -305,7 +305,7 @@ impl Daemon {
                 match draft.load_model(draft_path, draft_gpu_layers) {
                     Ok(()) => tracing::info!(
                         draft_model = %draft.model_name(),
-                        gamma = self.config.inference.speculative_gamma,
+                        gamma = self.config.inference.guesses_per_check(),
                         "Draft model loaded for speculative decoding"
                     ),
                     Err(e) => tracing::warn!(

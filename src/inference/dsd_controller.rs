@@ -11,8 +11,9 @@
 //! "dynamic window" that rounding pinned at γ = 4, and a constant-cost choice
 //! that drove a processor-bound check to γ = 14-16 (2026-09-28).
 
-/// The longest guess run [`best_gamma_for_check`] will propose.
-pub const BEST_GAMMA_MAX: u32 = 16;
+/// The longest guess run [`best_gamma_for_check`] will propose — the same cap
+/// every speculating path reads through `InferenceConfig::guesses_per_check`.
+pub const BEST_GAMMA_MAX: u32 = crate::config::MAX_GUESSES_PER_CHECK;
 
 /// Expected tokens one round yields: `γ` drafts, each kept with probability `α`
 /// while every one before it was kept, plus the token sampled where they stop —
@@ -110,6 +111,11 @@ pub fn best_gamma_for_check(
     current: u32,
     max: u32,
 ) -> u32 {
+    // A starting γ from configuration may lie outside [1, max]; the answer
+    // never does — past `max` a verify can exceed what a peer accepts on the
+    // wire (`protocol::MAX_DRAFT_TOKENS`).
+    let max = max.max(1);
+    let current = current.clamp(1, max);
     let Some((fixed, slope)) = check.fit() else {
         return current;
     };
@@ -220,6 +226,23 @@ mod tests {
         // Read as a constant (the controller this replaced), the same first
         // round's cost climbs to a long run.
         assert!(settle(0.9, |_| true_cost(5), 20.0) >= 12);
+    }
+
+    /// A configured starting γ past the cap is brought inside it at once, with
+    /// or without a measurement to go on.
+    #[test]
+    fn a_starting_gamma_past_the_cap_is_clamped() {
+        assert_eq!(
+            best_gamma_for_check(0.9, &CheckCost::default(), 10.0, 40, 16),
+            16
+        );
+        let mut check = CheckCost::default();
+        check.record(41, 300.0);
+        assert!(best_gamma_for_check(0.99, &check, 1.0, 40, 16) <= 16);
+        assert_eq!(
+            best_gamma_for_check(0.9, &CheckCost::default(), 10.0, 0, 16),
+            1
+        );
     }
 
     #[test]

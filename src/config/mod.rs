@@ -802,6 +802,18 @@ mod tests {
         assert_eq!(config.inference.session_timeout_seconds, 600);
     }
 
+    /// A configured guess count past what a peer accepts is brought inside
+    /// the cap; the default is untouched.
+    #[test]
+    fn the_guess_count_stays_inside_the_wire_cap() {
+        let mut c = InferenceConfig::default();
+        assert_eq!(c.guesses_per_check(), 4);
+        c.speculative_gamma = 40;
+        assert_eq!(c.guesses_per_check(), MAX_GUESSES_PER_CHECK);
+        c.speculative_gamma = 0;
+        assert_eq!(c.guesses_per_check(), 1);
+    }
+
     /// `SWARMLLM_LOGGING_LEVEL` was accepted and never consulted: the log
     /// filter read the config file alone. Flags > env > file > default.
     #[test]

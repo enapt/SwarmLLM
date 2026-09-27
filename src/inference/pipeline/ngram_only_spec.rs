@@ -377,7 +377,7 @@ impl PipelineExecutor {
 
         let live = self.shared_state.cfg();
         let cfg = &live.inference;
-        let max_draft = cfg.ngram_num_pred_tokens.min(cfg.speculative_gamma);
+        let max_draft = cfg.ngram_num_pred_tokens.min(cfg.guesses_per_check());
         // SWARM-SPEC L1: pending truncate carries over to the NEXT verify
         // call. When a verify round partially rejects drafts, the remote
         // KV still holds k+1 positions from this round, but only

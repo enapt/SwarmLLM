@@ -108,7 +108,7 @@ impl PipelineExecutor {
 
         let request_id = self.request.id;
         let max_tokens = self.request.sampling_params.max_tokens;
-        let initial_gamma = self.shared_state.cfg().inference.speculative_gamma.max(2);
+        let initial_gamma = self.shared_state.cfg().inference.guesses_per_check().max(2);
         // γ is chosen each round from MEASURED costs (Leviathan et al. §3.4):
         // the verify's cost as a line in the positions it reads — its round
         // trip, plus what the far layers charge per position, which is ~0 on a

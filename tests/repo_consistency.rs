@@ -11289,3 +11289,54 @@ fn the_owner_segment_guard_catches_a_forward_that_says_nothing() {
          if fwd.for_the_owner { kv_store.mark_owner_request(&id); }"
     ));
 }
+
+/// Statements outside `src/config/` that read `speculative_gamma` bare.
+fn raw_guess_count_reads(src: &str) -> Vec<usize> {
+    statements(src)
+        .into_iter()
+        .filter(|(_, s)| s.contains(".speculative_gamma"))
+        .map(|(line, _)| line)
+        .collect()
+}
+
+/// How many tokens a round guesses is read through ONE accessor.
+///
+/// `InferenceConfig::guesses_per_check` clamps `speculative_gamma` to what a
+/// peer accepts on the wire. Three paths send guesses to another computer and
+/// each read the field bare, so a configured value past the cap would have
+/// failed every such request on whichever path forgot to clamp (2026-09-28).
+#[test]
+fn the_guess_count_is_read_through_one_accessor() {
+    let mut offenders = Vec::new();
+    for path in rust_sources_under("src") {
+        let rel = path
+            .strip_prefix(repo_root())
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        if rel.starts_with("src/config/") {
+            continue;
+        }
+        let src = std::fs::read_to_string(&path).unwrap();
+        for line in raw_guess_count_reads(&src) {
+            offenders.push(format!("{rel}:{line}"));
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "read `inference.guesses_per_check()`, never `speculative_gamma`, outside \
+         src/config/ — it is what keeps a check inside the wire cap: {offenders:?}"
+    );
+}
+
+/// The guard above, against what it exists to catch — planted, wrapped.
+#[test]
+fn the_guess_count_guard_catches_a_wrapped_bare_read() {
+    assert_eq!(
+        raw_guess_count_reads(
+            "let g = self\n    .config\n    .inference\n    .speculative_gamma\n    .max(1);"
+        ),
+        vec![1]
+    );
+    assert!(raw_guess_count_reads("let g = cfg.inference.guesses_per_check();").is_empty());
+}

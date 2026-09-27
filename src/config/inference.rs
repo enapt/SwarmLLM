@@ -223,7 +223,9 @@ pub struct InferenceConfig {
     /// because the SlotTable never activates.
     #[serde(default = "default_batched_prefill_forward")]
     pub batched_prefill_forward: bool,
-    /// Number of draft tokens to propose per verification step (default: 4).
+    /// Number of draft tokens to propose per verification step (default: 4),
+    /// capped at `MAX_GUESSES_PER_CHECK`. Read it through
+    /// [`InferenceConfig::guesses_per_check`], never directly.
     #[serde(default = "default_speculative_gamma")]
     pub speculative_gamma: u32,
     /// SWARM-SPEC Layer 3: enable conversation-level predictive
@@ -264,7 +266,7 @@ pub struct InferenceConfig {
     pub ngram_max_size: u32,
     /// Number of candidate tokens to emit per n-gram match. Default 10
     /// matches HuggingFace `prompt_lookup_num_tokens`. Capped at
-    /// `speculative_gamma + 1` at runtime (no point proposing more
+    /// `guesses_per_check()` at runtime (no point proposing more
     /// drafts than the spec wire format will verify).
     #[serde(default = "default_ngram_num_pred_tokens")]
     pub ngram_num_pred_tokens: u32,
@@ -1097,7 +1099,26 @@ impl InferenceConfig {
             None => true,
         }
     }
+
+    /// How many tokens one round of speculation may guess: `speculative_gamma`
+    /// brought into `1..=MAX_GUESSES_PER_CHECK`.
+    ///
+    /// **The single answer for every path that sends guesses to another
+    /// computer** — the n-gram loop, the draft-model loop and the split
+    /// drafter all read it, never the field. A check carrying more than
+    /// `network::protocol::MAX_DRAFT_TOKENS` is refused by the computer it is
+    /// sent to, so a configured value past the cap would fail every such
+    /// request; clamping here means no path can forget to.
+    pub fn guesses_per_check(&self) -> u32 {
+        self.speculative_gamma.clamp(1, MAX_GUESSES_PER_CHECK)
+    }
 }
+
+/// The most guesses one check may carry, whatever `speculative_gamma` says —
+/// half of what a peer accepts on the wire (`protocol::MAX_DRAFT_TOKENS` = 32),
+/// and the ceiling of the split drafter's own choice
+/// (`dsd_controller::BEST_GAMMA_MAX`).
+pub const MAX_GUESSES_PER_CHECK: u32 = 16;
 
 impl Default for InferenceConfig {
     fn default() -> Self {
