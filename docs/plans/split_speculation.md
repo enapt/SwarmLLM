@@ -295,17 +295,24 @@ model's local speed once decode is bound by bytes rather than submissions.
   requantized from the Q4 shard, deterministic, so any node of the same build can
   check one by recomputing it), never an implicit full download.
 
-**KV refresh — measured, 39% fewer misses.** The tail computes the far layers'
-exact K/V for every confirmed token anyway; sent back (~28 KB/token for a 7B),
-the shadow attends over an EXACT history and approximates only the token being
-drafted, so its errors stop accumulating across the context. Probe
+**KV refresh — measured: large for a small model, small for a 7B.** The tail
+computes the far layers' exact K/V for every confirmed token anyway; sent back
+(~28 KB/token for a 7B), the shadow attends over an EXACT history and
+approximates only the token being drafted. Probe
 (`split::tests::kv_refresh::kv_refresh_probe`, our own engine, CPU, the far
 layers' cache replaced before every token by an independent copy of the
-target's): Qwen3-1.7B Q8 target, far half at Q3_K_S, 400 positions over 4
-prompts — **own cache 86.5% → refreshed 91.75%** top-1 agreement (misses 13.5%
-→ 8.25%). Not yet run on the 7B (three 7B copies exceeded the build slice; the
-probe now shares one shadow between both arms). ~9 Mbit/s at 40 tok/s — cheap
-beside the hidden states already crossing.
+target's), far half at Q3_K_S, 400 positions over 4 prompts each:
+
+| target | own cache | refreshed | misses |
+|---|---|---|---|
+| Qwen3-1.7B Q8 | 86.5% | 91.75% | −39% |
+| Qwen2.5-Coder-7B Q4_K_M | 93.75% | 94.25% | −8% |
+
+⚠ **Corrected the same day:** the 1.7B figure was first written up alone, as if it
+carried to the model sizes a split is for. It does not: the small model's errors
+accumulate through its history, the 7B's are mostly in the drafted token's own
+path. The 7B's own-cache 93.75% also independently confirms llama.cpp's 93.8% for
+the same pair. KV refresh is a minor lever at 7B; not a priority.
 
 ## What the literature says (survey 2026-09-27)
 

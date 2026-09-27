@@ -38,9 +38,10 @@ form of this (off by default) also works at any temperature now, not only 0.
 **What is next for split speed**, measured and written up in
 `docs/plans/faster_than_local.md` and `docs/plans/split_speculation.md`: a
 low-bit copy of the far computer's layers guesses its next token 92-94% of the
-time on a 7B model, sharing the random numbers both sides sample with keeps that
-true at normal chat temperatures, and sending the far computer's exact cache
-back to the copy cut its misses by a further 39%.
+time on a 7B model, and sharing the random numbers both sides sample with keeps
+that true at normal chat temperatures. Sending the far computer's exact cache
+back to the copy helps small models far more than large ones: 39% fewer misses
+on a 1.7B model, 8% on the 7B.
 
 ## [0.3.210-alpha] — 2026-09-27
 
