@@ -191,6 +191,36 @@ fn largest_that_can_draft(
     candidates.into_iter().find_map(|(_, m)| can_draft(m))
 }
 
+/// Have the drafter's worker read the prompt NOW — spawned beside the target's
+/// own prompt pass, which runs over the network, so the drafter's read (and, on
+/// a request's first use, its worker's spawn and load: 4.4 s measured for
+/// qwen2.5-0.5b on an RTX 3070) happens while the reply could not have started
+/// anyway, instead of after it. A guess-free call (`gamma` 0) that leaves the
+/// prompt in the worker's cache; on success the caller marks it read with
+/// [`EngineDrafter::prompt_read`], on failure the first round reads it itself.
+pub(super) fn read_ahead(
+    state: std::sync::Arc<SharedState>,
+    spec: &DrafterSpec,
+    request_id: uuid::Uuid,
+    prompt_ids: Vec<u32>,
+    sampling: &SamplingParams,
+    cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+) -> tokio::task::JoinHandle<Result<Vec<u32>, SwarmError>> {
+    let d = IpcDraft {
+        request_id,
+        model_id: spec.model_id.clone(),
+        layer_range: spec.layer_range,
+        keep: 0,
+        append: prompt_ids,
+        gamma: 0,
+        sampling: sampling.clone(),
+        history: Vec::new(),
+        coupling_seed: None,
+        for_the_owner: true,
+    };
+    tokio::spawn(async move { state.model_process_pool.draft(d, cancel).await })
+}
+
 /// One request's drafting state on this side of the worker IPC.
 pub(super) struct EngineDrafter {
     spec: DrafterSpec,
@@ -244,6 +274,13 @@ impl EngineDrafter {
     /// Tokens the reply now contains, in order — what a round emitted.
     pub(super) fn push(&mut self, tokens: &[u32]) {
         self.seq.extend_from_slice(tokens);
+    }
+
+    /// The drafter's worker has read the whole prompt ([`read_ahead`]): its
+    /// cache holds every token of `seq` so far, and the first round reads only
+    /// what follows.
+    pub(super) fn prompt_read(&mut self) {
+        self.valid = self.seq.len();
     }
 
     /// Ask the drafter's worker for `gamma` guesses following the sequence so
@@ -434,5 +471,16 @@ mod tests {
         d.open = Some((3, 4));
         d.settle(0);
         assert_eq!(d.valid(), 3);
+    }
+
+    /// A prompt read ahead leaves only the first reply token for round one —
+    /// and marking it read BEFORE that token is pushed is what makes it so.
+    #[test]
+    fn a_prompt_read_ahead_leaves_round_one_only_the_first_reply_token() {
+        let mut d = drafter(&[1, 2, 3, 4]);
+        d.prompt_read();
+        d.push(&[9]);
+        assert_eq!(d.valid(), 4);
+        assert_eq!(&d.seq[d.valid..], &[9]);
     }
 }

@@ -42,6 +42,12 @@
 #          EXTRA_TOML, e.g. EXTRA_TOML=$'[inference]\nactivation_compression = false'.
 #          RIG_TEMPERATURE=0.7 asks every question at that temperature (default 0,
 #          greedy) — for speculation that must hold at the temperatures clients send.
+#   (any mode) DRAFTER=<model id> also gives A that model WHOLE, from the same
+#          models directory — the small model speculation across computers guesses
+#          with (`pipeline::engine_drafter`). Pair it with EXTRA_TOML switching
+#          `speculative_decoding` and `decentralized_spec_decoding` on; A picks it
+#          itself (or name it with `draft_model`). MODEL must share its vocabulary,
+#          e.g. MODEL=qwen2.5-coder-7b-instruct-q4-k-m DRAFTER=qwen2.5-0.5b-instruct-fp16.
 #   context  the FAILOVER topology, but B serves a SHORTER conversation than the
 #          long prompt (CEIL_B, default 512, as B's own max_seq_len_override) —
 #          the field report of 2026-09-25, where an 8192-token peer refused an
@@ -252,6 +258,12 @@ cleanup() {
 trap cleanup EXIT
 
 make_node "$BASE/A" "$SHARDS_A" ""
+if [ -n "${DRAFTER:-}" ]; then
+  DSRC="$MODELS_DIR/$DRAFTER"
+  [ -f "$DSRC/manifest.json" ] || { echo "no manifest for drafter $DRAFTER in $MODELS_DIR"; exit 2; }
+  mkdir -p "$BASE/A/models/$DRAFTER"
+  for f in "$DSRC"/*; do ln "$f" "$BASE/A/models/$DRAFTER/" || { echo "cannot link $f"; exit 2; }; done
+fi
 # The n-gram-only path takes every request a coordinator holding the header can
 # tokenize, and it is a SEGMENT path (its own failover covers #111 there). The
 # whole-model path under test is what a coordinator runs once that path is off

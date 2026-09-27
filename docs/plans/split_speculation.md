@@ -198,6 +198,14 @@ the n-gram loop's always has, so `keeping_the_partial` reports it and the router
 retries a request that has streamed nothing. The single-peer path (Item 2) had
 the same swallow and is fixed the same way.
 
+**The drafter reads the prompt while the target does** (2026-09-28): its first
+call (`engine_drafter::read_ahead`, a guess-free `DaemonMsg::Draft`) is spawned
+beside the target's prompt pass instead of after it. On a freshly started node its
+worker's spawn began at 17:09:28 and the model was loaded at 17:09:38, against the
+target's prompt pass ending at 17:09:36 — the first round waited ~1.6 s for it
+instead of the whole load (9.4 s here, both workers loading from cold at once;
+4.4 s alone).
+
 1. **Accept at the tail.** A verify forward carries its draft tokens. The last
    segment walks them with the request's own sampler: sample position i with
    `sample_token_with_params_history`, `generated_ids` extended by the tokens

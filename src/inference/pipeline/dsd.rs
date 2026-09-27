@@ -167,6 +167,19 @@ impl PipelineExecutor {
             Some((spec, ids))
         };
 
+        // Our engine's drafter reads the prompt while the target does, not
+        // after it — see `engine_drafter::read_ahead`.
+        let read_ahead = engine.as_ref().map(|(spec, ids)| {
+            super::engine_drafter::read_ahead(
+                self.shared_state.clone(),
+                spec,
+                request_id,
+                ids.clone(),
+                &self.request.sampling_params,
+                self.request.cancel.clone(),
+            )
+        });
+
         // Phase 1: standard prefill through the pipeline to produce the first
         // token AND prime every segment's KV with the prompt. We reuse the
         // existing forward_through_segments path. The first token bootstraps
@@ -202,6 +215,24 @@ impl PipelineExecutor {
                     return Ok(None);
                 }
                 let mut e = EngineDrafter::new(spec, request_id, ids.clone());
+                if let Some(h) = read_ahead {
+                    // On failure the first round reads the prompt instead; a
+                    // drafter that cannot read at all is caught there, with
+                    // the fallback.
+                    match h.await {
+                        Ok(Ok(_)) => e.prompt_read(),
+                        Ok(Err(err)) => tracing::debug!(
+                            %request_id,
+                            error = %err,
+                            "DSD: the drafter's read-ahead failed — the first round reads the prompt"
+                        ),
+                        Err(err) => tracing::debug!(
+                            %request_id,
+                            error = %err,
+                            "DSD: the drafter's read-ahead task ended — the first round reads the prompt"
+                        ),
+                    }
+                }
                 e.push(&[first_token]);
                 (Drafter::Engine(e), ids)
             }

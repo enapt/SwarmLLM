@@ -168,9 +168,25 @@ Multi-segment distributed inference with speculative decoding woven in.
 A γ-token decode on the last-segment worker plus KV truncation primitives
 plus a coordinator loop in `pipeline/dsd.rs`.
 
-- **Status:** All phases landed 2026-04-18 behind flag. End-to-end
-  multi-segment WAN benchmark pending.
-- **Config:** `inference.decentralized_spec_decoding = true`
+- **Status:** Off by default; measured across a real link. A model split
+  between a graphics card in Thailand and one in Belgium, with a small model
+  of the same family guessing (Qwen2.5-0.5B for Qwen2.5-Coder-7B), decoded at
+  **4.63 tokens/s greedy and 5.55 at temperature 0.7, against 2.3-2.7 without
+  guessing**. Replies are the big model's own: the computer holding the last
+  layers keeps a guess only when its own sample agrees. How many tokens to
+  guess each round is chosen from what a check actually costs, including what
+  each extra guess adds when that computer checks on its processor.
+- **The guesser** is a model this computer already holds, run by SwarmLLM's
+  own engine from its parts — chosen automatically (the largest held model
+  that shares the big model's vocabulary and is at most a quarter of its
+  size), or named with `inference.draft_model`. A whole model file named in
+  `draft_model_path` is still used, by llama.cpp, where the build has it.
+- **Failure behaviour:** if the guesser fails, the reply finishes without
+  guessing; if a check does not come back, the request fails and is retried
+  like any other split request.
+- **Config:** `inference.speculative_decoding = true` and
+  `inference.decentralized_spec_decoding = true`; optionally
+  `inference.draft_model = "<model id>"`.
 
 ### Activation compression Q8_0 (`activation_compression`)
 
@@ -187,7 +203,11 @@ tag.
 Replace per-token request/response with one long-lived libp2p bidirectional
 stream per pipeline session.
 
-- **Status:** **Off by default — measured faster, not yet trusted.** The first measurement,
+- **Status:** **Off by default, and no longer faster.** Since v0.3.211 an
+  ordinary split negotiates each message without an extra round trip, and with
+  both computers on it request-response decodes as fast as the stream: 2.86
+  against 2.81 tokens/s on the same Thailand-Belgium split (2026-09-28). The
+  earlier measurement below was taken before that. The first measurement,
   on loopback, showed no win — a round trip is free there. Across a real
   link it is the difference that matters: a model split between a graphics
   card in Thailand and one in Belgium decoded at **1.19 tokens/s over
