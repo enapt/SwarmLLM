@@ -149,6 +149,12 @@ What this says:
 
 ### Phase 1 — drafter chain, accepted where the tail samples (~2.8×)
 
+**Status 2026-09-27:** items 1 and 2 are built and measured (for v0.3.211):
+`split_rig.sh repeat` on llama-3.2-3b, every result from the tail 43-59 bytes
+instead of 513 KB-2.5 MB, replies 119/121 at llama.cpp's first choice, and
+byte-identical to a run whose v0.3.209 tail was sent the old request. Items 3
+and 4 (a drafter from the shard system, γ from the trip) remain.
+
 1. **Accept at the tail.** A verify forward carries its draft tokens. The last
    segment walks them with the request's own sampler: sample position i with
    `sample_token_with_params_history`, `generated_ids` extended by the tokens
