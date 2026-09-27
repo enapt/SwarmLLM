@@ -73,10 +73,21 @@ impl Drop for OutboundStreamHandle {
     }
 }
 
+/// One outbound stream per request AND peer — the key [`PipelineStreamClient`]
+/// holds streams by.
+///
+/// **The peer is part of the key, not a detail of the stream.** Keyed by request
+/// alone, a plan the coordinator drives across TWO remote peers sent the second
+/// peer's forward down the first peer's stream: sealed for the second peer, so
+/// the first could not open it (2026-09-27, found reading the client before
+/// turning the stream on by default; the module doc had always said
+/// "per (peer, request_id)").
+type StreamKey = (Uuid, PeerId);
+
 /// Coordinator-side handle for opening outbound pipeline streams.
 pub struct PipelineStreamClient {
     control: Mutex<Control>,
-    streams: DashMap<Uuid, Arc<OutboundStreamHandle>>,
+    streams: DashMap<StreamKey, Arc<OutboundStreamHandle>>,
 }
 
 impl PipelineStreamClient {
@@ -100,7 +111,8 @@ impl PipelineStreamClient {
     ) -> Result<(), SwarmError> {
         // Fast path: stream already open. The handle is cloned out so no shard
         // guard is alive at the send's `.await` (clippy.toml).
-        let open = self.streams.get(&request_id).map(|e| e.value().clone());
+        let key: StreamKey = (request_id, peer_id);
+        let open = self.streams.get(&key).map(|e| e.value().clone());
         if let Some(handle) = open {
             return handle
                 .tx
@@ -135,7 +147,7 @@ impl PipelineStreamClient {
             _reader: reader,
             _writer: writer,
         });
-        self.streams.insert(request_id, handle);
+        self.streams.insert(key, handle);
 
         // RAII guard: if the caller's future is cancelled between the
         // `streams.insert` above and the `tx.send().await` below — e.g.,
@@ -145,20 +157,20 @@ impl PipelineStreamClient {
         // first send; the explicit `close()` call at pipeline completion
         // remains the steady-state cleanup path.
         struct InsertGuard<'a> {
-            streams: &'a DashMap<Uuid, Arc<OutboundStreamHandle>>,
-            request_id: Uuid,
+            streams: &'a DashMap<StreamKey, Arc<OutboundStreamHandle>>,
+            key: StreamKey,
             armed: bool,
         }
         impl Drop for InsertGuard<'_> {
             fn drop(&mut self) {
                 if self.armed {
-                    self.streams.remove(&self.request_id);
+                    self.streams.remove(&self.key);
                 }
             }
         }
         let mut guard = InsertGuard {
             streams: &self.streams,
-            request_id,
+            key,
             armed: true,
         };
 
@@ -172,9 +184,19 @@ impl PipelineStreamClient {
         result
     }
 
-    /// Drop the stream for `request_id`. Writer/reader tasks terminate on drop.
+    /// Drop every stream `request_id` opened — one per peer it sent to.
+    /// Writer/reader tasks terminate on drop.
     pub fn close(&self, request_id: Uuid) {
-        self.streams.remove(&request_id);
+        self.streams.retain(|(rid, _), _| *rid != request_id);
+    }
+
+    /// Streams open for `request_id`, one per peer. For tests and diagnostics.
+    #[cfg(test)]
+    fn open_for(&self, request_id: Uuid) -> usize {
+        self.streams
+            .iter()
+            .filter(|e| e.key().0 == request_id)
+            .count()
     }
 }
 
@@ -739,6 +761,42 @@ mod tests {
             None,
         );
         state
+    }
+
+    /// **A request driving two peers holds two streams, and closing it drops
+    /// both.** Keyed by request alone, the second peer's forward went down the
+    /// first peer's stream — sealed for someone else (2026-09-27). A `Control`
+    /// needs no running swarm, so the map is exercised as `send_forward` and
+    /// `close` use it.
+    #[tokio::test]
+    async fn a_request_keeps_one_stream_per_peer_and_closes_them_all() {
+        let client = PipelineStreamClient::new(libp2p_stream::Behaviour::new().new_control());
+        let handle = || {
+            let (tx, _rx) = mpsc::channel(1);
+            Arc::new(OutboundStreamHandle {
+                tx,
+                _reader: tokio::spawn(async {}),
+                _writer: tokio::spawn(async {}),
+            })
+        };
+        let (request, other_request) = (Uuid::new_v4(), Uuid::new_v4());
+        let (a, b) = (PeerId::random(), PeerId::random());
+        client.streams.insert((request, a), handle());
+        client.streams.insert((request, b), handle());
+        client.streams.insert((other_request, a), handle());
+
+        assert_eq!(
+            client.open_for(request),
+            2,
+            "two peers, two streams — a forward for b must never find a's"
+        );
+        client.close(request);
+        assert_eq!(
+            client.open_for(request),
+            0,
+            "closing a request drops every stream it opened"
+        );
+        assert_eq!(client.open_for(other_request), 1, "and no other request's");
     }
 
     /// A sealed forward from a known peer whose seal does not open is

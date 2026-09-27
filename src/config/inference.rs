@@ -114,9 +114,17 @@ pub struct InferenceConfig {
     /// carrying a real queue.
     #[serde(default = "default_shed_load_threshold")]
     pub shed_load_threshold: u32,
-    /// Use a persistent libp2p bidirectional stream per pipeline session for
-    /// distributed inference instead of the per-token request_response path.
-    /// Off by default until validated. See `docs/plans/archive/distributed_inference_speedup.md`.
+    /// Carry a split's forwards and results on one long-lived libp2p stream per
+    /// (request, peer) instead of a request-response exchange per token.
+    ///
+    /// **Off by default — faster, not yet trusted.** Measured 2026-09-27 on a
+    /// real link (RTX 3070 in Thailand → RTX 4050 in Belgium, 412 ms): 2.85
+    /// tok/s against 1.19 over request-response, A-B-A inside one binary. But
+    /// the 4-node composite rig (`split_rig.sh failover`) then had a HEALTHY
+    /// peer never finish reading a 1.8 MB prompt pass on the stream — no error
+    /// on either side, and with no receipt acknowledgement on this path the
+    /// coordinator waited out the whole 600 s deadline (FUTURE_WORK #133).
+    /// Turn it on by default only once that is root-caused.
     #[serde(default)]
     pub persistent_pipeline_stream: bool,
     /// R139 Tier 4K — daemon-side STREAM-chunked activation send. When on AND

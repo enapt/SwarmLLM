@@ -187,10 +187,20 @@ tag.
 Replace per-token request/response with one long-lived libp2p bidirectional
 stream per pipeline session.
 
-- **Status:** Landed behind flag. Wire-level verified; no measured latency
-  win because the bottleneck was elsewhere (solved by remote-generate +
-  batched prefill).
-- **Config:** `inference.persistent_pipeline_stream = true`
+- **Status:** **Off by default — measured faster, not yet trusted.** The first measurement,
+  on loopback, showed no win — a round trip is free there. Across a real
+  link it is the difference that matters: a model split between a graphics
+  card in Thailand and one in Belgium decoded at **1.19 tokens/s over
+  request-response and 2.85 over the stream** (same binary, only this
+  setting changed, back and forth). Each request-response message opens a
+  new substream; the stream is opened once per request and peer.
+- Any failure on the stream falls back to request-response for that
+  forward, and only the machine coordinating the request needs the setting.
+- **Why it is still off:** in a four-computer failover test a healthy
+  computer never finished reading one prompt sent on the stream, with no
+  error on either side, and the request waited out its full deadline before
+  moving on. Until that is explained, request-response stays the default.
+- **Config:** `inference.persistent_pipeline_stream = true` turns it on.
 
 ### Daemon-side STREAM-chunked activation send (R139, `streaming_chunked_send`)
 

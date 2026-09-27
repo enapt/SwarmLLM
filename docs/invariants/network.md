@@ -2287,3 +2287,48 @@ claim to be mid-request, and that only reaches the reserve — both caps still b
 it. Per-request admission proper needs an end-of-request signal; why, and in what
 order, is in `docs/FUTURE_WORK.md` #123. Test:
 `a_new_request_leaves_a_reserve_for_running_ones`.
+
+## A split token crosses on the pipeline stream, one per (request, peer) (2026-09-27)
+
+**`inference.persistent_pipeline_stream` is measured 2.4x faster on a real link
+and stays OFF by default** until the stall below is root-caused. The standard distributed
+loop sends each forward on a `/swarmllm/pipeline/1.0.0` stream opened once per
+request and peer (`network::pipeline_stream::PipelineStreamClient`), and the peer
+answers on it; request-response is the per-forward fallback.
+
+**Measured, WAN** — the spread benchmark, qwen2.5-coder-7b split this node
+(RTX 3070, Thailand) L0-14 → a peer (RTX 4050, Belgium) L14-28, one peer 412 ms
+away (app-level minimum), A-B-A inside one binary with only this flag changed:
+request-response 1.19 tok/s (838 ms/token), stream 2.85 (351), request-response
+again 1.20 (832). Verified per result, not by the clock: in the stream arm 0 of
+64 results came through the rr dispatcher (`dispatcher received LayerResult`),
+64 of 64 in the others. Per-token remote segment over rr: min 669 / p50 766 /
+p90 807 ms — each rr message opens a substream. It had been left off after a
+LOOPBACK measurement (no win where a round trip is free), which is the wrong
+place to measure a per-message cost that scales with distance.
+
+**The key is (request, peer), and it was request alone.** `send_forward` reused
+any open stream for the request whatever `peer_id` it was given, so a plan the
+coordinator drives across two remote peers would have sent the second peer's
+forward — sealed for the second peer — down the first peer's stream. Found by
+reading the client before flipping the default (the module doc had always said
+"per (peer, request_id)"). `close(request_id)` now drops every stream the
+request opened. Test: `a_request_keeps_one_stream_per_peer_and_closes_them_all`.
+
+**Why it is not the default (FUTURE_WORK #133).** With the stream on, the 4-node
+composite rig (`split_rig.sh failover`) had a HEALTHY peer B log `pipeline stream
+handler started` and then nothing for ten minutes: it never finished reading
+A's 1.8 MB prompt-pass frame, never dispatched it, and neither side logged an
+error or closed a connection (three direct A↔B connections, no relay). The
+request-response path passes the same rig at every gate, and a 7.3 MB prompt
+pass crossed the WAN stream fine — size alone is not it. The stream path also
+has no receipt acknowledgement, so a stalled frame costs the full segment
+deadline (600 s) where rr's `FORWARD_ACK` fails over in seconds. Both need
+answers — the stall's cause, and an ack or read deadline — before the default
+flips.
+
+**What a change must keep:** only the coordinator's setting matters (every node
+registers the acceptor since v0.1.0-alpha.2); any send failure falls back to
+request-response for that forward and evicts the stream; a stream read error
+resolves the pending result with an error at once (faster than rr's ACK
+deadline for a peer that went away).

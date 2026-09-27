@@ -214,7 +214,10 @@ def log_window(start):
         return {}
     rid = done[-1].group(1)
     mine = [l for l in lines if rid in l]
-    path = next((name for marker, name in PATHS if any(marker in l for l in mine)), "pipeline")
+    # The API's local fast path logs its own lines without the request id, so
+    # none of the markers match it; its completion line says `route=local`.
+    fallback = "local-fastpath" if done[-1].group(2) == "local" else "pipeline"
+    path = next((name for marker, name in PATHS if any(marker in l for l in mine)), fallback)
     plan = [f"{m.group(3)} L{m.group(4)}-{m.group(5)}" for m in (PLAN_RE.search(l) for l in mine) if m]
     done_line = next(l for l in mine if "DIAG: request complete" in l)
     kv = dict(re.findall(r"(\w+)=(\S+)", done_line))
@@ -360,6 +363,11 @@ for rnd, rep, order, unload_first in schedule:
     shared = decode_prompt(rep, f"{RUN}{rnd}{rep}") if args.kind == "decode" else None
     for label, route in order:
         prompt = shared or prefill_prompt()
+        # Re-derive the arm against the nodes known NOW: `only=` excludes every
+        # other node, and one that connected after the run started was not in
+        # the list — a "split" arm was handed whole to a latecomer (2026-09-27).
+        spec = next(a for a in args.arm if a.partition(":")[0] == label)
+        route = parse_arm(spec, known_nodes()[0])[1]
         r = one(route, prompt)
         r.update({"arm": label, "rep": rep, "round": rnd, "model": args.model, "kind": args.kind,
                   "swarm_route": route, "t": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())})

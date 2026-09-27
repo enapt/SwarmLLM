@@ -243,6 +243,17 @@ as a request, an old server is never held to the ACK deadline. This also
 retired the chain-specific addressing branches from earlier the same day
 (gotcha #354): one rule now covers chained and unchained results.
 
+## A split token crosses on the pipeline stream, keyed by (request, peer) (2026-09-27)
+
+`inference.persistent_pipeline_stream` is 2.4x per token on a 412 ms link (1.19 →
+2.85 tok/s, A-B-A in one binary) but stays OFF: a healthy peer stalled reading a
+prompt pass on it in the 4-node rig, and the path has no receipt ACK (#133).
+Streams are keyed by **(request, peer)** — keyed by request alone, a second
+remote peer's forward went down the first's stream. Measure a per-message cost
+on a REAL link, never loopback — and run the failover rigs before any default flip.
+
+→ `docs/invariants/network.md` § "A split token crosses on the pipeline stream"
+
 ## A result names the step it answers; one that did not arrive is sent again (2026-09-25)
 
 A request's forwards to one segment share its id, so a result matched by id alone
