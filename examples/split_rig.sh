@@ -40,6 +40,8 @@
 #          n-gram-only path and the rest the standard loop (it self-disables
 #          per process), so one arm yields both. Vary one thing per arm with
 #          EXTRA_TOML, e.g. EXTRA_TOML=$'[inference]\nactivation_compression = false'.
+#          REPEAT_GAP=S waits S seconds between runs (default 0) — past the
+#          pool's 5 s reclaim floor, a worker idle between turns is reclaimable.
 #          RIG_TEMPERATURE=0.7 asks every question at that temperature (default 0,
 #          greedy) — for speculation that must hold at the temperatures clients send.
 #   (any mode) DRAFTER=<model id> also gives A that model WHOLE, from the same
@@ -430,6 +432,7 @@ if [ "$MODE" = repeat ]; then
   printf '%s' "$PROMPT" > "$OUT/prompt.txt"
   : > "$OUT/repeat.jsonl"
   for i in $(seq 1 "${REPEAT:-3}"); do
+    [ "$i" -gt 1 ] && sleep "${REPEAT_GAP:-0}"
     ask "$PROMPT" 120 "repeat$i" | tee -a "$OUT/repeat.jsonl" | cut -c1-160
   done
   echo "repeat: n-gram path taken by $(grep -c 'try_ngram_only_distributed ELIGIBLE' "$BASE/A/node.log") of ${REPEAT:-3} requests (expected: the first)"
