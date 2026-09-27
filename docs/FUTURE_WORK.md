@@ -24,6 +24,20 @@ Priority is user-visible impact x how many users x whether it fails silently.
 and 69's residual SHIPPED in v0.3.180-alpha.** The rows sit in the P-sections
 and in the two "2026-09-14" headings below; read the row, not just the number.
 
+### 2026-09-27 — GPU↔GPU spread benchmark on the released v0.3.209-alpha
+
+The live node (RTX 3070 Laptop, TH, ~6 GB budget beside Windows + a browser) and a tester's
+`bf7b3263` (RTX 4050 Laptop 6 GB, BE, 443 ms min RTT), both v0.3.209, measured with
+`examples/spread_bench.py` (path read per request from the log). Numbers: `memory/perf_spread_0927_gpu.md`.
+
+| # | Item | Status |
+|---|---|---|
+| 125 | **A live worker that could not grow refused instead of reclaiming or respawning** — an idle 3B blocked an 8B held whole (503 after 11.8 s); a partial worker then wedged the model, every chat request refused in ~50 ms; the same on the peer for the 14B | ✅ **FIXED 2026-09-27** — `ModelProcessPool::grow_worker` (reclaim idle, then retire an idle worker so the spawn places the range, hybrid if need be). `docs/invariants/memory.md` § "A worker that cannot grow gets the spawn's ladder" |
+| 126 | **A whole model on one peer ran as a per-token n-gram loop on the first request after each restart** — 0.78 tok/s where the hand-off streams ~11 | ✅ **FIXED 2026-09-27** — the n-gram loop stands aside for every plan `remote_generate::eligible` accepts. `docs/invariants/scheduling.md` § "A whole model on one peer is handed over" |
+| 127 | **This node priced its own GPU from a cold load** — one 1-layer segment that spawned a worker priced an RTX 3070 at 196 ms/layer (224×) | ✅ **FIXED 2026-09-27** — ranking falls back to WARM prefill samples only; the local verify branch records decode samples. `docs/invariants/scheduling.md` § "A node is ranked on warm work only" |
+| 128 | **The hand-off asked privacy without the request's override** — a plan made for a single remote segment was refused the hand-off and ran per token (override requests only) | ✅ **FIXED 2026-09-27** — `encrypted_pipeline_for_request`, the planner's form |
+| 129 | **A model a few MB too large for the card is sent on a boomerang across continents instead of running a layer or two on the processor** — llama-3.1-8b (6033 MB) against a 6019 MB budget: local L0-1, Belgium L1-26, local L26-32, two intercontinental crossings per token (18.3 s for 4 tokens); the 14B split (with an override) planned the peer TWICE (L0-10, L32-48) where one crossing would do | **OPEN.** Three contributors: the DP does not model the local hybrid placement a spawn would use (`partial_gpu_layers` — local reads "can host 26 of 32" and the rest MUST go elsewhere); a remote hop's network cost is charged once per SEGMENT, not per token (`docs/plans/regional_pipelines.md` § "What is actually missing" 2); and #127 made this node look 224× slower than it is. Re-measure after #127 before touching the cost model; then price the local hybrid run as a candidate. **Do NOT tune `ASSUMED_FORWARD_PASSES`** — the per-token term needs pricing per crossing | Anyone whose card is just short of a model it holds, with peers online |
+
 ### 2026-09-26 — benchmark pass on the released v0.3.207-alpha (graphics-card memory)
 
 Isolated node per model (private gossip id, no bootstrap, no mDNS, auto-manage off), the
@@ -15771,6 +15785,24 @@ already serving is not obviously worth it, and reclaiming re-enters
 `unload_model` while the spawn lock is held. If a real workload shows this
 refusing ranges a reclaim would have admitted, the reclaim needs to happen
 outside the lock.
+
+✅ **BUILT 2026-09-27 — the real workload arrived.** On the live node (RTX 3070
+Laptop, budget ~6 GB) an idle 3B held 3138 MB when the 8B the node holds whole
+was asked for; the 8B's worker had been spawned for one layer of a split and its
+growth was refused, 503 after 11.8 s. A second shape was worse: after a split
+left an 8B worker holding two ranges, every request for the whole model — the
+dashboard chat's streaming path included — was refused in ~50 ms until the
+worker aged out, because an 8B 14 MB over the budget can only run PART on the
+card and growth cannot place part of a range on the processor.
+`ModelProcessPool::grow_worker` now runs the spawn's missing rungs, outside
+`spawn_lock`: reclaim idle models' graphics memory (same planner, same guards),
+and if the range still does not fit and nothing is using the worker
+(`WorkerHandle::in_use`), retire it so `get_or_spawn`'s slow path places the
+range afresh — hybrid where needed. A worker in use keeps the refusal, and the
+router re-plans on it as before. Evidence: `docs/invariants/memory.md` § "A
+worker that cannot grow gets the spawn's ladder". The RAM side is unchanged
+(`free_ram_for_admission` is still not called on growth): no workload has shown
+it.
 
 ## CPU prefill against llama.cpp, measured 2026-09-26 (#119)
 
