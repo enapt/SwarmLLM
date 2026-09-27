@@ -465,6 +465,10 @@ pub struct IpcDraft {
     /// See `IpcForward::for_the_owner`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub for_the_owner: bool,
+    /// Stop guessing after a guess this model gives less than this probability
+    /// (`SplitModel::draft_after`). `None` guesses all `gamma`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_below: Option<f32>,
 }
 
 /// Send a DaemonMsg to the socket. Payload = raw bytes (e.g., activations).

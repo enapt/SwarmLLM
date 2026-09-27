@@ -47,7 +47,7 @@ fn greedy() -> crate::types::SamplingParams {
 fn fresh(model: &mut SplitModel, seq: &[u32], gamma: usize) -> Vec<u32> {
     let kv = KvCacheStore::new(std::time::Duration::from_secs(60));
     model
-        .draft_after(&kv, "fresh", 0, seq, gamma, &greedy(), &[], None, 0)
+        .draft_after(&kv, "fresh", 0, seq, gamma, &greedy(), &[], None, 0, None)
         .unwrap()
 }
 
@@ -68,7 +68,7 @@ fn incremental_drafting_guesses_what_a_fresh_read_guesses() {
     let mut seq = prompt.clone();
     seq.push(5);
     let d1 = model
-        .draft_after(&kv, "r", 0, &seq, 4, &greedy(), &[], None, 0)
+        .draft_after(&kv, "r", 0, &seq, 4, &greedy(), &[], None, 0, None)
         .unwrap();
     assert_eq!(d1, fresh(&mut model, &seq, 4));
     assert_eq!(cache_len(&model, &kv, "r"), seq.len() + 3);
@@ -82,7 +82,18 @@ fn incremental_drafting_guesses_what_a_fresh_read_guesses() {
     kv.truncate_request_to(model.kv_model_key(), "r", valid)
         .unwrap();
     let d2 = model
-        .draft_after(&kv, "r", valid, &seq[valid..], 3, &greedy(), &[], None, 0)
+        .draft_after(
+            &kv,
+            "r",
+            valid,
+            &seq[valid..],
+            3,
+            &greedy(),
+            &[],
+            None,
+            0,
+            None,
+        )
         .unwrap();
     assert_eq!(d2, fresh(&mut model, &seq, 3));
 
@@ -95,10 +106,41 @@ fn incremental_drafting_guesses_what_a_fresh_read_guesses() {
         .unwrap();
     assert_eq!(seq.len() - valid, 2, "the unread last guess and the sample");
     let d3 = model
-        .draft_after(&kv, "r", valid, &seq[valid..], 2, &greedy(), &[], None, 0)
+        .draft_after(
+            &kv,
+            "r",
+            valid,
+            &seq[valid..],
+            2,
+            &greedy(),
+            &[],
+            None,
+            0,
+            None,
+        )
         .unwrap();
     assert_eq!(d3, fresh(&mut model, &seq, 2));
     assert_eq!(cache_len(&model, &kv, "r"), seq.len() + 1);
+}
+
+/// An unsure guess ends the round after itself: a floor no guess can reach
+/// gives exactly one, and the cache then holds what was read and nothing guessed.
+#[test]
+fn a_guess_below_the_confidence_floor_ends_the_round_after_itself() {
+    let mut model = whole_model();
+    let kv = KvCacheStore::new(std::time::Duration::from_secs(60));
+    let seq: Vec<u32> = vec![4, 8, 15, 16, 23, 42];
+    let one = model
+        .draft_after(&kv, "c", 0, &seq, 5, &greedy(), &[], None, 0, Some(1.01))
+        .unwrap();
+    assert_eq!(one.len(), 1);
+    assert_eq!(one, fresh(&mut model, &seq, 1));
+    assert_eq!(cache_len(&model, &kv, "c"), seq.len());
+    let kv2 = KvCacheStore::new(std::time::Duration::from_secs(60));
+    let all = model
+        .draft_after(&kv2, "d", 0, &seq, 5, &greedy(), &[], None, 0, Some(0.0))
+        .unwrap();
+    assert_eq!(all.len(), 5, "a floor of 0 stops nothing");
 }
 
 #[test]
@@ -116,7 +158,7 @@ fn with_shared_noise_a_guess_is_the_draw_plain_sampling_makes() {
     let seq: Vec<u32> = vec![9, 8, 7, 6, 5];
     let kv = KvCacheStore::new(std::time::Duration::from_secs(60));
     let guesses = model
-        .draft_after(&kv, "n", 0, &seq, 3, &s, &[], Some(&noise), 0)
+        .draft_after(&kv, "n", 0, &seq, 3, &s, &[], Some(&noise), 0, None)
         .unwrap();
 
     let kv2 = KvCacheStore::new(std::time::Duration::from_secs(60));

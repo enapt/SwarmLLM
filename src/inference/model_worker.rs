@@ -3464,6 +3464,7 @@ async fn handle_draft(
             &d.history,
             noise.as_ref(),
             prefill_chunk_tokens,
+            d.stop_below,
         )
     })?;
     send_worker(

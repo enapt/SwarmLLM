@@ -217,6 +217,7 @@ pub(super) fn read_ahead(
         history: Vec::new(),
         coupling_seed: None,
         for_the_owner: true,
+        stop_below: None,
     };
     tokio::spawn(async move { state.model_process_pool.draft(d, cancel).await })
 }
@@ -235,6 +236,21 @@ pub(super) struct EngineDrafter {
     /// read up to, and how many guesses it made.
     open: Option<(usize, usize)>,
     calls: u32,
+}
+
+/// The probability below which a drafter stops guessing for the round
+/// (`SplitModel::draft_after`): 0.4, Hugging Face's assisted-generation choice
+/// for the same rule. `SWARMLLM_DRAFT_CONFIDENCE=<p>` sets it for an A/B inside
+/// one binary; 0 guesses every token the round asks for. Read once.
+fn draft_confidence_floor() -> Option<f32> {
+    static F: OnceLock<Option<f32>> = OnceLock::new();
+    *F.get_or_init(|| {
+        let p = std::env::var("SWARMLLM_DRAFT_CONFIDENCE")
+            .ok()
+            .and_then(|v| v.trim().parse::<f32>().ok())
+            .unwrap_or(0.4);
+        (p > 0.0).then_some(p)
+    })
 }
 
 /// `SWARMLLM_FAULT_DRAFT_FAIL=<n>`: this node's in-engine drafter fails its
@@ -322,6 +338,7 @@ impl EngineDrafter {
             history: history.to_vec(),
             coupling_seed,
             for_the_owner: true,
+            stop_below: draft_confidence_floor(),
         };
         let guesses = state.model_process_pool.draft(d, cancel).await?;
         self.open = Some((self.seq.len(), guesses.len()));

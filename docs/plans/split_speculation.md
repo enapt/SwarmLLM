@@ -206,6 +206,18 @@ target's prompt pass ending at 17:09:36 — the first round waited ~1.6 s for it
 instead of the whole load (9.4 s here, both workers loading from cold at once;
 4.4 s alone).
 
+**An unsure guess ends the round** (2026-09-28): the drafter stops after a guess
+it gives less than 0.4 (`SplitModel::draft_after`, Hugging Face's
+`ConfidenceCriteria` / `assistant_confidence_threshold`; `SWARMLLM_DRAFT_CONFIDENCE`
+sets it, 0 turns it off). A/B on the same link (`run_drafter_conf.sh`,
+`drafter_conf.jsonl`): at T=0.7 4.96 tok/s with it against 4.32 without, greedy
+4.27 against 4.80 — **no speed difference within this link's noise** (a third
+arm lost its far node twice and is not counted). What moved consistently is the
+WORK: guesses proposed per 64-token reply fell from 85-110 to 64-79 with the kept
+ones unchanged (29-39), i.e. ~25% fewer positions for the far computer to check —
+compute a peer lends to the swarm, and the per-position cost `CheckCost` fits
+when that peer checks on its processor.
+
 1. **Accept at the tail.** A verify forward carries its draft tokens. The last
    segment walks them with the request's own sampler: sample position i with
    `sample_token_with_params_history`, `generated_ids` extended by the tokens
