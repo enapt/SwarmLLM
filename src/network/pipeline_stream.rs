@@ -190,6 +190,13 @@ impl PipelineStreamClient {
         self.streams.retain(|(rid, _), _| *rid != request_id);
     }
 
+    /// Drop the ONE stream a send to `peer_id` failed on. Closing the whole
+    /// request here tore down every other peer's healthy stream too, and each
+    /// then paid a fresh open on its next token (pre-release review 2026-09-27).
+    pub fn evict(&self, request_id: Uuid, peer_id: PeerId) {
+        self.streams.remove(&(request_id, peer_id));
+    }
+
     /// Streams open for `request_id`, one per peer. For tests and diagnostics.
     #[cfg(test)]
     fn open_for(&self, request_id: Uuid) -> usize {
@@ -790,6 +797,13 @@ mod tests {
             2,
             "two peers, two streams — a forward for b must never find a's"
         );
+        client.evict(request, b);
+        assert_eq!(
+            client.open_for(request),
+            1,
+            "a failed send to b drops b's stream only — a's is healthy and stays"
+        );
+        assert!(client.streams.contains_key(&(request, a)));
         client.close(request);
         assert_eq!(
             client.open_for(request),

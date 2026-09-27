@@ -184,6 +184,11 @@ fn vram_reclaim_eligible(c: &VramReclaimCandidate) -> bool {
     !c.busy && c.charge_mb > 0 && c.idle_secs >= vram_make_room_min_idle_secs()
 }
 
+/// Rounds [`ModelProcessPool::get_or_spawn`] may take before giving up: each
+/// one that ends empty means another task replaced the worker in between, so
+/// more than a couple is contention, not progress.
+const GET_OR_SPAWN_ROUNDS: usize = 3;
+
 /// A live worker's budget would not take a range it was asked to add
 /// (`ModelProcessPool::charge_additional_segment`), with what reclaiming room
 /// for it — or replacing the worker — needs to know.
@@ -193,8 +198,23 @@ struct GrowthRefused {
     needed_mb: u64,
     /// Which budget refused: the card, or system memory.
     on_gpu: bool,
+    /// What the worker had been charged when it refused, read under
+    /// `spawn_lock`. A later figure that differs means another request grew
+    /// the same worker in between — it is that request's now.
+    worker_charged_mb: u64,
     /// The refusal as the caller reports it.
     error: SwarmError,
+}
+
+/// [`ModelProcessPool::retirement_decision`]'s answer.
+#[derive(Debug, PartialEq, Eq)]
+enum Retirement {
+    /// Nothing is using it and nobody grew it since it refused: replace it.
+    Retire,
+    /// In use, or grown by another request since: keep it, refuse ours.
+    Keep,
+    /// The map holds a different worker now; the spawn path will find it.
+    AlreadyReplaced,
 }
 
 /// What [`ModelProcessPool::grow_worker`] did about a range a live worker had
@@ -3538,6 +3558,7 @@ impl ModelProcessPool {
             return Err(GrowthRefused {
                 needed_mb: net_mb,
                 on_gpu,
+                worker_charged_mb: handle.charged_mb.load(Ordering::Acquire),
                 error: SwarmError::LocalMemoryUnavailable(format!(
                     "{} layers {}..{} of {} need about {} MB more than this node has left \
                      (its worker is already holding {} MB) — another holder will have to \
@@ -3643,8 +3664,16 @@ impl ModelProcessPool {
                 Err(r) => r,
             };
         }
-        if handle.in_use(self.conversation_window()) {
-            return Err(refused.error);
+        // Decide under the spawn lock — the one every charge takes — so a
+        // request that grew this same worker between our refusal and here is
+        // seen: it may not have registered its use yet, which `in_use` cannot
+        // see, but its charge moved the total (pre-release review 2026-09-27).
+        let guard = self.spawn_lock.lock().await;
+        match self.retirement_decision(model_id, &handle, &refused) {
+            Retirement::Keep => return Err(refused.error),
+            // Replaced meanwhile: the slow path finds the replacement.
+            Retirement::AlreadyReplaced => return Ok(Growth::Respawn),
+            Retirement::Retire => {}
         }
         tracing::info!(
             model = %model_id,
@@ -3654,20 +3683,40 @@ impl ModelProcessPool {
              it — replacing it, so the range can be placed afresh (part of it on the \
              processor if the card cannot hold it all)"
         );
-        // Retire the worker THIS call was given, never whichever one the map
-        // holds by now: a concurrent spawn may already have replaced it, and
-        // the slow path will find that one.
+        // Our clone must not outlive the retirement: dropping the last handle is
+        // what signals the process, and `unload_model` waits for it to exit.
+        // Under the lock, as the promotion's retirement in `get_or_spawn` is.
+        drop(handle);
+        self.unload_model(model_id).await;
+        drop(guard);
+        Ok(Growth::Respawn)
+    }
+
+    /// May `grow_worker` retire `handle`? Called under `spawn_lock`.
+    ///
+    /// Only the worker THIS call was given — never whichever the map holds by
+    /// now — and only if nothing is using it AND no request has grown it since
+    /// it refused us: a changed charge total is someone else's admitted range,
+    /// about to be used.
+    fn retirement_decision(
+        &self,
+        model_id: &ModelId,
+        handle: &Arc<WorkerHandle>,
+        refused: &GrowthRefused,
+    ) -> Retirement {
         let still_ours = self
             .workers
             .get(model_id)
-            .is_some_and(|w| Arc::ptr_eq(&w, &handle));
-        // Our clone must not outlive the retirement: dropping the last handle is
-        // what signals the process, and `unload_model` waits for it to exit.
-        drop(handle);
-        if still_ours {
-            self.unload_model(model_id).await;
+            .is_some_and(|w| Arc::ptr_eq(&w, handle));
+        if !still_ours {
+            Retirement::AlreadyReplaced
+        } else if handle.in_use(self.conversation_window())
+            || handle.charged_mb.load(Ordering::Acquire) != refused.worker_charged_mb
+        {
+            Retirement::Keep
+        } else {
+            Retirement::Retire
         }
-        Ok(Growth::Respawn)
     }
 
     /// `(fixed_mb, per_layer_mb)` for this model on the given device.
@@ -4164,6 +4213,28 @@ impl ModelProcessPool {
         model_id: &ModelId,
         segment: (u32, u32),
     ) -> Result<Arc<WorkerHandle>, SwarmError> {
+        // A round ends without a worker only when another task put one in the
+        // map, while this one waited for the spawn lock, that does not hold this
+        // range — the next round grows it through the fast path. Bounded, so
+        // contention cannot spin; running out is a local lifecycle failure.
+        for _ in 0..GET_OR_SPAWN_ROUNDS {
+            if let Some(handle) = self.get_or_spawn_once(model_id, segment).await? {
+                return Ok(handle);
+            }
+        }
+        Err(SwarmError::ServiceUnavailable(format!(
+            "could not settle a worker for layers {}..{} of {}: it kept being replaced \
+             while this request waited",
+            segment.0, segment.1, model_id.0
+        )))
+    }
+
+    /// One round of [`Self::get_or_spawn`]: `Ok(None)` asks for another.
+    async fn get_or_spawn_once(
+        &self,
+        model_id: &ModelId,
+        segment: (u32, u32),
+    ) -> Result<Option<Arc<WorkerHandle>>, SwarmError> {
         // Fast path: worker already exists — and, unless this node demoted it
         // to the processor and the card has since made room, that is the answer.
         let existing = self.workers.get(model_id).map(|h| h.clone());
@@ -4193,14 +4264,14 @@ impl ModelProcessPool {
                 self.retire_dead_worker(model_id).await;
             } else if !self.worker_should_return_to_gpu(model_id, &handle) {
                 if handle.segment_is_charged(segment) {
-                    return Ok(handle);
+                    return Ok(Some(handle));
                 }
                 // A range this worker has not been asked for before: it is
                 // about to load more weights, so weigh them first — and where
                 // the card will not take them, reclaim or replace the worker
                 // rather than refuse (`grow_worker`).
                 match self.grow_worker(model_id, segment, handle).await? {
-                    Growth::Grown(handle) => return Ok(handle),
+                    Growth::Grown(handle) => return Ok(Some(handle)),
                     // Retired: fall through to the slow path, which spawns.
                     Growth::Respawn => {}
                 }
@@ -4224,7 +4295,13 @@ impl ModelProcessPool {
             }
             Some(handle) => {
                 if !self.worker_should_return_to_gpu(model_id, &handle) {
-                    return Ok(handle.clone());
+                    // Another task spawned it while this one waited. Hand it
+                    // back only if it holds THIS range: returned uncharged, the
+                    // worker loads whatever a forward names, and memory the pool
+                    // never admitted is in use (found in pre-release review
+                    // 2026-09-27; `grow_worker`'s retirement sends traffic here).
+                    // Otherwise go round again, and the fast path grows it.
+                    return Ok(handle.segment_is_charged(segment).then(|| handle.clone()));
                 }
                 true
             }
@@ -4592,7 +4669,7 @@ impl ModelProcessPool {
                         );
                     }
                 }
-                Ok(handle)
+                Ok(Some(handle))
             }
             Err(e) => {
                 // The worker never started, so it owes nothing. Leaving the
@@ -7153,6 +7230,44 @@ mod tests {
         assert_eq!(
             recent.max_local_hostable_layers(&wanted, true),
             with_it_resident
+        );
+    }
+
+    /// **A worker another request grew after it refused us is not retired.**
+    /// That request's range fit where ours did not, and between its charge and
+    /// registering its use `in_use` reads false — so the decision is taken under
+    /// `spawn_lock` against the charge total the refusal saw (pre-release review
+    /// 2026-09-27). The race is staged here in order, which is what the lock makes
+    /// of it in the pool.
+    #[tokio::test]
+    async fn a_worker_grown_by_another_request_since_it_refused_is_kept() {
+        let pool = ModelProcessPool::new(std::path::PathBuf::from("/tmp/swarmllm-grow-raced"));
+        let (_idle, wanted, h) = card_with_an_idle_model_and_a_one_layer_worker(&pool, 190).await;
+        let refused = pool
+            .charge_additional_segment(&wanted, (0, 32), &h)
+            .await
+            .expect_err("32 x 190 is more than the whole budget");
+        assert_eq!(
+            pool.retirement_decision(&wanted, &h, &refused),
+            Retirement::Retire,
+            "the control: idle and untouched since it refused, it may be replaced"
+        );
+
+        pool.charge_additional_segment(&wanted, (1, 2), &h)
+            .await
+            .expect("another request's one layer fits");
+        assert_eq!(
+            pool.retirement_decision(&wanted, &h, &refused),
+            Retirement::Keep,
+            "grown since the refusal: that range is someone's, about to be used"
+        );
+
+        let replacement = fake_worker_handle_on(false, None, false).await;
+        pool.workers.insert(wanted.clone(), replacement);
+        assert_eq!(
+            pool.retirement_decision(&wanted, &h, &refused),
+            Retirement::AlreadyReplaced,
+            "never retire whichever worker the map holds by now"
         );
     }
 

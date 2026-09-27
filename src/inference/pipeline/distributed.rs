@@ -1435,7 +1435,9 @@ impl PipelineExecutor {
                                                     error = %e,
                                                     "pipeline stream send failed — falling back to RR"
                                                 );
-                                                client.close(request_id);
+                                                // This peer's stream only: the
+                                                // request's other streams are healthy.
+                                                client.evict(request_id, peer_id);
                                                 all_ok = false;
                                                 break;
                                             }

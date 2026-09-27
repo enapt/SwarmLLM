@@ -1404,3 +1404,24 @@ and only what it needs. Test: `room_an_idle_model_holds_is_room_the_planner_may_
 the credit removed. ⚠ `max_local_hostable_layers` also feeds what this node
 ADVERTISES; peers now see the same room, and their segment triggers the same
 reclaim here — consistent with "graphics memory has ONE owner".
+
+### Hardened in pre-release review (same day)
+
+Two races a `code-reviewer` pass found in the fix, both closed and tested:
+
+- **A retirement could kill a worker another request had just grown.** That
+  request's smaller range fit where ours did not, and until it registers its use
+  `in_use` reads false. The retirement is now decided under `spawn_lock` by
+  `retirement_decision`, against the charge total the refusal saw
+  (`GrowthRefused::worker_charged_mb`, read under the same lock): a changed total
+  is someone's admitted range → `Keep`, refuse ours. Test
+  `a_worker_grown_by_another_request_since_it_refused_is_kept` (red without the
+  total check).
+- **The spawn path could hand back a worker that did not hold the caller's
+  range.** Its "another task spawned it while we waited" return predates this
+  fix, but a retirement now sends traffic there: returned uncharged, the worker
+  loads whatever a forward names and memory the pool never admitted is in use.
+  `get_or_spawn` is now bounded rounds of `get_or_spawn_once`, and that return
+  hands the worker back only if it holds the range — otherwise another round,
+  whose fast path grows it. Three rounds that each find a replacement fail as a
+  lifecycle error (`ServiceUnavailable`), which is contention, not progress.
