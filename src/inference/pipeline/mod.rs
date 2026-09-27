@@ -501,14 +501,33 @@ pub(super) async fn forward_verify_through_segments(
             result
         } else {
             // A verify step of a request this node coordinates: ours.
-            shared_state
+            let seg_start = std::time::Instant::now();
+            let result = shared_state
                 .model_process_pool
                 .forward_for_request(
                     forward,
                     None,
                     crate::inference::process_pool::Requester::Owner,
                 )
-                .await?
+                .await?;
+            // Measure ourselves too, exactly as the branch above measures a
+            // peer and `forward_through_segments_inner` measures a local
+            // segment. This loop is the default path for a split, and without
+            // this our own node was never timed on a decode step there — its
+            // price came only from the prefill fallback, and one cold sample of
+            // that priced an RTX 3070 at 196 ms a layer (2026-09-27). Same
+            // single-token rule, for the same reason.
+            if verify_tokens.len() == 1 {
+                shared_state.record_peer_segment_latency(
+                    &segment.node_id,
+                    &segment.shard_id.model_id,
+                    crate::daemon::state::WorkKind::Decode,
+                    seg_start.elapsed().as_millis() as u64,
+                    segment.layer_range.1 - segment.layer_range.0,
+                    result.activations.len(),
+                );
+            }
+            result
         };
 
         if let Some(crate::types::NetworkFinishReason::Error(msg)) = &result.finish_reason {

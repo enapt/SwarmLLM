@@ -183,6 +183,18 @@ impl LinearFit {
 pub struct PeerSpeed {
     /// EMA of ms per (layer × activation byte) during prefill.
     prefill_ms_per_layer_byte: Option<f32>,
+    /// The same coefficient from WARM samples only — the one that may RANK.
+    ///
+    /// `prefill_ms_per_layer_byte` keeps cold samples on purpose: it sizes how
+    /// long to wait, where pessimism is safe. Ranking read it too, as its
+    /// fallback when no decode step had been timed, and a single cold segment
+    /// — one layer that paid for spawning a worker and loading the model —
+    /// then priced a whole node. Measured on the live node 2026-09-27: 2448 ms
+    /// for one layer of an 8B, carrying 204,564 bytes, became
+    /// `observed_ms_per_layer = 196` for an RTX 3070 that decodes in ~1 ms a
+    /// layer — 224x its advertised figure — and it was the node's OWN price,
+    /// since this map is keyed by node id, ours included.
+    warm_prefill_ms_per_layer_byte: Option<f32>,
     /// EMA of ms per layer for a single-token decode step.
     decode_ms_per_layer: Option<f32>,
     /// EMA of ms per layer for one decode step of a WHOLE model run on the
@@ -230,6 +242,7 @@ impl Default for PeerSpeed {
     fn default() -> Self {
         Self {
             prefill_ms_per_layer_byte: None,
+            warm_prefill_ms_per_layer_byte: None,
             decode_ms_per_layer: None,
             delegated_ms_per_layer: None,
             decode_fit: LinearFit::default(),
@@ -289,6 +302,15 @@ impl PeerSpeed {
         // A cold decode sample is a load time wearing a compute figure's clothes.
         if !warm && matches!(kind, WorkKind::Decode | WorkKind::Delegated) {
             return;
+        }
+        // And so is a cold PREFILL sample, for anything that ranks: only warm
+        // ones reach the figure `ranking_ms_per_layer` falls back to.
+        if warm && matches!(kind, WorkKind::Prefill) {
+            let slot = &mut self.warm_prefill_ms_per_layer_byte;
+            *slot = Some(match *slot {
+                Some(prev) => ALPHA * sample + (1.0 - ALPHA) * prev,
+                None => sample,
+            });
         }
         // The same sample, unnormalised, for the two-term fit. Fed the RAW
         // wall-clock and layer count rather than the per-layer figure above,
@@ -407,8 +429,12 @@ impl PeerSpeed {
                 return Some(d);
             }
         }
-        // Prefill is local by construction, so it can always rank.
-        self.prefill_ms_per_layer_byte
+        // Prefill is local by construction, so it can always rank — from WARM
+        // samples. A cold one timed a model load (see
+        // `warm_prefill_ms_per_layer_byte`); with no warm sample the caller
+        // prices from the advertised capability, which is what a node never
+        // measured gets, so this can never price one worse than that.
+        self.warm_prefill_ms_per_layer_byte
             .map(|c| c * NOMINAL_DECODE_ACTIVATION_BYTES as f32)
     }
 
@@ -869,6 +895,41 @@ mod ranking_trusts_only_what_it_measured {
             "timeout sizing must keep the cold sample — waiting too long is safe, \
              waiting too little is not"
         );
+    }
+
+    /// **...but a cold prefill sample must not RANK.** The live node's own
+    /// numbers (2026-09-27): one layer of an 8B, 204,564 bytes, 2448 ms of which
+    /// most was spawning the worker and loading the model. Ranking fell back to
+    /// the prefill coefficient and priced an RTX 3070 at 196 ms a layer.
+    #[test]
+    fn a_cold_prefill_sample_times_a_load_and_does_not_rank() {
+        let mut cold = PeerSpeed::default();
+        cold.observe(WorkKind::Prefill, 2448, 1, 204_564, false);
+        assert!(
+            cold.predict_ms(WorkKind::Prefill, 1, 204_564).is_some(),
+            "it still sizes the wait"
+        );
+        assert_eq!(
+            cold.ranking_ms_per_layer(),
+            None,
+            "a load time must not price the node — with no warm figure the caller \
+             uses the advertised speed, as for a node never measured"
+        );
+
+        // The control: the same segment once the model is resident ranks.
+        let mut warm = PeerSpeed::default();
+        warm.observe(WorkKind::Prefill, 2448, 1, 204_564, true);
+        let ranked = warm
+            .ranking_ms_per_layer()
+            .expect("a warm prefill sample ranks");
+        assert!(
+            (ranked - 196.066).abs() < 0.01,
+            "the fallback's arithmetic: {ranked}"
+        );
+
+        // And a cold sample after a warm one does not move the ranking figure.
+        warm.observe(WorkKind::Prefill, 60_000, 1, 204_564, false);
+        assert!((warm.ranking_ms_per_layer().unwrap() - 196.066).abs() < 0.01);
     }
 
     /// The reliability figure must start optimistic, fall with losses, and

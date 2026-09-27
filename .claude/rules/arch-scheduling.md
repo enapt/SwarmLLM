@@ -30,6 +30,27 @@ the identical plan (gotcha #452).
 
 → `docs/invariants/scheduling.md`
 
+## A whole model on one peer is handed over, never driven token by token (2026-09-27)
+
+**`remote_generate::eligible` is the single answer to "does the hand-off take
+this plan"**, and the n-gram loop — tried first — stands aside for every plan it
+accepts. The peer speculates on its own card, where a miss costs nothing; the
+loop pays a round trip per round (0.78 tok/s against the hand-off's ~11 from one
+peer 443 ms away). It asks privacy with `encrypted_pipeline_for_request`, the
+form the plan was made with.
+
+→ `docs/invariants/scheduling.md` § "A whole model on one peer is handed over"
+
+## A node is ranked on warm work only — including this node (2026-09-27)
+
+`PeerSpeed::ranking_ms_per_layer` falls back to the WARM prefill coefficient; the
+cold-inclusive one sizes timeouts only. The map is keyed by node id, ours too:
+one cold 1-layer segment (a worker spawn) priced this RTX 3070 at 196 ms/layer,
+224× its advertised speed. Every path that times a segment — local ones too —
+records it (`forward_verify_through_segments` did not, for ours).
+
+→ `docs/invariants/scheduling.md` § "A node is ranked on warm work only"
+
 ## Room for more layers is not room for the layers already held
 
 **`NodeCandidate::held_ranges` + `layers_it_would_add`** charge a local segment

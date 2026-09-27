@@ -2311,3 +2311,70 @@ Test: `a_peer_running_on_its_processor_is_not_priced_as_its_card`.
 Not established as the field report's cause — its peer's configuration is not
 known — but it is one way a chain is priced far below what it delivers, and
 847 s against a price that preferred the chain says something did.
+
+## A whole model on one peer is handed over, never driven token by token (2026-09-27)
+
+**A plan `remote_generate::eligible` accepts is the hand-off's.** The n-gram loop
+(`ngram_only_spec`), which `execute_distributed` tries first, asks that same
+predicate and stands aside for every plan it accepts.
+
+**What it replaced.** The n-gram loop ran first on the premise, stated at the
+call site, that the hand-off gives "one token per round trip". It never has:
+the peer decodes on its own card — speculating there with its OWN n-gram lookup
+(`model_worker::ngram_spec_eligible`), where a miss costs nothing on the wire —
+and streams the reply. The loop pays one round trip per round. Its payoff gate
+switches it off after one poor request, so the cost fell on the first such
+request after every restart (and nodes auto-update). Measured on the live node,
+one peer (RTX 4050, Belgium) 443 ms away, 2026-09-27: the loop 0.78 tok/s
+(1283 ms/token, llama-3.1-8b), the hand-off 10.64-11.15 tok/s (qwen2.5-coder-7b);
+the project's own 2026-09-20 figure is 6.57 tok/s by hand-off at 1043 ms.
+
+**And the hand-off asks privacy the way the plan was made.**
+`remote_generate::eligible` now reads `encrypted_pipeline_for_request`, the form
+the scheduler plans with. With the model-only form, a `swarm_route` override
+that released this node's shards (so the automatic default stepped aside and the
+scheduler planned a single remote segment) had the hand-off refuse that plan,
+and it ran as a per-token pipeline instead — only override requests could reach
+it, but they are how spread is benchmarked. An explicit per-model or global
+privacy setting still refuses. `distributed.rs`'s local-embedding check still
+asks the model-only form deliberately: embedding locally before a remote
+segment 0 is harmless defence in depth.
+
+**Unblocks FUTURE_WORK #10's peer credit**: the stated reason peers' prefix
+caches are not priced is that the n-gram loop could take a peer's whole-model
+plan and never read the cache. It no longer can (a draft-model path still can,
+when one is configured).
+
+Test: `a_single_remote_segment_is_the_hand_offs_and_never_the_n_gram_loops`
+(`pipeline/local_generate.rs`) — with a positive control proving the loop's own
+preconditions pass in the fixture, and a privacy control; each assertion goes
+red with its half of the fix planted out.
+
+## A node is ranked on warm work only — including this node (2026-09-27)
+
+**`PeerSpeed::ranking_ms_per_layer` falls back to the WARM prefill coefficient
+(`warm_prefill_ms_per_layer_byte`), never the one that sizes timeouts.** The
+timeout coefficient keeps cold samples on purpose — pessimism about how long to
+wait is safe — and ranking read it as its fallback when no decode step had been
+timed. The map is keyed by node id, THIS node included.
+
+**Measured, and root-caused to seven figures** (a `root-cause` agent, CAUSED):
+right after a restart, one 3-segment plan ran a 1-layer local segment that paid
+for spawning a worker and loading the model — 2448 ms carrying 204,564 bytes.
+`2448 / (1 × 204564) × 16384 = 196.0659`, and the next candidate line priced
+this node `observed_ms_per_layer=Some(196.06593)`: an RTX 3070 that decodes in
+~1 ms a layer, priced 223.6× its advertised figure (`cost_compute_ms` 401,543
+against 1,796). The agent found no unconfounded route it changed in the window
+read — the one candidate was under a benchmark override — but the mechanism is
+a 224× input to `vertex_cost`, with no local exemption.
+
+**Why the fallback was the only source for this node**:
+`forward_verify_through_segments`'s LOCAL branch — the default n-gram verify
+path for a split this node coordinates — recorded nothing, while its remote
+branch has recorded single-token verifies since gotcha #418. It now records
+ours the same way (single-token rule included), so this node gets real decode
+samples, which outrank the fallback.
+
+Test: `a_cold_prefill_sample_times_a_load_and_does_not_rank` (the live
+numbers; red with the fallback pointed back at the cold-inclusive coefficient),
+beside `a_cold_segment_still_sizes_the_timeout`, which keeps the timeout half.
