@@ -4384,7 +4384,12 @@ impl PipelineScheduler {
 
                 // Must be a LAN peer with low latency for AllReduce.
                 // Accept peers that are either mDNS-discovered (is_lan_peer) or
-                // have measured RTT ≤ 10ms (auto-detected via rr_ping).
+                // whose PHYSICAL round trip is within `tp_max_latency_ms`.
+                // `latency_ms` times a whole request-response exchange — two
+                // round trips under V1 negotiation, one under V1Lazy — so it is
+                // converted, never compared raw: a raw comparison let a peer
+                // twice as far through the day V1Lazy halved the sample
+                // (gotcha #742).
                 let (is_lan, measured_latency) = self
                     .shared_state
                     .peer_registry
@@ -4392,7 +4397,9 @@ impl PipelineScheduler {
                     .map(|p| (p.is_lan_peer, p.latency_ms))
                     .unwrap_or((false, None));
                 let tp_max_ms = self.shared_state.config.inference.tp_max_latency_ms;
-                let low_latency = measured_latency.is_some_and(|ms| ms <= tp_max_ms);
+                let low_latency = measured_latency.is_some_and(|ms| {
+                    crate::network::manager::physical_rtt_ms(ms as f32) <= tp_max_ms as f32
+                });
                 if !is_lan && !low_latency {
                     continue;
                 }

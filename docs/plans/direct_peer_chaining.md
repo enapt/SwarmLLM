@@ -385,7 +385,7 @@ Both alternatives were researched and priced; the arithmetic is in
   Australia to Belgium is ~16,700 km, so 167 ms is the round-trip floor in fibre:
   **9.4 s per token at the theoretical limit**, with infinitely fast GPUs and
   infinite bandwidth. It belongs on NVLink at ~1-2 µs, which is why
-  `tp_max_latency_ms` is 10.
+  `tp_max_latency_ms` is 5 (a physical round trip; 10 on the doubled ping before 2026-09-27).
 - **Sequence parallelism / ring attention** parallelises prefill and is the right
   shape for a "process chunks in parallel" intuition, but it is **bandwidth**-bound,
   so moving nodes closer together does not help. Circulating K/V costs, per node

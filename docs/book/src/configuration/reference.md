@@ -97,7 +97,7 @@ booted with.
 | `draft_model_path` | path | none | Path to draft model |
 | `max_split_model_memory_mb` | integer | none | Max GPU memory for split model cache |
 | `tensor_parallel` | boolean | `false` | Split single layers across LAN peers via per-layer AllReduce. Off by default — over Ethernet the two round trips per layer cost more than the compute they split, and a node that holds every layer never forms a group regardless |
-| `tp_max_latency_ms` | integer | `10` | Max peer latency (ms) for tensor parallelism groups (only consulted when `tensor_parallel = true`) |
+| `tp_max_latency_ms` | integer | `5` | Max physical round trip (ms) to a peer for tensor parallelism groups (only consulted when `tensor_parallel = true`) |
 | `local_embedding_privacy` | boolean | `false` | Embed tokens locally before sending to first segment. Remote nodes never see raw token IDs. They still receive hidden states, which published attacks can turn back into much of the text |
 | `encrypted_pipeline` | boolean | `false` | Prompt privacy ("boomerang"): run the first and last steps on this computer, so no other computer is handed the prompt as text or picks the reply's words. **Structural, not cryptographic** — middle computers still compute on hidden states in plaintext, which published attacks invert to roughly 81% of the input. Adds ~1 RTT/token. Per-model override via API. Requires shard 0 + final shard locally; see `encrypted_pipeline_auto` |
 | `privacy_mode` | boolean | `false` | Never write user prompts to disk — KV-cache sessions stay in memory only |

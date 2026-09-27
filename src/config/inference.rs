@@ -374,10 +374,11 @@ pub struct InferenceConfig {
     /// whole model alone (see `assemble_pipeline_for`).
     #[serde(default)]
     pub tensor_parallel: bool,
-    /// Maximum peer RTT (ms) to consider for tensor parallelism AllReduce.
-    /// Peers with measured latency above this threshold are excluded from TP groups.
-    /// Only consulted when `tensor_parallel` is enabled.
-    /// Default: 10ms (LAN-only).
+    /// Maximum PHYSICAL round trip (ms) to a peer considered for tensor
+    /// parallelism AllReduce; peers farther than this are excluded from TP
+    /// groups. Only consulted when `tensor_parallel` is enabled. Default: 5 ms
+    /// (LAN-only) — the same boundary the old default of 10 drew when the
+    /// measurement it was compared to took two round trips (gotcha #742).
     #[serde(default = "default_tp_max_latency_ms")]
     pub tp_max_latency_ms: u32,
     /// Enable cross-request prefix KV-cache on worker subprocesses. When on,
@@ -650,7 +651,7 @@ fn default_batched_prefill_forward() -> bool {
 }
 
 fn default_tp_max_latency_ms() -> u32 {
-    10
+    5
 }
 
 fn default_prefix_cache_max_mb() -> u32 {

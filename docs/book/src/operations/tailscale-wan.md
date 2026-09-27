@@ -95,7 +95,7 @@ For higher latency links (cross-continent), you may also want:
 
 ```toml
 [inference]
-tp_max_latency_ms = 50        # Relax tensor parallelism latency threshold (default: 10ms)
+tp_max_latency_ms = 50        # Relax tensor parallelism round-trip threshold (default: 5ms)
 ```
 
 ## Binding to a Specific Interface
@@ -203,7 +203,7 @@ browser's address bar — and offers the paste box. See the section above.
 
 **Slow inference across WAN:**
 - Pipeline parallelism (splitting layers across nodes) works best on low-latency links (<50ms)
-- Tensor parallelism requires LAN-like latency (<10ms) — increase `tp_max_latency_ms` or let SwarmLLM use pipeline mode instead
+- Tensor parallelism requires LAN-like latency (<5ms round trip) — increase `tp_max_latency_ms` or let SwarmLLM use pipeline mode instead
 - Consider having each site run its own models for local inference, with the swarm as fallback
 
 **Stale peer cache after IP change:**

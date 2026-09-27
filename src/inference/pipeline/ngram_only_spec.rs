@@ -418,7 +418,7 @@ impl PipelineExecutor {
                 // honour the same sampling parameters every other step does.
                 // Walked at the tail where it can be, so a miss round costs a
                 // token id on the wire, not a vocabulary.
-                let (_, bonus, _) = super::forward_verify_through_segments(
+                let reply = super::forward_verify_through_segments(
                     &self.shared_state,
                     &self.network_tx,
                     request_id,
@@ -432,8 +432,21 @@ impl PipelineExecutor {
                         generated: &generated,
                     }),
                 )
-                .await?
-                .accept(&[], &self.request.sampling_params, &generated)?;
+                .await?;
+                // An unusable reply ends the request with what it has, exactly
+                // as the hit arm below does — the same failure must not stream
+                // an error on a miss round and a clean finish on a hit round.
+                let (_, bonus, _) = match reply.accept(
+                    &[],
+                    &self.request.sampling_params,
+                    &generated,
+                ) {
+                    Ok(decided) => decided,
+                    Err(e) => {
+                        tracing::warn!(%request_id, error = %e, "ngram-only: unusable verify reply, returning partial");
+                        break;
+                    }
+                };
                 last_token = bonus;
                 generated.push(bonus);
                 current_pos += 1;
