@@ -1737,6 +1737,28 @@ impl CpuReason {
     }
 }
 
+/// Whether loading a model may take memory from other models — a REQUIRED
+/// argument of `ModelProcessPool::get_or_spawn`, so no load can leave it out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Tenancy {
+    /// Asked for by a request FOR this model: reclaims idle models' memory
+    /// rather than run on the processor, may go part card, part processor, and
+    /// returns to the card once it fits.
+    Tenant,
+    /// Serves another model's request — the split drafter
+    /// (`ModelProcessPool::draft`). It takes only memory that is free as it
+    /// stands: no reclaim, no card/processor split, no promotion, no growth,
+    /// and no dashboard notice. Loaded as a tenant it evicted the very model it
+    /// was guessing for — idle between turns after `VRAM_MAKE_ROOM_MIN_IDLE_SECS`
+    /// — whose next prompt pass then reloaded it beside the drafter, on the
+    /// processor if the card was full, and the two could swap on every turn.
+    /// vLLM hit the static form of this (the draft model's weights missing from
+    /// its memory profiler, vllm-project/vllm#14067) and plans the two
+    /// together; a swarm node loads models on demand, so the drafter is made
+    /// subordinate instead (2026-09-28).
+    Guest,
+}
+
 /// Whose request a [`ModelProcessPool::generate`] — or a forward of a segment
 /// of it, [`ModelProcessPool::forward_for_request`] — serves, which decides
 /// how many cores may read its prompt (`cpu_pools::in_phase_pool`).
@@ -4204,22 +4226,71 @@ impl ModelProcessPool {
         let _ = self.activity_tx.set(tx);
     }
 
+    /// Does a live worker hold exactly this range of this model, charged?
+    /// The question a caller asks before starting something that would
+    /// compete with that range's load for memory — see [`Tenancy::Guest`].
+    pub fn holds_segment(&self, model_id: &ModelId, segment: (u32, u32)) -> bool {
+        self.live_worker(model_id)
+            .is_some_and(|h| h.segment_is_charged(segment))
+    }
+
+    /// Admit `estimated` MB to the card for a spawn, reclaiming idle models'
+    /// graphics memory first when `tenancy` allows it — a guest takes the card
+    /// only as it stands. Ask ONCE unless the answer was no: `admit_to_gpu`
+    /// charges the reservation when it succeeds, so a second call would weigh
+    /// the model against its own charge and refuse one already let in.
+    async fn admit_to_gpu_as(&self, model_id: &ModelId, estimated: u64, tenancy: Tenancy) -> bool {
+        let mut admitted = self.admit_to_gpu(model_id, estimated);
+        if !admitted && tenancy == Tenancy::Tenant {
+            let freed = self.free_vram_for_admission(model_id, estimated).await;
+            if freed > 0 {
+                tracing::info!(
+                    model = %model_id,
+                    freed_mb = freed,
+                    "Reclaimed graphics memory from idle models; retrying admission"
+                );
+                admitted = self.admit_to_gpu(model_id, estimated);
+            }
+        }
+        admitted
+    }
+
+    /// [`Self::admit_to_gpu_as`] for the RAM budget: reclaim memory from
+    /// unused models, then ask again — unless `tenancy` is a guest's.
+    async fn admit_to_cpu_as(&self, model_id: &ModelId, estimated: u64, tenancy: Tenancy) -> bool {
+        let mut admitted = self.admit_to_cpu(model_id, estimated);
+        if !admitted && tenancy == Tenancy::Tenant {
+            let freed = self.free_ram_for_admission(model_id, estimated).await;
+            if freed > 0 {
+                tracing::info!(
+                    model = %model_id,
+                    freed_mb = freed,
+                    "Reclaimed memory from unused models; retrying admission"
+                );
+            }
+            admitted = self.admit_to_cpu(model_id, estimated);
+        }
+        admitted
+    }
+
     /// Get or spawn a worker for this model.
     /// `segment` is the layer range this request needs. One worker serves a
     /// model, and its `models` map is keyed by layer range — so a worker can
     /// come to hold SEVERAL segments of one model, and each is charged as it is
     /// first asked for. See [`Self::charge_additional_segment`].
+    /// `tenancy` says whether it may take memory from other models to do it.
     async fn get_or_spawn(
         &self,
         model_id: &ModelId,
         segment: (u32, u32),
+        tenancy: Tenancy,
     ) -> Result<Arc<WorkerHandle>, SwarmError> {
         // A round ends without a worker only when another task put one in the
         // map, while this one waited for the spawn lock, that does not hold this
         // range — the next round grows it through the fast path. Bounded, so
         // contention cannot spin; running out is a local lifecycle failure.
         for _ in 0..GET_OR_SPAWN_ROUNDS {
-            if let Some(handle) = self.get_or_spawn_once(model_id, segment).await? {
+            if let Some(handle) = self.get_or_spawn_once(model_id, segment, tenancy).await? {
                 return Ok(handle);
             }
         }
@@ -4235,7 +4306,9 @@ impl ModelProcessPool {
         &self,
         model_id: &ModelId,
         segment: (u32, u32),
+        tenancy: Tenancy,
     ) -> Result<Option<Arc<WorkerHandle>>, SwarmError> {
+        let guest = tenancy == Tenancy::Guest;
         // Fast path: worker already exists — and, unless this node demoted it
         // to the processor and the card has since made room, that is the answer.
         let existing = self.workers.get(model_id).map(|h| h.clone());
@@ -4263,9 +4336,19 @@ impl ModelProcessPool {
                      failing the request"
                 );
                 self.retire_dead_worker(model_id).await;
-            } else if !self.worker_should_return_to_gpu(model_id, &handle) {
+            } else if guest || !self.worker_should_return_to_gpu(model_id, &handle) {
+                // A guest is never promoted: moving it to the card means
+                // taking memory, which it may not do (`Tenancy::Guest`).
                 if handle.segment_is_charged(segment) {
                     return Ok(Some(handle));
+                }
+                if guest {
+                    // Growing reclaims or replaces — both take memory. A guest
+                    // does without instead; its caller carries on unaided.
+                    return Err(SwarmError::ServiceUnavailable(format!(
+                        "{} is loaded here for other layers, so it is not used to guess",
+                        model_id.0
+                    )));
                 }
                 // A range this worker has not been asked for before: it is
                 // about to load more weights, so weigh them first — and where
@@ -4295,7 +4378,7 @@ impl ModelProcessPool {
                 false
             }
             Some(handle) => {
-                if !self.worker_should_return_to_gpu(model_id, &handle) {
+                if guest || !self.worker_should_return_to_gpu(model_id, &handle) {
                     // Another task spawned it while this one waited. Hand it
                     // back only if it holds THIS range: returned uncharged, the
                     // worker loads whatever a forward names, and memory the pool
@@ -4378,22 +4461,9 @@ impl ModelProcessPool {
         let mut charged_ram_mb: u64 = 0;
         if !going_to_cpu {
             // Demoting to the CPU is the last resort, not the first answer:
-            // reclaim the card from models nothing is using, then ask again.
-            // Ask ONCE unless the answer was no — `admit_to_gpu` charges the
-            // reservation when it succeeds, so a second call would weigh the
-            // model against its own charge and refuse one already let in.
-            let mut admitted = self.admit_to_gpu(model_id, estimated);
-            if !admitted {
-                let freed = self.free_vram_for_admission(model_id, estimated).await;
-                if freed > 0 {
-                    tracing::info!(
-                        model = %model_id,
-                        freed_mb = freed,
-                        "Reclaimed graphics memory from idle models; retrying admission"
-                    );
-                    admitted = self.admit_to_gpu(model_id, estimated);
-                }
-            }
+            // reclaim the card from models nothing is using, then ask again —
+            // for a tenant (`admit_to_gpu_as`).
+            let mut admitted = self.admit_to_gpu_as(model_id, estimated, tenancy).await;
             if admitted {
                 charged_vram_mb = estimated;
             }
@@ -4403,7 +4473,10 @@ impl ModelProcessPool {
             // this swarm, with graphics memory sitting free and unused beside
             // it (three reports, most recently 5151 MB free while the model
             // ran on the processor).
-            if !admitted {
+            // Not for a guest: it would fill whatever the card has left, and a
+            // guess is paced by its slowest layer, which would be on the
+            // processor anyway.
+            if !admitted && !guest {
                 if let Some((n, total)) =
                     self.partial_gpu_layers(model_id, Some(segment), estimated)
                 {
@@ -4421,7 +4494,15 @@ impl ModelProcessPool {
                     admitted = true;
                 }
             }
-            if !admitted {
+            if !admitted && guest {
+                tracing::info!(
+                    model = %model_id,
+                    estimated_mb = estimated,
+                    committed_mb = self.vram_committed_mb(),
+                    "The guessing model does not fit the graphics memory that is free — \
+                     running it on the processor; it never takes the card from another model"
+                );
+            } else if !admitted {
                 // Now it IS true: the budget could not be made to fit, even
                 // after reclaiming every idle model that could be spared.
                 tracing::warn!(
@@ -4435,6 +4516,8 @@ impl ModelProcessPool {
                      instead (slower, but it answers). It will use the GPU again once \
                      memory frees up"
                 );
+            }
+            if !admitted {
                 going_to_cpu = true;
                 placed_on_cpu_because = Some(CpuReason::NotEnoughVram);
                 // **Deliberately NOT a pin.** A refusal here is arithmetic
@@ -4453,7 +4536,10 @@ impl ModelProcessPool {
                 // graphics card has FAILED for this model (`classify_worker_
                 // error`), which is the case where retrying really does cost a
                 // load.
-                if let Some(tx) = self.activity_tx.get() {
+                //
+                // Nobody asked for a guest by name, so its placement is not news
+                // to the owner: the log line above is its whole record.
+                if let Some(tx) = self.activity_tx.get().filter(|_| !guest) {
                     let _ = tx.send(
                         crate::daemon::state::ActivityEvent::new(
                             "inference",
@@ -4527,31 +4613,16 @@ impl ModelProcessPool {
         if charge_ram {
             let estimated = self.estimate_cpu_footprint_mb(model_id, Some(segment));
             // Refusing is the last resort: first reclaim memory from models
-            // nothing is using, then ask again. Only then does the user see an
-            // error.
-            //
-            // Ask ONCE unless the answer was no. `admit_to_cpu` charges the
-            // reservation when it succeeds, so calling it a second time after a
-            // success weighs the model against its own charge and refuses a
-            // model that had already been let in.
-            let mut admitted = self.admit_to_cpu(model_id, estimated);
-            if !admitted {
-                let freed = self.free_ram_for_admission(model_id, estimated).await;
-                if freed > 0 {
-                    tracing::info!(
-                        model = %model_id,
-                        freed_mb = freed,
-                        "Reclaimed memory from unused models; retrying admission"
-                    );
-                }
-                admitted = self.admit_to_cpu(model_id, estimated);
-            }
+            // nothing is using, then ask again (`admit_to_cpu_as`, a tenant's
+            // only). Only then does the user see an error.
+            let admitted = self.admit_to_cpu_as(model_id, estimated, tenancy).await;
             if admitted {
                 charged_ram_mb = estimated;
             }
             if !admitted {
                 self.release_vram_charge(model_id, charged_vram_mb);
-                if let Some(tx) = self.activity_tx.get() {
+                // A guest's refusal only means a reply goes unguessed.
+                if let Some(tx) = self.activity_tx.get().filter(|_| !guest) {
                     let _ = tx.send(
                         crate::daemon::state::ActivityEvent::new(
                             "inference",
@@ -5375,7 +5446,9 @@ impl ModelProcessPool {
         // forward sent on its behalf, which is where the memory would have
         // gone.
         crate::inference::cancel::bail_if_cancelled(cancel.as_ref())?;
-        let handle = self.get_or_spawn(&model_id, forward.layer_range).await?;
+        let handle = self
+            .get_or_spawn(&model_id, forward.layer_range, Tenancy::Tenant)
+            .await?;
         crate::inference::cancel::bail_if_cancelled(cancel.as_ref())?;
 
         // Destructure to avoid cloning activations (can be large tensor data)
@@ -5560,7 +5633,9 @@ impl ModelProcessPool {
         let model_id = d.model_id.clone();
         let request_id = d.request_id;
         crate::inference::cancel::bail_if_cancelled(cancel.as_ref())?;
-        let handle = self.get_or_spawn(&model_id, d.layer_range).await?;
+        let handle = self
+            .get_or_spawn(&model_id, d.layer_range, Tenancy::Guest)
+            .await?;
         crate::inference::cancel::bail_if_cancelled(cancel.as_ref())?;
         if handle.dead.load(Ordering::Acquire) {
             self.retire_dead_worker(&model_id).await;
@@ -5647,7 +5722,7 @@ impl ModelProcessPool {
         // Every forward in a batch shares a model AND a layer range — see
         // `batch_eligible`, which is what put them in one batch.
         let handle = self
-            .get_or_spawn(&model_id, forwards[0].layer_range)
+            .get_or_spawn(&model_id, forwards[0].layer_range, Tenancy::Tenant)
             .await?;
         if handle.dead.load(Ordering::Acquire) {
             self.retire_dead_worker(&model_id).await;
@@ -5902,7 +5977,9 @@ impl ModelProcessPool {
         token_tx: Option<crate::inference::router::StreamingTokenTx>,
         emitted: &std::sync::atomic::AtomicBool,
     ) -> Result<crate::inference::router::InferenceOutput, SwarmError> {
-        let handle = self.get_or_spawn(model_id, layer_range).await?;
+        let handle = self
+            .get_or_spawn(model_id, layer_range, Tenancy::Tenant)
+            .await?;
 
         // Kept for the post-generation stop-marker trim below; `sampling` is
         // moved into the IPC message.
@@ -7252,6 +7329,89 @@ mod tests {
         );
         assert!(h.segment_is_charged((0, 32)));
         assert_eq!(pool.vram_committed_mb(), 500 + 5440);
+    }
+
+    /// **The guessing model never takes the card from another model** — not
+    /// even one idle for an hour, which an ordinary load reclaims (the control).
+    /// Loaded as a tenant, the drafter evicted the target it guessed for, idle
+    /// between turns (`Tenancy::Guest`).
+    #[tokio::test]
+    async fn a_guest_never_takes_the_card_from_an_idle_model() {
+        let pool = ModelProcessPool::new(std::path::PathBuf::from("/tmp/swarmllm-guest-gpu"));
+        pool.set_gpu_layers(-1);
+        pool.set_vram_budget_mb(6000);
+        let target = ModelId("target-7b".into());
+        let drafter = ModelId("drafter-0.5b".into());
+        let hour = std::time::Duration::from_secs(3600);
+        admit_and_insert_gpu_worker(&pool, &target, 3138, hour).await;
+
+        assert!(!pool.admit_to_gpu_as(&drafter, 3000, Tenancy::Guest).await);
+        assert!(
+            pool.workers.get(&target).is_some(),
+            "the target keeps the card"
+        );
+        assert_eq!(
+            pool.vram_committed_mb(),
+            3138,
+            "and the guest charged nothing"
+        );
+
+        // The control: the same load as a tenant reclaims the idle model.
+        assert!(pool.admit_to_gpu_as(&drafter, 3000, Tenancy::Tenant).await);
+        assert!(pool.workers.get(&target).is_none());
+        assert_eq!(pool.vram_committed_mb(), 3000);
+    }
+
+    /// The same for system memory, where a guest sent off the card lands.
+    #[tokio::test]
+    async fn a_guest_never_takes_system_memory_from_an_idle_model() {
+        let pool = ModelProcessPool::new(std::path::PathBuf::from("/tmp/swarmllm-guest-ram"));
+        pool.set_ram_budget_mb(8000);
+        let target = ModelId("target-7b".into());
+        let drafter = ModelId("drafter-0.5b".into());
+        admit_and_insert_cpu_worker(&pool, &target, 6000, false).await;
+
+        assert!(!pool.admit_to_cpu_as(&drafter, 3000, Tenancy::Guest).await);
+        assert!(pool.workers.get(&target).is_some());
+        assert_eq!(pool.ram_committed_mb(), 6000);
+
+        assert!(pool.admit_to_cpu_as(&drafter, 3000, Tenancy::Tenant).await);
+        assert!(pool.workers.get(&target).is_none());
+    }
+
+    /// A guest is handed a worker that holds its range, and is refused one that
+    /// would have to grow — growing reclaims or replaces. A tenant grows it
+    /// (the control), which with the card free costs nothing else.
+    #[tokio::test]
+    async fn a_guest_does_not_grow_a_worker_it_finds() {
+        let pool = ModelProcessPool::new(std::path::PathBuf::from("/tmp/swarmllm-guest-grow"));
+        pool.set_gpu_layers(-1);
+        pool.set_vram_budget_mb(6000);
+        let m = ModelId("shared-0.5b".into());
+        pool.test_cost_curve.insert(m.clone(), (300, 50));
+        let h = admit_and_insert_gpu_worker(&pool, &m, 350, std::time::Duration::ZERO).await;
+        h.record_charged_segment((0, 1), 0);
+
+        let held = pool.get_or_spawn(&m, (0, 1), Tenancy::Guest).await;
+        assert!(
+            held.is_ok_and(|g| Arc::ptr_eq(&g, &h)),
+            "the range it holds is handed back"
+        );
+        let refused = pool.get_or_spawn(&m, (0, 24), Tenancy::Guest).await;
+        assert!(matches!(refused, Err(SwarmError::ServiceUnavailable(_))));
+        assert!(
+            !h.segment_is_charged((0, 24)),
+            "and nothing was loaded for it"
+        );
+        assert!(pool.holds_segment(&m, (0, 1)));
+        assert!(!pool.holds_segment(&m, (0, 24)));
+
+        let grown = pool
+            .get_or_spawn(&m, (0, 24), Tenancy::Tenant)
+            .await
+            .expect("a tenant grows the worker");
+        assert!(Arc::ptr_eq(&grown, &h));
+        assert!(pool.holds_segment(&m, (0, 24)));
     }
 
     /// **An idle worker that cannot grow on the card is replaced, not refused.**

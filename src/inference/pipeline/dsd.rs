@@ -168,17 +168,35 @@ impl PipelineExecutor {
         };
 
         // Our engine's drafter reads the prompt while the target does, not
-        // after it — see `engine_drafter::read_ahead`.
-        let read_ahead = engine.as_ref().map(|(spec, ids)| {
-            super::engine_drafter::read_ahead(
-                self.shared_state.clone(),
-                spec,
-                request_id,
-                ids.clone(),
-                &self.request.sampling_params,
-                self.request.cancel.clone(),
-            )
-        });
+        // after it — see `engine_drafter::read_ahead` — but only once this
+        // node's own segments of the target are loaded. The drafter is a guest
+        // (`process_pool::Tenancy::Guest`): it takes graphics memory only as it
+        // stands free, and on a cold start that is exactly the memory those
+        // segments are about to be loaded into. Loaded first, it would push
+        // them onto the processor; waiting, it takes what they leave. The first
+        // round then reads the prompt itself.
+        let target_segments_loaded = {
+            let me = self.shared_state.identity.node_id();
+            let pool = &self.shared_state.model_process_pool;
+            self.assignment
+                .segments
+                .iter()
+                .filter(|s| s.node_id == *me)
+                .all(|s| pool.holds_segment(&self.request.model_id, s.layer_range))
+        };
+        let read_ahead = engine
+            .as_ref()
+            .filter(|_| target_segments_loaded)
+            .map(|(spec, ids)| {
+                super::engine_drafter::read_ahead(
+                    self.shared_state.clone(),
+                    spec,
+                    request_id,
+                    ids.clone(),
+                    &self.request.sampling_params,
+                    self.request.cancel.clone(),
+                )
+            });
 
         // Phase 1: standard prefill through the pipeline to produce the first
         // token AND prime every segment's KV with the prompt. We reuse the

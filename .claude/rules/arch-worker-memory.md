@@ -161,6 +161,19 @@ refusal; never retire one mid-conversation (#93).
 
 → `docs/invariants/memory.md` § "A worker that cannot grow gets the spawn's ladder"
 
+## A model loaded for ANOTHER model's request is a guest (2026-09-28)
+
+**`process_pool::Tenancy` is a REQUIRED argument of `get_or_spawn`.** A `Guest`
+— the split drafter, `ModelProcessPool::draft` — takes memory only as it stands
+free: no reclaim, no card/processor split, no promotion, no growth, no dashboard
+notice. As an ordinary load it evicted the very target it guessed for, which is
+idle between turns after the 5 s floor, and the target's next prompt pass then
+reloaded beside it, on the processor if the card was full. **`dsd.rs` reads
+ahead only once this node's target segments are loaded** (`holds_segment`): on a
+cold start the free memory is the memory those segments are about to take.
+
+→ `docs/invariants/memory.md` § "A model loaded for another model's request is a guest"
+
 ## A fan-out to every worker is bounded, and the two waits mean different things
 
 **`ModelProcessPool::notify_every_worker` is the one place a fire-and-forget

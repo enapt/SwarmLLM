@@ -1425,3 +1425,68 @@ Two races a `code-reviewer` pass found in the fix, both closed and tested:
   hands the worker back only if it holds the range — otherwise another round,
   whose fast path grows it. Three rounds that each find a replacement fail as a
   lifecycle error (`ServiceUnavailable`), which is contention, not progress.
+
+## A model loaded for another model's request is a guest (2026-09-28)
+
+### What it replaced
+
+The in-engine drafter (`pipeline::engine_drafter`, v0.3.212) is an ordinary
+model this node holds, run by its own worker through `ModelProcessPool::draft`,
+and it went through `get_or_spawn` like any request FOR that model. Admission
+therefore did what it does for a tenant: refused as it stands, it reclaimed
+graphics memory from every model not in use and idle past
+`VRAM_MAKE_ROOM_MIN_IDLE_SECS` (5 s). Between two chat turns the TARGET's own
+segment worker is exactly that — its conversation released, idle for longer than
+the floor — so the drafter's load could unload the model it was about to guess
+for. The target's prompt pass then reloaded its segment beside the drafter,
+which now held the card, and admission placed it part-card or on the processor.
+On the next turn promotion could evict the idle drafter and the drafter's load
+evict the idle target again: the "two models alternating faster than they load"
+case the idle floor exists for, with the floor too short to cover a chat turn.
+
+The read-ahead (`engine_drafter::read_ahead`, spawned before the target's prompt
+pass so the drafter's load overlaps it) made the cold start a race too: with
+neither loaded, whichever took `spawn_lock` first took the free memory, and the
+drafter usually got there first.
+
+Found by reading the path before a default flip, not by a failure on the WAN
+bench: that run's target segment was warm and the card had room for both.
+
+### Research
+
+vLLM hit the static form: the draft model's weights were missing from its
+memory profiler, so it went out of memory once the KV cache had taken the
+remainder (vllm-project/vllm#14067); its fix plans draft and target memory
+together, up front, and llama.cpp's server likewise loads both at startup. A
+swarm node loads models on demand and the planner prices only the target, so
+there is no up-front plan to join; the drafter is made subordinate instead.
+
+### The rule
+
+`Tenancy::Guest` takes memory only as it stands free: `admit_to_gpu_as` and
+`admit_to_cpu_as` skip the reclaim, the partial card/processor placement is not
+offered (a guess is paced by its slowest layer), promotion is skipped, a worker
+that would have to GROW is refused rather than grown (growth reclaims or
+replaces), and neither the processor-fallback nor the RAM-refusal notice reaches
+the dashboard — nobody asked for the drafter by name, and a refused drafter only
+means a reply goes unguessed (`drafting_off`). The TARGET may still reclaim an
+idle drafter: guest status is a property of the load, not of the model, so the
+same model asked for by name is an ordinary tenant.
+
+The ordering half is in `dsd.rs`: the read-ahead starts only when
+`holds_segment` says every segment of the plan assigned to this node is already
+loaded. Otherwise the first round reads the prompt, as it did before the
+read-ahead existed. Two contiguous local segments that the loader merged into
+one run read as "not loaded" and lose only the overlap.
+
+### What a change must keep
+
+- Every load names its tenancy; the parameter is required so a new caller
+  cannot inherit the tenant's reclaim by omission.
+- Tests: `a_guest_never_takes_the_card_from_an_idle_model`,
+  `a_guest_never_takes_system_memory_from_an_idle_model` (each with the tenant
+  as control), `a_guest_does_not_grow_a_worker_it_finds` — all three red with
+  the guest checks removed.
+- Residual: a guest placed on the processor stays there until it is unloaded
+  idle, even if the card frees up; promoting it would mean taking memory.
+
