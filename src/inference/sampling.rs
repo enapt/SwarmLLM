@@ -1,3 +1,4 @@
+use crate::inference::coupled_noise::{CoupledNoise, GUMBEL_MAX, GUMBEL_MIN};
 use crate::types::SamplingParams;
 
 /// Pre-allocated scratch buffers for sampling, eliminating ~700KB of allocations per token.
@@ -311,7 +312,7 @@ fn apply_top_p_with_ctx(logits: &mut [f32], p: f32, ctx: &mut SamplingContext) {
 /// for tests and one-shot validation paths.
 pub fn sample_token(logits: &mut [f32], params: &SamplingParams) -> u32 {
     let mut ctx = SamplingContext::new(logits.len());
-    sample_token_with_ctx(logits, params, &[], &mut ctx)
+    sample_token_with_ctx(logits, params, &[], &mut ctx, None)
 }
 
 /// Sample a token index applying frequency/presence penalties from the
@@ -325,7 +326,61 @@ pub fn sample_token_with_history(
     generated_ids: &[u32],
     ctx: &mut SamplingContext,
 ) -> u32 {
-    sample_token_with_ctx(logits, params, generated_ids, ctx)
+    sample_token_with_ctx(logits, params, generated_ids, ctx, None)
+}
+
+/// Sample the token that will occupy absolute sequence `position`, drawing from
+/// the request's SHARED noise stream instead of this process's random numbers
+/// (`inference::coupled_noise`). The same filters as every other sampler —
+/// penalties, temperature, top-k, top-p — then Gumbel-max over what survives:
+/// an exact sample of the same distribution, but one a drafter holding the same
+/// seed can reproduce. Temperature 0 is the argmax, as everywhere.
+pub fn sample_token_coupled(
+    logits: &mut [f32],
+    params: &SamplingParams,
+    generated_ids: &[u32],
+    ctx: &mut SamplingContext,
+    noise: &CoupledNoise,
+    position: u64,
+) -> u32 {
+    sample_token_with_ctx(logits, params, generated_ids, ctx, Some((noise, position)))
+}
+
+/// `argmax_i (score_i + G(position, i))` over `(token, score)` pairs, where
+/// `score` is the temperature-scaled logit of a token that survived the filters —
+/// Gumbel-max, an exact sample of the softmax over those scores.
+///
+/// **Pruned exactly, never approximately.** Noise is computed only for tokens
+/// that could still win: the best candidate scores at least
+/// `max + GUMBEL_MIN`, and no noise exceeds `GUMBEL_MAX`, so a token scoring below
+/// `max + GUMBEL_MIN - GUMBEL_MAX` cannot be the argmax. Evaluating noise only for
+/// SOME other subset (a drafter's candidates, say) would bias the sample; this
+/// bound cannot. Ties go to the lowest token id. `None` when nothing is finite.
+fn gumbel_argmax(
+    candidates: impl Iterator<Item = (usize, f32)> + Clone,
+    noise: &CoupledNoise,
+    position: u64,
+) -> Option<u32> {
+    let max = candidates
+        .clone()
+        .filter(|&(_, l)| l.is_finite())
+        .map(|(_, l)| l)
+        .fold(f32::NEG_INFINITY, f32::max);
+    if !max.is_finite() {
+        return None;
+    }
+    let floor = f64::from(max) + GUMBEL_MIN - GUMBEL_MAX;
+    let mut best: Option<(u32, f64)> = None;
+    for (i, l) in candidates {
+        if !l.is_finite() || f64::from(l) < floor {
+            continue;
+        }
+        let score = f64::from(l) + noise.gumbel(position, i as u32);
+        if best.is_none_or(|(_, b)| score > b) {
+            best = Some((i as u32, score));
+        }
+    }
+    best.map(|(i, _)| i)
 }
 
 /// Are the rows a verify of `n_drafts` drafts reads (γ+1 of them) all finite?
@@ -440,6 +495,7 @@ fn sample_token_with_ctx(
     params: &SamplingParams,
     generated_ids: &[u32],
     ctx: &mut SamplingContext,
+    coupled: Option<(&CoupledNoise, u64)>,
 ) -> u32 {
     // Repetition penalties (frequency + presence) MUST run before
     // temperature scaling per OpenAI spec — applying after temperature
@@ -471,9 +527,9 @@ fn sample_token_with_ctx(
 
     let k = params.top_k as usize;
     if k > 0 && k < logits.len() {
-        sample_among_top_k(logits, params, k, ctx, simple_random)
+        sample_among_top_k(logits, params, k, ctx, simple_random, coupled)
     } else {
-        sample_full_vocab(logits, params, ctx, simple_random)
+        sample_full_vocab(logits, params, ctx, simple_random, coupled)
     }
 }
 
@@ -546,6 +602,7 @@ fn sample_among_top_k(
     k: usize,
     ctx: &mut SamplingContext,
     uniform: impl FnOnce() -> f32,
+    coupled: Option<(&CoupledNoise, u64)>,
 ) -> u32 {
     select_top_k_candidates(logits, k, &mut ctx.indexed_logits);
     let cands = &mut ctx.indexed_logits;
@@ -602,6 +659,13 @@ fn sample_among_top_k(
                     kept
                 });
             }
+        }
+    }
+
+    // The shared-noise draw: Gumbel-max over the same survivors.
+    if let Some((noise, position)) = coupled {
+        if let Some(token) = gumbel_argmax(cands.iter().copied(), noise, position) {
+            return token;
         }
     }
 
@@ -662,10 +726,18 @@ fn sample_full_vocab(
     params: &SamplingParams,
     ctx: &mut SamplingContext,
     uniform: impl FnOnce() -> f32,
+    coupled: Option<(&CoupledNoise, u64)>,
 ) -> u32 {
     apply_temperature(logits, params.temperature);
     apply_top_k_with_ctx(logits, params.top_k, ctx);
     apply_top_p_with_ctx(logits, params.top_p, ctx);
+
+    // The shared-noise draw over what the masks left finite.
+    if let Some((noise, position)) = coupled {
+        if let Some(token) = gumbel_argmax(logits.iter().copied().enumerate(), noise, position) {
+            return token;
+        }
+    }
 
     let len = logits.len();
     ctx.ensure_capacity(len);
@@ -777,7 +849,7 @@ pub fn sample_token_with_logprobs_history(
     // (especially important for greedy/temperature=0 which skips softmax)
     ctx.probs.clear();
 
-    let token_id = sample_token_with_ctx(logits, params, generated_ids, ctx);
+    let token_id = sample_token_with_ctx(logits, params, generated_ids, ctx, None);
 
     let logprob_info = if need_logprobs {
         // Compute log-softmax from raw (pre-sampling) logits per OpenAI spec.
@@ -1123,13 +1195,14 @@ mod tests {
             };
             for u in [1e-6f32, 0.1, 0.37, 0.5, 0.83, 0.999_999] {
                 let mut full = logits.clone();
-                let want = sample_full_vocab(&mut full, &params, &mut ctx_full, || u);
+                let want = sample_full_vocab(&mut full, &params, &mut ctx_full, || u, None);
                 let got = sample_among_top_k(
                     &logits,
                     &params,
                     params.top_k as usize,
                     &mut ctx_fast,
                     || u,
+                    None,
                 );
                 assert_eq!(
                     got, want,
@@ -1181,11 +1254,14 @@ mod tests {
         };
         let mut ctx = SamplingContext::new(0);
         assert_eq!(
-            sample_among_top_k(&logits, &params, 40, &mut ctx, || 0.5),
+            sample_among_top_k(&logits, &params, 40, &mut ctx, || 0.5, None),
             0
         );
         let mut full = logits.clone();
-        assert_eq!(sample_full_vocab(&mut full, &params, &mut ctx, || 0.5), 0);
+        assert_eq!(
+            sample_full_vocab(&mut full, &params, &mut ctx, || 0.5, None),
+            0
+        );
     }
 
     #[test]
@@ -1207,7 +1283,7 @@ mod tests {
             ..Default::default()
         };
         let mut ctx = SamplingContext::new(logits.len());
-        let token = sample_token_with_ctx(&mut logits, &params, &[], &mut ctx);
+        let token = sample_token_with_ctx(&mut logits, &params, &[], &mut ctx, None);
         assert_eq!(token, 1);
     }
 
@@ -1538,5 +1614,175 @@ mod speculative_acceptance_tests {
         let mut poisoned = rows;
         poisoned[2][1] = f32::INFINITY;
         assert!(walk_verified_positions(&[1, 0], &poisoned, &greedy, &[]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod coupled_sampling_tests {
+    use super::*;
+    use crate::inference::coupled_noise::CoupledNoise;
+
+    fn tv(a: &[u32], b: &[u32], n: u32) -> f64 {
+        a.iter()
+            .zip(b)
+            .map(|(&x, &y)| (f64::from(x) - f64::from(y)).abs() / f64::from(n))
+            .sum::<f64>()
+            / 2.0
+    }
+
+    fn logits(vocab: usize) -> Vec<f32> {
+        (0..vocab).map(|i| (i as f32 * 0.37).sin() * 2.0).collect()
+    }
+
+    /// **The exactness the whole scheme rests on.** A shared-noise sample, taken
+    /// at fresh positions, must follow the SAME distribution the ordinary sampler
+    /// draws from — on both the top-k path and the full-vocabulary path, with
+    /// top-p in play. A bias here would quietly change every sampled reply of a
+    /// split request. The control below proves the metric can see one.
+    #[test]
+    fn a_coupled_sample_follows_the_ordinary_samplers_distribution() {
+        let vocab = 24usize;
+        let base = logits(vocab);
+        let noise = CoupledNoise::new(0xC0FFEE);
+        for params in [
+            SamplingParams {
+                temperature: 0.8,
+                top_k: 10,
+                top_p: 0.9,
+                ..Default::default()
+            },
+            SamplingParams {
+                temperature: 1.0,
+                top_k: 0,
+                top_p: 1.0,
+                ..Default::default()
+            },
+        ] {
+            let n = 60_000u32;
+            let (mut plain, mut coupled) = (vec![0u32; vocab], vec![0u32; vocab]);
+            let mut ctx = SamplingContext::new(vocab);
+            for pos in 0..n {
+                let mut a = base.clone();
+                plain[sample_token_with_history(&mut a, &params, &[], &mut ctx) as usize] += 1;
+                let mut b = base.clone();
+                let t =
+                    sample_token_coupled(&mut b, &params, &[], &mut ctx, &noise, u64::from(pos));
+                coupled[t as usize] += 1;
+            }
+            let d = tv(&plain, &coupled, n);
+            assert!(d < 0.02, "coupled sampling moved the distribution: tv {d:.4} for {params:?}\n plain {plain:?}\n coupled {coupled:?}");
+        }
+    }
+
+    /// The control: dropping the noise (always taking the argmax) is the kind of
+    /// mistake the test above must catch, and it moves the distribution by far
+    /// more than the tolerance.
+    #[test]
+    fn a_coupled_draw_that_ignored_its_noise_would_fail_that_test() {
+        let vocab = 24usize;
+        let base = logits(vocab);
+        let params = SamplingParams {
+            temperature: 1.0,
+            top_k: 0,
+            top_p: 1.0,
+            ..Default::default()
+        };
+        let n = 20_000u32;
+        let (mut plain, mut greedy) = (vec![0u32; vocab], vec![0u32; vocab]);
+        let mut ctx = SamplingContext::new(vocab);
+        for _ in 0..n {
+            let mut a = base.clone();
+            plain[sample_token_with_history(&mut a, &params, &[], &mut ctx) as usize] += 1;
+            greedy[argmax(&base) as usize] += 1;
+        }
+        assert!(tv(&plain, &greedy, n) > 0.3);
+    }
+
+    /// Why it exists: a drafter whose distribution is CLOSE to the target's draws
+    /// the target's token far more often with the same noise than a fixed guess is
+    /// accepted by an independent sample (p(guess)).
+    #[test]
+    fn shared_noise_makes_a_close_distribution_draw_the_same_token() {
+        let vocab = 64usize;
+        let target: Vec<f32> = (0..vocab).map(|i| (i as f32 * 0.11).cos() * 1.5).collect();
+        let draft: Vec<f32> = target
+            .iter()
+            .enumerate()
+            .map(|(i, l)| l + ((i as f32 * 1.7).sin() * 0.15))
+            .collect();
+        let params = SamplingParams {
+            temperature: 1.0,
+            top_k: 0,
+            top_p: 1.0,
+            ..Default::default()
+        };
+        let noise = CoupledNoise::new(7);
+        let mut ctx = SamplingContext::new(vocab);
+        let n = 20_000u32;
+        let (mut same_coupled, mut same_independent) = (0u32, 0u32);
+        let guess = argmax(&draft);
+        for pos in 0..n {
+            let (mut t, mut d) = (target.clone(), draft.clone());
+            let tt = sample_token_coupled(&mut t, &params, &[], &mut ctx, &noise, u64::from(pos));
+            let dd = sample_token_coupled(&mut d, &params, &[], &mut ctx, &noise, u64::from(pos));
+            same_coupled += u32::from(tt == dd);
+            let mut t2 = target.clone();
+            same_independent +=
+                u32::from(sample_token_with_history(&mut t2, &params, &[], &mut ctx) == guess);
+        }
+        let (c, i) = (
+            f64::from(same_coupled) / f64::from(n),
+            f64::from(same_independent) / f64::from(n),
+        );
+        assert!(
+            c > 0.85 && c > i + 0.5,
+            "coupled agreement {c:.3} vs a fixed guess accepted {i:.3}"
+        );
+    }
+
+    /// Pruning is exact: the pick equals an unpruned brute-force Gumbel argmax,
+    /// including on logits spread far wider than the pruning margin.
+    #[test]
+    fn pruning_never_changes_the_coupled_pick() {
+        let noise = CoupledNoise::new(99);
+        for spread in [1.0f32, 10.0, 80.0] {
+            let l: Vec<f32> = (0..500)
+                .map(|i| (i as f32 * 0.713).sin() * spread)
+                .collect();
+            for pos in 0..200u64 {
+                let brute = l
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &x)| (i as u32, f64::from(x) + noise.gumbel(pos, i as u32)))
+                    .fold(
+                        (0u32, f64::NEG_INFINITY),
+                        |b, c| if c.1 > b.1 { c } else { b },
+                    )
+                    .0;
+                assert_eq!(
+                    gumbel_argmax(l.iter().copied().enumerate(), &noise, pos),
+                    Some(brute),
+                    "spread {spread} pos {pos}"
+                );
+            }
+        }
+    }
+
+    /// Temperature 0 is the argmax whatever the noise.
+    #[test]
+    fn a_greedy_request_ignores_the_noise() {
+        let base = logits(24);
+        let params = SamplingParams {
+            temperature: 0.0,
+            ..Default::default()
+        };
+        let mut ctx = SamplingContext::new(24);
+        for pos in 0..50u64 {
+            let mut l = base.clone();
+            assert_eq!(
+                sample_token_coupled(&mut l, &params, &[], &mut ctx, &CoupledNoise::new(pos), pos),
+                argmax(&base)
+            );
+        }
     }
 }

@@ -3,6 +3,7 @@ pub mod attn_kernel;
 pub(crate) mod attn_softmax;
 pub(crate) mod cancel;
 pub mod chat_template;
+pub mod coupled_noise;
 pub(crate) mod cpu_pools;
 pub mod decode_attn;
 pub mod dsd_controller;
