@@ -3018,10 +3018,14 @@ impl SharedState {
         false
     }
 
-    /// Fold one measured round trip into this node's network coordinate.
+    /// Fold one measured exchange into this node's network coordinate.
     ///
-    /// **The single writer of `metrics.network_coord`.** `rtt_ms` must be a
-    /// real measurement to `node_id`; the peer's own published coordinate is
+    /// **The single writer of `metrics.network_coord`.** `exchange_ms` must be a
+    /// real request-response exchange timed to `node_id` (the PEX ping, a small
+    /// acknowledged forward); it is turned into the PHYSICAL round trip here,
+    /// through `network::manager::physical_rtt_ms`, because an exchange cost two
+    /// round trips under V1 negotiation and one under V1Lazy, and a coordinate is
+    /// a distance, not a cost. The peer's own published coordinate is
     /// looked up here so no caller has to know where capabilities live, and a
     /// peer that publishes none teaches us nothing (there is no coordinate to
     /// be pushed relative to) and is skipped.
@@ -3031,7 +3035,8 @@ impl SharedState {
     /// forwards, where the elapsed time is the peer's round trip rather than
     /// the payload's transfer — which is exactly the quantity Vivaldi models,
     /// and the same reason `ACK_OBSERVE_MAX_BYTES` exists.
-    pub fn observe_network_coord(&self, node_id: &NodeId, rtt_ms: f32) {
+    pub fn observe_network_coord(&self, node_id: &NodeId, exchange_ms: f32) {
+        let rtt_ms = crate::network::manager::physical_rtt_ms(exchange_ms);
         // Filter FIRST, and record the sample even when the peer publishes no
         // coordinate yet: the window is about this link, not about whether we
         // can use it right now, and throwing samples away while a peer starts

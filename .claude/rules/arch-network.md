@@ -254,6 +254,23 @@ on a REAL link, never loopback — and run the failover rigs before any default 
 
 → `docs/invariants/network.md` § "A split token crosses on the pipeline stream"
 
+## A substream sends with its protocol proposal; a ping sample is a COST, a distance is converted (2026-09-27)
+
+The swarm negotiates every substream it opens with multistream-select **V1Lazy**
+(0-RTT for one offered protocol; `SWARMLLM_SUBSTREAM_V1=1` restores V1 for an
+A/B). Under V1 each request-response message waited a round trip for the
+protocol confirmation, so every split token paid one extra. Wire-identical for
+the listener: older peers need nothing.
+
+It halves every exchange sample, the PEX ping included. **`PeerInfo::latency_ms`
+and ACK samples are COSTS** — routing, the hand-off bound and deadlines read them
+raw and should move. **A reader that means DISTANCE goes through
+`network::manager::physical_rtt_ms`**: the LAN heuristic (`exchange_says_lan`,
+a privacy boundary — private mode admits LAN peers) and the coordinate
+(`observe_network_coord`). Never compare a raw sample to a distance constant.
+
+→ `docs/invariants/network.md` § "A substream sends with its protocol proposal"
+
 ## A speculative verify is walked where the logits are (2026-09-27)
 
 A verify's last segment walks the drafts with the caller's sampler and answers

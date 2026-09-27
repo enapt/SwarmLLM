@@ -67,6 +67,63 @@ const RR_ACK_RTT_HEADROOM: u32 = 3;
 const RR_ACK_TIMEOUT_MAX_SECS: u64 = 90;
 /// libp2p swarm idle connection timeout. Connections with no traffic for this long are closed.
 const IDLE_CONNECTION_TIMEOUT_SECS: u64 = 120;
+
+/// How this node negotiates the protocol on a substream it opens: `V1Lazy`
+/// (0-RTT when one protocol is offered), or `V1` with `SWARMLLM_SUBSTREAM_V1=1`
+/// for an A/B inside one binary. See the swarm config for why. Read once: the
+/// swarm is built with it, and the distance conversion below must agree.
+fn substream_negotiation() -> libp2p::core::upgrade::Version {
+    static MODE: std::sync::OnceLock<libp2p::core::upgrade::Version> = std::sync::OnceLock::new();
+    *MODE.get_or_init(|| {
+        substream_negotiation_from(std::env::var("SWARMLLM_SUBSTREAM_V1").ok().as_deref())
+    })
+}
+
+/// Round trips one request-response exchange this node opens costs: the
+/// exchange itself, plus the protocol confirmation V1 waits for first.
+fn round_trips_per_exchange(mode: libp2p::core::upgrade::Version) -> f32 {
+    match mode {
+        libp2p::core::upgrade::Version::V1 => 2.0,
+        _ => 1.0,
+    }
+}
+
+/// The physical round trip a request-response sample stands for — **the one
+/// conversion for anything that reads such a sample as DISTANCE**: the LAN
+/// heuristic and the network coordinate.
+///
+/// `PeerInfo::latency_ms` (the PEX ping) and the forward-ACK samples time a
+/// whole exchange, which under V1 was TWO round trips (gotcha #356's addendum:
+/// "~2×RTT … never read it as an RTT"). V1Lazy made it one, so the same peer
+/// now reads half. Cost terms — routing, the hand-off bound, ACK deadlines — read
+/// the raw sample and SHOULD see the halving, because every exchange they price
+/// really is that much cheaper. A distance must not: a LAN boundary that doubled
+/// with a transport change would admit a machine across town to private mode.
+pub(crate) fn physical_rtt_ms(exchange_ms: f32) -> f32 {
+    physical_rtt_ms_under(substream_negotiation(), exchange_ms)
+}
+
+fn physical_rtt_ms_under(mode: libp2p::core::upgrade::Version, exchange_ms: f32) -> f32 {
+    exchange_ms / round_trips_per_exchange(mode)
+}
+
+/// Below this PHYSICAL round trip a pinged peer is taken for one on our LAN —
+/// the bound `< 5 ms` on a two-round-trip exchange enforced since the heuristic
+/// was written, now stated as the distance it always meant.
+pub(crate) const LAN_PHYSICAL_RTT_MS: f32 = 2.5;
+
+/// Does an exchange sample put this peer on our LAN? Through
+/// [`physical_rtt_ms`], so the boundary is a distance whatever the negotiation.
+pub(crate) fn exchange_says_lan(exchange_ms: u32) -> bool {
+    physical_rtt_ms(exchange_ms as f32) < LAN_PHYSICAL_RTT_MS
+}
+
+fn substream_negotiation_from(v1_switch: Option<&str>) -> libp2p::core::upgrade::Version {
+    match v1_switch {
+        Some("1") => libp2p::core::upgrade::Version::V1,
+        _ => libp2p::core::upgrade::Version::V1Lazy,
+    }
+}
 /// Interval for periodic PEX ping health checks. Keeps the outbound queue shallow so
 /// tensor forwards get immediate service instead of queueing behind stale requests.
 const RR_PING_INTERVAL_SECS: u64 = 120;
@@ -759,6 +816,20 @@ impl NetworkManager {
                     // blocking the connection task at events.send().await and preventing
                     // it from processing inbound NotifyHandler commands (tensor forwards).
                     .with_per_connection_event_buffer_size(64)
+                    // Send a substream's first message WITH its protocol proposal
+                    // instead of a round trip later (multistream-select V1Lazy).
+                    // Under V1 every substream waits for the listener's confirmation
+                    // before any data, and request-response opens one substream per
+                    // message — so every token of a split request paid a whole extra
+                    // round trip each way (838 ms/token over request-response
+                    // against 351 on the persistent stream, 412 ms link,
+                    // 2026-09-27). Wire-identical to V1 for the listener: only the
+                    // dialer stops waiting, so an older peer needs nothing.
+                    // Substrate runs it for every substream and measured request
+                    // answer time halved (paritytech/substrate#7606). Protocols
+                    // offering several versions (gossipsub) still negotiate in full.
+                    // `SWARMLLM_SUBSTREAM_V1=1` restores V1 for an A/B in one binary.
+                    .with_substream_upgrade_protocol_override(substream_negotiation())
                 })
                 .build();
             Ok::<_, SwarmError>(swarm)
@@ -1990,6 +2061,41 @@ impl NetworkManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every substream this node opens sends its first message without waiting
+    /// a round trip for the protocol confirmation, unless the A/B switch asks
+    /// for the old behaviour.
+    #[test]
+    fn substreams_negotiate_lazily_unless_the_switch_restores_v1() {
+        use libp2p::core::upgrade::Version;
+        assert_eq!(substream_negotiation_from(None), Version::V1Lazy);
+        assert_eq!(substream_negotiation_from(Some("0")), Version::V1Lazy);
+        assert_eq!(substream_negotiation_from(Some("1")), Version::V1);
+    }
+
+    /// The LAN boundary is a DISTANCE, whatever the negotiation costs an
+    /// exchange. Under V1 a 4 ms ping was two 2 ms round trips (LAN, as it always
+    /// was); under V1Lazy the same 4 ms is ONE 4 ms round trip — a machine across
+    /// town, which private mode's LAN allowance must not admit. Without the
+    /// conversion the lazy node would read it as LAN.
+    #[test]
+    fn a_lan_boundary_means_the_same_distance_whatever_the_negotiation() {
+        use libp2p::core::upgrade::Version;
+        let lan = |mode, ms: f32| physical_rtt_ms_under(mode, ms) < LAN_PHYSICAL_RTT_MS;
+        // The pre-V1Lazy rule, `rtt_ms < 5` on a two-round-trip exchange, is kept exactly.
+        assert!(lan(Version::V1, 4.0) && !lan(Version::V1, 5.0));
+        // The same peer, now timed in one round trip, lands on the same side.
+        assert!(lan(Version::V1Lazy, 2.0) && !lan(Version::V1Lazy, 2.5));
+        assert!(
+            !lan(Version::V1Lazy, 4.0),
+            "4 ms is one physical round trip under V1Lazy"
+        );
+        // And the coordinate is fed the same distance for the same link either way.
+        assert_eq!(
+            physical_rtt_ms_under(Version::V1, 412.0),
+            physical_rtt_ms_under(Version::V1Lazy, 206.0)
+        );
+    }
 
     /// One peer failing identically every 30s produced **1928 warnings over
     /// three days** — 247 in one four-hour window, 80% of that node's entire

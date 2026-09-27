@@ -2375,3 +2375,44 @@ the reply was byte-identical, from logits walked on the coordinator.
   was asked for, and refuses non-finite logits, too few rows, an empty walk, or
   a "kept" token that was never drafted. The old rule answered non-finite logits
   with `(empty, 0, false)` and callers emitted token 0 as the "bonus".
+
+## A substream sends with its protocol proposal (V1Lazy); a ping sample is a cost, a distance is converted (2026-09-27)
+
+**What it replaced.** libp2p negotiates every substream with multistream-select;
+under `Version::V1` the dialer waits for the listener's confirmation — "always at
+least one dedicated round-trip message exchange before application data"
+(multistream-select 0.13.0 docs) — and request-response opens a substream per
+message. So every token of a split request paid one extra round trip on each
+leg. `Version::V1Lazy` sends the first message with the proposal when one
+protocol is offered; it is wire-identical for the listener, so an older peer needs
+nothing. Substrate runs it for every substream and measured request answer time
+halved (paritytech/substrate#7606). libp2p-swarm 0.47 has no per-substream
+setting, so it is the swarm-wide `with_substream_upgrade_protocol_override`;
+protocols offering several versions (gossipsub) still negotiate in full.
+
+**Measured, real link** — A/B/A in one binary (`SWARMLLM_SUBSTREAM_V1=1` = V1),
+qwen2.5-coder-7b split this node (RTX 3070, TH) L0-14 → bf7b (RTX 4050, BE,
+v0.3.210) L14-28, request-response path, n-gram loop off, 64 tokens × 3 per arm:
+V1Lazy **1.67 tok/s** (598 ms/token) → V1 **1.23** (811) → V1Lazy **1.76** (568).
+Mechanism: the PEX ping to the same peer read 248 ms lazy against 497 under V1
+(ICMP 206). Only OUR dialer changed; the peer's result messages still paid V1,
+so a peer on this build should take a further round trip off.
+
+**The trap it opened (gotcha #742).** The same halving reaches every
+request-response SAMPLE, `PeerInfo::latency_ms` included — the figure #356's
+addendum recorded as ~2×RTT and kept. Cost readers (routing's per-hop price,
+`DELEGATE_MAX_LATENCY_MS`, ACK deadlines) should move with it: every exchange they
+price is that much cheaper. Two readers mean DISTANCE and must not: the LAN
+heuristic (`rtt_ms < 5 → is_lan_peer`, sticky, and private mode admits LAN peers
+by default) and the Vivaldi coordinate. Under V1Lazy the same 4 ms ping is one
+4 ms round trip — across town — not two 2 ms ones.
+
+**What a change must keep:**
+- `network::manager::physical_rtt_ms` is the ONE conversion from an exchange
+  sample to a round trip (÷ the round trips the negotiation costs); the LAN check
+  (`exchange_says_lan`, `LAN_PHYSICAL_RTT_MS = 2.5`, the distance the old rule
+  meant) and `observe_network_coord` go through it. Test:
+  `a_lan_boundary_means_the_same_distance_whatever_the_negotiation`.
+- Never compare a raw request-response sample to a distance constant.
+- The negotiation mode is read ONCE (`substream_negotiation`, a `OnceLock`) so the
+  swarm and the conversion cannot disagree within a process.

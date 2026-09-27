@@ -526,8 +526,10 @@ impl NetworkManager {
                                 self.shared_state.peer_registry.get_mut(&node_id)
                             {
                                 peer_info.latency_ms = Some(rtt_ms);
-                                // Auto-detect LAN peer from low latency (< 5ms)
-                                if rtt_ms < 5 && !peer_info.is_lan_peer {
+                                // Auto-detect a LAN peer from a short PHYSICAL round
+                                // trip — the sample times a whole exchange, which is
+                                // one or two round trips depending on negotiation.
+                                if super::exchange_says_lan(rtt_ms) && !peer_info.is_lan_peer {
                                     peer_info.is_lan_peer = true;
                                     drop(peer_info);
                                     let count = self
