@@ -720,6 +720,7 @@ fn cancelled_request_id(msg: &DaemonMsg) -> Option<Uuid> {
     match msg {
         DaemonMsg::Forward(f) => Some(f.request_id),
         DaemonMsg::Generate(g) => Some(g.request_id),
+        DaemonMsg::Draft(d) => Some(d.request_id),
         _ => None,
     }
 }
@@ -3385,6 +3386,98 @@ async fn handle_generate(
     Ok(())
 }
 
+/// Guess `gamma` tokens with this model for a bigger one's request
+/// (`DaemonMsg::Draft`) — the drafter of speculation across computers, run in
+/// this engine from the model's shards instead of in llama.cpp from a whole
+/// model file (which a node must never assemble from shards, CLAUDE.md).
+///
+/// The request's cache lives on between calls, keyed by the TARGET request's
+/// id in this worker's own store, and released with it (`ReleaseRequestKv`
+/// goes to every worker). See `IpcDraft` for what each call reads and leaves.
+/// A guess is drawn with the shared noise when the request carries a seed —
+/// the draw the target's sampler will make at that position — and is the
+/// argmax otherwise, exactly as the llama.cpp drafter
+/// (`pipeline::speculative::draft_next_gamma`) picks.
+#[allow(clippy::too_many_arguments)]
+async fn handle_draft(
+    writer: &mut IpcWriter,
+    models: &mut HashMap<(usize, usize, usize, usize), SplitModel>,
+    kv_store: &Arc<KvCacheStore>,
+    prefix_cache: &Arc<PrefixCache>,
+    data_dir: &std::path::Path,
+    shard_window: &Option<Vec<u32>>,
+    prefill_chunk_tokens: usize,
+    d: IpcDraft,
+) -> Result<(), SwarmError> {
+    let (layer_start, layer_end) = (d.layer_range.0 as usize, d.layer_range.1 as usize);
+    ensure_model_loaded(
+        models,
+        data_dir,
+        &d.model_id,
+        layer_start,
+        layer_end,
+        0,
+        1,
+        shard_window,
+    )?;
+    let key = (layer_start, layer_end, 0, 1);
+    ensure_whole_model_for_generate(models, key, &d.model_id)?;
+    let model = models
+        .get_mut(&key)
+        .ok_or_else(|| SwarmError::Internal("Model vanished after load".into()))?;
+    if d.append.is_empty() {
+        return Err(SwarmError::Validation(
+            "a draft call must name the token its first guess follows".into(),
+        ));
+    }
+    let req = d.request_id.to_string();
+    if d.for_the_owner {
+        kv_store.mark_owner_request(&req);
+    }
+    let keep = d.keep as usize;
+    let gamma = d.gamma as usize;
+    if keep == 0 {
+        // The first call reads the whole prompt: admit it as a prompt, with
+        // room for the reply's guesses, before any memory is claimed.
+        ensure_room_for_prompt(
+            model,
+            kv_store,
+            prefix_cache,
+            &req,
+            d.append.len(),
+            reply_reserve_positions(d.sampling.max_tokens, gamma.saturating_add(1)),
+        )?;
+    } else {
+        kv_store.truncate_request_to(model.kv_model_key(), &req, keep)?;
+    }
+    let noise = d
+        .coupling_seed
+        .map(crate::inference::coupled_noise::CoupledNoise::new);
+    let tokens = tokio::task::block_in_place(|| {
+        model.draft_after(
+            kv_store,
+            &req,
+            keep,
+            &d.append,
+            gamma,
+            &d.sampling,
+            &d.history,
+            noise.as_ref(),
+            prefill_chunk_tokens,
+        )
+    })?;
+    send_worker(
+        writer,
+        &WorkerMsg::Drafted {
+            request_id: d.request_id,
+            tokens,
+        },
+        &[],
+    )
+    .await
+    .map_err(|e| SwarmError::Internal(format!("send Drafted: {e}")))
+}
+
 /// SWIFT (arxiv 2410.06916) decode loop. Greedy-only v1.
 ///
 /// Each round:
@@ -4542,6 +4635,23 @@ async fn handle_daemon_msg(
                 shard_window,
                 activation_compression,
                 options.prefill_chunk_tokens as usize,
+            )
+            .await
+            {
+                send_worker_error(writer, request_id, e).await;
+            }
+        }
+        DaemonMsg::Draft(d) => {
+            let request_id = d.request_id;
+            if let Err(e) = handle_draft(
+                writer,
+                models,
+                kv_store,
+                prefix_cache,
+                data_dir,
+                shard_window,
+                options.prefill_chunk_tokens as usize,
+                d,
             )
             .await
             {

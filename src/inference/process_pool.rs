@@ -701,6 +701,7 @@ fn worker_msg_request_id(msg: &WorkerMsg) -> Option<Uuid> {
         WorkerMsg::LayerResult(r) => Some(r.request_id),
         WorkerMsg::Token { request_id, .. }
         | WorkerMsg::GenerateDone { request_id, .. }
+        | WorkerMsg::Drafted { request_id, .. }
         | WorkerMsg::Error { request_id, .. } => Some(*request_id),
         // `PrefixSnapshotResponse` is correlated by `request_id` via the
         // normal response-routing channel — `fetch_local_snapshot`
@@ -5533,6 +5534,82 @@ impl ModelProcessPool {
                         // Reader actor closed the channel — worker died while we were waiting.
                         // Subprocess lifecycle failure → ServiceUnavailable (per
                         // .claude/rules/completeness.md); Internal is for code bugs.
+                        self.evict_this_worker(&model_id, &handle, "closed its connection");
+                        guard.disarm();
+                        return Err(SwarmError::ServiceUnavailable(
+                            "worker closed connection before reply".into(),
+                        ));
+                    }
+                }
+            }
+        };
+        crate::inference::cancel::unless_cancelled(wait, cancel.as_ref()).await
+    }
+
+    /// Guess tokens with a small model for a bigger one's request
+    /// (`DaemonMsg::Draft`, see `IpcDraft`) — the in-engine drafter of
+    /// speculation across computers. Same shape as [`Self::forward_direct`]:
+    /// the load is bracketed by cancel checks, not wrapped, and only the wait
+    /// is watched; the worker keeps the request's drafting cache, released
+    /// with the request like any other (`release_request_kv`).
+    pub async fn draft(
+        &self,
+        d: IpcDraft,
+        cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
+    ) -> Result<Vec<u32>, SwarmError> {
+        let model_id = d.model_id.clone();
+        let request_id = d.request_id;
+        crate::inference::cancel::bail_if_cancelled(cancel.as_ref())?;
+        let handle = self.get_or_spawn(&model_id, d.layer_range).await?;
+        crate::inference::cancel::bail_if_cancelled(cancel.as_ref())?;
+        if handle.dead.load(Ordering::Acquire) {
+            self.retire_dead_worker(&model_id).await;
+            return Err(SwarmError::ServiceUnavailable("worker is dead".into()));
+        }
+        let (resp_tx, mut resp_rx) = mpsc::channel(RESPONSE_CHANNEL_CAPACITY);
+        let (mut guard, _) = handle.register_response(request_id, resp_tx, true);
+        handle.note_conversation(request_id);
+        {
+            let mut writer = handle.writer.lock().await;
+            if let Err(e) = send_daemon(&mut *writer, &DaemonMsg::Draft(d), &[]).await {
+                drop(writer);
+                self.evict_this_worker(&model_id, &handle, "IPC send failed");
+                guard.disarm();
+                return Err(SwarmError::ServiceUnavailable(format!("send Draft: {e}")));
+            }
+        }
+        let wait = async {
+            loop {
+                match resp_rx.recv().await {
+                    Some((
+                        WorkerMsg::Drafted {
+                            request_id: rid,
+                            tokens,
+                        },
+                        _,
+                    )) if rid == request_id => {
+                        guard.disarm();
+                        return Ok(tokens);
+                    }
+                    Some((
+                        WorkerMsg::Error {
+                            request_id: rid,
+                            message,
+                            fatal,
+                            local_memory_refusal,
+                        },
+                        _,
+                    )) if rid == request_id => {
+                        guard.disarm();
+                        return Err(self.classify_worker_error(
+                            &model_id,
+                            message,
+                            fatal,
+                            local_memory_refusal,
+                        ));
+                    }
+                    Some(_) => continue,
+                    None => {
                         self.evict_this_worker(&model_id, &handle, "closed its connection");
                         guard.disarm();
                         return Err(SwarmError::ServiceUnavailable(

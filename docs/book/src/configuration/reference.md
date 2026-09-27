@@ -95,6 +95,7 @@ booted with.
 | `speculative_decoding` | boolean | `false` | Enable speculative decoding |
 | `speculative_gamma` | integer | `4` | Draft tokens per verification step |
 | `draft_model_path` | path | none | Path to draft model |
+| `draft_model` | string | none | A model this node holds (its id) to guess ahead with when a request is split across computers (`decentralized_spec_decoding`), run from its own parts in SwarmLLM's engine. Unset: the largest held model that shares the target's vocabulary and is at most a quarter of its size |
 | `max_split_model_memory_mb` | integer | none | Max GPU memory for split model cache |
 | `tensor_parallel` | boolean | `false` | Split single layers across LAN peers via per-layer AllReduce. Off by default — over Ethernet the two round trips per layer cost more than the compute they split, and a node that holds every layer never forms a group regardless |
 | `tp_max_latency_ms` | integer | `5` | Max physical round trip (ms) to a peer for tensor parallelism groups (only consulted when `tensor_parallel = true`) |

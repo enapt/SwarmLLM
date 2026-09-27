@@ -42,6 +42,10 @@ pub enum DaemonMsg {
     /// Full generation loop (for local API inference).
     /// Worker tokenizes, runs prefill + decode, streams tokens back.
     Generate(IpcGenerate),
+    /// Guess the next tokens with this (small) model on behalf of a bigger one
+    /// — the drafter of speculation across computers (`pipeline::dsd`) run in
+    /// this engine from the model's shards. Answered with `WorkerMsg::Drafted`.
+    Draft(IpcDraft),
     /// Unload a specific layer range (free its GPU memory within the worker).
     Unload {
         layer_start: usize,
@@ -119,6 +123,8 @@ pub enum WorkerMsg {
         results: Vec<IpcLayerResult>,
         activation_lens: Vec<u32>,
     },
+    /// The guesses a `DaemonMsg::Draft` asked for, in order.
+    Drafted { request_id: Uuid, tokens: Vec<u32> },
     /// A single decoded token (for streaming Generate).
     Token {
         request_id: Uuid,
@@ -425,6 +431,39 @@ pub struct IpcGenerate {
     /// contribution level. The worker records it on the request's KV
     /// bookkeeping (`KvCacheStore::mark_owner_request`).
     #[serde(default)]
+    pub for_the_owner: bool,
+}
+
+/// A drafting call (`DaemonMsg::Draft`).
+///
+/// The worker keeps the request's cache between calls, so each call carries
+/// only what changed: cut the cache back to `keep` positions — what the last
+/// round's check confirmed of the guesses this model made — read `append` (the
+/// tokens since, ending with the one the next guess follows), then guess
+/// `gamma` tokens, reading each back in so the next can follow it. After the
+/// call the cache holds `keep + append.len() + gamma - 1` positions; the caller
+/// tracks how many of them the next check confirms.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct IpcDraft {
+    pub request_id: Uuid,
+    pub model_id: ModelId,
+    pub layer_range: (u32, u32),
+    pub keep: u32,
+    pub append: Vec<u32>,
+    pub gamma: u32,
+    /// The target request's sampling parameters, for a guess drawn with the
+    /// shared noise; unused for a greedy guess.
+    pub sampling: SamplingParams,
+    /// The reply so far, which the sampler's penalties read.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub history: Vec<u32>,
+    /// The request's shared noise seed (`inference::coupled_noise`): guess the
+    /// token the target's sampler will DRAW rather than its most likely one.
+    /// `None` guesses the argmax.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coupling_seed: Option<u64>,
+    /// See `IpcForward::for_the_owner`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub for_the_owner: bool,
 }
 

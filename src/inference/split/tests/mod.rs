@@ -13,6 +13,7 @@
 
 mod common;
 mod core;
+mod drafting;
 mod gemma2;
 mod gqa;
 mod kv_refresh;

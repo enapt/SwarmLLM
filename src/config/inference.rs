@@ -273,6 +273,16 @@ pub struct InferenceConfig {
     /// main model (ideally <1/10th parameters) and share the same vocabulary.
     #[serde(default)]
     pub draft_model_path: Option<PathBuf>,
+    /// A model this node holds (its id, e.g. `qwen2.5-0.5b-instruct-fp16`) to
+    /// guess ahead with when a request is split across computers
+    /// (`decentralized_spec_decoding`): run in this engine from its own shards
+    /// by its own worker, so it needs neither a model file nor the `llama`
+    /// build. Used only for targets that share its vocabulary; a
+    /// `draft_model_path` takes precedence where the build can load it. Unset,
+    /// the largest held model that shares the target's vocabulary and is at
+    /// most a quarter of its size is chosen (`pipeline::engine_drafter`).
+    #[serde(default)]
+    pub draft_model: Option<String>,
     /// GPU layers to offload for the draft model (default: same as main model).
     #[serde(default)]
     pub draft_gpu_layers: Option<i32>,
@@ -1124,6 +1134,7 @@ impl Default for InferenceConfig {
             ngram_max_size: default_ngram_max_size(),
             ngram_num_pred_tokens: default_ngram_num_pred_tokens(),
             draft_model_path: None,
+            draft_model: None,
             draft_gpu_layers: None,
             shard_range: None,
             max_batch_size: default_max_batch_size(),

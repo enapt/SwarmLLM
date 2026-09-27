@@ -27,7 +27,9 @@
 //!
 //! - `decentralized_spec_decoding && speculative_decoding` config flags both on
 //! - Pipeline has 2+ segments AND no TP groups (single-segment is Item 2's job)
-//! - Draft model loaded
+//! - A drafter: llama.cpp's from `draft_model_path` (the `llama` build), or a
+//!   small model this node holds that shares the target's vocabulary
+//!   (`inference.draft_model`, run in this engine — `pipeline::engine_drafter`)
 //! - No vision or LoRA
 //!
 //! # Correctness
@@ -53,59 +55,45 @@
 //! or a systematic drift, not one token in a long reply.
 
 use crate::error::SwarmError;
-#[cfg(feature = "llama")]
 use crate::inference::router::StreamingTokenEvent;
 use crate::inference::router::{InferenceOutput, StreamingTokenTx};
 
-#[cfg(feature = "llama")]
+use super::engine_drafter::{engine_drafter_for, EngineDrafter};
 use super::speculative::{
-    draft_next_gamma, draft_prefill, draft_sync_after_round, draft_sync_tokens, ngram_lookup_drafts,
+    draft_next_gamma, draft_prefill, draft_sync_after_round, draft_sync_tokens,
+    ngram_lookup_drafts, DraftState,
 };
 use super::PipelineExecutor;
-#[cfg(feature = "llama")]
 use crate::inference::dsd_controller::{
     best_gamma_for_check, AcceptanceEstimate, CheckCost, BEST_GAMMA_MAX,
 };
 
-/// Fast-path preconditions for the DSD coordinator loop.
-#[cfg(feature = "llama")]
+/// Which model guesses for this request.
+enum Drafter {
+    /// llama.cpp from `inference.draft_model_path` — a build with the `llama`
+    /// feature, holding the draft executor for the whole request.
+    Llama {
+        exec: tokio::sync::OwnedMutexGuard<crate::inference::executor::ModelExecutor>,
+        state: DraftState,
+    },
+    /// A small model this node holds, run in this engine by its own worker
+    /// (`engine_drafter`, `inference.draft_model`).
+    Engine(EngineDrafter),
+}
+
+/// Fast-path preconditions for the DSD coordinator loop, short of which
+/// drafter will guess — that is decided in the loop, where the llama.cpp
+/// executor can be asked whether it holds a model and this node's held models
+/// searched for one that can draft (`engine_drafter_for`).
 fn eligible(exec: &PipelineExecutor) -> bool {
-    // Path-specific flag.
-    if !exec
-        .shared_state
-        .cfg()
-        .inference
-        .decentralized_spec_decoding
-    {
-        return false;
-    }
-    // Common speculative-path baseline (draft model, no vision/LoRA, etc.).
-    // Any temperature: acceptance walks with the caller's sampler.
-    if !super::speculative_common_eligible(exec) {
-        return false;
-    }
-    // Multi-segment pipeline only — single-segment falls through to Item 2.
-    if exec.assignment.segments.len() < 2 {
-        return false;
-    }
-    true
+    let cfg = exec.shared_state.cfg();
+    cfg.inference.decentralized_spec_decoding
+        // Any temperature: acceptance walks with the caller's sampler.
+        && super::speculation_allowed(exec)
+        // Multi-segment pipeline only — single-segment falls through to Item 2.
+        && exec.assignment.segments.len() >= 2
 }
 
-#[cfg(not(feature = "llama"))]
-impl PipelineExecutor {
-    /// DSD requires the `llama` feature for the local draft model. Without
-    /// it the eligibility check above also fails (`draft_model_path` is None
-    /// because no draft can be loaded), but stub the entry point regardless
-    /// so the dispatch site in `execute_distributed` compiles unconditionally.
-    pub(super) async fn try_dsd_distributed(
-        &mut self,
-        _token_tx: Option<StreamingTokenTx>,
-    ) -> Result<Option<InferenceOutput>, SwarmError> {
-        Ok(None)
-    }
-}
-
-#[cfg(feature = "llama")]
 impl PipelineExecutor {
     /// Try the distributed multi-segment DSD path. Returns `Ok(None)` if any
     /// runtime precondition fails; caller falls back to standard
@@ -151,18 +139,33 @@ impl PipelineExecutor {
             return Ok(None);
         }
 
-        // Build prompt and confirm a draft model is loaded BEFORE any pipeline
-        // forward — we want to fail fast and fall back cleanly. The lock is
-        // released before the (mutable-self) prefill forward to avoid an
-        // overlapping borrow on `self.shared_state.draft_executor`.
+        // Build prompt and settle WHICH drafter guesses BEFORE any pipeline
+        // forward — we want to fail fast and fall back cleanly. llama.cpp's,
+        // where the build can load `draft_model_path`; otherwise a model this
+        // node holds (`inference.draft_model`), which also needs the prompt as
+        // the TARGET tokenized it, since its guesses are checked as ids.
         let prompt = self.build_prompt().await;
-        {
-            let draft = self.shared_state.draft_executor.lock().await;
-            if !draft.is_loaded() {
-                tracing::debug!(%request_id, "DSD: draft model not loaded — falling back");
+        let llama_loaded = self.shared_state.cfg().inference.draft_model_path.is_some()
+            && self.shared_state.draft_executor.lock().await.is_loaded();
+        let engine = if llama_loaded {
+            None
+        } else {
+            let target = self.request.model_id.clone();
+            let Some(spec) = engine_drafter_for(&self.shared_state, &target) else {
+                tracing::debug!(%request_id, "DSD: no drafter available — falling back");
                 return Ok(None);
-            }
-        }
+            };
+            let Some(tokenizer) = self.shared_state.standalone_tokenizer(&target) else {
+                tracing::debug!(%request_id, "DSD: no tokenizer for the target — falling back");
+                return Ok(None);
+            };
+            let ids: Vec<u32> = tokenizer
+                .encode(&prompt)
+                .into_iter()
+                .map(|t| t as u32)
+                .collect();
+            Some((spec, ids))
+        };
 
         // Phase 1: standard prefill through the pipeline to produce the first
         // token AND prime every segment's KV with the prompt. We reuse the
@@ -182,16 +185,44 @@ impl PipelineExecutor {
         let (prompt_token_count, eos_tokens, decoder) = self.extract_model_cache(&prompt).await;
         let eos_set: std::collections::HashSet<u32> = eos_tokens.into_iter().collect();
 
-        // Phase 2: re-acquire the draft lock for the rest of the request,
-        // prefill the draft model, sync to target's KV state.
-        let mut draft = self.shared_state.draft_executor.lock().await;
-        let draft_state = tokio::task::block_in_place(|| draft_prefill(&mut draft, &prompt));
-        let mut draft_state = match draft_state {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!(%request_id, error = %e, "DSD: draft prefill failed — falling back");
-                return Ok(None);
+        // Phase 2: the drafter reads the prompt. llama.cpp re-acquires its lock
+        // for the rest of the request and prefills now; our engine's drafter
+        // reads it with its first round, together with the first reply token.
+        let (mut drafter, prompt_tokens) = match engine {
+            Some((spec, ids)) => {
+                if ids.len() != prompt_token_count {
+                    // The drafter's positions would then disagree with the
+                    // target's — the shared noise is keyed by position.
+                    tracing::warn!(
+                        %request_id,
+                        drafter_tokens = ids.len(),
+                        target_tokens = prompt_token_count,
+                        "DSD: the drafter's prompt is not the target's — falling back"
+                    );
+                    return Ok(None);
+                }
+                let mut e = EngineDrafter::new(spec, request_id, ids.clone());
+                e.push(&[first_token]);
+                (Drafter::Engine(e), ids)
             }
+            None => {
+                let mut exec = self.shared_state.draft_executor.clone().lock_owned().await;
+                let prefilled = tokio::task::block_in_place(|| draft_prefill(&mut exec, &prompt));
+                match prefilled {
+                    Ok(state) => {
+                        let prompt_tokens = state.prompt_tokens.clone();
+                        (Drafter::Llama { exec, state }, prompt_tokens)
+                    }
+                    Err(e) => {
+                        tracing::warn!(%request_id, error = %e, "DSD: draft prefill failed — falling back");
+                        return Ok(None);
+                    }
+                }
+            }
+        };
+        let drafter_name = match &drafter {
+            Drafter::Llama { .. } => "llama.cpp".to_string(),
+            Drafter::Engine(e) => e.model_id().0.clone(),
         };
 
         let mut generated: Vec<u32> = vec![first_token];
@@ -271,8 +302,9 @@ impl PipelineExecutor {
 
             // SWARM-SPEC Layer 1 cascade (same pattern as single-segment
             // speculative.rs): try n-gram lookup first; on miss fall back
-            // to the draft model. On hit, still sync draft KV via
-            // draft_sync_tokens so subsequent rounds remain consistent.
+            // to the draft model. On hit, llama.cpp's draft KV is synced via
+            // draft_sync_tokens so subsequent rounds remain consistent; our
+            // engine's drafter reads what it missed with its next call.
             // Not with shared noise: an n-gram guess is a FIXED token, accepted
             // with probability p(guess) at temperature > 0, while the drafter
             // drawing with the shared noise reproduces the sample itself.
@@ -284,56 +316,52 @@ impl PipelineExecutor {
             } else {
                 ngram_lookup_drafts(
                     &self.shared_state.config.inference,
-                    &draft_state.prompt_tokens,
+                    &prompt_tokens,
                     &generated,
                     gamma,
                 )
             };
-            let drafts = if !ngram_drafts.is_empty() {
-                let sync_outcome = tokio::task::block_in_place(|| {
-                    draft_sync_tokens(&mut draft_state, &mut draft, last_token, &ngram_drafts)
-                });
-                match sync_outcome {
-                    Ok(()) => ngram_drafts,
-                    Err(e) => {
-                        tracing::warn!(%request_id, error = %e, "DSD: ngram-sync failed — falling back to draft sample");
-                        let draft_outcome = tokio::task::block_in_place(|| {
-                            draft_next_gamma(
-                                &mut draft_state,
-                                &mut draft,
-                                last_token,
-                                gamma,
-                                pick.as_ref(),
-                            )
-                        });
-                        match draft_outcome {
-                            Ok(d) => d,
-                            Err(e2) => {
-                                tracing::warn!(%request_id, error = %e2, "DSD: draft step failed");
-                                finish_reason = "stop".to_string();
-                                break;
+            let outcome: Result<Vec<u32>, SwarmError> = match &mut drafter {
+                Drafter::Llama { exec, state } => {
+                    let synced = if ngram_drafts.is_empty() {
+                        None
+                    } else {
+                        match tokio::task::block_in_place(|| {
+                            draft_sync_tokens(state, exec, last_token, &ngram_drafts)
+                        }) {
+                            Ok(()) => Some(ngram_drafts),
+                            Err(e) => {
+                                tracing::warn!(%request_id, error = %e, "DSD: ngram-sync failed — falling back to draft sample");
+                                None
                             }
                         }
+                    };
+                    match synced {
+                        Some(d) => Ok(d),
+                        None => tokio::task::block_in_place(|| {
+                            draft_next_gamma(state, exec, last_token, gamma, pick.as_ref())
+                        }),
                     }
                 }
-            } else {
-                // Draft phase — sync, llama-cpp.
-                let draft_outcome = tokio::task::block_in_place(|| {
-                    draft_next_gamma(
-                        &mut draft_state,
-                        &mut draft,
-                        last_token,
+                Drafter::Engine(_) if !ngram_drafts.is_empty() => Ok(ngram_drafts),
+                Drafter::Engine(e) => {
+                    e.draft(
+                        &self.shared_state,
                         gamma,
-                        pick.as_ref(),
+                        &self.request.sampling_params,
+                        &generated,
+                        noise.map(|n| n.seed()),
+                        self.request.cancel.clone(),
                     )
-                });
-                match draft_outcome {
-                    Ok(d) => d,
-                    Err(e) => {
-                        tracing::warn!(%request_id, error = %e, "DSD: draft step failed");
-                        finish_reason = "stop".to_string();
-                        break;
-                    }
+                    .await
+                }
+            };
+            let drafts = match outcome {
+                Ok(d) => d,
+                Err(e) => {
+                    tracing::warn!(%request_id, error = %e, "DSD: draft step failed");
+                    finish_reason = "stop".to_string();
+                    break;
                 }
             };
             if drafts.is_empty() {
@@ -453,10 +481,16 @@ impl PipelineExecutor {
                 drafted_at.elapsed().as_secs_f64() * 1000.0,
             );
 
-            // Sync draft KV.
-            tokio::task::block_in_place(|| {
-                draft_sync_after_round(&mut draft_state, &mut draft, &drafts, &accepted, bonus)
-            })?;
+            // Bring the drafter's cache in line with what the check kept.
+            match &mut drafter {
+                Drafter::Llama { exec, state } => tokio::task::block_in_place(|| {
+                    draft_sync_after_round(state, exec, &drafts, &accepted, bonus)
+                })?,
+                Drafter::Engine(e) => {
+                    e.settle(accepted.len());
+                    e.push(&emitted);
+                }
+            }
 
             current_pos += emitted.len();
             last_token = *emitted.last().unwrap();
@@ -492,6 +526,7 @@ impl PipelineExecutor {
         tracing::info!(
             %request_id,
             segments = self.assignment.segments.len(),
+            drafter = %drafter_name,
             proposed = acceptance_proposed,
             accepted = acceptance_accepted,
             final_gamma = gamma_now,

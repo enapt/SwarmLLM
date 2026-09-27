@@ -153,9 +153,37 @@ What this says:
 `split_rig.sh repeat` on llama-3.2-3b, every result from the tail 43-59 bytes
 instead of 513 KB-2.5 MB, replies 119/121 at llama.cpp's first choice, and
 byte-identical to a run whose v0.3.209 tail was sent the old request. Item 4
-(γ from the trip) shipped in v0.3.211 too. Item 3 (a drafter from the shard
-system) remains, and is now stage 4e of "The next batch" below: the drafter
-runs in our own engine from shards rather than as a separate model.
+(γ from the trip) shipped in v0.3.211 too. **Item 3 built 2026-09-28, opt-in**
+(`inference.draft_model = "<a model id this node holds>"`, beside the two DSD
+switches): `pipeline::engine_drafter` drafts with a small same-family model run
+by its own worker from its shards (`DaemonMsg::Draft`, `SplitModel::draft_after`)
+— no `llama` build, no model file. The worker keeps the drafting cache between
+rounds and each call reads only what the last check did not confirm. The
+vocabulary check accepts a list padded with unused entries: Qwen2.5-Coder-7B
+lists 152,064 tokens, Qwen2.5-0.5B 151,936, identical over the shared ids, the
+7B's extra 128 `[PAD…]` of type unused. Unset, the drafter is chosen: the
+largest held model that can draft (whole, no recurrent state, the target's
+vocabulary) at most a quarter of the target by layers × width². Not yet:
+acquiring one a node does not hold.
+
+**Measured on the real link 2026-09-28** (same TH↔BE split and binary as the
+table below, drafter qwen2.5-0.5b-instruct-fp16 on this RTX 3070, the far node
+on v0.3.211; `~/swarmllm-bench-0928/run_drafter.sh`, `drafter.jsonl`):
+
+| arm | tok/s (median, min-max) | guesses kept | γ settled |
+|---|---|---|---|
+| plain split, before | **2.71** (2.55-2.80) | — | — |
+| engine drafter, greedy | **4.63** (3.21-5.55) | 0.65-0.73 | 3-7 |
+| engine drafter, T=0.7, shared noise | **5.55** (4.78-6.07) | 0.64-0.75 | 3-5 |
+| plain split, after | **2.29** (2.21-2.36) | — | — |
+
+1.7-2.4× over the plain arms either side. The fitted check cost was 300-430 ms
+fixed plus 0-32 ms per position (the far node's card), so γ stayed at 3-7
+instead of the 11-16 the constant model chose. Mechanism in every request's
+`DSD: request complete … drafter=qwen2.5-0.5b-instruct-fp16` line. Two warm-up
+requests failed, neither from this path: the far node's worker ran out of card
+memory on a prompt pass (`CUDA_ERROR_OUT_OF_MEMORY`, its own v0.3.211), and the
+connection to it dropped once in the last plain arm.
 
 1. **Accept at the tail.** A verify forward carries its draft tokens. The last
    segment walks them with the request's own sampler: sample position i with

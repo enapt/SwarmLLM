@@ -5,6 +5,7 @@
 //! between nodes. Uses candle for direct tensor computation with quantized
 //! GGUF weights.
 
+mod draft;
 mod entry;
 mod executor;
 mod gguf_meta;

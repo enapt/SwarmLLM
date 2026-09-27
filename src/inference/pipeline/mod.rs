@@ -7,6 +7,7 @@
 
 pub(crate) mod distributed;
 mod dsd;
+mod engine_drafter;
 mod local;
 mod local_generate;
 mod ngram_only_spec;
@@ -986,6 +987,14 @@ pub(super) fn fastpath_request_disqualified(exec: &PipelineExecutor) -> bool {
 /// Read live (`cfg()`), so a setting changed in Settings applies to the
 /// next request rather than the next restart (#281).
 pub(super) fn speculative_common_eligible(exec: &PipelineExecutor) -> bool {
+    speculation_allowed(exec) && exec.shared_state.cfg().inference.draft_model_path.is_some()
+}
+
+/// [`speculative_common_eligible`] short of WHICH drafter guesses: the switch,
+/// the peers' support, and the request's own disqualifiers. DSD asks this and
+/// then chooses between llama.cpp's drafter and a model this node holds
+/// (`pipeline::engine_drafter`); Item 2 can only use llama.cpp's.
+pub(super) fn speculation_allowed(exec: &PipelineExecutor) -> bool {
     let cfg = exec.shared_state.cfg();
     if !cfg.inference.speculative_decoding {
         return false;
@@ -994,9 +1003,6 @@ pub(super) fn speculative_common_eligible(exec: &PipelineExecutor) -> bool {
         return false;
     }
     if fastpath_request_disqualified(exec) {
-        return false;
-    }
-    if cfg.inference.draft_model_path.is_none() {
         return false;
     }
     true
