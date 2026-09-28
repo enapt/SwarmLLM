@@ -427,11 +427,29 @@ pub async fn run_worker(
         }
     });
 
+    // Whether the card's pool may hold memory freed since the last hand-back:
+    // set by any message or tick, cleared by `cuda_pool::trim` once the worker
+    // has had nothing to do for `cuda_pool::IDLE_TRIM` (#146).
+    let mut pool_may_hold_freed = false;
+
     loop {
         // Either block on the next IPC message (no slots are decoding) OR race
         // a fresh IPC arrival against an immediate decode tick (slots active).
         let next_msg: Option<(DaemonMsg, Vec<u8>)> = if slot_table.is_empty() {
-            ipc_rx.recv().await
+            if pool_may_hold_freed && crate::inference::cuda_pool::keep_enabled() {
+                match tokio::time::timeout(crate::inference::cuda_pool::IDLE_TRIM, ipc_rx.recv())
+                    .await
+                {
+                    Ok(m) => m,
+                    Err(_idle) => {
+                        pool_may_hold_freed = false;
+                        hand_back_idle_card_memory(&models);
+                        continue;
+                    }
+                }
+            } else {
+                ipc_rx.recv().await
+            }
         } else {
             tokio::select! {
                 biased;
@@ -442,6 +460,7 @@ pub async fn run_worker(
 
         let mut shutdown = false;
         if let Some((msg, payload)) = next_msg {
+            pool_may_hold_freed = true;
             shutdown |= handle_daemon_msg(
                 msg,
                 payload,
@@ -599,6 +618,32 @@ pub async fn run_worker(
     reader_task.abort();
     drop(models);
     tracing::info!("model-worker: exiting cleanly");
+}
+
+/// Hand the card memory this worker's pool keeps unused back to the driver,
+/// once it has been idle for `cuda_pool::IDLE_TRIM` — so another worker, or a
+/// model the daemon wants to load, sees the room (`docs/FUTURE_WORK.md` #146).
+/// The pool is the device's, shared by every model this process holds on the
+/// card, so one trim covers them all.
+fn hand_back_idle_card_memory(models: &HashMap<(usize, usize, usize, usize), SplitModel>) {
+    let Some(device) = models
+        .values()
+        .map(SplitModel::device)
+        .find(|d| d.is_cuda())
+    else {
+        return;
+    };
+    let started = std::time::Instant::now();
+    if let Some((before, after)) = crate::inference::cuda_pool::trim(device) {
+        tracing::info!(
+            reserved_before_mb = before.reserved >> 20,
+            reserved_after_mb = after.reserved >> 20,
+            in_use_mb = after.used >> 20,
+            took_ms = started.elapsed().as_millis() as u64,
+            idle_secs = crate::inference::cuda_pool::IDLE_TRIM.as_secs(),
+            "DIAG: card memory pool handed its unused memory back after idle"
+        );
+    }
 }
 
 /// Send a `WorkerMsg::Error` back to the daemon. Used by the `run_worker`

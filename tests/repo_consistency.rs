@@ -11214,6 +11214,55 @@ fn the_free_memory_sync_guard_catches_an_unsynchronized_read() {
     );
 }
 
+/// Lines of `src` that open a CUDA device anywhere but inside `load_device`.
+fn card_opened_outside_load_device(src: &str) -> Vec<String> {
+    let allowed = fn_body(src, "fn load_device(").map(|b| {
+        let start = b.as_ptr() as usize - src.as_ptr() as usize;
+        start..start + b.len()
+    });
+    let mut out = Vec::new();
+    for pat in ["cuda_if_available(", "new_cuda(", "new_cuda_with_stream("] {
+        for (at, _) in src.match_indices(pat) {
+            if allowed.as_ref().is_some_and(|r| r.contains(&at)) {
+                continue;
+            }
+            let line = src[..at].matches('\n').count() + 1;
+            out.push(format!("line {line}: {pat}"));
+        }
+    }
+    out
+}
+
+/// `docs/FUTURE_WORK.md` #146: the card's memory pool must be told to keep what
+/// it frees, or every synchronize hands it back to the driver and the next
+/// admission fetches it fresh — the step that slowed ~1000× with host uptime.
+/// `loader::load_device` is where that happens, so a model that reaches the
+/// card by any other road in the loader runs without it. CUDA-gated: nothing
+/// but this guard sees the device choice in a default build.
+#[test]
+fn every_split_model_reaches_the_card_through_load_device() {
+    let dir = repo_root().join("src/inference/split/loader");
+    let mut offenders = Vec::new();
+    for path in rust_files_under(&dir) {
+        let src = std::fs::read_to_string(&path).expect("read loader file");
+        for hit in card_opened_outside_load_device(&src) {
+            offenders.push(format!("{}: {hit}", path.display()));
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "a split model is put on the card without `load_device` — it would run \
+         with a pool that hands memory back at every synchronize (#146): {offenders:#?}"
+    );
+    // Planted: the shape `shards.rs` had twice before the fix, beside the
+    // helper itself, which is the one place allowed to open the card.
+    let planted = "pub(super) fn load_device(force_cpu: bool) -> Device {\n    let device = Device::cuda_if_available(0).unwrap_or(Device::Cpu);\n    keep(&device);\n    device\n}\n\nfn load() {\n    let device = if force_cpu {\n        Device::Cpu\n    } else {\n        Device::cuda_if_available(0).unwrap_or(Device::Cpu)\n    };\n}\n";
+    assert_eq!(
+        card_opened_outside_load_device(planted),
+        vec!["line 11: cuda_if_available(".to_string()]
+    );
+}
+
 /// Does the card-pace gate run before the worker chooses between the batched
 /// table and the sequential path? `None` when the text lacks one of the three.
 /// Whitespace-blind, so a reformat cannot retire it.

@@ -11,7 +11,6 @@ use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
 
 use candle_core::quantized::gguf_file;
-use candle_core::Device;
 
 use crate::error::SwarmError;
 
@@ -118,11 +117,7 @@ impl SplitModel {
                     crate::inference::split::explain_gguf_parse_error(&e)
                 ))
             })?;
-            let device = if force_cpu {
-                Device::Cpu
-            } else {
-                Device::cuda_if_available(0).unwrap_or(Device::Cpu)
-            };
+            let device = super::load_device(force_cpu);
             return Self::load_model_from_content(
                 ct,
                 &mut cursor,
@@ -237,11 +232,7 @@ impl SplitModel {
             }
         }
 
-        let device = if force_cpu {
-            Device::Cpu
-        } else {
-            Device::cuda_if_available(0).unwrap_or(Device::Cpu)
-        };
+        let device = super::load_device(force_cpu);
         if device.is_cuda() {
             tracing::info!(layer_start, layer_end, "Split model using CUDA GPU");
         } else if force_cpu {

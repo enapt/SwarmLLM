@@ -200,15 +200,17 @@ Sends run concurrently, so the fan-out costs one timeout, not one per worker.
 ## A card's free memory is read after a synchronize (2026-09-26)
 
 **`kv_budget::device_free_and_total_bytes` synchronizes the device's stream
-before `mem_get_info`.** cudarc frees through the card's memory pool
-(`cuMemFreeAsync`), and the pool hands memory back to the device only at a
-synchronize, so an unsynchronized reading counts what the previous request just
-released as still in use — the next long prompt was refused against half its
-budget, every time, on the released v0.3.207 (#121). Every budget decision
-reaches the card through `SplitModel::kv_budget_now` → this one function; a new
-reading of device memory goes through it too. Guard:
-`the_cards_free_memory_is_read_after_a_synchronize`; A/B:
-`SWARMLLM_KV_DEVICE_SYNC=0`.
+before `mem_get_info`, and adds what this process's pool keeps unused.** cudarc
+frees through the card's memory pool (`cuMemFreeAsync`); a buffer freed on the
+stream counts as unused only after a synchronize, so an unsynchronized reading
+counts what the previous request just released as still in use — the next long
+prompt was refused against half its budget, every time, on the released
+v0.3.207 (#121). Since #146 the pool KEEPS freed memory (below), which
+`mem_get_info` reports as used; `cuda_pool::reusable_bytes` is the other half of
+"free for this process". Every budget decision reaches the card through
+`SplitModel::kv_budget_now` → this one function; a new reading of device memory
+goes through it too. Guard: `the_cards_free_memory_is_read_after_a_synchronize`;
+A/B: `SWARMLLM_KV_DEVICE_SYNC=0`.
 
 **A reply is reserved by what it can reach** — `reply_reserve_positions(max_tokens)`,
 a REQUIRED argument of `ensure_room_for_prompt`; a segment's prompt pass, which
@@ -235,6 +237,23 @@ generation path is gated by it. Refusal = `LocalMemoryUnavailable` (the busy 503
 the router re-plans). A/B: `SWARMLLM_CARD_PACE=0`.
 
 → `docs/invariants/memory.md` § "A card that stalls is given less work"
+
+## A card's memory pool keeps what the worker frees, until the worker is idle (2026-09-28)
+
+**The pool's release threshold defaults to 0** — every synchronize handed all
+freed card memory back to the driver, and the next admission (and, with the
+per-token logits copy, the next token) fetched it fresh; on WSL2 that fresh
+fetch slowed ~1000× over two days of host uptime (#146, #755). **`split::loader::load_device`
+is the one place a worker picks the card**, and it raises the threshold to max
+(`inference::cuda_pool::keep_freed_memory`); **`model_worker::run_worker` hands
+the unused part back after `cuda_pool::IDLE_TRIM` (60 s) idle**, because the
+driver lends a pool's spare memory only within its own process and the daemon's
+`nvidia-smi` reading cannot tell a worker's kept memory from another program's.
+Any reading of "free for this process" adds `cuda_pool::reusable_bytes`. Guard:
+`every_split_model_reaches_the_card_through_load_device`; A/B:
+`SWARMLLM_CUDA_POOL_KEEP=0`.
+
+→ `docs/invariants/memory.md` § "A card's memory pool keeps what the worker frees"
 
 ## Single-source-of-truth helpers — Worker memory: graphics, RAM and the KV cache
 

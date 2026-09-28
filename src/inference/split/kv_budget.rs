@@ -215,6 +215,15 @@ pub(crate) fn budget_reconciled_with_device(
 /// guard on a growth boundary), so the wait is for work the next step would
 /// queue behind anyway. `SWARMLLM_KV_DEVICE_SYNC=0` reads without it, for the
 /// A/B inside one binary.
+///
+/// **Free includes what this process's pool keeps** (`inference::cuda_pool`,
+/// #146). The pool no longer hands freed memory back at the synchronize — that
+/// hand-back, and fetching the memory fresh at the next admission, was the
+/// step that slowed ~1000× with host uptime — so `cuMemGetInfo` alone would
+/// read a finished request's cache as used, which is #121 again by another
+/// road. Reserved-but-unused pool memory is exactly what the next allocation
+/// here draws from first, and the synchronize is still what makes a buffer
+/// freed on the stream count as unused.
 pub(crate) fn device_free_and_total_bytes(device: &candle_core::Device) -> Option<(u64, u64)> {
     #[cfg(feature = "candle-cuda")]
     if let candle_core::Device::Cuda(dev) = device {
@@ -224,11 +233,23 @@ pub(crate) fn device_free_and_total_bytes(device: &candle_core::Device) -> Optio
             // existed — conservative, never larger than the truth.
             let _ = stream.synchronize();
         }
-        return stream
+        let pool = crate::inference::cuda_pool::usage(device);
+        let reading = stream
             .context()
             .mem_get_info()
             .ok()
             .map(|(free, total)| (free as u64, total as u64));
+        if let (Some(p), Some((free, _))) = (pool, reading) {
+            tracing::debug!(
+                device_free_mb = free >> 20,
+                pool_reserved_mb = p.reserved >> 20,
+                pool_used_mb = p.used >> 20,
+                pool_reusable_mb = p.reusable() >> 20,
+                "DIAG: card memory reading"
+            );
+        }
+        let kept = pool.map_or(0, crate::inference::cuda_pool::PoolUsage::reusable);
+        return reading.map(|(free, total)| (free.saturating_add(kept).min(total), total));
     }
     if matches!(device, candle_core::Device::Cpu) {
         if !processor_reconciliation_enabled() {

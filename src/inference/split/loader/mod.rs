@@ -343,6 +343,24 @@ fn moe_renormalizes_by_default(arch: &str) -> bool {
     arch != "qwen2moe"
 }
 
+/// The device a split model loads onto: the card when there is one and the
+/// worker was not told to use the processor (`force_cpu`, from
+/// `inference.gpu_layers = 0`), the processor otherwise.
+///
+/// The ONE place a worker picks the card, so it is also where the card's
+/// memory pool is told to keep what it frees (`inference::cuda_pool`,
+/// `docs/FUTURE_WORK.md` #146) — a model that reached the card any other way
+/// would run with a pool that hands memory back to the driver at every
+/// synchronize. Guard: `every_split_model_reaches_the_card_through_load_device`.
+pub(super) fn load_device(force_cpu: bool) -> Device {
+    if force_cpu {
+        return Device::Cpu;
+    }
+    let device = Device::cuda_if_available(0).unwrap_or(Device::Cpu);
+    crate::inference::cuda_pool::keep_freed_memory(&device);
+    device
+}
+
 impl SplitModel {
     /// Load a partial model from a GGUF file, only loading the specified layer range.
     ///
@@ -387,11 +405,7 @@ impl SplitModel {
             ))
         })?;
 
-        let device = if force_cpu {
-            Device::Cpu
-        } else {
-            Device::cuda_if_available(0).unwrap_or(Device::Cpu)
-        };
+        let device = load_device(force_cpu);
         if device.is_cuda() {
             tracing::info!(layers = %(layer_start..=layer_end).count(), layer_start, layer_end, "Split model using CUDA GPU");
         } else if force_cpu {
@@ -655,7 +669,12 @@ impl SplitModel {
             // of zero would refuse every request, which is far worse than the
             // no-budget behaviour that preceded this.
             if let Some(free_mb) = crate::model::auto_manage::vram::query_gpu_vram_free_mb() {
-                let free_bytes = free_mb.saturating_mul(1024 * 1024);
+                // nvidia-smi counts what this worker's own pool keeps as used;
+                // it is this process's to allocate (a range loaded into a
+                // worker that has already served, `inference::cuda_pool`).
+                let free_bytes = free_mb
+                    .saturating_mul(1024 * 1024)
+                    .saturating_add(crate::inference::cuda_pool::reusable_bytes(&device));
                 let budget = super::kv_budget::kv_headroom_bytes(weight_bytes, free_bytes);
                 kv_budget_bytes = Some(budget);
                 kv_bytes_per_token = per_token;
