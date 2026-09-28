@@ -154,12 +154,14 @@ UNDETERMINED and never a fix — use it BEFORE blaming a change, especially your
 
 ## Status
 
-**v0.3.212-alpha is the live release (published 2026-09-28 04:55 UTC), signed and on both nodes; `main` equals it**
+**v0.3.212-alpha is the live release (published 2026-09-28 04:55 UTC), signed and on both nodes**
 — split speculation with an in-engine small drafter (`pipeline::engine_drafter`, 1.7-2.4× TH↔BE), **shipped OFF by
 default**: with the drafter resident the failover rig lost its standbys (FUTURE_WORK #140 — the flip's precondition).
 The drafter is a pool GUEST (#747); attempt-scoped state is never keyed by the request id, which retries reuse (#749).
 **Why split decode is slow and what beats it → `docs/plans/faster_than_local.md`; the speculation plan, its
-measurements and the NEXT batch (continuous stream) → `docs/plans/split_speculation.md`.**
+measurements and the NEXT batch (continuous stream) → `docs/plans/split_speculation.md`.** ⛔ **No design may need a
+user to hold the whole model, not even a low-bit copy** (user, 2026-09-28) → parallelize the REPLY, not the token:
+`docs/plans/wan_parallel.md`. `main` is AHEAD of the release (two field-report fixes, not released).
 Qwen 3.5 is on local branch `qwen35-support` (#117); Gemma 4 scoped, not built (#115).
 ⚠ **A family in `supported_list` is a claim: check it against a REAL file's header** (#715). **Next** → `memory/next_up.md`.
 
