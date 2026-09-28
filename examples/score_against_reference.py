@@ -17,7 +17,7 @@ while a correct one is rank 1 almost everywhere, with the odd rank-2 pick by a
 small margin. Compare replies by their SCORES: a takeover should score like a
 same-topology control.
 
-usage: score_against_reference.py [--lora adapter.gguf] [--system TEXT] <model.gguf> <replies.jsonl> <prompt-file> [label ...]
+usage: score_against_reference.py [--lora adapter.gguf] [--system TEXT] [--n-ctx N] <model.gguf> <replies.jsonl> <prompt-file> [label ...]
   --lora         score against the model WITH this adapter applied by llama.cpp
                  (`peft_lora_to_gguf.py` makes one from a PEFT adapter).
   --system       render a system turn first. The node supplies
@@ -26,6 +26,17 @@ usage: score_against_reference.py [--lora adapter.gguf] [--system TEXT] <model.g
                  none of its own — TinyLlama, Phi-3.5 — so scoring their replies
                  without it scores them against a prompt they were never given.
                  Check: "prompt tokens" must equal the node's `usage.prompt_tokens`.
+                 Phi-4-mini and GLM-4 get it too (their prompt count is 8 short without).
+  --n-ctx        llama.cpp's context size, default 8192 — the node's default
+                 served window. NOT only a capacity: for a LongRoPE model (Phi-3.5,
+                 Phi-4-mini — `phi3` arch) llama.cpp picks the SHORT rotary factors
+                 when n_ctx <= the model's original context (4096) and the LONG ones
+                 beyond it, as the node does from the window it serves
+                 (`split::rope::load_longrope_factors`). At the old fixed 4096 the
+                 reference ran the short factors against a node on the long ones and
+                 Phi-4-mini scored ~85% with 1.5-logit gaps on EVERY path; at 8192,
+                 97% and <= 0.35 (2026-09-29). Pass the node's `max_seq_len_override`
+                 when it has one.
 
 A reply is scored as llama.cpp re-tokenizes its TEXT. For a SentencePiece model
 (TinyLlama, Mistral, Phi-3.5) llama.cpp's tokenizer is no authority on whitespace
@@ -64,6 +75,11 @@ def main():
         i = args.index("--system")
         system = args[i + 1]
         del args[i:i + 2]
+    n_ctx = 8192
+    if "--n-ctx" in args:
+        i = args.index("--n-ctx")
+        n_ctx = int(args[i + 1])
+        del args[i:i + 2]
     if len(args) < 3:
         sys.exit(__doc__)
     gguf, replies_path, prompt_path = args[:3]
@@ -71,7 +87,7 @@ def main():
     rows = [json.loads(line) for line in open(replies_path) if line.strip()]
     labels = args[3:] or [f"reply {i + 1}" for i in range(len(rows))]
 
-    llm = Llama(model_path=gguf, n_ctx=4096, n_gpu_layers=0, n_threads=8,
+    llm = Llama(model_path=gguf, n_ctx=n_ctx, n_gpu_layers=0, n_threads=8,
                 logits_all=True, verbose=False, seed=0, lora_path=lora)
     env = Environment(trim_blocks=True, lstrip_blocks=True)
     env.globals["strftime_now"] = lambda f: datetime.datetime.now().strftime(f)

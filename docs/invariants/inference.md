@@ -2026,13 +2026,16 @@ node stopped, SINGLE requests; unique prompts, `max_tokens` 1, best of 3;
   llama.cpp ranks first, Qwen2.5-7B + Llama-3.2-3B + Gemma-2-2B: MMQ 98.3%, f16/f32-acc 97.5%,
   f16-acc 98.2% — every miss rank ≤ 3 with a logit gap ≤ 0.43. Phi-3.5 (SentencePiece, scored by
   near-ties only) is the same in all arms. Mistral-7B (SentencePiece), Phi-4-mini and GLM-4-9B
-  (both scored with the node's default system turn, prompt counts equal): MMQ 464/480, 423/473,
-  417/464; f32-acc 464/480, 419/476, 413/460; f16-acc 460/475, 413/476, 417/454 — after the replies
-  fork, each continuation meets its own near-ties, so a few tokens either way is noise; the
-  worst ranks and largest gaps are the SAME positions in every arm (`~/swarmllm-pool-0928/score/`).
-- ⚠ **Phi-4-mini and GLM-4-9B disagree with llama.cpp in EVERY arm** at a few positions (gaps
-  ~1.5 logits on Phi-4-mini, ~20 on GLM-4) — a difference in the model or the tokenizer, not in
-  this path; FUTURE_WORK #147 item 6.
+  (both with the node's default system turn, prompt counts equal): MMQ 464/480, 465/473, 417/464;
+  f32-acc 464/480, 467/476, 413/460; f16-acc 460/475, 466/476, 417/454 — after the replies fork,
+  each continuation meets its own near-ties, so a few tokens either way is noise; the worst
+  ranks and largest gaps are the SAME positions in every arm (`~/swarmllm-pool-0928/score/`).
+- ⚠ **Score a LongRoPE model (Phi-3.5, Phi-4-mini) at the node's window**: at the scorer's old
+  fixed `n_ctx=4096` llama.cpp used Phi's SHORT rotary factors against a node on the LONG ones
+  (it serves 8192), and Phi-4-mini read ~85% with 1.5-logit gaps on every path — a reference
+  misconfiguration that looked like a model bug. `score_against_reference.py --n-ctx` now
+  defaults to 8192 (gotcha #757). GLM-4-9B keeps ~20-logit gaps on every path at either size —
+  FUTURE_WORK #147 item 6.
 - ⚠ Llama-3.x replies change across midnight: its template writes today's date. Compare runs on
   the same day, or a family whose template has none (Qwen: byte-identical across runs).
 

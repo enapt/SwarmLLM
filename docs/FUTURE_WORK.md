@@ -16227,10 +16227,11 @@ tensor cores". Rule: `arch-inference.md` § the same.
    traced. `~/swarmllm-pool-0928/f16ab_countmmq_*.node.log`.
 5. **An int8 tensor-core (`mma`) MMQ**, as current llama.cpp uses on Ampere, would beat the
    cuBLAS path at every batch size and need no dequantized copy — a port of `mmq.cuh`, large.
-6. **Phi-4-mini and GLM-4-9B disagree with llama.cpp at a few positions on EVERY path**, MMQ
-   included (found while scoring #147): Phi-4-mini ~87-89% of reply tokens ranked first with
-   gaps up to ~1.8 logits, GLM-4-9B ~90% with gaps of ~19-22 — where Qwen, Llama and Gemma sit at
-   98% with gaps ≤ 0.43. Pre-existing. Leads: Phi-4-mini's LongRoPE short/long factors (#124's
-   shape — a tensor or key the loader never reads), GLM-4's re-tokenization of the reply text
-   by llama.cpp. Replies to reproduce with: `~/swarmllm-pool-0928/score/3arm_*` +
-   `prompts/`, scored with `--system "You are a helpful assistant."`.
+6. **GLM-4-9B disagrees with llama.cpp at a few positions on EVERY path**, MMQ included (found
+   while scoring #147): ~90% of reply tokens ranked first, gaps of ~19-22 logits, at the scorer's
+   old 4096 and at 8192 alike — where Qwen, Llama, Gemma and Phi-4-mini sit at ~98% with gaps
+   ≤ 0.43. Pre-existing. Lead: llama.cpp's re-tokenization of the reply text (a piece the two
+   tokenizers split differently ranks far down for ANY reply). Replies:
+   `~/swarmllm-pool-0928/score/3arm_thudm-*` + `prompts/`, `--system "You are a helpful
+   assistant."`. ✅ **Phi-4-mini's apparent disagreement was the SCORER** — `n_ctx=4096` chose
+   Phi's short RoPE factors; fixed (`--n-ctx`, default 8192), gotcha #757.
