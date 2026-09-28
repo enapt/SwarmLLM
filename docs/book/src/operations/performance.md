@@ -168,7 +168,11 @@ Multi-segment distributed inference with speculative decoding woven in.
 A γ-token decode on the last-segment worker plus KV truncation primitives
 plus a coordinator loop in `pipeline/dsd.rs`.
 
-- **Status:** Off by default; measured across a real link. A model split
+- **Status:** Off by default in v0.3.212: with the guessing model loaded, a
+  split whose far computer failed part-way was retried instead of being taken
+  over by standby computers (the reply was still correct). It is switched on for
+  everyone once that is resolved (FUTURE_WORK #140). Measured across a real
+  link: a model split
   between a graphics card in Thailand and one in Belgium, with a small model
   of the same family guessing (Qwen2.5-0.5B for Qwen2.5-Coder-7B), decoded at
   **4.63 tokens/s greedy and 5.55 at temperature 0.7, against 2.3-2.7 without
@@ -181,6 +185,8 @@ plus a coordinator loop in `pipeline/dsd.rs`.
   that shares the big model's vocabulary and is at most a quarter of its
   size), or named with `inference.draft_model`. A whole model file named in
   `draft_model_path` is still used, by llama.cpp, where the build has it.
+  It uses only graphics memory that is free — never the card of the model it
+  guesses for — and runs on the processor otherwise.
 - **Failure behaviour:** if the guesser fails, the reply finishes without
   guessing; if a check does not come back, the request fails and is retried
   like any other split request.

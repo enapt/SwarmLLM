@@ -222,6 +222,20 @@ has lost the reply's context says so**: `draft_after` refuses a cache shorter th
 the one the call continues (expired, worker replaced), and the reply finishes
 without guessing instead of guessing from a context never written.
 
+**Shipped OFF by default in v0.3.212 — the decision and its evidence** (2026-09-28,
+`~/swarmllm-gate-0212/{decide,verify}212.out`, then the artifact gate). The rule
+was: flip only if, with it on, the failure rigs pass, replies score against
+llama.cpp as well as plain, a coordinator with no drafter is unchanged, and the
+drafter never takes the card from the target. Three held — greedy DSD 118/119 of
+120 rank-1 against plain 116/118; no drafter → the n-gram path, identical replies;
+12f, A on the card: the target stayed there and the drafter ran on the processor.
+**Failover did not**: with the drafter resident, the plan for the failing request
+had no standby, so B's range was retried rather than taken over (reply correct,
+119/120). The same binary without speculation took it over. That is FUTURE_WORK
+#140, and the flip waits on its discriminator (the drafter on A's card, so it
+takes no shared RAM). The same rig also found #749 — attempt-scoped drafter state
+keyed by the request id, which retries reuse — fixed before the tag.
+
 **An unsure guess ends the round** (2026-09-28): the drafter stops after a guess
 it gives less than 0.4 (`SplitModel::draft_after`, Hugging Face's
 `ConfidenceCriteria` / `assistant_confidence_threshold`; `SWARMLLM_DRAFT_CONFIDENCE`

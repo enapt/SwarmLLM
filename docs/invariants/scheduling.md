@@ -2397,3 +2397,47 @@ to shards 0-3 and the peer to 4-7 leaves the split as the only route. Test:
 control that restricting only ourselves does NOT produce that split; red with
 the filter removed. ⚠ It is a measurement tool: a plan forced this way is
 evidence about what a split COSTS, never about what the router would choose.
+
+## State that belongs to an attempt is keyed by the attempt, never by the request id (2026-09-28)
+
+### What happened
+
+Found by the v0.3.212 default-decision rig (`split_rig.sh failover` with speculation across
+computers on, qwen2.5-coder-7b + a qwen2.5-0.5b drafter on the coordinator), before release. B's
+worker was killed at the start of its prompt pass; the plan had no standby, the request failed and
+the router retried it — under the same request id, as it always does. Then, in order:
+
+1. The failed attempt's drafter read-ahead (`engine_drafter::read_ahead`, a spawned task) was still
+   waiting on the drafter's worker. The retry's read-ahead registered a reply channel for the same
+   id on the same worker, which displaces the older one (`claim_response_slot`).
+2. `ModelProcessPool::draft`'s wait saw its channel close and took it for a dead worker: it EVICTED
+   the healthy drafter. `generate` had had the check that tells the two apart since gotcha #180; the
+   forward, batch and draft waits never got it.
+3. The stale read-ahead then finished, and its guard (`ReadAhead`, added the night before to stop a
+   leak) ran `release_request_kv(request_id)` — which is a fan-out to EVERY worker. It emptied the
+   retry's cache on the TARGET's own segment worker, so the retry's first guessed round was refused
+   ("this computer no longer holds the conversation", position 557) and the salvage returned one token
+   as a 200.
+
+### The rule
+
+Anything scoped to one attempt is keyed by that attempt. `engine_drafter::draft_key()` is a fresh
+UUID per speculating attempt, shared by its `ReadAhead` and `EngineDrafter`; each releases only that
+key when dropped, so no attempt's release reaches another's state or the target's. And
+`ModelProcessPool::reply_channel_closed` is now the ONE place a closed reply channel is judged —
+superseded → plain error, closed → evict — used by generate, forward, batch and draft
+(`docs/invariants/memory.md`).
+
+### Verified
+
+The same rig on the rebuilt binary: 0 drafter evictions, 0 lost conversations, takeover reply full
+length (119/120 rank-1 vs llama.cpp, = control). Test
+`a_superseded_draft_leaves_the_worker_for_the_call_that_superseded_it` is red with the supersede
+check removed. What remains is separate: with the drafter resident the plan still had no standby
+(FUTURE_WORK #140), which is why speculation ships off by default in v0.3.212.
+
+### What a change must keep
+
+Before keying anything by `request.id`, ask whether a retry of the same request could hold it at the
+same moment — and whether a release keyed that way reaches workers you did not mean.
+

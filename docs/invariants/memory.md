@@ -1487,6 +1487,11 @@ one run read as "not loaded" and lose only the overlap.
   `a_guest_never_takes_system_memory_from_an_idle_model` (each with the tenant
   as control), `a_guest_does_not_grow_a_worker_it_finds` — all three red with
   the guest checks removed.
+- **A closed reply channel is judged in one place** (`reply_channel_closed`, 2026-09-28, gotcha #749):
+  superseded by a later call under the same id → a plain error and the worker stays; otherwise evict.
+  The draft wait had copied `forward_direct`'s loop, which never got #180's check, and evicted the
+  healthy drafter a router retry had just started on. Test
+  `a_superseded_draft_leaves_the_worker_for_the_call_that_superseded_it`, red without the check.
 - Residual: a guest placed on the processor stays there until it is unloaded
   idle, even if the card frees up; promoting it would mean taking memory.
 

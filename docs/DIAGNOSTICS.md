@@ -398,6 +398,40 @@ means this workload has nothing to copy. `paused_rounds` counts rounds where the
 backoff suppressed drafting — high is CORRECT on prose, not a fault. A request
 that is not alone on the worker joins the batch instead and logs nothing.
 
+### Across computers (DSD) — off by default since v0.3.212
+
+With `speculative_decoding` and `decentralized_spec_decoding` on, a split request
+whose coordinator holds a small same-family model guesses with it
+(`pipeline::engine_drafter`). One line per request, at info:
+
+```bash
+grep "DSD: request complete" node.log
+# drafter=qwen2.5-0.5b-instruct-fp16 proposed=71 accepted=50 final_gamma=3 alpha=0.70
+#   check_fixed_ms=258.7 check_ms_per_position=0.0 draft_ms_each=119.5
+```
+
+`accepted / proposed` is how often the guesses were kept; `final_gamma` is how
+far it guessed by the end. **γ settling at 1 on a loopback rig is correct** —
+there a check costs less than a guess; across a real link it settled at 3-7.
+`check_ms_per_position` above 0 means the far computer checks on its processor.
+No line at all: grep `DSD: no drafter available` at debug — no held model shares
+the target's vocabulary within a quarter of its size.
+
+```bash
+# The guesser was refused the card and runs on the processor — by design, it
+# never takes memory from the model it guesses for (Tenancy::Guest, #747).
+grep "The guessing model does not fit the graphics memory that is free" node.log
+# The guesser failed; the reply finished at plain speed (drafting_off).
+grep "DSD: the drafter failed" node.log
+# A call displaced by a router retry of the same request — the worker was
+# kept, not evicted (#749). Harmless on its own.
+grep "superseded by a retry of the same request" node.log
+```
+
+A split reply that came back one token after a router retry, with speculation
+on, is #749's shape: check for `no longer holds the conversation` beside a
+`superseding the earlier attempt` line.
+
 ## "Something is slow" — split user time from kernel time FIRST
 
 Before theorising about which code is slow, spend one command finding out

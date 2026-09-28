@@ -1175,8 +1175,11 @@ ModelProcessPool.forward()   ──socket──▶   runs forward passes / decod
 - `DaemonMsg::Generate(IpcGenerate)` — full prompt→tokens decode loop for API inference
 - `DaemonMsg::Draft(IpcDraft)` → `WorkerMsg::Drafted` — guess γ tokens with this (small)
   model for a bigger one's request (`pipeline::engine_drafter`). The worker keeps the
-  request's drafting cache between calls; each call cuts it back to what the last
-  check confirmed (`keep`) and reads only what is new (`append`).
+  drafting cache between calls; each call cuts it back to what the last check
+  confirmed (`keep`) — refusing a cache shorter than that — and reads only what is new
+  (`append`). The cache is keyed by the speculating ATTEMPT (`draft_key`), never the
+  request id a router retry reuses (#749), and the model loads as a pool GUEST
+  (`Tenancy::Guest`: free memory only, #747).
 - `DaemonMsg::Unload` — drop a layer range within the worker (partial memory reclaim)
 - `DaemonMsg::CancelRequest` — abandon a request the daemon no longer wants a reply for
 - `DaemonMsg::ReleaseRequestKv` — the request is over; free the KV cache it holds
@@ -2883,6 +2886,8 @@ Single-node inference performance, measured with `swarmllm bench` (100 output to
 The list is split into **open** (will be addressed) and **won't fix unless a concrete caller appears** (the work is understood but not justified by current demand). Per-finding history (status, resolution, deferral) is tracked in `.claude/sweep-log.jsonl`.
 
 ### Open
+
+- **Speculation across computers on by default** — `docs/FUTURE_WORK.md` #140: shipped OFF in v0.3.212 because, with the drafter resident, the failover rig's plan lost its standbys and a failed segment was retried instead of taken over (reply correct). The discriminator (drafter on the card, not in shared RAM) is written down there.
 
 - **StarCoder2 — recognised, refused** — `docs/FUTURE_WORK.md` #118: a LayerNorm model with biases the loader does not read, and a metadata key (`layer_norm_epsilon`) the shared parser does not accept.
 

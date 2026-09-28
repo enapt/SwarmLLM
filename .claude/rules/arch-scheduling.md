@@ -287,6 +287,19 @@ every position wrongly and is equally silent.
 
 → `docs/invariants/scheduling.md`
 
+## State that belongs to an ATTEMPT is keyed by the attempt, never by the request id (2026-09-28)
+
+The router retries a failed request under the SAME id, and the old attempt's
+spawned work can still be running. Anything scoped to one attempt — the split
+drafter's cache is the worked example (`engine_drafter::draft_key`, released by
+the attempt's own `ReadAhead` / `EngineDrafter` on drop) — gets its own key.
+Keyed by the request id, the dead attempt's read-ahead displaced the retry's call
+(which evicted the drafter) and its release, which fans out to EVERY worker,
+emptied the retry's target segment: a one-token reply returned as 200 (#749).
+**A release keyed by request id reaches every worker, not just the one you meant.**
+
+→ `docs/invariants/scheduling.md` § "State that belongs to an attempt"
+
 ## A failed request hands back the work it had already done
 
 `SharedState::salvaged_replies` holds what a request had generated when it

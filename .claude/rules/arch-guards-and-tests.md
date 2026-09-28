@@ -69,3 +69,15 @@ field list — it forbade all seventeen `.config.auto_manage.` fields while its
 own comment stated the principle that only the four the Settings panel exposes
 are live-settable, the rest being config-file/CLI where the boot value is
 CORRECT.
+
+## A rig step about PLACEMENT must set the placement it tests (2026-09-28)
+
+`examples/split_rig.sh` in `repeat` mode puts EVERY node on the processor
+(`GPU_A=0 GPU_B=0`) and gives A only shard 0. A step about the graphics card must
+say `GPU_A=-1` and give A a real share (`SHARDS_A=…`), with the card budget in
+`EXTRA_TOML` (`[resources] max_gpu_vram_mb`). The .212 gate's guest step first ran
+on the defaults and printed "7B off the card: 1" (the rig's own setting) beside a
+zero for its actual subject — a check that could not see what it checks (#748).
+**Read the step's own `A.log` placement lines** (`Model will run on the CPU` +
+`reason=`) before trusting a count of zero.
+
