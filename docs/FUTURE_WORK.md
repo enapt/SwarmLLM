@@ -16220,8 +16220,14 @@ tensor cores". Rule: `arch-inference.md` § the same.
    q8_1 quantization on the MMQ path (3 casts per layer, ~1% of a chunk).
 3. **The 8 `ucopy_f32` per layer in a prompt pass**, each with a host→device upload of its
    layout (`cuda_backend/mod.rs` `copy_strided_src`, 256 of the 259 uploads in a 512-token
-   forward) — `.contiguous()` of strided views around attention. Found in the kernel table,
-   not yet traced.
+   forward) — `.contiguous()` of strided views around attention. Read (not measured): the
+   projections produce BSHD, RoPE and the cache take BHSD, flash takes BSHD again and returns
+   BSHD that is turned to BHSD and back for the output projection (`layers::run_attention`'s
+   flash arm, `q.transpose(1, 2)?.contiguous()` and `out…transpose(1, 2)?.contiguous()`, plus
+   the K/V turns before the cache). Keeping a prompt pass in BSHD end to end on the flash path
+   (candle has a BSHD RoPE, `rope_thd`) would drop most of them; ~5% of a chunk by the kernel
+   table's arithmetic. The KV cache and every decode path read BHSD — change the prompt path
+   only, and check both with `kernel_count_ab.sh` + replies.
 4. **One `mul_mat_vec_q4_K_q8_1_cuda1` per layer in every chunk of a long prompt** (both paths,
    so not this change) — a single-row quantized matmul per layer during a prompt pass; not
    traced. `~/swarmllm-pool-0928/f16ab_countmmq_*.node.log`.
