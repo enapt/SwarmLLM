@@ -258,6 +258,12 @@ pub enum SwarmError {
     /// memory on the fresh assembly, so a request committed to this node while
     /// the budget looked sufficient is planned onto a peer the second time —
     /// which is the gap report #018 named and report #025 measured.
+    ///
+    /// **Its second producer is a card that has been stalling**
+    /// (`inference::card_pace`, `docs/FUTURE_WORK.md` #146): the worker refuses
+    /// a new generation past the pace's ceiling. Same decision, same variant —
+    /// this node must not run the whole model for this request now, and the
+    /// re-plan barring it is exactly what helps. The message says which cause.
     #[error("Service unavailable: {0}")]
     LocalMemoryUnavailable(String),
 

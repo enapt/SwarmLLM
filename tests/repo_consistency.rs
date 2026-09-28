@@ -11214,6 +11214,91 @@ fn the_free_memory_sync_guard_catches_an_unsynchronized_read() {
     );
 }
 
+/// Does the card-pace gate run before the worker chooses between the batched
+/// table and the sequential path? `None` when the text lacks one of the three.
+/// Whitespace-blind, so a reformat cannot retire it.
+fn card_pace_gates_before_the_path_choice(generate_arm: &str) -> Option<bool> {
+    let flat: String = generate_arm
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    let gate = flat.find("card_pace.admits(")?;
+    let batched = flat.find("slot_admission_eligible(")?;
+    let sequential = flat.find("handle_generate(")?;
+    Some(gate < batched && gate < sequential)
+}
+
+/// `docs/FUTURE_WORK.md` #146, gotcha #754: a worker kept admitting chats while
+/// its card stalled 2-60 s per step, and the PC hung. The pace must gate a new
+/// generation BEFORE the path choice — a request the full table turns away
+/// falls through to `handle_generate` and runs on the card anyway, so a gate on
+/// the table alone would cap nothing. And both device-bound steps on the
+/// worker loop must be timed into it, or it can never trip.
+#[test]
+fn a_stalling_card_gates_every_generation_path() {
+    let src = std::fs::read_to_string(repo_root().join("src/inference/model_worker.rs"))
+        .expect("read model_worker.rs");
+    let handler = fn_body(&src, "async fn handle_daemon_msg(")
+        .expect("handle_daemon_msg moved — move this guard with it");
+    let arm_start = handler
+        .find("DaemonMsg::Generate(gen) =>")
+        .expect("the Generate arm moved — move this guard with it");
+    let arm = &handler[arm_start..];
+    let arm = &arm[..arm.find("DaemonMsg::CancelRequest").unwrap_or(arm.len())];
+    assert_eq!(
+        card_pace_gates_before_the_path_choice(arm),
+        Some(true),
+        "`card_pace.admits(` must run in the Generate arm BEFORE both \
+         `slot_admission_eligible(` and `handle_generate(` (FUTURE_WORK #146)"
+    );
+    let flat = |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+    let run = flat(fn_body(&src, "pub async fn run_worker(").expect("run_worker moved"));
+    let tick = run
+        .find("step_decode_pool(")
+        .expect("the decode tick moved");
+    assert!(
+        run[tick..].contains("card_pace.observe("),
+        "the decode tick must be timed into the card pace"
+    );
+    let admit =
+        flat(fn_body(&src, "async fn try_register_generate_slot(").expect("admission moved"));
+    let observed = admit
+        .find("card_pace.observe(")
+        .expect("the admission's device calls must be timed into the card pace");
+    let remote = admit
+        .find("try_remote_prefix_hydrate(")
+        .expect("remote probe moved");
+    assert!(
+        admit
+            .find("admission_done(card_pace)")
+            .is_some_and(|done| done < remote)
+            && observed < remote,
+        "admission must be timed BEFORE the remote prefix probe, which waits on the \
+         network, not the card"
+    );
+}
+
+/// The guard above, against the forms it exists to catch — planted.
+#[test]
+fn the_card_pace_guard_catches_a_gate_after_the_path_choice() {
+    let gated =
+        "let running = slot_table.len();\nif !card_pace.admits(running, now) { return false; }\n\
+                 if batch_generate && slot_admission_eligible(g) {}\nhandle_generate(writer)";
+    assert_eq!(card_pace_gates_before_the_path_choice(gated), Some(true));
+    // Gating only the batched table: the fall-through still reaches the card.
+    let table_only = "if batch_generate && slot_admission_eligible(g) {\n    if card_pace.admits(n, now) {}\n}\n\
+                      handle_generate(writer)";
+    assert_eq!(
+        card_pace_gates_before_the_path_choice(table_only),
+        Some(false)
+    );
+    // No gate at all.
+    assert_eq!(
+        card_pace_gates_before_the_path_choice("slot_admission_eligible(g); handle_generate(w)"),
+        None
+    );
+}
+
 /// Does this call hand the pool the OWNER as its requester?
 fn forwards_as_the_owner(body: &str) -> bool {
     let flat: String = body.chars().filter(|c| !c.is_whitespace()).collect();

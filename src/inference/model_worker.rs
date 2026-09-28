@@ -309,6 +309,10 @@ pub async fn run_worker(
     );
 
     let mut slot_table = SlotTable::new(batch_generate_max_slots as usize);
+    // How many generations the card may run at once, by what the card DOES:
+    // halved on a stall, one back per quiet minute (`docs/FUTURE_WORK.md` #146).
+    let mut card_pace =
+        crate::inference::card_pace::CardPace::new(batch_generate_max_slots as usize);
     // `prefill_chunk_tokens` is the ceiling; the pacer picks the operating
     // quantum from measured wall time whenever more than one slot is active,
     // so a long prompt cannot starve a co-scheduled request on a slow machine
@@ -451,6 +455,7 @@ pub async fn run_worker(
                 &ngram_cfg,
                 &options,
                 &mut slot_table,
+                &mut card_pace,
                 &pending_fetches,
                 &cancelled,
             )
@@ -479,6 +484,7 @@ pub async fn run_worker(
                             &ngram_cfg,
                             &options,
                             &mut slot_table,
+                            &mut card_pace,
                             &pending_fetches,
                             &cancelled,
                         )
@@ -542,7 +548,13 @@ pub async fn run_worker(
         // across all decoding slots (Phase B). Marks finished slots which the
         // drain step then collects.
         if !slot_table.is_empty() {
-            if let Err(e) = step_decode_pool(
+            let running = slot_table.len();
+            let on_card = slot_table
+                .current_layer_range()
+                .and_then(|(ls, le)| models.get(&(ls, le, 0, 1)))
+                .is_some_and(SplitModel::runs_entirely_on_card);
+            let tick_started = std::time::Instant::now();
+            let tick = step_decode_pool(
                 &mut writer,
                 &mut models,
                 &kv_store,
@@ -552,8 +564,16 @@ pub async fn run_worker(
                 force_standard_attn,
                 batched_prefill_forward,
             )
-            .await
-            {
+            .await;
+            if let Some(stalled) = card_pace.observe(
+                tick_started.elapsed(),
+                running,
+                on_card,
+                std::time::Instant::now(),
+            ) {
+                stalled.log("decode tick");
+            }
+            if let Err(e) = tick {
                 tracing::warn!(error = %e, "model-worker: decode tick failed — finishing all slots with error");
                 let drained = std::mem::replace(
                     &mut slot_table,
@@ -3869,6 +3889,7 @@ async fn try_register_generate_slot(
     mut gen: IpcGenerate,
     shard_window: &Option<Vec<u32>>,
     slot_table: &mut SlotTable,
+    card_pace: &mut crate::inference::card_pace::CardPace,
     pending_fetches: &PrefixFetchWaiterMap,
     // `draft_margin_positions` of this worker's settings. A batched slot is
     // not speculated today (`slot_admission_eligible` sends those requests
@@ -3932,15 +3953,38 @@ async fn try_register_generate_slot(
     // Prefix-cache lookup + per-request KV hydration if we hit. Cheap clone of
     // K/V tensors — no compute.
     let matched = prefix_cache.lookup(&model_key_string, &prompt_ids);
-    ensure_room_for_prompt(
+    // The device-bound part of admission: the budget's synchronize and
+    // free-memory read, then hydration's allocations and copies. Healthy it is
+    // well under 0.1 s; on 2026-09-28 it took 2-60 s, and every running slot
+    // waited with it, because admission and decode share this one loop
+    // (`docs/FUTURE_WORK.md` #146). Timed after the model load and before the
+    // remote-prefix probe, which wait on disk and network, not on the card.
+    let running = slot_table.len();
+    let on_card = model.runs_entirely_on_card();
+    let admission_started = std::time::Instant::now();
+    let room = ensure_room_for_prompt(
         model,
         kv_store,
         prefix_cache,
         &req_id_str,
         prompt_ids.len(),
         reply_reserve_positions(gen.sampling.max_tokens, draft_margin),
-    )
-    .map_err(SlotAdmitError::Fatal)?;
+    );
+    // A refusal is timed too: the stall can be in the synchronize before it.
+    let admission_done = |card_pace: &mut crate::inference::card_pace::CardPace| {
+        if let Some(stalled) = card_pace.observe(
+            admission_started.elapsed(),
+            running,
+            on_card,
+            std::time::Instant::now(),
+        ) {
+            stalled.log("admission");
+        }
+    };
+    if let Err(e) = room {
+        admission_done(card_pace);
+        return Err(SlotAdmitError::Fatal(e));
+    }
     let mut prefix_len = match matched.as_ref() {
         Some(snap) => prefix_cache
             .hydrate_request_from_snapshot(kv_store, &model_key_string, &req_id_str, snap)
@@ -3957,6 +4001,7 @@ async fn try_register_generate_slot(
         prefix_len,
         prompt_tokens,
     );
+    admission_done(card_pace);
     if prefix_len == 0 {
         // Item 8 Phase 2b: probe cross-node only when local missed.
         prefix_len = try_remote_prefix_hydrate(
@@ -4605,6 +4650,7 @@ async fn handle_daemon_msg(
     ngram_cfg: &crate::inference::ngram_lookup::NgramLookupConfig,
     options: &WorkerOptions,
     slot_table: &mut SlotTable,
+    card_pace: &mut crate::inference::card_pace::CardPace,
     pending_fetches: &PrefixFetchWaiterMap,
     cancelled: &CancelledSet,
 ) -> bool {
@@ -4683,6 +4729,33 @@ async fn handle_daemon_msg(
         }
         DaemonMsg::Generate(gen) => {
             let request_id = gen.request_id;
+            // A card that has been stalling takes no more than its pace allows,
+            // on EITHER path: this sits before the choice between the batched
+            // table and `handle_generate`, because a request the full table
+            // turns away falls through to the sequential path and runs on the
+            // card all the same (`docs/FUTURE_WORK.md` #146). Refused as the
+            // busy 503 the router re-plans with this node barred from the
+            // whole model — before anything is marked, so nothing is left to
+            // release.
+            let running = slot_table.len();
+            if !card_pace.admits(running, std::time::Instant::now()) {
+                let ceiling = card_pace.ceiling();
+                tracing::warn!(
+                    %request_id,
+                    running,
+                    ceiling,
+                    "DIAG: card pace — refusing a new generation while the graphics card is stalling"
+                );
+                send_worker_error(
+                    writer,
+                    request_id,
+                    SwarmError::LocalMemoryUnavailable(
+                        crate::inference::card_pace::refusal_message(running, ceiling),
+                    ),
+                )
+                .await;
+                return false;
+            }
             // Recorded once, here, before either admission path: every forward
             // of this request reads it where its thread pool is chosen
             // (`cpu_pools::in_phase_pool`), and it is released with the rest
@@ -4707,6 +4780,7 @@ async fn handle_daemon_msg(
                     g,
                     shard_window,
                     slot_table,
+                    card_pace,
                     pending_fetches,
                     draft_margin_positions(ngram_cfg, swift_cfg),
                 )

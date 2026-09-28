@@ -218,6 +218,24 @@ caused by OTHER live conversations says to wait, never to shorten the prompt
 
 → `docs/invariants/memory.md` § "A card's free memory is read after a synchronize"
 
+## A card that stalls is given less work, not more (2026-09-28)
+
+**Memory arithmetic is not a limit on what the CARD can do.** Every admission
+gate on the card was arithmetic (slot count, KV budget), and on WSL2/Windows the
+driver hands out host memory instead of failing — so a worker kept admitting
+chats while its card stalled 2-60 s per step, for an hour, until the PC hung
+(gotcha #754, #146). **`inference::card_pace::CardPace` is the one answer to "may
+this worker start another generation on its card now"**: a device-bound step of
+≥ 2 s (Windows' `TdrDelay`) on an all-card model halves the ceiling, one comes
+back per quiet minute, never below one. The gate sits in the `Generate` arm
+BEFORE the batched/sequential choice — a full table falls through to
+`handle_generate`, which runs on the card anyway, so lowering the slot count caps
+nothing. A new device-bound step on the worker loop is timed into it; a new
+generation path is gated by it. Refusal = `LocalMemoryUnavailable` (the busy 503
+the router re-plans). A/B: `SWARMLLM_CARD_PACE=0`.
+
+→ `docs/invariants/memory.md` § "A card that stalls is given less work"
+
 ## Single-source-of-truth helpers — Worker memory: graphics, RAM and the KV cache
 
 Each names the ONE place a decision is made. A second implementation of any of

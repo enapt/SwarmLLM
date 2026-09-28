@@ -1495,3 +1495,54 @@ one run read as "not loaded" and lose only the overlap.
 - Residual: a guest placed on the processor stays there until it is unloaded
   idle, even if the card frees up; promoting it would mean taking memory.
 
+
+## A card that stalls is given less work (2026-09-28)
+
+**What it replaced.** Nothing watched what the card did. Admission on the card was the slot
+count (`batch_generate_max_slots`, default 8) and the KV budget; #122's fix (v0.3.208) let an
+8 GB card with an 8B take six short chats instead of three, verified by counting refusals.
+`split::kv_budget` already recorded that on WSL2 and Windows the driver answers an
+over-commitment with host-backed memory rather than an error, so the model keeps answering
+while decode crawls — "the accounting is the only guard there is".
+
+**What it was measured at.** The live node, 2026-09-28 (RTX 3070 Laptop 8 GB that also drives
+a 320 Hz desktop, hardware GPU scheduling on, WSL2, driver 616.92, Llama-3.1-8B Q4_K_M), from
+`node.log` alone: the device calls between the prefix-cache lookup and slot registration took
+**< 0.1 s every time from 2026-09-17 to 09-28 morning** (a handful at 0.1-2 s), then **2-60 s,
+34 times in ~90 minutes** of 2-8 simultaneous chats. Every running chat froze for as long —
+the worker is one loop, admission runs inline before the tick — and per-chat speed fell to
+2-7 tok/s against 50 alone. The hour ended with a hard hang of the whole PC (gotcha #754). Why
+the card stalled is NOT known (host paging, contention with the compositor — nvlddmkm FECS
+exceptions recur on heavy-GPU days —, the laptop, or v0.3.212 itself); the guard does not
+need it.
+
+**The rule.** `inference::card_pace::CardPace`, one per worker: a device-bound step (the
+admission section of `try_register_generate_slot`, after the model load and before the
+network-bound remote prefix probe; each `step_decode_pool` tick) of ≥ `STALL` = 2 s on a model
+that runs entirely on the card (`SplitModel::runs_entirely_on_card`) sets the ceiling to
+`max(1, running / 2)` if that is lower; one more is allowed after each `HOLD` = 60 s without a
+stall, back to capacity. The first `WARM_STEPS` = 16 card steps of a worker never count.
+Past a LOWERED ceiling, `Generate` is refused with `LocalMemoryUnavailable` BEFORE the
+batched/sequential choice; at capacity the pace refuses nothing — a full table's extra request
+falls through as it always did, and a refusal saying the card stalled would be untrue. The constants are Windows' own: `TdrDelay` 2 s ("the number of
+seconds that the GPU can delay the preempt request from the GPU scheduler") and
+`TdrLimitTime` 60 s (learn.microsoft.com, "TDR registry keys"). The shape is congestion
+control on concurrency — Netflix `concurrency-limits`, Envoy adaptive concurrency — reduced to
+AIMD on one unambiguous signal.
+
+**What a change must keep.**
+- **Processor steps never count** — a CPU tick legitimately takes seconds (gotcha #191), and a
+  card/processor split is excluded for the same reason.
+- **The gate precedes the path choice.** A request the full table turns away falls through to
+  `handle_generate` and runs on the card; a gate on the table alone caps nothing.
+- **Never below one**, so the owner is never locked out of their own card.
+- **The refusal must not read as fatal** (`worker_ipc::worker_error_is_fatal`): the pool would
+  kill a healthy worker. `the_refusal_is_never_mistaken_for_a_broken_worker`.
+- **Refuse, never queue inside the loop**: a wait there stalls every running chat (the #122
+  "still open" note says the same about queueing).
+
+**Not covered** (`docs/FUTURE_WORK.md` #146): segment forwards of split pipelines are neither
+timed nor refused — refusing one mid-request kills that request, so only a prompt pass could be
+refused; `handle_generate`'s per-token forwards are not timed; the daemon does not advertise a
+tripped card to peers. **Measured on a card: not yet** — that is a stress test, and follows
+`memory/feedback_research_before_stress_tests.md`.

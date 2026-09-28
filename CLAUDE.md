@@ -88,8 +88,8 @@ until readers leave (#90's shape); `clippy.toml` fails the build on one.
 ## Testing
 
 **Always say which feature set a count came from.** With
-`--features dev,claude-subscription`: **3072 lib** (+15 ignored),
-79 integration (31 + 34 + 14 `yamux_substream`), **184 repo-consistency**,
+`--features dev,claude-subscription`: **3083 lib** (+15 ignored),
+79 integration (31 + 34 + 14 `yamux_substream`), **186 repo-consistency**,
 1 `api_key_side_effects`, 56 `swarmllm-types`, and 11 in the vendored
 request-response patch — plus 17 in the `swarmllm` BIN target (`cli::*`, counted
 nowhere else). Clippy clean. The types crate and the vendored patch are **not**
@@ -165,9 +165,11 @@ user to hold the whole model, not even a low-bit copy** (user, 2026-09-28) → p
 Qwen 3.5 is on local branch `qwen35-support` (#117); Gemma 4 scoped, not built (#115).
 ⚠ **A family in `supported_list` is a claim: check it against a REAL file's header** (#715). **Next** → `memory/next_up.md`.
 
-⛔ **This PC had two unclean shutdowns on 2026-09-26 (#716 bluescreen, #718 hard hang), causes
-unknown.** Heavy CPU/GPU benches run only with the user present and the live node stopped — a bench
-beside the live node also reads about HALF (#119).
+⛔ **This PC had three unclean shutdowns 2026-09-26/28 (#716, #718, #754), all under sustained load.**
+The third was a concurrency probe on the live node — **simultaneous requests to a node ARE a stress
+test.** Before any: research → deep dive → conceptualize → research again, then the user's go-ahead
+for THAT run, live node stopped (`memory/feedback_research_before_stress_tests.md`; #146's
+`card_pace` is the node's own guard). A bench beside the live node also reads about HALF (#119).
 
 ⚠ **Behaviour gate = `reply_ab.sh` + `split_rig.sh`** (incl. `failover`), not
 conformance alone — `family_conformance.sh` pins `gpu_layers = 0` and never

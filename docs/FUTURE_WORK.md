@@ -24,6 +24,12 @@ Priority is user-visible impact x how many users x whether it fails silently.
 and 69's residual SHIPPED in v0.3.180-alpha.** The rows sit in the P-sections
 and in the two "2026-09-14" headings below; read the row, not just the number.
 
+### 2026-09-28 — a graphics card that had started stalling was handed more work, and the PC hung
+
+| # | Item | Status |
+|---|---|---|
+| 146 | **A worker kept admitting simultaneous chats while its card stalled for 2-60 s at a time** — an hour of it on the live node (8B on an 8 GB laptop card that also drives a 320 Hz desktop), then a hard hang of the whole PC (gotcha #754) | **Guard BUILT 2026-09-28 (`inference::card_pace`), not yet released or measured on a card.** A stall of ≥ 2 s halves how many generations the worker runs at once and refuses the rest as the busy 503 the router re-plans; one more is allowed back per quiet minute. The cause of the stalls is NOT known and the guard does not need it. Body: § "A graphics card that stalls is handed more work". |
+
 ### 2026-09-27 — GPU↔GPU spread benchmark on the released v0.3.209-alpha
 
 The live node (RTX 3070 Laptop, TH, ~6 GB budget beside Windows + a browser) and a tester's
@@ -16024,3 +16030,89 @@ AllReduce registry listens for.
 
 (This section was dropped by accident from 37d23c38 to 8cba20c4 — a scripted
 insertion above it truncated the file — and restored 2026-09-27.)
+
+## A graphics card that stalls is handed more work (#146, 2026-09-28)
+
+**What happened.** On the live node (RTX 3070 Laptop 8 GB, which also drives the Windows
+desktop — one external monitor at 1920×1080, 320 Hz, hardware GPU scheduling ON; WSL2 GPU-PV;
+driver 616.92), Llama-3.1-8B Q4_K_M served two experiments sending 2-8 simultaneous chats. For
+the hour before the crash, admitting a chat to the batched table — the device calls between
+the prefix-cache lookup and `try_register_generate_slot`'s log line — took **2-60 s** (23 of
+them ≥ 10 s in one hour); before 2026-09-28 the same step took **< 0.1 s every time** in the
+whole log (from 2026-09-17), a handful at 0.1-2 s. Per-chat speed fell to 2-7 tok/s against
+50 alone. Then the whole PC hung: Kernel-Power 41 with bugcheck 0, WSL's last kernel lines the
+host GPU channel failing (`dxgvmb_send_sync_msg: vmbus_sendpacket failed`), gotcha #754.
+
+**Why every chat stalls at once.** The worker is ONE cooperative loop (`run_worker`):
+`handle_daemon_msg` runs admission inline and awaited, and only then does `step_decode_pool`
+run the tick. So a device call that takes 14 s during admission (the budget read's
+`synchronize` + `mem_get_info`, then ~64 allocations and copies for hydration) freezes every
+running slot for 14 s. By construction — not a lock, not a spin; nothing between the two log
+lines loops without a small bound.
+
+**What is NOT known, and the guard does not depend on it.** Whether the card stalled because
+WDDM was paging the process's memory to the host (the "system-memory fallback" `kv_budget.rs`
+already documents: the model answers, `device=Cuda` still logs, decode crawls), because of
+contention with the 320 Hz desktop compositor for the same engine (the recurring nvlddmkm
+Event 13 is a FECS — context-switch — exception: 95 in 30 days, clustered on heavy-GPU days),
+because of the laptop itself, or because of something in v0.3.212 (deployed the same morning;
+the stalls all fall after it, but so does the concurrency). At two chats the node's own
+arithmetic put the card at ~6.1 of 8 GB, which argues against simple over-commit. Not
+reproduced, deliberately: a reproduction is exactly the load that hung the PC.
+
+**Why the existing guards did not act.** Admission is decided by MEMORY ARITHMETIC only —
+the slot count (`batch_generate_max_slots`, 8) and the KV budget, which #122's fix (released
+in v0.3.208) loosened so "an 8 GB card with an 8B takes six such chats instead of three";
+that was verified by counting refusals, never by measuring speed. `kv_budget.rs` itself says
+"WSL2 hands out shared memory rather than failing, so the accounting is the only guard there
+is." Nothing watches what the card actually DOES.
+
+**Research.** Admission by observed latency is an established pattern: TCP congestion control
+applied to concurrency — Netflix `concurrency-limits` (Vegas / Gradient2 / AIMD) and Envoy's
+adaptive-concurrency filter (limit = f(minRTT / sampled latency), minRTT re-measured at low
+concurrency). The trip threshold borrows Windows' own: `TdrDelay` defaults to 2 s, the time
+after which the OS declares a graphics engine hung (learn.microsoft.com, "Timeout detection and
+recovery"). Headroom alone was checked and is not the lever: Ollama keeps `MinimumMemory` =
+457 MiB beyond measured free (`OLLAMA_GPU_OVERHEAD` defaults to 0), vLLM's
+`gpu_memory_utilization` 0.9 covers its own profiling error, llama.cpp's fit heuristic ~800 MB
+— this node already left ~800 MB. WSL-side reports of the same channel failing:
+microsoft/WSL#40732 (repeated OOM → host bugcheck), #41224 (residency failure → TDR storm →
+display lost), #41361 (llama.cpp CUDA hangs non-deterministically); #41701 is a slowdown only.
+
+**The guard (`inference::card_pace::CardPace`, one per worker).** AIMD on the number of
+generations the worker runs at once, driven by one signal that needs no model of the cause:
+- **Stall** = one device-bound step on the worker loop taking ≥ `STALL` (2 s): the admission
+  section of `try_register_generate_slot` (AFTER the model load and excluding the remote-prefix
+  network wait) and each `step_decode_pool` tick. Healthy is < 0.1 s and tens of ms; 2 s is
+  ~20× the worst healthy admission in the log.
+- **Card only.** A processor tick can legitimately take seconds (gotcha #191), so a step counts
+  only when its model runs entirely on the card (`SplitModel::runs_entirely_on_card`); a
+  card/processor split is excluded for the same reason.
+- **Warm-up excluded**: the first `WARM_STEPS` card steps of a worker (PTX loading, library
+  handles) do not count.
+- **Decrease**: on a stall, the ceiling becomes `max(1, running / 2)`, never above what it was.
+- **Refuse, do not queue**: while a stall has LOWERED the ceiling and the worker already runs
+  that many generations, a new `Generate` is refused (at capacity the pace refuses nothing), with `LocalMemoryUnavailable` — the busy 503 the router already
+  re-plans away from this node for this request (`note_local_memory_refusal` →
+  `local_can_hold_every_layer`), so it lands on a peer or, alone, tells the caller to retry.
+  Lowering the slot count would NOT cap the card: an over-capacity request falls through to
+  `handle_generate` and runs on the card anyway.
+- **Never below one**: a lone chat is always admitted — the owner is never locked out.
+- **Increase**: one more generation per `HOLD` (60 s) without a stall, back up to the configured
+  capacity.
+- **A/B inside one binary**: `SWARMLLM_CARD_PACE=0` disables it.
+
+**Not covered yet** (write here when closed): segment forwards of split pipelines
+(`Forward`/`BatchForward`) are neither observed nor refused — refusing a forward mid-request
+kills that request; only new work may be refused, and that needs a prompt-pass-only gate. The
+sequential `handle_generate` path is gated (the check sits before the path choice) but its
+per-token forwards are not observed. The daemon does not yet advertise a tripped card to peers.
+
+**Verification without load.** Unit tests of the AIMD logic with injected clocks (trip, floor
+of one, never-raise-on-trip, hold, one-per-hold recovery, warm-up, processor steps ignored,
+disabled switch), and a test of the refusal's class (`local_memory_refusal` on the wire) —
+toggle the gate off and the refusal test must go red. **Measuring it on the card is a stress
+test** and follows `memory/feedback_research_before_stress_tests.md`: with the user's go-ahead
+for that run, after the machine has been checked, live node stopped, under `timeout`, stop at
+the first nvlddmkm event. Mechanism check: the `DIAG: card pace — stalled` line and a refusal
+reaching the client, with the stall count per hour falling against the 2026-09-28 log.

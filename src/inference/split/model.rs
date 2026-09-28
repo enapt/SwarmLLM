@@ -119,6 +119,16 @@ impl SplitModel {
         }
     }
 
+    /// Does every layer of this segment run on the graphics card?
+    ///
+    /// What `inference::card_pace` asks before it counts a step's time: a step
+    /// with any processor layer can take seconds for reasons that are not the
+    /// card's (gotcha #191), so only an all-card segment's time says anything
+    /// about the card.
+    pub(crate) fn runs_entirely_on_card(&self) -> bool {
+        !self.device.is_cpu() && self.cpu_layer_count() == 0
+    }
+
     /// The model's context window in tokens.
     ///
     /// Exposed so a caller that holds the WHOLE prompt can check it before
