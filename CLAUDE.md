@@ -161,7 +161,7 @@ The drafter is a pool GUEST (#747); attempt-scoped state is never keyed by the r
 **Why split decode is slow and what beats it → `docs/plans/faster_than_local.md`; the speculation plan, its
 measurements and the NEXT batch (continuous stream) → `docs/plans/split_speculation.md`.** ⛔ **No design may need a
 user to hold the whole model, not even a low-bit copy** (user, 2026-09-28) → parallelize the REPLY, not the token:
-`docs/plans/wan_parallel.md`. `main` is AHEAD of the release (two field-report fixes, not released).
+`docs/plans/wan_parallel.md`. `main` is AHEAD of the release: two field-report fixes + `card_pace` (#146), not released.
 Qwen 3.5 is on local branch `qwen35-support` (#117); Gemma 4 scoped, not built (#115).
 ⚠ **A family in `supported_list` is a claim: check it against a REAL file's header** (#715). **Next** → `memory/next_up.md`.
 
@@ -170,6 +170,8 @@ The third was a concurrency probe on the live node — **simultaneous requests t
 test.** Before any: research → deep dive → conceptualize → research again, then the user's go-ahead
 for THAT run, live node stopped (`memory/feedback_research_before_stress_tests.md`; #146's
 `card_pace` is the node's own guard). A bench beside the live node also reads about HALF (#119).
+⚠ **On this WSL2 host, fresh card allocations slow ~1000× over two days of Windows uptime** (#146 deep dive):
+a card figure that drifts across releases may be UPTIME, not code — note each run's uptime.
 
 ⚠ **Behaviour gate = `reply_ab.sh` + `split_rig.sh`** (incl. `failover`), not
 conformance alone — `family_conformance.sh` pins `gpu_layers = 0` and never
