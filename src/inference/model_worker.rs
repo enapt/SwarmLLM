@@ -4189,7 +4189,7 @@ async fn step_decode_pool(
         // on there being someone to starve — a solo prompt keeps the full
         // configured chunk so its throughput is untouched.
         let sharing = crate::inference::prefill_pacer::PrefillPacer::is_sharing(active.len());
-        let chunk_size = prefill_pacer.chunk_size(sharing);
+        let chunk_size = prefill_pacer.chunk_size_for(sharing, model.runs_entirely_on_card());
         let phase_a_started = std::time::Instant::now();
 
         // Stage 1: collect chunks + build input tensors.

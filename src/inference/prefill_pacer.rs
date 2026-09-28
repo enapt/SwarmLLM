@@ -40,6 +40,35 @@ use std::time::Duration;
 /// a share of a second's extra responsiveness.
 pub const MIN_CHUNK_TOKENS: usize = 8;
 
+/// The fewest prompt tokens one forward reads on a model that runs ENTIRELY on
+/// the card, whatever `inference.prefill_chunk_tokens` says.
+///
+/// That setting's default (128) was sized for the processor, where 128 tokens
+/// can take seconds (gotcha #191). On the card 128 is milliseconds, and a
+/// prompt read 128 at a time repeats every per-forward cost and hands each
+/// quantized matmul too few rows to fill the card: measured 2026-09-28 on an
+/// RTX 3070 Laptop, Llama-3.1-8B, one prompt alone — 742 → 856 tok/s at 512
+/// (1,835 tokens) and 740 → 852 (3,035), replies byte-identical; 1,024 added
+/// ~1% more. 512 is also llama.cpp's default `n_ubatch`, and it is where the
+/// f16 tensor-core matmul (≥ 64 rows, vendored `quantized/cuda.rs`) amortises
+/// its per-chunk weight dequantization.
+pub const CARD_CHUNK_TOKENS: usize = 512;
+
+/// The most prompt tokens one forward may read: `configured`, raised to
+/// [`CARD_CHUNK_TOKENS`] when the model runs entirely on the card.
+///
+/// The ONE answer for every prompt pass — the batched table's solo prompt
+/// ([`PrefillPacer::chunk_size_for`]), a pipeline segment's prompt pass and the
+/// drafter's. A card/processor split is not "on the card": its processor
+/// layers are the slow part and keep the configured ceiling.
+pub fn prompt_chunk_ceiling(configured: usize, on_card: bool) -> usize {
+    if on_card {
+        configured.max(CARD_CHUNK_TOKENS)
+    } else {
+        configured
+    }
+}
+
 /// Weight of each new observation in the ms-per-token EWMA. Deliberately
 /// sluggish: prompt-token cost climbs with `index_pos` (attention is quadratic
 /// in context), so a single late chunk should nudge the estimate rather than
@@ -104,6 +133,19 @@ impl PrefillPacer {
                 let budgeted = (self.target_ms as f64 / ms).floor() as usize;
                 budgeted.clamp(MIN_CHUNK_TOKENS.min(self.max_tokens), self.max_tokens)
             }
+        }
+    }
+
+    /// [`Self::chunk_size`] for a model that may run entirely on the card: a
+    /// prompt with nobody waiting on the tick reads at
+    /// [`prompt_chunk_ceiling`]; while slots share the tick the pacer's own
+    /// choice stands, since a larger chunk there is a longer stall for every
+    /// chat decoding beside it.
+    pub fn chunk_size_for(&self, sharing: bool, on_card: bool) -> usize {
+        if sharing {
+            self.chunk_size(true)
+        } else {
+            prompt_chunk_ceiling(self.max_tokens, on_card)
         }
     }
 
@@ -329,5 +371,30 @@ mod tests {
         assert!(!PrefillPacer::is_sharing(0));
         assert!(!PrefillPacer::is_sharing(1));
         assert!(PrefillPacer::is_sharing(2));
+    }
+
+    #[test]
+    fn a_prompt_alone_on_the_card_reads_in_card_sized_chunks() {
+        assert_eq!(prompt_chunk_ceiling(128, true), CARD_CHUNK_TOKENS);
+        // A larger configured ceiling is the operator's and stands.
+        assert_eq!(prompt_chunk_ceiling(2048, true), 2048);
+        // The processor keeps what was configured — 512 tokens there can be
+        // tens of seconds of one forward (gotcha #191).
+        assert_eq!(prompt_chunk_ceiling(128, false), 128);
+        assert_eq!(prompt_chunk_ceiling(32, false), 32);
+
+        let p = PrefillPacer::new(128, 200);
+        assert_eq!(p.chunk_size_for(false, true), CARD_CHUNK_TOKENS);
+        assert_eq!(p.chunk_size_for(false, false), 128);
+    }
+
+    #[test]
+    fn chats_sharing_the_card_keep_the_pacers_choice() {
+        // A bigger chunk while another slot decodes is a longer stall for it;
+        // only a prompt with nobody waiting gets the card-sized chunk.
+        let mut p = PrefillPacer::new(128, 200);
+        p.observe(128, Duration::from_millis(640)); // 5 ms/token → 40 fits 200 ms
+        assert_eq!(p.chunk_size_for(true, true), p.chunk_size(true));
+        assert!(p.chunk_size_for(true, true) < 128);
     }
 }

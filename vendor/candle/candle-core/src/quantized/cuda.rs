@@ -195,6 +195,18 @@ fn dequantize_f16(
     elem_count: usize,
     dev: &CudaDevice,
 ) -> Result<CudaStorage> {
+    let dst = dequantize_f16_slice(data, dtype, elem_count, dev)?;
+    Ok(CudaStorage::wrap_cuda_slice(dst, dev.clone()))
+}
+
+/// SwarmLLM patch: [`dequantize_f16`]'s kernel launch, handing back the raw
+/// slice so [`mul_mat_via_f16_cublas`] can pass it straight to cuBLAS.
+fn dequantize_f16_slice(
+    data: &PaddedCudaSlice,
+    dtype: GgmlDType,
+    elem_count: usize,
+    dev: &CudaDevice,
+) -> Result<CudaSlice<f16>> {
     let nb = elem_count.div_ceil(256);
     let (kernel_name, is_k, block_dim, num_blocks) = match dtype {
         GgmlDType::Q4_0 => ("dequantize_block_q4_0_f16", false, 32, nb),
@@ -246,7 +258,198 @@ fn dequantize_f16(
         barg!(builder, nb32 as i32);
         unsafe { builder.launch(cfg) }.w()?;
     }
+    Ok(dst)
+}
+
+/// SwarmLLM patch: the fewest activation rows for which a quantized matmul
+/// dequantizes the weight to f16 and hands it to cuBLAS instead of running
+/// the MMQ kernel.
+///
+/// **llama.cpp's own rule, for OUR kind of MMQ.** The MMQ kernels vendored here
+/// are llama.cpp's older dp4a ones (`mul_mat_q4_K` and friends: `__dp4a`, no
+/// tensor cores). llama.cpp keeps a dp4a MMQ only below
+/// `MMQ_DP4A_MAX_BATCH_SIZE` = 64 rows when the card has fp16 tensor cores —
+/// "Max. batch size to use for dp4a MMQ kernels when FP16 tensor cores are
+/// available" (`ggml-cuda/mmq.cuh`); above it `ggml_cuda_should_use_mmq`
+/// returns false and the weight is dequantized to f16 for a cuBLAS GEMM
+/// (`ggml_cuda_op_mul_mat_cublas`). Its NEWER MMQ uses int8 tensor-core `mma`
+/// instructions, which is why current llama.cpp keeps MMQ on Ampere; ours has
+/// no such kernel, so the dp4a rule is the one that applies to us.
+///
+/// Decode (one row per slot, eight at most) never reaches it; a prompt pass
+/// does, which is where time-to-first-token goes. `SWARMLLM_QMATMUL_CUBLAS=0`
+/// keeps MMQ for every batch (the A/B in one binary);
+/// `SWARMLLM_QMATMUL_CUBLAS_MIN_ROWS` moves the threshold for a measurement.
+const CUBLAS_MIN_ROWS: usize = 64;
+
+/// Rows at which [`mul_mat_via_f16_cublas`] takes over, or `None` when it
+/// never does (switched off, or a card without fp16 tensor cores). Read once.
+fn cublas_min_rows(dev: &CudaDevice) -> Option<usize> {
+    static MIN_ROWS: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+    *MIN_ROWS.get_or_init(|| {
+        if matches!(
+            std::env::var("SWARMLLM_QMATMUL_CUBLAS").ok().as_deref(),
+            Some("0") | Some("off") | Some("false")
+        ) {
+            return None;
+        }
+        // fp16 tensor cores arrived with Volta (7.0). Below it cuBLAS runs the
+        // f16 GEMM on the ordinary cores and the dp4a MMQ is the faster path —
+        // llama.cpp's `fp16_mma_hardware_available` makes the same cut.
+        use cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR;
+        let major = dev
+            .cuda_stream()
+            .context()
+            .attribute(CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR)
+            .unwrap_or(0);
+        if major < 7 {
+            return None;
+        }
+        Some(
+            std::env::var("SWARMLLM_QMATMUL_CUBLAS_MIN_ROWS")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .filter(|&n| n > 0)
+                .unwrap_or(CUBLAS_MIN_ROWS),
+        )
+    })
+}
+
+/// SwarmLLM patch: `dst[y_cols, x_rows] = y[y_cols, x_cols] · Wᵀ` for a
+/// quantized `W[x_rows, x_cols]`, as llama.cpp's cuBLAS path computes it: the
+/// weight dequantized to f16, the activation cast to f16, one `cublasGemmEx`
+/// on the tensor cores accumulating in f32.
+///
+/// Same layout as [`mul_mat_via_q8_1`]'s result (row-major `[y_cols, x_rows]`),
+/// so a caller cannot tell which ran — except by precision: MMQ rounds the
+/// activation to 8 bits (`q8_1`), this path to f16, so replies may move by a
+/// near-tie between the two; judge them against a reference, not each other.
+///
+/// Temporary memory: the f16 weight (`x_rows · x_cols · 2` bytes — 117 MB for
+/// an 8B's feed-forward) and the f16 activation, both freed on return into the
+/// card's pool, which keeps them for the next matmul (`inference::cuda_pool`).
+fn mul_mat_via_f16_cublas(
+    data: &PaddedCudaSlice,
+    y: &CudaView<f32>,
+    dtype: GgmlDType,
+    x_rows: usize,
+    x_cols: usize,
+    y_cols: usize,
+    dev: &CudaDevice,
+) -> Result<CudaStorage> {
+    use cudarc::cublas::sys;
+    use cudarc::driver::{DevicePtr, DevicePtrMut};
+
+    let k = x_cols;
+    if y.len() != k * y_cols {
+        crate::bail!("unexpected y size {}, {k} {y_cols}", y.len())
+    }
+    let w = dequantize_f16_slice(data, dtype, x_rows * k, dev)?;
+
+    let el = y.len();
+    let mut y16 = dev.alloc_fully_overwritten::<f16>(el)?;
+    {
+        // candle's own cast kernel; a null layout means contiguous, and it
+        // assigns every one of the `el` elements.
+        let func = dev.get_or_load_func("cast_f32_f16", &candle_kernels::CAST)?;
+        let cfg = cudarc::driver::LaunchConfig::for_num_elems(el as u32);
+        let mut builder = func.builder();
+        barg!(builder, el, 1usize, 0usize);
+        builder.arg(y);
+        builder.arg(&mut y16);
+        unsafe { builder.launch(cfg) }.w()?;
+    }
+
+    // cuBLAS is column-major: with `W` row-major [x_rows, k] read as a k×x_rows
+    // column-major matrix, op(A) = Aᵀ is the x_rows×k weight; `y` row-major
+    // [y_cols, k] is k×y_cols column-major, op(B) = B. C is x_rows×y_cols
+    // column-major, i.e. row-major [y_cols, x_rows] — MMQ's layout.
+    let mut dst = dev.alloc_fully_overwritten::<f32>(x_rows * y_cols)?;
+    let stream = dst.stream().clone();
+    let blas = dev.cublas_handle();
+    let (a, _ga) = w.device_ptr(&stream);
+    let (b, _gb) = y16.device_ptr(&stream);
+    if cublas_accumulates_in_f16() {
+        // llama.cpp's own default on NVIDIA (`ggml_cuda_op_mul_mat_cublas`):
+        // f16 accumulate into an f16 result, then widened — twice the tensor
+        // rate of an f32 accumulate on GeForce cards. Opt-in until judged.
+        let mut dst16 = dev.alloc_fully_overwritten::<f16>(x_rows * y_cols)?;
+        let alpha = f16::ONE;
+        let beta = f16::ZERO;
+        {
+            let (c, _gc) = dst16.device_ptr_mut(&stream);
+            unsafe {
+                cudarc::cublas::result::gemm_ex(
+                    *blas.handle(),
+                    sys::cublasOperation_t::CUBLAS_OP_T,
+                    sys::cublasOperation_t::CUBLAS_OP_N,
+                    x_rows as i32,
+                    y_cols as i32,
+                    k as i32,
+                    (&alpha) as *const f16 as *const _,
+                    a as *const _,
+                    sys::cudaDataType_t::CUDA_R_16F,
+                    k as i32,
+                    b as *const _,
+                    sys::cudaDataType_t::CUDA_R_16F,
+                    k as i32,
+                    (&beta) as *const f16 as *const _,
+                    c as *mut _,
+                    sys::cudaDataType_t::CUDA_R_16F,
+                    x_rows as i32,
+                    sys::cublasComputeType_t::CUBLAS_COMPUTE_16F,
+                    sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT_TENSOR_OP,
+                )
+            }
+            .w()?;
+        }
+        let el = x_rows * y_cols;
+        let func = dev.get_or_load_func("cast_f16_f32", &candle_kernels::CAST)?;
+        let cfg = cudarc::driver::LaunchConfig::for_num_elems(el as u32);
+        let mut builder = func.builder();
+        barg!(builder, el, 1usize, 0usize);
+        builder.arg(&dst16);
+        builder.arg(&mut dst);
+        unsafe { builder.launch(cfg) }.w()?;
+    } else {
+        let alpha: f32 = 1.0;
+        let beta: f32 = 0.0;
+        let (c, _gc) = dst.device_ptr_mut(&stream);
+        unsafe {
+            cudarc::cublas::result::gemm_ex(
+                *blas.handle(),
+                sys::cublasOperation_t::CUBLAS_OP_T,
+                sys::cublasOperation_t::CUBLAS_OP_N,
+                x_rows as i32,
+                y_cols as i32,
+                k as i32,
+                (&alpha) as *const f32 as *const _,
+                a as *const _,
+                sys::cudaDataType_t::CUDA_R_16F,
+                k as i32,
+                b as *const _,
+                sys::cudaDataType_t::CUDA_R_16F,
+                k as i32,
+                (&beta) as *const f32 as *const _,
+                c as *mut _,
+                sys::cudaDataType_t::CUDA_R_32F,
+                x_rows as i32,
+                sys::cublasComputeType_t::CUBLAS_COMPUTE_32F,
+                sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT_TENSOR_OP,
+            )
+        }
+        .w()?;
+    }
     Ok(CudaStorage::wrap_cuda_slice(dst, dev.clone()))
+}
+
+/// `SWARMLLM_QMATMUL_CUBLAS_ACC=16` → [`mul_mat_via_f16_cublas`] accumulates
+/// in f16 as llama.cpp's cuBLAS path does; otherwise in f32. Read once.
+fn cublas_accumulates_in_f16() -> bool {
+    static F16: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *F16.get_or_init(|| {
+        std::env::var("SWARMLLM_QMATMUL_CUBLAS_ACC").ok().as_deref() == Some("16")
+    })
 }
 
 fn dequantize_mul_mat_vec(
@@ -1076,16 +1279,28 @@ impl QCudaStorage {
                 }
                 .bt())?,
             };
-            mul_mat_via_q8_1(
-                &self.data,
-                &storage,
-                self.dtype,
-                /* x_rows */ n,
-                /* x_cols */ k,
-                /* y_rows */ k,
-                /* y_cols */ b * m,
-                self.device(),
-            )?
+            if cublas_min_rows(self.device()).is_some_and(|min| b * m >= min) {
+                mul_mat_via_f16_cublas(
+                    &self.data,
+                    &storage,
+                    self.dtype,
+                    /* x_rows */ n,
+                    /* x_cols */ k,
+                    /* y_cols */ b * m,
+                    self.device(),
+                )?
+            } else {
+                mul_mat_via_q8_1(
+                    &self.data,
+                    &storage,
+                    self.dtype,
+                    /* x_rows */ n,
+                    /* x_cols */ k,
+                    /* y_rows */ k,
+                    /* y_cols */ b * m,
+                    self.device(),
+                )?
+            }
         };
         let mut out_shape = layout.shape().dims().to_vec();
         out_shape.pop();

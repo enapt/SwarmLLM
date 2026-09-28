@@ -1962,3 +1962,90 @@ diff the GGUF's tensor names against what the loader reads: a tensor we ignore
 is a feature silently missing (gotcha #728). Tests: `unit_factors_are_plain_rope`,
 `a_factor_divides_its_pairs_angle`,
 `rope_factors_readable_without_shard_zero_only_through_their_sidecar`.
+
+## A prompt pass on the card multiplies quantized weights on the tensor cores (2026-09-29)
+
+**What it replaced.** Every quantized matmul with more than eight activation rows — a prompt
+pass, on a card — ran the vendored MMQ kernels (`mul_mat_q4_K` and friends): llama.cpp's OLDER
+dp4a kernels, int8 dot products on the ordinary cores, no tensor cores. And a prompt was read
+128 tokens per forward (`inference.prefill_chunk_tokens`, a default sized for the processor,
+gotcha #191). An 8B read a prompt at ~740 tok/s on an RTX 3070 Laptop — ~12 TFLOP/s effective
+on a card whose fp16 tensor cores do several times that. Each 128-token chunk launched MMQ
+grids of 64 blocks for a 4096-row projection, too few to fill the card.
+
+**Research.** llama.cpp routes a dp4a MMQ to cuBLAS above `MMQ_DP4A_MAX_BATCH_SIZE` = 64 when
+the card has fp16 tensor cores ("Max. batch size to use for dp4a MMQ kernels when FP16 tensor
+cores are available", `ggml-cuda/mmq.cuh`; `ggml_cuda_should_use_mmq` returns
+`!fp16_mma_hardware_available(cc) || ne11 < MMQ_DP4A_MAX_BATCH_SIZE`); its cuBLAS path
+(`ggml_cuda_op_mul_mat_cublas`) dequantizes the weight to f16, casts the activation to f16 and
+runs `cublasGemmEx`. Current llama.cpp keeps MMQ on Ampere only because its NEWER MMQ uses int8
+tensor-core `mma` — which the vendored kernels do not. llama.cpp's default `n_ubatch` is 512.
+
+**The rule.**
+- Vendored `quantized/cuda.rs::dequantize_matmul`: ≥ `CUBLAS_MIN_ROWS` (64) rows on a card of
+  compute capability ≥ 7.0 → `mul_mat_via_f16_cublas` (`dequantize_f16` kernel → f16 weight;
+  candle's `cast_f32_f16` → f16 activation; `cublasGemmEx`, f32 accumulate, f32 out — MMQ's
+  layout). The only production caller of `mul_mat_via_q8_1`, so every quantized prompt pass
+  passes the check. `SWARMLLM_QMATMUL_CUBLAS=0` = MMQ always; `SWARMLLM_QMATMUL_CUBLAS_MIN_ROWS`
+  moves the threshold for a measurement; `SWARMLLM_QMATMUL_CUBLAS_ACC=16` accumulates in f16
+  (below).
+- `prefill_pacer::prompt_chunk_ceiling(configured, on_card)` — the configured ceiling, raised to
+  `CARD_CHUNK_TOKENS` (512) on a model that runs ENTIRELY on the card. Read by the batched
+  table for a prompt with nobody waiting (`PrefillPacer::chunk_size_for`; while chats share the
+  tick the pacer's choice stands), and by `SplitModel::forward_prompt_in_chunks`, which a
+  segment's prompt pass and the drafter take. A card/processor split keeps the configured one.
+
+**Measured 2026-09-28/29** (RTX 3070 Laptop 8 GB, WSL2, Windows uptime ~6 h, isolated node, live
+node stopped, SINGLE requests; unique prompts, `max_tokens` 1, best of 3;
+`~/swarmllm-pool-0928/{chunk_ab,f16_ab,multi_ab,multi_ab2}.sh`):
+- **Chunk alone** (MMQ, Llama-3.1-8B): 128 → 512 took 742 → 856 tok/s (1,835 tokens) and 740 →
+  852 (3,035); 1,024 added ~1%; replies byte-identical across chunk sizes.
+- **Mechanism**: `SWARMLLM_COUNT_KERNELS=1` on a 512-token chunk shows 6 `dequantize_block_q4_K_f16`
+  + 1 `dequantize_block_q6_K_f16` per layer (the layer's 7 projections) and no `mul_mat_q4_K`.
+- **f16 + cuBLAS vs MMQ at 512** (tok/s, ~1,800 / ~3,000-token prompts, arms alternated):
+
+  | model | MMQ | f16, f32 accumulate (default) | f16 accumulate (opt-in) |
+  |---|---|---|---|
+  | Llama-3.1-8B | 876 / 864, 839 / 831 | 1,129 / 1,158, 1,112 / 1,143 | 1,398 / 1,436, 1,357 / 1,391 |
+  | Qwen2.5-Coder-7B | 904 / 899 | 1,178 / 1,213 | 1,454 / 1,494 |
+  | Mistral-7B-v0.3 | 857 / 867 | 1,105 / 1,143 | 1,348 / 1,383 |
+  | GLM-4-9B | 631 / — | 783 / — | 934 / — |
+  | Phi-3.5-mini | 1,256 / 1,225 | 1,552 / 1,546 | 1,814 / 1,801 |
+  | Phi-4-mini | 1,465 / 1,472 | 1,857 / 1,896 | 2,163 / 2,207 |
+  | Llama-3.2-3B | 1,870 / 1,854 | 2,315 / 2,317 | 2,801 / 2,826 |
+  | Gemma-2-2B | 2,294 / 2,338 | 2,985 / 3,010 | 3,420 / 3,485 |
+
+  Together with the chunk: Llama-3.1-8B ~740 → ~1,150 tok/s (1.55×) by default, ~1,400 (1.9×)
+  opt-in. Decode is untouched (~47 tok/s every arm — one row never reaches the path). GLM-4-9B's
+  3,000-word prompt is refused in every arm by its LOAD-time budget (304 MB, ~2,600 tokens on
+  this card beside the desktop) — not this change.
+- **Replies against llama.cpp** (`score_against_reference.py`, llama-cpp-python 0.3.16, three
+  ~200-350-token prompts per family, greedy 160 tokens; prompt-token counts equal to the node's):
+  each arm reproduces itself exactly across processes; the arms differ from each other at
+  near-ties (MMQ rounds activations to 8 bits, this path to f16). Share of reply tokens that
+  llama.cpp ranks first, Qwen2.5-7B + Llama-3.2-3B + Gemma-2-2B: MMQ 98.3%, f16/f32-acc 97.5%,
+  f16-acc 98.2% — every miss rank ≤ 3 with a logit gap ≤ 0.43. Phi-3.5 (SentencePiece, scored by
+  near-ties only) is the same in all arms. Mistral-7B (SentencePiece), Phi-4-mini and GLM-4-9B
+  (both scored with the node's default system turn, prompt counts equal): MMQ 464/480, 423/473,
+  417/464; f32-acc 464/480, 419/476, 413/460; f16-acc 460/475, 413/476, 417/454 — after the replies
+  fork, each continuation meets its own near-ties, so a few tokens either way is noise; the
+  worst ranks and largest gaps are the SAME positions in every arm (`~/swarmllm-pool-0928/score/`).
+- ⚠ **Phi-4-mini and GLM-4-9B disagree with llama.cpp in EVERY arm** at a few positions (gaps
+  ~1.5 logits on Phi-4-mini, ~20 on GLM-4) — a difference in the model or the tokenizer, not in
+  this path; FUTURE_WORK #147 item 6.
+- ⚠ Llama-3.x replies change across midnight: its template writes today's date. Compare runs on
+  the same day, or a family whose template has none (Qwen: byte-identical across runs).
+
+**Why f16 accumulate stays opt-in.** It is llama.cpp's default in that path and 15-23% faster
+again, and it scored the same on the families above — but its failure is an overflow or a lost
+low bit turning into a silently wrong reply on some model or long prompt, three short prompts
+per family cannot rule that out, and the release gate's family check runs on the processor
+(`gpu_layers = 0`), so it cannot see this path at all. Flip it after a card-side family check at
+long context (FUTURE_WORK #147).
+
+**What a change must keep.**
+- The threshold is about the KERNEL, not the model: a future int8-`mma` MMQ would move it, as it
+  did in llama.cpp.
+- A card without fp16 tensor cores (< 7.0) keeps MMQ.
+- Decode (≤ 8 rows) never takes it; batched decode stays on the vec kernel.
+- Replies are judged against llama.cpp, never byte-equality with MMQ.

@@ -263,6 +263,11 @@ impl SplitModel {
     /// position, which is the final chunk's output alone — the same as the
     /// one-shot call. `chunk_tokens == 0`, or a prompt no longer than one
     /// chunk, is the one-shot call unchanged.
+    ///
+    /// On a model that runs entirely on the card the chunk is at least
+    /// `prefill_pacer::CARD_CHUNK_TOKENS` (`prompt_chunk_ceiling`): 128 is
+    /// milliseconds there, so a cancel still lands within a fraction of a
+    /// second, and the larger chunk reads the prompt ~15% faster.
     #[allow(clippy::too_many_arguments)]
     pub fn forward_prompt_in_chunks(
         &mut self,
@@ -274,6 +279,13 @@ impl SplitModel {
         skip_embedding: bool,
         chunk_tokens: usize,
     ) -> Result<Tensor, SwarmError> {
+        let chunk_tokens = match chunk_tokens {
+            0 => 0,
+            n => crate::inference::prefill_pacer::prompt_chunk_ceiling(
+                n,
+                self.runs_entirely_on_card(),
+            ),
+        };
         let seq_len = input.dim(1).map_err(SwarmError::internal)?;
         if chunk_tokens == 0 || seq_len <= chunk_tokens {
             let (out, _) = self.forward_inner_impl(

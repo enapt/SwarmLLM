@@ -24,6 +24,12 @@ Priority is user-visible impact x how many users x whether it fails silently.
 and 69's residual SHIPPED in v0.3.180-alpha.** The rows sit in the P-sections
 and in the two "2026-09-14" headings below; read the row, not just the number.
 
+### 2026-09-29 — prompt reading on the card, ~1.55× by default and ~1.9× with f16 accumulation
+
+| # | Item | Status |
+|---|---|---|
+| 147 | **A prompt on the card was read by int8 kernels with no tensor cores, 128 tokens at a time** — Llama-3.1-8B read ~740 tok/s on an RTX 3070 Laptop | **FIXED on main 2026-09-29, not released**: ≥ 64 rows go to f16 dequant + cuBLAS (llama.cpp's own rule for a dp4a MMQ), and a prompt alone on the card reads 512 per forward — ~1,150 tok/s (1.55×), replies as close to llama.cpp as before on 7 families. **Open**: `SWARMLLM_QMATMUL_CUBLAS_ACC=16` (f16 accumulate, llama.cpp's default) gives ~1,400 (1.9×) and scored the same, but stays OPT-IN until a card-side family check at LONG context — the release gate's family check runs on the processor and cannot see this path. Body: § "Prompt reading on the card (#147)". |
+
 ### 2026-09-28 — a graphics card that had started stalling was handed more work, and the PC hung
 
 | # | Item | Status |
@@ -16194,3 +16200,37 @@ cost this exists for appears; at 5.5 h fresh allocations are still cheap and the
   the laptop's shared CPU/GPU power arbitration (Dynamic Boost) — unverified.
 - Windows Update 0x80073712 twice (09-26 08:50, 09-28 03:15): component store corrupt — a
   user-side `DISM /Online /Cleanup-Image /RestoreHealth` + `sfc /scannow`.
+
+## Prompt reading on the card (#147, 2026-09-29)
+
+**Shipped on main (not released).** Evidence and the per-family table:
+`docs/invariants/inference.md` § "A prompt pass on the card multiplies quantized weights on the
+tensor cores". Rule: `arch-inference.md` § the same.
+
+**Open, in order of value:**
+1. **Flip `SWARMLLM_QMATMUL_CUBLAS_ACC=16` to the default** — +15-23% more prompt speed on every
+   family measured (Llama-3.1-8B 1,150 → 1,400 tok/s), replies scored the same as MMQ and the f32
+   path on Qwen2.5-7B, Llama-3.2-3B, Gemma-2-2B, Phi-3.5, Mistral-7B, Phi-4-mini, GLM-4-9B (three
+   ~300-token prompts each). **Precondition**: a card-side family check at LONG context (4-8K
+   tokens, the families above plus Qwen3 and a MoE's attention), judged with
+   `score_against_reference.py` — f16 accumulation fails by overflow or lost low bits, silently,
+   and three short prompts cannot rule that out. llama.cpp guards specific ops with
+   `GGML_PREC_F32`; read which before flipping.
+2. **Share the f16 activation cast** across q/k/v and gate/up, as `forward_shared` shares the
+   q8_1 quantization on the MMQ path (3 casts per layer, ~1% of a chunk).
+3. **The 8 `ucopy_f32` per layer in a prompt pass**, each with a host→device upload of its
+   layout (`cuda_backend/mod.rs` `copy_strided_src`, 256 of the 259 uploads in a 512-token
+   forward) — `.contiguous()` of strided views around attention. Found in the kernel table,
+   not yet traced.
+4. **One `mul_mat_vec_q4_K_q8_1_cuda1` per layer in every chunk of a long prompt** (both paths,
+   so not this change) — a single-row quantized matmul per layer during a prompt pass; not
+   traced. `~/swarmllm-pool-0928/f16ab_countmmq_*.node.log`.
+5. **An int8 tensor-core (`mma`) MMQ**, as current llama.cpp uses on Ampere, would beat the
+   cuBLAS path at every batch size and need no dequantized copy — a port of `mmq.cuh`, large.
+6. **Phi-4-mini and GLM-4-9B disagree with llama.cpp at a few positions on EVERY path**, MMQ
+   included (found while scoring #147): Phi-4-mini ~87-89% of reply tokens ranked first with
+   gaps up to ~1.8 logits, GLM-4-9B ~90% with gaps of ~19-22 — where Qwen, Llama and Gemma sit at
+   98% with gaps ≤ 0.43. Pre-existing. Leads: Phi-4-mini's LongRoPE short/long factors (#124's
+   shape — a tensor or key the loader never reads), GLM-4's re-tokenization of the reply text
+   by llama.cpp. Replies to reproduce with: `~/swarmllm-pool-0928/score/3arm_*` +
+   `prompts/`, scored with `--system "You are a helpful assistant."`.

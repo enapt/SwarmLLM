@@ -232,6 +232,26 @@ submissions per layer, not faster arithmetic.
 → `docs/invariants/inference.md` · technique in `docs/DIAGNOSTICS.md` § "Where a
 decode token actually goes"
 
+## A prompt pass on the card multiplies quantized weights on the tensor cores (2026-09-29)
+
+**Vendored `quantized/cuda.rs::dequantize_matmul` sends ≥ 64 activation rows to
+`mul_mat_via_f16_cublas`** — weight dequantized to f16, activation cast to f16,
+one `cublasGemmEx` accumulating in f32 — instead of the MMQ kernel, which is
+llama.cpp's OLD dp4a one with no tensor cores. llama.cpp's own rule for a dp4a
+MMQ on a card with fp16 tensor cores (`MMQ_DP4A_MAX_BATCH_SIZE` = 64). Decode
+never reaches it. **And a prompt alone on an all-card model reads in chunks of
+≥ `prefill_pacer::CARD_CHUNK_TOKENS` (512)** — `prompt_chunk_ceiling` is the ONE
+answer, for the batched table, a segment's prompt pass and the drafter.
+Replies MAY move by a near-tie against MMQ (8-bit vs f16 activations): judge
+them against llama.cpp, never byte-equality. A/B: `SWARMLLM_QMATMUL_CUBLAS=0`;
+`SWARMLLM_QMATMUL_CUBLAS_ACC=16` (f16 accumulate, llama.cpp's default) is
+faster still and OPT-IN until a card-side family check at long context. The f16
+path does not share its activation cast across q/k/v or gate/up (3 extra casts
+per layer, ~1% of a chunk) — the third quantized path the sharing rule above
+would name.
+
+→ `docs/invariants/inference.md` § "A prompt pass on the card multiplies quantized weights on the tensor cores"
+
 ## Attention kernel choice and the query-length cliff (2026-08-23)
 
 Four helpers now own decisions that used to be spread across call sites. All
