@@ -154,12 +154,12 @@ UNDETERMINED and never a fix — use it BEFORE blaming a change, especially your
 
 ## Status
 
-**v0.3.211-alpha is the live release (published 2026-09-27 14:24 UTC), signed and on both nodes; `main` equals it**
-— the split-speed batch: concurrent requests on a card+processor model fixed (#135), the speculative verify
-walked at the tail (#134), one round trip less per split token (V1Lazy, +40% TH↔BE; a ping is a COST — distances go
-through `physical_rtt_ms`, #742), shadow-drafter speculation with shared-noise sampling and γ from measured costs.
+**v0.3.212-alpha is the live release (published 2026-09-28 04:55 UTC), signed and on both nodes; `main` equals it**
+— split speculation with an in-engine small drafter (`pipeline::engine_drafter`, 1.7-2.4× TH↔BE), **shipped OFF by
+default**: with the drafter resident the failover rig lost its standbys (FUTURE_WORK #140 — the flip's precondition).
+The drafter is a pool GUEST (#747); attempt-scoped state is never keyed by the request id, which retries reuse (#749).
 **Why split decode is slow and what beats it → `docs/plans/faster_than_local.md`; the speculation plan, its
-measurements and the NEXT batch (in-engine drafter, continuous stream) → `docs/plans/split_speculation.md`.**
+measurements and the NEXT batch (continuous stream) → `docs/plans/split_speculation.md`.**
 Qwen 3.5 is on local branch `qwen35-support` (#117); Gemma 4 scoped, not built (#115).
 ⚠ **A family in `supported_list` is a claim: check it against a REAL file's header** (#715). **Next** → `memory/next_up.md`.
 
