@@ -123,11 +123,16 @@ const QUARANTINE_RETENTION_SECS: u64 = 24 * 60 * 60;
 /// (gotcha #448).
 const QUARANTINE_EXTENSIONS: [&str; 2] = ["quarantine", "mismatched"];
 
-/// Delete quarantined shards older than [`QUARANTINE_RETENTION_SECS`].
+/// Delete quarantined shards older than `retention_secs`.
+///
+/// `retention_secs` is [`QUARANTINE_RETENTION_SECS`] while the node has room,
+/// and 0 once it is over its storage budget — see
+/// [`spawn_failed_download_reclaim`]. At 0 a file is removed whatever its
+/// timestamp says, including one that cannot be dated.
 ///
 /// Returns `(files_removed, bytes_reclaimed)`. Errors are logged and skipped —
-/// failing to reclaim disk must never take the verification pass down with it.
-fn sweep_expired_quarantine(models_dir: &std::path::Path) -> (u32, u64) {
+/// failing to reclaim disk must never take the pass that calls this down.
+fn sweep_expired_quarantine(models_dir: &std::path::Path, retention_secs: u64) -> (u32, u64) {
     let mut files = 0u32;
     let mut bytes = 0u64;
     let Ok(model_dirs) = std::fs::read_dir(models_dir) else {
@@ -155,13 +160,14 @@ fn sweep_expired_quarantine(models_dir: &std::path::Path) -> (u32, u64) {
             }
             // `modified()` is unavailable on some filesystems; treat an unknown
             // age as "not yet expired" rather than deleting something we cannot
-            // date.
-            let expired = meta
-                .modified()
-                .ok()
-                .and_then(|m| m.elapsed().ok())
-                .map(|age| age.as_secs() >= QUARANTINE_RETENTION_SECS)
-                .unwrap_or(false);
+            // date — unless there is no retention at all.
+            let expired = retention_secs == 0
+                || meta
+                    .modified()
+                    .ok()
+                    .and_then(|m| m.elapsed().ok())
+                    .map(|age| age.as_secs() >= retention_secs)
+                    .unwrap_or(false);
             if !expired {
                 continue;
             }
@@ -211,6 +217,135 @@ fn verification_summary(verified: u32, quarantined: u32, disputed: u32, unchecke
         out.push_str(&format!(" ({unchecked} not yet checkable)"));
     }
     out
+}
+
+/// How often the node looks for disk that failed downloads left behind.
+const FAILED_DOWNLOAD_RECLAIM_EVERY_SECS: u64 = 10 * 60;
+
+/// Give back the disk failed downloads left behind — quarantined shards, and,
+/// once the node is over its storage budget, partial `.tmp` files nothing is
+/// writing — on a timer, for as long as the node runs.
+///
+/// **`held_disk_bytes` may only charge for what something can reclaim** (its
+/// own doc says so), and quarantined files broke that. They were swept once,
+/// at the end of the startup verification pass: a node that stayed up for
+/// days never removed one. A field report (2026-09-28, an LXC node with a
+/// 30 GB disk) had 20 of them, 9.37 GiB, counted against a 20 GB budget —
+/// every real shard fitted, and the garbage pushed `held` past the budget
+/// and the filesystem to 100%. Prune then found nothing it could remove
+/// without under-replicating the swarm, downloads stopped, and the update
+/// carrying the fix for the transfer bug that made the garbage failed with
+/// `ENOSPC`. Twice in ten days, each time recovered from outside the
+/// container.
+///
+/// **Over budget, the retention goes to zero.** A day's grace is for an
+/// operator who wants to inspect a failed file; on a node that can no longer
+/// download or update, the disk is worth more than the evidence. The same
+/// condition clears `.tmp` partials: resuming one needs a download, and an
+/// over-budget node refuses every download. Neither ever touches a real shard,
+/// and a `.tmp` a download is writing is left alone
+/// (`cleanup_tmp_files_no_one_is_writing` reads the claims).
+pub(super) fn spawn_failed_download_reclaim(
+    tasks: &mut BackgroundTasks,
+    shared_state: Arc<SharedState>,
+    mut shutdown_rx: watch::Receiver<bool>,
+) {
+    tasks.spawn(async move {
+        // The first pass a minute after start, then on the interval: the
+        // startup verification pass (which quarantines) begins 2 s in.
+        let every = std::time::Duration::from_secs(FAILED_DOWNLOAD_RECLAIM_EVERY_SECS);
+        let mut tick = tokio::time::interval_at(
+            tokio::time::Instant::now() + std::time::Duration::from_secs(60),
+            every,
+        );
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                _ = shutdown_rx.changed() => {
+                    if *shutdown_rx.borrow() {
+                        break;
+                    }
+                }
+                _ = tick.tick() => {
+                    let state = shared_state.clone();
+                    let _ = tokio::task::spawn_blocking(move || reclaim_failed_downloads(&state))
+                        .await;
+                }
+            }
+        }
+        "failed_download_reclaim"
+    });
+}
+
+/// One pass of [`spawn_failed_download_reclaim`]. Blocking: it walks the
+/// models directory.
+fn reclaim_failed_downloads(state: &SharedState) {
+    let (budget, held_before, _) = crate::model::auto_manage::storage_budget_now(state);
+    let over_budget = budget.remaining(held_before) == 0;
+    let data_dir = &state.config.node.data_dir;
+    let models = state
+        .model_registry
+        .models()
+        .into_iter()
+        .map(|m| m.id.clone());
+    let (quarantined, partials) = reclaim_failed_downloads_in(
+        data_dir,
+        over_budget,
+        models,
+        &state.models.shard_download_claims,
+    );
+    if quarantined == 0 && partials == 0 {
+        return;
+    }
+    let freed = held_before.saturating_sub(crate::model::auto_manage::held_disk_bytes(data_dir));
+    let mb = freed / (1024 * 1024);
+    tracing::info!(
+        quarantined,
+        partials,
+        mb,
+        over_budget,
+        held_mb = held_before / (1024 * 1024),
+        budget_mb = budget.bytes / (1024 * 1024),
+        "Reclaimed disk from failed downloads"
+    );
+    state.emit_activity(
+        crate::daemon::state::ActivityEvent::new(
+            "system",
+            "quarantine_reclaimed",
+            format!(
+                "Recovered {mb} MB from {} failed part downloads",
+                quarantined as usize + partials
+            ),
+        )
+        .with_detail_num(mb as i64),
+    );
+}
+
+/// The file work of one pass: quarantined shards past their retention (none
+/// over budget), and — over budget only — every `.tmp` partial of `models` that
+/// no download holds a claim on. Returns `(quarantined, partials)` removed.
+fn reclaim_failed_downloads_in(
+    data_dir: &std::path::Path,
+    over_budget: bool,
+    models: impl Iterator<Item = crate::types::ModelId>,
+    claims: &dashmap::DashSet<crate::types::ShardId>,
+) -> (u32, usize) {
+    let retention = if over_budget {
+        0
+    } else {
+        QUARANTINE_RETENTION_SECS
+    };
+    let models_dir = crate::model::shard::ShardStore::new(data_dir).models_dir();
+    let (quarantined, _) = sweep_expired_quarantine(&models_dir, retention);
+    let mut partials = 0usize;
+    if over_budget {
+        for model_id in models {
+            let dir = crate::model::shard::model_dir(data_dir, &model_id.0);
+            partials +=
+                crate::model::shard::cleanup_tmp_files_no_one_is_writing(&dir, &model_id, claims);
+        }
+    }
+    (quarantined, partials)
 }
 
 /// BLAKE3 hash check runs after API is up so the dashboard is responsive
@@ -371,30 +506,6 @@ pub(super) fn spawn_shard_verification(
                     }
                 }
             }
-        }
-        // Reclaim disk from quarantined shards old enough that nobody is going
-        // to inspect them. Done here because this is the pass that creates
-        // them, so the two halves of their lifetime stay in one place.
-        let models_dir = shard_store.models_dir();
-        let (swept_files, swept_bytes) =
-            tokio::task::spawn_blocking(move || sweep_expired_quarantine(&models_dir))
-                .await
-                .unwrap_or_default();
-        if swept_files > 0 {
-            let mb = swept_bytes / (1024 * 1024);
-            tracing::info!(
-                files = swept_files,
-                mb,
-                "Reclaimed disk from expired quarantined shards"
-            );
-            shared_state.emit_activity(
-                crate::daemon::state::ActivityEvent::new(
-                    "system",
-                    "quarantine_reclaimed",
-                    format!("Recovered {mb} MB from {swept_files} quarantined part files"),
-                )
-                .with_detail_num(mb as i64),
-            );
         }
 
         if quarantined > 0 {
@@ -1462,7 +1573,7 @@ mod quarantine_sweep_tests {
             4096,
             QUARANTINE_RETENTION_SECS + 60,
         )]);
-        let (files, bytes) = sweep_expired_quarantine(root.path());
+        let (files, bytes) = sweep_expired_quarantine(root.path(), QUARANTINE_RETENTION_SECS);
         assert_eq!(files, 1);
         assert_eq!(bytes, 4096);
         assert!(!root
@@ -1476,7 +1587,7 @@ mod quarantine_sweep_tests {
     #[test]
     fn a_recent_quarantined_shard_is_kept() {
         let root = models_dir_with(&[("shard_000.bin.quarantine", 4096, 60)]);
-        let (files, bytes) = sweep_expired_quarantine(root.path());
+        let (files, bytes) = sweep_expired_quarantine(root.path(), QUARANTINE_RETENTION_SECS);
         assert_eq!((files, bytes), (0, 0), "recent quarantine must be kept");
         assert!(root
             .path()
@@ -1497,7 +1608,7 @@ mod quarantine_sweep_tests {
             ),
             ("shard_012.bin.mismatched", 4096, 60),
         ]);
-        let (files, bytes) = sweep_expired_quarantine(root.path());
+        let (files, bytes) = sweep_expired_quarantine(root.path(), QUARANTINE_RETENTION_SECS);
         assert_eq!(
             (files, bytes),
             (1, 4096),
@@ -1520,7 +1631,7 @@ mod quarantine_sweep_tests {
             ("hf_source.json", 64, old),
             ("shard_001.bin.quarantine", 999, old),
         ]);
-        let (files, bytes) = sweep_expired_quarantine(root.path());
+        let (files, bytes) = sweep_expired_quarantine(root.path(), QUARANTINE_RETENTION_SECS);
         assert_eq!((files, bytes), (1, 999), "only the quarantine file");
         let m = root.path().join("some-model");
         for keep in [
@@ -1533,13 +1644,87 @@ mod quarantine_sweep_tests {
         }
     }
 
+    /// **Over budget there is no grace.** A node that can no longer download
+    /// or update (field report 2026-09-28: 9.37 GiB of these on a full 30 GB
+    /// disk) gives the disk back at once — and still touches nothing but
+    /// quarantine files.
+    #[test]
+    fn with_no_retention_every_quarantined_file_goes_and_nothing_else() {
+        let root = models_dir_with(&[
+            ("shard_000.bin.quarantine", 4096, 5),
+            ("shard_001.bin.mismatched", 2048, 5),
+            ("shard_002.bin", 1024, 5),
+            ("gguf_header.bin", 512, 5),
+        ]);
+        assert_eq!(sweep_expired_quarantine(root.path(), 0), (2, 6144));
+        let m = root.path().join("some-model");
+        assert!(m.join("shard_002.bin").exists() && m.join("gguf_header.bin").exists());
+        // The control: the same files a day's grace keeps.
+        let root = models_dir_with(&[("shard_000.bin.quarantine", 4096, 5)]);
+        assert_eq!(
+            sweep_expired_quarantine(root.path(), QUARANTINE_RETENTION_SECS),
+            (0, 0)
+        );
+    }
+
+    /// The whole pass, both ways round. Over budget: a quarantine minutes old
+    /// and a partial nothing is writing both go; the partial a download IS
+    /// writing, and the real shard, stay. With room: all of it stays.
+    #[test]
+    fn over_budget_the_pass_takes_failed_downloads_and_never_a_shard_or_a_live_partial() {
+        let data = tempfile::tempdir().unwrap();
+        let mid = crate::types::ModelId("some-model".into());
+        let dir = crate::model::shard::model_dir(data.path(), &mid.0);
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, size) in [
+            ("shard_000.bin", 2048usize),
+            ("shard_001.bin.quarantine", 4096),
+            ("shard_002.bin.tmp", 1024),
+            ("shard_003.bin.tmp", 512),
+        ] {
+            std::fs::write(dir.join(name), vec![0u8; size]).unwrap();
+        }
+        let claims = dashmap::DashSet::new();
+        claims.insert(crate::types::ShardId {
+            model_id: mid.clone(),
+            index: 3,
+        });
+
+        let room = super::reclaim_failed_downloads_in(
+            data.path(),
+            false,
+            std::iter::once(mid.clone()),
+            &claims,
+        );
+        assert_eq!(
+            room,
+            (0, 0),
+            "with room, a fresh quarantine and every partial stay"
+        );
+
+        let over = super::reclaim_failed_downloads_in(
+            data.path(),
+            true,
+            std::iter::once(mid.clone()),
+            &claims,
+        );
+        assert_eq!(over, (1, 1));
+        assert!(!dir.join("shard_001.bin.quarantine").exists());
+        assert!(!dir.join("shard_002.bin.tmp").exists());
+        assert!(
+            dir.join("shard_003.bin.tmp").exists(),
+            "a download is writing it"
+        );
+        assert!(dir.join("shard_000.bin").exists(), "never a real shard");
+    }
+
     /// An empty or absent models dir must be a no-op, not an error.
     #[test]
     fn an_empty_models_dir_is_harmless() {
         let empty = tempfile::tempdir().unwrap();
-        assert_eq!(sweep_expired_quarantine(empty.path()), (0, 0));
+        assert_eq!(sweep_expired_quarantine(empty.path(), 0), (0, 0));
         assert_eq!(
-            sweep_expired_quarantine(&empty.path().join("does-not-exist")),
+            sweep_expired_quarantine(&empty.path().join("does-not-exist"), 0),
             (0, 0)
         );
     }

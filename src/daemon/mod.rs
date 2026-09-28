@@ -712,6 +712,11 @@ impl Daemon {
             self.config.clone(),
             shutdown_rx.clone(),
         );
+        background::spawn_failed_download_reclaim(
+            &mut background_tasks,
+            shared_state.clone(),
+            shutdown_rx.clone(),
+        );
         background::spawn_responses_sweep(
             &mut background_tasks,
             self.db.clone(),

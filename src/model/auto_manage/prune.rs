@@ -737,11 +737,20 @@ impl AutoShardManager {
                 Err(_) => false,
             };
         if should_warn_over_budget {
+            // The figures, so a pasted log says how far over and against which
+            // limit. Failed-download files are not the cause by the time this
+            // fires: over budget they are reclaimed with no grace period
+            // (`daemon::background::spawn_failed_download_reclaim`).
+            let (budget, held_bytes, _) = super::storage_budget_now(&self.shared_state);
             tracing::warn!(
                 resource_pressure = format!("{resource_pressure:.2}"),
+                held_mb = held_bytes / (1024 * 1024),
+                budget_mb = budget.bytes / (1024 * 1024),
+                limited_by = %budget.limited_by,
                 "Storage is over the configured budget, but nothing can be removed without \
-                 dropping a model below the number of copies the network needs. Raise \
-                 max_disk_mb, or delete a model yourself to choose which one goes."
+                 dropping a model below the number of copies the network needs. This node \
+                 will not free the space by itself: raise max_disk_mb, or delete a model \
+                 yourself to choose which one goes."
             );
             self.shared_state.emit_activity(
                 crate::daemon::state::ActivityEvent::new(
