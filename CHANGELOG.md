@@ -1,5 +1,70 @@
 # Changelog
 
+## [0.3.212-alpha] — 2026-09-28
+
+**A model split between two distant computers can answer about twice as fast
+by guessing ahead with a small model your computer already holds — off by
+default for now — and a split reply that went wrong part-way is no longer
+passed off as finished.**
+
+**Guessing ahead across computers can use a small model you already have.**
+When a model is split between computers, each token costs a full network round
+trip. Guessing ahead lets a small model of the same family propose several
+tokens, which the computers then check in one round trip. It used to need a
+separate model file run by llama.cpp; it now uses an ordinary model this
+computer already holds — for Qwen2.5 models, Qwen2.5-0.5B — chosen
+automatically and run in SwarmLLM's own engine. Measured on a model split
+between a graphics card in Thailand and one in Belgium: **4.6 tokens per
+second, and 5.6 at the temperature chats use, against 2.3-2.7 without
+guessing**. Replies are the big model's own: a guess is kept only when the big
+model's own sample agrees, and in testing, replies matched llama.cpp's as
+closely with guessing as without. The small model uses only graphics memory
+that is free — it never takes the card from the model it guesses for, and runs
+on the processor otherwise — stops guessing once it is unsure, and if it fails,
+the reply finishes without guessing.
+**It is off by default in this release**: when a split's far computer failed
+part-way, the reply was still correct, but the takeover by standby computers did
+not happen with the small model loaded — the request was retried instead. That
+is being looked into before it is switched on for everyone. To try it now, add
+to your `config.toml`:
+
+```toml
+[inference]
+speculative_decoding = true
+decentralized_spec_decoding = true
+```
+
+**Guessing ahead no longer over-guesses when the other computer checks on its
+processor.** Choosing how far to guess as if every check cost the same, it
+guessed 11-16 tokens ahead against a computer checking on its processor, and
+every round took 1.1-2.8 seconds — 3.35 tokens per second, where a request that
+stayed at 4 guesses ran at 7.3. It now learns what each extra guess adds to a
+check and moves at most two guesses a round.
+
+**Fixed: a split reply that went wrong part-way could be reported as a finished
+answer.** When the computer holding the last layers sent back a check that could
+not be read, the reply ended there and was marked complete — on the ordinary
+split path as well as with guessing ahead — and with guessing ahead, a
+connection dropping during a check did the same. Both are now reported as the
+failures they are, so the request is retried like any other split request. In
+one case the unreadable check also produced a stray token.
+
+**Fixed: a guess count set above 16 made checks other computers refuse.**
+`speculative_gamma` is now treated as 16 at most, on every path that sends
+guesses to another computer; the most a check may carry is 32.
+
+**A split no longer needs the persistent pipeline stream to be fast.** With both
+computers on v0.3.211, an ordinary split runs at 2.86 tokens per second and the
+stream at 2.81 on that link — the stream's advantage was the other computer's
+extra round trip, which v0.3.211 removed.
+
+**What changed in the plan.** v0.3.211's notes said the next step would bring a
+low-bit copy of the far computer's layers over the network. Worked through, that
+copy needs almost as much memory as the layers it copies — a computer with room
+for it could nearly run the model itself — so the plan now favours a small
+same-family guesser (above) and keeping guesses in flight while a check is still
+travelling. `docs/plans/split_speculation.md` has the arithmetic.
+
 ## [0.3.211-alpha] — 2026-09-27
 
 **A model shared between computers answers noticeably faster, and a model that
