@@ -513,6 +513,158 @@ accumulate through its history, the 7B's are mostly in the drafted token's own
 path. The 7B's own-cache 93.75% also independently confirms llama.cpp's 93.8% for
 the same pair. KV refresh is a minor lever at 7B; not a priority.
 
+## The loop's round trip, not the user's (2026-09-28)
+
+**Where "40-60 tok/s over a 500 ms split" came from, and what became of it.**
+On 2026-09-27 the shadow measurements above were projected, in conversation, to
+~36-39 tok/s TH↔BE (~46-51 at 60 tok/s drafting) for a continuous stream drafted
+by the 3-bit far-half shadow with a second draft line where it was unsure. The
+same day that was corrected to ~22-29 (the table in Phase 4: the second choice
+avoids a stall only if it was drafted ONWARD). Then the shadow was parked for
+memory (§ "The shadow's memory"), and what shipped in v0.3.212 is the first rung:
+a 0.5B drafter, round-based. It measured 4.6-5.5 tok/s, and **that is its
+ceiling, not a shortfall**: at α ≈ 0.7 a chain of guesses yields at most
+1/(1−α) ≈ 3.3 tokens a round, ≈ 5.6 tok/s at a 0.6 s loop; the optimal guess
+count grows only logarithmically with delay (UCB-SpecStop 2606.20591, the same
+0.5B → 7B pair). No published lossless method reports more than ~10 tok/s, or
+5×, with ≥ 100 ms inside the per-token loop (survey 2026-09-28, sources below).
+
+**What 40-60 tok/s across a 500 ms loop needs.** Time per token ≈ 1/v + m·S.
+At S ≈ 0.6 s and v ≈ 60, m must be ≲ 1.4% — 24-36 tokens a round, α ≈ 0.96-0.97.
+That is Q6_K-to-Q8_0 agreement (llama.cpp, Llama-3-8B, same top token vs F16:
+Q8_0 97.7%, Q6_K 96.0%, Q4_K_M 91.9%, Q2_K 71.1%; BF16 vs F16 of the SAME weights
+99.74%), i.e. a near-complete copy of the model on the drafting machine — the
+memory a split exists because nobody has. Low-rank error compensation (EoRA
+2410.21271) adds 2-7% memory and reports no agreement near that; trained heads
+(EAGLE, Kangaroo, mid-network drafters) top out at 0.65-0.88 acceptance.
+**So across a loop that long, 40-60 tok/s is out of reach for an exact method
+with the memory consumer machines have.** The honest ranges stand: ~5-8 with a
+small drafter (reached), ~15-30 with a shadow where one fits.
+
+**But the long link does not have to be IN the loop.** Only the round trip
+between the machines that hold consecutive layers must be paid per token; the
+requester's distance could be paid once, in time to the first token, with tokens
+streamed back. **It is paid per token today** (checked 2026-09-28 — the open
+unknown `regional_pipelines.md` Stage 5 carried): the tail answers the
+coordinator, the coordinator starts the next token at segment 0
+(`pipeline/distributed.rs:896`), `PipelineExecutor` is only ever built by the
+requester's router (`router/distributed_exec.rs:927`), and delegation exists
+only as a whole-model hand-off (`scheduler::delegation_target`, and only when this
+node would run on its processor). A Thailand request split among European peers
+20 ms apart therefore runs at ~0.5 s a token, where the same peers coordinated
+from Europe run at the 25-60 ms rows of the projection table above (GPU peers):
+9-13 tok/s plain, **26-38 with the drafter chain this release already ships**,
+~38-50 with draft trees — the 40-60 range, reached by moving the loop rather
+than by predicting past it. Projections, not measurements.
+Parallax (2509.26182: last peer → first peer, "Petals puts the LM head on the
+client") and Prime Intellect's ring do exactly this; Petals, Helix and we do
+not. That is FUTURE_WORK #143, a delegated coordinator: the whole request to the
+head holder, which plans among its near peers, runs the loop and the speculation
+(`dsd.rs`, the n-gram loop and `engine_drafter` are `PipelineExecutor` methods
+and move with it), and streams tokens back.
+
+**What bounds it:** the fleet. On 2026-09-28 this node (Thailand) had five peers
+at 210-290 ms and one LAN peer; four of the five are two operators' machines in
+Belgium and Italy (one RTX 4050 laptop, the rest processors). A delegated loop
+among them is fast only for the parts that run on a card, and placement still
+converges on whole models per node (`regional_pipelines.md` Stage 0/3).
+
+## Draft on your own card, check on everyone else's (2026-09-28)
+
+**The one hard constraint, and what it leaves.** A token's first layer needs the
+token before it, which exists only once the last layer has sampled it. So an
+exact split decodes by "the near side guesses, the far side checks", and tokens
+per trip are capped by how often the guess is right — no bandwidth moves that.
+What the constraint does NOT forbid: the far machines checking a CONTINUOUS
+stream of guesses, each stage working on different positions of the same reply
+at once. Then the long hop is on the critical path only when the full model
+disagrees, and time per token ≈ 1/v + m·S — the near machine's own speed plus
+misses × the loop. Everything turns on m, the miss rate of a predictor the near
+machine can actually hold.
+
+**Measured** (`~/swarmllm-ref/spec/lopsided.py`, `lopsided_qwen7b.json`):
+Qwen2.5-Coder-7B Q4_K_M as the target, llama.cpp as the reference, 709
+positions of the target's own greedy replies to six prompts (prose, code, a code
+edit, Q&A, advice, a story). Shadows REQUANTIZED from the Q4 file, so every
+shadow figure is pessimistic. "≥ τ of best": the full model rates the guess at
+least τ × its own top probability.
+
+| predictor | GiB (target 4.36) | first guess = target's | top 2 | ≥ 0.5 of best | ≥ 0.3 of best |
+|---|---|---|---|---|---|
+| qwen2.5-coder-0.5b (today's drafter) | 0.63 | 72.6% | 85.3% | 77.7% | 81.8% |
+| **whole model at Q3_K_S** | 3.25 | **94.2%** | **98.6%** | 98.4% | 99.7% |
+| whole model at Q2_K | 2.81 | 85.6% | 95.9% | 92.5% | 95.6% |
+| middle 7 of 28 layers at Q2_K | 4.01 | 94.1% | 99.0% | 99.3% | 99.9% |
+| middle 14 of 28 at Q2_K | 3.68 | 92.0% | 98.0% | 97.6% | 99.0% |
+| last 4 of 28 at Q2_K | 4.12 | 92.4% | 97.9% | 98.0% | 99.3% |
+| last 7 of 28 at Q2_K | 3.98 | 88.9% | 97.0% | 95.8% | 98.0% |
+| last 14 of 28 at Q2_K | 3.63 | 87.3% | 96.9% | 93.7% | 97.0% |
+| middle 7 of 28 at Q3_K_S | 4.11 | 96.8% | 99.6% | 99.9% | 100% |
+| middle 14 of 28 at Q3_K_S | 3.87 | 96.5% | 99.3% | 99.4% | 99.9% |
+| last 7 of 28 at Q3_K_S | 4.08 | 95.5% | 99.3% | 99.7% | 100% |
+
+What it says:
+
+- **The drafter for a model is the same model at fewer bits.** A plain Q3_K_S
+  file agrees 94.2% on the first guess against the 0.5B drafter's 72.6%, has the
+  same tokenizer by construction, and exists on HuggingFace for every popular
+  model — the shard system can fetch it like any other model. It is 25-36%
+  smaller than the Q4 target, which is exactly the "a little too big for my card"
+  gap (a 14B Q4 is 9 GB; its Q2_K is 5.8).
+- **WHERE you approximate matters more than how much.** 2-bit on the middle 7
+  layers (94.1%) beats 2-bit on only the last 4 (92.4%); the last layers are the
+  quantization-sensitive ones. The far machines should hold the middle — the
+  boomerang layout the prompt-privacy mode already plans.
+- **Almost every disagreement is a near-tie.** Where a 3-bit copy differs, the
+  full model rates the copy's token at least half as likely as its own pick
+  98.4-99.9% of the time. The misses that cost a trip are the target's own
+  coin-flips.
+- **Exact has a floor of about 1%.** Run with the target drafting for itself
+  (`relaxed_gen.py`, `relaxed_self-control.json`), llama.cpp's batched check
+  disagreed with its own one-token-at-a-time decoding at 0.97 of every 100
+  positions — batch shape moves the arithmetic enough to flip a near-tie. The two
+  replies with no correction were byte-identical to the reference, the four with
+  one diverged there. Byte-identity was never the right test for a split
+  (CLAUDE.md), and this is the number that says how far "exact" can go.
+
+**Projected** (not measured) with t = 1/v + m·S, v = this RTX 3070's measured
+local speed on our engine, S = the TH↔BE loop plus far compute:
+
+| 7B split TH↔BE (local 44 tok/s; measured today 4.6-5.5) | 0.5B drafter | whole Q3 copy | middle-7 Q3 copy |
+|---|---|---|---|
+| exact | 5.8 | 18.3 | 24.8 |
+| exact, a second guess drafted where the copy is unsure (top 2) | 9.7 | 32.9 | 40.1 |
+| relaxed, near-best accepted (≥ 0.3 of best) | 8.1 | 41.0 | 43.5 |
+
+| 14B on an 8 GB card (today, card + processor: 3.35 tok/s) | whole Q3 copy | whole Q2 copy |
+|---|---|---|
+| checked by this node's own processor (~360 ms a miss) | 16-24 | 11-18 |
+| checked by the swarm (~550 ms a miss) | 14-24 | 8-16 |
+
+**The design this points to.** The near machine (the requester's card) holds a
+low-bit copy of the whole model — or, in the boomerang layout, the exact first and
+last layers and a low-bit middle — and generates continuously at its own speed.
+The full-precision model checks the stream wherever it lives: this node's own
+RAM for a model too big for its card (no network at all), or the swarm's peers
+for a split. A miss rewinds the near machine to the corrected token and discards
+what was in flight after it. For a GPU user this outranks moving the coordinator
+(FUTURE_WORK #143): a 3070 drafting at 44 tok/s with a 500 ms loop behind it beats
+handing the loop to processors 20 ms from each other. #143 still matters for users
+with no card. And the checker can be MORE precise than anything the user could run
+(Q8 split across peers) — faster than local and better than local at once, once
+local decode is bound by bytes rather than submissions (a Q2 copy reads ~40% fewer
+bytes per token than Q4; today's engine cannot cash that, `local_decode_submissions.md`).
+
+**What is missing, in order:** (1) the continuous stream — the same Q3 drafter in
+today's round-based DSD projects only ~13 tok/s TH↔BE, because on this engine a
+7B-size drafter costs 23 ms per guess and ten guesses take 230 ms before each check
+even leaves (measured: the 0.5B costs 17-24 ms a guess, the same as the 7B's 22.9 —
+cost follows layer count); (2) the drafter chosen as "the same model at fewer
+bits" (`engine_drafter`'s auto rule wants a quarter of the target's size and would
+never pick it); (3) a second guess where the copy is unsure; (4) verification on
+this node's own processor, the no-network case; (5) relaxed acceptance as an
+opt-in, once its quality is measured (below). FUTURE_WORK #144.
+
 ## What the literature says (survey 2026-09-27)
 
 The survey found no method that makes a WAN split fast without speculation. It

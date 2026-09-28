@@ -393,5 +393,10 @@ speculation work however attractive the latter is.
   full-precision HF checkpoints. Layer-skip drafting on Q4_K_M is unvalidated.
 - Whether `region_score`'s 1.0/0.5/0.2/0.7 buckets survive contact with real
   coordinates, or should be replaced by them outright.
-- Whether the coordinator currently sits in the per-token return path
-  (Stage 5, third bullet) — not yet checked.
+- ~~Whether the coordinator currently sits in the per-token return path
+  (Stage 5, third bullet)~~ — **checked 2026-09-28: it does**, on every token,
+  even when it holds no layers (the tail answers the coordinator, which restarts
+  the loop at segment 0). The fix is a delegated coordinator rather than a
+  tail→head ring: it moves speculation, failover and finalisation with the loop
+  unchanged. FUTURE_WORK #143; `split_speculation.md` § "The loop's round trip,
+  not the user's".
