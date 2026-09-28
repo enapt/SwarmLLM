@@ -3080,6 +3080,30 @@ impl ModelProcessPool {
     /// opposite treatment.
     ///
     /// Returns the megabytes reclaimed.
+    /// A reply channel closed before its answer came. Two causes look the same
+    /// (gotcha #180): a later call under the same `request_id` took the entry
+    /// over — the worker is healthy, and busy for that call — or the worker
+    /// died. Only the second evicts. `generate` had the check and the forward,
+    /// batch and draft waits did not; the draft wait evicted the drafter a
+    /// router retry had just started on (2026-09-28). Every wait on a worker
+    /// ends here, so a new one cannot copy a loop that skipped it.
+    fn reply_channel_closed(
+        &self,
+        model_id: &ModelId,
+        handle: &Arc<WorkerHandle>,
+        request_id: Uuid,
+        token: u64,
+        during: &str,
+    ) -> SwarmError {
+        if handle.response_superseded(request_id, token) {
+            return SwarmError::ServiceUnavailable(
+                "superseded by a retry of the same request".into(),
+            );
+        }
+        self.evict_this_worker(model_id, handle, "closed its connection");
+        SwarmError::ServiceUnavailable(format!("worker closed connection {during}"))
+    }
+
     async fn free_vram_for_admission(&self, exclude: &ModelId, needed_mb: u64) -> u64 {
         let budget = self
             .vram_budget_mb
@@ -5525,6 +5549,7 @@ impl ModelProcessPool {
         // route any early error/reply. Unregistered on drop via ResponseGuard.
         let (resp_tx, mut resp_rx) = mpsc::channel(RESPONSE_CHANNEL_CAPACITY);
         let (mut guard, _) = handle.register_response(request_id, resp_tx, true);
+        let attempt_token = guard.token;
         // A forward leaves this request's cache on the worker for the next one,
         // so the worker stays in use after `guard` is gone (`kv_holders`).
         handle.note_conversation(request_id);
@@ -5604,13 +5629,15 @@ impl ModelProcessPool {
                         _ => continue,
                     },
                     None => {
-                        // Reader actor closed the channel — worker died while we were waiting.
                         // Subprocess lifecycle failure → ServiceUnavailable (per
                         // .claude/rules/completeness.md); Internal is for code bugs.
-                        self.evict_this_worker(&model_id, &handle, "closed its connection");
                         guard.disarm();
-                        return Err(SwarmError::ServiceUnavailable(
-                            "worker closed connection before reply".into(),
+                        return Err(self.reply_channel_closed(
+                            &model_id,
+                            &handle,
+                            request_id,
+                            attempt_token,
+                            "before reply",
                         ));
                     }
                 }
@@ -5623,8 +5650,9 @@ impl ModelProcessPool {
     /// (`DaemonMsg::Draft`, see `IpcDraft`) — the in-engine drafter of
     /// speculation across computers. Same shape as [`Self::forward_direct`]:
     /// the load is bracketed by cancel checks, not wrapped, and only the wait
-    /// is watched; the worker keeps the request's drafting cache, released
-    /// with the request like any other (`release_request_kv`).
+    /// is watched; the worker keeps the attempt's drafting cache until the
+    /// attempt releases it (`engine_drafter::release_of`). Loaded as a guest
+    /// (`Tenancy::Guest`).
     pub async fn draft(
         &self,
         d: IpcDraft,
@@ -5643,6 +5671,7 @@ impl ModelProcessPool {
         }
         let (resp_tx, mut resp_rx) = mpsc::channel(RESPONSE_CHANNEL_CAPACITY);
         let (mut guard, _) = handle.register_response(request_id, resp_tx, true);
+        let attempt_token = guard.token;
         handle.note_conversation(request_id);
         {
             let mut writer = handle.writer.lock().await;
@@ -5685,10 +5714,13 @@ impl ModelProcessPool {
                     }
                     Some(_) => continue,
                     None => {
-                        self.evict_this_worker(&model_id, &handle, "closed its connection");
                         guard.disarm();
-                        return Err(SwarmError::ServiceUnavailable(
-                            "worker closed connection before reply".into(),
+                        return Err(self.reply_channel_closed(
+                            &model_id,
+                            &handle,
+                            request_id,
+                            attempt_token,
+                            "before reply",
                         ));
                     }
                 }
@@ -5732,7 +5764,7 @@ impl ModelProcessPool {
         // Register one response channel per request_id BEFORE sending.
         type SlotRx = mpsc::Receiver<(WorkerMsg, Vec<u8>)>;
         let n = forwards.len();
-        let mut receivers: Vec<(Uuid, SlotRx)> = Vec::with_capacity(n);
+        let mut receivers: Vec<(Uuid, u64, SlotRx)> = Vec::with_capacity(n);
         let mut guards: Vec<ResponseGuard> = Vec::with_capacity(n);
         for f in &forwards {
             let (tx, rx) = mpsc::channel(RESPONSE_CHANNEL_CAPACITY);
@@ -5741,8 +5773,8 @@ impl ModelProcessPool {
             // Matches `cancelled_request_id`'s exclusion.
             let (g, _) = handle.register_response(f.request_id, tx, false);
             handle.note_conversation(f.request_id);
+            receivers.push((f.request_id, g.token, rx));
             guards.push(g);
-            receivers.push((f.request_id, rx));
         }
 
         // Build IPC requests + concatenated activation payload.
@@ -5834,7 +5866,7 @@ impl ModelProcessPool {
         // Collect results in the original request order. Each receiver fires
         // exactly once (LayerResult or Error) before being dropped.
         let mut results: Vec<crate::types::LayerResult> = Vec::with_capacity(n);
-        for (rid, mut rx) in receivers {
+        for (rid, token, mut rx) in receivers {
             loop {
                 match rx.recv().await {
                     Some((WorkerMsg::LayerResult(r), payload)) if r.request_id == rid => {
@@ -5879,9 +5911,12 @@ impl ModelProcessPool {
                     None => {
                         // Subprocess lifecycle failure → ServiceUnavailable
                         // (mirrors the single-forward arm above).
-                        self.evict_this_worker(&model_id, &handle, "closed its connection");
-                        return Err(SwarmError::ServiceUnavailable(
-                            "worker closed connection during batch forward".into(),
+                        return Err(self.reply_channel_closed(
+                            &model_id,
+                            &handle,
+                            rid,
+                            token,
+                            "during batch forward",
                         ));
                     }
                 }
@@ -6038,23 +6073,15 @@ impl ModelProcessPool {
                 Some(v) => v,
                 None => {
                     guard.disarm();
-                    // A closed channel has two very different causes. If a
-                    // later attempt has taken over this request_id, the worker
-                    // is fine and is still computing for that attempt —
-                    // evicting it here would destroy a healthy worker (forcing
-                    // a full model reload) and abort the attempt that replaced
-                    // us.
-                    if handle.response_superseded(request_id, attempt_token) {
-                        return Err(SwarmError::ServiceUnavailable(
-                            "superseded by a retry of the same request".into(),
-                        ));
-                    }
                     // Subprocess lifecycle failure → ServiceUnavailable.
                     // Was Internal; operators saw 500s here and misattributed
                     // them to code bugs rather than worker crashes.
-                    self.evict_this_worker(model_id, &handle, "closed its connection");
-                    return Err(SwarmError::ServiceUnavailable(
-                        "worker closed connection mid-generate".into(),
+                    return Err(self.reply_channel_closed(
+                        model_id,
+                        &handle,
+                        request_id,
+                        attempt_token,
+                        "mid-generate",
                     ));
                 }
             };
@@ -7377,6 +7404,61 @@ mod tests {
 
         assert!(pool.admit_to_cpu_as(&drafter, 3000, Tenancy::Tenant).await);
         assert!(pool.workers.get(&target).is_none());
+    }
+
+    /// **A call displaced by a later one under the same id does not evict the
+    /// worker** (gotcha #180) — the later call is using it. The draft wait
+    /// lacked the check `generate` had, and evicted the drafter a router retry
+    /// had just started on (2026-09-28, the failover rig with speculation on).
+    #[tokio::test]
+    async fn a_superseded_draft_leaves_the_worker_for_the_call_that_superseded_it() {
+        let pool = ModelProcessPool::new(std::path::PathBuf::from("/tmp/swarmllm-supersede"));
+        pool.set_gpu_layers(-1);
+        pool.set_vram_budget_mb(6000);
+        let m = ModelId("drafter-0.5b".into());
+        let h = admit_and_insert_gpu_worker(&pool, &m, 350, std::time::Duration::ZERO).await;
+        h.record_charged_segment((0, 24), 0);
+        let id = Uuid::new_v4();
+        let d = IpcDraft {
+            request_id: id,
+            model_id: m.clone(),
+            layer_range: (0, 24),
+            keep: 0,
+            append: vec![1, 2, 3],
+            gamma: 0,
+            sampling: crate::types::SamplingParams::default(),
+            history: Vec::new(),
+            coupling_seed: None,
+            for_the_owner: true,
+            stop_below: None,
+        };
+        let pool = Arc::new(pool);
+        let first = tokio::spawn({
+            let pool = pool.clone();
+            async move { pool.draft(d, None).await }
+        });
+        for _ in 0..200 {
+            if h.responses.contains_key(&id) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        let (tx, _rx) = mpsc::channel(RESPONSE_CHANNEL_CAPACITY);
+        let (_later, displaced) = h.register_response(id, tx, false);
+        assert!(
+            displaced.is_some(),
+            "the later call took the first one's place"
+        );
+
+        let out = first.await.expect("the first call returns");
+        assert!(
+            matches!(&out, Err(SwarmError::ServiceUnavailable(m)) if m.contains("superseded")),
+            "{out:?}"
+        );
+        assert!(
+            pool.workers.get(&m).is_some(),
+            "the worker stays for the call that superseded the first"
+        );
     }
 
     /// A guest is handed a worker that holds its range, and is refused one that

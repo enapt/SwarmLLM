@@ -198,16 +198,17 @@ fn largest_that_can_draft(
 /// anyway, instead of after it. A guess-free call (`gamma` 0) that leaves the
 /// prompt in the worker's cache; on success the caller marks it read with
 /// [`EngineDrafter::prompt_read`], on failure the first round reads it itself.
+/// `key` is the attempt's own ([`draft_key`]), shared with its [`EngineDrafter`].
 pub(super) fn read_ahead(
     state: std::sync::Arc<SharedState>,
     spec: &DrafterSpec,
-    request_id: uuid::Uuid,
+    key: uuid::Uuid,
     prompt_ids: Vec<u32>,
     sampling: &SamplingParams,
     cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> ReadAhead {
     let d = IpcDraft {
-        request_id,
+        request_id: key,
         model_id: spec.model_id.clone(),
         layer_range: spec.layer_range,
         keep: 0,
@@ -219,35 +220,51 @@ pub(super) fn read_ahead(
         for_the_owner: true,
         stop_below: None,
     };
-    let release = state.clone();
+    let release = release_of(state.clone(), key);
     ReadAhead::new(
         tokio::spawn(async move { state.model_process_pool.draft(d, cancel).await }),
-        Box::new(move || {
-            Box::pin(async move {
-                release
-                    .model_process_pool
-                    .release_request_kv(request_id)
-                    .await
-            })
-        }),
+        release,
     )
+}
+
+/// The key one attempt at speculating a request keeps its drafter's cache
+/// under — fresh per attempt, never the request's id.
+///
+/// The router retries a failed request under the SAME id, so a cache keyed by
+/// it was shared by the attempt that failed and the one retrying it: the dead
+/// attempt's read-ahead, still running, superseded the retry's call on the
+/// drafter's worker (which evicted the worker), and its release of the request
+/// id then emptied the retry's caches — the target's own segment included, so
+/// the retried reply ended after one token (2026-09-28, the failover rig with
+/// speculation on). Keyed per attempt, nothing an attempt does reaches another,
+/// and its own release ([`release_of`], run when its [`ReadAhead`] or
+/// [`EngineDrafter`] is dropped) touches only the drafter's cache.
+pub(super) fn draft_key() -> uuid::Uuid {
+    uuid::Uuid::new_v4()
+}
+
+/// Release the drafter's cache for `key` on every worker holding it — only the
+/// drafter's worker ever does, since the key is the attempt's own.
+pub(super) fn release_of(state: std::sync::Arc<SharedState>, key: uuid::Uuid) -> Release {
+    Box::new(move || {
+        Box::pin(async move { state.model_process_pool.release_request_kv(key).await })
+    })
 }
 
 /// What a dropped [`ReadAhead`] runs once its call has finished.
 type Release = Box<dyn FnOnce() -> futures::future::BoxFuture<'static, ()> + Send>;
 
-/// A [`read_ahead`] in flight, owned by the request that started it.
+/// A [`read_ahead`] in flight, owned by the attempt that started it.
 ///
-/// Awaited by [`Self::finish`] on the path that uses it. On every other path —
-/// the prompt pass failing, a fallback to another loop — it is dropped, and a
-/// dropped `JoinHandle` detaches its task (gotcha #146): the call runs on, and
-/// the cache it leaves on the drafter's worker outlives the request, because
-/// the request's one `release_request_kv` goes only to the workers in the pool
-/// at that moment, which need not yet include the drafter's. So dropping this
-/// lets the call finish — not an abort, which part-way through the drafter's
-/// load would abandon a spawning worker (gotcha #459) — and then releases the
-/// request's cache itself. A type whose `Drop` runs, not a statement after an
-/// `.await` (gotcha #593).
+/// Awaited by [`Self::finish`] on the path that uses it, which hands the cache
+/// on to the attempt's [`EngineDrafter`]. On every other path — the prompt pass
+/// failing, a fallback to another loop — it is dropped, and a dropped
+/// `JoinHandle` detaches its task (gotcha #146): the call runs on and leaves a
+/// cache on the drafter's worker that nothing else will release. So dropping
+/// this lets the call finish — not an abort, which part-way through the
+/// drafter's load would abandon a spawning worker (gotcha #459) — and then
+/// releases that cache, under the attempt's own key ([`draft_key`]). A type
+/// whose `Drop` runs, not a statement after an `.await` (gotcha #593).
 pub(super) struct ReadAhead {
     handle: Option<tokio::task::JoinHandle<Result<Vec<u32>, SwarmError>>>,
     release: Option<Release>,
@@ -289,10 +306,14 @@ impl Drop for ReadAhead {
     }
 }
 
-/// One request's drafting state on this side of the worker IPC.
+/// One attempt's drafting state on this side of the worker IPC. Dropping it
+/// releases the drafter's cache (`release`), whichever way the attempt ended.
 pub(super) struct EngineDrafter {
     spec: DrafterSpec,
-    request_id: uuid::Uuid,
+    /// The attempt's own key ([`draft_key`]) — what the drafter's worker keeps
+    /// its cache under.
+    key: uuid::Uuid,
+    release: Option<Release>,
     /// The request's tokens so far — prompt, then every token of the reply —
     /// ending with the one the next guess follows.
     seq: Vec<u32>,
@@ -339,10 +360,18 @@ impl EngineDrafter {
     /// `prompt_ids` must be the target's own tokenization of the prompt — the
     /// ids its first segment read — with the first reply token appended by
     /// [`Self::push`] once the prompt pass has sampled it.
-    pub(super) fn new(spec: DrafterSpec, request_id: uuid::Uuid, prompt_ids: Vec<u32>) -> Self {
+    /// `key` and `release` are the attempt's ([`draft_key`], [`release_of`]),
+    /// shared with its [`read_ahead`].
+    pub(super) fn new(
+        spec: DrafterSpec,
+        key: uuid::Uuid,
+        prompt_ids: Vec<u32>,
+        release: Release,
+    ) -> Self {
         Self {
             spec,
-            request_id,
+            key,
+            release: Some(release),
             seq: prompt_ids,
             valid: 0,
             open: None,
@@ -395,7 +424,7 @@ impl EngineDrafter {
             ));
         }
         let d = IpcDraft {
-            request_id: self.request_id,
+            request_id: self.key,
             model_id: self.spec.model_id.clone(),
             layer_range: self.spec.layer_range,
             keep: self.valid as u32,
@@ -428,6 +457,19 @@ impl EngineDrafter {
     }
 }
 
+impl Drop for EngineDrafter {
+    fn drop(&mut self) {
+        // No call is in flight: every one is awaited inside the attempt, and a
+        // cancelled one has already told the worker to stop (`ResponseGuard`),
+        // which it does before reading the release queued behind it.
+        if let (Some(release), Ok(rt)) =
+            (self.release.take(), tokio::runtime::Handle::try_current())
+        {
+            rt.spawn(release());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -441,6 +483,7 @@ mod tests {
             },
             uuid::Uuid::nil(),
             prompt.to_vec(),
+            Box::new(|| Box::pin(async {})),
         )
     }
 
@@ -627,5 +670,39 @@ mod tests {
         assert!(matches!(ra.finish().await, Some(Ok(Ok(ref t))) if t == &vec![7]));
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         assert!(!released.load(SeqCst));
+    }
+    /// An attempt's drafter releases its cache when the attempt ends, however
+    /// it ends — the request's own release no longer reaches it, since the
+    /// cache is keyed by the attempt ([`draft_key`]).
+    #[tokio::test]
+    async fn an_attempts_drafter_releases_its_cache_when_dropped() {
+        use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+        let released = std::sync::Arc::new(AtomicBool::new(false));
+        let d = EngineDrafter::new(
+            DrafterSpec {
+                model_id: ModelId("d".into()),
+                layer_range: (0, 24),
+                reads: 1000,
+            },
+            draft_key(),
+            vec![1, 2, 3],
+            flagged_release(released.clone()),
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        assert!(!released.load(SeqCst), "not while the attempt is running");
+        drop(d);
+        for _ in 0..100 {
+            if released.load(SeqCst) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(released.load(SeqCst));
+    }
+
+    /// Two attempts at one request never share a drafter cache.
+    #[test]
+    fn every_attempt_gets_its_own_drafter_key() {
+        assert_ne!(draft_key(), draft_key());
     }
 }

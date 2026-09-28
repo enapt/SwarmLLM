@@ -445,6 +445,9 @@ pub struct IpcGenerate {
 /// tracks how many of them the next check confirms.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct IpcDraft {
+    /// The speculating ATTEMPT's key (`pipeline::engine_drafter::draft_key`),
+    /// not the target request's id — a router retry reuses that id, and two
+    /// attempts sharing one drafter cache clobbered each other.
     pub request_id: Uuid,
     pub model_id: ModelId,
     pub layer_range: (u32, u32),

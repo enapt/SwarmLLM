@@ -184,6 +184,9 @@ impl PipelineExecutor {
                 .filter(|s| s.node_id == *me)
                 .all(|s| pool.holds_segment(&self.request.model_id, s.layer_range))
         };
+        // The attempt's own key for the drafter's cache — never the request's
+        // id, which a router retry reuses (`engine_drafter::draft_key`).
+        let draft_key = super::engine_drafter::draft_key();
         let read_ahead = engine
             .as_ref()
             .filter(|_| target_segments_loaded)
@@ -191,7 +194,7 @@ impl PipelineExecutor {
                 super::engine_drafter::read_ahead(
                     self.shared_state.clone(),
                     spec,
-                    request_id,
+                    draft_key,
                     ids.clone(),
                     &self.request.sampling_params,
                     self.request.cancel.clone(),
@@ -232,7 +235,12 @@ impl PipelineExecutor {
                     );
                     return Ok(None);
                 }
-                let mut e = EngineDrafter::new(spec, request_id, ids.clone());
+                let mut e = EngineDrafter::new(
+                    spec,
+                    draft_key,
+                    ids.clone(),
+                    super::engine_drafter::release_of(self.shared_state.clone(), draft_key),
+                );
                 if let Some(h) = read_ahead {
                     // On failure the first round reads the prompt instead; a
                     // drafter that cannot read at all is caught there, with

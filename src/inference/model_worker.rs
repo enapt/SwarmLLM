@@ -3391,9 +3391,10 @@ async fn handle_generate(
 /// this engine from the model's shards instead of in llama.cpp from a whole
 /// model file (which a node must never assemble from shards, CLAUDE.md).
 ///
-/// The request's cache lives on between calls, keyed by the TARGET request's
-/// id in this worker's own store, and released with it (`ReleaseRequestKv`
-/// goes to every worker). See `IpcDraft` for what each call reads and leaves.
+/// The cache lives on between calls, keyed by the speculating ATTEMPT's own id
+/// (`IpcDraft::request_id`, `engine_drafter::draft_key`) in this worker's own
+/// store, and released when that attempt ends (`ReleaseRequestKv` for that id).
+/// See `IpcDraft` for what each call reads and leaves.
 /// A guess is drawn with the shared noise when the request carries a seed —
 /// the draw the target's sampler will make at that position — and is the
 /// argmax otherwise, exactly as the llama.cpp drafter
