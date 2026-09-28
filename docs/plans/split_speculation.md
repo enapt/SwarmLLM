@@ -487,6 +487,36 @@ has rejected — no cancel message needed. Projected on the 300 ms link with the
 3-bit shadow: ~20 tok/s against ~14.5 for the best round-based γ; the gain comes
 from overlapping the round trip, so it grows with distance.
 
+**Fitted to today's loop (2026-09-28, after reading `dsd.rs:334-589`).** The round
+is strictly serial: draft → `forward_verify_through_segments([bootstrap, q₁..q_γ],
+pending_truncate, TailWalk)` → `accept` → emit → settle the drafter. The stream
+needs little new wire:
+
+- **A one-token LOOKAHEAD links the chunks.** Chunk j carries one guess beyond its
+  rows — the drafter's guess for its own bonus position — which the tail's walk
+  checks against the last row's sample instead of returning that sample as the
+  bonus. Chunk j+1 takes that guess as its bootstrap, so it can be SENT before
+  j's verdict: if j was accepted whole, lookahead included, j+1 was built on the
+  right prefix. The walk rule is the existing one; only "one draft beyond the
+  rows" is new, so it is gated by a `features` bit at the sender (a tail without
+  it gets today's rounds).
+- **Verdicts are consumed in order, and the first partial acceptance bumps an
+  EPOCH.** Results of the old epoch are dropped on arrival (by step, never by
+  luck — the re-keyed `pending_layer_results` above). The new epoch's first chunk
+  carries the truncate `pending_truncate` already expresses; chunks travel each
+  hop in order, so every segment truncates after the stale chunks and before the
+  new ones, and a stale chunk costs a far segment wasted compute, never a wrong
+  cache.
+- **Two activities per request instead of one loop**: the drafter produces chunks
+  as fast as it can (bounded by a window of ≈ loop time × drafting speed tokens in
+  flight), and the verdict consumer emits accepted tokens and, on a rejection,
+  tells the drafter to rewind to the correction (`EngineDrafter::settle` + `push`,
+  which exist for rounds).
+- **Where the head segment is this node's own** (every TH↔BE measurement), the
+  first hop costs nothing and the drafter's real near layers could be the
+  verify input (4e's "one near pass does both jobs") — a later saving, not a
+  precondition.
+
 Order: 4e before 4b — 4e is what makes shadow speculation usable without hand
 configuration, and it removes the duplicate near-half pass 4b would otherwise
 pay on every chunk. ⚠ **Revised 2026-09-28: see "The shadow's memory" above
@@ -585,9 +615,9 @@ machine can actually hold.
 **Measured** (`~/swarmllm-ref/spec/lopsided.py`, `lopsided_qwen7b.json`):
 Qwen2.5-Coder-7B Q4_K_M as the target, llama.cpp as the reference, 709
 positions of the target's own greedy replies to six prompts (prose, code, a code
-edit, Q&A, advice, a story). Shadows REQUANTIZED from the Q4 file, so every
-shadow figure is pessimistic. "≥ τ of best": the full model rates the guess at
-least τ × its own top probability.
+edit, Q&A, advice, a story). Shadows REQUANTIZED from the Q4 file (see the 14B
+check below for what that does and does not change). "≥ τ of best": the full
+model rates the guess at least τ × its own top probability.
 
 | predictor | GiB (target 4.36) | first guess = target's | top 2 | ≥ 0.5 of best | ≥ 0.3 of best |
 |---|---|---|---|---|---|
@@ -602,6 +632,26 @@ least τ × its own top probability.
 | middle 7 of 28 at Q3_K_S | 4.11 | 96.8% | 99.6% | 99.9% | 100% |
 | middle 14 of 28 at Q3_K_S | 3.87 | 96.5% | 99.3% | 99.4% | 99.9% |
 | last 7 of 28 at Q3_K_S | 4.08 | 95.5% | 99.3% | 99.7% | 100% |
+
+**The same measurement on Qwen2.5-14B-Instruct** (`agree14.py`,
+`agree_qwen14b.json`; 715 positions, target Q4_K_M 8.37 GiB — it does not fit an
+8 GB card):
+
+| 14B copy | GiB | first guess | top 2 | ≥ 0.5 of best | ≥ 0.3 of best |
+|---|---|---|---|---|---|
+| Q3_K_S file (bartowski, from the original weights) | 6.20 | 88.9% | 96.5% | 94.5% | 97.2% |
+| Q3_K_S requantized from the Q4_K_M file | 6.20 | 88.4% | 96.5% | 94.5% | 96.9% |
+| Q2_K file (from the original weights) | 5.37 | 86.0% | 95.9% | 91.5% | 93.7% |
+| Q2_K requantized from the Q4_K_M file | 5.37 | 81.4% | 93.0% | 87.8% | 91.7% |
+
+The requantized rows are the discriminator for an assumption made in this plan and
+then doubted: a copy made from the target's own Q4 weights was called
+"pessimistic", then suspected of being optimistic (it only adds its own rounding to
+the target's). Measured, neither: at 3 bits the source makes no difference, at 2
+bits requantizing loses 4.6 points. **So a copy is FETCHED as the published
+lower-bit file, not derived from the Q4 shards.** And the 7B-coder/14B-general gap
+(94.2% vs 88.9% at Q3) is the MODEL — the general 14B has more near-ties of its own
+on these prompts — so agreement is a per-model figure to measure, not a constant.
 
 What it says:
 
@@ -636,10 +686,14 @@ local speed on our engine, S = the TH↔BE loop plus far compute:
 | exact, a second guess drafted where the copy is unsure (top 2) | 9.7 | 32.9 | 40.1 |
 | relaxed, near-best accepted (≥ 0.3 of best) | 8.1 | 41.0 | 43.5 |
 
-| 14B on an 8 GB card (today, card + processor: 3.35 tok/s) | whole Q3 copy | whole Q2 copy |
+| 14B on an 8 GB card (today, card + processor: 3.35 tok/s), the 14B's own measured rates | whole Q3 copy | whole Q2 copy |
 |---|---|---|
-| checked by this node's own processor (~360 ms a miss) | 16-24 | 11-18 |
-| checked by the swarm (~550 ms a miss) | 14-24 | 8-16 |
+| checked by this node's own processor (~360 ms a miss) | 13-20 | 11-18 |
+| checked by the swarm (~550 ms a miss) | 10-19 | 8-16 |
+
+(Q3_K_S 6.20 GiB fits the card with a ~2K-token cache on today's engine, which
+keeps the cache in f32 — 393 KB a token for a 14B; Q2_K 5.37 GiB fits with 4K. A
+half-precision cache, llama.cpp's default, fits both comfortably.)
 
 **The design this points to.** The near machine (the requester's card) holds a
 low-bit copy of the whole model — or, in the boomerang layout, the exact first and
@@ -654,6 +708,35 @@ with no card. And the checker can be MORE precise than anything the user could r
 (Q8 split across peers) — faster than local and better than local at once, once
 local decode is bound by bytes rather than submissions (a Q2 copy reads ~40% fewer
 bytes per token than Q4; today's engine cannot cash that, `local_decode_submissions.md`).
+
+**Relaxed acceptance, measured in real generation** (`relaxed_gen.py`: the copy
+drafts 12, the full model checks the chunk in one pass and keeps a guess when it
+rates it ≥ τ × its own best, else takes its own token; `relaxed_whole-q{3,2}.json`,
+6 prompts × 120 tokens). Corrections per 100 tokens are the miss rate m a split
+would pay a trip for; NLL is the FULL model's own teacher-forced negative
+log-likelihood per token of the text produced. The fair reference is not greedy
+(the single likeliest text, 0.266) but what the model writes when sampled as
+clients sample it — **T=0.7, top-p 0.9: 0.349** (`sampled_ref.py`, 3 samples per
+prompt, per-prompt range 0.08-0.63).
+
+| drafter | rule | corrections / 100 tokens | full model's NLL/token |
+|---|---|---|---|
+| whole Q3_K_S | exact (τ = 1) | 6.4 (≈1 of it the numeric floor) | 0.255 |
+| whole Q3_K_S | ≥ 0.5 of best | 2.3 | 0.306 |
+| whole Q3_K_S | ≥ 0.3 of best | **0.15** | 0.285 |
+| whole Q2_K | exact | 13.5 | 0.257 |
+| whole Q2_K | ≥ 0.5 of best | 6.8 | 0.259 |
+| whole Q2_K | ≥ 0.3 of best | 3.2 | 0.307 |
+
+The generated miss rates match the per-position table above, so the agreement
+figures hold in real generation. A 3-bit copy under "≥ 0.3 of best" needs about
+one correction per 675 tokens — under a millisecond a token of network cost at a
+550 ms loop — and every relaxed text scored inside what the full model writes
+itself at chat temperature. That is one measure on six prompts: directional, not
+a verdict on task accuracy (code that must run, facts that must be right), which
+an opt-in mode still has to be checked against. It is also a DIFFERENT output
+distribution from the full model's, by construction — never the default, never
+described as the full model's own output.
 
 **What is missing, in order:** (1) the continuous stream — the same Q3 drafter in
 today's round-based DSD projects only ~13 tok/s TH↔BE, because on this engine a
