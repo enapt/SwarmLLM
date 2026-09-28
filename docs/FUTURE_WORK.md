@@ -28,7 +28,7 @@ and in the two "2026-09-14" headings below; read the row, not just the number.
 
 | # | Item | Status |
 |---|---|---|
-| 146 | **A worker kept admitting simultaneous chats while its card stalled for 2-60 s at a time** — an hour of it on the live node (8B on an 8 GB laptop card that also drives a 320 Hz desktop), then a hard hang of the whole PC (gotcha #754) | **Guard BUILT 2026-09-28 (`inference::card_pace`), not yet released or measured on a card.** A stall of ≥ 2 s halves how many generations the worker runs at once and refuses the rest as the busy 503 the router re-plans; one more is allowed back per quiet minute. The cause of the stalls is NOT known and the guard does not need it. **Deep dive (same evening): the slow step is a FRESH card allocation, ~1000× slower after two days of Windows uptime, same binary fast after a reboot (microsoft/WSL#41701's shape); we hand memory back to the driver at every admission (pool release threshold 0) — candidate fix written, not built.** Body: § "A graphics card that stalls is handed more work" + its deep-dive subsection. |
+| 146 | **A worker kept admitting simultaneous chats while its card stalled for 2-60 s at a time** — an hour of it on the live node (8B on an 8 GB laptop card that also drives a 320 Hz desktop), then a hard hang of the whole PC (gotcha #754) | **Guard BUILT 2026-09-28 (`inference::card_pace`), not yet released or measured on a card.** A stall of ≥ 2 s halves how many generations the worker runs at once and refuses the rest as the busy 503 the router re-plans; one more is allowed back per quiet minute. The cause of the stalls is NOT known and the guard does not need it. **Deep dive (same evening): the slow step is a FRESH card allocation, ~1000× slower after two days of Windows uptime, same binary fast after a reboot (microsoft/WSL#41701's shape); we hand memory back to the driver at every admission (pool release threshold 0).** **Allocator fix BUILT + verified on the card 2026-09-28 night (`inference::cuda_pool`, not yet released): the pool keeps freed memory while serving, counts it free for the KV budget, hands it back after 60 s idle; mechanism fired, #121 still fixed, replies byte-identical, decode not slower — the high-uptime reading is still owed.** Body: § "A graphics card that stalls is handed more work" + its deep-dive subsection. |
 
 ### 2026-09-27 — GPU↔GPU spread benchmark on the released v0.3.209-alpha
 
@@ -16156,13 +16156,21 @@ reboot or `pnputil /restart-device` on the GPU does). The crash hour sat at 54 h
   outlier. NVIDIA part 2: "exclusive to a single process: use the maximum release threshold".
 - The worker is one loop, so a slow allocation freezes every running chat (#146 above).
 
-**Candidate fix, NOT built** — needs a CUDA build to verify, which waits on the user: set the
-pool's release threshold to the maximum at worker start, and make `device_free_and_total_bytes`
-count the pool's reserved-but-unused bytes (`CU_MEMPOOL_ATTR_RESERVED_MEM_CURRENT` −
-`USED_MEM_CURRENT`) as free, instead of relying on the synchronize to trim — #121's reason for
-the sync stays satisfied without handing memory to the driver. Check with SINGLE chats only:
-the first-snapshot and admission times of one long prompt, A/B inside one binary, and the
-pool attributes logged before/after one admission.
+**Fix BUILT 2026-09-28 night** (`inference::cuda_pool`, commit `4abb05be`, not yet released):
+the threshold goes to the maximum where the loader picks the card (`split::loader::load_device`),
+`device_free_and_total_bytes` counts the pool's reserved-but-unused bytes as free after its
+synchronize (so #121 needs no hand-back), and the worker trims the pool after 60 s idle —
+research added one half the candidate lacked: the driver lends a pool's spare memory only within
+its OWN process ("an unrelated memory allocation request in the same process", NVIDIA part 1),
+and a node runs one worker per model, so a pool that never trims would starve a second model
+and read to the daemon's `nvidia-smi` as another program's memory. **Verified on the card with
+single requests** (Windows uptime 5.5 h): pool held 5,856 MB between requests with ~850 MB
+unused and counted free; idle hand-back 11 ms; three ~1,835-token prompts served in both arms;
+replies byte-identical on Llama-3.1-8B and Qwen2.5-Coder-7B; decode 50.1/50.4 vs 48.6/48.7
+tok/s best-of-3 (not slower; inside the spread). Evidence: `docs/invariants/memory.md` § "A
+card's memory pool keeps what the worker frees". **Still owed: the same single-request run
+(`~/swarmllm-pool-0928/pool_ab.sh`) at high Windows uptime (~2 days)**, where the admission
+cost this exists for appears; at 5.5 h fresh allocations are still cheap and the arms tie.
 
 **Other findings.**
 - **FECS (nvlddmkm 13) bursts track TWO CUDA processes sharing the card**: the 09-28 00:09/00:34

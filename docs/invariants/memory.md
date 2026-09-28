@@ -1546,3 +1546,74 @@ timed nor refused — refusing one mid-request kills that request, so only a pro
 refused; `handle_generate`'s per-token forwards are not timed; the daemon does not advertise a
 tripped card to peers. **Measured on a card: not yet** — that is a stress test, and follows
 `memory/feedback_research_before_stress_tests.md`.
+
+## A card's memory pool keeps what the worker frees (2026-09-28)
+
+**What it replaced.** cudarc allocates every candle buffer with `cuMemAllocAsync` from the
+device's current memory pool and frees into it, and nothing in cudarc, candle or this repo set
+the pool's release threshold — so it was the driver default, ZERO: "all unused memory in the
+pool is released back to the OS during every synchronization operation" (NVIDIA, "Using the
+CUDA Stream-Ordered Memory Allocator", part 1). The worker synchronizes at every admission
+(#121's budget reading) and at every token's logits copy, so every admission's buffers, every
+prefix snapshot and every token's ~650 temporaries went back to the driver and were fetched
+fresh. On WSL2 a fresh fetch crosses the host's GPU channel, and on the dev machine that cost
+grew ~1000× over two days of Windows uptime (the same first snapshot copy: 0.007 s at ~8 h,
+8.8 s at ~49 h — `docs/FUTURE_WORK.md` #146 deep dive, gotcha #755) until a worker admitting
+several chats stalled 2-60 s per admission and the PC hung (#754).
+
+**Research.** PyTorch's `cudaMallocAsync` backend sets the threshold to `UINT64_MAX`; RAPIDS RMM
+holds its pool for the process's life; ggml plans its buffers once. NVIDIA, part 2: "Exclusive
+to a single process: Use the maximum release threshold"; "Shared among cooperating processes:
+… set each process pool to an appropriate value to avoid any one process monopolizing all
+device memory". And part 1: memory in a pool "can also be released implicitly by the CUDA
+driver to enable an unrelated memory allocation request in the SAME process to succeed" — never
+for another process. A node runs one worker process per model beside the desktop, so a pool
+that keeps everything forever would hold room another worker, or a model the daemon wants to
+load, cannot get; and the daemon reads the card through `nvidia-smi`, which charges a worker's
+kept memory to "other programs" (`compute_vram_budget`).
+
+**The rule.** `inference::cuda_pool`:
+- `split::loader::load_device` — the one place a worker picks the card — raises the threshold
+  to max once per process (`keep_freed_memory`). Guard:
+  `every_split_model_reaches_the_card_through_load_device` (planted violation verified red).
+- `kv_budget::device_free_and_total_bytes` adds the pool's reserved-but-unused bytes
+  (`RESERVED_MEM_CURRENT − USED_MEM_CURRENT`) to `cuMemGetInfo`'s free figure, after the
+  synchronize, so #121 stays fixed without the hand-back; the loader's load-time budget does the
+  same. The reading is logged at debug: `DIAG: card memory reading`.
+- `model_worker::run_worker` hands the unused part back (`cuMemPoolTrimTo(pool, 0)` after a
+  synchronize) once the worker has had nothing to do for `IDLE_TRIM` = 60 s, logged as `DIAG:
+  card memory pool handed its unused memory back after idle` — inside the daemon's own idle
+  unload (`idle_unload_secs`, 300 s by default).
+- A/B in one binary: `SWARMLLM_CUDA_POOL_KEEP=0` (driver default, no trim).
+
+**Measured 2026-09-28 23:04-23:12 +07** on the CUDA release build of `4abb05be`, RTX 3070 Laptop
+8 GB, Llama-3.1-8B Q4_K_M alone on the card, isolated node, live node stopped, Windows uptime
+5.5 h, SINGLE requests only (`~/swarmllm-pool-0928/pool_ab.sh`, arms interleaved keep /
+control / keep / control):
+- **Mechanism fired**: with the switch unset the pool held 5,856 MB reserved between requests
+  with ~850 MB of it unused and counted free (device 974 MB + pool 853 MB); the idle hand-back
+  took 11 ms and returned it to 5,248 / 5,120 MB (in use 5,013). The control arm logged the
+  driver-default line.
+- **#121 stays fixed**: three ~1,835-token prompts in sequence served in both arms, zero
+  refusals of any kind.
+- **Speed at 5.5 h uptime**: prompt 2.36-2.47 s keep vs 2.42-2.48 s control (no difference —
+  fresh allocations are still cheap this soon after a boot, which is the deep dive's
+  prediction); decode best-of-3 50.1 / 50.4 tok/s keep vs 48.6 / 48.7 control, the same
+  direction in both pairs (~3%, inside this box's spread, so no claim beyond "not slower").
+  The win this exists for — admissions at high host uptime — needs a run after ~2 days of
+  uptime, the same script.
+- **Replies byte-identical** between the arms, greedy, after a long prompt had used and freed
+  memory, on Llama-3.1-8B and Qwen2.5-Coder-7B (`replies_ab.sh`) — a reused buffer read before
+  it is written would show there.
+- ⚠ The prompt sent after 75 s idle took ~0.2-0.3 s longer in BOTH arms, so it is not the
+  hand-back (the card clocks down when idle); without the control arm it would have read as
+  the trim's cost.
+
+**What a change must keep.**
+- **Count kept memory as free wherever this process asks how much room it has** — otherwise the
+  budget reads a finished request's cache as used and refuses the next long prompt (#121 by
+  another road).
+- **Hand it back when idle**; the driver will not lend it to another process, and the daemon
+  cannot tell it from another program's memory.
+- **The synchronize before the reading stays**: a buffer freed on the stream counts as unused
+  only after it.
