@@ -28,7 +28,7 @@ and in the two "2026-09-14" headings below; read the row, not just the number.
 
 | # | Item | Status |
 |---|---|---|
-| 146 | **A worker kept admitting simultaneous chats while its card stalled for 2-60 s at a time** — an hour of it on the live node (8B on an 8 GB laptop card that also drives a 320 Hz desktop), then a hard hang of the whole PC (gotcha #754) | **Guard BUILT 2026-09-28 (`inference::card_pace`), not yet released or measured on a card.** A stall of ≥ 2 s halves how many generations the worker runs at once and refuses the rest as the busy 503 the router re-plans; one more is allowed back per quiet minute. The cause of the stalls is NOT known and the guard does not need it. Body: § "A graphics card that stalls is handed more work". |
+| 146 | **A worker kept admitting simultaneous chats while its card stalled for 2-60 s at a time** — an hour of it on the live node (8B on an 8 GB laptop card that also drives a 320 Hz desktop), then a hard hang of the whole PC (gotcha #754) | **Guard BUILT 2026-09-28 (`inference::card_pace`), not yet released or measured on a card.** A stall of ≥ 2 s halves how many generations the worker runs at once and refuses the rest as the busy 503 the router re-plans; one more is allowed back per quiet minute. The cause of the stalls is NOT known and the guard does not need it. **Deep dive (same evening): the slow step is a FRESH card allocation, ~1000× slower after two days of Windows uptime, same binary fast after a reboot (microsoft/WSL#41701's shape); we hand memory back to the driver at every admission (pool release threshold 0) — candidate fix written, not built.** Body: § "A graphics card that stalls is handed more work" + its deep-dive subsection. |
 
 ### 2026-09-27 — GPU↔GPU spread benchmark on the released v0.3.209-alpha
 
@@ -16116,3 +16116,73 @@ test** and follows `memory/feedback_research_before_stress_tests.md`: with the u
 for that run, after the machine has been checked, live node stopped, under `timeout`, stop at
 the first nvlddmkm event. Mechanism check: the `DIAG: card pace — stalled` line and a refusal
 reaching the client, with the stall count per hour falling against the 2026-09-28 log.
+
+### #146 deep dive (2026-09-28 evening) — the slow step is a FRESH card allocation, and it slows with Windows uptime
+
+**The controlled series.** Every release gate since .208 ran the same `kv121` workload on this
+card with the live node stopped. Its FIRST prefix-cache snapshot copy (a few hundred MB of new
+allocations plus a device copy; later copies in the same run reuse freed memory and take 1-2 ms):
+
+| gate | Windows uptime | first copy | per position | 4 simultaneous chats |
+|---|---|---|---|---|
+| .208 (09-26) | ~8 h | 0.007 s (919) | 0.008 ms | 20.4 tok/s each |
+| .209 (09-27) | ~24 h | 2.3 s (431) | 5.3 ms | 13.1 |
+| .211 (09-27) | ~35 h | 4.0 s (515) | 7.8 ms | 11.5 |
+| .212 (09-28) | ~49 h | 8.8 s (1009) | 8.7 ms | 8.6 |
+
+Prompt COMPUTE did not slow (the cached-path prompt stayed ~2.4 s in every gate), and a lone
+chat's decode stayed 36-50 tok/s at 47-55 h. Nothing on the card path changed from .208 to
+.209 (the only layer change is gated on `q.device().is_cpu()`; the lockfile added a CPU gemm).
+**Discriminator, same binary**: after the reboot (~4 h uptime), ONE ordinary 1,065-token chat on
+the .212 live node did its prompt AND its first snapshot in 1.5 s together — against 8.8 s for
+the copy alone at 49 h. The cost of a fresh allocation on this host grew ~1000× over two days
+of uptime; our code did not change. This is the shape of microsoft/WSL#41701 (CUDA calls slow
+over days of host uptime, host-side GPU-PV state; `wsl --shutdown` does not recover it, a host
+reboot or `pnputil /restart-device` on the GPU does). The crash hour sat at 54 h.
+
+**Why our node meets it more than it needs to** (all verified in source):
+- cudarc 0.19 allocates from the card's memory pool (`cuMemAllocAsync`,
+  `CU_DEVICE_ATTRIBUTE_MEMORY_POOLS_SUPPORTED` = 1 on this card, queried read-only) and frees
+  into it; **nothing in cudarc, candle or this repo sets the pool's release threshold**, so at
+  every synchronize the pool hands everything freed back to the driver ("all unused memory in
+  the pool is released back to the OS during every synchronization operation" — NVIDIA,
+  "Using the CUDA Stream-Ordered Memory Allocator", part 1). `device_free_and_total_bytes`
+  synchronizes at every admission (#121's fix, .208), so each admission's ~64 hydration
+  allocations and every snapshot go back to the driver — on WSL2, a trip through the host
+  channel ("all the GPU operations are serialized through VMBUS", NVIDIA, "Leveling up CUDA
+  performance on WSL2").
+- PyTorch's `cudaMallocAsync` backend sets the threshold to `UINT64_MAX` citing that guidance;
+  RAPIDS RMM holds a pool for the application's life; ggml plans its buffers once. We are the
+  outlier. NVIDIA part 2: "exclusive to a single process: use the maximum release threshold".
+- The worker is one loop, so a slow allocation freezes every running chat (#146 above).
+
+**Candidate fix, NOT built** — needs a CUDA build to verify, which waits on the user: set the
+pool's release threshold to the maximum at worker start, and make `device_free_and_total_bytes`
+count the pool's reserved-but-unused bytes (`CU_MEMPOOL_ATTR_RESERVED_MEM_CURRENT` −
+`USED_MEM_CURRENT`) as free, instead of relying on the synchronize to trim — #121's reason for
+the sync stays satisfied without handing memory to the driver. Check with SINGLE chats only:
+the first-snapshot and admission times of one long prompt, A/B inside one binary, and the
+pool attributes logged before/after one admission.
+
+**Other findings.**
+- **FECS (nvlddmkm 13) bursts track TWO CUDA processes sharing the card**: the 09-28 00:09/00:34
+  bursts fired one per request, ~4 s after each DSD request finished, while the target
+  (Qwen-Coder-7B) and the drafter (Qwen-0.5B) ran in separate workers — per-token context
+  switches between two processes plus the desktop. Crash day had ONE worker; its single FECS
+  (16:25) fell inside the stall hour. 95 of 99 events in 30 days had no worker start/load/exit
+  within 10 s.
+- **`systemd-journald: Time jumped backwards` is an IDLE artifact, not a stall signal** —
+  3-5 per 5 min while idle, 0-1 during the stall stretches (anti-correlated). #718 read it as
+  the crash's "only anomaly"; it is not.
+- `dxgvmbus.c:3095 field-spanning write` on this kernel (6.18.33.1) is the known once-per-boot
+  FORTIFY warning (microsoft/WSL#40580; wslg#1467): nothing breaks.
+- No residency failures (`make_resident -12`) and no `wait_for_completion failed` in the
+  crashed boot's kernel log; no TDR recovered (4101) in 30 days — the stalls were SLOW calls,
+  not a frozen engine the OS reset. Thermal log: only ACPI fan on/off; no WHEA.
+- The card drives the desktop with the kernel-exec watchdog ON (`KERNEL_EXEC_TIMEOUT` = 1) and
+  compute preemption supported. NVIDIA recommends HAGS ON for WSL2 (submission path); no
+  source ties the 320 Hz refresh to stalls.
+- #718 (CPU-only bench, card idle) fits none of the card mechanisms; the only candidate found is
+  the laptop's shared CPU/GPU power arbitration (Dynamic Boost) — unverified.
+- Windows Update 0x80073712 twice (09-26 08:50, 09-28 03:15): component store corrupt — a
+  user-side `DISM /Online /Cleanup-Image /RestoreHealth` + `sfc /scannow`.
