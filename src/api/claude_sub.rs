@@ -250,6 +250,7 @@ fn build_content_chunk(
         } else {
             Some(content)
         },
+        reasoning_content: None,
         tool_calls: None,
     };
     super::openai::ChatCompletionChunk {

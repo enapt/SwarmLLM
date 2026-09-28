@@ -262,6 +262,20 @@ pub fn parse_tool_calls(text: &str) -> Option<Vec<ParsedToolCall>> {
 /// a call at all. Leaving it out lets prose that merely mentions tool calls
 /// keep streaming.
 const CALL_MARKERS: [&str; 6] = [
+    FRAMED_CALL_MARKERS[0],
+    FRAMED_CALL_MARKERS[1],
+    FRAMED_CALL_MARKERS[2],
+    FRAMED_CALL_MARKERS[3],
+    FRAMED_CALL_MARKERS[4],
+    "{",
+];
+
+/// The call markers that announce a tool call by themselves — all but the bare
+/// brace. What an UNCLOSED scratchpad is held back at while it streams
+/// (`StreamingToolText::take_reasoning`): a brace is everywhere in a model
+/// thinking about code, and stopping at it would silence exactly the
+/// scratchpads that run longest.
+const FRAMED_CALL_MARKERS: [&str; 5] = [
     "<tool_call>",
     "[TOOL_CALLS]",
     "<|python_tag|>",
@@ -270,7 +284,6 @@ const CALL_MARKERS: [&str; 6] = [
     // surfaces emit the literal word `functools` as content and then withhold
     // the call — the same leak the code-fence retraction above exists to stop.
     "functools",
-    "{",
 ];
 
 /// How many bytes at the END of `text` could be the beginning of `marker`.
@@ -291,6 +304,17 @@ fn partial_marker_overlap(text: &str, marker: &str) -> usize {
                 && text.as_bytes().ends_with(&marker.as_bytes()[..n])
         })
         .unwrap_or(0)
+}
+
+/// Length of the prefix of `text` that holds none of `markers` and does not end
+/// in the start of one. Not cut inside a character: every marker is ASCII.
+fn before_any_marker(text: &str, markers: &[&str]) -> usize {
+    markers
+        .iter()
+        .fold(text.len(), |safe, marker| match text.find(marker) {
+            Some(at) => safe.min(at),
+            None => safe.min(text.len() - partial_marker_overlap(text, marker)),
+        })
 }
 
 /// Length of the prefix of `text` that is certainly ordinary content: it can be
@@ -317,14 +341,7 @@ fn partial_marker_overlap(text: &str, marker: &str) -> usize {
 /// message. The alternative, which this replaced, threw away text the model
 /// had actually produced.
 pub fn content_prefix_len(text: &str) -> usize {
-    let mut safe = text.len();
-    for marker in CALL_MARKERS {
-        if let Some(at) = text.find(marker) {
-            safe = safe.min(at);
-        } else {
-            safe = safe.min(text.len() - partial_marker_overlap(text, marker));
-        }
-    }
+    let mut safe = before_any_marker(text, &CALL_MARKERS);
     // A code fence that opens right where a call may begin is scaffolding FOR
     // the call, not content. `strip_code_fences` already removes it before
     // parsing, so a fenced call parses fine — but the prefix was measured on the
@@ -381,6 +398,30 @@ enum Reasoning {
     Absent,
 }
 
+/// Where a reasoning model's scratchpad goes while its reply streams.
+///
+/// A REQUIRED constructor argument for the same reason `detect_tools` is: the
+/// two surfaces answer it differently, and a default would let one of them
+/// answer it by accident.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ReasoningOut {
+    /// Streamed as it is written, through [`StreamingToolText::take_reasoning`],
+    /// because the surface has a field for it — OpenAI's `delta.reasoning_content`,
+    /// the name llama.cpp's server and DeepSeek's API use. Withholding it made a
+    /// reasoning model's stream silent until the block closed, and a reply cut
+    /// off inside the block arrived as ONE chunk of scratchpad when the stream
+    /// ended (field report 2026-09-28: qwen3-1.7b, 1 content chunk thinking
+    /// against 50 with `/no_think`). An unfinished block is reasoning to the
+    /// end — it is never released as the answer.
+    Separate,
+    /// Not shown while it streams: the surface has no field it may use.
+    /// Anthropic's `thinking` blocks exist only for a request that enabled
+    /// thinking, and carry a signature this server cannot produce. An
+    /// unfinished block is released as text at the end, exactly as the
+    /// non-streamed finaliser leaves it.
+    Withheld,
+}
+
 pub struct StreamingToolText {
     text: String,
     emitted: usize,
@@ -390,11 +431,44 @@ pub struct StreamingToolText {
     /// Deliberately a field rather than a condition at the call site, and
     /// deliberately NOT defaulted — see [`StreamingToolText::new`].
     detect_tools: bool,
+    reasoning_out: ReasoningOut,
+    /// Where the scratchpad's own text begins (just past `<think>`), once the
+    /// reply is known to open with one.
+    reasoning_from: Option<usize>,
+    /// Where it ends (the `</think>`), once that has arrived.
+    reasoning_to: Option<usize>,
+    /// How much of the scratchpad has been handed out by `take_reasoning`.
+    reasoning_released: usize,
+    /// Where the reply proper begins: past a closed scratchpad and the
+    /// whitespace after it, else 0. The tool-call search starts here.
+    content_from: usize,
 }
 
 /// Opening and closing markers of a reasoning preamble.
 const THINK_OPEN: &str = "<think>";
 const THINK_CLOSE: &str = "</think>";
+
+/// A finalised reply that ended INSIDE its reasoning block, split for a
+/// surface with a field for the scratchpad: `(String::new(), Some(reasoning))`.
+/// Any other reply comes back unchanged with `None`.
+///
+/// `finalize_reply_text` leaves an unclosed block in the text on purpose — it
+/// serves surfaces with nowhere else to put it, and an empty reply there cannot
+/// be told from a blank answer. Where `reasoning_content` exists that argument
+/// is gone: the scratchpad is visible in its own field and `finish_reason` says
+/// `length`. This is the non-streamed half of [`ReasoningOut::Separate`], and
+/// the two are held to agreeing on `content` by
+/// `streamed_and_unstreamed_replies_strip_the_same_scratchpad`. The reasoning
+/// is trimmed as `take_reasoning` trims what it streams.
+pub fn split_unfinished_reasoning(content: String) -> (String, Option<String>) {
+    let lead = content.len() - content.trim_start().len();
+    if !content[lead..].starts_with(THINK_OPEN) || content.contains(THINK_CLOSE) {
+        return (content, None);
+    }
+    let reasoning = content[lead + THINK_OPEN.len()..].trim();
+    let reasoning = (!reasoning.is_empty()).then(|| reasoning.to_string());
+    (String::new(), reasoning)
+}
 
 impl StreamingToolText {
     /// A buffer for one streamed reply.
@@ -418,12 +492,17 @@ impl StreamingToolText {
     /// Requiring the answer here is what makes the mistake unrepresentable: a
     /// caller must say which kind of reply it is reading, and cannot express
     /// "do not use the buffer at all".
-    pub fn new(detect_tools: bool) -> Self {
+    pub fn new(detect_tools: bool, reasoning_out: ReasoningOut) -> Self {
         Self {
             text: String::new(),
             emitted: 0,
             reasoning: Reasoning::default(),
             detect_tools,
+            reasoning_out,
+            reasoning_from: None,
+            reasoning_to: None,
+            reasoning_released: 0,
+            content_from: 0,
         }
     }
 
@@ -442,7 +521,13 @@ impl StreamingToolText {
     /// ordinary chat keeps streaming at exactly the rate it always did.
     fn releasable_len(&self) -> usize {
         if self.detect_tools {
-            content_prefix_len(&self.text).max(self.emitted)
+            // Searched from where the reply proper begins, never from the top:
+            // a closed scratchpad is not a place a call can start, and a `{` in
+            // it — a model thinking about code writes them constantly — sat
+            // behind everything already released and held the whole answer
+            // back to the end of the stream.
+            let from = self.content_from;
+            (from + content_prefix_len(&self.text[from..])).max(self.emitted)
         } else {
             self.text.len()
         }
@@ -479,6 +564,9 @@ impl StreamingToolText {
                 let rest = &self.text[lead..];
                 if rest.starts_with(THINK_OPEN) {
                     self.reasoning = Reasoning::Inside;
+                    let from = lead + THINK_OPEN.len();
+                    self.reasoning_from = Some(from);
+                    self.reasoning_released = from;
                     return self.withholding_reasoning();
                 }
                 // Still a possible prefix of `<think>`? Then wait. Otherwise the
@@ -524,6 +612,7 @@ impl StreamingToolText {
             }
             Reasoning::Inside => match self.text.find(THINK_CLOSE) {
                 Some(at) => {
+                    self.reasoning_to = Some(at);
                     let after = at + THINK_CLOSE.len();
                     let tail = &self.text[after..];
                     let ws = tail.len() - tail.trim_start().len();
@@ -538,6 +627,7 @@ impl StreamingToolText {
                     // Never emitted, and never will be: this is the deliberate
                     // loss the non-streaming finaliser also makes.
                     self.emitted = self.emitted.max(after + ws);
+                    self.content_from = after + ws;
                     self.reasoning = Reasoning::Absent;
                     false
                 }
@@ -578,9 +668,88 @@ impl StreamingToolText {
         })
     }
 
+    /// Scratchpad text that has become safe to show since the last call —
+    /// `None` unless this buffer streams reasoning ([`ReasoningOut::Separate`]).
+    /// Call it after [`push`](Self::push), and send what it returns BEFORE the
+    /// content `push` returned: a token that closes the block can release both,
+    /// and the scratchpad came first.
+    ///
+    /// Holds back what the end of the block could still be: a tail that may be
+    /// the start of `</think>`, and trailing whitespace, which is released once
+    /// something follows it and dropped if `</think>` does. The block's opening
+    /// whitespace is dropped too — the same trimming llama.cpp applies to
+    /// `reasoning_content`.
+    pub fn take_reasoning(&mut self) -> Option<String> {
+        let limit = match (self.reasoning_to, self.reasoning_from) {
+            (Some(end), _) => end,
+            (None, Some(from)) if self.reasoning == Reasoning::Inside => {
+                let open = self.text.len() - partial_marker_overlap(&self.text, THINK_CLOSE);
+                // With tools in play an unclosed block can end in a call
+                // instead of `</think>` (Qwen3 does it); its markup is not
+                // thinking. Held at the framed markers only — see
+                // `FRAMED_CALL_MARKERS` for why not at a brace.
+                if self.detect_tools {
+                    from + before_any_marker(&self.text[from..open], &FRAMED_CALL_MARKERS)
+                } else {
+                    open
+                }
+            }
+            _ => return None,
+        };
+        self.release_reasoning(limit)
+    }
+
+    /// Everything of the scratchpad not yet handed out, for the END of a
+    /// stream: a block the reply never closed is released whole, a tail that
+    /// looked like the start of `</think>` included, because nothing more is
+    /// coming to finish it.
+    ///
+    /// `a_call_ends_it`: the reply turned out to hold a tool call. A block
+    /// closed by `</think>` is unaffected; an UNCLOSED one ends where the call
+    /// begins — Qwen3 goes straight from `<think>` to the call without closing
+    /// it, and the rest of the text is the call, not thinking. Same rule as
+    /// [`leading_content`]. What streamed before the end cannot be taken back:
+    /// a call begun inside an unclosed block can have part of its text in the
+    /// streamed reasoning. Holding reasoning back at every `{` would have
+    /// stopped a code-heavy scratchpad streaming on every tool request, which
+    /// is the silence this channel exists to end.
+    pub fn finish_reasoning(&mut self, a_call_ends_it: bool) -> Option<String> {
+        let limit = match (self.reasoning_to, self.reasoning_from) {
+            (Some(end), _) => end,
+            (None, Some(from)) if a_call_ends_it => from + content_prefix_len(&self.text[from..]),
+            (None, Some(_)) => self.text.len(),
+            (None, None) => return None,
+        };
+        self.release_reasoning(limit)
+    }
+
+    fn release_reasoning(&mut self, limit: usize) -> Option<String> {
+        if self.reasoning_out != ReasoningOut::Separate {
+            return None;
+        }
+        let from = self.reasoning_from?;
+        let mut start = self.reasoning_released.min(limit);
+        if start == from {
+            let seg = &self.text[start..limit];
+            start += seg.len() - seg.trim_start().len();
+        }
+        let end = start + self.text[start..limit].trim_end().len();
+        (end > start).then(|| {
+            self.reasoning_released = end;
+            self.text[start..end].to_string()
+        })
+    }
+
     /// Everything not yet emitted — the fallback for a reply that turned out
     /// to be ordinary text after all (a model given tools may simply answer).
     pub fn pending_all(&mut self) -> Option<String> {
+        // A reply that ended INSIDE its scratchpad has no answer to release
+        // when the scratchpad has its own field: it went out as reasoning, and
+        // releasing it again here would show it twice, once as the reply.
+        if self.reasoning_out == ReasoningOut::Separate && self.reasoning == Reasoning::Inside {
+            self.emitted = self.text.len();
+            return None;
+        }
         // Nothing released yet means the reply's opening has not been dropped
         // — a reply that never left `Undecided`, e.g. one that was only
         // whitespace. Drop it here by the same rule, or the stream would end
@@ -599,8 +768,17 @@ impl StreamingToolText {
         })
     }
 
-    pub fn text(&self) -> &str {
-        &self.text
+    /// The reply to search for a tool call at the end of the stream: past a
+    /// scratchpad that CLOSED, everything otherwise. The non-streamed surfaces
+    /// parse the finalised reply, which has already lost a closed block — so
+    /// searching the whole text here let JSON a model sketched while thinking
+    /// become a `tool_calls` answer when streamed and a `stop` when not. An
+    /// UNCLOSED block is searched whole: the call is what ended it.
+    pub fn reply_text(&self) -> &str {
+        match self.reasoning_to {
+            Some(at) => &self.text[at + THINK_CLOSE.len()..],
+            None => &self.text,
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -1214,7 +1392,7 @@ mod tests {
     /// llama-3.2-3b, identical prompt, 120 content deltas without `tools` and
     /// **1** with them.
     fn deltas_for(reply: &str, token_len: usize) -> (Vec<String>, super::StreamingToolText) {
-        let mut buf = super::StreamingToolText::new(true);
+        let mut buf = super::StreamingToolText::new(true, super::ReasoningOut::Withheld);
         let mut out = Vec::new();
         let chars: Vec<char> = reply.chars().collect();
         for chunk in chars.chunks(token_len) {
@@ -1235,7 +1413,7 @@ mod tests {
             "prose must stream, not arrive in one lump: got {} deltas",
             deltas.len()
         );
-        assert!(super::parse_tool_calls(buf.text()).is_none());
+        assert!(super::parse_tool_calls(buf.reply_text()).is_none());
         // Everything emitted plus whatever is left is exactly the reply — no
         // token lost, none duplicated.
         let mut seen = deltas.concat();
@@ -1257,7 +1435,7 @@ mod tests {
             "not one character of the marker may leak: {streamed:?}"
         );
         // The call is recognised from the whole text, exactly as before.
-        let calls = super::parse_tool_calls(buf.text()).expect("still parses");
+        let calls = super::parse_tool_calls(buf.reply_text()).expect("still parses");
         assert_eq!(calls[0].name, "read");
         // And the leftover content is the tail of the prose, never the call.
         let leftover = buf.pending_content().unwrap_or_default();
@@ -1273,7 +1451,7 @@ mod tests {
         let reply = "{\"name\": \"read\", \"arguments\": {\"path\": \"/x\"}}";
         let (deltas, mut buf) = deltas_for(reply, 3);
         assert!(deltas.is_empty(), "nothing to stream, got {deltas:?}");
-        assert!(super::parse_tool_calls(buf.text()).is_some());
+        assert!(super::parse_tool_calls(buf.reply_text()).is_some());
         assert_eq!(buf.pending_content(), None, "there is no content in it");
     }
 
@@ -2137,7 +2315,7 @@ mod tool_choice_tests {
 
 #[cfg(test)]
 mod streaming_reasoning_tests {
-    use super::StreamingToolText;
+    use super::{split_unfinished_reasoning, ReasoningOut, StreamingToolText};
 
     /// Run a reply through the buffer with tool detection ON — the shape these
     /// tests have always used.
@@ -2154,21 +2332,54 @@ mod streaming_reasoning_tests {
     /// streamed the model's `<think>` scratchpad to the user as the answer.
     /// Every test below runs both ways.
     fn stream_with(chunks: &[&str], detect_tools: bool) -> (String, StreamingToolText) {
-        let mut b = StreamingToolText::new(detect_tools);
+        let (out, _, b) = stream_in(chunks, detect_tools, ReasoningOut::Withheld);
+        (out, b)
+    }
+
+    /// Run a reply through the buffer the way `push_and_send` does: content
+    /// from `push`, then the scratchpad from `take_reasoning`. Returns the two
+    /// streams separately, before the end-of-stream flush.
+    fn stream_in(
+        chunks: &[&str],
+        detect_tools: bool,
+        mode: ReasoningOut,
+    ) -> (String, Vec<String>, StreamingToolText) {
+        let mut b = StreamingToolText::new(detect_tools, mode);
         let mut out = String::new();
+        let mut reasoning = Vec::new();
         for c in chunks {
-            if let Some(s) = b.push(c) {
+            let content = b.push(c);
+            if let Some(r) = b.take_reasoning() {
+                reasoning.push(r);
+            }
+            if let Some(s) = content {
                 out.push_str(&s);
             }
         }
-        (out, b)
+        (out, reasoning, b)
     }
 
     /// The whole reply as the client would receive it: the deltas, plus the
     /// end-of-stream flush every streaming surface runs.
     fn streamed_reply(chunks: &[&str], detect_tools: bool) -> String {
-        let (out, mut b) = stream_with(chunks, detect_tools);
-        out + &b.pending_all().unwrap_or_default()
+        streamed_reply_in(chunks, detect_tools, ReasoningOut::Withheld).0
+    }
+
+    /// Content and reasoning as the client receives them, flush included —
+    /// the order `emit_openai_tool_calls` runs it in (no tool call here).
+    fn streamed_reply_in(
+        chunks: &[&str],
+        detect_tools: bool,
+        mode: ReasoningOut,
+    ) -> (String, String) {
+        let (out, mut reasoning, mut b) = stream_in(chunks, detect_tools, mode);
+        if let Some(r) = b.finish_reasoning(false) {
+            reasoning.push(r);
+        }
+        (
+            out + &b.pending_all().unwrap_or_default(),
+            reasoning.concat(),
+        )
     }
 
     /// **Report #031: one whitespace-only first chunk disabled the filter for
@@ -2253,6 +2464,251 @@ mod streaming_reasoning_tests {
                      disagree on {chunks:?}"
                 );
             }
+
+            // And the surface with a reasoning field: its non-streamed half is
+            // the finaliser plus `split_unfinished_reasoning`, which is what
+            // `build_chat_completion_response` applies. Content must agree; the
+            // scratchpad of a reply that ended inside it must agree too.
+            let (content, unfinished) = split_unfinished_reasoning(whole.clone());
+            for detect_tools in [true, false] {
+                let (streamed, reasoning) =
+                    streamed_reply_in(chunks, detect_tools, ReasoningOut::Separate);
+                assert_eq!(
+                    streamed, content,
+                    "Separate (detect_tools={detect_tools}): content disagrees on {chunks:?}"
+                );
+                if let Some(unfinished) = &unfinished {
+                    assert_eq!(
+                        &reasoning, unfinished,
+                        "Separate: the unfinished scratchpad disagrees on {chunks:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// **Field report 2026-09-28: a reasoning model's stream was silent until
+    /// its block closed** — qwen3-1.7b sent ONE content chunk thinking against
+    /// 50 with `/no_think`. With a field for it, the scratchpad streams as it
+    /// is written, a chunk per token, and the answer still streams after it.
+    #[test]
+    fn the_scratchpad_streams_as_it_is_written_when_the_surface_has_a_field() {
+        for detect_tools in [true, false] {
+            let (out, reasoning, _) = stream_in(
+                &[
+                    "<think>",
+                    "\n",
+                    "Okay",
+                    ", the user",
+                    " wants a count",
+                    ".\n",
+                    "</think>",
+                    "\n\n",
+                    "One",
+                    ", two",
+                ],
+                detect_tools,
+                ReasoningOut::Separate,
+            );
+            assert_eq!(
+                reasoning,
+                ["Okay", ", the user", " wants a count", "."],
+                "detect_tools={detect_tools}: a delta per token, opening and \
+                 closing whitespace dropped"
+            );
+            assert_eq!(out, "One, two", "the answer streams after it, unchanged");
+        }
+    }
+
+    /// The control for the test above: on the surface WITHOUT a field nothing
+    /// changes — the scratchpad is withheld and never handed out.
+    #[test]
+    fn a_withheld_scratchpad_is_never_handed_out() {
+        let (out, reasoning, mut b) = stream_in(
+            &["<think>", "hmm", "</think>", "\n\n", "OK"],
+            false,
+            ReasoningOut::Withheld,
+        );
+        assert!(reasoning.is_empty());
+        assert_eq!(b.finish_reasoning(false), None);
+        assert_eq!(out, "OK");
+    }
+
+    /// `</think>` arrives a token at a time. Its first half must not reach the
+    /// reasoning stream as text, and a `<` that turns out NOT to start it must
+    /// not be lost either.
+    #[test]
+    fn a_closer_split_across_tokens_does_not_leak_into_the_reasoning() {
+        let (out, reasoning, _) = stream_in(
+            &["<think>", "a < b", " so", "</th", "ink>", "\n\n", "Yes"],
+            false,
+            ReasoningOut::Separate,
+        );
+        assert_eq!(reasoning.concat(), "a < b so");
+        assert_eq!(out, "Yes");
+    }
+
+    /// **The report's second symptom: at a small `max_tokens` the whole budget
+    /// goes inside the block, and the stream ended with the scratchpad as ONE
+    /// content chunk.** Streamed with a field, it arrives as reasoning while it
+    /// is written, and the end of the stream releases no content — the same
+    /// shape llama.cpp's server gives (`finish_reason: length`, content empty).
+    #[test]
+    fn a_reply_cut_off_inside_its_scratchpad_is_reasoning_not_the_answer() {
+        let (out, mut reasoning, mut b) = stream_in(
+            &["<think>", "\nCounting", " from one", " to twenty", "</th"],
+            false,
+            ReasoningOut::Separate,
+        );
+        assert_eq!(out, "", "nothing may stream as content");
+        if let Some(r) = b.finish_reasoning(false) {
+            reasoning.push(r);
+        }
+        assert_eq!(
+            reasoning.concat(),
+            "Counting from one to twenty</th",
+            "the held-back tail goes out at the end: nothing more can close it"
+        );
+        assert_eq!(
+            b.pending_all(),
+            None,
+            "and it is not released again as content"
+        );
+    }
+
+    /// Qwen3 can go from `<think>` straight to a tool call without closing the
+    /// block. At the end, the scratchpad stops where the call begins — the rule
+    /// `leading_content` applies to the non-streamed reply.
+    #[test]
+    fn an_unclosed_scratchpad_ended_by_a_call_stops_where_the_call_begins() {
+        let chunks = [
+            "<think>",
+            "I should run date",
+            "\n<tool",
+            "_call>",
+            "\n{\"name\": \"t\"}",
+        ];
+        let (_, mut reasoning, mut b) = stream_in(&chunks, true, ReasoningOut::Separate);
+        if let Some(r) = b.finish_reasoning(true) {
+            reasoning.push(r);
+        }
+        assert_eq!(
+            reasoning.concat(),
+            "I should run date",
+            "not a byte of the call"
+        );
+
+        // The control: with no tools asked for, `<tool_call>` is only text,
+        // and the scratchpad is all of it.
+        let (_, mut reasoning, mut b) = stream_in(&chunks, false, ReasoningOut::Separate);
+        if let Some(r) = b.finish_reasoning(false) {
+            reasoning.push(r);
+        }
+        assert_eq!(
+            reasoning.concat(),
+            "I should run date\n<tool_call>\n{\"name\": \"t\"}"
+        );
+    }
+
+    /// **With tools requested, a brace inside the scratchpad held the whole
+    /// answer back to the end of the stream.** The tool-call search ran over the
+    /// entire text, scratchpad included, so the `{` it found there sat behind
+    /// everything already released and nothing after it could go out. A model
+    /// thinking about code writes braces constantly, and every agentic client
+    /// sends `tools`. Both modes: this is the content stream, not the reasoning.
+    #[test]
+    fn a_brace_in_a_closed_scratchpad_does_not_hold_the_answer_back() {
+        for mode in [ReasoningOut::Withheld, ReasoningOut::Separate] {
+            let (out, _, _) = stream_in(
+                &[
+                    "<think>",
+                    "use a map {k: v}",
+                    "</think>",
+                    "\n\n",
+                    "The ",
+                    "answer",
+                ],
+                true,
+                mode,
+            );
+            assert_eq!(
+                out, "The answer",
+                "{mode:?}: the answer must stream as it arrives"
+            );
+        }
+    }
+
+    /// A call sketched INSIDE a closed scratchpad is not a call. The
+    /// non-streamed reply is parsed after the finaliser removed the block, so
+    /// the streamed one must not find it either, or the same reply answers
+    /// `tool_calls` streamed and `stop` not.
+    #[test]
+    fn a_call_sketched_in_a_closed_scratchpad_is_not_a_call() {
+        let (_, _, b) = stream_in(
+            &[
+                "<think>",
+                "maybe {\"name\": \"f\", \"arguments\": {}}",
+                "</think>",
+                "\n\n",
+                "No tool needed.",
+            ],
+            true,
+            ReasoningOut::Separate,
+        );
+        assert!(super::parse_tool_calls(b.reply_text()).is_none());
+
+        // The control: the same JSON AFTER the block is a call.
+        let (_, _, b) = stream_in(
+            &[
+                "<think>",
+                "hmm",
+                "</think>",
+                "\n\n",
+                "{\"name\": \"f\", \"arguments\": {}}",
+            ],
+            true,
+            ReasoningOut::Separate,
+        );
+        assert!(super::parse_tool_calls(b.reply_text()).is_some());
+    }
+
+    /// A block CLOSED by `</think>` is thinking to its end, even if the model
+    /// wrote a call's markup inside it while planning — the hold at a framed
+    /// marker applies only while the block is open.
+    #[test]
+    fn a_closed_scratchpad_is_released_whole_even_if_it_mentions_a_call() {
+        let (out, reasoning, _) = stream_in(
+            &["<think>", "use <tool_call> next", "</think>", "\n\n", "OK"],
+            true,
+            ReasoningOut::Separate,
+        );
+        assert_eq!(reasoning.concat(), "use <tool_call> next");
+        assert_eq!(out, "OK");
+    }
+
+    /// The non-streamed half. A reply that ended inside its scratchpad moves
+    /// it to the reasoning field; every other reply is untouched.
+    #[test]
+    fn only_an_unfinished_scratchpad_is_split_out_of_a_finished_reply() {
+        assert_eq!(
+            split_unfinished_reasoning("<think>\nstill going ".into()),
+            (String::new(), Some("still going".into()))
+        );
+        assert_eq!(
+            split_unfinished_reasoning(" <think>".into()),
+            (String::new(), None),
+            "an empty scratchpad is no reasoning, and no answer"
+        );
+        for kept in [
+            "Paris.",
+            "<think>closed</think> but the finaliser would have removed it",
+            "I <think> therefore",
+            "",
+        ] {
+            assert_eq!(
+                split_unfinished_reasoning(kept.into()),
+                (kept.to_string(), None)
+            );
         }
     }
 
@@ -2339,7 +2795,7 @@ mod streaming_reasoning_tests {
     /// the end.
     #[test]
     fn the_answer_still_streams_token_by_token() {
-        let mut b = StreamingToolText::new(true);
+        let mut b = StreamingToolText::new(true, ReasoningOut::Withheld);
         for c in ["<think>", "hmm", "</think>", "\n\n"] {
             assert_eq!(b.push(c), None, "nothing escapes while reasoning");
         }
@@ -2351,7 +2807,7 @@ mod streaming_reasoning_tests {
     /// content back waiting for a block that never comes.
     #[test]
     fn an_ordinary_reply_is_not_delayed() {
-        let mut b = StreamingToolText::new(true);
+        let mut b = StreamingToolText::new(true, ReasoningOut::Separate);
         assert_eq!(b.push("Hello").as_deref(), Some("Hello"));
         assert_eq!(b.push(" there").as_deref(), Some(" there"));
     }

@@ -488,6 +488,11 @@ pub struct ChatMessageResponse {
     pub role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
+    /// A reasoning model's scratchpad, when the reply ENDED inside it — see
+    /// `tool_parse::split_unfinished_reasoning`. A finished block is dropped by
+    /// the finalisers before the text reaches this surface (FUTURE_WORK #141).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
 }
@@ -549,6 +554,9 @@ pub struct Delta {
     pub role: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
+    /// A reasoning model's scratchpad — see `StreamEvent::Reasoning`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<StreamToolCall>>,
 }

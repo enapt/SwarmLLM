@@ -68,7 +68,7 @@ fn build_chat_completion_response(
     // Gated on the request actually carrying tools: otherwise a model asked to
     // "reply in JSON" could have a legitimate answer reinterpreted as a call.
     // Truncated output deliberately stays text (see `api::tool_parse`).
-    let (content, tool_calls, finish_reason) = if tools_requested {
+    let (content, reasoning_content, tool_calls, finish_reason) = if tools_requested {
         match crate::api::tool_parse::parse_tool_calls(&content) {
             Some(parsed) => {
                 let calls: Vec<crate::api::openai::types::ToolCall> = parsed
@@ -93,12 +93,20 @@ fn build_chat_completion_response(
                 // `finish_reason` must be "tool_calls" or clients never
                 // dispatch them (the reported response said "length").
                 let leading = crate::api::tool_parse::leading_content(&content).map(str::to_string);
-                (leading, Some(calls), "tool_calls".to_string())
+                (leading, None, Some(calls), "tool_calls".to_string())
             }
-            None => (Some(content), None, finish_reason),
+            None => {
+                let (content, reasoning) =
+                    crate::api::tool_parse::split_unfinished_reasoning(content);
+                (Some(content), reasoning, None, finish_reason)
+            }
         }
     } else {
-        (Some(content), None, finish_reason)
+        // A reply that ended inside its scratchpad: the stream sent it as
+        // `reasoning_content` and no content, so this must too — the same reply
+        // may not answer differently for `stream` (see `ReasoningOut::Separate`).
+        let (content, reasoning) = crate::api::tool_parse::split_unfinished_reasoning(content);
+        (Some(content), reasoning, None, finish_reason)
     };
 
     ChatCompletionResponse {
@@ -111,6 +119,7 @@ fn build_chat_completion_response(
             message: ChatMessageResponse {
                 role: "assistant".into(),
                 content,
+                reasoning_content,
                 tool_calls,
             },
             finish_reason,
@@ -593,6 +602,38 @@ pub(super) async fn router_inference(
 /// It owns BOTH outcomes so no caller can flush one and forget the other, and
 /// so that content preceding a call is emitted rather than discarded — the
 /// non-streaming path does the same, and vLLM's reference parser does the same.
+/// Feed one generated token through the reply buffer and send what it
+/// released — the scratchpad first, then content, since a token that closes
+/// the block can release both. The ONE per-token send on this surface, so the
+/// router path and the local split path cannot stream reasoning differently.
+/// `false` once the client is gone (closed, or not reading).
+async fn push_and_send(
+    tx: &tokio::sync::mpsc::Sender<StreamEvent>,
+    buffered: &mut crate::api::tool_parse::StreamingToolText,
+    token: &str,
+) -> bool {
+    let content = buffered.push(token);
+    if let Some(text) = buffered.take_reasoning() {
+        if !crate::api::sse_send_live(tx, StreamEvent::Reasoning { text }).await {
+            return false;
+        }
+    }
+    match content {
+        Some(safe) => {
+            crate::api::sse_send_live(
+                tx,
+                StreamEvent::Delta {
+                    content: Some(safe),
+                    role: None,
+                    finish_reason: None,
+                },
+            )
+            .await
+        }
+        None => true,
+    }
+}
+
 async fn emit_openai_tool_calls(
     tx: &tokio::sync::mpsc::Sender<StreamEvent>,
     buffered: &mut crate::api::tool_parse::StreamingToolText,
@@ -601,6 +642,17 @@ async fn emit_openai_tool_calls(
     // still holds text back (a reasoning preamble it is part-way through), so
     // this must run — but parsing prose for a call could only ever produce a
     // false `finish_reason: "tool_calls"` on an ordinary answer.
+    let parsed = if buffered.detects_tools() {
+        crate::api::tool_parse::parse_tool_calls(buffered.reply_text())
+    } else {
+        None
+    };
+    // The scratchpad goes out before anything else the flush releases: the
+    // tail `take_reasoning` held back, or the whole of a block the reply never
+    // closed. Whether a call ends it decides where an unclosed block stops.
+    if let Some(text) = buffered.finish_reasoning(parsed.is_some()) {
+        let _ = crate::api::sse_send_live(tx, StreamEvent::Reasoning { text }).await;
+    }
     if !buffered.detects_tools() {
         if let Some(text) = buffered.pending_all() {
             let _ = crate::api::sse_send_live(
@@ -615,7 +667,6 @@ async fn emit_openai_tool_calls(
         }
         return false;
     }
-    let parsed = crate::api::tool_parse::parse_tool_calls(buffered.text());
     // Whatever is left over: the prose before a call, or the whole reply when
     // there is none.
     let leftover = match parsed {
@@ -727,7 +778,10 @@ async fn router_inference_stream(
         let mut got_finish = false;
         // Text held back for tool inspection — but only the part that could
         // still BE a tool call. See `tool_parse::content_prefix_len`.
-        let mut buffered = crate::api::tool_parse::StreamingToolText::new(tools_requested);
+        let mut buffered = crate::api::tool_parse::StreamingToolText::new(
+            tools_requested,
+            crate::api::tool_parse::ReasoningOut::Separate,
+        );
         let mut client_disconnected = false;
         loop {
             let event = tokio::select! {
@@ -761,22 +815,11 @@ async fn router_inference_stream(
                     // for: it is also the only thing that removes a reasoning
                     // model's `<think>` preamble from a streamed reply
                     // (report #032).
-                    if let Some(safe) = buffered.push(&event.text) {
-                        if !crate::api::sse_send_live(
-                            &sse_tx,
-                            StreamEvent::Delta {
-                                content: Some(safe),
-                                role: None,
-                                finish_reason: None,
-                            },
-                        )
-                        .await
-                        {
-                            tracing::warn!(
-                                token_count,
-                                "DIAG: SSE final text delta send failed — client disconnected"
-                            );
-                        }
+                    if !push_and_send(&sse_tx, &mut buffered, &event.text).await {
+                        tracing::warn!(
+                            token_count,
+                            "DIAG: SSE final text delta send failed — client disconnected"
+                        );
                     }
                 }
                 // Flush what tool inspection withheld before the finish delta,
@@ -805,26 +848,15 @@ async fn router_inference_stream(
                 token_count += 1;
                 // Through the buffer whether or not tools were asked for —
                 // see the finish branch above (report #032).
-                if let Some(safe) = buffered.push(&event.text) {
-                    // Closed OR stalled (non-reading) consumer → cancel the pipeline.
-                    if !crate::api::sse_send_live(
-                        &sse_tx,
-                        StreamEvent::Delta {
-                            content: Some(safe),
-                            role: None,
-                            finish_reason: None,
-                        },
-                    )
-                    .await
-                    {
-                        tracing::warn!(
-                            token_count,
-                            elapsed_ms = stream_start.elapsed().as_millis() as u64,
-                            "DIAG: SSE consumer gone mid-stream (closed or not reading) — cancelling pipeline"
-                        );
-                        client_disconnected = true;
-                        break;
-                    }
+                // Closed OR stalled (non-reading) consumer → cancel the pipeline.
+                if !push_and_send(&sse_tx, &mut buffered, &event.text).await {
+                    tracing::warn!(
+                        token_count,
+                        elapsed_ms = stream_start.elapsed().as_millis() as u64,
+                        "DIAG: SSE consumer gone mid-stream (closed or not reading) — cancelling pipeline"
+                    );
+                    client_disconnected = true;
+                    break;
                 }
             }
         }
@@ -1102,7 +1134,10 @@ pub(super) async fn split_stream_response(
         // streamed the raw JSON we could not retract it. So buffer, then emit
         // either tool_calls or the text at the end. Matches OpenAI, which does
         // not stream partial text for a tool call either.
-        let mut buffered = crate::api::tool_parse::StreamingToolText::new(tools_requested);
+        let mut buffered = crate::api::tool_parse::StreamingToolText::new(
+            tools_requested,
+            crate::api::tool_parse::ReasoningOut::Separate,
+        );
         loop {
             let event = tokio::select! {
                 biased;
@@ -1147,23 +1182,11 @@ pub(super) async fn split_stream_response(
             // way every token goes through it — this gate used to skip the
             // buffer entirely, so an ordinary chat message streamed the model's
             // whole `<think>` scratchpad to the user (report #032).
-            let Some(safe) = buffered.push(&event.text) else {
-                continue;
-            };
             // Stop the instant the consumer closes OR stops reading (a stalled
             // send past SSE_CONSUMER_STALL_TIMEOUT). Returning drops token_rx →
             // cancels the worker, bounding runaway compute for a client that
             // walked away without closing the connection (Finding 2).
-            if !crate::api::sse_send_live(
-                &tx,
-                StreamEvent::Delta {
-                    content: Some(safe),
-                    role: None,
-                    finish_reason: None,
-                },
-            )
-            .await
-            {
+            if !push_and_send(&tx, &mut buffered, &event.text).await {
                 tracing::warn!(
                     token_count,
                     elapsed_ms = stream_start.elapsed().as_millis() as u64,
@@ -1422,6 +1445,7 @@ fn stream_events_to_sse(
                         delta: Delta {
                             role: Some("assistant".into()),
                             content: Some(String::new()),
+                            reasoning_content: None,
                             tool_calls: None,
                         },
                         finish_reason: None,
@@ -1459,6 +1483,7 @@ fn stream_events_to_sse(
                         delta: Delta {
                             role,
                             content,
+                            reasoning_content: None,
                             tool_calls: None,
                         },
                         finish_reason,
@@ -1494,7 +1519,32 @@ fn stream_events_to_sse(
                         delta: Delta {
                             role: None,
                             content: None,
+                            reasoning_content: None,
                             tool_calls: Some(calls),
+                        },
+                        finish_reason: None,
+                        logprobs: None,
+                    }],
+                    session_id: None,
+                    usage: None,
+                };
+                Ok::<_, Infallible>(
+                    Event::default().data(serde_json::to_string(&chunk).unwrap_or_default()),
+                )
+            }
+            StreamEvent::Reasoning { text } => {
+                let chunk = ChatCompletionChunk {
+                    id: request_id.clone(),
+                    object: "chat.completion.chunk",
+                    created,
+                    model: model_name.clone(),
+                    choices: vec![ChunkChoice {
+                        index: 0,
+                        delta: Delta {
+                            role: None,
+                            content: None,
+                            reasoning_content: Some(text),
+                            tool_calls: None,
                         },
                         finish_reason: None,
                         logprobs: None,

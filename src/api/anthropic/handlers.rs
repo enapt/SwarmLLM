@@ -159,7 +159,7 @@ async fn emit_anthropic_tool_blocks(
         }
         return false;
     }
-    let parsed = crate::api::tool_parse::parse_tool_calls(buffered.text());
+    let parsed = crate::api::tool_parse::parse_tool_calls(buffered.reply_text());
     // Into block 0, which is still open: the prose before a call, or the whole
     // reply when there is none.
     let leftover = match parsed {
@@ -323,7 +323,10 @@ pub(super) async fn anthropic_stream(
         let mut finish_matched_stop: Option<String> = None;
         // See the split-path sibling: with tools requested, text is withheld
         // until complete because a tool call is only recognisable in full.
-        let mut buffered = crate::api::tool_parse::StreamingToolText::new(tools_requested);
+        let mut buffered = crate::api::tool_parse::StreamingToolText::new(
+            tools_requested,
+            crate::api::tool_parse::ReasoningOut::Withheld,
+        );
         loop {
             let event = tokio::select! {
                 biased;
@@ -617,7 +620,10 @@ pub(super) async fn anthropic_split_stream(
         let mut stop_reason = "max_tokens".to_string();
         let mut text_block = TextBlock::Open;
         let mut matched_stop_sequence: Option<String> = None;
-        let mut buffered = crate::api::tool_parse::StreamingToolText::new(tools_requested);
+        let mut buffered = crate::api::tool_parse::StreamingToolText::new(
+            tools_requested,
+            crate::api::tool_parse::ReasoningOut::Withheld,
+        );
 
         loop {
             let event = tokio::select! {

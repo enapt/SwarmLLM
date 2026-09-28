@@ -427,17 +427,15 @@ async fn run_one_stream(
                     Ok(v) => v,
                     Err(_) => continue,
                 };
-                if let Some(content) = v["choices"][0]["delta"]["content"].as_str() {
-                    if !content.is_empty() {
-                        if ttft_ms.is_none() {
-                            ttft_ms = Some(start.elapsed().as_millis() as f64);
-                        }
-                        // Approximate token count from chunk count — the
-                        // server emits one Token per chunk in practice. This
-                        // overcounts when a stop-string trim happens but is
-                        // close enough for throughput numbers.
-                        completion_tokens += 1;
+                if generated_text_delta(&v) {
+                    if ttft_ms.is_none() {
+                        ttft_ms = Some(start.elapsed().as_millis() as f64);
                     }
+                    // Approximate token count from chunk count — the
+                    // server emits one Token per chunk in practice. This
+                    // overcounts when a stop-string trim happens but is
+                    // close enough for throughput numbers.
+                    completion_tokens += 1;
                 }
                 if let Some(usage) = v["usage"].as_object() {
                     if let Some(pt) = usage.get("prompt_tokens").and_then(|x| x.as_u64()) {
@@ -451,6 +449,18 @@ async fn run_one_stream(
         }
     }
     finalize_stream(start, ttft_ms, prompt_tokens, completion_tokens)
+}
+
+/// Does this chunk carry generated text — the reply, or a reasoning model's
+/// scratchpad (`reasoning_content`)? Both are tokens the model produced, and
+/// the first of either is the first token. Counting `content` alone reported a
+/// reasoning model's TTFT as its total time and "1 tokens" for 50 (field report
+/// 2026-09-28), which is the measurement `--stream` exists to take.
+fn generated_text_delta(chunk: &serde_json::Value) -> bool {
+    let delta = &chunk["choices"][0]["delta"];
+    ["content", "reasoning_content"]
+        .iter()
+        .any(|field| delta[field].as_str().is_some_and(|t| !t.is_empty()))
 }
 
 fn finalize_stream(
@@ -467,4 +477,28 @@ fn finalize_stream(
         tokens_per_sec: tokens_per_sec(completion_tokens, total_ms),
         ttft_ms,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::generated_text_delta;
+    use serde_json::json;
+
+    /// A reasoning model's scratchpad streams as `reasoning_content`; it is
+    /// generated text, and the first of it is the first token.
+    #[test]
+    fn a_reasoning_delta_is_a_generated_token() {
+        let chunk = |delta: serde_json::Value| json!({"choices": [{"delta": delta}]});
+        assert!(generated_text_delta(&chunk(json!({"content": "Hi"}))));
+        assert!(generated_text_delta(&chunk(
+            json!({"reasoning_content": "Okay"})
+        )));
+        // The opening role chunk, the idle keep-alive and the finish chunk
+        // carry no text and must not start the clock.
+        assert!(!generated_text_delta(&chunk(
+            json!({"role": "assistant", "content": ""})
+        )));
+        assert!(!generated_text_delta(&chunk(json!({}))));
+        assert!(!generated_text_delta(&json!({"choices": [], "usage": {}})));
+    }
 }

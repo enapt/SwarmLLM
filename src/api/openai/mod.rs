@@ -1224,6 +1224,7 @@ mod tests {
             message: ChatMessageResponse {
                 role: "assistant".into(),
                 content: Some("hello".into()),
+                reasoning_content: None,
                 tool_calls: None,
             },
             finish_reason: "stop".into(),
@@ -1260,6 +1261,7 @@ mod tests {
             message: ChatMessageResponse {
                 role: "assistant".into(),
                 content: None,
+                reasoning_content: None,
                 tool_calls: Some(vec![ToolCall {
                     id: "call_123".into(),
                     tool_type: "function".into(),
@@ -1338,6 +1340,7 @@ mod tests {
         let delta = Delta {
             role: Some("assistant".into()),
             content: None,
+            reasoning_content: None,
             tool_calls: Some(vec![StreamToolCall {
                 index: 0,
                 id: Some("call_1".into()),

@@ -21,15 +21,26 @@ measured at, and what a change must keep — lives in `docs/invariants/`.
 
 `inference::take_leading_reasoning_block` removes a leading `<think>…</think>`
 in `finalize_reply_text` (the non-streaming choke point), and
-`tool_parse::StreamingToolText` withholds the same block while streaming — the
-buffer both encoders already share, so all four API paths inherit it.
+`tool_parse::StreamingToolText` keeps the same block out of the content while
+streaming — the buffer both encoders already share, so all four API paths
+inherit it.
+
+**Where the block GOES is `tool_parse::ReasoningOut`, a required constructor
+argument (2026-09-28).** OpenAI: `Separate` — streamed as
+`delta.reasoning_content` (`push_and_send`, the one per-token send), and a reply
+that ENDED inside it is reasoning, never content, on both paths
+(`split_unfinished_reasoning`). Anthropic: `Withheld`, unchanged. The agreement
+test runs in both modes. **The tool-call search starts AFTER a closed
+scratchpad** — `reply_text()`, and `releasable_len` from `content_from`; over the
+whole text, a `{` in the thinking held the answer to the end of every
+tool-carrying stream.
 
 **`StreamingToolText` has no `Default`, and that is load-bearing.** The buffer
 does two jobs — hold text back while it could still be a tool call, AND withhold
 the reasoning preamble — and all four streaming surfaces wrapped `push` in
 `if tools_requested`, so on an ordinary chat message the filter was never
 reached and the whole scratchpad streamed to the user as the answer. The mode is
-a REQUIRED constructor argument (`new(detect_tools)`) so no caller can express
+a REQUIRED constructor argument (`new(detect_tools, reasoning_out)`) so no caller can express
 "skip the buffer"; `push` always runs the filter and only withholds for tool
 detection when asked. The two flush helpers return early with `pending_all()`
 when `!detects_tools()` — they must still run, but must not find a call in prose.

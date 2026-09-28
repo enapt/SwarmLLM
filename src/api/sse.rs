@@ -91,6 +91,14 @@ pub enum StreamEvent {
     ToolCalls {
         calls: Vec<crate::api::openai::StreamToolCall>,
     },
+    /// A reasoning model's scratchpad, as it is written — encoded as
+    /// `delta.reasoning_content`, the field llama.cpp's server and DeepSeek's
+    /// API stream it in (vLLM renamed its own to `reasoning`; Open WebUI reads
+    /// both). Additive variant for the reason `ToolCalls` is one. Produced only
+    /// by `tool_parse::StreamingToolText` in `ReasoningOut::Separate` mode.
+    Reasoning {
+        text: String,
+    },
     /// OpenAI 2024+ spec: when the request includes
     /// `stream_options: {"include_usage": true}`, an extra terminal chunk
     /// is emitted right before `[DONE]` with `choices: []` and the usage

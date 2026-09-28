@@ -495,13 +495,78 @@ Four things a change here must keep:
 - **The streaming side waits for the answer to START.** The blank line between
   scratchpad and answer arrives in a LATER token than `</think>`, so deciding on
   first sight of the closer emits it and the reply opens with a stray newline.
-- **The silence is covered.** `sse::progress_ticker` is already merged into both
-  encoders precisely so a slow reply does not look dead — which is what makes
-  withholding during reasoning safe rather than a hang.
-- **The reasoning is DISCARDED, not surfaced.** Exposing it wants a field on
-  both surfaces (`reasoning_content` on OpenAI, a thinking block on Anthropic)
-  and is worth doing; returning it glued to the answer is not a smaller version
-  of that, it is the bug.
+- **The silence is covered — on a surface with no field for the scratchpad.**
+  `sse::progress_ticker` is merged into both encoders so a slow reply does not
+  look dead. On the OpenAI surface the scratchpad now streams instead (below).
+- **Returning it glued to the answer is the bug**, never a smaller version of
+  surfacing it.
+
+### Where the scratchpad goes: `ReasoningOut` (2026-09-28)
+
+**Field report 2026-09-28 (qwen3-1.7b, `route=local`, v0.3.211): a reasoning
+model's stream was one content chunk thinking against 50 with `/no_think`.**
+Withheld while it was written, the scratchpad left the stream silent until the
+block closed; at a small `max_tokens` the block never closed, and `pending_all`
+released the whole of it as ONE content chunk when the stream ended —
+`finish_reason: length`, nothing logged, and `swarmllm bench --stream` (which
+counted `content` deltas) reported "1 tokens" and TTFT equal to the total.
+
+`StreamingToolText::new` now takes a REQUIRED `ReasoningOut`, for the same reason
+it takes `detect_tools`: the surfaces answer it differently.
+
+- **`Separate` — the OpenAI chat surface.** `take_reasoning` hands out the
+  scratchpad as it is written and `push_and_send` streams it as
+  `delta.reasoning_content` before the content that token released — the field
+  llama.cpp's server (`--reasoning-format deepseek`, its default) and DeepSeek's
+  API use; vLLM renamed its own to `reasoning`, Open WebUI reads both. It holds
+  back a tail that could be the start of `</think>` (`partial_marker_overlap`,
+  vLLM's technique) and trailing whitespace, and drops the opening whitespace
+  as llama.cpp trims `reasoning_content`. **An unfinished block is reasoning to
+  the end, never the answer**: the stream releases no content for it, and the
+  non-streamed reply moves it into `message.reasoning_content` with an empty
+  `content` (`split_unfinished_reasoning`, applied in the one builder,
+  `build_chat_completion_response`). The "lesser harm" argument for leaving it
+  in the text does not survive a field: the scratchpad is visible and
+  `finish_reason` says `length`. llama.cpp gives the same shape.
+- **`Withheld` — the Anthropic surface.** A `thinking` block exists only for a
+  request that enabled thinking and carries a signature this server cannot
+  produce, so nothing changes there: withheld while streaming, an unfinished
+  block released as text at the end, as the non-streamed finaliser leaves it.
+
+**The agreement test covers both modes**, each against its own non-streamed
+half: `Withheld` against `finalize_reply_text`, `Separate` against
+`finalize_reply_text` + `split_unfinished_reasoning`. Content must agree; the
+scratchpad of a reply that ended inside it must agree too.
+
+**A tool call inside an unclosed block.** Qwen3 can go from `<think>` straight
+to a call without closing it (`leading_content`'s rule). With tools requested,
+the streamed scratchpad is held at the FRAMED call markers (`<tool_call>`,
+`[TOOL_CALLS]`, …) while the block is open — never at a bare `{`, which a model
+thinking about code writes constantly, and holding there would silence exactly
+the scratchpads that run longest. At the end, `finish_reasoning(a_call_ends_it)`
+stops an unclosed block where the call begins. A raw-JSON call with no framing
+inside an unclosed block can still reach the streamed reasoning; the call itself
+is parsed and sent either way.
+
+**Two defects in the same buffer, found while tracing this (both predate it,
+both red before the fix):**
+
+- **A brace in a closed scratchpad held the whole ANSWER back** on every
+  tool-carrying request: `releasable_len` ran `content_prefix_len` over the
+  entire text, scratchpad included, so a `{` there sat behind everything already
+  released. The search now starts where the reply proper begins
+  (`content_from`). Test `a_brace_in_a_closed_scratchpad_does_not_hold_the_answer_back`.
+- **JSON sketched inside a closed scratchpad became a `tool_calls` answer when
+  streamed** and a `stop` when not: both flushes parsed `text()`, the whole
+  buffer; the non-streamed surfaces parse the finalised reply, which has lost
+  the block. `reply_text()` replaces `text()` and starts after `</think>`, so a
+  caller cannot parse the scratchpad. Test
+  `a_call_sketched_in_a_closed_scratchpad_is_not_a_call` (red with the whole
+  text restored).
+
+**Not yet:** the non-streamed reply's reasoning for a CLOSED block —
+`finalize_reply_text` drops it in eight reply sources before the API sees the
+text (FUTURE_WORK #141).
 
 ## A prompt that closed someone else's turn is finished for the model
 
