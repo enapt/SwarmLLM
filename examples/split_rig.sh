@@ -231,7 +231,21 @@ mode = "off"
 [ui]
 open_browser_on_start = false
 CFG
-  [ -n "${EXTRA_TOML:-}" ] && printf '\n%s\n' "$EXTRA_TOML" >> "$d/config.toml"
+  local extra="${EXTRA_TOML:-}"
+  # failover_mid needs chaining OFF: chained, a crashed middle segment is
+  # re-run on the SAME node first (`chained run failed — re-running this
+  # segment unchained`), B respawns its worker and serves it, and the composite
+  # takeover this mode exists to see never happens — a FAIL with nothing wrong.
+  # It was the caller's job (gate212.sh passed it); a run that forgot it
+  # failed both arms on 2026-09-29. Merged into the caller's [inference], if any.
+  if [ "$MODE" = failover_mid ] && ! printf '%s' "$extra" | grep -q 'pipeline_chaining'; then
+    if printf '%s' "$extra" | grep -q '^\[inference\]'; then
+      extra=$(printf '%s' "$extra" | sed 's/^\[inference\]$/[inference]\npipeline_chaining = false/')
+    else
+      extra=$(printf '%s\n[inference]\npipeline_chaining = false' "$extra")
+    fi
+  fi
+  [ -n "$extra" ] && printf '\n%s\n' "$extra" >> "$d/config.toml"
   return 0
 }
 start() { # dir port bin gpu
@@ -562,9 +576,24 @@ if [ "$MODE" = failover ] || [ "$MODE" = failover_mid ]; then
       t=$((t + $(awk '{print $14+$15}' "/proc/$p/stat" 2>/dev/null || echo 0))); done; echo $t; }
   taken0=$(grep -c 'segment taken over by several nodes' "$BASE/A/node.log")
   retried0=$(grep -c 'retrying with fresh pipeline' "$BASE/A/node.log")
+  had_worker=$(pgrep -P "$PB" | head -1)
+  loaded0=$(grep -c 'Split model using' "$BASE/B/node.log")
   base=$(cpu_of_children)
   ask "$PROMPT" 120 takeover >> "$OUT/failover.jsonl" &
   ASK=$!
+  # A worker spawned FOR this request (failover_mid has no healthy arm to warm
+  # it) loads its model first, and the load burns CPU too: killed then, B's
+  # pool just respawns it — the forward was still waiting on the spawn — and
+  # the request is served with no takeover to observe. A rig FAIL with nothing
+  # wrong, seen 2026-09-29 with A on the card (the plain arm failed alike).
+  # So wait out the load, then time the prompt pass from there.
+  if [ -z "$had_worker" ]; then
+    until [ "$(grep -c 'Split model using' "$BASE/B/node.log")" -gt "$loaded0" ]; do
+      kill -0 $ASK 2>/dev/null || break
+      sleep 0.02
+    done
+    base=$(cpu_of_children)
+  fi
   until [ $(( $(cpu_of_children) - base )) -ge 30 ]; do
     kill -0 $ASK 2>/dev/null || { echo "failover: the reply finished before B started computing"; break; }
     sleep 0.02

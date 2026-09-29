@@ -133,16 +133,25 @@ impl PipelineExecutor {
                 .collect::<Vec<_>>()
                 .join(",")
         );
-        let (mut acceptance, mut check, mut draft_ms_each, mut gamma_now) =
-            match crate::inference::dsd_controller::recall(&learned_key) {
-                Some(l) => (l.acceptance, l.check, l.draft_ms_each, l.gamma),
-                None => (
-                    AcceptanceEstimate::new(),
-                    CheckCost::default(),
-                    None,
-                    initial_gamma,
-                ),
-            };
+        let recalled = crate::inference::dsd_controller::recall(&learned_key);
+        if recalled.as_ref().is_some_and(|l| {
+            crate::inference::dsd_controller::steps_aside(l, std::time::Instant::now())
+        }) {
+            tracing::debug!(
+                %request_id,
+                "DSD: guessing did not pay on these machines last time — the ordinary loop runs this request"
+            );
+            return Ok(None);
+        }
+        let (mut acceptance, mut check, mut draft_ms_each, mut gamma_now) = match recalled {
+            Some(l) => (l.acceptance, l.check, l.draft_ms_each, l.gamma),
+            None => (
+                AcceptanceEstimate::new(),
+                CheckCost::default(),
+                None,
+                initial_gamma,
+            ),
+        };
         let ema = |old: Option<f64>, new: f64| Some(old.map_or(new, |o| 0.7 * o + 0.3 * new));
 
         // Resolve peer IDs upfront. Local segments push None and dispatch to
@@ -655,6 +664,7 @@ impl PipelineExecutor {
                 check: check.clone(),
                 draft_ms_each,
                 gamma: gamma_now,
+                at: std::time::Instant::now(),
             },
         );
         tracing::info!(

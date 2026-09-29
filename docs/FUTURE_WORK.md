@@ -16272,8 +16272,12 @@ card, ~0 ms of network: 25-27 → 38-42 tok/s against 50 local.
    CUDA contexts share one card, which a real split does not.
 2. **Two chats through a split are never batched** — 0 batched forwards for two simultaneous
    chats, on v0.3.212 and on main: their forwards reach each node a segment's compute apart
-   (5-9 ms), past the 5 ms window, and the scheduler then serves one per iteration. The config's
-   "1.34-1.55× at batch 2-8" is not reached in a split. Whether it pays needs the aggregate rate
-   measured with batching forced; the per-stream cost of waiting is what #148 just removed.
+   (5-9 ms), past the 5 ms window, and the scheduler then serves one per iteration. **Probably
+   not a defect on real machines:** unbatched, two chats INTERLEAVE — while B runs chat 1's
+   second half, A runs chat 2's first — which keeps both machines busy, where a batch would
+   make them take turns. On the rig both halves share one card, so interleaving cannot show;
+   the one-card aggregate (15 + 18 tok/s against 40 for one chat) says nothing about two
+   machines. Measure the aggregate on TWO machines, unbatched vs forced batching, before
+   changing anything.
 3. **The coordinator's own segment ends a chain** (#143) — at 0 ms that costs nothing; across
    a WAN it is a round trip per token.

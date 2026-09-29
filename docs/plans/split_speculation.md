@@ -776,6 +776,19 @@ sat at 0, it would have kept guessing off where it pays. It is left out of `draf
 cold start 33. `draft_ms_each` 126 ms (a warm guess on the processor). On the TH↔BE link the
 controller's comparison is the one that already chose γ = 2-7; nothing there changes.
 
+**And while "zero" is the fresh verdict, DSD stays out** (`dsd_controller::steps_aside`, 10
+minutes, then it probes again): entering only to run plain rounds still spawned the drafter and
+had it read the prompt before the first token — time to first token 0.53 s against 0.20 plain,
+on every request — and held its memory for nothing. After: the third request on stepped aside,
+TTFT 0.20 s, 36.8-41.1 tok/s, one drafter spawn in total.
+
+**The four rules for turning DSD on by default, re-run 2026-09-29 on this build**
+(`~/swarmllm-split-0929/decide213.sh` + `mid213.sh`, `d213/`): kill, failover and failover_mid
+with DSD on all PASS (A on the card; failover_mid needs chaining OFF, which `split_rig.sh` now
+sets itself); DSD replies 117-118/120 against plain 116-118; no drafter → identical to plain;
+the drafter stays a guest (7B kept on the card). DSD guessed actively where its checks were
+dear (the failover arms: 100-108 guesses a request) and chose zero where they were not.
+
 ## What the literature says (survey 2026-09-27)
 
 The survey found no method that makes a WAN split fast without speculation. It

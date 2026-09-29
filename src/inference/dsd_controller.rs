@@ -194,6 +194,22 @@ pub struct Learned {
     pub check: CheckCost,
     pub draft_ms_each: Option<f64>,
     pub gamma: u32,
+    /// When it was learned — see [`steps_aside`].
+    pub at: std::time::Instant,
+}
+
+/// How long a "guessing does not pay here" verdict stands before speculation
+/// is tried again on the same model and machines — links and loads change.
+pub const REPROBE_AFTER: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// Should speculation stay out of this request altogether? Yes when the last
+/// request on the same model and machines settled on γ = 0 within
+/// [`REPROBE_AFTER`]: entering anyway loads the drafter and has it read the
+/// prompt before the first token — +0.3 s of time to first token on every
+/// request of a near split (2026-09-29), and the drafter's memory held for
+/// nothing — to run plain rounds the ordinary loop runs as well.
+pub fn steps_aside(learned: &Learned, now: std::time::Instant) -> bool {
+    learned.gamma == 0 && now.duration_since(learned.at) < REPROBE_AFTER
 }
 
 /// The most distinct (model, machines) pairs remembered; past it the memory
@@ -261,12 +277,37 @@ mod tests {
                 check,
                 draft_ms_each: Some(170.0),
                 gamma: 0,
+                at: std::time::Instant::now(),
             },
         );
         let got = recall(&key).expect("remembered");
         assert_eq!(got.gamma, 0);
         assert_eq!(got.draft_ms_each, Some(170.0));
         assert!(got.check.fit().is_some());
+    }
+
+    #[test]
+    fn a_zero_verdict_keeps_speculation_out_until_it_is_worth_asking_again() {
+        let t0 = std::time::Instant::now();
+        let learned = |gamma| Learned {
+            acceptance: AcceptanceEstimate::new(),
+            check: CheckCost::default(),
+            draft_ms_each: Some(170.0),
+            gamma,
+            at: t0,
+        };
+        assert!(steps_aside(
+            &learned(0),
+            t0 + std::time::Duration::from_secs(5)
+        ));
+        assert!(
+            !steps_aside(&learned(2), t0),
+            "guessing that paid keeps its place"
+        );
+        assert!(
+            !steps_aside(&learned(0), t0 + REPROBE_AFTER),
+            "after a while the link may have changed: probe again"
+        );
     }
 
     #[test]
