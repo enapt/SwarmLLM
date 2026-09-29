@@ -46,7 +46,13 @@ pub struct InferenceConfig {
     #[serde(default = "default_kv_cache_ttl")]
     pub kv_cache_ttl_secs: Option<u64>,
     /// Enable speculative decoding when a valid draft-target model pair is available.
-    #[serde(default)]
+    ///
+    /// **On by default since 2026-09-29** (with `decentralized_spec_decoding`).
+    /// Of the paths it gates, only speculation across computers runs without
+    /// more configuration — the llama.cpp ones also need `draft_model_path` —
+    /// and that one engages only where this node holds a small model sharing
+    /// the target's vocabulary, and steps aside where guessing does not pay.
+    #[serde(default = "default_speculative_decoding")]
     pub speculative_decoding: bool,
     /// Chain consecutive remote pipeline segments peer to peer instead of
     /// returning every hop to this node.
@@ -551,11 +557,18 @@ pub struct InferenceConfig {
     /// single round trip, then accept-rejects on the returned γ+1 logits.
     /// Eliminates `(N-1)·t1·(γ-1)/γ` of inter-node round-trip latency at the
     /// cost of N·γ× the per-link payload (still small after Item 13's Q8_0).
-    /// Single-segment workloads continue to use the Item 4 fast path. Off by
-    /// default until the coordinator loop and adaptive γ controller land
-    /// (DSD Phases 2–4 — see `docs/plans/archive/distributed_inference_speedup.md`
-    /// Item 12). Worker (Phase 1) accepts the γ-token wire format already.
-    #[serde(default)]
+    /// Single-segment workloads continue to use the Item 4 fast path.
+    ///
+    /// **On by default since 2026-09-29.** It engages only where this node
+    /// holds a drafter — a model sharing the target's vocabulary at most a
+    /// quarter of its size (`pipeline::engine_drafter`, or `draft_model`) —
+    /// and its controller chooses zero guesses where guessing costs more than
+    /// the round trips it saves (`dsd_controller`), staying out of the next
+    /// requests on those machines for ten minutes. Measured 1.7-2.4× on a
+    /// Thailand↔Belgium split; on a near split it steps aside and costs
+    /// nothing. The four rules the flip waited on (FUTURE_WORK #140) passed on
+    /// the rig: `docs/plans/split_speculation.md` § "Guessing steps aside".
+    #[serde(default = "default_decentralized_spec_decoding")]
     pub decentralized_spec_decoding: bool,
     /// Quantize intermediate-segment hidden state activations to Q8_0
     /// (group-32 symmetric) before sending them to the next pipeline peer.
@@ -971,6 +984,14 @@ fn default_speculative_gamma() -> u32 {
     4
 }
 
+fn default_speculative_decoding() -> bool {
+    true
+}
+
+fn default_decentralized_spec_decoding() -> bool {
+    true
+}
+
 fn default_shed_load_threshold() -> u32 {
     4
 }
@@ -1134,7 +1155,7 @@ impl Default for InferenceConfig {
             model_path: None,
             gpu_layers: default_gpu_layers(),
             kv_cache_ttl_secs: default_kv_cache_ttl(),
-            speculative_decoding: false,
+            speculative_decoding: default_speculative_decoding(),
             pipeline_chaining: default_pipeline_chaining(),
             max_chain_hops: default_max_chain_hops(),
             shed_load_when_busy: false,
@@ -1185,7 +1206,7 @@ impl Default for InferenceConfig {
             swift_skip_ratio: default_swift_skip_ratio(),
             force_standard_attn: false,
             max_seq_len_override: None,
-            decentralized_spec_decoding: false,
+            decentralized_spec_decoding: default_decentralized_spec_decoding(),
             activation_compression: default_activation_compression(),
             parallax_routing: default_parallax_routing(),
             parallax_partial_ranges: false,

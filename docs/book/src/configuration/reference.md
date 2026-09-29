@@ -92,7 +92,7 @@ booted with.
 | `kv_cache_ttl_secs` | integer | `600` | KV-cache lifetime |
 | `max_batch_size` | integer | `8` | How many requests run through the model together, amortising the weight reads that dominate a decode step. Measured on an RTX 3070 with llama-3.2-3b using per-request rates: no cost at any concurrency, about 3% at eight concurrent requests and about 16% at twelve — the gain grows with load. Neutral on a processor (6-core i5-10500T, llama-3.2-1b). Set to `1` to disable |
 | `batch_timeout_ms` | integer | `50` | Ms to wait for additional requests before dispatching a partial batch. `0` = dispatch immediately (purely opportunistic batching) |
-| `speculative_decoding` | boolean | `false` | Enable speculative decoding |
+| `speculative_decoding` | boolean | `true` | Enable speculative decoding (on its own it enables only `decentralized_spec_decoding`'s path; the llama.cpp paths also need `draft_model_path`) |
 | `speculative_gamma` | integer | `4` | Draft tokens per verification step; values above 16 are treated as 16, the most another computer accepts in one check with room to spare. With a model split across computers this is only the starting point — the count is then chosen each round from what checks and guesses actually cost |
 | `draft_model_path` | path | none | Path to draft model |
 | `draft_model` | string | none | A model this node holds (its id) to guess ahead with when a request is split across computers (`decentralized_spec_decoding`), run from its own parts in SwarmLLM's engine. Unset: the largest held model that shares the target's vocabulary and is at most a quarter of its size |
@@ -137,7 +137,7 @@ booted with.
 | Option | Type | Default | Description |
 |---|---|---|---|
 | `speculative_distributed` | boolean | `false` | Speculative decoding on the distributed path. Needs `speculative_decoding` + a loaded draft model |
-| `decentralized_spec_decoding` | boolean | `false` | DSD: draft and target split across nodes |
+| `decentralized_spec_decoding` | boolean | `true` | DSD: guess ahead when a request is split across computers. Engages only where this node holds a small model sharing the target's vocabulary, and stops guessing where it does not pay |
 | `swift_self_speculative` | boolean | `false` | SWIFT ([arXiv 2410.06916](https://arxiv.org/abs/2410.06916)) — draft by skipping layers of the target model, so no separate draft model is needed |
 | `swift_calibration_tokens` | integer | `32` | Warm-up tokens before SWIFT's calibrator pins a skip pattern |
 | `swift_gamma` | integer | `4` | Draft tokens proposed per SWIFT verification round |

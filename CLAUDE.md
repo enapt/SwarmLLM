@@ -155,8 +155,8 @@ UNDETERMINED and never a fix — use it BEFORE blaming a change, especially your
 ## Status
 
 **v0.3.212-alpha is the live release (published 2026-09-28 04:55 UTC), signed and on both nodes**
-— split speculation with an in-engine small drafter (`pipeline::engine_drafter`, 1.7-2.4× TH↔BE), **shipped OFF by
-default**: with the drafter resident the failover rig lost its standbys (FUTURE_WORK #140 — the flip's precondition).
+— split speculation with an in-engine small drafter (`pipeline::engine_drafter`, 1.7-2.4× TH↔BE), shipped OFF in
+.212; **ON by default on main since 2026-09-29** (#140 was the rig; γ = 0 where guessing does not pay).
 The drafter is a pool GUEST (#747); attempt-scoped state is never keyed by the request id, which retries reuse (#749).
 **Why split decode is slow and what beats it → `docs/plans/faster_than_local.md`; the speculation plan, its
 measurements and the NEXT batch (continuous stream) → `docs/plans/split_speculation.md`.** ⛔ **No design may need a

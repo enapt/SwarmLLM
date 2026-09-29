@@ -168,10 +168,13 @@ Multi-segment distributed inference with speculative decoding woven in.
 A γ-token decode on the last-segment worker plus KV truncation primitives
 plus a coordinator loop in `pipeline/dsd.rs`.
 
-- **Status:** Off by default in v0.3.212: with the guessing model loaded, a
-  split whose far computer failed part-way was retried instead of being taken
-  over by standby computers (the reply was still correct). It is switched on for
-  everyone once that is resolved (FUTURE_WORK #140). Measured across a real
+- **Status:** On by default from the release after v0.3.212 (it was off in
+  v0.3.212 while a failover question was open; that turned out to be the test
+  rig, FUTURE_WORK #140). It does nothing on a computer that holds no suitable
+  guessing model, and it stops guessing — and, for the next ten minutes, stays
+  out of requests on the same computers — where guessing costs more than the
+  round trips it saves: on two computers side by side it would otherwise have
+  made replies six times slower. Measured across a real
   link: a model split
   between a graphics card in Thailand and one in Belgium, with a small model
   of the same family guessing (Qwen2.5-0.5B for Qwen2.5-Coder-7B), decoded at
@@ -190,9 +193,9 @@ plus a coordinator loop in `pipeline/dsd.rs`.
 - **Failure behaviour:** if the guesser fails, the reply finishes without
   guessing; if a check does not come back, the request fails and is retried
   like any other split request.
-- **Config:** `inference.speculative_decoding = true` and
-  `inference.decentralized_spec_decoding = true`; optionally
-  `inference.draft_model = "<model id>"`.
+- **Config:** on by default (`inference.speculative_decoding` and
+  `inference.decentralized_spec_decoding`); set either to `false` to switch it
+  off. Optionally `inference.draft_model = "<model id>"`.
 
 ### Activation compression Q8_0 (`activation_compression`)
 
