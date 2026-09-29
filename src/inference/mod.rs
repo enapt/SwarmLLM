@@ -6,6 +6,7 @@ pub(crate) mod card_pace;
 pub mod chat_template;
 pub mod coupled_noise;
 pub(crate) mod cpu_pools;
+pub(crate) mod cuda_graph;
 pub(crate) mod cuda_pool;
 pub mod decode_attn;
 pub mod dsd_controller;

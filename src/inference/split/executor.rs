@@ -455,6 +455,24 @@ impl SplitModel {
         // owner's on every one, the swarm's within the contribution level.
         let for_the_owner = kv_cache_store.serves_the_owner(request_id);
         crate::inference::cpu_pools::in_phase_pool(seq_len, cpu_layers, for_the_owner, || {
+            // One position, the whole model's own weights: a decode step,
+            // which may go to the card as one CUDA graph.
+            if seq_len == 1
+                && lora_adapter.is_none()
+                && capture_layers.is_none()
+                && skip_mask.is_none()
+            {
+                if let Some(out) = self.forward_decode_as_graph(
+                    input,
+                    index_pos,
+                    kv_cache_store,
+                    request_id,
+                    skip_embedding,
+                    all_positions,
+                )? {
+                    return Ok((out, HashMap::new()));
+                }
+            }
             self.forward_inner_body(
                 input,
                 index_pos,
@@ -467,6 +485,149 @@ impl SplitModel {
                 skip_mask,
             )
         })
+    }
+
+    /// Why this model's decode steps may NOT be captured, if they may not. The
+    /// capture has been checked on dense layers held whole on one device;
+    /// MoE routing copies scores to the host every layer, and a recurrent
+    /// state (Qwen 3.5) is replaced inside the forward.
+    fn decode_graph_ineligibility(&self) -> Option<&'static str> {
+        if !self.layer_devices.is_empty() {
+            return Some("the model is split between the card and the processor");
+        }
+        let all_dense = self.layers.iter().all(|layer| match layer {
+            LayerVariant::Dense(lw) => matches!(lw.ffn, FfnVariant::Dense(_)),
+            _ => false,
+        });
+        if !all_dense {
+            return Some("a layer type the capture has not been checked on (MoE, MLA, Qwen 3.5)");
+        }
+        None
+    }
+
+    /// A decode step sent to the card as one CUDA graph where that is safe —
+    /// see [`crate::inference::cuda_graph`] for the conditions and why each
+    /// exists. `Ok(None)` hands the step to the ordinary path untouched: this
+    /// model does not capture at all.
+    fn forward_decode_as_graph(
+        &mut self,
+        input: &Tensor,
+        index_pos: usize,
+        kv_cache_store: &KvCacheStore,
+        request_id: &str,
+        skip_embedding: bool,
+        all_positions: bool,
+    ) -> Result<Option<Tensor>, SwarmError> {
+        use crate::inference::cuda_graph::DecodeGraphSlot;
+        if matches!(self.decode_graph, DecodeGraphSlot::Unchecked) {
+            self.decode_graph =
+                DecodeGraphSlot::decide(&self.device, self.decode_graph_ineligibility());
+        }
+        let mut graph = match std::mem::replace(&mut self.decode_graph, DecodeGraphSlot::Off) {
+            DecodeGraphSlot::On(graph) => graph,
+            other => {
+                self.decode_graph = other;
+                return Ok(None);
+            }
+        };
+        let out = self.decode_step_with_graph(
+            &mut graph,
+            input,
+            index_pos,
+            kv_cache_store,
+            request_id,
+            skip_embedding,
+            all_positions,
+        );
+        self.decode_graph = if graph.gave_up() {
+            DecodeGraphSlot::Off
+        } else {
+            DecodeGraphSlot::On(graph)
+        };
+        out.map(Some)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn decode_step_with_graph(
+        &mut self,
+        graph: &mut crate::inference::cuda_graph::DecodeGraph,
+        input: &Tensor,
+        index_pos: usize,
+        kv_cache_store: &KvCacheStore,
+        request_id: &str,
+        skip_embedding: bool,
+        all_positions: bool,
+    ) -> Result<Tensor, SwarmError> {
+        let follows = graph.follows_previous_step(request_id, index_pos);
+        let cache_key = KvCacheStore::cache_key(&self.kv_model_key, request_id);
+        // A step that grows a KV buffer frees memory allocated outside the
+        // capture and keeps memory allocated inside it — never captured. Nor
+        // is a conversation's first decode step: it is the one that may shed a
+        // hydrated snapshot's mirror, and it loads the kernel modules.
+        let template = match graph.template(all_positions) {
+            Some(t) if follows && kv_cache_store.every_cache_holds(&cache_key, index_pos + 1) => {
+                t.clone()
+            }
+            _ => {
+                let (out, _) = self.forward_inner_body(
+                    input,
+                    index_pos,
+                    kv_cache_store,
+                    request_id,
+                    None,
+                    None,
+                    skip_embedding,
+                    all_positions,
+                    None,
+                )?;
+                graph.note_uncaptured(all_positions, &out);
+                return Ok(out);
+            }
+        };
+        // Everything that crosses from the host happens BEFORE the capture:
+        // the input (a hidden state from the previous node arrives on the
+        // processor) and the tensor the result is copied into.
+        let device = self.device.clone();
+        let input = input.to_device(&device).map_err(SwarmError::internal)?;
+        let (shape, dtype) = template;
+        let out = Tensor::zeros(shape, dtype, &device).map_err(SwarmError::internal)?;
+        let captured = graph.capture(&device, || {
+            let (step, _) = self.forward_inner_body(
+                &input,
+                index_pos,
+                kv_cache_store,
+                request_id,
+                None,
+                None,
+                skip_embedding,
+                all_positions,
+                None,
+            )?;
+            // The step's own output is graph memory, freed inside the graph
+            // when `step` drops at the end of this closure; `out` was made
+            // outside it and so outlives the launch.
+            out.slice_set(&step, 0, 0).map_err(SwarmError::internal)
+        });
+        if captured.is_ok() {
+            return Ok(out);
+        }
+        // Refused: nothing the capture recorded will run, but the forward
+        // still moved each layer's cache length on by one on the host. Put it
+        // back, then take the step the ordinary way.
+        kv_cache_store.truncate_request_to(&self.kv_model_key, request_id, index_pos)?;
+        let (out, _) = self.forward_inner_body(
+            &input,
+            index_pos,
+            kv_cache_store,
+            request_id,
+            None,
+            None,
+            skip_embedding,
+            all_positions,
+            None,
+        )?;
+        graph.note_uncaptured(all_positions, &out);
+        Ok(out)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -742,232 +903,260 @@ impl SplitModel {
         // closing add can be fused into the next norm (`inference::residual_norm`).
         let mut hidden = Residual::Ready(layer_in);
 
-        // Run through our layers
-        for (layer_idx, layer) in self.layers.iter().enumerate() {
-            let abs_layer = self.layer_start + layer_idx;
-            // A client that has gone away must not keep a processor pegged
-            // for the rest of a prompt pass it will never read (gotcha #441):
-            // a 14k-token prompt on a CPU node is minutes of work in ONE
-            // forward, and the per-token cancel check lives in the decode
-            // loop, after it. One map probe per layer is nothing beside a
-            // layer.
-            if layer_idx > 0 && kv_cache_store.request_cancelled(request_id) {
-                return Err(SwarmError::Inference(
-                    super::kv_cache::CANCELLED_MID_FORWARD.to_string(),
-                ));
-            }
-            let lora_param = lora_adapter.map(|a| (a, abs_layer));
-
-            // SWIFT skip: identity pass-through, no attention, no MLP, no KV write.
-            if let Some(mask) = skip_mask {
-                if mask.get(abs_layer).copied().unwrap_or(false) {
-                    continue;
+        // Run through our layers. A step that fails part-way comes back
+        // through ONE place, which puts the caches back (below).
+        let layers_run = (|| -> Result<Residual, SwarmError> {
+            for (layer_idx, layer) in self.layers.iter().enumerate() {
+                let abs_layer = self.layer_start + layer_idx;
+                // A client that has gone away must not keep a processor pegged
+                // for the rest of a prompt pass it will never read (gotcha #441):
+                // a 14k-token prompt on a CPU node is minutes of work in ONE
+                // forward, and the per-token cancel check lives in the decode
+                // loop, after it. One map probe per layer is nothing beside a
+                // layer.
+                if layer_idx > 0 && kv_cache_store.request_cancelled(request_id) {
+                    return Err(SwarmError::Inference(
+                        super::kv_cache::CANCELLED_MID_FORWARD.to_string(),
+                    ));
                 }
-            }
+                let lora_param = lora_adapter.map(|a| (a, abs_layer));
 
-            // Hybrid placement: bring the activation, and the mask that goes
-            // with it, to this layer's device.
-            //
-            // `layer_devices` is EMPTY unless the segment is actually split, so
-            // a model on one device pays a single `get` returning `None` per
-            // layer and nothing else — this is the decode hot path.
-            //
-            // The split is contiguous and card-first, so this fires at most
-            // once per forward: one copy of the hidden state (a few KB while
-            // decoding, a few MB during prefill) and one of the mask. That is
-            // the whole per-token cost of hybrid placement, and it is why the
-            // boundary has to stay contiguous.
-            if let Some(target) = self.layer_devices.get(layer_idx) {
-                if !hidden.device().same_device(target) {
-                    // A pending residual sum is taken on the device it was
-                    // produced on, then moved — a fused add+norm cannot span
-                    // two devices.
-                    let moved = hidden
-                        .into_tensor()
-                        .and_then(|t| t.to_device(target))
-                        .map_err(|e| {
-                            SwarmError::Internal(format!(
-                                "layer {abs_layer} activation to device: {e}"
-                            ))
-                        })?;
-                    hidden = Residual::Ready(moved);
-                    if let Some(m) = mask.as_ref() {
-                        mask = Some(m.to_device(target).map_err(|e| {
-                            SwarmError::Internal(format!("layer {abs_layer} mask to device: {e}"))
-                        })?);
+                // SWIFT skip: identity pass-through, no attention, no MLP, no KV write.
+                if let Some(mask) = skip_mask {
+                    if mask.get(abs_layer).copied().unwrap_or(false) {
+                        continue;
                     }
                 }
-            }
 
-            // Time per-layer only when TRACE is enabled — at default log
-            // level the syscall and Instant allocation are pure overhead
-            // on the per-token decode hot path (28 syscalls/token on a
-            // 28-layer model). Compute once outside the match so the
-            // .elapsed() call below has something to measure.
-            let layer_start_time = if tracing::enabled!(tracing::Level::TRACE) {
-                Some(std::time::Instant::now())
-            } else {
-                None
-            };
-            match layer {
-                LayerVariant::Dense(lw) => {
-                    // The previous layer's closing residual add is resolved
-                    // HERE, fused into this norm — see `inference::residual_norm`.
-                    let (residual, x) = crate::inference::prof::timed!(
-                        crate::inference::prof::Stage::Norms,
-                        hidden.add_norm(&lw.attention_norm)
-                    )
-                    .map_err(|e| SwarmError::Internal(format!("attn_norm: {e}")))?;
-                    let mut attn = lw
-                        .forward_attn(
-                            &x,
-                            mask.as_ref(),
-                            index_pos,
-                            &mut layer_kv_caches[layer_idx],
-                            max_seq_len,
-                            kv_reserve,
-                            lora_param,
+                // Hybrid placement: bring the activation, and the mask that goes
+                // with it, to this layer's device.
+                //
+                // `layer_devices` is EMPTY unless the segment is actually split, so
+                // a model on one device pays a single `get` returning `None` per
+                // layer and nothing else — this is the decode hot path.
+                //
+                // The split is contiguous and card-first, so this fires at most
+                // once per forward: one copy of the hidden state (a few KB while
+                // decoding, a few MB during prefill) and one of the mask. That is
+                // the whole per-token cost of hybrid placement, and it is why the
+                // boundary has to stay contiguous.
+                if let Some(target) = self.layer_devices.get(layer_idx) {
+                    if !hidden.device().same_device(target) {
+                        // A pending residual sum is taken on the device it was
+                        // produced on, then moved — a fused add+norm cannot span
+                        // two devices.
+                        let moved = hidden
+                            .into_tensor()
+                            .and_then(|t| t.to_device(target))
+                            .map_err(|e| {
+                                SwarmError::Internal(format!(
+                                    "layer {abs_layer} activation to device: {e}"
+                                ))
+                            })?;
+                        hidden = Residual::Ready(moved);
+                        if let Some(m) = mask.as_ref() {
+                            mask = Some(m.to_device(target).map_err(|e| {
+                                SwarmError::Internal(format!(
+                                    "layer {abs_layer} mask to device: {e}"
+                                ))
+                            })?);
+                        }
+                    }
+                }
+
+                // Time per-layer only when TRACE is enabled — at default log
+                // level the syscall and Instant allocation are pure overhead
+                // on the per-token decode hot path (28 syscalls/token on a
+                // 28-layer model). Compute once outside the match so the
+                // .elapsed() call below has something to measure.
+                let layer_start_time = if tracing::enabled!(tracing::Level::TRACE) {
+                    Some(std::time::Instant::now())
+                } else {
+                    None
+                };
+                match layer {
+                    LayerVariant::Dense(lw) => {
+                        // The previous layer's closing residual add is resolved
+                        // HERE, fused into this norm — see `inference::residual_norm`.
+                        let (residual, x) = crate::inference::prof::timed!(
+                            crate::inference::prof::Stage::Norms,
+                            hidden.add_norm(&lw.attention_norm)
                         )
-                        .map_err(|e| SwarmError::Internal(format!("attn: {e}")))?;
-                    // Gemma 2 post-attention norm: normalize before residual add
-                    if let Some(ref post_norm) = lw.post_attention_norm {
-                        attn = post_norm
-                            .forward(&attn)
-                            .map_err(|e| SwarmError::Internal(format!("post_attn_norm: {e}")))?;
-                    }
-                    let (residual, x) = crate::inference::prof::timed!(
-                        crate::inference::prof::Stage::Norms,
-                        Residual::pending(attn, residual).add_norm(&lw.ffn_norm)
-                    )
-                    .map_err(|e| SwarmError::Internal(format!("ffn_norm: {e}")))?;
-                    let mut x = match &lw.ffn {
-                        FfnVariant::Dense(mlp) => mlp
-                            .forward(&x, lora_param)
-                            .map_err(|e| SwarmError::Internal(format!("mlp: {e}")))?,
-                        FfnVariant::MoE(moe) => moe
-                            .forward(&x)
-                            .map_err(|e| SwarmError::Internal(format!("moe: {e}")))?,
-                    };
-                    // Gemma 2 post-FFN norm: normalize before residual add
-                    if let Some(ref post_norm) = lw.post_ffw_norm {
-                        x = post_norm
-                            .forward(&x)
-                            .map_err(|e| SwarmError::Internal(format!("post_ffw_norm: {e}")))?;
-                    }
-                    // Not added here: the next norm point takes this sum
-                    // (`Residual::add_norm`), fused on CUDA.
-                    hidden = Residual::pending(x, residual);
-                }
-                LayerVariant::DeepSeek {
-                    attention,
-                    ffn,
-                    attention_norm,
-                    ffn_norm,
-                } => {
-                    let (residual, x) = hidden
-                        .add_norm(attention_norm)
-                        .map_err(|e| SwarmError::Internal(format!("ds_attn_norm: {e}")))?;
-                    let attn = attention
-                        .forward_mla(
-                            &x,
-                            mask.as_ref(),
-                            index_pos,
-                            &mut layer_kv_caches[layer_idx],
-                            max_seq_len,
-                            kv_reserve,
+                        .map_err(|e| SwarmError::Internal(format!("attn_norm: {e}")))?;
+                        let mut attn = lw
+                            .forward_attn(
+                                &x,
+                                mask.as_ref(),
+                                index_pos,
+                                &mut layer_kv_caches[layer_idx],
+                                max_seq_len,
+                                kv_reserve,
+                                lora_param,
+                            )
+                            .map_err(|e| SwarmError::Internal(format!("attn: {e}")))?;
+                        // Gemma 2 post-attention norm: normalize before residual add
+                        if let Some(ref post_norm) = lw.post_attention_norm {
+                            attn = post_norm.forward(&attn).map_err(|e| {
+                                SwarmError::Internal(format!("post_attn_norm: {e}"))
+                            })?;
+                        }
+                        let (residual, x) = crate::inference::prof::timed!(
+                            crate::inference::prof::Stage::Norms,
+                            Residual::pending(attn, residual).add_norm(&lw.ffn_norm)
                         )
-                        .map_err(|e| SwarmError::Internal(format!("mla: {e}")))?;
-                    let (residual, normed) =
-                        Residual::pending(attn, residual)
+                        .map_err(|e| SwarmError::Internal(format!("ffn_norm: {e}")))?;
+                        let mut x = match &lw.ffn {
+                            FfnVariant::Dense(mlp) => mlp
+                                .forward(&x, lora_param)
+                                .map_err(|e| SwarmError::Internal(format!("mlp: {e}")))?,
+                            FfnVariant::MoE(moe) => moe
+                                .forward(&x)
+                                .map_err(|e| SwarmError::Internal(format!("moe: {e}")))?,
+                        };
+                        // Gemma 2 post-FFN norm: normalize before residual add
+                        if let Some(ref post_norm) = lw.post_ffw_norm {
+                            x = post_norm
+                                .forward(&x)
+                                .map_err(|e| SwarmError::Internal(format!("post_ffw_norm: {e}")))?;
+                        }
+                        // Not added here: the next norm point takes this sum
+                        // (`Residual::add_norm`), fused on CUDA.
+                        hidden = Residual::pending(x, residual);
+                    }
+                    LayerVariant::DeepSeek {
+                        attention,
+                        ffn,
+                        attention_norm,
+                        ffn_norm,
+                    } => {
+                        let (residual, x) = hidden
+                            .add_norm(attention_norm)
+                            .map_err(|e| SwarmError::Internal(format!("ds_attn_norm: {e}")))?;
+                        let attn = attention
+                            .forward_mla(
+                                &x,
+                                mask.as_ref(),
+                                index_pos,
+                                &mut layer_kv_caches[layer_idx],
+                                max_seq_len,
+                                kv_reserve,
+                            )
+                            .map_err(|e| SwarmError::Internal(format!("mla: {e}")))?;
+                        let (residual, normed) = Residual::pending(attn, residual)
                             .add_norm(ffn_norm)
                             .map_err(|e| SwarmError::Internal(format!("ds_ffn_norm: {e}")))?;
-                    let ffn_out = match ffn {
-                        FfnVariant::Dense(mlp) => mlp
-                            .forward(&normed, None)
-                            .map_err(|e| SwarmError::Internal(format!("ds_mlp: {e}")))?,
-                        FfnVariant::MoE(moe) => moe
-                            .forward(&normed)
-                            .map_err(|e| SwarmError::Internal(format!("moe: {e}")))?,
-                    };
-                    hidden = Residual::pending(ffn_out, residual);
+                        let ffn_out = match ffn {
+                            FfnVariant::Dense(mlp) => mlp
+                                .forward(&normed, None)
+                                .map_err(|e| SwarmError::Internal(format!("ds_mlp: {e}")))?,
+                            FfnVariant::MoE(moe) => moe
+                                .forward(&normed)
+                                .map_err(|e| SwarmError::Internal(format!("moe: {e}")))?,
+                        };
+                        hidden = Residual::pending(ffn_out, residual);
+                    }
+                    LayerVariant::Qwen35Attn {
+                        ref weights,
+                        ref ffn,
+                        ref attention_norm,
+                        ref post_attention_norm,
+                    } => {
+                        let (residual, x) = hidden
+                            .add_norm(attention_norm)
+                            .map_err(|e| SwarmError::Internal(format!("q35_attn_norm: {e}")))?;
+                        let attn = weights
+                            .forward_attn(
+                                &x,
+                                mask.as_ref(),
+                                index_pos,
+                                &mut layer_kv_caches[layer_idx],
+                                max_seq_len,
+                                kv_reserve,
+                            )
+                            .map_err(|e| SwarmError::Internal(format!("q35_attn: {e}")))?;
+                        let (residual, normed) = Residual::pending(attn, residual)
+                            .add_norm(post_attention_norm)
+                            .map_err(|e| {
+                                SwarmError::Internal(format!("q35_post_attn_norm: {e}"))
+                            })?;
+                        let ffn_out = match ffn {
+                            FfnVariant::Dense(mlp) => mlp
+                                .forward(&normed, None)
+                                .map_err(|e| SwarmError::Internal(format!("q35_mlp: {e}")))?,
+                            FfnVariant::MoE(moe) => moe
+                                .forward(&normed)
+                                .map_err(|e| SwarmError::Internal(format!("q35_moe: {e}")))?,
+                        };
+                        hidden = Residual::pending(ffn_out, residual);
+                    }
+                    LayerVariant::Qwen35Ssm {
+                        ref weights,
+                        ref ffn,
+                        ref attention_norm,
+                        ref post_attention_norm,
+                    } => {
+                        let (residual, x) = hidden
+                            .add_norm(attention_norm)
+                            .map_err(|e| SwarmError::Internal(format!("q35_ssm_norm: {e}")))?;
+                        let ssm_out = weights
+                            .forward_deltanet(&x, &mut layer_ssm_states[layer_idx])
+                            .map_err(|e| SwarmError::Internal(format!("q35_deltanet: {e}")))?;
+                        let (residual, normed) = Residual::pending(ssm_out, residual)
+                            .add_norm(post_attention_norm)
+                            .map_err(|e| SwarmError::Internal(format!("q35_post_ssm_norm: {e}")))?;
+                        let ffn_out = match ffn {
+                            FfnVariant::Dense(mlp) => mlp
+                                .forward(&normed, None)
+                                .map_err(|e| SwarmError::Internal(format!("q35_ssm_mlp: {e}")))?,
+                            FfnVariant::MoE(moe) => moe
+                                .forward(&normed)
+                                .map_err(|e| SwarmError::Internal(format!("q35_ssm_moe: {e}")))?,
+                        };
+                        hidden = Residual::pending(ffn_out, residual);
+                    }
                 }
-                LayerVariant::Qwen35Attn {
-                    ref weights,
-                    ref ffn,
-                    ref attention_norm,
-                    ref post_attention_norm,
-                } => {
-                    let (residual, x) = hidden
-                        .add_norm(attention_norm)
-                        .map_err(|e| SwarmError::Internal(format!("q35_attn_norm: {e}")))?;
-                    let attn = weights
-                        .forward_attn(
-                            &x,
-                            mask.as_ref(),
-                            index_pos,
-                            &mut layer_kv_caches[layer_idx],
-                            max_seq_len,
-                            kv_reserve,
-                        )
-                        .map_err(|e| SwarmError::Internal(format!("q35_attn: {e}")))?;
-                    let (residual, normed) = Residual::pending(attn, residual)
-                        .add_norm(post_attention_norm)
-                        .map_err(|e| SwarmError::Internal(format!("q35_post_attn_norm: {e}")))?;
-                    let ffn_out = match ffn {
-                        FfnVariant::Dense(mlp) => mlp
-                            .forward(&normed, None)
-                            .map_err(|e| SwarmError::Internal(format!("q35_mlp: {e}")))?,
-                        FfnVariant::MoE(moe) => moe
-                            .forward(&normed)
-                            .map_err(|e| SwarmError::Internal(format!("q35_moe: {e}")))?,
-                    };
-                    hidden = Residual::pending(ffn_out, residual);
+                if let Some(start) = layer_start_time {
+                    tracing::trace!(
+                        layer = abs_layer,
+                        layer_ms = start.elapsed().as_millis() as u64,
+                        "DIAG: layer forward complete"
+                    );
                 }
-                LayerVariant::Qwen35Ssm {
-                    ref weights,
-                    ref ffn,
-                    ref attention_norm,
-                    ref post_attention_norm,
-                } => {
-                    let (residual, x) = hidden
-                        .add_norm(attention_norm)
-                        .map_err(|e| SwarmError::Internal(format!("q35_ssm_norm: {e}")))?;
-                    let ssm_out = weights
-                        .forward_deltanet(&x, &mut layer_ssm_states[layer_idx])
-                        .map_err(|e| SwarmError::Internal(format!("q35_deltanet: {e}")))?;
-                    let (residual, normed) = Residual::pending(ssm_out, residual)
-                        .add_norm(post_attention_norm)
-                        .map_err(|e| SwarmError::Internal(format!("q35_post_ssm_norm: {e}")))?;
-                    let ffn_out = match ffn {
-                        FfnVariant::Dense(mlp) => mlp
-                            .forward(&normed, None)
-                            .map_err(|e| SwarmError::Internal(format!("q35_ssm_mlp: {e}")))?,
-                        FfnVariant::MoE(moe) => moe
-                            .forward(&normed)
-                            .map_err(|e| SwarmError::Internal(format!("q35_ssm_moe: {e}")))?,
-                    };
-                    hidden = Residual::pending(ffn_out, residual);
-                }
-            }
-            if let Some(start) = layer_start_time {
-                tracing::trace!(
-                    layer = abs_layer,
-                    layer_ms = start.elapsed().as_millis() as u64,
-                    "DIAG: layer forward complete"
-                );
-            }
 
-            // Capture hidden state if requested (zero overhead when not capturing)
-            if let Some(layers_to_capture) = capture_layers {
-                if layers_to_capture.contains(&abs_layer) {
-                    // A captured layer needs the value itself, so its closing
-                    // add is taken here rather than fused forward.
-                    let taken = hidden.into_tensor().map_err(SwarmError::internal)?;
-                    captured.insert(abs_layer, taken.clone());
-                    hidden = Residual::Ready(taken);
+                // Capture hidden state if requested (zero overhead when not capturing)
+                if let Some(layers_to_capture) = capture_layers {
+                    if layers_to_capture.contains(&abs_layer) {
+                        // A captured layer needs the value itself, so its closing
+                        // add is taken here rather than fused forward.
+                        let taken = hidden.into_tensor().map_err(SwarmError::internal)?;
+                        captured.insert(abs_layer, taken.clone());
+                        hidden = Residual::Ready(taken);
+                    }
                 }
             }
-        }
+            Ok(hidden)
+        })();
+        let hidden = match layers_run {
+            Ok(hidden) => hidden,
+            Err(e) => {
+                // Put the caches back, cut to the length they had before
+                // this step, so a failed step costs the step and not the
+                // conversation. Dropping them with the error left the store
+                // holding an entry with no layers at all; a refused CUDA
+                // graph capture re-runs its step on what is put back here
+                // (`forward_decode_as_graph`). Recurrent state cannot be
+                // cut back, so a segment holding any drops it all as before.
+                if layer_ssm_states.iter().all(Option::is_none) {
+                    for cache in layer_kv_caches.iter_mut().flatten() {
+                        cache.truncate(kv_offset);
+                    }
+                    let mut entry = kv_cache_store.get_or_create_keyed(&cache_key, num_layers);
+                    entry.layers = layer_kv_caches;
+                    entry.ssm_states = layer_ssm_states;
+                }
+                return Err(e);
+            }
+        };
 
         let hidden = self.output_on_primary_device(hidden)?;
 

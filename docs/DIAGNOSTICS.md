@@ -833,6 +833,18 @@ If `pending_tensor_forwards > 0` when a connection closes, those requests will g
 
 For per-token decode analysis, combine the forward pass timing with the decode loop timing from `DIAG: split stream decode loop complete` which reports `tok_per_sec`. Use `-vvv` (trace) to see per-layer timing.
 
+**CUDA-graph decode** (`SWARMLLM_CUDA_OWN_STREAM=1 SWARMLLM_CUDA_GRAPH=1`, opt-in):
+
+| Level | What | Where |
+|-------|------|-------|
+| INFO | `DIAG: decode steps on this model go to the card as one CUDA graph` / `DIAG: decode steps on this model stay uncaptured` + `reason` — decided once, at a model's first decode step | cuda_graph.rs |
+| INFO | `DIAG: decode graph` — `launched`, `updated_in_place`, `instantiated`, `uncaptured`, `refused`; at most once a minute while decoding. `instantiated` should stay at 1 per model; `uncaptured` is one per request (its first decode step) plus any step that grew a KV buffer | cuda_graph.rs |
+| INFO/DEBUG | `DIAG: decode graph capture refused` — `kind`, `detail`; the first of each kind at info. `a host-to-device copy inside the capture` means something on the decode path now uploads from the host — find it with `SWARMLLM_COUNT_KERNELS=1`'s `htod` rows | cuda_graph.rs |
+| WARN | `decode graph: this model's steps kept being refused` — three refusals of the capture's own making; the model decodes the ordinary way from then on | cuda_graph.rs |
+
+**Verify the mechanism fired** by `launched` > 0 on a `--features cuda` build, and compare replies against a
+run without the switches — the same kernels in the same order, so byte-identical.
+
 ## Performance Diagnostics
 
 ### Identifying Slow Requests

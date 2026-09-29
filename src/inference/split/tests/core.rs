@@ -1638,3 +1638,55 @@ fn a_cancelled_request_stops_at_the_next_chunk_boundary() {
         .unwrap();
     assert_eq!(out.dims(), &[1, 12, hidden_dim]);
 }
+
+/// A step that fails part-way through its layers costs the step, not the
+/// conversation: the caches go back cut to the length they had, and the same
+/// step run again answers exactly as if it had never failed. A refused CUDA
+/// graph capture re-runs its step on what this puts back
+/// (`forward_decode_as_graph`). Before, the error dropped every layer's cache
+/// and left the request's entry with no layers at all.
+#[test]
+fn a_step_that_fails_part_way_keeps_the_conversation() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    let hidden_dim = 128;
+    // Three layers: the cancel probe runs BETWEEN layers, so the step fails
+    // after layer 0 has appended its position and before the others have.
+    let mut model = make_test_split_model(3, hidden_dim);
+    let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
+    let prompt = Tensor::randn(0f32, 1.0, (1, 5, hidden_dim), &Device::Cpu).unwrap();
+    let step = Tensor::randn(0f32, 1.0, (1, 1, hidden_dim), &Device::Cpu).unwrap();
+
+    model.forward(&prompt, 0, &kv_store, "reference").unwrap();
+    let expected = model.forward(&step, 5, &kv_store, "reference").unwrap();
+
+    model.forward(&prompt, 0, &kv_store, "interrupted").unwrap();
+    let cancelled = Arc::new(AtomicBool::new(true));
+    let flag = cancelled.clone();
+    kv_store.set_cancel_oracle(Box::new(move |req: &str| {
+        req == "interrupted" && flag.load(Ordering::SeqCst)
+    }));
+    let err = model
+        .forward(&step, 5, &kv_store, "interrupted")
+        .unwrap_err();
+    assert!(
+        crate::inference::split::kv_cache::forward_was_cancelled(&err),
+        "the step must fail with the cancel marker, got {err}"
+    );
+    assert_eq!(
+        kv_store.request_positions(&model.kv_model_key, "interrupted"),
+        5,
+        "every layer's cache is back, at the prompt's length"
+    );
+
+    cancelled.store(false, Ordering::SeqCst);
+    let again = model.forward(&step, 5, &kv_store, "interrupted").unwrap();
+    // Layer 0 had appended position 5 before the failure; had it kept it, the
+    // retry would attend over a duplicate position and answer differently.
+    assert_tensors_close(
+        &again,
+        &expected,
+        1e-6,
+        "the retried step must answer as if it had never failed",
+    );
+}

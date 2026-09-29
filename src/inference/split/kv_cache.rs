@@ -879,6 +879,30 @@ impl KvCacheStore {
             .unwrap_or(0)
     }
 
+    /// Whether a forward reaching `positions` would allocate NOTHING in the
+    /// caches under `key`: every layer has a cache, and every buffer in it —
+    /// K and V, and the f16 mirror's pair where one is kept — already holds
+    /// `positions`. Stricter than [`Self::allocated_positions`], which reads
+    /// one layer's K buffer: a mirror hydrated from a prefix snapshot can be
+    /// sized differently from the cache beside it.
+    ///
+    /// The question a CUDA graph capture asks before a decode step
+    /// (`inference::cuda_graph`): a buffer that grows inside a capture frees
+    /// memory allocated outside it and keeps memory allocated inside it, and
+    /// the graph can then neither be replayed nor trusted.
+    pub(crate) fn every_cache_holds(&self, key: &str, positions: usize) -> bool {
+        self.caches.get(key).is_some_and(|entry| {
+            !entry.layers.is_empty()
+                && entry.layers.iter().all(|layer| {
+                    layer.as_ref().is_some_and(|kv| {
+                        kv.all_caches()
+                            .iter()
+                            .all(|c| c.all_data().is_some() && c.max_seq_len() >= positions)
+                    })
+                })
+        })
+    }
+
     /// Positions the caches under `key` are ALLOCATED for right now — the
     /// buffer, not the positions written — or 0 before the first append. What
     /// the head-room guard compares a forward against: a forward that fits
@@ -1420,6 +1444,43 @@ mod tests {
             store.allocated_positions(&key),
             2048,
             "five tokens, one reservation"
+        );
+    }
+
+    /// The question a CUDA graph capture asks before a decode step: would it
+    /// allocate anything? Only when every layer has a cache and every buffer
+    /// already holds the new position does it not.
+    #[test]
+    fn a_step_allocates_nothing_only_inside_every_layers_buffer() {
+        let store = KvCacheStore::new(std::time::Duration::from_secs(600));
+        let key = KvCacheStore::cache_key("m", "r");
+        assert!(
+            !store.every_cache_holds(&key, 1),
+            "no entry yet: the first append allocates"
+        );
+        let fill = |layer: usize| {
+            let mut entry = store.get_or_create("m", "r", 2);
+            let k = Tensor::zeros((1usize, 2, 5, 4), DType::F32, &Device::Cpu).unwrap();
+            let mut kv = new_kv_cache(4096, false, 0);
+            kv.append(&k, &k.clone()).unwrap();
+            entry.layers[layer] = Some(kv);
+        };
+        fill(0);
+        assert!(
+            !store.every_cache_holds(&key, 6),
+            "a layer with no cache yet allocates on its first append"
+        );
+        fill(1);
+        let capacity = store.allocated_positions(&key);
+        assert!(
+            capacity > 6,
+            "one growth quantum holds more than the prompt"
+        );
+        assert!(store.every_cache_holds(&key, 6));
+        assert!(store.every_cache_holds(&key, capacity));
+        assert!(
+            !store.every_cache_holds(&key, capacity + 1),
+            "one position past the buffer grows it"
         );
     }
 

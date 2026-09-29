@@ -95,6 +95,10 @@ pub struct SplitModel {
     /// When the counters above were last reported. `None` until the first
     /// multi-request call, so an idle model never reports.
     pub(super) batch_stats_reported_at: Option<std::time::Instant>,
+    /// Whether this model's decode steps go to the card as one CUDA graph,
+    /// and the graph if so — see [`crate::inference::cuda_graph`]. Decided at
+    /// the first decode step; `SWARMLLM_CUDA_GRAPH=1` only.
+    pub(super) decode_graph: crate::inference::cuda_graph::DecodeGraphSlot,
 }
 
 impl SplitModel {

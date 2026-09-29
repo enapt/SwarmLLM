@@ -510,6 +510,22 @@ keeping freed memory (#146):
   ~5-6 ms (~+35%); smaller models, more submission-bound, more. The preconditions below still
   stand — this answers only whether the capture route pays on this platform. It does.
 
+### ▶ Stage 4, BUILT (opt-in) — 2026-09-29
+
+`SWARMLLM_CUDA_OWN_STREAM=1 SWARMLLM_CUDA_GRAPH=1`: a one-position forward on a dense model held
+whole on the card is re-captured every token and launched as one graph
+(`inference::cuda_graph`, `SplitModel::forward_decode_as_graph`). Each item of 4b below has an
+answer in the code; the evidence and the table are in `docs/invariants/inference.md` § "A decode
+step can go to the card as one CUDA graph". In short: **byte-identical replies; TinyLlama +48%,
+Llama 3.2 3B +18%, Llama 3.1 8B none** (card-bound — a graph cannot start the card until the step
+is recorded, where op-by-op submission overlaps it). OFF by default until (a) one prompt pass per
+graph arm running 0.3-1.7 s slow is explained and (b) the choice is made per model, since the 8B
+loses ~2%.
+
+Found building it, and not in the docs: **a pageable host→device copy inside a capture is
+captured, not refused, and read at LAUNCH** (`examples/cuda_graph_capture_rules.cu` B) — the
+reason for the always-on copy counter in vendored candle and the capture that throws itself away.
+
 ### ▶ Stage 4b — what capturing OUR decode step still has to solve
 
 The probe establishes the platform. These are the program's problems, found by

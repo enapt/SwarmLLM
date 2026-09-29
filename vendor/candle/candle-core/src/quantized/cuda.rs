@@ -1035,16 +1035,22 @@ impl QCudaStorage {
 
         // `index_select` over the bytes: one "element" is one byte, the
         // selected dimension is the row, and `right_size` is the row width.
-        let ids_dims = [n_ids];
-        let ids_strides = [1usize];
-        let info = dev.clone_htod(&[ids_dims.as_slice(), ids_strides.as_slice()].concat())?;
+        //
+        // No layout is uploaded. The kernel reads `info` for one thing — is
+        // the SOURCE contiguous? — and with zero dims `is_contiguous` answers
+        // yes without a read, which is true: the source is a flat run of
+        // bytes. The `[n_ids] / [1]` layout this passed before was contiguous
+        // too, so every lookup takes the same branch as before. The upload was
+        // a host→device copy on every decoded token, and a copy inside a CUDA
+        // graph capture is replayed from a freed host address (see
+        // `cuda_backend::device::HTOD_COPIES`).
         let func = dev.get_or_load_func("is_u32_u8", &candle_kernels::INDEXING)?;
         let cfg = cudarc::driver::LaunchConfig::for_num_elems(out_bytes as u32);
         let src = self.data.inner.slice(..self.data.len);
         let mut builder = func.builder();
         barg!(builder, out_bytes);
-        barg!(builder, ids_dims.len());
-        builder.arg(&info);
+        barg!(builder, 0usize); // num_dims
+        barg!(builder, 0u64); // info: a null `const size_t*`, never read with zero dims
         builder.arg(ids);
         builder.arg(&src);
         builder.arg(&out);

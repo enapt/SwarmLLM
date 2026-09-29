@@ -105,8 +105,27 @@ fn htod_counts() -> &'static std::sync::Mutex<HashMap<String, u64>> {
     C.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
+/// SwarmLLM patch: every host→device copy this process has made, counted
+/// ALWAYS — one relaxed add, unlike the per-line table above, which runs only
+/// under `SWARMLLM_COUNT_KERNELS=1`.
+///
+/// A CUDA graph capture reads it before and after. CUDA accepts a copy from
+/// pageable host memory inside a capture without an error and replays it from
+/// that host ADDRESS at every launch — measured: a value changed after the
+/// capture is the one that arrives (`examples/cuda_graph_capture_rules.cu`).
+/// Candle's copies come from temporaries freed before the launch, so a capture
+/// that made one would feed the card freed memory, silently. Complete for the
+/// same reason the table is: every copy comes through the two functions below.
+static HTOD_COPIES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// See [`HTOD_COPIES`].
+pub fn htod_copies_so_far() -> u64 {
+    HTOD_COPIES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 #[inline]
 fn count_htod_copy(at: &'static std::panic::Location<'static>) {
+    HTOD_COPIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     if !counting_kernels() {
         return;
     }

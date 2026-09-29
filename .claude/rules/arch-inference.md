@@ -252,6 +252,24 @@ would name.
 
 → `docs/invariants/inference.md` § "A prompt pass on the card multiplies quantized weights on the tensor cores"
 
+## A decode step can go to the card as ONE CUDA graph — opt-in (2026-09-29)
+
+**`inference::cuda_graph` + `SplitModel::forward_decode_as_graph`** re-capture a
+one-position forward every token and update one instantiated graph in place
+(llama.cpp's way) — `SWARMLLM_CUDA_OWN_STREAM=1 SWARMLLM_CUDA_GRAPH=1`, OFF by
+default. Replies byte-identical; +48% TinyLlama, +18% Llama 3.2 3B, none on an 8B
+(card-bound: a graph launches nothing until the step is recorded). ⛔ **A pageable
+host→device copy inside a capture is ACCEPTED and replayed from the host address
+at LAUNCH** — silent garbage. So vendored candle counts every copy
+(`htod_copies_so_far`), a capture that made one is thrown away, and a new
+`clone_htod` on the decode path turns capture off for that model. Capture only a
+step whose KV buffers already hold it (`KvCacheStore::every_cache_holds`); a
+refusal rolls the cache back and runs the step the ordinary way. **A forward that
+fails part-way now puts its caches back, cut to their old length** — it used to
+drop them all.
+
+→ `docs/invariants/inference.md` § "A decode step can go to the card as one CUDA graph"
+
 ## Attention kernel choice and the query-length cliff (2026-08-23)
 
 Four helpers now own decisions that used to be spread across call sites. All

@@ -2298,6 +2298,7 @@ impl SplitModel {
             batch_calls: 0,
             batch_fellback: 0,
             batch_stats_reported_at: None,
+            decode_graph: Default::default(),
         })
     }
 }

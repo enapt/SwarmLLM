@@ -2052,3 +2052,67 @@ long context (FUTURE_WORK #147).
 - A card without fp16 tensor cores (< 7.0) keeps MMQ.
 - Decode (≤ 8 rows) never takes it; batched decode stays on the vec kernel.
 - Replies are judged against llama.cpp, never byte-equality with MMQ.
+
+## A decode step can go to the card as one CUDA graph (2026-09-29, opt-in)
+
+**What.** `SWARMLLM_CUDA_OWN_STREAM=1 SWARMLLM_CUDA_GRAPH=1` sends a one-position forward
+(dense layers, the whole segment on one card, no LoRA) to the card as ONE graph:
+`SplitModel::forward_decode_as_graph` captures `forward_inner_body` on the device's own stream,
+`inference::cuda_graph` updates the model's one instantiated graph from the capture
+(`cuGraphExecUpdate`) and launches it. Re-captured every token, as llama.cpp does — no length
+classes, no stable-buffer arena: candle's per-op allocations become graph memory nodes.
+
+**Why re-capture works here** (`examples/cuda_graph_cost_probe.cu`,
+`examples/cuda_graph_capture_rules.cu`, RTX 3070 Laptop, WSL2): recording a launch costs ~2 µs
+against ~10 µs to submit one, and the update accepts a graph whose allocation SIZES and launch
+GRIDS changed since the last one — 199/199 updated, none re-instantiated — which is exactly what
+a growing KV length does to the attention scores.
+
+**The trap that shapes the code.** A PAGEABLE host→device copy inside a capture is not refused:
+the capture records it and every LAUNCH reads the host address — the probe changed the host
+buffer after capture and the card received the new value. Candle copies from temporaries it frees
+at once, so a copy in a captured step is garbage, silently. Hence:
+- Vendored candle counts every copy, always (`cuda_backend::device::HTOD_COPIES`,
+  `candle_core::cuda::htod_copies_so_far`) — both copy functions are the only way in, which is
+  why the per-line table was already complete. A capture during which the count moved is thrown
+  away.
+- The quantized embedding gather no longer uploads its layout: the kernel reads it only to ask
+  whether the source is contiguous, and with zero dims `is_contiguous` says yes without reading.
+  That was the one copy inside a decode step (the token id is made before the forward).
+- A hidden state arriving from a peer is moved to the card BEFORE the capture.
+
+**What else a capture must not do, and how each is kept out** (`local_decode_submissions.md`
+§ Stage 4b): free memory made before it (a KV buffer that grows, a mirror a hydrated snapshot
+brought, dropped on the first decode step) — so only a step that directly FOLLOWS an ordinary one
+of the same conversation, whose every KV buffer already holds the new position
+(`KvCacheStore::every_cache_holds`), is captured; keep memory made inside it — the output is
+copied into a tensor made before the capture; synchronise — CUDA refuses that loudly.
+
+**A refusal never fails the request.** `forward_inner_body` moved each layer's cache length on
+the host even though nothing ran, so the caller truncates to `index_pos`
+(`truncate_request_to`) and runs the step the ordinary way. That needed a change underneath: a
+forward that failed part-way used to DROP the request's caches (taken out of the store, never put
+back), leaving an entry with no layers; it now puts them back cut to their old length
+(`a_step_that_fails_part_way_keeps_the_conversation`, red without it). Three refusals that are the
+program's fault — a copy, a failed call, a broken capture — turn capture off for the model: one of
+them (a free of outside memory) also leaks the buffer, so a systematic one would leak per token.
+
+**Measured** (one binary, interleaved arms, isolated node, greedy, 3 prompts × 256 tokens, host
+uptime ~21 h, `~/swarmllm-graph-0929/`):
+
+| model | legacy stream | own stream | own stream + graph | replies vs legacy |
+|---|---|---|---|---|
+| TinyLlama 1.1B Q4_K_M (22 L) | 94-99 tok/s | — | **141-146** | 3/3 identical |
+| Llama 3.2 3B Q4_K_M (28 L) | 62-70 | — | **75-77** | 6/6 identical |
+| Llama 3.1 8B Q4_K_M (32 L) | 45.0-46.6 | 45.1-47.3 | 44.3-45.1 | 6/6 identical (own 6/6 too) |
+
+- 773-780 launches per arm, all but the first updated in place, 0 refused. The own-stream arm is
+  the first `--features cuda` generation on an own stream since .199 (#683/#685): identical.
+- **No gain on the 8B, a slight loss**: its decode is card-bound, and issued op by op the card
+  starts each kernel while the processor submits the next; a graph launches nothing until the
+  whole step is recorded (~2-3 ms of an idle card). The gain is where submission, not the card,
+  was the bottleneck — small models, and small segments of them.
+- ⚠ **Open: one prompt pass per graph arm ran 0.3-1.7 s slow** (3B: 310 ms against 17 ms for
+  the same 53-token pass in legacy). The default pool had to GROW for that pass in the graph arm
+  (decode temporaries no longer churn through it); legacy grew the same pool on a later pass in
+  18 ms, so growth alone is not the cause. This is why it stays OFF.
