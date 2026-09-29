@@ -484,6 +484,32 @@ device, buffers never crossing devices** (candle refuses cross-device tensors).
 ⚠ And `SWARMLLM_CUDA_EVENT_TRACKING=1` stopped being a pure revert — with
 multi-stream mode now true it also hands cudarc back stream-sync management.
 
+### ▶ Stage 4, measured: re-capture every token and UPDATE the graph — ~2× on submissions (2026-09-29)
+
+The plan left open how to graph a step whose kernel parameters change every token (item 4
+below): a graph per length class, or llama.cpp's re-capture-and-`cudaGraphExecUpdate`. The
+latter only pays if RECORDING a launch is cheap where SUBMITTING one costs ~10 µs (WSL2).
+`examples/cuda_graph_cost_probe.cu` measures exactly that on this RTX 3070 Laptop (driver
+616.92, WSL2): N near-empty kernels a "token", each with a `cudaMallocAsync` before and a
+`cudaFreeAsync` after (candle's pattern), one scalar argument changing every token, the pool
+keeping freed memory (#146):
+
+| per token | 600 kernels | 1,000 kernels |
+|---|---|---|
+| direct launches (today) | 6.40 ms | 10.38 ms |
+| re-capture + `cudaGraphExecUpdate` + launch | **2.53 ms** (capture 1.09, update 0.29) | **4.89 ms** (capture 2.12, update 0.68) |
+| capture once, replay (upper bound) | 0.74 ms | 1.08 ms |
+
+- **Recording costs ~2 µs a launch against ~10 µs to submit one**, so llama.cpp's approach
+  halves the submission cost here — and it needs no length classes: the changing KV length is
+  simply re-captured.
+- **`cudaGraphExecUpdate` succeeded 199 of 199 tokens WITH memory alloc/free nodes in the
+  graph** — the unknown that could have forced a re-instantiate per token (0.3-0.7 ms here
+  would have become several ms).
+- Projected, not measured: an 8B decode at ~20 ms and ~1,000 submissions a token would save
+  ~5-6 ms (~+35%); smaller models, more submission-bound, more. The preconditions below still
+  stand — this answers only whether the capture route pays on this platform. It does.
+
 ### ▶ Stage 4b — what capturing OUR decode step still has to solve
 
 The probe establishes the platform. These are the program's problems, found by
