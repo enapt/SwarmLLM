@@ -518,9 +518,12 @@ whole on the card is re-captured every token and launched as one graph
 answer in the code; the evidence and the table are in `docs/invariants/inference.md` § "A decode
 step can go to the card as one CUDA graph". In short: **byte-identical replies; TinyLlama +48%,
 Llama 3.2 3B +18%, Llama 3.1 8B none** (card-bound — a graph cannot start the card until the step
-is recorded, where op-by-op submission overlaps it). OFF by default until (a) one prompt pass per
-graph arm running 0.3-1.7 s slow is explained and (b) the choice is made per model, since the 8B
-loses ~2%.
+is recorded, where op-by-op submission overlaps it). OFF by default because the models a split
+carries are mostly 7-8B and card-bound, where it loses ~2%: it needs a per-model choice, or a
+capture pipelined by layer groups so the card never waits for the recording. (A slow prompt pass
+first seen only with graphs on turned up in a legacy arm and in llama.cpp too — a host effect,
+not the capture's.) **On a card-bound 7B the gap to llama.cpp is ~20% and it is the kernels**:
+Qwen 2.5 Coder 7B decodes 57.5 tok/s through llama.cpp in the same binary, 47-48 through ours.
 
 Found building it, and not in the docs: **a pageable host→device copy inside a capture is
 captured, not refused, and read at LAUNCH** (`examples/cuda_graph_capture_rules.cu` B) — the

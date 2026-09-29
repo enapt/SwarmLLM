@@ -2112,7 +2112,13 @@ uptime ~21 h, `~/swarmllm-graph-0929/`):
   starts each kernel while the processor submits the next; a graph launches nothing until the
   whole step is recorded (~2-3 ms of an idle card). The gain is where submission, not the card,
   was the bottleneck — small models, and small segments of them.
-- ⚠ **Open: one prompt pass per graph arm ran 0.3-1.7 s slow** (3B: 310 ms against 17 ms for
-  the same 53-token pass in legacy). The default pool had to GROW for that pass in the graph arm
-  (decode temporaries no longer churn through it); legacy grew the same pool on a later pass in
-  18 ms, so growth alone is not the cause. This is why it stays OFF.
+- **A prompt pass 0.3-1.9 s slow is NOT the graph's doing** — corrected the same day. It showed in
+  graph arms first (3B: a 53-token pass 310 ms against 17 ms, the thread blocked 455 ms inside the
+  LAST layer — work already queued, the card busy elsewhere), but the Qwen 2.5 Coder 7B run then
+  hit a LEGACY arm (0.98 s) and the llama.cpp arms (0.43-0.66 s against 0.14 s). A standalone probe
+  found default-pool growth 2-3 ms with or without graph memory held. It is a host effect at ~22 h
+  of Windows uptime (the #755 family), not a property of capture.
+- **Why it stays OFF**: most models a split carries are 7-8B and card-bound, where it gains nothing
+  and costs ~2%. Qwen 2.5 Coder 7B: legacy 46.7-48.7, graph 46.2-47.0 tok/s — and llama.cpp, in the
+  same binary on the same card and file, **57.5-57.7**: the gap on a card-bound model is the KERNELS,
+  ~20%, not submissions.
