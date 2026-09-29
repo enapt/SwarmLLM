@@ -2122,3 +2122,44 @@ uptime ~21 h, `~/swarmllm-graph-0929/`):
   and costs ~2%. Qwen 2.5 Coder 7B: legacy 46.7-48.7, graph 46.2-47.0 tok/s — and llama.cpp, in the
   same binary on the same card and file, **57.5-57.7**: the gap on a card-bound model is the KERNELS,
   ~20%, not submissions.
+
+## A decoded token's attention on a card is one kernel (2026-09-29)
+
+**What.** `decode_attn::gqa_decode_attention_cuda` + `kernels/decode_attn.cu`: one query position,
+the f32 cache read where it lies, split into fixed 64-position chunks (Dao et al., "Flash-Decoding
+for long-context inference", 2023; llama.cpp's `fattn-vec` + `flash_attn_combine_results`). One
+block holds ONE KV head and EVERY query head of its group, so a K or V row is read once per group
+(#119's lesson from the CPU kernel). Replaces `affine` + two cuBLAS matmuls + `softmax`. Pinned
+against the matmul composition on the card by `cuda_decode_kernel_matches_the_matmul_path`
+(10 shapes: n_rep 1-7, d 64/128/256, soft-cap, 8K positions, a narrowed cache; < 1e-5 abs).
+
+**And the f16 mirror is lazy.** Decode never reads it (its reader is the warm-prefix flash path),
+yet every token paid two casts and two copies per layer to keep it in step. A one-position append
+now skips it; the next multi-position append converts the lag from the f32 cache first
+(`decode_steps_leave_the_mirror_behind_and_the_next_chunk_catches_it_up`: equal to an eager
+mirror, bit for bit). `SWARMLLM_GQA_DECODE_FLASH=1` — the one decode path that reads it — keeps it
+eager; `SWARMLLM_KV_MIRROR_EAGER=1` restores the old behaviour for an A/B.
+
+**Measured** (Qwen2.5-Coder-7B Q4_K_M, RTX 3070 Laptop, one binary per row, 3 prompts × 256):
+
+| | tok/s | launches/layer |
+|---|---|---|
+| before | 46.7-48.7 | 27.2 |
+| decode kernel + lazy mirror | **48.3-51.0** | 23.2 |
+| llama.cpp, same binary/card/file | 57.5-57.7 | — |
+
+The kernel ALONE did not move the 7B (47.0-48.4 either way, `SWARMLLM_DECODE_ATTN=standard`) —
+the synchronised stage profile had overstated attention's share. Replies: each path repeats itself
+byte for byte; new vs old diverge at near-ties (2/3 prompts). Against llama.cpp: 729/737 rank-1
+(worst rank 3, gap 0.34) vs 728/739 (worst rank 2, gap 0.10) — the same agreement.
+
+**Where the rest of the gap to llama.cpp is.** `examples/qmatvec_card_bench.rs` queues one token's
+weight products (Qwen2.5-7B shapes, per-layer K/V so they cannot sit in L2) and synchronises once:
+**16.9 ms** — llama.cpp's WHOLE token is 17.4. Big matrices run at 300-310 GB/s (~69% of the
+card's 448), q/o at 211, k/v are launch-bound at ~22 µs each, the output head alone is 1.55 ms.
+llama.cpp's current Q4_K `vec_dot` is the same algorithm (a branchless scale unpack is the only
+change) and its batch-1 geometry is the same (4 warps, one row per block), so its advantage is
+between kernels: fused gate+up+GLU and bias in the matvec, and CUDA graphs. Ours confirms it — a
+graph step shows `recording_ms_per_launch` ≈ 4.5 ms against a 20.8 ms cycle, i.e. **~16 ms of card
+time** against ~19.8 op by op; the recording is what eats the gain. Next: record layer groups and
+launch each as it is recorded, so the card never waits for the recording.

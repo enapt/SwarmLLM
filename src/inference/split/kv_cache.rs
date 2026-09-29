@@ -351,15 +351,39 @@ impl LayerKv {
         k: &Tensor,
         v: &Tensor,
     ) -> candle_core::Result<(Tensor, Tensor)> {
+        let before = self.main.current_seq_len();
         let out = self.main.append(k, v)?;
+        // A decode step — ONE position — leaves the mirror behind. Its reader
+        // is attention over the f32 cache (`layers::cuda_decode_prefers_standard`
+        // and the card's decode kernel), so keeping the mirror in step cost four
+        // launches per layer per token (two casts, two copies: 15% of a 7B's
+        // decode launches) for a copy nothing read until the next prompt chunk.
+        // That chunk catches it up below, in one conversion.
+        if self.main.current_seq_len() == before + 1 && mirror_is_lazy() {
+            return Ok(out);
+        }
         if self.shadow.is_none() && self.mirrorable && Self::wants_shadow(k) {
             self.shadow = Some(KvPair::with_capacity(1, self.initial, self.growth));
         }
         if let Some(shadow) = self.shadow.as_mut() {
-            // Convert only what is being added — this is the point of the mirror.
-            let k_new = Self::to_bshd_f16(k)?;
-            let v_new = Self::to_bshd_f16(v)?;
-            if let Err(e) = shadow.append(&k_new, &v_new) {
+            let have = shadow.current_seq_len();
+            let caught_up = (|| -> candle_core::Result<()> {
+                // The positions the f32 cache took without it: the decode
+                // steps since the last chunk, or a whole history when the
+                // mirror starts mid-conversation.
+                if have < before {
+                    let k_lag = out.0.narrow(2, have, before - have)?;
+                    let v_lag = out.1.narrow(2, have, before - have)?;
+                    shadow.append(&Self::to_bshd_f16(&k_lag)?, &Self::to_bshd_f16(&v_lag)?)?;
+                } else if have > before {
+                    shadow.truncate(before);
+                }
+                // Then only what is being added — this is the point of the mirror.
+                shadow
+                    .append(&Self::to_bshd_f16(k)?, &Self::to_bshd_f16(v)?)
+                    .map(|_| ())
+            })();
+            if let Err(e) = caught_up {
                 // Never serve from a mirror that failed to take an append: drop
                 // it and let the flash path fall back to converting the f32
                 // cache. Wrong attention is far worse than losing the speedup.
@@ -453,6 +477,12 @@ impl LayerKv {
     /// kernel a history of the wrong length.
     pub(crate) fn flash_operands(&self) -> Option<(Tensor, Tensor)> {
         let shadow = self.shadow.as_ref()?;
+        // BEHIND is by design: decode steps leave it there (`append`), and the
+        // next multi-position append catches it up before anything reads it.
+        // Every decode step asks, so this must stay quiet.
+        if shadow.current_seq_len() < self.main.current_seq_len() && mirror_is_lazy() {
+            return None;
+        }
         if shadow.current_seq_len() != self.main.current_seq_len() {
             // Deliberately a warning and a fallback, not an assertion. Drift is
             // a bug, but the safe response is to convert the f32 cache and
@@ -485,6 +515,20 @@ fn mirror_disabled() -> bool {
         std::env::var("SWARMLLM_DISABLE_KV_MIRROR")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false)
+    })
+}
+
+/// Whether a one-position append leaves the f16 mirror behind (the default).
+///
+/// `SWARMLLM_KV_MIRROR_EAGER=1` keeps it in step on every append, as before —
+/// the A/B inside one binary. `SWARMLLM_GQA_DECODE_FLASH=1` does too: it routes
+/// decode through the flash kernel, the one decode path that reads the mirror,
+/// and a lagging mirror would send every token to the whole-cache conversion.
+fn mirror_is_lazy() -> bool {
+    static LAZY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *LAZY.get_or_init(|| {
+        std::env::var("SWARMLLM_KV_MIRROR_EAGER").as_deref() != Ok("1")
+            && std::env::var("SWARMLLM_GQA_DECODE_FLASH").as_deref() != Ok("1")
     })
 }
 
@@ -1800,6 +1844,57 @@ mod tests {
             .to_scalar::<f32>()
             .unwrap();
         assert_eq!(diff, 0.0, "mirror diverged from the f32 cache it mirrors");
+    }
+
+    /// Decode steps leave the mirror behind — nothing reads it until the next
+    /// prompt chunk — and that chunk catches it up in one conversion, to
+    /// exactly what an eager mirror would have held. Before, every decoded
+    /// token paid four launches per layer to keep it in step.
+    #[test]
+    fn decode_steps_leave_the_mirror_behind_and_the_next_chunk_catches_it_up() {
+        let dev = candle_core::Device::Cpu;
+        let mut kv = LayerKv::with_capacity(2, 64, 64);
+        kv.force_shadow_for_test();
+        kv.append(&t(&dev, 1, 2, 3, 4), &t(&dev, 1, 2, 3, 4))
+            .unwrap();
+        for i in 0..4 {
+            let step = (t(&dev, 1, 2, 1, 4) + (i as f64 + 100.0)).unwrap();
+            kv.append(&step, &step).unwrap();
+        }
+        assert_eq!(kv.current_seq_len(), 7);
+        assert_eq!(
+            kv.shadow_len_for_test(),
+            Some(3),
+            "decode steps skip the mirror"
+        );
+        assert!(
+            kv.flash_operands().is_none(),
+            "a lagging mirror is never handed to the kernel"
+        );
+
+        let chunk = (t(&dev, 1, 2, 2, 4) + 500.0).unwrap();
+        kv.append(&chunk, &chunk).unwrap();
+        assert_eq!(kv.shadow_len_for_test(), Some(9));
+        let expect = kv
+            .k()
+            .unwrap()
+            .unwrap()
+            .transpose(1, 2)
+            .unwrap()
+            .contiguous()
+            .unwrap()
+            .to_dtype(DType::F16)
+            .unwrap();
+        let (mk, _) = kv.flash_operands().expect("caught up");
+        let diff = (mk.to_dtype(DType::F32).unwrap() - expect.to_dtype(DType::F32).unwrap())
+            .unwrap()
+            .abs()
+            .unwrap()
+            .max_all()
+            .unwrap()
+            .to_scalar::<f32>()
+            .unwrap();
+        assert_eq!(diff, 0.0, "the caught-up mirror must equal the f32 cache");
     }
 
     #[test]

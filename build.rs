@@ -27,7 +27,10 @@ fn main() {
 /// above the virtual arch, so one artifact serves the whole `sm_80+` range the
 /// CUDA release builds target.
 fn build_fused_decode_ptx() {
-    const KERNELS: &[&str] = &["fused_decode.cu"];
+    // `decode_attn.cu` is NOT bit-identical to the ops it replaces (it sums in
+    // a different order); its header says so. The no-fast-math rule below
+    // still applies to it.
+    const KERNELS: &[&str] = &["fused_decode.cu", "decode_attn.cu"];
 
     for k in KERNELS {
         println!("cargo:rerun-if-changed=kernels/{k}");

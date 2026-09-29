@@ -270,6 +270,24 @@ drop them all.
 
 → `docs/invariants/inference.md` § "A decode step can go to the card as one CUDA graph"
 
+## A decoded token's attention on a card is ONE kernel, and never keeps the mirror in step (2026-09-29)
+
+**`decode_attn::gqa_decode_attention_cuda`** (`kernels/decode_attn.cu`, flash-decoding: one
+block per KV head and 64-position chunk, every query head of the group, a combine kernel past one
+chunk) answers a one-position attention on a card, from `standard_attention` — the card's twin of
+the CPU kernel, same `SWARMLLM_DECODE_ATTN=standard` A/B. **And a one-position append leaves the
+f16 mirror behind** (`LayerKv::append`); the next multi-position append catches it up, and
+`flash_operands` declines a lagging mirror quietly (`SWARMLLM_KV_MIRROR_EAGER=1` = old). Together
+−4 launches per layer: Qwen2.5-Coder-7B 46.7-48.7 → 48.3-51.0 tok/s. ⚠ Not bit-identical to the
+matmul path — judge replies against llama.cpp.
+
+**Where a card-bound 7B's token goes** (`examples/qmatvec_card_bench.rs`): the weight products
+ALONE take 16.9 ms — llama.cpp's whole token is 17.4, with the same Q4_K kernel (the current
+`mmvq` differs only in a branchless scale unpack). The gap is BETWEEN kernels: a graph runs the
+7B step in ~16 ms of card time but records for 4.5 ms first (`recording_ms_per_launch`).
+
+→ `docs/invariants/inference.md` § "A decoded token's attention on a card is one kernel"
+
 ## Attention kernel choice and the query-length cliff (2026-08-23)
 
 Four helpers now own decisions that used to be spread across call sites. All

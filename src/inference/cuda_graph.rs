@@ -137,6 +137,11 @@ struct Stats {
     instantiated: u64,
     uncaptured: u64,
     refused: u64,
+    /// Host time from the start of a capture to its launch, summed over the
+    /// launched ones. The card waits for all of it — a graph starts nothing
+    /// until the step is recorded — so it is the cost to set against the
+    /// submissions the graph saves.
+    recording: Duration,
     reasons_seen: Vec<&'static str>,
     reported_at: Option<Instant>,
 }
@@ -203,6 +208,7 @@ impl DecodeGraph {
         device: &Device,
         forward: impl FnOnce() -> Result<(), SwarmError>,
     ) -> Result<(), Refusal> {
+        let started = Instant::now();
         #[cfg(feature = "candle-cuda")]
         let outcome = match device {
             Device::Cuda(dev) => cuda::capture_and_launch(dev, &mut self.exec, forward),
@@ -222,6 +228,7 @@ impl DecodeGraph {
         match &outcome {
             Ok(updated) => {
                 self.stats.launched += 1;
+                self.stats.recording += started.elapsed();
                 if *updated {
                     self.stats.updated += 1;
                 } else {
@@ -271,6 +278,10 @@ impl DecodeGraph {
         let s = &self.stats;
         tracing::info!(
             launched = s.launched,
+            recording_ms_per_launch = format!(
+                "{:.2}",
+                s.recording.as_secs_f64() * 1e3 / s.launched.max(1) as f64
+            ),
             updated_in_place = s.updated,
             instantiated = s.instantiated,
             uncaptured = s.uncaptured,

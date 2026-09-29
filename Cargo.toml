@@ -364,6 +364,12 @@ name = "gpu_decode_bench"
 path = "examples/gpu_decode_bench.rs"
 required-features = ["flash-attn"]
 
+# Needs a card at RUN time and CUDA to compile, like the one above.
+[[example]]
+name = "qmatvec_card_bench"
+path = "examples/qmatvec_card_bench.rs"
+required-features = ["candle-cuda"]
+
 [[test]]
 name = "integration"
 path = "tests/integration/api_test.rs"

@@ -1472,7 +1472,9 @@ pub(crate) fn new_kv_cache(
 /// away on both geometries and its remaining reader is the warm-prefix flash
 /// path, i.e. prompt chunks after the first. That makes it a genuine trade
 /// rather than free: a chunk keeps an O(history) f16 conversion it would
-/// otherwise repeat, while every decoded token pays the append.
+/// otherwise repeat. Decoded tokens no longer pay for it (2026-09-29): a
+/// one-position append leaves the mirror behind and the next chunk catches it
+/// up (`kv_cache::LayerKv::append`), which cut four launches per layer.
 /// `SWARMLLM_KV_MIRROR=0`/`=1` forces it off/on for an A/B inside one binary.
 pub(crate) fn model_wants_kv_mirror(n_head: usize, n_kv_head: usize) -> bool {
     match std::env::var("SWARMLLM_KV_MIRROR").as_deref() {
@@ -1621,6 +1623,23 @@ pub(crate) fn standard_attention(
     // anything outside its scope (non-CPU, non-f32, q_len > 1, a mask it cannot
     // reduce to one row) and this function carries on as before.
     // `SWARMLLM_DECODE_ATTN=standard` forces the matmul path for A/B.
+    //
+    // Its twin on a card: one launch (two past 64 positions) in place of two
+    // cuBLAS matmuls around a softmax, which cost ~0.1 ms per layer at 512
+    // positions on an RTX 3070 — ~3 ms of a 28-layer token for a few MB of
+    // cache. Same switch, same fallback.
+    if q.dim(2)? == 1 && q.device().is_cuda() {
+        if let Some(out) = crate::inference::decode_attn::gqa_decode_attention_cuda(
+            q,
+            k,
+            v,
+            mask,
+            crate::inference::attn_softmax::scale_from_head_dim(head_dim) as f32,
+            attn_logit_softcap,
+        )? {
+            return Ok(out);
+        }
+    }
     if q.dim(2)? == 1 && q.device().is_cpu() {
         if let Some(out) = crate::inference::decode_attn::gqa_decode_attention_cpu(
             q,

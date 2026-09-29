@@ -271,6 +271,245 @@ pub fn gqa_decode_attention_cpu(
     )?))
 }
 
+/// Cached positions per block on the CARD — `DA_CHUNK` in
+/// `kernels/decode_attn.cu`, and FIXED for the same reason [`CHUNK`] is: the
+/// result depends on the cache length only. Smaller than the processor's
+/// because a card needs blocks to fill it: at 200 positions on a 4-KV-head
+/// model, 256 would be four blocks on a 40-SM card.
+#[cfg(feature = "candle-cuda")]
+pub(crate) const CUDA_CHUNK: usize = 64;
+/// Query heads per KV head one block holds (`DA_MAX_REP`); head dims it
+/// handles (`DA_MAX_D`, and a multiple of 32).
+const CUDA_MAX_REP: usize = 16;
+const CUDA_MAX_D: usize = 256;
+
+/// PTX for the card kernel, compiled from `kernels/decode_attn.cu` by
+/// `build.rs` and loaded through candle's `get_or_load_custom_func`.
+#[cfg(feature = "candle-cuda")]
+pub(crate) const DECODE_ATTN_PTX: &str = include_str!(concat!(env!("OUT_DIR"), "/decode_attn.ptx"));
+
+/// [`gqa_decode_attention_cpu`]'s twin on a CARD: one query position, straight
+/// over the f32 cache in its stored layout, each K and V row read once for its
+/// whole group, split into fixed chunks merged by flash-decoding's reduction.
+/// It replaces two cuBLAS matmuls around a softmax (plus the scale and the
+/// copies around them) — ~0.1 ms per layer at 512 positions, 0.32 at 8K on an
+/// RTX 3070 — with one launch (two past [`CUDA_CHUNK`] positions).
+///
+/// Scope: CUDA, f32, `q_len == 1`, no mask (a decode step on a card never has
+/// one), `d` a multiple of 32 up to 256, at most 16 query heads per KV head,
+/// K/V with dense `[S, d]` rows. Anything else returns `Ok(None)` and the
+/// caller keeps the matmul path. `SWARMLLM_DECODE_ATTN=standard` turns both
+/// kernels off for an A/B inside one binary.
+///
+/// Not bit-identical to the matmul path (another summation order); pinned
+/// against it within float tolerance by
+/// `cuda_decode_kernel_matches_the_matmul_path`, and replies are judged against
+/// llama.cpp.
+pub fn gqa_decode_attention_cuda(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    mask: Option<&Tensor>,
+    scale: f32,
+    softcap: Option<f32>,
+) -> Result<Option<Tensor>> {
+    if !decode_kernel_enabled() || !q.device().is_cuda() || mask.is_some() {
+        return Ok(None);
+    }
+    if q.dtype() != candle_core::DType::F32
+        || k.dtype() != candle_core::DType::F32
+        || v.dtype() != candle_core::DType::F32
+    {
+        return Ok(None);
+    }
+    let (b, n_head, q_len, d) = q.dims4()?;
+    let (kb, n_kv_head, s_len, kd) = k.dims4()?;
+    if q_len != 1
+        || kb != b
+        || kd != d
+        || n_kv_head == 0
+        || n_head % n_kv_head != 0
+        || n_head / n_kv_head > CUDA_MAX_REP
+        || s_len == 0
+        || d == 0
+        || d % 32 != 0
+        || d > CUDA_MAX_D
+        || v.dims4()? != (b, n_kv_head, s_len, d)
+    {
+        return Ok(None);
+    }
+    for t in [k, v] {
+        let st = t.stride();
+        if st[3] != 1 || st[2] != d {
+            return Ok(None);
+        }
+    }
+    #[cfg(feature = "candle-cuda")]
+    {
+        let q = q.contiguous()?;
+        let op = cuda::DecodeAttn {
+            scale,
+            softcap: softcap.unwrap_or(0.0),
+        };
+        Ok(Some(q.apply_op3_no_bwd(k, v, &op)?))
+    }
+    #[cfg(not(feature = "candle-cuda"))]
+    {
+        let _ = (scale, softcap);
+        Ok(None)
+    }
+}
+
+#[cfg(feature = "candle-cuda")]
+mod cuda {
+    use super::CUDA_CHUNK;
+    use candle_core::{CpuStorage, CustomOp3, Layout, Result, Shape};
+
+    pub(super) struct DecodeAttn {
+        pub(super) scale: f32,
+        /// 0 = none.
+        pub(super) softcap: f32,
+    }
+
+    impl CustomOp3 for DecodeAttn {
+        fn name(&self) -> &'static str {
+            "decode-attention"
+        }
+
+        /// Never reached: [`super::gqa_decode_attention_cuda`] returns `None`
+        /// off a card, and the processor has its own kernel.
+        fn cpu_fwd(
+            &self,
+            _: &CpuStorage,
+            _: &Layout,
+            _: &CpuStorage,
+            _: &Layout,
+            _: &CpuStorage,
+            _: &Layout,
+        ) -> Result<(CpuStorage, Shape)> {
+            candle_core::bail!("decode-attention is CUDA-only")
+        }
+
+        fn cuda_fwd(
+            &self,
+            s1: &candle_core::CudaStorage,
+            l1: &Layout,
+            s2: &candle_core::CudaStorage,
+            l2: &Layout,
+            s3: &candle_core::CudaStorage,
+            l3: &Layout,
+        ) -> Result<(candle_core::CudaStorage, Shape)> {
+            use candle_core::cuda_backend::cudarc::driver::{LaunchConfig, PushKernelArg};
+            use candle_core::cuda_backend::WrapErr;
+
+            let dev = s1.device.clone();
+            let Some((qo, qe)) = l1.contiguous_offsets() else {
+                candle_core::bail!("decode-attention: q must be contiguous");
+            };
+            let (b, n_head, _, d) = l1.shape().dims4()?;
+            let (_, n_kv_head, s_len, _) = l2.shape().dims4()?;
+            let (ks, vs) = (l2.stride(), l3.stride());
+            if ks[3] != 1 || ks[2] != d || vs[3] != 1 || vs[2] != d || qe - qo != b * n_head * d {
+                candle_core::bail!("decode-attention: unexpected layout");
+            }
+            let n_rep = n_head / n_kv_head;
+            let n_chunks = s_len.div_ceil(CUDA_CHUNK);
+
+            let q = s1.as_cuda_slice::<f32>()?.slice(qo..qe);
+            // The cache views start where their layouts say; every read the
+            // kernel makes is within `b` batches × `n_kv_head` heads ×
+            // `s_len` rows of `d` from there, by the strides passed.
+            let k = s2.as_cuda_slice::<f32>()?.slice(l2.start_offset()..);
+            let v = s3.as_cuda_slice::<f32>()?.slice(l3.start_offset()..);
+
+            // Every element of both buffers is assigned: `out` by the one
+            // kernel or the combine, `partial` by every (block, head, dim).
+            let mut out = dev.alloc_fully_overwritten::<f32>(b * n_head * d)?;
+            let mut partial = if n_chunks > 1 {
+                Some(
+                    dev.alloc_fully_overwritten::<f32>(b * n_kv_head * n_chunks * n_rep * (d + 2))?,
+                )
+            } else {
+                None
+            };
+
+            let func = dev.get_or_load_custom_func(
+                "decode_attn_f32",
+                "swarmllm_decode_attn",
+                super::DECODE_ATTN_PTX,
+            )?;
+            let cfg = LaunchConfig {
+                grid_dim: ((b * n_kv_head) as u32, n_chunks as u32, 1),
+                block_dim: (128, 1, 1),
+                shared_mem_bytes: 0,
+            };
+            let (n_kv_i, n_rep_i, d_i, s_len_i) =
+                (n_kv_head as i32, n_rep as i32, d as i32, s_len as i32);
+            let (k_sb, k_sh, v_sb, v_sh) = (ks[0] as i64, ks[1] as i64, vs[0] as i64, vs[1] as i64);
+            // A null pointer for whichever output this launch does not write.
+            let null: u64 = 0;
+            {
+                let mut builder = func.builder();
+                builder.arg(&q);
+                builder.arg(&k);
+                builder.arg(&v);
+                match partial.as_mut() {
+                    None => {
+                        builder.arg(&mut out);
+                        builder.arg(&null);
+                    }
+                    Some(p) => {
+                        builder.arg(&null);
+                        builder.arg(p);
+                    }
+                }
+                builder.arg(&n_kv_i);
+                builder.arg(&n_rep_i);
+                builder.arg(&d_i);
+                builder.arg(&s_len_i);
+                builder.arg(&k_sb);
+                builder.arg(&k_sh);
+                builder.arg(&v_sb);
+                builder.arg(&v_sh);
+                builder.arg(&self.scale);
+                builder.arg(&self.softcap);
+                // SAFETY: ffi. Shapes, strides and scope (d % 32 == 0, d <= 256,
+                // n_rep <= 16) are checked by the caller and above; the kernel
+                // reads within the views and writes `out` or `partial`, each
+                // sized for exactly what it assigns.
+                unsafe { builder.launch(cfg) }.w()?;
+            }
+            if let Some(p) = partial.as_ref() {
+                let combine = dev.get_or_load_custom_func(
+                    "decode_attn_combine_f32",
+                    "swarmllm_decode_attn",
+                    super::DECODE_ATTN_PTX,
+                )?;
+                let cfg = LaunchConfig {
+                    grid_dim: ((b * n_head) as u32, 1, 1),
+                    block_dim: (128, 1, 1),
+                    shared_mem_bytes: 0,
+                };
+                let n_chunks_i = n_chunks as i32;
+                let mut builder = combine.builder();
+                builder.arg(p);
+                builder.arg(&mut out);
+                builder.arg(&n_kv_i);
+                builder.arg(&n_rep_i);
+                builder.arg(&d_i);
+                builder.arg(&n_chunks_i);
+                // SAFETY: ffi. `partial` holds `n_chunks` rows of `d + 2` per
+                // (group, head), all written above; `out` is `b * n_head * d`.
+                unsafe { builder.launch(cfg) }.w()?;
+            }
+            Ok((
+                candle_core::CudaStorage::wrap_cuda_slice(out, dev),
+                Shape::from_dims(&[b, n_head, 1, d]),
+            ))
+        }
+    }
+}
+
 /// 8-lane dot product (independent accumulators so LLVM vectorises it).
 #[inline(always)]
 fn dot(a: &[f32], b: &[f32]) -> f32 {
@@ -402,6 +641,92 @@ mod tests {
             assert!(
                 worst_abs < 1e-5 && worst_rel < 1e-4,
                 "b={b} heads {n_head}/{n_kv_head} S={s_len} softcap={softcap:?} masked={masked:?}: worst abs {worst_abs} rel {worst_rel}"
+            );
+        }
+    }
+
+    /// The card kernel against the matmul composition it replaces, computed on
+    /// the processor from the same numbers. ⚠ Gated, so no default build runs
+    /// it: `cargo test --features candle-cuda --lib decode_attn -- --nocapture`,
+    /// and look for the SKIPPED line before believing a pass.
+    #[cfg(feature = "candle-cuda")]
+    #[test]
+    fn cuda_decode_kernel_matches_the_matmul_path() {
+        let card = match Device::new_cuda(0) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("SKIPPED cuda decode attention: no CUDA device ({e})");
+                return;
+            }
+        };
+        let cpu = Device::Cpu;
+        for (b, n_head, n_kv_head, s_len, d, softcap) in [
+            (1usize, 24usize, 8usize, 37usize, 128usize, None),
+            (1, 28, 4, 200, 128, None),
+            // Several chunks, the last one partial, n_rep = 7 (Qwen2.5-7B).
+            (1, 28, 4, 2055, 128, None),
+            (1, 32, 32, 300, 128, None),
+            (1, 32, 32, 300, 64, None),
+            (1, 8, 4, 700, 256, Some(50.0f32)),
+            (1, 32, 8, 8192, 128, None),
+            // Exactly one chunk, and one chunk plus one position.
+            (1, 24, 8, CUDA_CHUNK, 128, None),
+            (1, 24, 8, CUDA_CHUNK + 1, 128, None),
+            (2, 24, 8, 600, 128, None),
+        ] {
+            let q = Tensor::randn(0f32, 1.0, (b, n_head, 1, d), &cpu).unwrap();
+            let kbuf = Tensor::randn(0f32, 1.0, (b, n_kv_head, s_len + 17, d), &cpu).unwrap();
+            let vbuf = Tensor::randn(0f32, 1.0, (b, n_kv_head, s_len + 17, d), &cpu).unwrap();
+            let scale = 1.0 / (d as f32).sqrt();
+
+            let (k, v) = (
+                kbuf.narrow(2, 0, s_len).unwrap(),
+                vbuf.narrow(2, 0, s_len).unwrap(),
+            );
+            let n_rep = n_head / n_kv_head;
+            let qg = q.reshape((b, n_kv_head, n_rep, d)).unwrap();
+            let att = (qg.matmul(&k.t().unwrap()).unwrap() * scale as f64).unwrap();
+            let att = match softcap {
+                Some(c) => ((att / c as f64).unwrap().tanh().unwrap() * c as f64).unwrap(),
+                None => att,
+            };
+            let att = candle_nn::ops::softmax_last_dim(&att).unwrap();
+            let want = att
+                .matmul(&v.contiguous().unwrap())
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap();
+
+            // On the card: the cache as a `narrow` of a larger buffer, the way
+            // `KvCache` hands it out.
+            let (qc, kc, vc) = (
+                q.to_device(&card).unwrap(),
+                kbuf.to_device(&card).unwrap().narrow(2, 0, s_len).unwrap(),
+                vbuf.to_device(&card).unwrap().narrow(2, 0, s_len).unwrap(),
+            );
+            let got = gqa_decode_attention_cuda(&qc, &kc, &vc, None, scale, softcap)
+                .unwrap()
+                .expect("the card kernel applies to these inputs")
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap();
+            assert_eq!(got.len(), want.len());
+            let worst_abs = got
+                .iter()
+                .zip(&want)
+                .map(|(a, b)| (a - b).abs())
+                .fold(0f32, f32::max);
+            let worst_rel = got
+                .iter()
+                .zip(&want)
+                .map(|(a, b)| (a - b).abs() / a.abs().max(b.abs()).max(0.05))
+                .fold(0f32, f32::max);
+            assert!(
+                worst_abs < 1e-5 && worst_rel < 1e-4,
+                "b={b} heads {n_head}/{n_kv_head} S={s_len} d={d} softcap={softcap:?}: worst abs {worst_abs} rel {worst_rel}"
             );
         }
     }
