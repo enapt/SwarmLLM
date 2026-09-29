@@ -1617,3 +1617,42 @@ control / keep / control):
   cannot tell it from another program's memory.
 - **The synchronize before the reading stays**: a buffer freed on the stream counts as unused
   only after it.
+
+## A lone decode stream is never held for a batch (2026-09-29)
+
+**What it replaced.** `process_pool::batch_scheduler_loop` — which every decode forward a node
+serves passes through while `inference.continuous_batching` is on (the default), on the
+coordinator's own segment and on every peer's — waited `batch_collection_ms` (5 ms) after the
+FIRST forward for others to join, whether or not anything else was decoding. The config said
+"single-request workloads are unaffected" and that WSL2's ~15 ms timer resolution made the
+window moot. Neither held.
+
+**Measured** (RTX 3070 Laptop, both nodes of a two-node split of qwen2.5-coder-7b on the one
+card, ~0 ms of network, `~/swarmllm-split-0929/split_speed.sh` + the worker's `DIAG: worker
+forward received` / `answered` lines): per decoded token, 6.6 ms from the daemon's send to the
+worker's receipt on EACH node — 13 of a 36 ms token; the split ran at 25.3-26.7 tok/s against
+46-49 for the same model on one node (54%). The per-token breakdown after the fix: 0.3 ms per
+hand-off, 5 ms of layers per node, ~3.6 / ~5.3 ms after each forward (the card finishing, the
+hidden state or logits to the host, sampling at the tail), under 1 ms per network hop.
+
+**The rule.** `collection_target(others_decoding, collection_ms, max_batch)`: no wait unless
+ANOTHER request is decoding on the same model, and then only until each of those has arrived,
+capped by the window. `ActiveStreams` says who is decoding by each stream's own pace — a request
+counts while its next forward is due, within twice the gap between its last two (a first
+forward: 250 ms; a cap of 3 s). The first version used a fixed 2 s window and the rig showed
+the next of two back-to-back requests paying the full wait for its first 2 s — half of 390
+tokens — which is an agent's next call exactly. Iteration-level schedulers (Orca, OSDI '22;
+vLLM) never delay one request for a batch that is not there; Triton's dynamic batcher waits
+only up to a queue delay it is configured to accept.
+
+**After** (same rig, one binary, arms interleaved): one chat through the split **38.4-42.0
+tok/s** against 50.3-50.9 local (~80%); two chats at once 15.1 + 18.2 tok/s against 13.7 +
+15.5 on the released v0.3.212. Pooled (Nehanth/pooled) reports two devices at 0 ms emulated
+latency at 86% of one.
+
+⚠ **Two chats through a split were NOT batched before or after** — 0 `batched forward
+complete` lines on either node, on either binary: their forwards reach each node a segment's
+compute apart (5-9 ms), past the window. The config's "1.34-1.55× at batch 2-8" was not
+reproduced in a split; FUTURE_WORK #148.
+⚠ The rig puts both nodes' workers on ONE card, so what is left includes two CUDA contexts
+sharing it — a real split does not pay that; the numbers above are an upper bound on its cost.

@@ -1456,6 +1456,11 @@ async fn handle_forward(
     let request_id = fwd.request_id;
     let model_id = fwd.model_id.clone();
     let (layer_start, layer_end) = (fwd.layer_range.0 as usize, fwd.layer_range.1 as usize);
+    // Where a split's per-token time goes outside the layers: this line's
+    // timestamp against the daemon's send, the executor's `forward_ms`, and
+    // `DIAG: worker forward answered` below (split overhead, 2026-09-29).
+    let received = std::time::Instant::now();
+    tracing::debug!(%request_id, index_pos = fwd.index_pos, "DIAG: worker forward received");
 
     // Split the compound payload: daemon sends `[vision_bytes][activation_bytes]`
     // with `vision_embeddings_len` giving the prefix boundary. Before
@@ -1981,6 +1986,7 @@ async fn handle_forward(
         });
 
     let mut result = compute_result.map_err(SwarmError::Internal)?;
+    let computed = std::time::Instant::now();
 
     // Build IPC response. The payload slot is single-use: activations and
     // spec_logits are mutually exclusive (spec fires only on the last
@@ -2018,6 +2024,12 @@ async fn handle_forward(
     send_worker(writer, &WorkerMsg::LayerResult(ipc_result), &payload)
         .await
         .map_err(|e| SwarmError::Internal(format!("send LayerResult: {e}")))?;
+    tracing::debug!(
+        %request_id,
+        received_to_computed_ms = format_args!("{:.2}", (computed - received).as_secs_f64() * 1000.0),
+        computed_to_sent_ms = format_args!("{:.2}", computed.elapsed().as_secs_f64() * 1000.0),
+        "DIAG: worker forward answered"
+    );
 
     Ok(())
 }

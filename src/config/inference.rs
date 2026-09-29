@@ -169,7 +169,9 @@ pub struct InferenceConfig {
     /// compute setup across requests. **Default on as of 2026-04-19.** Worker
     /// falls back to sequential on CPU (measured neutral-to-loss on CPU, see
     /// `docs/plans/benchmarks/round3.md`); delivers 1.34–1.55× on GPU at
-    /// batch 2–8. Single-request workloads are unaffected. Set to `false`
+    /// batch 2–8. A lone request is dispatched at once — it waits for
+    /// nobody (`process_pool::collection_target`, since 2026-09-29; before
+    /// that it paid the collection window on every token). Set to `false`
     /// to bypass the scheduler entirely.
     #[serde(default = "default_continuous_batching")]
     pub continuous_batching: bool,
@@ -177,10 +179,13 @@ pub struct InferenceConfig {
     /// worker forward. Only consulted when `continuous_batching = true`.
     #[serde(default = "default_max_decode_batch")]
     pub max_concurrent_decode_batch: u32,
-    /// Time window (ms) the batch scheduler waits after the first request
-    /// arrives before dispatching, to allow additional concurrent requests to
-    /// coalesce. On WSL2 timer resolution is ~15 ms so anything below that
-    /// effectively dispatches immediately.
+    /// The longest the batch scheduler waits, after a decode forward arrives,
+    /// for the forwards of OTHER requests decoding on the same model — and
+    /// only when there are some; the wait ends the moment each has arrived. A
+    /// lone request is never held (`process_pool::collection_target`). The
+    /// note this replaces said WSL2's timer resolution made the window moot;
+    /// measured 2026-09-29, a lone split request paid 6.6 ms of it per node
+    /// per token.
     #[serde(default = "default_batch_collection_ms")]
     pub batch_collection_ms: u64,
     /// Item 7 Phase 2: Sarathi-style chunked prefill chunk size (in prompt

@@ -255,6 +255,16 @@ Any reading of "free for this process" adds `cuda_pool::reusable_bytes`. Guard:
 
 → `docs/invariants/memory.md` § "A card's memory pool keeps what the worker frees"
 
+## A lone decode stream is never held for a batch (2026-09-29)
+
+**`process_pool::collection_target` decides whether the batch scheduler waits**: only when
+ANOTHER request is decoding on the same model (`ActiveStreams`, judged by each stream's own
+pace — twice its last forward gap), and only until those have arrived. The old rule waited
+`batch_collection_ms` after every first forward: 6.6 ms per node per token for a lone split
+request, the split at 54% of local; now ~80%. Never reintroduce a wait a lone stream pays.
+
+→ `docs/invariants/memory.md` § "A lone decode stream is never held for a batch"
+
 ## Single-source-of-truth helpers — Worker memory: graphics, RAM and the KV cache
 
 Each names the ONE place a decision is made. A second implementation of any of

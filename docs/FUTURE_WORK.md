@@ -24,6 +24,12 @@ Priority is user-visible impact x how many users x whether it fails silently.
 and 69's residual SHIPPED in v0.3.180-alpha.** The rows sit in the P-sections
 and in the two "2026-09-14" headings below; read the row, not just the number.
 
+### 2026-09-29 — a split on a fast link: from 54% to ~80% of local
+
+| # | Item | Status |
+|---|---|---|
+| 148 | **A split paid ~18 ms a token on top of its layers with NO network in the way** — two nodes on one machine ran qwen2.5-coder-7b at 25-27 tok/s against 46-49 whole; Pooled reports 86% of one device at 0 ms | **Main cause FIXED on main 2026-09-29, not released**: the batch scheduler held every lone decode forward 5 ms for a batch that was not there (6.6 ms per node per token) — now ~80% of local (38-42 tok/s). **Open**: ~3.6/5.3 ms after each segment's forward (the card finishing, the state to the host, sampling), and two chats through a split are never batched. Body: § "A split on a fast link (#148)". |
+
 ### 2026-09-29 — prompt reading on the card, ~1.55× by default and ~1.9× with f16 accumulation
 
 | # | Item | Status |
@@ -15012,6 +15018,14 @@ same card measured 20.0 tok/s sequentially against its advertised 20.45.
 
 ## Every pipeline hop round-trips through the coordinator, and that is what makes big models slow (2026-08-20)
 
+> **Superseded — read this first (noted 2026-09-29).** Direct peer chaining shipped the next
+> day and is ON by default since v0.3.109 (`inference.pipeline_chaining`,
+> `docs/plans/direct_peer_chaining.md`): consecutive REMOTE segments forward peer to peer and
+> only the tail answers the coordinator. What is still true: a LOCAL segment ends a chain, so a
+> plan in which the coordinator runs the first layers pays its own round trip every token
+> (#143); the n-gram speculative loop — the default split path — runs unchained; and only a
+> two-segment LAN chain has been measured. The body below describes the code before chaining.
+
 **This is the single highest-leverage change available for distributed inference,
 and it is a topology choice rather than a law of physics.**
 
@@ -16241,3 +16255,25 @@ tensor cores". Rule: `arch-inference.md` § the same.
    `~/swarmllm-pool-0928/score/3arm_thudm-*` + `prompts/`, `--system "You are a helpful
    assistant."`. ✅ **Phi-4-mini's apparent disagreement was the SCORER** — `n_ctx=4096` chose
    Phi's short RoPE factors; fixed (`--n-ctx`, default 8192), gotcha #757.
+
+
+## A split on a fast link (#148, 2026-09-29)
+
+**Measured, and the main cause fixed on main (not released).** Evidence:
+`docs/invariants/memory.md` § "A lone decode stream is never held for a batch"; method:
+`docs/DIAGNOSTICS.md` § "Where a split's token goes". Two nodes on this machine, both on the one
+card, ~0 ms of network: 25-27 → 38-42 tok/s against 50 local.
+
+**Open, in order:**
+1. **What each segment spends after its forward** — 3.6 ms on a first segment (the card
+   finishing the launched work, the hidden state to the host, Q8 encode) and 5.3 ms on the tail
+   (the same plus sampling from a 152k vocabulary). Local decode pays the tail's share too; the
+   first segment's is the split's own. Measure on TWO machines before optimising: the rig's two
+   CUDA contexts share one card, which a real split does not.
+2. **Two chats through a split are never batched** — 0 batched forwards for two simultaneous
+   chats, on v0.3.212 and on main: their forwards reach each node a segment's compute apart
+   (5-9 ms), past the 5 ms window, and the scheduler then serves one per iteration. The config's
+   "1.34-1.55× at batch 2-8" is not reached in a split. Whether it pays needs the aggregate rate
+   measured with batching forced; the per-stream cost of waiting is what #148 just removed.
+3. **The coordinator's own segment ends a chain** (#143) — at 0 ms that costs nothing; across
+   a WAN it is a round trip per token.

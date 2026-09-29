@@ -1596,6 +1596,23 @@ identical runs, and read a Qwen2.5-7B kernel A/B as level where the same pair at
 4 threads read 141.6 → 134.1. Pin the width explicitly for an A/B
 (`SWARMLLM_DECODE_THREADS=4` here) and say which one a figure came from.
 
+### Where a split's token goes (2026-09-29)
+
+For "a split is slower than it should be" with the network ruled out. Run both nodes at
+`-v` and read, per decoded token, the coordinator's `starting forward_through_segments` →
+each worker's `DIAG: worker forward received` → the executor's `forward pass complete`
+(`forward_ms` = launch time of the layers) → `DIAG: worker forward answered`
+(`received_to_computed_ms`, `computed_to_sent_ms`) → `sent tensor forward` / `processing
+LayerForward locally` (the network) → `segment result received`. `~/swarmllm-split-0929/`
+holds the harness (`split_speed.sh`: `local` / `split` / `split2` arms, streamed timing in
+`stream_time.py`) and the merge-by-timestamp breakdown used on 2026-09-29, which found 6.6 ms
+per node per token in the batch scheduler (#148).
+⚠ **Split the tokens by their total before taking medians** — the first fix left a bimodal
+distribution (21-23 ms and 33-36 ms) whose median described neither; the slow half was the
+previous request still counting as active.
+⚠ **Streamed deltas count tokens only when each delta is one token** — speculation emits
+several per delta; pair it with `completion_tokens`.
+
 ### Current baseline — 2026-08-29, v0.3.132-alpha
 
 **Re-take with the same command before claiming a delta.** These were taken on

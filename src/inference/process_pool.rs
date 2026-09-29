@@ -1301,6 +1301,85 @@ impl Drop for ResponseGuard {
     }
 }
 
+/// How long a request seen only once still counts as decoding here, before
+/// its own pace is known.
+const FIRST_FORWARD_ACTIVE: std::time::Duration = std::time::Duration::from_millis(250);
+/// The longest a request counts as decoding after its last forward, however
+/// slow its pace — a processor or a far WAN ring.
+const MAX_STREAM_GAP: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// The requests whose decode forwards reached the batch scheduler recently,
+/// by model, with each one's own pace — the only forwards a wait could batch
+/// with.
+///
+/// **A stream counts while its NEXT forward is due** — within twice the gap
+/// between its last two — not for a fixed window. A fixed 2 s window was
+/// measured holding every request back for the first 2 s after the previous
+/// one FINISHED (2026-09-29: half of 390 tokens of back-to-back requests paid
+/// the full wait; an agent's next call is exactly that shape). A card stream
+/// forwarding every ~30 ms stops counting ~60 ms after it ends; a WAN stream
+/// forwarding every 500 ms, ~1 s after.
+#[derive(Default)]
+struct ActiveStreams {
+    /// request → (model, last forward, gap before it)
+    last_seen: std::collections::HashMap<
+        uuid::Uuid,
+        (ModelId, std::time::Instant, Option<std::time::Duration>),
+    >,
+}
+
+impl ActiveStreams {
+    fn note(&mut self, request_id: uuid::Uuid, model_id: &ModelId, now: std::time::Instant) {
+        self.last_seen
+            .retain(|_, (_, at, _)| now.duration_since(*at) < MAX_STREAM_GAP);
+        let gap = self
+            .last_seen
+            .get(&request_id)
+            .map(|(_, at, _)| now.duration_since(*at));
+        self.last_seen
+            .insert(request_id, (model_id.clone(), now, gap));
+    }
+
+    /// Other requests decoding on `model_id` — the forwards worth waiting for.
+    fn others_on(&self, model_id: &ModelId, except: uuid::Uuid, now: std::time::Instant) -> usize {
+        self.last_seen
+            .iter()
+            .filter(|(id, (m, at, gap))| {
+                let due_within = gap.map_or(FIRST_FORWARD_ACTIVE, |g| (g * 2).min(MAX_STREAM_GAP));
+                **id != except && m == model_id && now.duration_since(*at) < due_within
+            })
+            .count()
+    }
+}
+
+/// How many distinct requests' forwards to collect before dispatching, or
+/// `None` to dispatch at once.
+///
+/// **A lone stream does not wait.** The window used to run after EVERY first
+/// forward, so a request with nothing to batch with paid it on every token, on
+/// every node of a split: measured 2026-09-29 on a two-node split of
+/// qwen2.5-coder-7b on one card at ~0 ms of network, 6.6 ms from the daemon's
+/// send to the worker's receipt, per node per token — 13 of a 36 ms token,
+/// the split at 54% of the same model run locally. The config's own note said
+/// "single-request workloads are unaffected" and that WSL2's timer resolution
+/// made the window moot; neither held. Iteration-level schedulers (Orca,
+/// OSDI '22; vLLM) never delay one request for a batch that is not there, and
+/// Triton's dynamic batcher waits only up to a queue delay it is configured to
+/// accept.
+///
+/// With others decoding on the same model the wait is for THEM — it ends the
+/// moment each has arrived, not at the deadline, which still caps it.
+fn collection_target(
+    others_decoding: usize,
+    collection_ms: u64,
+    max_batch: usize,
+) -> Option<usize> {
+    if collection_ms == 0 || others_decoding == 0 || max_batch <= 1 {
+        return None;
+    }
+    Some((others_decoding + 1).min(max_batch))
+}
+
 /// Auto-coalescing batch scheduler loop. One per `ModelProcessPool`. Collects
 /// `Forward` requests into time-windowed batches grouped by `model_id`, then
 /// dispatches each group via `pool.forward_batch(...)`. Responses are fanned
@@ -1317,6 +1396,7 @@ async fn batch_scheduler_loop(
 ) {
     use std::collections::HashMap;
     use std::time::{Duration, Instant};
+    let mut active = ActiveStreams::default();
     loop {
         let first = tokio::select! {
             biased;
@@ -1337,16 +1417,40 @@ async fn batch_scheduler_loop(
             .load(std::sync::atomic::Ordering::Relaxed) as usize;
         let max_batch = max_batch.max(1);
 
+        let (first_request, first_model) = {
+            let BatchSchedulerMsg::Forward { ref fwd, .. } = first;
+            (fwd.request_id, fwd.model_id.clone())
+        };
+        let now = Instant::now();
+        active.note(first_request, &first_model, now);
+        let target = collection_target(
+            active.others_on(&first_model, first_request, now),
+            collection_ms,
+            max_batch,
+        );
+
         let mut pending: Vec<BatchSchedulerMsg> = vec![first];
-        if collection_ms > 0 {
-            let deadline = Instant::now() + Duration::from_millis(collection_ms);
-            while pending.len() < max_batch {
+        if let Some(target) = target {
+            let deadline = now + Duration::from_millis(collection_ms);
+            let arrived_on_model = |pending: &[BatchSchedulerMsg]| {
+                pending
+                    .iter()
+                    .filter(|BatchSchedulerMsg::Forward { fwd, .. }| fwd.model_id == first_model)
+                    .map(|BatchSchedulerMsg::Forward { fwd, .. }| fwd.request_id)
+                    .collect::<std::collections::HashSet<_>>()
+                    .len()
+            };
+            while pending.len() < max_batch && arrived_on_model(&pending) < target {
                 let now = Instant::now();
                 if now >= deadline {
                     break;
                 }
                 match tokio::time::timeout(deadline - now, rx.recv()).await {
-                    Ok(Some(msg)) => pending.push(msg),
+                    Ok(Some(msg)) => {
+                        let BatchSchedulerMsg::Forward { ref fwd, .. } = msg;
+                        active.note(fwd.request_id, &fwd.model_id, Instant::now());
+                        pending.push(msg);
+                    }
                     Ok(None) => {
                         // Sender dropped — process what we have and exit.
                         dispatch_scheduler_pending(&pool, pending).await;
@@ -6768,6 +6872,66 @@ impl ModelProcessPool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_lone_decode_stream_is_dispatched_without_waiting() {
+        // Nobody else decoding on the model: dispatch now, whatever the window.
+        assert_eq!(collection_target(0, 5, 8), None);
+        // No window, or a batch of one, never waits either.
+        assert_eq!(collection_target(3, 0, 8), None);
+        assert_eq!(collection_target(3, 5, 1), None);
+        // Others decoding: wait for them (and this one), capped by the batch.
+        assert_eq!(collection_target(1, 5, 8), Some(2));
+        assert_eq!(collection_target(9, 5, 8), Some(8));
+    }
+
+    #[test]
+    fn only_streams_whose_next_forward_is_due_are_waited_for() {
+        use std::time::Duration;
+        let t0 = std::time::Instant::now();
+        let ms = Duration::from_millis;
+        let a = uuid::Uuid::new_v4();
+        let b = uuid::Uuid::new_v4();
+        let c = uuid::Uuid::new_v4();
+        let m = ModelId("m".into());
+        let other = ModelId("other".into());
+        let mut s = ActiveStreams::default();
+        s.note(a, &m, t0);
+        assert_eq!(
+            s.others_on(&m, a, t0),
+            0,
+            "a request does not wait for itself"
+        );
+        // b decodes on m every 30 ms; c is another model.
+        s.note(b, &m, t0);
+        s.note(b, &m, t0 + ms(30));
+        s.note(c, &other, t0 + ms(30));
+        assert_eq!(
+            s.others_on(&m, a, t0 + ms(40)),
+            1,
+            "b's next forward is due"
+        );
+        // b's reply ended: two of its own gaps later it no longer counts.
+        // The measured case — back-to-back requests, the next paying for the
+        // last for 2 s under a fixed window.
+        assert_eq!(s.others_on(&m, a, t0 + ms(30) + ms(61)), 0);
+        // A stream seen once counts only briefly, until its pace is known.
+        let d = uuid::Uuid::new_v4();
+        s.note(d, &m, t0 + ms(100));
+        assert_eq!(s.others_on(&m, a, t0 + ms(200)), 1);
+        assert_eq!(
+            s.others_on(&m, a, t0 + ms(100) + FIRST_FORWARD_ACTIVE + ms(1)),
+            0
+        );
+        // A slow stream (a far ring) keeps counting across its long gap…
+        let e = uuid::Uuid::new_v4();
+        s.note(e, &m, t0);
+        s.note(e, &m, t0 + ms(500));
+        assert_eq!(s.others_on(&m, a, t0 + ms(1400)), 1);
+        // …and everything is forgotten past the cap.
+        s.note(a, &m, t0 + ms(500) + MAX_STREAM_GAP + ms(1));
+        assert!(!s.last_seen.contains_key(&e));
+    }
 
     /// A decode step the batch scheduler will accept: past the prompt pass,
     /// no vision, LoRA, speculation, tensor parallelism or KV truncation.
