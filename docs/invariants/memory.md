@@ -1656,3 +1656,26 @@ compute apart (5-9 ms), past the window. The config's "1.34-1.55× at batch 2-8"
 reproduced in a split; FUTURE_WORK #148.
 ⚠ The rig puts both nodes' workers on ONE card, so what is left includes two CUDA contexts
 sharing it — a real split does not pay that; the numbers above are an upper bound on its cost.
+
+## A model is admitted against the card as it stands NOW (2026-09-29)
+
+**What it replaced.** `ModelProcessPool::admit_to_gpu` — the one decision that puts a model
+(or a range of one) on the card — weighed it against `vram_budget_mb`, computed ONCE in
+`SharedState::new`. That budget subtracts what OTHER programs hold on the card, so memory any
+program took after the node started was invisible to admission, while every other reader of
+the same budget (routing, downloads, scans, pruning) called `compute_vram_budget` live.
+
+**Found** on the split rig (two nodes on one card, DSD on, a drafter on A): A admitted the
+3,081 MB drafter beside its 1,621 MB segment against 6,314 MB — the figure from before B's
+worker took 1,705 MB of the same card. Free memory then sat under the KV margin, and BOTH of
+A's workers refused every prompt with a 0 MB conversation budget (18 refusals, three requests
+failed after the router's retries), on the released v0.3.212 as on main — and with the #146
+pool keep switched off, so not that change. On a desktop the other program is a game or a
+browser started after the node.
+
+**The rule.** `vram_budget_now()` re-reads the budget at every admission through a source
+`SharedState::new` sets (`compute_vram_budget`: `nvidia-smi`, ~0.1 s, beside a spawn that takes
+seconds), falling back to the last reading when it fails. Test
+`admission_reads_the_card_budget_at_the_moment_of_admission` replays the case (verified red
+with the fix reverted). **After, same rig:** the drafter was refused the card ("does not fit
+the graphics memory that is free"), ran on the processor, 0 refusals, every request answered.

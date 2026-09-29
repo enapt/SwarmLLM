@@ -104,6 +104,17 @@ impl CheckCost {
 /// that costs the same at any length climbs to long runs (≈12 at a 300 ms
 /// trip, 25 ms drafts, α = 0.92); a free round trip, or a check that grows
 /// with every position, settles short.
+///
+/// **Zero is an answer**: a round that guesses nothing — the token already
+/// sampled checked alone, a plain decode step through the same path — where
+/// guessing costs more than the round trips it saves. SmartSpec (arXiv
+/// 2406.14066, the vLLM team) chooses each request's speculation length from
+/// zero up by estimated goodput for the same reason: speculation that does not
+/// pay makes a reply SLOWER. Measured 2026-09-29 on a two-node split with ~0 ms
+/// between the machines and the drafter on the processor (150-185 ms a guess):
+/// 6.8 tok/s where plain decoding ran 38-42 — this function could not go below
+/// one guess. Zero-guess rounds still feed [`CheckCost`], so a round trip that
+/// grows brings the guesses back.
 pub fn best_gamma_for_check(
     alpha: f64,
     check: &CheckCost,
@@ -111,16 +122,16 @@ pub fn best_gamma_for_check(
     current: u32,
     max: u32,
 ) -> u32 {
-    // A starting γ from configuration may lie outside [1, max]; the answer
+    // A starting γ from configuration may lie outside [0, max]; the answer
     // never does — past `max` a verify can exceed what a peer accepts on the
     // wire (`protocol::MAX_DRAFT_TOKENS`).
     let max = max.max(1);
-    let current = current.clamp(1, max);
+    let current = current.min(max);
     let Some((fixed, slope)) = check.fit() else {
         return current;
     };
     let each = draft_ms_each.max(0.0);
-    let lo = current.saturating_sub(GAMMA_STEP).max(1);
+    let lo = current.saturating_sub(GAMMA_STEP);
     let hi = (current + GAMMA_STEP).min(max).max(lo);
     (lo..=hi)
         .map(|g| {
@@ -169,9 +180,94 @@ impl Default for AcceptanceEstimate {
     }
 }
 
+/// What one request's speculation learned — how often the guesses were kept,
+/// what a check cost, what a guess cost, and the γ it settled on — handed to
+/// the next request on the same model and machines.
+///
+/// Each request used to learn from nothing: its first round guessed at the
+/// configured length and γ moved [`GAMMA_STEP`] a round from there, so where
+/// guessing does not pay every request spent its first few rounds (a second,
+/// with a drafter on the processor) proving it again.
+#[derive(Debug, Clone)]
+pub struct Learned {
+    pub acceptance: AcceptanceEstimate,
+    pub check: CheckCost,
+    pub draft_ms_each: Option<f64>,
+    pub gamma: u32,
+}
+
+/// The most distinct (model, machines) pairs remembered; past it the memory
+/// starts again rather than growing with every plan a node ever made.
+const LEARNED_CAPACITY: usize = 64;
+
+fn learned_store() -> &'static std::sync::Mutex<std::collections::HashMap<String, Learned>> {
+    static STORE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, Learned>>,
+    > = std::sync::OnceLock::new();
+    STORE.get_or_init(Default::default)
+}
+
+/// What the last request on `key` learned, if any. `key` names the model and
+/// the machines of the plan, in order — a check's cost is theirs.
+pub fn recall(key: &str) -> Option<Learned> {
+    learned_store()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(key)
+        .cloned()
+}
+
+/// Keep what this request learned for the next one on `key`.
+pub fn remember(key: String, learned: Learned) {
+    let mut store = learned_store().lock().unwrap_or_else(|e| e.into_inner());
+    if store.len() >= LEARNED_CAPACITY && !store.contains_key(&key) {
+        store.clear();
+    }
+    store.insert(key, learned);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Where guessing costs more than the round trips it saves, the controller
+    /// stops guessing — the split of 2026-09-29: ~25 ms checks, a drafter on
+    /// the processor at ~170 ms a guess, α ≈ 0.68.
+    #[test]
+    fn guessing_that_does_not_pay_goes_to_zero_and_comes_back_when_it_does() {
+        let fast = settle(0.68, |p| 25.0 + 0.5 * f64::from(p), 170.0);
+        assert_eq!(fast, 0, "a near link and a slow drafter: plain rounds");
+        // From zero, a long round trip brings the guesses back (a plain round
+        // still feeds the check's cost).
+        let mut check = CheckCost::default();
+        let mut g = 0;
+        for _ in 0..10 {
+            check.record(g + 1, 500.0);
+            g = best_gamma_for_check(0.7, &check, 30.0, g, BEST_GAMMA_MAX);
+        }
+        assert!(g >= 2, "a 500 ms check with 30 ms drafts: {g}");
+    }
+
+    #[test]
+    fn what_a_request_learned_is_there_for_the_next_one() {
+        let key = format!("m|test-{}", std::process::id());
+        assert!(recall(&key).is_none());
+        let mut check = CheckCost::default();
+        check.record(2, 25.0);
+        remember(
+            key.clone(),
+            Learned {
+                acceptance: AcceptanceEstimate::new(),
+                check,
+                draft_ms_each: Some(170.0),
+                gamma: 0,
+            },
+        );
+        let got = recall(&key).expect("remembered");
+        assert_eq!(got.gamma, 0);
+        assert_eq!(got.draft_ms_each, Some(170.0));
+        assert!(got.check.fit().is_some());
+    }
 
     #[test]
     fn expected_tokens_follow_the_closed_form() {
@@ -239,9 +335,11 @@ mod tests {
         let mut check = CheckCost::default();
         check.record(41, 300.0);
         assert!(best_gamma_for_check(0.99, &check, 1.0, 40, 16) <= 16);
+        // Zero is a γ of its own now (a plain round), kept until a
+        // measurement says otherwise.
         assert_eq!(
             best_gamma_for_check(0.9, &CheckCost::default(), 10.0, 0, 16),
-            1
+            0
         );
     }
 
@@ -255,14 +353,14 @@ mod tests {
             4 + GAMMA_STEP
         );
         // A cheap check and dear, poor guesses: shorter is better — one step,
-        // and never below one guess.
+        // down to no guesses at all (a plain round) where none pays.
         let mut cheap = CheckCost::default();
         cheap.record(9, 5.0);
         assert_eq!(
             best_gamma_for_check(0.1, &cheap, 1000.0, 8, 16),
             8 - GAMMA_STEP
         );
-        assert_eq!(best_gamma_for_check(0.1, &cheap, 1000.0, 1, 16), 1);
+        assert_eq!(best_gamma_for_check(0.1, &cheap, 1000.0, 1, 16), 0);
     }
 
     #[test]

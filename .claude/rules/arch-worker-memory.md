@@ -265,6 +265,16 @@ request, the split at 54% of local; now ~80%. Never reintroduce a wait a lone st
 
 → `docs/invariants/memory.md` § "A lone decode stream is never held for a batch"
 
+## A model is admitted against the card as it stands NOW (2026-09-29)
+
+**`ModelProcessPool::vram_budget_now` is what `admit_to_gpu` weighs a model against** —
+`compute_vram_budget` re-read at the admission (other programs' use included), the last
+reading only as a fallback. It was the startup figure, so a program that took part of the card
+later let the node overcommit it: a drafter admitted that way left both workers with a 0 MB
+conversation budget and every prompt refused. Never cache a live condition at startup.
+
+→ `docs/invariants/memory.md` § "A model is admitted against the card as it stands NOW"
+
 ## Single-source-of-truth helpers — Worker memory: graphics, RAM and the KV cache
 
 Each names the ONE place a decision is made. A second implementation of any of

@@ -118,11 +118,32 @@ impl PipelineExecutor {
         // makes them waste. The multiplicative controller this replaced could
         // never leave γ = 4; the constant-cost one after it ran a processor
         // check at γ = 14-16 and 1.1-2.8 s a round.
-        let mut acceptance = AcceptanceEstimate::new();
-        let mut check = CheckCost::default();
-        let mut draft_ms_each: Option<f64> = None;
+        //
+        // A request starts from what the last one on the same model and
+        // machines learned (`dsd_controller::recall`) — including γ = 0, "plain
+        // rounds", where guessing does not pay — rather than re-proving it from
+        // the configured length every time.
+        let learned_key = format!(
+            "{}|{}",
+            self.request.model_id.0,
+            self.assignment
+                .segments
+                .iter()
+                .map(|s| s.node_id.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let (mut acceptance, mut check, mut draft_ms_each, mut gamma_now) =
+            match crate::inference::dsd_controller::recall(&learned_key) {
+                Some(l) => (l.acceptance, l.check, l.draft_ms_each, l.gamma),
+                None => (
+                    AcceptanceEstimate::new(),
+                    CheckCost::default(),
+                    None,
+                    initial_gamma,
+                ),
+            };
         let ema = |old: Option<f64>, new: f64| Some(old.map_or(new, |o| 0.7 * o + 0.3 * new));
-        let mut gamma_now = initial_gamma;
 
         // Resolve peer IDs upfront. Local segments push None and dispatch to
         // the worker subprocess in `forward_verify_through_segments`; remote
@@ -325,6 +346,12 @@ impl PipelineExecutor {
         // other (`walk_verified_positions` with no drafts answers the sample),
         // and an older tail answers one row of logits, which `accept` reads.
         let mut drafting_off = false;
+        // The drafter's FIRST call in a request is not a guess's cost: it reads
+        // the prompt (when the read-ahead did not) and whatever it missed, and
+        // on a cold worker loads — measured 902 ms "per guess" on the rig
+        // (2026-09-29), which, remembered across requests and never re-measured
+        // while γ sat at 0, would have kept guessing off even where it pays.
+        let mut drafter_warm = false;
 
         if eos_set.contains(&first_token) {
             finish_reason = "stop".to_string();
@@ -352,7 +379,9 @@ impl PipelineExecutor {
                     BEST_GAMMA_MAX,
                 );
             }
-            let gamma = gamma_now.min(remaining).max(1);
+            // 0 = a plain round: the controller's answer where guessing costs
+            // more than the round trips it saves (`best_gamma_for_check`).
+            let gamma = gamma_now.min(remaining);
             let round_start = std::time::Instant::now();
 
             // Guess k lands at absolute position current_pos + 1 + k: the verify
@@ -376,7 +405,7 @@ impl PipelineExecutor {
             // Measured on the split rig (llama-3.2-3b, 3-bit far-half shadow,
             // T=0.7, γ=4): 4.11 tokens per round with n-gram lookup skipped,
             // 3.47 with it tried first.
-            let ngram_drafts = if pick.is_some() {
+            let ngram_drafts = if pick.is_some() || gamma == 0 {
                 Vec::new()
             } else {
                 ngram_lookup_drafts(
@@ -388,6 +417,16 @@ impl PipelineExecutor {
             };
             let outcome: Result<Vec<u32>, SwarmError> = match &mut drafter {
                 _ if drafting_off => Ok(Vec::new()),
+                // A plain round guesses nothing. llama.cpp's drafter still takes
+                // the round's first token into its cache — each drafting call
+                // begins by feeding it, and a round that skipped it would leave
+                // a gap in the drafter's context. Our engine's drafter reads
+                // what it missed with its next call.
+                Drafter::Llama { exec, state } if gamma == 0 => {
+                    tokio::task::block_in_place(|| draft_sync_tokens(state, exec, last_token, &[]))
+                        .map(|()| Vec::new())
+                }
+                Drafter::Engine(_) if gamma == 0 => Ok(Vec::new()),
                 Drafter::Llama { exec, state } => {
                     let synced = if ngram_drafts.is_empty() {
                         None
@@ -556,7 +595,10 @@ impl PipelineExecutor {
             if !drafts.is_empty() {
                 acceptance.record(accepted.len() as u32, drafts.len() as u32);
                 let draft_ms = (drafted_at - round_start).as_secs_f64() * 1000.0;
-                draft_ms_each = ema(draft_ms_each, draft_ms / drafts.len() as f64);
+                if drafter_warm {
+                    draft_ms_each = ema(draft_ms_each, draft_ms / drafts.len() as f64);
+                }
+                drafter_warm = true;
             }
             check.record(
                 verify_tokens.len() as u32,
@@ -606,6 +648,15 @@ impl PipelineExecutor {
                 .await;
         }
 
+        crate::inference::dsd_controller::remember(
+            learned_key,
+            crate::inference::dsd_controller::Learned {
+                acceptance: acceptance.clone(),
+                check: check.clone(),
+                draft_ms_each,
+                gamma: gamma_now,
+            },
+        );
         tracing::info!(
             %request_id,
             segments = self.assignment.segments.len(),

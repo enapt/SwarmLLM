@@ -1387,6 +1387,18 @@ impl SharedState {
         if let Some(budget) = crate::model::auto_manage::compute_vram_budget(&state) {
             state.model_process_pool.set_vram_budget_mb(budget);
         }
+        // …and re-read at every admission, so a program that takes part of
+        // the card after startup is counted (`ModelProcessPool::vram_budget_now`).
+        // Weak: the pool is owned by the state it reads.
+        {
+            let weak = std::sync::Arc::downgrade(&state);
+            state
+                .model_process_pool
+                .set_vram_budget_source(Box::new(move || {
+                    weak.upgrade()
+                        .and_then(|s| crate::model::auto_manage::compute_vram_budget(&s))
+                }));
+        }
         // CPU parallelism, resolved the same way. Without this a single request
         // took every core on the machine whatever the contribution level said —
         // measured at 529-534% of 600% on a 6-core node set to Minimal.

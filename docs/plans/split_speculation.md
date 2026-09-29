@@ -748,6 +748,34 @@ never pick it); (3) a second guess where the copy is unsure; (4) verification on
 this node's own processor, the no-network case; (5) relaxed acceptance as an
 opt-in, once its quality is measured (below). FUTURE_WORK #144.
 
+## Guessing steps aside where it does not pay (2026-09-29)
+
+**Measured on a fast split** (two nodes on one machine, ~0 ms between them, qwen2.5-coder-7b
+halves on one card, qwen2.5-0.5b as the drafter on A — which the live card budget put on the
+PROCESSOR, 125-185 ms a guess; `~/swarmllm-split-0929/split_speed.sh`): DSD ran **6.8 tok/s
+where plain decoding ran 38-42**. `best_gamma_for_check` could not go below one guess a round,
+and a guess cost five times the round trip it saved. Turned on by default as planned (#140),
+DSD would have made every nearby split slower.
+
+**The rule** (`dsd_controller::best_gamma_for_check`): γ = 0 is a candidate — a plain round,
+the token already sampled checked alone through the same path — chosen where it yields the
+most tokens per second. SmartSpec (arXiv 2406.14066, the vLLM team) picks each request's
+speculation length from ZERO up by estimated goodput for the same reason. Zero-guess rounds
+still feed `CheckCost`, so a round trip that grows brings guessing back (unit test: from 0,
+500 ms checks with 30 ms drafts climb to ≥ 2). A llama.cpp drafter is still fed each round's
+first token (`draft_sync_tokens`) so its context has no gap; ours catches up on its next call.
+
+**Learned across requests** (`dsd_controller::recall` / `remember`, keyed by model + the plan's
+machines): each request used to relearn from the configured γ, so on a link where guessing
+does not pay every request spent its first rounds (a second, with a processor drafter)
+proving it again. **The drafter's first call in a request is not a guess's cost** — it reads
+the prompt and, cold, loads (measured 902 ms "per guess"); counted, and remembered while γ
+sat at 0, it would have kept guessing off where it pays. It is left out of `draft_ms_each`.
+
+**After, same rig:** 37-38 tok/s from the second request (plain 38-42); the first after a
+cold start 33. `draft_ms_each` 126 ms (a warm guess on the processor). On the TH↔BE link the
+controller's comparison is the one that already chose γ = 2-7; nothing there changes.
+
 ## What the literature says (survey 2026-09-27)
 
 The survey found no method that makes a WAN split fast without speculation. It

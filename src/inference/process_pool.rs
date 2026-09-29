@@ -1914,10 +1914,16 @@ pub struct ModelProcessPool {
     cpu_pinned_models: dashmap::DashSet<ModelId>,
     /// GPU memory budget in MB, 0 = unset (no admission control).
     ///
-    /// Mirror of the effective `resources` budget, set at startup like the other
-    /// knobs here. The pool cannot reach `SharedState`, and this has to be
-    /// readable from inside `spawn_lock` where the admission decision happens.
+    /// The LAST reading of the effective `resources` budget — re-read at every
+    /// admission through [`Self::vram_budget_source`] where one is set, so this
+    /// is what a failed reading (or a test with no source) falls back to.
     vram_budget_mb: std::sync::atomic::AtomicU64,
+    /// Where the card budget comes from NOW: `auto_manage::compute_vram_budget`,
+    /// set by `SharedState::new` — `nvidia-smi` minus what this node's own
+    /// workers are charged, so another program's use of the card counts at
+    /// the moment a model is admitted, not as it stood when the node started.
+    /// See [`Self::vram_budget_now`].
+    vram_budget_source: std::sync::OnceLock<Box<dyn Fn() -> Option<u64> + Send + Sync>>,
     /// CPU threads each worker's rayon pool may use. 0 until set at startup,
     /// which the spawn path reads as "not configured" and leaves alone.
     cpu_threads: std::sync::atomic::AtomicUsize,
@@ -2166,6 +2172,7 @@ impl ModelProcessPool {
             gpu_layers: std::sync::atomic::AtomicI32::new(-1),
             cpu_pinned_models: dashmap::DashSet::new(),
             vram_budget_mb: std::sync::atomic::AtomicU64::new(0),
+            vram_budget_source: std::sync::OnceLock::new(),
             cpu_threads: std::sync::atomic::AtomicUsize::new(0),
             owner_prefill_threads: std::sync::atomic::AtomicUsize::new(0),
             vram_reserved_mb: dashmap::DashMap::new(),
@@ -2811,6 +2818,38 @@ impl ModelProcessPool {
             .store(budget_mb, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// Where admission reads the card budget from NOW (set once, by
+    /// `SharedState::new`). See [`Self::vram_budget_now`].
+    pub fn set_vram_budget_source(&self, source: Box<dyn Fn() -> Option<u64> + Send + Sync>) {
+        let _ = self.vram_budget_source.set(source);
+    }
+
+    /// The card budget a model is admitted against: read again at the moment
+    /// of admission, falling back to the last reading.
+    ///
+    /// **It was read ONCE, at startup** (`SharedState::new`), while every other
+    /// reader of the same budget — routing, downloads, scans, pruning — calls
+    /// `compute_vram_budget` live. So memory another program took after the node
+    /// started was invisible to the one decision that puts a model on the card.
+    /// Found 2026-09-29 on the split rig: a drafter admitted against 6,314 MB,
+    /// the figure from 5 s earlier, after a second process had taken 1,705 MB
+    /// of the same card; free memory then fell under the KV margin and both of
+    /// the node's workers refused every prompt with a 0 MB conversation budget,
+    /// on v0.3.212 as on main. On a desktop the other program is a game or a
+    /// browser started after the node. Costs one `nvidia-smi` (~0.1 s) per
+    /// admission, beside a worker spawn that takes seconds.
+    fn vram_budget_now(&self) -> u64 {
+        if let Some(source) = self.vram_budget_source.get() {
+            if let Some(budget) = source() {
+                self.vram_budget_mb
+                    .store(budget, std::sync::atomic::Ordering::Relaxed);
+                return budget;
+            }
+        }
+        self.vram_budget_mb
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// Set the CPU thread count handed to each worker's rayon pool.
     ///
     /// Resolved from `resources.max_cpu_threads` / `node.contribution` at
@@ -3048,9 +3087,7 @@ impl ModelProcessPool {
     /// rather than a `CUDA_ERROR_OUT_OF_MEMORY` that kills the worker and (until
     /// the pin became recoverable) cost the model its GPU for the whole run.
     fn admit_to_gpu(&self, model_id: &ModelId, estimated_mb: u64) -> bool {
-        let budget = self
-            .vram_budget_mb
-            .load(std::sync::atomic::Ordering::Relaxed);
+        let budget = self.vram_budget_now();
         if budget == 0 || estimated_mb == 0 {
             // No budget configured, or nothing to weigh: preserve the previous
             // behaviour rather than inventing a limit.
@@ -7486,6 +7523,32 @@ mod tests {
         // Its spawn's own range, recorded at zero exactly as `get_or_spawn` does.
         h.record_charged_segment((0, 1), 0);
         (idle, wanted, h)
+    }
+
+    /// **Admission weighs the card as it stands NOW, not as it stood at
+    /// startup.** The split rig of 2026-09-29, replayed: a 6,314 MB budget read
+    /// at startup, another process then took 1,705 MB of the card, and a 3,081 MB
+    /// drafter beside a 1,621 MB model was admitted against the old figure —
+    /// both of the node's workers then refused every prompt.
+    #[test]
+    fn admission_reads_the_card_budget_at_the_moment_of_admission() {
+        let pool = ModelProcessPool::new(std::path::PathBuf::from("/tmp/swarmllm-live-budget"));
+        pool.set_vram_budget_mb(6314);
+        assert!(pool.admit_to_gpu(&ModelId("target".into()), 1621));
+        // The control, as the pool behaved with only the startup figure: fits.
+        assert_eq!(pool.vram_budget_now(), 6314);
+        // Another program takes 1,705 MB; the live reading says so.
+        pool.set_vram_budget_source(Box::new(|| Some(6314 - 1705)));
+        assert!(
+            !pool.admit_to_gpu(&ModelId("drafter".into()), 3081),
+            "1,621 + 3,081 > 4,609: the drafter must not be put on the card"
+        );
+        assert_eq!(pool.vram_budget_now(), 4609);
+        // A reading that fails keeps the last one rather than inventing a limit.
+        let pool2 = ModelProcessPool::new(std::path::PathBuf::from("/tmp/swarmllm-live-budget2"));
+        pool2.set_vram_budget_mb(6314);
+        pool2.set_vram_budget_source(Box::new(|| None));
+        assert_eq!(pool2.vram_budget_now(), 6314);
     }
 
     /// **A worker that cannot grow takes the card back from an idle model** —
