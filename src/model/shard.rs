@@ -770,9 +770,13 @@ pub fn cleanup_tmp_files_no_one_is_writing(
             continue;
         }
         // `shard_007.bin.tmp` and `shard_007.bin.tmp.layout` both belong to
-        // shard 7. A name we cannot read an index out of (the mmproj or header
-        // staging file) has no claim to check, so it is swept as before.
-        if let Some(index) = shard_index_from_tmp_name(name) {
+        // shard 7, and `mmproj.gguf.tmp` to the vision encoder's sentinel
+        // shard, whose download holds a claim the same way. Since the sweep
+        // runs every 10 minutes (`daemon::background::spawn_failed_download_reclaim`),
+        // not only at startup, a live mmproj download must be found by its
+        // claim too — it used to be swept as a name with no index. A staging
+        // name with no claim to look up is swept.
+        if let Some(index) = claim_index_from_tmp_name(name) {
             let sid = crate::types::ShardId {
                 model_id: model_id.clone(),
                 index,
@@ -793,8 +797,16 @@ pub fn cleanup_tmp_files_no_one_is_writing(
     removed
 }
 
-/// Shard index out of a `shard_NNN.bin.tmp` or `shard_NNN.bin.tmp.layout` name.
-fn shard_index_from_tmp_name(name: &str) -> Option<u32> {
+/// The shard index a download claims while it writes this staging file: the
+/// NNN of `shard_NNN.bin.tmp` / `shard_NNN.bin.tmp.layout`, or the vision
+/// encoder's sentinel for `mmproj.gguf.tmp`.
+fn claim_index_from_tmp_name(name: &str) -> Option<u32> {
+    if name
+        .strip_prefix(MMPROJ_FILENAME)
+        .is_some_and(|rest| rest.starts_with(".tmp"))
+    {
+        return Some(crate::types::MMPROJ_SHARD_INDEX);
+    }
     let digits = name.strip_prefix("shard_")?;
     let end = digits.find(|c: char| !c.is_ascii_digit())?;
     digits[..end].parse().ok()
@@ -1444,16 +1456,47 @@ mod cancel_cleanup_tests {
     }
 
     #[test]
-    fn a_shard_index_is_read_from_either_tmp_name() {
-        assert_eq!(shard_index_from_tmp_name("shard_007.bin.tmp"), Some(7));
+    fn a_claim_index_is_read_from_every_download_staging_name() {
+        assert_eq!(claim_index_from_tmp_name("shard_007.bin.tmp"), Some(7));
         assert_eq!(
-            shard_index_from_tmp_name("shard_007.bin.tmp.layout"),
+            claim_index_from_tmp_name("shard_007.bin.tmp.layout"),
             Some(7)
         );
-        assert_eq!(shard_index_from_tmp_name("shard_012.bin.tmp"), Some(12));
-        // Not a shard: no index to check a claim against, so it is swept.
-        assert_eq!(shard_index_from_tmp_name("mmproj.gguf.tmp"), None);
-        assert_eq!(shard_index_from_tmp_name("gguf_header.bin.tmp"), None);
+        assert_eq!(claim_index_from_tmp_name("shard_012.bin.tmp"), Some(12));
+        assert_eq!(
+            claim_index_from_tmp_name("mmproj.gguf.tmp"),
+            Some(crate::types::MMPROJ_SHARD_INDEX)
+        );
+        // No download claims these: nothing to check, so they are swept.
+        assert_eq!(claim_index_from_tmp_name("gguf_header.bin.tmp"), None);
+        assert_eq!(claim_index_from_tmp_name("mmproj.gguf"), None);
+    }
+
+    /// The sweep runs every 10 minutes while the node is over its storage
+    /// limit, so it meets LIVE downloads — the vision encoder's included, which
+    /// writes `mmproj.gguf.tmp` under its sentinel shard's claim. Swept, its
+    /// finished download fails the rename and starts again from nothing.
+    #[test]
+    fn the_sweep_leaves_alone_a_vision_encoder_being_downloaded() {
+        let dir = tempfile::tempdir().unwrap();
+        let mid = ModelId("llava-v1.5-7b".to_string());
+        let claims: dashmap::DashSet<ShardId> = dashmap::DashSet::new();
+        touch(dir.path(), "mmproj.gguf.tmp");
+        claims.insert(ShardId {
+            model_id: mid.clone(),
+            index: crate::types::MMPROJ_SHARD_INDEX,
+        });
+        assert_eq!(
+            cleanup_tmp_files_no_one_is_writing(dir.path(), &mid, &claims),
+            0
+        );
+        assert!(dir.path().join("mmproj.gguf.tmp").exists());
+        // With no download claiming it, it is a leftover and goes.
+        claims.clear();
+        assert_eq!(
+            cleanup_tmp_files_no_one_is_writing(dir.path(), &mid, &claims),
+            1
+        );
     }
 
     /// Cancelling a download must not delete the partial file of a download

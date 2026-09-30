@@ -180,6 +180,13 @@ impl SplitModel {
         stop_below: Option<f32>,
     ) -> Result<Vec<u32>, SwarmError> {
         use candle_core::Tensor;
+        // A read-ahead (`engine_drafter::read_ahead`) asks for no guesses: the
+        // prompt is in the cache and that is the whole call. Without this,
+        // `Tensor::stack` of nothing failed every read-ahead on a card, and the
+        // first round then read the prompt a second time from scratch.
+        if gamma == 0 {
+            return Ok(Vec::new());
+        }
         let t = if temperature > 0.0 {
             f64::from(temperature)
         } else {
@@ -217,7 +224,12 @@ impl SplitModel {
             let z: Vec<f32> = Tensor::stack(&mass, 0)
                 .and_then(|v| v.to_vec1())
                 .map_err(SwarmError::internal)?;
-            if let Some(k) = z.iter().position(|&z| 1.0 / z < floor) {
+            // A row that was not finite (its mass NaN) cuts too, as the host's
+            // `probability_at` reads such a row as probability 0.
+            if let Some(k) = z.iter().position(|&z| {
+                let p = 1.0 / z;
+                p.is_nan() || p < floor
+            }) {
                 guesses.truncate(k + 1);
             }
         }

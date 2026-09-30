@@ -398,7 +398,7 @@ means this workload has nothing to copy. `paused_rounds` counts rounds where the
 backoff suppressed drafting — high is CORRECT on prose, not a fault. A request
 that is not alone on the worker joins the batch instead and logs nothing.
 
-### Across computers (DSD) — off by default since v0.3.212
+### Across computers (DSD) — on by default since v0.3.213 (off in v0.3.212)
 
 With `speculative_decoding` and `decentralized_spec_decoding` on, a split request
 whose coordinator holds a small same-family model guesses with it

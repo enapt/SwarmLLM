@@ -275,3 +275,27 @@ fn guesses_chosen_where_the_logits_are_match_the_host_loop() {
         assert_eq!(card, host, "floor {floor:?}");
     }
 }
+
+/// A read-ahead asks the card path for NO guesses — the prompt read is the
+/// whole call — and must get none back, as the host loop does, not an error:
+/// every read-ahead on a card failed with "stack expects at least one tensor"
+/// (review of e437b1e0, seen on the 2026-09-30 rigs) and the first round then
+/// read the prompt again.
+#[test]
+fn a_read_ahead_asks_the_card_path_for_nothing_and_gets_nothing() {
+    let mut model = whole_model();
+    let seq: Vec<u32> = vec![3, 17, 99, 250, 7, 41, 12, 5];
+    let kv = KvCacheStore::new(std::time::Duration::from_secs(60));
+    let logits = model
+        .forward(&model.tensor_from_ids(&seq).unwrap(), 0, &kv, "r")
+        .unwrap();
+    let guesses = model
+        .argmax_guesses_on_card(&kv, "r", seq.len(), logits, 0, 0.0, Some(0.4))
+        .unwrap();
+    assert!(guesses.is_empty());
+    assert_eq!(
+        kv.request_positions(model.kv_model_key(), "r"),
+        seq.len(),
+        "the prompt stays in the cache for the first round"
+    );
+}
