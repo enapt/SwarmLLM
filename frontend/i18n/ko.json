@@ -15,6 +15,7 @@
   "actions.save_settings": "설정 저장",
   "actions.saving": "저장 중...",
   "actions.unlock": "잠금 해제",
+  "activity.card_slow_restart_windows": "그래픽 카드의 메모리 할당이 느려졌습니다({detail}초, 평소에는 수 밀리초). Windows를 재시작하지 않고 오래 실행할수록 심해집니다. Windows를 재시작하면 원래 속도와 안정성을 되찾습니다.",
   "activity.config_updated": "설정이 업데이트되었습니다",
   "activity.connected": "SwarmLLM에 연결되었습니다",
   "activity.count": "{count}개의 이벤트",

@@ -98,6 +98,7 @@
     'hf_sources_cap_reached': '\u26A0\uFE0F', // ⚠️ R141 (peer-gossip cap drops)
     'manifest_rejected': '\u274C',       // ❌ R126 (bad manifest from peer)
     'manifest_rejected_backup': '\u274C', // backup-copy model name refused from a peer
+    'card_slow_restart_windows': '\u26A0\uFE0F', // \u26A0\uFE0F fresh card memory slow \u2014 restart Windows (#762)
   };
 
   // Category CSS class for color coding

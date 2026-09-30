@@ -40,9 +40,24 @@
 //!
 //! `SWARMLLM_CUDA_POOL_KEEP=0` leaves the pool at the driver's default and
 //! never trims — the A/B inside one binary.
+//!
+//! **And a measurement of the slowdown itself** ([`probe_once`]): the first
+//! time a worker picks the card it times [`PROBE_ALLOCATIONS`] fresh
+//! allocations straight from the driver, the shape of the step that slowed.
+//! Every worker logs the figure; past [`SLOW_FRESH_ALLOCATIONS`] the daemon
+//! tells the owner, once, that restarting Windows restores it
+//! ([`SlowCardNotice`]). Nothing here changes what the node does — the pool
+//! above and `card_pace` are the defences; this is the diagnosis the owner can
+//! act on, which neither of them gives. microsoft/WSL#41701 (open, 2026-10-01)
+//! reports the same shape with no fix from Microsoft or NVIDIA; the one remedy
+//! reported to work besides a reboot is `pnputil /restart-device` on the card,
+//! too risky to suggest for a card that drives the display. The PC here
+//! crashed twice at 52-54 h of Windows uptime (gotchas #754, #762).
 
 use candle_core::Device;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 /// How long a worker with nothing to do keeps its freed card memory.
 ///
@@ -153,10 +168,174 @@ pub(crate) fn trim(device: &Device) -> Option<(PoolUsage, PoolUsage)> {
     None
 }
 
+/// Fresh allocations [`probe_once`] times, each [`PROBE_BYTES_EACH`]: 64 MB
+/// in 16 calls. The step that slowed (#146's deep dive) was a few hundred MB
+/// in ~64 calls, and whether the cost grows per call or per byte is not
+/// known — this has some of each, and costs ~ms on a healthy card.
+#[cfg(any(feature = "candle-cuda", test))]
+pub(crate) const PROBE_ALLOCATIONS: usize = 16;
+/// See [`PROBE_ALLOCATIONS`].
+#[cfg(any(feature = "candle-cuda", test))]
+pub(crate) const PROBE_BYTES_EACH: usize = 4 << 20;
+
+/// A probe at least this slow is worth telling the owner about. ~100× what a
+/// healthy card takes; by #146's series (a few hundred MB: 0.007 s at 8 h of
+/// Windows uptime, 2.3 s at 24 h, 8.8 s at 49 h) the probe crosses it at
+/// roughly a day of uptime, before the 52-54 h where this PC crashed.
+pub(crate) const SLOW_FRESH_ALLOCATIONS: Duration = Duration::from_millis(500);
+
+/// [`SLOW_FRESH_ALLOCATIONS`], unless `SWARMLLM_CARD_PROBE_SLOW_MS` says
+/// otherwise — for a check that must watch the notice fire end to end on a
+/// healthy card (`0` makes every probe slow). Read in both processes: the
+/// worker's log line and the daemon's notice agree on what "slow" means.
+fn slow_threshold() -> Duration {
+    static T: OnceLock<Duration> = OnceLock::new();
+    *T.get_or_init(|| {
+        std::env::var("SWARMLLM_CARD_PROBE_SLOW_MS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .map_or(SLOW_FRESH_ALLOCATIONS, Duration::from_millis)
+    })
+}
+
+/// How often the owner is reminded while the probes stay slow: the slowdown
+/// lasts until Windows restarts, and a notice per worker start would nag.
+pub(crate) const SLOW_CARD_NOTICE_EVERY: Duration = Duration::from_secs(12 * 3600);
+
+/// This worker's probe: `None` inside while it has not run, or could not.
+static PROBE: OnceLock<Option<Duration>> = OnceLock::new();
+static PROBE_REPORTED: AtomicBool = AtomicBool::new(false);
+
+/// Whether the probe runs (on unless `SWARMLLM_CARD_PROBE=0`).
+#[cfg(feature = "candle-cuda")]
+fn probe_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| keep_enabled_for(std::env::var("SWARMLLM_CARD_PROBE").ok().as_deref()))
+}
+
+/// Time [`PROBE_ALLOCATIONS`] fresh allocations on `device`, once per worker,
+/// and log the figure — every worker's start adds a point to the uptime
+/// curve in `node.log`. A no-op on the processor. Called by the split
+/// loader's device choice beside [`keep_freed_memory`], before the model's
+/// weights take the memory.
+pub(crate) fn probe_once(device: &Device) {
+    #[cfg(feature = "candle-cuda")]
+    if let Device::Cuda(dev) = device {
+        PROBE.get_or_init(|| {
+            if !probe_enabled() {
+                return None;
+            }
+            match cuda::probe(dev) {
+                Ok(took) => {
+                    let slow = took >= slow_threshold();
+                    tracing::info!(
+                        took_ms = took.as_millis() as u64,
+                        allocations = PROBE_ALLOCATIONS,
+                        mb_each = PROBE_BYTES_EACH >> 20,
+                        slow,
+                        "DIAG: card allocation probe — fresh memory from the driver{}",
+                        if slow {
+                            " is SLOW (on WSL2 this grows with Windows uptime; restarting \
+                             Windows restores it — microsoft/WSL#41701)"
+                        } else {
+                            ""
+                        }
+                    );
+                    Some(took)
+                }
+                Err(e) => {
+                    // Not enough free memory for the probe is an answer too:
+                    // nothing to measure, and nothing the owner should hear.
+                    tracing::debug!(error = %e, "card allocation probe did not run");
+                    None
+                }
+            }
+        });
+    }
+    let _ = device;
+}
+
+/// The probe's figure, handed out ONCE — the worker sends it to the daemon
+/// (`WorkerMsg::CardAllocationProbe`) after the message that loaded a model.
+pub(crate) fn take_probe_report() -> Option<Duration> {
+    let took = (*PROBE.get()?)?;
+    (!PROBE_REPORTED.swap(true, Ordering::Relaxed)).then_some(took)
+}
+
+/// The daemon's side: the slowest probe its workers reported since the owner
+/// was last told, and when that was. Held by `ModelProcessPool`, written by
+/// each worker's reader, read by the health monitor's tick.
+#[derive(Debug, Default)]
+pub(crate) struct SlowCardNotice {
+    /// Milliseconds; 0 = nothing slow waiting to be told.
+    pending_ms: AtomicU32,
+    last_told: Mutex<Option<Instant>>,
+}
+
+impl SlowCardNotice {
+    /// A worker's probe arrived.
+    pub(crate) fn record(&self, took: Duration) {
+        if took >= slow_threshold() {
+            let ms = u32::try_from(took.as_millis()).unwrap_or(u32::MAX).max(1);
+            self.pending_ms.fetch_max(ms, Ordering::Relaxed);
+        }
+    }
+
+    /// The slowest probe to tell the owner about now, if any: at most once per
+    /// [`SLOW_CARD_NOTICE_EVERY`]. A slow probe inside that window is dropped
+    /// rather than kept — the owner has just been told the same thing.
+    pub(crate) fn take(&self, now: Instant) -> Option<Duration> {
+        let ms = self.pending_ms.swap(0, Ordering::Relaxed);
+        if ms == 0 {
+            return None;
+        }
+        let mut last = self.last_told.lock().unwrap_or_else(|e| e.into_inner());
+        if last.is_some_and(|t| now.duration_since(t) < SLOW_CARD_NOTICE_EVERY) {
+            return None;
+        }
+        *last = Some(now);
+        Some(Duration::from_millis(u64::from(ms)))
+    }
+}
+
 #[cfg(feature = "candle-cuda")]
 mod cuda {
     use super::PoolUsage;
     use candle_core::cuda_backend::cudarc::driver::{result, sys, DriverError};
+
+    /// [`super::PROBE_ALLOCATIONS`] allocations straight from the driver
+    /// (`cuMemAlloc`, never the pool, which may already hold memory), timed
+    /// with their frees. One untimed allocation first, so a context's
+    /// first-allocation setup is not counted. Whatever was taken is freed on
+    /// every path.
+    pub(super) fn probe(dev: &candle_core::CudaDevice) -> Result<std::time::Duration, DriverError> {
+        let stream = dev.cuda_stream();
+        stream.context().bind_to_thread()?;
+        // SAFETY: a bound context; each pointer is freed exactly once below.
+        unsafe {
+            let warm = result::malloc_sync(super::PROBE_BYTES_EACH)?;
+            result::free_sync(warm)?;
+            let started = std::time::Instant::now();
+            let mut taken = Vec::with_capacity(super::PROBE_ALLOCATIONS);
+            let mut failed = None;
+            for _ in 0..super::PROBE_ALLOCATIONS {
+                match result::malloc_sync(super::PROBE_BYTES_EACH) {
+                    Ok(ptr) => taken.push(ptr),
+                    Err(e) => {
+                        failed = Some(e);
+                        break;
+                    }
+                }
+            }
+            for ptr in taken {
+                let _ = result::free_sync(ptr);
+            }
+            match failed {
+                Some(e) => Err(e),
+                None => Ok(started.elapsed()),
+            }
+        }
+    }
 
     /// The device's CURRENT pool — the one `cuMemAllocAsync` draws from — or
     /// `None` when cudarc allocates without one.
@@ -279,6 +458,54 @@ mod tests {
         assert_eq!(usage(&cpu), None);
         assert_eq!(reusable_bytes(&cpu), 0);
         assert_eq!(trim(&cpu), None);
+    }
+
+    #[test]
+    fn a_healthy_probe_tells_the_owner_nothing() {
+        let notice = SlowCardNotice::default();
+        notice.record(Duration::from_millis(3));
+        notice.record(SLOW_FRESH_ALLOCATIONS.saturating_sub(Duration::from_millis(1)));
+        assert_eq!(notice.take(Instant::now()), None);
+    }
+
+    #[test]
+    fn a_slow_probe_is_told_once_per_window_and_the_slowest_is_what_is_told() {
+        let notice = SlowCardNotice::default();
+        let t0 = Instant::now();
+        notice.record(Duration::from_millis(900));
+        notice.record(Duration::from_millis(2_400));
+        notice.record(Duration::from_millis(700));
+        assert_eq!(notice.take(t0), Some(Duration::from_millis(2_400)));
+        // Told: nothing more until a new slow probe arrives...
+        assert_eq!(notice.take(t0 + Duration::from_secs(1)), None);
+        // ...and one inside the window is dropped, not saved for later.
+        notice.record(Duration::from_secs(3));
+        assert_eq!(notice.take(t0 + Duration::from_secs(60)), None);
+        assert_eq!(notice.take(t0 + SLOW_CARD_NOTICE_EVERY), None);
+        // Past the window, a slow probe is told again.
+        notice.record(Duration::from_secs(4));
+        assert_eq!(
+            notice.take(t0 + SLOW_CARD_NOTICE_EVERY),
+            Some(Duration::from_secs(4))
+        );
+    }
+
+    #[test]
+    fn the_slow_threshold_sits_far_above_a_healthy_card_and_below_the_crash_hours() {
+        // Healthy: #146's first copy of a few hundred MB took 0.007 s at 8 h of
+        // uptime; the probe is a fraction of that work. 24 h: 2.3 s for the copy.
+        assert!(SLOW_FRESH_ALLOCATIONS >= Duration::from_millis(100));
+        assert!(SLOW_FRESH_ALLOCATIONS <= Duration::from_secs(2));
+        assert_eq!(PROBE_ALLOCATIONS * PROBE_BYTES_EACH, 64 << 20);
+    }
+
+    #[test]
+    fn the_processor_is_never_probed() {
+        // Compared with what was there before: under the CUDA feature another
+        // test in this process may have probed the card already.
+        let before = PROBE.get().copied();
+        probe_once(&Device::Cpu);
+        assert_eq!(PROBE.get().copied(), before);
     }
 
     #[test]

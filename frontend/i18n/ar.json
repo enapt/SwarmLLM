@@ -15,6 +15,7 @@
   "actions.save_settings": "حفظ الإعدادات",
   "actions.saving": "جارٍ الحفظ...",
   "actions.unlock": "إلغاء القفل",
+  "activity.card_slow_restart_windows": "أصبحت بطاقة الرسومات بطيئة في حجز الذاكرة ({detail} ث، والمعتاد أجزاء من الألف من الثانية). يزداد ذلك كلما طال تشغيل Windows دون إعادة تشغيل. أعد تشغيل Windows لاستعادة السرعة الكاملة والاستقرار.",
   "activity.config_updated": "تم تحديث الإعدادات",
   "activity.connected": "تم الاتصال بـ SwarmLLM",
   "activity.count": "{count} أحداث",

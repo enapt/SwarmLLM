@@ -352,12 +352,17 @@ fn moe_renormalizes_by_default(arch: &str) -> bool {
 /// `docs/FUTURE_WORK.md` #146) — a model that reached the card any other way
 /// would run with a pool that hands memory back to the driver at every
 /// synchronize. Guard: `every_split_model_reaches_the_card_through_load_device`.
+///
+/// And where the worker's one allocation probe runs (`cuda_pool::probe_once`),
+/// before the model's weights take the memory — so every worker that uses the
+/// card measures the host's allocation path once (#762).
 pub(super) fn load_device(force_cpu: bool) -> Device {
     if force_cpu {
         return Device::Cpu;
     }
     let device = Device::cuda_if_available(0).unwrap_or(Device::Cpu);
     crate::inference::cuda_pool::keep_freed_memory(&device);
+    crate::inference::cuda_pool::probe_once(&device);
     device
 }
 

@@ -3,6 +3,8 @@ paths:
   - "src/inference/process_pool.rs"
   - "src/inference/model_worker.rs"
   - "src/inference/worker_ipc.rs"
+  - "src/inference/cuda_pool.rs"
+  - "src/inference/card_pace.rs"
   - "src/inference/slot_table.rs"
   - "src/inference/split/kv_cache.rs"
   - "src/inference/split/kv_budget.rs"
@@ -254,6 +256,17 @@ Any reading of "free for this process" adds `cuda_pool::reusable_bytes`. Guard:
 `SWARMLLM_CUDA_POOL_KEEP=0`.
 
 → `docs/invariants/memory.md` § "A card's memory pool keeps what the worker frees"
+
+## The owner is told when fresh card memory has become slow (2026-10-01)
+
+**`cuda_pool::probe_once` times 16 fresh 4 MB allocations straight from the driver, once per
+worker, at `load_device`** — never through the pool, never per request. Every worker logs
+`DIAG: card allocation probe`; a probe ≥ 0.5 s reaches the health monitor
+(`WorkerMsg::CardAllocationProbe` → `ModelProcessPool::slow_card_notice`), which tells the owner
+to restart Windows, under WSL2 only, at most every 12 h (#762, WSL#41701). It changes nothing the
+node does; the threshold is a guess until the DIAG lines cover a few days of uptime.
+
+→ `docs/invariants/memory.md` § "The owner is told when the card has become slow"
 
 ## A lone decode stream is never held for a batch (2026-09-29)
 

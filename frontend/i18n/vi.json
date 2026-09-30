@@ -15,6 +15,7 @@
   "actions.save_settings": "Lưu cài đặt",
   "actions.saving": "Đang lưu...",
   "actions.unlock": "Mở khóa",
+  "activity.card_slow_restart_windows": "Card đồ họa của bạn đã trở nên chậm khi cấp phát bộ nhớ ({detail} giây, bình thường chỉ vài phần nghìn giây). Tình trạng này tăng dần khi Windows chạy lâu mà không khởi động lại. Hãy khởi động lại Windows để lấy lại tốc độ và độ ổn định.",
   "activity.config_updated": "Cấu hình đã được cập nhật",
   "activity.connected": "Đã kết nối tới SwarmLLM",
   "activity.count": "{count} sự kiện",

@@ -15,6 +15,7 @@
   "actions.save_settings": "Зберегти налаштування",
   "actions.saving": "Збереження...",
   "actions.unlock": "Розблокувати",
+  "activity.card_slow_restart_windows": "Відеокарта стала повільно виділяти пам'ять ({detail} с, зазвичай — тисячні частки секунди). Це накопичується, що довше Windows працює без перезавантаження. Перезавантажте Windows, щоб повернути повну швидкість і стабільність.",
   "activity.config_updated": "Конфігурацію оновлено",
   "activity.connected": "Підключено до SwarmLLM",
   "activity.count": "{count} подій",

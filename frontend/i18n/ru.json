@@ -15,6 +15,7 @@
   "actions.save_settings": "Сохранить настройки",
   "actions.saving": "Сохранение...",
   "actions.unlock": "Разблокировать",
+  "activity.card_slow_restart_windows": "Видеокарта стала медленно выделять память ({detail} с, обычно — тысячные доли секунды). Это накапливается, чем дольше Windows работает без перезагрузки. Перезагрузите Windows, чтобы вернуть полную скорость и стабильность.",
   "activity.config_updated": "Конфигурация обновлена",
   "activity.connected": "Подключено к SwarmLLM",
   "activity.count": "{count} событий",

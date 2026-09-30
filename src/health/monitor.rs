@@ -418,6 +418,7 @@ impl HealthMonitor {
                     }
 
                     self.maybe_warn_wsl_firewall();
+                    self.maybe_warn_slow_card();
 
                     self.maybe_remeasure_memory_bandwidth(nonce).await;
 
@@ -1903,6 +1904,53 @@ impl HealthMonitor {
     /// right way round. This is an onboarding aid, and its own history says a
     /// warning that cries wolf is worth less than one that occasionally misses:
     /// it had already been narrowed once for exactly that reason.
+    /// Tell the owner, at most every `cuda_pool::SLOW_CARD_NOTICE_EVERY`, that
+    /// the graphics card has become slow to hand out fresh memory — what the
+    /// workers' allocation probes measure (`cuda_pool::probe_once`). On WSL2
+    /// that grows with Windows uptime and only a Windows restart clears it
+    /// (#146's deep dive, microsoft/WSL#41701); this PC crashed twice at 52-54 h
+    /// of uptime with it (#754, #762). The log line is written everywhere; the
+    /// dashboard notice only where its advice — restart Windows — applies.
+    fn maybe_warn_slow_card(&self) {
+        let Some(took) = self
+            .shared_state
+            .model_process_pool
+            .slow_card_notice()
+            .take(std::time::Instant::now())
+        else {
+            return;
+        };
+        let wsl = crate::config::network::is_wsl2();
+        tracing::warn!(
+            took_ms = took.as_millis() as u64,
+            wsl,
+            "The graphics card has become slow to hand out memory — a fresh allocation \
+             probe took {:.1} s where a healthy card takes a few milliseconds. Under WSL2 \
+             this builds up the longer Windows runs, and restarting Windows restores it \
+             (microsoft/WSL#41701); the node keeps working, but more slowly, and this PC \
+             has crashed under load in this state",
+            took.as_secs_f64()
+        );
+        if !wsl {
+            return;
+        }
+        let secs = format!("{:.1}", took.as_secs_f64());
+        self.shared_state.emit_activity(
+            crate::daemon::state::ActivityEvent::new(
+                "system",
+                "card_slow_restart_windows",
+                format!(
+                    "Your graphics card has become slow to set aside memory ({secs} s, \
+                     normally a few thousandths of a second). This builds up the longer \
+                     Windows runs without a restart. Restart Windows to bring back full \
+                     speed and stability."
+                ),
+            )
+            .with_detail_str(secs)
+            .with_toast("warning", 20000),
+        );
+    }
+
     fn maybe_warn_wsl_firewall(&mut self) {
         use std::sync::atomic::Ordering;
         if self.wsl_firewall_warned {

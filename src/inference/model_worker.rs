@@ -427,6 +427,12 @@ pub async fn run_worker(
         }
     });
 
+    // Read once: the daemon that spawned this worker decodes the card probe's
+    // report (`worker_ipc::DAEMON_READS_CARD_PROBE`).
+    let daemon_reads_card_probe = crate::inference::worker_ipc::daemon_reads_card_probe(
+        std::env::var_os(crate::inference::worker_ipc::DAEMON_READS_CARD_PROBE).as_deref(),
+    );
+
     // Whether the card's pool may hold memory freed since the last hand-back:
     // set by any message or tick, cleared by `cuda_pool::trim` once the worker
     // has had nothing to do for `cuda_pool::IDLE_TRIM` (#146).
@@ -510,6 +516,24 @@ pub async fn run_worker(
                         .await;
                     }
                     Err(_) => break,
+                }
+            }
+            // The card allocation probe ran inside the first load onto the
+            // card (`split::loader::load_device`); hand its figure to the
+            // daemon once (#762) — only to a daemon that said it reads it.
+            if let Some(took) = daemon_reads_card_probe
+                .then(crate::inference::cuda_pool::take_probe_report)
+                .flatten()
+            {
+                let took_ms = u32::try_from(took.as_millis()).unwrap_or(u32::MAX);
+                if let Err(e) = send_worker(
+                    &mut writer,
+                    &WorkerMsg::CardAllocationProbe { took_ms },
+                    &[],
+                )
+                .await
+                {
+                    tracing::debug!(error = %e, "model-worker: could not report the card probe");
                 }
             }
         } else if slot_table.is_empty() {

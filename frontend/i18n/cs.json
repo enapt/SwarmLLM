@@ -15,6 +15,7 @@
   "actions.save_settings": "Uložit nastavení",
   "actions.saving": "Ukládání...",
   "actions.unlock": "Odemknout",
+  "activity.card_slow_restart_windows": "Grafická karta začala pomalu přidělovat paměť ({detail} s, obvykle několik tisícin sekundy). Zhoršuje se to, čím déle Windows běží bez restartu. Restartujte Windows, abyste obnovili plnou rychlost a stabilitu.",
   "activity.config_updated": "Konfigurace aktualizována",
   "activity.connected": "Připojeno ke SwarmLLM",
   "activity.count": "{count} událostí",

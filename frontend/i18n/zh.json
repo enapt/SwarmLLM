@@ -15,6 +15,7 @@
   "actions.save_settings": "保存设置",
   "actions.saving": "保存中...",
   "actions.unlock": "解锁",
+  "activity.card_slow_restart_windows": "您的显卡分配内存变慢了（{detail} 秒，正常只需几毫秒）。Windows 不重启运行得越久，情况越严重。请重启 Windows 以恢复全速和稳定。",
   "activity.config_updated": "配置已更新",
   "activity.connected": "已连接到 SwarmLLM",
   "activity.count": "{count} 个事件",

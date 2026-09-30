@@ -15,6 +15,7 @@
   "actions.save_settings": "Save Settings",
   "actions.saving": "Saving...",
   "actions.unlock": "Unlock",
+  "activity.card_slow_restart_windows": "Your graphics card has become slow to set aside memory ({detail} s — normally a few thousandths of a second). This builds up the longer Windows runs without a restart. Restart Windows to bring back full speed and stability.",
   "activity.config_updated": "Configuration updated",
   "activity.connected": "Connected to SwarmLLM",
   "activity.count": "{count} events",

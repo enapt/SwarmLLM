@@ -1618,6 +1618,50 @@ control / keep / control):
 - **The synchronize before the reading stays**: a buffer freed on the stream counts as unused
   only after it.
 
+## The owner is told when the card has become slow to hand out memory (2026-10-01)
+
+**Why.** The pool above and `card_pace` defend the node against a host whose fresh card
+allocations have slowed; neither tells the OWNER, and the owner holds the only fix. On WSL2 the
+slowdown grows with Windows uptime (#146's series: a few hundred MB of fresh allocations took
+0.007 s at ~8 h, 2.3 s at ~24 h, 4.0 s at ~35 h, 8.8 s at ~49 h), and only a Windows restart
+clears it. The dev PC then crashed twice under GPU load at 52-54 h of uptime — a hard hang during
+twelve simultaneous chats (#754) and bugcheck 0x116 VIDEO_TDR_FAILURE right after an 8B worker
+exited and the next node started (#762).
+
+**Research (2026-10-01).** microsoft/WSL#41701 is the same shape — CUDA through GPU-PV slowing
+over days of host uptime, `dxgvmb_send_sync_msg` failures accumulating — and is OPEN with no
+root cause or fix from Microsoft or NVIDIA; `wsl --shutdown` does not clear it; one report says
+`pnputil /restart-device` on the card does, which is not advice for a card that drives the
+display. NVIDIA 617.14's notes list no WSL, CUDA or TDR fix. Microsoft documents the TDR registry
+keys for driver development only. The 0x116 arguments (`c000009a`, `4`) are identical to
+Microsoft's own documentation example — generic, not a diagnosis. No source links the pool or
+CUDA graphs to GPU-PV failures (the CUDA-on-WSL known limitations list neither).
+
+**The rule.** `inference::cuda_pool::probe_once`, called by `split::loader::load_device` beside
+`keep_freed_memory` — once per worker, before the model's weights load — times 16 fresh 4 MB
+allocations straight from the driver (`cuMemAlloc`, never the pool) with their frees, after one
+untimed warm-up allocation. Every worker logs `DIAG: card allocation probe` with the figure, so
+the uptime curve builds up in `node.log`. The worker sends it once
+(`WorkerMsg::CardAllocationProbe`, side-band like `Progress`); `ModelProcessPool::slow_card_notice`
+keeps the slowest one at or over `SLOW_FRESH_ALLOCATIONS` (0.5 s); the health monitor's tick
+(`maybe_warn_slow_card`) logs a warning everywhere and, under WSL2 only — where its advice
+applies — shows `activity.card_slow_restart_windows` as a toast, at most once per 12 h.
+A/B / off: `SWARMLLM_CARD_PROBE=0`; `SWARMLLM_CARD_PROBE_SLOW_MS=N` moves the threshold (0 = every probe slow — how the chain was checked end to end on a healthy card).
+
+**What it deliberately does NOT do.** It changes nothing the node does: no pacing, no refusal.
+The threshold is a CALIBRATION GUESS from #146's series (16 calls, 64 MB — some of the ~64 calls
+and a fraction of the bytes that slowed, since whether the cost grows per call or per byte is not
+known); the probe's own figure at high uptime is the measurement still owed. Read the DIAG lines
+across a few days of uptime before tuning the threshold or letting the figure drive anything.
+
+**What a change must keep.**
+- **The probe goes straight to the driver.** Timed through the pool it measures nothing once the
+  pool holds memory.
+- **Once per worker, at the device choice** — a probe per request adds the very allocations it
+  measures to every admission.
+- **The advice only where it applies**: the log line on every platform, "restart Windows" only
+  under WSL2.
+
 ## A lone decode stream is never held for a batch (2026-09-29)
 
 **What it replaced.** `process_pool::batch_scheduler_loop` — which every decode forward a node

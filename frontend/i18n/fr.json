@@ -15,6 +15,7 @@
   "actions.save_settings": "Enregistrer les paramètres",
   "actions.saving": "Enregistrement...",
   "actions.unlock": "Déverrouiller",
+  "activity.card_slow_restart_windows": "Votre carte graphique met de plus en plus de temps à réserver de la mémoire ({detail} s, contre quelques millièmes de seconde normalement). Cela s'aggrave tant que Windows tourne sans redémarrage. Redémarrez Windows pour retrouver toute la vitesse et la stabilité.",
   "activity.config_updated": "Configuration mise à jour",
   "activity.connected": "Connecté à SwarmLLM",
   "activity.count": "{count} événements",

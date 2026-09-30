@@ -15,6 +15,7 @@
   "actions.save_settings": "Instellingen opslaan",
   "actions.saving": "Opslaan...",
   "actions.unlock": "Ontgrendelen",
+  "activity.card_slow_restart_windows": "Je videokaart is traag geworden bij het reserveren van geheugen ({detail} s, normaal een paar duizendsten van een seconde). Dit wordt erger naarmate Windows langer draait zonder herstart. Start Windows opnieuw op voor volle snelheid en stabiliteit.",
   "activity.config_updated": "Configuratie bijgewerkt",
   "activity.connected": "Verbonden met SwarmLLM",
   "activity.count": "{count} gebeurtenissen",

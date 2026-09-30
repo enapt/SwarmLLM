@@ -15,6 +15,7 @@
   "actions.save_settings": "सेटिंग्स सहेजें",
   "actions.saving": "सहेज रहे हैं...",
   "actions.unlock": "अनलॉक करें",
+  "activity.card_slow_restart_windows": "आपका ग्राफ़िक्स कार्ड मेमोरी आरक्षित करने में धीमा हो गया है ({detail} सेकंड, सामान्यतः कुछ मिलीसेकंड)। Windows जितना लंबे समय तक बिना रीस्टार्ट के चलता है, यह उतना बढ़ता है। पूरी गति और स्थिरता वापस पाने के लिए Windows को रीस्टार्ट करें।",
   "activity.config_updated": "कॉन्फ़िगरेशन अपडेट हुआ",
   "activity.connected": "SwarmLLM से जुड़ गया",
   "activity.count": "{count} घटनाएँ",

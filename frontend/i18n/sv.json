@@ -15,6 +15,7 @@
   "actions.save_settings": "Spara inställningar",
   "actions.saving": "Sparar...",
   "actions.unlock": "Lås upp",
+  "activity.card_slow_restart_windows": "Ditt grafikkort har blivit långsamt på att reservera minne ({detail} s, normalt några tusendels sekunder). Det förvärras ju längre Windows körs utan omstart. Starta om Windows för att få tillbaka full hastighet och stabilitet.",
   "activity.config_updated": "Konfiguration uppdaterad",
   "activity.connected": "Ansluten till SwarmLLM",
   "activity.count": "{count} händelser",

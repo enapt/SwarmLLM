@@ -107,6 +107,16 @@ pub enum DaemonMsg {
     Shutdown,
 }
 
+/// Set by the daemon in every worker's environment: this daemon decodes
+/// `WorkerMsg::CardAllocationProbe`. See that variant for why a worker must not
+/// send it otherwise.
+pub(crate) const DAEMON_READS_CARD_PROBE: &str = "SWARMLLM_DAEMON_READS_CARD_PROBE";
+
+/// Whether the daemon that spawned this worker reads the card probe's report.
+pub(crate) fn daemon_reads_card_probe(v: Option<&std::ffi::OsStr>) -> bool {
+    v.is_some_and(|v| v == "1")
+}
+
 /// Message from worker → daemon.
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "t")]
@@ -149,6 +159,20 @@ pub enum WorkerMsg {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         matched_stop_sequence: Option<String>,
     },
+    /// How long the worker's fresh card allocations took when it first picked
+    /// the card (`cuda_pool::probe_once`), sent once, after the message that
+    /// loaded a model. Side-band like `Progress`: the daemon's
+    /// `cuda_pool::SlowCardNotice` tells the owner when it is slow (#762).
+    ///
+    /// ⚠ **Sent only when the daemon said it reads it** ([`DAEMON_READS_CARD_PROBE`]).
+    /// A worker is spawned from the binary on disk NOW (`current_exe_path`,
+    /// gotcha #188), which after an update that has not restarted the daemon is
+    /// NEWER than the daemon; an older daemon's reader cannot decode this
+    /// variant, and `recv_framed` fails on the JSON before reading the payload,
+    /// so the stream is lost and the worker evicted on every load (pre-release
+    /// review, 2026-10-01). Gate every new worker-to-daemon message the same
+    /// way — the IPC twin of gating a new wire message on a peer's `features`.
+    CardAllocationProbe { took_ms: u32 },
     /// Error for a specific request.
     ///
     /// `fatal` marks a failure that corrupted or exhausted the worker's device
@@ -695,6 +719,16 @@ pub fn permanent_gpu_failure(message: &str) -> Option<PermanentGpuFailure> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_worker_reports_its_card_probe_only_to_a_daemon_that_said_it_reads_it() {
+        // Unset = an older daemon (spawned the new binary after an update it
+        // has not restarted into): it would lose the stream on the new variant.
+        assert!(!daemon_reads_card_probe(None));
+        assert!(daemon_reads_card_probe(Some(std::ffi::OsStr::new("1"))));
+        assert!(!daemon_reads_card_probe(Some(std::ffi::OsStr::new("0"))));
+        assert!(!daemon_reads_card_probe(Some(std::ffi::OsStr::new(""))));
+    }
 
     #[test]
     fn cuda_oom_is_fatal() {

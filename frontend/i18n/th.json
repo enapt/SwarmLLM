@@ -15,6 +15,7 @@
   "actions.save_settings": "บันทึกการตั้งค่า",
   "actions.saving": "กำลังบันทึก...",
   "actions.unlock": "ปลดล็อก",
+  "activity.card_slow_restart_windows": "การ์ดจอของคุณจองหน่วยความจำได้ช้าลง ({detail} วินาที ปกติใช้เพียงไม่กี่มิลลิวินาที) อาการนี้สะสมมากขึ้นยิ่ง Windows เปิดนานโดยไม่รีสตาร์ต รีสตาร์ต Windows เพื่อให้กลับมาเร็วและเสถียรเต็มที่",
   "activity.config_updated": "อัปเดตการกำหนดค่าแล้ว",
   "activity.connected": "เชื่อมต่อกับ SwarmLLM แล้ว",
   "activity.count": "{count} เหตุการณ์",

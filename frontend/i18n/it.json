@@ -15,6 +15,7 @@
   "actions.save_settings": "Salva impostazioni",
   "actions.saving": "Salvataggio...",
   "actions.unlock": "Sblocca",
+  "activity.card_slow_restart_windows": "La scheda grafica è diventata lenta nel riservare memoria ({detail} s, di norma pochi millesimi di secondo). Il rallentamento cresce quanto più a lungo Windows resta acceso senza riavvio. Riavvia Windows per ripristinare piena velocità e stabilità.",
   "activity.config_updated": "Configurazione aggiornata",
   "activity.connected": "Connesso a SwarmLLM",
   "activity.count": "{count} eventi",

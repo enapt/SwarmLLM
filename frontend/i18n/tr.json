@@ -15,6 +15,7 @@
   "actions.save_settings": "Ayarları Kaydet",
   "actions.saving": "Kaydediliyor...",
   "actions.unlock": "Kilidi aç",
+  "activity.card_slow_restart_windows": "Ekran kartınız bellek ayırmakta yavaşladı ({detail} sn; normalde saniyenin birkaç binde biri). Windows yeniden başlatılmadan ne kadar uzun çalışırsa bu o kadar artar. Tam hız ve kararlılık için Windows'u yeniden başlatın.",
   "activity.config_updated": "Yapılandırma güncellendi",
   "activity.connected": "SwarmLLM'ye bağlanıldı",
   "activity.count": "{count} olay",

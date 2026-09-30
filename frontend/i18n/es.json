@@ -15,6 +15,7 @@
   "actions.save_settings": "Guardar Ajustes",
   "actions.saving": "Guardando...",
   "actions.unlock": "Desbloquear",
+  "activity.card_slow_restart_windows": "Tu tarjeta gráfica tarda cada vez más en reservar memoria ({detail} s; lo normal son unas milésimas de segundo). Esto se acumula cuanto más tiempo lleva Windows encendido sin reiniciarse. Reinicia Windows para recuperar toda la velocidad y la estabilidad.",
   "activity.config_updated": "Configuración actualizada",
   "activity.connected": "Conectado a SwarmLLM",
   "activity.count": "{count} eventos",

@@ -15,6 +15,7 @@
   "actions.save_settings": "Zapisz ustawienia",
   "actions.saving": "Zapisywanie...",
   "actions.unlock": "Odblokuj",
+  "activity.card_slow_restart_windows": "Karta graficzna zaczęła wolno przydzielać pamięć ({detail} s, zwykle kilka tysięcznych sekundy). Narasta to, im dłużej Windows działa bez ponownego uruchomienia. Uruchom Windows ponownie, aby przywrócić pełną szybkość i stabilność.",
   "activity.config_updated": "Konfiguracja zaktualizowana",
   "activity.connected": "Połączono ze SwarmLLM",
   "activity.count": "{count} zdarzeń",

@@ -15,6 +15,7 @@
   "actions.save_settings": "設定を保存",
   "actions.saving": "保存中...",
   "actions.unlock": "ロック解除",
+  "activity.card_slow_restart_windows": "グラフィックカードのメモリ確保が遅くなっています（{detail} 秒、通常は数ミリ秒）。Windows を再起動せずに長く使うほど悪化します。Windows を再起動すると、本来の速度と安定性が戻ります。",
   "activity.config_updated": "設定が更新されました",
   "activity.connected": "SwarmLLM に接続しました",
   "activity.count": "{count} 件のイベント",

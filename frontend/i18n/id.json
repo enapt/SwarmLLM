@@ -15,6 +15,7 @@
   "actions.save_settings": "Simpan Pengaturan",
   "actions.saving": "Menyimpan...",
   "actions.unlock": "Buka kunci",
+  "activity.card_slow_restart_windows": "Kartu grafis Anda menjadi lambat saat menyediakan memori ({detail} dtk, biasanya hanya beberapa milidetik). Ini makin parah semakin lama Windows berjalan tanpa dimulai ulang. Mulai ulang Windows untuk mengembalikan kecepatan penuh dan kestabilan.",
   "activity.config_updated": "Konfigurasi diperbarui",
   "activity.connected": "Terhubung ke SwarmLLM",
   "activity.count": "{count} peristiwa",

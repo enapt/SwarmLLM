@@ -715,9 +715,20 @@ fn worker_msg_request_id(msg: &WorkerMsg) -> Option<Uuid> {
         | WorkerMsg::PrefixManifestUpdate { .. }
         | WorkerMsg::PrefixFetchProbe { .. }
         | WorkerMsg::Progress { .. }
+        | WorkerMsg::CardAllocationProbe { .. }
         | WorkerMsg::Ready
         | WorkerMsg::Bye => None,
     }
+}
+
+/// Where a worker's side-band messages go — the ones that answer no request.
+/// Each channel is unset in a bare pool (unit tests, before startup), and the
+/// message is then dropped.
+struct SideBand {
+    prefix_manifest_tx: Option<mpsc::Sender<PrefixManifestEvent>>,
+    prefix_probe_tx: Option<mpsc::Sender<PrefixProbeEvent>>,
+    progress_tx: Option<mpsc::Sender<ProgressEvent>>,
+    slow_card: Arc<crate::inference::cuda_pool::SlowCardNotice>,
 }
 
 /// Reader actor: owns the read half of the worker socket, dispatches each
@@ -729,10 +740,14 @@ async fn reader_actor(
     responses: ResponseMap,
     dead: Arc<AtomicBool>,
     model_id: ModelId,
-    prefix_manifest_tx: Option<mpsc::Sender<PrefixManifestEvent>>,
-    prefix_probe_tx: Option<mpsc::Sender<PrefixProbeEvent>>,
-    progress_tx: Option<mpsc::Sender<ProgressEvent>>,
+    side: SideBand,
 ) {
+    let SideBand {
+        prefix_manifest_tx,
+        prefix_probe_tx,
+        progress_tx,
+        slow_card,
+    } = side;
     loop {
         match recv_worker(&mut reader).await {
             Ok((msg, payload)) => {
@@ -789,6 +804,13 @@ async fn reader_actor(
                             total,
                         });
                     }
+                    continue;
+                }
+                // The worker's one card allocation probe (#762). Its own log
+                // line carries the figure; the daemon keeps only a slow one,
+                // for the health monitor to tell the owner.
+                if let WorkerMsg::CardAllocationProbe { took_ms } = msg {
+                    slow_card.record(std::time::Duration::from_millis(u64::from(took_ms)));
                     continue;
                 }
                 // Worker-initiated cross-node probe (Item 8 Phase 2b).
@@ -2053,6 +2075,10 @@ pub struct ModelProcessPool {
     /// Item 8 Phase 2b: worker-initiated fetch probes land here. Daemon
     /// drains and responds via `send_prefix_fetch_result`. Unset → drop.
     prefix_probe_tx: std::sync::OnceLock<mpsc::Sender<PrefixProbeEvent>>,
+    /// The slowest card allocation probe the workers reported since the owner
+    /// was last told (#762) — written by every reader actor, read by the
+    /// health monitor through [`Self::slow_card_notice`].
+    slow_card: Arc<crate::inference::cuda_pool::SlowCardNotice>,
     /// A model's `(fixed_mb, per_layer_mb)` for a test that needs the growth
     /// path to weigh something. The real curve is read off a GGUF header on
     /// disk, which a unit test must not depend on the developer's node for.
@@ -2214,6 +2240,7 @@ impl ModelProcessPool {
             prefix_manifest_tx: std::sync::OnceLock::new(),
             progress_tx: std::sync::OnceLock::new(),
             prefix_probe_tx: std::sync::OnceLock::new(),
+            slow_card: Arc::new(crate::inference::cuda_pool::SlowCardNotice::default()),
             #[cfg(test)]
             test_cost_curve: DashMap::new(),
         }
@@ -2228,6 +2255,12 @@ impl ModelProcessPool {
 
     pub fn set_prefix_manifest_tx(&self, tx: mpsc::Sender<PrefixManifestEvent>) {
         let _ = self.prefix_manifest_tx.set(tx);
+    }
+
+    /// What the workers' card allocation probes say the owner should hear
+    /// (`cuda_pool::SlowCardNotice`); the health monitor reads it each tick.
+    pub(crate) fn slow_card_notice(&self) -> &crate::inference::cuda_pool::SlowCardNotice {
+        &self.slow_card
     }
 
     /// Install the prefix-probe sink. Daemon owns the receiver and answers
@@ -5356,6 +5389,9 @@ impl ModelProcessPool {
         if owner_threads > 0 && std::env::var_os("SWARMLLM_OWNER_PREFILL_THREADS").is_none() {
             command.env("SWARMLLM_OWNER_PREFILL_THREADS", owner_threads.to_string());
         }
+        // This daemon reads the worker's card probe report; a worker spawned by
+        // an older daemon (an update not yet restarted into) must not send it.
+        command.env(crate::inference::worker_ipc::DAEMON_READS_CARD_PROBE, "1");
         let mut child = command
             .spawn()
             .map_err(|e| SwarmError::ServiceUnavailable(format!("spawn worker: {e}")))?;
@@ -5460,9 +5496,12 @@ impl ModelProcessPool {
             responses.clone(),
             dead.clone(),
             model_id.clone(),
-            self.prefix_manifest_tx.get().cloned(),
-            self.prefix_probe_tx.get().cloned(),
-            self.progress_tx.get().cloned(),
+            SideBand {
+                prefix_manifest_tx: self.prefix_manifest_tx.get().cloned(),
+                prefix_probe_tx: self.prefix_probe_tx.get().cloned(),
+                progress_tx: self.progress_tx.get().cloned(),
+                slow_card: self.slow_card.clone(),
+            },
         ));
         Ok(WorkerHandle {
             child: Some(child),

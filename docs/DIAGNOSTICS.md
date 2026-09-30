@@ -969,6 +969,24 @@ networkingMode=mirrored
 
 This avoids the virtual NAT layer that causes additional latency and routing issues.
 
+### The graphics card slows with Windows uptime (#146, #762, WSL#41701)
+
+`DIAG: card allocation probe — fresh memory from the driver … took_ms=N` — one line per worker
+that picks the card: 16 fresh 4 MB allocations straight from the driver, timed. A few ms on a
+healthy card; it grows with Windows uptime under WSL2 and only a Windows restart clears it
+(`wsl --shutdown` does not). `slow=true` (≥ 500 ms) also makes the health monitor warn
+(`The graphics card has become slow to hand out memory`) and, under WSL2, show the owner a
+"restart Windows" notice at most every 12 h. To read the curve against uptime:
+
+```bash
+grep -a "DIAG: card allocation probe" ~/.local/share/swarmllm/node.log | grep -o 'took_ms=[0-9]*\|^[^ ]*'
+# Windows boots (uptime at each line = its time minus the boot before it):
+/mnt/c/WINDOWS/System32/WindowsPowerShell/v1.0/powershell.exe -NoProfile -Command \
+  "Get-WinEvent -FilterHashtable @{LogName='System'; ProviderName='Microsoft-Windows-Kernel-General'; Id=12} -MaxEvents 5 | Select TimeCreated"
+```
+
+`SWARMLLM_CARD_PROBE=0` turns the probe off; `SWARMLLM_CARD_PROBE_SLOW_MS=0` makes every probe count as slow, to watch the notice fire end to end on a healthy card.
+
 ### Recommendation
 
 For production testing, use native Linux (dual boot or bare metal). WSL2 is suitable for single-node development and basic multi-node testing with the above mitigations, but production distributed inference should run on native networking.
