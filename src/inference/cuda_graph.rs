@@ -43,21 +43,24 @@
 //! back where it was and runs the step the ordinary way — the same kernels in
 //! the same order, so the same answer.
 //!
-//! `SWARMLLM_CUDA_GRAPH=1` turns it on. OFF by default until it has been
-//! measured and gated on a `--features cuda` build: v0.3.199 shipped a stream
-//! change that every test and a cheaper build passed while every reply was
-//! garbage (gotcha #683).
+//! ON by default since 2026-09-30, after the gate ran on a `--features cuda`
+//! build (v0.3.199 shipped a stream change that every test and a cheaper build
+//! passed while every reply was garbage, gotcha #683): byte-identical replies on
+//! five models, a 7B split across two card nodes, `failover_mid`, 700-token
+//! replies across a KV growth step, split speculation with its drafter.
+//! `SWARMLLM_CUDA_GRAPH=0` turns it off; `SWARMLLM_CUDA_OWN_STREAM=0` does too,
+//! since the legacy stream cannot be captured.
 
 use crate::error::SwarmError;
 use candle_core::{DType, Device, Tensor};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-/// `SWARMLLM_CUDA_GRAPH=1`. Read once: the answer must not change between
-/// two models in one worker.
+/// On unless `SWARMLLM_CUDA_GRAPH=0`. Read once: the answer must not change
+/// between two models in one worker.
 pub(crate) fn requested() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("SWARMLLM_CUDA_GRAPH").as_deref() == Ok("1"))
+    *ON.get_or_init(|| std::env::var("SWARMLLM_CUDA_GRAPH").as_deref() != Ok("0"))
 }
 
 /// How many conversations' last decode step a model remembers. A worker
@@ -157,13 +160,29 @@ impl DecodeGraphSlot {
             }
             None => {
                 tracing::info!(
-                    switch = "SWARMLLM_CUDA_GRAPH=1",
+                    off_switch = "SWARMLLM_CUDA_GRAPH=0",
                     "DIAG: decode steps on this model go to the card as one CUDA graph"
                 );
                 Self::On(Box::default())
             }
         }
     }
+}
+
+/// Hand the card memory graphs hold between steps back to the driver, once a
+/// worker has been idle (`model_worker::hand_back_idle_card_memory`, beside the
+/// memory pool's own trim). Graph allocations come from a pool of their own that
+/// `cuda_pool::trim` never touches; each group's graph keeps its step's
+/// temporaries mapped so the next launch need not map them again. Returns the
+/// megabytes held before and after, or `None` off a card / when the driver
+/// will not say. The caller has synchronised, so no graph is running.
+pub(crate) fn trim_idle_graph_memory(device: &Device) -> Option<(u64, u64)> {
+    #[cfg(feature = "candle-cuda")]
+    if let Device::Cuda(dev) = device {
+        return cuda::trim_graph_memory(dev);
+    }
+    let _ = device;
+    None
 }
 
 fn device_says_no(device: &Device) -> Option<&'static str> {
@@ -409,11 +428,38 @@ mod cuda {
         }
     }
 
+    fn graph_reserved(device: sys::CUdevice) -> Option<u64> {
+        let mut value: u64 = 0;
+        // SAFETY: RESERVED_MEM_CURRENT is a `cuuint64_t`.
+        unsafe {
+            sys::cuDeviceGetGraphMemAttribute(
+                device,
+                sys::CUgraphMem_attribute::CU_GRAPH_MEM_ATTR_RESERVED_MEM_CURRENT,
+                (&mut value as *mut u64).cast::<core::ffi::c_void>(),
+            )
+        }
+        .result()
+        .ok()
+        .map(|()| value)
+    }
+
+    pub(super) fn trim_graph_memory(dev: &candle_core::CudaDevice) -> Option<(u64, u64)> {
+        let stream = dev.cuda_stream();
+        let ctx = stream.context();
+        ctx.bind_to_thread().ok()?;
+        let device = ctx.cu_device();
+        let before = graph_reserved(device)?;
+        // SAFETY: a live device; the caller has synchronised the stream.
+        unsafe { sys::cuDeviceGraphMemTrim(device) }.result().ok()?;
+        let after = graph_reserved(device)?;
+        Some((before >> 20, after >> 20))
+    }
+
     pub(super) fn device_says_no(dev: &candle_core::CudaDevice) -> Option<&'static str> {
         if dev.cuda_stream().cu_stream().is_null() {
             return Some(
                 "the card is driven on CUDA's legacy stream, which cannot be captured \
-                 (SWARMLLM_CUDA_OWN_STREAM=1)",
+                 (SWARMLLM_CUDA_OWN_STREAM=0 is set)",
             );
         }
         if dev.is_event_tracking() {

@@ -644,6 +644,17 @@ fn hand_back_idle_card_memory(models: &HashMap<(usize, usize, usize, usize), Spl
             "DIAG: card memory pool handed its unused memory back after idle"
         );
     }
+    if let Some((before_mb, after_mb)) =
+        crate::inference::cuda_graph::trim_idle_graph_memory(device)
+    {
+        if before_mb > after_mb {
+            tracing::info!(
+                before_mb,
+                after_mb,
+                "DIAG: CUDA graphs handed their idle card memory back"
+            );
+        }
+    }
 }
 
 /// Send a `WorkerMsg::Error` back to the daemon. Used by the `run_worker`

@@ -157,38 +157,30 @@ fn cuda_event_tracking_requested() -> bool {
     *ON.get_or_init(|| std::env::var("SWARMLLM_CUDA_EVENT_TRACKING").as_deref() == Ok("1"))
 }
 
-/// SwarmLLM patch: `SWARMLLM_CUDA_OWN_STREAM=1` gives every `CudaDevice` its
-/// own explicitly created stream instead of the legacy null stream.
+/// SwarmLLM patch: every `CudaDevice` gets its own explicitly created stream
+/// instead of the legacy null stream — ON by default since 2026-09-30;
+/// `SWARMLLM_CUDA_OWN_STREAM=0` goes back to the legacy stream.
 ///
-/// ⛔ **OFF by default, and the default was flipped back on 2026-09-22 after it
-/// shipped broken.** CUDA refuses to capture a graph on the legacy stream, so
-/// moving off it is the precondition for collapsing a token's ~513 launches and
-/// ~1,300 alloc/free calls into one submission — but turning it on by default
-/// made **every model emit garbage** in a full `--features cuda` build:
-/// `给给给…` on tinyllama, `<|reserved_special_token_247|>…` on llama-3.2-3b.
-/// The same binary with this off answers correctly, which is what isolated it.
+/// CUDA refuses to capture a graph on the legacy stream, so this is the
+/// precondition for CUDA-graph decode (`inference::cuda_graph`, +9-75% decode).
 ///
-/// ⚠ **It was verified clean under `--features candle-cuda`, and that is
-/// exactly why it got through.** That feature set has no flash-attn and no
-/// llama backend, so the attention path a release build actually uses was never
-/// compiled, let alone run — gotcha #677 says in as many words that such a
-/// binary is "NOT a drop-in for the release node". **A change whose blast
-/// radius is every CUDA kernel in the process cannot be cleared by the cheap
-/// gate.**
-///
-/// The cause is not yet established. Leading hypothesis: several `CudaDevice`s
-/// are built (the daemon's capability probe and the shard loader) which used to
-/// share the ONE legacy stream and now each get their own, so work that was
-/// ordered by construction is now unordered with event tracking off.
-/// **Do not re-enable without reproducing under `--features cuda` on a real
-/// generation** — every unit test and the whole `candle-cuda` A/B passed while
-/// this was broken.
+/// ⛔ **History: turning it on shipped BROKEN in v0.3.199-alpha** — every model
+/// emitted garbage in a full `--features cuda` build (`给给给…` on tinyllama),
+/// cleared under `--features candle-cuda`, which has no flash-attn and no llama
+/// backend (gotcha #677: that binary is "NOT a drop-in for the release node").
+/// **A change whose blast radius is every CUDA kernel in the process cannot be
+/// cleared by the cheap gate.** The cause, found 2026-09-23 (#685): the
+/// vendored flash-attn kernel launched on stream 0, which a
+/// `CU_STREAM_NON_BLOCKING` stream does not synchronise with; it now takes the
+/// device's stream. Re-verified on `--features cuda` generations before the
+/// flip (2026-09-29/30): byte-identical replies on five models, a 7B split
+/// across two card nodes, `failover_mid`, split speculation with its drafter.
 ///
 /// Read once and cached; it sits on the device-construction path, and the
 /// answer must not change between two devices in one process.
 fn own_cuda_stream_requested() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("SWARMLLM_CUDA_OWN_STREAM").as_deref() == Ok("1"))
+    *ON.get_or_init(|| std::env::var("SWARMLLM_CUDA_OWN_STREAM").as_deref() != Ok("0"))
 }
 
 /// SwarmLLM patch: `SWARMLLM_ZERO_QMATMUL_BUFFERS=1` puts the zero-fill back
@@ -515,7 +507,7 @@ impl BackendDevice for CudaDevice {
 
     fn new(ordinal: usize) -> Result<Self> {
         let context = cudarc::driver::CudaContext::new(ordinal).w()?;
-        // SwarmLLM patch: this constructor runs everything on the DEFAULT
+        // SwarmLLM patch: this constructor gives each device exactly ONE
         // stream, so cudarc's per-allocation events cannot be doing anything.
         //
         // cudarc creates a read event AND a write event for every `CudaSlice`
@@ -544,18 +536,16 @@ impl BackendDevice for CudaDevice {
         //     another device's stream. **This bullet used to be a hypothetical
         //     about a constructor nobody called; since the migration it is the
         //     load-bearing one.**
-        //   * `is_in_multi_stream_mode()` is FALSE by default, because
-        //     `new_stream()` is what sets it and the default is back to
-        //     `default_stream()`. cudarc's
+        //   * `is_in_multi_stream_mode()` is TRUE since the own stream became
+        //     the default (2026-09-30) — `new_stream()` sets it — so cudarc's
         //     `is_managing_stream_synchronization()` —
-        //     `is_in_multi_stream_mode() && is_event_tracking()` — is therefore
-        //     false twice over, as it was before the migration attempt.
+        //     `is_in_multi_stream_mode() && is_event_tracking()` — rests on
+        //     event tracking alone, which is off unless asked for.
         //
-        // ⚠ **Under `SWARMLLM_CUDA_OWN_STREAM=1` that changes**: multi-stream
-        // mode becomes true, so `SWARMLLM_CUDA_EVENT_TRACKING=1` then stops
-        // being a pure revert and also hands cudarc back stream-sync
-        // management. It can only ADD synchronisation, so it stays a valid A/B
-        // — but say which arm you are in when quoting it.
+        // ⚠ So `SWARMLLM_CUDA_EVENT_TRACKING=1` is not a pure revert: it also
+        // hands cudarc back stream-sync management. It can only ADD
+        // synchronisation, so it stays a valid A/B — but say which arm you are
+        // in when quoting it (`SWARMLLM_CUDA_OWN_STREAM=0` is the legacy arm).
         //
         // ⚠⚠ **ANYONE GIVING ONE DEVICE A SECOND STREAM MUST RE-ENABLE THIS.**
         // That device's buffers would have nothing tracking their use, i.e. used
@@ -598,12 +588,12 @@ impl BackendDevice for CudaDevice {
         // either end state.** (A `llama`-feature build runs llama.cpp on its own
         // context and shares no buffers with candle.)
         //
-        // ⛔ **Opt-in only** (`SWARMLLM_CUDA_OWN_STREAM=1`). Shipping it ON in
-        // v0.3.199-alpha made every model emit garbage in a `--features cuda`
-        // build while every test and the whole `candle-cuda` A/B stayed green —
-        // see the note on `own_cuda_stream_requested`. The legacy stream is the
-        // default until that is understood, which also means graph capture
-        // stays unreachable by default, by design.
+        // ON by default since 2026-09-30 (`SWARMLLM_CUDA_OWN_STREAM=0` = the
+        // legacy stream). ⛔ It shipped ON once before, in v0.3.199-alpha, and
+        // made every model emit garbage in a `--features cuda` build while every
+        // test and the whole `candle-cuda` A/B stayed green: flash-attn launched
+        // on stream 0 (#685, fixed) — see the note on `own_cuda_stream_requested`
+        // for what was re-verified before this default.
         let stream = if own_cuda_stream_requested() {
             context.new_stream().w()?
         } else {

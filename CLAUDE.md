@@ -187,9 +187,10 @@ verifies the downloaded ARTIFACT before signing.
 
 **Local GPU decode is bound by SUBMISSION COUNT** — layer count predicts cost.
 Our kernels live in `kernels/*.cu` (PTX via `build.rs`), each bit-identical to
-the candle ops it replaces. ⚠ **ONE CUDA stream per device**;
-`SWARMLLM_CUDA_OWN_STREAM=1` stays opt-in and OFF. Plan:
-`docs/plans/local_decode_submissions.md`.
+the candle ops it replaces. ⚠ **ONE CUDA stream per device** — its OWN stream
+since 2026-09-30 (`SWARMLLM_CUDA_OWN_STREAM=0` = legacy), and decode steps go
+to the card as CUDA graphs recorded two layers at a time (`SWARMLLM_CUDA_GRAPH=0`
+= off): 7B at llama.cpp parity. Plan: `docs/plans/local_decode_submissions.md`.
 
 ⚠ **The privacy mode is STRUCTURAL** — in the UI "Start and finish on this
 computer", never "end-to-end", "encrypted pipeline" or "private". **"At this

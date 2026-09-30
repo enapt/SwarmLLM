@@ -531,9 +531,9 @@ reason for the always-on copy counter in vendored candle and the capture that th
 
 **2026-09-30: recorded in groups of two layers and launched as recorded, it pays on every model**
 — TinyLlama +75%, 3B +25%, Qwen 7B +13% (parity with llama.cpp), Llama 8B +9%, replies
-byte-identical. Still opt-in: the default flip needs the behaviour gate (`reply_ab.sh` +
-`split_rig.sh` incl. failover) on a `--features cuda` artifact, for the own stream as much as the
-graph (.199).
+byte-identical. **ON by default since 2026-09-30** (own stream and graphs) after the gate on a
+`--features cuda` build; the release gate still runs `reply_ab.sh` + `split_rig.sh` on the
+downloaded artifact (.199).
 
 ### ▶ Stage 4b — what capturing OUR decode step still has to solve
 

@@ -183,8 +183,9 @@ submissions per layer, not faster arithmetic.
   what the disabled per-allocation events rest on. **Giving one device a second
   stream means re-enabling them** (`SWARMLLM_CUDA_EVENT_TRACKING=1`) or its
   buffers cross streams unsynchronised — a silently wrong reply, not an error.
-  ⛔ **Moving off the legacy stream SHIPPED BROKEN in v0.3.199-alpha and is now
-  opt-in** (`SWARMLLM_CUDA_OWN_STREAM=1`). Every model emitted garbage in a
+  ⛔ **Moving off the legacy stream SHIPPED BROKEN in v0.3.199-alpha**; it is the
+  default again since 2026-09-30 (`SWARMLLM_CUDA_OWN_STREAM=0` = legacy), after the
+  gate below. Every model emitted garbage in a
   `--features cuda` build while every test and the whole `candle-cuda` A/B
   stayed green — **the cheap gate has no flash-attn and no llama backend**
   (#677, #683). CUDA does refuse graph capture on the legacy stream (measured:
@@ -197,8 +198,8 @@ submissions per layer, not faster arithmetic.
   (upstream's own 0.11.0 fix). ⚠ **Verify "X uses the device's stream" at the
   LAUNCH** — flash took `dev.cuda_stream()` for its pointer guards only
   (#685). Guarded in CI by
-  `the_vendored_attention_kernels_launch_on_the_devices_stream`; the switch
-  stays OFF until graph capture needs it.
+  `the_vendored_attention_kernels_launch_on_the_devices_stream`; graph capture
+  now needs it, and it is on.
 - **Fused kernels are OURS, in `kernels/*.cu`**, compiled to PTX by `build.rs`
   and loaded through candle's `get_or_load_custom_func` — not a fifth vendored
   crate, since `candle-kernels` is a registry dep. **Write each one to be
@@ -252,12 +253,15 @@ would name.
 
 → `docs/invariants/inference.md` § "A prompt pass on the card multiplies quantized weights on the tensor cores"
 
-## A decode step can go to the card as ONE CUDA graph — opt-in (2026-09-29)
+## A decode step goes to the card as CUDA graphs — ON by default since 2026-09-30
 
 **`inference::cuda_graph` + `SplitModel::forward_decode_as_graph`** re-capture a
 one-position forward every token and update one instantiated graph in place
-(llama.cpp's way) — `SWARMLLM_CUDA_OWN_STREAM=1 SWARMLLM_CUDA_GRAPH=1`, OFF by
-default. **Recorded in groups of two layers, each launched as soon as it is recorded**
+(llama.cpp's way) — on by default, `SWARMLLM_CUDA_GRAPH=0` off (so is the legacy stream,
+which cannot be captured). The flip's gate, on a `--features cuda` build: five models, a 7B
+split over two card nodes, `failover_mid`, 700-token replies, split speculation — identical or
+scored against llama.cpp. ⚠ `split_rig.sh failover` with B ON THE CARD fails with or without
+graphs: B's prompt pass ends before the kill lands, and a stand-in is offered only on it. **Recorded in groups of two layers, each launched as soon as it is recorded**
 (`cuda_graph::group_layers`, `Cutter::cut` via the forward's per-layer hook), so the card runs
 one group while the next is recorded — a whole-step graph left it idle for all 4.5 ms of recording
 and gained nothing on a 7B. Replies byte-identical; TinyLlama 126-135 → 226-229 tok/s, 3B 80-90 →
