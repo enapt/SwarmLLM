@@ -560,12 +560,17 @@ On parallel hardware — the case a split across machines is — the stream is +
 chunk size 2-4 and window 2-3 all measured 16-17 tok/s there, so the defaults (3, 3)
 stand. Sharing one card, the far half's checks and the next chunk contend for the
 same device and the work thrown away at each restart is paid for: the rig reads
-the stream's COST. Replies scored against llama.cpp (`score_against_reference.py`)
-like the rounds' and like plain local decoding: worst rank 2 on every token, one
-0.635-logit near-tie ("battered against" / "battered the") with rank 1 at every
-token after it; local decoding alone showed 0.377 on the same prompts.
+the stream's COST. ⚠ **Corrected the same evening:** the "near-tie" first recorded
+here ("battered against" at 0.635 logits, rank 1 after it) was a BUG, not noise — it
+recurred at the same sentence in 6 of 11 streamed replies, never in the rounds' or local
+decoding's, and never with `SWARMLLM_CUDA_GRAPH=0`. A refused CUDA-graph capture left
+the f16 KV mirror claiming positions it never received (#761, fixed `4fac99bf`: the
+mirror is caught up before a step is recorded). After the fix, streamed replies score
+like the rounds': worst rank 2, largest gaps 0.156 / 0.074 / 0.113 — and the stream
+runs 24-26 tok/s on the shared card (was 17-25), since its graphs are no longer given up.
 
-**Open:** the 4e saving (the drafter's near layers as the verify input) and
+**Open** (FUTURE_WORK #149): the default flip after a TH↔BE measurement on v0.3.214+,
+a window sized from the round trip, the 4e saving (the drafter's near layers as the verify input) and
 cancelling a stale chunk the far node has already STARTED — the gate skips only
 chunks not yet run, because running two forwards of one request at a worker at
 once would route one's reply to the other (gotcha #180); a far node on its

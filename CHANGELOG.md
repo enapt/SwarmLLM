@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.3.214-alpha] — 2026-09-30
+
+**Fixes replies of a model split across computers drifting slightly from the
+model's own words on a graphics card, in v0.3.213.**
+
+In v0.3.213 each generated token runs on the graphics card as recorded CUDA
+graphs. When a split model checks several guessed words at once — the default
+way split replies are generated — it first brings a half-precision copy of its
+attention memory up to date. That update was recorded inside the graph and was
+also what made the recording fail; the step was then re-run the ordinary way,
+but the copy was left believing it held positions it never received, and later
+steps read them. Replies stayed fluent, but at some points picked a slightly
+less likely word than the model itself would: in a test, one sentence came out
+differently in 6 of 11 replies, and never with graphs switched off. The copy is
+now brought up to date before the step is recorded, so a failed recording
+leaves nothing behind; after the fix every reply matched and no recording
+failed, which also keeps those checks on the faster recorded path.
+
+Who was affected: models split across computers where a computer holding part
+of the model checks guesses on a graphics card and runs v0.3.213. A model
+running whole on one computer was not affected in testing.
+
 ## [0.3.213-alpha] — 2026-09-30
 
 **Models on a graphics card generate 9-75% faster — a 7B now matches llama.cpp on

@@ -24,6 +24,12 @@ Priority is user-visible impact x how many users x whether it fails silently.
 and 69's residual SHIPPED in v0.3.180-alpha.** The rows sit in the P-sections
 and in the two "2026-09-14" headings below; read the row, not just the number.
 
+### 2026-09-30 — checking a split's guesses as a continuous stream
+
+| # | Item | Status |
+|---|---|---|
+| 149 | **Split speculation's continuous stream is built and OPT-IN** (`pipeline::dsd_stream`, coordinator `SWARMLLM_SPEC_STREAM=1`; the serving half — `daemon::state::forward_streams`, `features::STREAMED_VERIFY` — is on every node since v0.3.213) | **Open: the default flip.** Measured +15-21% only with the far half on the PROCESSOR of the same machine (a real second resource); on one shared card it reads ~15% slower by design (gotcha #759), and between two cards over a real link it is still a projection (~+26% at 24-50 ms). **Precondition for the flip**: the TH↔BE A/B with both ends on v0.3.214+ (the .213 build had #761, which drifted streamed replies; fixed `4fac99bf`), `SWARMLLM_SPEC_STREAM=1` on OUR coordinator only, rounds vs stream in one binary, replies scored with `examples/score_against_reference.py`. **Then, in order of expected value**: (a) the window sized from the measured round trip (W = ceil(L_c / production), today a constant 3 — deep enough for ~70 ms, too shallow for TH↔BE's ~280); (b) cancelling a stale chunk the far node has already STARTED (today only unstarted ones are skipped — running two forwards of one request at a worker at once would cross their replies, #180, so it needs the worker's cancel path, not a second forward); (c) the drafter's near layers as the verify input (4e's "one pass does both jobs") where the head segment is the coordinator's own. Design, measurements and the model: `docs/plans/split_speculation.md` § 4b. |
+
 ### 2026-09-29 — a split on a fast link: from 54% to ~80% of local
 
 | # | Item | Status |

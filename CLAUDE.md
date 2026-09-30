@@ -154,16 +154,17 @@ UNDETERMINED and never a fix — use it BEFORE blaming a change, especially your
 
 ## Status
 
-**v0.3.212-alpha is the live release (published 2026-09-28 04:55 UTC), signed and on both nodes**
-— split speculation with an in-engine small drafter (`pipeline::engine_drafter`, 1.7-2.4× TH↔BE), shipped OFF in
-.212; **ON by default on main since 2026-09-29** (#140 was the rig; γ = 0 where guessing does not pay).
+**v0.3.213-alpha is the live release (published 2026-09-30 13:10 UTC), signed and on both nodes** — card decode as
+CUDA graphs (a 7B at llama.cpp parity), card prompts ~1.5×, a split's per-token overhead cut (~80% of local), split
+speculation with an in-engine small drafter ON by default (`pipeline::engine_drafter`; γ = 0 where guessing does not pay).
+⚠ **.213 has #761** — a refused CUDA-graph capture left the f16 KV mirror claiming positions it never got, so split
+checks could drift to a 2nd-choice word; fixed `4fac99bf` → **v0.3.214** (gate: `memory/release_gate.md`).
 The drafter is a pool GUEST (#747); attempt-scoped state is never keyed by the request id, which retries reuse (#749).
-Its checks can STREAM (`pipeline::dsd_stream`, 4b, opt-in `SWARMLLM_SPEC_STREAM=1` until measured TH↔BE): +15-21% with the far half on other hardware.
-⚠ **A rig sharing ONE card reads the stream ~15% SLOWER** — it measures the stream's cost, not its gain (`docs/DIAGNOSTICS.md`).
-**Why split decode is slow and what beats it → `docs/plans/faster_than_local.md`; the speculation plan, its
-measurements and the NEXT batch (continuous stream) → `docs/plans/split_speculation.md`.** ⛔ **No design may need a
-user to hold the whole model, not even a low-bit copy** (user, 2026-09-28) → parallelize the REPLY, not the token:
-`docs/plans/wan_parallel.md`. `main` is AHEAD of the release: two field-report fixes + `card_pace` (#146), not released.
+Split checks can STREAM (`pipeline::dsd_stream`, opt-in `SWARMLLM_SPEC_STREAM=1`; the flip waits on a TH↔BE A/B,
+FUTURE_WORK #149): +15-21% with the far half on other hardware. ⚠ **A rig sharing ONE card reads it ~15% SLOWER** (#759).
+**Why split decode is slow and what beats it → `docs/plans/faster_than_local.md`; the speculation plan and its
+measurements → `docs/plans/split_speculation.md`.** ⛔ **No design may need a user to hold the whole model, not even a
+low-bit copy** (user, 2026-09-28) → parallelize the REPLY, not the token: `docs/plans/wan_parallel.md`.
 Qwen 3.5 is on local branch `qwen35-support` (#117); Gemma 4 scoped, not built (#115).
 ⚠ **A family in `supported_list` is a claim: check it against a REAL file's header** (#715). **Next** → `memory/next_up.md`.
 
@@ -175,24 +176,18 @@ for THAT run, live node stopped (`memory/feedback_research_before_stress_tests.m
 ⚠ **On this WSL2 host, fresh card allocations slow ~1000× over two days of Windows uptime** (#146 deep dive):
 a card figure that drifts across releases may be UPTIME, not code — note each run's uptime.
 
-⚠ **Behaviour gate = `reply_ab.sh` + `split_rig.sh`** (incl. `failover`), not
-conformance alone — `family_conformance.sh` pins `gpu_layers = 0` and never
-splits, so it could not see #93. Recipe: `memory/release_gate.md`. ⛔ A rig
-shares the machine with NOTHING — every node's loopback probe finds it (#708).
-Judge a split reply against llama.cpp (`examples/score_against_reference.py`),
-never by byte-equality.
+⚠ **Behaviour gate = `reply_ab.sh` + `split_rig.sh`** (incl. `failover`), not conformance alone —
+`family_conformance.sh` pins `gpu_layers = 0` and never splits (#93). ⛔ **v0.3.199 shipped BROKEN**: a BUILD gate
+is not a BEHAVIOUR gate (#683) — the gate verifies the downloaded ARTIFACT before signing. Recipe:
+`memory/release_gate.md`. ⛔ A rig shares the machine with NOTHING (#708). Judge a split reply against llama.cpp
+(`examples/score_against_reference.py`), never by byte-equality — and a gap that RECURS at the same sentence is a
+bug, not a near-tie (#761: compare arms at an identical prefix, graphs on and off).
 
-⛔ **v0.3.199-alpha SHIPPED BROKEN and was WITHDRAWN** — cleared under
-`--features candle-cuda` (no flash-attn, no llama backend) while the release is
-`--features cuda`. **A BUILD gate is not a BEHAVIOUR gate** (#683); the gate
-verifies the downloaded ARTIFACT before signing.
-
-**Local GPU decode is bound by SUBMISSION COUNT** — layer count predicts cost.
-Our kernels live in `kernels/*.cu` (PTX via `build.rs`), each bit-identical to
-the candle ops it replaces. ⚠ **ONE CUDA stream per device** — its OWN stream
-since 2026-09-30 (`SWARMLLM_CUDA_OWN_STREAM=0` = legacy), and decode steps go
-to the card as CUDA graphs recorded two layers at a time (`SWARMLLM_CUDA_GRAPH=0`
-= off): 7B at llama.cpp parity. Plan: `docs/plans/local_decode_submissions.md`.
+**Local GPU decode is bound by SUBMISSION COUNT** — layer count predicts cost. Our kernels are `kernels/*.cu`
+(PTX via `build.rs`). ⚠ **ONE CUDA stream per device** — its OWN stream (`SWARMLLM_CUDA_OWN_STREAM=0` = legacy);
+decode steps AND speculative checks go to the card as CUDA graphs two layers at a time (`SWARMLLM_CUDA_GRAPH=0` =
+off). ⚠ Anything a capture changes on the HOST must be undone if the capture is refused (#761).
+Plan: `docs/plans/local_decode_submissions.md`.
 
 ⚠ **The privacy mode is STRUCTURAL** — in the UI "Start and finish on this
 computer", never "end-to-end", "encrypted pipeline" or "private". **"At this
