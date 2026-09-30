@@ -94,6 +94,17 @@ impl SplitModel {
                     prefill_chunk_tokens,
                 )?
             };
+        if noise.is_none() && self.device.is_cuda() {
+            return self.argmax_guesses_on_card(
+                kv,
+                request_id,
+                first,
+                logits,
+                gamma,
+                sampling.temperature,
+                stop_below,
+            );
+        }
         let mut history = history.to_vec();
         let mut ctx = crate::inference::sampling::SamplingContext::new(0);
         let mut guesses = Vec::with_capacity(gamma);
@@ -138,6 +149,76 @@ impl SplitModel {
             if j + 1 < gamma {
                 let next = self.token_tensor(t)?;
                 logits = self.forward(&next, first + j, kv, request_id)?;
+            }
+        }
+        Ok(guesses)
+    }
+
+    /// Argmax guesses that never leave the card between steps: each step's
+    /// token is chosen on the card and is the next step's input there, so the
+    /// host records step j+1 while the card still runs step j, and every guess
+    /// comes back in ONE transfer at the end.
+    ///
+    /// The host loop read every row back to choose its token — ~600 KB and a
+    /// wait for the card per guess — so recording (~3 ms on a 0.5B) and the
+    /// card's own work (~2.7 ms) ran one after the other: 5.7 ms a guess on the
+    /// split rig (2026-09-30). With `stop_below`, each guess's probability is
+    /// computed on the card too and the guesses are cut after the first unsure
+    /// one here — the set the host loop keeps; the steps after it are drafted
+    /// and dropped, and the next call cuts the drafter's cache back as always.
+    /// Ties between equal maxima may break differently from the host's
+    /// first-index rule; a guess is only a guess, and the check decides.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn argmax_guesses_on_card(
+        &mut self,
+        kv: &KvCacheStore,
+        request_id: &str,
+        first: usize,
+        mut logits: candle_core::Tensor,
+        gamma: usize,
+        temperature: f32,
+        stop_below: Option<f32>,
+    ) -> Result<Vec<u32>, SwarmError> {
+        use candle_core::Tensor;
+        let t = if temperature > 0.0 {
+            f64::from(temperature)
+        } else {
+            1.0
+        };
+        let mut ids: Vec<Tensor> = Vec::with_capacity(gamma);
+        let mut mass: Vec<Tensor> = Vec::with_capacity(gamma);
+        for j in 0..gamma {
+            let row = logits
+                .flatten_all()
+                .and_then(|r| r.to_dtype(candle_core::DType::F32))
+                .map_err(SwarmError::internal)?;
+            let best = row.argmax(0).map_err(SwarmError::internal)?;
+            if stop_below.is_some() {
+                // Σ exp((x - max) / T): the guess's probability is its inverse.
+                let z = row
+                    .max_keepdim(0)
+                    .and_then(|m| row.broadcast_sub(&m))
+                    .and_then(|d| d / t)
+                    .and_then(|d| d.exp())
+                    .and_then(|e| e.sum(0))
+                    .map_err(SwarmError::internal)?;
+                mass.push(z);
+            }
+            ids.push(best.clone());
+            if j + 1 < gamma {
+                let next = best.reshape((1, 1)).map_err(SwarmError::internal)?;
+                logits = self.forward(&next, first + j, kv, request_id)?;
+            }
+        }
+        let mut guesses: Vec<u32> = Tensor::stack(&ids, 0)
+            .and_then(|v| v.to_vec1())
+            .map_err(SwarmError::internal)?;
+        if let Some(floor) = stop_below {
+            let z: Vec<f32> = Tensor::stack(&mass, 0)
+                .and_then(|v| v.to_vec1())
+                .map_err(SwarmError::internal)?;
+            if let Some(k) = z.iter().position(|&z| 1.0 / z < floor) {
+                guesses.truncate(k + 1);
             }
         }
         Ok(guesses)

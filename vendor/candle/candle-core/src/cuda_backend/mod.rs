@@ -342,7 +342,12 @@ impl Map1Any for FastReduce<'_> {
             block_dim: (block_dim as u32, 1, 1),
             shared_mem_bytes: 0,
         };
-        let ds = dev.clone_htod(&[dims.as_slice(), stride.as_slice()].concat())?;
+        // SwarmLLM patch: the device's cached copy (`CudaDevice::layout_params`).
+        // A pageable host→device copy waits for the stream to drain first, so
+        // uploading here on every call made a reduction between two graph
+        // launches (a drafter's argmax) serialise the host behind the card.
+        let ds = dev.layout_params(&[dims.as_slice(), stride.as_slice()].concat())?;
+        let ds = ds.as_ref();
         let src = &src.slice(layout.start_offset()..);
         let (name, check_empty, return_index) = match self.1 {
             ReduceOp::Sum => ("fast_sum", false, false),
@@ -362,7 +367,7 @@ impl Map1Any for FastReduce<'_> {
             barg!(builder, src_el);
             barg!(builder, el_to_sum_per_block);
             barg!(builder, src_dims.len());
-            builder.arg(&ds);
+            builder.arg(ds);
             builder.arg(src);
             builder.arg(&out);
             // SAFETY: ffi.
@@ -375,7 +380,7 @@ impl Map1Any for FastReduce<'_> {
             barg!(builder, src_el);
             barg!(builder, el_to_sum_per_block);
             barg!(builder, src_dims.len());
-            builder.arg(&ds);
+            builder.arg(ds);
             builder.arg(src);
             builder.arg(&out);
             // SAFETY: ffi.

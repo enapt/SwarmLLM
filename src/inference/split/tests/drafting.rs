@@ -244,3 +244,34 @@ fn a_first_read_starts_from_nothing_whatever_an_earlier_call_left() {
     assert_eq!(again, fresh(&mut model, &seq, 3));
     assert_eq!(cache_len(&model, &kv, "s"), seq.len() + 2);
 }
+
+/// The card's loop — each token chosen where the logits are, the next step fed
+/// from there, every guess read back at once — guesses what the host loop
+/// guesses, and cuts after the same unsure guess. It is ordinary tensor code,
+/// so it runs here on the processor as it would on a card.
+#[test]
+fn guesses_chosen_where_the_logits_are_match_the_host_loop() {
+    let mut model = whole_model();
+    let seq: Vec<u32> = vec![3, 17, 99, 250, 7, 41, 12, 5];
+    for floor in [
+        None,
+        Some(1.01f32),
+        Some(0.0),
+        Some(0.3),
+        Some(0.6),
+        Some(0.9),
+    ] {
+        let kv = KvCacheStore::new(std::time::Duration::from_secs(60));
+        let host = model
+            .draft_after(&kv, "h", 0, &seq, 5, &greedy(), &[], None, 0, floor)
+            .unwrap();
+        let kv2 = KvCacheStore::new(std::time::Duration::from_secs(60));
+        let logits = model
+            .forward(&model.tensor_from_ids(&seq).unwrap(), 0, &kv2, "c")
+            .unwrap();
+        let card = model
+            .argmax_guesses_on_card(&kv2, "c", seq.len(), logits, 5, 0.0, floor)
+            .unwrap();
+        assert_eq!(card, host, "floor {floor:?}");
+    }
+}

@@ -2236,3 +2236,15 @@ What each step found, from the debug timeline of one round:
 
 Correctness: replies of speculation with captured checks score 118/120 rank-1 against llama.cpp
 (worst gap 0.035); single-node replies byte-identical to the previous build.
+
+**The drafter's guesses stay on the card between steps** (`SplitModel::argmax_guesses_on_card`,
+2026-09-30): an argmax guess (no shared noise) is chosen on the card and fed to the next step
+there, every guess and its probability come back in one transfer, and the confidence floor cuts
+after the first unsure one exactly as the host loop does (`guesses_chosen_where_the_logits_are_match_the_host_loop`).
+The host loop read each 600 KB row back to choose, so recording (~3 ms on a 0.5B) and the card's
+work (~2.7 ms) ran in series — steps were ~6 ms apart; now ~3 ms (recording-bound). ⚠ candle's
+reductions uploaded their layout every call, and a PAGEABLE upload waits for the stream to drain
+first (CUDA's documented pageable-copy behaviour) — the argmax between two steps would have
+re-serialised the loop; they read `layout_params` now. A round at a 24 ms emulated round trip
+moved only ~10%: its budget is drafting ~12 ms, A's check 11.5, B's check + walk 15.3, two hops
+of RTT/2 + ~1.5 ms — the checks and the round trip, not the drafter, are now the long poles.
