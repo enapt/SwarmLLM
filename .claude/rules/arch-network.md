@@ -298,7 +298,7 @@ draw different noise for the same token and agreement collapses silently
 
 A request's forwards to one segment share its id, so a result matched by id alone
 cannot tell step N from N+1 — a late or resent copy would answer the NEXT step,
-silently. `LayerResult::answers_step` (the `0x07` trailer, always LAST) names the
+silently. `LayerResult::answers_step` (the `0x07` trailer, LAST but for a streamed answer's `0x08`) names the
 forward — position AND layer range, because one node can serve two segments at
 one position; `PendingLayerResult::expects_step` (`ExpectedStep`) refuses any
 other. **Every registration sets it from the forward it actually sends** (every
@@ -308,6 +308,21 @@ resend a result on `OutboundFailure` (`resend_lost_result`, gated on the
 coordinator's `features::RESULT_STEP`, once). Test with `SWARMLLM_FAULT_RESULT=lose|duplicate`.
 
 → `docs/invariants/network.md` § "A result names the step it answers"
+
+## A stream of verifies runs in its order, and its answers are found by number (2026-09-30)
+
+A streamed check keeps several verify forwards of ONE request in flight
+(`LayerForward::stream_seq`, `0x0C`, gated on `features::STREAMED_VERIFY`).
+**`daemon::state::forward_streams` runs them in number order** — forward N waits
+until N-1 has ended here, since the worker writes at its cache's length and
+nothing else orders them; the turn is given back by DROPPING it, on every exit.
+**`pending_layer_results` is keyed by `WaiterKey`** (request + number) and an
+answer echoes its number (`ResultStep::stream_seq`, `0x08`): position alone
+cannot name a chunk once a restarted stream reuses one. A failure this node
+manufactures (no step) ends the stream's OLDEST wait on that node only (#229).
+The cancel registry holds every forward of a request.
+
+→ `docs/invariants/network.md` § "A stream of verifies runs in its order"
 
 ## Every reply a serving node sends goes to whoever is WAITING — failures included
 

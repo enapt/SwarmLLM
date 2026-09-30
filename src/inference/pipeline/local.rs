@@ -353,6 +353,7 @@ impl PipelineExecutor {
             spec_logits_requested: false,
             spec_walk_at_tail: false,
             coupling_seed: None,
+            stream_seq: None,
             truncate_kv_to: None,
             chunk_meta: None,
             // The segment that samples needs the caller's parameters. Without
@@ -826,9 +827,12 @@ async fn resend_after_link_repair(
     // The refusal consumed the caller's waiter. Pinned to the same node, as
     // the caller's was: this forward is for it and for nobody else.
     let forward = rebuild();
+    // The same wait the refused forward had — for a streamed verify, its
+    // number too, so the resend's answer finds this waiter and no other.
+    let key = crate::daemon::state::WaiterKey::of_forward(&forward);
     let (tx, rx) = tokio::sync::oneshot::channel();
     state.pending_layer_results.insert(
-        request_id,
+        key,
         crate::daemon::state::PendingLayerResult {
             tx,
             awaiting: Some(node_id.clone()),
@@ -847,7 +851,7 @@ async fn resend_after_link_repair(
         .await
         .is_err()
     {
-        state.pending_layer_results.remove(&request_id);
+        state.pending_layer_results.remove(&key);
         return None;
     }
     tracing::info!(
@@ -1709,6 +1713,7 @@ mod segment_budget_tests {
             spec_logits_requested: false,
             spec_walk_at_tail: false,
             coupling_seed: None,
+            stream_seq: None,
             truncate_kv_to: None,
             chunk_meta: None,
             sampling: None,
@@ -1862,7 +1867,9 @@ mod segment_budget_tests {
         assert_eq!(got.refusal, Some(ForwardRefusal::Undecryptable));
         assert!(net_rx.try_recv().is_err());
         assert!(
-            !state.pending_layer_results.contains_key(&request_id),
+            !state
+                .pending_layer_results
+                .contains_key(&crate::daemon::state::WaiterKey::request(request_id)),
             "no waiter is left behind for a forward that was never sent"
         );
     }

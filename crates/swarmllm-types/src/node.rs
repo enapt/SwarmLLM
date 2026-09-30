@@ -193,6 +193,19 @@ pub mod features {
     /// trailers it parsed, so an unknown one fails every encrypted forward.
     pub const COUPLED_SAMPLING: u64 = 1 << 14;
 
+    /// Serves a STREAM of verify forwards for one request: several in flight
+    /// at once, each numbered (`LayerForward::stream_seq`, the `0x0C`
+    /// trailer), run here strictly in that order whatever order they arrive
+    /// in, and each answered with its number echoed (`ResultStep::stream_seq`,
+    /// the `0x08` result trailer) so the coordinator can tell the answer to
+    /// chunk N from the answer to chunk N+1 at the same position — which a
+    /// restarted stream reuses (`docs/plans/split_speculation.md` § 4b).
+    ///
+    /// Gated at the sender like every trailer: an older peer rebuilds the
+    /// seal's AAD from the trailers it parsed, and would also run two forwards
+    /// of one request concurrently, writing each at its cache's length.
+    pub const STREAMED_VERIFY: u64 = 1 << 15;
+
     /// The full feature set THIS build implements. Advertised by every node.
     pub const ALL: u64 = RELAY
         | TENSOR_RELAY
@@ -208,7 +221,8 @@ pub mod features {
         | FORWARD_SAMPLING
         | RESULT_STEP
         | SPEC_WALK_AT_TAIL
-        | COUPLED_SAMPLING;
+        | COUPLED_SAMPLING
+        | STREAMED_VERIFY;
 
     /// Does `advertised` include every bit in `needed`?
     pub fn supports(advertised: u64, needed: u64) -> bool {

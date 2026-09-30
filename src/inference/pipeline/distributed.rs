@@ -1278,6 +1278,7 @@ impl PipelineExecutor {
                     spec_logits_requested: false,
                     spec_walk_at_tail: false,
                     coupling_seed: None,
+                    stream_seq: None,
                     // Rewind a segment a failed chained run already ran at this
                     // position (see `rewind`); `None` for every ordinary forward.
                     truncate_kv_to: rewind
@@ -1320,7 +1321,7 @@ impl PipelineExecutor {
                 }
                 let (tx, rx) = tokio::sync::oneshot::channel();
                 self.shared_state.pending_layer_results.insert(
-                    request_id,
+                    crate::daemon::state::WaiterKey::request(request_id),
                     crate::daemon::state::PendingLayerResult {
                         tx,
                         // Pin to whichever node will actually answer. Without a
@@ -1360,7 +1361,7 @@ impl PipelineExecutor {
                 // while a guard would hold a `&` borrow on
                 // `self.shared_state.pending_layer_results` for the full
                 // iteration. Every error/failover branch in the loop body has
-                // an explicit `pending_layer_results.remove(&request_id)`
+                // an explicit `pending_layer_results.remove(..)`
                 // immediately above the `return Err`/failover call.
 
                 // Per-token call in the decode loop. tracing::info! eagerly
@@ -1483,7 +1484,9 @@ impl PipelineExecutor {
                         .await
                         .is_err()
                 {
-                    self.shared_state.pending_layer_results.remove(&request_id);
+                    self.shared_state
+                        .pending_layer_results
+                        .remove(&crate::daemon::state::WaiterKey::request(request_id));
                     return Err(SwarmError::Network(
                         "Failed to send LayerForward".to_string(),
                     ));
@@ -1568,7 +1571,9 @@ impl PipelineExecutor {
                         },
                     };
                     if let Some(reason) = failed {
-                        self.shared_state.pending_layer_results.remove(&request_id);
+                        self.shared_state
+                            .pending_layer_results
+                            .remove(&crate::daemon::state::WaiterKey::request(request_id));
                         if !self.chaining_disabled {
                             self.chaining_disabled = true;
                             rewind = Some((idx, idx + chain.len(), index_pos as u32));
@@ -1614,7 +1619,9 @@ impl PipelineExecutor {
                                     error = %err_msg,
                                     "Remote segment refused the request itself — not failing over"
                                 );
-                                self.shared_state.pending_layer_results.remove(&request_id);
+                                self.shared_state
+                                    .pending_layer_results
+                                    .remove(&crate::daemon::state::WaiterKey::request(request_id));
                                 return Err(err);
                             }
                             // A prompt longer than THIS peer serves: its own
@@ -1660,7 +1667,9 @@ impl PipelineExecutor {
                                     .blacklist_holder_for_request(request_id, &segment.node_id);
                             }
                             // Remove stale pending entry before failover inserts a new one
-                            self.shared_state.pending_layer_results.remove(&request_id);
+                            self.shared_state
+                                .pending_layer_results
+                                .remove(&crate::daemon::state::WaiterKey::request(request_id));
                             let failover_result = self
                                 .failover_segment(
                                     idx,
@@ -1786,7 +1795,9 @@ impl PipelineExecutor {
                                     got = result.activations.len(),
                                     "Remote segment returned wrong activation shape — failing over"
                                 );
-                                self.shared_state.pending_layer_results.remove(&request_id);
+                                self.shared_state
+                                    .pending_layer_results
+                                    .remove(&crate::daemon::state::WaiterKey::request(request_id));
                                 let failover_result = self
                                     .failover_segment(
                                         idx,
@@ -1822,7 +1833,9 @@ impl PipelineExecutor {
                     }
                     Err(e) => {
                         // Timeout or channel drop — remove stale entry and failover
-                        self.shared_state.pending_layer_results.remove(&request_id);
+                        self.shared_state
+                            .pending_layer_results
+                            .remove(&crate::daemon::state::WaiterKey::request(request_id));
                         // Not a failure of the peer: the client left. Tell the
                         // peer to stop and end the request; failing over would
                         // send the same prompt to another machine for nobody.
@@ -2467,7 +2480,7 @@ impl PipelineExecutor {
             // rejecting all new requests with ServiceUnavailable.
             let (tx, rx) = tokio::sync::oneshot::channel();
             self.shared_state.pending_layer_results.insert(
-                request_id,
+                crate::daemon::state::WaiterKey::request(request_id),
                 crate::daemon::state::PendingLayerResult {
                     tx,
                     // Pin to the standby. The forward we just gave up on is
@@ -2488,7 +2501,7 @@ impl PipelineExecutor {
             );
             let mut pending_guard = super::PendingLayerResultGuard::new(
                 &self.shared_state.pending_layer_results,
-                request_id,
+                crate::daemon::state::WaiterKey::request(request_id),
             );
 
             // Send to backup node via directed tensor protocol. Rebuildable
@@ -2540,6 +2553,7 @@ impl PipelineExecutor {
                 spec_logits_requested: false,
                 spec_walk_at_tail: false,
                 coupling_seed: None,
+                stream_seq: None,
                 truncate_kv_to: None,
                 chunk_meta: None,
                 // Same rule as the planned send, asked of the STAND-IN — a

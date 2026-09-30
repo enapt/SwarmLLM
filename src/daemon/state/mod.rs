@@ -19,6 +19,7 @@ mod capacity;
 pub(crate) mod capacity_plan;
 mod credits;
 mod events;
+pub(crate) mod forward_streams;
 mod hf;
 mod metrics;
 mod models;
@@ -231,6 +232,67 @@ pub struct PendingLayerResult {
     /// none (an older peer, or one we built ourselves) is matched by request
     /// and node as before. `docs/FUTURE_WORK.md` #113.
     pub expects_step: Option<ExpectedStep>,
+}
+
+/// Which forward a `pending_layer_results` waiter is for: its request, and —
+/// for a streamed verify, several of which are in flight at once — the number
+/// it carried (`LayerForward::stream_seq`). Every other wait is
+/// [`WaiterKey::request`], one per request as before.
+///
+/// A result finds its waiter by the number it echoes
+/// (`ResultStep::stream_seq`); position and layer range alone cannot tell a
+/// streamed chunk from a discarded one sent at the same position, which a
+/// stream restarted after a refused guess does (`docs/plans/split_speculation.md`
+/// § 4b).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct WaiterKey {
+    pub request_id: uuid::Uuid,
+    pub stream_seq: Option<u32>,
+}
+
+impl WaiterKey {
+    /// The one wait of an unstreamed forward.
+    pub fn request(request_id: uuid::Uuid) -> Self {
+        Self {
+            request_id,
+            stream_seq: None,
+        }
+    }
+
+    /// The wait on streamed verify `seq` of `request_id`.
+    pub fn streamed(request_id: uuid::Uuid, seq: u32) -> Self {
+        Self {
+            request_id,
+            stream_seq: Some(seq),
+        }
+    }
+
+    /// The wait `forward` is answered to.
+    pub fn of_forward(forward: &crate::types::LayerForward) -> Self {
+        Self {
+            request_id: forward.request_id,
+            stream_seq: forward.stream_seq,
+        }
+    }
+
+    /// The wait `result` answers.
+    pub fn of_result(result: &crate::types::LayerResult) -> Self {
+        Self {
+            request_id: result.request_id,
+            stream_seq: result.answers_step.and_then(|s| s.stream_seq),
+        }
+    }
+}
+
+/// One inbound segment forward a `CancelInference` or its coordinator's
+/// disconnect can abandon — see `SharedState::inbound_forward_aborts`.
+pub struct InboundForwardAbort {
+    pub handle: tokio::task::AbortHandle,
+    /// The coordinator's peer bytes, which the disconnect sweep matches on.
+    pub coordinator_bytes: Vec<u8>,
+    /// The flag the forward's task sets as it ends; names THIS forward among
+    /// the request's others.
+    finished: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// What a waiter will take an answer for: ONE position, and the layer ranges
@@ -470,7 +532,16 @@ pub struct SharedState {
     /// therefore run its removal before the insert has happened, leaving an
     /// entry for a task that is already finished and that nothing will ever
     /// remove. The pair above closes that window.
-    pub inbound_forward_aborts: DashMap<uuid::Uuid, (tokio::task::AbortHandle, Vec<u8>)>,
+    ///
+    /// **Several per request**: a streamed verify (`LayerForward::stream_seq`)
+    /// has more than one forward of the same request here at once, and one
+    /// entry per request let the second overwrite the first and the first,
+    /// finishing, withdraw the second — which no cancel could then reach.
+    pub inbound_forward_aborts: DashMap<uuid::Uuid, Vec<InboundForwardAbort>>,
+    /// Streamed verifies this node serves, run in each stream's order — see
+    /// `forward_streams`. Taken by `handle_layer_forward` for every forward
+    /// carrying `LayerForward::stream_seq`; swept on the health tick.
+    pub(crate) forward_streams: forward_streams::ForwardStreams,
     /// Per-cancel-token cancel signals. The HTTP entry for `chat_completions`
     /// looks up an `Arc<AtomicBool>` by token (passed via the
     /// `x-swarmllm-cancel-token` header) and attaches it to the
@@ -499,10 +570,11 @@ pub struct SharedState {
     pub(crate) retained_activations: retained_activations::RetainedActivations,
     pub(crate) retained_replies: retained_replies::RetainedReplies,
     /// Coordinator-side waiters for remote segment results, keyed by
-    /// `request_id`. The value records WHICH node the waiter expects to hear
+    /// [`WaiterKey`] — the request, and for a streamed verify the number it
+    /// carried. The value records WHICH node the waiter expects to hear
     /// from — see `PendingLayerResult::awaiting`. Resolve through
     /// `resolve_pending_layer_result`, never by a bare `remove` + `send`.
-    pub pending_layer_results: DashMap<uuid::Uuid, PendingLayerResult>,
+    pub pending_layer_results: DashMap<WaiterKey, PendingLayerResult>,
     /// R139 Tier 4K — receiver-side assembly state for STREAM-chunked
     /// activation forwards. Keyed by `request_id`. Each chunk arriving on
     /// the wire (LayerForward with `chunk_meta = Some(_)`) gets inserted at
@@ -1056,6 +1128,7 @@ impl SharedState {
             active_pipelines: DashMap::new(),
             inbound_generate_aborts: DashMap::new(),
             inbound_forward_aborts: DashMap::new(),
+            forward_streams: forward_streams::ForwardStreams::default(),
             cancel_signals: DashMap::new(),
             metrics: MetricsProviders {
                 network_coord: std::sync::RwLock::new(swarmllm_types::netcoord::NetworkCoord::new()),
@@ -1622,6 +1695,17 @@ impl SharedState {
     /// The check and the take are one atomic `remove_if`, so a result arriving
     /// concurrently with a failover cannot observe a half-swapped entry.
     ///
+    /// A result finds its waiter by [`WaiterKey::of_result`]: a streamed
+    /// verify's answer by the number it echoes, anything else by its request.
+    /// One exception: a failure THIS node manufactured (`locally_constructed`,
+    /// no step) — a send that failed, a receipt that never came — is about
+    /// the LINK to the node its forward went to, not about one forward. With
+    /// no unstreamed wait on the request, the stream to that node cannot go
+    /// on either, so it ends the stream's oldest wait, the one its coordinator
+    /// is reading, instead of leaving every chunk to sit out its deadline. The
+    /// node pin still applies: a failure about node X never ends a wait on Y
+    /// (gotcha #229).
+    ///
     /// Returns `true` when the waiter was resolved.
     pub fn resolve_pending_layer_result(
         &self,
@@ -1630,9 +1714,18 @@ impl SharedState {
     ) -> bool {
         let request_id = result.request_id;
         let answers = result.answers_step;
+        let mut key = WaiterKey::of_result(&result);
+        if answers.is_none()
+            && result.locally_constructed
+            && !self.pending_layer_results.contains_key(&key)
+        {
+            if let Some(oldest) = self.oldest_streamed_wait(request_id, sender) {
+                key = oldest;
+            }
+        }
         match self
             .pending_layer_results
-            .remove_if(&request_id, |_, pending| pending.accepts(sender, answers))
+            .remove_if(&key, |_, pending| pending.accepts(sender, answers))
         {
             Some((_, pending)) => {
                 if pending.tx.send(result).is_err() {
@@ -1647,7 +1740,7 @@ impl SharedState {
                 // Either nothing is waiting (timed out), or a
                 // waiter is present but pinned to a different node — the
                 // stale-forward case this pinning exists to reject.
-                if let Some(entry) = self.pending_layer_results.get(&request_id) {
+                if let Some(entry) = self.pending_layer_results.get(&key) {
                     if entry.accepts(sender, None) {
                         // The right node, the wrong step: a resent or late copy
                         // of a step this request has moved past (#113).
@@ -1673,6 +1766,24 @@ impl SharedState {
         }
     }
 
+    /// The lowest-numbered streamed wait on `request_id` that a result from
+    /// `sender` could resolve — see [`Self::resolve_pending_layer_result`].
+    fn oldest_streamed_wait(
+        &self,
+        request_id: uuid::Uuid,
+        sender: Option<&crate::types::NodeId>,
+    ) -> Option<WaiterKey> {
+        self.pending_layer_results
+            .iter()
+            .filter(|e| {
+                e.key().request_id == request_id
+                    && e.key().stream_seq.is_some()
+                    && e.value().accepts(sender, None)
+            })
+            .map(|e| *e.key())
+            .min_by_key(|k| k.stream_seq)
+    }
+
     /// Fail every waiter pinned to `node` with a synthetic error result, and
     /// return the request ids that were resolved.
     ///
@@ -1695,22 +1806,38 @@ impl SharedState {
         node: &crate::types::NodeId,
         reason: &str,
     ) -> Vec<uuid::Uuid> {
-        let ids: Vec<uuid::Uuid> = self
+        let waiting: Vec<(WaiterKey, Option<crate::types::ResultStep>)> = self
             .pending_layer_results
             .iter()
             // A synthetic failure names no step: it is about the NODE, which
             // is gone, whatever step the waiter was on.
             .filter(|e| e.value().awaiting.is_some() && e.value().accepts(Some(node), None))
-            .map(|e| *e.key())
-            .collect();
-        ids.into_iter()
-            .filter(|id| {
-                self.resolve_pending_layer_result(
-                    Some(node),
-                    crate::types::LayerResult::error(*id, reason),
-                )
+            .map(|e| {
+                // A streamed waiter is found by its number, so the failure
+                // names the step that waiter is on.
+                let key = *e.key();
+                let step = key.stream_seq.and_then(|seq| {
+                    let expected = e.value().expects_step.as_ref()?;
+                    Some(crate::types::ResultStep {
+                        index_pos: expected.index_pos,
+                        layer_range: *expected.layer_ranges.first()?,
+                        stream_seq: Some(seq),
+                    })
+                });
+                (key, step)
             })
-            .collect()
+            .collect();
+        let mut failed: Vec<uuid::Uuid> = Vec::new();
+        for (key, step) in waiting {
+            let mut error = crate::types::LayerResult::error(key.request_id, reason);
+            error.answers_step = step;
+            if self.resolve_pending_layer_result(Some(node), error)
+                && !failed.contains(&key.request_id)
+            {
+                failed.push(key.request_id);
+            }
+        }
+        failed
     }
 
     /// Record that an inbound segment forward is in flight and can be aborted.
@@ -1733,12 +1860,45 @@ impl SharedState {
         request_id: uuid::Uuid,
         handle: tokio::task::AbortHandle,
         coordinator_bytes: Vec<u8>,
-        finished: &std::sync::atomic::AtomicBool,
+        finished: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) {
         self.inbound_forward_aborts
-            .insert(request_id, (handle, coordinator_bytes));
+            .entry(request_id)
+            .or_default()
+            .push(InboundForwardAbort {
+                handle,
+                coordinator_bytes,
+                finished: finished.clone(),
+            });
         if finished.load(std::sync::atomic::Ordering::Acquire) {
-            self.inbound_forward_aborts.remove(&request_id);
+            self.withdraw_inbound_forward_abort(&request_id, finished);
+        }
+    }
+
+    /// Remove THIS forward's entry — the one carrying `finished` — and the
+    /// request's key with it once no forward of it is left.
+    fn withdraw_inbound_forward_abort(
+        &self,
+        request_id: &uuid::Uuid,
+        finished: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        if let Some(mut entries) = self.inbound_forward_aborts.get_mut(request_id) {
+            entries.retain(|e| !std::sync::Arc::ptr_eq(&e.finished, finished));
+        }
+        self.inbound_forward_aborts
+            .remove_if(request_id, |_, entries| entries.is_empty());
+    }
+
+    /// Abandon every forward of `request_id` running here; how many there were.
+    pub fn abort_inbound_forwards(&self, request_id: &uuid::Uuid) -> usize {
+        match self.inbound_forward_aborts.remove(request_id) {
+            Some((_, entries)) => {
+                for e in &entries {
+                    e.handle.abort();
+                }
+                entries.len()
+            }
+            None => 0,
         }
     }
 
@@ -1750,10 +1910,10 @@ impl SharedState {
     pub fn clear_inbound_forward_abort(
         &self,
         request_id: &uuid::Uuid,
-        finished: &std::sync::atomic::AtomicBool,
+        finished: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) {
         finished.store(true, std::sync::atomic::Ordering::Release);
-        self.inbound_forward_aborts.remove(request_id);
+        self.withdraw_inbound_forward_abort(request_id, finished);
     }
 
     pub fn try_assemble_chunked_forward(
@@ -4398,7 +4558,7 @@ mod inbound_forward_abort_tests {
     async fn a_forward_is_cancellable_while_running_and_forgotten_after() {
         let state = test_state();
         let id = uuid::Uuid::new_v4();
-        let finished = AtomicBool::new(false);
+        let finished = std::sync::Arc::new(AtomicBool::new(false));
 
         state.register_inbound_forward_abort(
             id,
@@ -4431,7 +4591,7 @@ mod inbound_forward_abort_tests {
     async fn a_forward_that_finishes_before_it_is_registered_strands_nothing() {
         let state = test_state();
         let id = uuid::Uuid::new_v4();
-        let finished = AtomicBool::new(false);
+        let finished = std::sync::Arc::new(AtomicBool::new(false));
 
         // The task got there first.
         state.clear_inbound_forward_abort(&id, &finished);
@@ -4456,8 +4616,8 @@ mod inbound_forward_abort_tests {
         let state = test_state();
         let running = uuid::Uuid::new_v4();
         let done = uuid::Uuid::new_v4();
-        let running_flag = AtomicBool::new(false);
-        let done_flag = AtomicBool::new(false);
+        let running_flag = std::sync::Arc::new(AtomicBool::new(false));
+        let done_flag = std::sync::Arc::new(AtomicBool::new(false));
 
         state.register_inbound_forward_abort(
             running,
@@ -4481,6 +4641,36 @@ mod inbound_forward_abort_tests {
             !state.inbound_forward_aborts.contains_key(&done),
             "the finished forward must not be left behind"
         );
+    }
+
+    /// Two forwards of ONE request running at once — a streamed verify's
+    /// chunks: the first finishing must not withdraw the second, and a cancel
+    /// must reach both. One entry per request failed both.
+    #[tokio::test]
+    async fn two_forwards_of_one_request_are_each_cancellable() {
+        let state = test_state();
+        let id = uuid::Uuid::new_v4();
+        let first = std::sync::Arc::new(AtomicBool::new(false));
+        let second = std::sync::Arc::new(AtomicBool::new(false));
+        let running = tokio::spawn(std::future::pending::<()>());
+
+        state.register_inbound_forward_abort(id, finished_abort_handle().await, vec![9], &first);
+        state.register_inbound_forward_abort(id, running.abort_handle(), vec![9], &second);
+        state.clear_inbound_forward_abort(&id, &first);
+        assert_eq!(
+            state.inbound_forward_aborts.get(&id).map(|e| e.len()),
+            Some(1),
+            "the finished chunk withdraws only itself"
+        );
+
+        assert_eq!(state.abort_inbound_forwards(&id), 1);
+        assert!(
+            running.await.unwrap_err().is_cancelled(),
+            "the cancel reached the running chunk"
+        );
+        assert!(state.inbound_forward_aborts.is_empty());
+        state.clear_inbound_forward_abort(&id, &second);
+        assert!(state.inbound_forward_aborts.is_empty());
     }
 }
 
@@ -4738,7 +4928,7 @@ mod pending_layer_result_tests {
 
         let (tx1, mut rx_gone) = tokio::sync::oneshot::channel();
         state.pending_layer_results.insert(
-            rid_gone,
+            super::WaiterKey::request(rid_gone),
             PendingLayerResult {
                 tx: tx1,
                 awaiting: Some(gone.clone()),
@@ -4748,7 +4938,7 @@ mod pending_layer_result_tests {
         );
         let (tx2, mut rx_healthy) = tokio::sync::oneshot::channel();
         state.pending_layer_results.insert(
-            rid_healthy,
+            super::WaiterKey::request(rid_healthy),
             PendingLayerResult {
                 tx: tx2,
                 awaiting: Some(healthy.clone()),
@@ -4758,7 +4948,7 @@ mod pending_layer_result_tests {
         );
         let (tx3, mut rx_unpinned) = tokio::sync::oneshot::channel();
         state.pending_layer_results.insert(
-            rid_unpinned,
+            super::WaiterKey::request(rid_unpinned),
             PendingLayerResult {
                 tx: tx3,
                 awaiting: None,
@@ -4787,8 +4977,12 @@ mod pending_layer_result_tests {
             rx_unpinned.try_recv().is_err(),
             "an unpinned waiter survives"
         );
-        assert!(state.pending_layer_results.contains_key(&rid_healthy));
-        assert!(state.pending_layer_results.contains_key(&rid_unpinned));
+        assert!(state
+            .pending_layer_results
+            .contains_key(&super::WaiterKey::request(rid_healthy)));
+        assert!(state
+            .pending_layer_results
+            .contains_key(&super::WaiterKey::request(rid_unpinned)));
     }
 
     /// A chained run cannot complete without every hop, so a waiter whose
@@ -4803,7 +4997,7 @@ mod pending_layer_result_tests {
         let rid = uuid::Uuid::new_v4();
         let (tx, mut rx) = tokio::sync::oneshot::channel();
         state.pending_layer_results.insert(
-            rid,
+            super::WaiterKey::request(rid),
             PendingLayerResult {
                 tx,
                 awaiting: Some(tail.clone()),
@@ -4836,7 +5030,7 @@ mod pending_layer_result_tests {
         // Failover has happened: the live waiter belongs to standby B.
         let (tx, rx) = tokio::sync::oneshot::channel();
         state.pending_layer_results.insert(
-            request_id,
+            super::WaiterKey::request(request_id),
             PendingLayerResult {
                 tx,
                 awaiting: Some(node_b.clone()),
@@ -4855,7 +5049,9 @@ mod pending_layer_result_tests {
             "a reaped forward to A must not resolve a waiter expecting B"
         );
         assert!(
-            state.pending_layer_results.contains_key(&request_id),
+            state
+                .pending_layer_results
+                .contains_key(&super::WaiterKey::request(request_id)),
             "the standby's waiter must survive the stale notification"
         );
 
@@ -4880,7 +5076,7 @@ mod pending_layer_result_tests {
 
         let (tx, rx) = tokio::sync::oneshot::channel();
         state.pending_layer_results.insert(
-            request_id,
+            super::WaiterKey::request(request_id),
             PendingLayerResult {
                 tx,
                 awaiting: Some(node.clone()),
@@ -4894,7 +5090,9 @@ mod pending_layer_result_tests {
             LayerResult::error(request_id, "shard missing"),
         ));
         assert!(rx.await.is_ok());
-        assert!(!state.pending_layer_results.contains_key(&request_id));
+        assert!(!state
+            .pending_layer_results
+            .contains_key(&super::WaiterKey::request(request_id)));
     }
 
     /// An unpinned waiter keeps the old accept-anything behaviour, so paths
@@ -4982,7 +5180,7 @@ mod pending_layer_result_tests {
         // Waiting on node's segment 15..20 at position 41.
         let (tx, mut rx) = tokio::sync::oneshot::channel();
         state.pending_layer_results.insert(
-            rid,
+            super::WaiterKey::request(rid),
             PendingLayerResult {
                 tx,
                 awaiting: Some(node.clone()),
@@ -5009,7 +5207,9 @@ mod pending_layer_result_tests {
         );
         assert!(rx.try_recv().is_err(), "nothing delivered");
         assert!(
-            state.pending_layer_results.contains_key(&rid),
+            state
+                .pending_layer_results
+                .contains_key(&super::WaiterKey::request(rid)),
             "the waiter stays for the real answer"
         );
 
@@ -5031,6 +5231,85 @@ mod pending_layer_result_tests {
         assert_eq!(rx.try_recv().unwrap().activations, vec![41]);
     }
 
+    /// A streamed verify has several waits on one request at once, and a
+    /// restarted stream sends its next chunk at the position a discarded one
+    /// also started at. Each answer reaches the wait its number names — never
+    /// the other one at the same position — and a failure this node made up
+    /// about the link ends the stream's OLDEST wait, and only one on the node
+    /// that failed (gotcha #229).
+    #[test]
+    fn a_streamed_answer_reaches_the_wait_its_number_names() {
+        let state = test_state();
+        let (node, other) = (NodeId([4u8; 32]), NodeId([5u8; 32]));
+        let rid = uuid::Uuid::new_v4();
+        let wait = |seq: u32, pos: u32, on: &NodeId| {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            state.pending_layer_results.insert(
+                super::WaiterKey::streamed(rid, seq),
+                PendingLayerResult {
+                    tx,
+                    awaiting: Some(on.clone()),
+                    chain_members: Vec::new(),
+                    expects_step: Some(super::ExpectedStep::one(pos, (14, 28))),
+                },
+            );
+            rx
+        };
+        let answer = |seq: u32, pos: u32, tag: u8| {
+            let mut r = crate::types::LayerResult::error(rid, "x").answering_step(
+                crate::types::ResultStep {
+                    index_pos: pos,
+                    layer_range: (14, 28),
+                    stream_seq: Some(seq),
+                },
+            );
+            r.finish_reason = None;
+            r.locally_constructed = false;
+            r.token_ids = vec![u32::from(tag)];
+            r
+        };
+        // Chunk 3 was discarded (its waiter dropped); chunk 5 restarted the
+        // stream at the SAME position 90.
+        let mut five = wait(5, 90, &node);
+        let mut six = wait(6, 93, &node);
+        assert!(
+            !state.resolve_pending_layer_result(Some(&node), answer(3, 90, 3)),
+            "the discarded chunk's late answer finds no wait, though its position matches"
+        );
+        assert!(five.try_recv().is_err());
+        assert!(state.resolve_pending_layer_result(Some(&node), answer(6, 93, 6)));
+        assert_eq!(
+            six.try_recv().unwrap().token_ids,
+            vec![6],
+            "out of order is fine"
+        );
+        assert!(state.resolve_pending_layer_result(Some(&node), answer(5, 90, 5)));
+        assert_eq!(five.try_recv().unwrap().token_ids, vec![5]);
+
+        // A send to the node failed: the made-up failure names no step.
+        let mut seven = wait(7, 96, &node);
+        let mut eight = wait(8, 99, &node);
+        let link = || crate::types::LayerResult::error(rid, "Peer not connected");
+        assert!(
+            !state.resolve_pending_layer_result(Some(&other), link()),
+            "a failure about another node ends nothing"
+        );
+        assert!(state.resolve_pending_layer_result(Some(&node), link()));
+        assert!(
+            matches!(
+                seven.try_recv().unwrap().finish_reason,
+                Some(crate::types::NetworkFinishReason::Error(_))
+            ),
+            "the oldest wait — the one the coordinator reads — ends"
+        );
+        assert!(eight.try_recv().is_err(), "one failure ends one wait");
+        // A PEER's answer that names no number never takes a streamed wait.
+        let mut peers = crate::types::LayerResult::error(rid, "x");
+        peers.locally_constructed = false;
+        assert!(!state.resolve_pending_layer_result(Some(&node), peers));
+        assert!(eight.try_recv().is_err());
+    }
+
     /// A chained run is answered by its TAIL, and any hop may report a failure:
     /// the waiter admits each hop's range at the run's position, and only those.
     #[test]
@@ -5042,6 +5321,7 @@ mod pending_layer_result_tests {
         let step = |pos, range| crate::types::ResultStep {
             index_pos: pos,
             layer_range: range,
+            stream_seq: None,
         };
         assert!(expected.admits(&step(7, (20, 28))), "the tail's answer");
         assert!(

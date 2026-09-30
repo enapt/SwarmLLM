@@ -914,6 +914,7 @@ mod tests {
             spec_logits_requested: false,
             spec_walk_at_tail: false,
             coupling_seed: None,
+            stream_seq: None,
             truncate_kv_to: None,
             chunk_meta: None,
             sampling: None,

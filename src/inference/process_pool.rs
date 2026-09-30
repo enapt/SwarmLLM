@@ -2097,6 +2097,11 @@ fn forward_is_schedulable(f: &crate::types::LayerForward) -> bool {
     if f.truncate_kv_to.is_some() {
         return false;
     }
+    // A streamed verify runs in its stream's order, which the batch scheduler
+    // does not keep. Every one is a verify too, so this states the reason.
+    if f.stream_seq.is_some() {
+        return false;
+    }
     true
 }
 
@@ -5637,6 +5642,7 @@ impl ModelProcessPool {
             spec_logits_requested,
             spec_walk_at_tail: _,
             coupling_seed,
+            stream_seq,
             truncate_kv_to,
             chunk_meta: _,
             sampling: _,
@@ -5677,6 +5683,7 @@ impl ModelProcessPool {
             // Shared noise is meaningful only to a walk that samples with the
             // caller's parameters; anything else keeps the worker's own draw.
             coupling_seed: coupling_seed.filter(|_| walk_with_the_callers_sampler),
+            stream_seq,
             truncate_kv_to,
             for_the_owner: requester == Requester::Owner,
         };
@@ -5947,6 +5954,8 @@ impl ModelProcessPool {
                 spec_logits_requested,
                 spec_walk_at_tail,
                 coupling_seed: _,
+                // Streamed verifies are never batched (`forward_is_schedulable`).
+                stream_seq: _,
                 truncate_kv_to,
                 chunk_meta: _,
                 // Per-item: a batch can carry forwards from different requests,
@@ -5976,6 +5985,7 @@ impl ModelProcessPool {
                 spec_walk_at_tail,
                 // Batched forwards are never verify walks (`forward_is_schedulable`).
                 coupling_seed: None,
+                stream_seq: None,
                 truncate_kv_to,
                 // Decode steps only (see `dispatch_scheduler_group`); the
                 // owner's mark, if any, was made at the prompt pass.
@@ -6994,6 +7004,7 @@ mod tests {
             spec_logits_requested: false,
             spec_walk_at_tail: false,
             coupling_seed: None,
+            stream_seq: None,
             truncate_kv_to: None,
             chunk_meta: None,
             sampling: None,

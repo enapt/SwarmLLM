@@ -409,6 +409,15 @@ pub struct LayerForward {
     /// `0x0B` trailer, only to a peer advertising `features::COUPLED_SAMPLING`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coupling_seed: Option<u64>,
+    /// This forward's place in a STREAM of verifies for its request and layer
+    /// range: numbered from 0, several in flight at once, and run by the
+    /// receiver strictly in this order (`daemon::dispatch::forward_stream`),
+    /// whatever order they arrive in. `None` — every forward that is not part
+    /// of such a stream — runs as it arrives, as before. Echoed in the answer
+    /// (`ResultStep::stream_seq`). Travels in the `0x0C` trailer, only to a
+    /// peer advertising `features::STREAMED_VERIFY`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_seq: Option<u32>,
     /// Speculative decoding KV-cache fixup: if `Some(L)`, the worker truncates
     /// the per-request KV cache to exactly L sequence positions BEFORE running
     /// this forward. Used after partial acceptance to discard the trailing γ-k
@@ -737,6 +746,13 @@ pub struct ResultStep {
     pub index_pos: u32,
     /// The forward's `layer_range`, start inclusive, end exclusive.
     pub layer_range: (u32, u32),
+    /// The forward's `stream_seq`, for one that was part of a stream of
+    /// verifies — where (position, range) alone does not name one forward: a
+    /// stream restarted after a refused guess sends its next chunk at the
+    /// position a discarded chunk also started at. Travels as the `0x08`
+    /// result trailer, after `0x07`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_seq: Option<u32>,
 }
 
 /// Why a peer refused a forward before any of it ran.
@@ -830,7 +846,15 @@ impl LayerResult {
         self.answers_step = Some(ResultStep {
             index_pos,
             layer_range,
+            stream_seq: None,
         });
+        self
+    }
+
+    /// Mark this result as the answer to `step` — the forward's position,
+    /// layers and, for a streamed verify, its number.
+    pub fn answering_step(mut self, step: ResultStep) -> Self {
+        self.answers_step = Some(step);
         self
     }
 
@@ -946,6 +970,7 @@ mod chunk_assembly_tests {
             spec_logits_requested: false,
             spec_walk_at_tail: false,
             coupling_seed: None,
+            stream_seq: None,
             truncate_kv_to: None,
             chunk_meta: None,
             // In-process only (`serde(skip)`): a decoded forward always has

@@ -131,6 +131,15 @@ pub fn encode_layer_result(result: &LayerResult) -> Result<Vec<u8>, SwarmError> 
         buf.extend_from_slice(&step.index_pos.to_le_bytes());
         buf.extend_from_slice(&step.layer_range.0.to_le_bytes());
         buf.extend_from_slice(&step.layer_range.1.to_le_bytes());
+        // Optional, and only inside a step: the streamed verify this answers
+        // (marker 0x08 + stream_seq u32 LE), see `ResultStep::stream_seq`.
+        // After 0x07, so an older decoder reads the step and stops here. Only
+        // a coordinator advertising `features::STREAMED_VERIFY` sends a
+        // streamed forward, so only it is answered with one.
+        if let Some(seq) = step.stream_seq {
+            buf.push(0x08);
+            buf.extend_from_slice(&seq.to_le_bytes());
+        }
     }
 
     Ok(buf)
@@ -407,11 +416,22 @@ pub fn decode_layer_result(data: &[u8]) -> Result<LayerResult, SwarmError> {
         };
         let word =
             |i: usize| u32::from_le_bytes([bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]]);
-        answers_step = Some(crate::types::ResultStep {
+        let mut step = crate::types::ResultStep {
             index_pos: word(0),
             layer_range: (word(4), word(8)),
-        });
+            stream_seq: None,
+        };
         pos += 12;
+        // Optional: the streamed verify it answers (marker 0x08 + u32 LE).
+        if pos < data.len() && data[pos] == 0x08 {
+            pos += 1;
+            let Some(b) = data.get(pos..pos + 4) else {
+                return Err(SwarmError::Network("stream trailer truncated".into()));
+            };
+            step.stream_seq = Some(u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+            pos += 4;
+        }
+        answers_step = Some(step);
     }
     // Suppress unused-assignment warning on the last pos += that has no
     // subsequent reader.

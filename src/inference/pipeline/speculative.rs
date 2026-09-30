@@ -129,7 +129,7 @@ impl PipelineExecutor {
             // PendingLayerResultGuard / gotcha #45.
             let (rx, mut prefill_guard) = super::register_pending_layer_result(
                 &self.shared_state.pending_layer_results,
-                request_id,
+                crate::daemon::state::WaiterKey::request(request_id),
                 Some(segment.node_id.clone()),
                 // The prompt pass, which `rebuild_forward` sends at position 0.
                 Some(crate::daemon::state::ExpectedStep::one(
@@ -164,6 +164,7 @@ impl PipelineExecutor {
                 spec_logits_requested: false,
                 spec_walk_at_tail: false,
                 coupling_seed: None,
+                stream_seq: None,
                 truncate_kv_to: None,
                 chunk_meta: None,
                 sampling: None,
@@ -658,7 +659,7 @@ pub(super) async fn send_verify_batch(
     // see PendingLayerResultGuard / gotcha #45.
     let (rx, mut verify_guard) = super::register_pending_layer_result(
         &shared_state.pending_layer_results,
-        request_id,
+        crate::daemon::state::WaiterKey::request(request_id),
         Some(segment.node_id.clone()),
         Some(crate::daemon::state::ExpectedStep::one(
             index_pos,
@@ -678,9 +679,9 @@ pub(super) async fn send_verify_batch(
             index_pos,
             activations.clone(),
             segment,
-            shared_state.identity.node_id().0,
             truncate_kv_to,
             // Item 2 accepts by argmax on the logits it gets back.
+            None,
             None,
         )
     };

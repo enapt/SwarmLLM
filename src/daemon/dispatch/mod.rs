@@ -2968,16 +2968,14 @@ pub(crate) async fn dispatch_network_messages(
                                         // logged "no in-flight decode", and we computed the whole
                                         // abandoned prefill anyway while every other request queued
                                         // behind it.
-                                        if let Some((_, (abort, _))) = shared_state
-                                            .inbound_forward_aborts
-                                            .remove(&cancel.request_id)
-                                        {
+                                        let forwards = shared_state.abort_inbound_forwards(&cancel.request_id);
+                                        if forwards > 0 {
                                             tracing::info!(
                                                 request_id = %cancel.request_id,
                                                 sender = ?authenticated_sender,
+                                                forwards,
                                                 "CancelInference: abandoning inbound segment forward"
                                             );
-                                            abort.abort();
                                             aborted_something = true;
                                         }
                                         if !aborted_something {

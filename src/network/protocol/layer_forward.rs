@@ -119,6 +119,7 @@ pub fn encode_layer_forward(forward: &LayerForward) -> Result<Vec<u8>, SwarmErro
     append_pre_embedded_trailer(&mut buf, forward);
     append_sampling_trailer(&mut buf, forward);
     append_coupling_trailer(&mut buf, forward);
+    append_stream_trailer(&mut buf, forward);
 
     Ok(buf)
 }
@@ -238,6 +239,35 @@ pub(crate) fn read_coupling_trailer(data: &[u8], cursor: &mut usize) -> Option<u
     seed.copy_from_slice(&data[*cursor + 1..*cursor + COUPLING_TRAILER_LEN]);
     *cursor += COUPLING_TRAILER_LEN;
     Some(u64::from_le_bytes(seed))
+}
+
+/// Write the stream trailer: `0x0C | seq u32 LE` — 5 bytes, the forward's
+/// place in its request's stream of verifies (`LayerForward::stream_seq`).
+/// Written after the coupling trailer, by the ONE function the plaintext
+/// frame, the encrypted frame and the AAD all call: the number decides the
+/// order the receiver runs forwards in, so a relay must not be able to change
+/// it. Emitted only when the forward carries one, which the coordinator sets
+/// only for a peer advertising `features::STREAMED_VERIFY`.
+pub(crate) fn append_stream_trailer(buf: &mut Vec<u8>, forward: &LayerForward) {
+    let Some(seq) = forward.stream_seq else {
+        return;
+    };
+    buf.push(0x0C);
+    buf.extend_from_slice(&seq.to_le_bytes());
+}
+
+/// Length of the stream trailer, marker included.
+const STREAM_TRAILER_LEN: usize = 5;
+
+/// Read the stream trailer (`0x0C`) at `cursor`, if present.
+pub(crate) fn read_stream_trailer(data: &[u8], cursor: &mut usize) -> Option<u32> {
+    if data.len() < *cursor + STREAM_TRAILER_LEN || data[*cursor] != 0x0C {
+        return None;
+    }
+    let at = *cursor + 1;
+    let seq = u32::from_le_bytes([data[at], data[at + 1], data[at + 2], data[at + 3]]);
+    *cursor += STREAM_TRAILER_LEN;
+    Some(seq)
 }
 
 /// Write the decoded-so-far trailer: `0x08 | n(2 LE) | n × id(4 LE)`.
@@ -691,6 +721,7 @@ pub fn decode_layer_forward(data: &[u8]) -> Result<LayerForward, SwarmError> {
         s
     });
     let coupling_seed = read_coupling_trailer(data, &mut cursor);
+    let stream_seq = read_stream_trailer(data, &mut cursor);
     let _ = cursor;
 
     Ok(LayerForward {
@@ -713,6 +744,7 @@ pub fn decode_layer_forward(data: &[u8]) -> Result<LayerForward, SwarmError> {
         spec_logits_requested,
         spec_walk_at_tail,
         coupling_seed,
+        stream_seq,
         truncate_kv_to,
         chunk_meta,
         sampling,
@@ -753,6 +785,7 @@ mod tests {
             spec_logits_requested: false,
             spec_walk_at_tail: false,
             coupling_seed: None,
+            stream_seq: None,
             truncate_kv_to: None,
             chunk_meta: None,
             sampling: None,
@@ -964,6 +997,35 @@ mod tests {
         let plain = encode_layer_forward(&f).unwrap();
         assert_eq!(plain.len(), bytes.len() - 9);
         assert_eq!(decode_layer_forward(&plain).unwrap().coupling_seed, None);
+    }
+
+    /// A streamed verify's number crosses the wire after the coupling seed,
+    /// and a forward without one is byte-for-byte what it was before.
+    #[test]
+    fn a_stream_number_survives_the_wire_and_is_absent_when_unset() {
+        let mut f = base_forward();
+        f.coupling_seed = Some(7);
+        f.stream_seq = Some(0x0A0B_0C0D);
+        let bytes = encode_layer_forward(&f).unwrap();
+        assert_eq!(&bytes[bytes.len() - 5..], &[0x0C, 0x0D, 0x0C, 0x0B, 0x0A]);
+        let back = decode_layer_forward(&bytes).unwrap();
+        assert_eq!(back.stream_seq, Some(0x0A0B_0C0D));
+        assert_eq!(
+            back.coupling_seed,
+            Some(7),
+            "the trailer before it still reads"
+        );
+        // Alone, without the coupling trailer in front of it.
+        f.coupling_seed = None;
+        let alone = encode_layer_forward(&f).unwrap();
+        assert_eq!(
+            decode_layer_forward(&alone).unwrap().stream_seq,
+            Some(0x0A0B_0C0D)
+        );
+        f.stream_seq = None;
+        let plain = encode_layer_forward(&f).unwrap();
+        assert_eq!(plain.len(), alone.len() - 5);
+        assert_eq!(decode_layer_forward(&plain).unwrap().stream_seq, None);
     }
 
     #[test]

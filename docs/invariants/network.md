@@ -2446,3 +2446,59 @@ fixed token — so DSD skips it whenever shared noise is on.
   frame, the encrypted frame and the AAD alike; absent, a frame is byte-identical.
 - Exactness is pinned by `a_coupled_sample_follows_the_ordinary_samplers_distribution`
   (with its control) and pruning by `pruning_never_changes_the_coupled_pick`.
+
+## A stream of verifies runs in its order, and each answer names its number (2026-09-30)
+
+**What it is for.** Split speculation's rounds are strictly serial — draft, run
+the near half, send, wait a round trip for the far half's verdict, draft again —
+so the drafting and the near half sit inside every round trip. A stream keeps
+several verify chunks of ONE request in flight to the segment that samples, each
+built on the guess that the chunks before it will be kept (`docs/plans/split_speculation.md`
+§ 4b). PipeInfer (arXiv 2407.11798, SC'24) runs the same scheme across MPI
+nodes; its two requirements carry over: runs are executed in the order sent
+(MPI's non-overtaking rule for one sender, receiver and tag), and micro-batches
+of 1-4 tokens beat large ones once several are in flight.
+
+**What assumed one forward per request, and what each became:**
+- **The serving node ran forwards as they arrived.** An encrypted forward is
+  opened in its own task and the dispatcher spawns a handler per forward, so two
+  a few milliseconds apart race to the worker — which writes each at its cache's
+  CURRENT length while RoPE rotates by `index_pos`: swapped chunks are silently
+  read into each other's positions. Now `LayerForward::stream_seq` (the `0x0C`
+  trailer, sealed in the AAD) numbers a stream's forwards, and
+  `daemon::state::forward_streams` makes forward N wait until N-1 has ended on
+  this node (`STREAM_TURN_WAIT`, 60 s, then refused). A prompt pass for the same
+  (request, layer range) starts the numbering over, since a router retry reuses
+  the request id. The worker checks the result: a streamed forward whose
+  `index_pos` is not the cache's length after truncation is refused.
+- **The worker's reply routing is keyed by request id** (gotcha #180). The gate
+  keeps one forward of a stream at the worker at a time, so that map needs no
+  change.
+- **The cancel registry held one forward per request**, so a second
+  overwrote the first and the first, finishing, withdrew the second — which no
+  `CancelInference` could then reach. It holds every forward of a request now
+  (`inbound_forward_aborts`, `two_forwards_of_one_request_are_each_cancellable`).
+- **The coordinator's waiters were keyed by request id.** `pending_layer_results`
+  is keyed by `WaiterKey` (request + stream number) now, and a streamed answer
+  echoes its number (`ResultStep::stream_seq`, the `0x08` result trailer, after
+  `0x07` so an older decoder reads the step and stops). Position and range alone
+  cannot name a chunk: a stream restarted after a refused guess sends its next
+  chunk at the position a discarded chunk also started at.
+- **A failure this node manufactures names no step** (a send that failed, a
+  receipt that never came). It is about the LINK to one node, so with no
+  unstreamed wait on the request it ends the stream's OLDEST wait pinned to that
+  node — the one its coordinator reads — rather than leaving every chunk to sit
+  out its deadline. Gotcha #229 is why it is pinned: a failure about node X must
+  never end a wait on Y.
+
+**What a change must keep:**
+- Streamed forwards go only to a peer advertising `features::STREAMED_VERIFY`.
+  An older peer would fail the seal on `0x0C` and would also run the chunks
+  concurrently.
+- The turn is given back by DROPPING it (`forward_streams::Turn`), on every
+  exit of `handle_layer_forward` — an early refusal or an abort included —
+  or every later chunk waits out `STREAM_TURN_WAIT`.
+- Pinned by `forwards_run_in_their_streams_order_whatever_order_they_arrive_in`,
+  `a_streamed_answer_reaches_the_wait_its_number_names` (red with either the
+  number's routing or the link-failure rule toggled off, 2026-09-30) and the
+  codec tests `a_stream_number_*` / `a_streamed_answer_names_its_number_after_the_step`.

@@ -1219,6 +1219,7 @@ mod tests {
             spec_logits_requested: false,
             spec_walk_at_tail: false,
             coupling_seed: None,
+            stream_seq: None,
             truncate_kv_to: None,
             chunk_meta: None,
             sampling: None,
@@ -1262,6 +1263,7 @@ mod tests {
                 spec_logits_requested: false,
                 spec_walk_at_tail: false,
                 coupling_seed: None,
+                stream_seq: None,
                 truncate_kv_to: None,
                 chunk_meta: None,
                 sampling: None,
@@ -1301,6 +1303,7 @@ mod tests {
             spec_logits_requested: false,
             spec_walk_at_tail: false,
             coupling_seed: None,
+            stream_seq: None,
             truncate_kv_to: None,
             chunk_meta: None,
             sampling: None,
@@ -1334,6 +1337,7 @@ mod tests {
             spec_logits_requested: false,
             spec_walk_at_tail: false,
             coupling_seed: None,
+            stream_seq: None,
             truncate_kv_to: None,
             chunk_meta: None,
             sampling: None,
@@ -1372,6 +1376,7 @@ mod tests {
             spec_logits_requested: false,
             spec_walk_at_tail: false,
             coupling_seed: None,
+            stream_seq: None,
             truncate_kv_to: None,
             chunk_meta: None,
             sampling: None,
@@ -1563,6 +1568,7 @@ mod tests {
             spec_logits_requested: false,
             spec_walk_at_tail: false,
             coupling_seed: None,
+            stream_seq: None,
             truncate_kv_to: None,
             chunk_meta: None,
             sampling: None,
@@ -1609,6 +1615,7 @@ mod tests {
             spec_logits_requested: true,
             spec_walk_at_tail: false,
             coupling_seed: None,
+            stream_seq: None,
             truncate_kv_to: None,
             chunk_meta: None,
             sampling: None,
@@ -1648,6 +1655,7 @@ mod tests {
             spec_logits_requested: true,
             spec_walk_at_tail: false,
             coupling_seed: None,
+            stream_seq: None,
             truncate_kv_to: None,
             chunk_meta: None,
             sampling: None,
@@ -1685,6 +1693,7 @@ mod tests {
             spec_logits_requested: false,
             spec_walk_at_tail: false,
             coupling_seed: None,
+            stream_seq: None,
             truncate_kv_to: None,
             chunk_meta: None,
             sampling: None,
@@ -1864,7 +1873,8 @@ mod tests {
                 back.answers_step,
                 Some(crate::types::ResultStep {
                     index_pos: 0x01020304,
-                    layer_range: (3, 9)
+                    layer_range: (3, 9),
+                    stream_seq: None,
                 })
             );
             assert_eq!(back.refusal.is_some(), refused);
@@ -1873,6 +1883,33 @@ mod tests {
             // A truncated trailer is refused, not read as some other step.
             assert!(decode_layer_result(&with[..with.len() - 1]).is_err());
         }
+    }
+
+    /// A streamed verify's number rides inside the step, after `0x07`: an
+    /// older decoder reads the step and stops, and this one reads the number.
+    #[test]
+    fn a_streamed_answer_names_its_number_after_the_step() {
+        let rid = uuid::Uuid::new_v4();
+        let plain = LayerResult::error(rid, "x").answering(9, (14, 28));
+        let streamed = LayerResult::error(rid, "x").answering_step(crate::types::ResultStep {
+            index_pos: 9,
+            layer_range: (14, 28),
+            stream_seq: Some(0x0102_0304),
+        });
+        let without = encode_layer_result(&plain).unwrap();
+        let with = encode_layer_result(&streamed).unwrap();
+        assert_eq!(&with[..without.len()], &without[..]);
+        assert_eq!(&with[without.len()..], &[0x08, 0x04, 0x03, 0x02, 0x01]);
+        assert_eq!(
+            decode_layer_result(&with).unwrap().answers_step,
+            streamed.answers_step
+        );
+        // What a decoder that stops after 0x07 sees: the step, no number.
+        assert_eq!(
+            decode_layer_result(&without).unwrap().answers_step,
+            plain.answers_step
+        );
+        assert!(decode_layer_result(&with[..with.len() - 1]).is_err());
     }
 
     /// A reason a newer peer knows and this build does not is read as no

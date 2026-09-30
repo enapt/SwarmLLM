@@ -151,6 +151,8 @@ pub fn build_layer_forward_aad(forward: &LayerForward) -> Vec<u8> {
     super::layer_forward::append_sampling_trailer(&mut aad, forward);
     // The coupling trailer (0x0B): which noise the sampler draws with.
     super::layer_forward::append_coupling_trailer(&mut aad, forward);
+    // The stream trailer (0x0C): the order the receiver runs this forward in.
+    super::layer_forward::append_stream_trailer(&mut aad, forward);
 
     aad
 }
@@ -260,6 +262,7 @@ pub fn encode_layer_forward_encrypted(
     super::layer_forward::append_pre_embedded_trailer(&mut buf, forward);
     super::layer_forward::append_sampling_trailer(&mut buf, forward);
     super::layer_forward::append_coupling_trailer(&mut buf, forward);
+    super::layer_forward::append_stream_trailer(&mut buf, forward);
 
     Ok(buf)
 }
@@ -484,6 +487,7 @@ pub fn decode_layer_forward_encrypted(
     // RAW until the AAD below is rebuilt from it — see `read_sampling_trailer`.
     let sampling = super::layer_forward::read_sampling_trailer(data, &mut cursor);
     let coupling_seed = super::layer_forward::read_coupling_trailer(data, &mut cursor);
+    let stream_seq = super::layer_forward::read_stream_trailer(data, &mut cursor);
     let _ = cursor;
 
     let mut forward = LayerForward {
@@ -506,6 +510,7 @@ pub fn decode_layer_forward_encrypted(
         spec_logits_requested,
         spec_walk_at_tail,
         coupling_seed,
+        stream_seq,
         truncate_kv_to,
         chunk_meta,
         sampling,
@@ -551,6 +556,7 @@ mod tests {
             spec_logits_requested: false,
             spec_walk_at_tail: false,
             coupling_seed: None,
+            stream_seq: None,
             truncate_kv_to: None,
             chunk_meta: None,
             sampling: None,
@@ -702,6 +708,27 @@ mod tests {
             aad,
             "a relay must not swap the noise"
         );
+    }
+
+    /// The number decides the order the receiver runs a stream in, so it is
+    /// sealed: a relay that renumbers a chunk breaks the seal.
+    #[test]
+    fn a_stream_number_is_sealed_and_survives_the_encrypted_frame() {
+        let mut orig = base_forward();
+        orig.stream_seq = Some(3);
+        let bytes = encode_layer_forward_encrypted(&orig, vec![0u8; 32]).unwrap();
+        let (decoded, _sealed, aad) = decode_layer_forward_encrypted(&bytes).unwrap();
+        assert_eq!(decoded.stream_seq, Some(3));
+        assert_eq!(aad, build_layer_forward_aad(&orig));
+        let mut other = orig.clone();
+        other.stream_seq = Some(4);
+        assert_ne!(
+            build_layer_forward_aad(&other),
+            aad,
+            "a relay must not renumber a chunk"
+        );
+        other.stream_seq = None;
+        assert_ne!(build_layer_forward_aad(&other), aad);
     }
 
     #[test]

@@ -620,11 +620,6 @@ pub async fn run_worker(
     tracing::info!("model-worker: exiting cleanly");
 }
 
-/// Hand the card memory this worker's pool keeps unused back to the driver,
-/// once it has been idle for `cuda_pool::IDLE_TRIM` — so another worker, or a
-/// model the daemon wants to load, sees the room (`docs/FUTURE_WORK.md` #146).
-/// The pool is the device's, shared by every model this process holds on the
-/// card, so one trim covers them all.
 /// A pure-argmax verify's walk, from each row's argmax (`picks`, γ+1 of them):
 /// the drafts kept while each equals its row's pick, then the pick where they
 /// part — or the last row's, the bonus, after all of them. What
@@ -643,6 +638,11 @@ fn argmax_walk(drafts: &[u32], picks: &[u32]) -> Vec<u32> {
     kept
 }
 
+/// Hand the card memory this worker's pool keeps unused back to the driver,
+/// once it has been idle for `cuda_pool::IDLE_TRIM` — so another worker, or a
+/// model the daemon wants to load, sees the room (`docs/FUTURE_WORK.md` #146).
+/// The pool is the device's, shared by every model this process holds on the
+/// card, so one trim covers them all.
 fn hand_back_idle_card_memory(models: &HashMap<(usize, usize, usize, usize), SplitModel>) {
     let Some(device) = models
         .values()
@@ -1585,6 +1585,23 @@ async fn handle_forward(
                 target_len,
                 "DIAG: truncated KV cache for speculative partial accept"
             );
+        }
+    }
+
+    // A streamed verify must continue exactly where the cache ends: the cache
+    // writes at its OWN length while RoPE rotates by `index_pos`, so a chunk
+    // that arrived out of its stream's order would be read into the wrong
+    // positions with nothing failing. The serving daemon runs a stream in
+    // order (`daemon::dispatch::forward_stream`); this is the check that it
+    // did, refused like the drafter's own (`SplitModel::draft_after`).
+    if fwd.stream_seq.is_some() {
+        let held = kv_store.request_positions(&model_key, &req_id_str);
+        if held != fwd.index_pos as usize {
+            return Err(SwarmError::ServiceUnavailable(format!(
+                "this computer holds {held} positions of request {request_id}, not the {} \
+                 its next streamed check continues from — the stream arrived out of order",
+                fwd.index_pos
+            )));
         }
     }
 

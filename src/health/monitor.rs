@@ -462,6 +462,11 @@ impl HealthMonitor {
                             "Swept stale chunk assemblies"
                         );
                     }
+                    // Streamed verifies whose request went quiet (a stream is
+                    // numbered per request, so an entry per request served).
+                    self.shared_state.forward_streams.sweep(
+                        crate::daemon::state::forward_streams::FORWARD_STREAM_IDLE,
+                    );
                     // Replies kept for `ResendTokens` (gotcha #438) — bounded by
                     // count at insert, and by age here.
                     let swept = self.shared_state.retained_replies.sweep(
@@ -1680,7 +1685,7 @@ impl HealthMonitor {
             tracing::info!(
                 count = stale_layer.len(),
                 total_pending = self.shared_state.pending_layer_results.len(),
-                request_ids = ?stale_layer.iter().take(5).map(|u| u.to_string()).collect::<Vec<_>>(),
+                request_ids = ?stale_layer.iter().take(5).map(|k| k.request_id.to_string()).collect::<Vec<_>>(),
                 "DIAG: cleaning up stale pending_layer_results"
             );
             for key in stale_layer {

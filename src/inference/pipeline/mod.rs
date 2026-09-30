@@ -21,6 +21,7 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc;
 
+use crate::daemon::state::WaiterKey;
 use crate::daemon::SharedState;
 use crate::error::SwarmError;
 use crate::inference::router::{InferenceOutput, StreamingTokenTx, TokenLogProbEntry};
@@ -125,14 +126,14 @@ const MAX_PENDING_LAYER_RESULTS: usize = 1024;
 /// failed inference, eventually exhausting `MAX_PENDING_LAYER_RESULTS`.
 /// Per gotcha #45 in `memory/MEMORY.md`.
 pub(super) struct PendingLayerResultGuard<'a> {
-    pub(super) map: &'a dashmap::DashMap<uuid::Uuid, crate::daemon::state::PendingLayerResult>,
-    pub(super) id: uuid::Uuid,
+    pub(super) map: &'a dashmap::DashMap<WaiterKey, crate::daemon::state::PendingLayerResult>,
+    pub(super) id: WaiterKey,
     pub(super) armed: bool,
 }
 impl<'a> PendingLayerResultGuard<'a> {
     pub(super) fn new(
-        map: &'a dashmap::DashMap<uuid::Uuid, crate::daemon::state::PendingLayerResult>,
-        id: uuid::Uuid,
+        map: &'a dashmap::DashMap<WaiterKey, crate::daemon::state::PendingLayerResult>,
+        id: WaiterKey,
     ) -> Self {
         Self {
             map,
@@ -162,8 +163,8 @@ impl<'a> PendingLayerResultGuard<'a> {
 /// answer, and cannot resolve this waiter (#113). Required, so a new caller
 /// has to say which forward it waits on.
 pub(super) fn register_pending_layer_result(
-    map: &dashmap::DashMap<uuid::Uuid, crate::daemon::state::PendingLayerResult>,
-    request_id: uuid::Uuid,
+    map: &dashmap::DashMap<WaiterKey, crate::daemon::state::PendingLayerResult>,
+    key: WaiterKey,
     awaiting: Option<crate::types::NodeId>,
     expects_step: Option<crate::daemon::state::ExpectedStep>,
 ) -> Result<
@@ -180,7 +181,7 @@ pub(super) fn register_pending_layer_result(
     }
     let (tx, rx) = tokio::sync::oneshot::channel();
     map.insert(
-        request_id,
+        key,
         crate::daemon::state::PendingLayerResult {
             tx,
             awaiting,
@@ -190,7 +191,7 @@ pub(super) fn register_pending_layer_result(
             expects_step,
         },
     );
-    let guard = PendingLayerResultGuard::new(map, request_id);
+    let guard = PendingLayerResultGuard::new(map, key);
     Ok((rx, guard))
 }
 impl<'a> Drop for PendingLayerResultGuard<'a> {
@@ -373,9 +374,9 @@ pub(super) fn build_spec_verify_forward(
     index_pos: u32,
     activations: Vec<u8>,
     segment: &crate::types::PipelineSegment,
-    _requester_node_id_bytes: [u8; 32],
     truncate_kv_to: Option<u32>,
     walk: Option<&TailWalk<'_>>,
+    stream_seq: Option<u32>,
 ) -> crate::types::LayerForward {
     crate::types::LayerForward {
         request_id,
@@ -411,6 +412,9 @@ pub(super) fn build_spec_verify_forward(
         spec_logits_requested: true,
         spec_walk_at_tail: walk.is_some(),
         coupling_seed: walk.and_then(|w| w.coupling),
+        // Only a streamed check (`dsd_stream`) numbers its forwards, and only
+        // for a peer advertising `features::STREAMED_VERIFY`.
+        stream_seq,
         truncate_kv_to,
         chunk_meta: None,
         sampling: walk.map(|w| w.sampling.clone()),
@@ -507,9 +511,9 @@ pub(super) async fn forward_verify_through_segments(
                 index_pos,
                 activation_bytes.clone(),
                 segment,
-                shared_state.identity.node_id().0,
                 truncate_kv_to,
                 tail_walk.as_ref(),
+                None,
             )
         };
         let forward = rebuild_forward();
@@ -517,7 +521,7 @@ pub(super) async fn forward_verify_through_segments(
         let result = if let Some(peer_bytes) = target_peer_bytes {
             let (rx, mut pending_guard) = register_pending_layer_result(
                 &shared_state.pending_layer_results,
-                request_id,
+                WaiterKey::request(request_id),
                 Some(segment.node_id.clone()),
                 Some(crate::daemon::state::ExpectedStep::one(
                     index_pos,
@@ -538,7 +542,9 @@ pub(super) async fn forward_verify_through_segments(
                 // otherwise fire its own remove when this stack frame
                 // unwinds).
                 pending_guard.disarm();
-                shared_state.pending_layer_results.remove(&request_id);
+                shared_state
+                    .pending_layer_results
+                    .remove(&WaiterKey::request(request_id));
                 return Err(SwarmError::Network(
                     "fwd_verify_through_segments: send dropped".into(),
                 ));
@@ -764,6 +770,7 @@ pub(super) fn build_kv_truncate_forward(
         spec_logits_requested: false,
         spec_walk_at_tail: false,
         coupling_seed: None,
+        stream_seq: None,
         truncate_kv_to: Some(truncate_to),
         chunk_meta: None,
         sampling: None,
@@ -2420,14 +2427,13 @@ mod tests {
             layer_range: (4, 8),
         };
         let activations = vec![1u8, 2, 3, 4];
-        let requester = [9u8; 32];
         let fwd = build_spec_verify_forward(
             request_id,
             42,
             activations.clone(),
             &segment,
-            requester,
             Some(100),
+            None,
             None,
         );
         assert_eq!(fwd.request_id, request_id);
@@ -2581,7 +2587,10 @@ mod tests {
         // The waiter registers before the send, but yield anyway so this is
         // not a race on a loaded machine.
         for _ in 0..50 {
-            if state.pending_layer_results.contains_key(&request_id) {
+            if state
+                .pending_layer_results
+                .contains_key(&WaiterKey::request(request_id))
+            {
                 break;
             }
             tokio::task::yield_now().await;

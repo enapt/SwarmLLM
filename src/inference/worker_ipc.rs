@@ -306,6 +306,13 @@ pub struct IpcForward {
     /// The request's shared noise seed for the walk (`LayerForward::coupling_seed`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coupling_seed: Option<u64>,
+    /// `LayerForward::stream_seq`: this forward is one of a stream of verifies
+    /// that arrive back to back, so the worker checks that the cache holds
+    /// exactly the positions before `index_pos` (after any truncation) and
+    /// refuses the forward otherwise — a chunk of a stream run out of order
+    /// would be written at the cache's length, not its own position.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_seq: Option<u32>,
     /// KV cache truncation: if `Some(L)`, worker truncates per-request KV to
     /// L sequence positions BEFORE running the forward. Used by speculative
     /// partial-accept fixup.
@@ -882,6 +889,7 @@ mod tests {
             spec_logits_requested: false,
             spec_walk_at_tail: false,
             coupling_seed: None,
+            stream_seq: None,
             truncate_kv_to: None,
             for_the_owner: false,
         };
@@ -920,6 +928,7 @@ mod tests {
             spec_logits_requested: false,
             spec_walk_at_tail: false,
             coupling_seed: None,
+            stream_seq: None,
             truncate_kv_to: None,
             for_the_owner,
         };
@@ -960,6 +969,7 @@ mod tests {
             spec_logits_requested: false,
             spec_walk_at_tail: false,
             coupling_seed: None,
+            stream_seq: None,
             truncate_kv_to: None,
             for_the_owner: false,
         };

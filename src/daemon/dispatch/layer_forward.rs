@@ -21,6 +21,7 @@ pub(super) async fn handle_layer_forward(
     let answering = crate::types::ResultStep {
         index_pos,
         layer_range: forward.layer_range,
+        stream_seq: forward.stream_seq,
     };
     let sender_peer_bytes = match forward.sender_peer_bytes {
         Some(ref bytes) => bytes.clone(),
@@ -47,6 +48,44 @@ pub(super) async fn handle_layer_forward(
                 state.resolve_connected_peer_id_bytes(n)
             })
         }
+    };
+
+    // A prompt pass begins the conversation again, and its stream numbering
+    // with it: a router retry reuses the request id (`forward_streams`).
+    if forward.sequence_num == 0 {
+        shared_state
+            .forward_streams
+            .restart(request_id, forward.layer_range);
+    }
+    // A streamed verify runs in its stream's order: held here until the one
+    // numbered before it has ended on this node, whatever order the network
+    // delivered them in. The turn is given back by dropping it, so every exit
+    // below — the early refusals included — lets the next one go.
+    let turn = match forward.stream_seq {
+        None => None,
+        Some(seq) => match shared_state
+            .forward_streams
+            .turn(
+                request_id,
+                forward.layer_range,
+                seq,
+                crate::daemon::state::forward_streams::STREAM_TURN_WAIT,
+            )
+            .await
+        {
+            Ok(turn) => Some(turn),
+            Err(refused) => {
+                send_error_result(
+                    &network_tx,
+                    &reply_to(),
+                    request_id,
+                    answering,
+                    &refused.reason(seq),
+                )
+                .await;
+                return;
+            }
+        },
     };
 
     // Estimate token count for credit accounting: prefill carries many tokens,
@@ -175,6 +214,9 @@ pub(super) async fn handle_layer_forward(
 
     // Route forward pass to subprocess via process pool
     let result = shared_state.model_process_pool.forward(forward).await;
+    // The worker is done with it: the stream's next forward may start while
+    // this answer is on its way.
+    drop(turn);
 
     let result = match result {
         Ok(r) => r,
@@ -357,6 +399,7 @@ pub(super) async fn handle_layer_forward(
                         spec_logits_requested: false,
                         spec_walk_at_tail: false,
                         coupling_seed: None,
+                        stream_seq: None,
                         truncate_kv_to: None,
                         chunk_meta: None,
                         // Handed down so the TAIL samples as the caller asked —
@@ -580,7 +623,7 @@ async fn send_error_result(
 ) {
     tracing::warn!(request_id = %request_id, error, "LayerForward processing failed");
     let result = crate::types::LayerResult::error(request_id, sanitize_peer_facing_error(error))
-        .answering(answering.index_pos, answering.layer_range);
+        .answering_step(answering);
     send_result_timed(network_tx, reply_to, result).await;
 }
 
@@ -604,6 +647,7 @@ impl RefusalAddress {
             answering: crate::types::ResultStep {
                 index_pos: forward.index_pos,
                 layer_range: forward.layer_range,
+                stream_seq: forward.stream_seq,
             },
             requester_node_id: forward.requester_node_id,
             sender_peer_bytes: forward.sender_peer_bytes.clone(),
@@ -937,6 +981,7 @@ mod chaining_tests {
             spec_logits_requested: false,
             spec_walk_at_tail: false,
             coupling_seed: None,
+            stream_seq: None,
             truncate_kv_to: None,
             chunk_meta: None,
             sampling: None,
@@ -1089,6 +1134,7 @@ mod tests {
             spec_logits_requested: false,
             spec_walk_at_tail: false,
             coupling_seed: None,
+            stream_seq: None,
             truncate_kv_to: None,
             chunk_meta: None,
             sampling: None,
@@ -1115,7 +1161,8 @@ mod tests {
             result.answers_step,
             Some(crate::types::ResultStep {
                 index_pos: 17,
-                layer_range: (4, 12)
+                layer_range: (4, 12),
+                stream_seq: None,
             })
         );
         let Some(crate::types::NetworkFinishReason::Error(reason)) = result.finish_reason else {

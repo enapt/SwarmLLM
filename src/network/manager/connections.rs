@@ -283,13 +283,11 @@ impl NetworkManager {
                 .shared_state
                 .inbound_forward_aborts
                 .iter()
-                .filter(|e| e.value().1 == peer_bytes)
+                .filter(|e| e.value().iter().any(|f| f.coordinator_bytes == peer_bytes))
                 .map(|e| *e.key())
                 .collect();
             for rid in orphaned_forwards {
-                if let Some((_, (abort, _))) = self.shared_state.inbound_forward_aborts.remove(&rid)
-                {
-                    abort.abort();
+                if self.shared_state.abort_inbound_forwards(&rid) > 0 {
                     tracing::info!(
                         request_id = %rid,
                         %peer_id,
