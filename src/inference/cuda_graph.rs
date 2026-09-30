@@ -80,6 +80,59 @@ const DEFECTS_BEFORE_GIVING_UP: u32 = 3;
 /// The refusal that is the forward's own failure, not the capture's.
 pub(crate) const FORWARD_FAILED: &str = "the forward failed inside the capture";
 
+/// The error a forward returns from [`Cutter::cut`] when a group was refused —
+/// it unwinds the forward; [`DecodeGraph::capture`] reports the refusal itself.
+#[cfg(feature = "candle-cuda")]
+pub(crate) const GROUP_REFUSED: &str = "a CUDA graph group was refused";
+
+/// Layers per graph group: the card waits only for the FIRST group to be
+/// recorded, then runs each group while the next is recorded. Recording a 7B
+/// step whole took 4.5 ms of a 20.8 ms token, all of it with the card idle.
+/// Two was best or tied on every model measured (RTX 3070 Laptop, 2026-09-30,
+/// tok/s by layers per group 1 / 2 / 4 / whole step): TinyLlama 226 / 228 /
+/// 220, Llama 3.2 3B 105 / 106 / 103, Qwen2.5-Coder-7B 56.6 / 56.7 / 56.1 /
+/// 47.3, Llama 3.1 8B 55.0 / 54.9 / 54.7. `SWARMLLM_CUDA_GRAPH_GROUP=N` sets
+/// it; `0` records the step as one graph.
+pub(crate) fn group_layers() -> usize {
+    static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *N.get_or_init(|| {
+        match std::env::var("SWARMLLM_CUDA_GRAPH_GROUP")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+        {
+            Some(0) => usize::MAX,
+            Some(n) => n,
+            None => 2,
+        }
+    })
+}
+
+/// Handed to a forward being captured: [`Cutter::cut`] closes the group
+/// recorded so far, launches it, and begins the next.
+pub(crate) struct Cutter<'a> {
+    #[cfg(feature = "candle-cuda")]
+    session: cuda::Session<'a>,
+    #[cfg(not(feature = "candle-cuda"))]
+    _never: std::marker::PhantomData<&'a ()>,
+}
+
+impl Cutter<'_> {
+    /// Launch what has been recorded and begin recording the rest. Everything
+    /// the rest reads that the launched part made must already have been
+    /// copied into memory made OUTSIDE the capture ([`DecodeGraph::boundaries`]).
+    /// An `Err` (`GROUP_REFUSED`) means stop the forward.
+    pub(crate) fn cut(&mut self) -> Result<(), SwarmError> {
+        #[cfg(feature = "candle-cuda")]
+        {
+            self.session.cut()
+        }
+        #[cfg(not(feature = "candle-cuda"))]
+        {
+            Ok(())
+        }
+    }
+}
+
 /// Whether a model's decode steps are captured — decided at its first decode
 /// step, once, because nothing it depends on changes while a model is loaded.
 #[derive(Default)]
@@ -150,8 +203,15 @@ struct Stats {
 /// and what the caller needs to decide whether a step may be captured.
 #[derive(Default)]
 pub(crate) struct DecodeGraph {
+    /// One instantiated graph per layer GROUP ([`group_layers`]); the same
+    /// group covers the same layers every token, so each updates in place.
     #[cfg(feature = "candle-cuda")]
-    exec: Option<cuda::Exec>,
+    execs: Vec<Option<cuda::Exec>>,
+    /// Where the residual stream crosses from one group's graph to the next:
+    /// made OUTSIDE every capture and reused every token (two, alternating, so
+    /// a group never writes the buffer its own first layer read). Only clones
+    /// are handed out, so no drop inside a capture frees them.
+    boundaries: Option<[Tensor; 2]>,
     /// Each conversation's last decode position. A capture needs the step
     /// before it to have run the ordinary way: that step allocated whatever a
     /// conversation's first decode step allocates, loaded every kernel module
@@ -187,6 +247,22 @@ impl DecodeGraph {
         self.defects >= DEFECTS_BEFORE_GIVING_UP
     }
 
+    /// The two boundary buffers for a `[1, 1, hidden]` residual stream, made
+    /// on first use — which must be OUTSIDE a capture, so the caller asks
+    /// before it begins one.
+    pub(crate) fn boundaries(
+        &mut self,
+        device: &Device,
+        hidden: usize,
+    ) -> Result<[Tensor; 2], SwarmError> {
+        if self.boundaries.is_none() {
+            let make =
+                || Tensor::zeros((1, 1, hidden), DType::F32, device).map_err(SwarmError::internal);
+            self.boundaries = Some([make()?, make()?]);
+        }
+        Ok(self.boundaries.clone().expect("made just above"))
+    }
+
     pub(crate) fn template(&self, all_positions: bool) -> Option<&(Vec<usize>, DType)> {
         self.templates[usize::from(all_positions)].as_ref()
     }
@@ -198,20 +274,24 @@ impl DecodeGraph {
         self.report();
     }
 
-    /// Capture `forward` on `device`'s stream, update (or build) the graph
-    /// from it, and launch it. On `Ok` the step's work is queued on the stream
-    /// exactly as if it had been issued op by op; on `Err` nothing the capture
-    /// recorded will ever run, and the caller must undo what `forward` did on
-    /// the host and run the step the ordinary way.
+    /// Capture `forward` on `device`'s stream and launch it — in GROUPS: each
+    /// [`Cutter::cut`] the forward makes ends the group recorded so far,
+    /// updates (or builds) that group's graph and launches it, and begins the
+    /// next, so the card runs one group while the next is recorded. A forward
+    /// that never cuts is one graph. On `Ok` the step's work is queued on the
+    /// stream exactly as if issued op by op. On `Err`, groups launched before
+    /// the refusal HAVE run (their layers wrote this position's KV), nothing
+    /// after it will, and the caller must undo what `forward` did on the host
+    /// and run the step the ordinary way — which rewrites the same positions.
     pub(crate) fn capture(
         &mut self,
         device: &Device,
-        forward: impl FnOnce() -> Result<(), SwarmError>,
+        forward: impl FnOnce(&mut Cutter<'_>) -> Result<(), SwarmError>,
     ) -> Result<(), Refusal> {
         let started = Instant::now();
         #[cfg(feature = "candle-cuda")]
         let outcome = match device {
-            Device::Cuda(dev) => cuda::capture_and_launch(dev, &mut self.exec, forward),
+            Device::Cuda(dev) => cuda::capture_in_groups(dev, &mut self.execs, forward),
             _ => Err(Refusal {
                 kind: "not on a graphics card",
                 detail: String::new(),
@@ -219,7 +299,13 @@ impl DecodeGraph {
         };
         #[cfg(not(feature = "candle-cuda"))]
         let outcome = {
-            let _ = (device, forward);
+            let _ = (
+                device,
+                forward,
+                Cutter {
+                    _never: std::marker::PhantomData,
+                },
+            );
             Err(Refusal {
                 kind: "built without CUDA",
                 detail: String::new(),
@@ -343,87 +429,174 @@ mod cuda {
         }
     }
 
-    /// `Ok(true)` when the previous graph was updated in place, `Ok(false)`
-    /// when one had to be built.
-    pub(super) fn capture_and_launch(
-        dev: &candle_core::CudaDevice,
-        exec: &mut Option<Exec>,
-        forward: impl FnOnce() -> Result<(), SwarmError>,
-    ) -> Result<bool, Refusal> {
-        let stream = dev.cuda_stream();
-        let ctx = stream.context();
-        ctx.bind_to_thread()
-            .map_err(|e| refused("could not bind the context", e))?;
-        // An error some earlier drop recorded is not this capture's: take it
-        // now, so the check after the capture sees only what happened inside.
-        if let Err(e) = ctx.check_err() {
-            tracing::debug!(error = %e, "a CUDA error recorded before the capture began");
-        }
-        let copies_before = htod_copies_so_far();
-        // THREAD_LOCAL: only this thread's unsafe calls break the capture, so
-        // another thread reading the card's free memory does not.
-        // SAFETY: a live stream cudarc created for this device.
-        unsafe {
-            result::stream::begin_capture(
-                stream.cu_stream(),
-                sys::CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_THREAD_LOCAL,
-            )
-        }
-        .map_err(|e| refused("could not begin a capture", e))?;
-        let ran = forward();
-        // ALWAYS end it: a stream left capturing refuses everything after.
-        // SAFETY: the stream this thread began capturing just above.
-        let ended = unsafe { result::stream::end_capture(stream.cu_stream()) };
-        let copies = htod_copies_so_far().wrapping_sub(copies_before);
-        // A buffer dropped inside a broken capture records its failed free on
-        // the context, where it would surface as the error of some later,
-        // unrelated call. Take it here, where it belongs.
-        let recorded = ctx.check_err();
-        let graph = match ended {
-            Ok(g) if !g.is_null() => Graph(g),
-            Ok(_) => return Err(refused("the capture was invalidated", "")),
-            Err(e) => return Err(refused("the capture ended with an error", e)),
-        };
-        if let Err(e) = ran {
-            return Err(refused(super::FORWARD_FAILED, e));
-        }
-        if copies != 0 {
-            return Err(refused(
-                "a host-to-device copy inside the capture",
-                format!("{copies} copies"),
-            ));
-        }
-        if let Err(e) = recorded {
-            return Err(refused("a CUDA call failed inside the capture", e));
+    /// One step's capture, group by group. Dropping it mid-capture (an error
+    /// or a panic in the forward) ends the capture and discards it: a stream
+    /// left capturing refuses everything after.
+    pub(crate) struct Session<'a> {
+        dev: &'a candle_core::CudaDevice,
+        execs: &'a mut Vec<Option<Exec>>,
+        group: usize,
+        copies_before: u64,
+        capturing: bool,
+        refusal: Option<Refusal>,
+        all_updated: bool,
+    }
+
+    impl Session<'_> {
+        fn begin(&mut self) -> Result<(), Refusal> {
+            let stream = self.dev.cuda_stream();
+            let ctx = stream.context();
+            ctx.bind_to_thread()
+                .map_err(|e| refused("could not bind the context", e))?;
+            // An error some earlier drop recorded is not this capture's: take
+            // it now, so the check at the end sees only what happened inside.
+            if let Err(e) = ctx.check_err() {
+                tracing::debug!(error = %e, "a CUDA error recorded before the capture began");
+            }
+            self.copies_before = htod_copies_so_far();
+            // THREAD_LOCAL: only this thread's unsafe calls break the capture,
+            // so another thread reading the card's free memory does not.
+            // SAFETY: a live stream cudarc created for this device.
+            unsafe {
+                result::stream::begin_capture(
+                    stream.cu_stream(),
+                    sys::CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_THREAD_LOCAL,
+                )
+            }
+            .map_err(|e| refused("could not begin a capture", e))?;
+            self.capturing = true;
+            Ok(())
         }
 
-        let updated = exec.as_ref().is_some_and(|x| {
-            // SAFETY: zeroed is a valid bit pattern for this plain C struct,
-            // and the driver writes it before returning.
-            let mut info: sys::CUgraphExecUpdateResultInfo = unsafe { std::mem::zeroed() };
-            // SAFETY: both handles are live.
-            unsafe { sys::cuGraphExecUpdate_v2(x.0, graph.0, &mut info) }
-                .result()
-                .is_ok()
-        });
-        if !updated {
-            // A refused update leaves the old graph in an unspecified state:
-            // replace it, as llama.cpp does.
-            *exec = None;
-            let mut raw: sys::CUgraphExec = std::ptr::null_mut();
-            // SAFETY: `graph` is a complete captured graph; flags 0.
-            unsafe { sys::cuGraphInstantiateWithFlags(&mut raw, graph.0, 0) }
-                .result()
-                .map_err(|e| refused("could not instantiate the graph", e))?;
-            *exec = Some(Exec(raw));
+        /// End the current group's capture, update (or build) its graph, launch it.
+        fn end_and_launch(&mut self) -> Result<(), Refusal> {
+            let stream = self.dev.cuda_stream();
+            let ctx = stream.context();
+            self.capturing = false;
+            // SAFETY: the stream this thread began capturing.
+            let ended = unsafe { result::stream::end_capture(stream.cu_stream()) };
+            let copies = htod_copies_so_far().wrapping_sub(self.copies_before);
+            // A buffer dropped inside a broken capture records its failed free
+            // on the context, where it would surface as the error of some
+            // later, unrelated call. Take it here, where it belongs.
+            let recorded = ctx.check_err();
+            let graph = match ended {
+                Ok(g) if !g.is_null() => Graph(g),
+                Ok(_) => return Err(refused("the capture was invalidated", "")),
+                Err(e) => return Err(refused("the capture ended with an error", e)),
+            };
+            if copies != 0 {
+                return Err(refused(
+                    "a host-to-device copy inside the capture",
+                    format!("{copies} copies"),
+                ));
+            }
+            if let Err(e) = recorded {
+                return Err(refused("a CUDA call failed inside the capture", e));
+            }
+            if self.execs.len() <= self.group {
+                self.execs.resize_with(self.group + 1, || None);
+            }
+            let slot = &mut self.execs[self.group];
+            let updated = slot.as_ref().is_some_and(|x| {
+                // SAFETY: zeroed is a valid bit pattern for this plain C
+                // struct, and the driver writes it before returning.
+                let mut info: sys::CUgraphExecUpdateResultInfo = unsafe { std::mem::zeroed() };
+                // SAFETY: both handles are live.
+                unsafe { sys::cuGraphExecUpdate_v2(x.0, graph.0, &mut info) }
+                    .result()
+                    .is_ok()
+            });
+            if !updated {
+                // A refused update leaves the old graph in an unspecified
+                // state: replace it, as llama.cpp does.
+                *slot = None;
+                let mut raw: sys::CUgraphExec = std::ptr::null_mut();
+                // SAFETY: `graph` is a complete captured graph; flags 0.
+                unsafe { sys::cuGraphInstantiateWithFlags(&mut raw, graph.0, 0) }
+                    .result()
+                    .map_err(|e| refused("could not instantiate the graph", e))?;
+                *slot = Some(Exec(raw));
+                self.all_updated = false;
+            }
+            let x = slot.as_ref().expect("set just above");
+            // SAFETY: a live exec, launched on the stream it was captured from.
+            if let Err(e) = unsafe { result::graph::launch(x.0, stream.cu_stream()) } {
+                *slot = None;
+                return Err(refused("the graph would not launch", e));
+            }
+            Ok(())
         }
-        let x = exec.as_ref().expect("set just above");
-        // SAFETY: a live exec, launched on the stream it was captured from.
-        if let Err(e) = unsafe { result::graph::launch(x.0, stream.cu_stream()) } {
-            *exec = None;
-            return Err(refused("the graph would not launch", e));
+
+        /// End a capture without launching it.
+        fn abandon(&mut self) {
+            if !self.capturing {
+                return;
+            }
+            self.capturing = false;
+            let stream = self.dev.cuda_stream();
+            // SAFETY: the stream this thread began capturing.
+            if let Ok(g) = unsafe { result::stream::end_capture(stream.cu_stream()) } {
+                if !g.is_null() {
+                    drop(Graph(g));
+                }
+            }
+            let _ = stream.context().check_err();
         }
-        Ok(updated)
+
+        pub(super) fn cut(&mut self) -> Result<(), SwarmError> {
+            if self.refusal.is_none() {
+                let next = self.end_and_launch().and_then(|()| {
+                    self.group += 1;
+                    self.begin()
+                });
+                match next {
+                    Ok(()) => return Ok(()),
+                    Err(r) => {
+                        self.abandon();
+                        self.refusal = Some(r);
+                    }
+                }
+            }
+            Err(SwarmError::Internal(super::GROUP_REFUSED.to_string()))
+        }
+    }
+
+    impl Drop for Session<'_> {
+        fn drop(&mut self) {
+            self.abandon();
+        }
+    }
+
+    /// `Ok(true)` when every group's graph was updated in place, `Ok(false)`
+    /// when at least one had to be built.
+    pub(super) fn capture_in_groups(
+        dev: &candle_core::CudaDevice,
+        execs: &mut Vec<Option<Exec>>,
+        forward: impl FnOnce(&mut super::Cutter<'_>) -> Result<(), SwarmError>,
+    ) -> Result<bool, Refusal> {
+        let mut session = Session {
+            dev,
+            execs,
+            group: 0,
+            copies_before: 0,
+            capturing: false,
+            refusal: None,
+            all_updated: true,
+        };
+        session.begin()?;
+        let mut cutter = super::Cutter { session };
+        let ran = forward(&mut cutter);
+        let mut session = cutter.session;
+        if let Some(r) = session.refusal.take() {
+            return Err(r);
+        }
+        if let Err(e) = ran {
+            session.abandon();
+            return Err(refused(super::FORWARD_FAILED, e));
+        }
+        session.end_and_launch()?;
+        Ok(session.all_updated)
     }
 }
 

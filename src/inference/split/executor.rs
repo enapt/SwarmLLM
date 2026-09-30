@@ -35,6 +35,12 @@ fn window_overflow_is_a_finished_reply(seq_len: usize, index_pos: usize) -> bool
     seq_len == 1 && index_pos > 0
 }
 
+/// Called after each layer of a forward with the layer's index (within the
+/// segment) and the residual stream, which it hands back — possibly moved.
+/// A CUDA graph capture uses it to launch the step in groups
+/// (`forward_decode_as_graph`); every other forward passes `None`.
+type LayerEndHook<'a> = Option<&'a mut dyn FnMut(usize, Residual) -> Result<Residual, SwarmError>>;
+
 impl SplitModel {
     /// Build an ADDITIVE causal mask: `0.0` where a query may attend, `-inf`
     /// where it may not.
@@ -483,6 +489,7 @@ impl SplitModel {
                 skip_embedding,
                 all_positions,
                 skip_mask,
+                None,
             )
         })
     }
@@ -579,6 +586,7 @@ impl SplitModel {
                     skip_embedding,
                     all_positions,
                     None,
+                    None,
                 )?;
                 graph.note_uncaptured(all_positions, &out);
                 return Ok(out);
@@ -591,7 +599,30 @@ impl SplitModel {
         let input = input.to_device(&device).map_err(SwarmError::internal)?;
         let (shape, dtype) = template;
         let out = Tensor::zeros(shape, dtype, &device).map_err(SwarmError::internal)?;
-        let captured = graph.capture(&device, || {
+        let boundaries = graph.boundaries(&device, self.hidden_dim)?;
+        let per_group = crate::inference::cuda_graph::group_layers();
+        let num_layers = self.layers.len();
+        let captured = graph.capture(&device, |cutter| {
+            // Every `per_group` layers: park the residual stream in memory
+            // made outside the capture, launch what is recorded, and carry on
+            // recording from the parked copy — so the card runs this group
+            // while the next is recorded. The sum a layer leaves pending is
+            // taken here (one add) rather than fused into the next norm.
+            let mut crossed = 0usize;
+            let mut at_layer_end = |layer_idx: usize, hidden: Residual| {
+                if !(layer_idx + 1).is_multiple_of(per_group) || layer_idx + 1 >= num_layers {
+                    return Ok(hidden);
+                }
+                let parked = &boundaries[crossed % 2];
+                crossed += 1;
+                let value = hidden.into_tensor().map_err(SwarmError::internal)?;
+                parked
+                    .slice_set(&value, 0, 0)
+                    .map_err(SwarmError::internal)?;
+                drop(value);
+                cutter.cut()?;
+                Ok(Residual::Ready(parked.clone()))
+            };
             let (step, _) = self.forward_inner_body(
                 &input,
                 index_pos,
@@ -602,6 +633,7 @@ impl SplitModel {
                 skip_embedding,
                 all_positions,
                 None,
+                Some(&mut at_layer_end),
             )?;
             // The step's own output is graph memory, freed inside the graph
             // when `step` drops at the end of this closure; `out` was made
@@ -625,6 +657,7 @@ impl SplitModel {
             skip_embedding,
             all_positions,
             None,
+            None,
         )?;
         graph.note_uncaptured(all_positions, &out);
         Ok(out)
@@ -642,6 +675,7 @@ impl SplitModel {
         skip_embedding: bool,
         all_positions: bool,
         skip_mask: Option<&[bool]>,
+        mut at_layer_end: LayerEndHook<'_>,
     ) -> Result<(Tensor, HashMap<usize, Tensor>), SwarmError> {
         // Skip the clock_gettime syscall when DEBUG tracing is off — fires per
         // token per layer-forward, and the elapsed time is consumed only by
@@ -1132,6 +1166,9 @@ impl SplitModel {
                         captured.insert(abs_layer, taken.clone());
                         hidden = Residual::Ready(taken);
                     }
+                }
+                if let Some(hook) = at_layer_end.as_mut() {
+                    hidden = hook(layer_idx, hidden)?;
                 }
             }
             Ok(hidden)

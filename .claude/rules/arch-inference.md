@@ -257,8 +257,13 @@ would name.
 **`inference::cuda_graph` + `SplitModel::forward_decode_as_graph`** re-capture a
 one-position forward every token and update one instantiated graph in place
 (llama.cpp's way) — `SWARMLLM_CUDA_OWN_STREAM=1 SWARMLLM_CUDA_GRAPH=1`, OFF by
-default. Replies byte-identical; +48% TinyLlama, +18% Llama 3.2 3B, none on an 8B
-(card-bound: a graph launches nothing until the step is recorded). ⛔ **A pageable
+default. **Recorded in groups of two layers, each launched as soon as it is recorded**
+(`cuda_graph::group_layers`, `Cutter::cut` via the forward's per-layer hook), so the card runs
+one group while the next is recorded — a whole-step graph left it idle for all 4.5 ms of recording
+and gained nothing on a 7B. Replies byte-identical; TinyLlama 126-135 → 226-229 tok/s, 3B 80-90 →
+105-106, Qwen2.5-Coder-7B 49-51 → 56-57 (llama.cpp 57.5), Llama 3.1 8B 50-51 → 55. Only the
+residual stream crosses a group boundary, parked in `DecodeGraph::boundaries` (made outside every
+capture). ⛔ **A pageable
 host→device copy inside a capture is ACCEPTED and replayed from the host address
 at LAUNCH** — silent garbage. So vendored candle counts every copy
 (`htod_copies_so_far`), a capture that made one is thrown away, and a new

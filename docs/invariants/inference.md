@@ -2163,3 +2163,29 @@ between kernels: fused gate+up+GLU and bias in the matvec, and CUDA graphs. Ours
 graph step shows `recording_ms_per_launch` ≈ 4.5 ms against a 20.8 ms cycle, i.e. **~16 ms of card
 time** against ~19.8 op by op; the recording is what eats the gain. Next: record layer groups and
 launch each as it is recorded, so the card never waits for the recording.
+
+## A decode step's graph is recorded in groups, launched as it is recorded (2026-09-30)
+
+The whole-step graph above cut ~4 ms of card-side gaps from a 7B token and then spent the same
+recording it with the card idle (`recording_ms_per_launch` 4.5 of a 20.8 ms cycle). So the forward
+is now recorded in groups of `cuda_graph::group_layers()` layers (default 2,
+`SWARMLLM_CUDA_GRAPH_GROUP`, 0 = whole step): at every group boundary the forward's per-layer hook
+(`LayerEndHook`, `SplitModel::forward_inner_body`) resolves the residual stream into one of two
+buffers made outside every capture (`DecodeGraph::boundaries`, alternating), and `Cutter::cut` ends
+the capture, updates that group's own exec and launches it, then begins the next. Only the card's
+first group waits for recording. A refusal after some groups ran is safe for the same reason a
+refusal was before: those groups wrote this position's KV, the host-side lengths are cut back, and
+the ordinary rerun writes the same positions again.
+
+Measured 2026-09-30 (one binary, interleaved arms, isolated node, greedy, 3 prompts × 256; tok/s):
+
+| model | ordinary | 1 layer | **2 layers** | 4 layers | whole step |
+|---|---|---|---|---|---|
+| TinyLlama 1.1B | 126-135 | 222-230 | **226-229** | 217-221 | — |
+| Llama 3.2 3B | 80-90 | 105-106 | **106** | 103 | — |
+| Qwen2.5-Coder-7B | 49-51 | 56.5-56.7 | **56.2-57.2** | 55.9-56.2 | 46.1-47.9 |
+| Llama 3.1 8B | 50-51 | 54.7-55.1 | **54.8-54.9** | 54.5-54.8 | — |
+
+Replies byte-identical to the ordinary path in all 12 graph arms (the boundary add is the same
+IEEE add the fused norm does); 0 refusals. llama.cpp in the same binary on the same card and file:
+57.5-57.7 on the Qwen 7B — parity.

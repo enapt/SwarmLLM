@@ -4241,6 +4241,15 @@ residual add) into custom kernels; reuse activation buffers across layers to cut
 the allocation share; CUDA graph capture, which is the biggest but needs
 deterministic allocation addresses that candle does not currently give.
 
+**Update 2026-09-30 — the last clause turned out not to hold.** Graph capture needs no stable
+addresses: re-capturing every token and updating the instantiated graph in place (llama.cpp's
+way) turns candle's per-op allocations into the graph's own memory nodes, and the update accepts
+their sizes changing. Built opt-in as `SWARMLLM_CUDA_OWN_STREAM=1 SWARMLLM_CUDA_GRAPH=1`
+(`inference::cuda_graph`), recorded two layers per graph so the card runs one group while the next
+is recorded: TinyLlama 126-135 → 226-229 tok/s, Llama 3.2 3B 80-90 → 105-106, Qwen2.5-Coder-7B
+49-51 → 56-57 (llama.cpp: 57.5 on the same card), Llama 3.1 8B 50-51 → 55. Replies byte-identical.
+→ `docs/invariants/inference.md` § "A decode step can go to the card as one CUDA graph".
+
 **Two things checked on 2026-08-23 that shrink this considerably.** `rms_norm`
 is ALREADY fused — `candle_transformers::quantized_nn::RmsNorm::forward` calls
 `candle_nn::ops::rms_norm`, which has a CUDA kernel — so that 0.8 ms bucket is
