@@ -88,7 +88,7 @@ until readers leave (#90's shape); `clippy.toml` fails the build on one.
 ## Testing
 
 **Always say which feature set a count came from.** With
-`--features dev,claude-subscription`: **3123 lib** (+15 ignored),
+`--features dev,claude-subscription`: **3126 lib** (+15 ignored),
 79 integration (31 + 34 + 14 `yamux_substream`), **187 repo-consistency**,
 1 `api_key_side_effects`, 56 `swarmllm-types`, and 11 in the vendored
 request-response patch — plus 17 in the `swarmllm` BIN target (`cli::*`, counted
@@ -160,8 +160,8 @@ drift to a 2nd-choice word; `4fac99bf`). .213 brought card decode as CUDA graphs
 prompts ~1.5×, a split's per-token overhead cut (~80% of local), split speculation with an in-engine small drafter ON
 by default (`pipeline::engine_drafter`; γ = 0 where guessing does not pay). Gate record: `memory/release_gate.md`.
 The drafter is a pool GUEST (#747); attempt-scoped state is never keyed by the request id, which retries reuse (#749).
-Split checks can STREAM (`pipeline::dsd_stream`, opt-in `SWARMLLM_SPEC_STREAM=1`; the flip waits on a TH↔BE A/B,
-FUTURE_WORK #149): +15-21% with the far half on other hardware. ⚠ **A rig sharing ONE card reads it ~15% SLOWER** (#759).
+Split checks STREAM by default from v0.3.215 (`pipeline::dsd_stream`, `SWARMLLM_SPEC_STREAM=0` = rounds): +20-57% over
+rounds TH↔IT with a far PROCESSOR (FUTURE_WORK #149). ⚠ **A rig sharing ONE card reads it ~15% SLOWER** (#759).
 **Why split decode is slow and what beats it → `docs/plans/faster_than_local.md`; the speculation plan and its
 measurements → `docs/plans/split_speculation.md`.** ⛔ **No design may need a user to hold the whole model, not even a
 low-bit copy** (user, 2026-09-28) → parallelize the REPLY, not the token: `docs/plans/wan_parallel.md`.

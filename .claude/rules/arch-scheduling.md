@@ -307,7 +307,9 @@ the same path) where guessing costs more than the round trips it saves — Smart
 could not before, and DSD ran a near split at 6.8 tok/s against 38-42 plain. What a request
 learned is handed to the next on the same model and machines (`recall` / `remember`), and the
 drafter's cold first call never counts as a guess's cost. A new speculating path gets a way to
-stop guessing, or it is only safe over long links.
+stop guessing, or it is only safe over long links. **The continuous stream (on by default since
+v0.3.215) walks no γ**: it remembers `best_gamma_overall` over the costs it measured, so a zero
+still steps the next request aside — it remembered its starting 4 until the flip (2026-10-01).
 
 → `docs/plans/split_speculation.md` § "Guessing steps aside where it does not pay"
 

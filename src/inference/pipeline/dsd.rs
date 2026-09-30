@@ -65,7 +65,7 @@ use super::speculative::{
 };
 use super::PipelineExecutor;
 use crate::inference::dsd_controller::{
-    best_gamma_for_check, AcceptanceEstimate, CheckCost, BEST_GAMMA_MAX,
+    best_gamma_for_check, best_gamma_overall, AcceptanceEstimate, CheckCost, BEST_GAMMA_MAX,
 };
 
 /// Which model guesses for this request.
@@ -373,8 +373,9 @@ impl PipelineExecutor {
         // The continuous stream (`dsd_stream`): where every segment but the far
         // one is this node's own and that peer serves a stream, the next chunk
         // of guesses goes out while the last is still being checked, instead
-        // of the rounds below waiting a whole round trip between them.
-        // Opt-in until measured over a real link: `SWARMLLM_SPEC_STREAM=1`.
+        // of the rounds below waiting a whole round trip between them. On by
+        // default since it was measured over a real link (TH↔IT, 2026-10-01:
+        // +20-57% over rounds); `SWARMLLM_SPEC_STREAM=0` keeps the rounds.
         let mut streamed = false;
         if let Drafter::Engine(engine) = &mut drafter {
             let tail = super::dsd_stream::stream_requested()
@@ -407,6 +408,19 @@ impl PipelineExecutor {
                 )
                 .await?;
                 streamed = true;
+                // The stream guesses a fixed chunk and walks no γ, so what the
+                // next request on these machines starts from is the rounds'
+                // verdict on the costs it measured — zero steps it aside, as
+                // for rounds ("Speculation that does not pay steps aside").
+                if let Some(each) = draft_cost.median() {
+                    gamma_now = best_gamma_overall(
+                        acceptance.alpha(),
+                        &check,
+                        each,
+                        gamma_now,
+                        BEST_GAMMA_MAX,
+                    );
+                }
             }
         }
 

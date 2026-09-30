@@ -74,15 +74,26 @@ fn knob(name: &str, default: u32, max: u32) -> u32 {
         .map_or(default, |v| v.clamp(1, max))
 }
 
-/// `SWARMLLM_SPEC_STREAM=1` streams a coordinator's checks; without it split
-/// speculation runs in rounds. OFF by default until it is measured between two
-/// graphics cards over a real link: every rig on one machine either shares the
-/// card between the halves, which measures the stream's cost (gotcha #759), or
-/// puts the far half on the processor. The SERVING side is always on, so a
-/// coordinator that opts in can stream to any node on this version.
+/// Whether a coordinator streams its checks: ON unless `SWARMLLM_SPEC_STREAM=0`
+/// (or `off` / `false`), which keeps the rounds. Measured over a real link on
+/// 2026-10-01 — this node's card holding the near half, a processor in Italy
+/// the far half, ~270 ms apart, the release binary with the switch as the only
+/// difference: +20% / +51% / +57% decode over rounds on prose, an explanation
+/// and code (+25-133% at temperature 0.7), replies scored against llama.cpp
+/// like the rounds' and plain decoding's. A rig with both halves on ONE card
+/// reads it ~15% slower (gotcha #759) — two processes contending for one
+/// device, not a deployment. Where guessing does not pay at all, a streamed
+/// request remembers the rounds' verdict of zero and the next one steps aside
+/// (`dsd_controller::best_gamma_overall`). The SERVING side has been on since
+/// v0.3.213; an older far node advertises no `STREAMED_VERIFY` and gets rounds.
 pub(super) fn stream_requested() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var("SWARMLLM_SPEC_STREAM").as_deref() == Ok("1"))
+    *ON.get_or_init(|| stream_switch(std::env::var("SWARMLLM_SPEC_STREAM").ok().as_deref()))
+}
+
+/// The switch's reading, apart from its `OnceLock` so a test can ask it twice.
+fn stream_switch(v: Option<&str>) -> bool {
+    !matches!(v, Some("0") | Some("off") | Some("false"))
 }
 
 /// The segment a stream's chunks go to: the request's LAST segment, when every
@@ -645,5 +656,19 @@ impl StreamRun<'_, '_> {
             // A chunk without a look-ahead had nothing built after it.
             None => Taken::Continue,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_stream_is_on_unless_switched_off() {
+        assert!(stream_switch(None));
+        assert!(stream_switch(Some("1")));
+        assert!(!stream_switch(Some("0")));
+        assert!(!stream_switch(Some("off")));
+        assert!(!stream_switch(Some("false")));
     }
 }

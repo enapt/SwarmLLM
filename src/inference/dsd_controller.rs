@@ -130,10 +130,45 @@ pub fn best_gamma_for_check(
     let Some((fixed, slope)) = check.fit() else {
         return current;
     };
-    let each = draft_ms_each.max(0.0);
     let lo = current.saturating_sub(GAMMA_STEP);
     let hi = (current + GAMMA_STEP).min(max).max(lo);
-    (lo..=hi)
+    best_in(lo..=hi, alpha, fixed, slope, draft_ms_each)
+}
+
+/// [`best_gamma_for_check`] over the WHOLE range `0..=max` — for a request that
+/// measured its costs without walking γ: a streamed one (`pipeline::dsd_stream`)
+/// guesses a fixed chunk and never moves γ itself, so what it remembers
+/// (`remember`) must be the rounds' verdict on those costs, or a split where
+/// guessing does not pay would stream guesses for ever — zero is what makes the
+/// next request on the same machines step aside (`steps_aside`; before zero
+/// existed, guessing ran 6× slower than plain on a near split, FUTURE_WORK #140).
+/// `fallback` before any check was timed.
+pub fn best_gamma_overall(
+    alpha: f64,
+    check: &CheckCost,
+    draft_ms_each: f64,
+    fallback: u32,
+    max: u32,
+) -> u32 {
+    match check.fit() {
+        Some((fixed, slope)) => best_in(0..=max.max(1), alpha, fixed, slope, draft_ms_each),
+        None => fallback.min(max.max(1)),
+    }
+}
+
+/// The γ in `range` with the most tokens per millisecond: a round costs the
+/// fitted check over γ + 1 positions plus `draft_ms_each` per guess. Ties go
+/// to the smaller γ.
+fn best_in(
+    range: std::ops::RangeInclusive<u32>,
+    alpha: f64,
+    fixed: f64,
+    slope: f64,
+    draft_ms_each: f64,
+) -> u32 {
+    let each = draft_ms_each.max(0.0);
+    let lo = *range.start();
+    range
         .map(|g| {
             let cost = (fixed + slope * f64::from(g + 1)).max(0.1) + each * f64::from(g);
             (g, expected_tokens_per_round(alpha, g) / cost)
@@ -309,6 +344,40 @@ mod tests {
             g = best_gamma_for_check(0.7, &check, 30.0, g, BEST_GAMMA_MAX);
         }
         assert!(g >= 2, "a 500 ms check with 30 ms drafts: {g}");
+    }
+
+    /// A streamed request walks no γ; what it remembers comes from the whole
+    /// range at once. From the stream's default of 4 a near split must reach
+    /// zero in ONE step — `best_gamma_for_check` moves at most `GAMMA_STEP` —
+    /// and a long link must keep guessing.
+    #[test]
+    fn a_streamed_request_remembers_the_verdict_over_the_whole_range() {
+        // Near: the 2026-09-29 split (25 ms checks, a processor drafter at 170 ms).
+        let mut near = CheckCost::default();
+        for p in [1, 2, 3, 3, 2, 1, 3] {
+            near.record(p, 25.0 + 0.5 * f64::from(p));
+        }
+        assert_eq!(best_gamma_overall(0.68, &near, 170.0, 4, BEST_GAMMA_MAX), 0);
+        assert!(
+            best_gamma_for_check(0.68, &near, 170.0, 4, BEST_GAMMA_MAX) > 0,
+            "the step-wise search cannot reach zero from 4 in one call — why this exists"
+        );
+        // Far: TH↔IT measured 2026-10-01 (checks ~330 ms fixed + ~22 ms a
+        // position, 8 ms guesses on the card, α ≈ 0.68).
+        let mut far = CheckCost::default();
+        for p in [4, 4, 3, 4, 2, 4] {
+            far.record(p, 330.0 + 22.0 * f64::from(p));
+        }
+        assert!(best_gamma_overall(0.68, &far, 8.0, 4, BEST_GAMMA_MAX) >= 2);
+        // Nothing timed: the stream's own starting point, clamped.
+        assert_eq!(
+            best_gamma_overall(0.7, &CheckCost::default(), 8.0, 4, 16),
+            4
+        );
+        assert_eq!(
+            best_gamma_overall(0.7, &CheckCost::default(), 8.0, 40, 16),
+            16
+        );
     }
 
     #[test]

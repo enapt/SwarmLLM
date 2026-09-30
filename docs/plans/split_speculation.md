@@ -524,9 +524,9 @@ before building 4e** — the near machine of a split that exists for memory
 reasons has no room for a shadow, so 4b (which works with ANY drafter) and a
 small drafter from the shard system now come first.
 
-**4b built 2026-09-30 (`pipeline::dsd_stream`; opt-in on the coordinator with
-`SWARMLLM_SPEC_STREAM=1` for v0.3.213, every node serving one — the default flips once
-it is measured between two cards over a real link, TH↔BE).** Where every segment but the far one is the coordinator's own and the
+**4b built 2026-09-30 (`pipeline::dsd_stream`; opt-in for v0.3.213-214, every node serving
+one; ON by default since v0.3.215 — `SWARMLLM_SPEC_STREAM=0` keeps the rounds — after the
+real-link A/B below).** Where every segment but the far one is the coordinator's own and the
 far peer advertises `features::STREAMED_VERIFY`, the next chunk is drafted, run
 through the near layers and sent while earlier ones are still out. What the build
 changed from the design above:
@@ -569,8 +569,34 @@ mirror is caught up before a step is recorded). After the fix, streamed replies 
 like the rounds': worst rank 2, largest gaps 0.156 / 0.074 / 0.113 — and the stream
 runs 24-26 tok/s on the shared card (was 17-25), since its graphs are no longer given up.
 
-**Open** (FUTURE_WORK #149): the default flip after a TH↔BE measurement on v0.3.214+,
-a window sized from the round trip, the 4e saving (the drafter's near layers as the verify input) and
+**Measured over a real link, 2026-10-01** (`~/swarmllm-wan-1001/`): the .214 release binary as
+coordinator, this node's RTX 3070 holding L0-14 of Qwen2.5-Coder-7B plus the 0.5B drafter, a
+PROCESSOR node in Italy (4a3ac72e, ~270 ms) holding L14-28 — Belgium's RTX 4050 now holds only
+other builds of every shared model, so no two-card split was possible. 128-token replies, one
+request at a time, decode tok/s on prose / an explanation / code:
+
+| arm | prose | explanation | code |
+|---|---|---|---|
+| plain split | 2.54 | 2.56 | 2.52 |
+| rounds (two runs) | 4.11-4.57 | 5.08-5.61 | 7.23-8.56 |
+| stream, window 3 (two runs) | 5.09-5.28 | 8.00-8.12 | 11.96-12.82 |
+| stream, window 6 | 4.85 | 8.50 | 14.62 |
+| rounds, T = 0.7 | 4.41 | 5.50 | 5.67 |
+| stream, T = 0.7 | 5.53 | 7.44 | 13.20 |
+
+The stream is +20% / +51% / +57% over the rounds greedy, more at T = 0.7; every greedy reply
+scores against llama.cpp like plain decoding's (worst rank 2 on the prose, the same largest
+gap). A far PROCESSOR gains more than the shared-card rig suggested because its per-position
+cost (~22 ms) is what the stream keeps busy. A window of 6 pays only where acceptance is high
+(code +18%, prose −7%): the default stays 3. **Flipped ON for v0.3.215**, with one fix the
+flip needed: a streamed request walked no γ and remembered its starting 4, so a split where
+guessing does not pay would never step aside — it now remembers
+`dsd_controller::best_gamma_overall` over the costs it measured. On a near split (one card, 0 ms, plain 54
+tok/s) the fixed build read 38.6 then 53.6 / 53.9 — the first streamed request learned γ = 0 and the rest
+stepped aside — where the unfixed stream read 28.3 / 27.0 / 38.4 with every request streamed.
+
+**Open** (FUTURE_WORK #149): the two-card measurement (TH↔BE) once a same-build split
+exists, a window sized from acceptance × round trip, the 4e saving (the drafter's near layers as the verify input) and
 cancelling a stale chunk the far node has already STARTED — the gate skips only
 chunks not yet run, because running two forwards of one request at a worker at
 once would route one's reply to the other (gotcha #180); a far node on its
