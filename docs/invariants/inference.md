@@ -2194,3 +2194,10 @@ Measured 2026-09-30 (one binary, interleaved arms, isolated node, greedy, 3 prom
 Replies byte-identical to the ordinary path in all 12 graph arms (the boundary add is the same
 IEEE add the fused norm does); 0 refusals. llama.cpp in the same binary on the same card and file:
 57.5-57.7 on the Qwen 7B — parity.
+
+**On a split too** (2026-09-30, `~/swarmllm-graph-0929/split_graph.sh`): Qwen2.5-Coder-7B over two
+nodes on the one card (`split_rig.sh repeat`, REPEAT=10, two interleaved rounds, median tok/s of
+the standard loop): legacy stream 27.7, own stream without graphs 27.3, **own stream + graphs
+35.7 (+29%)**. The own stream alone costs a split nothing; each segment's forward is captured on
+its own node (the pre-embedded path goes through the same entry). ⚠ A two-request run cannot see
+this (the default-flip gate's first split step read "no change" from two samples).

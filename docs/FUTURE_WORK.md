@@ -16273,6 +16273,10 @@ tensor cores". Rule: `arch-inference.md` § the same.
 `docs/DIAGNOSTICS.md` § "Where a split's token goes". Two nodes on this machine, both on the one
 card, ~0 ms of network: 25-27 → 38-42 tok/s against 50 local.
 
+**2026-09-30: CUDA-graph decode (now the default) lifts this rig's split +29%** — 27.7 → 35.7
+tok/s median on the same day (the day's legacy baseline read ~27-28, not yesterday's 38-42: note
+the host's uptime, #755). Local decode rose more (to ~61), so the split's share of local fell.
+
 **Open, in order:**
 1. **What each segment spends after its forward** — 3.6 ms on a first segment (the card
    finishing the launched work, the hidden state to the host, Q8 encode) and 5.3 ms on the tail
