@@ -1,5 +1,42 @@
 # Changelog
 
+## [0.3.215-alpha] — 2026-10-01
+
+**A model split across computers answers 20-57% faster over long distances, and a
+Windows computer running SwarmLLM under WSL now says when it needs a restart.**
+
+**Split replies stream their guess-checks by default.** When a model is split
+between this computer and another one far away, a small model guesses the next
+few words and the far computer checks them. Until now each batch of guesses
+waited for the previous check to come back; now the next batch is sent while
+the last is still being checked. Measured between Thailand and a computer in
+Italy (~270 ms apart, the far half on a processor), 128-word replies:
+
+| | plain split | before (rounds) | now (stream) |
+|---|---|---|---|
+| a short story | 2.5 | 4.1-4.6 | 5.1-5.3 |
+| an explanation | 2.6 | 5.1-5.6 | 8.0-8.1 |
+| code | 2.5 | 7.2-8.6 | 12.0-12.8 |
+
+(tokens per second). Replies were checked against llama.cpp and match the
+model's own choices as closely as plain decoding does. Where guessing does not
+pay — two computers very close together — the stream now learns that and stops
+guessing on the next request, as the rounds already did. `SWARMLLM_SPEC_STREAM=0`
+switches back to rounds.
+
+**A warning when the graphics card has become slow.** On Windows, a graphics
+card used from WSL gets slower at setting aside memory the longer Windows runs
+without a restart — about a thousand times slower after two days on the test
+machine, which then crashed twice under load. Only restarting Windows fixes it
+(a known, open WSL issue). Each time SwarmLLM starts using the card it now
+measures this once, logs it, and if it has become slow shows a notice asking
+you to restart Windows (at most every 12 hours). It changes nothing else about
+what SwarmLLM does.
+
+Who is affected: everyone running a model split across computers gets the
+faster replies once both ends run v0.3.213 or later; the restart notice appears
+only for Windows users running SwarmLLM under WSL whose card has slowed.
+
 ## [0.3.214-alpha] — 2026-09-30
 
 **Fixes replies of a model split across computers drifting slightly from the
