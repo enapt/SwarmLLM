@@ -439,7 +439,18 @@ impl Map1 for IndexSelect<'_> {
         };
         let ids_shape = ids_l.shape();
         let ids_dims = ids_shape.dims();
-        let ds = dev.clone_htod(&[ids_dims, ids_l.stride()].concat())?;
+        // SwarmLLM patch: no layout upload for contiguous ids. The kernel reads
+        // `info` only to ask `is_contiguous`, and with zero dims the answer is
+        // yes without a read — the same branch contiguous ids take anyway. The
+        // upload was a host→device copy on every dense embedding lookup, and a
+        // copy inside a CUDA graph capture is replayed from a freed host
+        // address (`device::HTOD_COPIES`); a split drafter's fp16 embedding
+        // was refused capture for it. Strided ids keep the upload, unchanged.
+        let ds = if ids_l.is_contiguous() {
+            None
+        } else {
+            Some(dev.clone_htod(&[ids_dims, ids_l.stride()].concat())?)
+        };
         let src = match src_l.contiguous_offsets() {
             Some((o1, o2)) => src.slice(o1..o2),
             None => Err(crate::Error::RequiresContiguous { op: "index-select" }.bt())?,
@@ -454,9 +465,18 @@ impl Map1 for IndexSelect<'_> {
         // SAFETY: Set later by running the kernel.
         let out = unsafe { dev.alloc::<T>(dst_el)? };
         let mut builder = func.builder();
+        let num_dims: usize = if ds.is_some() { ids_dims.len() } else { 0 };
+        let null_info: u64 = 0; // a null `const size_t*`, never read with zero dims
         barg!(builder, dst_el);
-        barg!(builder, ids_dims.len());
-        builder.arg(&ds);
+        builder.arg(&num_dims);
+        match &ds {
+            Some(ds) => {
+                builder.arg(ds);
+            }
+            None => {
+                builder.arg(&null_info);
+            }
+        }
         barg!(builder, ids);
         builder.arg(&src);
         builder.arg(&out);

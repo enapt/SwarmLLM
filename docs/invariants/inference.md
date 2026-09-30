@@ -2080,6 +2080,11 @@ at once, so a copy in a captured step is garbage, silently. Hence:
   whether the source is contiguous, and with zero dims `is_contiguous` says yes without reading.
   That was the one copy inside a decode step (the token id is made before the forward).
 - A hidden state arriving from a peer is moved to the card BEFORE the capture.
+- candle's `index_select` (every DENSE embedding lookup — an fp16 model such as the split drafter
+  Qwen2.5-0.5B) uploads no layout for contiguous ids either (2026-09-30): the default-flip gate
+  caught the drafter refused three times for "a host-to-device copy inside the capture" and giving
+  up — the safety net working as designed. After the patch: replies identical to the old binary
+  (3/3), captured with 0 refusals, 82-95 → 113-116 tok/s alone.
 
 **What else a capture must not do, and how each is kept out** (`local_decode_submissions.md`
 § Stage 4b): free memory made before it (a KV buffer that grows, a mirror a hydrated snapshot
