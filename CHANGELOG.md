@@ -1,5 +1,85 @@
 # Changelog
 
+## [0.3.213-alpha] — 2026-09-30
+
+**Models on a graphics card generate 9-75% faster — a 7B now matches llama.cpp on
+the same card — prompts are read about 1.5x faster, and a model split across
+computers is faster too: guessing ahead with a small model is now on by default.**
+
+**Faster on a graphics card.** Each generated token now goes to the card as a
+handful of CUDA graphs instead of several hundred separate submissions, on the
+card's own stream. Measured on an RTX 3070 Laptop, tokens per second:
+
+| model | before | now |
+|---|---|---|
+| TinyLlama 1.1B | 126-135 | 226-229 |
+| Llama 3.2 3B | 80-90 | 105-106 |
+| Qwen 2.5 Coder 7B | ~55 | 61 (llama.cpp on the same card and file: 62-63) |
+| Llama 3.1 8B | 50-51 | 55 |
+
+Attention for each generated token is now one kernel per layer. Prompts are read
+on the card's tensor cores — Llama 3.1 8B went from ~740 to ~1,150 prompt tokens
+per second, with similar gains on six other model families. Replies were checked
+against llama.cpp on every family. `SWARMLLM_CUDA_GRAPH=0` turns the graphs off,
+`SWARMLLM_CUDA_OWN_STREAM=0` goes back to the old stream, and
+`SWARMLLM_QMATMUL_CUBLAS=0` restores the old prompt kernel.
+
+**A model split across computers is faster.** Each computer in a split waited
+5 ms per token for other chats' work to batch with, even when there was none; it
+now waits only when another chat is actually running. A 7B split in two on one
+machine went from 25-27 to 38-42 tokens per second — about 80% of running it
+whole.
+
+**Guessing ahead is on by default.** When a model is split across computers and
+yours holds a small model of the same family (for Qwen2.5 models, Qwen2.5-0.5B),
+it guesses a few words ahead and the other computers check them in one round
+trip. Between Thailand and Belgium that measured 4.6-5.5 words per second instead
+of 2.3-2.7. Replies are the big model's own — a guess is kept only when the big
+model would have produced it. It uses only graphics memory that is free, and it
+stops guessing wherever that would not pay (computers close together, or a slow
+guessing model) — and remembers that for the next request. Guessing is also
+cheaper now: the small model's guesses stay on the graphics card between steps,
+and a batch of guesses is checked as one captured card submission. On an emulated
+link between two computers: 39-41 words per second at a 10 ms round trip (plain
+split 31), 30-33 at 24 ms (21), 21-22 at 50 ms (12). To switch it off:
+
+```toml
+[inference]
+decentralized_spec_decoding = false
+```
+
+**Checking guesses as a continuous stream — ready, not yet on.** Every computer
+on this version can now check a split's guesses as a stream: the next batch is
+sent while the last is still being checked, instead of one batch per round trip.
+Measured with the two halves on separate hardware, it was 15-21% faster than
+checking round by round. It stays off until it has been measured between two
+graphics cards over a real link; the computer running the request switches it on
+with `SWARMLLM_SPEC_STREAM=1`.
+
+**Fixed**
+- **A thinking model's reasoning now streams as it is written** (as
+  `reasoning_content`, the field llama.cpp's server uses) instead of arriving in
+  one block at the end. A reply that ends inside its thinking is reasoning, not
+  the answer. With tools requested, a brace in the thinking no longer holds the
+  whole answer back, and JSON sketched while thinking is no longer taken for a
+  tool call.
+- **A node no longer fills its disk with failed part downloads.** Leftovers were
+  only cleaned up at startup; a node that stayed up for days could fill its disk,
+  stop downloading, and be unable to fetch the update that fixed it. They are now
+  reclaimed every 10 minutes.
+- **A graphics card that starts stalling is given fewer chats at once, not more.**
+  On a laptop card under Windows + WSL2, a node kept accepting chats while each
+  step took seconds, until the whole machine hung. A step of 2 seconds or more now
+  halves how many chats the card runs at once; one comes back per quiet minute.
+  `SWARMLLM_CARD_PACE=0` turns this off.
+- **The graphics card keeps memory a chat frees** instead of handing it back to
+  the driver after every step, which on WSL2 grew ~1000x slower over two days of
+  Windows uptime. It is handed back after a minute idle so other programs see the
+  room. `SWARMLLM_CUDA_POOL_KEEP=0` restores the old behaviour.
+- **A node no longer overfills its graphics card when another program starts
+  using it.** It read the card's free memory at startup; it now reads it when it
+  decides.
+
 ## [0.3.212-alpha] — 2026-09-28
 
 **A model split between two distant computers can answer about twice as fast
