@@ -625,6 +625,24 @@ pub async fn run_worker(
 /// model the daemon wants to load, sees the room (`docs/FUTURE_WORK.md` #146).
 /// The pool is the device's, shared by every model this process holds on the
 /// card, so one trim covers them all.
+/// A pure-argmax verify's walk, from each row's argmax (`picks`, γ+1 of them):
+/// the drafts kept while each equals its row's pick, then the pick where they
+/// part — or the last row's, the bonus, after all of them. What
+/// `sampling::walk_verified_positions` returns for a greedy request with no
+/// penalties, from the picks alone (`the_argmax_walk_is_the_greedy_walk`).
+fn argmax_walk(drafts: &[u32], picks: &[u32]) -> Vec<u32> {
+    let mut kept = Vec::with_capacity(drafts.len() + 1);
+    for (i, &q) in drafts.iter().enumerate() {
+        if picks[i] != q {
+            kept.push(picks[i]);
+            return kept;
+        }
+        kept.push(q);
+    }
+    kept.push(picks[drafts.len()]);
+    kept
+}
+
 fn hand_back_idle_card_memory(models: &HashMap<(usize, usize, usize, usize), SplitModel>) {
     let Some(device) = models
         .values()
@@ -1814,6 +1832,55 @@ async fn handle_forward(
                 }
                 let seq_len = dims[1];
                 let vocab_size = dims[2];
+                // A pure-argmax walk — greedy, no penalties, no shared noise —
+                // is chosen on the card: the row's argmax IS what the sampler
+                // would pick (`sample_token_with_ctx`, temperature 0, penalties
+                // off), so only γ+1 token ids come back instead of every row
+                // (2.4 MB for four at a 152K vocabulary, plus a copy per row
+                // and a scan of each on the processor). The non-finite guard
+                // stays: one summed scalar, which any NaN or ±inf poisons.
+                if fwd.spec_walk_at_tail
+                    && output_t.device().is_cuda()
+                    && fwd.sampling.temperature <= 0.0
+                    && fwd.sampling.frequency_penalty == 0.0
+                    && fwd.sampling.presence_penalty == 0.0
+                    && fwd.coupling_seed.is_none()
+                {
+                    let total: f32 = output_t
+                        .sum_all()
+                        .and_then(|t| t.to_dtype(candle_core::DType::F32))
+                        .and_then(|t| t.to_scalar())
+                        .map_err(|e| format!("spec walk on the card: {e}"))?;
+                    if !total.is_finite() {
+                        return Err("spec walk: non-finite logits".into());
+                    }
+                    let picks: Vec<u32> = output_t
+                        .squeeze(0)
+                        .and_then(|t| t.argmax(candle_core::D::Minus1))
+                        .and_then(|t| t.to_vec1())
+                        .map_err(|e| format!("spec walk on the card: {e}"))?;
+                    if picks.len() != fwd.draft_tokens.len() + 1 {
+                        return Err(format!(
+                            "spec walk: {} positions verified for {} drafts",
+                            picks.len(),
+                            fwd.draft_tokens.len()
+                        ));
+                    }
+                    let token_ids = argmax_walk(&fwd.draft_tokens, &picks);
+                    return Ok(crate::types::LayerResult {
+                        request_id,
+                        token_ids,
+                        finish_reason: None,
+                        activations: vec![],
+                        sealed_token_ids: None,
+                        spec_logits: Vec::new(),
+                        matched_stop_sequence: None,
+                        token_logprobs: Vec::new(),
+                        locally_constructed: false,
+                        refusal: None,
+                        answers_step: None,
+                    });
+                }
                 let flat: Vec<f32> = output_t
                     .flatten_all()
                     .and_then(|t| t.to_dtype(candle_core::DType::F32))
@@ -5647,5 +5714,67 @@ mod lost_conversation_tests {
             ),
             "flattened to text, it must still read as ServiceUnavailable: {err}"
         );
+    }
+}
+
+#[cfg(test)]
+mod argmax_walk_tests {
+    use super::argmax_walk;
+
+    /// The card's walk from per-row argmaxes keeps what the processor's greedy
+    /// walk keeps, for every way a round can end: all kept, a mismatch at each
+    /// position, no drafts at all.
+    #[test]
+    fn the_argmax_walk_is_the_greedy_walk() {
+        let greedy = crate::types::SamplingParams {
+            temperature: 0.0,
+            ..Default::default()
+        };
+        let rows: Vec<Vec<f32>> = vec![
+            vec![0.1, 2.0, -1.0, 0.5],
+            vec![3.0, 0.0, 0.2, 0.1],
+            vec![-2.0, -1.0, 0.0, 4.0],
+            vec![0.0, 0.3, 1.5, 0.2],
+        ];
+        let picks: Vec<u32> = rows
+            .iter()
+            .map(|r| {
+                r.iter()
+                    .enumerate()
+                    .fold((0usize, f32::NEG_INFINITY), |b, (i, &x)| {
+                        if x > b.1 {
+                            (i, x)
+                        } else {
+                            b
+                        }
+                    })
+                    .0 as u32
+            })
+            .collect();
+        for drafts in [
+            vec![1u32, 0, 3],
+            vec![2, 0, 3],
+            vec![1, 1, 3],
+            vec![1, 0, 0],
+        ] {
+            let host = crate::inference::sampling::walk_verified_positions(
+                &drafts,
+                &rows,
+                &greedy,
+                &[],
+                None,
+            )
+            .unwrap();
+            assert_eq!(argmax_walk(&drafts, &picks), host, "drafts {drafts:?}");
+        }
+        let one = crate::inference::sampling::walk_verified_positions(
+            &[],
+            &rows[..1],
+            &greedy,
+            &[],
+            None,
+        )
+        .unwrap();
+        assert_eq!(argmax_walk(&[], &picks[..1]), one);
     }
 }
