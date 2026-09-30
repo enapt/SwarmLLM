@@ -394,6 +394,49 @@ impl LayerKv {
         Ok(out)
     }
 
+    /// Bring a lagging mirror level with the f32 cache — the catch-up the next
+    /// multi-position `append` would do first, done NOW, outside any capture.
+    ///
+    /// `SplitModel::decode_step_with_graph` calls it before RECORDING a
+    /// multi-position step. Recorded, the catch-up's copies run only when the
+    /// graph is launched, while the mirror's length moves at once; and a
+    /// catch-up is exactly what gets a capture refused — its slice of the lag is
+    /// a shape seen for the first time, whose layout candle uploads from the
+    /// host. Refused, the step is rolled back to its own start (`index_pos`),
+    /// which leaves the mirror claiming the lagging positions it never
+    /// received, and flash attention then reads them: plausible text, drifting
+    /// from the model's own (a split's streamed checks picked llama.cpp's 2nd
+    /// choice at one sentence in 6 of 11 replies, never with graphs off —
+    /// 2026-09-30). Caught up here, a capture only appends what it adds, and a
+    /// rollback to `index_pos` is exact.
+    pub(crate) fn catch_up_mirror(&mut self) {
+        let Some(shadow) = self.shadow.as_mut() else {
+            return;
+        };
+        let have = shadow.current_seq_len();
+        let len = self.main.current_seq_len();
+        if have >= len {
+            return;
+        }
+        let main = &self.main;
+        let caught_up = (|| -> candle_core::Result<()> {
+            let (Some(k), Some(v)) = (main.k()?, main.v()?) else {
+                return Ok(());
+            };
+            let k_lag = k.narrow(2, have, len - have)?;
+            let v_lag = v.narrow(2, have, len - have)?;
+            shadow
+                .append(&Self::to_bshd_f16(&k_lag)?, &Self::to_bshd_f16(&v_lag)?)
+                .map(|_| ())
+        })();
+        if let Err(e) = caught_up {
+            // As in `append`: never serve from a mirror that failed to take
+            // one; the flash path converts the f32 cache instead.
+            tracing::warn!("KV mirror catch-up failed, falling back to conversion: {e}");
+            self.shadow = None;
+        }
+    }
+
     /// Reset both representations together.
     pub(crate) fn reset(&mut self) {
         self.main.reset();
@@ -789,6 +832,14 @@ impl KvCacheEntry {
         target_len: usize,
     ) -> Result<(), crate::error::SwarmError> {
         self.truncate_to_with(truncate_mode(), target_len)
+    }
+
+    /// Every layer's mirror level with its f32 cache — see
+    /// [`LayerKv::catch_up_mirror`].
+    pub(crate) fn catch_up_mirrors(&mut self) {
+        for kv in self.layers.iter_mut().flatten() {
+            kv.catch_up_mirror();
+        }
     }
 
     pub(crate) fn truncate_to_with(
@@ -1201,6 +1252,15 @@ impl KvCacheStore {
             entry.truncate_to(target_len)?;
         }
         Ok(())
+    }
+
+    /// Bring every layer's f16 mirror for this request level with its f32
+    /// cache, outside any capture — see [`LayerKv::catch_up_mirror`].
+    pub(crate) fn catch_up_mirrors(&self, model_key: &str, request_id: &str) {
+        let key = Self::cache_key(model_key, request_id);
+        if let Some(mut entry) = self.caches.get_mut(key.as_str()) {
+            entry.catch_up_mirrors();
+        }
     }
 
     /// Clear (remove) the KV-cache for a specific request.
@@ -1895,6 +1955,65 @@ mod tests {
             .to_scalar::<f32>()
             .unwrap();
         assert_eq!(diff, 0.0, "the caught-up mirror must equal the f32 cache");
+    }
+
+    /// A step about to be RECORDED catches the mirror up first, outside the
+    /// capture: afterwards the mirror holds exactly the f32 cache, so the
+    /// recorded step's own append has nothing to catch up — nothing below
+    /// `index_pos` is written inside a capture a refusal could throw away.
+    #[test]
+    fn a_lagging_mirror_is_caught_up_before_a_step_is_recorded() {
+        let dev = candle_core::Device::Cpu;
+        let mut kv = LayerKv::with_capacity(2, 64, 64);
+        kv.force_shadow_for_test();
+        kv.append(&t(&dev, 1, 2, 3, 4), &t(&dev, 1, 2, 3, 4))
+            .unwrap();
+        for i in 0..3 {
+            let step = (t(&dev, 1, 2, 1, 4) + (i as f64 + 7.0)).unwrap();
+            kv.append(&step, &step).unwrap();
+        }
+        assert_eq!(
+            kv.shadow_len_for_test(),
+            Some(3),
+            "left behind by decode steps"
+        );
+
+        kv.catch_up_mirror();
+        assert_eq!(kv.shadow_len_for_test(), Some(6));
+        let expect = kv
+            .k()
+            .unwrap()
+            .unwrap()
+            .transpose(1, 2)
+            .unwrap()
+            .contiguous()
+            .unwrap()
+            .to_dtype(DType::F16)
+            .unwrap();
+        let (mk, _) = kv.flash_operands().expect("level with the cache");
+        let diff = (mk.to_dtype(DType::F32).unwrap() - expect.to_dtype(DType::F32).unwrap())
+            .unwrap()
+            .abs()
+            .unwrap()
+            .max_all()
+            .unwrap()
+            .to_scalar::<f32>()
+            .unwrap();
+        assert_eq!(diff, 0.0);
+
+        // The recorded step, and its rollback: the mirror and the cache both
+        // go back to where the step began, together.
+        let chunk = (t(&dev, 1, 2, 2, 4) + 50.0).unwrap();
+        kv.append(&chunk, &chunk).unwrap();
+        kv.truncate(6);
+        assert_eq!(kv.current_seq_len(), 6);
+        assert_eq!(kv.shadow_len_for_test(), Some(6));
+        // Nothing to do on a mirror already level, or on a cache without one.
+        kv.catch_up_mirror();
+        assert_eq!(kv.shadow_len_for_test(), Some(6));
+        let mut plain = LayerKv::with_capacity(2, 64, 64);
+        plain.catch_up_mirror();
+        assert_eq!(plain.shadow_len_for_test(), None);
     }
 
     #[test]

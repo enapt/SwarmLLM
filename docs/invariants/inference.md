@@ -2129,6 +2129,42 @@ uptime ~21 h, `~/swarmllm-graph-0929/`):
   same binary on the same card and file, **57.5-57.7**: the gap on a card-bound model is the KERNELS,
   ~20%, not submissions.
 
+### A capture writes nothing below `index_pos` (2026-09-30, #761)
+
+**What broke.** A decode step leaves the f16 mirror behind (the lazy mirror) and the
+next multi-position append catches it up. With multi-position steps captured (a
+speculative check, `mask_is_read` false), that catch-up was RECORDED — and it was the
+very thing that got the capture refused: its slice of the lag (`narrow(have, lag)`) is
+a layout seen for the first time, which candle uploads from the host (4 copies per
+refusal, logged as `a host-to-device copy inside the capture`). Refused, nothing the
+capture recorded ran, while each recorded layer's mirror length had already moved past
+the catch-up; the rollback cut back to the step's own start (`index_pos`) and so left
+the mirror CLAIMING the lagging positions it never received. Flash attention then read
+whatever the buffer held there. Groups launched before the refused one (pipelined
+capture) had run their catch-up for real, so only the refused group's two layers drifted.
+
+**How it showed.** Split speculation's streamed checks (`dsd_stream`) send many
+one-row checks, so they hit it often: at one sentence of a fixed prompt
+("the rain battered ___") rounds and plain local decoding chose llama.cpp's first
+choice ("the") in every run, while the stream chose its second ("against", 0.58-0.92
+logits behind) in 6 of 11 — and in 0 of 3 with `SWARMLLM_CUDA_GRAPH=0`. Each node logged
+3 refusals (then gave the shape up, so the stream also lost its graphs). Plausible text,
+worst rank 2: only the scorer's larger gaps and a same-context A/B made it visible.
+Reachable on the default split path too — the n-gram loop's miss is a one-row check and
+its hit a multi-row one; DSD's γ = 0 rounds likewise.
+
+**The fix.** `decode_step_with_graph` calls `KvCacheStore::catch_up_mirrors` before
+recording any multi-position step (`LayerKv::catch_up_mirror`, uncaptured); the recorded
+step then only appends what it adds, and a rollback to `index_pos` is exact. After:
+3/3 "the", 0 refusals on both nodes, stream replies scored worst rank 2 with largest
+gaps 0.156 / 0.074 / 0.113 (rounds' own: 0.156 / 0.120 / 0.003), and 24-26 tok/s against
+17-25 (graphs no longer given up). Test: `a_lagging_mirror_is_caught_up_before_a_step_is_recorded`.
+
+**What a change must keep:** anything a capture writes must be at or past the step's
+`index_pos`, or be rolled back by something other than `truncate_request_to(index_pos)`.
+A host-side counter that moves inside a capture is the trap — the device write it
+stands for runs only at launch.
+
 ## A decoded token's attention on a card is one kernel (2026-09-29)
 
 **What.** `decode_attn::gqa_decode_attention_cuda` + `kernels/decode_attn.cu`: one query position,

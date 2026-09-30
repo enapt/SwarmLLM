@@ -636,6 +636,13 @@ impl SplitModel {
         let (shape, dtype) = template;
         let out = Tensor::zeros(shape, dtype, &device).map_err(SwarmError::internal)?;
         let boundaries = graph.boundaries(&device, positions, self.hidden_dim)?;
+        // A multi-position step catches the f16 mirror up before appending to
+        // it; done inside the capture, a refusal leaves the mirror claiming
+        // positions it never received (`LayerKv::catch_up_mirror`). A single
+        // position leaves the mirror alone, so only a multi-position step asks.
+        if positions > 1 {
+            kv_cache_store.catch_up_mirrors(&self.kv_model_key, request_id);
+        }
         let per_group = crate::inference::cuda_graph::group_layers();
         let num_layers = self.layers.len();
         let captured = graph.capture(&device, positions, |cutter| {

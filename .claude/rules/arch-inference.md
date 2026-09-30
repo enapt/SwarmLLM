@@ -276,6 +276,12 @@ step whose KV buffers already hold it (`KvCacheStore::every_cache_holds`); a
 refusal rolls the cache back and runs the step the ordinary way. **A forward that
 fails part-way now puts its caches back, cut to their old length** — it used to
 drop them all.
+**Nothing below `index_pos` is written inside a capture** — a rollback cuts back to
+`index_pos` only. So a multi-position step catches the lazy f16 mirror up BEFORE it is
+recorded (`LayerKv::catch_up_mirror`, from `decode_step_with_graph`): recorded, the
+catch-up was what got the capture refused (its slice is a new layout, uploaded from the
+host) and the refused capture left the mirror claiming positions it never received —
+flash then read them, and a split's checks drifted to llama.cpp's 2nd choice (#761).
 
 → `docs/invariants/inference.md` § "A decode step can go to the card as one CUDA graph"
 
