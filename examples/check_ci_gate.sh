@@ -18,12 +18,15 @@
 #   * required but never produced  -> blocks every PR, for ever
 #   * produced but not required   -> the job runs and its failure gates nothing
 #
-# Usage:  examples/check_ci_gate.sh [owner/repo] [branch]
+# Usage:  examples/check_ci_gate.sh [owner/repo] [branch] [sha]
+#         With a sha — the release chain passes the commit it is about to tag —
+#         the check reads that commit's own CI run and nothing else.
 # Exit:   0 = in agreement, 1 = drift found, 2 = could not check
 set -uo pipefail
 
 REPO="${1:-$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null)}"
 BRANCH="${2:-main}"
+SHA="${3:-}"
 
 if [ -z "${REPO:-}" ]; then
   echo "FAIL: no repository given and 'gh repo view' could not name one." >&2
@@ -54,9 +57,18 @@ fi
 # healthy, and gotcha #530 is about exactly that class of edit. Observed
 # 2026-09-11 against a queued run: both `Build (…)` jobs reported BLOCKING and
 # both existed and passed a few minutes later.
+#
+# And a run that was CANCELLED is "completed" too, but never created the jobs it
+# did not reach — a matrix job it never expanded is listed by its template name
+# (`Build (${{ matrix.os }})`), which reads as drift (#557's shape again). A push
+# cancels the run on the commit before it, so at a release the newest completed
+# run is often a cancelled one: the v0.3.214 chain stopped on exactly that, with
+# the tagged commit's own run green and all 14 jobs in agreement (2026-09-30).
+# Only a run that completed without being cancelled or skipped answers; with a
+# sha, only that commit's run.
 run=$(gh run list --repo "$REPO" --workflow=CI --branch "$BRANCH" \
-        --limit 20 --json databaseId,status \
-        --jq 'map(select(.status == "completed")) | .[0].databaseId' 2>/dev/null)
+        --limit 30 --json databaseId,status,conclusion,headSha \
+        --jq "map(select(.status == \"completed\" and .conclusion != \"cancelled\" and .conclusion != \"skipped\" and (\"$SHA\" == \"\" or .headSha == \"$SHA\"))) | .[0].databaseId" 2>/dev/null)
 if [ -z "${run:-}" ] || [ "$run" = "null" ]; then
   echo "COULD NOT CHECK: no COMPLETED CI run found on $BRANCH to read job names" >&2
   echo "from. A run still in flight cannot answer this — it has not created all" >&2
