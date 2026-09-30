@@ -32,8 +32,8 @@
 //!    and a capture that made one is thrown away (`capture`).
 //! 3. Nothing allocated outside is freed inside, and nothing allocated inside
 //!    outlives it. The caller (`SplitModel::forward_decode_as_graph`) captures
-//!    only a step that directly follows an ordinary step of the same
-//!    conversation, whose KV buffers already hold the new position
+//!    only a step AFTER an ordinary step of the same conversation (at any
+//!    position since 2026-09-30), whose KV buffers already hold the new position
 //!    (`KvCacheStore::every_cache_holds`), and copies the result into a tensor
 //!    made BEFORE the capture.
 //! 4. No synchronisation inside — CUDA refuses that loudly, which ends the
@@ -62,6 +62,11 @@ pub(crate) fn requested() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("SWARMLLM_CUDA_GRAPH").as_deref() != Ok("0"))
 }
+
+/// The most positions one captured forward may carry: a decode step (1) or a
+/// speculative check (the token plus its guesses). Up to 8 rows the quantized
+/// matmuls stay on the vector kernel; past it they switch to the prompt path.
+pub(crate) const MAX_POSITIONS: usize = 8;
 
 /// How many conversations' last decode step a model remembers. A worker
 /// serves a handful at once; past this the map is simply cleared, which costs
@@ -222,36 +227,51 @@ struct Stats {
 /// and what the caller needs to decide whether a step may be captured.
 #[derive(Default)]
 pub(crate) struct DecodeGraph {
-    /// One instantiated graph per layer GROUP ([`group_layers`]); the same
-    /// group covers the same layers every token, so each updates in place.
+    /// One instantiated graph per layer GROUP ([`group_layers`]), per number
+    /// of positions: the same group covers the same layers every token, so
+    /// each updates in place. Keyed by positions because a speculative check
+    /// of 3 runs other kernels than a step of 1 — one shared graph would be
+    /// rebuilt every time a round alternated between them.
     #[cfg(feature = "candle-cuda")]
-    execs: Vec<Option<cuda::Exec>>,
-    /// Where the residual stream crosses from one group's graph to the next:
-    /// made OUTSIDE every capture and reused every token (two, alternating, so
-    /// a group never writes the buffer its own first layer read). Only clones
-    /// are handed out, so no drop inside a capture frees them.
-    boundaries: Option<[Tensor; 2]>,
+    execs: HashMap<usize, Vec<Option<cuda::Exec>>>,
+    /// Where the residual stream crosses from one group's graph to the next,
+    /// per number of positions: made OUTSIDE every capture and reused every
+    /// token (two, alternating, so a group never writes the buffer its own
+    /// first layer read). Only clones are handed out, so no drop inside a
+    /// capture frees them.
+    boundaries: HashMap<usize, [Tensor; 2]>,
     /// Each conversation's last decode position. A capture needs the step
     /// before it to have run the ordinary way: that step allocated whatever a
     /// conversation's first decode step allocates, loaded every kernel module
     /// the step uses, and left the output shape in `templates`.
     last_step: HashMap<String, usize>,
-    /// The decode output's shape and type, by `all_positions` — the tensor a
-    /// capture copies its result into has to exist before the capture starts.
-    templates: [Option<(Vec<usize>, DType)>; 2],
-    /// Refusals that were the capture's fault — see [`DEFECTS_BEFORE_GIVING_UP`].
-    defects: u32,
+    /// The output's shape and type, by (`all_positions`, positions) — the
+    /// tensor a capture copies its result into has to exist before the capture
+    /// starts.
+    templates: HashMap<(bool, usize), (Vec<usize>, DType)>,
+    /// Refusals that were the capture's fault, per number of positions — see
+    /// [`DEFECTS_BEFORE_GIVING_UP`]. Per positions because a defect of the
+    /// several-position check (22 host copies, 2026-09-30) said nothing about
+    /// the one-position step, and giving the whole model up threw away the
+    /// decode graphs with it.
+    defects: HashMap<usize, u32>,
     stats: Stats,
 }
 
 impl DecodeGraph {
-    /// Record a decode step at `index_pos`; true when it directly follows
-    /// this conversation's previous one.
+    /// Record a decode step at `index_pos`; true when this conversation has
+    /// already taken a decode step here. That step is the one that allocated
+    /// what a conversation's first step allocates, shed a hydrated snapshot's
+    /// mirror, and loaded every kernel module a step uses; a later step at ANY
+    /// position — after a rejected guess cut the cache back, or after a
+    /// several-position pass moved it on — has none of that left to do, and
+    /// the caller still checks every KV buffer holds the new position. Requiring
+    /// the very next position turned every speculation round's first step into
+    /// an uncaptured one (2026-09-30).
     pub(crate) fn follows_previous_step(&mut self, request_id: &str, index_pos: usize) -> bool {
         if let Some(last) = self.last_step.get_mut(request_id) {
-            let follows = *last + 1 == index_pos;
             *last = index_pos;
-            return follows;
+            return true;
         }
         if self.last_step.len() >= LAST_STEP_CAPACITY {
             self.last_step.clear();
@@ -260,35 +280,46 @@ impl DecodeGraph {
         false
     }
 
-    /// True once this model has been refused often enough, for reasons of the
-    /// program's making, that it should stop capturing.
-    pub(crate) fn gave_up(&self) -> bool {
-        self.defects >= DEFECTS_BEFORE_GIVING_UP
+    /// True once forwards of `positions` have been refused often enough, for
+    /// reasons of the program's making, that they should stop being captured.
+    pub(crate) fn gave_up(&self, positions: usize) -> bool {
+        self.defects.get(&positions).copied().unwrap_or(0) >= DEFECTS_BEFORE_GIVING_UP
     }
 
-    /// The two boundary buffers for a `[1, 1, hidden]` residual stream, made
-    /// on first use — which must be OUTSIDE a capture, so the caller asks
-    /// before it begins one.
+    /// The two boundary buffers for a `[1, positions, hidden]` residual
+    /// stream, made on first use — which must be OUTSIDE a capture, so the
+    /// caller asks before it begins one.
     pub(crate) fn boundaries(
         &mut self,
         device: &Device,
+        positions: usize,
         hidden: usize,
     ) -> Result<[Tensor; 2], SwarmError> {
-        if self.boundaries.is_none() {
-            let make =
-                || Tensor::zeros((1, 1, hidden), DType::F32, device).map_err(SwarmError::internal);
-            self.boundaries = Some([make()?, make()?]);
+        let make = || {
+            Tensor::zeros((1, positions, hidden), DType::F32, device).map_err(SwarmError::internal)
+        };
+        match self.boundaries.entry(positions) {
+            std::collections::hash_map::Entry::Occupied(e) => Ok(e.get().clone()),
+            std::collections::hash_map::Entry::Vacant(e) => {
+                Ok(e.insert([make()?, make()?]).clone())
+            }
         }
-        Ok(self.boundaries.clone().expect("made just above"))
     }
 
-    pub(crate) fn template(&self, all_positions: bool) -> Option<&(Vec<usize>, DType)> {
-        self.templates[usize::from(all_positions)].as_ref()
+    pub(crate) fn template(
+        &self,
+        all_positions: bool,
+        positions: usize,
+    ) -> Option<&(Vec<usize>, DType)> {
+        self.templates.get(&(all_positions, positions))
     }
 
     /// A step that ran the ordinary way: remember its output's shape.
-    pub(crate) fn note_uncaptured(&mut self, all_positions: bool, out: &Tensor) {
-        self.templates[usize::from(all_positions)] = Some((out.dims().to_vec(), out.dtype()));
+    pub(crate) fn note_uncaptured(&mut self, all_positions: bool, positions: usize, out: &Tensor) {
+        self.templates.insert(
+            (all_positions, positions),
+            (out.dims().to_vec(), out.dtype()),
+        );
         self.stats.uncaptured += 1;
         self.report();
     }
@@ -305,12 +336,15 @@ impl DecodeGraph {
     pub(crate) fn capture(
         &mut self,
         device: &Device,
+        positions: usize,
         forward: impl FnOnce(&mut Cutter<'_>) -> Result<(), SwarmError>,
     ) -> Result<(), Refusal> {
         let started = Instant::now();
         #[cfg(feature = "candle-cuda")]
         let outcome = match device {
-            Device::Cuda(dev) => cuda::capture_in_groups(dev, &mut self.execs, forward),
+            Device::Cuda(dev) => {
+                cuda::capture_in_groups(dev, self.execs.entry(positions).or_default(), forward)
+            }
             _ => Err(Refusal {
                 kind: "not on a graphics card",
                 detail: String::new(),
@@ -320,6 +354,7 @@ impl DecodeGraph {
         let outcome = {
             let _ = (
                 device,
+                positions,
                 forward,
                 Cutter {
                     _never: std::marker::PhantomData,
@@ -343,14 +378,16 @@ impl DecodeGraph {
             Err(refusal) => {
                 self.stats.refused += 1;
                 if refusal.kind != FORWARD_FAILED {
-                    self.defects += 1;
-                    if self.gave_up() {
+                    let defects = self.defects.entry(positions).or_insert(0);
+                    *defects += 1;
+                    if *defects == DEFECTS_BEFORE_GIVING_UP {
                         tracing::warn!(
+                            positions,
                             refused = self.stats.refused,
                             kinds = ?self.stats.reasons_seen,
                             last = refusal.kind,
-                            "decode graph: this model's steps kept being refused — it stops \
-                             capturing and decodes the ordinary way"
+                            "decode graph: this model's forwards of this many positions kept \
+                             being refused — they run the ordinary way from now on"
                         );
                     }
                 }
@@ -650,11 +687,12 @@ mod cuda {
 mod tests {
     use super::*;
 
-    /// A capture needs the step before it to have run the ordinary way for
-    /// the SAME conversation: that step did whatever a first decode step
-    /// allocates and left the output's shape behind.
+    /// A capture needs a decode step of the SAME conversation to have run the
+    /// ordinary way first: that step did whatever a first decode step
+    /// allocates and left the output's shape behind. After that, any position
+    /// follows — a rolled-back guess or a jump past a several-position pass.
     #[test]
-    fn only_the_step_right_after_a_conversations_last_one_follows_it() {
+    fn a_conversations_steps_follow_once_it_has_taken_one() {
         let mut graph = DecodeGraph::default();
         assert!(
             !graph.follows_previous_step("a", 10),
@@ -670,10 +708,13 @@ mod tests {
             "interleaving with another conversation does not break a run"
         );
         assert!(
-            !graph.follows_previous_step("a", 9),
-            "a rolled-back cache (a rejected guess) does not follow"
+            graph.follows_previous_step("a", 9),
+            "a rolled-back cache (a rejected guess) still follows"
         );
-        assert!(graph.follows_previous_step("a", 10));
+        assert!(
+            graph.follows_previous_step("a", 15),
+            "so does a step after a several-position pass"
+        );
     }
 
     /// The switch is off unless asked for, and a model that is not on a card

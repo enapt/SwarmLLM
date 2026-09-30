@@ -7,6 +7,11 @@ use crate::error::SwarmError;
 use super::kv_cache::KvCacheStore;
 use super::model::SplitModel;
 
+/// The longest read a draft call makes as single positions on a card (see
+/// `draft_after`): past a few positions, one pass reading the weights once
+/// wins even against captured steps.
+const SINGLE_STEP_READ_MAX: usize = 4;
+
 impl SplitModel {
     /// Read `append` into this request's cache from position `keep`, then guess
     /// `gamma` tokens, reading each back in so the next can follow it — all but
@@ -61,16 +66,34 @@ impl SplitModel {
         // call that failed part-way left in it.
         kv.truncate_request_to(self.kv_model_key(), request_id, keep)?;
         let first = keep + append.len();
-        let input = self.tensor_from_ids(append)?;
-        let mut logits = self.forward_prompt_in_chunks(
-            &input,
-            keep,
-            kv,
-            request_id,
-            None,
-            false,
-            prefill_chunk_tokens,
-        )?;
+        // A short read that continues the reply goes through as single
+        // positions on a card: each is a decode step, sent as a CUDA graph at
+        // ~3 ms on a 0.5B, where ONE multi-position forward of the same 2-4
+        // tokens takes the uncaptured prompt path at 12-17 ms (measured on the
+        // split rig, 2026-09-30). Most calls read two — the guess the last call
+        // never fed back, and the check's own token — so this was most of a
+        // call's cost. On the processor one pass reads the weights once and
+        // stays cheaper; the prompt's first read is a prompt pass either way.
+        let mut logits =
+            if keep > 0 && append.len() <= SINGLE_STEP_READ_MAX && self.runs_entirely_on_card() {
+                let mut last = None;
+                for (i, &id) in append.iter().enumerate() {
+                    let step = self.token_tensor(id)?;
+                    last = Some(self.forward(&step, keep + i, kv, request_id)?);
+                }
+                last.expect("append is not empty — the worker refuses an empty draft call")
+            } else {
+                let input = self.tensor_from_ids(append)?;
+                self.forward_prompt_in_chunks(
+                    &input,
+                    keep,
+                    kv,
+                    request_id,
+                    None,
+                    false,
+                    prefill_chunk_tokens,
+                )?
+            };
         let mut history = history.to_vec();
         let mut ctx = crate::inference::sampling::SamplingContext::new(0);
         let mut guesses = Vec::with_capacity(gamma);

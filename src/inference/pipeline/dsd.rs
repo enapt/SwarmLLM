@@ -143,16 +143,20 @@ impl PipelineExecutor {
             );
             return Ok(None);
         }
-        let (mut acceptance, mut check, mut draft_ms_each, mut gamma_now) = match recalled {
-            Some(l) => (l.acceptance, l.check, l.draft_ms_each, l.gamma),
+        let (mut acceptance, mut check, mut draft_cost, mut gamma_now) = match recalled {
+            Some(l) => (
+                l.acceptance,
+                l.check,
+                crate::inference::dsd_controller::RecentMedian::seeded(l.draft_ms_each),
+                l.gamma,
+            ),
             None => (
                 AcceptanceEstimate::new(),
                 CheckCost::default(),
-                None,
+                crate::inference::dsd_controller::RecentMedian::default(),
                 initial_gamma,
             ),
         };
-        let ema = |old: Option<f64>, new: f64| Some(old.map_or(new, |o| 0.7 * o + 0.3 * new));
 
         // Resolve peer IDs upfront. Local segments push None and dispatch to
         // the worker subprocess in `forward_verify_through_segments`; remote
@@ -379,7 +383,7 @@ impl PipelineExecutor {
                 break;
             }
             let remaining = max_tokens - generated.len() as u32;
-            if let Some(each) = draft_ms_each {
+            if let Some(each) = draft_cost.median() {
                 gamma_now = best_gamma_for_check(
                     acceptance.alpha(),
                     &check,
@@ -605,7 +609,7 @@ impl PipelineExecutor {
                 acceptance.record(accepted.len() as u32, drafts.len() as u32);
                 let draft_ms = (drafted_at - round_start).as_secs_f64() * 1000.0;
                 if drafter_warm {
-                    draft_ms_each = ema(draft_ms_each, draft_ms / drafts.len() as f64);
+                    draft_cost.record(draft_ms / drafts.len() as f64);
                 }
                 drafter_warm = true;
             }
@@ -662,7 +666,7 @@ impl PipelineExecutor {
             crate::inference::dsd_controller::Learned {
                 acceptance: acceptance.clone(),
                 check: check.clone(),
-                draft_ms_each,
+                draft_ms_each: draft_cost.median(),
                 gamma: gamma_now,
                 at: std::time::Instant::now(),
             },
@@ -677,7 +681,7 @@ impl PipelineExecutor {
             alpha = format_args!("{:.3}", acceptance.alpha()),
             check_fixed_ms = format_args!("{:.1}", check.fit().map_or(0.0, |f| f.0)),
             check_ms_per_position = format_args!("{:.1}", check.fit().map_or(0.0, |f| f.1)),
-            draft_ms_each = format_args!("{:.1}", draft_ms_each.unwrap_or(0.0)),
+            draft_ms_each = format_args!("{:.1}", draft_cost.median().unwrap_or(0.0)),
             "DSD: request complete"
         );
 

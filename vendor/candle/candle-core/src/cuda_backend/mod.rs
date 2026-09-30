@@ -28,14 +28,16 @@ pub use error::{CudaError, WrapErr};
 pub use utils::{Map1, Map1Any, Map2, Map2Any, Map2InPlace, Map3, S};
 
 pub enum SlicePtrOrNull<T> {
-    Ptr(CudaSlice<T>),
+    // SwarmLLM patch: shared, so a device's cached layout
+    // (`CudaDevice::layout_params`) is handed out without a copy.
+    Ptr(std::sync::Arc<CudaSlice<T>>),
     Null,
 }
 
 impl<T: DeviceRepr> SlicePtrOrNull<T> {
     pub fn builder_arg<'a, 'b: 'a>(&'b self, builder: &mut cudarc::driver::LaunchArgs<'a>) {
         match self {
-            SlicePtrOrNull::Ptr(slice) => builder.arg(slice),
+            SlicePtrOrNull::Ptr(slice) => builder.arg(slice.as_ref()),
             SlicePtrOrNull::Null => builder.arg(&0usize),
         };
     }
@@ -67,7 +69,7 @@ impl SlicePtrOrNull<usize> {
         let ds = if l.is_contiguous() {
             SlicePtrOrNull::Null
         } else {
-            SlicePtrOrNull::Ptr(dev.clone_htod(&[l.dims(), l.stride()].concat())?)
+            SlicePtrOrNull::Ptr(dev.layout_params(&[l.dims(), l.stride()].concat())?)
         };
         Ok(ds)
     }
@@ -1134,7 +1136,7 @@ impl<U: crate::op::BinaryOpT> Map2 for U {
         let dims_and_strides = if lhs_l.is_contiguous() && rhs_l.is_contiguous() {
             SlicePtrOrNull::Null
         } else {
-            SlicePtrOrNull::Ptr(dev.clone_htod(&[dims, lhs_l.stride(), rhs_l.stride()].concat())?)
+            SlicePtrOrNull::Ptr(dev.layout_params(&[dims, lhs_l.stride(), rhs_l.stride()].concat())?)
         };
         let lhs = &lhs.slice(lhs_l.start_offset()..);
         let rhs = &rhs.slice(rhs_l.start_offset()..);
@@ -1171,7 +1173,7 @@ impl Map2Any for Cmp {
         let dims_and_strides = if lhs_l.is_contiguous() && rhs_l.is_contiguous() {
             SlicePtrOrNull::Null
         } else {
-            SlicePtrOrNull::Ptr(dev.clone_htod(&[dims, lhs_l.stride(), rhs_l.stride()].concat())?)
+            SlicePtrOrNull::Ptr(dev.layout_params(&[dims, lhs_l.stride(), rhs_l.stride()].concat())?)
         };
         let lhs = &lhs.slice(lhs_l.start_offset()..);
         let rhs = &rhs.slice(rhs_l.start_offset()..);

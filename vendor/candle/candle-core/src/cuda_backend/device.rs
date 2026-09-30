@@ -213,7 +213,14 @@ pub struct CudaDevice {
     pub(crate) blas: Arc<cudarc::cublas::CudaBlas>,
     curand: Arc<Mutex<CudaRng>>,
     seed_value: Arc<RwLock<u64>>,
+    /// SwarmLLM patch: see [`CudaDevice::layout_params`].
+    layout_params: Arc<Mutex<HashMap<Vec<usize>, Arc<cudarc::driver::CudaSlice<usize>>>>>,
 }
+
+/// SwarmLLM patch: how many distinct layouts a device keeps — a decode step
+/// and a speculative check use a few dozen; the cap only bounds a pathological
+/// run of shapes.
+const LAYOUT_PARAMS_CAP: usize = 4096;
 
 impl std::fmt::Debug for CudaDevice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -222,6 +229,45 @@ impl std::fmt::Debug for CudaDevice {
 }
 
 impl CudaDevice {
+    /// SwarmLLM patch: the device's copy of a strided layout (dims then
+    /// strides) a kernel reads — uploaded once per distinct layout, then the
+    /// same read-only buffer every time.
+    ///
+    /// A strided op uploaded its layout on EVERY call: 155 host→device copies
+    /// in one three-position speculative check on a 7B segment (the transposes
+    /// the flash path makes, the bias adds a Qwen layer broadcasts). A copy
+    /// inside a CUDA graph capture is replayed from a freed host address
+    /// (`HTOD_COPIES`), so those checks could never be captured. The layouts
+    /// repeat exactly from token to token, so after the first, uncaptured
+    /// pass each one is a hit.
+    ///
+    /// ⚠ **Never cached while the stream is capturing**: a buffer allocated
+    /// there is graph memory, gone once the capture is thrown away — a cached
+    /// one would be a dangling pointer. Such a miss still uploads (and is
+    /// counted, which makes the capture refuse itself); the ordinary rerun
+    /// fills the cache.
+    #[track_caller]
+    pub fn layout_params(&self, values: &[usize]) -> Result<Arc<cudarc::driver::CudaSlice<usize>>> {
+        if let Ok(map) = self.layout_params.lock() {
+            if let Some(hit) = map.get(values) {
+                return Ok(hit.clone());
+            }
+        }
+        let uploaded = Arc::new(self.clone_htod(values)?);
+        let capturing = !matches!(
+            self.stream.capture_status(),
+            Ok(cudarc::driver::sys::CUstreamCaptureStatus::CU_STREAM_CAPTURE_STATUS_NONE)
+        );
+        if !capturing {
+            if let Ok(mut map) = self.layout_params.lock() {
+                if map.len() < LAYOUT_PARAMS_CAP {
+                    map.insert(values.to_vec(), uploaded.clone());
+                }
+            }
+        }
+        Ok(uploaded)
+    }
+
     #[allow(clippy::missing_safety_doc)]
     pub unsafe fn alloc<T: cudarc::driver::DeviceRepr>(
         &self,
@@ -498,6 +544,7 @@ impl CudaDevice {
             modules: Arc::new(std::sync::RwLock::new(module_store)),
             custom_modules: Arc::new(std::sync::RwLock::new(HashMap::new())),
             seed_value: Arc::new(RwLock::new(299792458)),
+            layout_params: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 }
@@ -613,6 +660,7 @@ impl BackendDevice for CudaDevice {
             modules: Arc::new(std::sync::RwLock::new(module_store)),
             custom_modules: Arc::new(std::sync::RwLock::new(HashMap::new())),
             seed_value: Arc::new(RwLock::new(299792458)),
+            layout_params: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 

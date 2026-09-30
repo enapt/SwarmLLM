@@ -12,9 +12,43 @@ use crate::types::{NetworkCommand, SwarmMessage};
 
 use super::{NetworkManager, MAX_BUFFERED_GOSSIP};
 
+/// `SWARMLLM_TEST_TENSOR_DELAY_MS=N` holds every outbound tensor message — a
+/// forward or a result — N ms before it is sent, so a split
+/// between two nodes on ONE machine sees a round trip 2N longer. It is how the
+/// split's speed at a same-city or same-country distance is measured and tuned
+/// without a second site (`tc netem` needs root). Unset or 0: never delays.
+/// Read once.
+pub(super) fn test_tensor_delay() -> Option<std::time::Duration> {
+    static DELAY: std::sync::OnceLock<Option<std::time::Duration>> = std::sync::OnceLock::new();
+    *DELAY.get_or_init(|| {
+        std::env::var("SWARMLLM_TEST_TENSOR_DELAY_MS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .filter(|&ms| ms > 0)
+            .map(std::time::Duration::from_millis)
+    })
+}
+
 impl NetworkManager {
     /// Handle outbound commands from daemon tasks.
     pub(super) async fn handle_outbound_command(&mut self, cmd: NetworkCommand) {
+        if let Some(delay) = test_tensor_delay() {
+            // The command that STARTS a send, once: `SendTensor` comes back as
+            // `SendEncodedTensor` after its off-loop encryption, and delaying
+            // both counted the delay twice.
+            let is_tensor = matches!(
+                cmd,
+                NetworkCommand::SendTensor { .. } | NetworkCommand::SendTensorResult { .. }
+            );
+            if is_tensor && !self.releasing_delayed {
+                let tx = self.delayed_cmd_tx.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(delay).await;
+                    let _ = tx.send(cmd).await;
+                });
+                return;
+            }
+        }
         let cmd_name = match &cmd {
             NetworkCommand::Broadcast(_) => "Broadcast",
             NetworkCommand::SendTensor { .. } => "SendTensor",

@@ -2164,7 +2164,7 @@ fn gqa_decode_keeps_flash() -> bool {
 /// out, and an unused-warning there is about ONE configuration, not about the
 /// symbol being dead (gotcha #264).
 #[cfg_attr(not(feature = "flash-attn"), allow(dead_code))]
-fn flash_handles_offset_causal() -> bool {
+pub(crate) fn flash_handles_offset_causal() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| {
         !matches!(
@@ -2367,6 +2367,17 @@ pub(crate) fn run_attention(
                 || decode_prefers_standard
                 || force_standard
             {
+                // Several positions without a mask would be attention with no
+                // causality — every position seeing the ones after it, a wrong
+                // answer with no error. The executor leaves the mask out only
+                // when flash will take the call (`SplitModel::mask_is_read`);
+                // reaching here without one means those two disagree.
+                if q_len > 1 && mask.is_none() {
+                    candle_core::bail!(
+                        "standard attention over {q_len} positions without a causal mask — \
+                         the executor expected flash to take this call"
+                    );
+                }
                 return standard_attention(
                     q,
                     k,

@@ -463,7 +463,11 @@ impl SplitModel {
         crate::inference::cpu_pools::in_phase_pool(seq_len, cpu_layers, for_the_owner, || {
             // One position, the whole model's own weights: a decode step,
             // which may go to the card as one CUDA graph.
-            if seq_len == 1
+            // A decode step, or a speculative check of a few positions — the
+            // latter only where no causal mask is read, since the mask is
+            // built on the host (`mask_is_read`).
+            if seq_len <= crate::inference::cuda_graph::MAX_POSITIONS
+                && (seq_len == 1 || !self.mask_is_read())
                 && lora_adapter.is_none()
                 && capture_layers.is_none()
                 && skip_mask.is_none()
@@ -492,6 +496,37 @@ impl SplitModel {
                 None,
             )
         })
+    }
+
+    /// Whether a forward of several positions on this segment reads the causal
+    /// mask. On a card with flash-attention built in, every attention call of a
+    /// dense layer over several positions goes to the flash kernel, which
+    /// takes causality as a flag and never reads the mask
+    /// (`layers::run_attention`) — unless standard attention is forced (a
+    /// speculation session's numerics, `SWARMLLM_FORCE_STANDARD_ATTN`) or
+    /// flash is barred from an offset causal mask
+    /// (`SWARMLLM_FLASH_OFFSET_CAUSAL=0`). Building it anyway was a
+    /// host→device copy on every prompt chunk and every speculative check on a
+    /// card, and the one thing that kept a check from being captured.
+    /// `run_attention` refuses standard attention over several positions with
+    /// no mask, so a disagreement here fails loudly.
+    fn mask_is_read(&self) -> bool {
+        #[cfg(feature = "flash-attn")]
+        {
+            let flash_takes_it = self.device.is_cuda()
+                && self.layer_devices.is_empty()
+                && self
+                    .layers
+                    .iter()
+                    .all(|layer| matches!(layer, LayerVariant::Dense(_)))
+                && !crate::inference::attn_kernel::is_force_standard_attn()
+                && crate::inference::layers::flash_handles_offset_causal();
+            !flash_takes_it
+        }
+        #[cfg(not(feature = "flash-attn"))]
+        {
+            true
+        }
     }
 
     /// Why this model's decode steps may NOT be captured, if they may not. The
@@ -546,11 +581,7 @@ impl SplitModel {
             skip_embedding,
             all_positions,
         );
-        self.decode_graph = if graph.gave_up() {
-            DecodeGraphSlot::Off
-        } else {
-            DecodeGraphSlot::On(graph)
-        };
+        self.decode_graph = DecodeGraphSlot::On(graph);
         out.map(Some)
     }
 
@@ -567,12 +598,17 @@ impl SplitModel {
     ) -> Result<Tensor, SwarmError> {
         let follows = graph.follows_previous_step(request_id, index_pos);
         let cache_key = KvCacheStore::cache_key(&self.kv_model_key, request_id);
+        let positions = input.dim(1).map_err(SwarmError::internal)?;
         // A step that grows a KV buffer frees memory allocated outside the
         // capture and keeps memory allocated inside it — never captured. Nor
         // is a conversation's first decode step: it is the one that may shed a
         // hydrated snapshot's mirror, and it loads the kernel modules.
-        let template = match graph.template(all_positions) {
-            Some(t) if follows && kv_cache_store.every_cache_holds(&cache_key, index_pos + 1) => {
+        let template = match graph.template(all_positions, positions) {
+            Some(t)
+                if follows
+                    && !graph.gave_up(positions)
+                    && kv_cache_store.every_cache_holds(&cache_key, index_pos + positions) =>
+            {
                 t.clone()
             }
             _ => {
@@ -588,7 +624,7 @@ impl SplitModel {
                     None,
                     None,
                 )?;
-                graph.note_uncaptured(all_positions, &out);
+                graph.note_uncaptured(all_positions, positions, &out);
                 return Ok(out);
             }
         };
@@ -599,10 +635,10 @@ impl SplitModel {
         let input = input.to_device(&device).map_err(SwarmError::internal)?;
         let (shape, dtype) = template;
         let out = Tensor::zeros(shape, dtype, &device).map_err(SwarmError::internal)?;
-        let boundaries = graph.boundaries(&device, self.hidden_dim)?;
+        let boundaries = graph.boundaries(&device, positions, self.hidden_dim)?;
         let per_group = crate::inference::cuda_graph::group_layers();
         let num_layers = self.layers.len();
-        let captured = graph.capture(&device, |cutter| {
+        let captured = graph.capture(&device, positions, |cutter| {
             // Every `per_group` layers: park the residual stream in memory
             // made outside the capture, launch what is recorded, and carry on
             // recording from the parked copy — so the card runs this group
@@ -659,7 +695,7 @@ impl SplitModel {
             None,
             None,
         )?;
-        graph.note_uncaptured(all_positions, &out);
+        graph.note_uncaptured(all_positions, positions, &out);
         Ok(out)
     }
 
@@ -918,7 +954,7 @@ impl SplitModel {
 
         // `mut` because a hybrid segment moves it across the device boundary
         // with the activation — see the transition at the head of the loop.
-        let mut mask = if seq_len == 1 {
+        let mut mask = if seq_len == 1 || !self.mask_is_read() {
             None
         } else if kv_offset > 0 {
             // Prefix cache: suffix query attends to (offset + seq_len) key positions

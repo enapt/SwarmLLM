@@ -188,6 +188,53 @@ impl Default for AcceptanceEstimate {
 /// configured length and γ moved [`GAMMA_STEP`] a round from there, so where
 /// guessing does not pay every request spent its first few rounds (a second,
 /// with a drafter on the processor) proving it again.
+/// The median of a cost's last [`RecentMedian::WINDOW`] samples — what the
+/// guess-count choice reads for the drafter's time per guess.
+///
+/// It was an average (0.7 old + 0.3 new), and ONE slow call moved it: on the
+/// split rig (2026-09-30) a few 68-76 ms drafting calls among 12 ms ones
+/// took it to 41-85 ms a guess, `best_gamma_for_check` then chose γ = 0, a
+/// round that guesses nothing records no new cost, so the figure could not
+/// recover for the rest of the request — and, remembered, for ten minutes.
+/// A median ignores a few outliers either way.
+#[derive(Debug, Clone, Default)]
+pub struct RecentMedian {
+    samples: std::collections::VecDeque<f64>,
+}
+
+impl RecentMedian {
+    pub const WINDOW: usize = 8;
+
+    /// Start from a remembered figure, if there is one.
+    pub fn seeded(from: Option<f64>) -> Self {
+        let mut m = Self::default();
+        if let Some(v) = from {
+            m.record(v);
+        }
+        m
+    }
+
+    pub fn record(&mut self, sample: f64) {
+        if !sample.is_finite() {
+            return;
+        }
+        if self.samples.len() == Self::WINDOW {
+            self.samples.pop_front();
+        }
+        self.samples.push_back(sample);
+    }
+
+    /// The median (the lower middle of an even count), or `None` before any sample.
+    pub fn median(&self) -> Option<f64> {
+        if self.samples.is_empty() {
+            return None;
+        }
+        let mut sorted: Vec<f64> = self.samples.iter().copied().collect();
+        sorted.sort_by(f64::total_cmp);
+        Some(sorted[(sorted.len() - 1) / 2])
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Learned {
     pub acceptance: AcceptanceEstimate,
@@ -416,5 +463,23 @@ mod tests {
             e.record(0, 4); // the first draft refused every time
         }
         assert!(e.alpha() < 0.1);
+    }
+
+    /// Two slow calls among fast ones do not make guessing look dear — the
+    /// average they replaced went from 12 to 41 ms a guess on exactly that.
+    #[test]
+    fn a_few_slow_drafting_calls_do_not_move_the_draft_cost() {
+        let mut cost = RecentMedian::seeded(Some(12.0));
+        for x in [11.5, 70.0, 12.5, 76.0, 12.0] {
+            cost.record(x);
+        }
+        let m = cost.median().unwrap();
+        assert!((11.0..=13.0).contains(&m), "median {m}");
+        // It does follow a lasting change.
+        for _ in 0..RecentMedian::WINDOW {
+            cost.record(30.0);
+        }
+        assert_eq!(cost.median(), Some(30.0));
+        assert_eq!(RecentMedian::default().median(), None);
     }
 }

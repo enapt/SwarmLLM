@@ -833,6 +833,12 @@ If `pending_tensor_forwards > 0` when a connection closes, those requests will g
 
 For per-token decode analysis, combine the forward pass timing with the decode loop timing from `DIAG: split stream decode loop complete` which reports `tok_per_sec`. Use `-vvv` (trace) to see per-layer timing.
 
+**Emulating a link on one machine**: `SWARMLLM_TEST_TENSOR_DELAY_MS=N` holds every outbound
+tensor forward and result N ms in the network manager, so two nodes on one box see a round trip
+2N longer (`tc netem` needs root). The split's speed at a same-city or same-country distance is
+measured this way (`~/swarmllm-link-0930/sweep.sh`); it delays each message once — an encrypted
+forward re-enters the handler as `SendEncodedTensor`, which is not delayed again.
+
 **CUDA-graph decode** (on by default since 2026-09-30; `SWARMLLM_CUDA_GRAPH=0` or `SWARMLLM_CUDA_OWN_STREAM=0` turns it off; recorded in groups of `SWARMLLM_CUDA_GRAPH_GROUP` layers, default 2, `0` = one graph per step):
 
 | Level | What | Where |
@@ -840,7 +846,7 @@ For per-token decode analysis, combine the forward pass timing with the decode l
 | INFO | `DIAG: decode steps on this model go to the card as one CUDA graph` / `DIAG: decode steps on this model stay uncaptured` + `reason` — decided once, at a model's first decode step | cuda_graph.rs |
 | INFO | `DIAG: decode graph` — `launched`, `recording_ms_per_launch` (host time from capture start to launch, which the card waits through), `updated_in_place`, `instantiated`, `uncaptured`, `refused`; at most once a minute while decoding. `instantiated` should stay at 1 per model; `uncaptured` is one per request (its first decode step) plus any step that grew a KV buffer | cuda_graph.rs |
 | INFO/DEBUG | `DIAG: decode graph capture refused` — `kind`, `detail`; the first of each kind at info. `a host-to-device copy inside the capture` means something on the decode path now uploads from the host — find it with `SWARMLLM_COUNT_KERNELS=1`'s `htod` rows | cuda_graph.rs |
-| WARN | `decode graph: this model's steps kept being refused` — three refusals of the capture's own making; the model decodes the ordinary way from then on | cuda_graph.rs |
+| WARN | `decode graph: this model's forwards of this many positions kept being refused` — three refusals of the capture's own making for one `positions` count; forwards of that many positions run the ordinary way from then on, others keep capturing | cuda_graph.rs |
 
 **Verify the mechanism fired** by `launched` > 0 on a `--features cuda` build, and compare replies against a
 run without the switches — the same kernels in the same order, so byte-identical.

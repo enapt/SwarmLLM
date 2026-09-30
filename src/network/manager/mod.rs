@@ -619,6 +619,13 @@ pub struct NetworkManager {
     /// block.
     internal_cmd_tx: mpsc::Sender<NetworkCommand>,
     internal_cmd_rx: mpsc::Receiver<NetworkCommand>,
+    /// Tensor sends held back by `SWARMLLM_TEST_TENSOR_DELAY_MS`
+    /// ([`commands::test_tensor_delay`]) come back through here once their
+    /// delay has passed, and `releasing_delayed` exempts them from a second one.
+    /// A test knob: it lets one machine play a link of a chosen round trip.
+    delayed_cmd_tx: mpsc::Sender<NetworkCommand>,
+    delayed_cmd_rx: mpsc::Receiver<NetworkCommand>,
+    releasing_delayed: bool,
     /// Hash verdicts for peer-served shards, computed on the blocking pool so
     /// a BLAKE3 pass over a whole shard never runs on this loop
     /// (`docs/FUTURE_WORK.md` #108). Its own channel rather than
@@ -837,6 +844,7 @@ impl NetworkManager {
 
         let shard_store = ShardStore::new(&config.node.data_dir);
         let (internal_cmd_tx, internal_cmd_rx) = mpsc::channel::<NetworkCommand>(256);
+        let (delayed_cmd_tx, delayed_cmd_rx) = mpsc::channel::<NetworkCommand>(1024);
         // One verdict per in-flight shard download, and those are bounded by the
         // download permits — 64 is headroom, not a limit anyone reaches.
         let (shard_verdict_tx, shard_verdict_rx) = mpsc::channel::<requests::ShardVerdict>(64);
@@ -889,6 +897,9 @@ impl NetworkManager {
             pending_shard_responses: HashMap::new(),
             internal_cmd_tx,
             internal_cmd_rx,
+            delayed_cmd_tx,
+            delayed_cmd_rx,
+            releasing_delayed: false,
             shard_verdict_tx,
             shard_verdict_rx,
             // Pre-allocate at the rate-limit cap so the Vec never grows past
@@ -1917,6 +1928,15 @@ impl NetworkManager {
                     last_arm = "internal_cmd".into();
                     arm_started = std::time::Instant::now();
                     self.handle_outbound_command(cmd).await;
+                }
+                // A tensor send whose test delay has passed
+                // (`SWARMLLM_TEST_TENSOR_DELAY_MS`); never taken otherwise.
+                Some(cmd) = self.delayed_cmd_rx.recv() => {
+                    last_arm = "delayed_cmd".into();
+                    arm_started = std::time::Instant::now();
+                    self.releasing_delayed = true;
+                    self.handle_outbound_command(cmd).await;
+                    self.releasing_delayed = false;
                 }
                 // A peer-served shard's hash verdict (#108): the hash ran on the
                 // blocking pool; registering or rejecting it happens here.

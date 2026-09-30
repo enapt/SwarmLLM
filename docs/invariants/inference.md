@@ -2088,8 +2088,9 @@ at once, so a copy in a captured step is garbage, silently. Hence:
 
 **What else a capture must not do, and how each is kept out** (`local_decode_submissions.md`
 § Stage 4b): free memory made before it (a KV buffer that grows, a mirror a hydrated snapshot
-brought, dropped on the first decode step) — so only a step that directly FOLLOWS an ordinary one
-of the same conversation, whose every KV buffer already holds the new position
+brought, dropped on the first decode step) — so only a step AFTER an ordinary one of the same
+conversation (any position since 2026-09-30: a rollback or a jump past a several-position pass
+has nothing of a first step left to do), whose every KV buffer already holds the new position
 (`KvCacheStore::every_cache_holds`), is captured; keep memory made inside it — the output is
 copied into a tensor made before the capture; synchronise — CUDA refuses that loudly.
 
@@ -2201,3 +2202,37 @@ the standard loop): legacy stream 27.7, own stream without graphs 27.3, **own st
 35.7 (+29%)**. The own stream alone costs a split nothing; each segment's forward is captured on
 its own node (the pre-embedded path goes through the same entry). ⚠ A two-request run cannot see
 this (the default-flip gate's first split step read "no change" from two samples).
+
+## A speculative check is captured too, and a layout is uploaded once (2026-09-30)
+
+**Measured on an emulated link** (`SWARMLLM_TEST_TENSOR_DELAY_MS`, one machine, Qwen2.5-Coder-7B
+split 4 + 4 shards over two nodes on the one card, Qwen2.5-0.5B **Q8_0** drafter,
+`~/swarmllm-link-0930/sweep.sh`, tok/s = completion tokens / decode time):
+
+| round trip | plain split | speculation, 09-29 main | + drafter single steps + median cost | + captured checks + layout cache |
+|---|---|---|---|---|
+| 0 ms | 50 | (fp16 drafter on the processor: 45-50, γ 0) | 35-42 | **44-53** |
+| 10 ms | 31 | — | 31.5-33 | **38.7-41.4** |
+| 24 ms | 21 | 21-22 (γ 0) | 26.5-28 | **30.1-32.7** |
+| 50 ms | 12 | 17-18 | 19 | **21.4-22.3** |
+
+What each step found, from the debug timeline of one round:
+- **The fp16 drafter is held as f32 on the card, ~3 GB for a 0.5B** — it fell to the processor at
+  124 ms a guess and the controller rightly stepped aside. A Q8_0 build of the same model fits.
+- **A draft call opened with a 2-token uncaptured forward** (the guess the last call never fed
+  back + the check's token), 12-17 ms against ~3 ms for a captured step; now single steps on a
+  card (`draft_after`, `SINGLE_STEP_READ_MAX`).
+- **Capture required the very next position**, so every round's first step after a rollback ran
+  uncaptured; now any step of a conversation that has taken one is captured
+  (`DecodeGraph::follows_previous_step`).
+- **The draft cost was an average**, and two 70 ms calls among 12 ms ones set γ to 0 for the rest
+  of the request (a zero-guess round measures nothing) and for ten minutes after; now the median
+  of the last 8 (`RecentMedian`).
+- **A check of several positions was never captured**: it built a causal mask on the host that
+  flash never reads on a card (`SplitModel::mask_is_read`), and candle uploaded a strided layout
+  on every copy and broadcast op — 155 host copies in one 3-position check, 22 per two-layer
+  group (`CudaDevice::layout_params` keeps each distinct one; the capture's copy counter found
+  them). Graph state, boundary buffers and the give-up are per position count.
+
+Correctness: replies of speculation with captured checks score 118/120 rank-1 against llama.cpp
+(worst gap 0.035); single-node replies byte-identical to the previous build.

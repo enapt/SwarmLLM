@@ -297,6 +297,22 @@ ALONE take 16.9 ms — llama.cpp's whole token is 17.4, with the same Q4_K kerne
 
 → `docs/invariants/inference.md` § "A decoded token's attention on a card is one kernel"
 
+## A speculative check is captured too, and a layout is uploaded once (2026-09-30)
+
+A forward of up to `cuda_graph::MAX_POSITIONS` (8) positions is captured like a decode step when
+no causal mask is read — on a card, dense layers, flash takes several positions and never reads
+it (`SplitModel::mask_is_read`; `run_attention` refuses standard attention over several positions
+without one). **Candle uploaded a strided layout on every call** (155 host copies in one 3-position
+check on a 7B segment): `CudaDevice::layout_params` keeps each distinct layout on the device, and
+**never caches one while the stream is capturing** (graph memory, gone when a capture is thrown
+away). Graph state and give-ups are per position count — a check's defect must not turn off the
+decode step's graphs. The drafter reads a short catch-up as single captured steps
+(`draft_after`), a known conversation's step after a rollback is captured, and the draft cost the
+γ choice reads is a median of recent calls (`RecentMedian`). Split speculation at an emulated
+10 / 24 / 50 ms round trip: +30% / +48% / +80% over a plain split (was break-even / +30% / +57%).
+
+→ `docs/invariants/inference.md` § "A speculative check is captured too"
+
 ## Attention kernel choice and the query-length cliff (2026-08-23)
 
 Four helpers now own decisions that used to be spread across call sites. All
