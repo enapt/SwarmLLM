@@ -409,13 +409,17 @@ pub struct LayerForward {
     /// `0x0B` trailer, only to a peer advertising `features::COUPLED_SAMPLING`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coupling_seed: Option<u64>,
-    /// This forward's place in a STREAM of verifies for its request and layer
-    /// range: numbered from 0, several in flight at once, and run by the
-    /// receiver strictly in this order (`daemon::dispatch::forward_stream`),
-    /// whatever order they arrive in. `None` — every forward that is not part
-    /// of such a stream — runs as it arrives, as before. Echoed in the answer
-    /// (`ResultStep::stream_seq`). Travels in the `0x0C` trailer, only to a
-    /// peer advertising `features::STREAMED_VERIFY`.
+    /// This forward's place in a STREAM of verifies — laid out by
+    /// [`stream_seq`]: the high bits name the ATTEMPT's stream, the low bits
+    /// its turn in it, from 0. Several are in flight at once, and the receiver
+    /// runs one stream's forwards strictly in turn order
+    /// (`daemon::state::forward_streams`), whatever order they arrive in.
+    /// `None` — every forward that is not part of such a stream — runs as it
+    /// arrives, as before. Echoed in the answer (`ResultStep::stream_seq`).
+    /// One carrying `truncate_kv_to` RESTARTS its stream: every earlier turn
+    /// that has not run on the receiver is skipped, answered but not computed.
+    /// Travels in the `0x0C` trailer, only to a peer advertising
+    /// `features::STREAMED_VERIFY`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_seq: Option<u32>,
     /// Speculative decoding KV-cache fixup: if `Some(L)`, the worker truncates
@@ -737,6 +741,42 @@ pub struct LayerResult {
     /// trailer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answers_step: Option<ResultStep>,
+}
+
+/// How a `LayerForward::stream_seq` is laid out: the attempt's stream in the
+/// high bits, the forward's turn in it in the low [`stream_seq::TURN_BITS`].
+///
+/// **Why the attempt is in the number.** A router retries a failed request
+/// under the SAME request id, and the failed attempt's chunks can still be in
+/// flight — or waiting out their turn on the serving node, whose refusal then
+/// arrives a minute later. Numbered from 0 per request, the retry's chunk N and
+/// the dead attempt's chunk N would be the same number: one's answer, or one's
+/// refusal, would land on the other's wait (gotcha #749's shape: attempt-scoped
+/// state keyed by the request). With the attempt in the number they are two
+/// streams at the serving node and two waits at the coordinator.
+pub mod stream_seq {
+    /// Bits for the turn: a million chunks per attempt, far past any reply.
+    pub const TURN_BITS: u32 = 20;
+    /// The largest turn a number can carry.
+    pub const MAX_TURN: u32 = (1 << TURN_BITS) - 1;
+    /// The largest attempt tag a number can carry.
+    pub const MAX_ATTEMPT: u32 = u32::MAX >> TURN_BITS;
+
+    /// The number of `turn` in attempt `attempt`'s stream, or `None` past
+    /// either field's range.
+    pub fn compose(attempt: u32, turn: u32) -> Option<u32> {
+        (attempt <= MAX_ATTEMPT && turn <= MAX_TURN).then_some((attempt << TURN_BITS) | turn)
+    }
+
+    /// The attempt a number belongs to.
+    pub fn attempt(seq: u32) -> u32 {
+        seq >> TURN_BITS
+    }
+
+    /// The number's turn within its attempt's stream.
+    pub fn turn(seq: u32) -> u32 {
+        seq & MAX_TURN
+    }
 }
 
 /// Which forward a [`LayerResult`] answers — see `LayerResult::answers_step`.

@@ -2467,10 +2467,22 @@ of 1-4 tokens beat large ones once several are in flight.
   read into each other's positions. Now `LayerForward::stream_seq` (the `0x0C`
   trailer, sealed in the AAD) numbers a stream's forwards, and
   `daemon::state::forward_streams` makes forward N wait until N-1 has ended on
-  this node (`STREAM_TURN_WAIT`, 60 s, then refused). A prompt pass for the same
-  (request, layer range) starts the numbering over, since a router retry reuses
-  the request id. The worker checks the result: a streamed forward whose
-  `index_pos` is not the cache's length after truncation is refused.
+  this node (`STREAM_TURN_WAIT`, 60 s, then refused). The number's high 12 bits
+  name the ATTEMPT (`types::inference::stream_seq`): a router retry reuses the
+  request id, and numbered from 0 per request the retry's chunk N and the dead
+  attempt's chunk N would share a number — one's answer, or one's late refusal,
+  would land on the other's wait (gotcha #749). The first build restarted the
+  numbering on a prompt pass instead; that closed the serving side and left the
+  coordinator's waits exposed. The worker checks the result: a streamed forward
+  whose `index_pos` is not the cache's length after truncation is refused.
+- **A restart skips what it supersedes.** A streamed forward carrying
+  `truncate_kv_to` restarts its stream — the coordinator sends one only after a
+  refused guess — so every earlier turn not yet run on the serving node is
+  answered unrun (`TurnRefused::Skipped`), still in turn order so no two ever run
+  at the worker at once. PipeInfer's early cancellation, signalled by the restart.
+  On the shared-card rig it took the stream from 17.8 to 25-27 tok/s. A stale
+  chunk the node has already STARTED is not stopped: running the restart beside
+  it would route one's reply to the other (gotcha #180).
 - **The worker's reply routing is keyed by request id** (gotcha #180). The gate
   keeps one forward of a stream at the worker at a time, so that map needs no
   change.

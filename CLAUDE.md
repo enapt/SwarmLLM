@@ -88,7 +88,7 @@ until readers leave (#90's shape); `clippy.toml` fails the build on one.
 ## Testing
 
 **Always say which feature set a count came from.** With
-`--features dev,claude-subscription`: **3114 lib** (+15 ignored),
+`--features dev,claude-subscription`: **3116 lib** (+15 ignored),
 79 integration (31 + 34 + 14 `yamux_substream`), **187 repo-consistency**,
 1 `api_key_side_effects`, 56 `swarmllm-types`, and 11 in the vendored
 request-response patch — plus 17 in the `swarmllm` BIN target (`cli::*`, counted
@@ -158,6 +158,8 @@ UNDETERMINED and never a fix — use it BEFORE blaming a change, especially your
 — split speculation with an in-engine small drafter (`pipeline::engine_drafter`, 1.7-2.4× TH↔BE), shipped OFF in
 .212; **ON by default on main since 2026-09-29** (#140 was the rig; γ = 0 where guessing does not pay).
 The drafter is a pool GUEST (#747); attempt-scoped state is never keyed by the request id, which retries reuse (#749).
+Its checks STREAM since 2026-09-30 (`pipeline::dsd_stream`, 4b): +15-21% with the far half on other hardware.
+⚠ **A rig sharing ONE card reads the stream ~15% SLOWER** — it measures the stream's cost, not its gain (`docs/DIAGNOSTICS.md`).
 **Why split decode is slow and what beats it → `docs/plans/faster_than_local.md`; the speculation plan, its
 measurements and the NEXT batch (continuous stream) → `docs/plans/split_speculation.md`.** ⛔ **No design may need a
 user to hold the whole model, not even a low-bit copy** (user, 2026-09-28) → parallelize the REPLY, not the token:

@@ -451,6 +451,16 @@ impl EngineDrafter {
         }
     }
 
+    /// Take the sequence back to its first `len` tokens — everything after a
+    /// guess the check refused, which a stream (`dsd_stream`) may already have
+    /// drafted several chunks beyond. The cache is trusted no further than
+    /// that; the next call cuts it back and reads from there.
+    pub(super) fn rewind(&mut self, len: usize) {
+        self.seq.truncate(len);
+        self.valid = self.valid.min(len);
+        self.open = None;
+    }
+
     #[cfg(test)]
     pub(super) fn valid(&self) -> usize {
         self.valid
@@ -519,6 +529,34 @@ mod tests {
         assert_eq!(d.valid(), 10);
         d.push(&[30, 31]);
         assert_eq!(&d.seq[d.valid..], &[23, 24, 30, 31]);
+    }
+
+    /// A stream drafts on as if every guess were kept, then rewinds to the
+    /// guess the check refused: the next call reads from the confirmed prefix,
+    /// never from a chunk drafted on top of the refused guess.
+    #[test]
+    fn a_stream_rewinds_the_drafter_to_the_refused_guess() {
+        let mut d = drafter(&[1, 2, 3]);
+        d.push(&[10]); // position 3
+                       // Chunk 1 guessed 11,12,13 (13 the look-ahead), taken as kept.
+        d.open = Some((4, 3));
+        d.settle(3);
+        d.push(&[11, 12, 13]);
+        // Chunk 2 read 13 and guessed 14,15 on top of it.
+        d.open = Some((7, 2));
+        d.settle(2);
+        d.push(&[14, 15]);
+        assert_eq!(d.valid(), 8);
+        // Chunk 1's check kept 11 and sampled 20 where 12 was guessed.
+        d.rewind(5);
+        d.push(&[20]);
+        assert_eq!(d.seq, vec![1, 2, 3, 10, 11, 20]);
+        assert_eq!(
+            d.valid(),
+            5,
+            "the cache is trusted only up to the refused guess"
+        );
+        assert_eq!(&d.seq[d.valid..], &[20]);
     }
 
     fn spec(name: &str) -> DrafterSpec {

@@ -370,8 +370,48 @@ impl PipelineExecutor {
             finish_reason = "stop".to_string();
         }
 
+        // The continuous stream (`dsd_stream`): where every segment but the far
+        // one is this node's own and that peer serves a stream, the next chunk
+        // of guesses goes out while the last is still being checked, instead
+        // of the rounds below waiting a whole round trip between them.
+        // `SWARMLLM_SPEC_STREAM=0` keeps the rounds, for an A/B.
+        let mut streamed = false;
+        if let Drafter::Engine(engine) = &mut drafter {
+            let tail = super::dsd_stream::stream_requested()
+                .then(|| {
+                    super::dsd_stream::stream_tail(&self.shared_state, &self.assignment.segments)
+                        .cloned()
+                })
+                .flatten();
+            if let Some(tail) = tail.filter(|_| finish_reason.is_empty()) {
+                self.stream_checks(
+                    tail,
+                    engine,
+                    current_pos as u32,
+                    super::dsd_stream::StreamIo {
+                        token_tx: &token_tx,
+                        decoder: &decoder,
+                        eos: &eos_set,
+                        noise,
+                        max_tokens,
+                    },
+                    super::dsd_stream::StreamReply {
+                        generated: &mut generated,
+                        finish_reason: &mut finish_reason,
+                        acceptance: &mut acceptance,
+                        check: &mut check,
+                        draft_cost: &mut draft_cost,
+                        proposed: &mut acceptance_proposed,
+                        accepted: &mut acceptance_accepted,
+                    },
+                )
+                .await?;
+                streamed = true;
+            }
+        }
+
         // Spec round loop.
-        while finish_reason.is_empty() && (generated.len() as u32) < max_tokens {
+        while !streamed && finish_reason.is_empty() && (generated.len() as u32) < max_tokens {
             // Honor external cancel between rounds — same pattern as
             // execute_distributed line 174 / speculative.rs.
             if self.request.is_cancelled() {

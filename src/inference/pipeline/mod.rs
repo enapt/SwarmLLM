@@ -7,6 +7,7 @@
 
 pub(crate) mod distributed;
 mod dsd;
+mod dsd_stream;
 mod engine_drafter;
 mod local;
 mod local_generate;

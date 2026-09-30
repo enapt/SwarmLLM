@@ -316,6 +316,9 @@ A streamed check keeps several verify forwards of ONE request in flight
 **`daemon::state::forward_streams` runs them in number order** — forward N waits
 until N-1 has ended here, since the worker writes at its cache's length and
 nothing else orders them; the turn is given back by DROPPING it, on every exit.
+The number's high bits name the ATTEMPT (`types::inference::stream_seq`, #749),
+and a forward carrying `truncate_kv_to` restarts the stream: earlier turns not
+yet run are skipped, in order — never run beside another (#180).
 **`pending_layer_results` is keyed by `WaiterKey`** (request + number) and an
 answer echoes its number (`ResultStep::stream_seq`, `0x08`): position alone
 cannot name a chunk once a restarted stream reuses one. A failure this node

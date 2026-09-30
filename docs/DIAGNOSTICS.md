@@ -839,6 +839,21 @@ tensor forward and result N ms in the network manager, so two nodes on one box s
 measured this way (`~/swarmllm-link-0930/sweep.sh`); it delays each message once — an encrypted
 forward re-enters the handler as `SendEncodedTensor`, which is not delayed again.
 
+**Split speculation's continuous stream** (`pipeline::dsd_stream`, on by default since
+2026-09-30; `SWARMLLM_SPEC_STREAM=0` keeps the rounds): `SWARMLLM_SPEC_STREAM_GUESSES` guesses per
+chunk, the look-ahead included (default 3), `SWARMLLM_SPEC_STREAM_WINDOW` chunks out at once
+(default 3). One INFO line per reply on the coordinator, `DIAG`-free:
+`DSD: streamed checks complete chunks=… kept_whole=… restarts=…` — `kept_whole / chunks` is how
+often a chunk's guesses AND its look-ahead were all kept (~0.25-0.35 on a 0.5B drafter for a 7B);
+each restart is logged at DEBUG (`a streamed check refused a guess`, with the turn and how many of
+its guesses were kept). On the serving node a superseded chunk is answered `streamed check N was
+skipped` and never computed. ⚠ **A rig that runs both halves on ONE card measures the stream's
+cost, not its gain** — the far half's checks and this node's next chunk share the device, so the
+stream reads ~15% SLOWER there than rounds (25-27 vs 28-33 tok/s at an emulated 24 ms, 2026-09-30),
+while with the far half on other hardware it is ~15-20% faster. Put B on the processor
+(`NODE_B_TOML='gpu_layers = 0\n[resources]\nmax_cpu_threads = 8'` in `split_speed.sh`) or on
+another machine to see the stream work.
+
 **CUDA-graph decode** (on by default since 2026-09-30; `SWARMLLM_CUDA_GRAPH=0` or `SWARMLLM_CUDA_OWN_STREAM=0` turns it off; recorded in groups of `SWARMLLM_CUDA_GRAPH_GROUP` layers, default 2, `0` = one graph per step):
 
 | Level | What | Where |

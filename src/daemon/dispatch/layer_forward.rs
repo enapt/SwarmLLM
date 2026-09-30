@@ -50,13 +50,6 @@ pub(super) async fn handle_layer_forward(
         }
     };
 
-    // A prompt pass begins the conversation again, and its stream numbering
-    // with it: a router retry reuses the request id (`forward_streams`).
-    if forward.sequence_num == 0 {
-        shared_state
-            .forward_streams
-            .restart(request_id, forward.layer_range);
-    }
     // A streamed verify runs in its stream's order: held here until the one
     // numbered before it has ended on this node, whatever order the network
     // delivered them in. The turn is given back by dropping it, so every exit
@@ -69,6 +62,9 @@ pub(super) async fn handle_layer_forward(
                 request_id,
                 forward.layer_range,
                 seq,
+                // A streamed forward that cuts the cache back restarts its
+                // stream; the turns it supersedes are skipped.
+                forward.truncate_kv_to.is_some(),
                 crate::daemon::state::forward_streams::STREAM_TURN_WAIT,
             )
             .await

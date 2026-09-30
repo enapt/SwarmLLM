@@ -524,6 +524,54 @@ before building 4e** — the near machine of a split that exists for memory
 reasons has no room for a shadow, so 4b (which works with ANY drafter) and a
 small drafter from the shard system now come first.
 
+**4b built 2026-09-30 (`pipeline::dsd_stream`, ON by default; `SWARMLLM_SPEC_STREAM=0`
+= rounds).** Where every segment but the far one is the coordinator's own and the
+far peer advertises `features::STREAMED_VERIFY`, the next chunk is drafted, run
+through the near layers and sent while earlier ones are still out. What the build
+changed from the design above:
+
+- **The tail needed no new walk.** It walks a chunk's rows exactly as a round's and
+  answers `kept + next`; `next` IS its own token at the look-ahead's position, so
+  the coordinator compares it with the look-ahead itself. The chunk counts as whole
+  when every row's guess was kept AND `next` equals the look-ahead.
+- **No epoch on the wire — a number that names the attempt.** Waits are keyed by
+  (request, `stream_seq`) and answers echo it (`0x0C` / `0x08`); a restart drops the
+  waits of every chunk after the refused one. The number's high 12 bits are a
+  per-attempt tag, since a router retry reuses the request id (gotcha #749).
+- **The far node runs a stream in order** (`daemon::state::forward_streams`) and
+  **skips what a restart supersedes**: a streamed forward carrying `truncate_kv_to`
+  restarts the stream, and every earlier turn not yet started there is answered
+  unrun — PipeInfer's early cancellation (arXiv 2407.11798), signalled by the
+  restart itself. Without it the shared-card rig ran 17.8 tok/s against 25-27.
+- **No chunk is built past an unsure guess**: when the drafter stops short of the
+  guesses asked for (its confidence floor), the look-ahead is that unsure guess and
+  the next chunk waits for its answer — PipeInfer's "reactive speculation".
+
+**Measured** (Qwen2.5-Coder-7B, 0.5B drafter, greedy, emulated 24 ms round trip,
+129-token replies ×3, one binary):
+
+| rig | rounds | stream |
+|---|---|---|
+| A = shards 0-5 + drafter on the card, B = shards 6-7 on the PROCESSOR (parallel hardware) | 13.6-14.3 | 14.5-17.4 |
+| A = 0-3, B = 4-7, BOTH on the one card | 28-33 | 25-27 |
+
+On parallel hardware — the case a split across machines is — the stream is +15-21%;
+chunk size 2-4 and window 2-3 all measured 16-17 tok/s there, so the defaults (3, 3)
+stand. Sharing one card, the far half's checks and the next chunk contend for the
+same device and the work thrown away at each restart is paid for: the rig reads
+the stream's COST. Replies scored against llama.cpp (`score_against_reference.py`)
+like the rounds' and like plain local decoding: worst rank 2 on every token, one
+0.635-logit near-tie ("battered against" / "battered the") with rank 1 at every
+token after it; local decoding alone showed 0.377 on the same prompts.
+
+**Open:** the 4e saving (the drafter's near layers as the verify input) and
+cancelling a stale chunk the far node has already STARTED — the gate skips only
+chunks not yet run, because running two forwards of one request at a worker at
+once would route one's reply to the other (gotcha #180); a far node on its
+processor pays a whole check for each such chunk. The GPU↔GPU gain over a real
+link is projected at ~+26% at 24-50 ms from the rig's timeline, not yet measured —
+the far node needs this build.
+
 **KV refresh — measured: large for a small model, small for a 7B.** The tail
 computes the far layers' exact K/V for every confirmed token anyway; sent back
 (~28 KB/token for a 7B), the shadow attends over an EXACT history and
