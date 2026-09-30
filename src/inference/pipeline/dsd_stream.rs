@@ -74,11 +74,15 @@ fn knob(name: &str, default: u32, max: u32) -> u32 {
         .map_or(default, |v| v.clamp(1, max))
 }
 
-/// `SWARMLLM_SPEC_STREAM=0` keeps split speculation in rounds, for an A/B
-/// inside one binary.
+/// `SWARMLLM_SPEC_STREAM=1` streams a coordinator's checks; without it split
+/// speculation runs in rounds. OFF by default until it is measured between two
+/// graphics cards over a real link: every rig on one machine either shares the
+/// card between the halves, which measures the stream's cost (gotcha #759), or
+/// puts the far half on the processor. The SERVING side is always on, so a
+/// coordinator that opts in can stream to any node on this version.
 pub(super) fn stream_requested() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var("SWARMLLM_SPEC_STREAM").as_deref() != Ok("0"))
+    *ON.get_or_init(|| std::env::var("SWARMLLM_SPEC_STREAM").as_deref() == Ok("1"))
 }
 
 /// The segment a stream's chunks go to: the request's LAST segment, when every

@@ -524,8 +524,9 @@ before building 4e** — the near machine of a split that exists for memory
 reasons has no room for a shadow, so 4b (which works with ANY drafter) and a
 small drafter from the shard system now come first.
 
-**4b built 2026-09-30 (`pipeline::dsd_stream`, ON by default; `SWARMLLM_SPEC_STREAM=0`
-= rounds).** Where every segment but the far one is the coordinator's own and the
+**4b built 2026-09-30 (`pipeline::dsd_stream`; opt-in on the coordinator with
+`SWARMLLM_SPEC_STREAM=1` for v0.3.213, every node serving one — the default flips once
+it is measured between two cards over a real link, TH↔BE).** Where every segment but the far one is the coordinator's own and the
 far peer advertises `features::STREAMED_VERIFY`, the next chunk is drafted, run
 through the near layers and sent while earlier ones are still out. What the build
 changed from the design above:

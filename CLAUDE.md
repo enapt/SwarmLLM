@@ -158,7 +158,7 @@ UNDETERMINED and never a fix — use it BEFORE blaming a change, especially your
 — split speculation with an in-engine small drafter (`pipeline::engine_drafter`, 1.7-2.4× TH↔BE), shipped OFF in
 .212; **ON by default on main since 2026-09-29** (#140 was the rig; γ = 0 where guessing does not pay).
 The drafter is a pool GUEST (#747); attempt-scoped state is never keyed by the request id, which retries reuse (#749).
-Its checks STREAM since 2026-09-30 (`pipeline::dsd_stream`, 4b): +15-21% with the far half on other hardware.
+Its checks can STREAM (`pipeline::dsd_stream`, 4b, opt-in `SWARMLLM_SPEC_STREAM=1` until measured TH↔BE): +15-21% with the far half on other hardware.
 ⚠ **A rig sharing ONE card reads the stream ~15% SLOWER** — it measures the stream's cost, not its gain (`docs/DIAGNOSTICS.md`).
 **Why split decode is slow and what beats it → `docs/plans/faster_than_local.md`; the speculation plan, its
 measurements and the NEXT batch (continuous stream) → `docs/plans/split_speculation.md`.** ⛔ **No design may need a

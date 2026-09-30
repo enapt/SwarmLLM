@@ -374,7 +374,7 @@ impl PipelineExecutor {
         // one is this node's own and that peer serves a stream, the next chunk
         // of guesses goes out while the last is still being checked, instead
         // of the rounds below waiting a whole round trip between them.
-        // `SWARMLLM_SPEC_STREAM=0` keeps the rounds, for an A/B.
+        // Opt-in until measured over a real link: `SWARMLLM_SPEC_STREAM=1`.
         let mut streamed = false;
         if let Drafter::Engine(engine) = &mut drafter {
             let tail = super::dsd_stream::stream_requested()
