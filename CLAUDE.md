@@ -154,11 +154,11 @@ UNDETERMINED and never a fix — use it BEFORE blaming a change, especially your
 
 ## Status
 
-**v0.3.213-alpha is the live release (published 2026-09-30 13:10 UTC), signed and on both nodes** — card decode as
-CUDA graphs (a 7B at llama.cpp parity), card prompts ~1.5×, a split's per-token overhead cut (~80% of local), split
-speculation with an in-engine small drafter ON by default (`pipeline::engine_drafter`; γ = 0 where guessing does not pay).
-⚠ **.213 has #761** — a refused CUDA-graph capture left the f16 KV mirror claiming positions it never got, so split
-checks could drift to a 2nd-choice word; fixed `4fac99bf` → **v0.3.214** (gate: `memory/release_gate.md`).
+**v0.3.214-alpha is the live release (published 2026-09-30 15:47 UTC), signed and on both nodes** — .213 plus the
+#761 fix (a refused CUDA-graph capture left the f16 KV mirror claiming positions it never got, so split checks could
+drift to a 2nd-choice word; `4fac99bf`). .213 brought card decode as CUDA graphs (a 7B at llama.cpp parity), card
+prompts ~1.5×, a split's per-token overhead cut (~80% of local), split speculation with an in-engine small drafter ON
+by default (`pipeline::engine_drafter`; γ = 0 where guessing does not pay). Gate record: `memory/release_gate.md`.
 The drafter is a pool GUEST (#747); attempt-scoped state is never keyed by the request id, which retries reuse (#749).
 Split checks can STREAM (`pipeline::dsd_stream`, opt-in `SWARMLLM_SPEC_STREAM=1`; the flip waits on a TH↔BE A/B,
 FUTURE_WORK #149): +15-21% with the far half on other hardware. ⚠ **A rig sharing ONE card reads it ~15% SLOWER** (#759).
@@ -168,13 +168,14 @@ low-bit copy** (user, 2026-09-28) → parallelize the REPLY, not the token: `doc
 Qwen 3.5 is on local branch `qwen35-support` (#117); Gemma 4 scoped, not built (#115).
 ⚠ **A family in `supported_list` is a claim: check it against a REAL file's header** (#715). **Next** → `memory/next_up.md`.
 
-⛔ **This PC had three unclean shutdowns 2026-09-26/28 (#716, #718, #754), all under sustained load.**
+⛔ **This PC had four unclean shutdowns 2026-09-26/30 (#716, #718, #754, #762), all under sustained load.**
 The third was a concurrency probe on the live node — **simultaneous requests to a node ARE a stress
 test.** Before any: research → deep dive → conceptualize → research again, then the user's go-ahead
 for THAT run, live node stopped (`memory/feedback_research_before_stress_tests.md`; #146's
 `card_pace` is the node's own guard). A bench beside the live node also reads about HALF (#119).
 ⚠ **On this WSL2 host, fresh card allocations slow ~1000× over two days of Windows uptime** (#146 deep dive):
-a card figure that drifts across releases may be UPTIME, not code — note each run's uptime.
+a card figure that drifts across releases may be UPTIME, not code — note each run's uptime. The 3rd and 4th
+(0x116 mid-gate) both came at 52-54 h of uptime: **read uptime before any card run; above ~24 h, ask for a restart.**
 
 ⚠ **Behaviour gate = `reply_ab.sh` + `split_rig.sh`** (incl. `failover`), not conformance alone —
 `family_conformance.sh` pins `gpu_layers = 0` and never splits (#93). ⛔ **v0.3.199 shipped BROKEN**: a BUILD gate
