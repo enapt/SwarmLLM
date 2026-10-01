@@ -206,6 +206,18 @@ pub mod features {
     /// of one request concurrently, writing each at its cache's length.
     pub const STREAMED_VERIFY: u64 = 1 << 15;
 
+    /// Serves such a stream as ONE piece of the sender's work: its chunks
+    /// share one per-peer slot, and a chunk this node refuses on arrival is
+    /// stepped over in the stream's order rather than waited for.
+    ///
+    /// No wire change — it gates the coordinator's DEFAULT. A node advertising
+    /// only `STREAMED_VERIFY` (v0.3.213-v0.3.215) counted every chunk against
+    /// its per-peer cap of 4, so a stream with a few stale chunks queued was
+    /// refused one, and every chunk after the refused one then waited 60 s
+    /// for it to take its turn (2026-10-01, the .215 release gate). A
+    /// coordinator streams only to a peer advertising this bit.
+    pub const STREAM_AS_ONE_WORK: u64 = 1 << 16;
+
     /// The full feature set THIS build implements. Advertised by every node.
     pub const ALL: u64 = RELAY
         | TENSOR_RELAY
@@ -222,7 +234,8 @@ pub mod features {
         | RESULT_STEP
         | SPEC_WALK_AT_TAIL
         | COUPLED_SAMPLING
-        | STREAMED_VERIFY;
+        | STREAMED_VERIFY
+        | STREAM_AS_ONE_WORK;
 
     /// Does `advertised` include every bit in `needed`?
     pub fn supports(advertised: u64, needed: u64) -> bool {

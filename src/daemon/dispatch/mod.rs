@@ -136,6 +136,178 @@ impl Drop for PeerWorkSlot {
     }
 }
 
+/// A streamed verify's chunks here, by (sender, request, layer range,
+/// attempt) — the sender first, so no peer can ride another's stream.
+type StreamWorkKey = (crate::types::NodeId, uuid::Uuid, (u32, u32), u32);
+
+/// One stream's chunks in flight here, and the ONE per-peer slot and ONE
+/// node-wide permit they share.
+struct StreamHold {
+    in_flight: std::sync::atomic::AtomicUsize,
+    _peer_slot: PeerWorkSlot,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+/// Why the dispatcher turned a forward away — each cap logs its own line.
+#[derive(Debug, PartialEq, Eq)]
+enum ForwardRefused {
+    /// The sender already holds `max_forwards_per_peer` pieces of work here.
+    PeerLimit,
+    /// A request not yet started would take the slots kept for running ones.
+    KeptForRunning,
+    /// Every node-wide slot is taken.
+    NodeFull,
+    /// The stream already holds its window of chunks here.
+    StreamWindow,
+}
+
+impl ForwardRefused {
+    fn log(&self, sender: &crate::types::NodeId, per_peer_limit: usize) {
+        match self {
+            Self::PeerLimit => tracing::warn!(
+                sender = %sender,
+                max = per_peer_limit,
+                "LayerForward rejected — per-peer limit reached"
+            ),
+            Self::KeptForRunning => tracing::warn!(
+                sender = %sender,
+                "LayerForward rejected — the rest is kept for requests already running here"
+            ),
+            Self::NodeFull => {
+                tracing::warn!(sender = %sender, "LayerForward rejected — forward semaphore full")
+            }
+            Self::StreamWindow => tracing::warn!(
+                sender = %sender,
+                max = crate::daemon::state::forward_streams::MAX_STREAM_CHUNKS_HERE,
+                "LayerForward rejected — its stream already has as many checks here as a stream may"
+            ),
+        }
+    }
+}
+
+/// Admit a forward that is not part of a stream: its own per-peer slot
+/// (`slot`, already taken or refused), the reserve kept for running requests,
+/// and its own node-wide permit — in that order, each refusal giving back what
+/// was taken.
+fn admit_own_forward(
+    forward: &crate::types::LayerForward,
+    slot: Option<PeerWorkSlot>,
+    semaphore: &Arc<tokio::sync::Semaphore>,
+    forward_limit: usize,
+) -> Result<(PeerWork, Option<tokio::sync::OwnedSemaphorePermit>), ForwardRefused> {
+    let slot = slot.ok_or(ForwardRefused::PeerLimit)?;
+    // A tensor-parallel prompt pass keeps `sequence_num == 0` for EVERY layer,
+    // and its coordinator waits on the AllReduce, not on a LayerResult — a
+    // refusal here would be unread and cost a 10 s AllReduce timeout per layer.
+    // It is one request's layers, not new ones: never held back.
+    if forward.sequence_num == 0
+        && forward.tp_meta.is_none()
+        && !admits_a_new_request(semaphore.available_permits(), forward_limit)
+    {
+        return Err(ForwardRefused::KeptForRunning);
+    }
+    let permit = semaphore
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| ForwardRefused::NodeFull)?;
+    Ok((PeerWork::Own { _slot: slot }, Some(permit)))
+}
+
+type StreamWork = Arc<dashmap::DashMap<StreamWorkKey, StreamHold>>;
+
+/// One chunk of a streamed verify (`LayerForward::stream_seq`), counted as part
+/// of its stream: the stream's first chunk in flight takes a per-peer slot and
+/// a node-wide permit, the chunks that arrive while it is out share them, and
+/// the last one out gives them back.
+///
+/// A stream runs here one chunk at a time, in its order
+/// (`daemon::state::forward_streams`), so its compute is one forward's however
+/// many chunks are queued — and with each counted as its own work, a stream
+/// with a few chunks a restart had superseded still queued was refused its
+/// next live one at the per-peer cap of 4 (the .215 release gate, 2026-10-01);
+/// two such streams would have filled a small node's 8 permits the same way.
+/// HTTP/2 counts the same way: `SETTINGS_MAX_CONCURRENT_STREAMS` limits
+/// streams, and a stream's frames are bounded by that stream's own window
+/// (RFC 9113 §5.1.2, §6.9). The window here is
+/// `forward_streams::MAX_STREAM_CHUNKS_HERE`; past it a chunk is refused, so a
+/// sender cannot queue without bound behind one permit.
+struct StreamWorkSlot {
+    streams: StreamWork,
+    key: StreamWorkKey,
+}
+
+impl StreamWorkSlot {
+    /// A place for chunk `seq` of `peer`'s stream. Refused when the stream
+    /// already holds its window here, or when it has nothing out yet and
+    /// `peer` already holds `per_peer_limit` slots or `permit` finds no
+    /// node-wide one.
+    ///
+    /// Decided under the stream's map entry: a last chunk giving the hold back
+    /// at the same moment either sees this one's count and keeps the entry, or
+    /// removes it first and this one takes a hold of its own.
+    fn try_take(
+        streams: &StreamWork,
+        counts: &PeerWorkCounts,
+        peer: &crate::types::NodeId,
+        stream: (uuid::Uuid, (u32, u32), u32),
+        per_peer_limit: usize,
+        permit: impl FnOnce() -> Option<tokio::sync::OwnedSemaphorePermit>,
+    ) -> Result<Self, ForwardRefused> {
+        use crate::daemon::state::forward_streams::MAX_STREAM_CHUNKS_HERE;
+        use std::sync::atomic::Ordering;
+        let (request_id, layer_range, seq) = stream;
+        let key = (
+            peer.clone(),
+            request_id,
+            layer_range,
+            crate::types::inference::stream_seq::attempt(seq),
+        );
+        match streams.entry(key.clone()) {
+            dashmap::mapref::entry::Entry::Occupied(held) => {
+                if held.get().in_flight.fetch_add(1, Ordering::Relaxed) >= MAX_STREAM_CHUNKS_HERE {
+                    held.get().in_flight.fetch_sub(1, Ordering::Relaxed);
+                    return Err(ForwardRefused::StreamWindow);
+                }
+            }
+            dashmap::mapref::entry::Entry::Vacant(free) => {
+                let slot = PeerWorkSlot::try_take(counts, peer, per_peer_limit)
+                    .ok_or(ForwardRefused::PeerLimit)?;
+                let permit = permit().ok_or(ForwardRefused::NodeFull)?;
+                free.insert(StreamHold {
+                    in_flight: std::sync::atomic::AtomicUsize::new(1),
+                    _peer_slot: slot,
+                    _permit: permit,
+                });
+            }
+        }
+        Ok(Self {
+            streams: streams.clone(),
+            key,
+        })
+    }
+}
+
+impl Drop for StreamWorkSlot {
+    fn drop(&mut self) {
+        use std::sync::atomic::Ordering;
+        if let Some(held) = self.streams.get(&self.key) {
+            held.in_flight.fetch_sub(1, Ordering::Relaxed);
+        }
+        // The same rule as `PeerWorkSlot`: removed only while it still reads
+        // zero, under the map's write lock. Removing it drops the stream's
+        // per-peer slot.
+        self.streams
+            .remove_if(&self.key, |_, h| h.in_flight.load(Ordering::Relaxed) == 0);
+    }
+}
+
+/// What one inbound forward counts against its sender: a slot of its own, or
+/// its share of its stream's (`StreamWorkSlot`). Held only to be dropped.
+enum PeerWork {
+    Own { _slot: PeerWorkSlot },
+    Stream { _share: StreamWorkSlot },
+}
+
 /// What a peer is told when this node is already doing as much work for other
 /// machines as its owner allows.
 ///
@@ -183,7 +355,7 @@ pub(super) fn peer_work_refusal() -> String {
 /// does not clear it; only a restart does.
 struct InboundForwardSlot {
     /// Given back when this struct's fields drop, after `Drop::drop` below.
-    _peer_slot: PeerWorkSlot,
+    _peer_work: PeerWork,
     state: Arc<crate::daemon::SharedState>,
     request_id: uuid::Uuid,
     finished: Arc<std::sync::atomic::AtomicBool>,
@@ -596,6 +768,9 @@ pub(crate) async fn dispatch_network_messages(
     let peer_forward_counts: Arc<
         dashmap::DashMap<crate::types::NodeId, std::sync::atomic::AtomicUsize>,
     > = Arc::new(dashmap::DashMap::new());
+    // A streamed verify's chunks, counted against their sender as ONE piece of
+    // work (`StreamWorkSlot`). Entries leave with their stream's last chunk.
+    let stream_work: StreamWork = Arc::new(dashmap::DashMap::new());
     let mut cleanup_interval =
         tokio::time::interval(std::time::Duration::from_secs(FORWARD_COUNTS_CLEANUP_SECS));
     cleanup_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -699,50 +874,30 @@ pub(crate) async fn dispatch_network_messages(
                                         // SEC: Per-peer concurrent forward limit to prevent single-peer exhaustion,
                                         // inside the node-wide semaphore. A refusal is ANSWERED
                                         // (`peer_work_refusal`): the forward was acknowledged on arrival.
+                                        // A streamed verify's chunks share ONE of each, their
+                                        // stream's (`StreamWorkSlot`).
                                         let peer_sender = authenticated_sender.clone().expect("guarded by Some check above");
-                                        let Some(peer_slot) =
-                                            PeerWorkSlot::try_take(&peer_forward_counts, &peer_sender, per_peer_limit)
-                                        else {
-                                            tracing::warn!(
-                                                sender = %peer_sender,
-                                                max = per_peer_limit,
-                                                "LayerForward rejected — per-peer limit reached"
-                                            );
-                                            tokio::spawn(layer_forward::refuse_forward(
-                                                shared_state.clone(),
-                                                network_tx.clone(),
-                                                layer_forward::RefusalAddress::of(&forward),
-                                                peer_work_refusal(),
-                                            ));
-                                            continue;
+                                        let admitted = match forward.stream_seq {
+                                            Some(seq) => StreamWorkSlot::try_take(
+                                                &stream_work,
+                                                &peer_forward_counts,
+                                                &peer_sender,
+                                                (forward.request_id, forward.layer_range, seq),
+                                                per_peer_limit,
+                                                || forward_semaphore.clone().try_acquire_owned().ok(),
+                                            )
+                                            .map(|share| (PeerWork::Stream { _share: share }, None)),
+                                            None => admit_own_forward(
+                                                &forward,
+                                                PeerWorkSlot::try_take(&peer_forward_counts, &peer_sender, per_peer_limit),
+                                                &forward_semaphore,
+                                                forward_limit,
+                                            ),
                                         };
-                                        // A tensor-parallel prompt pass keeps `sequence_num == 0`
-                                        // for EVERY layer, and its coordinator waits on the
-                                        // AllReduce, not on a LayerResult — a refusal here would be
-                                        // unread and cost a 10 s AllReduce timeout per layer. It is
-                                        // one request's layers, not new ones: never held back.
-                                        if forward.sequence_num == 0
-                                            && forward.tp_meta.is_none()
-                                            && !admits_a_new_request(forward_semaphore.available_permits(), forward_limit)
-                                        {
-                                            drop(peer_slot);
-                                            tracing::warn!(
-                                                sender = %peer_sender,
-                                                "LayerForward rejected — the rest is kept for requests already running here"
-                                            );
-                                            tokio::spawn(layer_forward::refuse_forward(
-                                                shared_state.clone(),
-                                                network_tx.clone(),
-                                                layer_forward::RefusalAddress::of(&forward),
-                                                peer_work_refusal(),
-                                            ));
-                                            continue;
-                                        }
-                                        let permit = match forward_semaphore.clone().try_acquire_owned() {
-                                            Ok(p) => p,
-                                            Err(_) => {
-                                                drop(peer_slot);
-                                                tracing::warn!(sender = %peer_sender, "LayerForward rejected — forward semaphore full");
+                                        let (peer_slot, permit) = match admitted {
+                                            Ok(admitted) => admitted,
+                                            Err(why) => {
+                                                why.log(&peer_sender, per_peer_limit);
                                                 tokio::spawn(layer_forward::refuse_forward(
                                                     shared_state.clone(),
                                                     network_tx.clone(),
@@ -773,7 +928,7 @@ pub(crate) async fn dispatch_network_messages(
                                             // does. As plain statements after the await they were
                                             // skipped by both, and a skipped decrement is permanent.
                                             let _slot = InboundForwardSlot {
-                                                _peer_slot: peer_slot,
+                                                _peer_work: peer_slot,
                                                 state: ss.clone(),
                                                 request_id: forward_request_id,
                                                 finished: finished_in_task,
@@ -3250,7 +3405,7 @@ mod rejected_manifest_tests {
 
 #[cfg(test)]
 mod inbound_forward_slot_tests {
-    use super::{InboundForwardSlot, PeerWorkSlot};
+    use super::{InboundForwardSlot, PeerWork, PeerWorkSlot, StreamWorkSlot};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
 
@@ -3296,9 +3451,11 @@ mod inbound_forward_slot_tests {
         let slot_state = state.clone();
         let handle = tokio::spawn(async move {
             let _slot = InboundForwardSlot {
-                _peer_slot: PeerWorkSlot {
-                    counts: slot_counts,
-                    peer: peer(),
+                _peer_work: PeerWork::Own {
+                    _slot: PeerWorkSlot {
+                        counts: slot_counts,
+                        peer: peer(),
+                    },
                 },
                 state: slot_state,
                 request_id: uuid::Uuid::new_v4(),
@@ -3335,9 +3492,11 @@ mod inbound_forward_slot_tests {
 
         {
             let _slot = InboundForwardSlot {
-                _peer_slot: PeerWorkSlot {
-                    counts: counts.clone(),
-                    peer: peer(),
+                _peer_work: PeerWork::Own {
+                    _slot: PeerWorkSlot {
+                        counts: counts.clone(),
+                        peer: peer(),
+                    },
                 },
                 state,
                 request_id: uuid::Uuid::new_v4(),
@@ -3419,5 +3578,136 @@ mod inbound_forward_slot_tests {
             counts.get(&peer()).is_none(),
             "a peer with nothing in flight leaves no entry"
         );
+    }
+
+    fn stream_share(
+        streams: &super::StreamWork,
+        counts: &super::PeerWorkCounts,
+        who: &crate::types::NodeId,
+        request: uuid::Uuid,
+        seq: u32,
+        limit: usize,
+    ) -> Option<StreamWorkSlot> {
+        let permits = Arc::new(tokio::sync::Semaphore::new(64));
+        StreamWorkSlot::try_take(
+            streams,
+            counts,
+            who,
+            (request, (14, 28), seq),
+            limit,
+            || permits.try_acquire_owned().ok(),
+        )
+        .ok()
+    }
+
+    /// The .215 gate's refusal: a stream's chunks — live ones and the ones a
+    /// restart superseded, still queued — are ONE piece of the sender's work.
+    /// Counted one each, the fifth chunk out from one stream was refused at
+    /// the per-peer cap of 4.
+    #[test]
+    fn a_streams_chunks_share_one_per_peer_slot() {
+        let streams: super::StreamWork = Arc::new(dashmap::DashMap::new());
+        let counts: super::PeerWorkCounts = Arc::new(dashmap::DashMap::new());
+        let limit = 4;
+        let request = uuid::Uuid::new_v4();
+        let mut chunks: Vec<StreamWorkSlot> = (0..6)
+            .map(|seq| {
+                stream_share(&streams, &counts, &peer(), request, seq, limit)
+                    .unwrap_or_else(|| panic!("chunk {seq} of one stream refused"))
+            })
+            .collect();
+        assert_eq!(
+            counts.get(&peer()).map(|c| c.load(Ordering::Relaxed)),
+            Some(1),
+            "six chunks of one stream hold one slot"
+        );
+        // The peer's other work still has the rest of its limit.
+        let others: Vec<PeerWorkSlot> = (0..limit - 1)
+            .map(|_| PeerWorkSlot::try_take(&counts, &peer(), limit).unwrap())
+            .collect();
+        assert!(
+            stream_share(&streams, &counts, &peer(), uuid::Uuid::new_v4(), 0, limit).is_none(),
+            "a NEW stream past the peer's limit is refused like any work"
+        );
+        assert!(
+            stream_share(&streams, &counts, &peer(), request, 6, limit).is_some(),
+            "a stream already here keeps its place"
+        );
+        drop(others);
+        chunks.clear();
+        // The chunk taken just above was dropped at once; nothing is left.
+        assert!(streams.is_empty(), "the stream's last chunk out removes it");
+        assert!(counts.get(&peer()).is_none(), "and gives its slot back");
+    }
+
+    /// A stream's chunks share ONE node-wide permit too: queued chunks wait
+    /// their turn and compute nothing, and one each, two busy streams filled a
+    /// small node's 8 permits. A new stream finding none is refused, and the
+    /// permit comes back with the stream's last chunk.
+    #[test]
+    fn a_streams_chunks_share_one_node_wide_permit() {
+        use super::ForwardRefused;
+        let streams: super::StreamWork = Arc::new(dashmap::DashMap::new());
+        let counts: super::PeerWorkCounts = Arc::new(dashmap::DashMap::new());
+        let permits = Arc::new(tokio::sync::Semaphore::new(1));
+        let take = |request: uuid::Uuid, seq: u32| {
+            StreamWorkSlot::try_take(
+                &streams,
+                &counts,
+                &peer(),
+                (request, (14, 28), seq),
+                4,
+                || permits.clone().try_acquire_owned().ok(),
+            )
+        };
+        let request = uuid::Uuid::new_v4();
+        let chunks: Vec<StreamWorkSlot> = (0..6).map(|seq| take(request, seq).unwrap()).collect();
+        assert_eq!(permits.available_permits(), 0, "six chunks, one permit");
+        assert_eq!(
+            take(uuid::Uuid::new_v4(), 0).err(),
+            Some(ForwardRefused::NodeFull),
+            "another stream finds the node full"
+        );
+        assert_eq!(
+            counts.get(&peer()).map(|c| c.load(Ordering::Relaxed)),
+            Some(1),
+            "and its refusal gave back the per-peer slot it had taken"
+        );
+        drop(chunks);
+        assert_eq!(
+            permits.available_permits(),
+            1,
+            "the last chunk out returns it"
+        );
+    }
+
+    /// One stream holds at most its window of chunks here, so it cannot take
+    /// every node-wide slot; and no peer rides another's stream.
+    #[test]
+    fn a_stream_is_bounded_and_belongs_to_its_sender() {
+        use crate::daemon::state::forward_streams::MAX_STREAM_CHUNKS_HERE;
+        let streams: super::StreamWork = Arc::new(dashmap::DashMap::new());
+        let counts: super::PeerWorkCounts = Arc::new(dashmap::DashMap::new());
+        let request = uuid::Uuid::new_v4();
+        let held: Vec<StreamWorkSlot> = (0..MAX_STREAM_CHUNKS_HERE as u32)
+            .map(|seq| stream_share(&streams, &counts, &peer(), request, seq, 4).unwrap())
+            .collect();
+        assert!(
+            stream_share(&streams, &counts, &peer(), request, 99, 4).is_none(),
+            "one past the window is refused"
+        );
+        let stranger = crate::types::NodeId([9u8; 32]);
+        let theirs = stream_share(&streams, &counts, &stranger, request, 0, 1);
+        assert!(
+            theirs.is_some(),
+            "the same request id from another peer is that peer's own stream"
+        );
+        assert_eq!(
+            counts.get(&stranger).map(|c| c.load(Ordering::Relaxed)),
+            Some(1),
+            "and takes a slot of its own"
+        );
+        drop((held, theirs));
+        assert!(streams.is_empty() && counts.is_empty());
     }
 }

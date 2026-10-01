@@ -525,7 +525,7 @@ reasons has no room for a shadow, so 4b (which works with ANY drafter) and a
 small drafter from the shard system now come first.
 
 **4b built 2026-09-30 (`pipeline::dsd_stream`; opt-in for v0.3.213-214, every node serving
-one; ON by default since v0.3.215 — `SWARMLLM_SPEC_STREAM=0` keeps the rounds — after the
+one; ON by default since v0.3.216 — `SWARMLLM_SPEC_STREAM=0` keeps the rounds — after the
 real-link A/B below).** Where every segment but the far one is the coordinator's own and the
 far peer advertises `features::STREAMED_VERIFY`, the next chunk is drafted, run
 through the near layers and sent while earlier ones are still out. What the build
@@ -588,7 +588,9 @@ The stream is +20% / +51% / +57% over the rounds greedy, more at T = 0.7; every 
 scores against llama.cpp like plain decoding's (worst rank 2 on the prose, the same largest
 gap). A far PROCESSOR gains more than the shared-card rig suggested because its per-position
 cost (~22 ms) is what the stream keeps busy. A window of 6 pays only where acceptance is high
-(code +18%, prose −7%): the default stays 3. **Flipped ON for v0.3.215**, with one fix the
+(code +18%, prose −7%): the default stays 3. **Flipped ON for v0.3.215** — whose release gate then found a serving-side stall,
+so the flip ships in v0.3.216 with its fix (`docs/invariants/network.md` § "A stream of
+verifies runs in its order") — with one fix the
 flip needed: a streamed request walked no γ and remembered its starting 4, so a split where
 guessing does not pay would never step aside — it now remembers
 `dsd_controller::best_gamma_overall` over the costs it measured. On a near split (one card, 0 ms, plain 54

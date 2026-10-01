@@ -61,10 +61,17 @@ fn guesses_per_chunk() -> u32 {
 /// Chunks out at once. Enough to cover a round trip with chunks being built
 /// (~20 ms each on the rig against ~45-70 ms to an answer); each one past that
 /// is only more work thrown away at a refusal. `SWARMLLM_SPEC_STREAM_WINDOW`
-/// (1-8).
+/// (1-8 — `forward_streams::MAX_STREAM_WINDOW`, which the serving side sizes
+/// its per-stream admission from).
 fn chunks_in_flight() -> usize {
     static N: OnceLock<u32> = OnceLock::new();
-    *N.get_or_init(|| knob("SWARMLLM_SPEC_STREAM_WINDOW", 3, 8)) as usize
+    *N.get_or_init(|| {
+        knob(
+            "SWARMLLM_SPEC_STREAM_WINDOW",
+            3,
+            crate::daemon::state::forward_streams::MAX_STREAM_WINDOW,
+        )
+    }) as usize
 }
 
 fn knob(name: &str, default: u32, max: u32) -> u32 {
@@ -84,8 +91,9 @@ fn knob(name: &str, default: u32, max: u32) -> u32 {
 /// reads it ~15% slower (gotcha #759) — two processes contending for one
 /// device, not a deployment. Where guessing does not pay at all, a streamed
 /// request remembers the rounds' verdict of zero and the next one steps aside
-/// (`dsd_controller::best_gamma_overall`). The SERVING side has been on since
-/// v0.3.213; an older far node advertises no `STREAMED_VERIFY` and gets rounds.
+/// (`dsd_controller::best_gamma_overall`). A far node is streamed to only from
+/// v0.3.216 (`features::STREAM_AS_ONE_WORK`); an older one gets rounds — see
+/// [`stream_tail`].
 pub(super) fn stream_requested() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| stream_switch(std::env::var("SWARMLLM_SPEC_STREAM").ok().as_deref()))
@@ -99,21 +107,23 @@ fn stream_switch(v: Option<&str>) -> bool {
 /// The segment a stream's chunks go to: the request's LAST segment, when every
 /// segment before it is this node's own — their forwards then leave here one
 /// at a time, in order — and it is a peer that walks a check and serves a
-/// stream (`features::STREAMED_VERIFY`). `None` keeps the rounds.
+/// stream as one piece of work. `None` keeps the rounds.
+///
+/// `STREAMED_VERIFY` alone is not enough: v0.3.213-v0.3.215 serve a stream but
+/// count each chunk against their per-peer cap of 4, and a chunk refused there
+/// stalled the rest of the stream for 60 s (`features::STREAM_AS_ONE_WORK`).
 pub(super) fn stream_tail<'a>(
     state: &SharedState,
     segments: &'a [PipelineSegment],
 ) -> Option<&'a PipelineSegment> {
+    use swarmllm_types::node::features::{STREAMED_VERIFY, STREAM_AS_ONE_WORK};
     let (tail, head) = segments.split_last()?;
     let me = state.identity.node_id();
     let head_is_ours = !head.is_empty() && head.iter().all(|s| s.node_id == *me);
     (head_is_ours
         && tail.node_id != *me
         && super::peer_walks_at_tail(state, &tail.node_id)
-        && state.peer_advertises_feature(
-            &tail.node_id,
-            swarmllm_types::node::features::STREAMED_VERIFY,
-        ))
+        && state.peer_advertises_feature(&tail.node_id, STREAMED_VERIFY | STREAM_AS_ONE_WORK))
     .then_some(tail)
 }
 

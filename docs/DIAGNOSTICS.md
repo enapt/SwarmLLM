@@ -840,7 +840,7 @@ measured this way (`~/swarmllm-link-0930/sweep.sh`); it delays each message once
 forward re-enters the handler as `SendEncodedTensor`, which is not delayed again.
 
 **Split speculation's continuous stream** (`pipeline::dsd_stream`, ON by default on the coordinator since
-v0.3.215 — `SWARMLLM_SPEC_STREAM=0` keeps the rounds; every node serves one since v0.3.213): `SWARMLLM_SPEC_STREAM_GUESSES` guesses per
+v0.3.216 — `SWARMLLM_SPEC_STREAM=0` keeps the rounds; it streams only to a node on v0.3.216 or later, `features::STREAM_AS_ONE_WORK`): `SWARMLLM_SPEC_STREAM_GUESSES` guesses per
 chunk, the look-ahead included (default 3), `SWARMLLM_SPEC_STREAM_WINDOW` chunks out at once
 (default 3). One INFO line per reply on the coordinator, `DIAG`-free:
 `DSD: streamed checks complete chunks=… kept_whole=… restarts=…` — `kept_whole / chunks` is how

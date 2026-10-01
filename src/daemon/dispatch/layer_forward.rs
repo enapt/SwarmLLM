@@ -634,6 +634,8 @@ pub(super) struct RefusalAddress {
     answering: crate::types::ResultStep,
     requester_node_id: Option<[u8; 32]>,
     sender_peer_bytes: Option<Vec<u8>>,
+    /// It cut the cache back — a streamed forward that restarts its stream.
+    restarts: bool,
 }
 
 impl RefusalAddress {
@@ -647,6 +649,7 @@ impl RefusalAddress {
             },
             requester_node_id: forward.requester_node_id,
             sender_peer_bytes: forward.sender_peer_bytes.clone(),
+            restarts: forward.truncate_kv_to.is_some(),
         }
     }
 }
@@ -659,12 +662,26 @@ impl RefusalAddress {
 /// exactly as `handle_layer_forward`'s own failures are — through
 /// [`reply_target`], so in a chain it reaches the coordinator rather than the
 /// previous hop.
+///
+/// A refused STREAMED forward also gives up its place in its stream's order
+/// (`ForwardStreams::refused_on_arrival`): it never reaches the handler that
+/// would have taken its turn, and every later forward of the stream would
+/// otherwise wait 60 s for it. Before anything else, so not even a sender that
+/// cannot be answered leaves the hole.
 pub(super) async fn refuse_forward(
     shared_state: Arc<SharedState>,
     network_tx: mpsc::Sender<NetworkCommand>,
     to: RefusalAddress,
     reason: String,
 ) {
+    if let Some(seq) = to.answering.stream_seq {
+        shared_state.forward_streams.refused_on_arrival(
+            to.request_id,
+            to.answering.layer_range,
+            seq,
+            to.restarts,
+        );
+    }
     let Some(sender) = to.sender_peer_bytes else {
         tracing::warn!(request_id = %to.request_id, "refused LayerForward has no sender to answer");
         return;

@@ -2502,14 +2502,58 @@ of 1-4 tokens beat large ones once several are in flight.
   node — the one its coordinator reads — rather than leaving every chunk to sit
   out its deadline. Gotcha #229 is why it is pinned: a failure about node X must
   never end a wait on Y.
+- **The per-peer cap counted each chunk as its own work, and a chunk it refused
+  left a hole** (found by the v0.3.215 release gate, 2026-10-01, step 12e
+  `failover` with speculation on: A on the card, B on the processor). B served
+  the healthy request's stream until five of its chunks were in flight at once —
+  one running, live ones, and ones a restart had superseded still waiting to be
+  skipped — and refused the fifth at `max_forwards_per_peer`'s floor of 4. That
+  refusal never reached `handle_layer_forward`, so the chunk never took its turn;
+  the coordinator, meanwhile, had restarted past it. The restart and the three
+  chunks after it waited `STREAM_TURN_WAIT` for that turn (B: "streamed check 21
+  waited 60s for the check before it, which never came", ×4), the coordinator's
+  52 s segment deadline fired first, and the request re-planned away from a
+  healthy B — 200, about a minute late, with the takeover the step exists to
+  watch never happening ("the reply finished before B started computing").
+  Reproduced on purpose the same morning on the plain two-node shape (A card
+  0-3, B processor 4-7, window 6 > the cap): .215 refused 19 chunks, 10 waited
+  the 60 s, all 3 requests timed out — and with no other holder to re-plan onto,
+  each ended with its first ~10 tokens, salvaged and marked `error`. The fixed
+  build on the same rig: 0 refusals, 0 waits, 0 retries, 120 tokens each (window
+  6 and 3). A restart skips only turns that ARRIVE, so nothing could close the hole.
+  Two changes, each sufficient for this instance and both needed in general:
+  **a stream is one piece of its sender's work** — `dispatch::StreamWorkSlot`
+  gives a stream's chunks one shared per-peer slot while any is in flight, up to
+  `MAX_STREAM_CHUNKS_HERE` (twice the coordinator's largest window), the way
+  HTTP/2's `SETTINGS_MAX_CONCURRENT_STREAMS` counts streams and leaves a stream's
+  frames to its own window (RFC 9113 §5.1.2, §6.9) — and one node-wide permit,
+  since queued chunks compute nothing (two busy streams would otherwise fill a
+  `Minimal` node's 8). This is per-STREAM admission without the end-of-request
+  signal #123 says per-REQUEST admission lacks: the hold lives exactly while a
+  chunk is in flight, so its own count is the signal; and **a refused chunk is
+  stepped over** — `refuse_forward` calls `ForwardStreams::refused_on_arrival`,
+  and the stream skips that number when it comes due, as it does a chunk that
+  took its turn and failed in the handler. TCP closes a receiver's hole by the
+  sender's retransmission; nobody resends a refused check, so the refusing node
+  closes it. The coordinator was answered either way: it ends the stream at that
+  answer, or a restart it already sent cuts both caches back past the hole.
+  Gated by a feature bit with no wire change (`features::STREAM_AS_ONE_WORK`):
+  v0.3.213-v0.3.215 still count each chunk, so a coordinator streams only to a
+  node advertising it and gives an older one rounds.
 
 **What a change must keep:**
-- Streamed forwards go only to a peer advertising `features::STREAMED_VERIFY`.
-  An older peer would fail the seal on `0x0C` and would also run the chunks
-  concurrently.
+- Streamed forwards go only to a peer advertising `features::STREAMED_VERIFY`
+  AND `features::STREAM_AS_ONE_WORK`. An older peer would fail the seal on
+  `0x0C` and would also run the chunks concurrently; one with the first bit only
+  refuses a busy stream's chunks and stalls on the hole.
 - The turn is given back by DROPPING it (`forward_streams::Turn`), on every
   exit of `handle_layer_forward` — an early refusal or an abort included —
-  or every later chunk waits out `STREAM_TURN_WAIT`.
+  or every later chunk waits out `STREAM_TURN_WAIT`. **And a forward refused
+  BEFORE the handler** (the dispatcher's admission caps) gives up its number
+  through `refuse_forward`; a new refusal point ahead of the handler must go
+  through it too. Pinned by
+  `a_restart_does_not_wait_for_a_turn_refused_on_arrival` (the gate's shape) and
+  `a_streams_chunks_share_one_per_peer_slot`.
 - Pinned by `forwards_run_in_their_streams_order_whatever_order_they_arrive_in`,
   `a_streamed_answer_reaches_the_wait_its_number_names` (red with either the
   number's routing or the link-failure rule toggled off, 2026-09-30) and the

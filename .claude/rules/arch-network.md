@@ -324,6 +324,14 @@ answer echoes its number (`ResultStep::stream_seq`, `0x08`): position alone
 cannot name a chunk once a restarted stream reuses one. A failure this node
 manufactures (no step) ends the stream's OLDEST wait on that node only (#229).
 The cancel registry holds every forward of a request.
+**A stream is ONE piece of its sender's work, and a chunk refused on arrival is
+stepped over** (2026-10-01): its chunks share one per-peer slot and one node-wide
+permit (`dispatch::StreamWorkSlot`, up to `MAX_STREAM_CHUNKS_HERE`), and every admission
+refusal goes through `refuse_forward`, which gives up the chunk's number
+(`ForwardStreams::refused_on_arrival`). Counted one each, a stream with superseded
+chunks queued was refused at the per-peer cap of 4, and every chunk after the
+hole waited 60 s — a restart skips only turns that ARRIVE. A coordinator streams
+only to a peer advertising `features::STREAM_AS_ONE_WORK`.
 
 → `docs/invariants/network.md` § "A stream of verifies runs in its order"
 
