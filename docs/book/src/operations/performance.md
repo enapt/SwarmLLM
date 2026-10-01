@@ -183,6 +183,14 @@ plus a coordinator loop in `pipeline/dsd.rs`.
   layers keeps a guess only when its own sample agrees. How many tokens to
   guess each round is chosen from what a check actually costs, including what
   each extra guess adds when that computer checks on its processor.
+- **Checks stream (from v0.3.216):** the next few guesses are sent while the
+  previous ones are still being checked, instead of waiting for each check to
+  come back. Measured between Thailand and a computer in Italy holding the far
+  half on its processor (~270 ms apart): 20-57% faster than checking one batch
+  at a time, with replies that match the big model's own choices as closely as
+  plain decoding. Used only when the far computer runs v0.3.216 or later — it
+  treats a reply's stream of checks as one job; older ones keep the one-batch
+  way. `SWARMLLM_SPEC_STREAM=0` switches back to batches.
 - **The guesser** is a model this computer already holds, run by SwarmLLM's
   own engine from its parts — chosen automatically (the largest held model
   that shares the big model's vocabulary and is at most a quarter of its

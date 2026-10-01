@@ -853,6 +853,15 @@ stream reads ~15% SLOWER there than rounds (25-27 vs 28-33 tok/s at an emulated 
 while with the far half on other hardware it is ~15-20% faster. Put B on the processor
 (`NODE_B_TOML='gpu_layers = 0\n[resources]\nmax_cpu_threads = 8'` in `split_speed.sh`) or on
 another machine to see the stream work.
+`DIAG:` **a stream that stalls ~52-60 s and then re-plans** (or, on a two-node split, returns a few tokens marked
+`error`): on the SERVING node grep `LayerForward rejected` and `waited 60s for the check before it`. Both together
+are the v0.3.213-215 shape (#767 — the per-peer cap refused a chunk, the rest waited for its turn); from v0.3.216 a
+stream holds one slot, so a refusal of a streamed chunk means the node was genuinely full or the stream exceeded
+`MAX_STREAM_CHUNKS_HERE` (`its stream already has as many checks here as a stream may`), and the refused turn is
+stepped over, never waited for. Reproduce with a window over an old node's cap of 4:
+`SWARMLLM_SPEC_STREAM_WINDOW=6 MODEL=qwen2.5-coder-7b-instruct-q4-k-m DRAFTER=qwen2.5-0.5b-instruct-fp16 GPU_A=-1
+SHARDS_A=0,1,2,3 SHARDS_B=4,5,6,7 EXTRA_TOML=<DSD on> REPEAT=3 examples/split_rig.sh repeat <binary>` — v0.3.215
+refused 19 chunks and cut 3 of 3 replies short; v0.3.216 refused none.
 
 **CUDA-graph decode** (on by default since 2026-09-30; `SWARMLLM_CUDA_GRAPH=0` or `SWARMLLM_CUDA_OWN_STREAM=0` turns it off; recorded in groups of `SWARMLLM_CUDA_GRAPH_GROUP` layers, default 2, `0` = one graph per step):
 
