@@ -243,6 +243,14 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg"]
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# Windows: start an update's replacement process WITHOUT our inheritable handles
+# (update_restart::spawn_without_inherited_handles). std's Command passes every
+# inheritable handle, and on Windows that included the old version's QUIC socket,
+# so the replacement held the port it then could not bind (#769). The version
+# already in the tree via tokio/mio; only the features are ours.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Console", "Win32_System_Threading"] }
+
 [features]
 default = ["swarmllm-frontend/embedded"]
 dev = ["swarmllm-frontend/dev"]

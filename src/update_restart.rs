@@ -150,24 +150,59 @@ impl PortClaim {
     }
 }
 
-/// After an update handoff, wait until the ports the previous version held can
-/// be bound — called once the configuration has said which ports those are.
+/// Set on a replacement that has already relaunched itself without inherited
+/// handles, so it never does so twice.
+#[cfg(windows)]
+const CLEAN_RELAUNCH_VAR: &str = "SWARMLLM_UPDATE_CLEAN_RELAUNCH";
+
+/// After an update handoff, make sure the ports the previous version held can be
+/// bound — called once the configuration has said which ports those are.
 ///
-/// **The predecessor leaving the process list is not the moment it lets go of
-/// its sockets.** Measured on Windows 2026-10-01 (#769): v0.3.204 installed
-/// v0.3.216 and spawned it; the replacement saw the old process gone 9 ms
-/// later, and its QUIC bind failed — UDP 8950 was still owned by the old
-/// process id for ~0.9 s after that id had left `Win32_Process`. The new node
-/// shut down, so every automatic update on Windows ended with the node stopped
-/// (2 of 2 runs). A process killed from outside (`Stop-Process`) released the
-/// port at once; one leaving through `ExitProcess`, as `exec_into` does, did
-/// not. So what is waited on here is the thing that was refused: binding.
+/// **On Windows the replacement itself held the old version's QUIC port** (#769,
+/// measured 2026-10-01): `exec_into` up to v0.3.217 started it with std's
+/// `Command`, which hands the child every inheritable handle — and the old QUIC
+/// socket was one. Nine seconds after the old process was gone, UDP 8950 was still
+/// registered to it; killing the replacement freed it 99 ms later. So the
+/// replacement could never bind it, waited or not: every automatic update on
+/// Windows ended with the node stopped (v0.3.204 → .216 and → .217, 3 of 3).
+/// (`Get-NetUDPEndpoint` names the process that CREATED a socket, which is why it
+/// first read as "the port outlives the old process".)
 ///
-/// It lives in the NEW binary on purpose: an older build doing the swap needs
-/// no change, because it already hands over [`HANDOFF_PID_VAR`].
+/// So a replacement that finds a port held relaunches itself once with no
+/// inherited handle and exits; its exit closes the inherited socket, and the
+/// relaunched node waits for it as for any predecessor. That is what rescues a
+/// swap done by an OLDER version — which still hands the socket down — and
+/// `exec_into` no longer passes it at all. The bounded wait stays for anything
+/// else holding a port.
 pub fn await_ports_released(claims: &[PortClaim]) {
     if std::env::var_os(HANDOFF_PID_VAR).is_none() {
         return;
+    }
+    #[cfg(windows)]
+    if std::env::var_os(CLEAN_RELAUNCH_VAR).is_none() && claims.iter().any(|c| !c.is_free()) {
+        let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+        let me = std::process::id().to_string();
+        match std::env::current_exe().and_then(|exe| {
+            spawn_without_inherited_handles(
+                &exe,
+                &args,
+                &[(HANDOFF_PID_VAR, me.as_str()), (CLEAN_RELAUNCH_VAR, "1")],
+            )
+        }) {
+            Ok(pid) => {
+                tracing::info!(
+                    relaunched_pid = pid,
+                    still_held = ?claims.iter().filter(|c| !c.is_free()).collect::<Vec<_>>(),
+                    "A port is held by a handle this process inherited from the version it \
+                     replaced — relaunching without inherited handles"
+                );
+                std::process::exit(0);
+            }
+            Err(e) => tracing::warn!(
+                error = %e,
+                "Could not relaunch without inherited handles — waiting for the ports instead"
+            ),
+        }
     }
     match wait_for_ports(claims, HANDOFF_WAIT, HANDOFF_POLL) {
         Some(elapsed) => tracing::info!(
@@ -246,20 +281,19 @@ pub fn exec_into(exe: &std::path::Path) -> std::io::Error {
         std::process::Command::new(exe).args(&args).exec()
     }
 
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
         // Windows has no exec: spawn a replacement and let this process exit.
-        // The new process inherits the console, so an interactive user keeps
-        // their window. A service wrapper sees the old process exit cleanly.
+        // The new process keeps the console, so an interactive user keeps their
+        // window. A service wrapper sees the old process exit cleanly.
         //
         // Unlike `exec`, this leaves two processes alive for an instant, both
         // wanting the API port and the redb lock. `HANDOFF_PID_VAR` is how the
         // replacement knows to wait for this one — see `await_predecessor_exit`.
-        match std::process::Command::new(exe)
-            .args(&args)
-            .env(HANDOFF_PID_VAR, std::process::id().to_string())
-            .spawn()
-        {
+        // And it passes NO handle but stdio: std's `Command` handed the
+        // replacement our QUIC socket, which it then could not bind (#769).
+        let me = std::process::id().to_string();
+        match spawn_without_inherited_handles(exe, &args, &[(HANDOFF_PID_VAR, me.as_str())]) {
             Ok(_) => {
                 tracing::info!("Replacement process spawned — exiting");
                 std::process::exit(0);
@@ -267,6 +301,210 @@ pub fn exec_into(exe: &std::path::Path) -> std::io::Error {
             Err(e) => e,
         }
     }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = args;
+        std::io::Error::other("restarting into an update is not supported on this platform")
+    }
+}
+
+/// Start `exe` with `args` and the given environment additions, passing it NO
+/// handle of ours except standard input, output and error (#769).
+///
+/// std's `Command` always calls `CreateProcessW` with `bInheritHandles = TRUE`,
+/// so the child receives every inheritable handle in the process; on Windows
+/// that included the QUIC socket, despite `socket2` asking for a non-inheritable
+/// one. `Command::inherit_handles(false)` was stabilised only in 2026-08
+/// (rust-lang/rust#161163), above this crate's minimum Rust. This is the
+/// approach Python's `subprocess` takes (`close_fds` + `handle_list`):
+/// `bInheritHandles = TRUE` restricted by `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` to
+/// the stdio handles that are inheritable — logs redirected to a file keep
+/// flowing — or `FALSE` when there are none, where the child simply attaches to
+/// the same console. Returns the new process id.
+#[cfg(windows)]
+fn spawn_without_inherited_handles(
+    exe: &std::path::Path,
+    args: &[std::ffi::OsString],
+    env: &[(&str, &str)],
+) -> std::io::Result<u32> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, GetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
+    };
+    use windows_sys::Win32::System::Console::{
+        GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+    };
+    use windows_sys::Win32::System::Threading::{
+        CreateProcessW, DeleteProcThreadAttributeList, InitializeProcThreadAttributeList,
+        UpdateProcThreadAttribute, CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT,
+        LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+        STARTF_USESTDHANDLES, STARTUPINFOEXW,
+    };
+
+    // The stdio handles that can be passed on: valid, inheritable, each once
+    // (a handle listed twice fails the whole call — stdout and stderr are often
+    // the same file).
+    let stdio = [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE].map(|which| {
+        // SAFETY: GetStdHandle has no preconditions.
+        let h = unsafe { GetStdHandle(which) };
+        let mut flags = 0u32;
+        // SAFETY: `h` is a handle this process holds (or null/invalid, which
+        // GetHandleInformation rejects); `flags` is a valid out-pointer.
+        let ok = !h.is_null()
+            && h != INVALID_HANDLE_VALUE
+            && unsafe { GetHandleInformation(h, &mut flags) } != 0
+            && flags & HANDLE_FLAG_INHERIT != 0;
+        if ok {
+            h
+        } else {
+            std::ptr::null_mut()
+        }
+    });
+    let mut pass: Vec<HANDLE> = Vec::new();
+    for h in stdio {
+        if !h.is_null() && !pass.contains(&h) {
+            pass.push(h);
+        }
+    }
+
+    let mut command_line = windows_command_line(exe.as_os_str(), args);
+    let mut block = Vec::<u16>::new();
+    for (k, v) in std::env::vars_os() {
+        if env.iter().any(|(name, _)| k.eq_ignore_ascii_case(name)) {
+            continue;
+        }
+        block.extend(k.encode_wide());
+        block.push(u16::from(b'='));
+        block.extend(v.encode_wide());
+        block.push(0);
+    }
+    for (k, v) in env {
+        block.extend(std::ffi::OsStr::new(k).encode_wide());
+        block.push(u16::from(b'='));
+        block.extend(std::ffi::OsStr::new(v).encode_wide());
+        block.push(0);
+    }
+    block.push(0);
+
+    // SAFETY: zeroed STARTUPINFOEXW / PROCESS_INFORMATION are valid "empty"
+    // values for these plain-data structs.
+    let mut si: STARTUPINFOEXW = unsafe { std::mem::zeroed() };
+    si.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
+    let mut pi: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
+    let mut flags = CREATE_UNICODE_ENVIRONMENT;
+    let mut attributes: Vec<usize> = Vec::new();
+    if !pass.is_empty() {
+        let mut size = 0usize;
+        // SAFETY: the documented size query — a null list with a size pointer;
+        // it fails by design and writes the size needed.
+        unsafe { InitializeProcThreadAttributeList(std::ptr::null_mut(), 1, 0, &mut size) };
+        // usize-aligned storage for the opaque attribute list.
+        attributes.resize(size.div_ceil(std::mem::size_of::<usize>()), 0);
+        let list = attributes.as_mut_ptr() as LPPROC_THREAD_ATTRIBUTE_LIST;
+        // SAFETY: `list` points at `size` writable bytes, kept alive in
+        // `attributes` until after CreateProcessW; `pass` outlives the call too.
+        unsafe {
+            if InitializeProcThreadAttributeList(list, 1, 0, &mut size) == 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if UpdateProcThreadAttribute(
+                list,
+                0,
+                PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
+                pass.as_ptr() as *const core::ffi::c_void,
+                pass.len() * std::mem::size_of::<HANDLE>(),
+                std::ptr::null_mut(),
+                std::ptr::null(),
+            ) == 0
+            {
+                let e = std::io::Error::last_os_error();
+                DeleteProcThreadAttributeList(list);
+                return Err(e);
+            }
+        }
+        si.lpAttributeList = list;
+        si.StartupInfo.dwFlags |= STARTF_USESTDHANDLES;
+        si.StartupInfo.hStdInput = stdio[0];
+        si.StartupInfo.hStdOutput = stdio[1];
+        si.StartupInfo.hStdError = stdio[2];
+        flags |= EXTENDED_STARTUPINFO_PRESENT;
+    }
+    // SAFETY: every pointer is valid for the call: the NUL-terminated mutable
+    // command line, the double-NUL-terminated UTF-16 environment block, the
+    // startup info (with its attribute list, when present) and `pi`.
+    let created = unsafe {
+        CreateProcessW(
+            std::ptr::null(),
+            command_line.as_mut_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            i32::from(!pass.is_empty()),
+            flags,
+            block.as_ptr() as *const core::ffi::c_void,
+            std::ptr::null(),
+            &si.StartupInfo,
+            &mut pi,
+        )
+    };
+    let error = std::io::Error::last_os_error();
+    if !si.lpAttributeList.is_null() {
+        // SAFETY: initialised above and not yet deleted.
+        unsafe { DeleteProcThreadAttributeList(si.lpAttributeList) };
+    }
+    if created == 0 {
+        return Err(error);
+    }
+    // SAFETY: both handles were just returned to us by CreateProcessW.
+    unsafe {
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+    }
+    Ok(pi.dwProcessId)
+}
+
+/// A Windows command line for `exe` + `args`, NUL-terminated: the program name
+/// in quotes, and each argument quoted by the rules `CommandLineToArgvW` and the
+/// MSVC runtime parse with — the same quoting std's `Command` applies.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn windows_command_line(exe: &std::ffi::OsStr, args: &[std::ffi::OsString]) -> Vec<u16> {
+    let mut out: Vec<u16> = Vec::new();
+    let quote = u16::from(b'"');
+    let backslash = u16::from(b'\\');
+    out.push(quote);
+    out.extend(exe.to_string_lossy().encode_utf16());
+    out.push(quote);
+    for arg in args {
+        out.push(u16::from(b' '));
+        let units: Vec<u16> = arg.to_string_lossy().encode_utf16().collect();
+        let plain = !units.is_empty()
+            && !units
+                .iter()
+                .any(|&c| c == u16::from(b' ') || c == u16::from(b'\t') || c == quote);
+        if plain {
+            out.extend(units);
+            continue;
+        }
+        out.push(quote);
+        let mut backslashes = 0usize;
+        for c in units {
+            if c == backslash {
+                backslashes += 1;
+            } else if c == quote {
+                out.extend(std::iter::repeat_n(backslash, backslashes * 2 + 1));
+                out.push(quote);
+                backslashes = 0;
+            } else {
+                out.extend(std::iter::repeat_n(backslash, backslashes));
+                out.push(c);
+                backslashes = 0;
+            }
+        }
+        out.extend(std::iter::repeat_n(backslash, backslashes * 2));
+        out.push(quote);
+    }
+    out.push(0);
+    out
 }
 
 #[cfg(test)]
@@ -369,6 +607,34 @@ mod tests {
         let free = wait_for_ports(&claims, Duration::from_secs(10), Duration::from_millis(10))
             .expect("free ports");
         assert!(free < Duration::from_millis(100));
+    }
+
+    /// The replacement's command line must parse back into the same arguments —
+    /// a data directory with spaces, a trailing backslash before the closing
+    /// quote, an embedded quote, an empty argument. These are the
+    /// `CommandLineToArgvW` / MSVC rules std's `Command` quotes by.
+    #[test]
+    fn a_relaunch_command_line_quotes_like_windows_parses() {
+        let line = |exe: &str, args: &[&str]| {
+            let args: Vec<std::ffi::OsString> = args.iter().map(|a| a.into()).collect();
+            let mut v = windows_command_line(std::ffi::OsStr::new(exe), &args);
+            assert_eq!(v.pop(), Some(0), "NUL-terminated");
+            String::from_utf16(&v).unwrap()
+        };
+        assert_eq!(
+            line(r"C:\SwarmLLM\swarmllm.exe", &["-p", "8800", "run"]),
+            r#""C:\SwarmLLM\swarmllm.exe" -p 8800 run"#
+        );
+        assert_eq!(
+            line(r"C:\x.exe", &["-d", r"C:\Users\A B\data\", "run"]),
+            r#""C:\x.exe" -d "C:\Users\A B\data\\" run"#
+        );
+        assert_eq!(
+            line(r"C:\x.exe", &[r#"say "hi""#]),
+            r#""C:\x.exe" "say \"hi\"""#
+        );
+        assert_eq!(line(r"C:\x.exe", &[""]), r#""C:\x.exe" """#);
+        assert_eq!(line(r"C:\x.exe", &[r"a\b"]), r#""C:\x.exe" a\b"#);
     }
 
     #[test]

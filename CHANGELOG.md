@@ -31,6 +31,19 @@ replies — see the correction there.
 Who is affected: everyone running SwarmLLM on Windows. Linux and macOS computers
 were not affected by any of these and see no change.
 
+**Correction (2026-10-01, after release).** Two things above turned out wrong when
+the published release was tried on a Windows machine:
+
+- **A Windows computer still stops after installing this update.** Waiting did
+  not help, because the cause was not what this entry said: the new version was
+  holding the old version's network port ITSELF — Windows had handed it the old
+  process's connection when it was started. (On the test machine the port came
+  free a tenth of a second after the new process was stopped.) Start SwarmLLM
+  again and it runs v0.3.217 normally. The real fix is in the next release.
+- **The extra copy of the graphics-card file has been taken down** from this
+  release until that fix is out, so a Windows graphics-card computer stays on the
+  version it is running instead of updating into a stop.
+
 ## [0.3.216-alpha] — 2026-10-01
 
 **A model split across computers answers 20-57% faster over long distances, and a

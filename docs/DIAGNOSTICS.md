@@ -1189,19 +1189,27 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
 
 - **Never moves off a version** — grep its log for `No matching binary asset for this platform
   and build variant`; `expected=` names what it asked for. Every Windows GPU build up to v0.3.216
-  asked for `swarmllm-windows-x86_64-cuda.exe` (#768); releases after v0.3.216 publish that name too
-  (`legacy_alias` in `release.yml`).
+  asked for `swarmllm-windows-x86_64-cuda.exe` (#768). `release.yml` publishes the GPU exe under
+  that name too (`legacy_alias`) — taken DOWN from v0.3.217 (whose restart still failed), back from
+  the release that carries the #769 fix below.
   A peer's version and OS are on `/api/identity/leaderboard` (`capability.os`, `version`).
 - **Updates, then is gone** — `Started by an update` → `The previous version has exited` → `Port
-  … is already in use` → `Daemon shutdown complete` within ~0.1 s. The old process's UDP port
-  outlives its entry in the process list by ~0.9 s (#769); builds after v0.3.216 wait for
-  the ports (`The previous version's ports are free — starting`). Watch the owner with
-  `Get-NetUDPEndpoint -LocalPort <port>` polled every ~30 ms during the update.
-- ⚠ **Only the real update path reproduces it.** Emulating the handoff by `Stop-Process`-ing the
-  old process freed the port at once and the replacement survived; the old process has to leave
-  through `ExitProcess`, as `exec_into` does. To test on this machine: unpack an older Windows
-  release into `C:\temp\…`, run it hidden on a spare port with its own `-d` data dir and
-  `auto_manage`/`prune` off, and let it update itself to the latest release.
+  … is already in use` → `Daemon shutdown complete`. **The replacement itself holds the old QUIC
+  socket** (#769): `exec_into` up to v0.3.217 spawned it with std's `Command`, which passes every
+  inheritable handle. ⚠ `Get-NetUDPEndpoint` names the process that CREATED a socket, so the port
+  reads as "still the old pid's" after that pid is gone — the tell is that it frees ~0.1 s after
+  the REPLACEMENT exits (kill it mid-wait to check). A v0.3.217 replacement waits 30 s
+  (`A port this node needs is still taken`) and still stops. Fixed builds relaunch once without
+  inherited handles (`relaunching without inherited handles` → `The previous version's ports are
+  free — starting`), and `exec_into` no longer hands the socket down.
+- ⚠ **Reproduce it with a parent that hands down an INHERITABLE socket**:
+  `C:\temp\swarm-updcpu\handoff_inherit.py` (Windows Python: UDP bound on the port +
+  `set_inheritable(True)`, spawn with `close_fds=False` and the handoff variable, `os._exit`).
+  A v0.3.217 replacement fails under it exactly as in the real update; a fixed one survives.
+  `Stop-Process` emulations and a Python parent with default (non-inheritable) sockets do NOT
+  reproduce it — both passed on a broken build. The real check is still an old release updating
+  itself to the published one: unpack it into `C:\temp\…`, run it hidden on a spare port with its
+  own `-d` data dir and `auto_manage`/`prune` off (`realupdate.sh` there).
 - ⚠ **Launch it with a Windows working folder** (`Start-Process -WorkingDirectory C:\temp\…`).
   Started from a WSL shell its folder is `\\wsl.localhost\…`, where builds up to v0.3.216 read
   WSL's `/proc/version`, decide they are in WSL2, and turn QUIC off (#770).
