@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.3.218-alpha] — 2026-10-01
+
+**Windows computers keep running after updating themselves.**
+
+Until now a Windows computer that installed an update stopped right after it,
+and stayed off the swarm until someone started SwarmLLM again. The new version
+could not open its network port because it was holding that port itself:
+Windows had handed it the old version's connection when it was started (the
+first attempt at a fix, in v0.3.217, waited for the port and so did not help).
+Now the new version is started with nothing from the old one but its input and
+output. And a new version started by an OLDER one — which still hands the
+connection down — notices, restarts itself once without it, and carries on.
+That second part is what lets a computer updating TO this release keep running.
+Both were tested on a Windows machine before release, including the update
+being done by an older version.
+
+**Windows graphics-card computers update again.** The copy of the
+graphics-card download under the name older versions look for is back. It was
+taken down from v0.3.217, where those computers would have stopped after
+updating; one on an older version now updates to this release and keeps
+running.
+
+Who is affected: everyone running SwarmLLM on Windows. Nothing changes on Linux
+or macOS.
+
 ## [0.3.217-alpha] — 2026-10-01
 
 **Windows computers update themselves properly: one with an NVIDIA graphics card
