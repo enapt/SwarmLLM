@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.3.215-alpha] — 2026-10-01
+## [0.3.216-alpha] — 2026-10-01
 
 **A model split across computers answers 20-57% faster over long distances, and a
 Windows computer running SwarmLLM under WSL now says when it needs a restart.**
@@ -24,6 +24,14 @@ pay — two computers very close together — the stream now learns that and sto
 guessing on the next request, as the rounds already did. `SWARMLLM_SPEC_STREAM=0`
 switches back to rounds.
 
+The far computer now treats a reply's stream of checks as one job. v0.3.215
+was built but never released: its release check found that a far computer
+busy with a stream could turn one batch of guesses away, and the rest of the
+reply then waited about a minute — and where no other computer could take over,
+ended after its first few words. That is fixed
+here, and the stream is used only with computers on v0.3.216 or later — older
+ones keep the previous way of checking.
+
 **A warning when the graphics card has become slow.** On Windows, a graphics
 card used from WSL gets slower at setting aside memory the longer Windows runs
 without a restart — about a thousand times slower after two days on the test
@@ -34,7 +42,7 @@ you to restart Windows (at most every 12 hours). It changes nothing else about
 what SwarmLLM does.
 
 Who is affected: everyone running a model split across computers gets the
-faster replies once both ends run v0.3.213 or later; the restart notice appears
+faster replies once both ends run v0.3.216 or later; the restart notice appears
 only for Windows users running SwarmLLM under WSL whose card has slowed.
 
 ## [0.3.214-alpha] — 2026-09-30
