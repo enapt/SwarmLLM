@@ -154,7 +154,9 @@ UNDETERMINED and never a fix — use it BEFORE blaming a change, especially your
 
 ## Status
 
-**v0.3.214-alpha is the live release (published 2026-09-30 15:47 UTC), signed and on both nodes** — .213 plus the
+**v0.3.216-alpha is the live release (published 2026-10-01 05:35 UTC), signed and on both nodes** — split checks
+streamed by default, a slow-card restart notice for WSL2 (#762), and the stream counted as ONE piece of the serving
+node's work (#767, `34d62310`). **.215 was never published**: its gate found #767. .214 was .213 plus the
 #761 fix (a refused CUDA-graph capture left the f16 KV mirror claiming positions it never got, so split checks could
 drift to a 2nd-choice word; `4fac99bf`). .213 brought card decode as CUDA graphs (a 7B at llama.cpp parity), card
 prompts ~1.5×, a split's per-token overhead cut (~80% of local), split speculation with an in-engine small drafter ON
