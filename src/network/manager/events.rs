@@ -910,11 +910,23 @@ impl NetworkManager {
                             if peer.is_lan_peer {
                                 peer.is_lan_peer = false;
                                 drop(peer);
-                                let _ = self.shared_state.lan_peer_count.fetch_update(
-                                    std::sync::atomic::Ordering::Relaxed,
-                                    std::sync::atomic::Ordering::Relaxed,
-                                    |v| v.checked_sub(1),
-                                );
+                                // Decrement, never below zero. A plain
+                                // compare-exchange loop: `fetch_update` is
+                                // deprecated from Rust 1.99 and its successor
+                                // `try_update` does not exist at our MSRV.
+                                let count = &self.shared_state.lan_peer_count;
+                                let mut current = count.load(std::sync::atomic::Ordering::Relaxed);
+                                while current > 0 {
+                                    match count.compare_exchange_weak(
+                                        current,
+                                        current - 1,
+                                        std::sync::atomic::Ordering::Relaxed,
+                                        std::sync::atomic::Ordering::Relaxed,
+                                    ) {
+                                        Ok(_) => break,
+                                        Err(actual) => current = actual,
+                                    }
+                                }
                             }
                         }
                     }
