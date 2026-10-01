@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.3.217-alpha] — 2026-10-01
+
+**Windows computers update themselves properly: one with an NVIDIA graphics card
+now finds its updates at all, and none stops after installing one.**
+
+**A Windows computer running the graphics-card download never updated itself.**
+Since v0.3.53 it looked for its update under a file name no release has used,
+found nothing, and quietly stayed on the version it had — one computer on the
+swarm sat on v0.3.204 for a week this way. It now looks for the right file. This
+release, and the ones after it, also publish that file under the old name,
+signed like every other, so a Windows graphics-card computer on an older version
+updates to this one by itself. Nothing to do.
+
+**A Windows computer that installed an update then stopped.** The new version
+started while Windows was still holding the old one's network port — for about a
+second after the old one had gone — could not open it, and shut down, leaving the
+computer off the swarm until someone started SwarmLLM again. Both automatic
+updates tried on a Windows test machine ended this way. The new version now waits
+until it can open its ports. The fix is in the version being installed, so the
+update to this release already has it.
+
+**A Windows download started from a folder inside WSL believed it was running in
+WSL** and turned off its fastest way of connecting to other computers. Only the
+Linux download checks for WSL now.
+
+Also corrected: the notes for v0.3.216 overstated who gets its faster split
+replies — see the correction there.
+
+Who is affected: everyone running SwarmLLM on Windows. Linux and macOS computers
+were not affected by any of these and see no change.
+
 ## [0.3.216-alpha] — 2026-10-01
 
 **A model split across computers answers 20-57% faster over long distances, and a
