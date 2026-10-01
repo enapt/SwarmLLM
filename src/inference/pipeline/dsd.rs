@@ -566,6 +566,8 @@ impl PipelineExecutor {
                     generated: &generated,
                     coupling: noise.map(|n| n.seed()),
                 }),
+                super::worker_requester(&self.request),
+                self.verify_may_chain(),
             )
             .await
             {
@@ -611,17 +613,14 @@ impl PipelineExecutor {
             acceptance_proposed += drafts.len() as u32;
             acceptance_accepted += accepted.len() as u32;
 
-            let mut emitted: Vec<u32> = accepted
-                .iter()
-                .copied()
-                .chain(std::iter::once(bonus))
-                .collect();
-
-            // BUG-FIX (R105): truncate at first EOS before any consumer sees
-            // post-EOS tokens. See speculative.rs for the same fix and rationale.
-            if let Some(eos_at) = emitted.iter().position(|t| eos_set.contains(t)) {
-                emitted.truncate(eos_at + 1);
-            }
+            // Cut at the first EOS (R105) and at the room left — one helper
+            // for every speculative path.
+            let emitted = super::round_tokens_for_reply(
+                &accepted,
+                bonus,
+                &eos_set,
+                (max_tokens as usize).saturating_sub(generated.len()),
+            );
 
             super::emit_streaming_batch(
                 &self.partial_reply,

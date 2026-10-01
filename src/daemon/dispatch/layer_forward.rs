@@ -194,6 +194,20 @@ pub(super) async fn handle_layer_forward(
     // The caller's sampling, to hand down a chain to the segment that samples.
     let sampling = forward.sampling.clone();
     let sequence_num = forward.sequence_num;
+    // A speculative CHECK travelling a chain (`features::CHAINED_VERIFY`):
+    // what the run's TAIL walks with, handed down beside the activations. This
+    // hop's own worker reads none of it unless it is the model's last segment
+    // (spec output is gated on that), so the forward keeps the fields as they
+    // came; only the rewind is also this hop's to apply, and the worker does.
+    let verify_onward = (!chain.is_empty() && forward.spec_logits_requested).then(|| {
+        (
+            forward.draft_tokens.clone(),
+            forward.spec_walk_at_tail,
+            forward.coupling_seed,
+            forward.truncate_kv_to,
+            forward.generated_ids.clone(),
+        )
+    });
 
     // Mark the model busy for as long as this segment is computing.
     //
@@ -355,6 +369,30 @@ pub(super) async fn handle_layer_forward(
     // request costs what it used to.
     if chaining_applies(&chain, tp_meta.is_some(), result.activations.is_empty()) {
         if let Some(next) = chain.first() {
+            // A check handed to a hop that cannot carry it on would reach the
+            // tail as a plain decode step and come back as the wrong answer.
+            // The coordinator chains only through hops that can; one that
+            // changed build since is told so, and the check fails like any
+            // other chained run that cannot continue.
+            if verify_onward.is_some()
+                && !shared_state.peer_advertises_feature(
+                    &next.node_id,
+                    swarmllm_types::node::features::CHAINED_VERIFY,
+                )
+            {
+                send_error_result(
+                    &network_tx,
+                    &reply_to(),
+                    request_id,
+                    answering,
+                    "chained check: the next segment cannot carry it",
+                )
+                .await;
+                return;
+            }
+            let (draft_tokens, spec_walk_at_tail, coupling_seed, truncate_kv_to, verify_ids) =
+                verify_onward.clone().unwrap_or_default();
+            let next_has = |bit| shared_state.peer_advertises_feature(&next.node_id, bit);
             match shared_state.resolve_connected_peer_id_bytes(&next.node_id) {
                 Some(next_peer_bytes) => {
                     let onward = crate::types::LayerForward {
@@ -387,16 +425,31 @@ pub(super) async fn handle_layer_forward(
                         // coordinator must therefore not chain a request that
                         // has penalties set. That is a constraint on whoever
                         // builds the chain, stated here because this is where
-                        // it would silently go wrong.
-                        generated_ids: Vec::new(),
+                        // it would silently go wrong. A chained CHECK carries
+                        // the history its sender put on it (empty unless the
+                        // sampler reads it), to a hop that reads the trailer.
+                        generated_ids: if next_has(
+                            swarmllm_types::node::features::FORWARD_GENERATED_IDS,
+                        ) {
+                            verify_ids
+                        } else {
+                            Vec::new()
+                        },
                         // LoRA requests do not take this path at all.
                         adapter_id: None,
-                        draft_tokens: Vec::new(),
-                        spec_logits_requested: false,
-                        spec_walk_at_tail: false,
-                        coupling_seed: None,
+                        // A chained check's guesses, walk and shared noise go to
+                        // the tail with the activations, and every hop rewinds
+                        // its own cache by the same position — the fields the
+                        // coordinator would have put on each hop's forward
+                        // itself. Empty for every chained decode step.
+                        spec_logits_requested: verify_onward.is_some(),
+                        spec_walk_at_tail: spec_walk_at_tail
+                            && next_has(swarmllm_types::node::features::SPEC_WALK_AT_TAIL),
+                        coupling_seed: coupling_seed
+                            .filter(|_| next_has(swarmllm_types::node::features::COUPLED_SAMPLING)),
+                        draft_tokens,
                         stream_seq: None,
-                        truncate_kv_to: None,
+                        truncate_kv_to,
                         chunk_meta: None,
                         // Handed down so the TAIL samples as the caller asked —
                         // only to a hop that reads the `0x0A` trailer. The

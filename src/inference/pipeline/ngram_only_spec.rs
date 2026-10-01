@@ -432,6 +432,8 @@ impl PipelineExecutor {
                         generated: &generated,
                         coupling: None,
                     }),
+                    super::worker_requester(&self.request),
+                    self.verify_may_chain(),
                 )
                 .await?;
                 // An unusable reply fails the request, exactly as the hit arm
@@ -503,6 +505,8 @@ impl PipelineExecutor {
                     generated: &generated,
                     coupling: None,
                 }),
+                super::worker_requester(&self.request),
+                self.verify_may_chain(),
             )
             .await?;
             let (accepted, bonus, _all) = match reply.accept(
@@ -517,14 +521,12 @@ impl PipelineExecutor {
                     return Err(e);
                 }
             };
-            let mut emitted: Vec<u32> = accepted
-                .iter()
-                .copied()
-                .chain(std::iter::once(bonus))
-                .collect();
-            if let Some(eos_at) = emitted.iter().position(|t| eos_tokens.contains(t)) {
-                emitted.truncate(eos_at + 1);
-            }
+            let emitted = super::round_tokens_for_reply(
+                &accepted,
+                bonus,
+                &eos_tokens,
+                (max_tokens as usize).saturating_sub(generated.len()),
+            );
 
             // Emit (stream + accumulate). The EOS token stays in `emitted` so
             // the accumulator below still sees it and stops; `emit_streaming_batch`

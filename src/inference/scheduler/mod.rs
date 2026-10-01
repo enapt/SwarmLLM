@@ -908,7 +908,11 @@ fn standby_may_take(
         return &c.node_id == local_node_id;
     }
     if is_first {
-        return trusted_with_the_plaintext_prompt(c, local_node_id);
+        // `can_be_first` is cleared on every peer of a request delegated to us
+        // (`lead_here`): its first segment stays ours, and a stand-in would be
+        // handed the prompt the requester trusted only us with.
+        return (&c.node_id == local_node_id || c.can_be_first)
+            && trusted_with_the_plaintext_prompt(c, local_node_id);
     }
     true
 }
@@ -981,6 +985,12 @@ fn delegation_target<'a>(
             .any(|r| r.0 == 0 && r.1 >= num_layers)
         {
             "does not hold every layer"
+        } else if layers_to_assign >= num_layers && !c.can_be_first {
+            // Only a request a peer DELEGATED to us clears a peer's
+            // `can_be_first` while it holds layer 0 (`RoutePlanOverride::
+            // lead_here`). Handing the whole of it on would delegate it twice,
+            // to a node the requester never chose to read its prompt.
+            "this request was handed to us to lead, so it is not handed on"
         } else if !matches!(c.reach, ReachTier::DirectMeasured) {
             "not directly reachable with a measured latency"
         } else if c.latency_ms > DELEGATE_MAX_LATENCY_MS {
@@ -2526,6 +2536,12 @@ impl PipelineScheduler {
         // Distributed layer assignment: prefer Parallax shortest-path DP when
         // enabled; fall back to greedy on any failure (disjoint ranges, no
         // valid source/sink, etc.) so routing never regresses below greedy.
+        // A request a peer delegated to us is led here or not at all — the
+        // greedy fallback must not hand layer 0 on (`RoutePlanOverride::lead_here`).
+        let lead_here = self
+            .shared_state
+            .route_plan_override(request_id)
+            .is_some_and(|o| o.lead_here);
         let raw_segments = if self.shared_state.config.inference.parallax_routing {
             // Encryption forces the first and last segments onto this node,
             // so an encrypted distributed pipeline is multi-segment by
@@ -2871,11 +2887,11 @@ impl PipelineScheduler {
                         err = %e,
                         "DIAG: parallax routing unavailable — falling back to greedy"
                     );
-                    self.greedy_assign(num_layers, &candidates, encrypted, purpose)?
+                    self.greedy_assign(num_layers, &candidates, encrypted, lead_here, purpose)?
                 }
             }
         } else {
-            self.greedy_assign(num_layers, &candidates, encrypted, purpose)?
+            self.greedy_assign(num_layers, &candidates, encrypted, lead_here, purpose)?
         };
 
         // Merge contiguous segments on the same node into a single segment.
@@ -3295,8 +3311,16 @@ impl PipelineScheduler {
             };
             let (reach, latency_ms, trust_score) = self.get_peer_metrics(&node_id, local_node_id);
 
-            // Determine if this node can serve as first/last segment
-            let can_be_first = shard_indices.contains(&0);
+            // Determine if this node can serve as first/last segment. A request
+            // a peer delegated to us is led HERE (`RoutePlanOverride::lead_here`):
+            // the requester trusted this node, not its peers, with the plaintext
+            // prompt layer 0 reads, and a peer leading it would be a second
+            // hand-off. Cleared on the candidate, the one place the DP's source
+            // filter, the greedy first-segment narrowing and the whole-model
+            // hand-off all read it from.
+            let can_be_first = shard_indices.contains(&0)
+                && (node_id == *local_node_id
+                    || route_override.as_ref().is_none_or(|o| o.lets_peer_lead()));
             let last_shard_idx = manifest.shard_count.saturating_sub(1);
             let can_be_last = shard_indices.contains(&last_shard_idx);
 
@@ -3909,9 +3933,11 @@ impl PipelineScheduler {
         num_layers: u32,
         candidates: &[NodeCandidate],
         encrypted_pipeline: bool,
+        lead_here: bool,
         purpose: Purpose,
     ) -> Result<Vec<PipelineSegment>, SwarmError> {
-        match self.greedy_assign_inner(num_layers, candidates, encrypted_pipeline, true) {
+        match self.greedy_assign_inner(num_layers, candidates, encrypted_pipeline, lead_here, true)
+        {
             Ok(segments) => Ok(segments),
             Err(capped_err) => {
                 // Only worth a second pass if a cap could have been what
@@ -3925,7 +3951,13 @@ impl PipelineScheduler {
                     "DIAG: no greedy route fits the peers' advertised memory — \
                      routing without that bound, a holder may be overcommitted"
                 );
-                self.greedy_assign_inner(num_layers, candidates, encrypted_pipeline, false)
+                self.greedy_assign_inner(
+                    num_layers,
+                    candidates,
+                    encrypted_pipeline,
+                    lead_here,
+                    false,
+                )
             }
         }
     }
@@ -3935,6 +3967,7 @@ impl PipelineScheduler {
         num_layers: u32,
         candidates: &[NodeCandidate],
         encrypted_pipeline: bool,
+        lead_here: bool,
         respect_capacity: bool,
     ) -> Result<Vec<PipelineSegment>, SwarmError> {
         let mut segments = Vec::new();
@@ -4010,6 +4043,14 @@ impl PipelineScheduler {
                     .collect();
                 if !first_capable.is_empty() {
                     options = first_capable;
+                } else if lead_here {
+                    // A request a peer delegated to us is led HERE or not at
+                    // all: every peer's `can_be_first` is cleared for it, so an
+                    // empty list means this node cannot take layer 0 itself.
+                    // Falling through would read the requester's prompt to a
+                    // peer it never chose; refusing costs nothing, because the
+                    // requester then runs the same plan itself.
+                    options.clear();
                 }
                 // If no can_be_first candidates, fall through (best-effort)
 
@@ -4371,6 +4412,14 @@ impl PipelineScheduler {
                 }
                 if tp_nodes.len() >= MAX_TP_GROUP_SIZE {
                     break;
+                }
+
+                // A group for the segment that reads the prompt takes only a
+                // peer that may lead it: `can_be_first` is cleared for a
+                // request a peer delegated to us (`lead_here`), whose prompt
+                // the requester trusted to this node alone.
+                if segment.layer_range.0 == 0 && !candidate.can_be_first {
+                    continue;
                 }
 
                 // Must cover the same layer range

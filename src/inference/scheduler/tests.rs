@@ -383,7 +383,7 @@ fn greedy_never_hands_a_node_more_layers_than_it_can_hold() {
     rest.max_hostable_layers = Some(48);
 
     let segments = scheduler
-        .greedy_assign(48, &[big, rest], false, super::Purpose::Route)
+        .greedy_assign(48, &[big, rest], false, false, super::Purpose::Route)
         .expect("a valid assignment exists");
 
     let first = &segments[0];
@@ -414,7 +414,7 @@ fn a_model_that_fits_nobody_is_still_assigned_rather_than_refused() {
     only.max_hostable_layers = Some(8);
 
     let segments = scheduler
-        .greedy_assign(48, &[only], false, super::Purpose::Route)
+        .greedy_assign(48, &[only], false, false, super::Purpose::Route)
         .expect("must fall back to an unbounded route rather than refuse");
     assert_eq!(
         segments.last().unwrap().layer_range.1,
@@ -433,7 +433,7 @@ fn an_unknown_capacity_still_takes_the_whole_range() {
     let mut only = simple_candidate(1, vec![(0, 48)]);
     only.max_hostable_layers = None;
     let segments = scheduler
-        .greedy_assign(48, &[only], false, super::Purpose::Route)
+        .greedy_assign(48, &[only], false, false, super::Purpose::Route)
         .unwrap();
     assert_eq!(segments.len(), 1, "unknown capacity must not fragment");
     assert_eq!(segments[0].layer_range, (0, 48));
@@ -512,7 +512,7 @@ fn greedy_assign_multi_range_candidate() {
     ];
 
     let segments = scheduler
-        .greedy_assign(14, &candidates, false, super::Purpose::Route)
+        .greedy_assign(14, &candidates, false, false, super::Purpose::Route)
         .unwrap();
     // Should produce 3 segments: [0,2) on A, [2,10) on B, [10,14) on A
     assert_eq!(segments.len(), 3);
@@ -4517,7 +4517,13 @@ fn the_greedy_fallback_does_not_hand_one_node_more_than_it_can_hold() {
     tail.max_hostable_layers = Some(24);
 
     let segments = scheduler
-        .greedy_assign(48, &[wide, middle, tail], false, super::Purpose::Route)
+        .greedy_assign(
+            48,
+            &[wide, middle, tail],
+            false,
+            false,
+            super::Purpose::Route,
+        )
         .expect("a plan respecting every bound exists");
 
     let mut per_node: std::collections::HashMap<NodeId, u32> = std::collections::HashMap::new();
@@ -4549,7 +4555,7 @@ fn an_impossible_bound_falls_through_to_the_relaxed_pass() {
     let mut only = simple_candidate(1, vec![(0, 48)]);
     only.max_hostable_layers = Some(16);
 
-    let constrained = scheduler.greedy_assign_inner(48, &[only.clone()], false, true);
+    let constrained = scheduler.greedy_assign_inner(48, &[only.clone()], false, false, true);
     assert!(
         constrained.is_err(),
         "no plan fits, so the constrained pass must say so: {constrained:?}"
@@ -4558,7 +4564,7 @@ fn an_impossible_bound_falls_through_to_the_relaxed_pass() {
     // …and the public entry point recovers, because a served request beats a
     // refused one and the holder's own admission is the backstop.
     let segments = scheduler
-        .greedy_assign(48, &[only], false, super::Purpose::Route)
+        .greedy_assign(48, &[only], false, false, super::Purpose::Route)
         .expect("the relaxed pass routes it");
     assert_eq!(segments.last().map(|s| s.layer_range.1), Some(48));
 }
@@ -4811,6 +4817,7 @@ fn the_greedy_fallback_applies_the_prompt_trust_bar() {
             28,
             &[cheap_but_docked, trusted],
             false,
+            false,
             super::Purpose::Route,
         )
         .expect("a valid assignment exists");
@@ -4833,6 +4840,7 @@ fn greedy_still_answers_when_every_layer_zero_holder_is_docked() {
         .greedy_assign(
             28,
             &[docked(0xD3, vec![(0, 28)])],
+            false,
             false,
             super::Purpose::Route,
         )
@@ -5636,4 +5644,130 @@ fn restricting_a_peer_to_the_upper_shards_forces_a_two_machine_split() {
         },
     );
     assert_eq!(plan(request), forced_split);
+}
+
+/// **A request a peer delegated to us is led HERE** (`RoutePlanOverride::
+/// lead_here`, FUTURE_WORK #143). The requester picked this node to read its
+/// plaintext prompt; a peer holding layer 0 — even one able to run the whole
+/// model alone — must neither lead the plan nor stand by for its first
+/// segment, or the prompt reaches a node the requester never chose and the
+/// request is handed on a second time.
+///
+/// The control: the same holdings planned for an ordinary request let the
+/// peer lead, so the assertion below is the override's doing.
+#[test]
+fn a_request_delegated_to_us_is_led_here_and_never_handed_on() {
+    let state = make_shared_state();
+    let local_id = state.identity.node_id().clone();
+    let model = ModelId("led-here".into());
+    let shards: Vec<ShardInfo> = (0..8u32)
+        .map(|i| ShardInfo {
+            index: i,
+            layer_range: (i * 4, i * 4 + 4),
+            size_bytes: 500_000_000,
+            hash: [0u8; 32],
+            tensors: vec![],
+        })
+        .collect();
+    state
+        .model_registry
+        .register_manifest(make_manifest("led-here", 32, shards));
+    let peer = NodeId([0x5a; 32]);
+    // This node holds the first shard only; the peer holds every shard.
+    for i in 0..8u32 {
+        let id = ShardId {
+            model_id: model.clone(),
+            index: i,
+        };
+        state
+            .model_registry
+            .record_shard_holder(id.clone(), peer.clone());
+        if i == 0 {
+            state
+                .model_registry
+                .record_shard_holder(id, local_id.clone());
+        }
+    }
+    state.peer_registry.insert(
+        peer.clone(),
+        PeerInfo {
+            node_id: peer.clone(),
+            addresses: vec![],
+            capability: None,
+            last_seen: chrono::Utc::now(),
+            latency_ms: Some(40),
+            trust_score: 0.8,
+            peer_id_bytes: None,
+            ack_srtt_ms: None,
+            active_request_count: 0,
+            first_seen: 0,
+            verified_transaction_count: 0,
+            is_lan_peer: false,
+            goodput_bytes_per_sec: None,
+            goodput_samples: 0,
+        },
+    );
+    state.connected_node_ids.insert(peer.clone());
+    let scheduler = PipelineScheduler::new(state.clone());
+    let plan = |request_id: uuid::Uuid| {
+        scheduler
+            .assemble_pipeline_for(&model, &local_id, request_id, Purpose::Route, None)
+            .unwrap()
+    };
+
+    let ordinary = plan(uuid::Uuid::new_v4());
+    assert_eq!(
+        ordinary.segments[0].node_id, peer,
+        "fixture: for an ordinary request the peer holding everything leads"
+    );
+
+    let request = uuid::Uuid::new_v4();
+    state.note_route_plan_override(
+        request,
+        crate::inference::route_override::RoutePlanOverride::lead_here(),
+    );
+    let led = plan(request);
+    assert_eq!(
+        led.segments[0].node_id, local_id,
+        "a delegated request's first segment is ours: {:?}",
+        led.segments
+    );
+    assert_eq!(
+        led.segments.last().map(|s| s.layer_range.1),
+        Some(32),
+        "and the plan still covers the model"
+    );
+    assert!(
+        led.standbys
+            .iter()
+            .all(|s| s.layer_range.0 != 0 || s.node_id == local_id),
+        "no peer stands by for the segment that reads the prompt: {:?}",
+        led.standbys
+    );
+}
+
+/// The greedy fallback beneath the search narrows "if anything survives" — a
+/// confidentiality bar that fails a routable request is worse than the exposure
+/// — EXCEPT for a request a peer delegated to us: refusing it costs nothing (the
+/// requester runs the plan itself), and falling through would read its prompt to
+/// a peer it never chose. The control: the same candidate, ordinary request,
+/// still answers.
+#[test]
+fn greedy_never_hands_layer_zero_to_a_peer_for_a_request_led_here() {
+    let scheduler = PipelineScheduler::new(make_shared_state());
+    let mut peer = simple_candidate(0xE1, vec![(0, 28)]);
+    // As `gather_candidates` leaves every peer of a request delegated to us.
+    peer.can_be_first = false;
+    let ordinary =
+        scheduler.greedy_assign(28, &[peer.clone()], false, false, super::Purpose::Route);
+    assert_eq!(
+        ordinary.expect("fixture: an ordinary request falls through to the peer")[0].node_id,
+        NodeId([0xE1; 32])
+    );
+    assert!(
+        scheduler
+            .greedy_assign(28, &[peer], false, true, super::Purpose::Route)
+            .is_err(),
+        "a request led here must not fall through to a peer for layer 0"
+    );
 }

@@ -992,6 +992,13 @@ pub(crate) async fn dispatch_network_messages(
                                                     None
                                                 }
                                             });
+                                        tracing::debug!(
+                                            request_id = %token.request_id,
+                                            token_id = token.token_id,
+                                            terminal = token.finish_reason.is_some(),
+                                            routed = maybe_tx.is_some(),
+                                            "DIAG: streaming token arrived"
+                                        );
                                         if let Some(tx) = maybe_tx {
                                             // `try_send`, so a client that is not reading cannot
                                             // block the dispatch loop for every other request.
@@ -1101,10 +1108,19 @@ pub(crate) async fn dispatch_network_messages(
                                         };
                                         let ss = shared_state.clone();
                                         let ntx = network_tx.clone();
+                                        let rtx = router_tx.clone();
                                         tokio::spawn(async move {
                                             let _permit = permit;
                                             let _peer_slot = peer_slot;
-                                            remote_generate::handle_remote_generate_request(ss, ntx, req).await;
+                                            // A split led here holds the same one slot and
+                                            // permit for the whole reply as a whole model run
+                                            // here: to this node it is one piece of the
+                                            // requester's work either way.
+                                            if req.delegation.is_some() {
+                                                remote_generate::handle_delegated_split(ss, ntx, rtx, req).await;
+                                            } else {
+                                                remote_generate::handle_remote_generate_request(ss, ntx, req).await;
+                                            }
                                         });
                                     }
                                     // T13: VisionEncodeRequest — encode image using local mmproj

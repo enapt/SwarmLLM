@@ -2376,6 +2376,96 @@ the reply was byte-identical, from logits walked on the coordinator.
   a "kept" token that was never drafted. The old rule answered non-finite logits
   with `(empty, 0, false)` and callers emitted token 0 as the "bonus".
 
+## A check travels a chain like a decode step does (2026-10-02)
+
+**What it replaced.** Decode steps had chained since 2026-08 (a run of remote
+segments hands activations along; the tail answers), but a speculative CHECK
+visited every segment through the coordinator: `forward_verify_through_segments`
+looped segments one at a time. The n-gram loop — the DEFAULT split path — sends a
+check every round, hits and misses alike, so a plan of N remote segments paid N
+of the coordinator's round trips per round where a plain step paid one. The
+delegated split (FUTURE_WORK #143) makes the head the coordinator, which removes
+the requester's distance but not this: a delegate leading [itself, C, D] still
+paid C and D separately.
+
+**The mechanism.** The coordinator plans the run with the SAME `plan_chain` the
+decode loop uses, filtered to hops advertising `features::CHAINED_VERIFY`, and
+sends the head one forward carrying the chain, the reply-to (`0x07`) and the
+TAIL's walk (computed for the answering node, not the head). Each hop's worker
+computes its layers and ignores the check fields unless it is the model's last
+segment (`model_worker::want_spec_output = spec_logits_requested && is_last`),
+so the forward keeps them; `layer_forward` hands them on — guesses, walk flag
+(gated on the next hop's `SPEC_WALK_AT_TAIL`), seed (`COUPLED_SAMPLING`), rewind,
+history (`FORWARD_GENERATED_IDS`). A run that ends short of the last segment
+returns hidden states and the loop resumes after it; one that reaches it returns
+the walk. Unlike a decode chain, a check may chain with penalties set: its
+history rides the head's forward and every hop hands it on.
+
+**What it must keep.** The bit gates the COORDINATOR: an older hop would forward
+activations only and the tail would answer a decode step — the wrong shape,
+silently. A hop that finds the next one without the bit fails the run out loud
+("the next segment cannot carry it") rather than forwarding it. The waiter pins
+the tail and lists every hop in `chain_members` (any may refuse), and a chained
+check passes `ResendOnRefusal::Never` — the refusal may be any hop's. A failed
+chained check fails the request exactly as a failed star check did; nothing
+re-runs it unchained mid-round (the earlier hops' caches already hold the
+positions).
+
+**Measured** (rig, 2026-10-02, `split_rig.sh remote REMOTE_NODES=3 DELAY_B=150`, A/B by
+`SWARMLLM_CHAIN_VERIFY=0`, one binary): the n-gram request 2.03 → **2.66 tok/s**
+(+31%); the mechanism counted — C chained 214 forwards with it on and 121 off, the
+difference exactly that request's 18 hit + 75 miss rounds. The standard loop's
+request is unchanged (2.57 vs 2.55): its decode steps were already chained.
+
+**Tests**: `a_check_travels_a_chain_of_peers_that_can_carry_it` (chain + reply-to
++ the tail's fields on the head forward; controls: `may_chain = false`, and a tail
+without the bit). Rig: `split_rig.sh remote` with `REMOTE_NODES=3`, `DELAY_B`, A/B
+by `SWARMLLM_CHAIN_VERIFY=0`.
+
+## A connection the swarm denied is forgotten (2026-10-02)
+
+**Found** by the delegated split (FUTURE_WORK #143): its reply streams back one
+request-response send per token, and the n-gram loop emits several tokens per
+round, so sends leave in bursts. The first delegated request failed on every rig
+run with resend asks for the SAME token ids (19-20, 31-32, …): deterministic.
+Per-token DIAG showed the serving node queued them and the requester's network
+layer never saw them; `-vv` plus a log in `try_send_request` showed the serving
+node's request-response listing five connections to the requester where the swarm
+had three (`connection limits configured max_per_peer=3`). Requests 43 and 44 —
+the fourth and fifth of a five-token burst — went to ConnectionIds 34 and 35,
+which had no substream, no response and no failure.
+
+**Mechanism.** `handle_established_inbound_connection` /
+`..._outbound_connection` build a handler and `preload_new_handler` pushes the
+connection onto `connected`. libp2p-swarm 0.47's own docs: "when any composed
+behaviour returns an error the connection will be closed and a
+[`FromSwarm::ListenFailure`] / [`FromSwarm::DialFailure`] event will be emitted"
+— carrying the `ConnectionId`. `connection_limits` is composed after
+request-response, so a connection over the cap is handed to request-response and
+then denied; upstream request-response clears only `pending_outbound_requests` on
+a dial failure and ignores a listen failure, so the entry stays. A ghost has no
+handler and nothing pending, and `connection_rank` ranks fewest-unanswered FIRST:
+the moment each real connection has one request in flight, the next send goes to
+a ghost. A capped peer is redialled every ~5 s (seen on the rig), so ghosts
+accrue for as long as a node runs.
+
+**Fix.** `forget_denied_connection(peer, connection_id)` on `ListenFailure` and
+`DialFailure`: remove the entry (the peer's too when it was the last) and emit
+`OutboundFailure::ConnectionClosed` for each request it was handed, which the
+network manager reports or resends. Test:
+`a_connection_the_swarm_denied_is_forgotten_and_its_request_fails` — a two-request
+burst reaches the connection about to be denied (fixture), the denial forgets it,
+its request is reported failed, the next send goes to the real connection; it
+fails with the `ListenFailure` arm removed. Rig after: 0 resend asks where every
+earlier run had 3-4.
+
+**What it explains, retrospectively** (not re-measured): the 2026-08-05 warning
+patched into `on_connection_closed` ("swarm reports no connections left but this
+behaviour still held some", right after PEX dialled four peers); gotcha #353's
+"newest connection dead in one direction" that swallowed a first send; and the
+"libp2p rr can silently drop sends under load" this file's ACK-timeout section
+was built to survive. Those defences stay — they bound any OTHER silent loss.
+
 ## A substream sends with its protocol proposal (V1Lazy); a ping sample is a cost, a distance is converted (2026-09-27)
 
 **What it replaced.** libp2p negotiates every substream with multistream-select;

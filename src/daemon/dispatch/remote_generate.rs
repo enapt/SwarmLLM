@@ -231,7 +231,7 @@ pub(super) async fn handle_remote_generate_request(
     // Channel from the worker (via ModelProcessPool::generate) → the network
     // forwarding task below. Must be bounded to apply back-pressure if the
     // network can't keep up.
-    let (token_tx, mut token_rx) = crate::inference::router::StreamingTokenTx::channel(64);
+    let (token_tx, token_rx) = crate::inference::router::StreamingTokenTx::channel(64);
 
     // Spawn the generate call. It holds the model worker's socket lock for
     // the entire decode, which is fine — other requests for the same model
@@ -258,6 +258,42 @@ pub(super) async fn handle_remote_generate_request(
         )
         .await
     });
+    stream_reply_to_requester(
+        shared_state,
+        network_tx,
+        request_id,
+        sender_bytes,
+        token_rx,
+        gen_fut,
+        layer_range.1.saturating_sub(layer_range.0),
+        serve_start,
+    )
+    .await;
+}
+
+/// Stream a reply this node produces FOR A PEER back to it, then its one
+/// authoritative terminal frame, and account for the work.
+///
+/// Shared by the two kinds of hand-off — a whole model run here
+/// (`handle_remote_generate_request`) and a split led here
+/// (`handle_delegated_split`) — so the requester sees one reply protocol
+/// whichever it asked for: content tokens numbered in order, every one
+/// retained for a resend, a terminal frame carrying the content-token count
+/// and usage, sent more than once. `gen_fut` is the reply's producer; aborting
+/// it is how an inbound `CancelInference` stops it.
+#[allow(clippy::too_many_arguments)]
+async fn stream_reply_to_requester(
+    shared_state: Arc<SharedState>,
+    network_tx: mpsc::Sender<NetworkCommand>,
+    request_id: uuid::Uuid,
+    sender_bytes: Vec<u8>,
+    mut token_rx: mpsc::Receiver<crate::inference::router::StreamingTokenEvent>,
+    gen_fut: tokio::task::JoinHandle<
+        Result<crate::inference::router::InferenceOutput, crate::error::SwarmError>,
+    >,
+    served_layers: u32,
+    serve_start: std::time::Instant,
+) {
     // Register the abort handle so an inbound `SwarmMessage::CancelInference`
     // can stop this decode before it streams more wasted tokens back to the
     // originator. The map entry is removed below once the decode completes
@@ -313,6 +349,12 @@ pub(super) async fn handle_remote_generate_request(
             // Remembered BEFORE it is queued, so an ask that races the send
             // still finds it.
             retain_state.retained_replies.push(request_id, &token);
+            tracing::debug!(
+                %request_id,
+                token_id = token.token_id,
+                bytes = token.text.len(),
+                "DIAG: hand-off reply token queued for the requester"
+            );
             if forward_net_tx
                 .send(NetworkCommand::SendStreamingToken {
                     target_peer_bytes: forward_sender.clone(),
@@ -345,7 +387,7 @@ pub(super) async fn handle_remote_generate_request(
     };
     shared_state.record_peer_serve(crate::daemon::state::PeerServe {
         kind: crate::daemon::state::ServeKind::WholeRequest,
-        layers: layer_range.1.saturating_sub(layer_range.0),
+        layers: served_layers,
         elapsed_ms: serve_start.elapsed().as_millis() as u64,
         // The fast path streams tokens rather than returning activations, so
         // there are no activation bytes to attribute.
@@ -443,6 +485,170 @@ pub(super) async fn handle_remote_generate_request(
     // request ended and waits out its whole deadline before reporting the peer
     // silent. Send it more than once.
     resend_terminal_token(network_tx, terminal_target, terminal_copy);
+}
+
+/// What a node answers when asked to LEAD a split of a model whose first
+/// layers it does not hold.
+///
+/// Deliberately not [`REMOTE_GENERATE_NOT_HOSTED`]: that one tells the
+/// requester its holder record is stale, and the requester retracts the claim
+/// and bars this node — wrong for a node that still holds, and serves, the
+/// middle or the end of the model. Any refusal of a delegated split reaches
+/// the requester before a single token, and it then runs its own plan.
+pub(crate) const DELEGATED_SPLIT_NOT_LED: &str =
+    "this node cannot lead a split of that model: it does not hold its first layers";
+
+/// Sets a request's cancel flag when dropped — on an abort as much as on
+/// completion.
+///
+/// The router runs a delegated request in its own task, so aborting the task
+/// that WAITS on it (what `CancelInference` does) stops nothing by itself; the
+/// flag is what the router's decode loops check between steps.
+struct CancelOnDrop(Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Handle an inbound `RemoteGenerateRequest` carrying `delegation`: LEAD a
+/// split of the model for the peer that asked, and stream the reply back
+/// (`docs/FUTURE_WORK.md` #143).
+///
+/// The requester holds none of the model; its own plan named this node for
+/// the first layers. Run there, every token costs the requester's round trip
+/// to the head AND the tail's back to it; run here, it costs only this node's
+/// round trips to the rest of the plan, which it chooses among ITS peers —
+/// and every path this node's router has (chaining, n-gram and drafter
+/// speculation, the continuous stream, failover) applies, since to the router
+/// this is an ordinary request. Petals keeps the client in the loop so it can
+/// replay a failed server's input history; here the replay moves with the
+/// loop, to this node, and only the loss of THIS node mid-reply is the
+/// requester's to report — as with a whole model handed to one peer.
+///
+/// Planned under `RoutePlanOverride::lead_here`: the first segment stays here
+/// and nothing is handed on, so the requester's trust bar — it chose this node
+/// to read the prompt — holds for the whole plan. Served as the swarm's work
+/// (`pipeline::worker_requester`), within the contribution level.
+pub(super) async fn handle_delegated_split(
+    shared_state: Arc<SharedState>,
+    network_tx: mpsc::Sender<NetworkCommand>,
+    router_tx: mpsc::Sender<crate::inference::router::RouterCommand>,
+    mut req: RemoteGenerateRequest,
+) {
+    let Some(sender_bytes) = req.sender_peer_bytes.clone() else {
+        tracing::warn!(
+            request_id = %req.request_id,
+            "delegated split missing sender_peer_bytes — dropping"
+        );
+        return;
+    };
+    let Some(delegation) = req.delegation.take() else {
+        return;
+    };
+    let request_id = req.request_id;
+    let model_id = req.model_id.clone();
+    let layer_range = req.layer_range;
+    let serve_start = std::time::Instant::now();
+    // The same clamp as the whole-model path: these parameters came off the
+    // wire and bypass the API's own `build_sampling_params`.
+    crate::api::clamp_peer_sampling(&mut req.sampling);
+
+    tracing::info!(
+        %request_id,
+        model = %model_id,
+        messages = delegation.messages.len(),
+        max_tokens = req.sampling.max_tokens,
+        "handling a delegated split — leading the plan here"
+    );
+
+    if !can_lead_a_split(&shared_state, &model_id) {
+        tracing::warn!(
+            %request_id,
+            model = %model_id,
+            "delegated split for a model whose first layers this node does not hold — refusing"
+        );
+        send_refusal(
+            &network_tx,
+            sender_bytes,
+            request_id,
+            DELEGATED_SPLIT_NOT_LED.into(),
+        )
+        .await;
+        return;
+    }
+
+    shared_state
+        .retained_replies
+        .start(request_id, sender_bytes.clone());
+
+    let (token_tx, token_rx) = crate::inference::router::StreamingTokenTx::channel(64);
+    let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // A fresh id: this is THIS node's request now, with its own plan, its own
+    // forwards and its own retries, and nothing of it may be confused with
+    // the requester's id (which still names the reply on the wire).
+    let mut request = crate::types::InferenceRequest::local(
+        model_id,
+        delegation.messages,
+        req.sampling,
+        true,
+        req.session_id,
+        None,
+        delegation.tools,
+    );
+    request.cancel = Some(cancel.clone());
+    request.route_override = Some(crate::inference::route_override::RoutePlanOverride::lead_here());
+    let led_id = request.id;
+    tracing::info!(
+        %request_id,
+        %led_id,
+        "delegated split: submitted to this node's router"
+    );
+    let gen_fut = tokio::spawn(async move {
+        let _cancel_on_drop = CancelOnDrop(cancel);
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        router_tx
+            .send(crate::inference::router::RouterCommand::StreamSubmit {
+                request,
+                result_tx,
+                token_tx,
+            })
+            .await
+            .map_err(|_| {
+                crate::error::SwarmError::ServiceUnavailable("Router unavailable".into())
+            })?;
+        result_rx.await.map_err(|_| {
+            crate::error::SwarmError::Internal(
+                "the router ended a delegated split without answering".into(),
+            )
+        })?
+    });
+
+    stream_reply_to_requester(
+        shared_state,
+        network_tx,
+        request_id,
+        sender_bytes,
+        token_rx,
+        gen_fut,
+        layer_range.1.saturating_sub(layer_range.0),
+        serve_start,
+    )
+    .await;
+}
+
+/// May this node lead a split of `model_id` — does it hold the model's first
+/// layers? The head of any plan must embed the prompt, and only a node holding
+/// layer 0 can.
+fn can_lead_a_split(shared_state: &SharedState, model_id: &ModelId) -> bool {
+    let Some(manifest) = shared_state.model_registry.get_manifest(model_id) else {
+        return false;
+    };
+    let Some(first) = manifest.shards.iter().find(|s| s.index == 0) else {
+        return false;
+    };
+    can_serve_layer_range(shared_state, model_id, (0, first.layer_range.1))
 }
 
 /// Can this node run `layer_range` of `model_id` on its own?

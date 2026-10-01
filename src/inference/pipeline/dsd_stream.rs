@@ -429,11 +429,7 @@ impl StreamRun<'_, '_> {
             let result = self
                 .state
                 .model_process_pool
-                .forward_for_request(
-                    forward,
-                    None,
-                    crate::inference::process_pool::Requester::Owner,
-                )
+                .forward_for_request(forward, None, super::worker_requester(&exec.request))
                 .await?;
             if let Some(NetworkFinishReason::Error(msg)) = &result.finish_reason {
                 return Err(crate::error::reclassify_flattened_error(msg)
@@ -604,13 +600,14 @@ impl StreamRun<'_, '_> {
             self.kept_whole += 1;
         }
 
-        let mut emitted: Vec<u32> = kept.iter().copied().chain(std::iter::once(next)).collect();
-        // Nothing past the first end-of-reply token reaches anyone (R105).
-        if let Some(at) = emitted.iter().position(|t| self.io.eos.contains(t)) {
-            emitted.truncate(at + 1);
-        }
-        let room = (self.io.max_tokens as usize).saturating_sub(self.reply.generated.len());
-        emitted.truncate(room.max(1));
+        // Nothing past the first end-of-reply token reaches anyone (R105), and
+        // nothing past the budget.
+        let emitted = super::round_tokens_for_reply(
+            &kept,
+            next,
+            self.io.eos,
+            (self.io.max_tokens as usize).saturating_sub(self.reply.generated.len()),
+        );
         super::emit_streaming_batch(
             &self.exec.partial_reply,
             self.io.token_tx,

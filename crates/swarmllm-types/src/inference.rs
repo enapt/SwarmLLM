@@ -964,9 +964,32 @@ pub struct RemoteGenerateRequest {
     pub sampling: SamplingParams,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+    /// `Some` asks the receiver to COORDINATE a split rather than run the
+    /// whole model: it holds the model's first layers, plans the rest among
+    /// its own peers with itself at the head, runs the decode loop and
+    /// streams the reply back exactly as a whole-model hand-off does
+    /// (`docs/FUTURE_WORK.md` #143). `layer_range` then names the whole model
+    /// and `prompt` is informational — the receiver renders `messages` itself,
+    /// so every path its own planner can choose builds the prompt the one way
+    /// it always does.
+    ///
+    /// Sent only to a peer advertising `features::DELEGATED_SPLIT`; an older
+    /// one would refuse it as a whole model it does not hold.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegation: Option<DelegatedSplit>,
     /// Populated locally after receiving from the network — never on the wire.
     #[serde(skip)]
     pub sender_peer_bytes: Option<Vec<u8>>,
+}
+
+/// The conversation a delegated split is asked to answer — what the
+/// requester's own router would have rendered, so the delegate's renders it
+/// the same way (`InferenceRequest::messages` and `tools`).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DelegatedSplit {
+    pub messages: Vec<ChatMessage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<serde_json::Value>>,
 }
 
 /// Finish reason for network protocol messages (distinct from inference::executor::FinishReason).
@@ -1167,6 +1190,16 @@ pub struct RoutePlanOverride {
     /// plan itself is still the search's.
     #[serde(default)]
     pub peer_holds: Vec<(String, PretendLocalHolds)>,
+    /// This node must LEAD the plan: no peer may take the first segment, so the
+    /// plan either starts here or does not exist. Set only on a request a peer
+    /// DELEGATED to us (`RemoteGenerateRequest::delegation`, FUTURE_WORK #143):
+    /// the requester chose this node to read its plaintext prompt — the trust
+    /// bar it applies to layer 0 — so handing layer 0 to anyone else would read
+    /// the prompt to a node the requester never vetted, and handing the whole
+    /// model to one peer would delegate a second time. Never parsed from a
+    /// client's `swarm_route` block.
+    #[serde(default)]
+    pub lead_here: bool,
 }
 
 impl RoutePlanOverride {
@@ -1178,6 +1211,21 @@ impl RoutePlanOverride {
         self.pretend_local_holds.is_none()
             && self.exclude_node_prefixes.is_empty()
             && self.peer_holds.is_empty()
+            && !self.lead_here
+    }
+
+    /// The instruction a delegated split is planned under: lead it here, and
+    /// change nothing else.
+    pub fn lead_here() -> Self {
+        Self {
+            lead_here: true,
+            ..Self::default()
+        }
+    }
+
+    /// May a PEER take the first segment of this plan?
+    pub fn lets_peer_lead(&self) -> bool {
+        !self.lead_here
     }
 
     /// Should this node be treated as holding `shard_index` of the model?
@@ -1226,5 +1274,53 @@ impl RoutePlanOverride {
         self.exclude_node_prefixes
             .iter()
             .any(|p| hex.starts_with(p.as_str()))
+    }
+}
+
+#[cfg(test)]
+mod delegated_split_wire_tests {
+    use super::*;
+
+    fn request(delegation: Option<DelegatedSplit>) -> RemoteGenerateRequest {
+        RemoteGenerateRequest {
+            request_id: uuid::Uuid::from_u128(7),
+            model_id: ModelId("m".into()),
+            layer_range: (0, 32),
+            prompt: "rendered".into(),
+            sampling: SamplingParams::default(),
+            session_id: None,
+            delegation,
+            sender_peer_bytes: None,
+        }
+    }
+
+    /// A whole-model hand-off is encoded exactly as before the field existed,
+    /// so every older peer reads it unchanged — and a request from one (no
+    /// field at all) decodes as a whole-model hand-off.
+    #[test]
+    fn a_whole_model_hand_off_carries_no_delegation_on_the_wire() {
+        let json = serde_json::to_value(request(None)).unwrap();
+        assert!(json.get("delegation").is_none(), "{json}");
+        let back: RemoteGenerateRequest = serde_json::from_value(json).unwrap();
+        assert!(back.delegation.is_none());
+    }
+
+    /// A delegated split carries the conversation and the tools as given.
+    #[test]
+    fn a_delegated_split_round_trips_its_conversation() {
+        let sent = request(Some(DelegatedSplit {
+            messages: vec![ChatMessage {
+                role: Role::User,
+                content: "hello".into(),
+                images: vec![],
+            }],
+            tools: Some(vec![serde_json::json!({"type": "function"})]),
+        }));
+        let bytes = serde_json::to_vec(&sent).unwrap();
+        let back: RemoteGenerateRequest = serde_json::from_slice(&bytes).unwrap();
+        let d = back.delegation.expect("delegation survives the wire");
+        assert_eq!(d.messages.len(), 1);
+        assert_eq!(d.messages[0].content, "hello");
+        assert_eq!(d.tools.map(|t| t.len()), Some(1));
     }
 }

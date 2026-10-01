@@ -218,6 +218,31 @@ pub mod features {
     /// coordinator streams only to a peer advertising this bit.
     pub const STREAM_AS_ONE_WORK: u64 = 1 << 16;
 
+    /// Coordinates a split on behalf of a peer: a `RemoteGenerateRequest`
+    /// carrying `delegation` asks this node — the one holding the model's
+    /// first layers — to plan the request among ITS peers, lead that plan
+    /// itself, run the decode loop and stream the reply back, as the
+    /// whole-model hand-off does for a peer holding everything
+    /// (`docs/FUTURE_WORK.md` #143). Without it a requester holding none of a
+    /// split model sat inside every token's round trip.
+    ///
+    /// Gated at the sender: an older node would read the request as a
+    /// whole-model hand-off, find it does not hold the whole model and refuse
+    /// it as "not hosted", which the requester treats as a stale holder record.
+    pub const DELEGATED_SPLIT: u64 = 1 << 17;
+
+    /// Carries a speculative CHECK down a chain: a hop handed a verify forward
+    /// with a `chain` passes its guesses, walk flag, shared-noise seed and
+    /// rewind on to the next hop with the activations, so the run's tail walks
+    /// the guesses and answers the coordinator — one trip around the machines
+    /// per check, where checks used to visit every segment through the
+    /// coordinator (a plan of N remote segments paid N round trips a round).
+    ///
+    /// No wire change — the fields are trailers every such peer reads. It gates
+    /// the coordinator: an older hop forwards only the activations, and the
+    /// tail would answer a guess-check as a plain decode step.
+    pub const CHAINED_VERIFY: u64 = 1 << 18;
+
     /// The full feature set THIS build implements. Advertised by every node.
     pub const ALL: u64 = RELAY
         | TENSOR_RELAY
@@ -235,7 +260,9 @@ pub mod features {
         | SPEC_WALK_AT_TAIL
         | COUPLED_SAMPLING
         | STREAMED_VERIFY
-        | STREAM_AS_ONE_WORK;
+        | STREAM_AS_ONE_WORK
+        | DELEGATED_SPLIT
+        | CHAINED_VERIFY;
 
     /// Does `advertised` include every bit in `needed`?
     pub fn supports(advertised: u64, needed: u64) -> bool {

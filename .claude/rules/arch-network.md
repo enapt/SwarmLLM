@@ -216,6 +216,20 @@ documented). Caller sees Err in ~10–20s instead of `FIRST_TOKEN_TIMEOUT`
 `is_transient_remote_failure` retry in `dispatch_single` so a single
 silent-drop transparently re-routes to a different holder.
 
+## A connection the swarm DENIED is forgotten by request-response (2026-10-02)
+
+The vendored request-response records a connection when it is handed one
+(`handle_established_*_connection`), BEFORE the swarm decides to keep it; the
+per-peer cap (3) then denies some, reported as `ListenFailure` / `DialFailure`,
+never `ConnectionClosed`. **`forget_denied_connection` drops the entry and fails
+its requests on both.** Remembered, a ghost had nothing pending and so won every
+send made while the real connections each had one outstanding — every burst lost
+its tail, silently, until the 600 s timeout. This is the "silent drop under load"
+the section above works around. A behaviour that keeps per-connection state must
+clean up on those two events as well as on a close.
+
+→ `docs/invariants/network.md` § "A connection the swarm denied is forgotten"
+
 ## A tensor forward is acknowledged on receipt; a result is always its own request (2026-08-21)
 
 `requests.rs` answers an inbound `LayerForward` with `SwarmResponse::Ack` the
@@ -293,6 +307,21 @@ verify at `index_pos` predicts position `index_pos + 1 + i`; a drafter keys gues
 k at `current_pos + 1 + k`. **Never a relative position** — the two sides then
 draw different noise for the same token and agreement collapses silently
 (`a_drafter_keyed_at_the_samplers_positions_is_accepted_and_one_off_is_not`).
+
+## A check travels a chain like a decode step does (2026-10-02)
+
+`forward_verify_through_segments` sends a run of remote segments ONE forward
+with the rest of the run as its `chain` — every hop advertising
+`features::CHAINED_VERIFY` (gated at the coordinator: an older hop hands the tail
+only activations, and it answers a plain decode step). A hop copies the check's
+fields — guesses, walk flag, seed, rewind, history — onto the onward forward,
+each gated on the next hop's own bit; a worker ignores them unless its segment is
+LAST (`want_spec_output`). The waiter pins the tail and admits every hop's
+refusal; a chained check resends on nothing (`ResendOnRefusal::Never`).
+`PipelineExecutor::verify_may_chain` decides; `SWARMLLM_CHAIN_VERIFY=0` is the
+control arm.
+
+→ `docs/invariants/network.md` § "A check travels a chain like a decode step does"
 
 ## A result names the step it answers; one that did not arrive is sent again (2026-09-25)
 

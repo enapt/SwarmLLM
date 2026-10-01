@@ -131,6 +131,7 @@ impl PipelineExecutor {
                 &self.shared_state.pending_layer_results,
                 crate::daemon::state::WaiterKey::request(request_id),
                 Some(segment.node_id.clone()),
+                Vec::new(),
                 // The prompt pass, which `rebuild_forward` sends at position 0.
                 Some(crate::daemon::state::ExpectedStep::one(
                     0,
@@ -474,22 +475,19 @@ impl PipelineExecutor {
             acceptance_accepted += accepted.len() as u32;
 
             // Emit accepted + bonus.
-            let mut emitted: Vec<u32> = accepted
-                .iter()
-                .copied()
-                .chain(std::iter::once(bonus))
-                .collect();
-
             // BUG-FIX (R105): truncate emitted at the FIRST EOS, before any
             // downstream consumer (streaming, generated buffer, KV bookkeeping)
             // sees post-EOS tokens. Previously the EOS check happened AFTER
             // both streaming and `generated.extend`, so junk tokens following
             // an EOS in a multi-token speculative round (e.g. [a, EOS, b, c])
-            // were streamed to the client and appended to `generated`. Same
-            // pattern applied in dsd.rs.
-            if let Some(eos_at) = emitted.iter().position(|t| eos_tokens.contains(t)) {
-                emitted.truncate(eos_at + 1);
-            }
+            // were streamed to the client and appended to `generated`. And at
+            // the room `max_tokens` leaves — one helper for every path.
+            let emitted = super::round_tokens_for_reply(
+                &accepted,
+                bonus,
+                &eos_tokens,
+                (max_tokens as usize).saturating_sub(generated.len()),
+            );
 
             // Streaming per token.
             super::emit_streaming_batch(
@@ -661,6 +659,7 @@ pub(super) async fn send_verify_batch(
         &shared_state.pending_layer_results,
         crate::daemon::state::WaiterKey::request(request_id),
         Some(segment.node_id.clone()),
+        Vec::new(),
         Some(crate::daemon::state::ExpectedStep::one(
             index_pos,
             segment.layer_range,

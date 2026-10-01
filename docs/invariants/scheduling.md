@@ -2441,3 +2441,73 @@ check removed. What remains is separate: with the drafter resident the plan stil
 Before keying anything by `request.id`, ask whether a retry of the same request could hold it at the
 same moment — and whether a release keyed that way reaches workers you did not mean.
 
+
+## A split none of which is ours is LED by its head, never driven from here (2026-10-02)
+
+**The defect it closes** (FUTURE_WORK #143, measured 2026-09-28): a requester
+holding none of a split model sat inside every token's round trip. The tail
+answered it, and it started the next token at the head, so a Thailand request
+split among European peers 20 ms apart ran at the Thailand↔Europe loop. On the
+default n-gram path it was worse: a guess-check round is star-shaped
+(`forward_verify_through_segments` visits each segment through the
+coordinator), so a plan of N remote segments paid N of the requester's round
+trips per round.
+
+**The rule.** `remote_generate::delegation_eligible` is the single answer to
+"is this request handed to its head to lead?" — several segments, none of them
+ours, the head advertising `features::DELEGATED_SPLIT`, prompt privacy off, our
+private mode off, no `swarm_route` override, no LoRA/vision/TP. It runs FIRST in
+`execute_distributed`, ahead of DSD and the n-gram loop, because each of those
+would put the loop here. The head runs it as an ordinary request of its own router
+(`dispatch::remote_generate::handle_delegated_split`), so chaining, n-gram and
+drafter speculation, the continuous stream and segment failover all apply there
+unchanged — the drafter, the n-gram loop and failover are `PipelineExecutor`
+methods and move with the loop.
+
+**What the delegate must keep** — `RoutePlanOverride::lead_here`, read at
+candidate gathering, the one place a candidate is admitted:
+- **No peer leads.** `can_be_first` is cleared on every peer, so the DP's source
+  filter, the greedy first-segment narrowing and `delegation_target`'s
+  whole-model hand-off all refuse a peer for layer 0. The requester applied its
+  plaintext-prompt trust bar when it picked the head; a different head would read
+  the prompt unvetted, and a whole-model hand-off would delegate twice.
+- **No peer stands by for segment 0** (`standby_may_take`), for the same reason.
+- **Its local segments are the swarm's work** (`pipeline::worker_requester` →
+  `Requester::Swarm`), within the contribution level. Four sites hardcoded the
+  owner because the router used to see only this node's API requests; the
+  verify helper now takes the requester as a REQUIRED parameter.
+
+**One id per attempt, and the gap a recovery needs.** The hand-off travels under
+its own id (`try_delegated_split` mints it; gotchas #180/#229): after a fallback
+this node sends ITS forwards to the same delegate under the request id, and a
+router retry may delegate again, so a cancel of the abandoned hand-off — sent on
+every failure — and its late tokens must not be able to name either. Between two
+tokens a delegated stream waits `INTER_TOKEN_TIMEOUT` plus one whole-model decode
+deadline: the delegate may be waiting out its own segment's and failing over.
+Under `lead_here` the greedy fallback REFUSES where it would otherwise fall
+through (narrow-if-non-empty is right only where a refusal fails the request; here
+the requester runs the plan itself), and `detect_tp_groups` admits to a layer-0
+group only a peer that may lead.
+
+**Reading a failure.** A delegate's error may name a peer IT chose, so the
+requester retracts no claim and bars nobody on it, and the reply's pace is the
+plan's, not the delegate's — no speed sample. Before any token arrives, any
+failure falls back to running the same plan here (`try_delegated_split` returns
+`Ok(None)`); after, it is the request's failure, as for a whole-model hand-off.
+
+**What it costs, knowingly.** Petals keeps the client in the loop precisely so it
+can replay a failed server's input history to a replacement (arXiv 2209.01188 §
+3.2; its servers also push activations straight to the next server, our
+chaining). Delegation moves that replay to the delegate: a failed C or D is
+still taken over, but losing the DELEGATE mid-reply loses the request, exactly
+as losing the one peer of a whole-model hand-off does. Parallax (arXiv
+2509.26182) runs the loop as a ring with the client outside for the same latency
+reason.
+
+**Tests**: `a_request_delegated_to_us_is_led_here_and_never_handed_on`
+(scheduler; fails with the `lead_here` clause removed — the peer then runs the
+whole model), `a_split_none_of_which_is_ours_is_led_by_its_head_and_only_that`,
+`a_delegated_requests_local_work_is_the_swarms`, and the wire pair in
+`swarmllm-types` (`a_whole_model_hand_off_carries_no_delegation_on_the_wire`).
+Rig: `examples/split_rig.sh remote` (`REMOTE_NODES=2|3`, `DELAY_A=ms`), A/B in
+one binary with `SWARMLLM_DELEGATE_SPLIT=0`.

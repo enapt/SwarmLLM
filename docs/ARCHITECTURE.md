@@ -78,7 +78,7 @@ swarmllm/
 │   │                          `run_mha` launches on the CALLER's stream, not stream 0 — .199's garbage, #683)
 │   ├── candle-paged-attention/ (kernels only — NOTHING references it; PagedAttention was never wired, #257;
 │   │                          its kernels still hardcode stream 0 — fix before wiring it, see FUTURE_WORK)
-│   └── libp2p-request-response/ (11 tests, `--lib`)
+│   └── libp2p-request-response/ (12 tests, `--lib`)
 ├── examples/      (runnable checks + harnesses, NOT `cargo test` targets:
 │                 frontend_load_check.js — loads every module in index.html's order;
 │                 research_gate_probe.py — plants one violation per Bash mutation form
@@ -423,6 +423,8 @@ libp2p Swarm
 │   ├── Refusal reason (2026-09-24, FUTURE_WORK #92) — `LayerResult` trailer `0x06` (`marker + one reason byte`, LAST in the frame), carrying `ForwardRefusal::Undecryptable`: the serving node could not open the forward's seal and has armed the repair. The coordinator's `wait_for_result` then sends the SAME forward to the SAME node once `SessionManager::rekeyed_since` says the link was re-keyed — safe mid-reply because the worker never saw it. A result's seal does not depend on its trailers, so an older decoder skips it; still sent only to a coordinator advertising `features::FORWARD_REFUSAL_REASON`.
 │   ├── Walk at the tail (2026-09-27, FUTURE_WORK #134) — `LayerForward` `0x03` flags bit 1 (`spec_walk_at_tail`, one writer `layer_forward::spec_trailer_flags` for plaintext/encrypted/AAD), gated on `features::SPEC_WALK_AT_TAIL`: the last segment walks a verify's drafts with the caller's sampler and answers with token ids (43-59 bytes) instead of a full vocabulary per position (513 KB each at 128K). `pipeline::VerifyReply::accept` is the one place either reply shape becomes accepted tokens
 │   ├── Shared noise (2026-09-27) — `LayerForward` trailer `0x0B` (9 bytes: the request's coupling seed), AAD-bound, gated on `features::COUPLED_SAMPLING`: the walk samples row i at absolute position `index_pos + 1 + i` with Gumbel-max over `inference::coupled_noise`, so a drafter holding the seed reproduces the draw at any temperature
+│   ├── Delegated split (2026-10-02, FUTURE_WORK #143) — `RemoteGenerateRequest::delegation` (`DelegatedSplit{messages, tools}`, JSON, `skip_serializing_if` so a whole-model hand-off encodes exactly as before), sent only to a head advertising `features::DELEGATED_SPLIT`: a requester holding none of a several-segment plan asks the holder of its first layers to LEAD it (`dispatch::remote_generate::handle_delegated_split` → its own router under `RoutePlanOverride::lead_here`), and the reply streams back on the whole-model hand-off's protocol (`stream_reply_to_requester`: numbered `StreamingToken`s, retained for `ResendTokens`, a repeated terminal frame). An older head would refuse it as a model it does not hold, hence the sender-side gate
+│   ├── Chained check (2026-10-02) — a speculative verify forward with a `chain`: each hop hands the check's guesses, walk flag, seed, rewind and history on with the activations (`dispatch::layer_forward`, each gated on the next hop's own bit), and the run's tail walks and answers the coordinator; gated at the coordinator on every hop advertising `features::CHAINED_VERIFY` (no wire change — the trailers exist; an older hop would hand the tail activations only). One trip around a run of remote segments per check instead of one per segment
 │   ├── Streamed verify (2026-09-30, FUTURE_WORK #149) — `LayerForward` trailer `0x0C` (`stream_seq`: attempt tag in the high bits, turn number below), AAD-bound, answered with the `0x08` result trailer echoing it; gated on `features::STREAMED_VERIFY`. A coordinator keeps several verify chunks of ONE request in flight (`pipeline::dsd_stream`, ON by default since v0.3.216); the serving node runs them strictly in number order (`daemon::state::forward_streams`), and a chunk carrying `truncate_kv_to` restarts the stream (earlier unstarted turns are skipped). Since v0.3.216 the serving node counts a stream as ONE piece of its sender's work (`dispatch::StreamWorkSlot`: one per-peer slot + one permit) and steps over a chunk it refused on arrival (`ForwardStreams::refused_on_arrival`); a coordinator streams only to a peer that also advertises `features::STREAM_AS_ONE_WORK` (no wire change) — v0.3.213-215 refused a busy stream's 5th chunk and stalled 60 s on the hole (gotcha #767)
 │   ├── Caller's sampling (2026-09-25, FUTURE_WORK #106) — `LayerForward` trailer `0x0A` (23 bytes: temperature, top_p, top_k, frequency/presence penalty, logprobs, top_logprobs), AAD-bound, to the segment that SAMPLES and to a chain head that hands it down. **`LayerForward.sampling` was in-process only**, so a REMOTE last segment sampled at the worker's 0.7 / 0.9 / 40 with no penalties whatever the caller asked — greedy requests came back different every run. Gated on `features::FORWARD_SAMPLING` at every sender (planned, failover stand-in, chain hop); `peer_supports_pipeline_chain` requires it. The receiver clamps (`api::clamp_peer_sampling`) only AFTER rebuilding the AAD from the bytes as sent
 │   ├── Pre-embedded flag (2026-09-21) — `LayerForward` trailer `0x09`, AAD-bound: the payload is already embedded hidden states, not prompt text. **It travelled only inside the tensor-parallel trailer (`0x02`)**, which an ordinary pipeline forward never carries, so a node handed a locally-embedded prompt tokenised a float tensor as UTF-8 and answered nonsense — the whole of `inference.local_embedding_privacy`, whose purpose is to give a REMOTE first segment hidden states instead of raw token ids. A coordinator that cannot send it to the node holding segment 0 raises `PromptPrivacyUnavailable` rather than quietly sending the tokens the caller asked to keep private.
@@ -920,6 +922,18 @@ assembly.
 7. Merge contiguous segments assigned to the same node
 8. Identify standby nodes per segment
 9. Send PipelineAssignment → all nodes ACK → begin forwarding
+
+**Who runs the decode loop.** The node that planned the request, with two
+exceptions, both one `RemoteGenerateRequest` that streams the reply back as
+`StreamingToken`s (`pipeline::remote_generate`): a plan that is ONE peer holding
+the whole model is handed to it (`eligible`), and since v0.3.219 a plan of
+several segments NONE of which is this node's is handed to the holder of its
+first layers, which LEADS it among its own peers (`delegation_eligible`,
+`features::DELEGATED_SPLIT`, FUTURE_WORK #143). The delegate plans under
+`RoutePlanOverride::lead_here` — no peer may take or stand by for layer 0,
+nothing is handed on — and runs its local layers as the swarm's work. Without it a
+requester holding nothing sat inside every token's round trip, paying its own
+distance per token to machines that were close to each other.
 
 **Capacity-respecting routing (`parallax::route_shortest_path`).** When
 `inference.parallax_routing` is on, the shortest-path DP replaces steps 5-7 and

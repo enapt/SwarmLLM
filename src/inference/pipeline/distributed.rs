@@ -44,6 +44,18 @@ impl PipelineExecutor {
             });
         }
 
+        // A split none of which is ours goes to the holder of its first
+        // layers, which leads it among its own peers (FUTURE_WORK #143). First,
+        // because every path below would run its loop HERE: a node holding no
+        // layer would sit inside each token's round trip — and each guess
+        // check's, one round trip per segment — for nothing. Falls through
+        // (`Ok(None)`) when the plan is not that shape or the delegate failed
+        // before delivering a token, and the same plan then runs here.
+        let outcome = self.try_delegated_split(token_tx.clone()).await;
+        if let Some(out) = self.keeping_the_partial(outcome, token_tx.as_ref()).await? {
+            return Ok(out);
+        }
+
         // Item 12 Phase 4: DSD multi-segment greedy speculative. Falls through
         // when fewer than 2 segments (Item 2 covers single-segment) or any
         // other precondition fails (TP groups, non-greedy, no draft, etc.).

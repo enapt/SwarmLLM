@@ -11,6 +11,12 @@
 //! that dominates the per-token path on loopback, leaving just compute +
 //! single-frame network transit (~20-30ms/token). ~5-7x single-user speedup
 //! for the common single-segment case.
+//!
+//! The same request also carries the DELEGATED SPLIT (`docs/FUTURE_WORK.md`
+//! #143): a plan of several segments, none of them ours, is handed to the
+//! holder of its first layers, which leads it among its own peers and streams
+//! the reply back the same way. Only the request's contents and the
+//! requester's reading of a failure differ — [`HandOff`].
 
 use std::time::Duration;
 
@@ -294,6 +300,95 @@ pub(super) fn hole_wait(peer_latency_ms: Option<u32>) -> Duration {
         .clamp(HOLE_WAIT_MIN, HOLE_WAIT_MAX)
 }
 
+/// Which hand-off a `RemoteGenerateRequest` makes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum HandOff {
+    /// The whole model, to the one peer holding it ([`eligible`]).
+    WholeModel,
+    /// A split none of which is ours, to the holder of its first layers, which
+    /// LEADS it among its own peers ([`delegation_eligible`]).
+    ///
+    /// The requester reads a failure differently from a whole-model one: the
+    /// error may be about a peer the delegate chose, so it retracts no claim
+    /// and bars nobody, and the reply's speed is the delegate's PLAN's, not
+    /// the delegate's — so it is not recorded as the delegate's.
+    DelegatedSplit,
+}
+
+/// `SWARMLLM_DELEGATE_SPLIT=0` keeps every split coordinated here — the
+/// control arm for measuring the delegated split in one binary. Read once.
+fn delegation_switched_off() -> bool {
+    use std::sync::OnceLock;
+    static OFF: OnceLock<bool> = OnceLock::new();
+    *OFF.get_or_init(|| {
+        std::env::var("SWARMLLM_DELEGATE_SPLIT")
+            .map(|v| v == "0" || v.eq_ignore_ascii_case("false"))
+            .unwrap_or(false)
+    })
+}
+
+/// Will the delegated split take this plan? The single answer
+/// (`docs/FUTURE_WORK.md` #143).
+///
+/// The shape: several segments, NONE of them this node's. Here the
+/// coordinator sits inside every token's round trip while holding no layer —
+/// the tail answers it and it starts the next token at the head — so a
+/// requester far from machines that are close to EACH OTHER paid its own
+/// distance per token (measured 0.35 tok/s Thailand↔Italy against 6.76 at
+/// 18 ms). Handed to the head, the loop runs at the holders' distance and
+/// only the finished tokens cross the requester's.
+///
+/// What must hold for it to be the SAME request, served as safely:
+/// - the head advertises `features::DELEGATED_SPLIT` (an older node would
+///   refuse it as a whole model it does not hold);
+/// - prompt privacy is off — the raw prompt reaches the head either way, but
+///   privacy keeps layer 0 HERE, which a node holding nothing cannot honour
+///   anyway, and the boomerang is never this shape;
+/// - this node's private mode is off: its scope is "who may serve MY
+///   request", and a delegate plans among peers this node never checked;
+/// - no `swarm_route` override: it is an instruction to THIS node's planner,
+///   and the delegate could not follow it;
+/// - the request is not itself one a peer delegated to us (never handed on).
+pub(crate) fn delegation_eligible(exec: &PipelineExecutor) -> bool {
+    if delegation_switched_off() {
+        return false;
+    }
+    if super::fastpath_request_disqualified(exec) {
+        return false;
+    }
+    let segments = &exec.assignment.segments;
+    if segments.len() < 2 {
+        return false;
+    }
+    let me = exec.shared_state.identity.node_id();
+    if segments.iter().any(|s| &s.node_id == me) {
+        return false;
+    }
+    if exec.request.route_override.is_some() {
+        return false;
+    }
+    let head = &segments[0];
+    if head.layer_range.0 != 0 {
+        return false;
+    }
+    if !exec
+        .shared_state
+        .peer_advertises_feature(&head.node_id, crate::types::features::DELEGATED_SPLIT)
+    {
+        return false;
+    }
+    let encrypted = exec
+        .shared_state
+        .encrypted_pipeline_for_request(&exec.request.model_id, exec.request.id);
+    if encrypted || exec.shared_state.config.inference.local_embedding_privacy {
+        return false;
+    }
+    if crate::pool::scope::allowed_node_set(&exec.shared_state).is_some() {
+        return false;
+    }
+    true
+}
+
 /// Preconditions for the fast path. All checks are local and cheap.
 /// Will the whole-model hand-off take this plan? The single answer — the n-gram
 /// loop, which runs earlier in `execute_distributed`, asks it too and stands
@@ -448,8 +543,117 @@ impl PipelineExecutor {
         if !eligible(self) {
             return Ok(None);
         }
+        let wire_id = self.request.id;
+        self.run_hand_off(token_tx, HandOff::WholeModel, wire_id)
+            .await
+    }
 
+    /// Hand a split none of which is ours to the holder of its first layers,
+    /// which leads it and streams the reply back (`delegation_eligible`).
+    ///
+    /// `Ok(None)` — run this same plan here instead — when the plan is not
+    /// that shape, and when the delegate failed BEFORE a single token of the
+    /// reply arrived: it declined (it no longer holds the first layers, its
+    /// router could not plan, its queue was full) or it never answered. Every
+    /// one of those leaves this node able to coordinate the plan it already
+    /// has, and nothing has been shown to the caller twice. A failure after
+    /// tokens arrived is the request's, exactly as for a whole-model hand-off.
+    pub(super) async fn try_delegated_split(
+        &mut self,
+        token_tx: Option<StreamingTokenTx>,
+    ) -> Result<Option<InferenceOutput>, SwarmError> {
+        if !delegation_eligible(self) {
+            return Ok(None);
+        }
+        let head = self.assignment.segments[0].node_id.clone();
+        tracing::info!(
+            request_id = %self.request.id,
+            delegate = %head,
+            segments = self.assignment.segments.len(),
+            "delegated split: this node holds none of the plan — handing it to the \
+             holder of its first layers to lead"
+        );
+        self.hand_off_emitted = 0;
+        // Its own id on the wire, per ATTEMPT. After a fallback this node sends
+        // its OWN forwards to the delegate under the request id, so a cancel
+        // of the abandoned hand-off — or a late token from it — must not be
+        // able to name them; and a router retry that delegates again must not
+        // collect the first attempt's stragglers (`arch-scheduling.md` § "State
+        // that belongs to an ATTEMPT").
+        let wire_id = uuid::Uuid::new_v4();
+        let outcome = self
+            .run_hand_off(token_tx, HandOff::DelegatedSplit, wire_id)
+            .await;
+        if outcome.is_err() {
+            // Whatever the delegate is still doing is for nobody now: a reply
+            // this node has failed, or a plan it is about to run itself.
+            self.shared_state.streaming_token_txs.remove(&wire_id);
+            if let Some(target) = self.shared_state.resolve_peer_id_bytes(&head) {
+                let _ = self
+                    .network_tx
+                    .send(NetworkCommand::SendDirectMessage {
+                        target_peer_bytes: target,
+                        message: crate::types::SwarmMessage::CancelInference(
+                            swarmllm_types::CancelInference {
+                                request_id: wire_id,
+                            },
+                        ),
+                        delivery_request_id: None,
+                    })
+                    .await;
+            }
+        }
+        match outcome {
+            Err(e) if self.hand_off_emitted == 0 => {
+                tracing::warn!(
+                    request_id = %self.request.id,
+                    delegate = %head,
+                    error = %e,
+                    "delegated split: the delegate did not serve it — coordinating the \
+                     same plan from here instead"
+                );
+                Ok(None)
+            }
+            other => other,
+        }
+    }
+
+    /// Send a `RemoteGenerateRequest` to the head of the plan and turn the
+    /// tokens it streams back into this request's reply. One protocol for
+    /// both hand-offs; `hand_off` says which, and so how the request is built
+    /// and how a failure is read.
+    async fn run_hand_off(
+        &mut self,
+        token_tx: Option<StreamingTokenTx>,
+        hand_off: HandOff,
+        // The id the request, its tokens, resend asks and cancels travel
+        // under. A whole model's is the request's own, as it always was.
+        wire_id: uuid::Uuid,
+    ) -> Result<Option<InferenceOutput>, SwarmError> {
+        let whole_model = hand_off == HandOff::WholeModel;
         let request_id = self.request.id;
+        // Between two tokens a delegate may be waiting out ITS segment's
+        // deadline and failing over — the recovery that delegation moves with
+        // the loop. A gap shorter than that turns its recovery into this
+        // node's failure, so it is the usual gap plus one decode deadline for
+        // the whole model (`compute_segment_timeout`'s rule), sized by the
+        // model and capped with it.
+        let inter_token_timeout = match hand_off {
+            HandOff::WholeModel => INTER_TOKEN_TIMEOUT,
+            HandOff::DelegatedSplit => {
+                let layers = self
+                    .assignment
+                    .segments
+                    .last()
+                    .map(|s| s.layer_range.1)
+                    .unwrap_or(0);
+                INTER_TOKEN_TIMEOUT
+                    + Duration::from_secs((u64::from(layers) * super::DECODE_SECS_PER_LAYER).clamp(
+                        super::SEGMENT_TIMEOUT_MIN_SECS,
+                        super::SEGMENT_TIMEOUT_MAX_SECS,
+                    ))
+            }
+        };
         let segment = self.assignment.segments[0].clone();
         let target_peer_bytes = self
             .shared_state
@@ -481,7 +685,7 @@ impl PipelineExecutor {
             REMOTE_GENERATE_TOKEN_CHANNEL_CAP,
         );
         self.shared_state.streaming_token_txs.insert(
-            request_id,
+            wire_id,
             crate::daemon::state::StreamingTokenSink {
                 tx: stream_tx,
                 // A retry keeps the request id, so the peer is what
@@ -490,14 +694,36 @@ impl PipelineExecutor {
             },
         );
 
-        // Send the RemoteGenerateRequest.
+        // Send the RemoteGenerateRequest. A delegated split names the WHOLE
+        // model and carries the conversation itself: the delegate renders it
+        // through its own router, so every path it can choose builds the
+        // prompt the one way it always does. `prompt` rides along as sent
+        // today, informational for a delegate.
+        let (layer_range, delegation) = match hand_off {
+            HandOff::WholeModel => (segment.layer_range, None),
+            HandOff::DelegatedSplit => (
+                (
+                    0,
+                    self.assignment
+                        .segments
+                        .last()
+                        .map(|s| s.layer_range.1)
+                        .unwrap_or(segment.layer_range.1),
+                ),
+                Some(crate::types::DelegatedSplit {
+                    messages: self.request.messages.clone(),
+                    tools: self.request.tools.clone(),
+                }),
+            ),
+        };
         let msg = crate::types::SwarmMessage::RemoteGenerateRequest(RemoteGenerateRequest {
-            request_id,
+            request_id: wire_id,
             model_id: segment.shard_id.model_id.clone(),
-            layer_range: segment.layer_range,
+            layer_range,
             prompt,
             sampling,
             session_id: self.request.session_id.clone(),
+            delegation,
             sender_peer_bytes: None,
         });
         if self
@@ -509,12 +735,12 @@ impl PipelineExecutor {
                 // the request (observed under load), the daemon closes
                 // streaming_token_txs[request_id] within RR_ACK_TIMEOUT_SECS
                 // (10s) so we fail fast instead of waiting 120s.
-                delivery_request_id: Some(request_id),
+                delivery_request_id: Some(wire_id),
             })
             .await
             .is_err()
         {
-            self.shared_state.streaming_token_txs.remove(&request_id);
+            self.shared_state.streaming_token_txs.remove(&wire_id);
             return Err(SwarmError::Network(
                 "RemoteGenerateRequest send dropped".into(),
             ));
@@ -522,7 +748,9 @@ impl PipelineExecutor {
 
         tracing::info!(
             %request_id,
+            %wire_id,
             target = %segment.node_id,
+            ?hand_off,
             "remote-generate fast path: request sent"
         );
 
@@ -584,12 +812,14 @@ impl PipelineExecutor {
                     .send(NetworkCommand::SendDirectMessage {
                         target_peer_bytes: target_peer_bytes.clone(),
                         message: crate::types::SwarmMessage::CancelInference(
-                            swarmllm_types::CancelInference { request_id },
+                            swarmllm_types::CancelInference {
+                                request_id: wire_id,
+                            },
                         ),
                         delivery_request_id: None,
                     })
                     .await;
-                self.shared_state.streaming_token_txs.remove(&request_id);
+                self.shared_state.streaming_token_txs.remove(&wire_id);
                 finish_reason = "stop".to_string();
                 break;
             }
@@ -615,7 +845,7 @@ impl PipelineExecutor {
                                 target_peer_bytes: target_peer_bytes.clone(),
                                 message: crate::types::SwarmMessage::ResendTokens(
                                     swarmllm_types::ResendTokens {
-                                        request_id,
+                                        request_id: wire_id,
                                         from_token_id: from,
                                         to_token_id: to,
                                     },
@@ -635,7 +865,7 @@ impl PipelineExecutor {
             } else if first {
                 first_token_budget
             } else {
-                INTER_TOKEN_TIMEOUT
+                inter_token_timeout
             };
             // Watched, not merely checked beforehand. The first-token budget
             // is prompt-scaled and reaches ten minutes, so a client that gave
@@ -693,9 +923,14 @@ impl PipelineExecutor {
                         // The retry this invites re-plans; without this it
                         // can re-pick the peer that just went quiet and wait
                         // the same silence out again (Envoy's `previous_hosts`
-                        // rule). Scoped to this request only.
-                        self.shared_state
-                            .blacklist_holder_for_request(request_id, &segment.node_id);
+                        // rule). Scoped to this request only. A delegate quiet
+                        // before any token is instead run as a segment of the
+                        // plan this node already holds (`try_delegated_split`),
+                        // where its silence is the segment deadline's to judge.
+                        if whole_model || self.hand_off_emitted > 0 {
+                            self.shared_state
+                                .blacklist_holder_for_request(request_id, &segment.node_id);
+                        }
                         return Err(SwarmError::PeerUnresponsive(format!(
                             "remote-generate: peer never acknowledged request_id={request_id} (silent drop or disconnect)"
                         )));
@@ -726,7 +961,7 @@ impl PipelineExecutor {
                         );
                         break;
                     }
-                    self.shared_state.streaming_token_txs.remove(&request_id);
+                    self.shared_state.streaming_token_txs.remove(&wire_id);
                     // A delivery that yielded nothing usable. Recorded so the
                     // router learns to prefer a peer whose answers arrive —
                     // this is also how the peer's own terminal ERROR frame
@@ -739,9 +974,12 @@ impl PipelineExecutor {
                         .record_peer_delivery(&segment.node_id, false);
                     // Same reclassification as the never-acknowledged arm
                     // above: the peer went quiet past its deadline — and the
-                    // same bar from this request's retry.
-                    self.shared_state
-                        .blacklist_holder_for_request(request_id, &segment.node_id);
+                    // same bar from this request's retry. A delegate quiet
+                    // before any token is not barred: the same plan runs here.
+                    if whole_model || self.hand_off_emitted > 0 {
+                        self.shared_state
+                            .blacklist_holder_for_request(request_id, &segment.node_id);
+                    }
                     return Err(SwarmError::PeerUnresponsive(format!(
                         "remote-generate timed out waiting for token (first={first})"
                     )));
@@ -756,6 +994,17 @@ impl PipelineExecutor {
                 finish_reason = match reason {
                     NetworkFinishReason::Stop => "stop".to_string(),
                     NetworkFinishReason::MaxTokens => "length".to_string(),
+                    NetworkFinishReason::Error(e) if !whole_model => {
+                        // A delegate's error may name a peer IT chose — a
+                        // missing shard, a refusal, a context limit — so
+                        // nothing here is evidence about the delegate's own
+                        // holdings or limits: retract nothing, bar nobody.
+                        // Before any token, `try_delegated_split` runs the plan
+                        // here; after, it is the request's failure.
+                        self.shared_state.streaming_token_txs.remove(&wire_id);
+                        return Err(crate::error::reclassify_flattened_error(e)
+                            .unwrap_or_else(|| SwarmError::Inference(e.clone())));
+                    }
                     NetworkFinishReason::Error(e) => {
                         // Same stale-claim retraction as the multi-segment path.
                         // This fast path has no failover, so without it a peer
@@ -788,7 +1037,7 @@ impl PipelineExecutor {
                             self.shared_state
                                 .blacklist_holder_for_request(request_id, &segment.node_id);
                         }
-                        self.shared_state.streaming_token_txs.remove(&request_id);
+                        self.shared_state.streaming_token_txs.remove(&wire_id);
                         // A conversation longer than THIS peer serves is its
                         // limit, not the request's, unless it is the model's own
                         // (#111): bar it and let the router re-plan, as a
@@ -856,6 +1105,7 @@ impl PipelineExecutor {
                 if t.text.is_empty() {
                     continue;
                 }
+                self.hand_off_emitted += 1;
                 content.push_str(&t.text);
                 if let Some(ref tx) = token_tx {
                     if tx
@@ -885,7 +1135,9 @@ impl PipelineExecutor {
                     .send(NetworkCommand::SendDirectMessage {
                         target_peer_bytes: target_peer_bytes.clone(),
                         message: crate::types::SwarmMessage::CancelInference(
-                            swarmllm_types::CancelInference { request_id },
+                            swarmllm_types::CancelInference {
+                                request_id: wire_id,
+                            },
                         ),
                         delivery_request_id: None,
                     })
@@ -910,7 +1162,7 @@ impl PipelineExecutor {
             }
         }
 
-        self.shared_state.streaming_token_txs.remove(&request_id);
+        self.shared_state.streaming_token_txs.remove(&wire_id);
 
         if finish_reason.is_empty() {
             finish_reason = "stop".to_string();
@@ -1012,7 +1264,9 @@ impl PipelineExecutor {
             )));
         }
 
-        if let Some(ttft) = first_token_at {
+        // A delegated split's pace is its PLAN's — the delegate and every peer
+        // it chose — and recorded as the delegate's it would misprice it.
+        if let Some(ttft) = first_token_at.filter(|_| whole_model) {
             let steady = sent_at
                 .elapsed()
                 .saturating_sub(ttft.duration_since(sent_at));

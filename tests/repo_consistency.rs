@@ -11361,10 +11361,11 @@ fn the_card_pace_guard_catches_a_gate_after_the_path_choice() {
     );
 }
 
-/// Does this call hand the pool the OWNER as its requester?
-fn forwards_as_the_owner(body: &str) -> bool {
+/// Does this call hand the pool the request's OWN class — `worker_requester`,
+/// the one answer to "is this the owner's work or a peer's"?
+fn forwards_as_the_requests_own(body: &str) -> bool {
     let flat: String = body.chars().filter(|c| !c.is_whitespace()).collect();
-    flat.contains(".forward_for_request(") && flat.contains("Requester::Owner")
+    flat.contains(".forward_for_request(") && flat.contains("worker_requester(")
 }
 
 /// Does this worker handler mark a forward the daemon flagged as the owner's —
@@ -11397,9 +11398,21 @@ fn the_owners_own_segment_is_forwarded_as_the_owners() {
     let body = fn_body(&local, "pub(super) async fn process_local_segment(")
         .expect("process_local_segment moved — move this guard with it");
     assert!(
-        forwards_as_the_owner(body),
-        "process_local_segment must forward with `Requester::Owner` — it runs this \
-         node's own segment of a request the router coordinates"
+        forwards_as_the_requests_own(body),
+        "process_local_segment must forward with `worker_requester(..)` — it runs this \
+         node's own segment of a request the router coordinates, which is the owner's \
+         unless a peer delegated it (2026-10-02)"
+    );
+    // And that answer is the owner's for everything but a request a peer handed
+    // us to lead (`RoutePlanOverride::lead_here`), whose work is the swarm's.
+    let pipeline = read("src/inference/pipeline/mod.rs");
+    let answer = fn_body(&pipeline, "pub(crate) fn worker_requester(")
+        .expect("worker_requester moved — move this guard with it");
+    assert!(
+        answer.contains("lead_here")
+            && answer.contains("Requester::Swarm")
+            && answer.contains("Requester::Owner"),
+        "worker_requester must answer Swarm for a delegated request and Owner otherwise"
     );
     let worker = read("src/inference/model_worker.rs");
     let body = fn_body(&worker, "async fn handle_forward(")
@@ -11413,14 +11426,19 @@ fn the_owners_own_segment_is_forwarded_as_the_owners() {
 /// The guard above, against what it exists to catch — planted.
 #[test]
 fn the_owner_segment_guard_catches_a_forward_that_says_nothing() {
-    assert!(!forwards_as_the_owner(
+    assert!(!forwards_as_the_requests_own(
         ".forward_for_request(layer_forward, self.request.cancel.clone())"
     ));
-    assert!(!forwards_as_the_owner(
+    assert!(!forwards_as_the_requests_own(
         ".forward_for_request(f, None, crate::inference::process_pool::Requester::Swarm)"
     ));
-    assert!(forwards_as_the_owner(
-        ".forward_for_request(\n    f,\n    c,\n    crate::inference::process_pool::Requester::Owner,\n)"
+    // A hardcoded owner is the pre-2026-10-02 shape: a delegated request would
+    // run on the owner's width.
+    assert!(!forwards_as_the_requests_own(
+        ".forward_for_request(f, c, crate::inference::process_pool::Requester::Owner)"
+    ));
+    assert!(forwards_as_the_requests_own(
+        ".forward_for_request(\n    f,\n    c,\n    super::worker_requester(&self.request),\n)"
     ));
     assert!(!marks_an_owners_forward("let request_id = fwd.request_id;"));
     assert!(marks_an_owners_forward(

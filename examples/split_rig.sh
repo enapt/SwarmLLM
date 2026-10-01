@@ -94,8 +94,25 @@
 #          much. Default model qwen2.5-0.5b (it renders tools natively, like
 #          the reporter's Qwen-based xLAM). Run BIN_A = an older release for
 #          the baseline: no planner line, and the route is decided cold.
+#   remote  A holds NONE of the model (the header only) and REMOTE_NODES (2,
+#          default, or 3) other nodes hold it between them in contiguous parts
+#          — B the first, then C (and D) — the shape a user who stores nothing
+#          meets for every split model (FUTURE_WORK #143). REPEAT (default 3)
+#          greedy runs of the long prompt through A, timed. DELAY_A=ms holds
+#          every tensor A sends that long (`SWARMLLM_TEST_TENSOR_DELAY_MS` on A
+#          only): A far from holders that are close to each other.
+#          DELAY_B=ms does the same for B, the delegate: with REMOTE_NODES=3 its
+#          checks either visit C and D one at a time (`SWARMLLM_CHAIN_VERIFY=0`)
+#          or travel B→C→D→B as one trip (the default). The arm is
+#          chosen by the caller's environment — `SWARMLLM_DELEGATE_SPLIT=0`
+#          keeps the loop on A (the control); unset, A hands the request to B,
+#          which leads it. PASS = every reply 200 with content, AND the
+#          mechanism the arm claims: delegated arm — A logged the hand-off and B
+#          logged leading it on every request, nothing fell back; control — no
+#          hand-off at all. Score both arms' replies against llama.cpp
+#          (score_against_reference.py, $OUT/remote.jsonl + prompt.txt).
 #
-# usage: split_rig.sh split|kill|failover|failover_mid|context|whole|repeat|fetch|cache <binary> [<binary for B>]
+# usage: split_rig.sh split|kill|failover|failover_mid|context|whole|repeat|fetch|cache|remote <binary> [<binary for B>]
 #   MODEL      model id (default: tinyllama for split, llama-3.2-3b for kill
 #              and failover)
 #   SHARDS_A   shard indices A holds, comma-separated (default 0; kill: 0,LAST)
@@ -113,10 +130,10 @@
 # isolation (#352).
 set -u
 
-MODE="${1:?usage: split_rig.sh split|kill|failover|context|repeat|fetch <binary> [<binary for B>]}"
+MODE="${1:?usage: split_rig.sh split|kill|failover|context|repeat|fetch|cache|remote <binary> [<binary for B>]}"
 BIN_A="${2:?binary}"
 BIN_B="${3:-$BIN_A}"
-case "$MODE" in split|kill|failover|failover_mid|context|whole|repeat|fetch|cache) ;; *) echo "mode must be split, kill, failover, failover_mid, context, whole, repeat, fetch or cache"; exit 2 ;; esac
+case "$MODE" in split|kill|failover|failover_mid|context|whole|repeat|fetch|cache|remote) ;; *) echo "mode must be split, kill, failover, failover_mid, context, whole, repeat, fetch, cache or remote"; exit 2 ;; esac
 if { [ "$MODE" = context ] || [ "$MODE" = whole ]; } && printf '%s' "${EXTRA_TOML:-}" | grep -q '^\[inference\]'; then
   echo "$MODE: EXTRA_TOML may not open [inference] — B's ceiling is written there"; exit 2
 fi
@@ -170,6 +187,17 @@ elif [ "$MODE" = failover_mid ]; then
   SHARDS_C=$(echo "$MID" | grep -vx "$MID_LAST" | paste -sd,)
   SHARDS_D=$MID_LAST
   SHARDS_E=$LAST
+  GPU_A="${GPU_A:-0}"; GPU_B="${GPU_B:-0}"
+elif [ "$MODE" = remote ]; then
+  RN="${REMOTE_NODES:-2}"
+  { [ "$RN" = 2 ] || [ "$RN" = 3 ]; } || { echo "REMOTE_NODES must be 2 or 3"; exit 2; }
+  [ "$N" -ge "$RN" ] || { echo "remote across $RN nodes needs at least $RN shard files here; $MODEL has $N"; exit 2; }
+  # A holds the header only; the shards go to B, C (and D) in contiguous runs,
+  # as even as the shard count allows.
+  SHARDS_A=""
+  part() { echo "$SHARDS" | awk -v n="$N" -v rn="$RN" -v want="$1" '{ if (int((NR-1)*rn/n) == want) print }' | paste -sd,; }
+  SHARDS_B=$(part 0); SHARDS_C=$(part 1)
+  [ "$RN" = 3 ] && SHARDS_D=$(part 2)
   GPU_A="${GPU_A:-0}"; GPU_B="${GPU_B:-0}"
 elif [ "$MODE" = whole ]; then
   # A holds the header only, so it knows the model's declared context but can
@@ -285,7 +313,8 @@ fi
 # whole-model path under test is what a coordinator runs once that path is off
 # for it — no header, or its payoff check has switched it off.
 [ "$MODE" = whole ] && printf '\n[inference]\nngram_lookup_enabled = false\n' >> "$BASE/A/config.toml"
-PA=$(start "$BASE/A" 8900 "$BIN_A" "${GPU_A:-}")
+# DELAY_A: A far from the others — every tensor it sends waits this long.
+PA=$(SWARMLLM_TEST_TENSOR_DELAY_MS="${DELAY_A:-0}" start "$BASE/A" 8900 "$BIN_A" "${GPU_A:-}")
 up "$BASE/A" 8900 || exit 1
 KA=$(cat "$BASE/A/api_key")
 # B dials A explicitly (mDNS is off). Any direct address A publishes will do;
@@ -299,7 +328,8 @@ ADDR=$(echo "$ADDRS" | grep -v "10\.255\.255\.254" | head -1)
 make_node "$BASE/B" "$SHARDS_B" "\"$ADDR\""
 # B alone serves a conversation shorter than the long prompt.
 { [ "$MODE" = context ] || [ "$MODE" = whole ]; } && printf '\n[inference]\nmax_seq_len_override = %s\n' "${CEIL_B:-512}" >> "$BASE/B/config.toml"
-PB=$(start "$BASE/B" 8920 "$BIN_B" "${GPU_B:-}")
+# DELAY_B: B far from the nodes after it (remote mode: the delegate leading [B, C, D]).
+PB=$(SWARMLLM_TEST_TENSOR_DELAY_MS="${DELAY_B:-0}" start "$BASE/B" 8920 "$BIN_B" "${GPU_B:-}")
 up "$BASE/B" 8920 || exit 1
 PEERS_EXPECTED=1
 if [ "$MODE" = failover ] || [ "$MODE" = context ] || [ "$MODE" = failover_mid ]; then
@@ -321,6 +351,19 @@ if [ "$MODE" = failover ] || [ "$MODE" = context ] || [ "$MODE" = failover_mid ]
     PEERS_EXPECTED=4
     echo "rig: E=[$SHARDS_E] gpu=${GPU_E:-0}"
   fi
+fi
+if [ "$MODE" = remote ]; then
+  make_node "$BASE/C" "$SHARDS_C" "\"$ADDR\""
+  PC=$(start "$BASE/C" 8940 "$BIN_A" "${GPU_C:-0}")
+  up "$BASE/C" 8940 || exit 1
+  PEERS_EXPECTED=2
+  if [ "$RN" = 3 ]; then
+    make_node "$BASE/D" "$SHARDS_D" "\"$ADDR\""
+    PD=$(start "$BASE/D" 8960 "$BIN_A" "${GPU_D:-0}")
+    up "$BASE/D" 8960 || exit 1
+    PEERS_EXPECTED=3
+  fi
+  echo "rig: remote across $RN nodes — C=[$SHARDS_C]${SHARDS_D:+ D=[$SHARDS_D]}, tensors delayed A ${DELAY_A:-0} / B ${DELAY_B:-0} ms, SWARMLLM_DELEGATE_SPLIT=${SWARMLLM_DELEGATE_SPLIT:-<unset: delegate>} SWARMLLM_CHAIN_VERIFY=${SWARMLLM_CHAIN_VERIFY:-<unset: chain>}"
 fi
 
 echo "rig: $MODEL  A=[$SHARDS_A] $("$BIN_A" --version) gpu=${GPU_A:-auto}  B=[$SHARDS_B] $("$BIN_B" --version) gpu=${GPU_B:-auto}"
@@ -452,6 +495,64 @@ if [ "$MODE" = repeat ]; then
   echo "repeat: n-gram path taken by $(grep -c 'try_ngram_only_distributed ELIGIBLE' "$BASE/A/node.log") of ${REPEAT:-3} requests (expected: the first)"
   echo "repeat: score with examples/score_against_reference.py <model.gguf> $OUT/repeat.jsonl $OUT/prompt.txt"
   exit 0
+fi
+
+if [ "$MODE" = remote ]; then
+  # Both planners must see the whole model before the first ask: A to plan it
+  # among the others, and B — which only dialled A — to lead it, having met C
+  # (and D) through A's peer exchange. A first ask racing that would read as
+  # a fallback the delegation did not deserve.
+  KB=$(cat "$BASE/B/api_key")
+  covered() { # key port want_head(self|other)
+    curl -s -m 10 -H "Authorization: Bearer $1" "localhost:$2/api/admin/models/$MODEL/pipeline-plan" \
+      | python3 -c 'import sys,json
+try: p=json.load(sys.stdin)
+except Exception: sys.exit(1)
+seg=p.get("segments",[])
+print("  plan on :%s:" % sys.argv[1], " ".join("%s%s" % (s["node_id"][:8], s["layer_range"]) for s in seg), file=sys.stderr)
+sys.exit(0 if len(seg) >= 2 else 1)' "$2"
+  }
+  for _ in $(seq 1 60); do covered "$KA" 8900 2>/dev/null && covered "$KB" 8920 2>/dev/null && break; sleep 3; done
+  covered "$KA" 8900 && covered "$KB" 8920 || { echo "remote: A or B never planned the model across the others"; exit 1; }
+  printf '%s' "$PROMPT" > "$OUT/prompt.txt"
+  : > "$OUT/remote.jsonl"
+  : > "$OUT/remote_times.txt"
+  for i in $(seq 1 "${REPEAT:-3}"); do
+    t0=$(date +%s.%N)
+    ask "$PROMPT" 120 "remote$i" | tee -a "$OUT/remote.jsonl" | cut -c1-160
+    echo "remote$i $(echo "$(date +%s.%N) - $t0" | bc)" >> "$OUT/remote_times.txt"
+  done
+  handed=$(grep -c 'delegated split: this node holds none of the plan' "$BASE/A/node.log")
+  led=$(grep -c 'handling a delegated split' "$BASE/B/node.log")
+  fell_back=$(grep -c 'coordinating the same plan from here instead' "$BASE/A/node.log")
+  grep -E 'delegated split|handling a delegated split' "$BASE/A/node.log" "$BASE/B/node.log" | head -4 | cut -c1-220
+  python3 - "$OUT" "${REPEAT:-3}" "$handed" "$led" "$fell_back" "${SWARMLLM_DELEGATE_SPLIT:-}" <<'PY'
+import json, sys
+out, n, handed, led, fell_back, switch = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4]), int(sys.argv[5]), sys.argv[6]
+rows = [json.loads(l) for l in open(f"{out}/remote.jsonl")]
+times = dict(l.split() for l in open(f"{out}/remote_times.txt"))
+ok = len(rows) == n
+for i, r in enumerate(rows, 1):
+    try:
+        usage = json.load(open(f"{out}/remote{i}.body")).get("usage", {})
+    except Exception:
+        usage = {}
+    secs = float(times.get(f"remote{i}", "nan"))
+    toks = usage.get("completion_tokens") or 0
+    good = r["status"].endswith("200 ok") and bool(r.get("content"))
+    ok &= good
+    print(f"remote: ask {i} {r['status']}  {toks} tokens in {secs:.1f} s = {toks / secs if secs else 0:.2f} tok/s end to end  route={r['route']}")
+control = switch in ("0", "false", "FALSE")
+if control:
+    mech = handed == 0
+    print(f"remote: control arm — hand-offs {handed} (expect 0)")
+else:
+    mech = handed == n and led == n and fell_back == 0
+    print(f"remote: delegated arm — A handed {handed}/{n}, B led {led}/{n}, fell back {fell_back}")
+print("remote: PASS" if ok and mech else "remote: FAIL")
+sys.exit(0 if ok and mech else 1)
+PY
+  exit $?
 fi
 
 if [ "$MODE" = whole ]; then

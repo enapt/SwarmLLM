@@ -632,6 +632,16 @@ where
                 .min_by_key(|(i, c)| connection_rank(*i, c))
                 .map(|(i, _)| i);
             let ix = best_direct.unwrap_or(connections.len() - 1);
+            tracing::debug!(
+                %peer,
+                request_id = ?request.request_id,
+                chosen = ?connections[ix].id,
+                candidates = ?connections
+                    .iter()
+                    .map(|c| (c.id, c.pending_outbound_responses.len(), c.last_answered.is_some()))
+                    .collect::<Vec<_>>(),
+                "rr: request assigned to a connection"
+            );
             let conn = &mut connections[ix];
             conn.pending_outbound_responses.insert(request.request_id);
             self.pending_events.push_back(ToSwarm::NotifyHandler {
@@ -820,6 +830,56 @@ where
         }
     }
 
+    /// SwarmLLM patch: drop a connection the swarm DENIED after this behaviour
+    /// had already recorded it, and fail the requests it was handed.
+    ///
+    /// `handle_established_{inbound,outbound}_connection` records a connection
+    /// in `connected` before the swarm has decided to keep it. When a behaviour
+    /// composed AFTER this one refuses it — `connection_limits`' per-peer cap of
+    /// 3 is the everyday case: two nodes dialling each other from both sides,
+    /// a loopback probe, a PEX redial — libp2p closes it and reports
+    /// `ListenFailure` (inbound) or `DialFailure` (outbound) carrying its
+    /// `ConnectionId`, never `ConnectionClosed` (libp2p-swarm's
+    /// `handle_established_*_connection` docs). Upstream handles neither for
+    /// this purpose, so the entry stayed: a connection with no handler behind
+    /// it, nothing pending, and — under `connection_rank` — the FIRST choice
+    /// for a request whenever the real connections each had one outstanding.
+    /// Every request sent to it vanished: no response, no failure, until the
+    /// 600 s request timeout. Measured 2026-10-02 on the rig: a peer held five
+    /// entries for three real connections, and the fourth and fifth of every
+    /// five-token burst of a streamed reply went to the two ghosts (requests 43
+    /// and 44 of `split_rig.sh remote`, tokens 19-20, every run). The
+    /// 2026-08-05 divergence handled in `on_connection_closed` — "the swarm
+    /// reports no connections left but this behaviour still held some", seen
+    /// right after PEX dialled four peers — is the same ghosts, met later.
+    fn forget_denied_connection(&mut self, peer: PeerId, connection_id: ConnectionId) {
+        let Some(connections) = self.connected.get_mut(&peer) else {
+            return;
+        };
+        let Some(pos) = connections.iter().position(|c| c.id == connection_id) else {
+            return;
+        };
+        let connection = connections.remove(pos);
+        if connections.is_empty() {
+            self.connected.remove(&peer);
+        }
+        tracing::debug!(
+            %peer,
+            ?connection_id,
+            failed_requests = connection.pending_outbound_responses.len(),
+            "request_response: forgetting a connection the swarm denied"
+        );
+        for request_id in connection.pending_outbound_responses {
+            self.pending_events
+                .push_back(ToSwarm::GenerateEvent(Event::OutboundFailure {
+                    peer,
+                    connection_id,
+                    request_id,
+                    error: OutboundFailure::ConnectionClosed,
+                }));
+        }
+    }
+
     /// Preloads a new [`Handler`] with requests that are
     /// waiting to be sent to the newly connected peer.
     fn preload_new_handler(
@@ -940,7 +1000,18 @@ where
                 self.on_connection_closed(connection_closed)
             }
             FromSwarm::AddressChange(address_change) => self.on_address_change(address_change),
-            FromSwarm::DialFailure(dial_failure) => self.on_dial_failure(dial_failure),
+            FromSwarm::DialFailure(dial_failure) => {
+                // SwarmLLM patch: see `forget_denied_connection`.
+                if let Some(peer) = dial_failure.peer_id {
+                    self.forget_denied_connection(peer, dial_failure.connection_id);
+                }
+                self.on_dial_failure(dial_failure)
+            }
+            FromSwarm::ListenFailure(listen_failure) => {
+                if let Some(peer) = listen_failure.peer_id {
+                    self.forget_denied_connection(peer, listen_failure.connection_id);
+                }
+            }
             _ => {}
         }
     }
@@ -1440,4 +1511,129 @@ mod swarmllm_relay_selection_tests {
         assert!(!connection_is_relayed(&inbound_direct));
     }
 
+}
+
+/// SwarmLLM patch tests: `forget_denied_connection`.
+#[cfg(test)]
+mod swarmllm_denied_connection_tests {
+    use super::*;
+    use futures::{AsyncRead, AsyncWrite};
+    use libp2p_swarm::{ConnectionDenied, ListenError, ListenFailure, StreamProtocol};
+
+    #[derive(Clone, Default)]
+    struct Unused;
+
+    #[async_trait::async_trait]
+    impl Codec for Unused {
+        type Protocol = StreamProtocol;
+        type Request = ();
+        type Response = ();
+        async fn read_request<T>(&mut self, _: &StreamProtocol, _: &mut T) -> io::Result<()>
+        where
+            T: AsyncRead + Unpin + Send,
+        {
+            Ok(())
+        }
+        async fn read_response<T>(&mut self, _: &StreamProtocol, _: &mut T) -> io::Result<()>
+        where
+            T: AsyncRead + Unpin + Send,
+        {
+            Ok(())
+        }
+        async fn write_request<T>(&mut self, _: &StreamProtocol, _: &mut T, _: ()) -> io::Result<()>
+        where
+            T: AsyncWrite + Unpin + Send,
+        {
+            Ok(())
+        }
+        async fn write_response<T>(&mut self, _: &StreamProtocol, _: &mut T, _: ()) -> io::Result<()>
+        where
+            T: AsyncWrite + Unpin + Send,
+        {
+            Ok(())
+        }
+    }
+
+    fn handler_of(event: &ToSwarm<Event<(), ()>, OutboundMessage<Unused>>) -> Option<ConnectionId> {
+        match event {
+            ToSwarm::NotifyHandler {
+                handler: NotifyHandler::One(id),
+                ..
+            } => Some(*id),
+            _ => None,
+        }
+    }
+
+    /// A connection a later behaviour DENIED (the per-peer limit) is reported
+    /// as a `ListenFailure`, never a `ConnectionClosed`. Remembered, it was a
+    /// handler-less ghost that won the next send whenever the real connection
+    /// had a request outstanding, and everything sent to it vanished. Now it
+    /// is forgotten, the request it was handed fails out loud, and the next
+    /// send goes to the connection that exists.
+    // A runtime only because the handler's watchdog (gotcha #13) is a tokio
+    // interval, made when the handler is.
+    #[tokio::test]
+    async fn a_connection_the_swarm_denied_is_forgotten_and_its_request_fails() {
+        let mut b = Behaviour::<Unused>::with_codec(
+            Unused,
+            [(StreamProtocol::new("/t/1"), ProtocolSupport::Full)],
+            Config::default(),
+        );
+        let peer: PeerId = "12D3KooWKwvCNmumN89DftJbEC1yRcnP1YxVFKEXMLCo7EzifsaY"
+            .parse()
+            .unwrap();
+        let local: Multiaddr = "/ip4/127.0.0.1/tcp/1".parse().unwrap();
+        let remote: Multiaddr = "/ip4/127.0.0.1/tcp/2".parse().unwrap();
+        let kept = ConnectionId::new_unchecked(1);
+        let denied = ConnectionId::new_unchecked(2);
+        assert!(b
+            .handle_established_inbound_connection(kept, peer, &local, &remote)
+            .is_ok());
+        assert!(b
+            .handle_established_inbound_connection(denied, peer, &local, &remote)
+            .is_ok());
+
+        // Two at once: the second goes to whichever has nothing outstanding —
+        // the ghost, once the real connection holds the first.
+        let _first = b.send_request(&peer, ());
+        let second = b.send_request(&peer, ());
+        let targets: Vec<_> = b.pending_events.iter().filter_map(handler_of).collect();
+        assert!(
+            targets.contains(&denied),
+            "fixture: the burst reaches the connection about to be denied: {targets:?}"
+        );
+        b.pending_events.clear();
+
+        let error = ListenError::Denied {
+            cause: ConnectionDenied::new("connection limit"),
+        };
+        b.on_swarm_event(FromSwarm::ListenFailure(ListenFailure {
+            local_addr: &local,
+            send_back_addr: &remote,
+            error: &error,
+            connection_id: denied,
+            peer_id: Some(peer),
+        }));
+
+        let ids: Vec<_> = b.connected[&peer].iter().map(|c| c.id).collect();
+        assert_eq!(ids, vec![kept], "the denied connection is forgotten");
+        let failed: Vec<_> = b
+            .pending_events
+            .iter()
+            .filter_map(|e| match e {
+                ToSwarm::GenerateEvent(Event::OutboundFailure {
+                    request_id,
+                    connection_id,
+                    ..
+                }) if *connection_id == denied => Some(*request_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(failed, vec![second], "its request is reported failed, not lost");
+        b.pending_events.clear();
+
+        let _third = b.send_request(&peer, ());
+        let targets: Vec<_> = b.pending_events.iter().filter_map(handler_of).collect();
+        assert_eq!(targets, vec![kept], "the next send goes to the real connection");
+    }
 }

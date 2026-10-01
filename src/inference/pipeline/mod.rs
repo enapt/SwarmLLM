@@ -167,6 +167,9 @@ pub(super) fn register_pending_layer_result(
     map: &dashmap::DashMap<WaiterKey, crate::daemon::state::PendingLayerResult>,
     key: WaiterKey,
     awaiting: Option<crate::types::NodeId>,
+    // Every hop of a chained check besides the tail that answers — any of them
+    // may report a failure it cannot recover from. Empty for an unchained one.
+    chain_members: Vec<crate::types::NodeId>,
     expects_step: Option<crate::daemon::state::ExpectedStep>,
 ) -> Result<
     (
@@ -186,9 +189,7 @@ pub(super) fn register_pending_layer_result(
         crate::daemon::state::PendingLayerResult {
             tx,
             awaiting,
-            // This helper serves the speculative and DSD paths, which never
-            // chain — they build their own forwards and drive them per token.
-            chain_members: Vec::new(),
+            chain_members,
             expects_step,
         },
     );
@@ -462,14 +463,20 @@ pub(super) async fn forward_verify_through_segments(
     verify_tokens: &[u32],
     truncate_kv_to: Option<u32>,
     walk: Option<TailWalk<'_>>,
+    requester: crate::inference::process_pool::Requester,
+    // May a run of remote segments take the check straight from each other
+    // (`PipelineExecutor::verify_may_chain`)? Each hop must also advertise
+    // `features::CHAINED_VERIFY`; anything else is sent the old way.
+    may_chain: bool,
 ) -> Result<VerifyReply, SwarmError> {
     let num_segments = segments.len();
     let local_node_id = shared_state.identity.node_id().clone();
 
     let mut activation_bytes: Vec<u8> = pack_verify_tokens_to_le_bytes(verify_tokens);
 
-    for (idx, segment) in segments.iter().enumerate() {
-        let is_last = idx == num_segments - 1;
+    let mut idx = 0usize;
+    while idx < num_segments {
+        let segment = &segments[idx];
         // Resolved fresh from the CURRENT assignment, never cached across rounds.
         let target_peer_bytes: Option<Vec<u8>> = if segment.node_id == local_node_id {
             None
@@ -485,19 +492,49 @@ pub(super) async fn forward_verify_through_segments(
             }
         };
         let target_peer_bytes = target_peer_bytes.as_ref();
+        let local = target_peer_bytes.is_none();
+        // A run of remote segments after this one that take the check from
+        // each other: one trip around them instead of one per segment through
+        // here (`features::CHAINED_VERIFY`). The run's TAIL answers, and when it
+        // is the model's last segment it walks the guesses. Empty — the old
+        // way, always correct — for a local segment, a hop without the bit, or
+        // when the caller may not chain.
+        let chain: Vec<crate::types::ChainHop> = if local || !may_chain {
+            Vec::new()
+        } else {
+            plan_chain(
+                segments,
+                idx,
+                &local_node_id,
+                |n| {
+                    shared_state.peer_supports_pipeline_chain(n)
+                        && shared_state.peer_advertises_feature(
+                            n,
+                            swarmllm_types::node::features::CHAINED_VERIFY,
+                        )
+                },
+                shared_state.cfg().inference.max_chain_hops as usize,
+            )
+        };
+        let run_end = idx + chain.len();
+        let is_last = run_end == num_segments - 1;
+        // The node that ANSWERS this forward: the run's tail.
+        let answering = chain
+            .last()
+            .map(|h| h.node_id.clone())
+            .unwrap_or_else(|| segment.node_id.clone());
         // The sampler walks where the logits are — our own worker always can,
         // a peer only when it says so. Otherwise it sends every position's
         // vocabulary back and `VerifyReply::accept` walks them here.
-        let local = target_peer_bytes.is_none();
         let tail_walk = walk
-            .filter(|_| is_last && (local || peer_walks_at_tail(shared_state, &segment.node_id)))
+            .filter(|_| is_last && (local || peer_walks_at_tail(shared_state, &answering)))
             // The seed only to a tail that samples with it; any other walks with
             // its own draw — still exact, just less often in agreement.
             .map(|w| TailWalk {
                 coupling: w.coupling.filter(|_| {
                     local
                         || shared_state.peer_advertises_feature(
-                            &segment.node_id,
+                            &answering,
                             swarmllm_types::node::features::COUPLED_SAMPLING,
                         )
                 }),
@@ -507,7 +544,7 @@ pub(super) async fn forward_verify_through_segments(
         // Rebuildable: a peer that refuses this unopened is sent it again once
         // the link is re-keyed (`local::ResendOnRefusal`).
         let rebuild_forward = || {
-            build_spec_verify_forward(
+            let mut forward = build_spec_verify_forward(
                 request_id,
                 index_pos,
                 activation_bytes.clone(),
@@ -515,7 +552,15 @@ pub(super) async fn forward_verify_through_segments(
                 truncate_kv_to,
                 tail_walk.as_ref(),
                 None,
-            )
+            );
+            if !chain.is_empty() {
+                forward.chain = chain.clone();
+                // The reply-to the tail answers (the `0x07` trailer), as on a
+                // chained decode step: unchained, a receiver answers its
+                // sender, and in a chain that is the hop before it.
+                forward.requester_node_id = Some(local_node_id.0);
+            }
+            forward
         };
         let forward = rebuild_forward();
 
@@ -523,11 +568,24 @@ pub(super) async fn forward_verify_through_segments(
             let (rx, mut pending_guard) = register_pending_layer_result(
                 &shared_state.pending_layer_results,
                 WaiterKey::request(request_id),
-                Some(segment.node_id.clone()),
-                Some(crate::daemon::state::ExpectedStep::one(
+                Some(answering.clone()),
+                // Any hop may refuse; the head too, which `awaiting` does not
+                // cover once a chain is planned (`distributed.rs`'s rule).
+                if chain.is_empty() {
+                    Vec::new()
+                } else {
+                    std::iter::once(segment.node_id.clone())
+                        .chain(chain.iter().map(|h| h.node_id.clone()))
+                        .collect()
+                },
+                // Every hop forwards this same position; the tail answers with
+                // ITS range and any hop may refuse with its own.
+                Some(crate::daemon::state::ExpectedStep {
                     index_pos,
-                    segment.layer_range,
-                )),
+                    layer_ranges: std::iter::once(segment.layer_range)
+                        .chain(chain.iter().map(|h| h.layer_range))
+                        .collect(),
+                }),
             )?;
 
             if network_tx
@@ -551,7 +609,11 @@ pub(super) async fn forward_verify_through_segments(
                 ));
             }
 
-            let num_layers = segment.layer_range.1 - segment.layer_range.0;
+            // The whole run's layers: its tail answers for all of them.
+            let num_layers = std::iter::once(segment.layer_range)
+                .chain(chain.iter().map(|h| h.layer_range))
+                .map(|(a, b)| b - a)
+                .sum::<u32>();
             let budget = local::SegmentBudget::for_forward(
                 shared_state,
                 &segment.node_id,
@@ -580,10 +642,18 @@ pub(super) async fn forward_verify_through_segments(
                 // A verify step is a few tokens' work; the loop that issues it
                 // reads the cancel flag between steps.
                 None,
-                local::ResendOnRefusal::SameForward {
-                    network_tx,
-                    target_peer_bytes: peer_bytes,
-                    rebuild: &rebuild_forward,
+                // A chained run's refusal may come from any hop
+                // (`arch-scheduling.md` § "A forward the peer could not open").
+                if chain.is_empty() {
+                    local::ResendOnRefusal::SameForward {
+                        network_tx,
+                        target_peer_bytes: peer_bytes,
+                        rebuild: &rebuild_forward,
+                    }
+                } else {
+                    local::ResendOnRefusal::Never(
+                        "a chained check's refusal may be any hop's, and the run is not re-sent",
+                    )
                 },
             )
             .await?;
@@ -608,7 +678,8 @@ pub(super) async fn forward_verify_through_segments(
             // would inflate ms/layer by roughly K and corrupt the same EWMA
             // that sizes segment timeouts — a worse failure than the one this
             // fixes. See `docs/FUTURE_WORK.md`.
-            if verify_tokens.len() == 1 {
+            // One peer's sample only: a chained run's time is several peers'.
+            if verify_tokens.len() == 1 && chain.is_empty() {
                 shared_state.record_peer_segment_latency(
                     &segment.node_id,
                     &segment.shard_id.model_id,
@@ -620,15 +691,12 @@ pub(super) async fn forward_verify_through_segments(
             }
             result
         } else {
-            // A verify step of a request this node coordinates: ours.
+            // A verify step of a request this node coordinates: the owner's,
+            // or the peer's that delegated it (`worker_requester`).
             let seg_start = std::time::Instant::now();
             let result = shared_state
                 .model_process_pool
-                .forward_for_request(
-                    forward,
-                    None,
-                    crate::inference::process_pool::Requester::Owner,
-                )
+                .forward_for_request(forward, None, requester)
                 .await?;
             // Measure ourselves too, exactly as the branch above measures a
             // peer and `forward_through_segments_inner` measures a local
@@ -716,6 +784,7 @@ pub(super) async fn forward_verify_through_segments(
             )));
         }
         activation_bytes = result.activations;
+        idx = run_end + 1;
     }
     unreachable!("loop returns on the last segment")
 }
@@ -971,6 +1040,56 @@ pub(in crate::inference::pipeline) async fn emit_streaming_batch(
 /// preconditions; those stay in the per-path `eligible()` because the
 /// shapes are subtly divergent (1-segment / 2+-segment / per-model
 /// encrypted-pipeline gate).
+/// What a speculative round hands the reply: the guesses the check kept and
+/// the token it sampled after them, cut at the first end-of-reply token (R105:
+/// nothing past it reaches anyone) and at the room `max_tokens` leaves.
+///
+/// The ONE place a round's tokens are trimmed — the n-gram loop, DSD, the
+/// continuous stream and the single-segment speculative path all call it. A
+/// round's guesses are sized to the room, but the token the check samples after
+/// them is not, so a round that kept every guess one short of the budget went
+/// one past it: `completion_tokens: 121` for `max_tokens: 120` on the n-gram
+/// loop, the default split path (2026-10-02 rig). Only the stream had a room
+/// check, inline; the other three had the EOS cut and nothing else.
+pub(super) fn round_tokens_for_reply(
+    kept: &[u32],
+    sampled: u32,
+    eos: &std::collections::HashSet<u32>,
+    room: usize,
+) -> Vec<u32> {
+    let mut emitted: Vec<u32> = kept
+        .iter()
+        .copied()
+        .chain(std::iter::once(sampled))
+        .collect();
+    if let Some(at) = emitted.iter().position(|t| eos.contains(t)) {
+        emitted.truncate(at + 1);
+    }
+    emitted.truncate(room.max(1));
+    emitted
+}
+
+/// Whose work a LOCAL segment of `request` is, for the worker's admission and
+/// thread width: the owner's — a request made to this node's own API — or a
+/// peer's, which this node serves within its contribution level.
+///
+/// Until the delegated split the router only ever received this node's own
+/// API requests, so four call sites hardcoded the owner. A split a peer
+/// DELEGATED to us (`RoutePlanOverride::lead_here`, `docs/FUTURE_WORK.md` #143)
+/// runs through the same router and the same paths, and it is the PEER's: run
+/// as the owner's, a peer could have this machine read its prompts on every
+/// core the owner is entitled to. The whole-model hand-off it generalises has
+/// always run as `Swarm`.
+pub(crate) fn worker_requester(
+    request: &crate::types::InferenceRequest,
+) -> crate::inference::process_pool::Requester {
+    if request.route_override.as_ref().is_some_and(|o| o.lead_here) {
+        crate::inference::process_pool::Requester::Swarm
+    } else {
+        crate::inference::process_pool::Requester::Owner
+    }
+}
+
 pub(super) fn fastpath_request_disqualified(exec: &PipelineExecutor) -> bool {
     if !exec.assignment.tp_groups.is_empty() {
         return true;
@@ -1042,6 +1161,10 @@ pub struct PipelineExecutor {
     /// What this request has generated so far — see [`PartialReply`]. Written
     /// by the shared emit helpers, read once by `keeping_the_partial`.
     pub(super) partial_reply: PartialReply,
+    /// Content tokens a hand-off has delivered to this request so far. A
+    /// delegated split that failed before delivering any is run here instead
+    /// (`try_delegated_split`); one that delivered some failed the request.
+    pub(super) hand_off_emitted: usize,
 }
 
 impl PipelineExecutor {
@@ -1060,7 +1183,27 @@ impl PipelineExecutor {
             chaining_disabled: false,
             reply_stops: tokio::sync::OnceCell::new(),
             partial_reply: PartialReply::default(),
+            hand_off_emitted: 0,
         }
+    }
+
+    /// May this request's speculative CHECKS travel a chain of remote segments
+    /// (`forward_verify_through_segments`' `may_chain`)? What a chained decode
+    /// step needs — chaining switched on, no chained run failed earlier in this
+    /// request — and `SWARMLLM_CHAIN_VERIFY=0` is the control arm that keeps
+    /// them star-shaped. A check's history travels WITH it (the head's forward
+    /// carries the tail's `generated_ids`, handed on by every hop), so unlike a
+    /// decode step it may chain with penalties set.
+    pub(super) fn verify_may_chain(&self) -> bool {
+        static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let switched_off = *OFF.get_or_init(|| {
+            std::env::var("SWARMLLM_CHAIN_VERIFY")
+                .map(|v| v == "0" || v.eq_ignore_ascii_case("false"))
+                .unwrap_or(false)
+        });
+        !switched_off
+            && !self.chaining_disabled
+            && self.shared_state.cfg().inference.pipeline_chaining
     }
 
     /// Resolve a `peer_id_bytes` for each segment in `self.assignment`.
@@ -2533,6 +2676,8 @@ mod tests {
             &verify_tokens,
             None,
             None,
+            crate::inference::process_pool::Requester::Owner,
+            false,
         )
         .await;
         assert!(result.is_err(), "closed-channel send must surface as Err");
@@ -2570,6 +2715,8 @@ mod tests {
                 &verify_tokens,
                 None,
                 None,
+                crate::inference::process_pool::Requester::Owner,
+                false,
             )
             .await
         });
@@ -2746,6 +2893,8 @@ mod failover_retarget_tests {
                 &[7u32],
                 None,
                 None,
+                crate::inference::process_pool::Requester::Owner,
+                false,
             )
             .await;
         });
@@ -2794,6 +2943,8 @@ mod failover_retarget_tests {
                     generated: &[3, 7],
                     coupling: Some(0x5EED),
                 }),
+                crate::inference::process_pool::Requester::Owner,
+                false,
             )
             .await;
         });
@@ -2805,6 +2956,164 @@ mod failover_retarget_tests {
             NetworkCommand::SendTensor { forward, .. } => forward,
             other => panic!("expected SendTensor, got {other:?}"),
         }
+    }
+
+    /// **A round never takes the reply past `max_tokens`, nor past its end.**
+    /// The overshoot was the sampled token after a full set of kept guesses.
+    #[test]
+    fn a_round_is_cut_at_the_budget_and_at_the_end_of_the_reply() {
+        let eos: std::collections::HashSet<u32> = [2].into_iter().collect();
+        assert_eq!(
+            super::round_tokens_for_reply(&[10, 11, 12], 13, &eos, 3),
+            vec![10, 11, 12]
+        );
+        assert_eq!(
+            super::round_tokens_for_reply(&[10, 11, 12], 13, &eos, 9),
+            vec![10, 11, 12, 13]
+        );
+        assert_eq!(
+            super::round_tokens_for_reply(&[10, 2, 12], 13, &eos, 9),
+            vec![10, 2]
+        );
+        assert_eq!(super::round_tokens_for_reply(&[], 13, &eos, 1), vec![13]);
+        assert_eq!(
+            super::round_tokens_for_reply(&[], 13, &eos, 0),
+            vec![13],
+            "a round always hands back the token it sampled"
+        );
+    }
+
+    /// The first forward a check over `segments` sends, with `may_chain`.
+    async fn first_check_forward(
+        state: Arc<SharedState>,
+        segments: Vec<PipelineSegment>,
+        may_chain: bool,
+    ) -> (Vec<u8>, crate::types::LayerForward) {
+        let (tx, mut rx) = mpsc::channel::<NetworkCommand>(8);
+        let sampling = crate::types::SamplingParams::default();
+        tokio::spawn(async move {
+            let _ = forward_verify_through_segments(
+                &state,
+                &tx,
+                uuid::Uuid::new_v4(),
+                5,
+                &segments,
+                &[7u32, 8, 9],
+                Some(4),
+                Some(TailWalk {
+                    drafts: &[8, 9],
+                    sampling: &sampling,
+                    generated: &[3, 7],
+                    coupling: Some(0x5EED),
+                }),
+                crate::inference::process_pool::Requester::Owner,
+                may_chain,
+            )
+            .await;
+        });
+        match tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .expect("a forward must be dispatched")
+            .expect("channel open")
+        {
+            NetworkCommand::SendTensor {
+                target_peer_bytes,
+                forward,
+            } => (target_peer_bytes, forward),
+            other => panic!("expected SendTensor, got {other:?}"),
+        }
+    }
+
+    /// **A check runs a chain of remote segments in ONE trip**
+    /// (`features::CHAINED_VERIFY`): the first hop is handed the rest of the
+    /// run and the reply-to, and the forward carries what the TAIL walks with
+    /// — guesses, walk flag, seed, rewind — which every hop hands on. Star-
+    /// shaped, a plan of N remote segments paid N of this node's round trips
+    /// per check. The controls: a caller that may not chain, and a hop
+    /// without the bit (it would hand the tail a plain decode step), both get
+    /// the old one-segment forward.
+    #[tokio::test]
+    async fn a_check_travels_a_chain_of_peers_that_can_carry_it() {
+        use swarmllm_types::node::features::{
+            CHAINED_VERIFY, COUPLED_SAMPLING, FORWARD_GENERATED_IDS, FORWARD_SAMPLING,
+            PIPELINE_CHAIN, PIPELINE_CHAIN_V2, SPEC_WALK_AT_TAIL,
+        };
+        let base = PIPELINE_CHAIN
+            | PIPELINE_CHAIN_V2
+            | FORWARD_SAMPLING
+            | FORWARD_GENERATED_IDS
+            | SPEC_WALK_AT_TAIL
+            | COUPLED_SAMPLING;
+        let (b, c) = (NodeId([0x1b; 32]), NodeId([0x1c; 32]));
+        let plan = |b: &NodeId, c: &NodeId| {
+            vec![
+                PipelineSegment {
+                    node_id: b.clone(),
+                    shard_id: ShardId {
+                        model_id: ModelId("m".into()),
+                        index: 0,
+                    },
+                    layer_range: (0, 14),
+                },
+                PipelineSegment {
+                    node_id: c.clone(),
+                    shard_id: ShardId {
+                        model_id: ModelId("m".into()),
+                        index: 2,
+                    },
+                    layer_range: (14, 28),
+                },
+            ]
+        };
+        let state_with = |c_features: u64| {
+            let state = super::tests::make_test_state();
+            state.peer_registry.insert(
+                b.clone(),
+                super::tests::peer_advertising(&b, base | CHAINED_VERIFY),
+            );
+            state
+                .peer_registry
+                .insert(c.clone(), super::tests::peer_advertising(&c, c_features));
+            state.peer_id_map.insert(b.clone(), vec![0xB1]);
+            state.peer_id_map.insert(c.clone(), vec![0xC1]);
+            state
+        };
+
+        let state = state_with(base | CHAINED_VERIFY);
+        let me = state.identity.node_id().0;
+        let (to, fwd) = first_check_forward(state, plan(&b, &c), true).await;
+        assert_eq!(to, vec![0xB1], "sent to the run's head");
+        assert_eq!(fwd.chain.len(), 1, "the rest of the run rides with it");
+        assert_eq!(fwd.chain[0].node_id, c);
+        assert_eq!(fwd.chain[0].layer_range, (14, 28));
+        assert_eq!(fwd.requester_node_id, Some(me), "the tail answers us");
+        assert!(fwd.spec_logits_requested && fwd.spec_walk_at_tail);
+        assert_eq!(fwd.draft_tokens, vec![8, 9], "the tail's guesses travel");
+        assert_eq!(
+            fwd.coupling_seed,
+            Some(0x5EED),
+            "the tail samples with the seed"
+        );
+        assert_eq!(fwd.truncate_kv_to, Some(4), "every hop rewinds");
+
+        let (to, fwd) =
+            first_check_forward(state_with(base | CHAINED_VERIFY), plan(&b, &c), false).await;
+        assert_eq!(to, vec![0xB1]);
+        assert!(
+            fwd.chain.is_empty(),
+            "a caller that may not chain sends the old way"
+        );
+        assert_eq!(fwd.requester_node_id, None);
+
+        let (_, fwd) = first_check_forward(state_with(base), plan(&b, &c), true).await;
+        assert!(
+            fwd.chain.is_empty(),
+            "a tail without CHAINED_VERIFY is never handed a check by its predecessor"
+        );
+        assert!(
+            !fwd.spec_walk_at_tail,
+            "and the head, not being the last segment, is not asked to walk"
+        );
     }
 
     /// Only a peer that reads the walk flag AND the trailers the walk samples

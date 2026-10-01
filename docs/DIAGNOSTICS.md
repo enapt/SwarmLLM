@@ -782,6 +782,24 @@ When running multiple nodes on the same machine (localhost), connection manageme
 
 Look for `is_loopback=true` in `DIAG: connection established` logs to confirm same-machine connections.
 
+### A request that vanished — no response, no failure (2026-10-02, gotcha #774)
+
+A deterministic "loss" (the SAME token ids missing on every run, say) is a routing
+bug until shown otherwise. Trace it end to end at `-vv` (request-response logs only appear there;
+`SWARMLLM_LOGGING_LEVEL=debug` is `swarmllm=debug` alone):
+- serving side, one line per token with its `token_id`:
+  `DIAG: hand-off reply token queued for the requester`;
+- requester, the same `token_id` (with `routed=false` when the sink belongs to
+  another attempt or peer): `DIAG: streaming token arrived`;
+- in between, from the vendored request-response, the connection each request was
+  put on with every candidate's (id, pending, has-answered):
+  `rr: request assigned to a connection`. A candidate the swarm never reported in
+  `DIAG: connection established` is a ghost, and
+  `request_response: forgetting a connection the swarm denied` is the fix
+  removing one.
+On the rig, `examples/split_rig.sh` takes a wrapper binary that appends `-vv` to
+`run` (`printf '#!/bin/bash\ncase "$1" in run) exec BIN "$@" -vv ;; *) exec BIN "$@" ;; esac'`).
+
 ### Connection Lifecycle
 
 ```

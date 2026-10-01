@@ -84,9 +84,9 @@ impl PipelineExecutor {
                 prompt,
                 sampling,
                 request_id,
-                // The router only plans requests made to this node's own API,
-                // so a plan that came back here is the owner's.
-                crate::inference::process_pool::Requester::Owner,
+                // A plan that came back here is the owner's, unless a peer
+                // delegated the request to us (`worker_requester`).
+                super::worker_requester(&self.request),
                 self.request.session_id.clone(),
                 token_tx,
             ),
@@ -301,6 +301,7 @@ mod tests {
                 ),
                 exclude_node_prefixes: vec![],
                 peer_holds: vec![],
+                lead_here: false,
             },
         );
         assert!(
@@ -477,5 +478,115 @@ mod tests {
             height: 1,
         }];
         assert_eq!(exec.local_whole_model_segment(), None);
+    }
+
+    /// **A split none of which is ours is handed to its head, and nothing
+    /// else is** (`remote_generate::delegation_eligible`, FUTURE_WORK #143).
+    /// Each refusal below is the one condition it names: the positive case is
+    /// asserted first, on the same state, so a refusal cannot be the fixture's.
+    #[tokio::test]
+    async fn a_split_none_of_which_is_ours_is_led_by_its_head_and_only_that() {
+        use crate::inference::pipeline::remote_generate::delegation_eligible;
+        use crate::inference::pipeline::tests::peer_advertising;
+        use swarmllm_types::node::features::DELEGATED_SPLIT;
+        let state = crate::inference::pipeline::tests::make_test_state();
+        let (b, c, d) = (NodeId([0x0b; 32]), NodeId([0x0c; 32]), NodeId([0x0d; 32]));
+        state
+            .peer_registry
+            .insert(b.clone(), peer_advertising(&b, DELEGATED_SPLIT));
+        state
+            .peer_registry
+            .insert(c.clone(), peer_advertising(&c, 0));
+        state
+            .peer_registry
+            .insert(d.clone(), peer_advertising(&d, 0));
+        let local = state.identity.node_id().clone();
+        let delegated = |segments: Vec<PipelineSegment>| {
+            delegation_eligible(&executor_for(state.clone(), segments))
+        };
+
+        assert!(
+            delegated(vec![
+                segment(b.clone(), (0, 16)),
+                segment(c.clone(), (16, 32))
+            ]),
+            "two peers hold it between them and this node none: the head leads"
+        );
+        assert!(
+            delegated(vec![
+                segment(b.clone(), (0, 10)),
+                segment(c.clone(), (10, 20)),
+                segment(d.clone(), (20, 32)),
+            ]),
+            "three peers too"
+        );
+        assert!(
+            !delegated(vec![
+                segment(c.clone(), (0, 16)),
+                segment(b.clone(), (16, 32))
+            ]),
+            "a head that does not advertise DELEGATED_SPLIT is never asked to lead"
+        );
+        assert!(
+            !delegated(vec![segment(b.clone(), (0, 32))]),
+            "one segment is the whole-model hand-off's"
+        );
+        assert!(
+            !delegated(vec![segment(b.clone(), (0, 16)), segment(local, (16, 32))]),
+            "a plan this node takes part in is coordinated here"
+        );
+
+        let split = vec![segment(b.clone(), (0, 16)), segment(c.clone(), (16, 32))];
+        let mut exec = executor_for(state.clone(), split.clone());
+        exec.request.route_override =
+            Some(crate::inference::route_override::RoutePlanOverride::lead_here());
+        assert!(
+            !delegation_eligible(&exec),
+            "a request a peer delegated to us is never handed on"
+        );
+        let mut exec = executor_for(state.clone(), split.clone());
+        exec.request.lora_adapter = Some("adapter".into());
+        assert!(
+            !delegation_eligible(&exec),
+            "an adapter is this node's own, so the request stays here"
+        );
+
+        state
+            .credits
+            .private_mode
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(
+            !delegated(split),
+            "private mode decides who may serve this node's request; a delegate would \
+             choose among peers it never checked"
+        );
+    }
+
+    /// **A request a peer delegated to us runs as the swarm's work, never as
+    /// the owner's** (`pipeline::worker_requester`). As the owner's, a peer
+    /// could have this machine read its prompts on every core the owner is
+    /// entitled to. A benchmark's `swarm_route` override is still the owner's.
+    #[test]
+    fn a_delegated_requests_local_work_is_the_swarms() {
+        use crate::inference::pipeline::worker_requester;
+        use crate::inference::process_pool::Requester;
+        use crate::inference::route_override::{PretendLocalHolds, RoutePlanOverride};
+        let mut request = InferenceRequest::local(
+            ModelId("m".into()),
+            vec![],
+            SamplingParams::default(),
+            true,
+            None,
+            None,
+            None,
+        );
+        assert!(worker_requester(&request) == Requester::Owner);
+        request.route_override = Some(RoutePlanOverride {
+            pretend_local_holds: Some(PretendLocalHolds::Nothing),
+            ..Default::default()
+        });
+        assert!(worker_requester(&request) == Requester::Owner);
+        request.route_override = Some(RoutePlanOverride::lead_here());
+        assert!(worker_requester(&request) == Requester::Swarm);
     }
 }

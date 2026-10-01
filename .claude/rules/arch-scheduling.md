@@ -644,3 +644,17 @@ Full evidence: `docs/invariants/scheduling.md`
 - **`inference::scheduler::delegation_target`** — the single decision to hand a WHOLE model to a peer rather than run it on this node's CPU.
 - **`inference::router::distributed_exec::failure_is_penalty_worthy`** — gates `penalty_serve_failure` on (a) the assignment actually having had a remote segment and (b) the error not being locally attributable.
 - **A peer that went silent is barred from THIS request's retry, and the retry happens** — every producer of `SwarmError::PeerUnresponsive` (the per-segment deadline in `pipeline/local.rs`, both fast-path arms in `remote_generate.rs`) calls `blacklist_holder_for_request` before returning, and `router::peer_went_silent` retries the variant by TYPE under `used_remote_segment`. Envoy's `previous_hosts` rule: a host that just failed is likely to keep failing, so the retry goes elsewhere or nowhere. A producer that bars nobody makes the retry wait the same deadline twice; a retry keyed on prose misses the producer whose words differ. → `docs/invariants/scheduling.md` § "A peer that went silent is barred from the retry"
+
+## A split none of which is ours is LED by its head (2026-10-02)
+
+**`remote_generate::delegation_eligible` is the single answer** — several
+segments, none ours, head advertising `DELEGATED_SPLIT`, no privacy / private
+mode / `swarm_route` / LoRA / vision / TP — and `try_delegated_split` runs FIRST
+in `execute_distributed`. The head runs it through its own router under
+`RoutePlanOverride::lead_here`: **no peer may lead or stand by for segment 0, and
+nothing is handed on** (cleared `can_be_first`, read by every path that assigns
+layer 0). Its local work is the swarm's: **`pipeline::worker_requester`**, never a
+hardcoded `Requester::Owner`. A delegate's error blames no one; before any token,
+the same plan runs here instead.
+
+→ `docs/invariants/scheduling.md` § "A split none of which is ours is LED by its head"

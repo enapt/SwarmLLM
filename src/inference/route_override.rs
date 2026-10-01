@@ -108,6 +108,9 @@ impl SwarmRouteRequest {
             pretend_local_holds,
             exclude_node_prefixes,
             peer_holds,
+            // A client cannot ask for this: it is the delegate's planning
+            // instruction, set only by `handle_delegated_split`.
+            lead_here: false,
         })
     }
 }
