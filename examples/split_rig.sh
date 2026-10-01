@@ -492,7 +492,10 @@ if [ "$MODE" = repeat ]; then
     [ "$i" -gt 1 ] && sleep "${REPEAT_GAP:-0}"
     ask "$PROMPT" 120 "repeat$i" | tee -a "$OUT/repeat.jsonl" | cut -c1-160
   done
-  echo "repeat: n-gram path taken by $(grep -c 'try_ngram_only_distributed ELIGIBLE' "$BASE/A/node.log") of ${REPEAT:-3} requests (expected: the first)"
+  # Not "the first only" any more: since the tail walks the guesses (a few ids back,
+  # not a vocabulary) the payoff gate keeps the loop on while rounds average past its
+  # bar — llama-3.2-3b on this prompt reads 1.30 tokens/round, all 3 of 3 on .218 too.
+  echo "repeat: n-gram path taken by $(grep -c 'try_ngram_only_distributed ELIGIBLE' "$BASE/A/node.log") of ${REPEAT:-3} requests (payoff_x100: $(grep -a -o 'payoff_x100=[0-9]*' "$BASE/A/node.log" | tail -1))"
   echo "repeat: score with examples/score_against_reference.py <model.gguf> $OUT/repeat.jsonl $OUT/prompt.txt"
   exit 0
 fi
