@@ -1,5 +1,50 @@
 # Changelog
 
+## [0.3.219-alpha] — 2026-10-02
+
+**A model split across other computers answers up to 1.7 times faster when your
+computer holds none of it.**
+
+When your computer stores none of a model and two or three other computers hold
+it between them, your computer used to drive every word of the reply itself: each
+word travelled out to the first of them, through the others and back before the
+next could start, so every word paid YOUR distance to them — even when they sat
+side by side. Now your computer hands the request to the computer holding the
+start of the model, which runs it among the others and streams the words back.
+On a test setup with the asking computer 150 ms away, a model split across two
+computers answered at 3.9-4.3 words a second instead of 2.5-2.6, and across three
+at 3.7-4.3 instead of 2.6-2.7, with replies of the same quality. If that computer
+cannot take it on, yours runs the request exactly as before. A request is only
+ever handed to the computer you had already chosen to read your question, never
+passed on a second time, and never in private mode or with "Start and finish on
+this computer". The computer leading it does the work within its own
+contribution setting, like anything else it does for the swarm. Both ends need
+this version; with an older computer at the start of the model, nothing changes.
+
+**Guess-checks travel a split in one trip.** When a model is split across several
+computers, its guesses are now checked by passing them along the computers in
+turn, the way ordinary words already were, instead of each computer being visited
+separately. With three computers holding a model and the one leading it 150 ms
+from the other two: 2.0 → 2.7 words a second while guessing.
+
+**Fixed: messages between two computers could vanish without any error.** The
+networking library kept a record of connections that had been turned away (each
+pair of computers is allowed three), and whenever the real connections were busy,
+the next message went down one of those dead ends and was never delivered —
+noticed only after a 10-minute timeout. Words streamed back from another computer
+went missing in bursts; this is very likely the "messages silently dropped under
+load" the software had long been working around. A turned-away connection is now
+forgotten at once, and anything already sent to it is reported as failed, so it
+is sent again.
+
+**Fixed: a reply could come back one word longer than the limit you set**
+(`max_tokens`) when a split model was guessing ahead — 121 words for a limit of
+120.
+
+Who is affected: everyone who uses a model their computer does not hold (faster),
+everyone running a split model (the guess-checks and the length fix), and every
+computer on the swarm (the networking fix).
+
 ## [0.3.218-alpha] — 2026-10-01
 
 **Windows computers keep running after updating themselves.**
