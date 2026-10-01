@@ -190,7 +190,11 @@ plus a coordinator loop in `pipeline/dsd.rs`.
   at a time, with replies that match the big model's own choices as closely as
   plain decoding. Used only when the far computer runs v0.3.216 or later — it
   treats a reply's stream of checks as one job; older ones keep the one-batch
-  way. `SWARMLLM_SPEC_STREAM=0` switches back to batches.
+  way. `SWARMLLM_SPEC_STREAM=0` switches back to batches. ⚠ **Only when this
+  computer runs the start of the model and the far computer the end.** A
+  computer holding both ends keeps them itself ("Start and finish on this
+  computer", on by default where possible) and one holding none runs no part;
+  both check in batches, as before.
 - **The guesser** is a model this computer already holds, run by SwarmLLM's
   own engine from its parts — chosen automatically (the largest held model
   that shares the big model's vocabulary and is at most a quarter of its

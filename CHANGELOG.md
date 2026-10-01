@@ -41,9 +41,26 @@ measures this once, logs it, and if it has become slow shows a notice asking
 you to restart Windows (at most every 12 hours). It changes nothing else about
 what SwarmLLM does.
 
-Who is affected: everyone running a model split across computers gets the
-faster replies once both ends run v0.3.216 or later; the restart notice appears
-only for Windows users running SwarmLLM under WSL whose card has slowed.
+Who is affected: the restart notice appears only for Windows users running
+SwarmLLM under WSL whose card has slowed. The faster split replies need a
+particular split — see the correction below.
+
+**Correction (2026-10-01, after release).** This entry first said everyone
+running a split model gets the faster replies. That was wrong. The stream is
+used only when **this computer runs the start of the model and one other
+computer runs the end** — the shape it was measured on. Two common shapes keep
+the previous way of checking (still with the small model's guesses):
+
+- a computer that holds both the first and the last part of a model keeps both
+  ends itself and asks the far computer for the middle — "Start and finish on
+  this computer", which is on automatically wherever it is possible;
+- a computer that holds none of the model, and so runs no part of it.
+
+On the live swarm the day of the release, 4 of the 78 model holdings the test
+node could see were the streaming shape. A split request from the test node took the first shape and
+ran at ~3.0 tokens/s after loading (Qwen2.5-14B, Thailand ↔ Italy, guesses
+checked in rounds). Making the stream work for those shapes is the next step
+for split speed.
 
 ## [0.3.214-alpha] — 2026-09-30
 
