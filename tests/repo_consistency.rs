@@ -1166,9 +1166,15 @@ fn every_asset_the_updater_can_request_is_published_by_the_release_workflow() {
 
     // `bare_asset: swarmllm-linux-x86_64` — the un-archived binary the updater
     // downloads. (The `.tar.gz` / `.zip` archives are for humans.)
+    // `legacy_alias:` publishes a build again under a name older builds asked
+    // for (#768) — published, and so counted here.
     let published: BTreeSet<String> = workflow
         .lines()
-        .filter_map(|l| l.trim().strip_prefix("bare_asset:"))
+        .filter_map(|l| {
+            let l = l.trim();
+            l.strip_prefix("bare_asset:")
+                .or_else(|| l.strip_prefix("legacy_alias:"))
+        })
         .map(|v| v.trim().to_string())
         .collect();
     assert!(
@@ -1200,6 +1206,10 @@ fn every_asset_the_updater_can_request_is_published_by_the_release_workflow() {
         }
         wanted.insert(name);
     }
+
+    // Asked for by every Windows GPU build up to v0.3.216 (#768) — they cannot
+    // reach a fixed build unless a release carries this name.
+    wanted.insert("swarmllm-windows-x86_64-cuda.exe".to_string());
 
     let missing: Vec<&String> = wanted.difference(&published).collect();
     assert!(
@@ -3268,6 +3278,9 @@ fn an_asset_the_updater_can_ask_for_is_an_asset_we_sign() {
     // and a missing one look identical from the field.
     requestable.insert("swarmllm-linux-x86_64-baseline".to_string());
     requestable.insert("swarmllm-windows-x86_64-baseline.exe".to_string());
+    // What every Windows GPU build up to v0.3.216 asked for (#768). An unsigned
+    // copy would be refused, leaving those nodes exactly where they are.
+    requestable.insert("swarmllm-windows-x86_64-cuda.exe".to_string());
 
     let unsigned: Vec<&String> = requestable.difference(&listed).collect();
     assert!(
@@ -11473,4 +11486,37 @@ fn the_guess_count_guard_catches_a_wrapped_bare_read() {
         vec![1]
     );
     assert!(raw_guess_count_reads("let g = cfg.inference.guesses_per_check();").is_empty());
+}
+
+/// After an update handoff the replacement must wait for the PORTS, not only for
+/// the previous process, and it can only do so once the configuration has said
+/// which ports those are — and before anything binds or locks.
+///
+/// On Windows the previous version's UDP port stayed owned by its process id for
+/// ~0.9 s after the process had left the process list; the replacement bound
+/// 9 ms after "the previous version has exited", failed, and the updated node
+/// stopped — 2 of 2 real updates (#769). Removing the call compiles, and every
+/// test of the wait itself stays green, so the call site is pinned here.
+#[test]
+fn an_updated_node_waits_for_its_ports_before_it_starts() {
+    let src = std::fs::read_to_string(repo_root().join("src/cli/run.rs")).expect("cli/run.rs");
+    let body = fn_body(&src, "pub async fn run_daemon(").expect("run_daemon");
+    let at = |needle: &str| {
+        statements(body)
+            .iter()
+            .position(|(_, s)| s.contains(needle))
+            .unwrap_or_else(|| panic!("run_daemon no longer contains `{needle}`"))
+    };
+    let config = at("Config::load_or_create(");
+    let anchor = at("apply_anchor_mode()");
+    let wait = at("await_ports_released(");
+    let db = at("Database::open(");
+    assert!(
+        config < wait && anchor < wait,
+        "the port wait must come after the configuration (and anchor mode) decide the ports"
+    );
+    assert!(
+        wait < db,
+        "the port wait must come before the database is opened and the daemon binds"
+    );
 }

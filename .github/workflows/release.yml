@@ -228,6 +228,12 @@ jobs:
             target: x86_64-pc-windows-msvc
             archive: swarmllm-windows-x86_64-gpu.zip
             bare_asset: swarmllm-windows-x86_64-gpu.exe
+            # The same binary again under the name every Windows GPU build up to
+            # v0.3.216 asked for (#768: `windows-gpu` enables `candle-cuda`, and
+            # the updater tested CUDA first). Without it those nodes can never
+            # reach a build that asks correctly. Signed like any other asset
+            # (release_signed_assets.txt).
+            legacy_alias: swarmllm-windows-x86_64-cuda.exe
             features: "--features windows-gpu"
             rustflags: "-C target-cpu=x86-64-v3"
             windows: true
@@ -408,6 +414,19 @@ jobs:
             if ($LASTEXITCODE -eq 0) { break }
             if ($i -eq 3) { exit 1 }
             Start-Sleep -Seconds ($i * 15)
+          }
+          # The legacy name older builds of this variant ask for (#768): the
+          # same bytes, with a sidecar naming the alias, signed separately.
+          $alias = "${{ matrix.legacy_alias }}"
+          if ($alias -ne "") {
+            Copy-Item $bare $alias
+            "$hash  $alias" | Out-File -Encoding ascii -NoNewline "${alias}.sha256"
+            for ($i = 1; $i -le 3; $i++) {
+              gh release upload "${env:GITHUB_REF_NAME}" $alias "${alias}.sha256" --clobber
+              if ($LASTEXITCODE -eq 0) { break }
+              if ($i -eq 3) { exit 1 }
+              Start-Sleep -Seconds ($i * 15)
+            }
           }
 
       # .deb package (Linux CPU only)

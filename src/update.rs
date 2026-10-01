@@ -706,10 +706,13 @@ impl UpdateChecker {
         // ever. Say so here, where the user is about to be handed one, rather
         // than leaving them to notice the GPU is idle.
         if let Some(gpu) = cpu_build_on_gpu_host() {
+            // This platform's graphics-card build: `-gpu` on Windows, `-cuda`
+            // elsewhere. A literal `-cuda` sent Windows users to a file no
+            // release has published (#768).
             let cuda_asset = asset_name_for(
                 std::env::consts::OS,
                 std::env::consts::ARCH,
-                "-cuda",
+                variant_suffix_for(cfg!(windows), true),
                 cfg!(windows),
             );
             tracing::warn!(
@@ -1903,7 +1906,9 @@ async fn staged_file_matches(staged: &std::path::Path, expected: &str) -> bool {
 /// matters is which artefact this binary was built from, not what hardware it
 /// happens to be sitting on.
 ///
-/// Keep in sync with the `bare_asset` names in `.github/workflows/release.yml`.
+/// Keep in sync with the `bare_asset` names in `.github/workflows/release.yml` —
+/// `every_published_build_asks_for_its_own_asset` checks each build there,
+/// with its features expanded through `Cargo.toml`.
 /// `candle-cuda` is included here, not just `cuda`. The published Linux GPU
 /// asset is built `--features cuda`, which pulls in `candle-cuda` — but the
 /// documented local GPU build is `--features candle-cuda` alone, and the split
@@ -1911,10 +1916,26 @@ async fn staged_file_matches(staged: &std::path::Path, expected: &str) -> bool {
 /// that. Keying only on `cuda` classified those builds as CPU, so they resolved
 /// the CPU asset and updated their own GPU support away.
 fn build_variant_suffix() -> &'static str {
-    if cfg!(any(feature = "cuda", feature = "candle-cuda")) {
-        "-cuda"
-    } else if cfg!(feature = "windows-gpu") {
+    variant_suffix_for(
+        cfg!(feature = "windows-gpu"),
+        cfg!(any(feature = "cuda", feature = "candle-cuda")),
+    )
+}
+
+/// The variant a build with these features asks for, apart from `cfg!` so every
+/// published build can be checked, not only the one a test binary happens to be.
+///
+/// **`windows-gpu` is asked FIRST because it enables `candle-cuda`** (Cargo.toml).
+/// Asked second, behind the CUDA test, every Windows graphics-card build asked for
+/// `swarmllm-windows-x86_64-cuda.exe` — a file no release has published — and
+/// skipped every update from v0.3.53 on, with only a log line to say so
+/// (#768: a Windows RTX 4060 node sat on v0.3.204 through eleven releases). The
+/// unit test beside this asserted the same order it was checking, so it passed.
+fn variant_suffix_for(windows_gpu: bool, cuda: bool) -> &'static str {
+    if windows_gpu {
         "-gpu"
+    } else if cuda {
+        "-cuda"
     } else {
         ""
     }
@@ -2312,27 +2333,116 @@ mod tests {
         assert_ne!(win_cpu, win_gpu);
     }
 
+    /// The variant for each feature combination. `candle-cuda` counts as a GPU
+    /// build, not just `cuda` — the documented LOCAL GPU build is
+    /// `--features candle-cuda` alone, and classifying it as CPU made it update
+    /// its own GPU support away. And `windows-gpu` wins over CUDA, because it
+    /// enables `candle-cuda` (#768).
     #[test]
-    fn build_variant_matches_this_builds_features() {
-        let variant = build_variant_suffix();
-        // Exactly one of the three known variants, and it must agree with the
-        // features this test binary was compiled with.
-        //
-        // `candle-cuda` counts as a GPU build, not just `cuda`. The published
-        // Linux GPU asset is built `--features cuda` (which implies
-        // candle-cuda), but the documented LOCAL GPU build is
-        // `--features candle-cuda` alone and is genuinely GPU-capable through
-        // the split engine. Classifying those as CPU made them resolve the CPU
-        // asset and update their own GPU support away.
-        if cfg!(any(feature = "cuda", feature = "candle-cuda")) {
-            assert_eq!(variant, "-cuda");
-        } else if cfg!(feature = "windows-gpu") {
-            assert_eq!(variant, "-gpu");
-        } else {
-            assert_eq!(variant, "");
-        }
-        // The composed name always starts with the product prefix.
+    fn a_windows_gpu_build_asks_for_the_gpu_asset_although_it_enables_cuda() {
+        assert_eq!(variant_suffix_for(true, true), "-gpu");
+        assert_eq!(variant_suffix_for(true, false), "-gpu");
+        assert_eq!(variant_suffix_for(false, true), "-cuda");
+        assert_eq!(variant_suffix_for(false, false), "");
         assert!(update_asset_name().starts_with("swarmllm-"));
+    }
+
+    /// Every build the release workflow publishes, with its features expanded
+    /// through `Cargo.toml`, must ask for the asset that build is published as.
+    ///
+    /// The tests above this one pinned names against constants in this file, and
+    /// the variant test asserted the same `if` order it was checking — so nothing
+    /// compared a BUILD to its asset. `windows-gpu` enables `candle-cuda`, the
+    /// CUDA test came first, and every Windows graphics-card build asked for
+    /// `swarmllm-windows-x86_64-cuda.exe` from v0.3.53 on: no update, ever, and
+    /// only a log line to say so (#768). Expanding the features is the point —
+    /// the workflow's own `--features windows-gpu` string never says "cuda".
+    #[test]
+    fn every_published_build_asks_for_its_own_asset() {
+        let root = env!("CARGO_MANIFEST_DIR");
+        let cargo: toml::Table =
+            toml::from_str(&std::fs::read_to_string(format!("{root}/Cargo.toml")).unwrap())
+                .unwrap();
+        let features = cargo["features"].as_table().unwrap();
+        let expand = |requested: Vec<String>| {
+            let mut on = std::collections::BTreeSet::new();
+            let mut todo = requested;
+            todo.push("default".to_string());
+            while let Some(f) = todo.pop() {
+                if let Some(implied) = features.get(f.as_str()).and_then(|v| v.as_array()) {
+                    if on.insert(f.clone()) {
+                        todo.extend(implied.iter().filter_map(|v| v.as_str().map(String::from)));
+                    }
+                }
+            }
+            on
+        };
+
+        let workflow =
+            std::fs::read_to_string(format!("{root}/.github/workflows/release.yml")).unwrap();
+        // One matrix entry per `- name:`; the three keys this needs.
+        let mut builds: Vec<std::collections::HashMap<&str, String>> = Vec::new();
+        for line in workflow.lines().map(str::trim) {
+            if line.starts_with("- name:") {
+                builds.push(Default::default());
+            }
+            for key in ["target", "bare_asset", "features"] {
+                if let (Some(b), Some(v)) =
+                    (builds.last_mut(), line.strip_prefix(&format!("{key}:")))
+                {
+                    b.insert(key, v.trim().trim_matches('"').to_string());
+                }
+            }
+        }
+        builds.retain(|b| b.contains_key("bare_asset") && b.contains_key("target"));
+        assert!(
+            builds.len() >= 6,
+            "found {} published builds in release.yml — the parse broke, not the workflow",
+            builds.len()
+        );
+
+        let mut checked_windows_gpu = false;
+        for b in &builds {
+            let requested: Vec<String> = b
+                .get("features")
+                .map(|f| {
+                    f.split_whitespace()
+                        .filter(|t| *t != "--features")
+                        .flat_map(|t| t.split(','))
+                        .map(String::from)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let on = expand(requested);
+            let variant = variant_suffix_for(
+                on.contains("windows-gpu"),
+                on.contains("cuda") || on.contains("candle-cuda"),
+            );
+            let target = &b["target"];
+            let (os, arch) = match target.as_str() {
+                t if t.contains("windows") => ("windows", t.split('-').next().unwrap()),
+                t if t.contains("linux") => ("linux", t.split('-').next().unwrap()),
+                t if t.contains("apple") => ("macos", t.split('-').next().unwrap()),
+                t => panic!("release.yml builds for {t}, which this test does not know"),
+            };
+            let name = asset_name_for(os, arch, variant, os == "windows");
+            let asked = if b["bare_asset"].contains("-baseline") {
+                baseline_asset_name(&name)
+            } else {
+                name
+            };
+            assert_eq!(
+                asked, b["bare_asset"],
+                "the {target} build with features {on:?} would ask for {asked}, but is published \
+                 as {} — it would never find an update",
+                b["bare_asset"]
+            );
+            checked_windows_gpu |= on.contains("windows-gpu");
+        }
+        assert!(
+            checked_windows_gpu,
+            "the Windows GPU build was not found in release.yml"
+        );
     }
 
     /// The variant is compile-time on purpose, so a CPU build never installs

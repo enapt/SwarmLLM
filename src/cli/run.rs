@@ -93,6 +93,13 @@ pub async fn run_daemon(args: DaemonArgs) -> anyhow::Result<()> {
         config.apply_anchor_mode();
     }
 
+    // The previous version leaving the process list is not the moment its
+    // sockets are free: on Windows the replacement bound too early, failed, and
+    // the updated node stopped (#769). Wait for the ports themselves. The
+    // database lock was already free in both measured runs, and is opened after
+    // this wait anyway. Returns at once on every start that was not a handoff.
+    swarmllm::update_restart::await_ports_released(&ports_this_node_binds(&config));
+
     // Ensure data directory exists
     std::fs::create_dir_all(&config.node.data_dir)?;
 
@@ -132,6 +139,25 @@ pub async fn run_daemon(args: DaemonArgs) -> anyhow::Result<()> {
     // Build and run daemon (spawns network, health, API tasks)
     let daemon = Daemon::new(config, identity, db);
     daemon.run().await
+}
+
+/// The sockets the daemon will bind: the API (`api::server::api_bind_addr`),
+/// QUIC on the node port and TCP on port + 10 (`NetworkManager::run`). An
+/// unparseable listen address is left out — the network says so itself.
+fn ports_this_node_binds(config: &Config) -> Vec<swarmllm::update_restart::PortClaim> {
+    use swarmllm::update_restart::PortClaim;
+    let port = config.node.listen_port;
+    let mut claims = vec![PortClaim::Tcp(swarmllm::api::server::api_bind_addr(
+        config.node.anchor_mode,
+        port,
+    ))];
+    if let Ok(ip) = config.network.listen_address.parse::<std::net::IpAddr>() {
+        claims.push(PortClaim::Tcp((ip, port.saturating_add(10)).into()));
+        if config.network.enable_quic {
+            claims.push(PortClaim::Udp((ip, port).into()));
+        }
+    }
+    claims
 }
 
 /// What to do with the shard range saved in the database.

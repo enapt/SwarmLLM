@@ -706,6 +706,15 @@ const HTTP_KEEPALIVE_INTERVAL_SECS: u64 = 10;
 const HTTP_KEEPALIVE_RETRIES: u32 = 3;
 
 /// Start the Axum HTTP server using SharedState from the daemon.
+/// Where the dashboard/API listens. Anchor nodes bind it to loopback only — the
+/// P2P ports are the only thing that should be reachable off-box. Normal nodes
+/// bind all interfaces so the dashboard is reachable on the LAN. Also read by
+/// `cli::run`, which waits for this port after an update handoff (#769).
+pub fn api_bind_addr(anchor: bool, port: u16) -> std::net::SocketAddr {
+    let bind_ip = if anchor { [127, 0, 0, 1] } else { [0, 0, 0, 0] };
+    std::net::SocketAddr::from((bind_ip, port))
+}
+
 pub async fn run_server_with_state(
     shared_state: Arc<SharedState>,
     router_tx: mpsc::Sender<RouterCommand>,
@@ -747,13 +756,9 @@ pub async fn run_server_with_state(
         }
     });
 
-    // Anchor nodes bind the dashboard/API to loopback only — the P2P ports are
-    // the only thing that should be reachable off-box. Normal nodes bind all
-    // interfaces so the dashboard is reachable on the LAN.
     let anchor = state.config.node.anchor_mode;
     let app = build_router(state);
-    let bind_ip = if anchor { [127, 0, 0, 1] } else { [0, 0, 0, 0] };
-    let addr = std::net::SocketAddr::from((bind_ip, port));
+    let addr = api_bind_addr(anchor, port);
 
     tracing::debug!(%addr, "DIAG: server startup");
 

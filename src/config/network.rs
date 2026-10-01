@@ -232,7 +232,17 @@ pub fn default_bootstrap_peers() -> Vec<String> {
 /// `/proc/version`, so this is `true` inside an ordinary Linux container on
 /// Windows. Ask [`running_in_container`] before acting on it — see
 /// [`wsl_network_adaptation`].
+///
+/// ⚠ **And only a Linux build can be inside WSL2.** On Windows `/proc/version`
+/// is a path relative to the CURRENT DRIVE, and a Windows build started from a
+/// folder under `\\wsl.localhost\…` — a WSL user who downloaded it into their
+/// Linux home — reads WSL's own file, believes it is in WSL2, and turns QUIC off
+/// and listens on loopback only (seen 2026-10-01 launching the Windows build
+/// from a WSL shell; #770). Third time this predicate proved too broad.
 pub(crate) fn is_wsl2() -> bool {
+    if !cfg!(target_os = "linux") {
+        return false;
+    }
     std::fs::read_to_string("/proc/version")
         .map(|v| {
             let lower = v.to_lowercase();

@@ -1185,6 +1185,27 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
 | DEBUG | `DIAG: check_for_update version compare` | `current`, `latest` |
 | INFO  | `DIAG: apply_update starting` | `path` |
 
+### A Windows node that never updates, or stops after updating (2026-10-01, #768/#769)
+
+- **Never moves off a version** — grep its log for `No matching binary asset for this platform
+  and build variant`; `expected=` names what it asked for. Every Windows GPU build up to v0.3.216
+  asked for `swarmllm-windows-x86_64-cuda.exe` (#768); releases after v0.3.216 publish that name too
+  (`legacy_alias` in `release.yml`).
+  A peer's version and OS are on `/api/identity/leaderboard` (`capability.os`, `version`).
+- **Updates, then is gone** — `Started by an update` → `The previous version has exited` → `Port
+  … is already in use` → `Daemon shutdown complete` within ~0.1 s. The old process's UDP port
+  outlives its entry in the process list by ~0.9 s (#769); builds after v0.3.216 wait for
+  the ports (`The previous version's ports are free — starting`). Watch the owner with
+  `Get-NetUDPEndpoint -LocalPort <port>` polled every ~30 ms during the update.
+- ⚠ **Only the real update path reproduces it.** Emulating the handoff by `Stop-Process`-ing the
+  old process freed the port at once and the replacement survived; the old process has to leave
+  through `ExitProcess`, as `exec_into` does. To test on this machine: unpack an older Windows
+  release into `C:\temp\…`, run it hidden on a spare port with its own `-d` data dir and
+  `auto_manage`/`prune` off, and let it update itself to the latest release.
+- ⚠ **Launch it with a Windows working folder** (`Start-Process -WorkingDirectory C:\temp\…`).
+  Started from a WSL shell its folder is `\\wsl.localhost\…`, where builds up to v0.3.216 read
+  WSL's `/proc/version`, decide they are in WSL2, and turn QUIC off (#770).
+
 ## Daemon Startup Diagnostics
 
 ### Main (main.rs)

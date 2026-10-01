@@ -21,3 +21,8 @@ swarmllm-macos-aarch64
 swarmllm-windows-x86_64.exe
 swarmllm-windows-x86_64-baseline.exe
 swarmllm-windows-x86_64-gpu.exe
+
+# Not asked for by any current build: the Windows GPU binary under the name
+# every Windows GPU build up to v0.3.216 asked for (#768). Signed so those nodes
+# can reach a build that asks for `-gpu.exe`. Keep while such nodes exist.
+swarmllm-windows-x86_64-cuda.exe

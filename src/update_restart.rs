@@ -112,7 +112,7 @@ pub fn await_predecessor_exit() {
         predecessor_pid = pid,
         "Started by an update — waiting for the previous version to finish exiting"
     );
-    let waited = wait_while_alive(
+    let waited = wait_while(
         || process_is_running(pid),
         HANDOFF_WAIT,
         HANDOFF_POLL,
@@ -133,6 +133,67 @@ pub fn await_predecessor_exit() {
     }
 }
 
+/// A socket this node is about to claim, which the build it replaced held.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PortClaim {
+    Tcp(std::net::SocketAddr),
+    Udp(std::net::SocketAddr),
+}
+
+impl PortClaim {
+    /// Could this node bind it right now? Binds and lets go at once.
+    fn is_free(&self) -> bool {
+        match self {
+            PortClaim::Tcp(addr) => std::net::TcpListener::bind(addr).is_ok(),
+            PortClaim::Udp(addr) => std::net::UdpSocket::bind(addr).is_ok(),
+        }
+    }
+}
+
+/// After an update handoff, wait until the ports the previous version held can
+/// be bound — called once the configuration has said which ports those are.
+///
+/// **The predecessor leaving the process list is not the moment it lets go of
+/// its sockets.** Measured on Windows 2026-10-01 (#769): v0.3.204 installed
+/// v0.3.216 and spawned it; the replacement saw the old process gone 9 ms
+/// later, and its QUIC bind failed — UDP 8950 was still owned by the old
+/// process id for ~0.9 s after that id had left `Win32_Process`. The new node
+/// shut down, so every automatic update on Windows ended with the node stopped
+/// (2 of 2 runs). A process killed from outside (`Stop-Process`) released the
+/// port at once; one leaving through `ExitProcess`, as `exec_into` does, did
+/// not. So what is waited on here is the thing that was refused: binding.
+///
+/// It lives in the NEW binary on purpose: an older build doing the swap needs
+/// no change, because it already hands over [`HANDOFF_PID_VAR`].
+pub fn await_ports_released(claims: &[PortClaim]) {
+    if std::env::var_os(HANDOFF_PID_VAR).is_none() {
+        return;
+    }
+    match wait_for_ports(claims, HANDOFF_WAIT, HANDOFF_POLL) {
+        Some(elapsed) => tracing::info!(
+            waited_ms = elapsed.as_millis() as u64,
+            "The previous version's ports are free — starting"
+        ),
+        None => tracing::warn!(
+            still_held = ?claims.iter().filter(|c| !c.is_free()).collect::<Vec<_>>(),
+            timeout_secs = HANDOFF_WAIT.as_secs(),
+            "A port this node needs is still taken after the update handoff. Starting anyway; if it \
+             is still taken this node will say so and stop, and starting it again by hand will work"
+        ),
+    }
+}
+
+/// Wait until every claim can be bound; how long that took, or `None` at the
+/// timeout. Apart from the handoff variable so it can be tested on real sockets.
+fn wait_for_ports(claims: &[PortClaim], timeout: Duration, poll: Duration) -> Option<Duration> {
+    wait_while(
+        || claims.iter().any(|c| !c.is_free()),
+        timeout,
+        poll,
+        Instant::now,
+    )
+}
+
 /// Is a process with this id running?
 fn process_is_running(pid: u32) -> bool {
     let mut sys = sysinfo::System::new();
@@ -141,21 +202,21 @@ fn process_is_running(pid: u32) -> bool {
     sys.process(pid).is_some()
 }
 
-/// Poll `alive` until it answers false, and say how long that took — or `None`
+/// Poll `busy` until it answers false, and say how long that took — or `None`
 /// if it never did.
 ///
 /// The clock is a parameter so this can be tested without one: what is being
 /// asserted is the loop's shape, and a test that waits out real timeouts to
 /// check a timeout is a test nobody runs twice.
-fn wait_while_alive(
-    mut alive: impl FnMut() -> bool,
+fn wait_while(
+    mut busy: impl FnMut() -> bool,
     timeout: Duration,
     poll: Duration,
     now: impl Fn() -> Instant,
 ) -> Option<Duration> {
     let started = now();
     loop {
-        if !alive() {
+        if !busy() {
             return Some(now().saturating_duration_since(started));
         }
         if now().saturating_duration_since(started) >= timeout {
@@ -217,7 +278,7 @@ mod tests {
     #[test]
     fn the_wait_ends_when_the_previous_version_exits() {
         let mut polls = 0;
-        let waited = wait_while_alive(
+        let waited = wait_while(
             || {
                 polls += 1;
                 polls < 3
@@ -243,7 +304,7 @@ mod tests {
     fn a_predecessor_that_never_exits_does_not_block_startup_for_ever() {
         let start = Instant::now();
         let ticks = std::cell::Cell::new(0u32);
-        let waited = wait_while_alive(
+        let waited = wait_while(
             || true,
             Duration::from_secs(30),
             Duration::from_millis(1),
@@ -270,7 +331,44 @@ mod tests {
         );
         let before = Instant::now();
         await_predecessor_exit();
+        // Nor for the ports, even when one of them is genuinely taken: outside a
+        // handoff a taken port is reported by the bind, as it always was.
+        let taken = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        await_ports_released(&[PortClaim::Udp(taken.local_addr().unwrap())]);
         assert!(before.elapsed() < Duration::from_secs(1));
+    }
+
+    /// #769's shape on real sockets: the previous version still holds the port
+    /// when the replacement starts, and lets go a moment later. The wait must
+    /// last until then — and a claim it can bind must cost nothing.
+    #[test]
+    fn the_replacement_waits_until_the_previous_versions_ports_are_free() {
+        let udp = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let tcp = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let claims = [
+            PortClaim::Udp(udp.local_addr().unwrap()),
+            PortClaim::Tcp(tcp.local_addr().unwrap()),
+        ];
+        // Held: the probe must see it — the null control for everything below.
+        assert!(claims.iter().all(|c| !c.is_free()));
+
+        let release_after = Duration::from_millis(300);
+        let holder = std::thread::spawn(move || {
+            std::thread::sleep(release_after);
+            drop((udp, tcp));
+        });
+        let waited = wait_for_ports(&claims, Duration::from_secs(10), Duration::from_millis(10))
+            .expect("the ports were released, so the wait must end");
+        holder.join().unwrap();
+        assert!(
+            waited >= release_after.saturating_sub(Duration::from_millis(50)),
+            "returned after {waited:?}, before the previous version let go"
+        );
+
+        // Free from the start: no wait at all.
+        let free = wait_for_ports(&claims, Duration::from_secs(10), Duration::from_millis(10))
+            .expect("free ports");
+        assert!(free < Duration::from_millis(100));
     }
 
     #[test]
