@@ -73,6 +73,15 @@ and the dead/dropped peer is filtered out via the liveness oracle
 above. Failure of the second attempt propagates to the user with a
 "try again" hint.
 
+One source of "silent rr drops" was found and removed in v0.3.219: the
+request-response layer kept connections the swarm had already refused
+(the per-peer limit of 3) and, whenever the real connections each had a
+request in flight, sent the next one down a refused connection, where it
+vanished until the 600 s request timeout. Bursts of streamed tokens lost
+their tail this way. A refused connection is now forgotten and anything
+sent to it reported failed (gotcha #774); the retry above still covers any
+other loss.
+
 Independently, streaming-tracked `SendDirectMessage` sends carry a
 `delivery_request_id`; if the receiver doesn't ACK within
 `RR_ACK_TIMEOUT_SECS` (10s), the daemon closes the caller's
@@ -171,6 +180,8 @@ speedup** on CPU-CPU localhost).
 - **Continuous Batching** — default-on: concurrent `Generate` requests share one `forward_batch` per decode tick; GPU uses fused kernel, CPU falls through to sequential
 - **Batched Prefill Forward** — default-on: fuses concurrent same-shape Prefilling chunks into one `forward_batch` call
 - **Remote-generate Fast Path** — default-on: single-segment distributed inference runs the full decode loop on the remote worker instead of per-token coordinator round-trips (measured 1.93× decode speedup)
+- **Delegated split** (v0.3.219) — default-on: a request whose plan is several segments, none of them this node's, is handed to the node holding the model's first layers, which leads it among its own peers and streams the reply back the same way. The requester no longer sits inside every token's round trip: measured on a rig with the requester 150 ms away, 1.4-1.7× faster with two or three holders. The delegate keeps the first segment itself (the requester chose it to read the prompt) and never hands the request on; it is not used in private mode or with prompt privacy. `SWARMLLM_DELEGATE_SPLIT=0` switches it off
+- **Chained checks** (v0.3.219) — a speculative check travels a run of remote segments like an ordinary decode step, one trip around them instead of one per segment (+31% on a guessing request across three nodes, the leader 150 ms from the others). `SWARMLLM_CHAIN_VERIFY=0` switches it off
 - **Cross-request Prefix Cache** — default-on: see "Prefix-Cache KV Sharing" above for the cross-node extension; the local cache alone is a 29.4× wall-clock win on prompt re-submission
 - **Activation Compression (Q8_0)** — Intermediate pipeline activations wire-quantized ~3.76× (flag-gated `activation_compression`)
 - **Flash Attention** — CPU and GPU fast paths (GQA-native, no `repeat_kv`)
