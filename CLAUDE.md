@@ -154,32 +154,27 @@ UNDETERMINED and never a fix — use it BEFORE blaming a change, especially your
 
 ## Status
 
-**v0.3.216-alpha is the live release (published 2026-10-01 05:35 UTC), signed and on both nodes** — split checks
-streamed by default, a slow-card restart notice for WSL2 (#762), and the stream counted as ONE piece of the serving
-node's work (#767, `34d62310`). **.215 was never published**: its gate found #767. .214 was .213 plus the
-#761 fix (a refused CUDA-graph capture left the f16 KV mirror claiming positions it never got, so split checks could
-drift to a 2nd-choice word; `4fac99bf`). .213 brought card decode as CUDA graphs (a 7B at llama.cpp parity), card
-prompts ~1.5×, a split's per-token overhead cut (~80% of local), split speculation with an in-engine small drafter ON
-by default (`pipeline::engine_drafter`; γ = 0 where guessing does not pay). Gate record: `memory/release_gate.md`.
-The drafter is a pool GUEST (#747); attempt-scoped state is never keyed by the request id, which retries reuse (#749).
-Split checks STREAM by default from v0.3.216 (`pipeline::dsd_stream`, `SWARMLLM_SPEC_STREAM=0` = rounds): +20-57% over
-rounds TH↔IT with a far PROCESSOR (FUTURE_WORK #149). ⚠ **A rig sharing ONE card reads it ~15% SLOWER** (#759).
-**Why split decode is slow and what beats it → `docs/plans/faster_than_local.md`; the speculation plan and its
-measurements → `docs/plans/split_speculation.md`.** ⛔ **No design may need a user to hold the whole model, not even a
-low-bit copy** (user, 2026-09-28) → parallelize the REPLY, not the token: `docs/plans/wan_parallel.md`.
-Qwen 3.5 is on local branch `qwen35-support` (#117); Gemma 4 scoped, not built (#115).
-⚠ **A family in `supported_list` is a claim: check it against a REAL file's header** (#715). **Next** → `memory/next_up.md`.
+**v0.3.217-alpha is the live release (published 2026-10-01 10:20 UTC), signed, on both nodes.** It fixed Windows GPU
+builds asking for an update file no release had (#768) and `is_wsl2` firing on Windows (#770) — but **its Windows
+restart fix (#769) did NOT work**: the new version inherits the old one's QUIC socket through std's `Command` and holds
+the port itself. Real fix on main `d203a24e` (verified on Windows) → **needs v0.3.218**; the `-cuda.exe` alias was
+taken DOWN from .217 meanwhile. Plan + checks: `memory/next_up.md`, `memory/release_gate.md`. Earlier releases →
+`memory/round_history.md`. ⚠ .216's streamed checks fire only on [ours…, ONE remote tail]; the default "both ends here"
+split runs rounds (FUTURE_WORK #152). **Why split decode is slow → `docs/plans/faster_than_local.md`,
+`docs/plans/split_speculation.md`.** ⛔ **No design may need a user to hold the whole model, not even a low-bit copy**
+(user, 2026-09-28) → `docs/plans/wan_parallel.md`. Qwen 3.5 is on local branch `qwen35-support` (#117).
+⚠ **A family in `supported_list` is a claim: check it against a REAL file's header** (#715).
 
-⛔ **This PC had five unclean shutdowns 2026-09-26 → 10-01 (#716, #718, #754, #762, #766), all under sustained load.**
-Two (#716, #766) came in Windows' Modern Standby — the display timeout puts this laptop there, "sleep: never" does not
-stop it; #766 hung at 4.5 h uptime with nothing on the card, so a restart alone does not make an unattended run safe.
-The third was a concurrency probe on the live node — **simultaneous requests to a node ARE a stress
-test.** Before any: research → deep dive → conceptualize → research again, then the user's go-ahead
-for THAT run, live node stopped (`memory/feedback_research_before_stress_tests.md`; #146's
-`card_pace` is the node's own guard). A bench beside the live node also reads about HALF (#119).
-⚠ **On this WSL2 host, fresh card allocations slow ~1000× over two days of Windows uptime** (#146 deep dive):
-a card figure that drifts across releases may be UPTIME, not code — note each run's uptime. The 3rd and 4th
-(0x116 mid-gate) both came at 52-54 h of uptime: **read uptime before any card run; above ~24 h, ask for a restart.**
+⚠ **Windows code is tested ON Windows before it ships** — .217 shipped an untested Windows fix. Cross-build with MinGW
+and run the binary natively from WSL (`memory/env_windows_test_node.md`); a reproduction must FAIL on the broken build
+first. **On Windows std's `Command` hands the child every inheritable handle** (#769) — a process that outlives us is
+started with `update_restart::spawn_without_inherited_handles`.
+
+⛔ **This PC had five unclean shutdowns 2026-09-26 → 10-01 (#716 #718 #754 #762 #766), all under sustained load,
+causes undetermined.** Every gate, rig, bench or long run: the safety kit (`~/swarmllm-gate-common/safety.sh` —
+keep-awake, Windows-disk telemetry, CPU/memory-capped scope, settle + cool-down, emergency stop), the user's go-ahead
+for THAT run, never 4 simultaneous chats (**simultaneous requests to a node ARE a stress test**), Windows uptime read
+first (above ~24 h ask for a restart). Card figures drift with uptime (#146) — note each run's.
 
 ⚠ **Behaviour gate = `reply_ab.sh` + `split_rig.sh`** (incl. `failover`), not conformance alone —
 `family_conformance.sh` pins `gpu_layers = 0` and never splits (#93). ⛔ **v0.3.199 shipped BROKEN**: a BUILD gate
