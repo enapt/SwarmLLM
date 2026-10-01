@@ -154,12 +154,13 @@ UNDETERMINED and never a fix — use it BEFORE blaming a change, especially your
 
 ## Status
 
-**v0.3.217-alpha is the live release (published 2026-10-01 10:20 UTC), signed, on both nodes.** It fixed Windows GPU
-builds asking for an update file no release had (#768) and `is_wsl2` firing on Windows (#770) — but **its Windows
-restart fix (#769) did NOT work**: the new version inherits the old one's QUIC socket through std's `Command` and holds
-the port itself. Real fix on main `d203a24e` (verified on Windows) → **needs v0.3.218**; the `-cuda.exe` alias was
-taken DOWN from .217 meanwhile. Plan + checks: `memory/next_up.md`, `memory/release_gate.md`. Earlier releases →
-`memory/round_history.md`. ⚠ .216's streamed checks fire only on [ours…, ONE remote tail]; the default "both ends here"
+**v0.3.218-alpha is the live release (published 2026-10-01 14:54 UTC), signed, on both nodes.** It ends the Windows
+updater saga of the day: GPU builds now find their update (#768, the `-cuda.exe` alias is published for builds up to
+.216), and an updated Windows node keeps RUNNING (#769 — the replacement had inherited the old QUIC socket; it now starts
+without inherited handles and, when started by an older version, relaunches itself once). Proven by a REAL self-update
+.204 → .218 of both Windows builds after publishing. (.217 shipped a restart fix that did not work — corrected publicly.)
+Gate records: `memory/release_gate.md`; queue: `memory/next_up.md`; history: `memory/round_history.md`.
+⚠ .216's streamed checks fire only on [ours…, ONE remote tail]; the default "both ends here"
 split runs rounds (FUTURE_WORK #152). **Why split decode is slow → `docs/plans/faster_than_local.md`,
 `docs/plans/split_speculation.md`.** ⛔ **No design may need a user to hold the whole model, not even a low-bit copy**
 (user, 2026-09-28) → `docs/plans/wan_parallel.md`. Qwen 3.5 is on local branch `qwen35-support` (#117).

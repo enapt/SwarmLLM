@@ -1191,7 +1191,7 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
   and build variant`; `expected=` names what it asked for. Every Windows GPU build up to v0.3.216
   asked for `swarmllm-windows-x86_64-cuda.exe` (#768). `release.yml` publishes the GPU exe under
   that name too (`legacy_alias`) — taken DOWN from v0.3.217 (whose restart still failed), back from
-  the release that carries the #769 fix below.
+  v0.3.218, which carries the #769 fix below (a real .204 → .218 update of the GPU build PASSED through it).
   A peer's version and OS are on `/api/identity/leaderboard` (`capability.os`, `version`).
 - **Updates, then is gone** — `Started by an update` → `The previous version has exited` → `Port
   … is already in use` → `Daemon shutdown complete`. **The replacement itself holds the old QUIC
