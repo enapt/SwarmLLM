@@ -20,7 +20,7 @@ from the tree itself; the annotations are what is worth keeping).
 ```
 swarmllm/
 ├── Cargo.toml / Cargo.lock / build.rs
-├── .cargo/config.toml (`target-cpu=native` for local builds — CI overrides it; the aliases `cargo lint` / `dev-test` / `dev-build` / `dev-run` = the ONE local feature set, `--no-default-features --features dev,claude-subscription`)
+├── .cargo/config.toml (`target-cpu=native` for local builds — CI overrides it; the aliases `cargo lint` / `dev-test` / `dev-build` / `dev-run` = the ONE local feature set, `--no-default-features --features dev,claude-subscription`. ⚠ rust-cache hashes this file into every CI cache key: ANY edit, a comment included, makes the next CI run and Cache warm build cold — batch edits)
 ├── .githooks/pre-push (Cargo.lock in step, fmt, types crate, `cargo lint`, repo_consistency; a default-feature lint only when the push touches default-only code)
 ├── clippy.toml (`await-holding-invalid-types` = dashmap 6 guard types: a shard guard across `.await` fails the build; it sees a guard bound directly, NOT one parked in its `Option` — gotcha #705; guard `clippy_refuses_a_dashmap_guard_held_across_an_await`)
 ├── .env.example                       (env var template for Docker deployments)

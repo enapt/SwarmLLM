@@ -41,6 +41,12 @@ on:
       - "Cargo.lock"
       - "Cargo.toml"
       - "crates/*/Cargo.toml"
+      # rust-cache hashes this file into EVERY key ("all Cargo.toml/Cargo.lock
+      # files, rust-toolchain files, and .cargo/config.toml files", its README).
+      # Adding the cargo aliases on 2026-10-02 changed every key at once; without
+      # this trigger the warm cache would have kept the old key and the next
+      # release would have built cold — #154's shape, by a different input.
+      - ".cargo/config.toml"
       - ".github/workflows/cache-warm.yml"
       - ".github/workflows/release.yml"
       # The composite action IS the toolchain definition — CUDA, Vulkan, MSVC,
