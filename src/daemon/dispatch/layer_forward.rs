@@ -84,15 +84,13 @@ pub(super) async fn handle_layer_forward(
         },
     };
 
-    // Estimate token count for credit accounting: prefill carries many tokens,
-    // decode carries 1. For prefill (seq==0), estimate from activation bytes
-    // (raw prompt: ~4 bytes/token, embedded: hidden_dim*4 bytes/token).
-    let estimated_tokens: u32 = if forward.sequence_num == 0 {
-        // Rough estimate: prompt bytes / 4 chars per token
-        (forward.activations.len() / 4).max(1) as u32
-    } else {
-        1
-    };
+    // The token positions this forward carries — what "tokens served" and the
+    // serve credit are counted in (`record_peer_serve`). See `forward_positions`.
+    let estimated_tokens: u32 = forward_positions(
+        &forward.activations,
+        forward.pre_embedded || forward.layer_range.0 > 0,
+        forward.sequence_num == 0,
+    );
     let forward_start = std::time::Instant::now();
     tracing::info!(
         request_id = %request_id,
@@ -594,6 +592,36 @@ const RESULT_HANDOFF_SLOW: std::time::Duration = std::time::Duration::from_secs(
 /// Commands queued ahead of a result that are worth a line — an eighth of the
 /// network command channel's 1024.
 const RESULT_HANDOFF_BACKLOG: usize = 128;
+
+/// How many token positions a forward's payload carries — the unit "tokens
+/// served" and the serve credit are counted in.
+///
+/// Three payloads cross a segment boundary, and the byte length means something
+/// different in each:
+/// - **hidden states** (`hidden_states`: any segment past the first, or a
+///   pre-embedded first one) — `[batch, seq, hidden]` in f32 or Q8_0, counted
+///   from the shape header (`tensor_util::activation_positions`), because the
+///   length is seq × hidden × bytes;
+/// - **prompt text** (a first segment's prompt pass) — ~4 characters a token,
+///   an estimate kept cheap on the serving path;
+/// - **token ids** (a first segment's later steps) — 8 bytes each: one for a
+///   decode step, the guesses for a check.
+///
+/// It divided every prompt pass's bytes by 4, which for hidden states is
+/// tokens × hidden size: a 20-token prompt pass of a 2048-wide model counted as
+/// 40,965 tokens, and the dashboard's "tokens served" and tok/s read ~2000×
+/// high (field report #004, 2026-10-01). A later step counted 1 whatever it
+/// carried, so a check's guesses were not counted at all.
+fn forward_positions(activations: &[u8], hidden_states: bool, prompt_pass: bool) -> u32 {
+    let positions = if hidden_states {
+        crate::inference::tensor_util::activation_positions(activations).map(|p| p as usize)
+    } else if prompt_pass {
+        Some(String::from_utf8_lossy(activations).chars().count() / 4)
+    } else {
+        Some(activations.len() / 8)
+    };
+    positions.unwrap_or(1).clamp(1, u32::MAX as usize) as u32
+}
 
 /// Who should receive this segment's result?
 ///
@@ -1249,5 +1277,58 @@ mod tests {
             !crate::inference::pipeline::remote_error_means_missing_shard(&reason),
             "busy is not a missing shard — the holder claims must stay: {reason}"
         );
+    }
+}
+
+#[cfg(test)]
+mod forward_positions_tests {
+    use super::forward_positions;
+    use crate::inference::tensor_util::{tensor_to_bytes, tensor_to_bytes_q8_0};
+    use candle_core::{DType, Device, Tensor};
+
+    /// Field report #004: a 20-token prompt pass of a 2048-wide model reached a
+    /// later segment as 163,860 bytes and was counted as 40,965 tokens. Counted
+    /// from the shape it is 20, in either encoding a peer may have chosen.
+    #[test]
+    fn a_hidden_state_prompt_pass_counts_its_positions_not_its_bytes() {
+        let f32_pass =
+            tensor_to_bytes(&Tensor::zeros((1, 20, 2048), DType::F32, &Device::Cpu).unwrap())
+                .unwrap();
+        assert_eq!(f32_pass.len(), 163_860, "fixture: the reported payload");
+        assert_eq!(forward_positions(&f32_pass, true, true), 20);
+        let q8_pass =
+            tensor_to_bytes_q8_0(&Tensor::zeros((1, 366, 2048), DType::F32, &Device::Cpu).unwrap())
+                .unwrap();
+        assert_eq!(forward_positions(&q8_pass, true, true), 366);
+        let step = tensor_to_bytes(&Tensor::zeros((1, 1, 2048), DType::F32, &Device::Cpu).unwrap())
+            .unwrap();
+        assert_eq!(
+            forward_positions(&step, true, false),
+            1,
+            "a decode step is one"
+        );
+        let check =
+            tensor_to_bytes(&Tensor::zeros((1, 5, 2048), DType::F32, &Device::Cpu).unwrap())
+                .unwrap();
+        assert_eq!(
+            forward_positions(&check, true, false),
+            5,
+            "a check counts its guesses"
+        );
+    }
+
+    #[test]
+    fn a_first_segment_counts_its_text_or_its_token_ids() {
+        assert_eq!(
+            forward_positions("x".repeat(400).as_bytes(), false, true),
+            100
+        );
+        assert_eq!(forward_positions(&7i64.to_le_bytes(), false, false), 1);
+        let ids: Vec<u8> = [1i64, 2, 3, 4, 5]
+            .iter()
+            .flat_map(|t| t.to_le_bytes())
+            .collect();
+        assert_eq!(forward_positions(&ids, false, false), 5);
+        assert_eq!(forward_positions(&[], false, true), 1, "never zero");
     }
 }
