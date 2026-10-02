@@ -636,7 +636,14 @@ impl PipelineExecutor {
                 } else {
                     SegmentOutcome::Returned
                 };
-                note_segment_delivery(state, is_remote, node_id, outcome, budget.is_prefill());
+                note_segment_delivery(
+                    state,
+                    is_remote,
+                    request_id,
+                    node_id,
+                    outcome,
+                    budget.is_prefill(),
+                );
                 Ok(result)
             }
             Ok(Err(_)) => {
@@ -663,6 +670,7 @@ impl PipelineExecutor {
                 note_segment_delivery(
                     state,
                     is_remote,
+                    request_id,
                     node_id,
                     SegmentOutcome::SenderDropped,
                     budget.is_prefill(),
@@ -700,6 +708,7 @@ impl PipelineExecutor {
                 note_segment_delivery(
                     state,
                     is_remote,
+                    request_id,
                     node_id,
                     SegmentOutcome::TimedOut,
                     budget.is_prefill(),
@@ -869,6 +878,7 @@ async fn resend_after_link_repair(
 fn note_segment_delivery(
     state: &SharedState,
     is_remote: bool,
+    request_id: uuid::Uuid,
     node_id: &crate::types::NodeId,
     outcome: SegmentOutcome,
     is_prefill: bool,
@@ -903,7 +913,15 @@ fn note_segment_delivery(
     if intact && !is_prefill {
         return;
     }
-    state.record_peer_delivery(node_id, intact);
+    // The model this segment belongs to, for the per-model ejection count. Every
+    // request in flight has a trace (`model_is_in_use` relies on the same); a
+    // miss means the request has already ended, and the link figure is still
+    // worth recording.
+    let model = state
+        .active_traces
+        .get(&request_id)
+        .map(|t| crate::types::ModelId(t.value().model.clone()));
+    state.record_peer_delivery(node_id, model.as_ref(), intact);
 }
 
 /// How a remote segment forward ended, as far as the PEER'S LINK is concerned.

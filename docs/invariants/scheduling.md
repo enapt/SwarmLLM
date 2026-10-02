@@ -2511,3 +2511,45 @@ whole model), `a_split_none_of_which_is_ours_is_led_by_its_head_and_only_that`,
 `swarmllm-types` (`a_whole_model_hand_off_carries_no_delegation_on_the_wire`).
 Rig: `examples/split_rig.sh remote` (`REMOTE_NODES=2|3`, `DELAY_A=ms`), A/B in
 one binary with `SWARMLLM_DELEGATE_SPLIT=0`.
+
+## A peer that fails a model on every request is left out of its plans for a while (2026-10-02)
+
+**What it replaced.** Field report (2026-10-01, v0.3.218): peer `bf7b3263`, a
+6 GB laptop card holding layers 7..18 of qwen3-30b-a3b, answered every prompt
+pass and went silent at the first decode step — 5 of 6 pipelines including it
+died (3 × "segment TIMED OUT … timeout_secs=30", 1 × lost conversation), 3 of 3
+without it were fine. Inside a request the rules held: the silent peer was
+barred from that request's retry. Nothing carried the lesson to the NEXT
+request: the delivery-reliability multiplier priced the peer at
+`expected_attempts=2.04`, which a fast peer survives, so the scheduler kept
+picking it and every pick cost a 30 s deadline.
+
+**The rule** (`daemon::state::peer_outliers`, Envoy's outlier detection —
+`consecutive_gateway_failure`, `base_ejection_time` × times ejected, and the
+panic threshold): `FAILURES_TO_EJECT` (2) failures of one model by one peer
+with no request completed in between eject it from that model's plans for
+`BASE_EJECTION` (2 min), doubling per repeat up to `MAX_EJECTION` (30 min). A
+request the peer sees through forgives everything. Two, not Envoy's five: each
+of ours costs a person tens of seconds, each of Envoy's costs a load balancer
+milliseconds.
+
+**Where it is fed and read:** failures through `SharedState::record_peer_delivery`
+— the one place a segment timeout, an abandoned forward or a silent whole-model
+reply is recorded, which now takes the model as a REQUIRED argument so no
+recorder can feed the reliability figure and skip the count; resets through
+`note_peer_completed_request` (every remote segment of a successful distributed
+request, and a whole-model reply that arrived intact). Read by
+`gather_candidates`, per PART: an ejected peer is admitted for a part only when
+no healthy holder of it is admitted (this node counts as healthy) — an ejection
+can slow a plan, never make a model unroutable.
+
+**What a change must keep:**
+- Refusals (out of memory, prompt too long) are NOT failures here — they arrive
+  fast with a reason and are re-planned inside the request.
+- The prompt-pass-only sampling of INTACT deliveries
+  (`pipeline::local::note_segment_delivery`) is why the reset is a completed
+  REQUEST and not an intact delivery: the field failure delivered every prompt
+  pass and failed every decode, so a reset on delivery would never let the count
+  reach two.
+- Pinned by `a_peer_failing_a_model_every_time_is_left_out_unless_it_is_the_only_way`
+  (red with the ejection disabled, 2026-10-02) and the `peer_outliers` unit tests.

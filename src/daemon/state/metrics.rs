@@ -189,6 +189,13 @@ pub struct MetricsProviders {
     /// `GET /api/admin/performance`. Swept by the HealthMonitor tick via
     /// `evict_stale_peer_speed` so departed peers do not linger.
     pub peer_speed: DashMap<crate::types::NodeId, super::PeerSpeed>,
+    /// Peers ejected from a model's plans after failing it on consecutive
+    /// requests — `peer_outliers` (Envoy-style outlier ejection). Written by
+    /// `SharedState::record_peer_delivery` (failures) and
+    /// `note_peer_completed_request` (resets); read by the scheduler's
+    /// `gather_candidates`, which still admits an ejected peer for a part
+    /// nobody else holds.
+    pub peer_outliers: super::PeerOutliers,
     /// Last time a segment forward for `(peer, model)` completed successfully.
     ///
     /// Its only job is to answer "might this peer have to LOAD the model

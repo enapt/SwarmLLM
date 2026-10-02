@@ -645,6 +645,18 @@ Full evidence: `docs/invariants/scheduling.md`
 - **`inference::router::distributed_exec::failure_is_penalty_worthy`** — gates `penalty_serve_failure` on (a) the assignment actually having had a remote segment and (b) the error not being locally attributable.
 - **A peer that went silent is barred from THIS request's retry, and the retry happens** — every producer of `SwarmError::PeerUnresponsive` (the per-segment deadline in `pipeline/local.rs`, both fast-path arms in `remote_generate.rs`) calls `blacklist_holder_for_request` before returning, and `router::peer_went_silent` retries the variant by TYPE under `used_remote_segment`. Envoy's `previous_hosts` rule: a host that just failed is likely to keep failing, so the retry goes elsewhere or nowhere. A producer that bars nobody makes the retry wait the same deadline twice; a retry keyed on prose misses the producer whose words differ. → `docs/invariants/scheduling.md` § "A peer that went silent is barred from the retry"
 
+## A peer that fails a model on every request is ejected from its plans (2026-10-02)
+
+**`daemon::state::peer_outliers`** — Envoy's outlier ejection per (peer, model):
+two failures in a row (timed out, abandoned, silent — fed ONLY by
+`record_peer_delivery`, model required) eject it for 2 min, doubling to 30;
+a completed request (`note_peer_completed_request`) forgives. `gather_candidates`
+skips an ejected peer for a part unless no healthy holder of that part is
+admitted (the panic threshold). Refusals are not failures. A peer silent at every
+first decode step kept being picked at a 30 s deadline each (field report).
+
+→ `docs/invariants/scheduling.md` § "A peer that fails a model on every request"
+
 ## A split none of which is ours is LED by its head (2026-10-02)
 
 **`remote_generate::delegation_eligible` is the single answer** — several

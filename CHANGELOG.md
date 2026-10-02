@@ -29,6 +29,15 @@ copy's folder, and fetching the description file from a different copy than the
 parts are all refused now; a computer whose description file came from another
 copy gets the right one and reloads the model.
 
+**A computer that keeps failing a model is left out of it for a while.** One
+computer holding part of a large model answered every question's start and then
+went silent at the first word, every time — and was picked again for each new
+request, costing 30 seconds before the request failed. Now a computer that fails
+the same model twice in a row is left out of that model's plans for 2 minutes,
+doubling each time it happens again, up to 30 minutes; one request it completes
+clears it. It is still used for a part no other computer holds, so this can only
+make a model slower to reach, never unreachable.
+
 Who is affected: every computer holding a model, and most of all anyone whose
 split requests failed or fell back because the other computers held "a
 different version of this model".

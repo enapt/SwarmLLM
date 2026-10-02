@@ -953,6 +953,16 @@ pub(super) async fn execute_request(
             // (+0.01 always against -0.1 on one in twenty), so such a peer
             // climbed the candidate ranking and stayed over the bar that
             // decides who may be handed a plaintext prompt. Issue #21.
+            // Every peer in the plan saw this request through, which forgives
+            // whatever it failed before (`peer_outliers`): ejection is for a
+            // peer that fails a model EVERY time, not one that failed once.
+            for seg in assignment_ref
+                .segments
+                .iter()
+                .filter(|s| s.node_id != local_node_id)
+            {
+                shared_state.note_peer_completed_request(&seg.node_id, &seg.shard_id.model_id);
+            }
             let verdict = check_distributed_result(&assignment_ref, &local_node_id, output);
             settle_participant_trust(
                 &shared_state.credits.trust_manager,

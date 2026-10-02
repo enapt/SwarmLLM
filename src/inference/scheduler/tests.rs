@@ -5771,3 +5771,67 @@ fn greedy_never_hands_layer_zero_to_a_peer_for_a_request_led_here() {
         "a request led here must not fall through to a peer for layer 0"
     );
 }
+
+/// Field report 2026-10-01: a peer silent at the first decode step of every
+/// request kept being picked for its layers, each pick a 30 s deadline, while
+/// another holder of them was free. Two failures in a row eject it from the
+/// model's plans (`daemon::state::peer_outliers`) — but an ejected peer that is
+/// the only way to a part is still used (Envoy's panic threshold), so an
+/// ejection can slow a plan and never make the model unroutable.
+#[test]
+fn a_peer_failing_a_model_every_time_is_left_out_unless_it_is_the_only_way() {
+    let (state, local, _b, c) = processor_holder_beside_two_gpu_halves(5, 20.0);
+    let model = ModelId("split-14b".into());
+    let d = NodeId([0xD1; 32]);
+    let sid1 = ShardId {
+        model_id: model.clone(),
+        index: 1,
+    };
+    state
+        .model_registry
+        .record_shard_holder(sid1.clone(), d.clone());
+    state
+        .peer_registry
+        .insert(d.clone(), gpu_holder_info(&d, 5, 20.0));
+    state.connected_node_ids.insert(d.clone());
+    // This node does not hold part 1 here, so only C and D can serve it.
+    state.model_registry.remove_shard_holder(&sid1, &local);
+
+    let manifest = state.model_registry.get_manifest(&model).unwrap();
+    let scheduler = PipelineScheduler::new(state.clone());
+    let holders_of_part_1 = || {
+        let mut v: Vec<NodeId> = scheduler
+            .gather_candidates(
+                &manifest,
+                &local,
+                uuid::Uuid::new_v4(),
+                Some(1_000).into(),
+                super::Purpose::Route,
+                &|| true,
+            )
+            .into_iter()
+            .filter(|cand| cand.available_ranges.iter().any(|r| r.0 <= 16 && r.1 >= 32))
+            .map(|cand| cand.node_id)
+            .collect();
+        v.sort_by_key(|n| n.0);
+        v
+    };
+    assert_eq!(holders_of_part_1(), vec![c.clone(), d.clone()]);
+
+    // One failure is a price, not an ejection.
+    state.record_peer_delivery(&c, Some(&model), false);
+    assert_eq!(holders_of_part_1(), vec![c.clone(), d.clone()]);
+    // The second in a row ejects C: D serves part 1 alone.
+    state.record_peer_delivery(&c, Some(&model), false);
+    assert_eq!(holders_of_part_1(), vec![d.clone()]);
+    // Another model is untouched by it.
+    assert!(!state.peer_ejected_from_model(&c, &ModelId("other".into())));
+    // D ejected too: nobody healthy holds part 1, so both are used anyway.
+    state.record_peer_delivery(&d, Some(&model), false);
+    state.record_peer_delivery(&d, Some(&model), false);
+    assert_eq!(holders_of_part_1(), vec![c.clone(), d.clone()]);
+    // A request C sees through forgives it.
+    state.note_peer_completed_request(&c, &model);
+    assert!(!state.peer_ejected_from_model(&c, &model));
+    assert_eq!(holders_of_part_1(), vec![c]);
+}

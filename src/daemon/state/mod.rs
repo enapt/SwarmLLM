@@ -24,6 +24,7 @@ pub(crate) mod forward_streams;
 mod hf;
 mod metrics;
 mod models;
+mod peer_outliers;
 pub(crate) mod peer_speed;
 mod perf_history;
 mod relay;
@@ -47,6 +48,7 @@ pub use models::{
     ModelMgmt, P2pDownloadSlot, ShardDownloadClaim, FOREIGN_WISHLIST_MAX_AGE_MS,
     MAX_FOREIGN_WISHLIST_ENTRIES,
 };
+pub use peer_outliers::PeerOutliers;
 pub use peer_speed::{PeerSpeed, WorkKind};
 pub use relay::{PeerServe, RelayForwardCounter, RelayProvenFeatures, RelayRoute, ServeKind};
 pub use tp_allreduce::TpAllReduceCollector;
@@ -1205,6 +1207,7 @@ impl SharedState {
                 stats_cache: parking_lot::Mutex::new(None),
                 stats_building: std::sync::atomic::AtomicBool::new(false),
                 peer_speed: DashMap::new(),
+                peer_outliers: Default::default(),
                 peer_model_warm_at: DashMap::new(),
                 swarm_capacity: arc_swap::ArcSwap::from_pointee(SwarmCapacity::default()),
                 segment_latency: Arc::new(
@@ -2877,12 +2880,57 @@ impl SharedState {
     /// Same shape as gotcha #451: a mechanism whose input is "unknown → do not
     /// apply" is worthless until something FILLS that input on the path the
     /// mechanism exists for.
-    pub fn record_peer_delivery(&self, node_id: &crate::types::NodeId, intact: bool) {
+    pub fn record_peer_delivery(
+        &self,
+        node_id: &crate::types::NodeId,
+        model_id: Option<&crate::types::ModelId>,
+        intact: bool,
+    ) {
         self.metrics
             .peer_speed
             .entry(node_id.clone())
             .or_default()
             .observe_delivery(intact);
+        // A failure also counts toward ejecting this peer from this model
+        // (`peer_outliers`). The model is a required argument — a recorder
+        // that cannot know it says `None` at its call site — so no new
+        // recorder feeds the reliability figure and silently skips the count.
+        if let (false, Some(model_id)) = (intact, model_id) {
+            if let Some(length) = self.metrics.peer_outliers.note_failure(
+                node_id,
+                model_id,
+                std::time::Instant::now(),
+            ) {
+                tracing::warn!(
+                    node = %node_id,
+                    model = %model_id,
+                    ejected_secs = length.as_secs(),
+                    "DIAG: peer ejected from this model's plans — it failed it on consecutive \
+                     requests; it is still used for a part nobody else holds"
+                );
+            }
+        }
+    }
+
+    /// `node_id` saw a request for `model_id` through to the end — resets its
+    /// failure count and any ejection (`peer_outliers`).
+    pub fn note_peer_completed_request(
+        &self,
+        node_id: &crate::types::NodeId,
+        model_id: &crate::types::ModelId,
+    ) {
+        self.metrics.peer_outliers.note_success(node_id, model_id);
+    }
+
+    /// Is `node_id` ejected from `model_id`'s plans right now?
+    pub fn peer_ejected_from_model(
+        &self,
+        node_id: &crate::types::NodeId,
+        model_id: &crate::types::ModelId,
+    ) -> bool {
+        self.metrics
+            .peer_outliers
+            .is_ejected(node_id, model_id, std::time::Instant::now())
     }
 
     /// How many delivery outcomes we have recorded for this peer.

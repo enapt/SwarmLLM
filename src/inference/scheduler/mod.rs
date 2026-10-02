@@ -3185,6 +3185,7 @@ impl PipelineScheduler {
                 index: shard.index,
             };
             let holders = self.shared_state.model_registry.shard_holders(&shard_id);
+            let mut admitted: Vec<NodeId> = Vec::new();
             for node_id in holders {
                 // Private mode: skip nodes outside the allowed set
                 if let Some(ref allowed) = allowed_set {
@@ -3262,6 +3263,35 @@ impl PipelineScheduler {
                 if !is_local && !self.peer_can_serve_inference(&node_id) {
                     continue;
                 }
+                admitted.push(node_id);
+            }
+            // A peer that failed this model on consecutive requests is left
+            // out of its plans for a while (`daemon::state::peer_outliers`) —
+            // but never where it is the only way to this part: Envoy's panic
+            // threshold. Ejection may make a plan slower; it must never make a
+            // model unroutable. Field report 2026-10-01: a peer silent at the
+            // first decode step of every request kept being picked, each pick
+            // costing a 30 s deadline, while another holder of its layers sat
+            // idle.
+            let local_node = local_node_id.clone();
+            let (healthy, ejected): (Vec<NodeId>, Vec<NodeId>) =
+                admitted.into_iter().partition(|n| {
+                    *n == local_node || !self.shared_state.peer_ejected_from_model(n, &manifest.id)
+                });
+            let use_ejected = healthy.is_empty();
+            if !ejected.is_empty() {
+                route_info!(purpose,
+                    model = %manifest.id,
+                    shard = shard.index,
+                    ejected = ejected.len(),
+                    used_anyway = use_ejected,
+                    "DIAG: holders ejected from this model after consecutive failures"
+                );
+            }
+            for node_id in healthy
+                .into_iter()
+                .chain(ejected.into_iter().filter(|_| use_ejected))
+            {
                 node_shards.entry(node_id).or_default().push(shard.index);
             }
         }

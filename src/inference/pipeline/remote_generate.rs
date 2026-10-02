@@ -918,8 +918,11 @@ impl PipelineExecutor {
                         // the retry that helps, and the peer is eligible for
                         // the serve-failure penalty (`PipelineError` is
                         // exempt as a local scheduling problem).
-                        self.shared_state
-                            .record_peer_delivery(&segment.node_id, false);
+                        self.shared_state.record_peer_delivery(
+                            &segment.node_id,
+                            Some(&segment.shard_id.model_id),
+                            false,
+                        );
                         // The retry this invites re-plans; without this it
                         // can re-pick the peer that just went quiet and wait
                         // the same silence out again (Envoy's `previous_hosts`
@@ -970,8 +973,11 @@ impl PipelineExecutor {
                     // exactly that: a precise "needs more memory than my
                     // budget allows" refusal, produced immediately and twice,
                     // reaching the caller as a 143-second silence.
-                    self.shared_state
-                        .record_peer_delivery(&segment.node_id, false);
+                    self.shared_state.record_peer_delivery(
+                        &segment.node_id,
+                        Some(&segment.shard_id.model_id),
+                        false,
+                    );
                     // Same reclassification as the never-acknowledged arm
                     // above: the peer went quiet past its deadline — and the
                     // same bar from this request's retry. A delegate quiet
@@ -1238,8 +1244,17 @@ impl PipelineExecutor {
         // reply survived — a figure built only from intact replies measures
         // nothing. This is what steers traffic away from a lossy link now that
         // truncation no longer (wrongly) does so through the speed EMA.
-        self.shared_state
-            .record_peer_delivery(&segment.node_id, !stream_was_truncated);
+        self.shared_state.record_peer_delivery(
+            &segment.node_id,
+            Some(&segment.shard_id.model_id),
+            !stream_was_truncated,
+        );
+        if !stream_was_truncated {
+            // The peer saw this request through: whatever it failed before is
+            // forgiven (`peer_outliers`).
+            self.shared_state
+                .note_peer_completed_request(&segment.node_id, &segment.shard_id.model_id);
+        }
 
         // What arrived is not the reply that was generated, so it must not be
         // handed over as one.
