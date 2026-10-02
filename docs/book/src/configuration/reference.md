@@ -199,8 +199,8 @@ value it booted with.
 | `api_key` | string | none | Bearer token. Empty = auto-generated |
 | `rate_limit_rpm` | integer | `60` | Rate limit for `/v1/` endpoints (requests/min) |
 | `rate_limit_admin_rpm` | integer | `200` | Rate limit for `/api/admin/` endpoints (requests/min) |
-| `metrics_auth_required` | boolean | `false` | Require Bearer auth on `/metrics` even from loopback |
-| `dashboard_trust_overlay` | boolean | `true` | Hand the dashboard its access key over a Tailscale-style overlay, when this node is on one too |
+| `metrics_auth_required` | boolean | `false` | Require Bearer auth on `/metrics` even from loopback. Read at startup — restart after changing it |
+| `dashboard_trust_overlay` | boolean | `true` | Hand the dashboard its access key over a Tailscale-style overlay, when this node is on one too. Read at startup — restart after changing it |
 | `dashboard_trust_lan` | boolean | `false` | Hand the dashboard its access key to any private/LAN address |
 
 The dashboard fetches its own access key on page load. These two options decide
