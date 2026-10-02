@@ -18,8 +18,14 @@ use crate::error::SwarmError;
 /// the member.
 /// `pool_invite_codes` is included because a corrupt consumed-flag entry
 /// could allow a one-time invite code to be reused.
+///
+/// `model_meta` is the tree model manifests are STORED in (startup reloads
+/// them from it, the delete handler removes from it). This list named
+/// `manifests`, which nothing writes, so the check validated an empty tree and
+/// never looked at a stored manifest — found 2026-10-02 by a docs-against-code
+/// review.
 const CRITICAL_TREES: &[&str] = &[
-    "manifests",
+    "model_meta",
     "credits",
     "nicknames",
     "pool_state",
@@ -44,7 +50,7 @@ const CRITICAL_TREES: &[&str] = &[
 /// tree is one such case — see below.
 fn validate_strict(tree: &str, value: &[u8]) -> bool {
     match tree {
-        "manifests" => serde_json::from_slice::<swarmllm_types::ModelManifest>(value).is_ok(),
+        "model_meta" => serde_json::from_slice::<swarmllm_types::ModelManifest>(value).is_ok(),
         "credits" => serde_json::from_slice::<swarmllm_types::CreditBalance>(value).is_ok(),
         "nicknames" => serde_json::from_slice::<swarmllm_types::NicknameRecord>(value).is_ok(),
         "pool_state" => serde_json::from_slice::<swarmllm_types::PoolState>(value).is_ok(),
@@ -835,7 +841,7 @@ mod tests {
     #[test]
     fn integrity_check_valid_entries() {
         let db = Database::open_temp().unwrap();
-        db.insert_raw("manifests", "model1", &test_model_manifest_json())
+        db.insert_raw("model_meta", "model1", &test_model_manifest_json())
             .unwrap();
         db.insert_raw("credits", "balance", &test_credit_balance_json())
             .unwrap();
@@ -843,29 +849,29 @@ mod tests {
         let report = db.check_integrity();
         assert_eq!(report.total_corrupt, 0);
 
-        let manifests = report.trees.get("manifests").unwrap();
-        assert_eq!(manifests.total_entries, 1);
-        assert_eq!(manifests.valid_entries, 1);
-        assert_eq!(manifests.corrupt_entries, 0);
+        let model_meta = report.trees.get("model_meta").unwrap();
+        assert_eq!(model_meta.total_entries, 1);
+        assert_eq!(model_meta.valid_entries, 1);
+        assert_eq!(model_meta.corrupt_entries, 0);
     }
 
     #[test]
     fn integrity_check_detects_corrupt_entry() {
         let db = Database::open_temp().unwrap();
         // Insert a type-valid manifest entry
-        db.insert_raw("manifests", "good", &test_model_manifest_json())
+        db.insert_raw("model_meta", "good", &test_model_manifest_json())
             .unwrap();
         // Insert raw invalid bytes directly
-        db.insert_raw("manifests", "corrupt_key", b"not valid json {{{")
+        db.insert_raw("model_meta", "corrupt_key", b"not valid json {{{")
             .unwrap();
 
         let report = db.check_integrity();
         assert_eq!(report.total_corrupt, 1);
 
-        let manifests = report.trees.get("manifests").unwrap();
-        assert_eq!(manifests.total_entries, 2);
-        assert_eq!(manifests.valid_entries, 1);
-        assert_eq!(manifests.corrupt_entries, 1);
+        let model_meta = report.trees.get("model_meta").unwrap();
+        assert_eq!(model_meta.total_entries, 2);
+        assert_eq!(model_meta.valid_entries, 1);
+        assert_eq!(model_meta.corrupt_entries, 1);
     }
 
     /// R138 — `validate_strict` enforces per-tree type contracts, so a
