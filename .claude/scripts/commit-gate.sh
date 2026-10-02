@@ -4,7 +4,7 @@
 # those guards read.
 #
 # WHY: .claude/rules/completeness.md § "A count edited after the test run is an
-# untested change". Test counts live in CLAUDE.md x2 and README.md x1, the i18n
+# untested change". Test counts live in CLAUDE.md and README.md, the i18n
 # key totals in CLAUDE.md and docs/ARCHITECTURE.md, the MSRV in several places.
 # The trap is not "run the tests" — it is that the number can only be written
 # down AFTER the run that produced it, so the edit that breaks the guard is the
@@ -21,7 +21,8 @@
 #
 # Fails OPEN everywhere: unparseable payload, missing cargo, or a hook timeout
 # all let the commit through. This gate exists to catch an honest mistake, not
-# to be a lock.
+# to be a lock. The 180 s hook timeout is outlasted by the rebuild after a
+# version bump; the pre-push hook runs the same guard, so a push still checks.
 set -uo pipefail
 
 INPUT=$(cat)
@@ -31,13 +32,15 @@ CMD=$(printf '%s' "$INPUT" | python3 -c \
   "import sys,json; print((json.load(sys.stdin).get('tool_input') or {}).get('command',''))" \
   2>/dev/null || echo "")
 
-# Only `git commit`. Not `git commit --dry-run`, not a commit inside a string.
+# Only `git commit`, never `--dry-run`. Matched anywhere in the command text, so
+# a command that merely MENTIONS it in a string is checked too — harmless, it
+# only runs the guard (and denies only if the guard fails).
 case "$CMD" in
     *"git commit"*) ;;
     *) exit 0 ;;
 esac
 case "$CMD" in
-    *--dry-run*|*--amend*) exit 0 ;;   # amend re-runs nothing new; dry-run writes nothing
+    *--dry-run*) exit 0 ;;   # writes nothing. An --amend CAN add a changed file, so it is checked.
 esac
 
 cd "$PROJECT_DIR" 2>/dev/null || exit 0
@@ -51,8 +54,26 @@ CHANGED=$( { git diff --cached --name-only; git diff --name-only; } 2>/dev/null 
            | sort -u | grep -E "$CROSS_CHECKED" || true)
 [ -z "$CHANGED" ] && exit 0
 
-OUT=$(cargo test --test repo_consistency --no-default-features \
-        --features dev,claude-subscription 2>&1) || {
+# Time-boxed INSIDE the hook (165 s of the 180 s hook timeout): a commit right
+# after a Rust edit rebuilds the crate first, and a hook the harness kills
+# lets the commit through in silence — shown on 2026-10-02, when a planted
+# wrong count was committed cold and refused once the build was warm. When the
+# guard cannot finish, say so instead (`timeout` kills the whole process group).
+OUT=$(timeout --kill-after=5 165 cargo dev-test --test repo_consistency 2>&1)
+RC=$?
+if [ "$RC" -eq 124 ] || [ "$RC" -eq 137 ]; then
+    python3 - "$CHANGED" <<'PY'
+import json, sys
+msg = ("commit gate: the repo-consistency guard did NOT run — the build did not "
+       "finish within the hook's time (a cold build after a Rust change). The "
+       "commit is allowed; run `cargo dev-test --test repo_consistency` before "
+       "pushing (the pre-push hook runs it too). Files: " + sys.argv[1].replace("\n", ", "))
+print(json.dumps({"systemMessage": msg, "hookSpecificOutput": {
+    "hookEventName": "PreToolUse", "additionalContext": msg}}))
+PY
+    exit 0
+fi
+[ "$RC" -eq 0 ] || {
     FAIL=$(printf '%s' "$OUT" | grep -E "^(test .* FAILED|failures:|thread)" | head -20)
     DETAIL=$(printf '%s' "$OUT" | grep -A12 "^failures:" | head -40)
     python3 - "$CHANGED" "$FAIL" "$DETAIL" <<'PY'

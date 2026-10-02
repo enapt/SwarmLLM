@@ -43,7 +43,7 @@ Three carry contracts, not just versions:
 - **Errors**: `thiserror` for `SwarmError` in `src/error.rs`; `anyhow` only in
   `main.rs` and integration tests. **Never choose an error type at a call site**
   — `classify_error` is the single answer; the variant → status contract is in
-  `.claude/rules/completeness.md`. Network: retry with backoff (3). Inference:
+  `.claude/rules/arch-errors.md`. Network: retry with backoff (3). Inference:
   return immediately, never retry silently. Shard integrity: quarantine,
   re-download, penalize trust.
 - **Naming**: `PascalCase` types, `snake_case` fns. Newtypes —
@@ -66,7 +66,8 @@ Three carry contracts, not just versions:
 - **5** WS message types, **2** broadcast channels. Do not add to either set.
 - i18n: **1401 translation keys** (**1403 entries per locale** incl. `_lang` + `_dir`) × 21,
   sorted. Counts asserted — **update BOTH CLAUDE.md and `docs/ARCHITECTURE.md`**.
-  A new key MUST be translated into all 21; **no English fallback.**
+  A new key — from the frontend OR minted in Rust — MUST be translated into all 21; never rely on
+  the runtime English fallback.
 - Payload ~1196 KB, capped by `frontend_payload_stays_within_budget` — a
   regression budget, not a goal.
 
@@ -93,10 +94,9 @@ request-response patch — plus 17 in the `swarmllm` BIN target (`cli::*`, count
 nowhere else). They are refreshed at release (`memory/release_gate.md`), not
 per change, so a higher count since then is expected. The types crate and the
 vendored patch are **not** run by a bare `cargo test`:
-`cargo test --manifest-path vendor/libp2p-request-response/Cargo.toml --lib`.
-
-⚠ **A count edited after the test run is an untested change** — a guard checks CLAUDE.md
-against README.md and the commit hook runs it when either changes (main went red twice before).
+`cargo test --manifest-path vendor/libp2p-request-response/Cargo.toml --lib`. Two VLM
+targets need model files: `llava_e2e` (`#[ignore]`) and `vlm_mmproj_e2e` (skips without an
+mmproj). Never edit a count without the run behind it (`completeness.md`).
 
 - Unit tests in-module `#[cfg(test)]`; integration in `tests/`, `--test-threads=1`. Real-model run:
   `SWARMLLM_TEST_MODEL_DIR=… cargo dev-test --test integration_phase10_11 -- --ignored end_to_end`.
@@ -168,7 +168,7 @@ against README.md and the commit hook runs it when either changes (main went red
 
 ## Subagents, workflows and usage (Max 5x plan)
 
-- Reasoning agents (`code-reviewer`, `code-architect`, `Plan`, `root-cause`) →
+- Reasoning agents (`feature-dev:code-reviewer`, `feature-dev:code-architect`, `Plan`, `root-cause`) →
   **sonnet, never haiku**; haiku only to run a command and report. **Never
   delegate production code writing.** `root-cause` returns CAUSED / NOT-CAUSED /
   UNDETERMINED, never a fix — use it BEFORE blaming a change, especially yours.

@@ -5,17 +5,18 @@
 # claim to verify, not a fact.
 #
 # Writes one JSONL line per load to .claude/logs/instructions-loaded.jsonl.
-# What loaded this session, newest last:
-#   jq -r '"\(.at)  \(.reason)  \(.lines)L  \(.file)"' .claude/logs/instructions-loaded.jsonl | tail -20
-# Always-on cost of the most recent session start:
-#   .claude/scripts/instruction-cost.sh
+# (jq is not installed on the dev machine — these use python3.)
+# What loaded, newest last:
+#   python3 -c 'import json;[print(d["at"],d["reason"],d["lines"],d["file"]) for d in map(json.loads,open(".claude/logs/instructions-loaded.jsonl"))]' | tail -20
+# Always-on bytes of the most recent session start:
+#   python3 -c 'import json;r=[d for d in map(json.loads,open(".claude/logs/instructions-loaded.jsonl")) if d["reason"]=="session_start"];s=r[-1].get("session");print(sum(d["bytes"] for d in r if d.get("session")==s))'
 #
 # ⚠ `lines`/`bytes` came from a `file_content` key that no payload has ever
 # carried, so both were 0 on every record ever written and the cost query in
 # this header reported `bytes: 0`. The size is now measured by STATTING `path`,
 # which the payload does carry and which the first version already logged
-# correctly. Same family as the `path`-vs-`file_path` bug that made
-# pre-edit-check.sh inert: a hook whose exit code is 0 and whose fields are
+# correctly. Same family as the `path`-vs-`file_path` bug that made a
+# since-removed edit hook inert: a hook whose exit code is 0 and whose fields are
 # empty looks exactly like a hook that is working (gotcha #614, #617).
 #
 # `session_id` is recorded so a gate can ask "did this rules file load in THIS

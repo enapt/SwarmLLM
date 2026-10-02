@@ -18,7 +18,7 @@ Scope: `$ARGUMENTS` if given, otherwise everything in `git diff` and `git diff -
    - **One invariant, N paths** (`.claude/rules/architecture.md`): does a shared helper exist that this change
      re-implements or skips? Enumerate the other paths the same property must hold on.
    - **Error typing**: no error type chosen at a call site; `classify_error` / `reclassify_flattened_error`
-     (`.claude/rules/completeness.md`).
+     (`.claude/rules/arch-errors.md`).
    - **Live config**: `state.cfg()`, never `state.config`, for anything changeable at runtime.
    - **Wire compatibility**: a new message, field or trailer is gated at the SENDER on a `features` bit.
    - **A DashMap guard across `.await`**, a fixed timeout on variable-size work, i18n for user-visible text.

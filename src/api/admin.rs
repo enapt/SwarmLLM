@@ -1634,7 +1634,7 @@ pub async fn reload_config(
     //   missing file → 404 NotFound (the dashboard hasn't saved yet)
     //   parse / IO error → 400 Validation (broken file content)
     // SwarmError::Config is reserved for startup-only errors per the rule in
-    // .claude/rules/completeness.md and would otherwise leak the unhelpful
+    // .claude/rules/arch-errors.md and would otherwise leak the unhelpful
     // "invalid_request_error" type for what is really a config-file issue.
     let params = crate::config::reload_operational_params(&config_path).map_err(|e| match e {
         crate::error::SwarmError::Config(msg) if msg.starts_with("Config file not found") => {

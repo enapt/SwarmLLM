@@ -19,14 +19,12 @@ replaced, what it was measured at, what a change must keep — lives in
 | `src/daemon/state/`, `src/config/`, `src/credit/`, `src/storage/` | `arch-state-and-config.md` | `docs/invariants/state-and-config.md` |
 | `frontend/` | `arch-frontend.md` | `docs/invariants/frontend.md` |
 | `tests/`, `examples/` | `arch-guards-and-tests.md` | — |
+| any file under `src/` | `arch-errors.md` | `docs/invariants/api-surfaces.md` § "Error type discipline" |
 | `frontend/`, `error.rs`, `auto_manage/`, `reference.rs` | `i18n.md` | — |
 
-**These load on the Read tool ONLY** — `cat`/`sed`/`grep` through Bash do not
-trigger them (`workflow.md` § "What the hooks enforce"). If you are reasoning
-about a subsystem without opening its files, Read its rules file directly.
-
-**A new user-facing string — from the frontend OR minted in Rust as an i18n key
-— must be translated into all 21 locales. There is no English fallback.**
+The table names the main directories; each file's `paths:` frontmatter is the
+full list. If you reason about a subsystem without opening its files, Read its
+rules file directly.
 
 ## SharedState Sub-Structs
 
@@ -145,8 +143,6 @@ For dashboard refresh signals, use `state.events.dashboard_tx`:
 - `DashboardSignal::ModelsChanged` — after shard download/load/prune/delete
 - `DashboardSignal::PeersChanged` — after peer connect/disconnect
 - `DashboardSignal::UpdateAvailable(info)` — after update check
-
-There are ONLY 2 broadcast channels. Do NOT add new ones.
 
 ## Additive Protocol Evolution (NETWORKING_PLAN cross-cutting)
 

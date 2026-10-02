@@ -8,29 +8,11 @@ Fix dead code, stale references, or broken patterns now — don't paper over wit
 
 `grep -rn` for the old name across ALL files — not just `src/`. Check `docs/`, `frontend/`, `tests/`, `python/`. Fix every stale reference. Update `///` doc comments if behavior changed. Check whether `CLAUDE.md` Architecture section still matches.
 
-## Pre-push integrity grep checks
-
-A doubled sub-struct path (`.events.events.`) and console output in
-`frontend/js/` are guards in `tests/repo_consistency.rs` since 2026-10-02.
-What is still by hand, after touching frontend JS:
-```
-for f in frontend/js/**/*.js; do node -c "$f"; done     # JS syntax
-node examples/frontend_load_check.js                     # JS actually LOADS
-```
-
-`node -c` is a syntax check and **nothing more** (gotcha #568): a reference to
-a name that is out of scope inside a function body passes it, and so does a
-component whose IIFE throws the moment it runs. `frontend_load_check.js` loads
-every module in `index.html`'s order and reports what throws — run it after
-deleting or renaming anything a component exports. It is not a substitute for
-looking at the page: what it catches and what it deliberately does not are
-listed at the top of the file.
-
 Run `/cleanup` after committing changes to: SharedState fields, API endpoints, JS file structure, broadcast channels, WebSocket message formats, error type → HTTP status mappings.
 
 ## A count edited after the test run is an untested change
 
-Test counts live in `CLAUDE.md` (twice) and `README.md`, cross-checked by
+Test counts live in `CLAUDE.md` and `README.md`, cross-checked by
 `the_readme_test_counts_agree_with_each_other_and_with_claude_md`; the i18n key
 count lives in `CLAUDE.md` and `docs/ARCHITECTURE.md` with its own guard. A
 count can only be written AFTER the run that produced it, so the edit that
@@ -42,84 +24,11 @@ count-only commits since August had each been broadcast to Discord). The same
 care applies to every figure a guard cross-checks between files: the frontend
 payload budget, the i18n totals, the MSRV.
 
-## Error type discipline
+## Error types
 
-**Never choose an error type at a call site.** `crate::error::classify_error`
-returns `(StatusCode, client-safe message, error_type)` and is the single answer
-for every surface — HTTP, both SSE encoders, the Responses API, MCP. A literal
-next to `"type":` is the bug: it produced the same failure reported four
-different ways at once (gotchas #300-#305), and
-`a_streamed_error_names_the_same_failure_as_its_non_streaming_sibling` in
-`tests/repo_consistency.rs` now fails the build on a new one.
-
-A surface may **refine** — Responses names a provider failure `upstream_error`,
-MCP maps 503 to `RESOURCE_UNAVAILABLE`, Anthropic translates into its own
-vocabulary — when the refinement names something *more precisely* than the
-canonical answer, and it must be commented at its definition. Naming the same
-meaning with a different word is a divergence, not a refinement, and is a bug.
-
-**A type that crossed a boundary is already lost.** `SwarmError` survives neither
-the worker IPC hop nor the network hop; both deliver a `String` that gets
-re-wrapped as `Inference` → 500. Call `reclassify_flattened_error` before falling
-back. This is the ONLY sanctioned place to derive a class from a message, and it
-matches `SwarmError`'s own `#[error(...)]` Display prefixes — which are part of
-the type, not prose written for a human (#295's trap).
-
-The variant → status contract:
-
-- `SwarmError::Validation` → 400, API input errors
-- `SwarmError::ModelNotAvailable` / `ShardNotFound` → 404
-- `SwarmError::Config` → startup / config file only
-- `SwarmError::ServiceUnavailable` → 503, *this server* can't serve (missing local binary, subprocess spawn/I/O failure, broken pipe, init timeout). Use for all subprocess lifecycle failures (R118-R119 cleanup).
-- `SwarmError::LocalMemoryUnavailable` → 503, and deliberately the same message shape and `error_type` as the line above: this node's own memory budget refused the load. The variant exists for ONE decision — it is the only local failure the router re-plans without a remote segment, because it is the only one where the re-plan is handed a new fact (`note_local_memory_refusal`) and so cannot repeat itself. Do not widen `ServiceUnavailable`'s retry to match it, and do not emit this from any site a re-plan cannot help.
-- `SwarmError::ProviderError {status, body}` → upstream returned an error OR upstream response couldn't be parsed (matches R119 translate.rs fix: parsing malformed upstream chat-completions response uses ProviderError, NOT Internal and NOT Validation, even though the upstream data passes through user-triggered code paths). Preserves upstream HTTP status.
-- `SwarmError::Internal` → actual bugs (500). Reach for it only when no external party can be blamed. Serializing our own well-typed struct failing is Internal; subprocess crashing is NOT.
-- `SwarmError::PeerUnresponsive` → 503, a peer took the request and went silent (ACK sweep, first-token deadline, or the per-segment result deadline in `pipeline/local.rs::segment_timeout_error`). Penalty-ELIGIBLE — as a `PipelineError` the silent peer inherited that variant's penalty exemption (fixed 2026-08-16 for the first two paths, 2026-08-25 for the third, gotcha #389). **Retried by TYPE since 2026-09-12** (`router::peer_went_silent`, gated on a remote segment having been involved) — the prose list in `is_transient_remote_failure` (`"never acknowledged"`, `"silent drop"`, `"remote-generate timed out"`) was the #295 trap and left the segment-deadline wording with no retry. Safe only because every producer of the variant now calls `blacklist_holder_for_request` on the silent peer FIRST (`pipeline/local.rs` deadline arm, both `remote_generate.rs` arms), so the re-plan cannot re-pick it and wait the deadline twice. A new producer of this variant must do the same.
-- `SwarmError::SegmentFailoverExhausted` → 503, mid-pipeline holder failure with no standby. Deliberately NOT `ModelIncompleteInSwarm` (variant-matched by `assembly_failed_for_lack_of_holders` → pointless DHT wait) and NOT `ServiceUnavailable` (triggers the peer-blacklist retry); penalty-exempt because it names no culprit.
-
-Never use `Config` or `Internal` for request validation. When unsure between Internal vs ProviderError vs ServiceUnavailable, look at the surrounding code in the same function — it usually picks a clear pattern (translate.rs lines 549-559 use ProviderError, so the tool_call missing-field arms should too).
-
-### A policy refusal is 503, and must never be told to retry
-
-A request this node declines *by configuration* — private mode, prompt privacy —
-is `ServiceUnavailable`-shaped (503), not `Internal` (500). 500 reports a
-deliberate setting as a crash: it tells monitoring this node has a bug and the
-user nothing they can act on. `PrivateModeUnavailable` and
-`PromptPrivacyUnavailable` are the two worked examples — each is its own variant
-with its own `error_type`, not a string stuffed into a general variant.
-
-**Give a permanent failure its own variant rather than filing it under
-`PipelineError(String)`.** That variant mixes transient and permanent causes, and
-its hint is picked by substring-matching user-facing prose that gets rewritten —
-so a new permanent failure silently inherits a *default* hint asserting that a
-peer went offline and to try again. Three failures have now been given that
-advice for a condition retrying can never fix (gotcha #295).
-
-**A variant carrying two causes that need opposite advice is the same bug.**
-`Unauthorized` meant both *no valid credential* and *valid credential, wrong
-machine* (the loopback-only update and shutdown endpoints). One hint had to serve
-both, so remote admins were told to go and fetch an API key they had already sent
-successfully — the advice could not work, and following it looped. Split into
-`LocalOnly` → 403 `permission_error` (gotcha #309). Ask of any shared variant:
-*would the two situations get the same next step?* If not, they are two variants.
-
-Two follow-ups a new `SwarmError` variant must not skip:
-
-- **`failure_is_penalty_worthy`** (`router/distributed_exec.rs`) defaults to
-  `_ => true`, i.e. blame the peer. A variant describing OUR OWN config or a
-  local fault must join the local-only list or it docks credits from innocent
-  peers.
-- **`error_hint`** — if retrying cannot help, say so. Test on the ADVICE, not the
-  wording: a test pinned to a phrase passes while the user is still looping.
-
-## Verify before deleting sweep findings
-
-Sweep agents report dead code / orphaned keys with confidence ≥80%, but their grep may miss call sites in adjacent directories (R120 caught Agent 4 missing 6 `enc.*` callers in `init.js`, `core/utils.js`, `chat.js`). Before deleting anything an agent flagged:
-```bash
-grep -rn "thing_name" frontend/js/ frontend/index.html frontend/css/   # full frontend
-grep -rn "thing_name\b" src/ tests/ crates/                            # word-boundary; catches re-exports
-```
-Cheap to verify; expensive to mis-restore. If callers exist, log as wontfix in `.claude/sweep-log.jsonl` to prevent re-report.
+**Never choose an error type at a call site** — `classify_error` is the single
+answer. The variant → status contract and the rules for a new variant are in
+`.claude/rules/arch-errors.md`, which loads with any file under `src/`.
 
 ## Re-exports and visibility downgrades
 

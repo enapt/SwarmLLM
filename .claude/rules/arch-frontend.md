@@ -202,3 +202,21 @@ reference `U.*` without declaring `var U = App.utils` first will throw
 swarm-tab regression hid behind this until the Capacity Plan view
 rendered for the first time. When adding a new component, copy the
 existing boilerplate from a sibling file (e.g. `chat.js`).
+
+## After touching frontend JS: two checks by hand
+
+A doubled sub-struct path (`.events.events.`) and console output in
+`frontend/js/` are guards in `tests/repo_consistency.rs` since 2026-10-02.
+What is still by hand, after touching frontend JS:
+```
+for f in frontend/js/**/*.js; do node -c "$f"; done     # JS syntax
+node examples/frontend_load_check.js                     # JS actually LOADS
+```
+
+`node -c` is a syntax check and **nothing more** (gotcha #568): a reference to
+a name that is out of scope inside a function body passes it, and so does a
+component whose IIFE throws the moment it runs. `frontend_load_check.js` loads
+every module in `index.html`'s order and reports what throws — run it after
+deleting or renaming anything a component exports. It is not a substitute for
+looking at the page: what it catches and what it deliberately does not are
+listed at the top of the file.

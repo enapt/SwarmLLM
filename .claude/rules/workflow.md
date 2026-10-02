@@ -36,12 +36,15 @@ reading something. `research-gate.sh` refuses a change to a file when:
 
 1. **its subsystem rules never loaded** — `arch-*.md` load on the **Read tool
    only**; `cat`/`sed`/`grep` through Bash do not trigger them (measured
-   2026-09-16, gotcha #617). Read the file, or its rules file, first.
+   2026-09-16, gotcha #617). Read the file, or its rules file, first. A rules
+   file created mid-session is not auto-loaded until the next session — Read it
+   directly (#778). `i18n.md` is not gated (only `arch-*.md`).
 2. **the file exists and this session never looked at it** — read-before-edit
    for the Bash path. A subagent's own reads count (#688).
 3. **the task consulted nothing this repo already knows** — per task
-   (`prompt_id`): `gotchas.md`, `closed_findings.md`, `docs/invariants/`,
-   `FUTURE_WORK.md`, the sweep log, or a web search satisfies it.
+   (`prompt_id`): `gotchas.md`, `closed_findings.md`, `open_cautions.md`,
+   `docs/invariants/`, `FUTURE_WORK.md`, `DIAGNOSTICS.md`, `ARCHITECTURE.md`,
+   the sweep log, or a web search satisfies it.
 
 ⚠ It reads any path NAMED in a mutating Bash command as a target, heredoc
 bodies included. For a multi-file edit script, write it to the scratchpad and
@@ -53,16 +56,12 @@ before a `git commit` touching a file whose figures another document restates
 `frontend/i18n/*.json`, the book's installation page) — it tests THIS content,
 which a stamp file could not.
 
-**Both fail OPEN** (unparseable payload, missing cargo, timeout), and **a hook
-is verified by its OUTPUT, never its exit code** (#614) — three hooks here sat
+**Both fail OPEN** (unparseable payload, missing cargo, timeout — the commit
+gate now SAYS so when a cold build outlasts it, #779), and **a hook is verified
+by its OUTPUT, never its exit code** (#614) — three hooks here sat
 inert for months looking healthy. After touching the gate's patterns run
 `python3 examples/research_gate_probe.py`: one planted violation per Bash
 mutation form plus a null control.
-
-There is **no compile-after-edit hook** (removed 2026-10-02): it ran a blocking
-`cargo check` on a second feature set after every `.rs` edit (~13 s each) and
-duplicated the one `cargo lint` that matters. Run `cargo lint` when a change is
-complete.
 
 ## I do the mechanics. The user does what needs their hands. (2026-09-22)
 

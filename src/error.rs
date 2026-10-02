@@ -819,7 +819,7 @@ pub fn classify_error(err: &SwarmError) -> (StatusCode, String, &'static str) {
         // that was fine all along.
         SwarmError::LocalOnly(_) => (StatusCode::FORBIDDEN, err.to_string(), "permission_error"),
         // SwarmError::Config is for daemon startup / config-file errors per
-        // .claude/rules/completeness.md. If it surfaces in an HTTP response
+        // .claude/rules/arch-errors.md. If it surfaces in an HTTP response
         // path, the daemon has shipped misconfigured — that's a 500, not a
         // 400 (the user did not send invalid input).
         SwarmError::Config(_) => (

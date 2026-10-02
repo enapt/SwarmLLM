@@ -13,14 +13,15 @@ isolation (every subagent already starts with a fresh context; a worktree only i
 ## Prior findings — by grep, never pasted
 
 `.claude/sweep-log.jsonl` holds every finding ever made (~440 KB). **Never paste it into a prompt** — that is
-~110K tokens per agent. Tell each agent: *before reporting a finding, `grep -n '<file or symbol>'
-.claude/sweep-log.jsonl`; drop it if a `fixed` or `wontfix` entry covers it.*
+~110K tokens per agent. Tell each agent: *before reporting a finding, search `.claude/sweep-log.jsonl` for the
+file or symbol with the Grep tool; drop it if a `fixed` or `wontfix` entry covers it.* (The reviewer agents
+have Grep, Glob and Read, but no Bash.)
 
 ## Rotation
 
-Offset = (line count of the sweep log ÷ 10) mod file count. Agents 1 and 3 start at that offset in
-`find src/ -name '*.rs' | sort`, agents 2 and 4 in `find frontend/js/ -name '*.js' | sort`, wrapping around,
-and each scans its whole range.
+YOU compute each agent's file list and paste it into its prompt — the agents cannot run `find`. Offset =
+(line count of the sweep log ÷ 10) mod file count; agents 1 and 3 take `find src/ -name '*.rs' | sort` from
+that offset, agents 2 and 4 `find frontend/js/ -name '*.js' | sort`, wrapping around.
 
 ## Agents (launch all four in one message, `model: sonnet`)
 
@@ -38,9 +39,17 @@ Each finding: file, line, what is wrong, confidence ≥ 80%. Not test-only code,
 
 ## After the agents return
 
-1. Deduplicate, then **verify every finding yourself before acting** — agents miss call sites in adjacent
-   directories (`.claude/rules/completeness.md` § "Verify before deleting sweep findings").
+1. Deduplicate, then **verify every finding yourself before acting** — see "Verify before deleting" below.
 2. Fix what is obvious and low-risk immediately, committing as you go. For the rest, research (diagnosis rule
    0) and decide — you manage this project; raise with the user only what needs their hands.
 3. Append one line per addressed finding to `.claude/sweep-log.jsonl`:
    `{"file":"…","line":N,"kind":"…","summary":"…","status":"fixed|wontfix|deferred","date":"YYYY-MM-DD"}`
+
+## Verify before deleting
+
+Sweep agents report dead code / orphaned keys with confidence ≥80%, but their grep may miss call sites in adjacent directories (R120 caught Agent 4 missing 6 `enc.*` callers in `init.js`, `core/utils.js`, `chat.js`). Before deleting anything an agent flagged:
+```bash
+grep -rn "thing_name" frontend/js/ frontend/index.html frontend/css/   # full frontend
+grep -rn "thing_name\b" src/ tests/ crates/                            # word-boundary; catches re-exports
+```
+Cheap to verify; expensive to mis-restore. If callers exist, log as wontfix in `.claude/sweep-log.jsonl` to prevent re-report.

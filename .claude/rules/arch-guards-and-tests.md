@@ -7,11 +7,10 @@ paths:
 # Repo-consistency guards and tests
 
 Invariants this codebase has paid to learn. Each heading is the rule; the text
-under it is what to do. The evidence — what the rule replaced, what it was
-measured at, and what a change must keep — lives in `docs/invariants/`.
+under it is what to do, with its evidence inline (there is no
+`docs/invariants/` topic for guards).
 
-**This file loads only when you touch the code it governs.** Read the linked
-`docs/invariants/` topic file before changing code a rule names.
+**This file loads only when you touch the code it governs.**
 
 ## A source-scanning guard is only as good as the spellings it knows (2026-08-30)
 

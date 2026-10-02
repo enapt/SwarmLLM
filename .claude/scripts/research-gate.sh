@@ -35,8 +35,8 @@
 #      which is the only one of its three items a machine can check.
 #
 # Fails OPEN on any parse error: a hook that cannot read its payload must not
-# become a hook that blocks everything (the lesson pre-edit-check.sh was fixed
-# for). Verify it by planting the violation, never by its exit code.
+# become a hook that blocks everything (the lesson a since-removed edit hook was
+# fixed for, gotcha #614). Verify it by planting the violation, never by its exit code.
 set -uo pipefail
 
 HOOK_INPUT="$(cat)" PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(pwd)}" python3 <<'PY'

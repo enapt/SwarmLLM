@@ -51,8 +51,10 @@ exactly like a rule nobody follows:
 ```bash
 python3 - <<'EOF'
 import glob,re
-for f in glob.glob('.claude/rules/arch-*.md'):
-    for p in re.findall(r'  - "(.*)"', open(f).read().split('---')[1]):
+for f in glob.glob('.claude/rules/*.md'):
+    t = open(f).read()
+    if not t.startswith('---'): continue      # always-loaded, no paths
+    for p in re.findall(r'  - "(.*)"', t.split('---')[1]):
         print(f"{len(glob.glob(p, recursive=True)):5d}  {p}  {f}")
 EOF
 ```

@@ -1,5 +1,6 @@
 #!/bin/bash
-# Pre-push hook: run cargo fmt --check and cargo clippy before pushing.
+# Pre-push hook: Cargo.lock in step, cargo fmt --check, the swarmllm-types tests,
+# `cargo lint` (plus a default-feature lint when needed) and the repo-consistency guard.
 #
 # Lints and tests on ONE feature set — the `cargo lint` / `cargo dev-test`
 # aliases in .cargo/config.toml — so this hook reuses what the commit gate and

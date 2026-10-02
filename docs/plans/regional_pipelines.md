@@ -184,7 +184,7 @@ cause was that no node had the memory (`assemble_pipeline_for completed
 segments=7` followed by `no route fits even what the peers themselves
 advertised`). A user reading it goes hunting for missing shards when the answer
 is RAM, and the hint — fetch the missing piece — cannot fix a capacity refusal.
-Wants its own variant per `completeness.md`.
+Wants its own variant per `.claude/rules/arch-errors.md`.
 
 We cannot answer it yet — we only measure RTT to peers, never between them.
 Cheapest probe: take RTT vectors from the two vantage points we control (local

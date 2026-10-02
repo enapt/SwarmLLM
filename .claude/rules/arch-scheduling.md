@@ -24,11 +24,9 @@ measured at, and what a change must keep — lives in `docs/invariants/`.
 
 ## The component that will refuse must be asked while the plan can still change
 
-Two halves of one rule, both learned from a 16 GB processor-only Mac mini that
-was assigned 36 of a 48-layer 14B, refused them at load, retried, and produced
-the identical plan (gotcha #452).
+Admission runs at load time, too late to reshape a plan (#452). **`ModelProcessPool::max_local_hostable_layers`** bounds the LOCAL node from the loader's own estimator and budgets (`None` = unknowable, never "no room"); **`process_pool::segment_shape`** prices the segment the worker will actually map, never the whole model.
 
-→ `docs/invariants/scheduling.md`
+→ `docs/invariants/scheduling.md` § "The component that will refuse must be asked while the plan can still change"
 
 ## A whole model on one peer is handed over, never driven token by token (2026-09-27)
 
@@ -80,11 +78,9 @@ The whole-model hand-off waits in `hand_off` when the priced search will run; it
 
 ## An unmeasured candidate is priced pessimistically, never excluded
 
-`priced_from_a_measurement` is one predicate with one meaning — "does the cost
-model have anything real about this candidate" — and both consumers must read
-it the same way. They did not.
+`priced_from_a_measurement` is one predicate with one meaning, read the same way by `delegation_target` and `pipeline_may_replace_processor_route`: an unmeasured peer competes on the pessimistic `UNKNOWN_COMPUTE_MS` prior, never vetoed (#479). The BASELINE must be priced — with no price for "here", stay home. A routing test pins the local speed (`with_local_processor_speed`).
 
-→ `docs/invariants/scheduling.md`
+→ `docs/invariants/scheduling.md` § "An unmeasured candidate is priced pessimistically, never excluded"
 
 ## A gate named for a comparison must make it, and against a route that exists
 
@@ -178,10 +174,9 @@ peer differently from the others.
 
 ## Delegation asks the same capacity bound routing does, and the retry it promises must exist
 
-Three defects reported from one live node on v0.3.153, all in the path that
-hands a whole model — or a boomerang's middle — to a single peer.
+**`scheduler::delegation_target` gates on `max_hostable_layers`** — the bound `route_shortest_path` uses — over `delegated_layer_span(num_layers, encrypted)`, the same span `boomerang_assignment` hands over (#454), and prices the prompt through `costs_more_than_staying_here` (`parallax::vertex_cost`, the search's own function; #455).
 
-→ `docs/invariants/scheduling.md`
+→ `docs/invariants/scheduling.md` § "Delegation asks the same capacity bound routing does, and the retry it promises must exist"
 
 ## A cap sized in units of the WORK is a ceiling on the product
 
@@ -247,12 +242,9 @@ budget it is describing.
 
 ## A peer's stated reason is the answer; do not substitute one of your own
 
-Two helpers in `inference::pipeline` own what happens when a serving node
-refuses a forward. Both exist because the correct handling was implemented on
-the **verify** hops and missing on the **prefill** hops, in the same files, with
-a comment on one of them explaining exactly why it mattered.
+**`pipeline::peer_error_from_result`** recovers a refusing peer's stated reason from its `LayerResult` (`finish_reason`, not `token_ids.is_empty()`) at the `forward_through_segments` choke point; **`failover_segment` loops over standbys** and a standby's error is that standby's failure, never the segment's output (#435); **`every_holder_would_refuse`** (only `Validation`) is asked BEFORE failing over. Every consumer of a `LayerResult` checks `finish_reason` before the payload.
 
-→ `docs/invariants/scheduling.md`
+→ `docs/invariants/scheduling.md` § "A peer's stated reason is the answer; do not substitute one of your own"
 
 ## A reply a PEER generated is finalised here, not taken as it arrives
 

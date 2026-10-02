@@ -1827,3 +1827,76 @@ Full evidence: `docs/invariants/api-surfaces.md`
 - **`crate::error::failure_log_level` + the `log_failure!` macro** — the single answer to "how loudly should this failure be recorded in THIS node's log".
 - **`crate::error::error_hint_with_key`** — returns the actionable hint as a stable `(key, english)` pair, from ONE match arm.
 - **`AnthropicSseEvent::Error`** — the ONLY way the Anthropic streaming surface reports a failure.
+
+## Error type discipline
+
+*Moved here word for word from `.claude/rules/completeness.md` on 2026-10-02; the
+short statements are in `.claude/rules/arch-errors.md`.*
+
+**Never choose an error type at a call site.** `crate::error::classify_error`
+returns `(StatusCode, client-safe message, error_type)` and is the single answer
+for every surface — HTTP, both SSE encoders, the Responses API, MCP. A literal
+next to `"type":` is the bug: it produced the same failure reported four
+different ways at once (gotchas #300-#305), and
+`a_streamed_error_names_the_same_failure_as_its_non_streaming_sibling` in
+`tests/repo_consistency.rs` now fails the build on a new one.
+
+A surface may **refine** — Responses names a provider failure `upstream_error`,
+MCP maps 503 to `RESOURCE_UNAVAILABLE`, Anthropic translates into its own
+vocabulary — when the refinement names something *more precisely* than the
+canonical answer, and it must be commented at its definition. Naming the same
+meaning with a different word is a divergence, not a refinement, and is a bug.
+
+**A type that crossed a boundary is already lost.** `SwarmError` survives neither
+the worker IPC hop nor the network hop; both deliver a `String` that gets
+re-wrapped as `Inference` → 500. Call `reclassify_flattened_error` before falling
+back. This is the ONLY sanctioned place to derive a class from a message, and it
+matches `SwarmError`'s own `#[error(...)]` Display prefixes — which are part of
+the type, not prose written for a human (#295's trap).
+
+The variant → status contract:
+
+- `SwarmError::Validation` → 400, API input errors
+- `SwarmError::ModelNotAvailable` / `ShardNotFound` → 404
+- `SwarmError::Config` → startup / config file only
+- `SwarmError::ServiceUnavailable` → 503, *this server* can't serve (missing local binary, subprocess spawn/I/O failure, broken pipe, init timeout). Use for all subprocess lifecycle failures (R118-R119 cleanup).
+- `SwarmError::LocalMemoryUnavailable` → 503, and deliberately the same message shape and `error_type` as the line above: this node's own memory budget refused the load. The variant exists for ONE decision — it is the only local failure the router re-plans without a remote segment, because it is the only one where the re-plan is handed a new fact (`note_local_memory_refusal`) and so cannot repeat itself. Do not widen `ServiceUnavailable`'s retry to match it, and do not emit this from any site a re-plan cannot help.
+- `SwarmError::ProviderError {status, body}` → upstream returned an error OR upstream response couldn't be parsed (matches R119 translate.rs fix: parsing malformed upstream chat-completions response uses ProviderError, NOT Internal and NOT Validation, even though the upstream data passes through user-triggered code paths). Preserves upstream HTTP status.
+- `SwarmError::Internal` → actual bugs (500). Reach for it only when no external party can be blamed. Serializing our own well-typed struct failing is Internal; subprocess crashing is NOT.
+- `SwarmError::PeerUnresponsive` → 503, a peer took the request and went silent (ACK sweep, first-token deadline, or the per-segment result deadline in `pipeline/local.rs::segment_timeout_error`). Penalty-ELIGIBLE — as a `PipelineError` the silent peer inherited that variant's penalty exemption (fixed 2026-08-16 for the first two paths, 2026-08-25 for the third, gotcha #389). **Retried by TYPE since 2026-09-12** (`router::peer_went_silent`, gated on a remote segment having been involved) — the prose list in `is_transient_remote_failure` (`"never acknowledged"`, `"silent drop"`, `"remote-generate timed out"`) was the #295 trap and left the segment-deadline wording with no retry. Safe only because every producer of the variant now calls `blacklist_holder_for_request` on the silent peer FIRST (`pipeline/local.rs` deadline arm, both `remote_generate.rs` arms), so the re-plan cannot re-pick it and wait the deadline twice. A new producer of this variant must do the same.
+- `SwarmError::SegmentFailoverExhausted` → 503, mid-pipeline holder failure with no standby. Deliberately NOT `ModelIncompleteInSwarm` (variant-matched by `assembly_failed_for_lack_of_holders` → pointless DHT wait) and NOT `ServiceUnavailable` (triggers the peer-blacklist retry); penalty-exempt because it names no culprit.
+
+Never use `Config` or `Internal` for request validation. When unsure between Internal vs ProviderError vs ServiceUnavailable, look at the surrounding code in the same function — it usually picks a clear pattern (translate.rs lines 549-559 use ProviderError, so the tool_call missing-field arms should too).
+
+### A policy refusal is 503, and must never be told to retry
+
+A request this node declines *by configuration* — private mode, prompt privacy —
+is `ServiceUnavailable`-shaped (503), not `Internal` (500). 500 reports a
+deliberate setting as a crash: it tells monitoring this node has a bug and the
+user nothing they can act on. `PrivateModeUnavailable` and
+`PromptPrivacyUnavailable` are the two worked examples — each is its own variant
+with its own `error_type`, not a string stuffed into a general variant.
+
+**Give a permanent failure its own variant rather than filing it under
+`PipelineError(String)`.** That variant mixes transient and permanent causes, and
+its hint is picked by substring-matching user-facing prose that gets rewritten —
+so a new permanent failure silently inherits a *default* hint asserting that a
+peer went offline and to try again. Three failures have now been given that
+advice for a condition retrying can never fix (gotcha #295).
+
+**A variant carrying two causes that need opposite advice is the same bug.**
+`Unauthorized` meant both *no valid credential* and *valid credential, wrong
+machine* (the loopback-only update and shutdown endpoints). One hint had to serve
+both, so remote admins were told to go and fetch an API key they had already sent
+successfully — the advice could not work, and following it looped. Split into
+`LocalOnly` → 403 `permission_error` (gotcha #309). Ask of any shared variant:
+*would the two situations get the same next step?* If not, they are two variants.
+
+Two follow-ups a new `SwarmError` variant must not skip:
+
+- **`failure_is_penalty_worthy`** (`router/distributed_exec.rs`) defaults to
+  `_ => true`, i.e. blame the peer. A variant describing OUR OWN config or a
+  local fault must join the local-only list or it docks credits from innocent
+  peers.
+- **`error_hint`** — if retrying cannot help, say so. Test on the ADVICE, not the
+  wording: a test pinned to a phrase passes while the user is still looping.

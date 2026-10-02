@@ -5817,7 +5817,7 @@ impl ModelProcessPool {
                     },
                     None => {
                         // Subprocess lifecycle failure → ServiceUnavailable (per
-                        // .claude/rules/completeness.md); Internal is for code bugs.
+                        // .claude/rules/arch-errors.md); Internal is for code bugs.
                         guard.disarm();
                         return Err(self.reply_channel_closed(
                             &model_id,
