@@ -23,11 +23,12 @@ chatting straight away.
 **Recommended: a shared test model.** In **Settings → Testing & Diagnostics**,
 click **Get my share** (this computer downloads only the parts it should hold)
 or **Get all of it** (so this computer can answer on its own). From a
-terminal, the same thing is:
+terminal:
 
 ```bash
-./swarmllm get-model             # list the test models
-./swarmllm get-model standard    # Llama 3.2 3B
+./swarmllm get-model                   # list the test models
+./swarmllm get-model standard          # Llama 3.2 3B — "Get my share"
+./swarmllm get-model standard --all    # "Get all of it"
 ```
 
 **Any other model:** open the **Models** tab and choose **Search HuggingFace**

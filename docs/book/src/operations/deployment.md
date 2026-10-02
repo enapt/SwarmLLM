@@ -12,7 +12,8 @@ This starts the daemon on port 8800 with default settings.
 
 ## Production Configuration
 
-For production use, create a config file:
+For production use, create `config.toml` in the node's data directory
+(`/var/lib/swarmllm/config.toml` for the systemd service below):
 
 ```toml
 [node]
@@ -35,9 +36,8 @@ max_storage_mb = 50000
 max_concurrent_downloads = 5
 
 [logging]
-level = "info"
-format = "json"            # Structured logs for production
-file = "/var/log/swarmllm.log"
+level = "info"             # logs go to the console — under systemd, `journalctl -u swarmllm`
+                           # (`format` and `file` are not applied yet — see the configuration reference)
 
 [ui]
 open_browser_on_start = false
@@ -48,7 +48,9 @@ region = "US"
 
 ## Systemd Service
 
-Create `/etc/systemd/system/swarmllm.service`:
+The `.deb` installs a ready unit (`packaging/swarmllm.service` in the repository). For a
+binary you installed yourself, create `/etc/systemd/system/swarmllm.service` along the same
+lines:
 
 ```ini
 [Unit]
@@ -59,21 +61,34 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=swarmllm
-ExecStart=/usr/local/bin/swarmllm run --config /etc/swarmllm/config.toml
+Group=swarmllm
+# Reads /var/lib/swarmllm/config.toml — put the production config there. Dashboard
+# saves always write that file, so a --config elsewhere would lose them at the next start.
+ExecStart=/usr/local/bin/swarmllm run
 Restart=on-failure
 RestartSec=10
 LimitNOFILE=65536
 
+# Data directory — without these the node would look in the service user's
+# home, which ProtectSystem=strict makes read-only
+StateDirectory=swarmllm
+Environment=SWARMLLM_NODE_DATA_DIR=/var/lib/swarmllm
+
 # Security hardening
 NoNewPrivileges=yes
 ProtectSystem=strict
-ReadWritePaths=/var/lib/swarmllm /var/log
+ProtectHome=true
+ReadWritePaths=/var/lib/swarmllm
+PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target
 ```
 
 ```bash
+# The service runs as its own user; create it once
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin swarmllm
+sudo systemctl daemon-reload
 sudo systemctl enable --now swarmllm
 ```
 
@@ -265,7 +280,7 @@ ANTHROPIC_API_KEY=sk-ant-...
 DEEPSEEK_API_KEY=sk-...
 MISTRAL_API_KEY=...
 GROQ_API_KEY=gsk_...
-NVIDIA_API_KEY=nvapi-...
+NVIDIA_NIM_API_KEY=nvapi-...
 CEREBRAS_API_KEY=...
 SAMBANOVA_API_KEY=...
 FIREWORKS_API_KEY=...

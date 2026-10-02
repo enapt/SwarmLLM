@@ -4,7 +4,7 @@
 # those guards read.
 #
 # WHY: .claude/rules/completeness.md § "A count edited after the test run is an
-# untested change". Test counts live in CLAUDE.md x2 and README.md x2, the i18n
+# untested change". Test counts live in CLAUDE.md x2 and README.md x1, the i18n
 # key totals in CLAUDE.md and docs/ARCHITECTURE.md, the MSRV in several places.
 # The trap is not "run the tests" — it is that the number can only be written
 # down AFTER the run that produced it, so the edit that breaks the guard is the
@@ -62,7 +62,7 @@ print(json.dumps({"hookSpecificOutput": {
     "hookEventName": "PreToolUse",
     "permissionDecision": "deny",
     "permissionDecisionReason": (
-        "`cargo test --test repo_consistency` FAILS, and this commit touches a "
+        "`cargo dev-test --test repo_consistency` FAILS, and this commit touches a "
         "file whose figures another document restates:\n\n"
         f"{changed}\n\n{fail}\n\n{detail}\n\n"
         "A count edited after the test run is an untested change — this is the "

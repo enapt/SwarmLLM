@@ -176,8 +176,9 @@ against README.md and the commit hook runs it when either changes (main went red
   (~50 KB) before it starts. Search with `Explore`; fork when the side task needs
   this conversation (a fork shares its prompt cache); look up a known file yourself.
 - Parallel Opus agents can hit the session limit with no warning (#574) — spawn
-  one and see it return first. Agent teams (~7x tokens) are switched off.
-  Workflows only on the user's explicit opt-in.
+  one and see it return first. Agent teams (~7x tokens) are off for this project
+  (`.claude/settings.json` sets `0` over the user-level `1`); never give a one-shot
+  agent a `name` — named agents run as teammates. Workflows only on explicit opt-in.
 - `/clear` between unrelated tasks; `/compact` is itself a large request.
   `/usage` attributes plan usage to skills and subagents; `/doctor prompt-audit`
   checks these instruction files for stale references and contradictions.

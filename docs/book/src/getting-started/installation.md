@@ -115,13 +115,23 @@ cd ~/swarmllm
 
 ### Linux packages (.deb / .rpm)
 
+Debian / Ubuntu:
+
 ```bash
-sudo dpkg -i swarmllm_*_amd64.deb                      # Debian / Ubuntu
+sudo dpkg -i swarmllm_*_amd64.deb
 sudo systemctl enable --now swarmllm                   # start it as a background service
-sudo rpm -i swarmllm_*.x86_64.rpm                      # Fedora / RHEL
 ```
 
-The .deb sets SwarmLLM up as a background service that keeps its data in
+Fedora / RHEL — the .rpm does not yet create the user the service runs as, so
+create it once before starting the service (systemd creates the data folder):
+
+```bash
+sudo rpm -i swarmllm_*.x86_64.rpm
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin swarmllm
+sudo systemctl enable --now swarmllm
+```
+
+Either way SwarmLLM runs as a background service that keeps its data in
 `/var/lib/swarmllm` (the access token is in `/var/lib/swarmllm/api_key`).
 Programs installed from a package **do not update themselves** — install the
 next release's package to update. Homebrew and AUR packages are not published
@@ -174,7 +184,10 @@ been removed. If a container of yours still runs one, pull `latest` again.)
 
 Data is persisted in Docker volumes. Model shards are stored in the `swarmllm-models` volume (or bind-mount a host directory via `SWARMLLM_MODELS_DIR` in `.env`).
 
-View logs with `docker compose logs -f`. The API key is printed on first startup.
+View logs with `docker compose logs -f`. The API key is printed on first startup;
+to read it again — the dashboard will ask for it, because a browser on your
+computer reaches the container from outside it — run
+`docker exec swarmllm cat /data/api_key`.
 
 ### Cargo Install
 

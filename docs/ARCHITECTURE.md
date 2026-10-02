@@ -29,17 +29,17 @@ swarmllm/
 │   ├── swarmllm-frontend/  (embedded + dev-mode frontend asset serving)
 │   └── swarmllm-types/     (shared types crate: NodeId, ModelManifest, SwarmMessage, etc.)
 ├── src/
-│   ├── main.rs, lib.rs, error.rs, http.rs, types.rs, update.rs, update_restart.rs
+│   ├── main.rs, lib.rs, error.rs, http.rs, types.rs, update.rs, update_restart.rs, update_signature.rs (minisign check of a downloaded release)
 │   ├── bin/       (launcher.rs — Windows GPU/CPU auto-selecting launcher)
 │   ├── cli/       (mod, run, status, chat, bench, peers, pool, split_test, update, get_model, remove_model, privacy, unload_model (`swarmllm unload` — retire a worker, keep the files), diagnostics (pasteable node report) — R150 `swarmllm get-model` reference-model opt-in)
 │   ├── config/    (mod, providers, credit, network, ops, node, inference)
 │   ├── daemon/    (mod, manifest, shard_loader, gpu_support (CUDA compute-capability floor + pre-Ampere CPU fallback), dispatch/, startup, background, helpers, supervisor)
 │   │   └── state/        (mod, activity, canonical (which upload of each model this node uses — the only writer of `hf_sources`, `origin_claims`, `canonical_builds`; `fetch_model_header`), capacity, capacity_plan, credits, events, forward_streams (a streamed verify's forwards run in their stream's order, #4b), hf, metrics, models, peer_outliers (a peer failing a model on consecutive requests is left out of its plans for a while — Envoy's outlier ejection, never for a part only it holds), peer_speed, perf_history, relay, removed_shards, repair, retained_activations (what was sent to each segment, so a stand-in can be replayed it and take over mid-reply), retained_replies (fast-path replies kept for ResendTokens, #438), tp_allreduce)
-│   ├── network/   (manager/{mod,events,requests,tensors,identify,commands,connections,dht,shard_transfer,relay}, behaviour, discovery, protocol, transport, relay, peer_cache, redact (address redaction for the pasteable diagnostics report), bandwidth (what this node actually puts on the wire — libp2p's transport counters, read back), helpers, pipeline_stream)
+│   ├── network/   (manager/{mod,events,requests,tensors,identify,commands,connections,dht,shard_transfer,relay}, behaviour, discovery, protocol/{mod,encrypted,layer_forward,layer_result}, transport, relay, peer_cache, redact (address redaction for the pasteable diagnostics report), bandwidth (what this node actually puts on the wire — libp2p's transport counters, read back), helpers, pipeline_stream)
 │   ├── model/     (manifest, shard, distribution, registry, acquisition, reference (R150 get-model), canonical (one upload per model id: the swarm-wide ranking of uploads, `CanonicalBuild`, #151), huggingface/, auto_manage/, lora)
 │   │   ├── auto_manage/  (mod, manager, scoring, download, prune, scan, vram, parallax, wishlist, quant (R133 recommender), canonical (background task: verify the swarm's upload of each model on HuggingFace, and switch a copy of another upload onto it — staged in `<data_dir>/canonical/<model>`, swapped when idle))
 │   │   └── huggingface/  (mod, download, private_types, probe, search, shards, watcher, tests)
-│   ├── inference/ (executor, sampling, coupled_noise (Philox4x64-10 Gumbel noise keyed by (seed, absolute position, token id) — the shared randomness that lets a drafter reproduce a remote sampler's draw), kv_cache, speculative, swift, dsd_controller (incl. `best_gamma_for_check`: guess-run length from measured round costs, the check fitted as fixed + per-position cost), quant, tokenizer, tensor_util, shard_layout, model_arch, vision, allreduce, attn_kernel, attn_softmax (fused scale+softcap+mask+softmax CPU kernel), decode_attn (single-position attention straight over the KV cache, each row read once per KV group — on the CPU, and on a card through `kernels/decode_attn.cu`), prefill_attn (CPU attention for several query positions, tiled over the keys so the score matrix is never written out — +17% on a 6K-token prompt), fast_math (AVX2 expf + fused SiLU×up), residual_norm (the residual stream carried between norm points; residual add + RMS norm as ONE CUDA kernel), cpu_pools (per-phase rayon pools: prefill wide, decode narrow), local_embedder, mem_bandwidth (measured memory bandwidth — what a CPU node advertises as its speed, replacing a hardcoded 50 GB/s assumption), model_worker, process_pool, slot_table, worker_ipc, ngram_lookup (R136 L1), segment_latency (per-peer forward latency for the performance table; hedged dispatch removed 2026-09-24, FUTURE_WORK #94), prefetch (R136 L3), trace (per-request route + timing record), prof (SWARMLLM_PROFILE=1 per-stage forward-pass profiler), cancel (the one cancellation signal), card_pace (how many generations a worker runs on its card at once, halved when one step stalls ≥ 2 s — FUTURE_WORK #146), cuda_pool (the card's memory pool keeps what a worker frees while it serves and hands it back after 60 s idle; its unused part counts as free for the KV budget — FUTURE_WORK #146), cuda_graph (a decode step sent to the card as ONE CUDA graph, re-captured every token and updated in place — opt-in `SWARMLLM_CUDA_GRAPH=1`; a capture that made a host→device copy is thrown away), prefill_pacer, thermal)
+│   ├── inference/ (executor, sampling, route_override (a request's `swarm_route` override), coupled_noise (Philox4x64-10 Gumbel noise keyed by (seed, absolute position, token id) — the shared randomness that lets a drafter reproduce a remote sampler's draw), kv_cache, speculative, swift, dsd_controller (incl. `best_gamma_for_check`: guess-run length from measured round costs, the check fitted as fixed + per-position cost), quant, tokenizer, tensor_util, shard_layout, model_arch, vision, allreduce, attn_kernel, attn_softmax (fused scale+softcap+mask+softmax CPU kernel), decode_attn (single-position attention straight over the KV cache, each row read once per KV group — on the CPU, and on a card through `kernels/decode_attn.cu`), prefill_attn (CPU attention for several query positions, tiled over the keys so the score matrix is never written out — +17% on a 6K-token prompt), fast_math (AVX2 expf + fused SiLU×up), residual_norm (the residual stream carried between norm points; residual add + RMS norm as ONE CUDA kernel), cpu_pools (per-phase rayon pools: prefill wide, decode narrow), local_embedder, mem_bandwidth (measured memory bandwidth — what a CPU node advertises as its speed, replacing a hardcoded 50 GB/s assumption), model_worker, process_pool, slot_table, worker_ipc, ngram_lookup (R136 L1), segment_latency (per-peer forward latency for the performance table; hedged dispatch removed 2026-09-24, FUTURE_WORK #94), prefetch (R136 L3), trace (per-request route + timing record), prof (SWARMLLM_PROFILE=1 per-stage forward-pass profiler), cancel (the one cancellation signal), card_pace (how many generations a worker runs on its card at once, halved when one step stalls ≥ 2 s — FUTURE_WORK #146), cuda_pool (the card's memory pool keeps what a worker frees while it serves and hands it back after 60 s idle; its unused part counts as free for the KV budget — FUTURE_WORK #146), cuda_graph (decode steps and speculative checks sent to the card as CUDA graphs, `SWARMLLM_CUDA_GRAPH_GROUP` layers per graph, default 2 — ON by default, `SWARMLLM_CUDA_GRAPH=0` turns it off; a capture that made a host→device copy is thrown away), prefill_pacer, thermal)
 │   │   ├── router/       (mod, types, batch, local_exec, distributed_exec, spot_check, tests)
 │   │   ├── scheduler/    (mod, parallax, parallax_allocator, cached_prefix (how much of a prompt our own worker already holds — a warm prompt is priced warm), tests)
 │   │   ├── pipeline/     (mod, distributed, dsd, dsd_stream (the continuous stream: the next chunk of guesses goes out while the last is being checked, split_speculation.md § 4b), engine_drafter (speculation across computers guessing with a small model this node holds, run by its own worker — `DaemonMsg::Draft`), local, local_generate (a plan that names this node is run as the local generation it is), prompt, remote_generate, speculative, tensor_parallel, vision, ngram_only_spec (R136 L1))
@@ -50,8 +50,8 @@ swarmllm/
 │   ├── credit/    (ledger, transaction, priority, anti_gaming, trust, escrow)
 │   ├── identity/  (keypair, nickname)
 │   ├── crypto/    (session, pipeline_seal, gossip_seal, relay_seal, key_rotation, provider_keys)
-│   ├── pool/      (types, crypto, manager/, forward, scope, invite (the `swarmpool://` v2 codec))
-│   ├── api/       (server, sse, tool_parse (local-model tool-call parser), admin, admin_providers, websocket, middleware, dashboard_trust (may this request be handed the API key?), process_memory (the largest memory accounting the platform offers — macOS keeps two), tailscale, identity, pool, metrics, providers, claude_sub*, mod, openai/, anthropic/, mcp/, admin_hf/, admin_models/, claude_session/)
+│   ├── pool/      (types, crypto, manager/{mod,gossip}, forward, scope, invite (the `swarmpool://` v2 codec))
+│   ├── api/       (server, sse, tool_parse (local-model tool-call parser), admin, admin_providers, websocket, middleware, dashboard_trust (may this request be handed the API key?), origin (`RequestOrigin::is_this_machine` — is the person at this machine?), process_memory (the largest memory accounting the platform offers — macOS keeps two), tailscale, identity, pool, metrics, providers, claude_sub*, mod, openai/, anthropic/, mcp/, admin_hf/, admin_models/, claude_session/)
 │   ├── storage/   (db)
 │   └── health/    (monitor, rebalancer)
 ├── frontend/      (ONE index.html carrying 11 `<template>` elements, css/, js/{core/4,components/19,init.js,i18n.js,providers.js,neural-bg.js,topojson-client.min.js}, i18n/, fonts/ (IBM Plex woff2, SIL OFL — see LICENSE-THIRD-PARTY.md))
@@ -60,7 +60,7 @@ swarmllm/
 ├── monitoring/    (Grafana + Prometheus + docker-compose)
 ├── deploy/anchor/ (R143 — hardened bootstrap/relay anchor kit: setup-anchor.sh, systemd unit, config.toml, runbook)
 ├── deploy/docker/select-cpu-build.sh (the CPU image's `swarmllm`: execs its x86-64-v3 build or its baseline build by asking glibc-hwcaps, which reads CPUID and so answers correctly under emulation; guard `every_docker_image_builds_the_release_cpu_target`)
-├── packaging/     (swarmllm.service + aur/, homebrew/, rpm/ + deb/{postinst,prerm} maintainer scripts — prerm acts on $1: an upgrade must never `systemctl disable`, gotcha #313)
+├── packaging/     (swarmllm.service + aur/, homebrew/ + deb/{postinst,prerm} maintainer scripts; the .rpm is built by release.yml from Cargo.toml's `[package.metadata.generate-rpm]` — prerm acts on $1: an upgrade must never `systemctl disable`, gotcha #313)
 ├── docs/          (ARCHITECTURE, CREDITS_DESIGN, FUTURE_WORK, DIAGNOSTICS, REFERENCE_MODELS,
 │                 NETWORKING, NETWORKING_PLAN, TESTING)
 ├── docs/invariants/  (the evidence behind .claude/rules/architecture.md — 7 topic files)
@@ -281,7 +281,8 @@ broadcast, so the withdrawal reverses itself when the condition clears. Guard:
 12. Spawn all tasks (12 tasks: NetworkManager, InferenceRouter, MessageDispatcher,
     HealthMonitor, ShardRebalancer, CreditLedger, AcquisitionManager, ApiServer,
     PoolManager, AutoShardManager, HfWatcher (R112), UpdateChecker — the last
-    skipped only for `run --no-update-check`; a file `mode = "off"` still gets it)
+    skipped only for `run --no-update-check`; a file `mode = "off"` still gets it).
+    An `--anchor` node also skips AutoShardManager and HfWatcher, so it runs 10.
 13. Open browser if ui.open_browser_on_start is true (setup wizard or admin)
 14. tokio::select! on Ctrl+C signal or any task exit
 15. Signal graceful shutdown via watch channel, save peer cache, flush redb database
@@ -401,19 +402,18 @@ Memory: O(shards × 50) bounded regardless of network size (was O(shards × node
 
 ```
 libp2p Swarm
-├── Kademlia (DHT)
-│   ├── /swarm/node/{node_id}                  → NodeCapability
-│   ├── /swarm/shards/{model_id}/{node_id_hex} → Vec<ShardIndex> (per-node; avoids last-writer-wins)
-│   ├── /swarm/shard/{model}/{index}           → Vec<NodeId> (batched per model)
-│   └── /swarm/model/{model_id}               → ModelManifest
-│   └── Records expire after 1 hour, re-published periodically
+├── Kademlia (DHT) — PROVIDER records only (`network::discovery`); no node writes a value record
+│   ├── /swarm/provide/{model}/{index} → "I hold this shard" (`start_providing_shards`, `get_providers`)
+│   └── /swarm/relay-service/v1        → "I relay" (`start_providing_relay_service`)
+│   (a signed `/swarm/node/…` record found by a query is still verified and read — see § DHT Records)
 │
 ├── GossipSub (pub/sub, mesh_n/mesh_n_low/mesh_n_high/mesh_outbound_min auto-scale with known_peers: 2/1/4/1 at <10 peers up to 8/6/16/4 at 10k+)
 │   ├── swarm/models/{model_id}       → ShardAnnounce, capacity
 │   ├── swarm/credits                 → CreditGossip
 │   ├── swarm/health                  → trust summaries
 │   ├── swarm/identity                → NicknameRecord (signed, timestamp-checked)
-│   └── swarm/pools                   → PoolState, PoolInvitation
+│   ├── swarm/pools                   → PoolState, PoolInvitation
+│   └── swarm/regions                 → RegionShardSummary, ModelDemandGossip, WishlistAnnouncement, PoolModelAvailability
 │   └── Messages >5 min old are rejected (replay protection)
 │   └── Failed publishes buffered and replayed on mesh formation
 │
@@ -438,7 +438,7 @@ libp2p Swarm
 ├── TCP transport (Noise + Yamux, nodelay=true, port+10)
 ├── QUIC transport (port, fallback for NAT traversal)
 ├── mDNS (optional, LAN peer discovery — conditional dial, not added to Kademlia)
-├── connection_limits (max 1/peer, 500 total)
+├── connection_limits (per peer `network.max_connections_per_peer`, default 3; total from `NetworkConfig::effective_max_connections`, which scales with the contribution level)
 ├── allow_block_list (blocked_peers — nodes Identify showed do not speak SwarmLLM;
 │   refuses both directions at the swarm level. Declining to REGISTER them left
 │   something inside libp2p re-dialling them a few times a minute each, and every
@@ -741,7 +741,7 @@ Node A (rank 0, coordinator)          Node B (rank 1)
 
 - **Topology**: Star AllReduce — rank 0 collects partials, element-wise sums, broadcasts result
 - **LAN detection**: Auto-detected via PEX RTT measurement (< 5ms → `is_lan_peer = true`)
-- **TP group formation**: Requires `is_lan_peer` OR measured `latency_ms ≤ 10`
+- **TP group formation**: Requires `is_lan_peer` OR measured `latency_ms ≤ inference.tp_max_latency_ms` (default 5)
 - **Weight splitting**: Dynamic slicing at inference time (`forward_attn_tp` slices attention heads, `forward_tp` slices FFN intermediate dimension)
 - **Wire format**: Partials zstd-compressed, sent via `SendAllReduceRequest` / `SendAllReduceResponse` NetworkCommand variants
 - **Registry cleanup**: `AllReduceRegistry::cleanup_stale()` runs on each HealthMonitor tick (30s), removing entries where the receiver was dropped (timed out)
@@ -872,14 +872,18 @@ For a 7B model (hidden_dim=3584):
 
 **Tensor Compression** — optional zstd compression for wire tensors (configurable):
 - `tensor_compression = true` — enable zstd compression on hidden-state payloads
-- `tensor_compress_level = 3` — zstd compression level (1-22, default 3)
-- `tensor_compress_threshold = 4096` — minimum payload bytes to trigger compression
+- `tensor_compress_level = 1` — zstd compression level (1-22, default 1)
+- `tensor_compress_threshold = 1024` — minimum payload bytes to trigger compression (default 1024)
 - Reduces bandwidth for prefill payloads by 30-60% with minimal latency overhead
 
 **LayerForward optional trailers** — the wire envelope appends
 optional trailer blocks after the activation bytes. Each trailer is a
 single tag byte + fixed payload. Decoders scan in tag order and
-ignore unknown tags (forward-compatible).
+ignore unknown tags — but that is NOT forward-compatible for an encrypted
+forward: an older peer rebuilds the seal's AAD from the trailers it parsed, so
+an unknown one fails the seal. A new trailer must therefore be sent only to a
+peer advertising its feature bit — gated at the SENDER
+(`.claude/rules/architecture.md` § "Additive Protocol Evolution").
 
 | Tag | Field | Layout | Purpose |
 |-----|-------|--------|---------|
@@ -888,6 +892,13 @@ ignore unknown tags (forward-compatible).
 | 0x03 | speculative | `flags(1)+n_drafts(2)+drafts(n×4)` | Draft tokens + `spec_logits_requested` flag |
 | 0x04 | kv_truncate | `target_len(4)` | Spec-decode KV-cache fixup after partial acceptance |
 | 0x05 | chunk_meta (R139) | `chunk_idx(4)+total_chunks(4)` | Tier 4K daemon-side STREAM-chunked transport |
+| 0x06 | chain | `n(1)+n×(node_id(32)+start(4)+end(4))` | Remaining hops of a chained forward |
+| 0x07 | requester_node_id | `node_id(32)` | Where a chain's tail answers |
+| 0x08 | generated_ids | `n(2)+n×id(4)` | Tokens so far, for penalties at the sampling segment (`features::FORWARD_GENERATED_IDS`) |
+| 0x09 | pre_embedded | `flag(1)` | Payload is embedded hidden states, not token ids |
+| 0x0A | sampling | 23 bytes | The caller's sampling at a remote sampler (`features::FORWARD_SAMPLING`) |
+| 0x0B | coupling seed | 9 bytes | Shared Gumbel noise for the walk (`features::COUPLED_SAMPLING`) |
+| 0x0C | stream_seq | 5 bytes | Order of a streamed verify chunk (`features::STREAMED_VERIFY`) |
 
 All trailers are bound into the encryption AAD via
 `build_layer_forward_aad` (single source of truth in
@@ -1374,12 +1385,13 @@ Spending (default rates, configurable per pool):
   -10 credits  per token consumed (balanced with earn side)
   -50 credits  per distributed inference failure (automatic penalty)
 
-Minimum balance enforcement:
-  Nodes below -1000 credits have remote requests rejected.
-  Local API requests (localhost) are always allowed.
-  Earn credits by: hosting shards, serving inference, seeding data.
+Minimum balance (DORMANT — MIN_BALANCE_FOR_INFERENCE = 0, and a floor of 0
+disables the check, so nobody is refused):
+  As designed: nodes below the floor have remote requests rejected;
+  local API requests (localhost) are always allowed.
 
-Tiers (enforced per-request in InferenceRouter):
+Tiers (DORMANT — calculate_tier returns DORMANT_TIER = Silver for everyone;
+the design was):
   Platinum  (≥90th percentile, balance>0)  → 2× concurrent slots
   Gold      (≥70th percentile, balance>0)  → base concurrent slots
   Silver    (positive balance)             → ½ concurrent slots
@@ -1390,7 +1402,8 @@ Tiers (enforced per-request in InferenceRouter):
 credit inflation — a 22-layer model serving 100 tokens earns exactly as much as it costs to
 consume. Previously the earn side multiplied by layers, causing 22× inflation per request.
 
-**Tier enforcement flow**: On each `handle_submit()`, the router computes the network percentile
+**Tier enforcement flow** (still runs; with tiers dormant every request gets the same
+slots): On each `handle_submit()`, the router computes the network percentile
 from `peer_credit_balances` (populated via credit gossip, **deduplicated by NodeId** to prevent
 Sybil percentile stuffing), calls `calculate_tier()`, and sets the request priority. Balance must
 be positive for Gold/Platinum tiers. In `drain_queue()`, `max_concurrent_for_tier()` limits
@@ -1409,9 +1422,10 @@ Retry passes `preferred_pipeline = None` so the scheduler re-runs and the dead/d
 filtered out via `connected_node_ids`. Bounded to one retry per request — failure of the second
 attempt propagates to the user with a "try again" hint.
 
-**Minimum balance enforcement**: Remote peers with balance below `MIN_BALANCE_FOR_INFERENCE`
-(-1000) have their inference requests rejected with a descriptive error message telling them to
-contribute. Local API requests (requester == NodeId([0;32])) bypass this check.
+**Minimum balance enforcement** (dormant): `router::refuse_for_insufficient_credit` refuses a
+remote request whose balance is below `MIN_BALANCE_FOR_INFERENCE` — but only when that floor is
+non-zero, and it is 0 while credits are dormant (it was -1000). Local API requests
+(requester == NodeId([0;32])) bypass it either way.
 
 **Atomic credit accumulation**: Forward participation credits (earned during distributed inference
 hot path) are accumulated in an `AtomicI64` (`pending_credit_earn`) to avoid lock contention.
@@ -1569,28 +1583,27 @@ long-running Tokio task, receiving commands via `mpsc` from the API server.
 
 Storage backend is **redb** (pure-Rust, ACID, single-file).
 
-| Table | Key | Value |
-|---|---|---|
-| config | "config" | Config |
-| config | "api_key" | String (32-byte hex Bearer token) |
-| identity | "keypair" | Encrypted Ed25519 key |
-| credits | "balance" | CreditBalance |
-| credit_txns | {uuid} | CreditTransaction |
-| peer_trust | {node_id_hex} | TrustScore |
-| peer_cache | {multiaddr_string} | () (presence key) |
-| shard_meta | {model_id}/{shard_index} | ShardInfo + path |
-| model_meta | {model_id} | ModelManifest |
-| sessions | {session_id} | KV-cache metadata (persisted across restarts) |
-| nicknames | {node_id_hex} | NicknameRecord |
-| identity_prefs | "nickname" | Local nickname preference |
-| pool_state | "pool" | PoolState |
-| pool_forwards | {uuid} | PoolCreditForward |
-| trust_scores | {node_id_hex} | f64 trust score |
-| escrow | {escrow_id} | EscrowEntry |
-| hf_sources | {model_id} | HfSource metadata |
-| locked_shards | {shard_id_json} | bool (presence = locked) |
-| removed_shards | {shard_id_json} | bool (presence = the user deleted this shard; auto-manage will not re-acquire it until it is explicitly requested again) |
-| resource_schedule | "current" | ResourceSchedule JSON |
+Everything lives in ONE redb table, `data`, whose keys are `"{tree}\0{key}"`
+(`storage/db.rs`); a "tree" below is that logical prefix. The node's keypair is
+NOT here — it is the `identity.key` file in the data directory. `check_integrity`
+validates the trees in `CRITICAL_TREES` at startup and only reports.
+
+| Tree | Holds |
+|---|---|
+| config | the persisted config and the API key (`"api_key"`, 32-byte hex Bearer token) |
+| credits · credit_txns · credit_log · escrow | balance, signed transactions, the append-only log, escrow entries (credits are dormant) |
+| trust_scores · model_trust | per-node trust; per-model download trust |
+| peer_cache | known peer addresses (presence keys) |
+| nicknames · identity_prefs | gossiped `NicknameRecord`s; this node's own nickname |
+| model_meta | `ModelManifest` per model id — reloaded at startup, integrity-checked |
+| hf_sources · canonical_builds · origin_verified_hashes | each model's upload, the verified canonical choice (#151), hashes checked against the origin |
+| locked_shards · removed_shards | user-pinned shards; user-deleted shards (auto-manage will not re-acquire one until it is asked for again) |
+| kv_sessions | KV-cache session metadata (persisted across restarts) |
+| pool_state · pool_forwards · pool_invitations · pool_invite_codes · pool_removal_replays · node_modes | the device pool |
+| responses | stored Responses-API responses |
+| update | update state |
+| network | inbound reachability (`INBOUND_REACHABILITY_TREE`) |
+| resource_schedule | the resource schedule (`"current"`) |
 
 ## Auto-Manage Shards
 
@@ -1801,7 +1814,7 @@ Models are loaded into VRAM only when needed, not eagerly at startup.
 1. `ModelProcessPool.get_or_spawn()` spawns a `swarmllm model-worker` subprocess
 2. Worker connects to the daemon's Unix socket and sends `WorkerMsg::Ready`
 3. First `Forward` or `Generate` request causes the worker to load shards from disk
-4. VRAM budget is tracked via `SplitModelEntry.estimated_vram_mb`; LRU eviction kills the oldest worker subprocess
+4. Graphics memory is admitted and reclaimed by `ModelProcessPool` alone (`admit_to_gpu`, `plan_vram_reclaim`) — it has one owner; the split-model cache cannot unload a worker (see "Graphics memory has one owner" above)
 
 **Loading coordination**: the process pool `Mutex<WorkerSocket>` serializes requests per model — if two requests arrive simultaneously for an unloaded model, the second waits for the first to complete spawning.
 
@@ -2119,7 +2132,7 @@ the type; it must never be extended to match user-facing prose (gotcha #295).
   it is an origin restriction, not the "may we hand over the key?" question that
   `api::dashboard_trust::classify` answers (gotcha #195).
 - Request body size limit: 32MB (configurable via `DefaultBodyLimit`, raised from 2MB for VLM image payloads)
-- Content-Security-Policy: `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:; img-src 'self' data: blob:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'`
+- Content-Security-Policy (`api/middleware.rs`): `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data: blob:; font-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'`
 - **Dashboard key bootstrap** (`src/api/dashboard_trust.rs`) — the dashboard has
   no Bearer token on page load and fetches one from `GET /api/admin/api-key`.
   That handout requires BOTH a trusted source network AND a valid single-use
@@ -2874,7 +2887,7 @@ enable_quic = false       # QUIC can win connection races but fail on large payl
 listen_address = "127.0.0.1"  # Bind to loopback only; avoids virtual NAT adapters
 ```
 
-**Why:** With `max_established_per_peer=1`, simultaneous connection attempts via different interfaces cause mutual rejection. Disabling competing transports and binding to a single interface avoids this.
+**Why:** this was written when one connection per peer was allowed (`max_established_per_peer=1`), so simultaneous attempts via different interfaces rejected each other. The limit is now `network.max_connections_per_peer` (default 3); one transport on one interface still keeps a local test deterministic.
 
 ### Multi-Node Local Testing
 
@@ -2935,7 +2948,6 @@ The list is split into **open** (will be addressed) and **won't fix unless a con
 - **`seed` is accepted and ignored for local models.** It rides in `extras` and is forwarded verbatim to a cloud provider, but nothing seeds the local sampler, so two requests with the same seed give different text (measured 2026-08-06). Unlike `n` and `logit_bias`, this is NOT refused: OpenAI documents `seed` as best-effort and explicitly does not guarantee determinism, so a caller cannot rely on it in the first place. Wiring it through would mean threading the seed into the sampler's RNG per request.
 
 
-- **Speculative decoding in subprocess** — IPC scaffolding for routing speculative decoding through worker subprocesses was removed; the path runs through the direct executor only. Speculative decoding is experimental and the worker-subprocess plumbing would need to track per-position logit returns, KV-cache state, and partial-accept truncation — substantial complexity for a feature whose target audience overlaps tightly with the user base that already has the legacy in-process executor working. Revisit if subprocess isolation becomes a hard requirement (e.g., per-model crash containment for a hosted deployment).
 
 - **Local executor streaming serialization** — `executor.lock().await` in `api/openai/streaming.rs::stream_response` and `api/anthropic/mod.rs` holds the mutex for the entire streaming inference duration, serializing concurrent local streaming requests. Only affects the legacy single-GGUF executor path; the modern split-model path (`split_stream_response`) and distributed paths route through `ModelProcessPool` and are unaffected. The "fix" of routing legacy through `ModelProcessPool` is misleading: the pool only handles shard-based models, so closing this gap requires either teaching the pool to load full GGUFs (large rearchitecture) or retiring the legacy executor entirely. Documented limitation: legacy GGUF mode is single-stream-at-a-time; users who need concurrency should switch to shard mode.
 
@@ -2951,7 +2963,7 @@ The list is split into **open** (will be addressed) and **won't fix unless a con
 
 - **Binary file inputs** — `input_file{file_data}` accepts UTF-8 only; PDF / docx / image-bytes payloads are rejected with a clear hint pointing at `input_image` (for images) or server-side text extraction (for documents). A PDF parser is a deferred call-site question.
 
-- **Synthetic tiny-model fixture (`tests/fixtures/tiny_model/`)** — empty placeholder. Originally specced as a 2-layer / 128-hidden / 2-shard llama-arch GGUF (~1 MB) committed to the repo so a multi-process spawn-and-infer integration test could run in CI without network. Stays unbuilt for two reasons: (1) generating a valid GGUF + matching `manifest.json` + `gguf_header.bin` + tokenizer requires a Python `gguf`-library generator script we don't maintain and that would version-drift against candle-transformers / our split loader; (2) random-weight outputs are gibberish, so the test would only catch GGUF-parse and worker-IPC plumbing bugs — both already covered by `tests/integration/end_to_end.rs` and `inference::split` unit tests. Pragmatic substitute: the env-var-gated `local_embedder_load_from_real_model` test (`SWARMLLM_TEST_MODEL_DIR`) and manual smoke tests against the TinyLlama-1.1B / Phi-3.5 / Qwen2.5-7B installs at `~/.local/share/swarmllm/models/`. Revisit if a CI worker-subprocess regression slips past the unit + in-process layers.
+- **Synthetic tiny-model fixture (`tests/fixtures/tiny_model/`)** — never created (the directory does not exist). Originally specced as a 2-layer / 128-hidden / 2-shard llama-arch GGUF (~1 MB) committed to the repo so a multi-process spawn-and-infer integration test could run in CI without network. Stays unbuilt for two reasons: (1) generating a valid GGUF + matching `manifest.json` + `gguf_header.bin` + tokenizer requires a Python `gguf`-library generator script we don't maintain and that would version-drift against candle-transformers / our split loader; (2) random-weight outputs are gibberish, so the test would only catch GGUF-parse and worker-IPC plumbing bugs — both already covered by `tests/integration/end_to_end.rs` and `inference::split` unit tests. Pragmatic substitute: the env-var-gated `local_embedder_load_from_real_model` test (`SWARMLLM_TEST_MODEL_DIR`) and manual smoke tests against the TinyLlama-1.1B / Phi-3.5 / Qwen2.5-7B installs at `~/.local/share/swarmllm/models/`. Revisit if a CI worker-subprocess regression slips past the unit + in-process layers.
 
 ### Recently closed
 

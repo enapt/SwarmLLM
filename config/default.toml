@@ -17,8 +17,10 @@ contribution = "minimal"       # "minimal", "moderate", "maximum" — change in 
                                # see [auto_manage] idle_unload_secs to reclaim idle VRAM.
 
 [resources]
-max_gpu_vram_mb = 0            # 0 = auto (80% of detected GPU used for inference; rest stays on disk for P2P)
-max_ram_mb = 0                 # 0 = auto (50% of system RAM with a GPU, 80% on a CPU-only node)
+max_gpu_vram_mb = 0            # 0 = auto: the card's size minus what other programs use, minus a margin
+                               # set by [node] contribution (10% / 7% / 5%, kept within 512 MB-2 GB)
+max_ram_mb = 0                 # 0 = auto, set by [node] contribution: at minimal ~31% of RAM when the
+                               # card runs the models, 50% on a CPU-only node (up to 50% / 80% at maximum)
 max_disk_mb = 50000            # 50GB for model storage
 max_bandwidth_mbps = 0         # UPLOAD cap for SERVING MODEL PIECES to other nodes, and
                                # nothing else: inference traffic and the gossip that keeps
@@ -83,7 +85,9 @@ max_concurrent_requests = 10
 gpu_layers = -1                # -1 = auto (use the GPU when one is available), 0 = CPU only.
                                # The split engine places a worker's whole layer window on one device,
                                # so a positive value means the same as -1; use shard windows to bound VRAM.
-max_batch_size = 1             # 1 = no batching (sequential); >1 enables batching for both local and remote forwards (pipeline bubble filling)
+# max_batch_size = 8           # requests run through the model together (default 8; 1 = no batching).
+                               # Left unset so the compiled default applies: this file is copied into a
+                               # new .deb install's config.toml, and a value here would pin it there.
 batch_timeout_ms = 50          # Ms to wait for more requests before dispatching a partial batch (0 = immediate)
 privacy_mode = false           # When true, user prompts are NOT written to disk (KV-cache sessions stay in-memory only)
 # local_embedding_privacy = false  # Embed tokens locally before sending to first segment (remote never sees raw tokens)

@@ -50,7 +50,8 @@ run it by path.
 `commit-gate.sh` runs `cargo dev-test --test repo_consistency` (~2 s once built)
 before a `git commit` touching a file whose figures another document restates
 (`CLAUDE.md`, `README.md`, `docs/ARCHITECTURE.md`, `Cargo.toml`,
-`frontend/i18n/*.json`) — it tests THIS content, which a stamp file could not.
+`frontend/i18n/*.json`, the book's installation page) — it tests THIS content,
+which a stamp file could not.
 
 **Both fail OPEN** (unparseable payload, missing cargo, timeout), and **a hook
 is verified by its OUTPUT, never its exit code** (#614) — three hooks here sat
