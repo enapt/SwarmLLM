@@ -69,7 +69,6 @@ Nothing records a peer — or this node — as holding a shard until its BLAKE3 
 
 ## The activity list reports a TRANSITION; the log may report every message
 
-
 The 100-entry `emit_activity` ring is the dashboard replay and the report's recent activity: gate an ActivityEvent on a state CHANGE, one entry per event not per item; the per-message DIAG log stays.
 
 → `docs/invariants/network.md` § "The activity list reports a TRANSITION; the log may report every message"
@@ -88,13 +87,11 @@ The 100-entry `emit_activity` ring is the dashboard replay and the report's rece
 
 ## ACK-Timeout Fast-Fail for rr Sends
 
-
 Streaming rr sends MUST set `SendDirectMessage.delivery_request_id = Some(uuid)`; the `RR_ACK_TIMEOUT_SECS` sweep then closes `streaming_token_txs[uuid]` when libp2p drops a send silently. Pair with the `is_transient_remote_failure` retry in `dispatch_single`.
 
 → `docs/invariants/network.md` § "ACK-Timeout Fast-Fail for rr Sends"
 
 ## A connection the swarm DENIED is forgotten by request-response (2026-10-02)
-
 
 **`forget_denied_connection`** drops a request-response connection the swarm denied (per-peer cap) and fails its requests. Anything keeping per-connection state must clean up on `ListenFailure` / `DialFailure` as well as on a close.
 
@@ -108,13 +105,11 @@ Streaming rr sends MUST set `SendDirectMessage.delivery_request_id = Some(uuid)`
 
 ## A split token crosses on the pipeline stream, keyed by (request, peer) (2026-09-27)
 
-
 `inference.persistent_pipeline_stream` is measured faster but stays OFF (no receipt ACK, #133). Streams are keyed by **(request, peer)**. Measure per-message cost on a REAL link; run the failover rigs before any default flip.
 
 → `docs/invariants/network.md` § "A split token crosses on the pipeline stream, keyed by (request, peer)"
 
 ## A substream sends with its protocol proposal; a ping sample is a COST, a distance is converted (2026-09-27)
-
 
 Substreams negotiate with multistream-select V1Lazy (`SWARMLLM_SUBSTREAM_V1=1` restores V1 for an A/B). `PeerInfo::latency_ms` and ACK samples are COSTS; a reader that means DISTANCE goes through **`network::manager::physical_rtt_ms`** (`exchange_says_lan`, `observe_network_coord`) — never compare a raw sample to a distance constant.
 
@@ -128,13 +123,11 @@ A verify's last segment walks the drafts and answers with token ids (`LayerForwa
 
 ## A check travels a chain like a decode step does (2026-10-02)
 
-
 **`PipelineExecutor::verify_may_chain`** decides whether `forward_verify_through_segments` sends a run of remote segments ONE forward (every hop advertising `features::CHAINED_VERIFY`, gated at the coordinator); a chained check resends on nothing (`ResendOnRefusal::Never`). `SWARMLLM_CHAIN_VERIFY=0` is the control arm.
 
 → `docs/invariants/network.md` § "A check travels a chain like a decode step does"
 
 ## A result names the step it answers; one that did not arrive is sent again (2026-09-25)
-
 
 `LayerResult::answers_step` (`0x07`) names the forward; `PendingLayerResult::expects_step` refuses any other, and every registration sets it from the forward it actually sends. Only then may a serving node resend a lost result (`resend_lost_result`, gated on `features::RESULT_STEP`). Test with `SWARMLLM_FAULT_RESULT=lose|duplicate`.
 
@@ -147,7 +140,6 @@ Streamed verify forwards (`LayerForward::stream_seq`, `0x0C`, gated on `features
 → `docs/invariants/network.md` § "A stream of verifies runs in its order, and each answer names its number"
 
 ## Every reply a serving node sends goes to whoever is WAITING — failures included
-
 
 **`layer_forward::reply_target`** is the single answer to who is WAITING; it returns a `ReplyTo` nothing else can build, so `send_error_result` cannot be handed the raw sender (the previous hop in a chain). Gotcha #707.
 
@@ -166,7 +158,6 @@ Every kind of peer work takes a `PeerWorkSlot`, and a refusal is ANSWERED — `l
 → `docs/invariants/network.md` § ""Is this connection direct?" — `network::relay::addr_is_direct_transport`"
 
 ## Whether a peer is on our LAN is decided only from what WE observed
-
 
 `is_lan_peer` is a privacy boundary: never derive it from `identify::Info` (peer-controlled); use only the connection's own address, mDNS, and a measured RTT. ⚠ The flag is sticky. Guard: `lan_membership_is_never_decided_from_what_a_peer_told_us`.
 
@@ -192,10 +183,14 @@ are how bootstrap and cached addresses are dialled. Group by target peer, one
 
 ## Peer Cache: storable vs dialable
 
-`network/peer_cache.rs` answers two different questions and they must not be
-conflated:
+`network/peer_cache.rs` answers two different questions; never use one as the
+other. **`filter_storable`** — what is worth KEEPING (`save_peer_cache`): keeps a
+peer's private addresses wherever this node is now. **`filter_dialable`** — what
+is worth dialling FROM HERE (every dial path): also drops a peer's private
+addresses when we have none, or when the peer advertises a public one (the
+Docker `172.17.0.1` loop-back).
 
-→ `docs/invariants/network.md`
+→ `docs/invariants/network.md` § "Peer Cache: storable vs dialable"
 
 ## ModelRegistry Holder Counts
 
@@ -210,7 +205,6 @@ cadence decides how fast.
 → `docs/invariants/network.md`
 
 ## A report built to be handed to a stranger is a publishing surface (2026-09-01)
-
 
 **`network::redact::redact_addresses`** hides every host in the diagnostics report at the one point `api::admin::diagnostics` returns; `?full=1` is the opt-in. Guard: `the_diagnostics_report_hides_addresses_unless_full_is_asked_for`.
 

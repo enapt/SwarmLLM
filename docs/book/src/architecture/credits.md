@@ -6,7 +6,8 @@
 > is `0` and `calculate_tier` returns the same tier whatever balance it is
 > given, so **no balance affects who is served, how fast, or what any surface
 > shows**. Nothing displays a balance either — not the dashboard, not the
-> leaderboard, not the command line.
+> leaderboard, not the command line. (`/metrics` still exports the raw ledger
+> figure as `swarmllm_credits_balance` for anyone graphing it; it gates nothing.)
 >
 > The reason is simple and worth stating: credit has never moved between two
 > machines as payment for work. Each node mints its own figure, and the one real
@@ -26,7 +27,7 @@
 > any of it comes back — is in
 > [`docs/CREDITS_DESIGN.md`](https://github.com/enapt/SwarmLLM/blob/main/docs/CREDITS_DESIGN.md).
 
-Credits are SwarmLLM's fairness mechanism — no blockchain, no token, just local accounting with dual-signed transactions. The design rewards contributors and deprioritizes free-riders.
+Credits are a dormant design for fairness — no blockchain, no token, just local accounting with dual-signed transactions. Switched on, it would reward contributors and deprioritize free-riders; today it gates nothing.
 
 ## Earning & Spending
 

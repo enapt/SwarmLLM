@@ -59,7 +59,7 @@ Client → API Server → InferenceRouter → Pipeline Assembly
 4. **Liveness filter**: drop holders that aren't in `connected_node_ids` (the libp2p truth — DHT can re-inject providers for peers that just disconnected, and `peer_registry` is intentionally preserved across mid-pipeline disconnects for reconnect attempts)
 5. Fetch node load/latency from peer_registry
 6. **Parallax scheduler**: shortest-path dynamic programming over observed per-layer latencies (EMA over recent forwards), rather than a greedy latency-only sort. Cross-gossips top-32 observed latencies via `NodeCapability.observed_latencies` so every node has a current view of the network's compute profile
-7. **Encrypted pipeline check**: if enabled for this model, force first and last segments to the local node (boomerang topology)
+7. **Start-and-finish check** (`encrypted_pipeline`): if enabled for this model, force first and last segments to the local node (boomerang topology)
 8. Assignment: widest contiguous layer range per node, merging on same-node
 9. Identify standby nodes per segment (failover)
 10. Send PipelineAssignment, wait for ACKs, begin forwarding
@@ -92,9 +92,9 @@ delivers it (no `OutboundFailure` event fires).
 
 ## Concurrent Request Throttling
 
-Per-tier concurrency caps come from `max_concurrent_requests`
-(default 10): Bronze=¼, Silver=½, Gold=1×, Platinum=2×. Requests
-beyond the cap queue in the router. **The queue is event-driven**:
+Every request gets the same middle tier while credits are dormant,
+and that tier runs at most HALF of `max_concurrent_requests` at once
+(5 with the default 10). Requests beyond the cap queue in the router. **The queue is event-driven**:
 every `active_count.fetch_sub(1)` on completion is paired with
 `queue_notify.notify_one()` so `drain_queue` wakes immediately.
 Without that pairing, queued requests would sit indefinitely until
@@ -188,8 +188,8 @@ speedup** on CPU-CPU localhost).
 - **PagedAttention** — Deferred; `paged-attn` feature flag reserved for future use (module removed, never wired to production)
 - **Logprobs** — NOT returned by local inference. The sampler can compute them (`sample_token_with_logprobs`) and the response type serializes them, but every local execution path pins `token_logprobs: vec![]`, so nothing reaches the response. `/v1/chat/completions` therefore REFUSES `logprobs` for a locally-served model rather than answering 200 with the field absent, which is indistinguishable from a request that never asked. Cloud-routed models still return them. See `docs/ARCHITECTURE.md` § Deferred Items
 - **Pipeline Error Broadcast** — On distributed inference failure, `broadcast_pipeline_error()` notifies all participants so peers can update shard availability and route around failures
-- **Local Embedding Privacy** — When `local_embedding_privacy: true`, the requesting node performs token→embedding locally (~1ms) and sends pre-embedded hidden-state activations instead of raw token IDs to the first pipeline segment. Remote nodes never see the plaintext prompt. See [Security > Local Embedding Privacy](../architecture/security.md#local-embedding-privacy)
-- **Encrypted Pipeline** — When enabled (per-model or global), forces a "boomerang" topology: the requesting node handles both the first segment (embedding) and last segment (token sampling). Remote nodes only process intermediate activations — no remote node ever sees plaintext input or output. See [Security > Encrypted Pipeline](../architecture/security.md#encrypted-pipeline)
+- **Local Embedding Privacy** — When `local_embedding_privacy: true`, the requesting node performs token→embedding locally (~1ms) and sends pre-embedded hidden-state activations instead of raw token IDs to the first pipeline segment. Remote nodes never receive the prompt as text or token IDs, but they still compute on hidden states that can be turned back into much of it. See [Security > Local Embedding Privacy](../architecture/security.md#local-embedding-privacy)
+- **Start and finish on this computer** (`encrypted_pipeline`, "boomerang") — When enabled (per-model or global), the requesting node runs both the first segment (embedding) and the last (token sampling), so no other computer is handed the prompt as text or picks the reply's words. This is structural, not cryptographic: the middle computers still compute on hidden states in plaintext, which published attacks turn back into much of the text. See [Security > Start and Finish on This Computer](../architecture/security.md#start-and-finish-on-this-computer-boomerang)
 
 ## Vision Language Models (VLM)
 

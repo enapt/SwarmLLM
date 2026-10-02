@@ -138,8 +138,7 @@ for the full pipeline and measured numbers.
 
 ## Anti-Gaming
 
-- Subnet clustering detection: >5 nodes per /24 triggers 25% spot-check rate (up from 5%)
-- `SubnetClustering` trust penalty (-0.03 per cycle)
+- Subnet clustering (>5 nodes per /24) is tracked; the elevated 25% check rate applies only to credit transactions, which are dormant, so today it has no effect. The `SubnetClustering` trust penalty is defined but never applied
 - Signed balance reports with timestamp freshness (5 min window)
 - Gossip replay rejection (5 min window)
 - `cross_node_prefix_trust_min` gates fetch peers at a minimum trust

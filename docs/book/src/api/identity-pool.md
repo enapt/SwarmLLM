@@ -21,7 +21,7 @@ Peer identity directory (nicknames, regions, tiers).
 
 Link multiple devices owned by the same user, so they serve each other privately and the owner can pin models to them. Credit forwarding to the owner's balance still runs underneath, but credits are dormant and nothing shows a balance (`docs/CREDITS_DESIGN.md`).
 
-> **Terminology**: "Linked Devices" in the UI. This is different from connecting to the SwarmLLM network — linking devices groups your own hardware, while the network connects you with other people.
+> **Terminology**: "My Devices" in the UI (More → My Devices). This is different from connecting to the SwarmLLM network — linking devices groups your own hardware, while the network connects you with other people.
 
 ### Quick Start (CLI)
 
@@ -29,10 +29,10 @@ Link multiple devices owned by the same user, so they serve each other privately
 # On your main device:
 swarmllm pool create --name "My Devices"
 swarmllm pool invite-code
-# → A3F7K2M9
+# → swarmpool://… (a long code)
 
 # On each other device:
-swarmllm pool join A3F7K2M9
+swarmllm pool join 'swarmpool://…'
 
 # Check status:
 swarmllm pool status
@@ -40,7 +40,7 @@ swarmllm pool status
 
 ### Invite Code System
 
-Instead of exchanging raw 64-character node IDs, device pools use **8-character invite codes** (e.g., `A3F7K2M9`):
+Instead of exchanging raw 64-character node IDs, device pools use an **invite code**: a `swarmpool://…` link that carries the main device's reachable addresses and a short join token, so the joining device can dial it directly. (A bare 8-character code such as `A3F7K2M9` — the token on its own — is still accepted, but only joins when both devices already share a swarm.)
 
 1. Owner generates a code → `POST /api/pool/generate-code`
 2. Code shared verbally, via QR, or copy-paste
@@ -96,7 +96,7 @@ Per-pool credit rate overrides.
 
 ## Private Mode
 
-Restrict inference to your device pool for maximum privacy. Your prompts never leave your devices.
+Keep your OWN requests on your device group. By default this also admits other SwarmLLM computers on your local network (`pool.private_mode_allow_lan = true`); set it to `false` to keep requests on your own devices only. It does not stop your node serving the swarm.
 
 ### GET /api/pool/private-mode
 Current state + coverage summary. Returns `enabled`, `allow_lan`, `offline_mode`, and `coverage` object.

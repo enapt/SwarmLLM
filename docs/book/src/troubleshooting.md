@@ -259,10 +259,12 @@ its GPU memory) whenever the daemon unloads it by either path above.
   the logs to confirm the fast-fail path engaged.
 
 **Concurrent requests stall when only some get dispatched:**
-- Concurrency is capped by `inference.max_concurrent_requests` (default
-  10), and any one requester may use at most half of it — the same for
-  everyone, since credits are dormant and gate nothing. Excess requests queue
-  until earlier ones finish; raise the setting to allow more.
+- This node runs at most half of `inference.max_concurrent_requests` of its
+  own requests at once (5 with the default 10 — every request gets the same
+  tier while credits are dormant); the rest queue until earlier ones finish.
+  Raise the setting to allow more. Work arriving from OTHER computers has its
+  own cap set by your contribution level (8 / 24 / 64 at minimal / moderate /
+  maximum), and no single computer may take more than half of that.
 
 ## Cross-Node Prefix-KV Sharing
 

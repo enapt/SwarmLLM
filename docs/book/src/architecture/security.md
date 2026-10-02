@@ -3,15 +3,15 @@
 ## Two Operator-Facing Encryption Layers
 
 SwarmLLM ships with two distinct encryption layers that solve different
-problems. The first is on by default; the second is an opt-in
-stronger privacy mode, which also switches on by itself for any model
+problems. The first is on by default; the second ("Start and finish on this
+computer") is opt-in, and also switches on by itself for any model
 whose first and last shard this node holds
 (`inference.encrypted_pipeline_auto`, default on).
 
 | Layer | Config flag | Default | What it protects |
 |-------|-------------|---------|------------------|
 | **Layer 1 — pairwise session encryption** | `network.enable_encryption` | **`true`** (on) | Every inter-node tensor forward is ChaCha20-Poly1305 sealed on the wire. Eavesdroppers on the network see ciphertext only. Entry/exit nodes still see plaintext at their boundary (the first segment receives the prompt itself — text or token IDs — unless `local_embedding_privacy` is on; the last segment sees the sampled tokens). |
-| **Layer 2 — encrypted (boomerang) pipeline** | `inference.encrypted_pipeline` | `false` (opt-in, per-model override available), but `inference.encrypted_pipeline_auto` (default **`true`**) turns it on automatically for any model whose first and last shard this node holds. A per-model setting wins over both. | Forces the requesting node to handle BOTH the first segment (embedding) AND the last segment (sampling), so no remote node receives the prompt text or samples the reply. Remote nodes still compute on the intermediate hidden states **in plaintext** (they are sealed only in transit), and those are partially invertible back to text. Requires shard 0 + final shard locally. Adds ~1 RTT/token. |
+| **Layer 2 — Start and finish on this computer ("boomerang")** | `inference.encrypted_pipeline` | `false` (opt-in, per-model override available), but `inference.encrypted_pipeline_auto` (default **`true`**) turns it on automatically for any model whose first and last shard this node holds. A per-model setting wins over both. | Forces the requesting node to handle BOTH the first segment (embedding) AND the last segment (sampling), so no remote node receives the prompt text or samples the reply. Remote nodes still compute on the intermediate hidden states **in plaintext** (they are sealed only in transit), and those are partially invertible back to text. Requires shard 0 + final shard locally. Adds ~1 RTT/token. |
 
 Layer 1 is "encryption in transit." Layer 2 keeps the two ENDS of the
 pipeline on your machine — a **structural** guarantee, not a cryptographic
@@ -231,7 +231,7 @@ When `local_embedding_privacy: true` is set in `[inference]` config, the request
 
 Relevant code: `src/inference/local_embedder.rs`, `src/inference/pipeline/`, `src/daemon/state/mod.rs` (`local_embedders` DashMap).
 
-## Encrypted Pipeline
+## Start and Finish on This Computer (boomerang)
 
 When `encrypted_pipeline: true` is enabled (globally or per-model), the pipeline scheduler forces the requesting node to handle both the **first** and **last** segments. This creates a "boomerang" topology:
 
@@ -243,7 +243,7 @@ No remote node handles the raw prompt tokens or samples the generated output —
 
 **Requirements:**
 - The requesting node must hold **shard 0** (embedding table) AND the **final shard** (output head)
-- `local_embedding_privacy` is auto-enabled when encrypted pipeline is active
+- `local_embedding_privacy` is auto-enabled when this setting is active
 - Only useful for models with **3+ shards** (2-shard models = fully local, no distribution)
 
 **Overhead:**

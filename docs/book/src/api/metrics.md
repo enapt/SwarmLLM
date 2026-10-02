@@ -1,6 +1,6 @@
 # Prometheus Metrics
 
-SwarmLLM exposes a Prometheus-compatible metrics endpoint at `GET /metrics`. No authentication required (standard convention for metrics endpoints).
+SwarmLLM exposes a Prometheus-compatible metrics endpoint at `GET /metrics`. It answers without a key only to a request made on the node's own machine, and not even then when `api.metrics_auth_required = true`; from anywhere else send `Authorization: Bearer <api key>` (see [Monitoring](../operations/monitoring.md)).
 
 ## Available Metrics
 
@@ -10,7 +10,7 @@ SwarmLLM exposes a Prometheus-compatible metrics endpoint at `GET /metrics`. No 
 |---|---|---|
 | `swarmllm_peers_connected` | gauge | Number of connected peers |
 | `swarmllm_inference_requests_total` | counter | Total inference requests processed |
-| `swarmllm_credits_balance` | gauge | Current credit balance |
+| `swarmllm_credits_balance` | gauge | The internal credit ledger's figure — dormant, it gates nothing and is self-minted |
 | `swarmllm_shards_hosted` | gauge | Number of locally hosted shards |
 | `swarmllm_network_bytes_total{direction="in"\|"out"}` | counter | Bytes sent and received over the peer network. Counted at the transport, so it covers every protocol — gossip, DHT maintenance, shard transfers, inference — not only what this node's own code writes. **Omitted entirely when nothing is counting** rather than reported as zero: a flat line at 0 would be read as "no traffic" when it means "not measured" |
 | `swarmllm_inference_latency_seconds` | histogram | Inference request latency |

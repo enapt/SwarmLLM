@@ -29,7 +29,7 @@ The Grafana dashboard includes:
 ### Node Overview
 - Connected Peers (stat)
 - Total Inference Requests (stat)
-- Credit Balance (stat)
+- Credit Balance (stat — the dormant ledger figure, which gates nothing)
 - Shards Hosted (stat)
 
 ### Inference
@@ -44,8 +44,8 @@ The Grafana dashboard includes:
 ### Storage & Shards
 - Hosted Shards Over Time
 
-### Credits
-- Credit Balance Over Time
+### Credits (dormant)
+- Credit Balance Over Time — a self-minted ledger figure that gates nothing
 
 ## Manual Setup
 

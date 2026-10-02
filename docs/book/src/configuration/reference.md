@@ -4,22 +4,28 @@ Every configuration option, organized by section.
 
 ## When a change takes effect
 
-Settings changed through the dashboard (or by editing this file and calling
-`POST /api/admin/config/reload`) apply to the running node immediately. You do
-not need to restart for a resource limit, a contribution level, an auto-manage
-threshold, or a batching setting to matter.
+Every setting the dashboard offers applies to the running node immediately
+(so does the same setting edited in this file, followed by
+`POST /api/admin/config/reload`). You do not need to restart for a resource
+limit, a contribution level, an auto-manage threshold, or a batching setting to
+matter.
 
-Two things are decided once, when the node starts, and keep their startup
-value until it starts again:
+A setting that exists **only in this file** applies without a restart where its
+row below says so; otherwise restart the node after changing it — several are
+read once, when something is built at startup (a listener, a rate limiter, the
+network).
+
+Two of the dashboard's settings are also decided once, when the node starts,
+and keep their startup value until it starts again:
 
 | Setting | Why |
 |---|---|
 | `[network] max_peers` (and the contribution level it derives from) | Connection limits are fixed when the peer-to-peer network is built |
 | `[resources] max_cpu_threads` for an **already-loaded** model | Threads are handed to a model's worker when it loads; taking them back would interrupt whatever it is answering. The next model to load uses the new value |
 
-Everything else is live. Before v0.3.88 none of it was: a setting would save,
-report success, show its new value, and leave the running node on the value it
-booted with.
+Before v0.3.88 none of the dashboard's settings were live: a setting would
+save, report success, show its new value, and leave the running node on the
+value it booted with.
 
 ## `[node]` — Basic Node Settings
 
@@ -86,7 +92,7 @@ booted with.
 |---|---|---|---|
 | `default_model` | string | `""` | The model a request for `"auto"` gets. Empty = the model `auto` answered with last time (so a conversation stays on one model), else one this node holds whole, else one the swarm can serve; ties go alphabetically. Applies from v0.3.209 — earlier releases ignored it |
 | `session_timeout_seconds` | integer | `600` | Chat session memory lifetime (10 min) |
-| `max_concurrent_requests` | integer | `10` | Max parallel requests |
+| `max_concurrent_requests` | integer | `10` | Request concurrency budget: half of it (5 by default) of this node's own requests run at once, the rest queue |
 | `model_path` | path | none | Path to a GGUF model file |
 | `gpu_layers` | integer | `-1` | Device placement. `-1` = auto: the whole model on the card when it fits, and when it does not, as many of its first layers as do with the rest on the processor (since v0.3.145; `SWARMLLM_HYBRID_OFFLOAD=0` turns the split off and falls back to processor-only). `0` = processor only. `>0` = put that many layers on the card and the rest on the processor. Architectures allowed to split (code-checked): Llama, Llama 4, Qwen2, Gemma, Gemma 2, Phi-3, Mistral, Starcoder2, GLM-4 — Llama 4 is allowed but has not been run on a real model; others load on one device as before |
 | `kv_cache_ttl_secs` | integer | `600` | KV-cache lifetime |
@@ -307,8 +313,8 @@ what gets *stored* where, not about how work is distributed.
 
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `inference_serve` | integer | `10` | Credits earned per layer per token served |
-| `inference_consume` | integer | `10` | Credits spent per layer per token consumed |
+| `inference_serve` | integer | `10` | Credits earned per token served |
+| `inference_consume` | integer | `10` | Credits spent per token consumed |
 | `shard_hosting` | integer | `1` | Credits per GB per hour hosting |
 | `shard_seeding` | integer | `5` | Credits per GB seeding |
 | `relay_service` | integer | `2` | Credits per connection hour relaying |
