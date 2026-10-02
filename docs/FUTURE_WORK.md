@@ -829,8 +829,8 @@ a total well above that request's own cache would reopen #11.
 #### #187 — Head-room admission prices load and runtime on two different bases
 `P3` · memory · **PARTIAL** — 2026-08-08 · history: archive § "Head-room admission: two things the live test found"
 
-The `positions_claimed` arithmetic is fixed. `kv_budget.rs` bases runtime head-room on free
-card memory (`mem_get_info`, `kv_headroom_bytes`) while the load-time estimator uses the
+The claim arithmetic is fixed (`kv_budget::positions_to_allocate`). `kv_budget.rs` bases runtime
+head-room on free card memory (`mem_get_info`, `kv_headroom_bytes`) while the load-time estimator uses the
 contribution-derived budget; nobody tried to reconcile them, and no end-to-end refusal under
 real pressure was ever constructed. Put both on one number, then occupy card memory before a
 load so the estimator passes but the runtime budget binds, and watch the refusal. Narrow

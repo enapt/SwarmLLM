@@ -621,7 +621,7 @@ histograms. Adding a field means adding it there once, not at each surface.
 |-------|------|-------|
 | DEBUG | `DIAG: processing swarm event` — event type name for every swarm event | manager/events.rs |
 | DEBUG | `DIAG: handling outbound command` — command type for every outbound command | manager/commands.rs |
-| INFO  | `DIAG: OutboundFailure` — `is_connected`, `pending_tensor_out`, `pending_channels` | manager/events.rs |
+| WARN  | `DIAG: OutboundFailure` — `is_connected`, `pending_tensor_out`, `pending_channels` | manager/events.rs |
 | WARN  | `DIAG: InboundFailure` — `pending_channels` | manager/events.rs |
 | DEBUG | `DIAG: remote-generate stream complete` — `streamed_count`, the number the done token carries so the coordinator can tell a finished stream from one whose end overtook its middle | daemon/dispatch/remote_generate.rs |
 | DEBUG | `DIAG: ResponseSent event` — confirms response written to wire. Per-message, so `-v`: at info these were three quarters of an idle node's log, and one line per streamed token under load | manager/events.rs |
@@ -717,7 +717,7 @@ All three streaming paths are instrumented with timing and error reporting:
 |-------|------|-------|
 | WARN  | `DIAG: SSE role delta send failed` — client disconnected before stream started | api/openai/streaming.rs |
 | WARN  | `DIAG: SSE final text delta send failed` — client disconnected on last token | api/openai/streaming.rs |
-| WARN  | `DIAG: SSE finish delta send failed` — client disconnected at finish | api/openai/streaming.rs |
+| DEBUG | `DIAG: SSE finish delta send failed` — client disconnected at finish | api/openai/streaming.rs |
 | DEBUG | `DIAG: SSE stream no finish event from pipeline` — falling back to result_rx | api/openai/streaming.rs |
 | WARN  | `DIAG: SSE result_rx channel dropped` — pipeline task died | api/openai/streaming.rs |
 | INFO  | `DIAG: SSE distributed stream completed` — `elapsed_ms`, `token_count` | api/openai/streaming.rs |
@@ -727,7 +727,7 @@ All three streaming paths are instrumented with timing and error reporting:
 | Level | What | Where |
 |-------|------|-------|
 | DEBUG | `DIAG: split stream model not found` — model evicted during request | api/openai/streaming.rs |
-| DEBUG | `DIAG: split stream decode loop complete (subprocess)` — `decode_ms`, `tok_per_sec` | api/openai/streaming.rs |
+| INFO  | `DIAG: split stream decode loop complete (subprocess)` — `decode_ms`, `tok_per_sec` | api/openai/streaming.rs |
 | WARN  | `DIAG: split stream client disconnected (connection closed) — cancelling decode` — `token_count`, `elapsed_ms` | api/openai/streaming.rs |
 | INFO  | `DIAG: split stream completed` — `elapsed_ms`, `token_count` | api/openai/streaming.rs |
 
@@ -735,7 +735,7 @@ All three streaming paths are instrumented with timing and error reporting:
 
 | Level | What | Where |
 |-------|------|-------|
-| WARN  | `DIAG: local stream role delta send failed` — client disconnected early | api/openai/streaming.rs |
+| DEBUG | `DIAG: local stream role delta send failed` — client disconnected early | api/openai/streaming.rs |
 | WARN  | `DIAG: local stream token send failed` — channel full or client disconnected | api/openai/streaming.rs |
 | ERROR | `DIAG: local stream generate_stream error` — executor error | api/openai/streaming.rs |
 | INFO  | `DIAG: local stream completed` — `elapsed_ms`, `token_count` | api/openai/streaming.rs |
@@ -1069,7 +1069,7 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
 
 | Level | What | Fields |
 |-------|------|--------|
-| DEBUG | `DIAG: speculative batch` | `drafted`, `accepted`, `acceptance_rate` |
+| DEBUG | `DIAG: speculative batch` | `drafted_count`, `accepted_count`, `acceptance_rate` |
 
 ### Vision (vision.rs + pipeline/mod.rs + daemon/dispatch/mod.rs)
 
@@ -1084,7 +1084,12 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
 
 | Level | What | Fields |
 |-------|------|--------|
-| DEBUG | `DIAG: build_prompt` | `template_matched`, `fallback` |
+| DEBUG | `DIAG: chat template applied` | `template_matched` |
+| DEBUG | `DIAG: chat template applied with the system turn folded into the first user turn` | `template_matched` |
+| WARN  | `DIAG: chat template failed, using gemma fallback` / `DIAG: chat template failed, using model-name fallback` / `DIAG: chat template failed, using fallback` | `fallback`, `model_name` |
+| DEBUG | `DIAG: no chat template, using model-name fallback` / `DIAG: no chat template, using fallback` | `template_matched` (false), `fallback` |
+| WARN  | `DIAG: chat template rendered a prompt with the user's question missing` — the render is discarded for the fallback chain | — |
+| DEBUG | `DIAG: build_prompt from header` (pipeline/prompt.rs) | `model`, `prompt_len` |
 
 ## Model Subsystem Diagnostics
 
@@ -1099,27 +1104,27 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
 
 | Level | What | Fields |
 |-------|------|--------|
-| INFO  | `DIAG: register_manifest` — **only when new or changed** (`manifest_hash` differs) | `model_id`, `shard_count`, `publisher` |
-| DEBUG | `DIAG: register_manifest (unchanged)` — a re-gossip of a manifest we already hold | `model_id` |
+| INFO  | `DIAG: register_manifest` — **only when new or changed** (`manifest_hash` differs) | `model`, `name`, `shard_count`, `publisher` |
+| DEBUG | `DIAG: register_manifest (unchanged)` — a re-gossip of a manifest we already hold | `model` |
 | INFO  | `DIAG: load_from_db complete` | `manifests_loaded_count` |
 
 ### HuggingFace (model/huggingface/)
 
 | Level | What | Fields |
 |-------|------|--------|
-| DEBUG | `DIAG: search_gguf_models` | `query`, `repos_found` |
+| DEBUG | `DIAG: search_gguf_models` | `query`, `repos_count`, `gguf_files_found` |
 
 ### Manifest (manifest.rs)
 
 | Level | What | Fields |
 |-------|------|--------|
-| DEBUG | `DIAG: load_from_dir` | `dir`, `shard_count` |
+| DEBUG | `DIAG: load_from_dir` | `model`, `shard_count`, `dir_path` |
 
 ### LoRA (lora.rs)
 
 | Level | What | Fields |
 |-------|------|--------|
-| INFO  | `DIAG: lora adapter loaded` | `adapter_path`, `rank`, `alpha`, `target_modules` |
+| DEBUG | `DIAG: lora adapter loaded` | `adapter_id`, `name`, `base_model`, `rank`, `num_layers`, `size_bytes` |
 
 ### Acquisition (acquisition.rs)
 
@@ -1132,8 +1137,8 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
 | Level | What | Fields |
 |-------|------|--------|
 | INFO  | `DIAG: evaluate_and_prune` | `resource_pressure`, `pressure_urgent` |
-| DEBUG | `DIAG: register_local_shard` | `model`, `shard_index` |
-| INFO  | `DIAG: check_and_load_model` | `model_id`, `available_shards`, `missing_shards`, `ready` |
+| DEBUG | `DIAG: register_local_shard` | `model`, `shard` |
+| INFO  | `DIAG: check_and_load_model` | `model`, `available_shards`, `missing_shards`, `total_shards`, `ranges`, `ready`, `local_shard_indices` |
 | DEBUG | `Skipping model — insufficient trust for auto-manage` | `model`, `trust` |
 | INFO  | `Model promoted to NetworkPopular` | `model`, `holders` |
 | INFO  | `HfWatcher: promoted to DemandVerified` | `model`, `repo`, `downloads` (R141 — fires at 10k for trusted publishers, 100k for unknown) |
@@ -1148,13 +1153,13 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
 
 | Level | What | Fields |
 |-------|------|--------|
-| INFO  | `DIAG: server startup` | `addr` |
+| DEBUG | `DIAG: server startup` | `addr` |
 
 ### Admin HF (admin_hf/shards.rs)
 
 | Level | What | Fields |
 |-------|------|--------|
-| INFO  | `DIAG: hf_download_shards` | `model_id`, `variant` |
+| INFO  | `DIAG: hf_download_shards` | `repo_id`, `filename`, `shard_count`, `peer_fair_share`, `all_shards` |
 
 ### Providers (providers.rs)
 
@@ -1174,7 +1179,7 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
 
 | Level | What | Fields |
 |-------|------|--------|
-| DEBUG | `DIAG: auth failure` | `path`, `auth_present` |
+| DEBUG | `DIAG: auth failure` | `request_path`, `auth_present` |
 
 ### Anthropic (anthropic/mod.rs)
 
@@ -1183,7 +1188,7 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
 | INFO  | `DIAG: anthropic messages request` | `request_id`, `model`, `messages`, `stream`, `max_tokens` |
 | DEBUG | `DIAG: anthropic connectivity probe` | `request_id` |
 | DEBUG | `DIAG: anthropic inference path resolution` | `request_id`, `has_local_split_model`, `network_available` |
-| INFO  | `DIAG: anthropic proxying to cloud API` | `model` |
+| DEBUG | `DIAG: anthropic proxying to cloud API` | `model` |
 
 ### Identity (identity.rs)
 
@@ -1203,9 +1208,9 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
 
 | Level | What | Fields |
 |-------|------|--------|
-| INFO  | `DIAG: pool_create request` | `name` |
-| INFO  | `DIAG: pool_invite request` | — |
-| INFO  | `DIAG: pool_rates_set request` | `pool_id` |
+| DEBUG | `DIAG: pool_create request` | `name` |
+| DEBUG | `DIAG: pool_invite request` | — |
+| DEBUG | `DIAG: pool_rates_set request` | `pool_id` |
 
 ## Config Diagnostics
 
@@ -1224,7 +1229,7 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
 |-------|------|--------|
 | DEBUG | `DIAG: check_for_update starting` | — |
 | DEBUG | `DIAG: check_for_update version compare` | `current`, `latest` |
-| INFO  | `DIAG: apply_update starting` | `path` |
+| DEBUG | `DIAG: apply_update starting` | `path` |
 
 ### A Windows node that never updates, or stops after updating (2026-10-01, #768/#769)
 
@@ -1261,7 +1266,7 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
 
 | Level | What | Fields |
 |-------|------|--------|
-| INFO  | `DIAG: daemon starting` | `version` |
+| DEBUG | `DIAG: daemon starting` | `version` |
 
 ## Credit Subsystem Diagnostics
 
@@ -1275,7 +1280,8 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
 
 | Level | What | Fields |
 |-------|------|--------|
-| INFO  | `DIAG: escrow created` / `DIAG: escrow release` | `tx_id`, `amount`, `state` |
+| INFO  | `DIAG: escrow created` | `escrow_id`, `request_id`, `amount`, `from` |
+| INFO  | `DIAG: escrow release` | `escrow_id`, `reserved`, `actual`, `reconciled`, `to_node`, `state` |
 
 ### Trust (trust.rs)
 
@@ -1290,7 +1296,7 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
 | Level | What | Fields |
 |-------|------|--------|
 | DEBUG | `DIAG: key rotation tick (eviction)` | `active_sessions`, `stale_evicted` |
-| DEBUG | `DIAG: key rotation tick (re-keying)` | `active_sessions`, `rekey_initiated` |
+| INFO  | `DIAG: key rotation tick (re-keying)` | `active_sessions`, `rekey_initiated` |
 
 ### Key Exchange (manager/identify.rs)
 
@@ -1305,13 +1311,13 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
 
 | Level | What | Fields |
 |-------|------|--------|
-| INFO  | `DIAG: db_open` | `path` |
+| DEBUG | `DIAG: db_open` | `path` |
 
 ### Identity (keypair.rs)
 
 | Level | What | Fields |
 |-------|------|--------|
-| INFO  | `DIAG: identity key loaded from disk` | `path` |
+| DEBUG | `DIAG: identity key loaded from disk` | `node_id` |
 
 ### Peer Cache (peer_cache.rs)
 
@@ -1323,7 +1329,7 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
 
 | Level | What | Fields |
 |-------|------|--------|
-| DEBUG | `DIAG: relay reservation` | `peer` |
+| INFO  | `DIAG: relay reservation` | `peer` |
 
 ## Files Modified
 

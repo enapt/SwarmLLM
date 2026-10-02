@@ -821,15 +821,21 @@ caused by OTHER live conversations says to wait, never to shorten the prompt
 ## `inference::split::kv_budget`
 
 (2026-08-08) — the KV memory budget and the
-admission check against it. The loader records `kv_headroom_bytes` on the
-model; `forward_inner_impl` checks `quantum_exceeds_headroom` before a forward
-claims another growth quantum, and refuses with `ServiceUnavailable` (503,
-so a coordinator re-routes to a peer). **Do NOT re-introduce a load-time
+admission check against it. The loader records the model's `kv_budget_bytes`
+(from `kv_headroom_bytes`); before a forward ALLOCATES more positions,
+`forward_inner_body` asks `KvCacheStore::claim_room` (→
+`kv_budget::claim_exceeds_headroom`) against `kv_budget_now` — the load-time
+figure capped by what the card has left — and claim_room evicts cached prompts
+before it refuses. A refusal is `LocalMemoryUnavailable` (503; the router
+re-plans, in a swarm onto a peer). Updated 2026-10-02: until then this section
+named `quantum_exceeds_headroom` and `positions_claimed`, both since renamed. **Do NOT re-introduce a load-time
 context clamp** — one existed, it shrank every user's context so a single
 full-length conversation would fit, and it did not bound concurrency at all.
 Three invariants a new caller must preserve: the check runs ONLY when
-`positions_claimed` is non-zero (otherwise it walks the whole store per
-generated token for an answer that is almost always "no"); it charges the
+`kv_budget::positions_to_allocate` is non-zero — zero for almost every decode
+step, read off the buffer the request already holds, reservation included
+(otherwise it walks the whole store per generated token for an answer that is
+almost always "no"); it charges the
 POSITIONS claimed, not one quantum, because a prefill jumps many quanta in a
 single forward and charging one under-counted the largest claim a request
 ever makes by 10x; and `kv_budget_bytes: None` means UNKNOWN, never zero — every CPU node
@@ -1086,8 +1092,9 @@ leftovers reclaimable on the next cycle.
   download claim. `manifest.json` and `hf_source.json` are kept — they are what
   the model IS.
 - **Losing the derived files is cheap where it is not free.**
-  `tied_output_weight.bin` is extracted from `shard_000.bin` by
-  `daemon::manifest::extract_tied_output_weight` and re-extracted automatically
+  `tied_output_weight.bin` (and every other sidecar in
+  `GgufTensorMeta::sidecar_tensors`) is extracted from `shard_000.bin` by
+  `daemon::manifest::extract_sidecar_tensors` and re-extracted automatically
   at startup.
 - **The byte figure and the shard COUNT are different questions.**
   `storage_budget_now` takes bytes from the directory and the count from the

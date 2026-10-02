@@ -949,9 +949,11 @@ is a fixed amount of work, not contention; go and find the count.
 The single
 definition of "is this model weight-tied", i.e. does it reuse
 `token_embd.weight` as the LM head instead of shipping an `output.weight`.
-Consumed by BOTH sidecar writers (`daemon::manifest::extract_tied_output_weight`,
-`huggingface::probe::download_tied_output_weight`) AND the reader
-(`inference::split::resolve_tied_output` → `ShardReader`). Producer and
+Consumed by BOTH sidecar writers (`daemon::manifest::extract_sidecar_tensors`,
+`huggingface::probe::download_sidecar_tensors`) AND the reader
+(`shard_reader::resolve_sidecars` → `ShardReader`) — since 2026-09-27 through
+`GgufTensorMeta::sidecar_tensors`, the one list of shard-0 tensors a node
+without shard 0 needs (the tied head and the RoPE factors, #124). Producer and
 consumer MUST agree on which tensor the sidecar holds; a new surface that
 needs the predicate goes through this method rather than re-deriving
 `contains_key("output.weight")`. The sidecar filename is
@@ -963,8 +965,8 @@ which that node frequently does not hold. The sidecar carries the raw bytes;
 `ct.tensor(&mut reader, "token_embd.weight", …)` resolves unchanged. It maps
 the sidecar ONLY when no local shard already covers that offset, since a
 duplicate `gguf_offset` would make `find_shard`'s binary search ambiguous.
-`tied_output` is a REQUIRED parameter on `ShardReader::new` with no
-convenience wrapper — for three releases the sidecar had three writers and
+The sidecars are a REQUIRED parameter of `ShardReader::new` (`sidecars`,
+once `tied_output`) with no convenience wrapper — for three releases the sidecar had three writers and
 zero readers, and every weight-tied model was unservable on any node lacking
 shard 0 (gotcha #178).
 

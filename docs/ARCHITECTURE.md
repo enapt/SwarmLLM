@@ -743,7 +743,7 @@ Node A (rank 0, coordinator)          Node B (rank 1)
 - **Topology**: Star AllReduce — rank 0 collects partials, element-wise sums, broadcasts result
 - **LAN detection**: Auto-detected via PEX RTT measurement (< 5ms → `is_lan_peer = true`)
 - **TP group formation**: Requires `is_lan_peer` OR measured `latency_ms ≤ inference.tp_max_latency_ms` (default 5)
-- **Weight splitting**: Dynamic slicing at inference time (`forward_attn_tp` slices attention heads, `forward_tp` slices FFN intermediate dimension)
+- **Weight splitting**: each rank's slice is cut once at load (`SplitModel::pre_split_for_tp(tp_rank, tp_size)`); `forward_tp_phase` then runs one layer in a `TpPhase` — `AttnOnly` (head-sliced attention) or `FfnOnly` (column-sliced FFN) — and returns a partial without the residual, which the coordinator adds after the AllReduce
 - **Wire format**: Partials zstd-compressed, sent via `SendAllReduceRequest` / `SendAllReduceResponse` NetworkCommand variants
 - **Registry cleanup**: `AllReduceRegistry::cleanup_stale()` runs on each HealthMonitor tick (30s), removing entries where the receiver was dropped (timed out)
 - **Files**: `src/inference/allreduce.rs` (coordinator + registry), `src/inference/scheduler/mod.rs` (TP group detection)
@@ -1767,7 +1767,7 @@ sees fresh data the moment it connects. Stored as
 | `unreachable` | Larger than the whole swarm pool VRAM | Informational only |
 | `blocked` | Trust gate / private mode / explicit user-ignore | "Awaiting verification" |
 
-**R141 — Candidate entries**. `compute_wishlist` merges `HfTrending` entries
+**R141 — Candidate entries**. `compute_wishlist` merges `HfTrendingEntry` rows
 the swarm hasn't adopted (cap `MAX_CANDIDATE_ENTRIES = 24`) as `Candidate`
 rows. Distinguishes from `Blocked` (trust-gated existing entries) and
 `Aspirational` (real partial coverage). Candidate entries populate two
@@ -1817,7 +1817,7 @@ Models are loaded into VRAM only when needed, not eagerly at startup.
 3. First `Forward` or `Generate` request causes the worker to load shards from disk
 4. Graphics memory is admitted and reclaimed by `ModelProcessPool` alone (`admit_to_gpu`, `plan_vram_reclaim`) — it has one owner; the split-model cache cannot unload a worker (see "Graphics memory has one owner" above)
 
-**Loading coordination**: the process pool `Mutex<WorkerSocket>` serializes requests per model — if two requests arrive simultaneously for an unloaded model, the second waits for the first to complete spawning.
+**Loading coordination**: `ModelProcessPool::spawn_lock` (a `Mutex<()>`) serializes worker spawning — if two requests arrive simultaneously for an unloaded model, the second waits for the first spawn instead of starting a second subprocess.
 
 **VRAM Budget**: Configured via `resources.max_gpu_vram_mb` or auto-detected (80% of GPU VRAM). LRU eviction protects active pipeline models from eviction.
 
@@ -2023,7 +2023,7 @@ described signed capability/shard records under per-node keys
 **Pool join security hardening**:
 - Join request **signature verification is transport-authenticated**: the dispatch layer sets the requester `NodeId` from the verified Noise-authenticated sender, not from a self-reported field in the message body. Forgery of join origin is not possible.
 - **Capacity check before invitation consumption**: pool size is validated before the invite code is marked as used, preventing invitee lockout when the pool is already full.
-- **`auto_accept` bound to specific `code_hash`**: auto-acceptance only fires for the exact invitation that matches the code the joiner used, preventing cross-pool or stale auto-acceptance.
+- **Auto-accept bound to a specific code hash** (`PoolManager`'s `auto_accept_code_hash`, which expires): auto-acceptance only fires for the exact invitation that matches the code the joiner used, preventing cross-pool or stale auto-acceptance.
 - **Removal freshness**: signed removal notices are rejected if their timestamp is more than 30 seconds in the future (previously `abs()` allowed ±5 min, enabling timestamp spoofing).
 - **Invite code DoS prevention**: base64-encoded invite codes are capped at 512 characters before decode. Oversized payloads are rejected before any allocation.
 - **`pending_credit_earn` atomics use `AcqRel` ordering** (was `Relaxed`) — ensures credit accumulator writes are visible across threads without data races.
@@ -2205,10 +2205,12 @@ segment is the one that needs it — and in a real swarm that node frequently do
 not hold shard 0.
 
 `tied_output_weight.bin` carries the raw tensor bytes so the head can be loaded
-without shard 0. It is produced by `extract_tied_output_weight` (local GGUF) and
-`download_tied_output_weight` (HF byte-range), and consumed by
-`resolve_tied_output` → `ShardReader::new`, which maps it over the tensor's gguf
-byte range. Reads resolve through the ordinary tensor map, so
+without shard 0. Since 2026-09-27 it is one of a LIST of such sidecars —
+`GgufTensorMeta::sidecar_tensors` (the tied head and the RoPE frequency factors,
+#124) — produced by `extract_sidecar_tensors` (local GGUF) and
+`download_sidecar_tensors` (HF byte-range), and consumed by
+`shard_reader::resolve_sidecars` → `ShardReader::new`, which maps each over its
+tensor's gguf byte range. Reads resolve through the ordinary tensor map, so
 `ct.tensor(&mut reader, "token_embd.weight", …)` works unchanged. When the node
 *does* hold shard 0 the sidecar is ignored and the shard is used.
 
@@ -2784,8 +2786,8 @@ benefits from the extra detail.
 
 `SharedState::peer_performance_rows` joins the three places peer speed was
 already known and none of which was readable from outside the scheduler: the
-health-ping round trip (`PeerInfo.latency_ms`), the per-layer EMA the Parallax
-router uses (`peer_segment_latency_ms_per_layer`), and `segment_latency`'s
+health-ping round trip (`PeerInfo.latency_ms`), the per-peer speed record the Parallax
+router ranks by (`state.metrics.peer_speed`, `PeerSpeed::ranking_ms_per_layer`), and `segment_latency`'s
 per-(model, segment, holder) EWMA and sample counts. Sorted slowest first; only peers that
 have actually served something appear.
 
@@ -2833,9 +2835,9 @@ A lightweight cross-subsystem event bus for real-time dashboard observability.
 **Frontend** (`js/components/dashboard.js`, `js/components/notifications.js`):
 - Global activity log persisted to `sessionStorage` (survives tab refresh within the session)
 - Category-based color coding by event kind (inference = blue, download = green, prune = orange, error = red, etc.)
-- Per-model activity ticker: latest event shown inline on each model card; hover expands to last 5 events
+- Per-model view: a model card links to the Activity and Network panels narrowed to that model (`App.notifications.filterByModel`); the ticker that once lived inside the card was removed (2026-09-13)
 - Global Activity panel: chronological log of all events with relative timestamps ("just now", "5m ago")
-- Shard flash animation: model card shard cells glow white on `ShardDownloaded`/`ShardPruned` events
+- Part flash animation: a part's row flashes (`.shard-transitioning`, 1.5 s) whenever a live update changes its state (`dashboard.js::_patchShardRow`)
 
 ## Node Tiers
 
