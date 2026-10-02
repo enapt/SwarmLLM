@@ -328,6 +328,21 @@ fn every_config_setting_is_read_somewhere() {
         }
     }
 
+    // Each file's identifiers, split ONCE. Splitting every file again for every
+    // field made this the slowest guard in the suite by two orders of magnitude
+    // (26 s of repo_consistency's 27 s on 2026-10-02), and the suite runs before
+    // every commit that touches a document and again before every push.
+    let words: Vec<(&PathBuf, std::collections::HashSet<&str>)> = sources
+        .iter()
+        .map(|(p, t)| {
+            let set = t
+                .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .filter(|w| !w.is_empty())
+                .collect();
+            (p, set)
+        })
+        .collect();
+
     let mut dead: Vec<String> = Vec::new();
     for (path, text) in sources.iter().filter(|(p, _)| p.starts_with(&cfg_dir)) {
         for line in text.lines() {
@@ -346,11 +361,9 @@ fn every_config_setting_is_read_somewhere() {
             {
                 continue; // types, generics, fn signatures
             }
-            let used_elsewhere = sources.iter().any(|(p, t)| {
-                p != path
-                    && t.split(|c: char| !(c.is_alphanumeric() || c == '_'))
-                        .any(|w| w == name)
-            });
+            let used_elsewhere = words
+                .iter()
+                .any(|(p, set)| *p != path && set.contains(name));
             if !used_elsewhere {
                 dead.push(format!(
                     "  {} (declared in {})",
@@ -11663,6 +11676,114 @@ fn a_models_header_is_fetched_only_from_the_upload_its_parts_are() {
         offenders.is_empty(),
         "fetch a model's header through `SharedState::fetch_model_header`, which refuses a \
          source of another upload than the parts beside it:\n  {}",
+        offenders.join("\n  ")
+    );
+}
+
+/// `state.events.events.x` — a sub-struct named twice — is what a mechanical
+/// rename into the four SharedState sub-structs leaves behind, and it compiles
+/// wherever the inner type happens to have a field of the same name.
+/// `.claude/rules/completeness.md` listed this as a grep to run by hand, and a
+/// Stop hook ran it into a log nobody read; this is that grep, made to fail.
+/// Scanned as statements, so a chain rustfmt wrapped is still seen.
+fn doubled_substruct_paths(text: &str) -> Vec<(usize, String)> {
+    const DOUBLED: &[&str] = &[
+        ".events.events.",
+        ".models.models.",
+        ".credits.credits.",
+        ".metrics.metrics.",
+    ];
+    statements(text)
+        .into_iter()
+        .filter(|(_, s)| DOUBLED.iter().any(|d| s.contains(d)))
+        .collect()
+}
+
+#[test]
+fn no_shared_state_path_names_a_sub_struct_twice() {
+    let root = repo_root();
+    let mut offenders = Vec::new();
+    for path in rust_sources_under("src") {
+        let text = std::fs::read_to_string(&path).expect("read source");
+        for (line, stmt) in doubled_substruct_paths(&text) {
+            let rel = path.strip_prefix(&root).unwrap_or(&path).display();
+            offenders.push(format!("{rel}:{line}: {stmt}"));
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "a SharedState path names its sub-struct twice — the accessor is \
+         `state.events.x`, not `state.events.events.x`:\n  {}",
+        offenders.join("\n  ")
+    );
+}
+
+#[test]
+fn the_doubled_substruct_guard_sees_a_wrapped_chain() {
+    assert_eq!(
+        doubled_substruct_paths("s.events.events.activity_tx.send(e);").len(),
+        1
+    );
+    assert_eq!(
+        doubled_substruct_paths(
+            "self.shared_state\n    .metrics\n    .metrics\n    .node_stats\n    .load();"
+        )
+        .len(),
+        1,
+        "rustfmt's wrapped form must be caught"
+    );
+    assert!(doubled_substruct_paths("s.events.activity_tx.send(e);").is_empty());
+}
+
+/// The dashboard ships to non-technical users, and debug output in their
+/// browser console is noise at best and a leak of request detail at worst.
+/// Same history as the guard above: a documented grep and an unread Stop-hook
+/// log, never a failure. Vendored minified libraries are not ours to edit.
+#[test]
+fn the_frontend_leaves_no_debug_output_in_the_console() {
+    let root = repo_root();
+    let mut stack = vec![root.join("frontend/js")];
+    let mut offenders = Vec::new();
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for e in rd.filter_map(|e| e.ok()) {
+            let p = e.path();
+            let name = p
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            if p.is_dir() {
+                stack.push(p);
+            } else if name.ends_with(".js") && !name.ends_with(".min.js") {
+                let text = std::fs::read_to_string(&p).expect("read js");
+                for (i, line) in text.lines().enumerate() {
+                    let code = line.trim_start();
+                    if code.starts_with("//") {
+                        continue;
+                    }
+                    if [
+                        "console.log(",
+                        "console.warn(",
+                        "console.error(",
+                        "console.debug(",
+                    ]
+                    .iter()
+                    .any(|c| code.contains(c))
+                    {
+                        let rel = p.strip_prefix(&root).unwrap_or(&p).display();
+                        offenders.push(format!("{rel}:{}: {}", i + 1, code));
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "console output left in the dashboard — remove it, or report the \
+         condition through the UI (toast / status) if a user should see it:\n  {}",
         offenders.join("\n  ")
     );
 }

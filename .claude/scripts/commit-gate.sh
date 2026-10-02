@@ -14,7 +14,10 @@
 # A stamp file was the obvious design and is the wrong one: it records that the
 # test ran, not that it ran against THIS content, and it goes stale in exactly
 # the case that matters. Running the guard here needs no state and cannot be
-# fooled. It costs ~25 s and only on a commit that touches one of these files.
+# fooled. It costs ~2 s to run once built (27 s until one guard stopped
+# re-tokenizing every source file per config field, 2026-10-02), and only on a
+# commit that touches one of these files. Same feature set as `cargo lint` and
+# the pre-push hook, so the build is shared, not repeated.
 #
 # Fails OPEN everywhere: unparseable payload, missing cargo, or a hook timeout
 # all let the commit through. This gate exists to catch an honest mistake, not

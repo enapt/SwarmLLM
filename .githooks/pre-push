@@ -1,9 +1,20 @@
 #!/bin/bash
 # Pre-push hook: run cargo fmt --check and cargo clippy before pushing.
+#
+# Lints and tests on ONE feature set — the `cargo lint` / `cargo dev-test`
+# aliases in .cargo/config.toml — so this hook reuses what the commit gate and
+# the session already compiled instead of recompiling the crate for another set
+# (measured 2026-10-02: ~50 s of the ~140 s an edit cost before the switch).
+# CI still lints default features; this hook adds that pass only when the push
+# touches code that ONLY default features compile (below).
 # Tracked in .githooks/ and activated by `git config core.hooksPath .githooks`
 # (see CONTRIBUTING.md). It used to live only in .git/hooks, which is not
 # version controlled, so no contributor ever received it.
 # Prevents CI failures from unformatted or clippy-warning code
+
+# git hands the pushed refs on stdin. Take them before any command below can
+# inherit stdin and swallow them.
+PUSH_REFS=$(cat)
 
 # Cargo.lock must match Cargo.toml. CI builds everything with `--locked`;
 # local builds do not, so a version bump committed without its lock file
@@ -50,22 +61,51 @@ if [ "$TYPES_RC" -ne 0 ]; then
     exit 1
 fi
 
-echo "Pre-push: checking cargo clippy..."
-cargo clippy --all-targets -- -D warnings 2>&1
+echo "Pre-push: checking cargo clippy (dev,claude-subscription)..."
+cargo lint 2>&1
 if [ $? -ne 0 ]; then
     echo ""
     echo "ERROR: cargo clippy failed. Fix warnings before pushing."
     exit 1
 fi
 
+# Default features compile code the set above does not: the frontend crate's
+# `embedded` paths and every `cfg(not(feature = "claude-subscription"))` arm.
+# Lint that set too, but only when the push touches one of them — CI lints it on
+# every push regardless. Range from git's pre-push stdin; a new remote branch
+# (all-zero remote sha) is compared with origin/main.
+PUSHED=""
+while read -r _lref lsha _rref rsha; do
+    [ -z "$lsha" ] && continue
+    case "$lsha" in *[!0]*) ;; *) continue ;; esac   # branch deletion
+    case "$rsha" in *[!0]*) base="$rsha" ;; *) base="origin/main" ;; esac
+    PUSHED="$PUSHED $(git diff --name-only "$base" "$lsha" 2>/dev/null)"
+done <<< "$PUSH_REFS"
+DEFAULT_ONLY=$(for f in $PUSHED; do
+    case "$f" in
+        crates/swarmllm-frontend/*|Cargo.toml|Cargo.lock) echo "$f" ;;
+        *.rs) [ -f "$f" ] && grep -l 'not(feature = "claude-subscription")' "$f" ;;
+    esac
+done | sort -u)
+if [ -n "$DEFAULT_ONLY" ]; then
+    echo "Pre-push: checking cargo clippy (default features) — the push touches:"
+    printf '  %s\n' $DEFAULT_ONLY
+    cargo clippy --all-targets -- -D warnings 2>&1
+    if [ $? -ne 0 ]; then
+        echo ""
+        echo "ERROR: cargo clippy (default features) failed. Fix warnings before pushing."
+        exit 1
+    fi
+fi
+
 # The counts stated in CLAUDE.md and README.md are cross-checked by
 # `tests/repo_consistency.rs`, and that guard has put main red twice — not
 # because the tests were not run, but because the count is written down AFTER
 # the run that produced it, so the edit that breaks it is the one edit no run
-# has seen (`.claude/rules/completeness.md`). Clippy above already compiled the
-# test targets, so this is a link and a run.
+# has seen (`.claude/rules/completeness.md`). Same feature set as the commit
+# gate, so after a gated commit this is only the run (~2 s since 2026-10-02).
 echo "Pre-push: checking repo consistency..."
-REPO_OUT=$(cargo test --locked --test repo_consistency --quiet 2>&1)
+REPO_OUT=$(cargo dev-test --locked --test repo_consistency --quiet 2>&1)
 if [ $? -ne 0 ]; then
     printf '%s\n' "$REPO_OUT" | tail -30
     echo ""

@@ -21,13 +21,9 @@ replaced, what it was measured at, what a change must keep — lives in
 | `tests/`, `examples/` | `arch-guards-and-tests.md` | — |
 | `frontend/`, `error.rs`, `auto_manage/`, `reference.rs` | `i18n.md` | — |
 
-**These load on the Read tool ONLY.** Opening a file with `cat`, `sed -n`,
-`head` or `grep` through Bash does NOT trigger them — measured 2026-09-16
-against `.claude/logs/instructions-loaded.jsonl`. A session that reads through
-Bash therefore has NO subsystem rules in context and gets no read-before-edit
-check either, because that one is attached to the Edit tool. `research-gate.sh`
-blocks a mutation whose governing rules never loaded; if you are reasoning about
-a subsystem without opening its files, Read its rules file directly.
+**These load on the Read tool ONLY** — `cat`/`sed`/`grep` through Bash do not
+trigger them (`workflow.md` § "What the hooks enforce"). If you are reasoning
+about a subsystem without opening its files, Read its rules file directly.
 
 **A new user-facing string — from the frontend OR minted in Rust as an i18n key
 — must be translated into all 21 locales. There is no English fallback.**
@@ -159,7 +155,8 @@ couldn't talk to vN±1 because a new/repurposed `SwarmMessage` variant failed to
 deserialize on the other side. The rule that fixes this:
 
 - **Never repurpose or remove a `SwarmMessage` variant** across a release, and
-  never change an existing variant's wire shape incompatibly. Add a NEW variant
+  never change an existing variant's wire shape incompatibly — **a new wire
+  trailer is not a no-op for an older peer either: gate it at the SENDER**. Add a NEW variant
   instead and keep handling the old one.
 - **Gate every new/optional message type on a negotiated feature.** Each node
   advertises the features it implements in `NodeCapability::features` (a `u64`

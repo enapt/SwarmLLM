@@ -10,13 +10,12 @@ Fix dead code, stale references, or broken patterns now — don't paper over wit
 
 ## Pre-push integrity grep checks
 
-Run when you've touched SharedState, frontend JS, or done a multi-commit refactor:
+A doubled sub-struct path (`.events.events.`) and console output in
+`frontend/js/` are guards in `tests/repo_consistency.rs` since 2026-10-02.
+What is still by hand, after touching frontend JS:
 ```
-grep -rn "\.events\.events\.\|\.models\.models\.\|\.credits\.credits\.\|\.metrics\.metrics\." src/    # double sub-struct
-grep -rn "shared_state\.activity_tx\b" src/ | grep -v state.rs                                       # direct field bypass
-grep -rn "console\.\(log\|error\|warn\)" frontend/js/                                                # console debug left behind
-for f in frontend/js/**/*.js; do node -c "$f"; done                                                  # JS syntax
-node examples/frontend_load_check.js                                                                 # JS actually LOADS
+for f in frontend/js/**/*.js; do node -c "$f"; done     # JS syntax
+node examples/frontend_load_check.js                     # JS actually LOADS
 ```
 
 `node -c` is a syntax check and **nothing more** (gotcha #568): a reference to
@@ -31,21 +30,17 @@ Run `/cleanup` after committing changes to: SharedState fields, API endpoints, J
 
 ## A count edited after the test run is an untested change
 
-Test counts live in THREE places — `CLAUDE.md` twice, `README.md` once — and
-`the_readme_test_counts_agree_with_each_other_and_with_claude_md` fails the
-build when they disagree. The i18n key count lives in `CLAUDE.md` and
-`docs/ARCHITECTURE.md`, with its own guard.
+Test counts live in `CLAUDE.md` (twice) and `README.md`, cross-checked by
+`the_readme_test_counts_agree_with_each_other_and_with_claude_md`; the i18n key
+count lives in `CLAUDE.md` and `docs/ARCHITECTURE.md` with its own guard. A
+count can only be written AFTER the run that produced it, so the edit that
+breaks the guard is the one edit no run has seen — main went red twice that way.
+`commit-gate.sh` now runs the guard on any commit touching those files.
 
-The trap is not "run the tests". It is that the count can only be written down
-AFTER the run that produced it, so the edit that breaks the guard is the one
-edit no run has seen. This has now put main red twice — the second time
-(2026-09-07) after a full green suite, a clean `-D warnings` clippy, and two
-verified null controls, because the number went in afterwards.
-
-**After editing any count, re-run `cargo test --test repo_consistency` before
-`git add`.** It is the cheapest target in the suite. The same applies to any
-figure a guard cross-checks between files: the frontend payload budget, the
-i18n key totals, the MSRV.
+**Test counts are refreshed at release, not per change** (2026-10-02: 26
+count-only commits since August had each been broadcast to Discord). The same
+care applies to every figure a guard cross-checks between files: the frontend
+payload budget, the i18n totals, the MSRV.
 
 ## Error type discipline
 

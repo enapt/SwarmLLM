@@ -14,7 +14,7 @@ Update knowledge artifacts the same commit as the change — not at session end.
 | Changed broadcast channels or WS message types | `CLAUDE.md` Frontend + `docs/book/src/architecture/daemon.md` |
 | Changed frontend JS file structure | `CLAUDE.md` Frontend + `docs/ARCHITECTURE.md` Frontend |
 | New debugging technique | `docs/DIAGNOSTICS.md` |
-| Test count changed | `CLAUDE.md` Testing (after `cargo test` confirms) |
+| Test count changed | Nothing per change — counts are refreshed at release (`memory/release_gate.md`) |
 | New i18n keys | Propagate to all 21 language files |
 | Repeated mistake | Create or update a `.claude/rules/` file — path-scoped unless it applies everywhere |
 | New rules file | Give it `paths:` frontmatter and verify every glob matches (see below) |
@@ -57,14 +57,10 @@ for f in glob.glob('.claude/rules/arch-*.md'):
 EOF
 ```
 
-**Why the tiers exist.** `architecture.md` was 4,573 lines and 308 KB before the
-2026-09-09 evidence split, and 1,787 lines before the 2026-09-16 path split —
-every session paid for all of it, on every task. It is now 162 lines. Anthropic's
-documented target is under 200 lines per always-loaded file, because "longer
-files consume more context and reduce adherence". **Keep statements short.**
-
-If you are reasoning about a subsystem without opening its files, its rules file
-has not loaded — read it directly.
+**Why the tiers exist**: always-on instructions are paid for by every session
+AND every subagent (each loads them before it starts). Anthropic's target is
+under 200 lines per file — "longer files consume more context and reduce
+adherence". **Keep statements short; put the evidence in `docs/invariants/`.**
 
 ## Memory hygiene
 

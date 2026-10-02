@@ -15,3 +15,24 @@
 # coordinating across all release/install paths.
 [build]
 rustflags = ["-C", "target-cpu=native"]
+
+# THE local feature set: lint, test and build with these and only these.
+#
+# `dev` serves the frontend from disk; `claude-subscription` adds the
+# subscription provider. Mixing feature sets between steps recompiles the main
+# crate on every switch, and a default-feature `cargo test` silently replaces
+# the dev binary with one that embeds a snapshot of the frontend (gotchas
+# #573/#578). Measured 2026-10-02: one edit -> commit -> push compiled the
+# crate ~140 s across three feature sets; on one set it is ~78 s, most of it
+# the first lint and the first test build.
+#
+# `--no-default-features` is not optional: without it feature unification
+# builds the frontend crate with BOTH `embedded` and `dev`, and the dev-only
+# helper fails clippy as dead code (gotcha #361).
+#
+# `cargo lint` takes no extra arguments (they would land after `-D warnings`).
+[alias]
+lint = "clippy --all-targets --no-default-features --features dev,claude-subscription -- -D warnings"
+dev-test = "test --no-default-features --features dev,claude-subscription"
+dev-build = "build --no-default-features --features dev,claude-subscription"
+dev-run = "run --no-default-features --features dev,claude-subscription"

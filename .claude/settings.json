@@ -71,21 +71,8 @@
     ]
   },
   "includeGitInstructions": false,
-  "env": {
-    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
-  },
   "hooks": {
     "PreToolUse": [
-      {
-        "matcher": "Edit|Write|NotebookEdit",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash ${CLAUDE_PROJECT_DIR}/.claude/scripts/pre-edit-check.sh",
-            "timeout": 5
-          }
-        ]
-      },
       {
         "matcher": "Edit|Write|NotebookEdit|Bash",
         "hooks": [
@@ -107,19 +94,6 @@
         ]
       }
     ],
-    "PostToolUse": [
-      {
-        "matcher": "Edit|Write",
-        "hooks": [
-          {
-            "type": "command",
-            "if": "Edit(*.rs)|Write(*.rs)",
-            "command": "bash ${CLAUDE_PROJECT_DIR}/.claude/scripts/post-edit-lint.sh",
-            "timeout": 120
-          }
-        ]
-      }
-    ],
     "SessionStart": [
       {
         "matcher": "compact",
@@ -127,17 +101,6 @@
           {
             "type": "command",
             "command": "bash ${CLAUDE_PROJECT_DIR}/.claude/scripts/post-compact-status.sh",
-            "timeout": 30
-          }
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash ${CLAUDE_PROJECT_DIR}/.claude/scripts/on-stop-verify.sh",
             "timeout": 30
           }
         ]

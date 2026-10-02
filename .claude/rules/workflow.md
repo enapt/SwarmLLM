@@ -30,55 +30,38 @@ the work went worse; both times it was done, it changed the implementation.
 
 ## What the hooks enforce (2026-09-16)
 
-The three rules above were prose for months and were skipped anyway, so the
-checkable parts now run as `PreToolUse` hooks. **They gate MUTATIONS only** —
-reading is never blocked, so every denial is resolvable by reading something.
+The checkable parts of the research rule run as `PreToolUse` hooks. **They gate
+MUTATIONS only** — reading is never blocked, so every denial is resolved by
+reading something. `research-gate.sh` refuses a change to a file when:
 
-`research-gate.sh` refuses to let a file be changed when:
+1. **its subsystem rules never loaded** — `arch-*.md` load on the **Read tool
+   only**; `cat`/`sed`/`grep` through Bash do not trigger them (measured
+   2026-09-16, gotcha #617). Read the file, or its rules file, first.
+2. **the file exists and this session never looked at it** — read-before-edit
+   for the Bash path. A subagent's own reads count (#688).
+3. **the task consulted nothing this repo already knows** — per task
+   (`prompt_id`): `gotchas.md`, `closed_findings.md`, `docs/invariants/`,
+   `FUTURE_WORK.md`, the sweep log, or a web search satisfies it.
 
-1. **its subsystem rules never loaded.** `arch-*.md` files auto-load on the
-   **Read tool only**; `cat`/`sed`/`grep` through Bash do not trigger them.
-   Measured, not assumed: a session that had read `repo_consistency.rs`,
-   `CLAUDE.md` and several `src/` files entirely through Bash had logged zero
-   `path_glob_match` events, and one `Read` logged one immediately. In
-   bypass-permissions mode, where Bash is the default for reading and editing,
-   this silently disabled the whole path-scoped rules architecture **and**
-   Claude Code's read-before-edit check, which is attached to the Edit tool.
-2. **the file exists and this session has never looked at it.** Restores
-   read-before-edit for the Bash path. A subagent's own reads count: its hook
-   input carries `agent_id`, and the gate follows that to the subagent's
-   transcript. Until 2026-09-23 it read only the parent's, and denied every
-   subagent edit of an existing file (gotcha #688).
-3. **the task consulted nothing this repo already knows.** Scoped per task via
-   `prompt_id`, satisfied by `gotchas.md`, `closed_findings.md`,
-   `docs/invariants/`, `FUTURE_WORK.md`, the sweep log, or a web search — item
-   3 of the research rule, the only one of the three a machine can check.
+⚠ It reads any path NAMED in a mutating Bash command as a target, heredoc
+bodies included. For a multi-file edit script, write it to the scratchpad and
+run it by path.
 
-`commit-gate.sh` runs `cargo test --test repo_consistency` before a `git commit`
-that touches a file whose figures another document restates (`CLAUDE.md`,
-`README.md`, `docs/ARCHITECTURE.md`, `Cargo.toml`, `frontend/i18n/*.json`). A
-stamp file was the obvious design and is the wrong one — it records that the
-test ran, not that it ran against THIS content. ~25 s, and only on those files.
+`commit-gate.sh` runs `cargo dev-test --test repo_consistency` (~2 s once built)
+before a `git commit` touching a file whose figures another document restates
+(`CLAUDE.md`, `README.md`, `docs/ARCHITECTURE.md`, `Cargo.toml`,
+`frontend/i18n/*.json`) — it tests THIS content, which a stamp file could not.
 
-**All of them fail OPEN** — unparseable payload, missing transcript, missing
-cargo or a timeout lets the call through. A gate that cannot read its input must
-not become a gate that blocks everything, which is exactly what
-`pre-edit-check.sh` became when it read the wrong payload key and sat inert for
-months. **Verify a hook by its OUTPUT, never its exit code** (#614): both gates
-were written, looked right, and did nothing until a planted violation proved
-otherwise — `research-gate.sh`'s first version accepted a one-line `grep` of a
-rules file as having loaded it.
+**Both fail OPEN** (unparseable payload, missing cargo, timeout), and **a hook
+is verified by its OUTPUT, never its exit code** (#614) — three hooks here sat
+inert for months looking healthy. After touching the gate's patterns run
+`python3 examples/research_gate_probe.py`: one planted violation per Bash
+mutation form plus a null control.
 
-**`python3 examples/research_gate_probe.py` is that planted violation, kept.**
-One per Bash mutation form, printing which are caught, plus a null control that
-fails if the gate denies nothing at all. Run it after touching the gate's
-patterns: a regex that silently stops matching reads exactly like a rule nobody
-breaks. Its first run (2026-09-16) found the gate catching redirects, `tee`,
-`cp`/`mv`, `truncate` and quoted `sed -i`, while missing `sed -i -e`, every
-python in-place edit, `perl -pi`, `git checkout --`, `git apply`, `patch <` and
-`rm` — most of the path it exists to close, including the multi-edit python
-script this repo reaches for routinely. All 20 forms are covered now, and the
-six read-only forms stay unblocked.
+There is **no compile-after-edit hook** (removed 2026-10-02): it ran a blocking
+`cargo check` on a second feature set after every `.rs` edit (~13 s each) and
+duplicated the one `cargo lint` that matters. Run `cargo lint` when a change is
+complete.
 
 ## I do the mechanics. The user does what needs their hands. (2026-09-22)
 
@@ -114,10 +97,13 @@ This project requires `git push` after every logical unit of work — don't batc
 
 Sequence (always run together, in this order):
 ```
-cargo fmt && cargo clippy --all-targets -- -D warnings && git add -A && git commit -m "..." && git push origin main
+cargo fmt && cargo lint && git add -A && git commit -m "..." && git push origin main
 ```
 
-`cargo fmt` actually applies formatting (not `--check`). `cargo clippy` must be zero warnings — fix before pushing.
+`cargo fmt` applies formatting (not `--check`); `cargo lint` is clippy on the one
+local feature set with `-D warnings`. The commit gate and pre-push hook reuse
+that build, so nothing compiles twice. Give `git push` up to 20 minutes after a
+version bump — the hook rebuilds the test binary (#698).
 
 ## Pushes are public-facing (2026-07-22)
 
@@ -149,22 +135,14 @@ Write for that audience without dumbing anything down:
 
 ## Memory Management Around Compaction
 
-**Nothing may block compaction.** A `SessionStart` hook (matcher `compact`,
-`post-compact-status.sh`) runs AFTER a compaction and lists what is still
-uncommitted, so the resumed session knows the work is pending. It replaced a
-PreCompact hook that refused to compact while anything was uncommitted — and
-that hook killed a whole session on 2026-09-23 (gotcha #687): work sat
-uncommitted for hours, the context filled, `/compact` was refused, and "commit
-and compact" then failed with "Prompt is too long", because there was no room
-left to run the commit it demanded. Compaction never touches the disk; what it
-can lose is only the knowledge that work is pending, and that is what the new
-hook restores.
+**Nothing may block compaction, so commit as you go — it is the only
+protection** (#687). A PreCompact hook that refused to compact while work was
+uncommitted killed a whole session on 2026-09-23: the context filled, `/compact`
+was refused, and the commit it demanded no longer fit. Compaction never touches
+the disk; `post-compact-status.sh` (SessionStart, matcher `compact`) lists what
+is still uncommitted afterwards. CLAUDE.md § "Compact instructions" says what a
+summary must keep.
 
-**So commit as you go — it is the only protection.** A session with hours of
-uncommitted work across a dozen agents is one bad compaction from losing the
-thread of it, whatever the hooks do.
-
-Before ~70% context usage, proactively update `memory/MEMORY.md` with anything
-worth carrying forward.
-
-After compaction, before doing anything else: read `memory/MEMORY.md`, then `git log --oneline -10` and `git diff HEAD~3 --stat`. Don't re-do committed work.
+Before ~70% context, update `memory/MEMORY.md` with anything worth carrying
+forward. After a compaction, first read `MEMORY.md`, `git log --oneline -10` and
+`git diff HEAD~3 --stat`; don't re-do committed work.
