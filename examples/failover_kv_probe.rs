@@ -1,8 +1,8 @@
 //! Does a stand-in taking over a pipeline segment mid-reply compute the same
 //! thing the machine it replaced would have?
 //!
-//! Reproduces the claim in `docs/FUTURE_WORK.md` § "A mid-decode failover
-//! silently loses the failed segment's KV context" with no daemon, no network
+//! Reproduces the claim in `docs/FUTURE_WORK.md` § "A failover after the prompt
+//! pass silently loses the failed segment's KV context" with no daemon, no network
 //! and no killing of anyone's node. Two real segments of a real model:
 //!
 //! * segment A, layers `[0, k)` — the part that KEEPS its cache, as it does in

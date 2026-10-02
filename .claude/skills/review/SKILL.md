@@ -1,42 +1,27 @@
 ---
 name: review
-description: Review recent changes against the SwarmLLM spec for correctness
+description: Review uncommitted SwarmLLM changes (or a named module/file) against this repo's rules and invariants
 argument-hint: "[module-or-file]"
-user-invocable: true
-allowed-tools: Read, Grep, Glob, Bash, Task
+allowed-tools: Read, Grep, Glob, Bash
 model: sonnet
 context: fork
+background: false
 ---
 
 # Code Review
 
-Review SwarmLLM code for correctness against the architecture and conventions.
+Scope: `$ARGUMENTS` if given, otherwise everything in `git diff` and `git diff --cached`.
 
-## Scope
-
-If `$ARGUMENTS` is provided, review only that module/file. Otherwise, review all uncommitted changes.
-
-## Instructions
-
-1. Get the scope of changes:
-   - If argument provided: read the specified files under ``
-   - Otherwise: run `git diff` and `git diff --cached` in `.` to find changed files
-
-2. For each changed file, read `docs/ARCHITECTURE.md` for the relevant subsystem
-
-3. Check for:
-   - **Type correctness**: Do data types match existing patterns? (field names, types, derives)
-   - **API compliance**: Do HTTP endpoints match existing route patterns and response formats?
-   - **Error handling**: Does it follow the error propagation rules from CLAUDE.md?
-   - **Naming conventions**: PascalCase types, snake_case functions, proper newtypes
-   - **Missing functionality**: Is anything expected but not implemented?
-   - **Over-engineering**: Is anything implemented beyond what's needed?
-
-4. For reviews touching 3+ files, spawn a `feature-dev:code-reviewer` subagent (model: haiku) for security and bug analysis in parallel.
-
-5. Report findings as:
-   - **BLOCKER**: Must fix before proceeding (architecture violations, security issues)
-   - **WARNING**: Should fix (minor deviations, missing edge cases)
-   - **NOTE**: Optional improvements
-
-Keep output concise. No findings = just say "Clean."
+1. **Open each changed file with the Read tool** — that is what loads its `.claude/rules/arch-*.md` rules;
+   `cat`/`grep` do not. Read the `docs/invariants/<topic>.md` section a rule points to before judging code it names.
+2. Check, in this order:
+   - **One invariant, N paths** (`.claude/rules/architecture.md`): does a shared helper exist that this change
+     re-implements or skips? Enumerate the other paths the same property must hold on.
+   - **Error typing**: no error type chosen at a call site; `classify_error` / `reclassify_flattened_error`
+     (`.claude/rules/completeness.md`).
+   - **Live config**: `state.cfg()`, never `state.config`, for anything changeable at runtime.
+   - **Wire compatibility**: a new message, field or trailer is gated at the SENDER on a `features` bit.
+   - **A DashMap guard across `.await`**, a fixed timeout on variable-size work, i18n for user-visible text.
+   - **Tests**: does each new test fail without the fix (diagnosis rule 5)?
+3. Report each finding as BLOCKER / WARNING / NOTE with `file:line`, the concrete failure, and the rule it
+   breaks. Only findings you would bet on; "Clean." when there are none.

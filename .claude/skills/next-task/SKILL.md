@@ -1,38 +1,19 @@
 ---
 name: next-task
-description: Determine and start the next task in the SwarmLLM build sequence
-user-invocable: true
-allowed-tools: Read, Grep, Glob, Bash, Edit, Write, Task
-model: opus
+description: Pick the top item of SwarmLLM's live work queue whose preconditions are met, and start it
+disable-model-invocation: true
+allowed-tools: Read, Grep, Glob, Bash, Edit, Write, Agent
 ---
 
-# Next Task Resolver
+# Next Task
 
-Determine what should be built next in the SwarmLLM project and begin working on it.
-
-## Instructions
-
-1. **Assess state** (use haiku-model subagents in parallel for speed):
-   - Spawn Explore agent: scan `src/` tree to inventory existing files
-   - Read `docs/plans/NEXT_STEPS.md` for the prioritized roadmap
-   - Run `cargo check` to verify current compilation state
-
-2. Identify the highest-priority incomplete item from NEXT_STEPS.md
-
-3. Report what you're about to build:
-   ```
-   Task: [description]
-   Files: [paths]
-   Dependencies: [what must exist first]
-   ```
-
-4. Implement the task following CLAUDE.md conventions
-   - Read `docs/ARCHITECTURE.md` for current architecture context
-   - Use `feature-dev:code-architect` agent (model: sonnet) for complex module design if the task involves 3+ interconnected files
-   - After writing each file, run `cargo check`
-
-5. After implementation:
-   - Run `cargo check` to verify compilation
-   - Run `cargo clippy -- -D warnings`
-   - Run `cargo test`
-   - Report what was completed and what the NEXT task would be
+1. Read the queue: `~/.claude/projects/-home-user-SwarmLLM/memory/next_up.md` § "Ranked queue", and
+   `docs/FUTURE_WORK.md` § "▶ PRIORITIES". Take the highest item whose preconditions are met; read its
+   FUTURE_WORK entry BODY — its scope is a hypothesis (gotcha #654) and its line numbers drift (#645).
+2. Research it before touching code (`.claude/rules/workflow.md` § "Research EVERY task"): how a system with
+   more scars does it, the pinned crate's current API, and what `gotchas.md` / `docs/invariants/` already know.
+3. Say in two lines what you will change and how you will know it worked (the mechanism, not just the outcome).
+4. Implement it yourself (never delegate production code). Use `Explore` for wide searches and a sonnet
+   `feature-dev:code-architect` only for a design spanning 3+ interconnected files.
+5. Finish with `cargo fmt && cargo lint` and the narrowest `cargo dev-test` that covers the change, then commit
+   and push (`.claude/rules/workflow.md`), and update `next_up.md`.

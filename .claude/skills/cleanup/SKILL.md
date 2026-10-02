@@ -1,67 +1,24 @@
 ---
 name: cleanup
-description: Verify all recent changes are complete — no stale refs, no broken tests, no deferred items lost, docs updated
-user-invocable: true
-allowed-tools: Read, Grep, Glob, Bash, Task, Agent
-model: opus
+description: Verify recent SwarmLLM changes are complete — no stale references, no broken tests, no deferred items lost, docs updated. Run after changes to SharedState fields, API endpoints, JS file structure, broadcast channels, WS message formats or error-to-status mappings.
+allowed-tools: Read, Grep, Glob, Bash, Edit, Write
 effort: high
 ---
 
 # Post-Change Cleanup Verification
 
-Run after any significant refactoring or multi-commit session to ensure nothing was left behind.
+Execute every item; fix what fails, then report PASS/FAIL per item.
 
-## Checklist (execute ALL items)
-
-### 1. Compilation + Tests
-```bash
-cargo fmt --check
-cargo clippy --all-targets -- -D warnings
-cargo test 2>&1 | grep "test result:"
-```
-If any fail, fix them before proceeding.
-
-### 2. Stale References Scan
-Search for references to any recently removed/renamed items:
-- Grep for old function names, old field names, old channel names
-- Grep for old WS message types
-- Check all `// NOTE:`, `// TODO:`, `// FIXME:` comments — are any stale?
-- Check frontend JS for references to removed backend fields
-
-### 3. Sub-Struct Consistency (SharedState)
-```bash
-# No double prefix
-grep -rn "\.events\.events\.\|\.models\.models\.\|\.credits\.credits\.\|\.metrics\.metrics\." src/
-
-# No direct bypass
-grep -rn "shared_state\.activity_tx\b\|shared_state\.credit_balance\b" src/ | grep -v state.rs
-```
-
-### 4. Frontend Integrity
-```bash
-# Syntax check all JS
-for f in frontend/js/core/*.js frontend/js/components/*.js frontend/js/init.js; do node -c "$f"; done
-
-# No debug output
-grep -rn "console\.\(log\|error\|warn\|debug\)" frontend/js/
-
-# No broken refs
-grep -rn "_lastModelsData\|wsHealthy\|showLoading\|hideLoading" frontend/js/
-```
-
-### 5. i18n Completeness
-- All `I18n.t()` keys used in JS must exist in en.json
-- All keys in en.json must exist in all 20 other language files
-
-### 6. Doc Freshness
-- CLAUDE.md: test count, file counts, architecture description match current code
-- docs/ARCHITECTURE.md: endpoints, channels, WS types match code
-- memory/MEMORY.md: current state section reflects latest session
-
-### 7. Git Hygiene
-- All changes committed and pushed
-- No large uncommitted diffs
-- Commit messages are descriptive
-
-## Output
-Report PASS/FAIL for each item with details on any failures found.
+1. **Build + tests**: `cargo fmt --check && cargo lint`, then `cargo dev-test 2>&1 | grep "test result:"`.
+   `tests/repo_consistency.rs` already guards i18n parity, doubled sub-struct paths, console output, counts
+   across documents, the MSRV and the payload budget — do not re-check those by hand.
+2. **Stale references**: for every symbol, field, endpoint, channel or file this change removed or renamed,
+   `grep -rn` across `src/ tests/ crates/ frontend/ docs/ examples/ python/ .claude/` — not just `src/`.
+   Read any `// NOTE:` near the change for claims it made false.
+3. **Frontend** (if `frontend/js/` changed): `for f in frontend/js/**/*.js; do node -c "$f"; done` and
+   `node examples/frontend_load_check.js` (a syntax check alone misses an IIFE that throws — gotcha #568).
+   A new user-visible string is translated into all 21 locales.
+4. **Docs**: `docs/ARCHITECTURE.md` (source tree, endpoints, channels, WS types) matches the code; a changed
+   rule is in its `arch-*.md` with evidence in `docs/invariants/`. Test counts are NOT refreshed here — that
+   happens at release.
+5. **Git**: everything committed and pushed; commit subjects stand alone for the public Discord feed.

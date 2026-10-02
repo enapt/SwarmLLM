@@ -1,40 +1,27 @@
 ---
 name: check
-description: Run full quality checks on SwarmLLM (fmt, clippy, test, build)
-user-invocable: true
-allowed-tools: Bash, Read, Glob
+description: Run SwarmLLM's full local quality checks (fmt, clippy, tests, types crate) on the one local feature set and report
+disable-model-invocation: true
+allowed-tools: Bash, Read
 model: haiku
 context: fork
+background: false
 ---
 
 # Quality Check Pipeline
 
-Run the full SwarmLLM quality check pipeline in order. Report results for each step.
+Run in order, one at a time (never two cargo commands at once — gotcha #684), and report. Fix nothing.
 
-Working directory: `.`
-
-## Steps
-
-1. **Format check**: `cargo fmt --check`
-   - If formatting issues found, run `cargo fmt` to fix them and report what changed
-2. **Lint**: `cargo clippy --all-targets -- -D warnings`
-   - Report any warnings/errors with file:line references
-   - Do NOT fix anything — just report
-3. **Test**: `cargo test`
-   - Report pass/fail counts
-   - If failures, report test name and assertion message
-4. **Build**: `cargo build --no-default-features --features dev,claude-subscription`
-   - Confirm clean build or report errors
-
-## Output
-
-Provide a concise summary table:
+1. `cargo fmt --check`
+2. `cargo lint` — clippy, all targets, `-D warnings`, on `--no-default-features --features dev,claude-subscription`
+3. `cargo dev-test 2>&1 | grep -E "^test result|FAILED|panicked"`
+4. `cargo test --locked -p swarmllm-types --quiet 2>&1 | grep -E "^test result|error"`
 
 | Step | Status | Details |
 |------|--------|---------|
-| fmt  | PASS/FAIL | ... |
-| clippy | PASS/FAIL | N warnings |
-| test | PASS/FAIL | N passed, N failed |
-| build | PASS/FAIL | ... |
+| fmt | PASS/FAIL | files |
+| lint | PASS/FAIL | first errors as file:line |
+| tests | PASS/FAIL | passed / failed / ignored per target |
+| types | PASS/FAIL | |
 
-If all pass, say "All clear." If any fail, list only the failures with actionable details.
+"All clear." if everything passed; otherwise only the failures, with test name, assertion and file:line.

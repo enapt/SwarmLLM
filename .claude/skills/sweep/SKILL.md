@@ -1,97 +1,46 @@
 ---
 name: sweep
-description: Deploy parallel agents to scan the entire codebase for dead code, duplication, inconsistencies, and stale references
-user-invocable: true
-allowed-tools: Read, Write, Grep, Glob, Bash, Task, Agent
-model: opus
+description: Deploy parallel agents to scan the SwarmLLM codebase for dead code, duplication, inconsistencies and stale references, then fix the obvious ones
+allowed-tools: Read, Write, Edit, Grep, Glob, Bash, Agent
 effort: high
 ---
 
 # Codebase Sweep
 
-Deploy 4 parallel review agents to scan the entire SwarmLLM codebase for issues. Each agent focuses on a different category. All findings are collected, deduplicated, and presented as a prioritized action list.
+Four parallel sonnet `feature-dev:code-reviewer` agents, one category each. They only READ, so no worktree
+isolation (every subagent already starts with a fresh context; a worktree only isolates files).
 
-## Pre-Sweep: Load Prior Findings
+## Prior findings — by grep, never pasted
 
-Before launching agents, check if `.claude/sweep-log.jsonl` exists. If it does:
-1. Read its contents — each line is a JSON object: `{"file":"...","line":N,"kind":"...","summary":"...","status":"fixed|wontfix|deferred","date":"YYYY-MM-DD"}`
-2. Extract all entries where `status` is `"fixed"` or `"wontfix"` — these are KNOWN issues
-3. Pass the known-issues list to EACH agent with explicit instructions: "Do NOT re-report any of these known issues. Focus on finding NEW issues not in this list."
+`.claude/sweep-log.jsonl` holds every finding ever made (~440 KB). **Never paste it into a prompt** — that is
+~110K tokens per agent. Tell each agent: *before reporting a finding, `grep -n '<file or symbol>'
+.claude/sweep-log.jsonl`; drop it if a `fixed` or `wontfix` entry covers it.*
 
-If the file doesn't exist, proceed normally (first sweep).
+## Rotation
 
-## File Rotation Strategy
+Offset = (line count of the sweep log ÷ 10) mod file count. Agents 1 and 3 start at that offset in
+`find src/ -name '*.rs' | sort`, agents 2 and 4 in `find frontend/js/ -name '*.js' | sort`, wrapping around,
+and each scans its whole range.
 
-To avoid always scanning files in the same order (which causes convergence):
+## Agents (launch all four in one message, `model: sonnet`)
 
-1. Get the list of all `.rs` files: `find src/ -name '*.rs' | sort`
-2. Get the list of all `.js` files: `find frontend/js/ -name '*.js' | sort`
-3. Pick a rotation offset based on the current sweep count (line count of sweep-log.jsonl ÷ 10, modulo file count)
-4. Tell Agent 1+3 to start from offset N in the Rust file list, wrapping around
-5. Tell Agent 2+4 to start from offset N in the JS/frontend file list, wrapping around
+1. **Dead code + stale references** — pub items with no external caller, unreachable arms, comments naming
+   removed code, `#[allow(dead_code)]` hiding a real warning.
+2. **Duplication** — near-identical blocks (>5 lines), one transformation done in several places, duplicate
+   fetches or DOM patterns in the frontend.
+3. **Consistency** — an error type chosen at a call site, unbounded collections, unvalidated API input, magic
+   numbers, unstructured `tracing` calls.
+4. **Frontend + i18n + docs** — English bypassing `I18n.t()`, dead CSS/JS, doc comments or `docs/` text that
+   no longer match the code.
 
-This ensures each sweep round examines files in a different order.
+Each finding: file, line, what is wrong, confidence ≥ 80%. Not test-only code, not an item listed in
+`docs/ARCHITECTURE.md` § "Deferred Items", and "0 new issues" is a valid result — never manufacture one.
 
-## Agents to Deploy (in parallel, with isolation: "worktree")
+## After the agents return
 
-IMPORTANT: Launch all agents with `isolation: "worktree"` so they get clean context without session history pollution.
-
-### Agent 1: Dead Code + Stale References (model: sonnet, type: feature-dev:code-reviewer)
-- pub functions with zero external callers
-- Unused imports, dead constants, unreachable match arms
-- Stale comments referencing removed code ("NOTE: X removed", "replaced by Y")
-- References to old channel names, old struct fields, removed endpoints
-- `#[allow(dead_code)]` that suppress legitimate warnings
-
-### Agent 2: Duplication + Copy-Paste (model: sonnet, type: feature-dev:code-reviewer)
-- Nearly identical code blocks in different files (>5 lines)
-- Same data transformation done in multiple places
-- Duplicate API response shapes for the same data
-- Frontend: duplicate fetch calls, duplicate DOM manipulation patterns
-
-### Agent 3: Consistency + Production Readiness (model: sonnet, type: feature-dev:code-reviewer)
-- SwarmError type misuse (Config/Internal for validation)
-- Unbounded collections without cleanup
-- Missing input validation on API endpoints
-- Hardcoded magic numbers that should be named constants
-- Bare string tracing calls without structured fields
-
-### Agent 4: Frontend + i18n + Docs (model: sonnet, type: feature-dev:code-reviewer)
-- Hardcoded English strings bypassing I18n.t()
-- Dead CSS rules, dead JS functions, broken references
-- Stale doc comments that don't match current code
-- CLAUDE.md, ARCHITECTURE.md, book/ out of sync with code
-
-## After Agents Return
-
-1. Deduplicate findings across agents
-2. Compare against known issues from sweep-log.jsonl — drop any re-reports
-3. Rate each NEW finding by priority (CRITICAL > HIGH > MEDIUM > LOW) and effort (small/medium/large)
-4. **Triage into two buckets:**
-   - **Auto-fix** (do immediately, no prompting): dead code removal, unused imports, stale comments, dead CSS/JS, missing i18n keys, hardcoded strings, duplicate code extraction, stale doc updates, magic number constants, simple consistency fixes. Anything where the correct fix is obvious and low-risk.
-   - **Needs discussion** (present to user): architectural changes, behavior changes, ambiguous deletions (might be used via reflection/macros), security-sensitive fixes, anything touching the inference hot path, changes that affect the public API contract, or findings where you're <90% confident in the fix.
-5. **Research before fixing** — Before implementing any non-trivial fix, WebSearch for:
-   - Latest docs/best practices for the relevant library or pattern (e.g., libp2p API changes, axum middleware patterns, candle tensor ops)
-   - Similar open-source projects solving the same problem — check how they handle it
-   - GitHub issues/discussions if the fix involves a known library quirk
-   - Even for fixes you're confident about, a quick search often reveals a better idiomatic approach
-   - Skip research only for truly mechanical fixes (deleting dead code, removing unused imports, fixing typos)
-6. Fix everything in the auto-fix bucket immediately — commit as you go
-7. Present only the "needs discussion" items to the user, if any
-
-## After Fixes Are Applied
-
-For every finding that was addressed (fixed, deferred, or won't-fix), append a line to `.claude/sweep-log.jsonl`:
-```json
-{"file":"src/api/server.rs","line":42,"kind":"dead_code","summary":"unused handle_legacy() function","status":"fixed","date":"2026-04-04"}
-```
-
-This log ensures future sweeps skip known issues and focus on genuinely new problems.
-
-## Rules
-- Every finding must include: file, line, what's wrong, confidence (80%+ only)
-- Do NOT report items that are intentionally deferred (check CLAUDE.md deferred list)
-- Do NOT report test-only code as dead (check if it's used in #[cfg(test)] blocks)
-- Do NOT re-report anything already in sweep-log.jsonl
-- Each agent MUST scan its full assigned file range, not just "interesting" files
-- If a sweep round finds 0 new issues, report that clearly — don't manufacture findings
+1. Deduplicate, then **verify every finding yourself before acting** — agents miss call sites in adjacent
+   directories (`.claude/rules/completeness.md` § "Verify before deleting sweep findings").
+2. Fix what is obvious and low-risk immediately, committing as you go. For the rest, research (diagnosis rule
+   0) and decide — you manage this project; raise with the user only what needs their hands.
+3. Append one line per addressed finding to `.claude/sweep-log.jsonl`:
+   `{"file":"…","line":N,"kind":"…","summary":"…","status":"fixed|wontfix|deferred","date":"YYYY-MM-DD"}`

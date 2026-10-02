@@ -3900,7 +3900,7 @@ fn credits_stay_dormant() {
     // walk, `read_dir` on a file simply errored and the entry was skipped, so
     // the guard could not fire on main.rs at all. Caught by planting the
     // violation, which is the only way that shape of hole is ever found
-    // (`.claude/rules/architecture.md` § "A source-scanning guard is only as
+    // (`.claude/rules/arch-guards-and-tests.md` § "A source-scanning guard is only as
     // good as the spellings it knows").
     let mut files: Vec<std::path::PathBuf> = Vec::new();
     let mut stack = vec![root.join("src/cli"), root.join("src/main.rs")];
@@ -3969,7 +3969,7 @@ fn credits_stay_dormant() {
 /// The CLI half of the guard above must actually be able to fire, on the shape
 /// the real code was written in — a `println!` that rustfmt has wrapped across
 /// several lines, with the word in the format string rather than on the
-/// `println!` line. Planted violation, per `.claude/rules/architecture.md` §
+/// `println!` line. Planted violation, per `.claude/rules/arch-guards-and-tests.md` §
 /// "A source-scanning guard is only as good as the spellings it knows".
 #[test]
 fn the_dormant_credits_guard_sees_a_printed_balance_rustfmt_has_wrapped() {
@@ -4930,7 +4930,7 @@ fn is_text_source_extension(p: &std::path::Path) -> bool {
 
 /// The scan above must look at the file types the defect it exists for actually
 /// landed in — a scan that cannot reach a file reports success exactly like a
-/// clean tree (`.claude/rules/architecture.md` § "A source-scanning guard is
+/// clean tree (`.claude/rules/arch-guards-and-tests.md` § "A source-scanning guard is
 /// only as good as the spellings it knows"). Markdown alone is what let
 /// gotcha #513 through in a `.rs` file.
 #[test]
@@ -6794,7 +6794,7 @@ fn feature_gated_modules(lib_rs: &str) -> Vec<String> {
 
 /// The guard above must fire on the shapes it forbids, planted in the form they
 /// would really appear — a scan that finds nothing is indistinguishable from a
-/// scan that CANNOT find anything (`.claude/rules/architecture.md` § "A
+/// scan that CANNOT find anything (`.claude/rules/arch-guards-and-tests.md` § "A
 /// source-scanning guard is only as good as the spellings it knows").
 #[test]
 fn the_vendored_test_counter_sees_every_spelling_of_a_test() {
@@ -7578,7 +7578,7 @@ fn a_live_workers_growth_is_weighed_by_the_budget_its_spawn_charged() {
 }
 
 /// The guard above must actually be able to fire, on the shape rustfmt
-/// produces. Planted violation, per `.claude/rules/architecture.md` §
+/// produces. Planted violation, per `.claude/rules/arch-guards-and-tests.md` §
 /// "A source-scanning guard is only as good as the spellings it knows".
 #[test]
 fn the_growth_accountant_guard_catches_a_re_derived_placement() {
@@ -7910,7 +7910,7 @@ fn a_translated_element_never_wraps_a_control_it_would_delete() {
 ///
 /// Deliberately scans the WHOLE element body rather than a character window,
 /// and reports the line so the offender is findable (see
-/// `.claude/rules/architecture.md` § "A source-scanning guard is only as good
+/// `.claude/rules/arch-guards-and-tests.md` § "A source-scanning guard is only as good
 /// as the spellings it knows").
 fn translated_elements_wrapping_a_control(html: &str) -> Vec<String> {
     const CONTAINERS: [&str; 6] = ["label", "span", "div", "p", "button", "summary"];
@@ -8295,7 +8295,7 @@ fn the_scratchpad_filter_is_never_gated_on_whether_tools_were_requested() {
 ///
 /// Brace-matched over the whole block, not a character window — a guard pinned
 /// to a fixed lookahead goes blind the moment the block grows (see
-/// `.claude/rules/architecture.md` § "A source-scanning guard is only as good as
+/// `.claude/rules/arch-guards-and-tests.md` § "A source-scanning guard is only as good as
 /// the spellings it knows").
 fn blocks_guarded_by(src: &str, cond: &str) -> Vec<(usize, String)> {
     let needle = format!("if {cond}");
@@ -10201,7 +10201,7 @@ fn a_memory_budget_is_charged_by_the_pool_never_by_the_metadata_map() {
 
 /// The guard above must actually be able to fire, including on the wrapped
 /// shape rustfmt produces for a chain this long. Planted violation, per
-/// `.claude/rules/architecture.md` § "A source-scanning guard is only as good
+/// `.claude/rules/arch-guards-and-tests.md` § "A source-scanning guard is only as good
 /// as the spellings it knows".
 #[test]
 fn the_metadata_budget_guard_catches_a_sum_rustfmt_has_wrapped() {
@@ -10461,7 +10461,7 @@ fn both_inference_outages_withdraw_through_one_predicate() {
 }
 
 /// The guard above must be able to fire on a re-derivation, not merely on the
-/// absence of a call. Planted violation, per `.claude/rules/architecture.md` §
+/// absence of a call. Planted violation, per `.claude/rules/arch-guards-and-tests.md` §
 /// "A source-scanning guard is only as good as the spellings it knows".
 #[test]
 fn the_outage_guard_catches_a_re_derived_withdrawal() {
@@ -10586,7 +10586,7 @@ fn an_execution_failure_is_never_the_route_planners_internal_signal() {
 
 /// The guard above must fire on the shape it forbids, including across the line
 /// break rustfmt puts in a long `return Err(...)`. Planted violation, per
-/// `.claude/rules/architecture.md` § "A source-scanning guard is only as good
+/// `.claude/rules/arch-guards-and-tests.md` § "A source-scanning guard is only as good
 /// as the spellings it knows".
 #[test]
 fn the_execution_failure_guard_catches_a_wrapped_pipeline_error() {
@@ -10681,7 +10681,7 @@ fn the_pipelines_segment_count_is_never_cached_across_the_forward_loop() {
 }
 
 /// The guard above must fire on the binding it forbids and pass on the live
-/// read that replaced it. Planted violation, per `.claude/rules/architecture.md`
+/// read that replaced it. Planted violation, per `.claude/rules/arch-guards-and-tests.md`
 /// § "A source-scanning guard is only as good as the spellings it knows".
 #[test]
 fn the_segment_count_guard_catches_a_cached_length() {

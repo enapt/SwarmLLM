@@ -4050,7 +4050,7 @@ impl SharedState {
     /// log volume).
     ///
     /// `connected_node_ids` is the liveness oracle (see
-    /// `.claude/rules/architecture.md` § Scheduler Liveness Oracle);
+    /// `.claude/rules/arch-scheduling.md` § Scheduler Liveness Oracle);
     /// `peer_registry` is explicitly NOT, as it is preserved across
     /// disconnects for reconnect purposes.
     pub fn resolve_connected_peer_id_bytes(

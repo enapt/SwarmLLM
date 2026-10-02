@@ -29,8 +29,8 @@ parallel pipelines hide inter-peer RTT. Stacks naturally with SWIFT
 
 **Fit for SwarmLLM today.**
 - Stacks on Item 6 (SWIFT) — currently shelved (slower than baseline
-  on candle CPU until flash-attn-with-mask lands, see MEMORY.md
-  § "Distributed inference speedup arc"). Mirror inherits SWIFT's
+  on candle CPU until flash-attn-with-mask lands, see
+  `docs/plans/archive/distributed_inference_speedup.md`, Item 6). Mirror inherits SWIFT's
   blocker.
 - Already have draft-target plumbing from Item 2 (distributed spec
   decoding) and Item 12 (DSD multi-segment) — both flag-gated, both

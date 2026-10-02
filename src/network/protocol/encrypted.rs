@@ -625,7 +625,7 @@ mod tests {
     #[test]
     fn aad_helper_matches_inline_layout() {
         // build_layer_forward_aad is the documented single source of truth
-        // (see .claude/rules/architecture.md § Centralised Wire-Format
+        // (see .claude/rules/arch-network.md § Centralised Wire-Format
         // Helpers). The encrypt path in network/manager/tensors.rs and the
         // decode path in this file MUST produce byte-identical AAD; pin
         // the layout here so a refactor that subtly drifts the order

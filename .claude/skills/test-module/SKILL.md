@@ -1,30 +1,24 @@
 ---
 name: test-module
-description: Run tests for a specific SwarmLLM module and report results
-argument-hint: "<module-path>"
-user-invocable: true
+description: Run the SwarmLLM tests for one module, test target or crate and report results
+argument-hint: "<module | test-target | types | vendored | all>"
+disable-model-invocation: true
 allowed-tools: Bash, Read, Grep, Glob
 model: haiku
 context: fork
+background: false
 ---
 
 # Module Test Runner
 
-Run tests for a specific SwarmLLM module. The user specified: `$ARGUMENTS`
+Argument: `$ARGUMENTS`. Every command uses the one local feature set via the `cargo dev-test` alias.
 
-Working directory: `.`
+- A module name or path (`network`, `src/inference/split/…`) → `cargo dev-test --lib <module path as a filter>`
+- `integration`, `integration_phase10_11` → `cargo dev-test --test <name> -- --test-threads=1`
+- `yamux_substream`, `repo_consistency`, `api_key_side_effects` → `cargo dev-test --test <name>`
+- `types` → `cargo test --locked -p swarmllm-types`
+- `vendored` → `cargo test --manifest-path vendor/libp2p-request-response/Cargo.toml --lib`
+- `all` → `cargo dev-test`
 
-## Instructions
-
-1. Determine the test target from the argument:
-   - Module name like `network`, `inference`, `credit`, `api` → run `cargo test $ARGUMENTS`
-   - File path → determine the module and run targeted tests
-   - `integration` → run `cargo test --test integration -- --test-threads=1`
-   - `all` → run `cargo test`
-
-2. Run the tests
-
-3. Report concisely:
-   - Tests run / passed / failed / ignored
-   - For failures: test name + assertion message + file:line
-   - If no tests exist for the module, state that clearly
+Report tests run / passed / failed / ignored; for each failure the test name, assertion and file:line. Say so
+plainly if the filter matched no tests — "0 tests ran" is not a pass.
