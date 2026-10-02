@@ -797,6 +797,27 @@ worker's one message loop, so a wait there would stall every other chat's
 decode; it needs a deferred-admission queue, and in a swarm it trades against
 the re-plan to a peer that the refusal already buys.
 
+**From the rules file (moved 2026-10-02):**
+
+**`kv_budget::device_free_and_total_bytes` synchronizes the device's stream
+before `mem_get_info`, and adds what this process's pool keeps unused.** cudarc
+frees through the card's memory pool (`cuMemFreeAsync`); a buffer freed on the
+stream counts as unused only after a synchronize, so an unsynchronized reading
+counts what the previous request just released as still in use — the next long
+prompt was refused against half its budget, every time, on the released
+v0.3.207 (#121). Since #146 the pool KEEPS freed memory (below), which
+`mem_get_info` reports as used; `cuda_pool::reusable_bytes` is the other half of
+"free for this process". Every budget decision reaches the card through
+`SplitModel::kv_budget_now` → this one function; a new reading of device memory
+goes through it too. Guard: `the_cards_free_memory_is_read_after_a_synchronize`;
+A/B: `SWARMLLM_KV_DEVICE_SYNC=0`.
+
+**A reply is reserved by what it can reach** — `reply_reserve_positions(max_tokens)`,
+a REQUIRED argument of `ensure_room_for_prompt`; a segment's prompt pass, which
+never sees the budget, passes the full `REPLY_RESERVE_POSITIONS`. And a refusal
+caused by OTHER live conversations says to wait, never to shorten the prompt
+(`other_conversations_hold_the_room`, both refusal sites) (#122).
+
 ## `inference::split::kv_budget`
 
 (2026-08-08) — the KV memory budget and the
@@ -985,6 +1006,31 @@ stable, so reconnecting does not clear it; only a restart does.
   That defends against cooperative cancellation only; an external `abort()`
   ignores it entirely.
 
+**From the rules file (moved 2026-10-02):**
+
+Three resources were released by plain statements placed after an `.await`,
+which run only when that await RETURNS. Two ordinary things stop it doing so:
+`cancel::unless_cancelled` cancels by DROPPING the future, and
+`SwarmMessage::CancelInference` calls `abort_handle().abort()` — and **no
+in-band checkpoint can defend against an external abort**, so `bail_if_cancelled`
+bracketing is not a defence either.
+
+- **`PendingSpawnCharge`** (`inference::process_pool`) — memory charged by
+  `admit_to_gpu`/`admit_to_cpu` before `spawn_worker(..).await`. No
+  `WorkerHandle` exists yet, so nothing downstream reconciles it; the budget is
+  keyed by model and ACCUMULATES until a restart.
+- **`InboundForwardSlot`** (`daemon::dispatch`) — the per-peer forward count and
+  the abort-registry entry. The sweep removes entries that reach ZERO and cannot
+  repair one stuck above it, and `max_forwards_per_peer` floors at 4, so four
+  aborts permanently refuse everything that peer sends afterwards.
+- **`ShardDownloadClaim`** — see the rule above.
+
+**`local_generate.rs` WRAPPING `pool.generate(..)` in `unless_cancelled` is how
+this came back**: `forward_direct` brackets the same call instead, and its
+comment says why — "dropping a load half-done abandons a spawning subprocess"
+(gotcha #459). A rule that lives only in a comment gets re-broken by the next
+file.
+
 ## A storage budget must count what is on disk, and may only count what can be freed
 
 **Rule:** `.claude/rules/arch-worker-memory.md` § the `storage_budget` /
@@ -1104,6 +1150,27 @@ the exception.
 `the_fan_out_is_bounded_once_not_once_per_worker`. Both verified by removing the
 bound: they do not merely fail, they hang until the harness timeout.
 
+**From the rules file (moved 2026-10-02):**
+
+**`ModelProcessPool::notify_every_worker` is the one place a fire-and-forget
+message goes to every live worker** — `cancel_request` and `release_request_kv`
+both go through it. It matters because `cancel_request` is awaited INLINE from
+the dispatch loop's `CancelInference` arm, and that loop is the network event
+loop's only consumer: an unbounded wait there is not a slow cancel, it is a node
+that stops receiving anything (gotcha #74).
+
+Both waits are bounded **separately**, because the wrong response to either is
+worse than the wait:
+
+- **The writer LOCK timing out** says another task is mid-message. Nothing has
+  been written, so stand down at `debug!` — that task owns the worker's fate.
+- **The SEND timing out** says the socket will not take a few dozen bytes.
+  Dropping that future can leave a PARTIAL FRAME, desynchronising every later
+  message, so the worker is marked `dead` and reaped rather than left in a state
+  no reader could parse.
+
+Sends run concurrently, so the fan-out costs one timeout, not one per worker.
+
 ## A worker that dies is not a worker that is slow, and the graphics stack can go mid-run
 
 **The rule**: `.claude/rules/arch-worker-memory.md` § "A subprocess you are
@@ -1173,6 +1240,42 @@ bug-reported for exactly that (k8s-device-plugin #1014, gpu-operator #1065).
   GPU one does (verified 2026-09-18 by running `model-worker --help` under a
   deliberately corrupt `libcuda.so.1`). Guarded by
   `the_unavailable_message_does_not_promise_the_processor_takes_over`.
+
+**From the rules file (moved 2026-10-02):**
+
+`spawn_worker` races `child.wait()` against `listener.accept()`. Watching the
+socket alone made every startup failure cost the full 30 s
+`WORKER_CONNECT_TIMEOUT_SECS` — per model, per arriving request — and arrive as
+one contentless `worker connect timeout`, while the real cause sat in the log
+as raw untimestamped `ld.so` output matching nothing anyone would grep for
+(#646/#647). **Whenever code waits for a subprocess to do something, handle it
+dying instead.**
+
+**`daemon::gpu_support::gpu_runtime_has_failed` is the single answer to "has the
+graphics stack stopped working since we started?"** — the half of the GPU
+question that is NOT a property of the card, and the half `local_gpu_is_supported`
+originally cached away on the reasoning that the answer "cannot change while the
+process runs". A driver update changes it: the daemon keeps running on libraries
+it already mapped while every worker it `exec`s dies, so only a failed worker
+start reveals it. Set by `diagnose_failed_start` (which re-runs `--version`
+rather than guessing from loader text), cleared by any worker that starts, read
+by `cpu_reason` (`CpuReason::GpuUnavailable`) and by the health monitor, which
+**withdraws the advertised GPU so peers stop routing work this node would fail**.
+
+⚠ **Do not tell the owner the processor takes over.** This binary links
+`libcuda.so.1`, so a bad library stops every new process in the loader and a
+CPU-only worker exits 127 exactly as a GPU one does.
+
+**Which is why it also withdraws INFERENCE, not just the card.**
+`SharedState::inference_outage` is the single answer to "can this node run a
+request right now", and it answers for this AND for a stalled message
+dispatcher — two unrelated faults with one shape: a total inference outage that
+reports itself as healthy. `NodeCapability::can_serve_inference` carries it, and
+the scheduler's `gather_candidates` acts on it. **Shard serving stays up** — a
+byte-range read needs no worker — and the field defaults to `true` on the wire,
+because a peer that says nothing has not said no. Guard:
+`both_inference_outages_withdraw_through_one_predicate`.
+→ `docs/FUTURE_WORK.md` #89, #90.
 
 ## A reply between two forwards is in use, and a lost conversation is refused
 
@@ -1265,6 +1368,24 @@ one pointless reload (never a wrong answer). And a serving node could be told
 when a remote reply ends — a completion notice would release its cache and its
 protection at once instead of after the gap. `docs/FUTURE_WORK.md` #93.
 
+**From the rules file (moved 2026-10-02):**
+
+**`WorkerHandle::in_use` is the single answer to "is this worker in use?"** —
+a response in flight OR a conversation it holds between forwards
+(`kv_holders`, stamped by every forward, released by `release_request_kv` /
+`cancel_request`, aged out `CONVERSATION_GAP_SECS` after the last forward).
+Promotion, both reclaims and `models_with_inflight_requests` ask it. Reading
+`responses` alone saw a split reply as idle between tokens, and promotion
+retired its worker 14 times in one reply — each respawn decoding from an empty
+cache (#93, gotcha #690). Guard:
+`whether_a_worker_is_in_use_is_decided_in_one_place`.
+
+**Promotion waits for the reason to be GONE** — `reason_still_holds` reads
+`cpu_reason`, the predicate the respawn reads first. **And a forward past the
+prompt pass whose conversation is gone is refused**
+(`model_worker::forward_lacks_its_conversation`, `ServiceUnavailable`), never
+decoded from nothing — whatever lost the worker.
+
 ## The contribution level caps the swarm's work, not the owner's prompt (2026-09-26)
 
 The Settings page defines the contribution level as "how much of your computer
@@ -1329,6 +1450,18 @@ peer cannot claim the owner's width. Guard:
 `the_owners_own_segment_is_forwarded_as_the_owners` (planted forms in
 `the_owner_segment_guard_catches_a_forward_that_says_nothing`); round trip:
 `a_forward_says_whether_it_is_the_owners`.
+
+**From the rules file (moved 2026-10-02):**
+
+**`process_pool::Requester`** is a REQUIRED argument of `ModelProcessPool::generate`
+AND of `forward_for_request` — the owner's own segment of a split request is
+the owner's too (`IpcForward::for_the_owner`) (`Owner` = this node's own API,
+`Swarm` = a peer's). The worker records it once, at
+its `Generate` entry (`KvCacheStore::mark_owner_request`), and `cpu_pools::in_phase_pool`
+reads it where every forward picks its pool: the owner's PROMPT reading runs on
+`ResourceConfig::owner_prefill_threads` (physical cores, or an explicit
+`max_cpu_threads`); decode and the swarm's work keep the contribution width. A
+default node read its owner's prompts on half its cores (+39% at 2.4K tokens).
 
 ## A worker that cannot grow gets the spawn's ladder (2026-09-27)
 
@@ -1426,6 +1559,17 @@ Two races a `code-reviewer` pass found in the fix, both closed and tested:
   whose fast path grows it. Three rounds that each find a replacement fail as a
   lifecycle error (`ServiceUnavailable`), which is contention, not progress.
 
+**From the rules file (moved 2026-10-02):**
+
+**`ModelProcessPool::grow_worker` is the one place a live worker takes on a new
+range.** Where the card will not take it: reclaim idle models' graphics memory
+(the spawn's `free_vram_for_admission`, outside `spawn_lock`), then — only if
+`WorkerHandle::in_use` is false — retire the worker so `get_or_spawn`'s slow
+path places the range afresh, part on the processor if need be. Growth used to
+refuse on the first rung, and a partial worker then wedged its model — every
+chat request refused in ~50 ms — until it aged out. A worker in use keeps the
+refusal; never retire one mid-conversation (#93).
+
 ## A model loaded for another model's request is a guest (2026-09-28)
 
 ### What it replaced
@@ -1495,6 +1639,17 @@ one run read as "not loaded" and lose only the overlap.
 - Residual: a guest placed on the processor stays there until it is unloaded
   idle, even if the card frees up; promoting it would mean taking memory.
 
+**From the rules file (moved 2026-10-02):**
+
+**`process_pool::Tenancy` is a REQUIRED argument of `get_or_spawn`.** A `Guest`
+— the split drafter, `ModelProcessPool::draft` — takes memory only as it stands
+free: no reclaim, no card/processor split, no promotion, no growth, no dashboard
+notice. As an ordinary load it evicted the very target it guessed for, which is
+idle between turns after the 5 s floor, and the target's next prompt pass then
+reloaded beside it, on the processor if the card was full. **`dsd.rs` reads
+ahead only once this node's target segments are loaded** (`holds_segment`): on a
+cold start the free memory is the memory those segments are about to take.
+
 
 ## A card that stalls is given less work (2026-09-28)
 
@@ -1546,6 +1701,22 @@ timed nor refused — refusing one mid-request kills that request, so only a pro
 refused; `handle_generate`'s per-token forwards are not timed; the daemon does not advertise a
 tripped card to peers. **Measured on a card: not yet** — that is a stress test, and follows
 `memory/feedback_research_before_stress_tests.md`.
+
+**From the rules file (moved 2026-10-02):**
+
+**Memory arithmetic is not a limit on what the CARD can do.** Every admission
+gate on the card was arithmetic (slot count, KV budget), and on WSL2/Windows the
+driver hands out host memory instead of failing — so a worker kept admitting
+chats while its card stalled 2-60 s per step, for an hour, until the PC hung
+(gotcha #754, #146). **`inference::card_pace::CardPace` is the one answer to "may
+this worker start another generation on its card now"**: a device-bound step of
+≥ 2 s (Windows' `TdrDelay`) on an all-card model halves the ceiling, one comes
+back per quiet minute, never below one. The gate sits in the `Generate` arm
+BEFORE the batched/sequential choice — a full table falls through to
+`handle_generate`, which runs on the card anyway, so lowering the slot count caps
+nothing. A new device-bound step on the worker loop is timed into it; a new
+generation path is gated by it. Refusal = `LocalMemoryUnavailable` (the busy 503
+the router re-plans). A/B: `SWARMLLM_CARD_PACE=0`.
 
 ## A card's memory pool keeps what the worker frees (2026-09-28)
 
@@ -1618,6 +1789,21 @@ control / keep / control):
 - **The synchronize before the reading stays**: a buffer freed on the stream counts as unused
   only after it.
 
+**From the rules file (moved 2026-10-02):**
+
+**The pool's release threshold defaults to 0** — every synchronize handed all
+freed card memory back to the driver, and the next admission (and, with the
+per-token logits copy, the next token) fetched it fresh; on WSL2 that fresh
+fetch slowed ~1000× over two days of host uptime (#146, #755). **`split::loader::load_device`
+is the one place a worker picks the card**, and it raises the threshold to max
+(`inference::cuda_pool::keep_freed_memory`); **`model_worker::run_worker` hands
+the unused part back after `cuda_pool::IDLE_TRIM` (60 s) idle**, because the
+driver lends a pool's spare memory only within its own process and the daemon's
+`nvidia-smi` reading cannot tell a worker's kept memory from another program's.
+Any reading of "free for this process" adds `cuda_pool::reusable_bytes`. Guard:
+`every_split_model_reaches_the_card_through_load_device`; A/B:
+`SWARMLLM_CUDA_POOL_KEEP=0`.
+
 ## The owner is told when the card has become slow to hand out memory (2026-10-01)
 
 **Why.** The pool above and `card_pace` defend the node against a host whose fresh card
@@ -1662,6 +1848,15 @@ across a few days of uptime before tuning the threshold or letting the figure dr
 - **The advice only where it applies**: the log line on every platform, "restart Windows" only
   under WSL2.
 
+**From the rules file (moved 2026-10-02):**
+
+**`cuda_pool::probe_once` times 16 fresh 4 MB allocations straight from the driver, once per
+worker, at `load_device`** — never through the pool, never per request. Every worker logs
+`DIAG: card allocation probe`; a probe ≥ 0.5 s reaches the health monitor
+(`WorkerMsg::CardAllocationProbe` → `ModelProcessPool::slow_card_notice`), which tells the owner
+to restart Windows, under WSL2 only, at most every 12 h (#762, WSL#41701). It changes nothing the
+node does; the threshold is a guess until the DIAG lines cover a few days of uptime.
+
 ## A lone decode stream is never held for a batch (2026-09-29)
 
 **What it replaced.** `process_pool::batch_scheduler_loop` — which every decode forward a node
@@ -1701,6 +1896,14 @@ reproduced in a split; FUTURE_WORK #148.
 ⚠ The rig puts both nodes' workers on ONE card, so what is left includes two CUDA contexts
 sharing it — a real split does not pay that; the numbers above are an upper bound on its cost.
 
+**From the rules file (moved 2026-10-02):**
+
+**`process_pool::collection_target` decides whether the batch scheduler waits**: only when
+ANOTHER request is decoding on the same model (`ActiveStreams`, judged by each stream's own
+pace — twice its last forward gap), and only until those have arrived. The old rule waited
+`batch_collection_ms` after every first forward: 6.6 ms per node per token for a lone split
+request, the split at 54% of local; now ~80%. Never reintroduce a wait a lone stream pays.
+
 ## A model is admitted against the card as it stands NOW (2026-09-29)
 
 **What it replaced.** `ModelProcessPool::admit_to_gpu` — the one decision that puts a model
@@ -1723,3 +1926,64 @@ seconds), falling back to the last reading when it fails. Test
 `admission_reads_the_card_budget_at_the_moment_of_admission` replays the case (verified red
 with the fix reverted). **After, same rig:** the drafter was refused the card ("does not fit
 the graphics memory that is free"), ran on the processor, 0 refusals, every request answered.
+
+**From the rules file (moved 2026-10-02):**
+
+**`ModelProcessPool::vram_budget_now` is what `admit_to_gpu` weighs a model against** —
+`compute_vram_budget` re-read at the admission (other programs' use included), the last
+reading only as a fallback. It was the startup figure, so a program that took part of the card
+later let the node overcommit it: a drafter admitted that way left both workers with a 0 MB
+conversation budget and every prompt refused. Never cache a live condition at startup.
+
+## "Used recently" has four answers, and one of them is never written locally
+
+`model::auto_manage::prune::effective_idle_secs` combines all of them — a
+request this node routed, one it served for a peer, the worker's own
+`last_used`, and residency as a hard upper bound. **`model_trust.last_request_at`
+alone is not an answer**: `record_request` has one caller
+(`router::distributed_exec`), so the local fast path and peer-served work both
+leave it untouched, and a persisted value from an older build can be stale by
+days.
+
+Both consumers read it through that helper now — the idle-VRAM unload since
+2026-09-02 (gotcha #437), and R134.7's prune protection since 2026-09-14, which
+had been left on the broken signal 400 lines below the fix.
+
+## A budget is charged by whatever owns the resource
+
+**`SharedState::committed_memory_mb` is the single answer to "how much of this
+memory is committed right now"**, and it asks `ModelProcessPool`
+(`vram_committed_mb` / `ram_committed_mb`) because the pool admits, charges and
+reclaims. Never charge a budget by summing `split_models` — those entries are
+GGUF headers read at scan time with no worker behind them, so the figure can
+only go up. It read `loaded_mb=5124` eighteen seconds after boot with zero
+workers, and nodes delegated models smaller than their free graphics memory.
+Guard: `a_memory_budget_is_charged_by_the_pool_never_by_the_metadata_map`.
+
+## Single-source-of-truth helpers — Worker memory: graphics, RAM and the KV cache
+
+Each names the ONE place a decision is made. A second implementation of any of
+them is this codebase's most-repeated defect — see `.claude/rules/architecture.md`
+§ "One invariant, N paths". **Read the topic file before changing one.**
+
+Full evidence: `docs/invariants/memory.md`
+
+- **`DaemonMsg::ReleaseRequestKv` — a finished request releases its conversation cache, wherever it is held.** Sent by `ModelProcessPool::release_request_kv` at the one place a request finishes. The `Generate` handlers clear their own; the FORWARD path had nothing, and the daemon's own `cleanup_request_id` is a DIFFERENT PROCESS's store. Unconditional: the worker keys by REQUEST id, so no later turn can find the entry. A KV-admission refusal is `LocalMemoryUnavailable`, carried over IPC as `WorkerMsg::Error::local_memory_refusal` because the wording is deliberately identical to a peer's refusal.
+- **`api::process_memory::resident_bytes` — a process's memory is the LARGEST accounting the platform offers.** macOS keeps two that differ by orders of magnitude; under-reporting is the failure that matters.
+
+- **`ModelProcessPool::reply_channel_closed` — a closed reply channel is judged in ONE place.** A later call under the same `request_id` displaces the entry (the worker is healthy and busy for it) or the worker died; only the second evicts. `generate` had the check since gotcha #180 and forward, batch and draft did not — the draft wait evicted the drafter a router retry was about to use (#749). Every wait on a worker ends there. → `docs/invariants/memory.md` § "A model loaded for another model's request is a guest"
+- **`inference::worker_ipc::worker_error_is_fatal`** — the single source of truth for "did this worker error destroy the worker's device state, or just this request?".
+- **`daemon::shard_loader::force_cpu_for`** — the single mapping from `inference.gpu_layers` (`-1` auto / `0` CPU only / `>0` GPU) to the loader's `force_cpu` flag.
+- **`daemon::gpu_support::MIN_COMPUTE_CAP` + `local_gpu_is_supported`** — the single answer to "can this card run OUR kernels?".
+- **`model::auto_manage::vram::ADMISSION_KV_CONTEXT`** — the context length admission charges KV cache for, on either device, whatever the user configured.
+- **`ModelProcessPool::free_vram_for_admission` + `plan_vram_reclaim`** — reclaim graphics memory from models nothing is using rather than demoting the requested one to the processor.
+- **`should_return_to_gpu` + `ModelProcessPool::worker_should_return_to_gpu`** — the single answer to "is this resident worker still in the right place?", asked on the request path in `get_or_spawn` rather than on a timer.
+- **Graphics memory has ONE owner: `ModelProcessPool`** — it admits (`admit_to_gpu`), charges (`vram_reserved_mb`) and reclaims (`free_vram_for_admission`, `try_idle_vram_unload`). Nothing else may take memory away from a loaded model.
+- **A worker's growth is weighed by the budget its spawn charged** — `WorkerHandle::holds_gpu_memory` reads `charged_against_ram` (what `charges_ram` decided at spawn), NEVER `placed_on_cpu_because`, which records why a model was *demoted* and so reads `None` on a machine with no card exactly as it does for a worker holding one. Re-deriving it sent every later layer-range growth on every GPU-less node to `admit_to_gpu`, which has no ceiling when `vram_budget_mb` is 0 — the anti-swap gate ran once per model and never again, and a 16 GB Mac swapped. Growth is the COMMON case on a swarm node. `a_live_workers_growth_is_weighed_by_the_budget_its_spawn_charged` in `tests/repo_consistency.rs` fails the build on a re-derivation.
+- **`model::auto_manage::storage_budget` is the ONE answer to "how much shard storage may this node hold?", and `held_disk_bytes` the one answer to "how much does it hold?"** — `storage_budget_now(&state)` gives both, live; the download pass, prune's disk pressure, the settings storage bar, the pool page and the diagnostics report all read it instead of re-deriving one. **The byte figure measures the DIRECTORY, not the manifest** (`held_shard_bytes` prices the manifest and so sees only `shard_NNN.bin`, missing the header, the tied output weight, mmproj, quarantined files and dead `.tmp` — 5% on the live node, 95% of it one file kind). **It is only safe to charge for them because each kind is reclaimable**: derived files by `shard::cleanup_orphaned_model_files` (once per prune cycle), quarantined shards and `.tmp` partials by `daemon::background::spawn_failed_download_reclaim` (every 10 min; over budget with NO retention, partials only when no download claims them). Prune deletes shards and nothing else, so a figure counting bytes nothing frees makes a node near its limit shed shards forever chasing an unreachable floor — or, where nothing may be shed, wedge: quarantines were swept only at STARTUP until 2026-09-28, and 9.37 GiB of them filled a field node's disk and blocked the update carrying the fix (gotcha #751). Never re-couple the two — changing the byte source without the reclaim pass is `docs/FUTURE_WORK.md` item 49's shape. And a test fixture that exercises this must own its `data_dir`, or it measures the developer's real node.
+- **`model::auto_manage::prune::effective_idle_secs` — residency is a hard UPPER BOUND on "idle since", and the worker's own `last_used` is the signal that moves** — NOT `model_trust.last_request_at`, which nothing in the current code writes — a stale persisted value once unloaded a model five seconds after it answered.
+- **An admitted prompt is RECORDED, not just decided** — `KvCacheStore::record_prompt_admission` / `outstanding_admission_bytes`; `ensure_room_for_prompt` adds the outstanding total to the live figure before `admit_prompt`, and records its own claim once admitted. **A request's claim and its reservation are released TOGETHER, by `forget_request_bookkeeping`, which `clear_request` and `cleanup_request_id` both call** — the draw-down that makes a stale claim harmless reads the request's CACHE ENTRY, so a cleanup that removes the entry and keeps the claim charges the full admission for memory it just freed (gotcha #637: 1848 MB owed against a 3042 MB budget, identical prompts refused for ten minutes). Never release one of the two maps alone.
+- **`inference::split::kv_budget::admit_prompt` + `PrefixCache::release`** — ONE decision for a whole prompt, before prefill, charging live caches PLUS the prefix cache's snapshots (the same device memory, previously charged nowhere): fit → evict cached prompts, oldest hit first → refuse with a 503 at token 0. **A budget must see every tenant of the memory it bounds.**
+- **`inference::split::kv_budget`** — the KV memory budget and the admission check against it.
+- **A prompt of known length is RESERVED, not grown into** — `KvCacheStore::set_reserved_positions` (written by the worker at the top of `ensure_room_for_prompt`, before any budget question) sizes every layer's FIRST allocation via `new_kv_cache(.., reserve_positions)`; growth by `Tensor::cat` is O(n²/quantum) in copies and one device allocation per step, none of it charged (97 GB copied and 2279 allocations for a 20837-token prompt). The guard charges what will be allocated, read off the buffer (`kv_budget::positions_to_allocate`), never derived from `index_pos`. Absent means "grow as before"; `SWARMLLM_KV_RESERVE=0` is the in-binary A/B. → `docs/invariants/memory.md` § "A prompt of known length is reserved"
+- **`inference::process_pool::worker_socket_path`** — the worker IPC socket path, and the ONLY place it is built.
