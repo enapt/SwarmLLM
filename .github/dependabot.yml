@@ -9,7 +9,9 @@ updates:
   # single-action PRs filled this ecosystem's limit and sat untriaged for
   # four months, during which Dependabot could not open anything new.
   - package-ecosystem: "github-actions"
-    directory: "/"
+    # "/" covers .github/workflows only. The composite actions pin actions too
+    # (gpu-build-env's rust-cache sat 45 commits behind the workflows' copy).
+    directories: ["/", "/.github/actions/*"]
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5

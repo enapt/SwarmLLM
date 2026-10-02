@@ -47,11 +47,12 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: vendored-request-response-v2  # v1 held target-cpu=native artifacts
           workspaces: vendor/libp2p-request-response
           cache-bin: false
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # `--lib` deliberately: the crate's own integration tests need
       # `libp2p-swarm-test`, which is not among its dependencies here.
       - name: Run patch tests

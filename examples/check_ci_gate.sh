@@ -60,10 +60,12 @@ fi
 #
 # And a run that was CANCELLED is "completed" too, but never created the jobs it
 # did not reach — a matrix job it never expanded is listed by its template name
-# (`Build (${{ matrix.os }})`), which reads as drift (#557's shape again). A push
-# cancels the run on the commit before it, so at a release the newest completed
-# run is often a cancelled one: the v0.3.214 chain stopped on exactly that, with
-# the tagged commit's own run green and all 14 jobs in agreement (2026-09-30).
+# (`Build (${{ matrix.os }})`), which reads as drift (#557's shape again). Until
+# 2026-10-02 a push to main cancelled the run on the commit before it, so at a
+# release the newest completed run was often a cancelled one: the v0.3.214 chain
+# stopped on exactly that, with the tagged commit's own run green and all 14 jobs
+# in agreement (2026-09-30). Main runs now finish, but a PENDING one can still be
+# replaced by a newer push, and PR runs still cancel — so the filter stays.
 # Only a run that completed without being cancelled or skipped answers; with a
 # sha, only that commit's run.
 run=$(gh run list --repo "$REPO" --workflow=CI --branch "$BRANCH" \
