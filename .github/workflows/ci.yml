@@ -13,12 +13,16 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: ci-${{ github.ref }}
   # A PR's older run is worthless once the PR is pushed again; a `main` run is
   # not. Cancelling there left 7 of 12 recent main commits with no result, and a
   # release chain waiting on CI for the SHA it means to tag stopped whenever a
-  # later push cancelled that run. On main a newer push now WAITS behind the
-  # running one (GitHub keeps only the newest pending run per group).
+  # later push cancelled that run. Not cancelling was not enough: a group keeps
+  # ONE pending run and a newer push replaces it, so two pushes inside one run's
+  # length still left the middle commit with no result (d1717482 and c236d4ef,
+  # 2026-10-02). Outside a PR each commit is now its own group. (`queue: max`
+  # would keep them queued instead, but it cannot be combined with the PR's
+  # `cancel-in-progress: true`.)
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # SEC: explicit least-privilege. Without this, every workflow job inherits
