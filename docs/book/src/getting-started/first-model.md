@@ -32,7 +32,7 @@ terminal:
 ```
 
 **Any other model:** open the **Models** tab and choose **Search HuggingFace**
-(or click **Find Models** on the Dashboard), search for a model — try
+(or click **Find models** on the Dashboard), search for a model — try
 `TinyLlama` for a small, fast one — and check its badge: **✓ Runs locally**,
 **↗ Host parts**, **○ Swarm computers only** or **⚠ Too large for your swarm**.
 The **Download** button starts the download. A model marked **Swarm computers

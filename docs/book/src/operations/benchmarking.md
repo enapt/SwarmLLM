@@ -81,6 +81,8 @@ spreading.
 
 Two-daemon loopback TCP. Measures iter-1 TTFT with the cross-node fetch
 path enabled vs gated off (via `cross_node_prefix_trust_min = 2.0`).
+Sharing is OFF by default, so both nodes need
+`share_prefix_cache_with_peers = true` first.
 Same recipe runs against TinyLlama (fast-GPU corner case: fetch is
 slightly slower than prefill) and Qwen-7B (**12.9× TTFT speedup** on
 CPU-CPU because 7B CPU prefill is slow enough that the ~1 s fetch +
@@ -89,6 +91,11 @@ verify + hydrate buys back ~150 s of local prefill).
 Sketch of the recipe:
 
 ```bash
+# Both nodes must opt in to sharing their prefix cache (default off)
+for d in /tmp/swarm_a /tmp/swarm_b; do
+  mkdir -p $d && printf '[inference]\nshare_prefix_cache_with_peers = true\n' > $d/config.toml
+done
+
 # Node A on 8800
 SWARMLLM_NODE_DATA_DIR=/tmp/swarm_a ./target/release/swarmllm run -p 8800 -v &
 

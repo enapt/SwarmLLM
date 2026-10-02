@@ -8,7 +8,7 @@ libp2p Swarm
 ├── GossipSub — pub/sub for shard/health/credits/identity/pools/regions
 ├── request_response — unified protocol (/swarmllm/1.0.0, 600s timeout)
 ├── mDNS — optional LAN peer discovery
-├── connection_limits — max 1/peer (>1 causes rr round-robin to dead connections), 500 total
+├── connection_limits — `network.max_connections_per_peer` (default 3; below 2 disables hole punching), `max_peers` total (150 / 300 / 500 by contribution level)
 ├── Identify — protocol identification
 ├── AutoNAT — NAT detection
 ├── DCUtR — hole punching

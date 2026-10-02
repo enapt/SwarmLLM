@@ -69,8 +69,8 @@ handed out, and it is the only thing that decides where your prompts go. Use
 both together for a private cluster: `gossip_network_id` to keep the
 announcements separate, Private Mode to keep the work in.
 
-Note `private_mode_allow_lan` is read at startup, so it belongs in the config
-file before you start SwarmLLM rather than being changed while it runs.
+`private_mode_allow_lan` applies without a restart: edit `config.toml` and
+reload it (`POST /api/admin/config/reload`).
 
 ## Firewall & internet reachability
 

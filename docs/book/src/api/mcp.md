@@ -2,7 +2,7 @@
 
 SwarmLLM includes a native [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) server at `POST /mcp`. This enables AI agents like Claude Code, Cursor, VS Code Copilot, and other MCP-compatible tools to use your SwarmLLM node as a tool provider.
 
-**Protocol version:** 2025-11-05 (JSON-RPC 2.0 over HTTP).
+**Protocol version:** 2025-11-25 (JSON-RPC 2.0 over HTTP); 2025-06-18, 2025-03-26 and 2024-11-05 are also accepted.
 
 ## Endpoint
 
@@ -214,6 +214,15 @@ Get detailed information about the SwarmLLM node: loaded models, connected peers
 ### `swarmllm://status`
 
 Returns node status information (version, model loaded, peer count).
+
+### `swarmllm://models`
+
+All models available for inference — local, network and cloud providers — with
+capabilities and status.
+
+### `swarmllm://peers`
+
+Currently connected computers, with latency, trust, load and shard information.
 
 ```json
 {

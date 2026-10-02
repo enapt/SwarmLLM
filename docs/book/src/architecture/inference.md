@@ -85,8 +85,8 @@ other loss.
 Independently, streaming-tracked `SendDirectMessage` sends carry a
 `delivery_request_id`; if the receiver doesn't ACK within
 `RR_ACK_TIMEOUT_SECS` (10s), the daemon closes the caller's
-streaming channel — converting a 120s `FIRST_TOKEN_TIMEOUT` hang
-into a fast-fail in ~10–20s. This handles the rare case where
+streaming channel — converting a first-token-deadline hang (120 s
+plus 0.5 s per prompt token, at most 600 s) into a fast-fail in ~10–20s. This handles the rare case where
 libp2p `request_response` accepts a `send_request` call but never
 delivers it (no `OutboundFailure` event fires).
 

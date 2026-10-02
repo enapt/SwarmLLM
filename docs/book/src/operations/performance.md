@@ -69,6 +69,11 @@ same-shape prefill chunks into one `forward_batch` call.
 
 ### Cross-node prefix-KV sharing
 
+**Off by default** — the one entry here that is: a computer shares its prefix
+cache only when its owner sets `inference.share_prefix_cache_with_peers = true`,
+because announcing it reveals hashes of the prompts it has cached. Your own
+local prefix cache works either way.
+
 When node B receives a prompt whose prefix was already prefilled by peer A,
 B fetches A's KV snapshot over the wire instead of re-prefilling locally.
 The pipeline is:
@@ -134,9 +139,10 @@ Both use fixed tile sizes, so a result does not depend on how many cores the
 machine has. `SWARMLLM_DECODE_ATTN=standard` and `SWARMLLM_PREFILL_ATTN=standard`
 switch back to the matrix-multiply path, for comparison.
 
-## Flag-gated features
+## Optional and tunable features
 
-Turn these on when you've measured that they match your workload.
+Some of these are on by default (each says so); turn the others on when
+you've measured that they match your workload.
 
 ### Distributed speculative decoding (`speculative_distributed`)
 
@@ -215,9 +221,9 @@ Intermediate pipeline hidden-state activations are quantized from f16 to
 Q8_0 before going over the wire. Receivers auto-dispatch on the dtype
 tag.
 
-- **Status:** Codec verified. ~3.76× wire compression, RMS error <0.005.
-  End-to-end multi-segment benchmark pending.
-- **Config:** `inference.activation_compression = true`
+- **Status:** On by default. Codec verified: ~3.76× wire compression, RMS
+  error <0.005. End-to-end multi-segment benchmark pending.
+- **Config:** `inference.activation_compression = false` switches it off
 
 ### Persistent pipeline stream (`persistent_pipeline_stream`)
 
@@ -282,12 +288,13 @@ handling and observable jitter.
 
 ## Debugging slow inference
 
-Default verbosity (`-v`) gives an `INFO`-level stream. Bump to `-vv` to
-see per-request `DIAG:` logs, which include the per-feature speedup
-signals:
+The default log level is `info`, which already prints the
+`DIAG: request complete` summary for every request. `-v` adds the debug-level
+`DIAG:` lines, which include the per-feature speedup signals; `-vv` adds
+libp2p internals:
 
 ```bash
-./swarmllm run -vv 2>&1 | grep "DIAG:"
+./swarmllm run -v 2>&1 | grep "DIAG:"
 ```
 
 Key DIAG kinds:

@@ -252,7 +252,8 @@ its GPU memory) whenever the daemon unloads it by either path above.
   (`RR_ACK_TIMEOUT_SECS`). Treated as a transient failure: the router
   automatically retries once with a fresh pipeline assembly that
   filters out the unreachable peer. If retry also fails, the user
-  sees the error within ~20s (vs the 120s `FIRST_TOKEN_TIMEOUT`).
+  sees the error within ~20s (vs the first-token deadline: 120 s plus
+  0.5 s per prompt token, at most 600 s).
 - Most common cause: the target peer was killed or partitioned and
   the local libp2p connection state hasn't yet caught up.
 - Look for `DIAG: rr ACK timeout — closing streaming caller` in

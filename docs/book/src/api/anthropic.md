@@ -7,7 +7,8 @@ SwarmLLM provides a full Anthropic Messages API at `POST /v1/messages`, enabling
 Use SwarmLLM as your Claude Code backend to access all models (local, network, and cloud) through a single endpoint:
 
 ```bash
-ANTHROPIC_BASE_URL=http://localhost:8800 claude --model qwen2.5-coder-7b
+ANTHROPIC_BASE_URL=http://localhost:8800 ANTHROPIC_AUTH_TOKEN="$SWARMLLM_KEY" \
+  claude --model qwen2.5-coder-7b-instruct-q4-k-m
 ```
 
 ### Environment Variables

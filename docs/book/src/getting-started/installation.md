@@ -212,7 +212,7 @@ CUDA + FlashAttention; it needs the CUDA toolkit and compiles for a long time):
 ```bash
 cargo build --release --features cuda
 ```
-Every feature flag is listed in `CONTRIBUTING.md`.
+The build command for each release variant is in `CONTRIBUTING.md`.
 
 For Apple Silicon: the default build runs on CPU. A Metal-accelerated
 build is on the roadmap but not yet implemented (no `metal` Cargo

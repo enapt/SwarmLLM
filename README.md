@@ -177,7 +177,7 @@ It depends on where the model runs, so here's the straight answer:
   get slower.
 - **Private Mode** keeps your questions on your own linked devices and, by
   default, on other SwarmLLM computers it treats as local: any on your network,
-  or any that answer within 5 milliseconds. In a shared building or on a fast
+  or any that answer in under about 2.5 milliseconds. In a shared building or on a fast
   city network that can include strangers — `private_mode_allow_lan = false` in
   the config file turns that part off. Your computer still helps others with
   what it can spare. Switch Private Mode on under **More → My Devices** in the
@@ -290,7 +290,7 @@ git clone https://github.com/enapt/SwarmLLM.git && cd SwarmLLM
 cargo build --release
 ```
 
-GPU builds and every feature flag are in [CONTRIBUTING.md](CONTRIBUTING.md).
+GPU builds — the build command for each release variant — are in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Get involved
 

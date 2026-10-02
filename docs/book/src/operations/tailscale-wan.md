@@ -42,7 +42,7 @@ Since mDNS doesn't work across Tailscale (it's link-local only), use one of thes
 
 **Option A: Invite code (easiest)**
 
-On Node A, copy the invite code from the dashboard (`http://localhost:8800`). On Node B, paste it into the "Join Network" field. The invite code contains the node's addresses — including the Tailscale IP if it's listening on `0.0.0.0`.
+On Node A, open the dashboard (`http://localhost:8800`) → **Computers** → **Connect a computer** and copy **Your Swarm Address**. On Node B, paste it under **Another User's Swarm Address** and connect. The invite code contains the node's addresses — including the Tailscale IP if it's listening on `0.0.0.0`.
 
 **Option B: Bootstrap peers in config**
 
@@ -207,7 +207,8 @@ browser's address bar — and offers the paste box. See the section above.
 - Consider having each site run its own models for local inference, with the swarm as fallback
 
 **Stale peer cache after IP change:**
-- If your Tailscale IP changes, old cached addresses will fail. Delete the database to clear the cache:
-  ```bash
-  rm ~/.local/share/swarmllm/db.redb
-  ```
+- If your Tailscale IP changes, the old cached address just fails to dial; the
+  node keeps saving the addresses of peers it is connected to, so once the two
+  find each other again (through the swarm, or **Connect a computer** with the
+  new address) the new one is cached too. Do not delete `db.redb` for this: it
+  also resets your Access Token and unlinks the device from My Devices.

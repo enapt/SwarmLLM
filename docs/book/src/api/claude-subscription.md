@@ -39,8 +39,11 @@ This opens a browser window. Sign in with your Claude Pro/Max/Team/Enterprise ac
 ### 3. Build SwarmLLM with the feature
 
 ```bash
-cargo build --no-default-features --features dev,claude-subscription
+cargo build --release --features claude-subscription
 ```
+
+The official downloads do not include this feature, so it needs a build from
+source.
 
 ### 4. Enable via the dashboard
 
