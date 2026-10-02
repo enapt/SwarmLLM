@@ -1,8 +1,22 @@
+# Future Work — ARCHIVE (frozen 2026-10-02)
+
+> **This file is history, not the queue.** It is `docs/FUTURE_WORK.md` as it stood on
+> 2026-10-02 (v0.3.221-alpha), kept word for word so that every `§ "…"` and `#NNN` cited
+> from code, tests and docs still resolves, and so the measurements, rejected experiments
+> and design reasoning behind each item stay readable.
+>
+> **Its statuses are as they were last written, and many were stale**: the 2026-10-02
+> verification found rows saying "not released" that had shipped, and bodies frozen at an
+> earlier date than their own rows. **The live list — every open item, verified against the
+> code on 2026-10-02 — is `docs/FUTURE_WORK.md`.** An item's status there overrides anything
+> here. History of items closed after the split is appended at the end of this file, under
+> § "Closed after 2026-10-02".
+
 # Future Work — Out of R110-R115 Scope
 
 Captures items deliberately deferred from the model-management redesign and from prior sweeps. Each entry has enough context that a future implementer (or a future me) can pick it up without re-deriving the rationale.
 
-## ▶ PRIORITIES — read this first (re-ranked 2026-10-02 evening, after v0.3.221-alpha)
+## PRIORITIES as they stood on 2026-10-02 (superseded — the live ranking is `docs/FUTURE_WORK.md` § "▶ PRIORITIES")
 
 Ranked by user-visible impact × how many users × whether it fails SILENTLY. Each line points at
 its entry; read the entry's BODY before planning from it (gotcha #654).
@@ -6053,7 +6067,9 @@ gotcha #327.
 > - Tier 4J (pre-emptive layer dispatch) — speculative novelty.
 > - Tier 5L (FP8 activation) — needs Hopper+ hardware.
 >
-> See `## A node holding every shard monopolises the model (measured 2026-07-27)
+> See the section below.
+
+## A node holding every shard monopolises the model (measured 2026-07-27)
 
 **Status: the degraded-local case is FIXED (2026-08-18); load-spreading is not.**
 
@@ -16370,3 +16386,9 @@ the host's uptime, #755). Local decode rose more (to ~61), so the split's share 
    changing anything.
 3. **The coordinator's own segment ends a chain** (#143) — at 0 ms that costs nothing; across
    a WAN it is a round trip per token.
+
+## Closed after 2026-10-02
+
+When an item in `docs/FUTURE_WORK.md` closes, its line moves to that file's § "Closed" and
+any history worth keeping — what was measured, what the fix replaced — is appended here
+under a heading naming its number.
