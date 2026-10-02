@@ -717,6 +717,12 @@ impl Daemon {
             shared_state.clone(),
             shutdown_rx.clone(),
         );
+        background::spawn_canonical_uploads(
+            &mut background_tasks,
+            shared_state.clone(),
+            network_tx.clone(),
+            shutdown_rx.clone(),
+        );
         background::spawn_responses_sweep(
             &mut background_tasks,
             self.db.clone(),

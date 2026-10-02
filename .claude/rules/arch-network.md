@@ -202,6 +202,22 @@ so neither can be supplied alone. Guard:
 
 → `docs/invariants/network.md`
 
+## One upload per model id, on every node (2026-10-02)
+
+**`model::canonical` is the single answer to "which file IS this model"**: uploads
+of one model id are totally ordered (reference pin, then `TRUSTED_HF_PUBLISHERS`
+position, then name) and every node uses the best one anyone has claimed, after
+checking it on HuggingFace WITHOUT its token. `hf_sources` is written only through
+`note_origin_claim` / `adopt_canonical_build`; a header only through
+`fetch_model_header`; every download path asks `canonical_allows_acquisition`; a
+peer's manifest of another upload is dropped. `auto_manage::canonical` heals a node
+holding another upload — stage the canonical parts, swap when idle — and replaces a
+header from another upload. ⚠ **Never reorder `TRUSTED_HF_PUBLISHERS`** — its order is
+a swarm-wide contract. Nine of twenty models were held as two or three uploads that
+could never be split together (#151).
+
+→ `docs/invariants/network.md` § "One upload per model id"
+
 ## ACK-Timeout Fast-Fail for rr Sends
 
 `SendDirectMessage` carries `delivery_request_id: Option<uuid::Uuid>`.

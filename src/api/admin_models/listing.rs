@@ -426,6 +426,23 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
                 None
             },
             "hf_source": hf_source,
+            // The upload the whole swarm uses for this model (`model::canonical`)
+            // and what this computer's own copy is against it: `nothing`,
+            // `canonical`, `switching` (fetching the shared copy to replace
+            // its old parts) or `stuck` with a reason. Null until checked.
+            "shared_copy": state
+                .shared_state
+                .canonical_build(&crate::types::ModelId(id.to_string()))
+                .map(|b| serde_json::json!({
+                    "repo_id": b.source.repo_id,
+                    "filename": b.source.filename,
+                    "this_computer": state
+                        .shared_state
+                        .models
+                        .canonical_holding
+                        .get(&crate::types::ModelId(id.to_string()))
+                        .map(|h| serde_json::to_value(h.value()).unwrap_or_default()),
+                })),
         })
     };
 

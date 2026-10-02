@@ -93,6 +93,13 @@ const MAX_ORIGIN_TRUST_PROBES_PER_TICK: usize = 8;
 ///
 /// Matched against the case-insensitive `<publisher>/<repo>` prefix on
 /// the HF repo_id. Update sparingly; each entry is a trust delegation.
+///
+/// ⚠ **The ORDER is a swarm-wide contract as well** (2026-10-02):
+/// `model::canonical` prefers an upload from an earlier entry, and every node
+/// must rank two uploads the same way or they settle on different files for one
+/// model id. Never reorder existing entries — that moves whole models to another
+/// upload on update. Inserting a new name is safe: it only changes how that
+/// publisher compares.
 const TRUSTED_HF_PUBLISHERS: &[&str] = &[
     // Official model authors
     "meta-llama",
@@ -109,6 +116,7 @@ const TRUSTED_HF_PUBLISHERS: &[&str] = &[
     "allenai",
     "ibm-granite",
     "CohereForAI",
+    "Salesforce",
     // Curator / quantiser community heavyweights
     "bartowski",
     "TheBloke",
@@ -134,10 +142,22 @@ pub(crate) fn min_downloads_for_repo(repo_id: &str) -> u64 {
 /// Used by the wishlist (Task #2) to mark Candidate entries that bypass
 /// the user's "review before adopt" friction.
 pub fn is_trusted_publisher(repo_id: &str) -> bool {
+    trusted_publisher_position(repo_id).is_some()
+}
+
+/// Where the repo's publisher sits in the allowlist — official authors first,
+/// then curators — or `None` for anyone else. `model::canonical` ranks uploads
+/// of one model by it; see the ordering note on `TRUSTED_HF_PUBLISHERS`.
+pub fn trusted_publisher_position(repo_id: &str) -> Option<usize> {
     let publisher = repo_id.split('/').next().unwrap_or("");
     TRUSTED_HF_PUBLISHERS
         .iter()
-        .any(|p| p.eq_ignore_ascii_case(publisher))
+        .position(|p| p.eq_ignore_ascii_case(publisher))
+}
+
+/// How many publishers the allowlist holds — the rank an unlisted one gets.
+pub fn trusted_publisher_count() -> usize {
+    TRUSTED_HF_PUBLISHERS.len()
 }
 
 /// R134: anti-gaming cooldown after an auto-promoted model decays back

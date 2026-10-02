@@ -60,18 +60,10 @@ pub(super) fn is_valid_hf_filename(filename: &str) -> bool {
         && !filename.contains("..")
 }
 
-/// Convert a GGUF filename to a model ID slug.
-/// Strips .gguf suffix, lowercases, replaces non-alphanumeric chars with hyphens,
-/// and collapses consecutive hyphens.
+/// Convert a GGUF filename to a model ID slug — `model::canonical` owns the
+/// rule, because the canonical-upload check must derive exactly what this does.
 pub(super) fn gguf_filename_to_model_id(filename: &str) -> String {
-    filename
-        .trim_end_matches(".gguf")
-        .to_lowercase()
-        .replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '.', "-")
-        .split('-')
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join("-")
+    crate::model::canonical::model_id_for_gguf_filename(filename)
 }
 
 /// Validate HF repo_id and filename inputs, returning ApiError on failure.

@@ -517,52 +517,17 @@ impl PipelineExecutor {
                     }
                 }
             } else {
-                // No header on disk — try fetching from HuggingFace on-demand.
-                //
-                // CLONED out of the map, never borrowed: the two calls below
-                // retry for minutes, and a DashMap `Ref` held that long blocks
-                // any writer to its shard — including the message dispatcher's
-                // `hf_sources.insert`, which parks its OS thread until the
-                // guard drops (see clippy.toml).
-                let hf_source = self
-                    .shared_state
-                    .models
-                    .hf_sources
-                    .get(model_id)
-                    .map(|s| s.value().clone());
-                if let Some(hf_source) = hf_source {
-                    let model_dir = crate::model::shard::model_dir(
-                        &self.shared_state.config.node.data_dir,
-                        &model_id.0,
-                    );
-                    tracing::info!(
-                        model = %model_id,
-                        repo = %hf_source.repo_id,
-                        "Fetching GGUF header from HuggingFace for remote model"
-                    );
-                    let probe_result = crate::model::huggingface::probe_gguf_file(
-                        &hf_source.repo_id,
-                        &hf_source.filename,
-                        self.shared_state.config.model.shard_size_bytes(),
-                    )
-                    .await;
-                    if let Ok(info) = probe_result {
-                        if let Ok(path) = crate::model::huggingface::download_gguf_header(
-                            &hf_source.repo_id,
-                            &hf_source.filename,
-                            &model_dir,
-                            info.header_size,
-                        )
-                        .await
-                        {
-                            if let Some((eos, decoder, tokenizer_opt)) =
-                                Self::decoder_from_header(&path)
-                            {
-                                let ptc =
-                                    prompt_positions(prompt, tokenizer_opt.as_ref(), model_id);
-                                return (ptc, eos, decoder);
-                            }
-                        }
+                // No header on disk — try fetching from HuggingFace on-demand,
+                // only from the upload this node's parts are: a header from
+                // another upload describes other bytes (`fetch_model_header`).
+                tracing::info!(
+                    model = %model_id,
+                    "Fetching GGUF header from HuggingFace for remote model"
+                );
+                if let Ok((path, _)) = self.shared_state.fetch_model_header(model_id).await {
+                    if let Some((eos, decoder, tokenizer_opt)) = Self::decoder_from_header(&path) {
+                        let ptc = prompt_positions(prompt, tokenizer_opt.as_ref(), model_id);
+                        return (ptc, eos, decoder);
                     }
                 }
                 // Same reasoning as the branch above: with neither a loaded

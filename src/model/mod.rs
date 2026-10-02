@@ -1,5 +1,6 @@
 pub mod acquisition;
 pub mod auto_manage;
+pub mod canonical;
 pub mod distribution;
 pub mod huggingface;
 pub mod lora;

@@ -517,11 +517,10 @@ pub(super) async fn restore_persistent_state(
                                     file = %source.filename,
                                     "Loaded HF source from disk"
                                 );
-                                shared_state
-                                    .models
-                                    .hf_sources
-                                    .insert(mid.clone(), source.clone());
-                                let _ = db.put_json("hf_sources", &model_id_str, &source);
+                                // A claim like any other: which upload this
+                                // node uses is chosen among all of them
+                                // (`model::canonical`).
+                                shared_state.note_origin_claim(&mid, source.clone());
                             }
                         }
                     }
@@ -558,80 +557,59 @@ pub(super) async fn restore_persistent_state(
                     }
                     let model_id_str = entry.file_name().to_string_lossy().to_string();
                     let mid = crate::types::ModelId(model_id_str.clone());
-                    // Cloned out: the probe and download below retry for
-                    // minutes, and no shard guard may live across them.
-                    let hf_src = shared_state
-                        .models
-                        .hf_sources
-                        .get(&mid)
-                        .map(|s| s.value().clone());
-                    if let Some(hf_src) = hf_src {
-                        tracing::info!(
-                            model = %model_id_str,
-                            repo = %hf_src.repo_id,
-                            "Downloading GGUF header from HuggingFace (no local shard_000)"
-                        );
-                        let shard_size = config.model.shard_size_bytes();
-                        match crate::model::huggingface::probe_gguf_file(
-                            &hf_src.repo_id,
-                            &hf_src.filename,
-                            shard_size,
-                        )
-                        .await
-                        {
-                            Ok(info) => {
-                                if let Ok(hp) = crate::model::huggingface::download_gguf_header(
+                    if !shared_state.models.hf_sources.contains_key(&mid) {
+                        continue;
+                    }
+                    tracing::info!(
+                        model = %model_id_str,
+                        "Downloading GGUF header from HuggingFace (no local shard_000)"
+                    );
+                    // Only from the upload this node's parts are
+                    // (`fetch_model_header`): a header from another upload
+                    // would describe other bytes.
+                    match shared_state.fetch_model_header(&mid).await {
+                        Ok((hp, hf_src)) => {
+                            tracing::info!(
+                                model = %model_id_str,
+                                path = %hp.display(),
+                                "Downloaded GGUF header from HuggingFace"
+                            );
+                            if let Ok(meta) =
+                                crate::inference::split::GgufTensorMeta::from_gguf_file(&hp)
+                            {
+                                shared_state.gguf_meta.insert(mid.clone(), meta.clone());
+                                let manifest_path =
+                                    model_dir.join(crate::model::shard::MANIFEST_FILENAME);
+                                if !manifest_path.exists() {
+                                    regenerate_manifest_from_header(
+                                        &mid, &model_dir, &meta, config,
+                                    );
+                                }
+                                // The shard-0 tensors a node without shard 0
+                                // still needs; each one already on disk is
+                                // skipped.
+                                if let Err(e) = crate::model::huggingface::download_sidecar_tensors(
                                     &hf_src.repo_id,
                                     &hf_src.filename,
                                     &model_dir,
-                                    info.header_size,
+                                    &meta,
                                 )
                                 .await
                                 {
-                                    tracing::info!(
+                                    tracing::warn!(
                                         model = %model_id_str,
-                                        path = %hp.display(),
-                                        "Downloaded GGUF header from HuggingFace"
+                                        error = %e,
+                                        "Failed to download sidecar tensors"
                                     );
-                                    if let Ok(meta) =
-                                        crate::inference::split::GgufTensorMeta::from_gguf_file(&hp)
-                                    {
-                                        shared_state.gguf_meta.insert(mid.clone(), meta.clone());
-                                        let manifest_path =
-                                            model_dir.join(crate::model::shard::MANIFEST_FILENAME);
-                                        if !manifest_path.exists() {
-                                            regenerate_manifest_from_header(
-                                                &mid, &model_dir, &meta, config,
-                                            );
-                                        }
-                                        // The shard-0 tensors a node without shard 0
-                                        // still needs; each one already on disk is
-                                        // skipped.
-                                        if let Err(e) =
-                                            crate::model::huggingface::download_sidecar_tensors(
-                                                &hf_src.repo_id,
-                                                &hf_src.filename,
-                                                &model_dir,
-                                                &meta,
-                                            )
-                                            .await
-                                        {
-                                            tracing::warn!(
-                                                model = %model_id_str,
-                                                error = %e,
-                                                "Failed to download sidecar tensors"
-                                            );
-                                        }
-                                    }
                                 }
                             }
-                            Err(e) => {
-                                tracing::warn!(
-                                    model = %model_id_str,
-                                    error = %e,
-                                    "Failed to probe GGUF on HuggingFace for header download"
-                                );
-                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                model = %model_id_str,
+                                error = %e,
+                                "Could not fetch this model's GGUF header from HuggingFace"
+                            );
                         }
                     }
                 }

@@ -138,6 +138,12 @@ pub async fn delete_model(
 
     // Remove from hf_sources
     shared.models.hf_sources.remove(&mid);
+    // Anything staged to switch this model onto the swarm's upload, and the
+    // record of this computer's copy. The canonical choice itself is kept: it
+    // is a fact about the swarm, not about this computer.
+    shared.models.canonical_holding.remove(&mid);
+    let staging = crate::model::auto_manage::canonical::staging_dir(shared, &mid);
+    let _ = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(staging)).await;
 
     // Free vision encoder (mmproj) and local embedder caches
     shared.vision_modules.remove(&mid);

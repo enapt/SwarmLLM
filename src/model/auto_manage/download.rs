@@ -37,6 +37,20 @@ impl AutoShardManager {
     /// After download, register the shard and check if the model is now complete.
     /// Acquires a semaphore permit to limit concurrent downloads.
     pub(super) async fn trigger_download(&self, candidate: &ShardCandidate) {
+        // Every path into a download passes here — the scorer, the repair
+        // queue, the origin fallback — so this is where a part of an upload
+        // the swarm does not use is refused, whoever asked for it.
+        if !self
+            .shared_state
+            .canonical_allows_acquisition(&candidate.model_id)
+        {
+            tracing::debug!(
+                model = %candidate.model_id,
+                shard = candidate.shard_index,
+                "Not fetching — this model's canonical upload is not settled here yet"
+            );
+            return;
+        }
         // Try to acquire a semaphore permit non-blocking. If all download slots
         // are occupied, defer to next evaluation cycle instead of blocking the loop.
         // Wrapped in an Option so both the HF branch (moves permit into a
@@ -407,12 +421,13 @@ impl AutoShardManager {
                         }
                     });
 
-                    // Probe to get shard layouts, then download the specific shard
-                    let configured_shard_size = shared.config.model.shard_size_bytes();
+                    // Probe to get shard layouts, then download the specific shard.
+                    // Cut at the canonical size, as every manifest of this upload
+                    // is — this node's own `shard_size_mb` would cut other parts.
                     let probe_result = crate::model::huggingface::probe_gguf_file(
                         &repo_id,
                         &filename,
-                        configured_shard_size,
+                        crate::model::canonical::canonical_shard_size_bytes(),
                     )
                     .await;
                     let info = match probe_result {
@@ -471,6 +486,45 @@ impl AutoShardManager {
                         return;
                     }
 
+                    // The part must be cut from the very file the manifest
+                    // describes. Fetching from a source of another upload and
+                    // writing its hash into this manifest made a manifest of
+                    // two files at once — parts that can never be split
+                    // together with anyone's (#151).
+                    let expected_part = shared.model_registry.get_manifest(&model_id).map(|m| {
+                        (
+                            m.total_size_bytes,
+                            m.shards
+                                .iter()
+                                .find(|s| s.index == shard_idx)
+                                .map(|s| s.size_bytes),
+                        )
+                    });
+                    let cut_from_this_upload = expected_part.is_some_and(|(total, part)| {
+                        total == info.total_size
+                            && part.is_some_and(|size| {
+                                info.layouts
+                                    .get(shard_idx as usize)
+                                    .is_some_and(|l| l.size_bytes == size)
+                            })
+                    });
+                    if !cut_from_this_upload {
+                        tracing::warn!(
+                            model = %model_id,
+                            shard = shard_idx,
+                            repo = %repo_id,
+                            source_bytes = info.total_size,
+                            manifest = ?expected_part,
+                            "Not fetching — this source is another upload than the manifest describes"
+                        );
+                        if let Some(mut entry) =
+                            shared.models.acquisition_progress.get_mut(&model_id)
+                        {
+                            entry.shard_progress.remove(&shard_idx);
+                        }
+                        shared.schedule_acquisition_cleanup(model_id.clone());
+                        return;
+                    }
                     let layout = match info.layouts.get(shard_idx as usize) {
                         Some(l) => l,
                         None => {

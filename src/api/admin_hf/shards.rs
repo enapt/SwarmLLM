@@ -96,8 +96,8 @@ pub async fn hf_download_shards(
     State(state): State<AppState>,
     JsonBody(body): JsonBody<HfShardDownloadRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let repo_id = body.repo_id;
-    let filename = body.filename;
+    let mut repo_id = body.repo_id;
+    let mut filename = body.filename;
     let mut shard_indices = body.shards;
     let peer_fair_share = body.peer_fair_share;
     let all_shards = body.all_shards;
@@ -144,23 +144,53 @@ pub async fn hf_download_shards(
     };
     let fair_share_node_id = state.shared_state.identity.node_id().clone();
 
-    // Use provided model_id if it matches an existing model, otherwise derive from filename.
-    // Always sanitize to prevent path traversal.
-    let safe_name = if let Some(ref mid) = body.model_id {
+    // The FILE names the model: a download goes into the directory of the id
+    // its own file name gives, never into another model's. Honouring a
+    // caller's `model_id` whenever that directory existed merged one upload's
+    // parts into another's (#151).
+    if let Some(ref mid) = body.model_id {
         if mid.len() > 256 {
             return Err(ApiError(crate::error::SwarmError::Validation(
                 "model_id must be 256 characters or fewer".into(),
             )));
         }
-        let sanitized = crate::model::shard::sanitize_path_component(mid);
-        if state.model_dir(&sanitized).exists() {
-            sanitized
-        } else {
-            gguf_filename_to_model_id(&filename)
+        if *mid != gguf_filename_to_model_id(&filename) {
+            tracing::info!(
+                asked = %mid,
+                file = %filename,
+                "Download names a model id its file does not give — using the file's"
+            );
         }
-    } else {
-        gguf_filename_to_model_id(&filename)
-    };
+    }
+    let safe_name = gguf_filename_to_model_id(&filename);
+
+    // One upload per model across the swarm (`model::canonical`). What was
+    // clicked is a claim like any other; when the swarm already uses a better
+    // one, that is the file fetched — the same model and quantisation, and the
+    // one every other computer holding it can work together with.
+    {
+        let mid = crate::types::ModelId(safe_name.clone());
+        let asked = crate::daemon::HfSource {
+            repo_id: repo_id.clone(),
+            filename: filename.clone(),
+            mmproj_filename: None,
+        };
+        state.shared_state.note_origin_claim(&mid, asked.clone());
+        if let Some(build) = state.shared_state.canonical_build(&mid) {
+            if !crate::model::canonical::same_origin(&build.source, &asked)
+                && crate::model::canonical::outranks(&mid, &build.source, &asked)
+            {
+                tracing::info!(
+                    model = %mid,
+                    asked = %asked.repo_id,
+                    using = %build.source.repo_id,
+                    "Downloading the swarm's shared upload of this model instead of the one clicked"
+                );
+                repo_id = build.source.repo_id.clone();
+                filename = build.source.filename.clone();
+            }
+        }
+    }
 
     let dest_dir = state.model_dir(&safe_name);
 
@@ -283,6 +313,33 @@ pub async fn hf_download_shards(
                     body: format!("HuggingFace probe failed: {detail}"),
                 })
             })?;
+
+    // Never mix two uploads in one model directory. A node holding parts of
+    // another upload switches them by itself (`auto_manage::canonical`).
+    {
+        let mid = crate::types::ModelId(safe_name.clone());
+        let me = state.shared_state.identity.node_id().clone();
+        let holds_another_upload = state
+            .shared_state
+            .model_registry
+            .get_manifest(&mid)
+            .is_some_and(|m| {
+                m.total_size_bytes != info.total_size
+                    && !state
+                        .shared_state
+                        .model_registry
+                        .local_shard_indices_in(&m, &me)
+                        .is_empty()
+            });
+        if holds_another_upload {
+            return Err(ApiError(crate::error::SwarmError::Validation(
+                "This computer already holds parts of a different upload of this model. It is \
+                 switching them to the swarm's shared copy by itself — download more once that \
+                 has finished."
+                    .into(),
+            )));
+        }
+    }
 
     let arch_str = &info.tensor_meta.architecture;
     let model_arch = crate::inference::split::ModelArch::from_gguf_arch(arch_str);
@@ -525,18 +582,13 @@ pub async fn hf_download_shards(
             filename: filename.clone(),
             mmproj_filename: None,
         };
-        download_shared.models.hf_sources.insert(
-            crate::types::ModelId(model_id_str.clone()),
+        // A claim, not an overwrite: when this upload is (or becomes) the
+        // swarm's, `auto_manage::canonical` adopts it and records it beside the
+        // parts; a node that already uses another keeps using it.
+        download_shared.note_origin_claim(
+            &crate::types::ModelId(model_id_str.clone()),
             hf_source.clone(),
         );
-        let _ = download_shared
-            .db
-            .put_json("hf_sources", &model_id_str, &hf_source);
-        let hf_source_path = dest_dir.join(crate::model::shard::HF_SOURCE_FILENAME);
-        let hf_source_json = serde_json::to_string_pretty(&hf_source).unwrap_or_default();
-        let _ =
-            tokio::task::spawn_blocking(move || std::fs::write(&hf_source_path, hf_source_json))
-                .await;
 
         // Broadcast HfSourceGossip + ModelManifest EARLY so peers can start
         // auto-acquiring shards immediately (before our shard data downloads finish).
@@ -969,57 +1021,32 @@ struct ManifestGenParams<'a> {
 
 /// Generate a manifest from a downloaded GGUF header and register shards.
 fn generate_manifest_from_header(params: &ManifestGenParams<'_>) -> Result<(), String> {
-    use crate::inference::split::GgufTensorMeta;
-
-    let header_path = params.header_path;
-    let total_size = params.total_size;
-    let shard_count = params.shard_count;
-
-    // Parse model metadata from the GGUF header
-    let meta = GgufTensorMeta::from_gguf_file(header_path)
-        .map_err(|e| format!("Failed to parse GGUF header: {e}"))?;
-
     let model_id = crate::types::ModelId(params.model_id_str.to_string());
-    let num_layers = meta.block_count as u32;
-
-    // Build a friendly model name from the GGUF metadata or filename
-    let model_name = meta
-        .model_name
-        .clone()
-        .unwrap_or_else(|| params.filename.trim_end_matches(".gguf").to_string());
-
-    // Architecture already extracted by GgufTensorMeta above — no need to re-read the file
-    let architecture = crate::model::manifest::gguf_arch_to_model_architecture(&meta.architecture);
-
-    let model_dir = header_path
+    let node_id = params.shared.identity.node_id().clone();
+    let computed_layouts;
+    let layouts: &[crate::inference::split::LayerShardLayout] =
+        if let Some(precomputed) = params.precomputed_layouts {
+            precomputed
+        } else {
+            let meta = crate::inference::split::GgufTensorMeta::from_gguf_file(params.header_path)
+                .map_err(|e| format!("Failed to parse GGUF header: {e}"))?;
+            computed_layouts =
+                crate::inference::split::compute_layer_shard_layouts(&meta, params.shard_count);
+            &computed_layouts
+        };
+    let (manifest, meta) = crate::model::manifest::manifest_from_header(
+        params.header_path,
+        &model_id,
+        params.filename,
+        params.total_size,
+        layouts,
+        node_id.clone(),
+    )?;
+    let num_layers = manifest.num_layers;
+    let model_dir = params
+        .header_path
         .parent()
         .ok_or_else(|| "GGUF header path has no parent directory".to_string())?;
-
-    let computed_layouts;
-    let layouts: &[crate::inference::split::LayerShardLayout] = if let Some(precomputed) =
-        params.precomputed_layouts
-    {
-        precomputed
-    } else {
-        computed_layouts = crate::inference::split::compute_layer_shard_layouts(&meta, shard_count);
-        &computed_layouts
-    };
-    let shards = crate::model::manifest::build_shard_infos_from_layouts(model_dir, layouts);
-
-    let node_id = params.shared.identity.node_id().clone();
-
-    let manifest = crate::model::manifest::build_manifest_from_gguf(
-        crate::model::manifest::ManifestFromGguf {
-            id: model_id.clone(),
-            name: model_name,
-            architecture,
-            num_layers,
-            total_size_bytes: total_size,
-            shard_count,
-            shards,
-            publisher: node_id.clone(),
-        },
-    );
 
     // Save manifest to disk
     manifest.save_to_dir(model_dir).map_err(|e| e.to_string())?;

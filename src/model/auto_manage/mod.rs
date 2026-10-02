@@ -4,6 +4,7 @@
 //! and resource pressure to download under-replicated shards and prune
 //! over-replicated ones.
 
+pub mod canonical;
 mod download;
 mod parallax;
 mod prune;

@@ -1025,15 +1025,9 @@ impl AutoShardManager {
                                 .with_model(&model_id_str)
                                 .with_detail_str(&source.repo_id),
                             );
-                            self.shared_state
-                                .models
-                                .hf_sources
-                                .insert(mid.clone(), source.clone());
-                            // Persist to DB
-                            let _ =
-                                self.shared_state
-                                    .db
-                                    .put_json("hf_sources", &model_id_str, &source);
+                            // A claim like any other — `model::canonical`
+                            // chooses among all of them.
+                            self.shared_state.note_origin_claim(&mid, source.clone());
                         }
                     }
                 }

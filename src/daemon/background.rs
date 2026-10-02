@@ -277,6 +277,20 @@ pub(super) fn spawn_failed_download_reclaim(
     });
 }
 
+/// Keep this node on the swarm's upload of every model it holds or may fetch,
+/// and move a copy of another upload onto it — `model::auto_manage::canonical`.
+pub(super) fn spawn_canonical_uploads(
+    tasks: &mut BackgroundTasks,
+    shared_state: Arc<SharedState>,
+    network_tx: tokio::sync::mpsc::Sender<crate::types::NetworkCommand>,
+    shutdown_rx: watch::Receiver<bool>,
+) {
+    tasks.spawn(async move {
+        crate::model::auto_manage::canonical::run(shared_state, network_tx, shutdown_rx).await;
+        "canonical_uploads"
+    });
+}
+
 /// One pass of [`spawn_failed_download_reclaim`]. Blocking: it walks the
 /// models directory.
 fn reclaim_failed_downloads(state: &SharedState) {

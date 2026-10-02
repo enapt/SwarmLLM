@@ -57,56 +57,40 @@ pub async fn hf_source(
 
     match crate::model::huggingface::search_gguf_models(&search_query).await {
         Ok(results) => {
-            // Find the result whose filename slug matches our model_id
-            if let Some(hit) = results
+            // EVERY upload whose file name gives this id is a claim, and the
+            // choice among them is the swarm-wide rule — not the search's
+            // order, which follows download counts and so changes over time
+            // and from node to node. Taking the first hit is how two nodes
+            // asking an hour apart came to fetch two different files.
+            for hit in results
                 .iter()
-                .find(|r| gguf_filename_to_model_id(&r.filename) == model_id)
+                .filter(|r| gguf_filename_to_model_id(&r.filename) == model_id)
             {
-                // Cache the discovered source for future lookups
-                let source = crate::daemon::HfSource {
-                    repo_id: hit.repo_id.clone(),
-                    filename: hit.filename.clone(),
-                    mmproj_filename: None,
-                };
-                state
-                    .shared_state
-                    .models
-                    .hf_sources
-                    .insert(mid.clone(), source);
-                let _ = state.db.put_json(
-                    "hf_sources",
-                    &model_id,
-                    &crate::daemon::HfSource {
+                state.shared_state.note_origin_claim(
+                    &mid,
+                    crate::daemon::HfSource {
                         repo_id: hit.repo_id.clone(),
                         filename: hit.filename.clone(),
                         mmproj_filename: None,
                     },
                 );
-
-                // Also write hf_source.json to disk for future startups
-                let model_dir = state.model_dir(&model_id);
-                if model_dir.is_dir() {
-                    let hf_path = model_dir.join(crate::model::shard::HF_SOURCE_FILENAME);
-                    let json_str = serde_json::to_string_pretty(&serde_json::json!({
-                        "repo_id": hit.repo_id,
-                        "filename": hit.filename,
-                    }))
-                    .unwrap_or_default();
-                    let _ = tokio::task::spawn_blocking(move || std::fs::write(&hf_path, json_str))
-                        .await;
-                }
-
+            }
+            if let Some(best) = state
+                .shared_state
+                .origin_candidates(&mid)
+                .into_iter()
+                .next()
+            {
                 tracing::info!(
                     model = %model_id,
-                    repo = %hit.repo_id,
-                    file = %hit.filename,
+                    repo = %best.repo_id,
+                    file = %best.filename,
                     "Auto-discovered HF source"
                 );
-
                 return Ok(Json(serde_json::json!({
                     "model_id": model_id,
-                    "repo_id": hit.repo_id,
-                    "filename": hit.filename,
+                    "repo_id": best.repo_id,
+                    "filename": best.filename,
                     "auto_discovered": true,
                 })));
             }

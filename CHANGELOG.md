@@ -1,5 +1,38 @@
 # Changelog
 
+## [Unreleased]
+
+**Every computer now holds the same file for each model, so any of them can share
+the work on it.** A model's name says which model and which compression it is,
+but several people publish their own copy of the same model on HuggingFace, and
+those copies differ byte for byte. Each computer checked its parts against the
+copy it downloaded — so every part was intact — but nothing made two computers
+pick the SAME copy: a computer used whichever one it heard of first, whatever was
+clicked in the dashboard, or the first search result. Parts of two different
+copies cannot be combined, so two computers holding different copies could never
+split a model between them. On 2026-10-01 this was the case for 9 of the 20
+models on the swarm.
+
+Now every computer applies the same rule to choose: the copy from the model's
+own author first, then from well-known publishers in a fixed order, then anyone
+else — checked on HuggingFace the way any computer would see it, without a
+login. A computer that already holds a different copy switches by itself: it
+downloads the chosen copy's parts for the layers it holds, checks them, and only
+then replaces its old parts, which keep working until the swap. You do not need
+to delete or re-download anything. The model page says when a computer is
+switching, and the activity list when it has finished.
+
+**Fixed: a computer could end up with parts of two different copies of one
+model, or a header from another copy than its parts.** Downloading a part from
+one copy into a model described by another, a dashboard download into another
+copy's folder, and fetching the description file from a different copy than the
+parts are all refused now; a computer whose description file came from another
+copy gets the right one and reloads the model.
+
+Who is affected: every computer holding a model, and most of all anyone whose
+split requests failed or fell back because the other computers held "a
+different version of this model".
+
 ## [0.3.219-alpha] — 2026-10-02
 
 **A model split across other computers answers up to 1.7 times faster when your

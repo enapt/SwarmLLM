@@ -158,6 +158,19 @@ impl AutoShardManager {
                 );
                 continue;
             }
+            // Never fetch a part of an upload the swarm does not use: wait
+            // until this model's canonical upload is known and the manifest
+            // parts are fetched against describes it, and leave a model this
+            // node is switching to `auto_manage::canonical`. Fetching first
+            // took whichever upload this node had heard of, which is how the
+            // swarm came to hold two or three uploads of one model (#151).
+            if !self.shared_state.canonical_allows_acquisition(&manifest.id) {
+                tracing::debug!(
+                    model = %manifest.id,
+                    "Skipping model — its canonical upload is not settled here yet"
+                );
+                continue;
+            }
             // -- Policy gate: skip models excluded from auto-manage --
             if let Some(policy) = self
                 .shared_state

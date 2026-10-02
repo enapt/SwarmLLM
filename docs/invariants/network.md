@@ -2648,3 +2648,88 @@ of 1-4 tokens beat large ones once several are in flight.
   `a_streamed_answer_reaches_the_wait_its_number_names` (red with either the
   number's routing or the link-failure rule toggled off, 2026-09-30) and the
   codec tests `a_stream_number_*` / `a_streamed_answer_names_its_number_after_the_step`.
+
+## One upload per model id, on every node (2026-10-02, FUTURE_WORK #151)
+
+**What it replaced.** A model id is derived from a GGUF's FILE NAME
+(`model::canonical::model_id_for_gguf_filename`), so independent uploads of one
+model and quantisation share an id — `bartowski/…/Qwen2.5-Coder-7B-Instruct-
+Q4_K_M.gguf`, `Qwen/…/qwen2.5-coder-7b-instruct-q4_k_m.gguf` and a third-party
+requant were all `qwen2.5-coder-7b-instruct-q4-k-m`, within 800 bytes and
+sharing no part hash (gotcha #406). Every part was verified — against the upload
+its own node fetched. Nothing made two nodes fetch the SAME upload: `hf_sources`
+had six writers with six rules (the first `HfSourceGossip` heard, the dashboard
+click, the first HuggingFace search hit — ordered by downloads, so it moved —,
+a `hf_source.json` on disk, the auto-manage discovery). Measured 2026-10-01:
+**9 of 20 models with peer holders had holders of another upload**
+(`peers_other_build`), and `shard_holders` (correctly) refuses to split across
+them. Three paths also MIXED uploads on one node: the auto-manage HuggingFace
+download fetched part *i* from `hf_sources` and wrote its hash into whatever
+manifest was registered; the dashboard download merged into an existing
+directory named by the caller's `model_id`; four header fetches took
+`gguf_header.bin` — the file that says where every tensor is — from
+`hf_sources` beside parts a peer had supplied.
+
+**The rule** (`model::canonical`): uploads of one model are totally ordered —
+a pinned reference model first (`model::reference`), then the publisher's
+position in `TRUSTED_HF_PUBLISHERS` (official authors, then curators), then
+anyone, ties by name — and every node uses the best upload anyone has claimed.
+Claims only grow by gossip and the choice is the maximum under a fixed order,
+so it converges: a state-based max-register CRDT (Shapiro et al., 2011 — merge
+is "keep the better", commutative, associative, idempotent). Petals keys a
+model's swarm identity by its HuggingFace repo and Ollama resolves `name:tag` to
+one manifest digest; this keeps the friendly id and makes it resolve to one file.
+
+**Verified anonymously.** A candidate is adopted only after a probe WITHOUT the
+node's HuggingFace token (`probe_public_upload`): a node with a token can read
+gated or private repos the rest of the swarm cannot, and an upload chosen on its
+word would be one nobody else could fetch. A refused upload is skipped for 24 h
+(not found / private) or 30 min (transient), so the next-best is chosen.
+
+**Healed, not just prevented** (`model::auto_manage::canonical`, a background
+task that runs whether or not auto-manage is on — repair, like
+`complete_pending_shard_fetches`):
+- A node holding NONE of a model it may fetch registers the canonical upload's
+  manifest (from its header) and fetches against it; the dispatcher drops a
+  peer's manifest of another upload once the choice is known
+  (`manifest_is_another_upload`); `canonical_allows_acquisition` holds every
+  download path until the choice is made (`trigger_download`, the scorer).
+- A node holding parts of the same SHAPE has each held part's first 64 KB
+  compared with the upload's bytes on HuggingFace (`parts_are_from`) — uploads
+  differ in tensor bytes everywhere, so this is decisive and costs 64 KB a part —
+  and its header compared by BLAKE3 with the upload's; a wrong header (a
+  peer-provisioned node's) is replaced with the upload's header and side files,
+  and the model reloaded.
+- A node holding another upload fetches the canonical parts covering its layers
+  into `<data_dir>/canonical/<model>` by byte range (never a whole GGUF), keeps
+  serving its old parts meanwhile, and swaps when every part is in and the model
+  is idle: old parts, header, manifest and side files deleted, new ones moved in,
+  origin hashes of the old upload forgotten (`forget_origin_verified_for_model`
+  — kept, they would refuse the new manifest as "a different build"), holders
+  re-announced complete-for-model, reloaded. One switch at a time.
+- `hf_sources` is written ONLY by `SharedState::write_hf_source` behind
+  `note_origin_claim` / `adopt_canonical_build` (and the startup restore of the
+  verified choice), and a header is fetched only by `fetch_model_header`, which
+  refuses a source whose file is not the size the manifest says. Guards:
+  `a_models_source_is_written_only_through_the_canonical_choice`,
+  `a_models_header_is_fetched_only_from_the_upload_its_parts_are` (both with
+  planted-violation null controls run 2026-10-02).
+
+**What a change must keep:**
+- The ORDER of `TRUSTED_HF_PUBLISHERS` is part of the wire contract: two
+  versions that rank two uploads differently move the swarm back and forth.
+  Never reorder; inserting a publisher is safe.
+- Every canonical layout is cut at the DEFAULT shard size
+  (`canonical_shard_size_bytes`), never at a node's `model.shard_size_mb`.
+- A claim must name the model (`origin_names_model`): a file whose name gives
+  another id is never a candidate, or one gossip message could move a model's
+  holders onto any file.
+- Offline mode keeps the old behaviour (it never reaches HuggingFace), and a
+  node every candidate of which HuggingFace refuses fetches as before rather
+  than never.
+
+**Known limits (FUTURE_WORK #151):** a switch fetches from HuggingFace, not from
+canonical holders over P2P; a coordinator holding none of a model routes on a
+manifest with placeholder hashes until a holder's gossip fills them, so for that
+window `shard_holders` cannot exclude another upload's holders; a node in
+offline mode never switches.

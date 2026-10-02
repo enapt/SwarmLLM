@@ -177,6 +177,24 @@ impl ModelRegistry {
         }
     }
 
+    /// Forget every origin-derived hash of one model, returning the shards it
+    /// held one for. Only for a node switching its copy to another upload of
+    /// the model (`auto_manage::canonical`): those hashes describe the upload it
+    /// is leaving, and kept, they would refuse the one it is switching to as
+    /// "a different build" (`register_manifest`) and argue its hashes away.
+    pub fn forget_origin_verified_for_model(&self, model_id: &ModelId) -> Vec<ShardId> {
+        let gone: Vec<ShardId> = self
+            .origin_verified
+            .iter()
+            .filter(|e| &e.key().model_id == model_id)
+            .map(|e| e.key().clone())
+            .collect();
+        for shard in &gone {
+            self.origin_verified.remove(shard);
+        }
+        gone
+    }
+
     /// The origin-derived hash for a shard, if this node has ever fetched it
     /// from the origin.
     pub fn origin_verified_hash(&self, shard_id: &ShardId) -> Option<crate::types::Blake3Hash> {

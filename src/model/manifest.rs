@@ -109,6 +109,42 @@ pub struct ManifestFromGguf {
     pub publisher: crate::types::NodeId,
 }
 
+/// A manifest for one upload, built from its GGUF header and the layouts its
+/// parts are cut at. Parts already in the header's directory are hashed; the
+/// rest carry placeholders. Returns the parsed header too, which callers cache.
+///
+/// Shared by the dashboard download and the switch onto the canonical upload
+/// (`auto_manage::canonical`), so both describe an upload identically.
+pub fn manifest_from_header(
+    header_path: &Path,
+    model_id: &crate::types::ModelId,
+    filename: &str,
+    total_size: u64,
+    layouts: &[crate::inference::split::LayerShardLayout],
+    publisher: crate::types::NodeId,
+) -> Result<(ModelManifest, crate::inference::split::GgufTensorMeta), String> {
+    let meta = crate::inference::split::GgufTensorMeta::from_gguf_file(header_path)
+        .map_err(|e| format!("Failed to parse GGUF header: {e}"))?;
+    let model_dir = header_path
+        .parent()
+        .ok_or_else(|| "GGUF header path has no parent directory".to_string())?;
+    let name = meta
+        .model_name
+        .clone()
+        .unwrap_or_else(|| filename.trim_end_matches(".gguf").to_string());
+    let manifest = build_manifest_from_gguf(ManifestFromGguf {
+        id: model_id.clone(),
+        name,
+        architecture: gguf_arch_to_model_architecture(&meta.architecture),
+        num_layers: meta.block_count as u32,
+        total_size_bytes: total_size,
+        shard_count: layouts.len() as u32,
+        shards: build_shard_infos_from_layouts(model_dir, layouts),
+        publisher,
+    });
+    Ok((manifest, meta))
+}
+
 /// Build a `ModelManifest` with standard zero-defaults for fields that are
 /// filled in later (params, quantization, tokenizer hash, license).
 /// Computes and sets `manifest_hash` automatically.

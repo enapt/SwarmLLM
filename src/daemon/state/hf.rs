@@ -1,5 +1,5 @@
 /// Tracks the HuggingFace origin of a model for re-downloading shards.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct HfSource {
     pub repo_id: String,
     pub filename: String,

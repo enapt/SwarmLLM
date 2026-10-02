@@ -10,11 +10,14 @@ pub mod watcher;
 pub use download::{download_model, download_url};
 pub use probe::{
     download_gguf_header, download_sidecar_tensors, hf_failure_log_level,
-    probe_failure_is_user_fixable, probe_gguf_file,
+    probe_failure_is_user_fixable, probe_gguf_file, probe_public_upload, read_public_range,
 };
 pub use search::{extract_quant_tag, search_gguf_models};
 pub use shards::{download_shard, download_shards, parse_retry_after};
-pub use watcher::{is_trusted_publisher, HfTrendingEntry, HfTrendingSnapshot, HfWatcher};
+pub use watcher::{
+    is_trusted_publisher, trusted_publisher_count, trusted_publisher_position, HfTrendingEntry,
+    HfTrendingSnapshot, HfWatcher,
+};
 
 /// Size of the GGUF header probe download (16 MB).
 /// Most GGUF headers are <10MB; 16MB gives margin for large vocab models.

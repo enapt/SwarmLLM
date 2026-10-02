@@ -15,6 +15,7 @@ use crate::types::{NodeId, NodeStats, PeerInfo, PipelineAssignment};
 use super::helpers::resolve_api_key;
 
 mod activity;
+mod canonical;
 mod capacity;
 pub(crate) mod capacity_plan;
 mod credits;
@@ -33,6 +34,7 @@ pub(crate) mod retained_replies;
 mod tp_allreduce;
 
 pub use activity::{ActivityEvent, DashboardSignal, LoadedModelInfo};
+pub use canonical::{ORIGIN_REFUSED_PERMANENT_SECS, ORIGIN_REFUSED_TRANSIENT_SECS};
 pub use capacity::{
     compute_swarm_capacity, refresh_swarm_capacity, HeadlineModel, ModelEntry, SwarmCapacity,
 };
@@ -1074,6 +1076,26 @@ impl SharedState {
             }
             map
         };
+        // The upload the swarm uses for each model, as verified on an earlier
+        // run. Restored BEFORE anything reads `hf_sources`, and it overrides
+        // that map: a source remembered from the first gossip a node heard is
+        // exactly what the canonical choice replaces (`model::canonical`).
+        let canonical_builds = {
+            let map = DashMap::new();
+            if let Ok(entries) = db.get_all_json::<crate::model::canonical::CanonicalBuild>(
+                crate::model::canonical::CANONICAL_BUILDS_TREE,
+            ) {
+                for (model_id_str, build) in entries {
+                    let mid = crate::types::ModelId(model_id_str);
+                    let mmproj = hf_sources.get(&mid).and_then(|s| s.mmproj_filename.clone());
+                    let mut source = build.source.clone();
+                    source.mmproj_filename = source.mmproj_filename.or(mmproj);
+                    hf_sources.insert(mid.clone(), source);
+                    map.insert(mid, build);
+                }
+            }
+            map
+        };
 
         let auto_manage_enabled = config.auto_manage.enabled;
         let default_model_shard_cap = config.auto_manage.default_model_shard_cap;
@@ -1315,6 +1337,10 @@ impl SharedState {
                 quant_recommendations: arc_swap::ArcSwap::from_pointee(
                     crate::model::auto_manage::quant::QuantRecommendations::default(),
                 ),
+                origin_claims: DashMap::new(),
+                canonical_builds,
+                origin_refusals: DashMap::new(),
+                canonical_holding: DashMap::new(),
             },
             events: EventBus {
                 dashboard_tx: broadcast::channel(32).0,
@@ -2561,24 +2587,8 @@ impl SharedState {
             model_id.clone(),
             std::time::Instant::now() + GEOMETRY_PROBE_COOLDOWN,
         );
-        let model_dir = self.model_dir(&model_id.0);
-        let fetch = async {
-            let info = crate::model::huggingface::probe_gguf_file(
-                &source.repo_id,
-                &source.filename,
-                self.cfg().model.shard_size_bytes(),
-            )
-            .await
-            .ok()?;
-            crate::model::huggingface::download_gguf_header(
-                &source.repo_id,
-                &source.filename,
-                &model_dir,
-                info.header_size,
-            )
-            .await
-            .ok()
-        };
+        // Only from the upload this node's manifest describes.
+        let fetch = async { self.fetch_model_header(model_id).await.ok() };
         match tokio::time::timeout(GEOMETRY_PROBE_BUDGET, fetch).await {
             Ok(Some(_)) => {
                 tracing::info!(

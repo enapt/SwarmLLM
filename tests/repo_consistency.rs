@@ -11538,3 +11538,131 @@ fn an_updated_node_waits_for_its_ports_before_it_starts() {
         "the port wait must come before the database is opened and the daemon binds"
     );
 }
+
+/// Every node must hold the SAME upload of a model (#151). A model id comes
+/// from a file name, so independent uploads of one model share an id; which
+/// one a node fetches from is `hf_sources`, and it used to be written by six
+/// paths with six rules — the first gossip heard, whatever the dashboard
+/// clicked, the first search hit, a file on disk. Nine of twenty models on the
+/// live swarm ended up held as two or three uploads that could never be split
+/// together. `SharedState::write_hf_source` (behind `note_origin_claim` and
+/// `adopt_canonical_build`) is the one writer now; startup's restore of the
+/// verified choice is the one other.
+#[test]
+fn a_models_source_is_written_only_through_the_canonical_choice() {
+    let root = repo_root();
+    let sanctioned: &[(&str, &str)] = &[
+        ("src/daemon/state/canonical.rs", "write_hf_source"),
+        // Restoring the canonical upload this node verified on an earlier run.
+        ("src/daemon/state/mod.rs", "new"),
+    ];
+    let mut offenders: Vec<String> = Vec::new();
+    for path in rust_files_under(&root.join("src")) {
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let src = &text[..text.find("#[cfg(test)]").unwrap_or(text.len())];
+        if !src.contains("hf_sources") {
+            continue;
+        }
+        let rel = path
+            .strip_prefix(&root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        for (line, stmt) in statements(src) {
+            if !(stmt.contains("hf_sources.insert(") || stmt.contains("hf_sources.entry(")) {
+                continue;
+            }
+            let enclosing = enclosing_fn_name(src, line);
+            let allowed = sanctioned
+                .iter()
+                .any(|(f, func)| *f == rel && Some(*func) == enclosing.as_deref());
+            if !allowed {
+                offenders.push(format!(
+                    "{rel}:{line} (in {}): {stmt}",
+                    enclosing.as_deref().unwrap_or("?")
+                ));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "a model's HuggingFace source is chosen by `model::canonical` and written only \
+         through `SharedState::note_origin_claim` / `adopt_canonical_build` — a path that \
+         writes its own choice puts a different upload on this node than on its peers:\n  {}",
+        offenders.join("\n  ")
+    );
+}
+
+/// Null control: the scan reads a source write rustfmt has wrapped.
+#[test]
+fn the_source_write_scan_sees_a_wrapped_insert() {
+    let planted = r#"
+fn adopt_whatever(&self) {
+    self.shared_state
+        .models
+        .hf_sources
+        .insert(mid.clone(), source);
+}
+"#;
+    assert!(statements(planted)
+        .into_iter()
+        .any(|(_, s)| s.contains("hf_sources.insert(")));
+}
+
+/// A model's header says where every tensor in its parts is, so it must come
+/// from the same upload as the parts. `fetch_model_header` fetches only from a
+/// source whose file is the size the manifest says; four sites used to fetch
+/// from whatever `hf_sources` held, which put another upload's header beside a
+/// peer-provisioned node's parts. The HuggingFace client itself, the switch
+/// onto the canonical upload (which fetches into its staging directory) and the
+/// two download paths that probe the very source they write parts from are the
+/// only other callers.
+#[test]
+fn a_models_header_is_fetched_only_from_the_upload_its_parts_are() {
+    let root = repo_root();
+    let sanctioned: &[(&str, &str)] = &[
+        ("src/daemon/state/canonical.rs", "fetch_model_header"),
+        ("src/model/auto_manage/canonical.rs", "verify_upload"),
+        ("src/model/auto_manage/canonical.rs", "staged_header"),
+        ("src/api/admin_hf/shards.rs", "hf_download_shards"),
+        ("src/model/auto_manage/download.rs", "trigger_download"),
+    ];
+    let mut offenders: Vec<String> = Vec::new();
+    for path in rust_files_under(&root.join("src")) {
+        let rel = path
+            .strip_prefix(&root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        if rel.starts_with("src/model/huggingface/") {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let src = &text[..text.find("#[cfg(test)]").unwrap_or(text.len())];
+        for (line, stmt) in statements(src) {
+            if !stmt.contains("download_gguf_header(") {
+                continue;
+            }
+            let enclosing = enclosing_fn_name(src, line);
+            let allowed = sanctioned
+                .iter()
+                .any(|(f, func)| *f == rel && Some(*func) == enclosing.as_deref());
+            if !allowed {
+                offenders.push(format!(
+                    "{rel}:{line} (in {}): {stmt}",
+                    enclosing.as_deref().unwrap_or("?")
+                ));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "fetch a model's header through `SharedState::fetch_model_header`, which refuses a \
+         source of another upload than the parts beside it:\n  {}",
+        offenders.join("\n  ")
+    );
+}

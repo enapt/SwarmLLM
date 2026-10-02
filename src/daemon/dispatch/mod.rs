@@ -1676,6 +1676,33 @@ pub(crate) async fn dispatch_network_messages(
                                                     manifest.manifest_hash,
                                                     transport,
                                                 );
+                                                // A manifest of an upload the swarm does not
+                                                // use describes parts this node must never
+                                                // fetch: registered, it becomes the reference
+                                                // every download of this model is checked
+                                                // against and fetched by, and the node holds a
+                                                // different file from everyone it should split
+                                                // with (`model::canonical`). Its holder is
+                                                // switching to the canonical upload too.
+                                                if shared_state.manifest_is_another_upload(&manifest) {
+                                                    if crate::model::manifest::note_manifest_rejection(
+                                                        crate::model::manifest::RejectionKey::Manifest {
+                                                            model: manifest.id.clone(),
+                                                            manifest_hash: manifest.manifest_hash,
+                                                        },
+                                                    )
+                                                    .is_some()
+                                                    {
+                                                        tracing::info!(
+                                                            model = %manifest.id,
+                                                            publisher = %manifest.publisher,
+                                                            their_bytes = manifest.total_size_bytes,
+                                                            "Ignoring a manifest of another upload of this \
+                                                             model — the swarm uses one upload per model"
+                                                        );
+                                                    }
+                                                    continue;
+                                                }
                                                 let is_new = shared_state
                                                     .model_registry
                                                     .get_manifest(&manifest.id)
@@ -2152,44 +2179,36 @@ pub(crate) async fn dispatch_network_messages(
                                             }
                                             continue;
                                         }
-                                        if !shared_state.models.hf_sources.contains_key(&mid) {
+                                        // Every upload a peer names is a CLAIM about this
+                                        // model, kept beside the others it competes with —
+                                        // not a first-come answer. Which upload this node
+                                        // fetches is chosen from all of them by one rule
+                                        // (`model::canonical`), so every node picks the
+                                        // same file. Storing the first one heard is how
+                                        // nine of twenty models came to be held as two or
+                                        // three different uploads (FUTURE_WORK #151).
+                                        let source = crate::daemon::HfSource {
+                                            repo_id: gossip.repo_id.clone(),
+                                            filename: gossip.filename.clone(),
+                                            mmproj_filename: gossip.mmproj_filename.clone(),
+                                        };
+                                        if !crate::model::canonical::origin_names_model(&source, &mid) {
+                                            tracing::debug!(
+                                                model = %mid,
+                                                filename = %gossip.filename,
+                                                publisher = %gossip.publisher,
+                                                "HfSourceGossip names a file that is not this model — dropping"
+                                            );
+                                            continue;
+                                        }
+                                        if shared_state.note_origin_claim(&mid, source) {
                                             tracing::info!(
                                                 model = %mid,
                                                 repo = %gossip.repo_id,
                                                 filename = %gossip.filename,
                                                 publisher = %gossip.publisher,
-                                                "Received HfSourceGossip — storing HF source"
+                                                "Heard of an upload of this model"
                                             );
-                                            let source = crate::daemon::HfSource {
-                                                repo_id: gossip.repo_id.clone(),
-                                                filename: gossip.filename.clone(),
-                                                mmproj_filename: gossip.mmproj_filename.clone(),
-                                            };
-                                            shared_state.models.hf_sources.insert(mid.clone(), source.clone());
-                                            // Persist to the DB and to disk, both OFF this loop.
-                                            //
-                                            // The disk write was already spawned; the DB write beside it
-                                            // was not — and redb serialises writers, so it waited here,
-                                            // in the only task that consumes `network_out`, for as long
-                                            // as another subsystem held the write transaction. The
-                                            // in-memory map inserted just above is what every reader
-                                            // consults, so neither write has to land before this loop
-                                            // moves on. Gotcha #74; `docs/FUTURE_WORK.md` #90.
-                                            let model_dir = shared_state.model_dir(&mid.0);
-                                            {
-                                                let json_str = serde_json::to_string_pretty(&source).unwrap_or_default();
-                                                let db = shared_state.db.clone();
-                                                let key = mid.0.clone();
-                                                tokio::task::spawn_blocking(move || {
-                                                    let _ = db.put_json("hf_sources", &key, &source);
-                                                    if model_dir.is_dir() {
-                                                        let hf_path = model_dir.join(crate::model::shard::HF_SOURCE_FILENAME);
-                                                        if !hf_path.exists() {
-                                                            let _ = std::fs::write(&hf_path, json_str);
-                                                        }
-                                                    }
-                                                });
-                                            }
                                             // Wake the AutoShardManager so it evaluates promptly
                                             shared_state.models.auto_manage_notify.notify_one();
                                         }

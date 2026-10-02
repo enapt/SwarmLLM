@@ -77,13 +77,100 @@ pub async fn probe_gguf_file(
     filename: &str,
     shard_size: u64,
 ) -> Result<GgufFileInfo, String> {
+    probe(repo_id, filename, shard_size, Credentials::IfConfigured)
+        .await
+        .map(|(info, _)| info)
+}
+
+/// Whether a request may carry this node's HuggingFace token.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Credentials {
+    IfConfigured,
+    /// Never: the question is what EVERY node can read.
+    Anonymous,
+}
+
+fn with_credentials(
+    builder: reqwest::RequestBuilder,
+    credentials: Credentials,
+) -> reqwest::RequestBuilder {
+    match credentials {
+        Credentials::IfConfigured => hf_headers(builder),
+        Credentials::Anonymous => builder.header("User-Agent", "SwarmLLM/0.1"),
+    }
+}
+
+/// Probe an upload as ANY node would see it — no token — and hand back the
+/// header bytes the probe already fetched, when they cover the whole header.
+///
+/// For choosing the swarm's upload of a model (`model::canonical`): a node with
+/// a token can read private and gated repositories that the rest of the swarm
+/// cannot, and an upload chosen on its word would be one nobody else could
+/// fetch. Asked anonymously, every node gets the same answer.
+pub async fn probe_public_upload(
+    repo_id: &str,
+    filename: &str,
+    shard_size: u64,
+) -> Result<(GgufFileInfo, Option<Vec<u8>>), String> {
+    let (info, bytes) = probe(repo_id, filename, shard_size, Credentials::Anonymous).await?;
+    let header = (info.header_size > 0 && (info.header_size as usize) <= bytes.len())
+        .then(|| bytes[..info.header_size as usize].to_vec());
+    Ok((info, header))
+}
+
+/// Read `len` bytes of an upload from `offset`, anonymously. Enough to tell
+/// whether a part on disk came from this upload without downloading the part.
+pub async fn read_public_range(
+    repo_id: &str,
+    filename: &str,
+    offset: u64,
+    len: u64,
+) -> Result<Vec<u8>, String> {
+    if len == 0 {
+        return Ok(Vec::new());
+    }
+    let client = &*HF_META_CLIENT;
+    let url = download_url(repo_id, filename)?;
+    let end = offset + len - 1;
+    retry_hf("Range-read", || async {
+        let resp = with_credentials(client.get(&url), Credentials::Anonymous)
+            .header("Range", format!("bytes={offset}-{end}"))
+            .send()
+            .await
+            .map_err(|e| (format!("Range read failed: {e}"), true))?;
+        let status = resp.status();
+        if status.as_u16() != 206 {
+            let transient = status.is_server_error() || status.as_u16() == 429;
+            return Err((format!("Range read returned {status}"), transient));
+        }
+        let bytes = resp
+            .bytes()
+            .await
+            .map_err(|e| (format!("Failed to read range bytes: {e}"), true))?;
+        if bytes.len() as u64 != len {
+            return Err((
+                format!("Range read returned {} bytes, asked for {len}", bytes.len()),
+                true,
+            ));
+        }
+        Ok(bytes.to_vec())
+    })
+    .await
+}
+
+async fn probe(
+    repo_id: &str,
+    filename: &str,
+    shard_size: u64,
+    credentials: Credentials,
+) -> Result<(GgufFileInfo, bytes::Bytes), String> {
     let client = &*HF_META_CLIENT;
 
     let url = download_url(repo_id, filename)?;
 
     // HEAD request to get total file size — retry on transient errors.
     let total_size = retry_hf("HEAD", || async {
-        let head_resp = hf_headers(client.head(&url))
+        let head_resp = with_credentials(client.head(&url), credentials)
             .send()
             .await
             .map_err(|e| (format!("HEAD request failed: {e}"), true))?;
@@ -131,7 +218,7 @@ pub async fn probe_gguf_file(
     let range_end = (probe_size - 1).min(total_size - 1);
 
     let probe_bytes = retry_hf("Range-probe", || async {
-        let probe_resp = hf_headers(client.get(&url))
+        let probe_resp = with_credentials(client.get(&url), credentials)
             .header("Range", format!("bytes=0-{range_end}"))
             .send()
             .await
@@ -180,12 +267,15 @@ pub async fn probe_gguf_file(
         "Probed remote GGUF file"
     );
 
-    Ok(GgufFileInfo {
-        total_size,
-        header_size,
-        tensor_meta,
-        layouts,
-    })
+    Ok((
+        GgufFileInfo {
+            total_size,
+            header_size,
+            tensor_meta,
+            layouts,
+        },
+        probe_bytes,
+    ))
 }
 
 /// Build `GgufTensorMeta` from a pre-parsed candle `Content`.

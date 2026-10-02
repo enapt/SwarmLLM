@@ -261,6 +261,26 @@ pub struct ModelMgmt {
     /// dashboard + REST handler can read a lock-free snapshot.
     pub quant_recommendations:
         arc_swap::ArcSwap<crate::model::auto_manage::quant::QuantRecommendations>,
+    /// Every upload of a model this node has heard claimed — by a peer's
+    /// `HfSourceGossip`, a dashboard download, a search — best-first and
+    /// bounded (`model::canonical::note_claim`). The raw material the
+    /// canonical choice is made from. Written ONLY by
+    /// `SharedState::note_origin_claim`.
+    pub origin_claims: DashMap<crate::types::ModelId, Vec<HfSource>>,
+    /// The upload the swarm uses for each model, as this node verified it
+    /// against HuggingFace (`model::canonical::CanonicalBuild`). Persisted in
+    /// the `canonical_builds` tree. **`hf_sources` follows it**: once a model
+    /// has one, its `hf_sources` entry IS this upload. Written ONLY by
+    /// `SharedState::adopt_canonical_build`.
+    pub canonical_builds: DashMap<crate::types::ModelId, crate::model::canonical::CanonicalBuild>,
+    /// Uploads HuggingFace would not serve us (gone, private, unsupported),
+    /// keyed by model and `repo/file`, with when to ask again. A refused upload
+    /// is skipped so the next-best one can be chosen.
+    pub origin_refusals: DashMap<(crate::types::ModelId, String), std::time::Instant>,
+    /// What this node's own copy of each model is, measured against the
+    /// canonical upload — read by the model listing and by the acquisition
+    /// gate, written by `model::auto_manage::canonical`.
+    pub canonical_holding: DashMap<crate::types::ModelId, crate::model::canonical::Holding>,
 }
 
 /// Maximum number of `(publisher, model_id)` entries we retain from inbound
@@ -1015,6 +1035,10 @@ mod tests {
             quant_recommendations: arc_swap::ArcSwap::from_pointee(
                 crate::model::auto_manage::quant::QuantRecommendations::default(),
             ),
+            origin_claims: DashMap::new(),
+            canonical_builds: DashMap::new(),
+            origin_refusals: DashMap::new(),
+            canonical_holding: DashMap::new(),
         }
     }
 
