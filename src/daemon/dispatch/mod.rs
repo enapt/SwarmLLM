@@ -26,7 +26,8 @@ const MAX_CONCURRENT_FORWARDS_MAX: usize = 64;
 ///
 /// A contribution setting has to mean something everywhere resources are spent,
 /// not only where it was convenient to plumb it. This is the concurrency half
-/// of that; `vram_fraction_for` in `config/node.rs` is the memory half.
+/// of that; `contribution_share_for` (system RAM) and `vram_reserve_fraction_for`
+/// (the graphics card) in `config/node.rs` are the memory half.
 ///
 /// The floor is deliberately not 1: a single-permit node cannot participate in
 /// tensor-parallel work at all, and refusing everything is its own kind of

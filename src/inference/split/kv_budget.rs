@@ -106,9 +106,9 @@ pub(crate) fn mla_kv_elems(
 
 /// Bytes available for KV cache once the weights are resident.
 ///
-/// The same headroom arithmetic [`fit_context_to_budget`] uses, exposed on its
-/// own because it is now the RUNTIME budget rather than only a load-time
-/// sizing input: the loader records it on the model and every forward checks
+/// The headroom arithmetic that once sized a context up front at load time
+/// (`fit_context_to_budget`, removed in f7c3010b, 2026-08-08). It is now the
+/// RUNTIME budget: the loader records it on the model and every forward checks
 /// against it before claiming another growth quantum.
 pub(crate) fn kv_headroom_bytes(weight_bytes: u64, free_vram_bytes: u64) -> u64 {
     (free_vram_bytes / 100 * VRAM_HEADROOM_PCT).saturating_sub(weight_bytes)

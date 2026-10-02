@@ -2,7 +2,7 @@
 //!
 //! A node holding every shard of a model still goes through the router
 //! whenever it would run that model on its PROCESSOR and has peers to ask —
-//! [`SharedState::local_fast_path_for`] stands the API fast path aside so the
+//! [`SharedState::local_fast_path_for`](crate::daemon::state::SharedState::local_fast_path_for) stands the API fast path aside so the
 //! scheduler gets to consider delegating. That is deliberate and right. Its
 //! doc says the cost when nobody better is found is "only a scheduling pass".
 //!

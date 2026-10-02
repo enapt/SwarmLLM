@@ -770,7 +770,7 @@ pub(crate) fn topk_cpu(
     ))
 }
 
-/// [`topk_cpu`]'s routing on a host slice of one token's raw router logits: the
+/// `topk_cpu`'s routing on a host slice of one token's raw router logits: the
 /// chosen experts, best first, and their FINAL weights.
 ///
 /// Host-side because the choice is data-dependent control flow, and
@@ -1417,7 +1417,7 @@ pub(crate) fn kv_growth_quantum(max_seq_len: usize) -> usize {
 /// prompt plus its reply reserve, from `KvCacheStore::reserved_positions` —
 /// clamped to the context window; 0 means one quantum, the ordinary start.
 /// A prompt of known length is held in ONE allocation per layer instead of
-/// being grown into a quantum at a time (FUTURE_WORK #32; see [`SeqCache`]).
+/// being grown into a quantum at a time (FUTURE_WORK #32; see `split::kv_cache::SeqCache`).
 pub(crate) fn new_kv_cache(
     max_seq_len: usize,
     mirror_for_flash: bool,

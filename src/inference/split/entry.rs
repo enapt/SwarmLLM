@@ -25,7 +25,7 @@ pub struct SplitModelEntry {
     pub eos_tokens: Vec<u32>,
     /// EOS token string (e.g., "<|endoftext|>").
     pub eos_token_str: String,
-    /// BOS token string (e.g., "<s>").
+    /// BOS token string (e.g., `"<s>"`).
     pub bos_token: String,
     /// Chat template from GGUF metadata (Jinja2 format).
     pub cached_chat_template: Option<String>,

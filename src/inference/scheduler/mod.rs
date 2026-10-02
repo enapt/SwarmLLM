@@ -732,7 +732,7 @@ pub(crate) fn peer_segment_has_standby(
 
 /// Layers each node is already on the hook for as a PRIMARY in this plan.
 ///
-/// Seeds the running tally in [`find_standbys`]. A node can appear more than
+/// Seeds the running tally in `find_standbys`. A node can appear more than
 /// once: under prompt privacy the local node holds both ends of a boomerang,
 /// so it is primary twice before any standby is considered.
 fn primary_layer_commitments(segments: &[PipelineSegment]) -> HashMap<NodeId, u32> {

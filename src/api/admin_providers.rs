@@ -138,7 +138,7 @@ pub struct ProvidersUpdate {
 
 impl ProvidersUpdate {
     /// R137 (R72 deferral closure): canonical iteration over the 12
-    /// keyed-provider Option<String> fields. Order matches
+    /// keyed-provider `Option<String>` fields. Order matches
     /// `ProvidersConfig::keyed_entries`. Adding a new provider only
     /// requires editing this and the corresponding ProvidersConfig.
     fn keyed_entries(&self) -> [(&'static str, &Option<String>); 12] {

@@ -279,7 +279,7 @@ async fn probe(
 }
 
 /// Build `GgufTensorMeta` from a pre-parsed candle `Content`.
-/// Thin adapter over [`GgufTensorMeta::from_content`] that maps `SwarmError`
+/// Thin adapter over `GgufTensorMeta::from_content` (`inference::split::gguf_meta`) that maps `SwarmError`
 /// to `String` for the HF-download error channel.
 fn build_tensor_meta_from_content(
     ct: &candle_core::quantized::gguf_file::Content,

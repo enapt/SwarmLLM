@@ -107,12 +107,12 @@ pub fn preprocess_images(
 /// Patch embedding: converts image patches into a sequence of embeddings.
 ///
 /// Input: (B, 3, H, W) image tensor
-/// Output: (B, num_patches + 1, hidden_dim) — includes [CLS] token
+/// Output: (B, num_patches + 1, hidden_dim) — includes `[CLS]` token
 pub struct PatchEmbedding {
     /// Conv2D projection: (hidden_dim, 3, patch_size, patch_size)
     proj_weight: Tensor,
     proj_bias: Tensor,
-    /// [CLS] token embedding: (1, 1, hidden_dim)
+    /// `[CLS]` token embedding: (1, 1, hidden_dim)
     cls_token: Tensor,
     /// Positional embeddings: (1, num_patches + 1, hidden_dim)
     position_embedding: Tensor,

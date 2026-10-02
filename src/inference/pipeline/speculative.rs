@@ -19,7 +19,7 @@
 //!      i — i.e., target's prediction for position (current_pos + i + 1).
 //!    - Greedy accept/reject: accept q_i iff argmax(spec_logits[i-1]) == q_i,
 //!      stopping at the first mismatch. The bonus token is the argmax of the
-//!      distribution at the rejection point (or spec_logits[γ] if all accepted).
+//!      distribution at the rejection point (or `spec_logits[γ]` if all accepted).
 //!    - Emit [q_1..q_k, bonus] (k+1 tokens). Resync the draft KV to match
 //!      what the target's KV will look like after truncation.
 //!    - Record expected KV length for next round's `truncate_kv_to`.

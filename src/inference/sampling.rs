@@ -75,7 +75,7 @@ pub(crate) fn sampler_reads_history(params: &SamplingParams) -> bool {
 /// Apply OpenAI-style frequency + presence penalties in-place.
 ///
 /// Formula (per OpenAI API spec): for each vocab token j,
-///   logits[j] -= count_j * frequency_penalty + I[count_j > 0] * presence_penalty
+///   `logits[j] -= count_j * frequency_penalty + I[count_j > 0] * presence_penalty`
 /// where count_j is the number of occurrences of token j in `generated_ids`
 /// (the completion-so-far, NOT including prompt tokens). Both penalties
 /// expected in the documented [-2.0, 2.0] range; we don't clamp here so

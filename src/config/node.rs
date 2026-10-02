@@ -258,20 +258,17 @@ const MAX_VRAM_RESERVE_MB: u64 = 2048;
 impl ResourceConfig {
     /// Compute the effective VRAM budget for inference model loading.
     ///
-    /// - If `max_gpu_vram_mb > 0`: use it as a hard cap.
-    /// - Else if a GPU was detected: use [`vram_fraction_for`] of TOTAL VRAM,
-    ///   which is 0.5 / 0.65 / 0.8 by contribution level — NOT a flat 80%, as
-    ///   this comment claimed until 2026-08-24.
-    /// - Else: `None` (CPU-only node, no budget = unlimited).
+    /// - No card (`gpu_vram_total_mb == 0`): `None` — no budget, unlimited.
+    /// - Otherwise: the card's TOTAL, minus what other programs hold on it now,
+    ///   minus a reserve of [`vram_reserve_fraction_for`] the total (10% / 7% /
+    ///   5% by contribution level), clamped to 512-2048 MB.
+    /// - `max_gpu_vram_mb > 0` lowers that further, never raises it: memory
+    ///   another program is holding is not this node's to offer.
     ///
-    /// **This is a fraction of TOTAL, not of FREE, and that has a cost worth
-    /// knowing.** A node on the default contribution level gets half its card
-    /// whatever else is or is not running on it, so an 8 GB card refuses a
-    /// 6 GB model while sitting 88% empty and the request falls to the
-    /// processor — measured at 1.0 tok/s against roughly 15-20 on the card.
-    /// Whether the fraction should instead track free VRAM the way
-    /// `vram::ram_budget_now` tracks free system memory is an open design
-    /// question; see `docs/FUTURE_WORK.md`.
+    /// Until 2026-08-24 this was a FRACTION of the total (0.5 / 0.65 / 0.8 by
+    /// contribution level), so an idle 8 GB card refused a 6 GB model and the
+    /// request fell to the processor at 1.0 tok/s against 25.7 on the card —
+    /// [`vram_reserve_fraction_for`] says why a reserve replaced it.
     pub fn inference_vram_budget_mb(
         &self,
         gpu_vram_total_mb: u64,
@@ -430,7 +427,7 @@ impl ResourceConfig {
         }
         let fraction = match contribution {
             // Default. Leave half the machine to whatever else its owner is
-            // doing — the same split `vram_fraction_for` uses.
+            // doing — the same half `contribution_share_for` gives system RAM.
             ContributionMode::Minimal => 0.5,
             ContributionMode::Moderate => 0.75,
             ContributionMode::Maximum => 1.0,

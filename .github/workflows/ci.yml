@@ -221,6 +221,18 @@ jobs:
           # ever overwriting a runtime-installed rustup.
           cache-bin: false
       - run: cargo clippy --locked ${{ matrix.flags }} --all-targets -- -D warnings
+      # Doc comments name functions, constants and types, and a rename leaves
+      # them pointing at nothing — nothing compiles a comment. rustdoc resolves
+      # every [`link`] and fails on one that no longer exists. First run
+      # (2026-10-02) found 25, two of them describing designs replaced months
+      # earlier (the VRAM budget's fraction-of-total; `fit_context_to_budget`). Private items are documented because this is a binary crate:
+      # its docs are for the people changing it. One cell only — the links do not
+      # depend on the OS — and it reuses the dependency metadata clippy built.
+      - name: Doc comments link to things that exist (rustdoc)
+        if: runner.os == 'Linux' && matrix.features == 'dev,claude-subscription'
+        env:
+          RUSTDOCFLAGS: "-D rustdoc::broken_intra_doc_links -D rustdoc::invalid_html_tags -A rustdoc::private_intra_doc_links"
+        run: cargo doc --locked --no-deps --document-private-items ${{ matrix.flags }} -p swarmllm -p swarmllm-types
 
   test:
     name: Test (${{ matrix.os }})

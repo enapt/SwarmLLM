@@ -42,7 +42,7 @@
 //! never trims — the A/B inside one binary.
 //!
 //! **And a measurement of the slowdown itself** ([`probe_once`]): the first
-//! time a worker picks the card it times [`PROBE_ALLOCATIONS`] fresh
+//! time a worker picks the card it times `PROBE_ALLOCATIONS` fresh
 //! allocations straight from the driver, the shape of the step that slowed.
 //! Every worker logs the figure; past [`SLOW_FRESH_ALLOCATIONS`] the daemon
 //! tells the owner, once, that restarting Windows restores it
@@ -213,7 +213,7 @@ fn probe_enabled() -> bool {
     *ENABLED.get_or_init(|| keep_enabled_for(std::env::var("SWARMLLM_CARD_PROBE").ok().as_deref()))
 }
 
-/// Time [`PROBE_ALLOCATIONS`] fresh allocations on `device`, once per worker,
+/// Time `PROBE_ALLOCATIONS` fresh allocations on `device`, once per worker,
 /// and log the figure — every worker's start adds a point to the uptime
 /// curve in `node.log`. A no-op on the processor. Called by the split
 /// loader's device choice beside [`keep_freed_memory`], before the model's

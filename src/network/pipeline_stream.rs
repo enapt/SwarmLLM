@@ -11,7 +11,7 @@
 //! forward + result frames for the lifetime of a pipeline session. Frames use
 //! the same `[len:4 LE][payload]` framing as the existing wire codec so the
 //! already-encoded tensor payloads pass through unchanged (including ChaCha
-//! sealing and the TENSOR_TAG_* byte at payload[0]).
+//! sealing and the `TENSOR_TAG_*` byte at `payload[0]`).
 //!
 //! Coordinator side:
 //!   - `PipelineStreamClient::send_forward` opens or reuses a stream to the

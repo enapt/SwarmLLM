@@ -364,7 +364,7 @@ pub fn content_prefix_len(text: &str) -> usize {
 /// Move `safe` back over a code-fence opener that ends the safe prefix.
 ///
 /// Recognises the two shapes a model actually emits before a fenced tool call:
-/// "```" and "```<lang>", each optionally followed by a newline. Anything else
+/// `` "```" `` and `` "```<lang>" ``, each optionally followed by a newline. Anything else
 /// is left alone, so a fence with real prose before it keeps that prose.
 fn retract_over_fence_opener(text: &str, safe: usize) -> usize {
     let head = text[..safe].trim_end_matches(['\n', '\r']);
@@ -980,7 +980,7 @@ fn close_open_delimiters(slice: &str) -> Option<String> {
 /// repaired string cannot carry arguments the model did not produce.
 ///
 /// Returns `None` when nothing needed fixing, when the input is unsalvageable,
-/// or when more than [`MAX_REPAIRS`] corrections would be required — a long run
+/// or when more than `MAX_REPAIRS` corrections would be required — a long run
 /// of mismatches means the output is not a near-miss tool call and guessing at
 /// it is worse than showing it.
 fn repair_unbalanced_close(slice: &str) -> Option<String> {

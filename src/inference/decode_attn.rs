@@ -293,7 +293,7 @@ pub(crate) const DECODE_ATTN_PTX: &str = include_str!(concat!(env!("OUT_DIR"), "
 /// whole group, split into fixed chunks merged by flash-decoding's reduction.
 /// It replaces two cuBLAS matmuls around a softmax (plus the scale and the
 /// copies around them) — ~0.1 ms per layer at 512 positions, 0.32 at 8K on an
-/// RTX 3070 — with one launch (two past [`CUDA_CHUNK`] positions).
+/// RTX 3070 — with one launch (two past `CUDA_CHUNK` positions).
 ///
 /// Scope: CUDA, f32, `q_len == 1`, no mask (a decode step on a card never has
 /// one), `d` a multiple of 32 up to 256, at most 16 query heads per KV head,

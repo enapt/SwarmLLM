@@ -163,7 +163,7 @@ pub(super) const MAX_SUBRANGE_VERTICES: usize = 4096;
 ///
 /// **So the relaxation spends the MARGIN before it spends the peer's own
 /// number** (report #028). The routine bound already discounts what a peer
-/// advertised by [`DELEGATE_VRAM_MARGIN`], precisely because the figure is a
+/// advertised by `scheduler::DELEGATE_VRAM_MARGIN`, precisely because the figure is a
 /// moment out of date; that discount is the whole of what a stale figure can
 /// justify reclaiming, and `max_hostable_layers_at_face_value` is the peer
 /// taken at its word with the discount spent. A route that fits what peers

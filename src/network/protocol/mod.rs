@@ -500,7 +500,7 @@ fn build_json_frame<T: serde::Serialize>(msg: &T, label: &str) -> io::Result<Vec
     Ok(frame)
 }
 
-/// Build a relayed-tensor wire frame: [WIRE_TAG_RELAYED_TENSOR][4B BE length][body].
+/// Build a relayed-tensor wire frame: `[WIRE_TAG_RELAYED_TENSOR][4B BE length][body]`.
 /// Bounded by `MAX_MESSAGE_SIZE` (the large-tensor limit) since the sealed
 /// activation body can be multi-MB.
 fn build_relayed_tensor_frame(rt: &RelayedTensor) -> io::Result<Vec<u8>> {

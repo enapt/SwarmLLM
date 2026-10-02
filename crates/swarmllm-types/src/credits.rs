@@ -8,7 +8,7 @@ use crate::ids::{NodeId, ShardId};
 ///
 /// **Persistence contract.** `CreditBalance` is persisted under
 /// `TREE_CREDITS / KEY_BALANCE` and restored at daemon startup
-/// ([`crate::credit::ledger::CreditLedger::new`] in the main crate). If
+/// (`swarmllm::credit::ledger::CreditLedger::new` in the main crate). If
 /// deserialization fails the node silently starts at zero — which means
 /// *adding a new field without `#[serde(default)]` is a credit-loss bug*:
 /// old persisted records lack the new field, deserialization rejects them,

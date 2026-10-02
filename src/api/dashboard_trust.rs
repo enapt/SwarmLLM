@@ -205,7 +205,7 @@ fn multiaddr_has_tailscale_v6(addr: &str) -> bool {
 
 /// Classify a request against this node's configuration.
 ///
-/// Takes the whole [`RequestOrigin`], never a bare address: a proxied request's
+/// Takes the whole [`RequestOrigin`](crate::api::origin::RequestOrigin), never a bare address: a proxied request's
 /// address is the proxy's, and judging it by that is what handed the API key to
 /// anyone behind a same-host reverse proxy. A proxy is `Proxied` before any
 /// address test runs.

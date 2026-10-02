@@ -13,7 +13,7 @@ use super::{gguf_filename_to_model_id, progress::spawn_progress_updater, validat
 pub struct HfShardDownloadRequest {
     pub repo_id: String,
     pub filename: String,
-    /// Which shard indices to download (e.g. [0,1,2] for the first 3 shards).
+    /// Which shard indices to download (e.g. `[0, 1, 2]` for the first 3 shards).
     ///
     /// Required unless `peer_fair_share` or `all_shards` is set — a request
     /// naming none of the three is a `Validation` error, because it names no
