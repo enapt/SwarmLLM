@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.3.220-alpha] — 2026-10-02
 
 **Every computer now holds the same file for each model, so any of them can share
 the work on it.** A model's name says which model and which compression it is,
@@ -38,11 +38,19 @@ doubling each time it happens again, up to 30 minutes; one request it completes
 clears it. It is still used for a part no other computer holds, so this can only
 make a model slower to reach, never unreachable.
 
+**Fixed: "tokens served" counted a prompt passed on to another computer as
+thousands of tokens.** The Performance panel's "Served for the swarm" figure
+divided the size of a prompt's internal working data by 4, as if it were text —
+so a 20-token prompt counted as about 41,000 tokens (reported: 81,930 tokens and
+2,447 tokens a second for two short prompts). It now counts the prompt's actual
+length.
+
 Who is affected: every computer holding a model, and most of all anyone whose
 split requests failed or fell back because the other computers held "a
 different version of this model".
 
-## [0.3.219-alpha] — 2026-10-02
+**Also in this release — everything prepared for 0.3.219-alpha, which was never
+published on its own:**
 
 **A model split across other computers answers up to 1.7 times faster when your
 computer holds none of it.**
