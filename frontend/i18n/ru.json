@@ -333,7 +333,7 @@
   "compare.waiting": "Ожидание ответа...",
   "connection.connected": "Подключено",
   "connection.connecting": "Подключение к SwarmLLM…",
-  "connection.lost": "Соединение потеряно — повтор каждые 3 секунды",
+  "connection.lost": "Соединение потеряно — переподключение выполняется автоматически",
   "connection.reconnecting": "Переподключение к SwarmLLM…",
   "connection.waiting": "Ожидание ответа от демона",
   "dashboard.all_models": "Все модели",

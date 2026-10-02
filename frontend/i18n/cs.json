@@ -333,7 +333,7 @@
   "compare.waiting": "Čekání na odpověď...",
   "connection.connected": "Připojeno",
   "connection.connecting": "Připojování ke SwarmLLM…",
-  "connection.lost": "Ztraceno spojení — opakování každé 3 sekundy",
+  "connection.lost": "Ztraceno spojení — automaticky se znovu připojuje",
   "connection.reconnecting": "Opětovné připojování ke SwarmLLM…",
   "connection.waiting": "Čekání na odpověď démona",
   "dashboard.all_models": "Všechny modely",

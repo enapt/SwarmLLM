@@ -333,7 +333,7 @@
   "compare.waiting": "Oczekiwanie na odpowiedź...",
   "connection.connected": "Połączono",
   "connection.connecting": "Łączenie z SwarmLLM…",
-  "connection.lost": "Utracono połączenie — ponowna próba co 3 sekundy",
+  "connection.lost": "Utracono połączenie — trwa automatyczne ponowne łączenie",
   "connection.reconnecting": "Ponowne łączenie z SwarmLLM…",
   "connection.waiting": "Oczekiwanie na odpowiedź demona",
   "dashboard.all_models": "Wszystkie modele",

@@ -333,7 +333,7 @@
   "compare.waiting": "応答を待っています...",
   "connection.connected": "接続済み",
   "connection.connecting": "SwarmLLMに接続中…",
-  "connection.lost": "接続が切れました — 3秒ごとに再試行中",
+  "connection.lost": "接続が切れました — 自動的に再接続しています",
   "connection.reconnecting": "SwarmLLMに再接続中…",
   "connection.waiting": "デーモンの応答を待っています",
   "dashboard.all_models": "すべてのモデル",

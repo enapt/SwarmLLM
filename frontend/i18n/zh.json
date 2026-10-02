@@ -333,7 +333,7 @@
   "compare.waiting": "等待响应...",
   "connection.connected": "已连接",
   "connection.connecting": "正在连接到 SwarmLLM…",
-  "connection.lost": "连接已断开 — 每 3 秒重试一次",
+  "connection.lost": "连接已断开 — 正在自动重新连接",
   "connection.reconnecting": "正在重新连接到 SwarmLLM…",
   "connection.waiting": "等待守护进程响应",
   "dashboard.all_models": "所有模型",

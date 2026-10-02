@@ -333,7 +333,7 @@
   "compare.waiting": "En attente de réponse...",
   "connection.connected": "Connecté",
   "connection.connecting": "Connexion à SwarmLLM…",
-  "connection.lost": "Connexion perdue — nouvelle tentative toutes les 3 secondes",
+  "connection.lost": "Connexion perdue — reconnexion automatique en cours",
   "connection.reconnecting": "Reconnexion à SwarmLLM…",
   "connection.waiting": "En attente de la réponse du daemon",
   "dashboard.all_models": "Tous les modèles",

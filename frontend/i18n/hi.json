@@ -333,7 +333,7 @@
   "compare.waiting": "जवाब का इंतज़ार...",
   "connection.connected": "जुड़ा हुआ",
   "connection.connecting": "SwarmLLM से जुड़ रहे हैं…",
-  "connection.lost": "कनेक्शन टूट गया — हर 3 सेकंड में पुनः प्रयास",
+  "connection.lost": "कनेक्शन टूट गया — अपने आप फिर से जुड़ रहा है",
   "connection.reconnecting": "SwarmLLM से फिर से जुड़ रहे हैं…",
   "connection.waiting": "डेमन के जवाब का इंतज़ार",
   "dashboard.all_models": "सभी मॉडल",

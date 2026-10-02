@@ -333,7 +333,7 @@
   "compare.waiting": "Yanıt bekleniyor...",
   "connection.connected": "Bağlandı",
   "connection.connecting": "SwarmLLM'e bağlanılıyor…",
-  "connection.lost": "Bağlantı kesildi — her 3 saniyede bir yeniden deneniyor",
+  "connection.lost": "Bağlantı kesildi — otomatik olarak yeniden bağlanılıyor",
   "connection.reconnecting": "SwarmLLM'e yeniden bağlanılıyor…",
   "connection.waiting": "Daemon'ın yanıt vermesi bekleniyor",
   "dashboard.all_models": "Tüm modeller",

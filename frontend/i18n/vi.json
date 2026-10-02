@@ -333,7 +333,7 @@
   "compare.waiting": "Đang chờ phản hồi...",
   "connection.connected": "Đã kết nối",
   "connection.connecting": "Đang kết nối SwarmLLM…",
-  "connection.lost": "Mất kết nối — thử lại mỗi 3 giây",
+  "connection.lost": "Mất kết nối — đang tự động kết nối lại",
   "connection.reconnecting": "Đang kết nối lại SwarmLLM…",
   "connection.waiting": "Đang chờ daemon phản hồi",
   "dashboard.all_models": "Tất cả mô hình",

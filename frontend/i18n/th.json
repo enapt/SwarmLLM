@@ -333,7 +333,7 @@
   "compare.waiting": "รอการตอบกลับ...",
   "connection.connected": "เชื่อมต่อแล้ว",
   "connection.connecting": "กำลังเชื่อมต่อ SwarmLLM…",
-  "connection.lost": "การเชื่อมต่อขาดหาย — ลองใหม่ทุก 3 วินาที",
+  "connection.lost": "การเชื่อมต่อขาดหาย — กำลังเชื่อมต่อใหม่โดยอัตโนมัติ",
   "connection.reconnecting": "กำลังเชื่อมต่อ SwarmLLM ใหม่…",
   "connection.waiting": "รอให้ daemon ตอบสนอง",
   "dashboard.all_models": "โมเดลทั้งหมด",

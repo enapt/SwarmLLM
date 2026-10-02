@@ -333,7 +333,7 @@
   "compare.waiting": "في انتظار الرد...",
   "connection.connected": "متصل",
   "connection.connecting": "جارٍ الاتصال بـ SwarmLLM…",
-  "connection.lost": "فُقد الاتصال — إعادة المحاولة كل 3 ثوانٍ",
+  "connection.lost": "فُقد الاتصال — تتم إعادة الاتصال تلقائيًا",
   "connection.reconnecting": "جارٍ إعادة الاتصال بـ SwarmLLM…",
   "connection.waiting": "في انتظار استجابة الخدمة",
   "dashboard.all_models": "جميع النماذج",

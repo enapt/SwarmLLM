@@ -333,7 +333,7 @@
   "compare.waiting": "Väntar på svar...",
   "connection.connected": "Ansluten",
   "connection.connecting": "Ansluter till SwarmLLM…",
-  "connection.lost": "Anslutning förlorad — försöker igen var 3:e sekund",
+  "connection.lost": "Anslutning förlorad — återansluter automatiskt",
   "connection.reconnecting": "Återansluter till SwarmLLM…",
   "connection.waiting": "Väntar på att daemonen ska svara",
   "dashboard.all_models": "Alla modeller",

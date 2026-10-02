@@ -333,7 +333,7 @@
   "compare.waiting": "Menunggu respons...",
   "connection.connected": "Terhubung",
   "connection.connecting": "Menghubungkan ke SwarmLLM…",
-  "connection.lost": "Koneksi terputus — mencoba ulang setiap 3 detik",
+  "connection.lost": "Koneksi terputus — menyambung ulang secara otomatis",
   "connection.reconnecting": "Menghubungkan kembali ke SwarmLLM…",
   "connection.waiting": "Menunggu daemon merespons",
   "dashboard.all_models": "Semua model",

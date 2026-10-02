@@ -333,7 +333,7 @@
   "compare.waiting": "Warte auf Antwort...",
   "connection.connected": "Verbunden",
   "connection.connecting": "Verbindung zu SwarmLLM wird hergestellt…",
-  "connection.lost": "Verbindung verloren — alle 3 Sekunden erneuter Versuch",
+  "connection.lost": "Verbindung verloren — wird automatisch wiederhergestellt",
   "connection.reconnecting": "Verbindung zu SwarmLLM wird wiederhergestellt…",
   "connection.waiting": "Warte auf Daemon-Antwort",
   "dashboard.all_models": "Alle Modelle",
