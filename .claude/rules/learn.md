@@ -21,7 +21,7 @@ Update knowledge artifacts the same commit as the change — not at session end.
 
 ## Code map
 
-`memory/code-map.md` is the dependency map index. Update when adding/removing/renaming a subsystem, API handler, JS component, channel, or WS message type. Read it at session start instead of re-exploring.
+`memory/code-map.md` is the dependency map index. Update when adding/removing/renaming a subsystem, API handler, JS component, channel, or WS message type. Read it before exploring unfamiliar code, instead of re-exploring.
 
 ## Where a rule lives
 

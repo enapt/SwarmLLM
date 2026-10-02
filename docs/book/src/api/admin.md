@@ -401,8 +401,8 @@ Response shape:
 (**R141**) / `unreachable` / `blocked`. Candidate entries carry an
 `hf_repo_id` field and a synthetic `model_id` (prefix `hf-candidate:`)
 so the frontend can route the click to the HF browse without colliding
-with real model_ids. See [Wishlist architecture](../architecture.md) for the
-score formula and trust-promotion path.
+with real model_ids. See [Wishlist architecture](https://github.com/enapt/SwarmLLM/blob/main/docs/ARCHITECTURE.md#wishlist-r111--r141)
+for the score formula and trust-promotion path.
 
 ### GET /api/admin/hf/trending
 R112 — most recent HF trending GGUF snapshot from the background

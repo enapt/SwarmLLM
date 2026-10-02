@@ -131,6 +131,7 @@ to confirm the fetch path fired.
   read + weight load + first CUDA context init; exclude this by
   pre-warming with a short unrelated prompt before the real measurement.
 
-Standard pre-push gate is `cargo fmt && cargo clippy --all-targets -- -D warnings && cargo test`.
+Standard pre-push gate is `cargo fmt && cargo lint && cargo dev-test` (the aliases in
+`.cargo/config.toml`, all on the development feature set — see `CONTRIBUTING.md`).
 If you add a benchmark, add it under `docs/plans/benchmarks/roundN.md`
 with the recipe + results + interpretation, and link it from here.

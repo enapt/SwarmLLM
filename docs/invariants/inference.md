@@ -571,6 +571,25 @@ it asserts contiguity directly, then drives a prefill, a decode, and the batched
 path at mixed positions (which ropes *after* narrowing a row out, and so reaches
 the same defect by another route).
 
+**From the rules file (moved 2026-10-02):**
+
+**`inference::layers::rope_over_heads`** is the single implementation of "rotate
+the leading `rope_dim` of each head, pass the rest through". Its result is
+contiguous, and the pass-through half is made contiguous BEFORE the `cat`, not
+the whole head after it.
+
+`Tensor::cat` answers with a transposed VIEW rather than a fresh buffer when any
+argument is non-contiguous and `dim != 0`. `slice_set` refuses a non-contiguous
+source and is how the KV cache writes K, so two copies of this branch — one in
+`LayerWeights`, one in `Qwen35AttnWeights`, both leaving the pass-through as a
+`narrow` view — killed every request on every partial-RoPE model: Phi-4-mini,
+GLM-4, Qwen 3.5. The discriminator is `rope_dim < head_dim`, not GQA.
+
+`SeqCache::append` makes its source contiguous too, so a new producer of K or V
+cannot bring the class back.
+
+→ `docs/invariants/inference.md`
+
 ## A RoPE layout is read off llama.cpp, per architecture (2026-09-24, FUTURE_WORK #96)
 
 **`ModelArch::use_rope_contiguous` is llama.cpp's `llama_model_rope_type`, arch
@@ -687,6 +706,23 @@ SPARSE GGUF (header + a hole to the real size), because llama.cpp checks tensor
 bounds even with `vocab_only`. A new model on the fleet, or any change to the
 tokenizer, is one command away from being checked against an independent
 implementation.
+
+**From the rules file (moved 2026-10-02):**
+
+**`tokenizer::declared_special`** (CONTROL / USER_DEFINED in `token_type`)
+decides what is matched whole, on both encoder paths — the `<…>` shape missed
+GLM-4's `[gMASK]` and Mistral's `[INST]` (#97).
+**`gguf_meta::add_bos_by_llama_cpp_rules`** decides whether a prompt gets a
+BOS, and **`SplitTokenizer::encode`** gives none to a text already opening with
+one. Check a tokenizer change with `examples/tokenizer_reference.py` +
+`tokenizer_agrees_with_llama_cpp` — an independent implementation, not itself.
+⚠ **For SentencePiece WHITESPACE llama.cpp is no authority** (it agreed with
+HF in 3/7, 5/8, 3/8 on Mistral, Phi-3.5, TinyLlama) — re-reference with
+`examples/tokenizer_hf_reference.py` against the model's own tokenizer.json.
+**`gguf_meta::special_token_spacing_for`** decides by architecture what the
+GGUF does not record: Phi-3 strips whitespace after its turn markers.
+
+→ `docs/invariants/inference.md`
 
 ## `inference::attn_softmax::scaled_masked_softmax`
 
@@ -1026,6 +1062,29 @@ the same area: `build_prompt_inner`'s no-template branch asks
 `fallback_by_model_name` first, so the prompt may be zephyr, llama3, gemma,
 mistral or vicuna — and each of those was left with no stop for the marker it
 will actually emit. It now returns the always-on list.
+
+**From the rules file (moved 2026-10-02):**
+
+**`GgufTokenizerMeta::end_of_generation_ids_from_vocab`** searches the
+vocabulary BY NAME for the tokens that end a reply, and every path that resolves
+EOS ids merges it in — `eos_tokens_with_arch_fallback` and
+`split::entry::SplitModelEntry::from_header`. A declared EOS is trusted but
+never assumed COMPLETE: the per-family id lists only ever ran when a GGUF
+declared nothing, so a model that declares one token and ends its turns with
+another got no help from them at all.
+
+Phi-3/3.5/4 are that model. They declare `<|endoftext|>` and close every turn
+with `<|end|>`, and nothing stopped the reply there — it ran to `max_tokens`
+inventing further turns, visibly on a GPT-2-BPE vocabulary and invisibly on a
+SentencePiece one.
+
+**`<|end|>` is conditional, and the condition is the whole reason to read
+upstream first.** For harmony (gpt-oss) and solar-open it separates messages
+inside one reply, so stopping on it truncates every such reply at its first
+message. Both the EOS search and `chat_template::extract_stop_strings` carry the
+same exclusion, keyed on the same neighbours llama.cpp keys it on.
+
+→ `docs/invariants/inference.md`
 
 
 ## A decode token is bound by GPU submission COUNT, not bandwidth (2026-09-22)
@@ -1530,6 +1589,94 @@ dispatch-bound per layer, and on both the arithmetic is a minority of the
 token. Treat "per-layer dispatch" as this project's standing first suspect for
 a decode number that will not move.
 
+**From the rules file (moved 2026-10-02):**
+
+Decode on the GPU spends most of a token in the CUDA driver API on ONE CPU
+thread — measured 1,085 submissions and 17.6 of 23.0 ms/token, with the card at
+52% and `ms/layer` flat (0.48-0.58) across a 3.3x span of bytes/token. **So
+layer count predicts decode cost, not model size**, and the lever is fewer
+submissions per layer, not faster arithmetic.
+
+- **`CudaDevice::alloc_fully_overwritten`** is the only way to allocate a buffer
+  the next kernel fills completely; it skips the `cuMemsetD8Async` that
+  `alloc_zeros` submits. **Read the kernel first** — it must ASSIGN every
+  element it owns. Load-time padded buffers must stay zeroed.
+- **`QMatMul::forward_shared` is how several projections consume ONE
+  activation** — Q/K/V, and the FFN's gate/up. It quantizes the activation once
+  instead of per matmul, and for a `FusedSlice` model (Phi-3/3.5/4) runs the
+  fused matmul once instead of once per slice: **+55% on phi-3.5-mini**.
+  ⚠ Apply LoRA AFTER it returns; LoRA's matmuls do not share that activation.
+  ⚠ **TWO quantized matmul paths must both share** — `mul_mat_vec_via_q8_1`
+  (decode) and `mul_mat_via_q8_1` (MMQ: prefill, batch). The first fix did only
+  the vec one and nothing went red; the per-kernel count is what showed prefill
+  still at 7.05 quantizations per layer.
+- **`layers::value_for_matmul` — the KV cache is read where it lies.** The
+  cache is a strided VIEW of a reserved buffer on every decode step, so a
+  `.contiguous()` on it is a full copy per layer per token (one per layer:
+  34 → 2 host→device copies on phi-3.5-mini, replies byte-identical).
+  Never `.contiguous()` a cache view before a matmul; `matmul_reads_rhs_in_place`
+  is the backends' rule. **The `htod` rows** of `SWARMLLM_COUNT_KERNELS=1` name
+  the source line of every host→device copy — nsys here cannot.
+- ⚠ **TTFT cannot measure prefill work**: a repeated prompt is served from the
+  PREFIX CACHE and reads ~0.02 s regardless. Use `PROF seq_len=N` with unique
+  prompts, filtered to ONE chunk size.
+- **`SWARMLLM_COUNT_KERNELS=1` prints launches by kernel name per forward**,
+  which is how the per-layer mix is known at all (nsys has no GPU kernel table
+  on WSL2). Never benchmark with it on — it takes a mutex per launch.
+- ⚠⚠ **ONE CUDA STREAM PER DEVICE, and buffers never cross devices** — that is
+  what the disabled per-allocation events rest on. **Giving one device a second
+  stream means re-enabling them** (`SWARMLLM_CUDA_EVENT_TRACKING=1`) or its
+  buffers cross streams unsynchronised — a silently wrong reply, not an error.
+  ⛔ **Moving off the legacy stream SHIPPED BROKEN in v0.3.199-alpha**; it is the
+  default again since 2026-09-30 (`SWARMLLM_CUDA_OWN_STREAM=0` = legacy), after the
+  gate below. Every model emitted garbage in a
+  `--features cuda` build while every test and the whole `candle-cuda` A/B
+  stayed green — **the cheap gate has no flash-attn and no llama backend**
+  (#677, #683). CUDA does refuse graph capture on the legacy stream (measured:
+  `cuda_graph_probe.cu` arm A, `cudaError 900`), so this still has to be solved
+  before graphs — but **reproduce under `--features cuda` on a real generation**,
+  not a unit test.
+  ✅ **Cause found and fixed 2026-09-23: vendored flash-attn launched on
+  `cudaStream_t stream = 0`**, which a `CU_STREAM_NON_BLOCKING` device stream
+  does not synchronise with. `run_mha` now takes the caller's stream
+  (upstream's own 0.11.0 fix). ⚠ **Verify "X uses the device's stream" at the
+  LAUNCH** — flash took `dev.cuda_stream()` for its pointer guards only
+  (#685). Guarded in CI by
+  `the_vendored_attention_kernels_launch_on_the_devices_stream`; graph capture
+  now needs it, and it is on.
+- **Fused kernels are OURS, in `kernels/*.cu`**, compiled to PTX by `build.rs`
+  and loaded through candle's `get_or_load_custom_func` — not a fifth vendored
+  crate, since `candle-kernels` is a registry dep. **Write each one to be
+  bit-identical to the candle ops it replaces** (same expression, same order,
+  no `-use_fast_math`), so an A/B moves the submission count and nothing else;
+  `examples/kernel_count_ab.sh` checks both halves of that in one run.
+  ⚠ **`get_or_load_custom_func` counts launches too** — it must, or a fusion
+  reads as removing two launches where it removed one.
+  Two ship: `silu_mul_f32` and `add_rmsnorm_f32` (2026-09-23, −2 launches per
+  layer). **A residual add is never written at a layer's end** — the sum is
+  carried as `inference::residual_norm::Residual::Pending` and resolved at the
+  next norm by `Residual::add_norm`; take it with `into_tensor()` only where a
+  plain tensor is required (device move, capture, a non-final segment's
+  output). ⚠ cudarc 0.19 takes a `CudaViewMut` kernel argument only as
+  `&mut` — `&view` does not compile, and only a `--features candle-cuda`
+  build sees it.
+- **Next moves are ordered in `docs/plans/local_decode_submissions.md`**: fusion
+  first, then CUDA graphs (~1.2x batch-1 on an H100, likely more here), with
+  stable buffers **no longer known to be a prerequisite** — graph memory nodes
+  may give candle's per-op allocations fixed addresses for free.
+  ⚠ **Do not re-derive the ordering from llama.cpp's**: their budget has no
+  allocation line (ggml plans one compute buffer), and the "~10% per fusion"
+  this file used to quote was their CEILING over all of them, not an estimate
+  of each (gotcha #680).
+- **Judge such a change by the submission COUNT, not the clock** — the count is
+  deterministic, this box spreads 10-18%. `SWARMLLM_ZERO_QMATMUL_BUFFERS=1`
+  restores the old behaviour for a one-binary A/B.
+- **"Per-layer dispatch" is the standing first suspect for a decode number that
+  will not move** — the CPU backend reached the same conclusion independently.
+
+→ `docs/invariants/inference.md` · technique in `docs/DIAGNOSTICS.md` § "Where a
+decode token actually goes"
+
 ## Top-k shrinks the candidate set before anything else runs (2026-09-24)
 
 `inference::sampling::sample_among_top_k` is the sampler whenever top-k is on —
@@ -1639,6 +1786,20 @@ its q/k, not from its RoPE type. Tests:
 `llama_q_and_k_rows_are_reordered_as_llama_cpp_reorders_them` (hand-worked
 permutation, k over the KV heads), `an_adapter_is_refused_where_it_cannot_all_be_applied`,
 `an_adapter_on_fused_projections_is_refused` — each red with its check removed.
+
+**From the rules file (moved 2026-10-02):**
+
+**`lora::QkRowOrder`** is the single answer to "what order are this model's
+q/k rows in, against the checkpoint an adapter was trained on" — a REQUIRED
+argument of the worker's adapter loader. Llama and Mistral are reordered by
+llama.cpp's converter (`LlamaModel.permute`) and so must an adapter's `B` be;
+applied in checkpoint order the adapter runs without error and answers
+wrongly. **`lora::check_fits`** refuses what the executor would silently skip
+(non-`Dense` layers, MoE feed-forwards) — half an adapter is #110 again.
+Verify with `examples/peft_lora_to_gguf.py` + `score_against_reference.py
+--lora`, on an adapter whose B is NOT zero.
+
+→ `docs/invariants/inference.md` § "An adapter meets the model in the model's row order"
 
 
 ## A mixture-of-experts layer keeps its experts quantized
@@ -1757,6 +1918,26 @@ of this change at the time. The claim is the operation count, which is exact.
 llama.cpp keeps routing ON the device (`argsort_top_k` + `mul_mat_id`); a device
 top-k is the next step if one host copy per layer ever shows up in a profile.
 
+**From the rules file (moved 2026-10-02):**
+
+**`split::loader::load_moe_ffn` is the one way a MoE feed-forward is loaded** —
+router dequantized, each routed expert sliced out of the GGUF's stack as its own
+QUANTIZED matrix (`split_expert_stack`), shared expert and its sigmoid gate when
+present. The three per-family copies it replaced dequantized every expert to f32:
+an 11 GB Qwen3-30B-A3B needed ~116 GB, invisible to a capacity planner that sizes
+by bytes on disk. A new MoE family calls it. **Routing defaults are per family**
+(`moe_renormalizes_by_default` — llama.cpp hardcodes `norm_w` per graph): read the
+family's llama.cpp file, never assume. Verify with `examples/logits_reference_probe.rs`
++ `compare_logits_reference.py` on a tiny model; ONE isolated outlier position is a
+router near-tie, a shift at every position is a bug — and judge a top-1 model on
+UNQUANTIZED weights (Q8 activation rounding flips near-ties). **Llama 4 is hardcoded in
+llama.cpp** (sigmoid, no renorm, weight on the expert's INPUT, Q/K RMS-norm after RoPE);
+`examples/make_tiny_llama4_gguf.py` builds the fixture. **Routing is one host copy of
+the layer's scores and one `index_add` per expert** (`topk_host`) — never per token,
+which was ~3 syncs and ~k+5 launches per token per layer on a card.
+
+→ `docs/invariants/inference.md` § "A mixture-of-experts layer keeps its experts quantized"
+
 ## A card/processor split is placed in every per-layer loop (2026-09-25)
 
 When a model does not fit the card whole, `ModelProcessPool::partial_gpu_layers`
@@ -1793,6 +1974,19 @@ loops (both the `for layer_idx in layer_start..layer_end` and the
 `(layer_start..layer_end).map(|layer_idx| …)` form), requires at least five, and
 requires `placement.device_for(layer_idx)` in the opening 20 lines of each. Red
 with the parallel fix undone, naming that loop.
+
+**From the rules file (moved 2026-10-02):**
+
+**`split::hybrid::LayerPlacement` says where each layer goes; every per-layer loop in
+`split/loader/` shadows `device`, `cos` and `sin` from it on its first line** —
+five loops, one of them the PARALLEL whole-file load, which was missed and put a
+split model whole on the card. `hybrid::layers_on_device` is the one count the KV
+budget charges, and `hybrid::arch_supports_hybrid` is an allowlist the POOL reads
+too (`process_pool::split_for_card`): never offer a split the loader will not
+make. Guard: `every_layer_loop_in_the_loader_places_its_layer`. Check on a card
+with `swarmllm test-split --gpu-layers N` + `score_ids.py`.
+
+→ `docs/invariants/inference.md` § "A card/processor split is placed in every per-layer loop"
 
 ## One prefix-cache snapshot is sized by bytes, and keeps the opening (2026-09-26)
 
@@ -1914,6 +2108,21 @@ cache read in place) call `matmul_attention`, never `standard_attention` — on 
 processor the latter answers from this kernel first, and a test through it
 passes without reaching the code it names.
 
+**From the rules file (moved 2026-10-02):**
+
+**`inference::prefill_attn::gqa_prefill_attention_cpu`** answers a CPU
+attention call with `q_len >= 2` before any matmul path: tiled over fixed
+1,024-key chunks per KV group (online softmax, flash-decoding merge), so a
+group's K/V are read once and the `[rows, kv_len]` matrix never leaves the
+cache — +17% on a 6K-token prompt (#119). The matmul paths are now
+**`layers::matmul_attention`**, reached when a kernel declines and always on a
+card; **a test of blocking, grouping or in-place V calls `matmul_attention`** —
+through `standard_attention` it would pass without reaching them. Chunk, tile
+and row-block sizes stay constants (result independent of thread count).
+A/B: `SWARMLLM_PREFILL_ATTN=standard`.
+
+→ `docs/invariants/inference.md` § "Several query positions on the processor"
+
 ## A model's RoPE frequency factors are applied — and reach a node without shard 0 (2026-09-27, #124)
 
 **The defect.** Llama 3.1/3.2 GGUFs carry `rope_freqs.weight`: 64 per-pair
@@ -1962,6 +2171,19 @@ diff the GGUF's tensor names against what the loader reads: a tensor we ignore
 is a feature silently missing (gotcha #728). Tests: `unit_factors_are_plain_rope`,
 `a_factor_divides_its_pairs_angle`,
 `rope_factors_readable_without_shard_zero_only_through_their_sidecar`.
+
+**From the rules file (moved 2026-10-02):**
+
+Llama 3.1/3.2 ship `rope_freqs.weight` and nothing read it, so every Llama 3
+rotated its slow RoPE pairs up to 32x too fast; agreement with llama.cpp drifted
+with conversation length (#124). Now applied as llama.cpp does. **Shard-0 tensors
+a later-layer node needs are ONE list** — `GgufTensorMeta::sidecar_tensors` (tied
+head, RoPE factors) — walked by `extract_sidecar_tensors`,
+`download_sidecar_tensors` and `resolve_sidecars`; add to the list, never a new
+producer. When checking an architecture, diff the file's tensor names against
+what the loader reads.
+
+→ `docs/invariants/inference.md` § "A model's RoPE frequency factors are applied"
 
 ## A prompt pass on the card multiplies quantized weights on the tensor cores (2026-09-29)
 
@@ -2052,6 +2274,26 @@ long context (FUTURE_WORK #147).
 - A card without fp16 tensor cores (< 7.0) keeps MMQ.
 - Decode (≤ 8 rows) never takes it; batched decode stays on the vec kernel.
 - Replies are judged against llama.cpp, never byte-equality with MMQ.
+
+**From the rules file (moved 2026-10-02):**
+
+**Vendored `quantized/cuda.rs::dequantize_matmul` sends ≥ 64 activation rows to
+`mul_mat_via_f16_cublas`** — weight dequantized to f16, activation cast to f16,
+one `cublasGemmEx` accumulating in f32 — instead of the MMQ kernel, which is
+llama.cpp's OLD dp4a one with no tensor cores. llama.cpp's own rule for a dp4a
+MMQ on a card with fp16 tensor cores (`MMQ_DP4A_MAX_BATCH_SIZE` = 64). Decode
+never reaches it. **And a prompt alone on an all-card model reads in chunks of
+≥ `prefill_pacer::CARD_CHUNK_TOKENS` (512)** — `prompt_chunk_ceiling` is the ONE
+answer, for the batched table, a segment's prompt pass and the drafter.
+Replies MAY move by a near-tie against MMQ (8-bit vs f16 activations): judge
+them against llama.cpp, never byte-equality. A/B: `SWARMLLM_QMATMUL_CUBLAS=0`;
+`SWARMLLM_QMATMUL_CUBLAS_ACC=16` (f16 accumulate, llama.cpp's default) is
+faster still and OPT-IN until a card-side family check at long context. The f16
+path does not share its activation cast across q/k/v or gate/up (3 extra casts
+per layer, ~1% of a chunk) — the third quantized path the sharing rule above
+would name.
+
+→ `docs/invariants/inference.md` § "A prompt pass on the card multiplies quantized weights on the tensor cores"
 
 ## A decode step can go to the card as one CUDA graph (2026-09-29, opt-in)
 
@@ -2165,6 +2407,38 @@ gaps 0.156 / 0.074 / 0.113 (rounds' own: 0.156 / 0.120 / 0.003), and 24-26 tok/s
 A host-side counter that moves inside a capture is the trap — the device write it
 stands for runs only at launch.
 
+**From the rules file (moved 2026-10-02):**
+
+**`inference::cuda_graph` + `SplitModel::forward_decode_as_graph`** re-capture a
+one-position forward every token and update one instantiated graph in place
+(llama.cpp's way) — on by default, `SWARMLLM_CUDA_GRAPH=0` off (so is the legacy stream,
+which cannot be captured). The flip's gate, on a `--features cuda` build: five models, a 7B
+split over two card nodes, `failover_mid`, 700-token replies, split speculation — identical or
+scored against llama.cpp. ⚠ `split_rig.sh failover` with B ON THE CARD fails with or without
+graphs: B's prompt pass ends before the kill lands, and a stand-in is offered only on it. **Recorded in groups of two layers, each launched as soon as it is recorded**
+(`cuda_graph::group_layers`, `Cutter::cut` via the forward's per-layer hook), so the card runs
+one group while the next is recorded — a whole-step graph left it idle for all 4.5 ms of recording
+and gained nothing on a 7B. Replies byte-identical; TinyLlama 126-135 → 226-229 tok/s, 3B 80-90 →
+105-106, Qwen2.5-Coder-7B 49-51 → 56-57 (llama.cpp 57.5), Llama 3.1 8B 50-51 → 55. Only the
+residual stream crosses a group boundary, parked in `DecodeGraph::boundaries` (made outside every
+capture). ⛔ **A pageable
+host→device copy inside a capture is ACCEPTED and replayed from the host address
+at LAUNCH** — silent garbage. So vendored candle counts every copy
+(`htod_copies_so_far`), a capture that made one is thrown away, and a new
+`clone_htod` on the decode path turns capture off for that model. Capture only a
+step whose KV buffers already hold it (`KvCacheStore::every_cache_holds`); a
+refusal rolls the cache back and runs the step the ordinary way. **A forward that
+fails part-way now puts its caches back, cut to their old length** — it used to
+drop them all.
+**Nothing below `index_pos` is written inside a capture** — a rollback cuts back to
+`index_pos` only. So a multi-position step catches the lazy f16 mirror up BEFORE it is
+recorded (`LayerKv::catch_up_mirror`, from `decode_step_with_graph`): recorded, the
+catch-up was what got the capture refused (its slice is a new layout, uploaded from the
+host) and the refused capture left the mirror claiming positions it never received —
+flash then read them, and a split's checks drifted to llama.cpp's 2nd choice (#761).
+
+→ `docs/invariants/inference.md` § "A decode step can go to the card as one CUDA graph"
+
 ## A decoded token's attention on a card is one kernel (2026-09-29)
 
 **What.** `decode_attn::gqa_decode_attention_cuda` + `kernels/decode_attn.cu`: one query position,
@@ -2205,6 +2479,24 @@ between kernels: fused gate+up+GLU and bias in the matvec, and CUDA graphs. Ours
 graph step shows `recording_ms_per_launch` ≈ 4.5 ms against a 20.8 ms cycle, i.e. **~16 ms of card
 time** against ~19.8 op by op; the recording is what eats the gain. Next: record layer groups and
 launch each as it is recorded, so the card never waits for the recording.
+
+**From the rules file (moved 2026-10-02):**
+
+**`decode_attn::gqa_decode_attention_cuda`** (`kernels/decode_attn.cu`, flash-decoding: one
+block per KV head and 64-position chunk, every query head of the group, a combine kernel past one
+chunk) answers a one-position attention on a card, from `standard_attention` — the card's twin of
+the CPU kernel, same `SWARMLLM_DECODE_ATTN=standard` A/B. **And a one-position append leaves the
+f16 mirror behind** (`LayerKv::append`); the next multi-position append catches it up, and
+`flash_operands` declines a lagging mirror quietly (`SWARMLLM_KV_MIRROR_EAGER=1` = old). Together
+−4 launches per layer: Qwen2.5-Coder-7B 46.7-48.7 → 48.3-51.0 tok/s. ⚠ Not bit-identical to the
+matmul path — judge replies against llama.cpp.
+
+**Where a card-bound 7B's token goes** (`examples/qmatvec_card_bench.rs`): the weight products
+ALONE take 16.9 ms — llama.cpp's whole token is 17.4, with the same Q4_K kernel (the current
+`mmvq` differs only in a branchless scale unpack). The gap is BETWEEN kernels: a graph runs the
+7B step in ~16 ms of card time but records for 4.5 ms first (`recording_ms_per_launch`).
+
+→ `docs/invariants/inference.md` § "A decoded token's attention on a card is one kernel"
 
 ## A decode step's graph is recorded in groups, launched as it is recorded (2026-09-30)
 
@@ -2284,3 +2576,154 @@ first (CUDA's documented pageable-copy behaviour) — the argmax between two ste
 re-serialised the loop; they read `layout_params` now. A round at a 24 ms emulated round trip
 moved only ~10%: its budget is drafting ~12 ms, A's check 11.5, B's check + walk 15.3, two hops
 of RTT/2 + ~1.5 ms — the checks and the round trip, not the drafter, are now the long poles.
+
+**From the rules file (moved 2026-10-02):**
+
+A forward of up to `cuda_graph::MAX_POSITIONS` (8) positions is captured like a decode step when
+no causal mask is read — on a card, dense layers, flash takes several positions and never reads
+it (`SplitModel::mask_is_read`; `run_attention` refuses standard attention over several positions
+without one). **Candle uploaded a strided layout on every call** (155 host copies in one 3-position
+check on a 7B segment): `CudaDevice::layout_params` keeps each distinct layout on the device, and
+**never caches one while the stream is capturing** (graph memory, gone when a capture is thrown
+away). Graph state and give-ups are per position count — a check's defect must not turn off the
+decode step's graphs. The drafter reads a short catch-up as single captured steps
+(`draft_after`), a known conversation's step after a rollback is captured, and the draft cost the
+γ choice reads is a median of recent calls (`RecentMedian`). Split speculation at an emulated
+10 / 24 / 50 ms round trip: +30% / +48% / +80% over a plain split (was break-even / +30% / +57%).
+
+→ `docs/invariants/inference.md` § "A speculative check is captured too"
+
+## A context that will not fit is shrunk, not refused
+
+`inference::executor::context_retry_ladder` is the answer to "what context size
+will this card actually accept": halve from the capped figure to a floor, serve
+the first size accepted, and log what was granted. `effective_llama_context`
+caps by a CONSTANT, and whether that constant fits is not constant — an 8B's
+weights can leave less room than its 8192-token KV cache needs, which failed
+every request on a 6 GB card.
+
+llama.cpp will not say how much it needs and free memory read beforehand is
+evidence rather than proof, so the size is asked for rather than predicted.
+**Called only from `llama`-gated code, so every default build reports it dead**
+(gotcha #264).
+
+→ `docs/FUTURE_WORK.md` § "A context that does not fit is refused instead of shrunk"
+
+## Cross-feature compile checks
+
+`cargo check` with default features does NOT compile any `cfg`-gated
+path. Nothing local sees them: `cargo fmt`, `cargo clippy --all-targets`,
+the whole test suite and the pre-push hook are all default-features, and
+so is the per-push CI run. **The only signal for the GPU paths is the
+cache-warm workflow**, which does not run on every push.
+
+Two gates matter here:
+
+- **`llama`** — `pipeline/dsd.rs` and the spec/llama-gated code in
+  `pipeline/speculative.rs`. Verify with `cargo check --features llama`,
+  which is cheap. R91 caught a regression R90 had let through.
+- **`flash-attn` / `cuda`** — the CUDA arm of
+  `inference::layers::run_attention` and anything else under
+  `#[cfg(feature = "flash-attn")]`. `cargo check --features flash-attn`
+  works locally when `nvcc` is present (set `CUDA_COMPUTE_CAP=80` to match
+  the release build) but compiles the kernels, so budget tens of minutes.
+
+  **It must be `--all-targets`, and that is not a detail.** CI runs
+  `cargo check --locked --features flash-attn --all-targets`; a plain
+  `cargo build --features cuda` does NOT compile test code, so a gated
+  `#[cfg(feature = "flash-attn")]` **test** is invisible to it. That is
+  precisely how main went red on 2026-08-10: `run_attention` gained a
+  parameter, every production caller was updated, and one caller inside a
+  flash-attn-gated benchmark test was not — through a release `--features
+  cuda` build, a default `--all-targets` clippy, 1819 passing tests and a
+  green pre-push hook. **Changing the signature of anything callable from
+  gated code means running the gated check with `--all-targets` before
+  pushing.** Grep for the symbol first: `grep -rn "the_fn(" src/` shows the
+  gated callers that no default build will compile.
+
+  A debug-profile `cargo check --features flash-attn` rebuilds the kernels
+  (tens of minutes) even though the release profile may already have them.
+  Adding `--release` reuses them and is much faster, but then the
+  **integration-test targets fail spuriously**: `Database::open_temp` is
+  `#[cfg(any(test, debug_assertions))]`, and `--release` turns
+  `debug_assertions` off, so `tests/integration/*` stop compiling with a
+  wall of `no associated function named open_temp`. That is the profile,
+  not a regression. Read which TARGET failed — `lib test` is the one that
+  carries the gated unit tests and the one CI reports.
+
+**The specific trap, which has now fired (gotcha #264): an import used only
+inside a `cfg`-gated arm is reported UNUSED by every local build.** Acting on
+that advice — which clippy gives confidently, and which is correct for the
+configuration being compiled — deletes a symbol the GPU build needs, and
+nothing local goes red. `DType` in `layers/mod.rs` is annotated
+`#[cfg_attr(not(feature = "flash-attn"), allow(unused_imports))]` for exactly
+this reason.
+
+So: **before removing anything an unused-warning points at, grep the file for
+`#[cfg(`.** If the file has gated arms, the warning is only telling you about
+one configuration. And after pushing a change that touches gated code, check
+the cache-warm run rather than assuming a green CI means the GPU builds work —
+`gh run list --workflow="Cache warm"`.
+
+### The CUTLASS kernels live OUTSIDE `target/` (2026-08-17)
+
+`candle-flash-attn`'s 19 kernels are built into `.flash-attn-build` (via
+`CANDLE_FLASH_ATTN_BUILD_DIR`, set by `.github/actions/gpu-build-env`) and cached
+separately from the Rust build cache.
+
+**Why, and the trap to remember**: `Swatinem/rust-cache` deletes everything in
+`target/` belonging to a package whose manifest is inside the repo — which every
+crate under `vendor/` is. So both GPU jobs restored a cache reporting
+`full match: true` and then recompiled all 19 kernels anyway, ~39 min of the
+Windows GPU build and ~27 of the Linux one, on every release, for months. Nothing
+ever went red; the only symptom was 39 minutes of silence in the log between the
+last `Compiling` line and the build script's output. **"Cache hit" is not "the
+slow thing was cached" — read the compile lines, not the restore line**
+(gotcha #318).
+
+It works because `cudaforge`'s own `BuildCache` skips up-to-date kernels by
+CONTENT HASH rather than mtime, so a directory restored from a tarball is
+accepted. A warm run logs `All kernels up-to-date, skipping compilation`; that
+line, plus `Cache restored from key: flash-attn-kernels-*`, is how you confirm
+the mechanism fired rather than inferring it from a faster wall clock.
+
+Two things a change here must preserve, both learned the hard way:
+
+- **Create the directory.** Upstream panics `Directory doesn't exists` unless the
+  override path already exists — i.e. on the very first run after introducing it.
+- **An empty env var is not an unset one.** `std::env::var` returns `Ok("")` for a
+  variable that is set but empty, and a matrix expression like
+  `${{ matrix.x && '…' || '' }}` yields exactly that for every cell that does not
+  want the override. The vendored build script filters empty explicitly.
+
+The CI `flash-attn` compile-check cell points the build script at a
+non-existent temp dir with `CANDLE_FLASH_ATTN_CHECK_ONLY=1`, which exercises this
+patch in ~50 s on every push — nothing else in CI compiles that crate, because
+compiling it is the cost being avoided.
+
+## Single-source-of-truth helpers — Inference kernels, caches and the tokenizer
+
+Each names the ONE place a decision is made. A second implementation of any of
+them is this codebase's most-repeated defect — see `.claude/rules/architecture.md`
+§ "One invariant, N paths". **Read the topic file before changing one.**
+
+Full evidence: `docs/invariants/inference.md`
+
+- **Vendored `GgmlType::vec_dot_rows` + the row-blocked tiled matmul** — `vendor/candle/candle-core/src/quantized/{k_quants,avx}.rs`.
+- **`inference::decode_attn::gqa_decode_attention_cpu`** — single-position attention straight over the KV cache in its stored `[b, kvh, S, d]` layout. **Each K/V row is read ONCE per group, never once per query head** (the per-head version was #119's long-context slowdown); tasks are (batch, kv head, fixed 256-position chunk) merged by flash-decoding's reduction — the chunk is a constant so the result never depends on the thread count. → `docs/invariants/inference.md` § "It read the cache once per QUERY head".
+- **`inference::prefill_attn::gqa_prefill_attention_cpu`** — the same idea for `q_len >= 2`: key-tiled, the score matrix never written out; the matmul paths it replaces on the CPU live on as `layers::matmul_attention`.
+- **`inference::fast_math`** — eight-lane AVX2 `expf` (`exp_inplace`, Cephes polynomial, ~2 ulp vs libm, pinned by `vectorised_exp_tracks_libm` over [-80, 80]) and the fused `silu_mul` CustomOp2. A new elementwise pass that calls `f32::exp` in a loop routes through here instead.
+- **`inference::cpu_pools::in_phase_pool`** — binds a forward pass to the CPU thread pool that suits its phase, at ONE choke point: `SplitModel::forward_inner_impl` and `forward_batch`.
+- **`inference::layers::new_kv_cache`** — the only way to construct a KV cache.
+- **`inference::split::kv_cache::LayerKv`** — one layer's KV cache: the f32 BHSD cache every path reads, plus an optional f16 BSHD mirror for the CUDA flash kernel.
+- **`inference::split::kv_cache::SeqCache` / `KvPair` + `LayerKv::truncate`** — the KV cache buffer is this project's own, not candle's, for ONE reason: candle's `Cache` keeps its length private, so the only way to keep the first `n` positions was snapshot + `reset()` + `append()` — two full copies per layer on every rejected speculative draft. **Never re-introduce a copy on the rollback path.**
+- **`inference::attn_softmax::scaled_masked_softmax`** — the single expression of attention's tail: scale, optional Gemma-2 logit soft-cap, additive mask, softmax.
+- **`inference::layers::standard_attention` grouped GQA decode** — (c4cc3b16, 2026-08-16) for `q_len == 1` with `n_kv_head < n_head`, standard attention no longer expands the KV cache with `repeat_kv`; it reshapes the query heads into matmul rows against the UNEXPANDED cache.
+- **`inference::layers::cuda_decode_prefers_standard`** — on CUDA, `q_len == 1` takes standard for EVERY head geometry, prefill always flash. The GQA exclusion was retired on 2026-08-23 once `grouped_gqa_decode_attention` deleted the `repeat_kv` cost it existed to route around; `SWARMLLM_GQA_DECODE_FLASH=1` restores the old rule for an A/B inside one binary.
+- **`inference::sampling::sample_among_top_k` — top-k shrinks the candidate set before temperature, top-p or the draw run**, and picks the SAME token as the full-vocabulary path for the same draw (candidates kept in INDEX order, so every sum is bit-identical). ~15x at a 152k vocabulary. Never re-add a vocabulary-wide pass after top-k. → `docs/invariants/inference.md` § "Top-k shrinks the candidate set"
+- **`inference::mem_bandwidth::measured_gbps`** — what this machine's memory actually delivers, measured once and cached.
+- **`inference::cancel::unless_cancelled` — every wait that can run for minutes watches the request's cancel flag** — `InferenceRequest::cancel` is the ONE cancellation signal — set by `CancelOnDisconnect`, by both SSE surfaces on `sse_tx.closed()`, and by `/cancel`; read around every WAIT, never around a send.
+- **A prompt pass asks between layers whether its request was cancelled** — `KvCacheStore::set_cancel_oracle` is probed once per layer by `forward_inner_impl`, which returns `CANCELLED_MID_FORWARD`; `forward_was_cancelled` is the one reader of that message.
+- **`inference::split::token_embedding::rows_on_demand_eligible`** — the single answer to "is this model's `token_embd.weight` held quantized with its rows dequantized on lookup, or dequantized whole at load?".
+- **`inference::split::read_gguf_header`** — the single way to parse a GGUF header off a PATH, and the buffering is the entire reason it exists.
+- **`inference::split::GgufTensorMeta::tied_output_location`** — the single definition of "is this model weight-tied", i.e. does it reuse `token_embd.weight` as the LM head instead of shipping an `output.weight`. Both sidecar writers and the reader go through it.

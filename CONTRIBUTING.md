@@ -22,9 +22,14 @@ CUDA_COMPUTE_CAP=80 cargo build --release --features cuda
 cargo build --release --features windows-gpu
 
 # Development: dashboard served from ./frontend, plus the Claude-subscription
-# provider (the feature set CI tests)
+# provider (the feature set CI tests). `cargo dev-build` is the same command.
 cargo build --no-default-features --features dev,claude-subscription
 ```
+
+`.cargo/config.toml` defines four aliases for that one development feature set —
+`cargo dev-build`, `cargo dev-run`, `cargo dev-test` and `cargo lint` (clippy).
+Use them for everything local: mixing feature sets between steps recompiles the
+whole crate each time you switch.
 
 `--features candle-cuda` on its own compiles, but it leaves out
 flash-attention and the llama.cpp backend. Never use it to judge GPU
@@ -34,10 +39,10 @@ behaviour — test GPU changes with `--features cuda`.
 
 ```bash
 # Unit and module tests
-cargo test
+cargo dev-test --lib
 
 # Integration tests (must run single-threaded)
-cargo test --test integration --test integration_phase10_11 --test yamux_substream -- --test-threads=1
+cargo dev-test --test integration --test integration_phase10_11 --test yamux_substream -- --test-threads=1
 
 # Two packages a workspace-root `cargo test` does not run
 cargo test -p swarmllm-types
@@ -50,10 +55,13 @@ Every PR must pass these checks locally before submission:
 
 ```bash
 cargo fmt
-cargo clippy --all-targets -- -D warnings
+cargo lint      # clippy --all-targets -D warnings on the development feature set
 ```
 
-Zero clippy warnings. No exceptions.
+Zero clippy warnings. No exceptions. CI also lints the default feature set
+(`cargo clippy --all-targets -- -D warnings`), on Linux, macOS and Windows; the
+pre-push hook below runs that pass too when your push touches code only the
+default features compile.
 
 To have these run automatically before every push, enable the tracked hook once:
 
@@ -71,7 +79,7 @@ package, so a workspace-root `cargo test` never compiles them.
 1. Fork the repo and create a branch off `main`.
 2. Make your changes. Keep commits focused — one logical change per commit.
 3. Write commit messages in imperative mood ("Add retry logic for shard downloads", not "Added retry logic").
-4. Run `cargo fmt`, `cargo clippy`, and `cargo test` before pushing.
+4. Run `cargo fmt`, `cargo lint` and `cargo dev-test` before pushing.
 5. Open a PR against `main`.
 
 ## What We Look For
