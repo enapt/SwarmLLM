@@ -301,6 +301,30 @@ async fn settle(
         set_holding(state, model, Holding::Stuck { reason: "own_file" });
         return;
     }
+    // A download of this model is under way — judge the copy once it has
+    // finished. Replacing the manifest or header under a running download
+    // changes what its parts are described by mid-flight: seen on the rig
+    // (2026-10-02), where a pass landed between a dashboard download's
+    // manifest and its first part. Claims cover a part being written; a
+    // recent `Downloading` entry covers the gaps between parts, and only a
+    // recent one, so an entry a failed path left behind cannot hold this
+    // model off for ever.
+    let downloading = state.models.model_has_live_shard_download(model)
+        || state
+            .models
+            .acquisition_progress
+            .get(model)
+            .is_some_and(|p| {
+                matches!(
+                    p.state,
+                    crate::model::acquisition::AcquisitionState::Downloading
+                ) && p.started_at.is_some_and(|t| {
+                    chrono::Utc::now().signed_duration_since(t) < chrono::Duration::hours(6)
+                })
+            });
+    if downloading {
+        return;
+    }
     let me = state.identity.node_id().clone();
     let held: Vec<u32> = state
         .model_registry

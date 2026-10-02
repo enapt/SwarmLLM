@@ -2728,6 +2728,15 @@ task that runs whether or not auto-manage is on — repair, like
   node every candidate of which HuggingFace refuses fetches as before rather
   than never.
 
+**Measured on a 2-node rig (2026-10-02):** A downloaded hugging-quants' Llama-3.2-1B
+Q8_0, B bartowski's (same id). A first adopted its own upload (the only claim it had
+heard), then bartowski's two minutes later when B's claim arrived — the max-register
+in action — and switched in 27 s; 157 s from the downloads starting to both reading
+`canonical` with `peers_other_build` 0. Every part, the header and both side files
+came out byte-identical, and a 3-segment split across the two answered. The run also
+caught a pass replacing the manifest while A's own dashboard download was between its
+header and first part — `settle` now waits while a download of the model is running.
+
 **Known limits (FUTURE_WORK #151):** a switch fetches from HuggingFace, not from
 canonical holders over P2P; a coordinator holding none of a model routes on a
 manifest with placeholder hashes until a holder's gossip fills them, so for that
