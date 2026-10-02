@@ -123,4 +123,4 @@ Cheap to verify; expensive to mis-restore. If callers exist, log as wontfix in `
 
 ## Re-exports and visibility downgrades
 
-Before downgrading a `pub` symbol to `pub(super)` or private, check if it's re-exported via `pub use` in any `mod.rs`. Downgrading without removing the re-export is inconsistent; downgrading and removing the re-export can break consumers (notably test modules using `use super::*`). Always re-grep for the symbol after the change and run `cargo clippy --all-targets` — R120 hit a test-only breakage on `coalesce_byte_ranges` exactly this way.
+Before downgrading a `pub` symbol to `pub(super)` or private, check if it's re-exported via `pub use` in any `mod.rs`. Downgrading without removing the re-export is inconsistent; downgrading and removing the re-export can break consumers (notably test modules using `use super::*`). Always re-grep for the symbol after the change and run `cargo lint` (it covers `--all-targets`) — R120 hit a test-only breakage on `coalesce_byte_ranges` exactly this way.

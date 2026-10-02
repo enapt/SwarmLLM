@@ -557,22 +557,22 @@ final SSE usage event.
 ## Quick Start — Filtering Diagnostic Logs
 
 ```bash
-# Run with debug logging, filter to DIAG lines only
-cargo run -- run -vv 2>&1 | grep "DIAG:"
+# Run with debug logging, filter to DIAG lines only (an installed binary: `swarmllm run -vv`)
+cargo dev-run -- run -vv 2>&1 | grep "DIAG:"
 
 # Full trace (very verbose) — includes encryption nonce details
-cargo run -- run -vvv 2>&1 | grep "DIAG:"
+cargo dev-run -- run -vvv 2>&1 | grep "DIAG:"
 
 # Filter to specific subsystem
-cargo run -- run -vv 2>&1 | grep "DIAG:.*encrypt"    # Encryption issues
-cargo run -- run -vv 2>&1 | grep "DIAG:.*segment"     # Pipeline segment timing
-cargo run -- run -vv 2>&1 | grep "DIAG:.*connection"   # Connection lifecycle
-cargo run -- run -vv 2>&1 | grep "DIAG:.*LayerForward" # Tensor forward path
-cargo run -- run -vv 2>&1 | grep "DIAG:.*SSE"          # SSE streaming path
-cargo run -- run -vv 2>&1 | grep "DIAG:.*KV-cache"     # KV-cache hit/miss
-cargo run -- run -vv 2>&1 | grep "DIAG:.*split stream"  # Split model decode loop
-cargo run -- run -vv 2>&1 | grep "DIAG:.*execute_request" # End-to-end request timing
-cargo run -- run -vv 2>&1 | grep "DIAG:.*codec"           # Wire-protocol codec frames
+cargo dev-run -- run -vv 2>&1 | grep "DIAG:.*encrypt"    # Encryption issues
+cargo dev-run -- run -vv 2>&1 | grep "DIAG:.*segment"     # Pipeline segment timing
+cargo dev-run -- run -vv 2>&1 | grep "DIAG:.*connection"   # Connection lifecycle
+cargo dev-run -- run -vv 2>&1 | grep "DIAG:.*LayerForward" # Tensor forward path
+cargo dev-run -- run -vv 2>&1 | grep "DIAG:.*SSE"          # SSE streaming path
+cargo dev-run -- run -vv 2>&1 | grep "DIAG:.*KV-cache"     # KV-cache hit/miss
+cargo dev-run -- run -vv 2>&1 | grep "DIAG:.*split stream"  # Split model decode loop
+cargo dev-run -- run -vv 2>&1 | grep "DIAG:.*execute_request" # End-to-end request timing
+cargo dev-run -- run -vv 2>&1 | grep "DIAG:.*codec"           # Wire-protocol codec frames
 ```
 
 ## End-to-End Request Trace
@@ -580,7 +580,7 @@ cargo run -- run -vv 2>&1 | grep "DIAG:.*codec"           # Wire-protocol codec 
 Every inference request gets a `request_id` (UUID) that appears in logs across all subsystems. To trace a single request:
 
 ```bash
-cargo run -- run -vv 2>&1 | grep "request_id=<UUID>"
+cargo dev-run -- run -vv 2>&1 | grep "request_id=<UUID>"
 ```
 
 ### Request Lifecycle (log points)

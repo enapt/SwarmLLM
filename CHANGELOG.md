@@ -1,5 +1,23 @@
 # Changelog
 
+## [Unreleased]
+
+**Fixed: new installs from the `.deb` package had batching switched off.** The
+`.deb` copies a starting configuration into a new node, and that file still
+said `max_batch_size = 1`, so every `.deb` install since 2026-07-28 served one
+request at a time although batching (8) is the default. New installs get the
+default now. An existing install keeps its file: if you installed from the
+`.deb` and never chose this setting yourself, delete the `max_batch_size = 1`
+line from `/var/lib/swarmllm/config.toml` and restart.
+
+**Fixed: the startup database check looked at the wrong place.** It checked a
+table nothing writes, so the stored model descriptions were never examined.
+It now checks them. It only warns about a damaged entry and never deletes one.
+
+**Install guide (Fedora/RHEL):** the `.rpm` runs its service as a `swarmllm`
+user that the package does not create, so the service could not start. The
+install page gives the one command that creates it, until the package does.
+
 ## [0.3.221-alpha] — 2026-10-02
 
 **Every computer now holds the same file for each model, so any of them can share

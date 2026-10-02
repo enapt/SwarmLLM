@@ -33,6 +33,8 @@ cargo generate-rpm
 
 # Install:
 sudo rpm -i target/generate-rpm/swarmllm-*.rpm
+# The package does not create the user its service runs as yet (FUTURE_WORK #163):
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin swarmllm
 sudo systemctl enable --now swarmllm
 ```
 
@@ -58,4 +60,7 @@ sudo systemctl status swarmllm         # check status
 journalctl -u swarmllm -f              # follow logs
 ```
 
-Data is stored in `/var/lib/swarmllm/`. Config at `/etc/swarmllm/default.toml`.
+Data is stored in `/var/lib/swarmllm/`, and the node reads its settings from
+`/var/lib/swarmllm/config.toml` — the file the dashboard saves to. The `.deb`
+copies `/etc/swarmllm/default.toml` there on first install only (the `.rpm`
+never does), so editing the `/etc` copy afterwards changes nothing.

@@ -50,13 +50,13 @@
       "Bash(pip3 *)",
       "Bash(sleep *)",
       "Bash(docker *)",
-      "Task(Explore)",
-      "Task(Plan)",
-      "Task(root-cause)",
-      "Task(general-purpose)",
-      "Task(feature-dev:code-explorer)",
-      "Task(feature-dev:code-architect)",
-      "Task(feature-dev:code-reviewer)"
+      "Agent(Explore)",
+      "Agent(Plan)",
+      "Agent(root-cause)",
+      "Agent(general-purpose)",
+      "Agent(feature-dev:code-explorer)",
+      "Agent(feature-dev:code-architect)",
+      "Agent(feature-dev:code-reviewer)"
     ],
     "deny": [
       "Bash(cargo publish *)",
