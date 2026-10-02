@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.3.220-alpha] — 2026-10-02
+## [0.3.221-alpha] — 2026-10-02
 
 **Every computer now holds the same file for each model, so any of them can share
 the work on it.** A model's name says which model and which compression it is,
@@ -50,7 +50,8 @@ split requests failed or fell back because the other computers held "a
 different version of this model".
 
 **Also in this release — everything prepared for 0.3.219-alpha, which was never
-published on its own:**
+published on its own (nor was 0.3.220-alpha; its final check found a problem,
+fixed here):**
 
 **A model split across other computers answers up to 1.7 times faster when your
 computer holds none of it.**
