@@ -8,6 +8,8 @@
 ├── identity.key         # Ed25519 keypair
 ├── api_key              # Bearer token (auto-generated)
 ├── db.redb              # redb database (migrated from sled db/ directory)
+├── canonical/           # parts of the swarm's copy of a model, staged while this
+│   └── <model>/         # computer switches to it (removed after the swap)
 └── models/
     ├── qwen2.5-coder-7b/
     │   ├── manifest.json
@@ -36,7 +38,9 @@
 | pool_state | `"pool"` | PoolState |
 | trust_scores | `{node_id_hex}` | f64 trust score |
 | escrow | `{escrow_id}` | EscrowEntry |
-| hf_sources | `{model_id}` | HfSource metadata |
+| hf_sources | `{model_id}` | HfSource — the upload this node fetches the model from; since v0.3.221 always the canonical one once verified |
+| canonical_builds | `{model_id}` | CanonicalBuild — the upload the whole swarm uses (size, part sizes and layers, first-tensor offsets, header BLAKE3) |
+| origin_verified_hashes | `{shard_id_json}` | BLAKE3 of a part fetched from the origin itself; forgotten when the node switches upload |
 | locked_shards | `{shard_id_json}` | bool |
 | removed_shards | `{shard_id_json}` | bool — the user deleted this shard; auto-manage leaves it alone until it is asked for again |
 | resource_schedule | `"current"` | ResourceSchedule |
@@ -70,3 +74,28 @@ Network Registry (GossipSub/DHT)
 - Downloads retried (3 attempts, exponential backoff)
 - Atomic writes prevent corrupt partial files
 - Stale `.tmp` files cleaned on startup
+
+## One upload per model (v0.3.221)
+
+A model's id comes from its file name, and several people publish their own copy
+of the same model and quantisation on HuggingFace — byte-different files under one
+id. Parts of two copies cannot be combined in a split, so **every node uses the same
+upload of each model**:
+
+- **One ranking everywhere.** A pinned reference model first, then the publisher's
+  place in the trusted list (the model's own author, then well-known curators, in a
+  fixed order), then anyone else, ties by name. Every node uses the best upload anyone
+  has claimed — after checking it on HuggingFace *without* a login token, so every
+  node sees the same answer.
+- **Nothing is fetched until the choice is made**, and a peer's manifest of another
+  upload is ignored.
+- **Self-healing.** A node holding another upload fetches the chosen upload's parts
+  for the layers it holds (by byte range — never the whole file) into `canonical/`,
+  keeps serving its old parts meanwhile, and swaps when every part is in and the
+  model is idle. A node whose parts are right but whose header or manifest describe
+  another upload gets the right ones and reloads.
+- `GET /api/admin/models` reports it per model in `shared_copy`;
+  `SWARMLLM_CANONICAL_UPLOADS=0` turns the mechanism off (test rigs).
+
+Details and evidence: `docs/invariants/network.md` § "One upload per model id".
+
