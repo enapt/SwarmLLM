@@ -2129,7 +2129,7 @@ impl PipelineExecutor {
         // sent; where it has not, `note_salvaged_reply` hands back everything
         // generated before the failure, marked unfinished.
         //
-        // See `docs/FUTURE_WORK.md` § "A failover after the prompt pass
+        // See `docs/FUTURE_WORK_ARCHIVE.md` § "A failover after the prompt pass
         // silently loses the failed segment's KV context".
         // The history to replay onto whatever takes this segment over, when
         // there is a provably complete one. On the prompt pass there is nothing

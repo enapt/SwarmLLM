@@ -586,7 +586,7 @@ impl RamBudget {
     /// actually fills up: if `70% of available` never falls below `total/4`
     /// while the machine is healthy, the floor is dead weight; if it does, the
     /// floor is load-bearing and the live term needs a platform-aware source.
-    /// See `docs/FUTURE_WORK.md` § "The RAM headroom clamp has a floor that can
+    /// See `docs/FUTURE_WORK_ARCHIVE.md` § "The RAM headroom clamp has a floor that can
     /// never refuse". Meaningless when memory is unreadable, hence the
     /// `available_mb == 0` arm.
     pub fn floor_is_binding(&self) -> bool {

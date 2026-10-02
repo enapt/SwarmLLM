@@ -11,7 +11,7 @@
 //! shape of the wishlist's "we couldn't host this at Q5 but we could at
 //! Q4" framing for non-technical users.
 //!
-//! See `docs/FUTURE_WORK.md` § "Quantisation choice automation" for
+//! See `docs/FUTURE_WORK_ARCHIVE.md` § "Quantisation choice automation" for
 //! design rationale.
 
 use std::collections::HashMap;

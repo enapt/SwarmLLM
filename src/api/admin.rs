@@ -245,7 +245,7 @@ pub async fn quant_recommendations(State(state): State<AppState>) -> Json<serde_
 /// The machine-readable sibling of `diagnostics`, for the dashboard. Pulled on
 /// demand rather than pushed on the 2s WebSocket stats tick: the per-peer and
 /// per-request detail here is exactly the high-cardinality data that must NOT
-/// go anywhere retained (see `docs/FUTURE_WORK.md` § Observability), and a
+/// go anywhere retained (see `docs/FUTURE_WORK_ARCHIVE.md` § Observability), and a
 /// panel nobody has open should cost nothing.
 pub async fn performance(State(state): State<AppState>) -> impl axum::response::IntoResponse {
     use std::sync::atomic::Ordering;

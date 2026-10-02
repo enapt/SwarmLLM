@@ -9,7 +9,7 @@
 //! Only aggregates are kept. Per-request detail lives in the in-memory ring
 //! (`recent_traces`) and is intentionally lost on restart — retaining
 //! per-request, per-peer rows on disk is the unbounded-growth trap that
-//! `docs/FUTURE_WORK.md` § Observability warns against.
+//! `docs/FUTURE_WORK_ARCHIVE.md` § Observability warns against.
 
 use std::collections::HashMap;
 

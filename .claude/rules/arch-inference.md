@@ -41,7 +41,7 @@ measured at, and what a change must keep — lives in `docs/invariants/`.
 
 `inference::executor::context_retry_ladder` is the answer to "what context size will this card accept": halve from the capped figure to a floor, serve the first size accepted, log what was granted. Never refuse a context a smaller one would fit. Called only from `llama`-gated code, so every default build reports it dead (gotcha #264).
 
-→ `docs/FUTURE_WORK.md` § "A context that does not fit is refused instead of shrunk"
+→ `docs/FUTURE_WORK_ARCHIVE.md` § "A context that does not fit is refused instead of shrunk"
 → `docs/invariants/inference.md` § "A context that will not fit"
 
 ## Cross-feature compile checks

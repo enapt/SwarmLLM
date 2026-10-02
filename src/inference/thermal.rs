@@ -28,7 +28,7 @@
 //! `/proc/<pid>/task` — and the work still ran ~8 threads wide. Shipping it
 //! would have claimed a protection that does not exist, which is worse than
 //! shipping nothing. The unresolved question and the numbers are in
-//! `docs/FUTURE_WORK.md` § "Thermal throttling had no measurable effect".
+//! `docs/FUTURE_WORK_ARCHIVE.md` § "Thermal throttling had no measurable effect".
 //!
 //! So the CPU's own throttle remains the real protection. This exists so that a
 //! laptop sitting at 88 °C is at least SAID so, which is what nothing did

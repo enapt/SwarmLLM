@@ -79,7 +79,7 @@ and cannot deliver it, for four reasons:
    Mbit/s that transfer alone costs 0.5-1.2 s, which is more than the trips it
    saves. Projected, DSD as shipped runs at **1.8-3.4 tok/s** on this link,
    against 2.85 with no speculation at all. The n-gram loop has the same wire
-   and the same problem (`FUTURE_WORK.md` § "The distributed n-gram miss round
+   and the same problem (`FUTURE_WORK_ARCHIVE.md` § "The distributed n-gram miss round
    returns a whole vocabulary").
 2. **Greedy only.** `speculative_common_eligible` refuses any temperature above
    0, and no client sends 0 by default. The n-gram loop already removed that

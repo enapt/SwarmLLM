@@ -806,7 +806,7 @@ const DECODE_SHAPED_MAX_TOKENS: usize = 32;
 /// installed (its `swarm-cool-*` threads are visible in `/proc/<pid>/task`), yet
 /// the work kept running ~8 threads wide, so `install` is not confining
 /// candle's `par_chunks_mut` on this path and the reason is not yet known. See
-/// `docs/FUTURE_WORK.md` § "Thermal throttling had no measurable effect".
+/// `docs/FUTURE_WORK_ARCHIVE.md` § "Thermal throttling had no measurable effect".
 ///
 /// Kept because the *observation* is worth having on its own: the user is told
 /// the machine is hot, which is what nothing did before.

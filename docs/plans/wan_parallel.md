@@ -95,11 +95,13 @@ math and code. Applies to ~27-46% of real chat prompts. Quality: see §7.
 **Agent sub-calls** are already separate streams (parallel tool calls, subagents);
 they only need to ride the same passes.
 
-## 4. The prompt pass is already parallel
+## 4. The prompt pass can be parallel — not built yet
 
-Every prompt token is known, so the head reads chunk k+1 while chunk k crosses and
-the tail reads it: time ≈ the slowest stage or the link, not their sum
-(`split_speculation.md` Phase 3). For agent traffic (~100:1 input to output) this is
+Every prompt token is known, so the head CAN read chunk k+1 while chunk k crosses
+and the tail reads it: time ≈ the slowest stage or the link, not their sum
+(`split_speculation.md` Phase 3). Today it does not — a receiver reassembles the
+whole chunked forward before computing, so one stage works at a time
+(`docs/FUTURE_WORK.md` #171, verified 2026-10-02). For agent traffic (~100:1 input to output) this is
 most of the work, and across a WAN it is bandwidth-bound, not latency-bound: at
 ~50 Mbit/s a 7B's Q8 activations (~3.5 KB a token) cross in ~0.56 ms a token, under
 a 3070's ~1.25 ms to read it alone — a two-GPU split reads a long prompt faster than
@@ -107,9 +109,10 @@ either GPU. Below ~25 Mbit/s the link binds.
 
 ## 5. A shorter pass
 
-- **Take the requester out of the loop** (FUTURE_WORK #143): today the coordinator
-  starts every token and the tail answers it, so a Thailand request split among
-  European peers 20 ms apart pays Thailand↔Europe per token.
+- **Take the requester out of the loop** (FUTURE_WORK #143, shipped v0.3.219-.221
+  for a requester holding none of the model): before it, the coordinator started
+  every token and the tail answered it, so a Thailand request split among European
+  peers 20 ms apart paid Thailand↔Europe per token.
 - **Rings of close machines** (`regional_pipelines.md` Stage 3): placement that
   completes a model within a region, contiguous segments, no 4-layer slivers.
 
@@ -165,4 +168,6 @@ where a reply decomposes (reasoning with workers, list-shaped answers, agents).
    switches it off; `split_speculation.md` § 4b).
 3. **MTP at the last stage** — Qwen 3.5 first (#117 branch), then GLM-4.5+.
 4. **Multi-block attention** (per-block query rotation) for shared-cache workers.
-5. **The delegated coordinator** (#143) and regional placement (Stage 3).
+5. ✅ **The delegated coordinator** (#143) — shipped in v0.3.219-.221 for a requester
+   holding none of the model. Regional placement (Stage 3) is still open
+   (`docs/FUTURE_WORK.md` #192).

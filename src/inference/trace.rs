@@ -102,7 +102,7 @@ impl Outcome {
 /// `elapsed_ms` is this segment's share of the request. In a pipeline the
 /// segments are SERIALISED — every token traverses each in turn — so these sum
 /// toward the total and identify the bottleneck hop. They are emphatically not
-/// per-segment throughput: see `docs/FUTURE_WORK.md` § Observability on why
+/// per-segment throughput: see `docs/FUTURE_WORK_ARCHIVE.md` § Observability on why
 /// "tokens per second per node" is not directly measurable here.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SegmentTrace {

@@ -1,7 +1,7 @@
 //! Does a stand-in taking over a pipeline segment mid-reply compute the same
 //! thing the machine it replaced would have?
 //!
-//! Reproduces the claim in `docs/FUTURE_WORK.md` § "A failover after the prompt
+//! Reproduces the claim in `docs/FUTURE_WORK_ARCHIVE.md` § "A failover after the prompt
 //! pass silently loses the failed segment's KV context" with no daemon, no network
 //! and no killing of anyone's node. Two real segments of a real model:
 //!

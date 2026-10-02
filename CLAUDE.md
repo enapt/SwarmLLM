@@ -186,7 +186,7 @@ mmproj). Never edit a count without the run behind it (`completeness.md`).
 
 - `docs/ARCHITECTURE.md` — **primary reference**: subsystems, source tree, protocols, security model
 - `docs/invariants/` — the evidence behind each rule (7 topics). **Read the topic file before changing code a rule names.**
-- `docs/FUTURE_WORK.md` — deferred items. ⚠ **An entry's own SCOPE is a hypothesis** (gotcha #654) and its line numbers are often wrong (#645) — trace a producer to its CONSUMER before planning from it.
+- `docs/FUTURE_WORK.md` — open work, ranked (history: `FUTURE_WORK_ARCHIVE.md`). **A fix moves its item to § "Closed" in the SAME commit.** ⚠ Its SCOPE is a hypothesis (#654), line numbers drift (#645).
 - `docs/DIAGNOSTICS.md` (`DIAG:`, bench traps) · `docs/CREDITS_DESIGN.md` · `docs/book/` ·
   `.claude/sweep-log.jsonl` (every `/sweep` finding — **grep before re-reporting**)
 - `memory/` is `~/.claude/projects/-home-user-SwarmLLM/memory/` (not in the repo).

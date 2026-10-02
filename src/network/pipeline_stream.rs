@@ -658,7 +658,7 @@ pub(crate) fn refusal_for_undecryptable(
 /// construction + TokenWeave MLSys 2026 K=2-4 sweet spot); 64 KiB floor;
 /// SwarmLLM's `inference.streaming_chunk_size_bytes` /
 /// `streaming_min_activation_bytes` knobs override these. See
-/// `docs/FUTURE_WORK.md § Tier 4K`.
+/// `docs/FUTURE_WORK.md` #206 (survey Tier 4K).
 pub fn chunk_layer_forward(forward: &LayerForward, chunk_size_bytes: usize) -> Vec<LayerForward> {
     let total = forward.activations.len();
     let chunk_size = chunk_size_bytes.max(1);

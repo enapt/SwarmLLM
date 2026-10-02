@@ -84,7 +84,7 @@ measurable wins.
 > single-segment. That changes the bottleneck calculus: distributed
 > wire-time is no longer the obvious dominator on workloads where L1
 > hits. Re-run the bottleneck-identification question against the
-> R136 numbers (see `docs/FUTURE_WORK.md § R136 local 3-node
+> R136 numbers (see `docs/FUTURE_WORK_ARCHIVE.md § R136 local 3-node
 > benchmark`) before pulling 14/17/18 in.
 
 ### 4. Release hygiene

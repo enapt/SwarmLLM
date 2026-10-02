@@ -14,6 +14,7 @@ Update knowledge artifacts the same commit as the change — not at session end.
 | Changed broadcast channels or WS message types | `CLAUDE.md` Frontend + `docs/book/src/architecture/daemon.md` |
 | Changed frontend JS file structure | `CLAUDE.md` Frontend + `docs/ARCHITECTURE.md` Frontend |
 | New debugging technique | `docs/DIAGNOSTICS.md` |
+| Fixed, narrowed or deferred a FUTURE_WORK item | `docs/FUTURE_WORK.md` — move it to § "Closed" or rewrite its residual, in the fix's own commit (2026-10-02: ~150 of 345 entries had shipped while still listed open) |
 | Test count changed | Nothing per change — counts are refreshed at release (`memory/release_gate.md`) |
 | New i18n keys | Propagate to all 21 language files |
 | Repeated mistake | Create or update a `.claude/rules/` file — path-scoped unless it applies everywhere |

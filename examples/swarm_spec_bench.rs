@@ -10,7 +10,8 @@
 //!
 //! No new dependencies (uses std::time only). End-to-end speedup
 //! measurement (running a real model on a multi-node cluster) is a
-//! separate harness — see docs/FUTURE_WORK.md § R136 validation plan.
+//! separate harness — see docs/FUTURE_WORK_ARCHIVE.md § "Validation plan (for
+//! whichever option ships)".
 
 use std::time::Instant;
 
@@ -35,7 +36,7 @@ fn main() {
     println!();
     bench_chunked_send();
     println!();
-    println!("=== Done. See docs/FUTURE_WORK.md § R136 for end-to-end methodology. ===");
+    println!("=== Done. See docs/FUTURE_WORK_ARCHIVE.md § R136 for end-to-end methodology. ===");
 }
 
 // ─── Layer 0: Q8_0 wire compression ────────────────────────────────────────
@@ -302,7 +303,7 @@ fn make_chat_workload() -> (Vec<u32>, Vec<u32>) {
 // Wire transit cost is identical between paths; only the serialise +
 // split + reassemble CPU work differs. WAN measurement (where chunking
 // recovers latency via encrypt/decrypt overlap) needs a real-network
-// harness — see docs/FUTURE_WORK.md § Tier 4K.
+// harness — see docs/FUTURE_WORK.md #206 (survey Tier 4K).
 fn bench_chunked_send() {
     println!("--- Tier 4K: chunked vs monolithic activation transport ---");
 

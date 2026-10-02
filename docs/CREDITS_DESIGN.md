@@ -284,7 +284,7 @@ it is recorded here rather than taken.
 
 ## References
 
-- `docs/FUTURE_WORK.md` § "Credits never move between nodes" — the original finding.
+- `docs/FUTURE_WORK_ARCHIVE.md` § "Credits never move between nodes" — the original finding.
 - Gotchas #278, #280.
 - [The Nuts and Bolts of Micropayments: A Survey](https://arxiv.org/pdf/1710.02964)
 - [Credit Limits beyond Full Collateralization in Decentralized Micropayments](https://arxiv.org/pdf/2604.25913)

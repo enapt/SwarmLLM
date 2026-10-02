@@ -289,7 +289,7 @@ const A_REFUSAL_THIS_FAST_COSTS_NOTHING_TO_RETRY: std::time::Duration =
 ///    fact, and every site that produces one bars that peer from this request
 ///    first (`blacklist_holder_for_request` in `pipeline/remote_generate.rs`), so
 ///    the next plan cannot come straight back to it. Without that pairing this
-///    would loop. `docs/FUTURE_WORK.md` § "Per-request holder blacklist on
+///    would loop. `docs/FUTURE_WORK_ARCHIVE.md` § "Per-request holder blacklist on
 ///    retry" named exactly that blacklist as the precondition for going past one
 ///    retry; it exists now, which is what makes this safe.
 /// 3. **It said so cheaply.** The same entry's warning about going past one

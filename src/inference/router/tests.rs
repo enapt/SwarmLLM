@@ -785,7 +785,7 @@ fn only_a_prompt_peer_refusal_earns_a_second_replan() {
 
     // A refusal is only cheap if it actually was. This is the term that stops
     // "one wasted timeout" becoming "N wasted timeouts" — the risk
-    // `docs/FUTURE_WORK.md` § "Per-request holder blacklist on retry" names as
+    // `docs/FUTURE_WORK_ARCHIVE.md` § "Per-request holder blacklist on retry" names as
     // the cost of going past a single retry.
     assert!(!super::a_further_replan_is_earned(
         &refused,

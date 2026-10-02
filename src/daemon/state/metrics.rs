@@ -87,7 +87,7 @@ pub struct MetricsProviders {
     /// from closed sets (5 routes × 4 outcomes = 20 series max), so this cannot
     /// grow with the swarm. Per-peer, per-model and per-shard breakdowns are
     /// unbounded and live in `GET /api/admin/diagnostics`, which is pulled on
-    /// demand and never retained — see `docs/FUTURE_WORK.md` § Observability on
+    /// demand and never retained — see `docs/FUTURE_WORK_ARCHIVE.md` § Observability on
     /// why an unbounded label set takes down the scrape.
     pub requests_by_route: DashMap<(&'static str, &'static str), u64>,
     /// Serving-side totals: segments this node computed FOR OTHER PEERS.
@@ -224,7 +224,7 @@ pub struct MetricsProviders {
     /// request becomes likely. The decision-and-history surface lives
     /// here; the actual prefetch dispatch (running activations
     /// forward, gossiping warming) is a follow-up integration point
-    /// per docs/FUTURE_WORK.md § R136 Layer 3.
+    /// per docs/FUTURE_WORK.md #182 (SWARM-SPEC Layer 3).
     pub prefetch_orchestrator: crate::inference::prefetch::PrefetchHandle,
     /// SWARM-SPEC Layer 1: lifetime counters for n-gram-cascade
     /// hits / misses across all spec paths (`speculative.rs` draft+ngram

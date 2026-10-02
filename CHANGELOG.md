@@ -10699,7 +10699,7 @@ stream non-chunked path.
 `.claude/rules/architecture.md` doc drifts fixed, DIAGNOSTICS.md
 DIAG strings synced, book introduction + config reference updated.
 
-Deferred to `docs/FUTURE_WORK.md § R142 deferred items`: VLM
+Deferred to `docs/FUTURE_WORK_ARCHIVE.md § R142 deferred items`: VLM
 `ffn_up/down` weight inversion (needs LLaVA integration test),
 LLaVA chat-template fallback edge case, Python SDK R140 endpoints,
 test-binary `spawn_test_server` extraction, streaming + invite v2

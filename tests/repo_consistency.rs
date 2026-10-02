@@ -6493,7 +6493,7 @@ fn a_reply_under_way_is_never_moved_to_a_machine_that_cannot_continue_it() {
         "{rel}: `failover_segment` no longer asks `failover_can_restore_state` before \
          looking for a stand-in.\nA mid-reply takeover computes from the current token \
          alone — measured at P(healthy machine's token) = 0.119 replacing just 4 of 28 \
-         layers — and nothing errors or warns.\nSee docs/FUTURE_WORK.md § \"A failover \
+         layers — and nothing errors or warns.\nSee docs/FUTURE_WORK_ARCHIVE.md § \"A failover \
          after the prompt pass silently loses the failed segment's KV context\"."
     );
 }
@@ -8430,7 +8430,7 @@ fn the_tools_gate_scan_catches_the_defect_it_is_for() {
 /// If you are here because this test went red: bumping the Windows CUDA toolkit
 /// means teaching `update.rs` to fetch the `-gpu` **zip** (which carries the
 /// DLLs) instead of the bare exe, or gating the release so those users are sent
-/// a fresh installer. `docs/FUTURE_WORK.md` § "Windows-GPU auto-update carries
+/// a fresh installer. `docs/FUTURE_WORK_ARCHIVE.md` § "Windows-GPU auto-update carries
 /// stale CUDA redist DLLs" has the detail.
 #[test]
 fn the_windows_gpu_update_swaps_one_file_and_the_cuda_pin_still_allows_that() {

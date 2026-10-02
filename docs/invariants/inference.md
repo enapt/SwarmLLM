@@ -2607,7 +2607,7 @@ evidence rather than proof, so the size is asked for rather than predicted.
 **Called only from `llama`-gated code, so every default build reports it dead**
 (gotcha #264).
 
-→ `docs/FUTURE_WORK.md` § "A context that does not fit is refused instead of shrunk"
+→ `docs/FUTURE_WORK_ARCHIVE.md` § "A context that does not fit is refused instead of shrunk"
 
 ## Cross-feature compile checks
 

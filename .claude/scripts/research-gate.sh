@@ -157,7 +157,9 @@ if not watched:
 #               a grep of arch-network.md for a single needle satisfied "the
 #               network rules have loaded", and check 1 never fired.
 read_tool, seen, searched_web, knowledge = set(), set(), False, False
-KNOWLEDGE = ("docs/invariants/", "docs/FUTURE_WORK.md", "gotchas.md",
+# "docs/FUTURE_WORK" covers the live list AND its frozen history
+# (FUTURE_WORK_ARCHIVE.md, split off 2026-10-02) — both are what the repo knows.
+KNOWLEDGE = ("docs/invariants/", "docs/FUTURE_WORK", "gotchas.md",
              "sweep-log.jsonl", "closed_findings.md", "docs/DIAGNOSTICS.md",
              "open_cautions.md", "docs/ARCHITECTURE.md")
 this_task_seen, this_task_web, this_task_knowledge = set(), False, False

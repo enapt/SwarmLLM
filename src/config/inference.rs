@@ -144,7 +144,7 @@ pub struct InferenceConfig {
     /// adds per-chunk fixed cost with near-zero compute-send overlap; the
     /// win only materializes when wire transfer dominates encrypt time
     /// (typically <30 Mbps WAN per current research). See
-    /// `docs/FUTURE_WORK.md § Tier 4K`.
+    /// `docs/FUTURE_WORK.md` #206 (survey Tier 4K).
     #[serde(default)]
     pub streaming_chunked_send: bool,
     /// Chunk size in bytes for `streaming_chunked_send`. Defaults to 256 KiB
