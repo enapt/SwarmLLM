@@ -81,10 +81,12 @@ impl SharedState {
     /// Is `manifest` a description of some OTHER upload than the one this
     /// node knows the swarm uses? `false` when no canonical upload is known.
     pub fn manifest_is_another_upload(&self, manifest: &crate::types::ModelManifest) -> bool {
-        self.models
-            .canonical_builds
-            .get(&manifest.id)
-            .is_some_and(|b| !b.describes(manifest))
+        canonical::canonical_uploads_enabled()
+            && self
+                .models
+                .canonical_builds
+                .get(&manifest.id)
+                .is_some_and(|b| !b.describes(manifest))
     }
 
     /// May this node fetch parts of `model_id` right now?
@@ -98,10 +100,11 @@ impl SharedState {
     /// all, or a node in offline mode (which never reaches HuggingFace), keeps
     /// the old behaviour.
     pub fn canonical_allows_acquisition(&self, model_id: &ModelId) -> bool {
-        if self
-            .credits
-            .offline_mode
-            .load(std::sync::atomic::Ordering::Relaxed)
+        if !canonical::canonical_uploads_enabled()
+            || self
+                .credits
+                .offline_mode
+                .load(std::sync::atomic::Ordering::Relaxed)
         {
             return true;
         }

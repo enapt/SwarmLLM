@@ -351,6 +351,31 @@ routing candidate, so the scheduler can hand a segment to a peer that does not
 hold those weights — which is one way a request comes to spend its first-token
 deadline waiting on a peer that was never going to answer.
 
+## "Which copy of this model does this node hold?" — one upload per model (2026-10-02, #151)
+
+Every node uses the same HuggingFace upload of a model (`model::canonical`); a
+node holding another switches by itself (`model::auto_manage::canonical`).
+`/api/admin/models` → `shared_copy`: the upload the swarm uses, and
+`this_computer.state` = `nothing` / `canonical` / `switching` (`fetched` of
+`needed` parts; `needed: 0` = queued behind another switch) / `stuck` (`reason`:
+`disk`, `download`, `cancelled`, `own_file` for a `-m` model). `peers_other_build`
+should fall to 0 swarm-wide as nodes update.
+
+| Level | Line | Means |
+|---|---|---|
+| INFO | `DIAG: canonical upload — every node uses this file for this model` | an upload was verified (anonymous probe) and adopted; `replaces` names the one before |
+| INFO | `An upload of this model could not be checked on HuggingFace` | skipped for 24 h (`permanent`) or 30 min; the next-best is tried |
+| INFO | `DIAG: registered the canonical upload's manifest` | a node holding none of the model now fetches against the canonical upload |
+| INFO | `DIAG: this node's parts are the canonical upload's` | the 64 KB-per-part byte check against HuggingFace passed |
+| INFO | `DIAG: switching this node's copy to the canonical upload` / `DIAG: switched this node's copy to the canonical upload` | the heal: parts staged in `<data_dir>/canonical/<model>`, swapped when idle |
+| WARN | `Replaced a header from another upload of this model` | the parts were right, `gguf_header.bin` was another upload's — replaced, model reloaded |
+| WARN | `Not fetching — this source is another upload than the manifest describes` | the old splice-two-uploads path, refused |
+| INFO | `Ignoring a manifest of another upload of this model` | a peer still on another upload (it switches too) |
+
+`SWARMLLM_CANONICAL_UPLOADS=0` switches all of it off (rigs and gates that link a
+node's files into throwaway nodes set it; it is also the A/B control). The
+header-source check (`fetch_model_header`) stays on either way.
+
 ## "Why is this node talking to a stranger?"
 
 ```

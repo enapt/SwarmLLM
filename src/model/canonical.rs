@@ -154,6 +154,16 @@ pub fn best_claim<'a>(
         .min_by_key(|c| origin_rank(model_id, c))
 }
 
+/// Is the one-upload-per-model machinery on? `SWARMLLM_CANONICAL_UPLOADS=0`
+/// switches it off: no upload is verified or adopted, nothing switches, and
+/// every acquisition gate answers as before. For rigs and gates that link a
+/// node's files into throwaway nodes and must not have them switched mid-step,
+/// and as the in-binary A/B control. Read once.
+pub fn canonical_uploads_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("SWARMLLM_CANONICAL_UPLOADS").as_deref() != Ok("0"))
+}
+
 /// DB tree holding each model's [`CanonicalBuild`], keyed by model id.
 pub const CANONICAL_BUILDS_TREE: &str = "canonical_builds";
 

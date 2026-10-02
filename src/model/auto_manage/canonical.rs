@@ -83,6 +83,9 @@ pub async fn run(
 }
 
 async fn pass(state: &Arc<SharedState>, net_tx: &mpsc::Sender<NetworkCommand>) {
+    if !canonical::canonical_uploads_enabled() {
+        return;
+    }
     if state
         .credits
         .offline_mode
