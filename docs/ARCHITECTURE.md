@@ -63,7 +63,7 @@ swarmllm/
 ├── packaging/     (swarmllm.service + aur/, homebrew/ + deb/{postinst,prerm} maintainer scripts; the .rpm is built by release.yml from Cargo.toml's `[package.metadata.generate-rpm]` — prerm acts on $1: an upgrade must never `systemctl disable`, gotcha #313)
 ├── docs/          (ARCHITECTURE, CREDITS_DESIGN, FUTURE_WORK, DIAGNOSTICS, REFERENCE_MODELS,
 │                 NETWORKING, NETWORKING_PLAN, TESTING)
-├── docs/invariants/  (the evidence behind .claude/rules/architecture.md — 7 topic files)
+├── docs/invariants/  (the evidence behind the .claude/rules/ statements — 7 topic files)
 ├── docs/plans/    (design notes + benchmarks/, archive/)
 ├── docs/book/     (mdBook documentation site)
 ├── vendor/        (patched upstream crates, all workspace-`exclude`d; every patch marked `SwarmLLM patch:`)
