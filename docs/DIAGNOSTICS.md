@@ -53,7 +53,7 @@ This answers most questions on its own:
 
 | Symptom in the line | Where to look next |
 |---|---|
-| `queue_ms` large | node is saturated — tier caps in `router/mod.rs`, or `max_concurrent_requests` |
+| `queue_ms` large | node is saturated — the router runs half of `max_concurrent_requests` at once (every request has the same tier while credits are dormant) |
 | `sched_ms` large | scheduler struggling to find holders — check `-- peer serving performance --` |
 | `predicted_ms` far from `total_ms` | the routing cost model is wrong about this shape — see below |
 | `assemblies=2` present | the request FAILED once and retried. Whatever else the line says, start here: the first attempt's cause is in the log just above |
@@ -801,7 +801,7 @@ When running multiple nodes on the same machine (localhost), connection manageme
 
 - mDNS discovers the local node on multiple interfaces (loopback, LAN, WSL)
 - Both sides dial simultaneously, creating multiple connection attempts
-- `max_established_per_peer=1` — prevents request_response round-robin routing to dead connections
+- `network.max_connections_per_peer` (default 3; below 2 disables hole punching). A connection the swarm denies is forgotten by request-response, so it is never routed to (#774)
 - Identify handler adds only the **connected** address to Kademlia (not all listen_addrs)
 - `connection_addrs: HashMap<ConnectionId, Multiaddr>` tracks which address each connection uses
 
@@ -839,8 +839,6 @@ If `pending_tensor_forwards > 0` when a connection closes, those requests will g
 | Level | What | Where |
 |-------|------|-------|
 | ERROR | `DIAG: {label} tensor decompression failed` — zstd decompress error | protocol.rs |
-| ERROR | `DIAG: {label} tensor decompression failed` — zstd decompress error | protocol.rs |
-| DEBUG | `DIAG: {label} tensor decompressed` — `compressed_len`, `decompressed_len`, `ratio` | protocol.rs |
 | DEBUG | `DIAG: {label} tensor decompressed` — `compressed_len`, `decompressed_len`, `ratio` | protocol.rs |
 
 ## KV-Cache Diagnostics
@@ -956,13 +954,13 @@ If stale channel cleanup is happening frequently, requests are timing out or bei
 
 ## Network Subsystem Diagnostics
 
-### Gossip Decryption Fallback
+### Gossip that cannot be decrypted
 
 ```
-DIAG: gossip decryption failed, plaintext fallback succeeded
+Gossip from a peer we cannot decrypt — most likely a node on a different private network (network.gossip_network_id); ignoring
 ```
 
-This is normal during bootstrapping (new nodes don't have the gossip seal key yet). If it persists after the network is established, it indicates a key rotation issue.
+A `WARN` from `network/manager/events.rs`, rate-limited per sender (`suppressed_since_last` counts the repeats). Gossip is never read as plaintext. The usual cause is a node configured with a different `network.gossip_network_id`; if every peer's gossip fails, compare that setting first.
 
 ### Bootstrap Failures
 
@@ -991,11 +989,11 @@ Only logged on startup if the database is corrupted. The node will function but 
 
 ## WSL2 Mitigations
 
-WSL2's Hyper-V Networking Stack (HNS) causes multi-address connection races when autonat/mDNS discover the WSL2 NAT adapter (10.255.255.254). With `max_established_per_peer=1`, both nodes simultaneously establish connections via multiple interfaces, sending mutual yamux GoAway frames that kill ALL connections. Two mitigations are available via config:
+WSL2's Hyper-V Networking Stack (HNS) causes multi-address connection races when autonat/mDNS discover the WSL2 NAT adapter (10.255.255.254). With a per-peer limit of 1 (`network.max_connections_per_peer = 1`; the default is 3), both nodes simultaneously establish connections via multiple interfaces, sending mutual yamux GoAway frames that kill ALL connections. Two mitigations are available via config:
 
 ### Disable autonat/dcutr
 
-AutoNAT and DCUtR trigger mDNS multi-address discovery on WSL2 (loopback + LAN + NAT adapter), causing connection races. Disable for WSL2 testing. `NetworkConfig::default()` already sets these to `false` (the serde default of `true` only applies when loading from a config file).
+AutoNAT and DCUtR trigger mDNS multi-address discovery on WSL2 (loopback + LAN + NAT adapter), causing connection races. Disable for WSL2 testing. Both default to `true`.
 
 ```toml
 # config/default.toml or ~/.local/share/swarmllm/config.toml
@@ -1045,7 +1043,7 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
 
 ## Inference Subsystem Diagnostics
 
-### Scheduler (scheduler.rs)
+### Scheduler (inference/scheduler/)
 
 | Level | What | Fields |
 |-------|------|--------|
@@ -1082,7 +1080,7 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
 | INFO  | `DIAG: precompute_vision_embeddings local` | `image_count`, `compressed_bytes` |
 | INFO  | `DIAG: precompute_vision_embeddings remote` | `remote_node` |
 
-### Chat Template (chat_template.rs)
+### Chat Template (inference/chat_template/)
 
 | Level | What | Fields |
 |-------|------|--------|
@@ -1105,7 +1103,7 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
 | DEBUG | `DIAG: register_manifest (unchanged)` — a re-gossip of a manifest we already hold | `model_id` |
 | INFO  | `DIAG: load_from_db complete` | `manifests_loaded_count` |
 
-### HuggingFace (huggingface.rs)
+### HuggingFace (model/huggingface/)
 
 | Level | What | Fields |
 |-------|------|--------|
@@ -1271,6 +1269,7 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
 
 | Level | What | Fields |
 |-------|------|--------|
+| ERROR | `DIAG: failed to read credit balance from database — starting at zero` | `error` |
 
 ### Escrow (escrow.rs)
 
@@ -1297,6 +1296,8 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
 
 | Level | What | Fields |
 |-------|------|--------|
+| INFO  | `DIAG: encryption session established` | `peer_id`, `node_id`, `session_type`, `session_count` |
+| TRACE | `DIAG: session already present — Identify left it intact` | `peer_id`, `node_id` |
 
 ## Infrastructure Diagnostics
 

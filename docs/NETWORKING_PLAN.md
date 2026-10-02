@@ -1,6 +1,11 @@
 # SwarmLLM Networking Plan — Reliable P2P Inference Across NAT (once and for all)
 
-Status: **IN PROGRESS (2026-07-24)**. Owner: maintainer. Supersedes ad-hoc NAT
+Status: **IMPLEMENTED** — Phases 1-3, the version handshake, DHT relay
+discovery and the mixed-version guard (audit 2026-07-25; see "Implementation
+status"). Sections below the status are the original plan (2026-07-24) and
+keep its wording. Credits are dormant and gate nothing
+(`docs/CREDITS_DESIGN.md`), so the "credit-metered relaying" and incentive
+arguments below describe a design, not behaviour. Owner: maintainer. Supersedes ad-hoc NAT
 fixes in R143–R150.
 
 ## Implementation status
@@ -45,8 +50,8 @@ fixes in R143–R150.
   rides existing `NodeCapability` gossip (`relay_capable` propagates), so a node
   learns every relay-capable peer without a new channel. (b) **Credit-metered
   relaying**: `relay_inference_bytes` earns at the shard-seeding rate, so
-  donating relay capacity counts as a contribution — informational/priority
-  only, since credits are not enforced for correctness. (c) **Mixed-version
+  donating relay capacity is recorded as a contribution — recorded only:
+  credits are dormant and grant no priority. (c) **Mixed-version
   wire-compat test** (`node.rs::version_compat_tests`): an older peer's
   capability parses as feature-less, a newer peer's (with unknown fields) still
   parses — a network-breaking change now fails the build.

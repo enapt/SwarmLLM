@@ -73,7 +73,7 @@ tunable independently of model size:
 under auto-manage.**
 
 *Fragmentation.* Contiguous runs merge, but non-contiguous ones do not. Nothing
-in acquisition scoring prefers contiguity — `auto_manage/scoring.rs` ranks
+in acquisition scoring prefers contiguity — `model/auto_manage/scoring.rs` ranks
 shards by rarity and demand, so a node can end up holding 0, 1, 4, 5. The
 bitmap turns that into **two** ranges, and a pipeline that could have been one
 hop becomes two. Smaller shards give that more opportunities to happen, and the

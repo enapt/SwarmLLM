@@ -2059,6 +2059,12 @@ fn every_documented_diag_line_exists_in_the_source() {
             claims.push(rest[..end].to_string());
         }
     }
+    // ...and the sample log lines in fenced blocks, which this scan skipped
+    // until 2026-10-02 — when a fenced `DIAG: gossip decryption failed,
+    // plaintext fallback succeeded`, a line that never existed, described a
+    // plaintext fallback the code does not have. A sample line ends where its
+    // structured fields (`key=value`) begin.
+    claims.extend(fenced_diag_lines(&doc));
     claims.sort();
     claims.dedup();
     assert!(
@@ -2090,6 +2096,41 @@ fn every_documented_diag_line_exists_in_the_source() {
          remove the entry when the line changes.\n  {}",
         missing.len(),
         missing.join("\n  ")
+    );
+}
+
+/// The `DIAG:` lines a markdown document shows as sample output inside fenced
+/// code blocks, each cut where its `key=value` fields begin. A line that only
+/// MENTIONS `DIAG:` (a `grep "DIAG:..."` command) does not start with it and is
+/// not a claim.
+fn fenced_diag_lines(doc: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut in_fence = false;
+    for line in doc.lines() {
+        let t = line.trim();
+        if t.starts_with("```") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if in_fence && t.starts_with("DIAG: ") {
+            let words: Vec<&str> = t
+                .split_whitespace()
+                .take_while(|w| !w.contains('='))
+                .collect();
+            out.push(words.join(" "));
+        }
+    }
+    out
+}
+
+#[test]
+fn the_diag_guard_reads_sample_lines_in_fenced_blocks() {
+    let doc = "text `DIAG: inline` text\n```\nDIAG: sample line request_id=abc ms=3\n\
+               cargo dev-run -- run -v 2>&1 | grep \"DIAG: not a claim\"\n```\n\
+               DIAG: outside any fence\n";
+    assert_eq!(
+        fenced_diag_lines(doc),
+        vec!["DIAG: sample line".to_string()]
     );
 }
 
