@@ -29,14 +29,14 @@ measured at, and what a change must keep — lives in `docs/invariants/`.
 
 ## SharedState Sub-Structs
 
-SharedState is organized into 4 sub-structs. Always use the correct accessor:
+The 4 sub-structs and the `cfg()` / `classify` accessors are in `architecture.md`
+(always loaded). Per-field rules:
 
 - `state.events.activity_tx` — NOT `state.activity_tx`
 - `state.events.dashboard_tx` — NOT `state.dashboard_tx`
 - `state.credits.credit_balance` — NOT `state.credit_balance`
 - `state.credits.pool_state` — NOT `state.pool_state`
 - `state.models.acquisition_progress` — NOT `state.acquisition_progress`
-- `state.models.hf_sources` — NOT `state.hf_sources`
 - `state.models.wishlist` — R111. ArcSwap<Wishlist>; refresh via `crate::model::auto_manage::refresh_wishlist(state)`.
 - `state.models.hf_trending_cache` — R112. ArcSwap<HfTrendingSnapshot>; written by `HfWatcher` only.
 - `state.models.foreign_wishlist` — R130. `DashMap<(NodeId, ModelId), (score, received_at_ms)>`, capped (`MAX_FOREIGN_WISHLIST_ENTRIES`), 2h freshness; written only by `apply_wishlist_announcement`, read by `compute_wishlist`.
@@ -59,7 +59,7 @@ SharedState is organized into 4 sub-structs. Always use the correct accessor:
 - `state.local_memory_refusals` — `DashSet<Uuid>` on the root; write ONLY `note_local_memory_refusal`, read only `local_memory_refused_for_request`; released by `release_request_state`.
 - `state.encrypted_pipeline_models` — **never read directly**: use `SharedState::encrypted_pipeline_for` (`privacy_explicitly_enabled_for` only for a deliberate user choice); guard `prompt_privacy_is_never_re_derived_from_the_per_model_map`.
 - `state.region_demand` / `state.local_region_demand` — merged vs own-region demand. ⚠ Only the LOCAL map may be GOSSIPED; guard `the_demand_we_gossip_is_the_demand_we_measured`. → `docs/invariants/network.md` § "Gossip volume"
-- `state.metrics.inference_counts` — per-topic message counts beside the byte counters (see `state.metrics.gossip`). ⚠ `sent` counts attempts, so never assert `sum(parts) <= whole`. Gotcha #674.
+- `state.metrics.gossip` also yields per-topic MESSAGE counts (`GossipTopicTotals`: `published`, `sent`, `recv`, `recv_unfiltered`) beside the bytes; `state.metrics.gossip_by_kind` (`GossipKindMeter`) splits a topic by message variant. ⚠ `sent` counts attempts, so never assert `sum(parts) <= whole`. Gotcha #674.
 - `state.metrics.bandwidth` — `Arc<BandwidthMeter>`; `totals()` answers `None`, never `0`; `refresh()` only from the health-monitor tick, everything else reads `current()`.
 - `state.metrics.gossip` — `Arc<GossipMeter>`; per-topic GossipSub bytes, answers `None` never `0`, warns about nothing. ⚠ `libp2p-gossipsub` is a DIRECT dep only for its `metrics` feature; guard `the_gossip_counters_come_from_the_same_crate_libp2p_uses`.
 - `state.metrics.inference` — `Arc<InferenceTraffic>`; inference bytes counted in the CODEC (`network/protocol/mod.rs`) and nowhere else — never at the send sites.
@@ -74,11 +74,9 @@ SharedState is organized into 4 sub-structs. Always use the correct accessor:
 - `state.listen_multiaddrs` — `ArcSwap<Vec<String>>` on the root; written ONLY by `NetworkManager::refresh_listen_multiaddrs()` (listeners ∪ external addrs, built by `build_reachable_multiaddr_list`); read by `PoolManager::handle_generate_invite_code`.
 - `config.api.dashboard_trust_lan` — read via `SharedState::cfg()`; `api::dashboard_trust::classify` decides API-key hand-out, never `addr.ip().is_loopback()`.
 - `state.observed_inbound_connection` — see `docs/invariants/state-and-config.md`
-- `SharedState::model_is_in_use` is the answer to "may I delete this… — see `docs/invariants/state-and-config.md`
-- **`api::dashboard_trust::classify`** is the single answer to "may this request be handed the API key automatically?"; never `addr.ip().is_loopback()`; same-origin checks use `Origin` vs `Host` (`websocket.rs::ws_origin_allowed`). Gotcha #195.
+- `SharedState::model_is_in_use` is the answer to "may I delete this model's files?" — see `docs/invariants/state-and-config.md`
+- Same-origin checks use `Origin` vs `Host` (`websocket.rs::ws_origin_allowed`), beside `classify` (gotcha #195).
 - `state.relay_proven_features` — `DashMap<NodeId, RelayProvenFeatures>` on the root; recorded by `record_relay_proven_features`, read by `relay_feature_proven(peer, bit)`; any new relay send gate MUST consult it before the gossiped `NodeCapability.features`.
-
-When adding new fields to SharedState, put them in the appropriate sub-struct unless they're accessed by 10+ files across 3+ subsystem boundaries.
 
 → `docs/invariants/state-and-config.md`
 

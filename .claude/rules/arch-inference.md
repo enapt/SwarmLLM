@@ -94,9 +94,17 @@ A forward of up to `cuda_graph::MAX_POSITIONS` (8) positions is captured when no
 
 ## Attention kernel choice and the query-length cliff (2026-08-23)
 
-Four helpers now own decisions that used to be spread across call sites. All
-four exist because a predicate that *reads* obviously correct was answering a
-different question than the one that mattered.
+Every CPU decode fast path was once gated on `q_len == 1` exactly, so a 2-token
+forward cost 7.8x a 1-token one (#369). Four helpers own those decisions now —
+never re-derive one from `q_len`:
+
+- **`layers::flash_handles_offset_causal`** — flash takes a query block on a warm
+  prefix (the vendored kernel is bottom-right causal; #368). A/B `SWARMLLM_FLASH_OFFSET_CAUSAL=0`.
+- **`layers::cuda_decode_prefers_standard`** — `q_len == 1` for every head geometry.
+- **`layers::grouping_applies` + `grouped_gqa_attention`** — read K/V at stored width
+  for any query length that fits one pass; the mask is TILED (row `r * q_len + t` sees row `t`).
+- **`cpu_pools::DECODE_SHAPED_MAX_TOKENS`** — the pool choice turns on bandwidth-bound
+  matmuls, not `seq_len == 1`; a short block never feeds the decode-width calibration.
 
 **A GQA call too big for one pass is blocked over query POSITIONS and grouped
 per block** (`grouped_blocking_applies`, `mask_rows`) — it never expands K/V
@@ -104,7 +112,7 @@ with `repeat_kv`. Expanding doubled attention for every prompt chunk past a
 5,461-long cache on a 24-head model (+20% on a 6.9K prompt once removed).
 Test `a_blocked_gqa_call_is_grouped_not_expanded` counts expansions.
 
-→ `docs/invariants/inference.md`
+→ `docs/invariants/inference.md` § "Attention kernel choice and the query-length cliff"
 
 ## Several query positions on the processor never write the score matrix (2026-09-26)
 

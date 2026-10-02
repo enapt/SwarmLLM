@@ -13,7 +13,7 @@ cd SwarmLLM/js && npm install && npm run build && npm pack
 npm install /path/to/SwarmLLM/js/swarmllm-0.1.0.tgz
 ```
 
-The build is CommonJS only: use `require('swarmllm')`, or `import` from TypeScript compiled to CommonJS. A native ES-module `import` fails, because `dist/index.mjs` is not built yet.
+The build is CommonJS, and Node.js loads it either way: `const { SwarmLLMClient } = require('swarmllm')`, or `import { SwarmLLMClient } from 'swarmllm'` from an ES module.
 
 ## Quick Start
 
@@ -56,12 +56,16 @@ const client = new SwarmLLMClient({
 ## API
 
 ### `client.chat(params)` — Chat completion (non-streaming)
-### `client.chatStream(params)` — Chat completion (streaming, async iterable)
-### `client.listModels()` — List available models
+### `client.chatStream(params)` — Chat completion (streaming, async iterable of chunks)
+### `client.listModels()` — List available models (`Promise<Model[]>`)
 ### `client.status()` — Node status
-### `client.health()` — Health check
+### `client.health()` — Health check (`Promise<string>`)
 ### `client.admin.stats()` — Node statistics
-### `client.admin.peers()` — Connected peers
+### `client.admin.peers()` — Connected peers (`Promise<Peer[]>`)
+
+Every method throws `SwarmLLMError` when the node answers with an error; it
+carries the HTTP `status` and the response `body`. `parseSSEStream(response)` is
+also exported, to read a streamed `fetch` response yourself.
 
 ## OpenAI Compatibility
 

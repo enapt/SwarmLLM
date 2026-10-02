@@ -217,8 +217,8 @@ except SwarmLLMError as e:
 | `hf_source(model_id)` | HF source info for a model |
 | `downloads()` | Active download queue |
 | `cancel_download(model_id)` | Cancel a download |
-| `lock_shard(model_id, index)` | Lock shard from auto-pruning |
-| `delete_shard(model_id, index)` | Delete a single shard |
+| `lock_shard(model_id, shard_index, locked=True)` | Lock a shard against auto-pruning (`locked=False` unlocks) |
+| `delete_shard(model_id, shard_index)` | Delete a single shard |
 | `delete_model(model_id)` | Remove a model and all shards |
 | `get_auto_manage(model_id)` | Per-model auto-manage policy |
 | `set_auto_manage(model_id, policy)` | Update auto-manage policy |
@@ -247,7 +247,22 @@ except SwarmLLMError as e:
 | `create(name)` | Create a device pool |
 | `invite(node_id)` | Invite a node |
 | `accept(invitation_id)` | Accept an invitation |
+| `invitations()` | Pending invitations |
+| `remove(node_id)` | Remove a member |
 | `leave()` | Leave the pool |
+| `generate_code()` | Mint a `swarmpool://` invite code (pool owner only) |
+| `join(code)` | Join a pool with an invite code |
+| `leaderboard()` | Members ranked by contribution |
+
+## Optional integrations
+
+```bash
+pip install "swarmllm-client[langchain] @ git+https://github.com/enapt/SwarmLLM.git#subdirectory=python"
+```
+
+- `[langchain]` adds `swarmllm_client.ChatSwarmLLM`, a LangChain chat model.
+- `[llamaindex]` adds `swarmllm_client.LlamaIndexSwarmLLM`, a LlamaIndex LLM.
+- `[all]` installs both.
 
 ## Development
 

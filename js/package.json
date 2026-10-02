@@ -1,15 +1,13 @@
 {
   "name": "swarmllm",
   "version": "0.1.0",
-  "description": "JavaScript/TypeScript client for SwarmLLM — zero-dependency, browser-compatible",
+  "description": "JavaScript/TypeScript client for SwarmLLM — zero-dependency, Node.js 18+",
   "main": "dist/index.js",
-  "module": "dist/index.mjs",
   "types": "dist/index.d.ts",
   "exports": {
     ".": {
-      "import": "./dist/index.mjs",
-      "require": "./dist/index.js",
-      "types": "./dist/index.d.ts"
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
     }
   },
   "files": [

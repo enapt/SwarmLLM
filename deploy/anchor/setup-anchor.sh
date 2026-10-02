@@ -190,7 +190,7 @@ dpkg-reconfigure -f noninteractive unattended-upgrades >/dev/null 2>&1 || true
 systemctl enable --now unattended-upgrades >/dev/null 2>&1 || true
 
 # --- 7. root-run auto-updater (the daemon can't self-update under the sandbox) -
-echo ">> Installing root auto-updater (daily)..."
+echo ">> Installing root auto-updater (hourly)..."
 curl -fsSL "$RAW_BASE/swarmllm-update.sh" -o /usr/local/bin/swarmllm-update.sh
 chmod 700 /usr/local/bin/swarmllm-update.sh
 curl -fsSL "$RAW_BASE/swarmllm-update.service" -o /etc/systemd/system/swarmllm-update.service
