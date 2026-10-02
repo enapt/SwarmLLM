@@ -173,9 +173,9 @@ started with `update_restart::spawn_without_inherited_handles`.
 
 ⛔ **This PC had five unclean shutdowns 2026-09-26 → 10-01 (#716 #718 #754 #762 #766), all under sustained load,
 causes undetermined.** Every gate, rig, bench or long run: the safety kit (`~/swarmllm-gate-common/safety.sh` —
-keep-awake, Windows-disk telemetry, CPU/memory-capped scope, settle + cool-down, emergency stop), the user's go-ahead
-for THAT run, never 4 simultaneous chats (**simultaneous requests to a node ARE a stress test**), Windows uptime read
-first (above ~24 h ask for a restart). Card figures drift with uptime (#146) — note each run's.
+keep-awake, Windows-disk telemetry, CPU/memory-capped scope, settle + cool-down, emergency stop) and never 4
+simultaneous chats (**simultaneous requests to a node ARE a stress test**). ⛔ **Do NOT ask for a go-ahead or a
+restart, and never refuse on uptime** (user, 2026-10-02) — run it; log the uptime, card figures drift with it (#146).
 
 ⚠ **Behaviour gate = `reply_ab.sh` + `split_rig.sh`** (incl. `failover`), not conformance alone —
 `family_conformance.sh` pins `gpu_layers = 0` and never splits (#93). ⛔ **v0.3.199 shipped BROKEN**: a BUILD gate
