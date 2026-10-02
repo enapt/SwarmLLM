@@ -1,5 +1,11 @@
 # Next Steps (post-Round-6)
 
+> **Historical — a plan from April 2026, kept because other documents cite its
+> sections.** It is not the current queue: the ranked priorities are in
+> `docs/FUTURE_WORK.md` § "PRIORITIES". Since it was written, binary signing
+> (C1) closed on 2026-09-19 (`docs/RELEASE_SIGNING.md`), the version line moved
+> to v0.3.x, and the test counts are in CLAUDE.md.
+>
 > Status snapshot taken 2026-04-20 after Item 8 cross-over demo on
 > RTX 3070 + Qwen2.5-Coder-7B. Last landed commit before this plan:
 > `badde4a Item 8 Phase 4: two-daemon bench recipe + probe-resolver sanity tests`.
@@ -12,14 +18,14 @@
   on both TinyLlama (fast-prefill corner case) and Qwen-7B
   (cross-over demonstrated: **12.9× iter-1 TTFT speedup**, 151.7 s →
   11.8 s on 640-token CPU prefill). Three wire bugs caught + fixed
-  in-tree (see `round6.md` Results):
+  in-tree (see `benchmarks/round6.md` Results):
   1. `PrefixCacheAnnounce` missing from `handle_broadcast` topic match.
   2. IPC JSON `Vec<u8>` bloat on `PrefixSnapshotResponse` +
      `PrefixFetchResult` → moved bytes to the binary-payload slot.
   3. All three cross-node-fetch timeouts (500 ms worker probe,
      400 ms daemon network, 500 ms serving IPC) were TinyLlama-sized;
      bumped to 3000 / 2500 / 2000 ms to handle 7B-class snapshots.
-- Docs brought current: `round6.md`, `distributed_inference_speedup.md`
+- Docs brought current: `benchmarks/round6.md`, `archive/distributed_inference_speedup.md`
   top-of-doc, `docs/ARCHITECTURE.md § Prefix-Cache KV Sharing`,
   `memory/MEMORY.md` gotchas #23 + #24.
 

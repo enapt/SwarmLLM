@@ -1,5 +1,11 @@
 # Making local decode fast: spend fewer submissions per token
 
+> **Status 2026-10-02:** Stages 1-4 are built. The device's own CUDA stream and
+> decode-as-CUDA-graphs are **ON by default since 2026-09-30**
+> (`SWARMLLM_CUDA_OWN_STREAM=0` / `SWARMLLM_CUDA_GRAPH=0` are the control arms).
+> The sections below are the plan as it was written and measured; where one
+> says "opt-in" or "off by default", that was true when written.
+
 **Written 2026-09-22 against v0.3.197-alpha, from measurements on the live
 release node.** Evidence and per-model numbers:
 `docs/invariants/inference.md` § "A decode token is bound by GPU submission
@@ -433,7 +439,7 @@ llama.cpp does), and a fallback path for the first token and for prefill. The
 four capture preconditions are in § Ordering item 3b — **the stream one is a
 blocker, not a detail.**
 
-### ▶ Stage 4a — move every `CudaDevice` off the legacy stream — ⛔ shipped broken in .199, now OPT-IN; cause found 2026-09-23
+### ▶ Stage 4a — move every `CudaDevice` off the legacy stream — ⛔ shipped broken in .199, cause found 2026-09-23; ON by default again since 2026-09-30
 
 The precondition, done on its own so that the graph change has one variable.
 ⛔ **SHIPPED BROKEN and REVERTED to opt-in.** `BackendDevice::new` takes
@@ -472,8 +478,9 @@ stream, so the default build launches exactly where it always did).
 in CI; `flash_launches_on_the_devices_own_stream` is the runtime test, which
 needs a card.
 
-⚠ **Why the switch stays OFF anyway**: the own stream buys nothing by itself —
-it exists for graph capture (Stage 4b), which is not built. Flipping the default
+⚠ **Why the switch stayed OFF then** (superseded 2026-09-30 — see "Stage 4,
+BUILT"): the own stream buys nothing by itself — it exists for graph capture
+(Stage 4b), which was not built yet. Flipping the default
 is its own change with its own behaviour gate, not a side effect of this fix.
 
 ⚠ **It changes the shape of the event-tracking argument**, which is why the
@@ -510,7 +517,7 @@ keeping freed memory (#146):
   ~5-6 ms (~+35%); smaller models, more submission-bound, more. The preconditions below still
   stand — this answers only whether the capture route pays on this platform. It does.
 
-### ▶ Stage 4, BUILT (opt-in) — 2026-09-29
+### ▶ Stage 4, BUILT 2026-09-29 — ON by default since 2026-09-30
 
 `SWARMLLM_CUDA_OWN_STREAM=1 SWARMLLM_CUDA_GRAPH=1`: a one-position forward on a dense model held
 whole on the card is re-captured every token and launched as one graph
@@ -518,7 +525,7 @@ whole on the card is re-captured every token and launched as one graph
 answer in the code; the evidence and the table are in `docs/invariants/inference.md` § "A decode
 step can go to the card as one CUDA graph". In short: **byte-identical replies; TinyLlama +48%,
 Llama 3.2 3B +18%, Llama 3.1 8B none** (card-bound — a graph cannot start the card until the step
-is recorded, where op-by-op submission overlaps it). OFF by default because the models a split
+is recorded, where op-by-op submission overlaps it). It was OFF by default at first, because the models a split
 carries are mostly 7-8B and card-bound, where it loses ~2%: it needs a per-model choice, or a
 capture pipelined by layer groups so the card never waits for the recording. (A slow prompt pass
 first seen only with graphs on turned up in a legacy arm and in llama.cpp too — a host effect,

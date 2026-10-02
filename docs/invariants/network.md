@@ -314,6 +314,15 @@ and the wrong figure reached a commit message. Discard the connect burst before
 calling anything a rate — and note that a rate and a burst want different fixes
 (gotcha #613).
 
+**In short** (the rule statement as it stood in `.claude/rules/arch-network.md`). `emit_activity`'s ring is 100 entries, and it is also the replay a dashboard
+opens on and the "recent activity" of the pasteable report. An event emitted per
+protocol message empties it of everything the user did — measured at 102 of 114
+entries. Before adding an ActivityEvent, ask what makes it fire: if that is a
+peer's timer or a handler libp2p re-runs, gate it on a state CHANGE and prefer
+one entry per event over one per item inside it. Three sites had this wrong at
+once, each with the identical lesson already written down for the log line
+beside it. The per-message DIAG log is the durable record and stays.
+
 ## A count that reads zero while the thing happens is worse than no count
 
 **`disputed_shards` exists so that "this node is serving bytes the swarm
@@ -2678,6 +2687,17 @@ request is unchanged (2.57 vs 2.55): its decode steps were already chained.
 without the bit). Rig: `split_rig.sh remote` with `REMOTE_NODES=3`, `DELAY_B`, A/B
 by `SWARMLLM_CHAIN_VERIFY=0`.
 
+**In short** (the rule statement as it stood in `.claude/rules/arch-network.md`). `forward_verify_through_segments` sends a run of remote segments ONE forward
+with the rest of the run as its `chain` — every hop advertising
+`features::CHAINED_VERIFY` (gated at the coordinator: an older hop hands the tail
+only activations, and it answers a plain decode step). A hop copies the check's
+fields — guesses, walk flag, seed, rewind, history — onto the onward forward,
+each gated on the next hop's own bit; a worker ignores them unless its segment is
+LAST (`want_spec_output`). The waiter pins the tail and admits every hop's
+refusal; a chained check resends on nothing (`ResendOnRefusal::Never`).
+`PipelineExecutor::verify_may_chain` decides; `SWARMLLM_CHAIN_VERIFY=0` is the
+control arm.
+
 ## A connection the swarm denied is forgotten (2026-10-02)
 
 **Found** by the delegated split (FUTURE_WORK #143): its reply streams back one
@@ -3482,45 +3502,3 @@ a privacy boundary — private mode admits LAN peers) and the coordinate
 (`observe_network_coord`). Never compare a raw sample to a distance constant.
 
 → `docs/invariants/network.md` § "A substream sends with its protocol proposal"
-
-## A check travels a chain like a decode step does (2026-10-02)
-
-`forward_verify_through_segments` sends a run of remote segments ONE forward
-with the rest of the run as its `chain` — every hop advertising
-`features::CHAINED_VERIFY` (gated at the coordinator: an older hop hands the tail
-only activations, and it answers a plain decode step). A hop copies the check's
-fields — guesses, walk flag, seed, rewind, history — onto the onward forward,
-each gated on the next hop's own bit; a worker ignores them unless its segment is
-LAST (`want_spec_output`). The waiter pins the tail and admits every hop's
-refusal; a chained check resends on nothing (`ResendOnRefusal::Never`).
-`PipelineExecutor::verify_may_chain` decides; `SWARMLLM_CHAIN_VERIFY=0` is the
-control arm.
-
-→ `docs/invariants/network.md` § "A check travels a chain like a decode step does"
-
-## The activity list reports a TRANSITION; the log may report every message
-
-`emit_activity`'s ring is 100 entries, and it is also the replay a dashboard
-opens on and the "recent activity" of the pasteable report. An event emitted per
-protocol message empties it of everything the user did — measured at 102 of 114
-entries. Before adding an ActivityEvent, ask what makes it fire: if that is a
-peer's timer or a handler libp2p re-runs, gate it on a state CHANGE and prefer
-one entry per event over one per item inside it. Three sites had this wrong at
-once, each with the identical lesson already written down for the log line
-beside it. The per-message DIAG log is the durable record and stays.
-
-→ `docs/invariants/network.md`
-
-## A report built to be handed to a stranger is a publishing surface (2026-09-01)
-
-**`network::redact::redact_addresses`** hides every host in the diagnostics
-report — an IP literal or a DNS name, in a multiaddr or in free prose — and is
-called at the ONE point `api::admin::diagnostics` returns. `?full=1` is the
-deliberate opt-in for an operator debugging their own machine;
-`swarmllm diagnostics --full` and `examples/two_node_test.sh` are the two
-callers that ask for it. `the_diagnostics_report_hides_addresses_unless_full_is_asked_for`
-in `tests/repo_consistency.rs` fails the build if the default changes, and
-checks the two surfaces that hand the report to a person still ask for the safe
-form.
-
-→ `docs/invariants/network.md`

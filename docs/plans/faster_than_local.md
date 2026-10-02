@@ -139,15 +139,18 @@ at the temperatures clients actually send. Measurement: `~/swarmllm-ref/spec/`
 
 ## 4. The order of work
 
-1. **Ship v0.3.211**: the card/processor batched-forward fix found at the .210
+Status 2026-10-02: items 1, 2 and 6 have shipped; 3-5 and 7 are open (the
+persistent stream is still off by default).
+
+1. ✅ **Ship v0.3.211**: the card/processor batched-forward fix found at the .210
    gate (every concurrent request to a model split between card and processor
    failed on .209 and earlier).
-2. **V1Lazy for the tensor protocol** (§3.4) — small, exact, every split user.
+2. ✅ **V1Lazy for the tensor protocol** (§3.4) — small, exact, every split user.
    Measure on the real link, never loopback (gotcha #739).
 3. **Our processor half** (§3.3) — measure the owner's decode threads first.
 4. **MoE experts on the processor** (§3.2).
 5. **Prefix affinity across peers** (§3.1), then CPU users' prompt hand-off pricing.
-6. **Split speculation Phase 1** (accept at the tail — code written, uncommitted),
+6. ✅ **Split speculation Phase 1** (accept at the tail — shipped; the stream of checks followed in v0.3.216),
    then the shadow + coupling measurement decides whether Phase 4 is built.
 7. **#133 + chunked prompt pass**, then the persistent stream by default.
 

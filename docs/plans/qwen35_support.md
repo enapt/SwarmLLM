@@ -1,5 +1,9 @@
 # Qwen 3.5 support (FUTURE_WORK #117) — the plan, read off llama.cpp
 
+> **Status 2026-10-02:** implemented on the local branch `qwen35-support` (math
+> checked against llama.cpp master; the 0.8B passes on CUDA), **not merged**:
+> `main` still refuses `qwen35`.
+
 Written 2026-09-25 night, when Qwen 3.5 was REFUSED because no real file could
 load: the loader had been written against a guessed layout, and several of its
 tensor names are llama.cpp's C++ **member** names (`attn_post_norm`, `ssm_dt`)

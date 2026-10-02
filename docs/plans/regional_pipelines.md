@@ -74,6 +74,9 @@ Across continents it is worse than doing nothing.
 
 ### 1. A bug: regional placement cannot fire on a normal node
 
+> **FIXED in v0.3.193 (Stage 1).** Kept as the original finding; the
+> `file:line` references below describe the code as it was then.
+
 Region is auto-detected by IP geolocation into `SharedState::detected_region`.
 `config.identity.region` is `None` unless an operator hand-edited config.toml.
 `SharedState::effective_region_sync()` is the accessor that resolves the two,
@@ -244,8 +247,9 @@ peer read `rtt_samples: 3`**, against a filter cap of 64. `LATENCY_WINDOW_MS`
 never been read against each other, so the "windowed minimum" was a minimum of
 three — which on a bimodal input whose slow mode is the majority answers in the
 slow mode about a third of the time. Fixed with `LATENCY_WINDOW_MIN_SAMPLES`;
-→ `docs/invariants/network.md` § "A window sized in time is only as good as the
-rate that fills it". **The comparison this stage asks for has therefore still
+→ `docs/invariants/network.md` § "The two things that were wrong, and how they
+were found" (item 3, "A window sized in time is only as good as the rate that
+fills it"). **The comparison this stage asks for has therefore still
 not been made on a trustworthy instrument** — retake it after a release
 carrying that fix.
 

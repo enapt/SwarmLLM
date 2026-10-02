@@ -160,8 +160,9 @@ where a reply decomposes (reasoning with workers, list-shaped answers, agents).
    split still needs is for a STAGE to batch forwards from different streams that
    arrive as separate network messages into one visit — today each `LayerForward`
    is its own forward.
-2. **The continuous stream** — passes in flight, epoch-tagged chunks
-   (`split_speculation.md` § 4b, fitted to `dsd.rs`).
+2. ✅ **The continuous stream** — built 2026-09-30, on by default since v0.3.216
+   (`pipeline::dsd_stream`, chunks keyed by `stream_seq`; `SWARMLLM_SPEC_STREAM=0`
+   switches it off; `split_speculation.md` § 4b).
 3. **MTP at the last stage** — Qwen 3.5 first (#117 branch), then GLM-4.5+.
 4. **Multi-block attention** (per-block query rotation) for shared-cache workers.
 5. **The delegated coordinator** (#143) and regional placement (Stage 3).

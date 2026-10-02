@@ -117,7 +117,7 @@ What was observed, by request id in the three logs:
   the result as a new request"; C received the tail's token directly. HTTP 200
   in 8.9 s, reply `Red\nBlue\nYellow` — byte-identical to the unchained control
   (`721eeb97`).
-- **Per token, not just the prompt.** Request `e5b34033` (64 tokens, temperature
+- **Per token, not just the prompt.** Request id `e5b34033` (64 tokens, temperature
   0.7 — which keeps decode on the main loop; at temperature 0 the n-gram
   speculative path runs decode with its own per-segment loop, which does NOT
   chain yet): 64 coordinator sends, all to the head with a chain, **zero** sends
@@ -198,6 +198,12 @@ those are exactly the models that need many segments. Chaining makes the cost
 roughly constant in the coordinator's own round trip, whatever the chain length.
 
 ---
+
+> **§1-§6 are the design as proposed (2026-08), written before it was built.**
+> "Today" in them means before chaining. What shipped differs in detail: no
+> `ChainProgress` message exists — a chained hop's refusal or failure reaches
+> the coordinator through `layer_forward::reply_target` (see
+> `.claude/rules/arch-network.md`).
 
 ## 1. What we do today, and what it costs
 

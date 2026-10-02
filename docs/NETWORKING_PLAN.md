@@ -198,6 +198,8 @@ route the inference **through any reachable peer** at the **application layer**,
 independent of libp2p circuit-relay quirks:
 
 - New `SwarmMessage::RelayedInference { target: NodeId, inner: sealed bytes }`.
+  *(Design as written; it shipped as `RelayedEnvelope` / `SwarmRequest::RelayedTensor`,
+  gated on `features::RELAY` / `TENSOR_RELAY`.)*
   A (NAT'd) sends it to the anchor; the anchor forwards `inner` to B; B's
   `SendStreamingToken`s go back A the same way (anchor → A). The anchor is a
   **dumb pipe** — `inner` stays sealed with the existing per-hop ChaCha20
@@ -272,6 +274,9 @@ This is half the adoption problem. Make network evolution **additive and
 backward-compatible**:
 - **Protocol-version handshake in `identify`**: nodes advertise a
   `swarm-net/<major>.<minor>`; a receiver negotiates the highest common minor.
+  *(Shipped differently: no version string in identify — a `PROTOCOL_VERSION`
+  epoch plus the `NodeCapability::features` bitfield, checked at the sender;
+  `.claude/rules/architecture.md` § "Additive Protocol Evolution".)*
   New message types are *optional extensions*, never a hard requirement.
 - **Never repurpose or remove a `SwarmMessage` variant** across a release; add a
   new variant and keep handling the old one for ≥2 minor versions (the
