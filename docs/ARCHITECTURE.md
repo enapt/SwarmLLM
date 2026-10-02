@@ -608,10 +608,10 @@ using candle for direct tensor computation with quantized GGUF weights. Each nod
 only the transformer layers it owns, forwarding hidden-state activations between nodes.
 
 The module is split into focused subfiles: `model.rs` (SplitModel struct + accessors),
-`loader.rs` (GGUF/shard load), `executor.rs` (forward pass + tensor-parallel),
+`loader/` (GGUF/shard load), `executor.rs` (forward pass + tensor-parallel),
 `kv_cache.rs` (per-request KV-cache store; `LayerKv` holds each layer's f32 BHSD
 cache plus an optional f16 BSHD mirror for the CUDA flash kernel — GQA only, worth
-1.41x on long-context decode, see `.claude/rules/architecture.md`),
+1.41x on long-context decode, see `docs/invariants/inference.md`),
 `entry.rs` (model entry + LRU eviction),
 `gguf_meta.rs` (GGUF header parsing), `shard_reader.rs` (multi-shard virtual reader),
 `rope.rs` (RoPE precomputation), `prefix_cache.rs` (cross-request prefix-KV reuse).
@@ -826,36 +826,38 @@ this class and passed throughout.
 ### Chat Template Evaluator
 
 `inference/chat_template/` renders the Jinja template a GGUF carries in
-`tokenizer.chat_template`, producing the exact text handed to the model.
-`parser.rs` tokenizes, `eval.rs` evaluates, `fallbacks.rs` supplies a
-family-appropriate format for a model whose template we cannot run.
+`tokenizer.chat_template`, producing the exact text handed to the model. Since
+2026-09-10 it renders on **minijinja + minijinja-contrib `pycompat`** — the
+engine HF's TGI and SGLang use — configured as transformers configures jinja2:
+`trim_blocks`, `lstrip_blocks`, `keep_trailing_newline`, and Python string
+methods through `pycompat`. (A hand-written Jinja subset, `parser.rs` +
+`eval.rs`, did this until then and was deleted: every gap in it was a silently
+wrong prompt — gotcha #248's doubled Llama-3 system prompt among them.)
+`fallbacks.rs` supplies a family-appropriate format for a model whose template
+cannot be run; `tojson.rs` is our own `tojson` (key order kept, as
+`preserve_order` keeps it everywhere else).
 
-It implements the subset real templates use, not Jinja. What it does NOT
-implement must FAIL — `apply_chat_template` returns `None` and the caller falls
-back by model name — rather than render approximately, because a prompt that is
-nearly right is simply a wrong prompt with no error attached:
+- **`apply_chat_template` returns `None` rather than render approximately** —
+  the caller then falls back by model name. A prompt that is nearly right is a
+  wrong prompt with no error attached.
+- **`strftime_now` and `raise_exception` are provided.** Llama-3.x templates
+  guard on `strftime_now` and otherwise fall back to a date hardcoded when the
+  model shipped; Gemma and Mistral say "no system turn" through
+  `raise_exception`, and `fold_system_into_first_user` retries those with the
+  system text moved into the first user turn.
+- **The template is peer-supplied GGUF metadata and a program**: its source is
+  capped (`MAX_TEMPLATE_BYTES`), its run is metered (`TEMPLATE_FUEL`) and its
+  output capped (`MAX_TEMPLATE_OUTPUT`).
+- `build_prompt_with_model` is the choke point: it checks the render kept the
+  last question (`render_kept_the_last_question`) and opens the model's turn when
+  a template closed it (`open_the_models_turn_if_the_prompt_closed_it`).
 
-- **`{% set x = messages[1:] %}` binds a slice, and the offset is honoured.**
-  Templates slice precisely to drop a message they have already placed by hand;
-  ignoring the offset renders that message TWICE. Every Llama-3 system prompt
-  was duplicated for exactly this reason (gotcha #248). A FILTER we do not
-  implement (`| reverse`) is applied as identity, which is a harmless superset —
-  the distinction between ignoring a refinement and ignoring a removal is the
-  whole point.
-- **`messages[0]['content']` indexes one message** and must not be mistaken for
-  a binding to the list, or the expression is aliased instead of evaluated.
-- **Comments obey trim markers.** `{#- … #}` drops its surrounding whitespace;
-  skipping only the body leaves a blank line in the model's input.
-- **`strftime_now` is provided.** Llama-3.x templates guard on it and fall back
-  to a date hardcoded when the model shipped, so reporting it undefined told
-  every Llama-3 model it was 26 July 2024.
-- Output is capped (`MAX_TEMPLATE_OUTPUT`) and recursion bounded
-  (`MAX_TEMPLATE_DEPTH`): the template is peer-supplied GGUF metadata.
-
-The integration guard is
-`the_official_llama3_template_renders_exactly_as_jinja2_does`, which renders the
-real shipped template against the exact text jinja2 produces for it. Expected
-strings are taken FROM jinja2 rather than derived from this evaluator.
+The integration guards render real shipped templates against the exact text
+jinja2 produces for them —
+`the_official_llama3_template_renders_exactly_as_jinja2_does` and
+`the_official_qwen3_template_renders_exactly_as_jinja2_does`. Expected strings are
+taken FROM jinja2, never derived from this renderer. Rules:
+`.claude/rules/arch-api-surfaces.md`.
 
 ### Tensor Wire Format
 
@@ -1289,7 +1291,7 @@ the rest, including models far smaller than its free graphics memory. Guard:
 Until v0.3.130 this cache carried its own VRAM budget that evicted entries *and*
 killed their workers — a second accountant with a smaller estimate, a weaker
 in-flight oracle and no idle floor. See gotcha #402 and
-`.claude/rules/architecture.md`.
+`.claude/rules/arch-worker-memory.md`.
 
 **How long a model keeps the card** (`VRAM_MAKE_ROOM_MIN_IDLE_SECS_DEFAULT`, 5 s
 since v0.3.131) protects a model in active use, not against thrash: at the
@@ -2726,9 +2728,10 @@ inherits the stamp with no author action. Only events carrying non-empty text
 count, so a zero-token response reports no TTFT.
 
 **Cost.** Phase boundaries only, plus one relaxed atomic load per token.
-`.claude/rules` forbids hot-path overhead in `pipeline.rs`,
-`split/executor.rs::forward` and `forward_through_segments`; a `Vec<SegmentTrace>`
-allocated once per *request* is inside budget, per-token work is not.
+The per-token path — `inference/pipeline/`, `split/executor.rs::forward` and
+`forward_through_segments` — carries no tracing work beyond that load; a
+`Vec<SegmentTrace>` allocated once per *request* is inside budget, per-token work
+is not.
 
 **Per-segment attribution.** `state.active_traces` maps request id → in-flight
 trace and has **exactly** the same lifetime as `active_pipelines` — inserted and

@@ -110,7 +110,7 @@ against README.md and the commit hook runs it when either changes (main went red
 
 ## Key Design Decisions
 
-- Config priority: CLI flags > env vars (SWARMLLM_ prefix) > config.toml > defaults. Provider API keys also loaded from `.env` file in data dir (standard names: `OPENAI_API_KEY`, etc.)
+- Config priority: CLI flags > seven named `SWARMLLM_*` env vars (no generic `<SECTION>_<KEY>` rule, #722) > config.toml > defaults. Provider API keys also loaded from `.env` file in data dir (standard names: `OPENAI_API_KEY`, etc.)
 - Data dir: `~/.local/share/swarmllm/` (Linux), `~/Library/Application Support/swarmllm/` (macOS), `%APPDATA%\swarmllm\` (Windows)
 - Port layout: HTTP API on TCP:port, P2P TCP on port+10 (Noise+Yamux), P2P QUIC on UDP:port
 - Credit transactions require dual Ed25519 signatures (serving node + requesting node)

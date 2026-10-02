@@ -43,7 +43,7 @@ pub(super) struct SplitLoadOptions<'a> {
     /// whatever `device` is, every layer goes there.
     ///
     /// The count is decided by `ModelProcessPool`, never here — graphics memory
-    /// has one owner (`.claude/rules/architecture.md`), and a loader that sized
+    /// has one owner (`.claude/rules/arch-worker-memory.md`), and a loader that sized
     /// its own placement would be the second accountant that #401/#402 were
     /// about. This obeys a number; it does not choose one.
     pub gpu_layers: Option<usize>,

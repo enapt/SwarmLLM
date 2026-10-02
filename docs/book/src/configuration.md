@@ -7,7 +7,11 @@ SwarmLLM works out of the box with sensible defaults. This section covers custom
 Settings are read from four sources, in order of priority:
 
 1. **Command-line flags** (highest) — e.g., `--port 9000`
-2. **Environment variables** — e.g., `SWARMLLM_NODE_LISTEN_PORT=9000`
+2. **Environment variables** — seven, by name: `SWARMLLM_NODE_DATA_DIR`,
+   `SWARMLLM_NODE_LISTEN_PORT`, `SWARMLLM_LOGGING_LEVEL`, `SWARMLLM_API_KEY`,
+   `SWARMLLM_NETWORK_BOOTSTRAP_PEERS`, `SWARMLLM_INFERENCE_MODEL_PATH` and
+   `SWARMLLM_INFERENCE_GPU_LAYERS`. There is no general
+   `SWARMLLM_<SECTION>_<KEY>` rule — any other setting goes in `config.toml`.
 3. **Config file** — `config.toml` in your data directory
 4. **Built-in defaults** (lowest)
 

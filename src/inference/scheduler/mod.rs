@@ -4283,7 +4283,8 @@ impl PipelineScheduler {
                     // and the fallback runs precisely when the model is awkward
                     // enough for parallax to give up — so the guard was absent
                     // exactly where it was needed. Same shape as the prefill
-                    // budget in `.claude/rules/architecture.md`: enforced on the
+                    // budget in `docs/invariants/scheduling.md` § "The units
+                    // decide whether a forward is a prefill": enforced on the
                     // sophisticated path, missing from the crude one beneath it.
                     //
                     // `None` means UNKNOWN and must never exclude — an

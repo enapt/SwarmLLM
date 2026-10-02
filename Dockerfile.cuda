@@ -145,7 +145,8 @@ ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
 ENV SWARMLLM_NODE_DATA_DIR=/data
 ENV SWARMLLM_NODE_LISTEN_PORT=8800
 ENV SWARMLLM_LOGGING_LEVEL=info
-ENV SWARMLLM_UI_OPEN_BROWSER_ON_START=false
+# Only these named variables are read (src/config/mod.rs); SWARMLLM_<SECTION>_<KEY>
+# is NOT a generic override. Set anything else in /data/config.toml.
 
 # Expose ports:
 #   8800/tcp  — HTTP API + admin dashboard

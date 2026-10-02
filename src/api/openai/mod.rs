@@ -896,7 +896,7 @@ pub async fn embeddings(
 /// Pull THIS node's peer id out of one of its own listen addresses.
 ///
 /// Every entry in `listen_multiaddrs` is terminated with `/p2p/<local peer id>`
-/// (see `.claude/rules/architecture.md`), so the id is the last such segment —
+/// (see `.claude/rules/arch-state-and-config.md`), so the id is the last such segment —
 /// **not the first**. A relay-circuit address carries two:
 ///
 /// ```text
@@ -966,7 +966,7 @@ pub async fn status(State(state): State<AppState>) -> Json<serde_json::Value> {
     // where getting it wrong means no other node can bootstrap.
     //
     // Taken from `listen_multiaddrs`, whose entries are each terminated with
-    // `/p2p/<local peer id>` (see `.claude/rules/architecture.md`), rather than
+    // `/p2p/<local peer id>` (see `.claude/rules/arch-state-and-config.md`), rather than
     // derived separately: two sources for one identity is how they come to
     // disagree. Absent rather than wrong when the swarm has not finished
     // binding and the list is still empty.
