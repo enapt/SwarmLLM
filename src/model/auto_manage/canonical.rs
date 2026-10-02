@@ -381,6 +381,18 @@ async fn settle(
         ) {
             return; // asked again next pass
         }
+        // And the manifest on disk, which the worker loads its tensor table
+        // from. The registry's copy can describe the canonical upload while the
+        // file beside the parts describes the one this node first downloaded:
+        // caught by the .220 gate (step 12k), where a dashboard download wrote
+        // its own manifest after the registry had adopted a peer's, and every
+        // tensor offset was off by the two headers' difference — "position … is
+        // in a missing region" on every request. (No earlier gotcha recorded a
+        // disk/registry manifest disagreement; #394 is the same words, another
+        // cause.)
+        if !ensure_manifest(state, model, &build).await {
+            return; // asked again next pass
+        }
         tracing::info!(model = %model, parts = held.len(), "DIAG: this node's parts are the canonical upload's");
         set_holding(state, model, Holding::Canonical);
         let _ = std::fs::remove_dir_all(staging_dir(state, model));
@@ -581,6 +593,61 @@ fn persist(state: &SharedState, manifest: &crate::types::ModelManifest, model_di
     if let Err(e) = manifest.save_to_dir(model_dir) {
         tracing::warn!(model = %manifest.id, error = %e, "Could not save the canonical manifest beside the parts");
     }
+}
+
+/// Make the manifest in the registry AND on disk describe the canonical
+/// upload, rebuilding it from the canonical header (hashing the parts held)
+/// when either does not. Returns whether both now do.
+async fn ensure_manifest(
+    state: &Arc<SharedState>,
+    model: &ModelId,
+    build: &CanonicalBuild,
+) -> bool {
+    let model_dir = state.model_dir(&model.0);
+    let on_disk = crate::types::ModelManifest::load_from_dir(&model_dir).ok();
+    let registered = state.model_registry.get_manifest(model);
+    if on_disk.as_ref().is_some_and(|m| build.describes(m))
+        && registered.as_ref().is_some_and(|m| build.describes(m))
+    {
+        return true;
+    }
+    if state.model_is_in_use(model) {
+        return false;
+    }
+    let header = model_dir.join(crate::model::shard::HEADER_FILENAME);
+    let rebuilt = {
+        let st = state.clone();
+        let m = model.clone();
+        let b = build.clone();
+        tokio::task::spawn_blocking(move || canonical_manifest(&st, &m, &b, &header)).await
+    };
+    let manifest = match rebuilt {
+        Ok(Ok(m)) => m.0,
+        Ok(Err(e)) => {
+            tracing::warn!(model = %model, error = %e, "Could not rebuild this model's manifest from the canonical header");
+            return false;
+        }
+        Err(e) => {
+            tracing::warn!(model = %model, error = %e, "Rebuilding this model's manifest failed");
+            return false;
+        }
+    };
+    state.evict_and_unload(model).await;
+    state.forget_origin_verified_for_model(model);
+    state.model_registry.remove_manifest(model);
+    state.model_registry.register_manifest(manifest.clone());
+    persist(state, &manifest, &model_dir);
+    state.gguf_meta.remove(model);
+    state.standalone_tokenizers.remove(model);
+    state.models.hf_probe_cache.remove(model);
+    tracing::warn!(
+        model = %model,
+        disk_bytes = on_disk.as_ref().map(|m| m.total_size_bytes),
+        repo = %build.source.repo_id,
+        "Rewrote this model's manifest — the one beside its parts described another upload"
+    );
+    crate::model::auto_manage::spawn_check_and_load(state.clone(), model.clone());
+    true
 }
 
 /// Parts that ARE the canonical upload's can still sit beside another

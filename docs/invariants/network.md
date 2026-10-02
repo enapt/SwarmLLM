@@ -2737,6 +2737,18 @@ came out byte-identical, and a 3-segment split across the two answered. The run 
 caught a pass replacing the manifest while A's own dashboard download was between its
 header and first part — `settle` now waits while a download of the model is running.
 
+**The .220 gate (step 12k) found a fourth place two uploads can meet: the
+manifest ON DISK.** A dashboard download of upload X had its registry manifest
+replaced by a peer's manifest of Y before any part arrived (no origin knowledge
+yet, last-writer-wins), then wrote X's manifest to disk; X's and Y's Q8_0 tensor
+bytes were identical, so the part check passed and the header was replaced —
+and the worker, loading the disk manifest, read every tensor 3,808 bytes off
+("position … is in a missing region (total_size=<X's size>)"). `ensure_manifest`
+now makes the registry AND the disk manifest describe the canonical upload
+(rebuilt from its header when not), and `CanonicalBuild::describes` also compares
+each part's first-tensor offset where a manifest carries its table. Verified on
+the same race: "Rewrote this model's manifest", then "Paris" whole and split.
+
 **Known limits (FUTURE_WORK #151):** a switch fetches from HuggingFace, not from
 canonical holders over P2P; a coordinator holding none of a model routes on a
 manifest with placeholder hashes until a holder's gossip fills them, so for that

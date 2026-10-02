@@ -284,6 +284,16 @@ impl CanonicalBuild {
                 self.shard_sizes
                     .get(s.index as usize)
                     .is_some_and(|&size| size == s.size_bytes)
+                    // Where the manifest carries its tensor table, each part's
+                    // first tensor must sit where this upload puts it: that
+                    // offset follows from the header, and a table built from
+                    // another upload's header sends every read to the wrong
+                    // place (the .220 gate, step 12k).
+                    && s.tensors.first().is_none_or(|t| {
+                        self.shard_first_tensor
+                            .get(s.index as usize)
+                            .is_some_and(|&(offset, _)| offset == t.gguf_offset)
+                    })
             })
     }
 
@@ -517,6 +527,33 @@ mod tests {
         assert!(!b.describes(&manifest_shaped(1_001, &[300, 300, 300])));
         assert!(!b.describes(&manifest_shaped(1_000, &[300, 301, 299])));
         assert!(!b.describes(&manifest_shaped(1_000, &[450, 450])));
+    }
+
+    /// A manifest the same shape as the upload but with a tensor table built
+    /// from another upload's header is NOT this upload: every offset in it is
+    /// wrong. Without the offset check it passed, and the worker read every
+    /// tensor from the wrong place (the .220 gate, step 12k).
+    #[test]
+    fn a_tensor_table_from_another_header_is_another_upload() {
+        let b = build();
+        let with_first_tensor_at = |offset: u64| {
+            let mut m = manifest_shaped(1_000, &[300, 300, 300]);
+            for (i, s) in m.shards.iter_mut().enumerate() {
+                s.tensors.push(crate::types::ShardTensorEntry {
+                    name: format!("blk.{i}.attn_q.weight"),
+                    gguf_offset: if i == 1 {
+                        offset
+                    } else {
+                        b.shard_first_tensor[i].0
+                    },
+                    shard_offset: 0,
+                    size: 300,
+                });
+            }
+            m
+        };
+        assert!(b.describes(&with_first_tensor_at(b.shard_first_tensor[1].0)));
+        assert!(!b.describes(&with_first_tensor_at(b.shard_first_tensor[1].0 + 3_808)));
     }
 
     #[test]
