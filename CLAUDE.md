@@ -154,12 +154,12 @@ UNDETERMINED and never a fix — use it BEFORE blaming a change, especially your
 
 ## Status
 
-**v0.3.218-alpha is the live release (published 2026-10-01 14:54 UTC), signed, on both nodes.** It ends the Windows
-updater saga of the day: GPU builds now find their update (#768, the `-cuda.exe` alias is published for builds up to
-.216), and an updated Windows node keeps RUNNING (#769 — the replacement had inherited the old QUIC socket; it now starts
-without inherited handles and, when started by an older version, relaunches itself once). Proven by a REAL self-update
-.204 → .218 of both Windows builds after publishing. (.217 shipped a restart fix that did not work — corrected publicly.)
-Gate records: `memory/release_gate.md`; queue: `memory/next_up.md`; history: `memory/round_history.md`.
+**v0.3.221-alpha is the live release (published 2026-10-02 11:15 UTC), signed, on both nodes** (.219/.220 never
+published). ⛔ **Every node holds the SAME upload of a model** (`model::canonical`, #151): one ranking of uploads,
+checked on HuggingFace anonymously; a node holding another heals itself (`auto_manage::canonical`). Registry, disk
+manifest, header and parts must ALL describe one upload (#776). Also: the delegated split (#143), chained checks,
+per-(peer, model) outlier ejection. Gate records: `memory/release_gate.md`; queue: `memory/next_up.md`; history:
+`memory/round_history.md`.
 ⚠ .216's streamed checks fire only on [ours…, ONE remote tail]; the default "both ends here"
 split runs rounds (FUTURE_WORK #152). **Why split decode is slow → `docs/plans/faster_than_local.md`,
 `docs/plans/split_speculation.md`.** ⛔ **No design may need a user to hold the whole model, not even a low-bit copy**
