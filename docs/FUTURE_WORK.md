@@ -34,9 +34,13 @@ its entry; read the entry's BODY before planning from it (gotcha #654).
     typed refusal, never prose — #295).
 11. A real TWO-MACHINE check of the delegated split (#143; the rig only ever had one box).
 12. **#160** — offline-mode nodes never verify or switch their copies.
+13. **#164** — .deb installs from 2026-07-28 to 2026-10-02 run with batching off, silently (the
+    template pinned `max_batch_size = 1`); check the Proxmox node, then decide how to reach the rest.
+14. **#163** — the .rpm never creates the user its service runs as, so the service cannot start
+    (the install page gives the `useradd` step meanwhile).
 
 **P3 — process**
-13. **#162** — cloning a release gate loses its helper scripts (v0.3.220 ran five steps late).
+15. **#162** — cloning a release gate loses its helper scripts (v0.3.220 ran five steps late).
 
 ## Open bugs — triage index (re-verified 2026-09-14, after v0.3.180-alpha)
 
@@ -64,6 +68,7 @@ and in the two "2026-09-14" headings below; read the row, not just the number.
 
 | # | Item | Status |
 |---|---|---|
+| 164 | **.deb installs made between 2026-07-28 and 2026-10-02 run with batching OFF** — since b29f183a (2026-07-28) `packaging/deb/postinst` copies `/etc/swarmllm/default.toml` into a NEW install's `/var/lib/swarmllm/config.toml`, and that template said `max_batch_size = 1` from March until 2026-10-02, so those installs kept batching off when f82e4199 (2026-08-21) made it the default (8, "about 40% more work from the same card"). Silent: no error, just less throughput. The template is fixed (`aa1f75c8`) for new installs; existing ones keep the pinned 1 | **OPEN, decision + one node** — (1) the project's own Proxmox node is a .deb install: read its `/var/lib/swarmllm/config.toml` at the next deploy and delete a `max_batch_size = 1` nobody chose. (2) For other .deb users, NOT added to `config::migrate_superseded_defaults`: its rule admits only a value nobody could have chosen on purpose, and `max_batch_size = 1` is a documented way to turn batching off. Options: a release note telling .deb users to delete the line, or a migration keyed on the file still matching the old template byte-for-byte in that section (proof it was never edited). |
 | 163 | **The .rpm installs a service whose user it never creates** — `packaging/swarmllm.service` runs as `User=swarmllm`; the .deb's `postinst` runs `useradd`, the .rpm (`[package.metadata.generate-rpm]` in Cargo.toml) has no scriptlets, so `systemctl enable --now swarmllm` after `rpm -i` cannot start the service | **OPEN, documented 2026-10-02** — `docs/book/src/getting-started/installation.md` now gives the `useradd` step. Fix: a `pre_install_script` (cargo-generate-rpm) doing the same `getent passwd swarmllm \|\| useradd --system …` as `postinst`, verified by installing the built .rpm in a Fedora/Rocky container and starting the unit. Found by a docs-against-code review, not by a field report. |
 | 162 | **Cloning a release gate's directory loses its helper scripts** — `gate220.sh` was made from `gate219.sh` with paths rewritten; `kv104.sh`, `lora_gate.sh`, `kv121.sh`, `guest.sh`, `repro767.sh`, `probe.py` live beside it and were not copied, so steps 11, 12, 12b, 12e2 and 12f printed `No such file` and moved on — the gate exited 0 | **OPEN, process** — they ran in a supplement (`~/swarmllm-gate-0220/gate220_supp.sh`, all PASS). Fix: a `new_gate.sh <from> <to>` that copies every `$G/*.sh|py` the script references and fails if any is missing; and a gate step that cannot find its helper must FAIL, not print. Also: `safety_start` still names the old gate (`gate219`) in the clone. |
 | 161 | **Outlier ejection does not count a peer that loses the conversation mid-reply** — the bf7b3263 field report's 4th failure ("this computer no longer holds the conversation") arrives as a peer REFUSAL, which `segment_delivery_verdict` correctly scores as an intact delivery | **OPEN** — `daemon::state::peer_outliers` counts timeouts, abandoned forwards and silent whole-model replies only. Needs a typed refusal (`ForwardRefusal::ConversationLost` beside `Undecryptable`, gated at the sender) so the coordinator can count it without matching prose (#295's trap). |

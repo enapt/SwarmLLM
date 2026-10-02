@@ -179,9 +179,8 @@ against README.md and the commit hook runs it when either changes (main went red
   one and see it return first. Agent teams (~7x tokens) are off for this project
   (`.claude/settings.json` sets `0` over the user-level `1`); never give a one-shot
   agent a `name` — named agents run as teammates. Workflows only on explicit opt-in.
-- `/clear` between unrelated tasks; `/compact` is itself a large request.
-  `/usage` attributes plan usage to skills and subagents; `/doctor prompt-audit`
-  checks these instruction files for stale references and contradictions.
+- `/clear` between tasks; `/compact` is itself a large request. `/usage` attributes plan
+  usage; `/doctor prompt-audit` checks these instruction files for stale references.
 
 ## Reference Documents
 

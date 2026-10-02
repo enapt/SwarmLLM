@@ -188,7 +188,7 @@ single-character early return and the output walk — and **both were
 
 ## A card/processor split is placed in EVERY per-layer loop, and offered only where the loader makes it (2026-09-25)
 
-**`split::hybrid::LayerPlacement` says where each layer goes; every per-layer loop in `split/loader/` shadows `device`, `cos`, `sin` from it on its first line.** `hybrid::layers_on_device` is the KV budget's one count; `hybrid::arch_supports_hybrid` is an allowlist the pool reads too (`process_pool::split_for_card`). Guard: `every_layer_loop_in_the_loader_places_its_layer`. Check with `swarmllm test-split --gpu-layers N` + `score_ids.py`.
+**`split::hybrid::LayerPlacement` says where each layer goes; every per-layer loop in `split/loader/` shadows `device`, `cos`, `sin` from it on its first line.** `hybrid::layers_on_device` is the KV budget's one count; `hybrid::arch_supports_hybrid` is an allowlist the pool reads too (`process_pool::split_for_card`). Guard: `every_layer_loop_in_the_loader_places_its_layer`. Check with `swarmllm test-split --gpu-layers N` + `~/swarmllm-ref/qwen3moe/score_ids.py`.
 
 → `docs/invariants/inference.md` § "A card/processor split is placed in every per-layer loop"
 
