@@ -87,6 +87,9 @@ swarmllm/
 │                 research_gate_probe.py — plants one violation per Bash mutation form
 │                 against `.claude/scripts/research-gate.sh` and reports which are caught;
 │                 check_ci_gate.sh — branch protection vs the jobs CI produces;
+│                 docs_drift.py — reports docs drifted from the code: cited names that no
+│                 longer exist, wrong module paths, DIAG rows whose level/fields differ
+│                 from the tracing call, § pointers to missing headings (the sweep runs it);
 │                 decode_bound_by.py — is decode bound by the GPU or by one CPU thread;
 │                 decode_submissions.sh — GPU submissions per decoded token, via nsys;
 │                 kernel_count_ab.sh — A/B two arms of ONE binary by per-kernel launch

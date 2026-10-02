@@ -23,6 +23,14 @@ YOU compute each agent's file list and paste it into its prompt — the agents c
 (line count of the sweep log ÷ 10) mod file count; agents 1 and 3 take `find src/ -name '*.rs' | sort` from
 that offset, agents 2 and 4 `find frontend/js/ -name '*.js' | sort`, wrapping around.
 
+## Docs drift — run it yourself first (seconds, no agent)
+
+`python3 examples/docs_drift.py --memory` checks mechanically what agents read past: every backticked name a
+doc cites still exists, a `module::path::item` is defined under that path, each DIAGNOSTICS DIAG row's level
+and fields match its `tracing` call, every `file.md § "Heading"` resolves. It is a report — read each line
+(proposals and other projects' names are legitimately absent), fix the real ones, log the rest `wontfix`.
+Agent 4 then spends its budget on prose and numbers, not names.
+
 ## Agents (launch all four in one message, `model: sonnet`)
 
 1. **Dead code + stale references** — pub items with no external caller, unreachable arms, comments naming

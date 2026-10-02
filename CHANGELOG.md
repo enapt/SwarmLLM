@@ -19,6 +19,10 @@ package pointed ES-module imports at a file the build never produced, so
 `import { SwarmLLMClient } from 'swarmllm'` failed; `require` worked. Both
 work now.
 
+**The lost-connection banner no longer says "retrying every 3 seconds".** The
+dashboard reconnects after 3 s and then waits longer each time, up to 30 s; the
+banner now just says it is reconnecting automatically, in every language.
+
 **Install guide (Fedora/RHEL):** the `.rpm` runs its service as a `swarmllm`
 user that the package does not create, so the service could not start. The
 install page gives the one command that creates it, until the package does.
