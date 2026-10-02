@@ -140,7 +140,10 @@ at the temperatures clients actually send. Measurement: `~/swarmllm-ref/spec/`
 ## 4. The order of work
 
 Status 2026-10-02: items 1, 2 and 6 have shipped; 3-5 and 7 are open (the
-persistent stream is still off by default).
+persistent stream is still off by default). `docs/FUTURE_WORK.md` carries them: item 3 is #137,
+item 4 is #138, item 5 is #10, item 7 is #133 (with V1Lazy, request-response is as fast, so
+there is no speed reason to default the stream on). The shadow of §3.5 is decided against as a
+default (#144, § "Decided"): no design may need a user to hold a whole model, even at low bits.
 
 1. ✅ **Ship v0.3.211**: the card/processor batched-forward fix found at the .210
    gate (every concurrent request to a model split between card and processor

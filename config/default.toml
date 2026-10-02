@@ -61,12 +61,12 @@ enable_upnp = true                 # UPnP/IGD gateway port-mapping — auto-open
                                    #   external_address = "/ip4/203.0.113.5/tcp/8810"
                                    # Flows into identify, the DHT, and every invite code this node mints.
 enable_encryption = true           # Encrypts tensor forwards in transit. Not end-to-end: the node computing a segment decrypts what it computes on.
-                                   # Note: speculative / DSD / remote-generate
-                                   # fast paths currently bypass the per-tensor
-                                   # ChaCha session layer (deferred — see
-                                   # docs/ARCHITECTURE.md § "Distributed
-                                   # inference fast paths"). Standard pipeline
-                                   # encryption is unaffected.
+                                   # Speculative and guess-check forwards are
+                                   # sealed the same way. A whole-model hand-off
+                                   # sends no tensors: its request travels inside
+                                   # the connection's own transport encryption
+                                   # (Noise on TCP, TLS on QUIC), like every
+                                   # other message.
 enable_quic = true                 # QUIC transport (set false on WSL2 — QUIC wins connection race over TCP)
 # listen_address = "0.0.0.0"      # Bind address for P2P (set "127.0.0.1" on WSL2)
 # Put this node on its own announcement channels, separate from the public
@@ -96,7 +96,7 @@ privacy_mode = false           # When true, user prompts are NOT written to disk
                                # over Ethernet the 2 round trips per layer cost more than the compute they split,
                                # and SwarmLLM's default pipeline parallelism moves one activation per SEGMENT instead.
                                # Only worth enabling for a large model on a very fast LAN, after measuring.
-# tp_max_latency_ms = 10       # Max peer RTT to admit into a tensor-parallel group (only used when tensor_parallel = true)
+# tp_max_latency_ms = 5        # Max peer RTT to admit into a tensor-parallel group (only used when tensor_parallel = true)
 # share_prefix_cache_with_peers = false
                                # Offer this node's prompt prefix cache to other nodes. OFF by default.
                                # Turning it on publishes, to the whole swarm, hashes chained over the

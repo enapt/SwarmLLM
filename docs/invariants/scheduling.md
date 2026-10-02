@@ -365,8 +365,8 @@ decides every delegation. An overestimate here biases the whole swarm toward kee
 work local, which is the opposite of what pipeline parallelism is for. Do NOT tune the
 constant before establishing which half is wrong — the forward-pass count, or the
 per-token `2 * latency` — and note `ack_srtt_ms` is already measured on real forwards
-where `latency_ms` is a ping. See `docs/FUTURE_WORK.md` § "The routing cost model's
-network term overestimates a boomerang".
+where `latency_ms` is a ping. See `docs/FUTURE_WORK.md` #3 ("The routing cost model's
+network term overestimates a boomerang").
 
 **From the rules file (moved 2026-10-02):**
 
@@ -438,7 +438,9 @@ Four things a change here must keep.
   rejects. It is now `source_ok(v, apply_trust)`.
 - **It does not apply to a middle segment.** Under `encrypted_pipeline` the
   source is this node by construction, and a peer running middle layers sees
-  encrypted activations, never the prompt — so narrowing who may take the middle
+  hidden states, never the token ids (structural, not cryptographic: the boomerang
+  keeps the prompt's text on this machine, it does not hide the activations from
+  the peer computing them) — so narrowing who may take the middle
   would cost the boomerang its whole point.
 - **It is about CONFIDENTIALITY, not speed or reach.** `DELEGATE_MAX_LATENCY_MS`
   and the reach tier stay in the gate; the search prices those itself.
@@ -841,7 +843,7 @@ fast-fail sweep (`fail_tensor_forward`), a peer whose connection closed and whos
 re-dial failed (`fail_layer_results_awaiting`), and a closed pipeline stream. All
 three complete the oneshot, so they land in the same `Ok(Ok(result))` arm as a
 peer's own refusal, and the arm scored every one of them as an intact delivery.
-Since the ACK deadline is 10-90 s inside a segment budget that runs to 300 s,
+Since the ACK deadline is 10-90 s inside a segment budget that ran to 300 s (the ceiling is now `SEGMENT_TIMEOUT_MAX_SECS` = 600 s),
 that was the NORMAL way a dead link was observed: the peer-reliability term
 shipped in v0.3.164 credited a peer whose link had died with a perfect delivery,
 and the only thing that could ever score against a peer was the local compute
@@ -884,7 +886,7 @@ resolve it is worthless while only tests can reach it.
 healthy TCP path shows up as retransmission LATENCY, not delivery failure — the
 forward completes, slowly. So this term catches links that break, not links that
 are merely bad, and it is not the fix for the netem case in issue #21. That needs
-per-peer goodput (`docs/FUTURE_WORK.md`). Do not weight samples by payload size
+per-peer goodput (built since: `GoodputEstimator`, in the next section). Do not weight samples by payload size
 as a substitute: the ACK estimator already declines transfer-dominated samples
 (`ACK_OBSERVE_MAX_BYTES`) precisely because they measure the payload rather than
 the peer.
@@ -964,7 +966,7 @@ unmeasured path and a fast one are indistinguishable from the figure alone, and
 that ambiguity is what hid #495 being inert.
 
 **A test for a max filter must cross a window boundary.** `rotate_for_test`
-exists because the window is five minutes and the app-limited rule governs only
+exists because each half-window is five minutes (`GOODPUT_WINDOW_HALF`) and the app-limited rule governs only
 what happens across rotations — the first version of its test passed with the
 rule disabled.
 
@@ -1207,7 +1209,9 @@ change here by P(the reference's token), never by confidence or entropy — and
 never by raw-logit cosine, which shares a large frequency-prior component and
 scored −0.076 on a case where the argmax agreed.
 
-**Still open** (`docs/FUTURE_WORK.md` items 17 and 18): mid-reply failover now
+**Still open** (`docs/FUTURE_WORK.md` #17 and #18; since 2026-09-09 the replay half
+above ships and only a composite cover, a chained middle and a tensor-parallel
+segment remain unrestorable): mid-reply failover now
 does not happen at all. Making it WORK needs the boundary activations retained
 for segments that have a standby — and that, not more standbys, is what a
 multi-node standby would need first.
@@ -2298,8 +2302,8 @@ let the module's name imply more.
 ### What is still open
 
 The bar this trust feeds is `DELEGATE_MIN_TRUST`, which equals `DEFAULT_TRUST` —
-the score an unknown peer starts on. See `docs/FUTURE_WORK.md` § "The
-plaintext-prompt trust bar sits exactly at the score an unknown peer starts on".
+the score an unknown peer starts on. See `docs/FUTURE_WORK.md` #30 ("The
+plaintext-prompt trust bar sits exactly at the score an unknown peer starts on").
 
 **From the rules file (moved 2026-10-02):**
 
@@ -2409,7 +2413,7 @@ evidence and the instrumentation that localises it.
 - `the_refusal_trailer_is_the_last_thing_in_the_frame` — what makes the
   trailer safe for older decoders.
 - **Not covered: the opt-in persistent pipeline stream**, whose receiver drops
-  a forward it cannot open without answering at all → FUTURE_WORK #105.
+  a forward it cannot open without answering at all → FUTURE_WORK #105 (since closed, v0.3.205).
 
 **From the rules file (moved 2026-10-02):**
 
@@ -3031,7 +3035,7 @@ answer the question a reader will ask of it, print the answer, not the count.
 `queue_notify.notified()`. **Every code path that calls
 `active_count.fetch_sub(1)` on completion MUST also call
 `queue_notify.notify_one()`** — otherwise queued requests beyond the
-per-tier cap (Bronze=¼ of `max_concurrent_requests`) sit indefinitely
+per-tier cap (Bronze=¼ of `max_concurrent_requests`; while credits are dormant every request is `DORMANT_TIER` = Silver, i.e. ½) sit indefinitely
 until a new Submit arrives. Four enforced sites:
 
 - `ActivePipelineGuard::drop` (panic path) in `router/mod.rs`

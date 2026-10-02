@@ -111,7 +111,7 @@ For large requests (above configurable threshold), credits are held in escrow:
 ## Device Pool Credit Forwarding
 
 When devices are linked in a pool, member devices forward their earnings to the owner:
-- Credit split configurable: 0-50% kept by member, rest forwarded
+- Credit split configurable: 0-100% kept by member (default 0), the rest forwarded
 - Dual-signed `PoolCreditForward` (member signature + owner co-signature)
 - Forwarded amount deducted from member balance before persisting
 - Owner's `PoolManager` validates and applies credits atomically

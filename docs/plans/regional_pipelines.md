@@ -4,6 +4,15 @@
 swarm.** Numbers and traps: `memory/perf_baseline_0920_post192.md`, gotchas
 #656-#661.
 
+> **Status 2026-10-02:** Stages 0, 0b and 1 are done (Stage 1 in v0.3.193). Stage 2's coordinates are
+> published but nothing prices a peer-to-peer hop with them (`docs/FUTURE_WORK.md` #192, PARTIAL; they
+> may exclude the far half but must not order the near half). Stage 3 (regional chain-completeness)
+> is not built. Stage 4 became `split_speculation.md`: guessing ahead has been on by default since
+> v0.3.213 and the continuous stream since v0.3.216 (#134, #149); its item 3's gates are open
+> (`speculative_decoding` and `decentralized_spec_decoding` default on, and DSD no longer needs a
+> `draft_model_path` — the engine drafter chooses among held models). Stage 5's coordinator-in-the-loop
+> question is answered by the delegated split (#143, shipped v0.3.219-.221).
+
 ## The goal, stated as a number
 
 Published results for a 7B over a real WAN: **8.7-9.3 tok/s at ~80 ms RTT**,

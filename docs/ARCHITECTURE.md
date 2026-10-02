@@ -7,7 +7,7 @@ Cargo workspace with three crates:
 | Crate | Path | Purpose |
 |-------|------|---------|
 | `swarmllm` | `/` (root) | Main binary — daemon, networking, inference, API, all subsystems |
-| `swarmllm-types` | `crates/swarmllm-types/` | Shared data types (90 types: NodeId, ModelManifest, SwarmMessage, etc.) |
+| `swarmllm-types` | `crates/swarmllm-types/` | Shared data types (100+ types: NodeId, ModelManifest, SwarmMessage, etc.) |
 | `swarmllm-frontend` | `crates/swarmllm-frontend/` | Frontend asset serving (embedded in release, disk-based in dev mode) |
 
 Extension traits (`ModelManifestExt`, `NicknameRecordExt`, `BlindedPoolInvitationExt`) provide methods for types in `swarmllm-types` that depend on main crate functionality (filesystem, crypto, blake3).
@@ -160,8 +160,8 @@ Single Rust binary, three simultaneous functions:
 │  │  │  credit_balance, pool_state, pool_registry     │ │  │
 │  │  │  trust_manager, escrow_manager, anti_gaming    │ │  │
 │  │  │  foreign_pool_catalog (R134)                   │ │  │
-│  │  │  allow_cross_pool_inference (R137)             │ │  │
-│  │  │  share_model_catalog (R137)                    │ │  │
+│  │  │  (cross-pool inference + catalog sharing       │ │  │
+│  │  │   are `pool.*` settings, read via cfg())       │ │  │
 │  │  └────────────────────────────────────────────────┘ │  │
 │  │  ┌─ ModelMgmt (state.models) ────────────────────┐ │  │
 │  │  │  acquisition_progress, hf_sources              │ │  │
@@ -344,8 +344,9 @@ SwarmLLM uses a 5-layer zero-config discovery stack. Each layer is independent �
 │                                                             │
 │  Anti-Gaming: Subnet Clustering Detection                    │
 │    Tracks /24 IPv4 prefixes. >5 nodes per /24 → 25%        │
-│    spot-check rate (up from 5%). SubnetClustering trust     │
-│    event penalty (-0.03).                                   │
+│    spot-check rate (up from 5%; no effect while credits are │
+│    dormant). The SubnetClustering trust event (-0.03) is     │
+│    defined but applied nowhere.                             │
 │                                                             │
 │  Gossip Network ID: "swarmllm-mainnet-v1" (fixed)           │
 │    gossip_network_id separates TOPICS, not routing — the     │
@@ -409,7 +410,7 @@ libp2p Swarm
 │   (a signed `/swarm/node/…` record found by a query is still verified and read — see § DHT Records)
 │
 ├── GossipSub (pub/sub, mesh_n/mesh_n_low/mesh_n_high/mesh_outbound_min auto-scale with known_peers: 2/1/4/1 at <10 peers up to 8/6/16/4 at 10k+)
-│   ├── swarm/models/{model_id}       → ShardAnnounce, capacity
+│   ├── swarm/models                  → ShardAnnounce, capacity, manifests (ONE topic for every model; a custom `gossip_network_id` appends `/<id>`)
 │   ├── swarm/credits                 → CreditGossip
 │   ├── swarm/health                  → trust summaries
 │   ├── swarm/identity                → NicknameRecord (signed, timestamp-checked)
@@ -538,7 +539,9 @@ without ever being able to read them.
   (`features::{RELAY, TENSOR_RELAY, PIPELINE_CHAIN, PIPELINE_CHAIN_V2,
   FORWARD_ACK, RESEND_TOKENS, NETWORK_COORDS, SESSION_KEY_CONFIRM,
   FORWARD_GENERATED_IDS, FORWARD_PRE_EMBEDDED, FORWARD_REFUSAL_REASON,
-  FORWARD_SAMPLING}`); a node only attempts a relayed send when
+  FORWARD_SAMPLING, RESULT_STEP, SPEC_WALK_AT_TAIL, COUPLED_SAMPLING,
+  STREAMED_VERIFY, STREAM_AS_ONE_WORK, DELEGATED_SPLIT, CHAINED_VERIFY}`, bits
+  0-18 — `features::ALL`); a node only attempts a relayed send when
   the *recipient* advertises the matching bit, so the protocol evolves additively
   with no flag-day. The relay is chosen only when there is no usable direct
   connection (`has_direct_connection` false — the circuit-only case); a real
@@ -942,7 +945,7 @@ assembly.
 **Who runs the decode loop.** The node that planned the request, with two
 exceptions, both one `RemoteGenerateRequest` that streams the reply back as
 `StreamingToken`s (`pipeline::remote_generate`): a plan that is ONE peer holding
-the whole model is handed to it (`eligible`), and since v0.3.219 a plan of
+the whole model is handed to it (`eligible`), and since v0.3.221 (prepared for .219, which was never published on its own) a plan of
 several segments NONE of which is this node's is handed to the holder of its
 first layers, which LEADS it among its own peers (`delegation_eligible`,
 `features::DELEGATED_SPLIT`, FUTURE_WORK #143). The delegate plans under
@@ -1038,6 +1041,8 @@ measured:
 | CPU | standard | standard (GQA takes the grouped no-copy path inside it) |
 | CUDA | flash | standard, for every head geometry |
 
+*(Since 2026-09-29 "standard" decode on either device first tries `inference::decode_attn` — a purpose-built one-position kernel over the KV cache, CPU and card (`kernels/decode_attn.cu`); `SWARMLLM_DECODE_ATTN=standard` forces the matmul path. The rules below describe the dispatch above it.)*
+
 **CPU decode is standard for every shape** (since c4cc3b16, 2026-08-16).
 `standard_attention` used to materialize the `repeat_kv` expansion every token —
 free when `n_head == n_kv_head`, growing with context otherwise — and that cost
@@ -1108,7 +1113,7 @@ where it ends.
 - `index_pos` travels through the wire protocol so all nodes apply correct RoPE positioning
 - Position tracking: `index_pos = prompt_token_count` after prefill, increments by 1 per decode step
 - KvCacheManager tracks sessions and wired to inference router for cache reuse
-- Causal masks cached with LRU eviction (max 16 entries) to prevent GPU memory leak
+- The causal mask of a prefill with no cached prefix is cached at its exact size (ONE entry, rebuilt on a size change); an offset mask is never cached — a pre-allocated `max_seq_len` mask handed out as strided views was removed (`split/executor.rs::mask`)
 - Abandoned cache entries cleaned up after 10 minutes
 - Sessions persisted across node restarts via redb, **stamped with the build
   that wrote them and discarded on a mismatch.** `cached_tokens` is a token
@@ -1124,7 +1129,7 @@ where it ends.
 Long prompts are split into chunks for overlapped prefill and decode:
 - Prevents head-of-line blocking from long-context requests
 - Decode steps for other requests can interleave between prefill chunks
-- Chunk size auto-tuned based on available VRAM
+- Chunk size is paced from measured ms-per-token while slots are shared, to land near `inference.prefill_target_ms` (default 200; `inference::prefill_pacer`, floor 8 tokens), capped by `inference.prefill_chunk_tokens` (default 128, a ceiling). A solo request is never paced
 
 ### Prefix-Cache KV Sharing (Cross-Node)
 
@@ -1256,7 +1261,7 @@ ModelProcessPool.forward()   ──socket──▶   runs forward passes / decod
 - `estimated_vram_mb` from shard file sizes on disk
 - The actual model weights live exclusively in the worker subprocess
 
-**Granularity**: one process per `ModelId` (not per shard). A single worker handles all layer ranges for one model, owns its own `KvCacheStore`, and processes requests sequentially — matching the prior `Mutex<SplitModel>` serialization. Individual shard load/unload is handled within the worker via `DaemonMsg::Unload`; the process only exits when all shards are released or `Shutdown` is received.
+**Granularity**: one process per `ModelId` (not per shard). A single worker handles all layer ranges for one model, owns its own `KvCacheStore`, and processes requests sequentially — matching the prior `Mutex<SplitModel>` serialization (`Forward`s still are; since Item 7, `inference.continuous_batching` — default ON — lets concurrent `Generate` requests share the worker's decode loop as slots, up to `max_concurrent_decode_batch` = 8, `inference/slot_table.rs`). Individual shard load/unload is handled within the worker via `DaemonMsg::Unload`; the process only exits when all shards are released or `Shutdown` is received.
 
 **Dashboard responsiveness**: since inference never runs on the main Tokio runtime, API and WebSocket handlers always get a fast response even under heavy inference load.
 
@@ -1648,11 +1653,14 @@ score = model_popularity × rarity_bonus × configured_bonus × vram_fitness
 When auto-manage is enabled and `prune_enabled = true`, the AutoShardManager also removes
 over-replicated shards to free VRAM and disk on smaller nodes.
 
-**Dynamic Target Replicas** — popularity-scaled based on per-model request counts (rolling 10-min window):
-- 0 requests → base target (min_replicas, default 2)
-- 1-10 requests → 1.5x base
-- 11-50 requests → 2.0x base
-- 51+ requests → 3.0x base
+**Dynamic Target Replicas** — one target for the download AND prune paths
+(`AutoShardManager::geo_target_replicas`, `scoring.rs`): a log-scaled floor
+`clamp(ceil(log2(pool_size)), min_replicas, max(pool_size/3, min_replicas))`
+(`min_replicas` default 2; pool of 10 → 3, 100 → 7, 1,000 → 10) times a demand factor
+from the regional request-rate EMA (`region_demand`, requests per 10 min): <0.1 → 1.0
+(or, from the raw request counter in the first window: 0 → 1.0, 1-5 → 1.5, 6-20 → 2.0,
+21-100 → 2.5, more → 3.0), <1 → 1.5, <5 → 2.0, <20 → 2.5, else 3.0; clamped to
+`[min_replicas, max(pool_size, min_replicas)]`.
 
 **Prune Scoring** (highest score pruned first):
 ```
@@ -1663,6 +1671,9 @@ over-replicated shards to free VRAM and disk on smaller nodes.
 - 0.5 if first/last shard (pipeline completeness)
 - 0.3 if rarest shard for the model
 - 0.2 if recently acquired (< 30 min)
+- 1.0 / 0.5 / 0.2 by regional demand EMA (> 10 / > 1 / > 0.1 — `region_demand`)
+- 1.5 if the model was used in the last 60 min (`RECENT_REQUEST_PROTECT_SECS`, read through `effective_idle_secs`: every way a model is used, not only the router's)
++ 0.5 if the Parallax allocator has wanted it off this node for the stability window
 ```
 
 **R121 — contribution_auto scale-back.** When `config.node.contribution_auto`
@@ -1728,7 +1739,7 @@ Discovered → Pinned → DemandVerified → NetworkPopular
 - 3rd inference request → `DemandVerified` (persisted on promotion)
 - 3+ unique holder nodes → `NetworkPopular` (checked periodically by AutoShardManager)
 - HfWatcher trending feed promotes `Discovered` → `DemandVerified` when the matching HF repo crosses the per-publisher download floor + 24h age gate (anti-gaming). R141 tiered the floor:
-  - **Trusted curators** (`TRUSTED_HF_PUBLISHERS` allowlist in `huggingface/watcher.rs` — meta-llama, mistralai, Qwen, google, microsoft, deepseek-ai, HuggingFaceH4, stabilityai, tiiuae, 01-ai, NousResearch, allenai, ibm-granite, CohereForAI, bartowski, TheBloke, unsloth, lmstudio-community, MaziyarPanahi, QuantFactory, second-state) promote at **10k downloads** (`MIN_DOWNLOADS_FOR_TRUST_TRUSTED`).
+  - **Trusted curators** (`TRUSTED_HF_PUBLISHERS` allowlist in `huggingface/watcher.rs` — meta-llama, mistralai, Qwen, google, microsoft, deepseek-ai, HuggingFaceH4, stabilityai, tiiuae, 01-ai, NousResearch, allenai, ibm-granite, CohereForAI, Salesforce, bartowski, TheBloke, unsloth, lmstudio-community, MaziyarPanahi, QuantFactory, second-state) promote at **10k downloads** (`MIN_DOWNLOADS_FOR_TRUST_TRUSTED`).
   - **Unknown publishers** keep the original **100k downloads** floor (`MIN_DOWNLOADS_FOR_TRUST`).
   - The 24h age gate is unchanged for both tiers — a fresh repo can still be a download-pump even from a trusted account if it's compromised.
   - Helper `is_trusted_publisher` is the canonical check, re-exported via `crate::model::huggingface`. Used by both the watcher's promotion path AND the wishlist scorer for the `wishlist.why.trusted_publisher` why-tag + score bonus.
@@ -2117,10 +2128,14 @@ the type; it must never be extended to match user-facing prose (gotcha #295).
 
 - Bearer token middleware in `src/api/middleware.rs` (constant-time comparison)
 - Auto-generated 32-byte hex API key on first run, persisted in redb
-- **Protected paths**: `/v1/*` (inference), `/api/admin/config` (PUT), `/api/admin/shutdown`,
-  `/api/admin/hf/*` (downloads), `/api/admin/api-key`, `/api/admin/provider-models`
-- **Exempt paths**: `/`, `/health`, `/admin`, `/chat`, `/setup`, `/static/*`,
-  read-only admin dashboard endpoints (GET `/api/admin/stats`, `/api/admin/models`, etc.)
+- **Protected paths**: everything not exempt below — `/v1/*`, `/mcp`, every `/api/admin/*`
+  (GET included), `/api/claude-code/*`, `/api/pool/*`.
+- **Exempt paths** (`middleware::is_exempt_request`): `/`, `/health`, `/health/ready`,
+  `/admin`, `/chat`, `/setup`, `/favicon.ico`, `/static/*`, `/admin/*`, `/chat/*`;
+  `/metrics` from the loopback only (and not at all when `api.metrics_auth_required`);
+  `GET /api/admin/ws` (the upgrade carries a single-use ticket instead). Read-only
+  admin GETs were once exempt on loopback; that exemption is gone — the dashboard
+  authenticates every call through `App.authFetch`.
 - **Loopback-only actions**: `POST /api/admin/update/check`, `/api/admin/update/apply`
   and `/api/admin/shutdown` additionally require the request to originate on the
   node's own machine. A valid API key is *not* sufficient — the first two write
@@ -2382,7 +2397,7 @@ support is three pieces, shared by the OpenAI and Anthropic layers:
 - `delegate` picks a model for you by tier. `fast` ranks **already loaded** above
   local above smallest — loading a cold model costs tens of seconds, which
   dominates every other difference (`fast_tier_rank`).
-- Resources: `swarmllm://status` (node status)
+- Resources: `swarmllm://status` (node status), `swarmllm://models`, `swarmllm://peers`
 - All tools include [tool annotations](https://modelcontextprotocol.io/specification/2025-11-25) (`readOnlyHint`, `destructiveHint`, etc.)
 - **`compare`:** sends the same prompt to up to 10 models concurrently, returns side-by-side results
 - **`research`:** fan-out a question to multiple models (auto-selects if models omitted), returns all responses with token usage
@@ -2434,7 +2449,7 @@ Routes Claude model requests through a locally-authenticated `claude` CLI subpro
 - `POST   /api/claude-code/session/{id}/message` — Send a turn
 - `POST   /api/claude-code/session/{id}/permission` — Answer a tool-permission prompt the CLI raised
 
-### Admin API (CORS-protected, no Bearer auth)
+### Admin API (CORS-protected; Bearer auth required — see § API Authentication)
 - `GET/PUT /api/admin/config` — Configuration read/update
 - `GET     /api/admin/stats` — Node statistics + hardware info. The memory
   figures are `process_rss_mb` (this daemon PLUS every model worker — the
@@ -2569,7 +2584,7 @@ Routes Claude model requests through a locally-authenticated `claude` CLI subpro
 - `/static/*path` — Embedded static assets (CSS, JS, i18n JSON)
 - `/static/i18n/{lang}.json` — Translation files (21 languages)
 - `/health` — Liveness probe (`{"status": "ok"}`, no auth)
-- `/` → redirect to `/admin`
+- `/` → redirect to `/chat` (it landed on `/admin` until the operator console stopped being the first thing a new person sees)
 
 ### Frontend Architecture
 - **Embedded payload size**: **~1196 KB** (html 142 + css 265 + js 789,
@@ -2651,6 +2666,7 @@ kernel and `standard_attention`. Both choices were wrong, in opposite directions
 | prefill (`seq_len > 1`) | fused | **standard** | fused parallelizes over KV tiles of 16 inside a per-query-row loop with a scratch allocation per tile; standard batches into two matmuls per head |
 | GQA decode (`seq_len == 1`) | standard below a 2048 crossover | **fused always** | standard materializes the KV cache expanded to `n_head` every token every layer, so cost grows with the conversation |
 
+(Superseded 2026-08-16 for CPU GQA decode: it is standard again, through a grouped no-copy path — see § Attention Kernel Selection; the table is the 08-06 finding.)
 Multi-head (non-GQA) decode keeps standard, where the expansion is a no-op.
 SWIFT/spec sessions still force standard so draft and verify share numerics.
 
@@ -2849,13 +2865,14 @@ A lightweight cross-subsystem event bus for real-time dashboard observability.
 
 ## Platform Targets
 
-| Platform | Priority | GPU Support |
-|---|---|---|
-| Linux x86_64 | P0 | CUDA (llama.cpp + candle) + ROCm (llama.cpp) |
-| macOS aarch64 | P1 | Metal (via llama.cpp) |
-| Windows x86_64 | P1 | Vulkan (llama.cpp, all vendors) + CUDA static (candle, NVIDIA) |
-| macOS x86_64 | P2 | CPU only |
-| Linux aarch64 | P3 | CPU only |
+What the release workflow builds (`.github/workflows/release.yml`), checked 2026-10-02:
+
+| Platform | Priority | Release assets | GPU Support |
+|---|---|---|---|
+| Linux x86_64 | P0 | `-linux-x86_64` (+ `-baseline`), `-linux-x86_64-cuda` | CUDA, NVIDIA only (`--features cuda`: candle + llama.cpp). No ROCm build exists |
+| macOS aarch64 | P1 | `-macos-aarch64` | **None — inference runs on the processor.** No Metal backend is compiled (`docs/FUTURE_WORK.md` #1) |
+| Windows x86_64 | P1 | `-windows-x86_64.exe` (+ `-baseline`), `-windows-x86_64-gpu.exe` | `--features windows-gpu`: Vulkan for llama.cpp's whole-file path (all vendors) + CUDA (candle, NVIDIA) for split inference |
+| macOS x86_64, Linux aarch64 | — | not built | build from source; CPU only |
 
 ### Windows GPU Distribution Strategy
 
@@ -3004,8 +3021,8 @@ Workers load only a subset of on-disk shards into GPU memory. Shards stay on dis
 - API: `in_vram` field per shard in model detail; frontend shows V/D badges
 
 ### Bandwidth-Based Speed Estimation
-- `gpu_memory_bandwidth_gbps()`: 30-GPU lookup table (RTX 20/30/40, A100, H100, Apple M-series, AMD)
-- `estimate_tokens_per_sec_7b()`: `bandwidth / 4.4GB * efficiency` (0.30 GPU, 0.15 CPU)
+- `gpu_memory_bandwidth_gbps()`: name-matched lookup table (RTX 20/30/40, A100, H100, Apple M-series, AMD)
+- `estimate_tokens_per_sec_7b()`: `bandwidth / 4.4GB * efficiency` (0.35 GPU, 0.75 CPU — a card is LESS efficient per byte than a processor at batch 1, one query row cannot fill it)
 - Gossiped via `NodeCapability.est_tokens_per_sec_7b`
 - Used as scheduler tie-breaker (after latency, region, load, trust)
 

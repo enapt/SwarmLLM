@@ -606,7 +606,7 @@ got two simultaneous dials whenever it was momentarily disconnected; with
 request_response's own dial that reaches `max_connections_per_peer = 3`.
 The vendored rr layer then spreads sends across all three (ranked, but ranked
 among connections that should not all exist), and one that has quietly died
-swallows its share until the 8-failure rule closes the peer entirely. Measured
+swallows its share until the failure rule (20 consecutive, or 8 after 90 s of silence) closes the peer entirely. Measured
 paired against an unpatched node, same swarm, same 43 minutes: **13 connection
 establishments to one peer against 3** (gotcha #405).
 
@@ -1168,7 +1168,8 @@ decides byte-range requests.
 different builds are pooled and the scheduler will route to either. Bounded —
 verification catches it, so it costs a wasted transfer, never a wrong answer.
 Closing it needs a build discriminator on `ShardAnnounce`; see
-`docs/FUTURE_WORK.md`.
+`docs/FUTURE_WORK.md`. (Closed 2026-09-05: `shard_holders` now drops holders
+claiming a different build — § "A holder record names a BUILD, not just a shard".)
 
 **Both rejection messages share ONE rate limiter**
 (`manifest::note_manifest_rejection` over `manifest::RejectionKey`), because

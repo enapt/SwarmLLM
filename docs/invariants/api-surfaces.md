@@ -288,7 +288,10 @@ generation and the `remote_generate` fast path (that peer is a worker too, and
 the flag reaches it). `pipeline/distributed.rs` runs its own loop over
 `sampling_params.max_tokens` and never consults a window — see
 `docs/FUTURE_WORK.md` #85. That is pre-existing, not a regression, and is
-recorded as observed rather than reproduced.
+recorded as observed rather than reproduced. (Since 2026-09-19 #85 is closed: the
+serving node's `executor.rs` pre-flight raises `ContextWindowReached` and
+`length_finish_or_error` turns it into `finish_reason: "length"`; see the first
+entry in this file. `distributed.rs` itself still checks no window.)
 
 **From the rules file (moved 2026-10-02):**
 
@@ -310,7 +313,8 @@ existing `u32`, deliberately not `Option<u32>`** — an `Option` serialises `nul
 which an older peer cannot deserialise. No `PROTOCOL_VERSION` bump; compatible
 both directions, pinned by two tests.
 
-⚠ `pipeline/distributed.rs` consults no window at all — `docs/FUTURE_WORK.md` #85.
+⚠ `pipeline/distributed.rs` consults no window itself; the `executor.rs` pre-flight is what ends a
+reply at the wall (#85, closed 2026-09-19 — first entry in this file).
 
 ## Every status payload reports traffic the same way, and there are THREE
 
@@ -1372,7 +1376,10 @@ new crates, everything else already being in the tree.
 
 Tool definitions are not passed to the renderer, so `{% if tools %}` is always
 false here and native rendering does not add tool-call framing to any model.
-That is handled separately by the API layer and `tool_parse`.
+That is handled separately by the API layer and `tool_parse`. (Written 2026-09-10;
+superseded the same day — `build_prompt` now takes `tools` and templates that read
+them render them natively, see "A model is told about its tools the way it was
+trained to be".)
 
 ### Known divergence from Jinja2: none currently
 
@@ -1505,7 +1512,9 @@ consumer didn't call it.
 **Before fixing anything in the request/response path, enumerate the paths.**
 There are more than you expect:
 
-- **Inference text sources (THREE)** — `inference/executor.rs` (in-process),
+- **Inference text sources (THREE, as first written — there are more now: see
+  "A reply is finalised on the coordinator", which counts six-plus and is guarded
+  by `every_reply_source_finalises_its_text`)** — `inference/executor.rs` (in-process),
   `inference/process_pool.rs` (worker subprocess), `inference/pipeline/
   distributed.rs` (assembled from remote segments). A reply-content rule belongs
   at all three. Note the cold-start request takes the *distributed* path while
@@ -1534,8 +1543,8 @@ not be called. Three escalating ways to make it obligatory, best first:
    `providers::strip_prefix_in_body` now runs inside `try_proxy_openai`,
    `proxy_to_anthropic` and `proxy_via_subprocess_anthropic` — the three
    functions that actually send — so a new proxy path is correct with no
-   author action. Same shape for `inference::finalize_reply_text`: the three
-   reply-text sources call one finaliser that owns the whole ordered sequence
+   author action. Same shape for `inference::finalize_reply_text`: the
+   reply-text sources (three when this was written; more now) call one finaliser that owns the whole ordered sequence
    (scrub → truncate → trim → newline cleanup), instead of each composing those
    steps itself, which is how they silently diverged.
 2. **Make the wrong call unrepresentable.** If context is needed to be correct,
@@ -1711,7 +1720,7 @@ a request's own model name; `auto` was the one reader using it to CHOOSE.
 `auto_falls_back_to_a_model_the_swarm_can_serve`. The fixture owns its data
 directory — "held whole" checks shard files on disk.
 
-**Still open** (FUTURE_WORK #120 (b)): with nothing servable here, the planner's
+**Still true** (#120 is closed; its half (b) was a recorded decision, not open work): with nothing servable here, the planner's
 `PeersUnbounded` rung can still hand a whole model to a peer that advertised too
 little room — a recorded decision (report #025), not an oversight. The other half,
 a peer that had published no capability yet, is narrowed by sending ours on
@@ -1748,10 +1757,11 @@ as `ShardNotFound` mid-stream, which is unrecoverable. The
 auto-manage prune path already does this via `active_pipeline_shards`
 in `model/auto_manage/prune.rs`. The same guard MUST live in:
 
-- `api/admin_models/shards.rs::delete_shard` — checks
-  `seg.shard_id.model_id == mid && seg.shard_id.index == shard_index`.
-- `api/admin_models/lifecycle.rs::delete_model` — checks
-  `seg.shard_id.model_id == mid`.
+- `api/admin_models/shards.rs::delete_shard` — `SharedState::model_is_in_use`,
+  plus a segment-spans-this-shard check against `active_pipelines`.
+- `api/admin_models/lifecycle.rs::delete_model` — `SharedState::model_is_in_use`
+  (which covers `active_pipelines`, active traces and in-flight serving; checking
+  `active_pipelines` alone missed local split replies and peer-served work).
 
 New "delete" or "evict-from-disk" admin handlers MUST add the guard
 before the destructive operation. Note that `unload_model` /

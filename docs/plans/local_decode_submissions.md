@@ -4,7 +4,11 @@
 > decode-as-CUDA-graphs are **ON by default since 2026-09-30**
 > (`SWARMLLM_CUDA_OWN_STREAM=0` / `SWARMLLM_CUDA_GRAPH=0` are the control arms).
 > The sections below are the plan as it was written and measured; where one
-> says "opt-in" or "off by default", that was true when written.
+> says "opt-in" or "off by default", that was true when written. Stage 3 (the activation-buffer arena)
+> was not built: `cuda_graph.rs` records candle's per-op allocations as graph memory nodes instead. Stage 5's
+> device-side sampling is not built for a reply's own tokens (logits still go to the host; only the
+> drafter's argmax stays on the card); the fusions (2c, 2d) and the V-copy fix are on by default
+> (`SWARMLLM_FUSE_SILU_MUL=0`, `SWARMLLM_FUSE_ADD_RMSNORM=0`, `SWARMLLM_CONTIGUOUS_V=1` are the A/B switches).
 
 **Written 2026-09-22 against v0.3.197-alpha, from measurements on the live
 release node.** Evidence and per-model numbers:

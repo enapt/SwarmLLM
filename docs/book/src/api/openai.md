@@ -29,9 +29,9 @@ curl http://localhost:8800/v1/chat/completions \
 | `model` | string | yes | — | Model name, or `"auto"`: the `inference.default_model` setting if set, else the model `auto` answered with last time, else one this node holds completely, else one the network can serve |
 | `messages` | array | yes | — | Chat messages (`role` + `content`). Roles: `system`, `user`, `assistant`, `tool` |
 | `stream` | boolean | no | `false` | Enable SSE streaming |
-| `max_tokens` | integer | no | `2048` | Max tokens to generate (clamped to 1–32768) |
+| `max_tokens` | integer | no | up to `2048`, lowered to fit the model's context window | Max tokens to generate. A value you send is honoured exactly or refused with the budget that fits; outside 1–32768 it is refused (400), never clamped |
 | `temperature` | float | no | `0.7` | Sampling temperature (0.0-2.0) |
-| `top_p` | float | no | `1.0` | Nucleus sampling threshold |
+| `top_p` | float | no | `0.9` | Nucleus sampling threshold |
 | `stop` | string or array | no | — | Stop sequence(s), 1–256 chars each, max 16 |
 | `frequency_penalty` | float | no | `0.0` | Frequency penalty (-2.0 to 2.0) |
 | `presence_penalty` | float | no | `0.0` | Presence penalty (-2.0 to 2.0) |

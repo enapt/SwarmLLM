@@ -881,7 +881,7 @@ behind this repo's most recurring defect, a rule fixed on one surface and forgot
 (TextDelta / ToolCall / Usage / Finish) with three thin serialisers. Needs its own release and a
 live A/B on every surface (OpenAI stream / non-stream, Anthropic stream / non-stream, Responses
 foreground / background, MCP). Until then: choke-point helpers (`finalize_reply_text`,
-`strip_prefix_in_body`) and `arch-api-surfaces.md` § "One invariant, N paths".
+`strip_prefix_in_body`) and `.claude/rules/architecture.md` § "One invariant, N paths".
 
 #### #141 — A non-streamed reply does not carry a reasoning model's scratchpad; the stream does
 `P3` · api · **OPEN** — deferred 2026-09-28 · history: archive row #141

@@ -1,5 +1,11 @@
 # Items 14 / 17 / 18 — Research Write-up
 
+> **Status 2026-10-02: none of Items 14, 17 or 18 was built, and none is tracked in
+> `docs/FUTURE_WORK.md`** (its #17/#18 are different entries; the item numbers here are this plan's own).
+> The WAN bench this plan waits on was done on a real link (Thailand-Belgium, 2026-09; see
+> `split_speculation.md`), and Item 12 (DSD) has been on by default since v0.3.213. Read the text
+> below as the April 2026 assessment.
+
 > Companion to `archive/distributed_inference_speedup.md` "Deferred" and
 > `next_steps.md` § 3 (both historical). Written 2026-04-26 to give the user a concrete
 > decision basis after the per-item details were trimmed out of the

@@ -40,7 +40,11 @@ the same `SWARMLLM_NODE_DATA_DIR` or `-d` as the daemon.
 ## Single-node baselines
 
 Reference numbers on an AMD Ryzen 7 5800H + RTX 3070 Laptop 8 GB VRAM
-(WSL2, release build):
+(WSL2, release build), **measured 2026-04-20 and not re-taken since**. Treat
+them as history: card decode has roughly doubled since (Qwen2.5-Coder 7B whole
+on this card read 46-49 tok/s in late September 2026, CUDA-graph decode came on
+by default after that), and processor prompt reading is now level with
+llama.cpp. Re-take with the method below before quoting any of them.
 
 | Model | Params | Quant | GPU | CPU |
 |---|---|---|---|---|

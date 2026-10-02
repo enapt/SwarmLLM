@@ -27,7 +27,7 @@ ANTHROPIC_BASE_URL=http://localhost:8800 ANTHROPIC_AUTH_TOKEN="$SWARMLLM_KEY" \
 |---|---|---|---|
 | `model` | string | yes | Model name (local GGUF, network model, or cloud model like `gpt-4o`) |
 | `messages` | array | yes | Chat messages with `role` + `content` |
-| `max_tokens` | integer | yes | Maximum tokens to generate (clamped to 1–32768) |
+| `max_tokens` | integer | yes | Maximum tokens to generate; outside 1–32768 it is refused (400), never clamped |
 | `system` | string or array | no | System prompt (supports `cache_control` blocks) |
 | `stream` | boolean | no | Enable SSE streaming |
 | `temperature` | float | no | Sampling temperature |

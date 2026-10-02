@@ -115,8 +115,8 @@ bias in `AutoShardManager` driven by a per-shard stability counter
 (≥3 consistent ticks before it acts) drifts shards toward where they're
 actually used without violating existing hard constraints.
 
-- **Measured:** 10 routing + 7 allocator + 2 scheduler integration tests
-  passing; real-world improvements depend on network heterogeneity. The
+- **Measured:** covered by routing, allocator and scheduler tests (19 when
+  this was written in April 2026; many more since); real-world improvements depend on network heterogeneity. The
   biggest impact is in asymmetric setups where a cheap peer's low
   observed latency should beat a high-VRAM peer's big shard slot.
 - **Config:** default-on. Multi-pipeline concurrency is deferred.
@@ -176,7 +176,7 @@ plus a coordinator loop in `pipeline/dsd.rs`.
 
 - **Status:** On by default from the release after v0.3.212 (it was off in
   v0.3.212 while a failover question was open; that turned out to be the test
-  rig, FUTURE_WORK #140). It does nothing on a computer that holds no suitable
+  rig, FUTURE_WORK #162, which absorbed #140). It does nothing on a computer that holds no suitable
   guessing model, and it stops guessing — and, for the next ten minutes, stays
   out of requests on the same computers — where guessing costs more than the
   round trips it saves: on two computers side by side it would otherwise have

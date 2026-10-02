@@ -14,6 +14,11 @@ line from `/var/lib/swarmllm/config.toml` and restart.
 table nothing writes, so the stored model descriptions were never examined.
 It now checks them. It only warns about a damaged entry and never deletes one.
 
+**Fixed: the JavaScript client could not be loaded with `import`.** Its
+package pointed ES-module imports at a file the build never produced, so
+`import { SwarmLLMClient } from 'swarmllm'` failed; `require` worked. Both
+work now.
+
 **Install guide (Fedora/RHEL):** the `.rpm` runs its service as a `swarmllm`
 user that the package does not create, so the service could not start. The
 install page gives the one command that creates it, until the package does.

@@ -126,7 +126,7 @@ The RoPE column is llama.cpp's per-architecture choice (`llama_model_rope_type`)
 | **Mistral** | Interleaved | No | GQA |
 | **DeepSeek-V2/V3** | Interleaved | No | Not supported yet — recognised and refused (no real file loads; needs YaRN and the current MLA tensor layout) |
 | **GLM-4** | Interleaved | No | Partial RoPE, extreme GQA (16:1) |
-| **Starcoder2** | Contiguous | Yes | Code-optimized |
+| **Starcoder2** | Contiguous | Yes | Not supported yet — recognised and refused (a LayerNorm model with biases the loader does not read; no real file loads) |
 
 **Mixture-of-experts layers keep every expert quantized**, one matrix per
 expert cut from the GGUF's stacked tensor, the way llama.cpp runs them — so a
@@ -175,7 +175,7 @@ speedup** on CPU-CPU localhost).
 
 - **Speculative Decoding** — Draft model proposes K tokens, target verifies in one pass (flag-gated `speculative_distributed`)
 - **SWIFT self-speculative** — Target model acts as its own draft by skipping a layer range (flag-gated `swift_self_speculative`)
-- **DSD (Decentralized Speculative Decoding)** — Multi-segment pipeline with γ-token speculation woven in (flag-gated `decentralized_spec_decoding`)
+- **DSD (Decentralized Speculative Decoding)** — Multi-segment pipeline with γ-token speculation woven in (`decentralized_spec_decoding`, on by default since v0.3.213)
 - **Chunked Prefill** — Sarathi-style: each Prefilling slot advances by `prefill_chunk_tokens` (default 128) per decode tick so a long admission can't block decode
 - **Continuous Batching** — default-on: concurrent `Generate` requests share one `forward_batch` per decode tick; GPU uses fused kernel, CPU falls through to sequential
 - **Batched Prefill Forward** — default-on: fuses concurrent same-shape Prefilling chunks into one `forward_batch` call
@@ -183,7 +183,7 @@ speedup** on CPU-CPU localhost).
 - **Delegated split** (v0.3.219) — default-on: a request whose plan is several segments, none of them this node's, is handed to the node holding the model's first layers, which leads it among its own peers and streams the reply back the same way. The requester no longer sits inside every token's round trip: measured on a rig with the requester 150 ms away, 1.4-1.7× faster with two or three holders. The delegate keeps the first segment itself (the requester chose it to read the prompt) and never hands the request on; it is not used in private mode or with prompt privacy. `SWARMLLM_DELEGATE_SPLIT=0` switches it off
 - **Chained checks** (v0.3.219) — a speculative check travels a run of remote segments like an ordinary decode step, one trip around them instead of one per segment (+31% on a guessing request across three nodes, the leader 150 ms from the others). `SWARMLLM_CHAIN_VERIFY=0` switches it off
 - **Cross-request Prefix Cache** — default-on: see "Prefix-Cache KV Sharing" above for the cross-node extension; the local cache alone is a 29.4× wall-clock win on prompt re-submission
-- **Activation Compression (Q8_0)** — Intermediate pipeline activations wire-quantized ~3.76× (flag-gated `activation_compression`)
+- **Activation Compression (Q8_0)** — Intermediate pipeline activations wire-quantized ~3.76× (`activation_compression`, on by default)
 - **Flash Attention** — CPU and GPU fast paths (GQA-native, no `repeat_kv`)
 - **PagedAttention** — Deferred; `paged-attn` feature flag reserved for future use (module removed, never wired to production)
 - **Logprobs** — NOT returned by local inference. The sampler can compute them (`sample_token_with_logprobs`) and the response type serializes them, but every local execution path pins `token_logprobs: vec![]`, so nothing reaches the response. `/v1/chat/completions` therefore REFUSES `logprobs` for a locally-served model rather than answering 200 with the field absent, which is indistinguishable from a request that never asked. Cloud-routed models still return them. See `docs/ARCHITECTURE.md` § Deferred Items

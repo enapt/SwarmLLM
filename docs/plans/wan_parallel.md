@@ -37,8 +37,8 @@ model":
 3. **The prompt pass**, which is parallel over positions already (§4).
 
 And separately, **a shorter pass** (§5): P itself is set by where the layers are
-and whether the requester sits inside the loop — today it always does
-(FUTURE_WORK #143).
+and whether the requester sits inside the loop — it does unless the requester
+holds none of the model (FUTURE_WORK #143, shipped v0.3.219-.221; §5).
 
 ## 2. More tokens per stream: drafting that lives on ONE stage
 

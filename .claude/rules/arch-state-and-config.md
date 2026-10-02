@@ -88,7 +88,7 @@ The 4 sub-structs and the `cfg()` / `classify` accessors are in `architecture.md
 
 ## A platform predicate answers "what kernel is this", not "where am I running"
 
-**`network::wsl_network_adaptation(is_wsl2, in_container, mirrored)` is the one decision** about WSL2 network overrides (`None` / `Mirrored` / `NatSafeDefaults`). `is_wsl2()` is true inside a Docker container on Windows (#640; the SECOND too-broad predicate after #161), so keep `running_in_container()` strict and ask what else inherits a signal before a platform predicate chooses settings.
+**`config::network::wsl_network_adaptation(is_wsl2, in_container, mirrored)` is the one decision** about WSL2 network overrides (`None` / `Mirrored` / `NatSafeDefaults`). `is_wsl2()` is true inside a Docker container on Windows (#640; the SECOND too-broad predicate after #161), so keep `running_in_container()` strict and ask what else inherits a signal before a platform predicate chooses settings.
 
 → `docs/invariants/state-and-config.md` § "A platform predicate answers "what kernel is this", not "where am I running""
 

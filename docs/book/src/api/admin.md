@@ -11,7 +11,7 @@ Node statistics and hardware info.
 Connected peers with latency, trust scores, and hosted models.
 
 ### GET /api/admin/credits
-Credit balance and tier info.
+The internal ledger figures (balance, lifetime earned and spent, escrow) and the tier name. Credits are dormant: the balance is self-minted, gates nothing, and the tier is the same for everyone.
 
 ### GET /api/admin/diagnostics
 Plain-text health report, meant to be read in a terminal or pasted into a bug
@@ -274,7 +274,7 @@ List configured cloud providers (name + configured flag, no keys exposed).
 Update cloud provider API keys. Bearer auth required. Keys are encrypted at rest.
 
 ### GET /api/admin/provider-models
-List available models from all configured cloud providers. Results are cached for 60 seconds; stale results are returned immediately and refreshed in the background. Includes models from OpenAI, Anthropic (static list), DeepSeek, Mistral, Groq, NVIDIA NIM, Cerebras, SambaNova, Fireworks, Together AI, DeepInfra, and Moonshot/Kimi.
+List available models from all configured cloud providers. Results are cached for 30 seconds; stale results are returned immediately and refreshed in the background. Includes models from OpenAI, Anthropic (static list), DeepSeek, Mistral, Groq, NVIDIA NIM, Cerebras, SambaNova, Fireworks, Together AI, DeepInfra, and Moonshot/Kimi.
 
 Calling this endpoint also refreshes the routing table that decides whether a model whose id carries no recognisable prefix is proxied to a provider or refused locally. Since v0.3.174 that table is **also** refreshed on its own every 15 minutes, so a node whose dashboard is never opened still routes its cloud models; before that it was filled only here, and a node that had not been visited refused them outright. A provider that fails to answer a refresh keeps the models it had, rather than having them dropped — a failed fetch used to be indistinguishable from a provider with no models.
 

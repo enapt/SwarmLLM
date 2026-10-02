@@ -6,6 +6,15 @@ acceptance data from two real model pairs.** Raw data and scripts:
 `examples/spec_coverage.py`, `examples/spec_best_tree.py`, `examples/spec_projection.py` (they read and write under `~/swarmllm-ref/spec/`); the split
 measurements are in `memory/perf_spread_0927_gpu.md`.
 
+> **Status 2026-10-02:** Phase 1 shipped (v0.3.211), guessing ahead has been on by default since
+> v0.3.213 (the "OFF by default" and "opt-in" lines below were true when written), and 4b, the
+> continuous stream, since v0.3.216. Open in `docs/FUTURE_WORK.md`: #134 (draft trees = Phase 2, a
+> drafter the node does not hold, the pipelined prompt pass = Phase 3, also #171), #149 (four stream
+> refinements), #167 (no mid-reply failover of a speculative split). Phase 4's shadow and the
+> same-model-at-fewer-bits drafter are decided against as a default (#144, § "Decided"): no design
+> may need a user to hold a whole model, even at low bits. The delegated coordinator (#143) shipped
+> v0.3.219-.221.
+
 ## The limit, stated as a number
 
 A split decodes one token per trip around the machines. Token *n+1* cannot

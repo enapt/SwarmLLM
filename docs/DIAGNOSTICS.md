@@ -936,7 +936,7 @@ If `schedule_ms` is high, the bottleneck is pipeline assembly. If `execute_ms` i
 ### 27-Second Response Times
 
 Common causes:
-- **Timeout-then-failover**: A segment times out at 30s, then failover succeeds quickly → ~30s total. Check for `DIAG: segment TIMED OUT` followed by `DIAG: failing over to standby`.
+- **Timeout-then-failover**: A segment times out at 30s (the floor of `SEGMENT_TIMEOUT_MIN_SECS`; the deadline grows with layers and prompt, to 600 s), then failover succeeds quickly → ~30s total. Check for `DIAG: segment TIMED OUT` followed by `DIAG: failing over to standby`.
 - **Connection not established**: Tensor sent to a peer that's not connected. Check `is_connected=false` in `Sent tensor forward` logs.
 - **Encryption failure + fallback**: Encrypted send fails, falls back to plaintext, which also fails. Check for `DIAG: seal() encryption failed` logs.
 - **Channel backpressure**: Result arrives but the dispatcher channel is full. Check for `Outbound channel full, dropping tensor result`. **Read `nothing_accepted_for_secs` on that line before anything else** — a few hundred milliseconds is a burst under load, while tens of seconds means the dispatcher has stopped consuming and every inbound swarm message is being dropped, not just this one (`docs/FUTURE_WORK.md` #90, gotcha #648). The line is rate-limited to one per 30 s per channel, so `dropped_since_last` is the real volume.
@@ -1734,6 +1734,10 @@ previous request still counting as active.
 several per delta; pair it with `completion_tokens`.
 
 ### Current baseline — 2026-08-29, v0.3.132-alpha
+
+(Dated 2026-08-29 and not re-taken since for the CPU rows. The GPU row predates CUDA-graph decode, on by
+default since 2026-09-30, and the fused kernels: `docs/plans/local_decode_submissions.md` and `memory/perf_spread_0927_gpu.md`
+carry newer GPU figures. Re-take before quoting any of it as today's.)
 
 **Re-take with the same command before claiming a delta.** These were taken on
 an idle box (AMD Ryzen 7 5800H / RTX 3070 Laptop, WSL2) with the live node

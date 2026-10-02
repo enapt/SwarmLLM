@@ -19,7 +19,7 @@ different question than the one that mattered.
   and it is not a judgement call: the vendored kernel's
   `col_idx_limit_right = row_idx + 1 + max_seqlen_k - max_seqlen_q`
   (`vendor/candle-flash-attn/kernels/mask.h`) is bottom-right aligned causal,
-  the same predicate `SplitExecutor::causal_mask` builds by hand. The dispatch
+  the same predicate `SplitModel::causal_mask` builds by hand. The dispatch
   used to divert that shape to `standard_attention` on the stated grounds that
   flash could not express the mask; since `prefill_chunk_tokens` is a CEILING
   that always applies, that meant EVERY prompt chunk after the first took the
@@ -616,8 +616,8 @@ for word.
 **Why nothing caught it, and what that means for a change here.**
 
 - **Four tests asserted the wrong layout** (`test_glm4_arch_supported`,
-  `test_llama4_arch_supported`, `test_deepseek_arch_supported`,
-  `model_arch_properties`), each written against the function rather than the
+  `test_llama4_arch_supported`, `test_deepseek_arch_supported` (since deleted: DeepSeek-2 is
+  now refused), `model_arch_properties`), each written against the function rather than the
   reference. A property test pinned to its own implementation is a change
   detector, not a check. `model_arch_properties` now states every supported
   arch's layout as llama.cpp gives it — **add a row there, from llama.cpp's
@@ -1281,6 +1281,8 @@ control that would report the claim wrong if capture were permitted.
 ⛔ **The migration SHIPPED BROKEN in v0.3.199-alpha** — garbage from every
 model in a `--features cuda` build — and is now opt-in via
 `SWARMLLM_CUDA_OWN_STREAM=1`, default OFF. See gotcha #683.
+(Since v0.3.213 the own stream is ON by default again — `SWARMLLM_CUDA_OWN_STREAM=0` is
+the legacy stream — after the gate described below.)
 
 ### Why .199 broke: one kernel was not on the device's stream (found 2026-09-23)
 
@@ -1345,6 +1347,7 @@ What keeps it fixed:
 
 ⚠ **The switch stays OFF.** An own stream buys nothing until graph capture
 exists; flipping the default is its own change and needs its own behaviour gate.
+(Since v0.3.213 the default HAS been flipped, after that gate: own stream on, `SWARMLLM_CUDA_OWN_STREAM=0` is the legacy stream.)
 
 `Drop` has no synchronous fallback when the events are absent — it skips the two
 `stream.wait()` calls and frees as before — so disabling is strictly less work.
@@ -2092,7 +2095,7 @@ Kernel alone against the unfused candle composition (`attn_bench`): 2.2x at 512
 cached positions, 2.7x at 2,048, 3.7x at 5,000. The end-to-end gain is smaller
 because production's softmax was already fused and the quantized matmuls around
 attention are most of a forward. llama.cpp read a 6,911-token prompt at 49.9 tok/s
-on these 8 threads (§ #119 in FUTURE_WORK).
+on these 8 threads (FUTURE_WORK #119, closed — see `docs/FUTURE_WORK_ARCHIVE.md`).
 
 **Correctness.** `prefill_kernel_matches_the_matmul_path` (< 1e-5 abs) across one
 tile, several tiles, several chunks, masks hiding whole tiles, soft-cap, MHA,
@@ -2297,9 +2300,9 @@ would name.
 
 → `docs/invariants/inference.md` § "A prompt pass on the card multiplies quantized weights on the tensor cores"
 
-## A decode step can go to the card as one CUDA graph (2026-09-29, opt-in)
+## A decode step can go to the card as one CUDA graph (2026-09-29; on by default since v0.3.213)
 
-**What.** `SWARMLLM_CUDA_OWN_STREAM=1 SWARMLLM_CUDA_GRAPH=1` sends a one-position forward
+**What.** (Written when it was opt-in via `SWARMLLM_CUDA_OWN_STREAM=1 SWARMLLM_CUDA_GRAPH=1`; both are now on unless set to `0`.) It sends a one-position forward
 (dense layers, the whole segment on one card, no LoRA) to the card as ONE graph:
 `SplitModel::forward_decode_as_graph` captures `forward_inner_body` on the device's own stream,
 `inference::cuda_graph` updates the model's one instantiated graph from the capture
@@ -2368,7 +2371,7 @@ uptime ~21 h, `~/swarmllm-graph-0929/`):
   hit a LEGACY arm (0.98 s) and the llama.cpp arms (0.43-0.66 s against 0.14 s). A standalone probe
   found default-pool growth 2-3 ms with or without graph memory held. It is a host effect at ~22 h
   of Windows uptime (the #755 family), not a property of capture.
-- **Why it stays OFF**: most models a split carries are 7-8B and card-bound, where it gains nothing
+- **Why it stayed OFF (at 2026-09-29; the default was flipped in v0.3.213, see the flip's gate below)**: most models a split carries are 7-8B and card-bound, where it gains nothing
   and costs ~2%. Qwen 2.5 Coder 7B: legacy 46.7-48.7, graph 46.2-47.0 tok/s — and llama.cpp, in the
   same binary on the same card and file, **57.5-57.7**: the gap on a card-bound model is the KERNELS,
   ~20%, not submissions.

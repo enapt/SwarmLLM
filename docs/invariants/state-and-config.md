@@ -242,7 +242,8 @@ Rules that follow:
 (2026-08-09) — clears the maps a
 finished request leaves behind: `active_pipelines`, `active_traces`,
 `request_holder_blacklist`, `peer_vram_commitments` and
-`local_memory_refusals`. They are keyed by request id and share one
+`local_memory_refusals` (since then also `route_plan_overrides`,
+`salvaged_replies` and `retained_activations`). They are keyed by request id and share one
 lifetime. Five call sites removed all three by hand and the invariant was held
 by three adjacent lines plus a comment asserting it — the shape this codebase
 keeps getting caught by. Dropping one is silent and unbounded: `active_traces`
@@ -702,7 +703,7 @@ letting it choose settings.
 
 **From the rules file (moved 2026-10-02):**
 
-**`network::wsl_network_adaptation(is_wsl2, in_container, mirrored)` is the one
+**`config::network::wsl_network_adaptation(is_wsl2, in_container, mirrored)` is the one
 decision** about WSL2 network overrides, returning
 `None` / `Mirrored` / `NatSafeDefaults` as a truth table rather than three
 separate calls at the use site.
@@ -730,7 +731,7 @@ them is this codebase's most-repeated defect — see `.claude/rules/architecture
 
 Full evidence: `docs/invariants/state-and-config.md`
 
-- **`SharedState::release_request_state`** — clears the maps a finished request leaves behind: `active_pipelines`, `active_traces`, `request_holder_blacklist`, `peer_vram_commitments` and `local_memory_refusals` — keyed by request id, sharing one lifetime. Deliberately does NOT touch `active_count` or `queue_notify`.
+- **`SharedState::release_request_state`** — clears the maps a finished request leaves behind: `active_pipelines`, `active_traces`, `request_holder_blacklist`, `peer_vram_commitments`, `local_memory_refusals`, `route_plan_overrides`, `salvaged_replies` and `retained_activations` — keyed by request id, sharing one lifetime. Deliberately does NOT touch `active_count` or `queue_notify`.
 - **Credits are DORMANT — nothing may publish or act on a balance** — `MIN_BALANCE_FOR_INFERENCE = 0` and `calculate_tier` returns `DORMANT_TIER` whatever it is given, so no balance affects who is served or how fast, and the leaderboard neither ranks by credits nor publishes them.
 - **`SharedState::cfg()`** — the live config, and the single answer to "what is this setting **now**".
 - **`SharedState::record_peer_serve`** — the single answer to "this node did inference work for a peer", counting it AND billing for it.

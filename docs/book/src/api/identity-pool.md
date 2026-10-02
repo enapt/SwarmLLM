@@ -80,7 +80,7 @@ Leave the current pool.
 Set this device's nickname. Body: `{"name": "Gaming PC"}`
 
 #### PUT /api/pool/credit-split
-Set credit split percentage (owner only). Body: `{"pct": 20}` (0-50)
+Set credit split percentage (owner only). Body: `{"pct": 20}` (0-100, the share the member keeps; default 0 = everything is forwarded)
 
 #### PUT /api/pool/contribution
 Set per-member contribution level override. Body: `{"node_id": "...", "level": 75}` (integer 0–100)
@@ -126,7 +126,7 @@ Remove a shard pin. Same body format as POST.
 - **Online/offline status**: Tracked via health pings, displayed with last-seen timestamps
 - **Per-device stats**: VRAM, shards hosted, forwards served, uptime, models hosted
 - **Combined VRAM**: Aggregate GPU memory across all linked devices
-- **Credit split**: Owner configures what percentage (0-50%) members keep vs forward
+- **Credit split**: Owner configures what percentage (0-100%, default 0) members keep vs forward
 - **Private Mode**: Restrict inference to pool devices only. Toggle via UI or API
 - **Shard Pinning**: Assign specific models to specific devices. Auto-manage respects pins
 - **Offline Mode**: Air-gapped LAN operation with mDNS-only discovery

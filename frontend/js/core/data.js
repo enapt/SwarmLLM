@@ -75,7 +75,7 @@
   // `models.js` called `updateChatAvailability(false)`, which DISABLES chat.
   //
   // This is the single data-fetch choke point every component is told to use
-  // (`.claude/rules/architecture.md` § "Frontend Data Fetching"), so recording
+  // (`.claude/rules/arch-frontend.md` § "Frontend Data Fetching"), so recording
   // it here is what lets any of them tell the difference.
   // `null` = not attempted yet, `true` = the daemon answered, `false` = it did
   // not, for whatever reason.

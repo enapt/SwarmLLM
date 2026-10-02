@@ -2,7 +2,8 @@
 
 > **Status 2026-10-02:** implemented on the local branch `qwen35-support` (math
 > checked against llama.cpp master; the 0.8B passes on CUDA), **not merged**:
-> `main` still refuses `qwen35`.
+> `main` still refuses `qwen35`. Open: the serving path for recurrent state, then a rebase and a 4B
+> check (`docs/FUTURE_WORK.md` #117, PARTIAL).
 
 Written 2026-09-25 night, when Qwen 3.5 was REFUSED because no real file could
 load: the loader had been written against a guessed layout, and several of its

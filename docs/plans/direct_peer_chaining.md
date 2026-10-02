@@ -5,6 +5,10 @@ default since v0.3.109** (`inference.pipeline_chaining`; set it to `false` to
 run every segment through the coordinator as before). This document is the case for doing it, the
 prior art it rests on, the design, and what is still unproven.
 
+> **Status 2026-10-02:** the speculative-check path chains too (`verify_may_chain`; `SWARMLLM_CHAIN_VERIFY=0`
+> is the control arm; commit `a2bb4cb0`, v0.3.219-.221), so item (1) of "What is NOT covered yet" below is
+> closed. Mid-reply failover of a chained segment is open: `docs/FUTURE_WORK.md` #18.
+
 ### Six defects, all found by review rather than by running it (2026-08-21)
 
 Worth listing, because the pattern is consistent: every one is silent. None

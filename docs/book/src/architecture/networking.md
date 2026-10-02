@@ -25,7 +25,7 @@ The unified protocol uses a type-tag byte on every frame
 | `0x00` | `WIRE_TAG_JSON` | JSON control message (`SwarmMessage`, `ShardRequest`/`ShardResponse`) |
 | `0x01` | `WIRE_TAG_TENSOR` | Binary tensor payload (`LayerForward`, `LayerResult`), f16 |
 | `0x02` | `WIRE_TAG_TENSOR_COMPRESSED` | Q8_0 activation frame (flag-gated `activation_compression`) — ~3.76× smaller than `0x01` |
-| `0x03` | `WIRE_TAG_SHARD` | Raw shard bytes (ShardResponse payload, 32 MB max — bypasses the 4 MB JSON cap) |
+| `0x03` | `WIRE_TAG_SHARD` | Raw shard bytes (ShardResponse payload; parts are sent in 8 MiB chunks, and this frame type may carry up to 256 MB — it bypasses the 4 MB JSON cap) |
 | `0x04` | `WIRE_TAG_PREFIX_KV` | Cross-node prefix-KV snapshot. Frame body's flag byte: `0` = miss, `1` = raw f32, `2` = zstd-compressed f32 (gated on `NetworkConfig::prefix_kv_compression`, default off). Receivers always decompress regardless of the send-side flag. |
 
 Receivers auto-dispatch on the leading byte; senders choose based on
@@ -40,7 +40,7 @@ SwarmLLM uses 5 independent discovery layers:
 2. **Persistent Peer Cache** — Saves up to 200 peers every 5 min + on shutdown. Fastest reconnect.
 3. **Invite Codes** — two formats, see below.
 4. **Peer Exchange (PEX)** — On each connection, exchanges up to 20 known peers.
-5. **Kademlia DHT** — Bootstrap flag + periodic re-bootstrap every 60s.
+5. **Kademlia DHT** — Bootstrap flag + periodic re-bootstrap every 5 minutes (and quick retries at 10/30/60/120 s while the node has no peers).
 
 ### Invite code formats
 
