@@ -330,6 +330,21 @@ pub struct ShardAnnounce {
     /// admitting ignorance.
     #[serde(default)]
     pub shard_builds: Vec<u64>,
+    /// Models whose parts in `shards` the sender has CHECKED against the
+    /// model's origin this run — every part it holds compared with the upload
+    /// on HuggingFace, its header and manifest the upload's. A part of a model
+    /// not listed is announced as the bytes it is, unchecked.
+    ///
+    /// What a node that cannot reach HuggingFace itself (offline mode, no
+    /// route) settles its own parts by: a part whose bytes differ from what
+    /// several CHECKED holders agree on is the odd one out, and is fetched again
+    /// from them. A tag alone cannot say that — a node that never checked
+    /// announces its bytes too, wrong or not.
+    ///
+    /// `#[serde(default)]`: an older node's announcement arrives with none, and
+    /// its parts count as unchecked — which is what they are.
+    #[serde(default)]
+    pub origin_checked_models: Vec<ModelId>,
 }
 
 /// "I could not say which build this is." Never compare equal to anything,
@@ -785,6 +800,10 @@ mod build_tag_tests {
             decoded.shard_builds.is_empty(),
             "and must read as 'no build stated', which the receiver treats as unknown"
         );
+        assert!(
+            decoded.origin_checked_models.is_empty(),
+            "and its parts as unchecked, which is what they are"
+        );
     }
 
     /// The other direction: a NEWER node's announcement reaching an older one.
@@ -813,6 +832,7 @@ mod build_tag_tests {
             timestamp: chrono::Utc::now(),
             complete_for_models: vec![],
             shard_builds: vec![build_tag_from_hash(&[7u8; 32])],
+            origin_checked_models: vec![ModelId("m".into())],
         };
         let wire = serde_json::to_string(&newer).expect("serialize");
         let old: OldShardAnnounce =

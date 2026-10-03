@@ -1344,7 +1344,9 @@ pub(crate) async fn dispatch_network_messages(
                                             tracing::debug!("Dropping unauthenticated ShardAnnounce");
                                             continue;
                                         }
-                                        if announce.shards.len() > MAX_SHARDS_PER_ANNOUNCE {
+                                        if announce.shards.len() > MAX_SHARDS_PER_ANNOUNCE
+                                            || announce.origin_checked_models.len() > MAX_SHARDS_PER_ANNOUNCE
+                                        {
                                             tracing::warn!(
                                                 node_id = %announce.node_id,
                                                 shards = announce.shards.len(),
@@ -1354,7 +1356,9 @@ pub(crate) async fn dispatch_network_messages(
                                             continue;
                                         }
                                         // Reject oversized model_id strings (memory DoS prevention)
-                                        if announce.shards.iter().any(|s| s.model_id.0.len() > 256) {
+                                        if announce.shards.iter().any(|s| s.model_id.0.len() > 256)
+                                            || announce.origin_checked_models.iter().any(|m| m.0.len() > 256)
+                                        {
                                             tracing::warn!(
                                                 node_id = %announce.node_id,
                                                 "ShardAnnounce contains oversized model_id — dropping"
@@ -1402,8 +1406,14 @@ pub(crate) async fn dispatch_network_messages(
                                                 .get(i)
                                                 .copied()
                                                 .unwrap_or(swarmllm_types::BUILD_TAG_UNKNOWN);
+                                            // First-hand: the holder says whether it checked
+                                            // this part against the model's origin. An older
+                                            // peer lists nothing, so its parts read unchecked.
+                                            let checked = announce
+                                                .origin_checked_models
+                                                .contains(&shard_id.model_id);
                                             let newly = shared_state.model_registry
-                                                .record_shard_holder_with_build(shard_id.clone(), announce.node_id.clone(), build);
+                                                .record_shard_holder_with_build(shard_id.clone(), announce.node_id.clone(), build, Some(checked));
                                             let e = models_announced
                                                 .entry(shard_id.model_id.0.clone())
                                                 .or_insert((0usize, 0usize));

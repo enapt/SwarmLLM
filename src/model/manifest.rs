@@ -704,6 +704,11 @@ fn note_rejection_in(
 /// `complete_for_models` is kept as given, so an announcement complete for such
 /// a model retracts every part of it on the peers that receive it.
 ///
+/// **It says which models' parts were checked against the origin**
+/// (`origin_checked_models`, from `ModelRegistry::model_is_origin_checked`) — of
+/// the models it announces parts of, so a node that cannot reach HuggingFace
+/// can tell a checked holder's bytes from anybody's.
+///
 /// Adding a field to `ShardAnnounce` extends this helper, not the call sites —
 /// the same contract `build_spec_verify_forward` keeps for `LayerForward`.
 /// `shard_announce_is_built_in_one_place` in `tests/repo_consistency.rs` fails
@@ -719,12 +724,20 @@ pub fn shard_announce(
         .iter()
         .map(|s| registry.announced_build_tag(s))
         .collect();
+    let mut origin_checked_models: Vec<crate::types::ModelId> = shards
+        .iter()
+        .map(|s| s.model_id.clone())
+        .filter(|m| registry.model_is_origin_checked(m))
+        .collect();
+    origin_checked_models.sort_by(|a, b| a.0.cmp(&b.0));
+    origin_checked_models.dedup();
     crate::types::ShardAnnounce {
         node_id,
         shards,
         timestamp: chrono::Utc::now(),
         complete_for_models,
         shard_builds,
+        origin_checked_models,
     }
 }
 

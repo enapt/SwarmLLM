@@ -52,7 +52,8 @@ then again after v0.3.223 (#157 and #164 closed, #160 raised to P1 on the swarm 
    ARE repairing (they withdrew parts of Mistral, GLM-4, Qwen2.5-14B, Qwen-Coder, xLAM… and
    re-announced them as they came back; one fetched Mistral parts from this node over P2P);
    `9594e1ff` withdrew nothing and announced the same 70 parts throughout — its heal is not
-   acting, as on .221/.222, most likely because it cannot reach HuggingFace (→ #160). The
+   acting, as on .221/.222 — a node with no origin to ask never judged its copy (#160, closed
+   the same day: it is now judged by the checked holders, from the next release). The
    contested hashes (`contradicts the one we took from the model's origin`, 27-37 an hour) had
    not stopped yet. This node's GLM-4 part 4 was hashed straight from HuggingFace the same day
    and is byte-identical (`35f07d7f…`): the peers disagreeing with it hold wrong bytes — the
@@ -64,8 +65,8 @@ then again after v0.3.223 (#157 and #164 closed, #160 raised to P1 on the swarm 
 3. **#159** — the remaining way a node can act on another upload's description of a model
    (#156's other door; #158 closed 2026-10-03; narrowed the same day to hashes gossiped by
    holders on v0.3.222 and older, and DHT-only holders).
-4. **#160** — a node that cannot reach HuggingFace never replaces its wrong parts: `9594e1ff`
-   has replaced none on .221, .222 or .223. Re-fetch from peers whose own heal verified the part.
+4. *(#160 closed 2026-10-03 — a node with no origin to ask is healed by the holders that
+   checked theirs; see § "Closed".)*
 5. **#165** — prompt privacy is on by default for every node holding both ends of a model
    (58 of 78 holdings in the 2026-10-01 census) and costs 9-14× on a far middle peer; the
    notice that was meant to tell the user never fires.
@@ -116,62 +117,6 @@ the byte check. **Residual:** holders on v0.3.222 and older still gossip such ha
 update; a holder known only from a DHT provider record carries no build and is not judged.
 Options for the rest: exclude holders whose tag is unknown when the canonical upload is known,
 or prefer hashes from holders whose announced tags agree with each other.
-
-#### #160 — A node that cannot reach HuggingFace never verifies or replaces its copies
-`P1` · storage · **OPEN** — 2026-10-02 (raised to P1 2026-10-03) · history: archive row #160
-
-**Why P1 now:** `9594e1ff` (Docker on Windows) has never replaced a single part — not on .221,
-.222 or .223 — while every other peer's heal acts within the hour; offline mode, or no route to
-HuggingFace from its container, is the reading that fits. The user's instruction (2026-10-03):
-wrong parts are pruned and "auto redownload[ed] from peers or HF" — this is the node the "or
-HF" leaves out. Its announcements are truthful since .223, so coordinators exclude its wrong
-parts, but its owner's own requests use them.
-
-`auto_manage::canonical` needs HuggingFace (anonymous probe, byte check) and deletes nothing it
-could not fetch back from there. An offline node could still adopt the canonical choice from
-peers' claims and fetch canonical parts over P2P against a canonical-shaped manifest (the
-repair queue already prefers peers when a part's hash is known; #157 closed 2026-10-03) — but
-it has no way to check a peer's bytes against the upload, only against a peer's hash. A
-workable bar: accept a hash for a part when holders whose own heal verified it agree on it
-(their announced tags are truthful since .223).
-
-**Narrowed 2026-10-03 13:00 UTC — not the build, not a hang.** `9594e1ff` runs v0.3.223,
-restarted ~11:20 UTC, and announced the same 70 parts (same tags) ever since — its heal never
-reached `replace_parts`, which always withdraws what it deletes, even when the delete fails.
-Every model it holds in another build names the SAME HuggingFace repo as the canonical
-choice, and whole runs of parts differ (Llama-3.2-3B 0-1, Qwen2.5-14B 1-3 and 11-15). How it
-runs is unsettled: its owner said on Discord it runs in Docker, and on 2026-10-01 it reported
-`os: linux` from `172.17.0.2`; on 10-03 it reports `os: windows` (`std::env::consts::OS`, a
-constant of the binary) from the host's own addresses — the identity has moved between a
-Windows install and a container at least once, or both run. Either way the build is not the
-cause: (1) the released Windows CPU build heals on Windows — on the project's Windows box a
-TinyLlama copy with its last part zeroed under a manifest vouching for it (`split_rig.sh
-spliced`'s shape) got the verdict 36 s after start, the part deleted, re-fetched from
-HuggingFace and byte-identical, `canonical`; the Linux build (what the container runs) passes
-the same rig and healed `e561df35` (Linux) the same day. (2) The HuggingFace calls cannot
-hang: `HF_META_CLIENT` has a 120 s total timeout, so a call is bounded at 4 attempts plus
-155 s of backoff (~10 min). What is left is local to that node, and its `/api/admin/models`
-`shared_copy.this_computer.state` tells the cases apart: absent or `nothing` with parts held →
-no upload ever verified (offline mode — `pass` returns at once — or no route to HuggingFace);
-`own_file` → served from the owner's own GGUF (`source_path`), never replaced by design;
-`replacing` → waiting for the model to be idle; `canonical` → its parts pass the 64 KB check and
-no dispute was recorded, i.e. bytes differing only past each part's first tensor slipped
-through both doors — a design gap, not a local condition. Ask the owner for that field, and
-how the node runs now (container or Windows app, and which data folder), before building the
-peer-sourced heal; which case it is decides whether that heal fixes it.
-
-#### #216 — A part the heal deletes right after a restart waits up to 5 min to be fetched again
-`P3` · storage · **OPEN** — 2026-10-03
-
-The canonical heal's first pass runs 30 s after start and deletes a part whose bytes are not the
-upload's at once, but the repair queue is drained by `AutoShardManager::run`, which sleeps its
-per-node phase offset (0-300 s, BLAKE3 of the node id mod the interval) before its loop — and so
-before the notify arm that `mark_shard_for_repair` wakes. Measured on the Windows rig
-2026-10-03: deleted 12:38:26, loop started 12:42:35 (offset 284 s), fetch 12:42:50, part back
-12:43:02 — the model was a part short for 4.5 min. The offset exists to spread `evaluate()`'s
-HuggingFace requests across a fleet that booted together; a repair is one named part, not a
-scan. Fix: service the notify arm's repair calls (`verify_pending_shards`,
-`complete_pending_shard_fetches`) during the offset sleep, leaving `evaluate()` where it is.
 
 #### #179 — A greedy reply (`temperature: 0`) is not reproducible run to run on the processor
 `P3` · correctness · **OPEN** — 2026-08-18 · history: archive § "`temperature: 0` with a fixed seed is not reproducible", gotcha #327
@@ -1318,7 +1263,34 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-03, after v0.3.223**
+**Closed 2026-10-03, after v0.3.223** (`docs/invariants/network.md` § "A node with no
+origin to ask is healed by the holders that checked theirs")
+- #160 — a node that could not reach HuggingFace never judged or replaced its copy: `9594e1ff`
+  replaced no part on .221, .222 or .223 while every other peer's heal acted within the hour
+  (its owner could not be asked; every branch that fits is closed). A node whose heal checked
+  its copy against the upload now says so (`ShardAnnounce::origin_checked_models`, additive),
+  and a node with no origin to ask — offline mode, which used to skip the heal outright, or no
+  route to HuggingFace, including one that verified an upload once and lost its route — deletes
+  a part whose bytes differ from what two connected checked holders agree on (none holding
+  ours) and fetches it from them against the hash their tags name
+  (`auto_manage::canonical::settle_by_checked_holders`). Where HuggingFace answers, a part every
+  checked holder disagrees with is a dispute the upload settles — the 64 KB check reads only a
+  part's first tensor. One failed HuggingFace call ends asking for the pass (each retries
+  ~155 s). A `source_path` exempts parts only while its file exists. `replace_parts` keeps a
+  part it could not delete (Windows, a file still open) recorded as held. Rig
+  `examples/outvoted_rig.sh`, 2026-10-03: B with no route to HuggingFace PASS (verdict 3 min
+  after start, part back over P2P 19 s later, byte-identical), B in offline mode PASS (285 s);
+  null control (v0.3.223 as B, no route to HuggingFace) FAILS as it must: the part stayed
+  zeroed for 600 s beside two checked holders — `9594e1ff`'s shape, reproduced. **Residual, by design:** a node with no origin to
+  ask cannot replace a copy of another LAYOUT (it is one upload's header, table and bytes,
+  computes correctly, and the swarm's header comes only from HuggingFace — it stays, announced
+  as the build it is), nor a part with fewer than two connected checked holders.
+- #216 — a part the heal deleted right after a restart waited for the auto-manage loop's
+  per-node phase offset (up to 300 s; 4.5 min measured on the Windows rig) before it was fetched
+  again. The offset still spreads `evaluate()`; a repair wake-up during it runs the repair calls
+  (`AutoShardManager::run`). Verified on the `outvoted` rig (node A, 2026-10-03): part deleted
+  14:25:06, download started the same millisecond and done at 14:25:17, while A's loop only
+  started at 14:28:03 — the fetch ran inside the offset it used to wait out.
 - #215 — `/api/admin/models` named no peer behind `peers_other_build`: it now lists them as
   `peers_other_build_nodes` (node ids, sorted), and the count is that list's length
   (`ModelPeerCounts`), so the two cannot disagree. Finding the one peer that never healed after

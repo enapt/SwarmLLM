@@ -59,7 +59,17 @@ type ManifestUpdateHook = Box<dyn Fn(&ModelManifest, bool, &[u32]) + Send + Sync
 struct HolderRecord {
     seen: Instant,
     build: u64,
+    /// The holder said, in its own announcement, that it CHECKED this part
+    /// against the model's origin (`ShardAnnounce::origin_checked_models`).
+    /// Only a first-hand announcement sets or clears it.
+    checked: bool,
 }
+
+/// How many distinct full hashes are remembered per part
+/// (`ModelRegistry::heard_part_hashes`). A part has one hash per byte version,
+/// and the field has never shown more than three for one part (GLM-4 part 4,
+/// 2026-10-03); the oldest goes first.
+const HEARD_HASHES_PER_PART: usize = 8;
 
 pub struct ModelRegistry {
     /// Known model manifests, keyed by model ID.
@@ -149,6 +159,21 @@ pub struct ModelRegistry {
     /// in a manifest, not served — until the switch lands. Written only by
     /// `SharedState::note_canonical_holding`.
     withheld_models: dashmap::DashSet<ModelId>,
+    /// Models whose copy on THIS node its heal has checked against the model's
+    /// origin this run (`Holding::Canonical`) — what `shard_announce` tells
+    /// peers in `origin_checked_models`. Written only by
+    /// `SharedState::note_canonical_holding`.
+    origin_checked_models: dashmap::DashSet<ModelId>,
+    /// Every distinct full hash a manifest has carried for a part, with the
+    /// part size that manifest gave, newest last (at most
+    /// [`HEARD_HASHES_PER_PART`]). An announcement carries only a 64-bit tag;
+    /// fetching the part those tags agree on needs the hash to check it
+    /// against, and a node whose own hash for the part came from the origin
+    /// never adopts a peer's (`register_manifest`). Recorded BEFORE any merge,
+    /// so what the merge keeps out is still heard. A hash here is a claim —
+    /// what makes one trusted is that checked holders' tags agree with it
+    /// (`auto_manage::canonical`), and bytes fetched against it must hash to it.
+    heard_part_hashes: DashMap<ShardId, Vec<(crate::types::Blake3Hash, u64)>>,
 
     persist_hook: std::sync::OnceLock<ManifestUpdateHook>,
     /// Local node ID — never evicted from holder sets.
@@ -166,6 +191,8 @@ impl ModelRegistry {
             origin_verified: DashMap::new(),
             bytes_disputed: DashMap::new(),
             withheld_models: dashmap::DashSet::new(),
+            origin_checked_models: dashmap::DashSet::new(),
+            heard_part_hashes: DashMap::new(),
             persist_hook: std::sync::OnceLock::new(),
             local_node_id: None,
         }
@@ -184,6 +211,8 @@ impl ModelRegistry {
             origin_verified: DashMap::new(),
             bytes_disputed: DashMap::new(),
             withheld_models: dashmap::DashSet::new(),
+            origin_checked_models: dashmap::DashSet::new(),
+            heard_part_hashes: DashMap::new(),
             persist_hook: std::sync::OnceLock::new(),
             local_node_id: Some(local_node_id),
         }
@@ -321,6 +350,20 @@ impl ModelRegistry {
                  the real model id if this is genuine."
             );
             return;
+        }
+        // Every hash this manifest carries is heard, whatever the merges below
+        // keep: an origin-derived hash outranks a peer's in the manifest, and the
+        // peer's is still what a node fetches against when the peers that
+        // checked their copies all hold it (`heard_hash_with_tag`).
+        for shard in &manifest.shards {
+            self.note_heard_part_hash(
+                ShardId {
+                    model_id: manifest.id.clone(),
+                    index: shard.index,
+                },
+                shard.hash,
+                shard.size_bytes,
+            );
         }
         // A different BUILD of this model is not an update to it.
         //
@@ -675,7 +718,12 @@ impl ModelRegistry {
     /// like evidence.
     #[track_caller]
     pub fn record_shard_holder(&self, shard_id: ShardId, node_id: NodeId) -> bool {
-        self.record_shard_holder_with_build(shard_id, node_id, swarmllm_types::BUILD_TAG_UNKNOWN)
+        self.record_shard_holder_with_build(
+            shard_id,
+            node_id,
+            swarmllm_types::BUILD_TAG_UNKNOWN,
+            None,
+        )
     }
 
     /// As `record_shard_holder`, but recording which BUILD the holder claims.
@@ -692,12 +740,19 @@ impl ModelRegistry {
     /// reporting the timer, not the swarm. Same reasoning as `note_build_tag`
     /// directly below, which has logged once per transition since the build
     /// filter was written.
+    ///
+    /// `checked` is what the holder's own announcement says about having
+    /// checked the part against the model's origin; `None` for a claim that says
+    /// nothing either way (a DHT record, a capability, a local registration),
+    /// which leaves what a first-hand announcement said untouched — the same
+    /// rule as an unknown build tag.
     #[track_caller]
     pub fn record_shard_holder_with_build(
         &self,
         shard_id: ShardId,
         node_id: NodeId,
         build: u64,
+        checked: Option<bool>,
     ) -> bool {
         // A first-hand claim supersedes any earlier retraction: the node is
         // telling us it has the shard now. Only this path clears it — the DHT
@@ -745,6 +800,9 @@ impl ModelRegistry {
         // re-announce would blank a known build.
         if let Some(existing) = holders.get_mut(&node_id) {
             existing.seen = Instant::now();
+            if let Some(checked) = checked {
+                existing.checked = checked;
+            }
             if build != swarmllm_types::BUILD_TAG_UNKNOWN && existing.build != build {
                 let was = existing.build;
                 existing.build = build;
@@ -780,6 +838,7 @@ impl ModelRegistry {
             HolderRecord {
                 seen: Instant::now(),
                 build,
+                checked: checked.unwrap_or(false),
             },
         );
         let announced_build = build;
@@ -1022,6 +1081,81 @@ impl ModelRegistry {
     /// Is this node's copy of `model_id` held back from the swarm?
     pub fn model_is_withheld(&self, model_id: &ModelId) -> bool {
         self.withheld_models.contains(model_id)
+    }
+
+    /// Record whether this node's copy of `model_id` has been checked against
+    /// the model's origin this run. Returns whether that changed. Only
+    /// `SharedState::note_canonical_holding` calls this.
+    pub fn set_model_origin_checked(&self, model_id: &ModelId, checked: bool) -> bool {
+        if checked {
+            self.origin_checked_models.insert(model_id.clone())
+        } else {
+            self.origin_checked_models.remove(model_id).is_some()
+        }
+    }
+
+    /// Has this node's heal checked its copy of `model_id` against the
+    /// model's origin this run?
+    pub fn model_is_origin_checked(&self, model_id: &ModelId) -> bool {
+        self.origin_checked_models.contains(model_id)
+    }
+
+    /// The tags OTHER holders announce for `shard_id` that also said they
+    /// checked it against the model's origin — one per holder, only known tags,
+    /// only holders `include` accepts (the caller's "connected now").
+    pub fn checked_holder_tags(
+        &self,
+        shard_id: &ShardId,
+        include: impl Fn(&NodeId) -> bool,
+    ) -> Vec<u64> {
+        self.shard_holders
+            .get(shard_id)
+            .map(|holders| {
+                holders
+                    .iter()
+                    .filter(|(node, rec)| {
+                        rec.checked
+                            && Some(*node) != self.local_node_id.as_ref()
+                            && rec.build != swarmllm_types::BUILD_TAG_UNKNOWN
+                            && rec.build != BUILD_TAG_BYTES_UNHASHED
+                            && include(node)
+                    })
+                    .map(|(_, rec)| rec.build)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn note_heard_part_hash(&self, shard_id: ShardId, hash: crate::types::Blake3Hash, size: u64) {
+        if hash == [0u8; 32] {
+            return;
+        }
+        let mut heard = self.heard_part_hashes.entry(shard_id).or_default();
+        if heard.iter().any(|(h, s)| *h == hash && *s == size) {
+            return;
+        }
+        if heard.len() >= HEARD_HASHES_PER_PART {
+            heard.remove(0);
+        }
+        heard.push((hash, size));
+    }
+
+    /// A full hash some manifest has carried for `shard_id` whose build tag is
+    /// `tag`, for a part of `size` bytes — what a part fetched to match that
+    /// tag is checked against.
+    pub fn heard_hash_with_tag(
+        &self,
+        shard_id: &ShardId,
+        tag: u64,
+        size: u64,
+    ) -> Option<crate::types::Blake3Hash> {
+        self.heard_part_hashes.get(shard_id).and_then(|heard| {
+            heard
+                .iter()
+                .rev()
+                .find(|(h, s)| *s == size && swarmllm_types::build_tag_from_hash(h) == tag)
+                .map(|(h, _)| *h)
+        })
     }
 
     /// Is the different-build holder filter switched on?
@@ -2309,8 +2443,8 @@ mod tests {
 
         let same_build = NodeId([2u8; 32]);
         let other_build = NodeId([3u8; 32]);
-        registry.record_shard_holder_with_build(sid.clone(), same_build.clone(), ours);
-        registry.record_shard_holder_with_build(sid.clone(), other_build.clone(), theirs);
+        registry.record_shard_holder_with_build(sid.clone(), same_build.clone(), ours, None);
+        registry.record_shard_holder_with_build(sid.clone(), other_build.clone(), theirs, None);
 
         let holders = registry.shard_holders(&sid);
         assert!(
@@ -2383,11 +2517,13 @@ mod tests {
             sid.clone(),
             same_build.clone(),
             swarmllm_types::build_tag_from_hash(&[7u8; 32]),
+            None,
         );
         registry.record_shard_holder_with_build(
             sid.clone(),
             other_build.clone(),
             swarmllm_types::build_tag_from_hash(&[9u8; 32]),
+            None,
         );
         registry.record_shard_holder(sid.clone(), untagged.clone());
 
@@ -2433,11 +2569,13 @@ mod tests {
             sid.clone(),
             a.clone(),
             swarmllm_types::build_tag_from_hash(&[7u8; 32]),
+            None,
         );
         registry.record_shard_holder_with_build(
             sid.clone(),
             b.clone(),
             swarmllm_types::build_tag_from_hash(&[8u8; 32]),
+            None,
         );
 
         let holders = registry.shard_holders(&sid);
@@ -2469,6 +2607,7 @@ mod tests {
             sid.clone(),
             other_build.clone(),
             swarmllm_types::build_tag_from_hash(&[8u8; 32]),
+            None,
         );
         assert!(!registry.shard_holders(&sid).contains(&other_build));
 
@@ -2672,7 +2811,7 @@ mod tests {
         // but is still not a new HOLDER — the feed would otherwise fire again
         // the moment a peer upgraded to a build-tagging release.
         assert!(
-            !registry.record_shard_holder_with_build(shard_id.clone(), peer.clone(), 42),
+            !registry.record_shard_holder_with_build(shard_id.clone(), peer.clone(), 42, None),
             "learning a build tag is not a new holder"
         );
 
@@ -3228,5 +3367,130 @@ mod servability_tests {
             !msg.contains("no-layers"),
             "a model with no layer count must not be suggested: {msg}"
         );
+    }
+}
+
+#[cfg(test)]
+mod checked_holder_tests {
+    use super::*;
+    use swarmllm_types::{build_tag_from_hash, ModelArchitecture, Quantization};
+
+    fn manifest(hashes: &[[u8; 32]]) -> ModelManifest {
+        ModelManifest {
+            id: ModelId("m".into()),
+            name: "m".into(),
+            architecture: ModelArchitecture::Llama,
+            num_layers: hashes.len() as u32,
+            num_params_billions: 0.001,
+            quantization: Quantization::Q4KM,
+            total_size_bytes: 1024,
+            shard_count: hashes.len() as u32,
+            shards: hashes
+                .iter()
+                .enumerate()
+                .map(|(i, h)| swarmllm_types::ShardInfo {
+                    index: i as u32,
+                    layer_range: (i as u32, i as u32 + 1),
+                    size_bytes: 100,
+                    hash: *h,
+                    tensors: Vec::new(),
+                })
+                .collect(),
+            tokenizer_hash: [0u8; 32],
+            manifest_hash: [0u8; 32],
+            publisher: NodeId([0u8; 32]),
+            publish_date: chrono::Utc::now(),
+            license: "MIT".into(),
+            mmproj: None,
+        }
+    }
+
+    fn sid(index: u32) -> ShardId {
+        ShardId {
+            model_id: ModelId("m".into()),
+            index,
+        }
+    }
+
+    /// Only a holder's own announcement says it checked a part, and a claim
+    /// that says nothing (a DHT record, a capability) leaves that alone — the
+    /// same rule as an unknown build tag. Our own record never counts, nor a
+    /// holder the caller does not accept, nor an unchecked one.
+    #[test]
+    fn a_checked_holder_is_counted_only_on_its_own_word() {
+        let me = NodeId([1u8; 32]);
+        let (a, b, c) = (NodeId([2u8; 32]), NodeId([3u8; 32]), NodeId([4u8; 32]));
+        let registry = ModelRegistry::with_local_node(me.clone());
+        let t = build_tag_from_hash(&[9u8; 32]);
+        registry.record_shard_holder_with_build(sid(0), me.clone(), t, Some(true));
+        registry.record_shard_holder_with_build(sid(0), a.clone(), t, Some(true));
+        registry.record_shard_holder_with_build(sid(0), b.clone(), t, Some(false));
+        registry.record_shard_holder_with_build(sid(0), c.clone(), t, Some(true));
+        // A DHT merge of the same holder says nothing about checking.
+        registry.record_shard_holder(sid(0), a.clone());
+        assert_eq!(
+            registry.checked_holder_tags(&sid(0), |_| true),
+            vec![t, t],
+            "a and c: not ourselves, not the unchecked b"
+        );
+        assert_eq!(
+            registry.checked_holder_tags(&sid(0), |n| *n == c),
+            vec![t],
+            "only holders the caller accepts (connected now)"
+        );
+        // A newer announcement from c that no longer lists the model clears it.
+        registry.record_shard_holder_with_build(sid(0), c.clone(), t, Some(false));
+        assert_eq!(registry.checked_holder_tags(&sid(0), |_| true), vec![t]);
+    }
+
+    /// The hash a fetch is checked against must be HEARD even when this node's
+    /// own origin-derived hash keeps it out of the manifest — that override is
+    /// exactly the case of a node holding a part every checked holder disagrees
+    /// with.
+    #[test]
+    fn a_peers_hash_is_heard_even_when_our_origin_hash_wins_the_manifest() {
+        let registry = ModelRegistry::with_local_node(NodeId([1u8; 32]));
+        let (ours, theirs) = ([5u8; 32], [6u8; 32]);
+        registry.record_origin_verified_hash(sid(0), ours);
+        registry.register_manifest(manifest(&[ours]));
+        registry.register_manifest(manifest(&[theirs]));
+        assert_eq!(
+            registry.get_manifest(&ModelId("m".into())).unwrap().shards[0].hash,
+            ours,
+            "the origin still wins the manifest"
+        );
+        assert_eq!(
+            registry.heard_hash_with_tag(&sid(0), build_tag_from_hash(&theirs), 100),
+            Some(theirs)
+        );
+        assert_eq!(
+            registry.heard_hash_with_tag(&sid(0), build_tag_from_hash(&theirs), 99),
+            None,
+            "a part of another size is another layout's"
+        );
+    }
+
+    /// What this node tells peers it checked is the set
+    /// `note_canonical_holding` writes, and the announcement carries it only
+    /// for models it announces parts of.
+    #[test]
+    fn an_announcement_says_which_models_were_checked() {
+        let me = NodeId([1u8; 32]);
+        let registry = ModelRegistry::with_local_node(me.clone());
+        let other = ShardId {
+            model_id: ModelId("n".into()),
+            index: 0,
+        };
+        assert!(registry.set_model_origin_checked(&ModelId("m".into()), true));
+        assert!(registry.set_model_origin_checked(&ModelId("z".into()), true));
+        let announce = crate::model::manifest::shard_announce(
+            &registry,
+            me,
+            vec![sid(0), sid(1), other],
+            vec![],
+        );
+        assert_eq!(announce.origin_checked_models, vec![ModelId("m".into())]);
+        assert!(registry.set_model_origin_checked(&ModelId("m".into()), false));
+        assert!(!registry.model_is_origin_checked(&ModelId("m".into())));
     }
 }

@@ -26,6 +26,16 @@
 //!    goes can come back. Bytes that are not their own table's upload go at
 //!    once, in use or not (a request using them computes garbage); the rest
 //!    wait until nothing is using the model, withheld from the swarm meanwhile.
+//! 4. **Ask the holders that checked theirs.** A node whose copy this heal has
+//!    checked says so in its announcements (`origin_checked_models`). The 64 KB
+//!    check reads only a part's first tensor; a part every checked holder
+//!    disagrees with is in dispute, and the upload's own bytes settle it. A
+//!    node with NO origin to ask — offline mode, or HuggingFace never
+//!    answering it — settles its parts by those holders instead
+//!    ([`settle_by_checked_holders`]): a part whose bytes differ from what
+//!    [`CHECKED_QUORUM`] of them agree on, none of them holding these bytes,
+//!    is fetched again from them. Before v0.3.224 such a node never judged its
+//!    copy at all (`9594e1ff`, FUTURE_WORK #160).
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -48,6 +58,62 @@ const SPOT_CHECK_BYTES: u64 = 64 * 1024;
 /// Records which upload a staging directory holds files of (its header, its
 /// side files), so what was staged for one upload is never used for another.
 const STAGED_UPLOAD_FILENAME: &str = "upload.json";
+/// How many connected holders that checked their copy against the upload must
+/// agree on a part before a node that cannot ask the upload itself deletes its
+/// own different bytes of it. Two, because one is a single stranger's word —
+/// the bar `ModelRegistry::mismatch_policy` exists to hold — and because the
+/// replacement must exist somewhere other than one peer before ours goes:
+/// HDFS invalidates a corrupt replica only while enough good replicas remain
+/// (HDFS-3493). Ceph's repair, which picks an "authoritative" copy among
+/// replicas, warns the pick cannot be proven without a recorded checksum; here
+/// every vote comes from a holder that checked against the upload, and the
+/// fetched bytes must hash to what the votes name.
+const CHECKED_QUORUM: usize = 2;
+
+/// For a node with no origin to ask: the tag its part should have instead of
+/// `ours`, when at least [`CHECKED_QUORUM`] checked holders announce one and
+/// the same tag and none of them announces ours. Checked holders that disagree
+/// with each other settle nothing.
+fn outvoted_by_checked_holders(ours: u64, checked: &[u64]) -> Option<u64> {
+    let first = *checked.first()?;
+    (checked.len() >= CHECKED_QUORUM
+        && !checked.contains(&ours)
+        && checked.iter().all(|t| *t == first))
+    .then_some(first)
+}
+
+/// For a node that CAN ask the origin: does every checked holder of this part
+/// hold other bytes than ours? One is enough — the dispute is settled by the
+/// upload's own bytes, never by the peer, so a wrong vote costs one download.
+fn disputed_by_checked_holders(ours: u64, checked: &[u64]) -> bool {
+    !checked.is_empty() && !checked.contains(&ours)
+}
+
+/// Is this model served from a whole GGUF its owner gave this node (`-m`)?
+/// While that file is there — or while there are no part files beside the
+/// marker to judge (an owner's drive unplugged for a while is not a reason to
+/// fetch the model again as parts). The marker outlives the flag: a node that
+/// once ran with `-m`, or whose data folder moved to another machine or into a
+/// container, keeps a `source_path` naming a file that is gone, and the heal
+/// used to exempt the PARTS beside it for ever. The marker itself is left
+/// alone — `-m` writes it only when it first builds the manifest, so removing
+/// it would end the exemption for good once the file came back.
+fn owner_serves_own_file(model_dir: &Path) -> bool {
+    let Ok(named) = std::fs::read_to_string(model_dir.join("source_path")) else {
+        return false;
+    };
+    Path::new(named.trim()).is_file() || !holds_part_files(model_dir)
+}
+
+fn holds_part_files(model_dir: &Path) -> bool {
+    std::fs::read_dir(model_dir).is_ok_and(|entries| {
+        entries.flatten().any(|e| {
+            e.file_name()
+                .to_str()
+                .is_some_and(|n| n.starts_with("shard_") && n.ends_with(".bin"))
+        })
+    })
+}
 
 /// Where parts of the canonical upload wait until they replace a node's old
 /// ones. Outside `models/`, so nothing scans it as a model.
@@ -97,6 +163,11 @@ pub async fn run(
 #[derive(Default)]
 struct CheckedParts {
     by_model: HashMap<ModelId, HashMap<u32, bool>>,
+    /// Parts this run deleted and fetched again from the upload itself. The
+    /// upload's own bytes have settled them: checked holders that still
+    /// disagree are the ones holding something else, and asking the origin
+    /// again would only fetch the same bytes again, every pass.
+    from_origin: HashSet<ShardId>,
 }
 
 impl CheckedParts {
@@ -121,8 +192,25 @@ impl CheckedParts {
     }
 
     /// Its parts are being replaced, or it is no longer this node's to judge.
+    /// What came from the origin stays known.
     fn forget(&mut self, model: &ModelId) {
         self.by_model.remove(model);
+    }
+
+    fn note_from_origin(&mut self, model: &ModelId, parts: &[u32]) {
+        for &index in parts {
+            self.from_origin.insert(ShardId {
+                model_id: model.clone(),
+                index,
+            });
+        }
+    }
+
+    fn came_from_origin(&self, model: &ModelId, index: u32) -> bool {
+        self.from_origin.contains(&ShardId {
+            model_id: model.clone(),
+            index,
+        })
     }
 }
 
@@ -134,26 +222,61 @@ async fn pass(
     if !canonical::canonical_uploads_enabled() {
         return;
     }
-    if state
+    // Offline mode never reaches HuggingFace — but its copy is still judged,
+    // by the holders that checked theirs. It used to skip the heal entirely.
+    let origin = if state
         .credits
         .offline_mode
         .load(std::sync::atomic::Ordering::Relaxed)
     {
-        return;
-    }
+        Origin::Unreachable
+    } else {
+        Origin::Ask
+    };
+    let mut origin = origin;
     let models = models_to_settle(state);
-    let mut asked = 0usize;
-    for model in &models {
-        if asked >= RESOLVES_PER_PASS {
-            break;
-        }
-        if resolve(state, model).await {
-            asked += 1;
+    if origin == Origin::Ask {
+        let mut asked = 0usize;
+        for model in &models {
+            if asked >= RESOLVES_PER_PASS {
+                break;
+            }
+            match resolve(state, model).await {
+                Asked::No => {}
+                Asked::Answered => asked += 1,
+                Asked::NoAnswer => {
+                    origin = Origin::Unreachable;
+                    break;
+                }
+            }
         }
     }
     for model in &models {
-        settle(state, net_tx, model, checked).await;
+        settle(state, net_tx, model, checked, &mut origin).await;
     }
+}
+
+/// Whether this pass may ask HuggingFace.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Origin {
+    Ask,
+    /// Offline mode — or HuggingFace did not answer earlier in this pass. Every
+    /// call retries for ~155 s before it gives up (`NETWORK_RETRY_DELAYS`), so
+    /// asking again for each model would hold a node with no route for many
+    /// minutes a pass before any of its copies was judged at all.
+    Unreachable,
+}
+
+/// What [`resolve`] did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Asked {
+    /// Nothing to ask about.
+    No,
+    /// HuggingFace answered — the upload checked out, or was refused for good.
+    Answered,
+    /// No answer that says anything about the upload: HuggingFace (or the way
+    /// to it) failed.
+    NoAnswer,
 }
 
 /// Models this node holds a part of, plus models it may acquire — pinned by
@@ -187,21 +310,21 @@ fn models_to_settle(state: &SharedState) -> Vec<ModelId> {
 }
 
 /// Adopt the best claimed upload of `model` if it outranks what this node
-/// uses now. Returns whether HuggingFace was asked.
-async fn resolve(state: &Arc<SharedState>, model: &ModelId) -> bool {
+/// uses now.
+async fn resolve(state: &Arc<SharedState>, model: &ModelId) -> Asked {
     let current = state.canonical_build(model);
     let Some(best) = state
         .origin_candidates(model)
         .into_iter()
         .find(|c| !state.origin_refused(model, c))
     else {
-        return false;
+        return Asked::No;
     };
     if let Some(cur) = &current {
         if canonical::same_origin(&best, &cur.source)
             || !canonical::outranks(model, &best, &cur.source)
         {
-            return false;
+            return Asked::No;
         }
     }
     match verify_upload(state, model, &best).await {
@@ -216,6 +339,7 @@ async fn resolve(state: &Arc<SharedState>, model: &ModelId) -> bool {
             state.adopt_canonical_build(model, build);
             // Judge the copy held here afresh against the new upload.
             state.note_canonical_holding(model, None);
+            Asked::Answered
         }
         Err((why, permanent)) => {
             tracing::info!(
@@ -235,9 +359,13 @@ async fn resolve(state: &Arc<SharedState>, model: &ModelId) -> bool {
                     crate::daemon::state::ORIGIN_REFUSED_TRANSIENT_SECS
                 },
             );
+            if permanent {
+                Asked::Answered
+            } else {
+                Asked::NoAnswer
+            }
         }
     }
-    true
 }
 
 /// Check an upload on HuggingFace as any node would see it, keep its header
@@ -335,14 +463,12 @@ async fn settle(
     net_tx: &mpsc::Sender<NetworkCommand>,
     model: &ModelId,
     checked: &mut CheckedParts,
+    origin: &mut Origin,
 ) {
-    let Some(build) = state.canonical_build(model) else {
-        return;
-    };
     let model_dir = state.model_dir(&model.0);
     // A model this node serves from a whole GGUF its owner gave it (`-m`):
     // that file is the owner's, and is never replaced on their behalf.
-    if model_dir.join("source_path").exists() {
+    if owner_serves_own_file(&model_dir) {
         set_holding(state, model, Holding::OwnFile);
         return;
     }
@@ -365,6 +491,18 @@ async fn settle(
         .filter(|&i| i != crate::types::MMPROJ_SHARD_INDEX)
         .collect();
     let manifest = state.model_registry.get_manifest(model);
+
+    // No upload verified here — offline mode, or HuggingFace has never
+    // answered this node about this model. Its parts are judged by the holders
+    // that checked theirs; before, they were not judged at all.
+    let build = match *origin {
+        Origin::Ask => state.canonical_build(model),
+        Origin::Unreachable => None,
+    };
+    let Some(build) = build else {
+        settle_by_checked_holders(state, net_tx, model, &held, manifest.as_ref()).await;
+        return;
+    };
 
     if held.is_empty() {
         set_holding(state, model, Holding::Nothing);
@@ -404,7 +542,15 @@ async fn settle(
             return;
         }
         checked.forget(model);
-        replace_parts(state, net_tx, model, &build, &held, Doomed::AnotherLayout).await;
+        let _ = replace_parts(
+            state,
+            net_tx,
+            model,
+            Some(&build),
+            &held,
+            Doomed::AnotherLayout,
+        )
+        .await;
         return;
     }
 
@@ -414,27 +560,58 @@ async fn settle(
     // node took from gossip can be another upload's), or one that has since
     // fallen into dispute. The rest was checked this run.
     let to_check = if holding(state, model) == Some(Holding::Canonical) {
-        let fresh = checked.to_check(model, &held, disputed);
-        if fresh.is_empty() {
-            return;
-        }
-        fresh
+        checked.to_check(model, &held, disputed)
     } else {
         held.clone()
     };
-    let failed = match parts_not_from(&build, &model_dir, &to_check).await {
+    // And any part every holder that checked its own copy disagrees with. The
+    // 64 KB check reads only a part's first tensor, so bytes that differ past
+    // it pass; the upload's own bytes settle it (`Doomed::InDispute`). Not a
+    // part the upload has already settled this run.
+    let connected = |n: &crate::types::NodeId| state.peer_registry.contains_key(n);
+    let outvoted: Vec<u32> = held
+        .iter()
+        .copied()
+        .filter(|&index| {
+            let sid = ShardId {
+                model_id: model.clone(),
+                index,
+            };
+            !checked.came_from_origin(model, index)
+                && !state.models.shards_pending_verification.contains(&sid)
+                && disputed_by_checked_holders(
+                    state.model_registry.announced_build_tag(&sid),
+                    &state.model_registry.checked_holder_tags(&sid, connected),
+                )
+        })
+        .collect();
+    let mut asking = to_check.clone();
+    asking.extend(outvoted.iter().copied());
+    asking.sort_unstable();
+    asking.dedup();
+    if asking.is_empty() && holding(state, model) == Some(Holding::Canonical) {
+        return;
+    }
+    let failed = match parts_not_from(&build, &model_dir, &asking).await {
         Ok(failed) => failed,
         Err(e) => {
-            tracing::debug!(model = %model, error = %e, "Could not compare parts with HuggingFace; asking again next pass");
+            // No verdict from HuggingFace this pass. A node that once reached
+            // it keeps the upload it verified (restored at startup), and a node
+            // that has lost its route keeps landing here — so its parts are
+            // judged by the checked holders instead of by nobody.
+            tracing::debug!(model = %model, error = %e, "Could not compare parts with HuggingFace — judging them by the holders that checked theirs");
+            *origin = Origin::Unreachable;
+            settle_by_checked_holders(state, net_tx, model, &held, manifest.as_ref()).await;
             return;
         }
     };
-    let doomed = doomed_parts(&to_check, &failed, disputed);
+    let doomed = doomed_parts(&asking, &failed, |i| disputed(i) || outvoted.contains(&i));
     if !doomed.is_empty() {
         tracing::warn!(
             model = %model,
             not_the_upload = ?failed,
-            in_dispute = ?doomed.iter().filter(|i| !failed.contains(i)).collect::<Vec<_>>(),
+            in_dispute = ?doomed.iter().filter(|i| !failed.contains(i) && !outvoted.contains(i)).collect::<Vec<_>>(),
+            checked_holders_disagree = ?doomed.iter().filter(|i| !failed.contains(i) && outvoted.contains(i)).collect::<Vec<_>>(),
             "DIAG: parts on this node are not the canonical upload's bytes — deleting them and fetching the upload's"
         );
         checked.forget(model);
@@ -443,7 +620,11 @@ async fn settle(
         } else {
             Doomed::WrongBytes
         };
-        replace_parts(state, net_tx, model, &build, &doomed, why).await;
+        // What was deleted is fetched again from the upload itself. Only that
+        // is settled: a replacement that waits for the model to be idle, or a
+        // file that would not go, is judged again next pass.
+        let deleted = replace_parts(state, net_tx, model, Some(&build), &doomed, why).await;
+        checked.note_from_origin(model, &deleted);
         return;
     }
     checked.record(model, &to_check, disputed);
@@ -475,9 +656,110 @@ async fn settle(
     let _ = std::fs::remove_dir_all(staging_dir(state, model));
 }
 
+/// The heal for a node with no origin to ask — offline mode, or HuggingFace
+/// never answering it. Its parts are judged by the holders that DID check
+/// theirs against the upload (`ShardAnnounce::origin_checked_models`): a part
+/// whose bytes differ from what at least [`CHECKED_QUORUM`] connected checked
+/// holders agree on, none of them holding these bytes, is deleted and fetched
+/// from them, checked against the full hash their tags name
+/// (`ModelRegistry::heard_hash_with_tag`). Nothing goes unless the agreed
+/// copy is held by enough peers connected NOW, so whatever goes can come back.
+///
+/// Only the same layout is judged (the agreed hash must come from a manifest
+/// giving the part the size ours has): a copy of another layout is one upload's
+/// header, table and bytes, computes correctly, and without HuggingFace there
+/// is no way to fetch the swarm's header in its place — it stays, announced as
+/// the build it is, so no peer routes to it.
+///
+/// The tag a part is announced under can lag its bytes for as long as a
+/// re-check is pending, so those parts wait, and the bytes of every part about
+/// to go are hashed first: a part that already IS the agreed bytes stays.
+async fn settle_by_checked_holders(
+    state: &Arc<SharedState>,
+    net_tx: &mpsc::Sender<NetworkCommand>,
+    model: &ModelId,
+    held: &[u32],
+    manifest: Option<&crate::types::ModelManifest>,
+) {
+    let Some(manifest) = manifest else {
+        return;
+    };
+    let connected = |n: &crate::types::NodeId| state.peer_registry.contains_key(n);
+    let mut outvoted: Vec<(u32, crate::types::Blake3Hash)> = Vec::new();
+    for &index in held {
+        let sid = ShardId {
+            model_id: model.clone(),
+            index,
+        };
+        if state.models.shards_pending_verification.contains(&sid) {
+            continue;
+        }
+        let ours = state.model_registry.announced_build_tag(&sid);
+        let checked = state.model_registry.checked_holder_tags(&sid, connected);
+        let Some(theirs) = outvoted_by_checked_holders(ours, &checked) else {
+            continue;
+        };
+        let Some(size) = manifest
+            .shards
+            .iter()
+            .find(|s| s.index == index)
+            .map(|s| s.size_bytes)
+        else {
+            continue;
+        };
+        match state.model_registry.heard_hash_with_tag(&sid, theirs, size) {
+            Some(hash) => outvoted.push((index, hash)),
+            None => tracing::debug!(
+                model = %model,
+                shard = index,
+                holders = checked.len(),
+                "The holders that checked this part agree on other bytes than ours, and no \
+                 manifest of the same layout has named their hash yet — waiting for one"
+            ),
+        }
+    }
+    if outvoted.is_empty() {
+        return;
+    }
+    let model_dir = state.model_dir(&model.0);
+    let confirmed: HashMap<u32, crate::types::Blake3Hash> =
+        tokio::task::spawn_blocking(move || {
+            outvoted
+                .into_iter()
+                .filter(|(index, agreed)| {
+                    crate::model::shard::hash_file_blake3(
+                        &model_dir.join(crate::model::shard::shard_filename(*index)),
+                    )
+                    .map_or(true, |ours| &ours != agreed)
+                })
+                .collect()
+        })
+        .await
+        .unwrap_or_default();
+    if confirmed.is_empty() {
+        return;
+    }
+    let mut doomed: Vec<u32> = confirmed.keys().copied().collect();
+    doomed.sort_unstable();
+    tracing::warn!(
+        model = %model,
+        parts = ?doomed,
+        "DIAG: parts on this node differ from what the holders that checked theirs against the upload agree on — this node cannot ask HuggingFace itself, so it is fetching them from those holders"
+    );
+    let _ = replace_parts(
+        state,
+        net_tx,
+        model,
+        None,
+        &doomed,
+        Doomed::Outvoted(confirmed),
+    )
+    .await;
+}
+
 /// Why parts of a copy are replaced — which decides whether they may wait for
-/// the model to be idle.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// the model to be idle, and where their replacements come from.
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum Doomed {
     /// A copy of another upload's LAYOUT: every part goes. Its header, table and
     /// bytes are one upload's, so it computes correctly — just not with the
@@ -493,6 +775,12 @@ enum Doomed {
     /// Parts whose bytes passed the check but disagree with the swarm's hash:
     /// settled by the upload's own bytes once nothing is using the model.
     InDispute,
+    /// On a node with no origin to ask: parts whose bytes differ from what
+    /// [`CHECKED_QUORUM`] connected holders that checked theirs agree on, with
+    /// the hash each replacement must have. Same layout, so — like
+    /// `WrongBytes` — every read of them lands on bytes that are not the
+    /// upload's: they go at once, and come back from those holders.
+    Outvoted(HashMap<u32, crate::types::Blake3Hash>),
 }
 
 /// Which of the checked parts must go: every one whose bytes are not the
@@ -515,9 +803,9 @@ fn replacement_targets(
     build: &CanonicalBuild,
     manifest: Option<&crate::types::ModelManifest>,
     doomed: &[u32],
-    why: Doomed,
+    why: &Doomed,
 ) -> Vec<u32> {
-    if why != Doomed::AnotherLayout {
+    if *why != Doomed::AnotherLayout {
         return doomed.to_vec();
     }
     let ranges: Vec<(u32, u32)> = manifest
@@ -555,18 +843,27 @@ fn replacement_targets(
 /// the space is there, and a peer already holding the upload can supply it.
 ///
 /// Waits while the model is in use — except for bytes that are not their own
-/// table's upload ([`Doomed::WrongBytes`]), which go at once — and the copy is
-/// withheld from the swarm meanwhile (`Holding::Replacing`).
+/// table's upload ([`Doomed::WrongBytes`], [`Doomed::Outvoted`]), which go at
+/// once — and the copy is withheld from the swarm meanwhile
+/// (`Holding::Replacing`).
+///
+/// `build` is the upload as HuggingFace described it this pass; `None` only for
+/// [`Doomed::Outvoted`], on a node with no origin to ask, whose replacements
+/// come from the checked holders against the hashes they agree on.
+///
+/// Returns the parts it actually deleted — none when it waits for the model to
+/// be idle, and not one whose file would not go.
 async fn replace_parts(
     state: &Arc<SharedState>,
     net_tx: &mpsc::Sender<NetworkCommand>,
     model: &ModelId,
-    build: &CanonicalBuild,
+    build: Option<&CanonicalBuild>,
     doomed: &[u32],
     why: Doomed,
-) {
+) -> Vec<u32> {
     let same_shape = why != Doomed::AnotherLayout;
-    if why != Doomed::WrongBytes && state.model_is_in_use(model) {
+    let waits_for_idle = matches!(why, Doomed::AnotherLayout | Doomed::InDispute);
+    if waits_for_idle && state.model_is_in_use(model) {
         set_holding(
             state,
             model,
@@ -574,7 +871,7 @@ async fn replace_parts(
                 parts: doomed.len() as u32,
             },
         );
-        return;
+        return Vec::new();
     }
     let me = state.identity.node_id().clone();
     let held: Vec<u32> = state
@@ -584,7 +881,6 @@ async fn replace_parts(
         .filter(|&i| i != crate::types::MMPROJ_SHARD_INDEX)
         .collect();
     let manifest = state.model_registry.get_manifest(model);
-    let targets = replacement_targets(build, manifest.as_ref(), doomed, why);
     state.evict_and_unload(model).await;
     let model_dir = state.model_dir(&model.0);
 
@@ -604,10 +900,35 @@ async fn replace_parts(
         .and_then(|r| r)
     };
     if let Err(e) = removed {
-        // Whatever is gone is gone; the records below follow the disk, and the
-        // next pass judges what is left.
         tracing::warn!(model = %model, error = %e, "Could not delete every part of this node's copy that is not the canonical upload's");
     }
+    // The records follow the DISK: a part whose file is still there was not
+    // deleted (Windows refuses to delete a file a just-stopped worker still
+    // holds open) and stays recorded as held, to be judged again next pass.
+    // Dropping it anyway left the file on disk with the registry saying it was
+    // gone, and the repair finding it "already on disk" — the wrong bytes kept.
+    let doomed: Vec<u32> = if same_shape {
+        doomed
+            .iter()
+            .copied()
+            .filter(|&i| {
+                !model_dir
+                    .join(crate::model::shard::shard_filename(i))
+                    .exists()
+            })
+            .collect()
+    } else {
+        doomed.to_vec()
+    };
+    if doomed.is_empty() {
+        return doomed;
+    }
+    let deleted = doomed.clone();
+    let doomed = doomed.as_slice();
+    let targets = match build {
+        Some(b) => replacement_targets(b, manifest.as_ref(), doomed, &why),
+        None => doomed.to_vec(),
+    };
 
     // What this node says about them, and what it checks the replacements by.
     let kept: HashSet<u32> = held
@@ -627,12 +948,18 @@ async fn replace_parts(
     if same_shape {
         // Their hashes are of the bytes just deleted: a replacement is checked
         // against the upload's — from a peer's gossip, or written by the
-        // download from HuggingFace — never against those.
+        // download from HuggingFace, or the one the checked holders agree on —
+        // never against those.
         state.forget_origin_verified_for_parts(model, doomed);
         if let Some(mut m) = manifest {
             for s in m.shards.iter_mut() {
                 if doomed.contains(&s.index) {
-                    s.hash = [0u8; 32];
+                    s.hash = match &why {
+                        Doomed::Outvoted(agreed) => {
+                            agreed.get(&s.index).copied().unwrap_or([0u8; 32])
+                        }
+                        _ => [0u8; 32],
+                    };
                 }
             }
             m.manifest_hash = m.compute_hash();
@@ -642,16 +969,27 @@ async fn replace_parts(
             state.model_registry.register_manifest(m.clone());
             persist(state, &m, &model_dir);
         }
-    } else {
+    } else if let Some(build) = build {
         state.forget_origin_verified_for_model(model);
         state.model_registry.remove_manifest(model);
         register_for_fetching(state, model, build).await;
     }
     // The side files are cut from part 0: when it goes, or the whole layout
-    // does, the upload's own replace them.
+    // does, the upload's own replace them. With no origin to ask they are
+    // deleted instead — a node holding part 0 never reads them, and startup
+    // cuts them again from the part 0 that comes back.
     if !same_shape || doomed.contains(&0) {
-        if let Err(e) = refresh_side_files(state, model, build).await {
-            tracing::info!(model = %model, error = %e, "Could not fetch the canonical side files yet — the header check fetches them again");
+        match build {
+            Some(build) => {
+                if let Err(e) = refresh_side_files(state, model, build).await {
+                    tracing::info!(model = %model, error = %e, "Could not fetch the canonical side files yet — the header check fetches them again");
+                }
+            }
+            None => {
+                for side in side_files() {
+                    let _ = std::fs::remove_file(model_dir.join(side));
+                }
+            }
         }
     }
     state.gguf_meta.remove(model);
@@ -699,11 +1037,15 @@ async fn replace_parts(
     }
     // Judged afresh next pass, once the replacements are in.
     state.note_canonical_holding(model, None);
+    let from = match build {
+        Some(b) => format!("other computers or {}", b.source.repo_id),
+        None => "the other computers that checked theirs".to_string(),
+    };
     tracing::warn!(
         model = %model,
         deleted = doomed.len(),
         fetching = ?targets,
-        repo = %build.source.repo_id,
+        from = %from,
         "DIAG: deleted this node's parts that are not the canonical upload's — fetching the upload's in their place"
     );
     state.emit_activity(
@@ -712,29 +1054,48 @@ async fn replace_parts(
             "model_copy_replaced",
             format!(
                 "{}: {} part(s) on this computer were not the copy the rest of the swarm uses — \
-                 deleted, and the right ones are being fetched from other computers or {}",
+                 deleted, and the right ones are being fetched from {from}",
                 state.model_registry.display_name(model),
                 doomed.len(),
-                build.source.repo_id
             ),
         )
         .with_model(model.0.clone())
         .with_toast("info", 8000),
     );
     crate::model::auto_manage::spawn_check_and_load(state.clone(), model.clone());
+    deleted
 }
 
-/// Delete these parts' files (a part already gone is fine).
+/// Delete these parts' files (a part already gone is fine). A file Windows
+/// will not delete yet — still open in a worker that was just stopped — is
+/// tried again for up to two seconds; what is left after that, the caller
+/// finds still on disk.
 fn remove_parts(model_dir: &Path, parts: &[u32]) -> Result<(), String> {
+    let mut failures = Vec::new();
     for &index in parts {
         let path = model_dir.join(crate::model::shard::shard_filename(index));
-        match std::fs::remove_file(&path) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(format!("remove {}: {e}", path.display())),
+        let mut attempt = 0;
+        loop {
+            match std::fs::remove_file(&path) {
+                Ok(()) => break,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => break,
+                Err(e) if attempt < 10 => {
+                    attempt += 1;
+                    tracing::debug!(path = %path.display(), error = %e, attempt, "Could not delete a part yet — trying again");
+                    std::thread::sleep(Duration::from_millis(200));
+                }
+                Err(e) => {
+                    failures.push(format!("remove {}: {e}", path.display()));
+                    break;
+                }
+            }
         }
     }
-    Ok(())
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("; "))
+    }
 }
 
 /// Delete every file of the upload a model directory holds — every part,
@@ -1163,11 +1524,11 @@ mod tests {
     fn the_parts_fetched_again_cover_the_layers_the_deleted_ones_held() {
         let b = build3();
         assert_eq!(
-            replacement_targets(&b, None, &[1], Doomed::WrongBytes),
+            replacement_targets(&b, None, &[1], &Doomed::WrongBytes),
             vec![1]
         );
         assert_eq!(
-            replacement_targets(&b, None, &[2], Doomed::InDispute),
+            replacement_targets(&b, None, &[2], &Doomed::InDispute),
             vec![2]
         );
         let theirs = crate::model::manifest::build_manifest_from_gguf(
@@ -1198,15 +1559,15 @@ mod tests {
             },
         );
         assert_eq!(
-            replacement_targets(&b, Some(&theirs), &[0], Doomed::AnotherLayout),
+            replacement_targets(&b, Some(&theirs), &[0], &Doomed::AnotherLayout),
             vec![0, 1]
         );
         assert_eq!(
-            replacement_targets(&b, Some(&theirs), &[1], Doomed::AnotherLayout),
+            replacement_targets(&b, Some(&theirs), &[1], &Doomed::AnotherLayout),
             vec![1, 2]
         );
         assert_eq!(
-            replacement_targets(&b, None, &[0], Doomed::AnotherLayout),
+            replacement_targets(&b, None, &[0], &Doomed::AnotherLayout),
             vec![0, 1, 2]
         );
     }
@@ -1277,6 +1638,93 @@ mod tests {
         assert!(
             !staging.join("shard_000.bin").exists(),
             "another upload: emptied"
+        );
+    }
+
+    /// A node with no origin to ask replaces a part only on the word of
+    /// [`CHECKED_QUORUM`] checked holders that agree with each other, while
+    /// none of them holds its bytes. The 2026-10-03 shape: `9594e1ff` held
+    /// parts whose tags no checked holder shared.
+    #[test]
+    fn a_part_is_outvoted_only_by_enough_checked_holders_that_agree() {
+        let (ours, right, other) = (11u64, 22u64, 33u64);
+        assert_eq!(
+            outvoted_by_checked_holders(ours, &[right, right]),
+            Some(right)
+        );
+        assert_eq!(
+            outvoted_by_checked_holders(ours, &[right, right, right]),
+            Some(right)
+        );
+        assert_eq!(
+            outvoted_by_checked_holders(ours, &[right]),
+            None,
+            "one stranger's word is not enough to delete bytes"
+        );
+        assert_eq!(
+            outvoted_by_checked_holders(ours, &[right, right, ours]),
+            None,
+            "a checked holder of OUR bytes means the swarm is not agreed"
+        );
+        assert_eq!(
+            outvoted_by_checked_holders(ours, &[right, other]),
+            None,
+            "checked holders that disagree with each other settle nothing"
+        );
+        assert_eq!(outvoted_by_checked_holders(ours, &[]), None);
+    }
+
+    /// A node that CAN ask the origin takes one checked holder's disagreement
+    /// as a dispute — the upload's bytes settle it, so a wrong vote costs one
+    /// download, never the bytes.
+    #[test]
+    fn one_checked_holder_disagreeing_puts_a_part_in_dispute_where_the_origin_answers() {
+        assert!(disputed_by_checked_holders(1, &[2]));
+        assert!(!disputed_by_checked_holders(1, &[2, 1]));
+        assert!(!disputed_by_checked_holders(1, &[]));
+    }
+
+    /// A part the upload has settled this run is not asked about again because
+    /// peers still disagree — and that knowledge survives `forget`, which every
+    /// replacement calls.
+    #[test]
+    fn a_part_fetched_again_from_the_origin_is_not_judged_by_peers_again() {
+        let mut c = CheckedParts::default();
+        let x = m("x-q4-k-m");
+        assert!(!c.came_from_origin(&x, 3));
+        c.note_from_origin(&x, &[3]);
+        c.forget(&x);
+        assert!(c.came_from_origin(&x, 3));
+        assert!(!c.came_from_origin(&x, 2));
+    }
+
+    /// The owner's own GGUF exempts a copy only while it is there, or while
+    /// there are no parts beside the marker to judge — and the marker is never
+    /// removed, since `-m` writes it only once.
+    #[test]
+    fn an_owners_file_exempts_its_parts_only_while_it_is_there() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("models/m");
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(!owner_serves_own_file(&dir), "no marker");
+
+        let gguf = root.path().join("own.gguf");
+        std::fs::write(&gguf, b"GGUF").unwrap();
+        std::fs::write(dir.join("source_path"), gguf.display().to_string()).unwrap();
+        std::fs::write(dir.join("shard_000.bin"), b"x").unwrap();
+        assert!(owner_serves_own_file(&dir), "the file is there");
+
+        std::fs::remove_file(&gguf).unwrap();
+        assert!(
+            !owner_serves_own_file(&dir),
+            "the file is gone and parts are here: they are judged"
+        );
+        assert!(dir.join("source_path").exists(), "the marker stays");
+
+        std::fs::remove_file(dir.join("shard_000.bin")).unwrap();
+        assert!(
+            owner_serves_own_file(&dir),
+            "nothing beside the marker to judge — an unplugged drive is not a reason to fetch the model"
         );
     }
 }

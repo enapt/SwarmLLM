@@ -245,13 +245,28 @@ impl AutoShardManager {
                 phase_offset_secs,
                 "Auto-manage applying per-node phase offset to break startup thundering-herd"
             );
-            tokio::select! {
-                _ = self.shutdown_rx.changed() => {
-                    if *self.shutdown_rx.borrow() {
-                        return;
+            // The offset spreads `evaluate()` — a scan of the whole catalogue —
+            // across a fleet. Repair work is not that: it is one named part, a
+            // copy this node already holds that is a part short, and it used to
+            // wait the offset out too. Measured on the Windows rig 2026-10-03:
+            // the canonical heal deleted a wrong part 30 s after start, and the
+            // fetch began 4 min 24 s later, when this loop first ran
+            // (FUTURE_WORK #216). So a wake-up during the offset runs the repair
+            // calls of the notify arm below, and nothing else.
+            let offset_ends = tokio::time::Instant::now() + Duration::from_secs(phase_offset_secs);
+            loop {
+                tokio::select! {
+                    _ = self.shutdown_rx.changed() => {
+                        if *self.shutdown_rx.borrow() {
+                            return;
+                        }
+                    }
+                    _ = tokio::time::sleep_until(offset_ends) => break,
+                    _ = self.notify.notified() => {
+                        self.verify_pending_shards().await;
+                        self.complete_pending_shard_fetches().await;
                     }
                 }
-                _ = tokio::time::sleep(Duration::from_secs(phase_offset_secs)) => {}
             }
         }
 
@@ -646,11 +661,24 @@ impl AutoShardManager {
                 // `trigger_download` does not rank, it fetches.
                 score: 0.0,
             };
-            tracing::info!(
-                model = %sid.model_id,
-                shard = sid.index,
-                "Fetching from the model's origin — no peer copy could be verified"
-            );
+            // Say where it is going. This line read "Fetching from the model's
+            // origin" for every repair, and a repair with a hash and holders
+            // goes to a peer (`trigger_download`) — on the 2026-10-03 rig the
+            // line was followed four seconds later by a P2P transfer.
+            if self.shared_state.models.shard_p2p_failed.contains(&sid) {
+                tracing::info!(
+                    model = %sid.model_id,
+                    shard = sid.index,
+                    "Fetching from the model's origin — no peer copy could be verified"
+                );
+            } else {
+                tracing::info!(
+                    model = %sid.model_id,
+                    shard = sid.index,
+                    holders = candidate.holder_count,
+                    "Fetching a part queued for repair — from a peer holding its hash, else from the model's origin"
+                );
+            }
             self.trigger_download(&candidate).await;
         }
     }

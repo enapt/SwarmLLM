@@ -3179,18 +3179,109 @@ while its heal works).
 **What a change must keep:** an announced tag is the tag of the bytes; a part that
 is not the canonical upload's bytes is deleted and fetched again, and until then
 offered to nobody; nothing is deleted without HuggingFace having answered in the
-same pass; the byte check against the upload runs on every part that enters, and
-again on every part that changed.
+same pass — or, on a node with no origin to ask, without enough checked holders of
+the agreed bytes connected (below); the byte check against the upload runs on every
+part that enters, and again on every part that changed.
+
+**A node with no origin to ask is healed by the holders that checked theirs
+(2026-10-03, after v0.3.223, FUTURE_WORK #160).** Read from the live node 1.2 h after
+v0.3.223 reached the peers: three peers holding wrong parts were deleting and
+re-fetching them; `9594e1ff` announced the same 70 parts under the same tags
+throughout, as it had on .221 and .222 — its heal never reached `replace_parts`,
+which always withdraws what it deletes. Its claims named the canonical repos, and
+whole runs of parts differed (Llama-3.2-3B 0-1, Qwen2.5-14B 1-3 and 11-15). Ruled
+out the same day: the platform (the released Windows build healed a spliced
+TinyLlama copy on a Windows machine end to end) and a hang (`HF_META_CLIENT` has a
+120 s total timeout). What the heal needed HuggingFace for was everything — which
+upload is the swarm's (`resolve`), whether a part is its bytes (`parts_not_from`),
+where the replacement comes from — and offline mode skipped the heal outright. A
+node that once reached HuggingFace keeps the upload it verified (restored at
+startup), so after losing its route it failed the byte check every pass at
+`debug!` and judged nothing, for ever. Four changes:
+
+1. **A checked copy says so.** `ShardAnnounce::origin_checked_models` (additive,
+   `#[serde(default)]`; both directions pinned in the types crate's tests) lists the
+   models whose copy this node's heal compared with the upload this run — exactly
+   `Holding::Canonical`, set by `SharedState::note_canonical_holding` through
+   `ModelRegistry::set_model_origin_checked`, built into every announcement by
+   `shard_announce`, and a CHANGE of it re-announces on the next tick (the monitor's
+   delta key carries it). The receiver keeps it per holder (`HolderRecord::checked`),
+   set or cleared ONLY by the holder's own announcement — a DHT record or capability
+   says nothing and changes nothing, the rule an unknown build tag already follows.
+   A copy settled by agreeing with peers is never listed: an attestation built from
+   attestations would let one checked holder count as several.
+2. **A node with no origin to ask settles its parts by them**
+   (`auto_manage::canonical::settle_by_checked_holders`): a part whose bytes differ
+   from what `CHECKED_QUORUM` (2) CONNECTED checked holders agree on, none of them
+   holding ours, is deleted at once (same layout — every read of it is the wrong
+   bytes, as `Doomed::WrongBytes`), its manifest hash set to the agreed one, and
+   fetched from those holders through the repair queue. The tag is 64 bits; the full
+   hash a fetch is checked against comes from any manifest that carried a hash with
+   that tag for a part of that size (`ModelRegistry::heard_part_hashes`, recorded in
+   `register_manifest` BEFORE the merges — an origin-derived hash keeps a peer's out
+   of the manifest, and that is exactly the node in question). Bytes that hash to the
+   agreed hash ARE the bytes the checked holders hold (a 64-bit second preimage),
+   whoever named the hash. The bytes about to go are hashed first, since a tag can lag
+   its bytes while a re-check is pending (those parts wait). Why two: one is a single
+   stranger's word, the bar `mismatch_policy` holds against; and the good copy must
+   exist on enough peers before ours goes — HDFS invalidates a corrupt replica only
+   while enough live replicas remain (HDFS-3493). Ceph's repair picks an
+   "authoritative" replica and warns the pick cannot be proven without a recorded
+   checksum; here every vote comes from a holder that checked against the upload.
+   Offline mode now runs the heal, skipping only the HuggingFace half.
+3. **A part every checked holder disagrees with is in dispute, where the origin
+   answers.** The 64 KB check reads a part's first tensor only; bytes that differ past
+   it passed for ever unless a gossiped hash happened to start a dispute — and an
+   origin-derived hash (the splice-era parts were fetched from HuggingFace at another
+   upload's offsets) keeps every gossiped one out. One disagreeing checked holder is
+   enough here: the upload's own bytes settle it (`Doomed::InDispute`), so a wrong
+   vote costs one download, and `CheckedParts::from_origin` stops a part the upload
+   has settled this run from being asked about again — only a part `replace_parts`
+   actually deleted (it returns them): one waiting for the model to be idle, or a file
+   that would not go, is judged again next pass, or a deferred dispute would read as
+   settled and the copy as canonical.
+4. **One HuggingFace failure ends asking for the pass** (`Origin::Unreachable`):
+   every call retries ~155 s, and a node with no route asked once per model per pass
+   — about 18 min a pass for seven models — before judging anything.
+
+Found on the way: `replace_parts` dropped every doomed part from the registry even
+when its file could not be deleted (Windows refuses while a just-stopped worker still
+holds it open) — the registry said gone, the repair found the file "already on disk",
+the wrong bytes stayed. The records now follow the disk (a retry for two seconds,
+then what is still there stays held and is judged again). And a `source_path` marker
+exempted the parts beside it for ever, though `-m` may never be used again or the
+file may be gone (a data folder moved into a container or to another machine); it
+exempts now only while the file is there or there are no parts beside it to judge.
+
+Tests that fail with the change undone: `a_peers_hash_is_heard_even_when_our_origin_hash_wins_the_manifest`,
+`a_checked_holder_is_counted_only_on_its_own_word`,
+`an_owners_file_exempts_its_parts_only_while_it_is_there` (all three planted off and
+red, 2026-10-03), `a_part_is_outvoted_only_by_enough_checked_holders_that_agree`,
+`an_announcement_says_which_models_were_checked`. Rig: `examples/outvoted_rig.sh`
+(B with no route to HuggingFace, or in offline mode; v0.3.223 as B is the null
+control).
+
+**What a change must keep:** a node's announcement says it checked a model only when
+its heal compared that copy with the upload this run; only the holder's own
+announcement sets or clears that; a node deletes a part on peers' word only when at
+least two connected checked holders agree and none holds its bytes, and fetches the
+replacement against the hash they agree on; where HuggingFace answers, peers'
+disagreement is settled by the upload, never by them.
 
 **Known limits (FUTURE_WORK #151):** a coordinator holding none of a model routes on a
 manifest with placeholder hashes until a holder's gossip fills them, so for that
 window `shard_holders` cannot exclude another upload's holders — narrowed by the
 withholding above to holders on v0.3.222 and older; a holder known only from a DHT
 provider record carries no build at all and is not judged; the byte check reads
-64 KB of a part's first tensor, which tells uploads apart but is not a check of the
-whole part (the part's BLAKE3 is still only as good as the hash it is checked
-against); a node in offline mode never checks its copy (it never reaches
-HuggingFace, so nothing could be fetched back).
+64 KB of a part's first tensor — what lies past it is judged by the checked holders
+when they disagree, and not at all when no other checked holder holds the part. A
+node with no origin to ask settles only parts of the swarm's LAYOUT: a copy of
+another layout is one upload's header, table and bytes, computes correctly, and
+cannot be replaced without the swarm's header, which only HuggingFace serves — it
+stays, announced as the build it is. A part with fewer than two connected checked
+holders is not settled on such a node. A rig cannot plant a wrong hash recorded as
+the ORIGIN's without editing a node's database, so change 3 is proven by unit tests
+and by the `InDispute` path it hands the part to (the `spliced` and `disputed` rigs).
 
 **From the rules file (moved 2026-10-02):**
 

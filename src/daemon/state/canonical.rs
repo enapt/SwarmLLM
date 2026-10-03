@@ -96,6 +96,12 @@ impl SharedState {
     /// not the upload; with a header from the upload beside them, that is the
     /// garbage #156 answered. The owner's own requests still use it.
     pub fn note_canonical_holding(&self, model_id: &ModelId, holding: Option<Holding>) -> bool {
+        // And of what this node tells peers it CHECKED: only a copy the heal
+        // has compared with the upload on HuggingFace this run, never one
+        // settled by agreeing with peers — an attestation that came from other
+        // attestations would let one checked holder count as several.
+        self.model_registry
+            .set_model_origin_checked(model_id, holding == Some(Holding::Canonical));
         let withhold = holding.as_ref().is_some_and(Holding::is_another_upload);
         if self.model_registry.set_model_withheld(model_id, withhold) {
             if withhold {

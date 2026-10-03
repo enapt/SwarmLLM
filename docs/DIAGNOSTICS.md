@@ -382,6 +382,18 @@ update.
 | INFO | `DIAG: this node's copy is not the swarm's upload — no longer offering it to peers` / `DIAG: offering this node's copy of the model to peers again` | state `replacing`: its parts leave every announcement within one broadcast tick (30 s; peers retract them), its manifest is not gossiped, the DHT stops naming us and a peer asking for a part gets nothing |
 | WARN | `A peer's part matched our hash but is not the swarm's upload of this model` | the accept path's byte check: the hash our manifest held for that part was another upload's — the part is discarded and fetched from the upload itself; the peer is not penalised |
 | INFO | `This node is keeping bytes the swarm disagrees with … It announces the part as the bytes it is` (`bytes_build=`) | a dispute (#61): the part is announced under its OWN bytes' build tag (`unhashed` = a size mismatch, announced under a tag no peer expects) — before 2026-10-03 it was announced under the build it was told of |
+| WARN | `DIAG: parts on this node differ from what the holders that checked theirs against the upload agree on — this node cannot ask HuggingFace itself, so it is fetching them from those holders` | a node with NO origin to ask (offline mode, or HuggingFace not answering it): `parts` = parts whose bytes differ from what ≥ 2 connected holders that CHECKED their copies agree on, none of them holding ours (`settle_by_checked_holders`, #160). Followed by `deleted this node's parts … from=the other computers that checked theirs` and `P2P shard download complete` |
+| DEBUG | `Could not compare parts with HuggingFace — judging them by the holders that checked theirs` | HuggingFace failed this pass; the rest of the pass does not ask it again (each call retries ~155 s) |
+| DEBUG | `The holders that checked this part agree on other bytes than ours, and no manifest of the same layout has named their hash yet — waiting for one` | the verdict is in, the hash to check the replacement against is not: a manifest gossip round brings it |
+| WARN | `DIAG: parts on this node are not the canonical upload's bytes — deleting them and fetching the upload's` with `checked_holders_disagree=[…]` | a node that CAN ask HuggingFace: parts that passed the 64 KB check but that every checked holder holds other bytes of — the check reads only a part's first tensor. Settled by the upload's own bytes (as `in_dispute`), once per part per run |
+
+**Who checked their copy.** Since v0.3.224 an announcement lists the models whose
+parts the sender's heal checked against HuggingFace this run
+(`ShardAnnounce::origin_checked_models` — only `canonical` copies; a copy settled by
+agreeing with peers is NOT listed, so one checked holder never counts twice). A
+holder record keeps it (`checked`), set or cleared only by the holder's own
+announcement. `/api/admin/models` → `peers_other_build_nodes` names the peers holding
+another build of each model (#215).
 
 **Who is right about a part — settle it from the origin.** When peers disagree about a
 part's hash, hash the part's byte range straight from HuggingFace and compare: the range is
@@ -392,9 +404,14 @@ sides "right" for different dates. 2026-10-03: GLM-4 part 4 on this node = Huggi
 (`35f07d7f…`), repo unchanged since 2025-04-30 — the disagreeing peers held wrong bytes.
 
 **A peer still counted in `peers_other_build` long after an update** is a peer
-that cannot replace its parts — the count does not say why (HuggingFace unreachable
-from it, the model always in use, or offline mode, which never checks). Its
-operator's `shared_copy.this_computer` does. Before v0.3.222, one model that could
+that cannot replace its parts — `peers_other_build_nodes` says which. Before v0.3.224
+a node with no route to HuggingFace, or in offline mode, never judged its copy at all
+(`9594e1ff`, #160); since then it is judged by the checked holders, so a peer still
+counted needs fewer than two connected checked holders of the part, holds another
+LAYOUT (its own header, table and bytes — consistent, and no way to fetch the swarm's
+header without HuggingFace), or — where it can ask HuggingFace — keeps a model with
+disputed parts in use (those wait for idle). Its operator's
+`shared_copy.this_computer` says which. Before v0.3.222, one model that could
 not switch also kept every model after it (in name order) from switching (gotcha
 #780); since the prune-and-fetch heal there is no queue to block.
 

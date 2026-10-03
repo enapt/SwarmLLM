@@ -20,9 +20,11 @@ pub struct HealthMonitor {
     /// Track last broadcast shard set for delta compression — each part with
     /// the build tag it went out under, so a tag that changes (a part falling
     /// into dispute, or out of it) is re-announced on the next tick rather
-    /// than left standing until the full re-announce.
+    /// than left standing until the full re-announce — and whether its model
+    /// went out as checked against the origin, so a copy the heal has just
+    /// checked tells peers on the next tick too.
     /// Full re-announce only when set changes or every FULL_REANNOUNCE ticks.
-    last_announced_shards: std::collections::HashSet<(crate::types::ShardId, u64)>,
+    last_announced_shards: std::collections::HashSet<(crate::types::ShardId, u64, bool)>,
     /// Models withheld from the swarm at the last broadcast
     /// (`ModelRegistry::model_is_withheld`), so the DHT is told when one stops
     /// or starts being offered.
@@ -1134,7 +1136,13 @@ impl HealthMonitor {
         if !held_models.is_empty() {
             let current_set: std::collections::HashSet<_> = hosted_shards
                 .iter()
-                .map(|s| (s.clone(), registry.announced_build_tag(s)))
+                .map(|s| {
+                    (
+                        s.clone(),
+                        registry.announced_build_tag(s),
+                        registry.model_is_origin_checked(&s.model_id),
+                    )
+                })
                 .collect();
             let shards_changed = current_set != self.last_announced_shards;
             self.shard_announce_counter += 1;
