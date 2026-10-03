@@ -1,5 +1,45 @@
 # Changelog
 
+## [0.3.223-alpha] — 2026-10-03
+
+**Fixed: computers holding wrong parts of a model now delete them and fetch
+the right ones.** Parts of some models had been cut from the wrong file
+before v0.3.221, and they were still on some computers: a request that used
+them could answer nonsense, such as one character repeated over and over.
+Every computer now checks each part it holds against the original file on
+HuggingFace, deletes any part that does not match, and downloads the right
+one again — from another computer when it can check it, otherwise from
+HuggingFace. Nothing is deleted unless the original was reachable at that
+moment, so whatever is deleted can be fetched back. A part whose bytes do
+not match the file it belongs to goes straight away, even while a request
+is using it: that request was producing nonsense, and is answered again by
+another computer instead. This replaces the old way of switching a copy,
+which kept the wrong parts working until a complete new copy had been
+downloaded beside them.
+
+**Fixed: a computer could tell the others it held a part it did not.** When
+a computer's part disagreed with what the other computers reported, it went
+on announcing their version of the part, and they sent it work for bytes it
+did not have. It now announces what it actually holds, and the disagreement
+is settled by fetching the original part.
+
+**Fixed: a copy waiting to be replaced was still offered to everyone.** It is
+now offered to no one until its parts are replaced.
+
+**Fixed: parts received from other computers are checked against the
+original file too**, not only against the fingerprint this computer had been
+given — and parts that arrive later are checked, not only the copy found at
+start-up.
+
+**Fixed: a part waiting to be fetched again could wait five minutes.** A
+repair now starts as soon as it is needed, also when automatic model
+management is switched off.
+
+**Changed: the dashboard** no longer says a model is switching to the other
+computers' version. While wrong parts wait to be replaced (the model is in
+use, or HuggingFace cannot be reached) it says so; the download that replaces
+them shows like any other.
+
 ## [0.3.222-alpha] — 2026-10-03
 
 **Fixed: a split could answer nonsense when one computer's copy of a model
