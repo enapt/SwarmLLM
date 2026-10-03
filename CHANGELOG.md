@@ -1,5 +1,42 @@
 # Changelog
 
+## [0.3.224-alpha] — 2026-10-04
+
+**Fixed: a computer that cannot reach HuggingFace now repairs wrong model
+parts too.** Since 0.3.221 every computer keeps the same copy of each model
+and replaces any part that is not that copy. That repair needed HuggingFace
+for every step, so a computer in offline mode, or one that could not reach
+HuggingFace, never checked its parts at all — one kept wrong parts through
+three releases, and its own chats with those models could use them.
+Computers that have checked their parts against HuggingFace now say so. A
+computer that cannot check its own replaces a part when at least two
+connected computers that did check agree on it and none of them holds its
+version; the new part comes from those computers and is checked against what
+they agree on.
+
+**Fixed: damage the quick check could not see.** The check compares the
+start of each part with HuggingFace. A part that matched at the start but
+differs from what the computers that checked theirs hold is now downloaded
+again from HuggingFace, which settles it.
+
+**Fixed: a computer that could not reach HuggingFace spent minutes per model
+retrying** each time it checked its copies. After the first failure it now
+stops asking for the rest of that round.
+
+**Fixed: a part deleted right after start-up could wait five minutes** before
+it was downloaded again. It now starts straight away.
+
+**Fixed: a model once loaded from a file on your computer (`-m`) was never
+checked again**, even after that file was gone. Its parts are checked now,
+unless the file is still there.
+
+**Fixed: on Windows, a part that could not be deleted yet (still open) was
+forgotten** instead of tried again, so the wrong bytes could stay. It is now
+tried again.
+
+**Changed:** `/api/admin/models` names the computers that hold a different
+copy of each model (`peers_other_build_nodes`), not only how many.
+
 ## [0.3.223-alpha] — 2026-10-03
 
 **Fixed: computers holding wrong parts of a model now delete them and fetch
