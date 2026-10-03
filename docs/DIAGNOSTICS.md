@@ -1062,7 +1062,7 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
 
 | Level | What | Fields |
 |-------|------|--------|
-| TRACE | `DIAG: sample_token complete` | `token`, `vocab_size`, `mode` (`greedy`/`stochastic`), `temperature`, `top_k`, `top_p` |
+| TRACE | `DIAG: sample_token complete` | `token`, `vocab_size`, `mode` (greedy or stochastic); a stochastic draw adds `temperature`, `top_k`, `top_p` |
 | WARN  | `DIAG: sampling fallback` | `vocab_size`, `sum` (cumulative probability rounding) |
 
 ### Speculative Decoding (speculative.rs)
@@ -1086,8 +1086,8 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
 |-------|------|--------|
 | DEBUG | `DIAG: chat template applied` | `template_matched` |
 | DEBUG | `DIAG: chat template applied with the system turn folded into the first user turn` | `template_matched` |
-| WARN  | `DIAG: chat template failed, using gemma fallback` / `DIAG: chat template failed, using model-name fallback` / `DIAG: chat template failed, using fallback` | `fallback`, `model_name` |
-| DEBUG | `DIAG: no chat template, using model-name fallback` / `DIAG: no chat template, using fallback` | `template_matched` (false), `fallback` |
+| WARN  | `DIAG: chat template failed, using gemma fallback` / `DIAG: chat template failed, using model-name fallback` / `DIAG: chat template failed, using fallback` | `fallback`; the model-name line adds `model_name` |
+| DEBUG | `DIAG: no chat template, using model-name fallback` / `DIAG: no chat template, using fallback` | `fallback`; the model-name line adds `model_name`, the other `template_matched` (false) |
 | WARN  | `DIAG: chat template rendered a prompt with the user's question missing` — the render is discarded for the fallback chain | — |
 | DEBUG | `DIAG: build_prompt from header` (pipeline/prompt.rs) | `model`, `prompt_len` |
 

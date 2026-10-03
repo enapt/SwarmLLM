@@ -8,8 +8,9 @@ matching reads EXACTLY like a rule nobody breaks — gotcha #413, and the reason
 the hook's own header says to verify it by planting the violation rather than by
 its exit code (#614: a hook is designed to exit 0).
 
-This is `arch-guards-and-tests.md` § "give every scan a self-test that plants the
-violation", applied to a guard that lives in bash rather than in
+This is `arch-guards-and-tests.md` § "A source-scanning guard is only as good as the
+spellings it knows (2026-08-30)" — its rule to give every scan a self-test that plants
+the violation — applied to a guard that lives in bash rather than in
 `repo_consistency.rs`. It is not run by `cargo test` — it shells out to bash and
 python and would add that dependency to CI for a file that changes rarely. Run
 it by hand after touching the gate's patterns:

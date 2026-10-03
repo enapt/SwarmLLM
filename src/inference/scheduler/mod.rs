@@ -31,8 +31,9 @@ use crate::types::{
 /// `active_traces` — which `note_predicted_route_cost` legitimately does,
 /// because there the consequence is a no-op — would make a real request whose
 /// trace failed to register lose its routing diagnostics at exactly the moment
-/// they are wanted. `.claude/rules/architecture.md` § "Make the wrong call
-/// unrepresentable".
+/// they are wanted. `.claude/rules/architecture.md` § "One invariant, N paths
+/// — the recurring bug of this codebase" (its second way: make the wrong call
+/// unrepresentable).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Purpose {
     /// A request is being served. Every routing line is wanted.
