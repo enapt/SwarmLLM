@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.3.222-alpha] — 2026-10-03
 
 **Fixed: a split could answer nonsense when one computer's copy of a model
 mixed two uploads of it.** A computer whose model parts came from one upload
