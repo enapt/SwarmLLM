@@ -112,6 +112,9 @@ impl SharedState {
                  claim could displace it after a restart"
             );
         }
+        // These bytes were just written from the origin: whatever this node
+        // disagreed with the swarm about, it no longer holds.
+        self.clear_shard_dispute(&shard_id);
         self.model_registry
             .record_origin_verified_hash(shard_id, hash);
     }
@@ -183,14 +186,29 @@ impl SharedState {
     /// (`docs/FUTURE_WORK.md` § "A disputed shard is kept but the disagreement
     /// is never settled"). Until then the job is to make it countable and
     /// visible rather than to guess at a policy.
-    pub fn note_shard_disputed(&self, shard_id: &ShardId) {
-        if self.models.disputed_shards.insert(shard_id.clone()) {
+    ///
+    /// `verdict` is the check's own error: when it hashed the bytes
+    /// (`ShardIntegrity`), that hash is kept, and it is what this node
+    /// ANNOUNCES for the part from now on (`ModelRegistry::announced_build_tag`)
+    /// — the manifest carries the hash the swarm reported, which our bytes are
+    /// not, and announcing it told peers we held their bytes.
+    pub fn note_shard_disputed(&self, shard_id: &ShardId, verdict: &crate::error::SwarmError) {
+        let bytes = crate::model::shard::bytes_hash_in_verdict(verdict);
+        if self
+            .model_registry
+            .note_bytes_disputed(shard_id.clone(), bytes)
+        {
             tracing::info!(
                 model = %shard_id.model_id,
                 shard = shard_id.index,
+                bytes_build = %bytes.map_or_else(
+                    || "unhashed".to_string(),
+                    |h| format!("{:016x}", swarmllm_types::build_tag_from_hash(&h))
+                ),
                 "This node is keeping bytes the swarm disagrees with — the \
                  claim has no origin backing, so it is not evidence enough to \
-                 destroy a copy that may be the last one"
+                 destroy a copy that may be the last one. It announces the \
+                 part as the bytes it is, not as the build it was told of"
             );
         }
     }
@@ -205,12 +223,12 @@ impl SharedState {
     /// were destroyed against origin-backed evidence and a replacement is
     /// queued.
     pub fn clear_shard_dispute(&self, shard_id: &ShardId) {
-        self.models.disputed_shards.remove(shard_id);
+        self.model_registry.clear_bytes_dispute(shard_id);
     }
 
     /// Is this shard one we hold, and disagree with the swarm about?
     pub fn shard_is_disputed(&self, shard_id: &ShardId) -> bool {
-        self.models.disputed_shards.contains(shard_id)
+        self.model_registry.bytes_dispute_recorded(shard_id)
     }
 
     /// The shards currently in dispute, dropping any whose file has since gone.
@@ -233,16 +251,15 @@ impl SharedState {
         let store = self.shard_store();
         let mut gone: Vec<ShardId> = Vec::new();
         let mut live: Vec<ShardId> = Vec::new();
-        for entry in self.models.disputed_shards.iter() {
-            let sid = entry.key();
+        for sid in self.model_registry.bytes_disputed_shards() {
             if store.shard_path(&sid.model_id, sid.index).exists() {
-                live.push(sid.clone());
+                live.push(sid);
             } else {
-                gone.push(sid.clone());
+                gone.push(sid);
             }
         }
         for sid in gone {
-            self.models.disputed_shards.remove(&sid);
+            self.model_registry.clear_bytes_dispute(&sid);
         }
         live
     }
@@ -285,6 +302,142 @@ mod tests {
             model_id: ModelId("m".into()),
             index: 3,
         }
+    }
+
+    /// What `verify_shard` returns when it hashed bytes that are not the
+    /// expected ones.
+    fn integrity_failure(bytes: [u8; 32]) -> crate::error::SwarmError {
+        crate::error::SwarmError::ShardIntegrity {
+            expected: hex::encode([9u8; 32]),
+            actual: hex::encode(bytes),
+        }
+    }
+
+    /// A one-part manifest for model "m" whose part 3 carries `hash`.
+    fn register_with_hash(state: &crate::daemon::SharedState, hash: [u8; 32]) {
+        state
+            .model_registry
+            .register_manifest(crate::model::manifest::build_manifest_from_gguf(
+                crate::model::manifest::ManifestFromGguf {
+                    id: ModelId("m".into()),
+                    name: "m".into(),
+                    architecture: crate::types::ModelArchitecture::Llama,
+                    num_layers: 4,
+                    total_size_bytes: 1_000,
+                    shard_count: 4,
+                    shards: (0..4)
+                        .map(|index| crate::types::ShardInfo {
+                            index,
+                            layer_range: (index, index + 1),
+                            size_bytes: 250,
+                            hash: if index == 3 { hash } else { [0; 32] },
+                            tensors: Vec::new(),
+                        })
+                        .collect(),
+                    publisher: crate::types::NodeId([0; 32]),
+                },
+            ));
+    }
+
+    fn announced_tag(state: &crate::daemon::SharedState, s: &ShardId) -> u64 {
+        crate::model::manifest::shard_announce(
+            &state.model_registry,
+            state.identity.node_id().clone(),
+            vec![s.clone()],
+            Vec::new(),
+        )
+        .shard_builds[0]
+    }
+
+    /// **A part in dispute is announced as the bytes it is.**
+    ///
+    /// The field shape (2026-10-03): a node holding another upload's part took
+    /// the swarm's hash into its manifest (#382 adopts a contradicting hash for
+    /// a held part, to queue the re-check), the re-check kept its bytes, and
+    /// its announcements went on carrying the SWARM's build — so every
+    /// coordinator routed that part's layers to bytes that were not those.
+    /// Announcing from the manifest makes this test fail on the first assert.
+    #[test]
+    fn a_part_in_dispute_is_announced_as_the_bytes_it_is() {
+        let state = test_state();
+        let s = sid();
+        let swarms = [5u8; 32];
+        let ours = [6u8; 32];
+        register_with_hash(&state, swarms);
+        let swarm_tag = swarmllm_types::build_tag_from_hash(&swarms);
+        assert_eq!(
+            announced_tag(&state, &s),
+            swarm_tag,
+            "no dispute: the manifest"
+        );
+
+        state.note_shard_disputed(&s, &integrity_failure(ours));
+        assert_eq!(
+            announced_tag(&state, &s),
+            swarmllm_types::build_tag_from_hash(&ours),
+            "a disputed part is announced under its own bytes' build"
+        );
+        assert!(swarmllm_types::build_tags_conflict(
+            state.model_registry.expected_build_tag(&s),
+            announced_tag(&state, &s)
+        ));
+
+        // Bytes found wrong without being hashed (a size mismatch): announced
+        // under a tag every expectation conflicts with — never "unknown",
+        // which peers read as "do not judge".
+        state.note_shard_disputed(
+            &s,
+            &crate::error::SwarmError::ShardIncomplete {
+                expected_bytes: 250,
+                actual_bytes: 10,
+            },
+        );
+        let unhashed = announced_tag(&state, &s);
+        assert_ne!(unhashed, swarmllm_types::BUILD_TAG_UNKNOWN);
+        assert!(swarmllm_types::build_tags_conflict(swarm_tag, unhashed));
+
+        // Bytes written from the origin end the dispute.
+        state.record_origin_verified_hash(s.clone(), swarms);
+        assert_eq!(announced_tag(&state, &s), swarm_tag);
+    }
+
+    /// **A withheld model is not offered**: its parts leave every announcement
+    /// while the announcement still says it is complete for the model — which
+    /// is what makes the peers that receive it retract the parts they had.
+    #[test]
+    fn a_withheld_model_is_retracted_not_announced() {
+        let state = test_state();
+        let s = sid();
+        register_with_hash(&state, [5; 32]);
+        let me = state.identity.node_id().clone();
+        state
+            .model_registry
+            .record_shard_holder(s.clone(), me.clone());
+        let m = ModelId("m".into());
+        assert!(state.model_registry.set_model_withheld(&m, true));
+        let announce = crate::model::manifest::shard_announce(
+            &state.model_registry,
+            me.clone(),
+            vec![s.clone()],
+            vec![m.clone()],
+        );
+        assert!(announce.shards.is_empty(), "no part of a withheld model");
+        assert!(announce.shard_builds.is_empty());
+        assert_eq!(announce.complete_for_models, vec![m.clone()]);
+        assert!(
+            state.model_registry.manifests_to_gossip(&me).is_empty(),
+            "nor its manifest, whose hashes are not the swarm's upload"
+        );
+
+        assert!(state.model_registry.set_model_withheld(&m, false));
+        let announce = crate::model::manifest::shard_announce(
+            &state.model_registry,
+            me.clone(),
+            vec![s.clone()],
+            vec![m],
+        );
+        assert_eq!(announce.shards, vec![s]);
+        assert_eq!(state.model_registry.manifests_to_gossip(&me).len(), 1);
     }
 
     /// Removing the bad bytes is only half of it. Before this, all three
@@ -340,7 +493,7 @@ mod tests {
         let state = test_state();
         let s = sid();
 
-        state.note_shard_disputed(&s);
+        state.note_shard_disputed(&s, &integrity_failure([7; 32]));
         // Membership, not the reported count: `disputed_shards_now` drops a
         // shard whose file is gone, and this test writes no file. The two are
         // different questions — see
@@ -356,14 +509,14 @@ mod tests {
         // Recording it twice is one dispute, not two — the sweep re-runs and
         // the count is what decides whether the settlement designs in
         // FUTURE_WORK are worth building.
-        state.note_shard_disputed(&s);
-        assert_eq!(state.models.disputed_shards.len(), 1);
+        state.note_shard_disputed(&s, &integrity_failure([7; 32]));
+        assert_eq!(state.model_registry.bytes_disputed_shards().len(), 1);
 
         // A later check that passes is what ends it: the hash was corrected,
         // or the origin's copy arrived.
         state.clear_shard_dispute(&s);
         assert!(!state.shard_is_disputed(&s));
-        assert!(state.models.disputed_shards.is_empty());
+        assert!(state.model_registry.bytes_disputed_shards().is_empty());
     }
 
     /// Zero is a measurement. The whole reason this state exists is that the
@@ -387,8 +540,8 @@ mod tests {
     fn a_dispute_about_a_shard_that_is_gone_evicts_itself() {
         let state = test_state();
         let s = sid();
-        state.note_shard_disputed(&s);
-        assert!(state.models.disputed_shards.contains(&s));
+        state.note_shard_disputed(&s, &integrity_failure([7; 32]));
+        assert!(state.shard_is_disputed(&s));
 
         // No file was ever written for it, which is the same thing the reader
         // sees after a delete or a prune.
@@ -398,7 +551,7 @@ mod tests {
             "a shard with no file on disk is not in dispute"
         );
         assert!(
-            !state.models.disputed_shards.contains(&s),
+            !state.shard_is_disputed(&s),
             "and the entry is dropped, so the set stays bounded without a sweep"
         );
     }

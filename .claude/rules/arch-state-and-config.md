@@ -50,7 +50,8 @@ The 4 sub-structs and the `cfg()` / `classify` accessors are in `architecture.md
 - `state.models.removed_by_user` — `DashMap<ShardId, bool>` of user-deleted shards (#360); only via the helpers in `daemon/state/removed_shards.rs` (`mark_shard_removed_by_user`, `shard_removed_by_user`, `clear_shard_removed_by_user`, `clear_removed_by_user_for_model`); never write the map or tree directly.
 - `state.models.shards_needing_repair` — see `docs/invariants/state-and-config.md`
 - `state.models.shards_pending_verification` — see `docs/invariants/state-and-config.md`
-- `state.models.disputed_shards` — kept-but-disagreeing shards; write only `SharedState::note_shard_disputed` / `clear_shard_dispute`, read only `SharedState::disputed_shards_now`; guard `every_path_that_keeps_disagreeing_bytes_records_the_dispute`. NOT `shards_needing_repair`. → `docs/invariants/network.md`
+- `ModelRegistry::bytes_disputed` (was `state.models.disputed_shards`, moved 2026-10-03) — kept-but-disagreeing shards WITH the hash their bytes have, which is what the node announces for them (`announced_build_tag`); write only `SharedState::note_shard_disputed(shard, &verdict)` / `clear_shard_dispute`, read only `SharedState::disputed_shards_now` / `shard_is_disputed`; guard `every_path_that_keeps_disagreeing_bytes_records_the_dispute`. NOT `shards_needing_repair`. → `docs/invariants/network.md` § "One upload per model id"
+- `state.models.canonical_holding` + `ModelRegistry::withheld_models` — written together ONLY by `SharedState::note_canonical_holding`; a copy of another upload is withheld from the swarm. → `docs/invariants/network.md` § "One upload per model id"
 - `ModelRegistry::origin_verified` — see `docs/invariants/state-and-config.md`
 - `network::manager::tensors::AckRttEstimator` — see `docs/invariants/state-and-config.md`
 - A KV-budget refusal MUST release what the request already took — see `docs/invariants/state-and-config.md`

@@ -365,6 +365,19 @@ impl AutoShardManager {
                             if *shutdown_rx.borrow() { break; }
                         }
                     }
+                    // Repair work first, whatever the toggle and the cooldown say:
+                    // a part queued for a fresh copy (`mark_shard_for_repair` —
+                    // corrupt, or deleted for not being the canonical upload's)
+                    // and a P2P transfer that fell back to the origin both notify
+                    // here, and this arm used to run only `evaluate()` — behind the
+                    // enabled gate — so they waited for the next interval tick, up
+                    // to `interval_secs` (300 s by default), with a part missing
+                    // all that time. Measured on the `spliced` rig 2026-10-03: a
+                    // part deleted at 07:41:50 was still not being fetched when the
+                    // node stopped at 07:44:02. Both calls are cheap when nothing
+                    // is pending.
+                    self.verify_pending_shards().await;
+                    self.complete_pending_shard_fetches().await;
                     // Cooldown: skip if we evaluated recently (prevents cascading
                     // re-evaluations from shard progress gossip between peers).
                     // Exception: bypass when P2P has exhausted for one or more
@@ -528,7 +541,7 @@ impl AutoShardManager {
                          reports — keeping our bytes, because that hash has no origin \
                          backing and deleting on it is how a last copy is lost"
                     );
-                    self.shared_state.note_shard_disputed(&sid);
+                    self.shared_state.note_shard_disputed(&sid, &e);
                 } else {
                     // `verify_shard` has already quarantined the bad bytes. Stop
                     // advertising them, then get a good copy.

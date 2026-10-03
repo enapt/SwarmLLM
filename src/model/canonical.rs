@@ -155,9 +155,9 @@ pub fn best_claim<'a>(
 }
 
 /// Is the one-upload-per-model machinery on? `SWARMLLM_CANONICAL_UPLOADS=0`
-/// switches it off: no upload is verified or adopted, nothing switches, and
+/// switches it off: no upload is verified or adopted, no part is replaced, and
 /// every acquisition gate answers as before. For rigs and gates that link a
-/// node's files into throwaway nodes and must not have them switched mid-step,
+/// node's files into throwaway nodes and must not have them replaced mid-step,
 /// and as the in-binary A/B control. Read once.
 pub fn canonical_uploads_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -175,12 +175,25 @@ pub enum Holding {
     Nothing,
     /// Holds parts of the canonical upload — checked against HuggingFace.
     Canonical,
-    /// Holds parts of another upload and is fetching the canonical one's to
-    /// replace them. The old parts keep serving until the new ones are in.
-    Switching { fetched: u32, needed: u32 },
-    /// Holds parts of another upload and cannot switch right now. `reason` is
-    /// an i18n key suffix (`models.build.stuck_<reason>`).
-    Stuck { reason: &'static str },
+    /// Holds `parts` parts that are not the canonical upload's bytes, and
+    /// deletes them — then fetches the upload's own in their place — as soon
+    /// as it can: when nothing is using the model, and HuggingFace answers.
+    Replacing { parts: u32 },
+    /// Serves the model from a whole GGUF its owner gave it (`-m`): the owner's
+    /// file, never replaced on their behalf.
+    OwnFile,
+}
+
+impl Holding {
+    /// Does this node hold bytes that are NOT the swarm's upload — a copy it
+    /// must not offer to anyone else? The owner's own file is announced as the
+    /// bytes it is, like any other.
+    pub fn is_another_upload(&self) -> bool {
+        match self {
+            Holding::Replacing { .. } => true,
+            Holding::Nothing | Holding::Canonical | Holding::OwnFile => false,
+        }
+    }
 }
 
 /// Every canonical layout is cut at the DEFAULT shard size, never at this

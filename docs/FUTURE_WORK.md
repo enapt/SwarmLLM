@@ -37,16 +37,27 @@ Re-ranked 2026-10-02 after the verification, and 2026-10-03 when #156, #158 and 
 `docs/plans/` holds the multi-step designs; the entries point at them.
 
 **P0 — wrong answers, silently**
-1. *(none open: #156 closed 2026-10-03 — a mixed copy is refused at load.)*
+1. *(none open: #156 closed 2026-10-03 — a mixed copy is refused at load. Its last doors
+   closed after v0.3.222 the same day: a part in dispute is announced as the bytes it is, a
+   part that is not the upload's bytes is DELETED and re-fetched (from peers or HuggingFace),
+   a copy waiting for that is withheld from the swarm, and every part entering from a peer is
+   byte-checked against the upload — `docs/invariants/network.md` § "One upload per model id". Rigs
+   `split_rig.sh disputed` and `spliced`: v0.3.222 answered garbage through such a peer, and
+   from such a copy on its own node (`给给给…`); the fix deletes and re-fetches.)*
 2. **Watch the live swarm converge (no code)**: `peers_other_build` → 0 per model once peers
-   run the release after v0.3.221 — on .221 it did NOT (12 holdings on at least 4 peers after
-   13 h, #213; `9594e1ff` switched none of its ~8 models). A peer still counted a day after updating is one that cannot switch (disk,
-   HuggingFace, offline mode); `docs/DIAGNOSTICS.md` § "Which copy of this model does this
-   node hold?".
+   run the release with the prune-and-fetch heal (after v0.3.222) — on .221 it did NOT (12
+   holdings on at least 4 peers after 13 h, #213; `9594e1ff` switched none of its ~8 models).
+   A peer still counted a day after updating is one that cannot replace its parts (HuggingFace
+   unreachable from it, the model always in use, offline mode); `docs/DIAGNOSTICS.md` § "Which
+   copy of this model does this node hold?". Also read whether the contested hashes for
+   Llama-3.1-8B part 7, GLM-4 parts 1/2/4/5/6, Mistral 4/6/7, Phi-3.5 part 2 stop
+   (`contradicts the one we took from the model's origin`) — the prediction that they were
+   other-upload/spliced bytes, not "corruption that spread" (gotchas #380-#384, #393).
 
 **P1 — silent, or broken for a whole class of users**
 3. **#159** — the remaining way a node can act on another upload's description of a model
-   (#156's other door; #158 closed 2026-10-03).
+   (#156's other door; #158 closed 2026-10-03; narrowed the same day to hashes gossiped by
+   holders on v0.3.222 and older, and DHT-only holders).
 4. **#165** — prompt privacy is on by default for every node holding both ends of a model
    (58 of 78 holdings in the 2026-10-01 census) and costs 9-14× on a far middle peer; the
    notice that was meant to tell the user never fires.
@@ -68,14 +79,13 @@ Re-ranked 2026-10-02 after the verification, and 2026-10-03 when #156, #158 and 
 12. **#162** — the release gate: a cloned gate loses its helpers, and step 12e cannot test a
     takeover on this box (absorbs #140).
 13. **#155** — AutoNAT dial-backs denied by the per-peer cap every ~5 s, for the life of a node.
-14. **#157** — a node switching copies fetches from HuggingFace even when peers hold the right one.
-15. **#194** — an agent-sized prompt fills an 8 GB card with conversation memory.
-16. **#147**, **#137**, **#138**, **#129** — prompt reading on the card, the processor half of
+14. **#194** — an agent-sized prompt fills an 8 GB card with conversation memory.
+15. **#147**, **#137**, **#138**, **#129** — prompt reading on the card, the processor half of
     a hybrid, MoE placement, and near-fit models sent across continents
     (`docs/plans/faster_than_local.md`).
-17. **#3**, **#180** — the routing cost model charges a constant where the reply length
+16. **#3**, **#180** — the routing cost model charges a constant where the reply length
     belongs, which keeps partial ranges (load spreading) off.
-18. **#171** — the prompt pass through a split runs one stage at a time.
+17. **#171** — the prompt pass through a split runs one stage at a time.
 
 Everything else is ranked in its own entry. **P3** is narrow or cosmetic, **P4** is process,
 maintenance or an idea with no user waiting on it.
@@ -85,32 +95,30 @@ maintenance or an idea with no user waiting on it.
 ### Wrong answers and the one-upload-per-model rule
 
 #### #159 — A coordinator holding none of a model routes on placeholder part hashes
-`P1` · routing · **OPEN** — 2026-10-02 · history: archive row #159
+`P1` · routing · **PARTIAL** — 2026-10-02 · history: archive row #159
 
 `register_for_fetching` registers the canonical manifest built from the header with zero part
 hashes, so `expected_build_tag` is unknown and `shard_holders` cannot exclude holders of
 another upload until a canonical holder's gossip fills the hashes
-(`merge_known_shard_hashes`). Known limit of #151's first cut (`docs/invariants/network.md` §
-"One upload per model id"). Options: take part hashes from the first canonical-SHAPED
-manifest a peer gossips (shape is already the adoption test), or exclude holders whose tag is
-unknown when the canonical upload is known.
+(`merge_known_shard_hashes`) — and the first hashes heard win.
 
-#### #157 — A node switching copies fetches from HuggingFace even when peers hold the canonical upload
-`P2` · storage · **OPEN** — 2026-10-02 · history: archive row #157
+**Narrowed 2026-10-03 (after v0.3.222):** a node on the next release withholds a copy of
+another upload (no announcement, no manifest gossip, no serving) and refuses to load parts
+whose bytes are not its table's upload, so neither the holder nor its hashes can be taken for
+the swarm's; a part fetched against a hash that was another upload's is caught at accept by
+the byte check. **Residual:** holders on v0.3.222 and older still gossip such hashes until they
+update; a holder known only from a DHT provider record carries no build and is not judged.
+Options for the rest: exclude holders whose tag is unknown when the canonical upload is known,
+or prefer hashes from holders whose announced tags agree with each other.
 
-`switch_to` stages parts with `download_shard` (HF byte ranges) into
-`<data_dir>/canonical/<model>`; the P2P transfer writes into the model directory and is
-accepted against the registered manifest, which during a switch is the OLD upload's. Needs
-the P2P path to take a destination and a manifest. Costs HF bandwidth and fails when HF is
-unreachable (measured: Qwen2.5-Coder-7B, 8 parts / 4.4 GB, switched in 56 s from HF).
-Prerequisite of #160.
-
-#### #160 — A node in offline mode never verifies or switches its copies
+#### #160 — A node in offline mode never verifies or replaces its copies
 `P3` · storage · **OPEN** — 2026-10-02 · history: archive row #160
 
-`auto_manage::canonical` needs HuggingFace (anonymous probe, byte check, staged fetch). An
-offline node could still adopt the canonical choice from peers' claims and fetch canonical
-parts over P2P against a canonical-shaped manifest — after #157.
+`auto_manage::canonical` needs HuggingFace (anonymous probe, byte check) and deletes nothing it
+could not fetch back from there. An offline node could still adopt the canonical choice from
+peers' claims and fetch canonical parts over P2P against a canonical-shaped manifest (the
+repair queue already prefers peers when a part's hash is known; #157 closed 2026-10-03) — but
+it has no way to check a peer's bytes against the upload, only against a peer's hash.
 
 #### #179 — A greedy reply (`temperature: 0`) is not reproducible run to run on the processor
 `P3` · correctness · **OPEN** — 2026-08-18 · history: archive § "`temperature: 0` with a fixed seed is not reproducible", gotcha #327
@@ -1086,9 +1094,12 @@ disk pressure against the orphan reclaim pass first.
 `P3` · storage · **PARKED: no field reading yet** — 2026-09-13 · history: archive row #61 and § "A disputed shard is kept but the disagreement is never settled"
 
 Fallout of #60 and strictly better than what it replaced (deleting good data): a part that
-disagrees with an unbacked hash is kept, served and recorded in `disputed_shards` (guard
-`every_path_that_keeps_disagreeing_bytes_records_the_dispute`; a "Disagrees" badge and a
-diagnostics line), but nothing settles it. Do not build before a reading: look for `-- shards
+disagrees with an unbacked hash is kept, served and recorded (`ModelRegistry::bytes_disputed`
+since 2026-10-03, with the hash the bytes DO have, which is what the node now announces for
+the part; guard `every_path_that_keeps_disagreeing_bytes_records_the_dispute`; a "Disagrees"
+badge and a diagnostics line), but nothing settles it. For a model whose canonical upload is
+known the heal now re-checks a part that falls into dispute against the upload and replaces
+the copy if its bytes are not the upload's; a dispute whose bytes pass that check stays open. Do not build before a reading: look for `-- shards
 kept despite disagreeing --` in a diagnostics report from a peer-fed node. The one-upload rule
 (#151, v0.3.221) should make disputes rarer. Designs: (1) self-attestation — free, but makes a
 node refuse to converge on the swarm's dominant build; (2) settle from the origin without
@@ -1268,6 +1279,16 @@ archive under the named heading. Reopen one only with the evidence its line name
 Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 19-28 were
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
+
+**Closed 2026-10-03, after v0.3.222** (`docs/invariants/network.md` § "A node vouches only for
+bytes that are the swarm's upload"; gotcha #782)
+- #157 — a node holding another upload no longer stages the canonical copy from HuggingFace
+  beside the old one: parts that are not the upload's bytes are DELETED and the upload's parts
+  covering the same layers re-fetched through the repair queue — from peers when the part's
+  hash is known, from HuggingFace otherwise (`auto_manage::canonical::replace_parts`). The
+  staged switch, its queue (#213's `SwitchQueue`) and the `switching`/`stuck` states are gone;
+  a copy that cannot be replaced yet (model in use, HuggingFace not answering) is `replacing`
+  and withheld from the swarm. Rigs: `split_rig.sh spliced`, `canon_rig.sh`.
 
 **Closed 2026-10-03** (next release after v0.3.221; history in the archive's § "Closed after 2026-10-02")
 - #156 — a node computing with a header that describes another upload than its parts: the

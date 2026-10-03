@@ -1286,25 +1286,14 @@
           }
         }
         // This computer's own copy against the one the swarm uses
-        // (`shared_copy`, `model::canonical`): say so while it is being
-        // switched, or why it cannot be. Nothing is shown once it matches.
+        // (`shared_copy`, `model::canonical`): say so while parts of it that
+        // are not that copy wait to be deleted and fetched again (the model is
+        // in use, or the original source cannot be reached). The fetch itself
+        // shows as an ordinary download. Nothing is shown once it matches.
         var mine = m.shared_copy && m.shared_copy.this_computer;
-        var copyKey = null;
-        var copyArgs = {};
-        if (mine && mine.state === 'switching') {
-          if (mine.needed > 0) {
-            copyKey = 'dashboard.copy_switching';
-            copyArgs = { fetched: mine.fetched, needed: mine.needed };
-          } else {
-            copyKey = 'dashboard.copy_queued';
-          }
-        } else if (mine && mine.state === 'stuck' &&
-                   ['disk', 'download', 'cancelled'].indexOf(mine.reason) !== -1) {
-          copyKey = 'dashboard.copy_stuck_' + mine.reason;
-        }
-        if (copyKey) {
+        if (mine && mine.state === 'replacing') {
           healthSentence += '<p class="mce-say mce-say-aside">' +
-            U.escapeHtml(I18n.t(copyKey, copyArgs)) + '</p>';
+            U.escapeHtml(I18n.t('dashboard.copy_replacing', { parts: mine.parts })) + '</p>';
         }
 
         // Pipeline encryption status — SwarmLLM requires the user to locally hold

@@ -428,8 +428,9 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
             "hf_source": hf_source,
             // The upload the whole swarm uses for this model (`model::canonical`)
             // and what this computer's own copy is against it: `nothing`,
-            // `canonical`, `switching` (fetching the shared copy to replace
-            // its old parts) or `stuck` with a reason. Null until checked.
+            // `canonical`, `replacing` (parts that are not that copy, waiting
+            // to be deleted and fetched again) or `own_file`. Null until
+            // checked.
             "shared_copy": state
                 .shared_state
                 .canonical_build(&crate::types::ModelId(id.to_string()))

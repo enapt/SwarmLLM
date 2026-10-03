@@ -207,7 +207,9 @@ trailer, gated on `features::FORWARD_REFUSAL_REASON`) and the coordinator's
 
 (2026-09-13.) **`state.models.disputed_shards` is the record of "we checked,
 we disagree, and we are keeping our copy"**, written and cleared only through
-`SharedState::note_shard_disputed` / `clear_shard_dispute`.
+`SharedState::note_shard_disputed` / `clear_shard_dispute`. (Moved 2026-10-03
+to `ModelRegistry::bytes_disputed`, which also keeps the hash the bytes DO have —
+it is what the node announces for them; § "One upload per model id".)
 
 **Why it exists.** `mismatch_policy` (the rule above) stops a node destroying
 its own bytes on a hash the model's origin never backed. It does not settle the
@@ -3003,13 +3005,23 @@ task that runs whether or not auto-manage is on — repair, like
   and its header compared by BLAKE3 with the upload's; a wrong header (a
   peer-provisioned node's) is replaced with the upload's header and side files,
   and the model reloaded.
-- A node holding another upload fetches the canonical parts covering its layers
-  into `<data_dir>/canonical/<model>` by byte range (never a whole GGUF), keeps
-  serving its old parts meanwhile, and swaps when every part is in and the model
-  is idle: old parts, header, manifest and side files deleted, new ones moved in,
-  origin hashes of the old upload forgotten (`forget_origin_verified_for_model`
-  — kept, they would refuse the new manifest as "a different build"), holders
-  re-announced complete-for-model, reloaded. One switch at a time.
+- A node holding parts that are not the upload's bytes DELETES them and fetches
+  the upload's parts covering the same layers through the repair queue
+  (`replace_parts`, 2026-10-03): from a peer when it knows the part's hash to check
+  it against, from HuggingFace otherwise — by byte range, never a whole GGUF. A
+  copy of another LAYOUT goes whole (parts, header, manifest, side files) and the
+  upload's header and manifest are installed; a copy of the upload's layout loses
+  only the parts that fail the byte check or are in dispute, and their hashes
+  (and origin hashes) are zeroed so a replacement is checked against the
+  upload's. Nothing is deleted until HuggingFace has answered in the same pass,
+  and — unless the bytes are not their own table's upload, which go at once —
+  not while the model is in use (withheld meanwhile). *Until 2026-10-03 this was a staged switch — fetch the whole copy
+  from HuggingFace beside the old one, keep serving the old parts, swap when idle,
+  one switch at a time — which held another upload's bytes on a node for as long
+  as a switch could not go ahead (13 holdings on 4 peers 13 h after v0.3.221, #780),
+  never fetched from peers (#157), and needed room for two copies. The user's
+  instruction (2026-10-03): "nodes that are holding incorrect parts should prune
+  them, and auto redownload from peers or HF correctly".*
 - `hf_sources` is written ONLY by `SharedState::write_hf_source` behind
   `note_origin_claim` / `adopt_canonical_build` (and the startup restore of the
   verified choice), and a header is fetched only by `fetch_model_header`, which
@@ -3061,7 +3073,9 @@ the uploads this node had adopted — the CHOICE converged, the SWITCH did not.
 "One switch at a time" was taken before the attempt, whatever came of it, so a
 model that could not switch (no room to stage, HuggingFace refusing) held the
 turn on every pass and blocked every model after it in name order, for ever.
-`SwitchQueue` now gives the turn only to a switch that FETCHED; a disk shortfall
+`SwitchQueue` then gave the turn only to a switch that FETCHED (superseded the
+same day: the prune-and-fetch heal has no queue to block — § "A node vouches only
+for bytes that are the swarm's upload"); a disk shortfall
 holds none and is re-checked next pass; a HuggingFace failure holds none and backs
 off 10 min, doubling to 6 h — Kubernetes' scheduling queue met the same
 head-of-line blocking (an unschedulable pod at the head, kubernetes#71486) and
@@ -3084,11 +3098,99 @@ on, now one method).
 started; a failure backs off and never blocks the queue. A peer's manifest is
 judged in ONE place. A node's claim travels wherever its manifests do.
 
-**Known limits (FUTURE_WORK #151):** a switch fetches from HuggingFace, not from
-canonical holders over P2P; a coordinator holding none of a model routes on a
+**A node vouches only for bytes that are the swarm's upload (2026-10-03, after
+v0.3.222).** Read from the live node 40 minutes after .222 reached the peers:
+peer `4a3ac72e` (on .222) announced, for Mistral-7B parts 4 and 7, GLM-4 part 4
+and xLAM-3B parts 0-1, a build tag that FLIPPED between this node's build and one
+or two others every few minutes (GLM-4 part 4 cycled through three tags) — while
+only ONE upload of each of those models had ever been claimed anywhere. Three
+byte versions of one part, one upload: leftovers of the pre-.221 splice (#775's
+first mixing path: part *i* of one source written under another's manifest), not
+a second upload. And peers re-gossiping this node's own manifest carried hashes
+contradicting our origin-verified ones for GLM-4 parts 1/2/4/5/6, Mistral 4/6/7,
+Llama-3.1-8B 1/7 and Phi-3.5 2, 18-19 times each since 10-02 12:00. Four doors let
+those bytes be vouched for as the swarm's:
+
+1. **An announcement described the MANIFEST, not the bytes.** `shard_announce`
+   took `expected_build_tag` — our manifest's hash — although the wire field is
+   documented as "a property of the bytes and nothing else". `register_manifest`
+   adopts a peer's contradicting hash for a part we HOLD (deliberately: it queues
+   the re-check, gotcha #382), and when the re-check keeps our bytes
+   (`mismatch_policy` → `KeepBytes`, no origin backing) the manifest goes on
+   carrying the peer's hash — so the node announced the peer's build for bytes it
+   did not have, and every coordinator expecting that build routed the layers to
+   it. That is the flip: whichever peer gossiped last set the tag. Now the
+   dispute record keeps the hash the bytes DO have (`SharedState::
+   note_shard_disputed` takes the check's own `ShardIntegrity` verdict; the store
+   is `ModelRegistry::bytes_disputed`, the one place a dispute lives), and
+   `ModelRegistry::announced_build_tag` announces that — or, for bytes found wrong
+   without being hashed (a size mismatch), `u64::MAX`, which equals no expectation
+   (never `BUILD_TAG_UNKNOWN`, which peers read as "do not judge"). Every path that
+   replaces a part's bytes ends its dispute (`record_origin_verified_hash`, a
+   verified peer transfer, the canonical swap). The monitor re-announces when a
+   part's TAG changes, not only when the set does. BitTorrent's rule (BEP 3): a
+   peer announces a piece only once that piece's own bytes have checked out.
+2. **A copy of another upload kept serving while it switched** — "the old parts
+   keep serving until the new ones are in", for as long as a switch could not go
+   ahead. A canonical coordinator excludes it only while its tags are truthful, and
+   a coordinator holding none of the model takes the first hashes it hears
+   (`merge_known_shard_hashes`), so its gossip could make it THE expected build;
+   with a header from the canonical upload beside spliced bytes, that is #156's
+   garbage again — for the swarm and for the node's own owner. Now such parts are
+   DELETED and fetched again (`replace_parts`, the heal above). For the moment
+   they cannot be — the model in use, HuggingFace not answering — the copy is
+   `Holding::Replacing` and withheld: `SharedState::note_canonical_holding`, the one
+   writer of `canonical_holding`, sets `ModelRegistry::set_model_withheld`;
+   `shard_announce` leaves its parts out while still declaring the model complete
+   (peers retract every part, within one 30 s broadcast tick), the capability
+   leaves them out, `manifests_to_gossip` skips the model, the DHT is told to stop
+   (the monitor's `last_withheld_models`), a `ShardTransfer` for it is answered
+   empty. Parts whose bytes are not their own table's upload never wait: they are
+   deleted at once, mid-request if need be.
+3. **A part fetched from a peer was checked only against the manifest's hash** —
+   for a part this node did not hold, a hash from gossip, which can be another
+   upload's (or a spliced copy's). Where the canonical upload is known, the accept
+   path now also compares the part's first 64 KB with the upload on HuggingFace
+   (`auto_manage::canonical::part_is_from`, the heal's own check); a part that
+   matches the hash and not the upload is discarded and fetched from the upload
+   itself (`refuse_part_of_another_upload`), which writes the upload's hash into
+   the manifest. No HuggingFace, no verdict: accepted on its hash, as before.
+4. **The heal checked a copy once per run** — "what is on disk changes only
+   through a switch" was not so: parts keep arriving after the check. `CheckedParts`
+   re-checks a part added since, and one that fell into dispute after its check;
+   a part in dispute is replaced by the upload's own bytes, whose hash then
+   settles the dispute for good (#61, for every model whose upload is known).
+5. **A part with no hash went to a peer first** and was thrown away on arrival
+   (`classify_p2p_shard_acceptance` → origin): `trigger_download` now asks the
+   same question before the transfer (`peer_copy_checkable`), so a part pruned for
+   not being the upload's comes from HuggingFace unless a holder's gossip has
+   supplied its hash.
+
+Tests that fail with the change undone: `a_part_in_dispute_is_announced_as_the_bytes_it_is`
+(announcing `expected_build_tag`), `a_withheld_model_is_retracted_not_announced`
+(no withheld filter), `a_part_that_arrives_after_the_check_is_checked_too`,
+`a_part_goes_when_it_is_not_the_upload_or_in_dispute`,
+`the_parts_fetched_again_cover_the_layers_the_deleted_ones_held`,
+`pruning_a_copy_removes_every_file_of_its_upload_and_nothing_else`. Rigs:
+`split_rig.sh disputed` (B serves a part whose bytes are not its manifest's) and
+`split_rig.sh spliced` (B's own manifest vouches for spliced bytes; asked directly
+while its heal works).
+
+**What a change must keep:** an announced tag is the tag of the bytes; a part that
+is not the canonical upload's bytes is deleted and fetched again, and until then
+offered to nobody; nothing is deleted without HuggingFace having answered in the
+same pass; the byte check against the upload runs on every part that enters, and
+again on every part that changed.
+
+**Known limits (FUTURE_WORK #151):** a coordinator holding none of a model routes on a
 manifest with placeholder hashes until a holder's gossip fills them, so for that
-window `shard_holders` cannot exclude another upload's holders; a node in
-offline mode never switches.
+window `shard_holders` cannot exclude another upload's holders — narrowed by the
+withholding above to holders on v0.3.222 and older; a holder known only from a DHT
+provider record carries no build at all and is not judged; the byte check reads
+64 KB of a part's first tensor, which tells uploads apart but is not a check of the
+whole part (the part's BLAKE3 is still only as good as the hash it is checked
+against); a node in offline mode never checks its copy (it never reaches
+HuggingFace, so nothing could be fetched back).
 
 **From the rules file (moved 2026-10-02):**
 

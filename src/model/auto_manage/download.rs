@@ -252,7 +252,27 @@ impl AutoShardManager {
             .models
             .shard_p2p_failed
             .contains(&sid_for_failed_check);
-        let has_peer_holders = candidate.holder_count > 0 && !p2p_exhausted;
+        // A peer's copy is worth fetching only when it can be checked: with no
+        // hash for the part, the accept path discards it and fetches from the
+        // origin anyway (`classify_p2p_shard_acceptance`) — the same rule, asked
+        // here first, so the transfer is not made to be thrown away. A part
+        // pruned for not being the canonical upload's has no hash until a
+        // holder's gossip supplies one.
+        let peer_copy_checkable = self
+            .shared_state
+            .model_registry
+            .get_manifest(&candidate.model_id)
+            .and_then(|m| {
+                m.shards
+                    .iter()
+                    .find(|s| s.index == candidate.shard_index)
+                    .map(|s| s.hash != [0u8; 32])
+            })
+            .unwrap_or(false)
+            || !self
+                .shared_state
+                .can_fetch_shard_from_origin(&candidate.model_id);
+        let has_peer_holders = candidate.holder_count > 0 && !p2p_exhausted && peer_copy_checkable;
 
         // Download from HuggingFace only if no peers hold the shard
         // In offline mode, skip automatic HF downloads (user must trigger manually)

@@ -1,6 +1,6 @@
 //! Which upload of each model this node uses — the state half of
 //! `model::canonical`. The pure rule lives there; the driver that checks
-//! uploads against HuggingFace and switches this node's copy lives in
+//! uploads against HuggingFace and replaces this node's wrong parts lives in
 //! `model::auto_manage::canonical`. These are the only writers of
 //! `origin_claims`, `canonical_builds` and `hf_sources`.
 
@@ -83,6 +83,41 @@ impl SharedState {
         self.note_origin_claim(model_id, build.source);
     }
 
+    /// Record what this node's copy of `model_id` is against the canonical
+    /// upload (`None`: not judged — the choice moved, or the model was
+    /// deleted). Returns whether it changed.
+    ///
+    /// The ONE writer of `canonical_holding`, and with it of whether the copy
+    /// is offered to the swarm: a copy waiting to have its parts replaced is
+    /// withheld (`ModelRegistry::set_model_withheld`) — not announced, not
+    /// gossiped, not served — until they are. It used to keep serving "until the
+    /// new parts are in", and a coordinator that took its hashes (the first a
+    /// node holding none of the model hears) routed layers to bytes that were
+    /// not the upload; with a header from the upload beside them, that is the
+    /// garbage #156 answered. The owner's own requests still use it.
+    pub fn note_canonical_holding(&self, model_id: &ModelId, holding: Option<Holding>) -> bool {
+        let withhold = holding.as_ref().is_some_and(Holding::is_another_upload);
+        if self.model_registry.set_model_withheld(model_id, withhold) {
+            if withhold {
+                tracing::info!(model = %model_id, "DIAG: this node's copy is not the swarm's upload — no longer offering it to peers");
+            } else {
+                tracing::info!(model = %model_id, "DIAG: offering this node's copy of the model to peers again");
+            }
+        }
+        let changed = match holding {
+            Some(h) => self
+                .models
+                .canonical_holding
+                .insert(model_id.clone(), h.clone())
+                .is_none_or(|was| was != h),
+            None => self.models.canonical_holding.remove(model_id).is_some(),
+        };
+        if changed {
+            self.signal_dashboard(super::DashboardSignal::ModelsChanged);
+        }
+        changed
+    }
+
     /// The upload the swarm uses for `model_id`, when this node has verified one.
     pub fn canonical_build(&self, model_id: &ModelId) -> Option<CanonicalBuild> {
         self.models
@@ -134,7 +169,8 @@ impl SharedState {
     ///
     /// The gate that stops a node acquiring parts of an upload the swarm does
     /// not use. Yes when the model's canonical upload is known AND the manifest
-    /// this node fetches against describes it AND this node is not mid-switch;
+    /// this node fetches against describes it AND this node is not waiting to
+    /// delete parts of another upload (`Holding::Replacing`);
     /// no while an upload still waits to be checked — fetching then would take
     /// whichever upload this node happened to hear of first, which is how the
     /// swarm split in the first place. A model with no HuggingFace origin at
@@ -150,14 +186,14 @@ impl SharedState {
             return true;
         }
         if let Some(build) = self.canonical_build(model_id) {
-            let switching = matches!(
+            let replacing = matches!(
                 self.models
                     .canonical_holding
                     .get(model_id)
                     .map(|h| h.value().clone()),
-                Some(Holding::Switching { .. } | Holding::Stuck { .. })
+                Some(Holding::Replacing { .. } | Holding::OwnFile)
             );
-            return !switching
+            return !replacing
                 && self
                     .model_registry
                     .get_manifest(model_id)
@@ -214,10 +250,25 @@ impl SharedState {
     /// Forget every origin-derived hash of `model_id`, in memory and on disk.
     /// See `ModelRegistry::forget_origin_verified_for_model`.
     pub fn forget_origin_verified_for_model(&self, model_id: &ModelId) {
-        for shard in self
-            .model_registry
-            .forget_origin_verified_for_model(model_id)
-        {
+        self.forget_origin_verified_on_disk(
+            model_id,
+            self.model_registry
+                .forget_origin_verified_for_model(model_id),
+        );
+    }
+
+    /// The same for some parts only. See
+    /// `ModelRegistry::forget_origin_verified_for_parts`.
+    pub fn forget_origin_verified_for_parts(&self, model_id: &ModelId, parts: &[u32]) {
+        self.forget_origin_verified_on_disk(
+            model_id,
+            self.model_registry
+                .forget_origin_verified_for_parts(model_id, parts),
+        );
+    }
+
+    fn forget_origin_verified_on_disk(&self, model_id: &ModelId, gone: Vec<crate::types::ShardId>) {
+        for shard in gone {
             if let Ok(key) = serde_json::to_string(&shard) {
                 if let Err(e) = self
                     .db

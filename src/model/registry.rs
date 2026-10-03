@@ -26,6 +26,12 @@ const RETRACTION_HONOURED_SECS: u64 = 26 * 60 * 60;
 /// swept when it is reached, so the map stays bounded without its own timer.
 const MAX_RETRACTED_CLAIMS: usize = 10_000;
 
+/// The build tag of a part whose bytes this node knows disagree with its
+/// manifest but never hashed: it equals no real expectation, so every peer —
+/// whatever its version — reads it as another build and routes nothing here.
+/// Never `BUILD_TAG_UNKNOWN`, which peers read as "do not judge".
+const BUILD_TAG_BYTES_UNHASHED: u64 = u64::MAX;
+
 /// Thread-safe registry of known models and shard locations.
 ///
 /// Uses DashMap for concurrent access from multiple daemon tasks.
@@ -121,6 +127,28 @@ pub struct ModelRegistry {
     /// that travels over the network is just another assertion, and forgeable.
     /// A node trusts only what IT fetched from the origin.
     origin_verified: DashMap<ShardId, crate::types::Blake3Hash>,
+    /// Parts THIS node holds whose bytes do not hash to what its own manifest
+    /// says, with the hash the bytes DO have (`None` when the check that found
+    /// the disagreement computed none — a size mismatch). Kept and served
+    /// anyway, because the manifest's hash has no origin backing
+    /// (`mismatch_policy`): "we checked, we disagree, and we stand by our copy".
+    /// Counted for the dashboard and the diagnostics report
+    /// (`SharedState::disputed_shards_now`) — the open question in
+    /// `docs/FUTURE_WORK.md` #61 is how often this fires in the field.
+    ///
+    /// The one store of a dispute: written only through
+    /// `SharedState::note_shard_disputed` / `clear_shard_dispute`, and cleared
+    /// wherever a part's bytes are replaced (an origin download, a peer
+    /// transfer that verified, a canonical swap). It is what
+    /// [`Self::announced_build_tag`] reads, so an announcement says what the
+    /// bytes are rather than what the manifest was last told.
+    bytes_disputed: DashMap<ShardId, Option<crate::types::Blake3Hash>>,
+    /// Models whose copy on this node is known NOT to be the swarm's upload
+    /// (`auto_manage::canonical` found it and is switching, or cannot).
+    /// Their parts are not offered to the swarm — not announced, not gossiped
+    /// in a manifest, not served — until the switch lands. Written only by
+    /// `SharedState::note_canonical_holding`.
+    withheld_models: dashmap::DashSet<ModelId>,
 
     persist_hook: std::sync::OnceLock<ManifestUpdateHook>,
     /// Local node ID — never evicted from holder sets.
@@ -136,6 +164,8 @@ impl ModelRegistry {
             global_holder_count: DashMap::new(),
             retracted_claims: DashMap::new(),
             origin_verified: DashMap::new(),
+            bytes_disputed: DashMap::new(),
+            withheld_models: dashmap::DashSet::new(),
             persist_hook: std::sync::OnceLock::new(),
             local_node_id: None,
         }
@@ -152,6 +182,8 @@ impl ModelRegistry {
             global_holder_count: DashMap::new(),
             retracted_claims: DashMap::new(),
             origin_verified: DashMap::new(),
+            bytes_disputed: DashMap::new(),
+            withheld_models: dashmap::DashSet::new(),
             persist_hook: std::sync::OnceLock::new(),
             local_node_id: Some(local_node_id),
         }
@@ -183,10 +215,26 @@ impl ModelRegistry {
     /// is leaving, and kept, they would refuse the one it is switching to as
     /// "a different build" (`register_manifest`) and argue its hashes away.
     pub fn forget_origin_verified_for_model(&self, model_id: &ModelId) -> Vec<ShardId> {
+        self.forget_origin_verified_where(|s| &s.model_id == model_id)
+    }
+
+    /// The same for some parts only: parts this node deletes because their
+    /// bytes were not the canonical upload's. Their origin hash, if any, is the
+    /// hash of those bytes, and kept, it would override the hash the replacement
+    /// is checked against (`register_manifest`).
+    pub fn forget_origin_verified_for_parts(
+        &self,
+        model_id: &ModelId,
+        parts: &[u32],
+    ) -> Vec<ShardId> {
+        self.forget_origin_verified_where(|s| &s.model_id == model_id && parts.contains(&s.index))
+    }
+
+    fn forget_origin_verified_where(&self, which: impl Fn(&ShardId) -> bool) -> Vec<ShardId> {
         let gone: Vec<ShardId> = self
             .origin_verified
             .iter()
-            .filter(|e| &e.key().model_id == model_id)
+            .filter(|e| which(e.key()))
             .map(|e| e.key().clone())
             .collect();
         for shard in &gone {
@@ -904,6 +952,78 @@ impl ModelRegistry {
             .unwrap_or(swarmllm_types::BUILD_TAG_UNKNOWN)
     }
 
+    /// The build tag THIS node announces for a part it holds: the tag of its
+    /// BYTES, which is what the wire field means (`build_tag_from_hash` — "a
+    /// property of the bytes and nothing else").
+    ///
+    /// That is our manifest's hash, except for a part in dispute.
+    /// `register_manifest` adopts a peer's contradicting hash for a part we
+    /// hold — deliberately, it is what queues the re-check (#382) — and when
+    /// the re-check keeps our bytes the manifest goes on carrying the peer's
+    /// hash. Announcing [`Self::expected_build_tag`] then told the swarm we
+    /// held the peer's bytes: every coordinator expecting them routed that
+    /// part's layers here, to bytes that were not those. Measured 2026-10-03
+    /// on a v0.3.222 peer holding parts of another upload: its announced tag
+    /// for one part flipped between this node's build and two others every
+    /// few minutes, as whichever peer gossiped last rewrote its manifest.
+    /// BitTorrent draws the same line (BEP 3): a peer announces a piece only
+    /// once the piece's own bytes have checked out.
+    ///
+    /// A dispute whose bytes were never hashed is announced under a tag no
+    /// expectation can equal, so no peer routes that part here at all.
+    pub fn announced_build_tag(&self, shard_id: &ShardId) -> u64 {
+        match self.bytes_disputed.get(shard_id).map(|h| *h) {
+            Some(Some(bytes)) => swarmllm_types::build_tag_from_hash(&bytes),
+            Some(None) => BUILD_TAG_BYTES_UNHASHED,
+            None => self.expected_build_tag(shard_id),
+        }
+    }
+
+    /// Record that our bytes of `shard_id` disagree with our manifest, and
+    /// what they hash to when known. Returns whether the dispute is new. Only
+    /// `SharedState::note_shard_disputed` calls this.
+    pub fn note_bytes_disputed(
+        &self,
+        shard_id: ShardId,
+        bytes_hash: Option<crate::types::Blake3Hash>,
+    ) -> bool {
+        self.bytes_disputed.insert(shard_id, bytes_hash).is_none()
+    }
+
+    /// The dispute is over. Only `SharedState::clear_shard_dispute` calls this.
+    pub fn clear_bytes_dispute(&self, shard_id: &ShardId) {
+        self.bytes_disputed.remove(shard_id);
+    }
+
+    pub fn bytes_dispute_recorded(&self, shard_id: &ShardId) -> bool {
+        self.bytes_disputed.contains_key(shard_id)
+    }
+
+    /// Every part recorded in dispute, file present or not — see
+    /// `SharedState::disputed_shards_now` for the reading that drops gone ones.
+    pub fn bytes_disputed_shards(&self) -> Vec<ShardId> {
+        self.bytes_disputed
+            .iter()
+            .map(|e| e.key().clone())
+            .collect()
+    }
+
+    /// Stop (or resume) offering this node's parts of `model_id` to the swarm.
+    /// Returns whether that changed. Only `SharedState::note_canonical_holding`
+    /// calls this.
+    pub fn set_model_withheld(&self, model_id: &ModelId, withheld: bool) -> bool {
+        if withheld {
+            self.withheld_models.insert(model_id.clone())
+        } else {
+            self.withheld_models.remove(model_id).is_some()
+        }
+    }
+
+    /// Is this node's copy of `model_id` held back from the swarm?
+    pub fn model_is_withheld(&self, model_id: &ModelId) -> bool {
+        self.withheld_models.contains(model_id)
+    }
+
     /// Is the different-build holder filter switched on?
     ///
     /// `SWARMLLM_BUILD_FILTER=0` turns it off, restoring the pre-2026-09-05
@@ -1167,6 +1287,11 @@ impl ModelRegistry {
     /// come through here rather than re-deriving the predicate — the one-shot
     /// startup announcement had it right and the 30s timer did not, so discovery
     /// worked for whoever was already connected at boot and for nobody after.
+    ///
+    /// A model whose copy here is withheld ([`Self::model_is_withheld`]) is not
+    /// gossiped: its hashes describe bytes that are not the swarm's upload, and
+    /// a node holding none of the model adopts the first hashes it hears
+    /// (`merge_known_shard_hashes`), then routes and verifies against them.
     pub fn manifests_to_gossip(&self, node_id: &NodeId) -> Vec<ModelManifest> {
         let hosted: std::collections::HashSet<String> = self
             .all_shard_entries()
@@ -1180,6 +1305,7 @@ impl ModelRegistry {
         self.models()
             .into_iter()
             .filter(|m| m.publisher == *node_id || hosted.contains(&m.id.0))
+            .filter(|m| !self.model_is_withheld(&m.id))
             .collect()
     }
 

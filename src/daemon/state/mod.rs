@@ -1321,7 +1321,6 @@ impl SharedState {
                 shard_p2p_failed: dashmap::DashSet::new(),
                 shards_needing_repair: dashmap::DashSet::new(),
                 shards_pending_verification: dashmap::DashSet::new(),
-                disputed_shards: dashmap::DashSet::new(),
                 shard_download_backoff: DashMap::new(),
                 geometry_probe_retry_after: DashMap::new(),
                 manifest_heard: DashMap::new(),

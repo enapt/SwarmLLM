@@ -1943,7 +1943,11 @@ impl NetworkManager {
                 Some(verdict) = self.shard_verdict_rx.recv() => {
                     last_arm = "shard_verdict".into();
                     arm_started = std::time::Instant::now();
-                    self.finish_p2p_shard(verdict.shard_id, verdict.peer, verdict.outcome);
+                    if verdict.another_upload {
+                        self.refuse_part_of_another_upload(verdict.shard_id, verdict.peer);
+                    } else {
+                        self.finish_p2p_shard(verdict.shard_id, verdict.peer, verdict.outcome);
+                    }
                     // The success path queues its ShardAnnounce here, as it
                     // did inside a swarm event; flush it the same way.
                     if !self.deferred_broadcasts.is_empty() {

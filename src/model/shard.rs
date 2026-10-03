@@ -23,6 +23,18 @@ pub fn hash_file_blake3(path: &Path) -> Result<[u8; 32], SwarmError> {
     Ok(*hasher.finalize().as_bytes())
 }
 
+/// The hash a failed [`ShardStore::verify_shard`] computed for the bytes on
+/// disk, when it got that far (`ShardIntegrity` carries it, hex-encoded);
+/// `None` for a check that failed before hashing (wrong size, missing file).
+pub fn bytes_hash_in_verdict(verdict: &SwarmError) -> Option<[u8; 32]> {
+    match verdict {
+        SwarmError::ShardIntegrity { actual, .. } => hex::decode(actual)
+            .ok()
+            .and_then(|b| <[u8; 32]>::try_from(b.as_slice()).ok()),
+        _ => None,
+    }
+}
+
 /// Sanitize a path component to prevent path traversal attacks.
 /// Blocks null bytes, control characters, and directory separators (`/`, `\`).
 /// Consecutive dots (`..`) are collapsed to prevent traversal.

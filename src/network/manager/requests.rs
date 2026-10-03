@@ -233,6 +233,28 @@ impl NetworkManager {
                     "Shard transfer request"
                 );
 
+                // This node's copy of the model is not the swarm's upload and
+                // is being switched (`ModelRegistry::model_is_withheld`): its
+                // parts are offered to nobody, so a peer still holding an old
+                // claim of ours is answered as if we had none.
+                if self
+                    .shared_state
+                    .model_registry
+                    .model_is_withheld(&shard_req.shard_id.model_id)
+                {
+                    tracing::info!(
+                        %peer,
+                        model = %shard_req.shard_id.model_id,
+                        index = shard_req.shard_id.index,
+                        "Not serving a part of a copy that is not the swarm's upload"
+                    );
+                    let _ = self.swarm.behaviour_mut().request_response.send_response(
+                        channel,
+                        SwarmResponse::ShardData(crate::types::ShardResponse::empty()),
+                    );
+                    return;
+                }
+
                 // SEC: do the disk read + bandwidth-throttle sleep OFF the
                 // swarm event loop (gotcha #11). Awaiting them inline
                 // suspends ALL network activity for the duration — at a
@@ -1044,6 +1066,26 @@ impl NetworkManager {
                                 let store = self.shard_store.clone();
                                 let verdict_tx = self.shard_verdict_tx.clone();
                                 let model_id = shard_id.model_id.clone();
+                                // A hash only says what some node's bytes were:
+                                // for a part this node did not hold, the one in
+                                // its manifest came from gossip, and gossip can
+                                // carry another upload's. Where the swarm's
+                                // upload is known, the bytes are also compared
+                                // with it (`auto_manage::canonical::part_is_from`).
+                                // Layer parts only: the vision encoder travels
+                                // under `MMPROJ_SHARD_INDEX`, a file of its own
+                                // that is no part of the upload's layout.
+                                let canonical = self
+                                    .shared_state
+                                    .canonical_build(&shard_id.model_id)
+                                    .filter(|b| {
+                                        crate::model::canonical::canonical_uploads_enabled()
+                                            && (shard_id.index as usize)
+                                                < b.shard_first_tensor.len()
+                                    });
+                                let path = self
+                                    .shard_store
+                                    .shard_path(&shard_id.model_id, shard_id.index);
                                 tokio::spawn(async move {
                                     let outcome = tokio::task::spawn_blocking(move || {
                                         // The accept gate for untrusted bytes:
@@ -1063,11 +1105,39 @@ impl NetworkManager {
                                             "shard verification task failed: {e}"
                                         )))
                                     });
+                                    let another_upload = match (&outcome, canonical) {
+                                        (Ok(()), Some(build)) => {
+                                            match crate::model::auto_manage::canonical::part_is_from(
+                                                &build,
+                                                path,
+                                                shard_id.index,
+                                            )
+                                            .await
+                                            {
+                                                Ok(same) => !same,
+                                                // No verdict without HuggingFace: the
+                                                // hash passed, and the copy is checked
+                                                // again by `auto_manage::canonical`.
+                                                Err(e) => {
+                                                    tracing::debug!(
+                                                        model = %shard_id.model_id,
+                                                        shard = shard_id.index,
+                                                        error = %e,
+                                                        "Could not compare a peer's part with the \
+                                                         swarm's upload — accepting on its hash"
+                                                    );
+                                                    false
+                                                }
+                                            }
+                                        }
+                                        _ => false,
+                                    };
                                     let _ = verdict_tx
                                         .send(ShardVerdict {
                                             shard_id,
                                             peer,
                                             outcome,
+                                            another_upload,
                                         })
                                         .await;
                                 });
@@ -1144,9 +1214,68 @@ pub(super) struct ShardVerdict {
     pub(super) shard_id: crate::types::ShardId,
     pub(super) peer: libp2p::PeerId,
     pub(super) outcome: Result<(), crate::error::SwarmError>,
+    /// The bytes matched the manifest's hash but are not the swarm's upload
+    /// (`auto_manage::canonical::part_is_from`) — the hash was another
+    /// upload's. Handled by [`NetworkManager::refuse_part_of_another_upload`].
+    pub(super) another_upload: bool,
 }
 
 impl NetworkManager {
+    /// A peer's part matched the hash this node's manifest carries and is
+    /// still not the swarm's upload: the hash came from a node holding another
+    /// upload. Discard it and fetch the part from the upload itself — which
+    /// writes the upload's own hash into the manifest, so the next transfer is
+    /// checked against that. The peer is not penalised: it sent the bytes we
+    /// asked for, and the hash it was judged by was ours.
+    pub(super) fn refuse_part_of_another_upload(
+        &mut self,
+        shard_id: crate::types::ShardId,
+        peer: libp2p::PeerId,
+    ) {
+        tracing::warn!(
+            model = %shard_id.model_id,
+            shard = shard_id.index,
+            %peer,
+            "A peer's part matched our hash but is not the swarm's upload of this model — \
+             discarding it and fetching the part from the upload itself"
+        );
+        let _ = self
+            .shard_store
+            .delete_shard(&shard_id.model_id, shard_id.index);
+        self.shared_state
+            .models
+            .shard_p2p_failed
+            .insert(shard_id.clone());
+        if let Some(mut entry) = self
+            .shared_state
+            .models
+            .acquisition_progress
+            .get_mut(&shard_id.model_id)
+        {
+            entry.shard_progress.remove(&shard_id.index);
+        }
+        self.shared_state
+            .models
+            .p2p_download_permits
+            .remove(&shard_id);
+        self.shared_state.emit_activity(
+            crate::daemon::state::ActivityEvent::new(
+                "download",
+                "shard_download_started",
+                format!(
+                    "Part {} of {} from another computer was not the swarm's shared copy — \
+                     fetching it from the original source instead",
+                    crate::types::ShardId::display_index_short(shard_id.index),
+                    shard_id.model_id
+                ),
+            )
+            .with_model(shard_id.model_id.0.clone())
+            .with_detail_num(shard_id.index as i64)
+            .with_detail_str("hf_fallback".to_string()),
+        );
+        self.shared_state.models.auto_manage_notify.notify_one();
+    }
+
     /// The rest of a peer-served shard's arrival, once its hash verdict is in:
     /// quarantine and re-fetch on a failure, or register, announce and load on
     /// success. Runs ON the event loop (`shard_verdict_rx`), because both halves
@@ -1300,6 +1429,10 @@ impl NetworkManager {
             self.shared_state
                 .schedule_acquisition_cleanup(shard_id.model_id.clone());
         }
+
+        // New bytes, checked against the manifest's hash: whatever this node
+        // disagreed with the swarm about before, it no longer holds.
+        self.shared_state.clear_shard_dispute(&shard_id);
 
         // Register ourselves as a holder of this shard
         let local_node_id = self.shared_state.identity.node_id().clone();

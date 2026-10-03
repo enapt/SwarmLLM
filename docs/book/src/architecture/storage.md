@@ -8,8 +8,8 @@
 ├── identity.key         # Ed25519 keypair
 ├── api_key              # Bearer token (auto-generated)
 ├── db.redb              # redb database (migrated from sled db/ directory)
-├── canonical/           # parts of the swarm's copy of a model, staged while this
-│   └── <model>/         # computer switches to it (removed after the swap)
+├── canonical/           # the swarm's copy's header and side files, staged while
+│   └── <model>/         # this computer checks its own copy against it
 └── models/
     ├── qwen2.5-coder-7b/
     │   ├── manifest.json

@@ -342,7 +342,7 @@ pub async fn rescan_local_shards(
                     shared.mark_shard_for_repair(&shard_id);
                     shared.clear_shard_dispute(&shard_id);
                 } else {
-                    shared.note_shard_disputed(&shard_id);
+                    shared.note_shard_disputed(&shard_id, &e);
                 }
                 // **The two outcomes are told to the user as two different
                 // things**, because they are. `kept` was computed one line

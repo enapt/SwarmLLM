@@ -691,13 +691,18 @@ fn note_rejection_in(
 
 /// Build a `ShardAnnounce` — the ONE place that struct is constructed.
 ///
-/// **Every announcement carries a build tag per shard**, taken from this
-/// node's own manifest, so a receiver can tell a holder of THIS build from a
-/// holder of a different GGUF build sharing the same model id (gotcha #406).
-/// Getting that from a call site would mean eight copies of the derivation and
-/// eight chances to send an announcement that silently claims nothing; a
-/// receiver cannot distinguish "older peer" from "newer peer that forgot", so
-/// a missed site is invisible.
+/// **Every announcement carries a build tag per shard** — the tag of the
+/// part's BYTES (`ModelRegistry::announced_build_tag`) — so a receiver can tell
+/// a holder of THIS build from a holder of a different GGUF build sharing the
+/// same model id (gotcha #406). Getting that from a call site would mean eight
+/// copies of the derivation and eight chances to send an announcement that
+/// silently claims nothing; a receiver cannot distinguish "older peer" from
+/// "newer peer that forgot", so a missed site is invisible.
+///
+/// **A withheld model's parts are left out** (`ModelRegistry::model_is_withheld`
+/// — this node's copy is not the swarm's upload), whatever the caller passed.
+/// `complete_for_models` is kept as given, so an announcement complete for such
+/// a model retracts every part of it on the peers that receive it.
 ///
 /// Adding a field to `ShardAnnounce` extends this helper, not the call sites —
 /// the same contract `build_spec_verify_forward` keeps for `LayerForward`.
@@ -706,12 +711,13 @@ fn note_rejection_in(
 pub fn shard_announce(
     registry: &crate::model::registry::ModelRegistry,
     node_id: crate::types::NodeId,
-    shards: Vec<crate::types::ShardId>,
+    mut shards: Vec<crate::types::ShardId>,
     complete_for_models: Vec<crate::types::ModelId>,
 ) -> crate::types::ShardAnnounce {
+    shards.retain(|s| !registry.model_is_withheld(&s.model_id));
     let shard_builds = shards
         .iter()
-        .map(|s| registry.expected_build_tag(s))
+        .map(|s| registry.announced_build_tag(s))
         .collect();
     crate::types::ShardAnnounce {
         node_id,

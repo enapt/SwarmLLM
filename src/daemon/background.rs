@@ -475,7 +475,7 @@ pub(super) fn spawn_shard_verification(
                         // about this whole path is how often it fires in the
                         // FIELD — which needs the dashboard and the diagnostics
                         // report to be able to say so.
-                        shared_state.note_shard_disputed(&sid);
+                        shared_state.note_shard_disputed(&sid, &e);
                         disputed += 1;
                     }
                     Ok(Err(e)) => {

@@ -354,12 +354,16 @@ deadline waiting on a peer that was never going to answer.
 ## "Which copy of this model does this node hold?" — one upload per model (2026-10-02, #151)
 
 Every node uses the same HuggingFace upload of a model (`model::canonical`); a
-node holding another switches by itself (`model::auto_manage::canonical`).
+node holding parts that are not that upload's bytes DELETES them and fetches the
+upload's own through the repair queue — from a peer when it knows the part's hash,
+from HuggingFace otherwise (`model::auto_manage::canonical::replace_parts`, since
+2026-10-03; before, a staged switch kept the old parts until a swap).
 `/api/admin/models` → `shared_copy`: the upload the swarm uses, and
-`this_computer.state` = `nothing` / `canonical` / `switching` (`fetched` of
-`needed` parts; `needed: 0` = queued behind another switch) / `stuck` (`reason`:
-`disk`, `download`, `cancelled`, `own_file` for a `-m` model). `peers_other_build`
-should fall to 0 swarm-wide as nodes update.
+`this_computer.state` = `nothing` / `canonical` / `replacing` (`parts` waiting to be
+deleted: the model is in use, or HuggingFace did not answer) / `own_file` (a `-m`
+model, never touched); absent = not judged yet (right after a replacement, until the
+re-fetched parts are in). `peers_other_build` should fall to 0 swarm-wide as nodes
+update.
 
 | Level | Line | Means |
 |---|---|---|
@@ -367,20 +371,24 @@ should fall to 0 swarm-wide as nodes update.
 | INFO | `An upload of this model could not be checked on HuggingFace` | skipped for 24 h (`permanent`) or 30 min; the next-best is tried |
 | INFO | `DIAG: registered the canonical upload's manifest` | a node holding none of the model now fetches against the canonical upload |
 | INFO | `DIAG: this node's parts are the canonical upload's` | the 64 KB-per-part byte check against HuggingFace passed |
-| INFO | `DIAG: switching this node's copy to the canonical upload` / `DIAG: switched this node's copy to the canonical upload` | the heal: parts staged in `<data_dir>/canonical/<model>`, swapped when idle |
+| WARN | `DIAG: parts on this node are not the canonical upload's bytes — deleting them and fetching the upload's` | `not_the_upload` = parts whose first 64 KB differ from the upload on HuggingFace; `in_dispute` = parts whose bytes disagree with the swarm's hash (#61) — settled by the upload's own bytes. Bytes that fail the check go at once even mid-request (that request was computing garbage, and fails and re-routes instead); a copy of another layout and disputed parts wait until the model is idle (`replacing`, withheld) |
+| WARN | `DIAG: deleted this node's parts that are not the canonical upload's — fetching the upload's in their place` | `deleted`, `fetching` = the upload's parts covering the same layers, queued for repair (`Fetching from the model's origin` / `P2P shard download complete` follow). A copy of another LAYOUT is deleted whole, the upload's header and manifest installed (`registered the canonical upload's manifest`) |
+| INFO | `This node holds another upload of this model and cannot reach the swarm's yet — keeping it, withheld, until it can` | HuggingFace did not answer, so nothing is deleted (nothing could be fetched back); state `replacing` |
 | WARN | `Replaced a header from another upload of this model` | the parts were right, `gguf_header.bin` was another upload's — replaced, model reloaded |
 | WARN | `Not fetching — this source is another upload than the manifest describes` | the old splice-two-uploads path, refused |
 | INFO | `Ignoring a manifest of another upload of this model` | a peer still on another upload (it switches too) |
 | INFO | `Ignoring a manifest of another build of this model while this node downloads it` | before the canonical upload is known, a peer's other build may not replace the manifest a running download fetches against (#158) |
-| INFO | `Could not fetch the canonical upload's header to switch this model` | the switch cannot start; state `stuck`/`download` |
-| INFO | `Switching this model to the canonical upload could not go ahead — trying the other models now, and this one again later` | HuggingFace failed the switch: it waits 10 min, doubling to 6 h, and holds no other model up (a disk shortfall waits for nothing and holds nobody up either) |
 | WARN | `Refusing to load: this model's header and its tensor table describe different uploads` | a MIXED copy (#156): loading would read every tensor from the wrong place. Locally a 503 (`mixed_model_copy`); on a peer, the coordinator sees `Required shards not available`, retracts it and re-routes |
+| INFO | `DIAG: this node's copy is not the swarm's upload — no longer offering it to peers` / `DIAG: offering this node's copy of the model to peers again` | state `replacing`: its parts leave every announcement within one broadcast tick (30 s; peers retract them), its manifest is not gossiped, the DHT stops naming us and a peer asking for a part gets nothing |
+| WARN | `A peer's part matched our hash but is not the swarm's upload of this model` | the accept path's byte check: the hash our manifest held for that part was another upload's — the part is discarded and fetched from the upload itself; the peer is not penalised |
+| INFO | `This node is keeping bytes the swarm disagrees with … It announces the part as the bytes it is` (`bytes_build=`) | a dispute (#61): the part is announced under its OWN bytes' build tag (`unhashed` = a size mismatch, announced under a tag no peer expects) — before 2026-10-03 it was announced under the build it was told of |
 
 **A peer still counted in `peers_other_build` long after an update** is a peer
-that cannot switch — the count does not say why (disk, HuggingFace, or offline
-mode, which never switches). Its operator's `shared_copy.this_computer` does.
-Before v0.3.222, one such model also kept every model after it (in name order)
-from switching (gotcha #780).
+that cannot replace its parts — the count does not say why (HuggingFace unreachable
+from it, the model always in use, or offline mode, which never checks). Its
+operator's `shared_copy.this_computer` does. Before v0.3.222, one model that could
+not switch also kept every model after it (in name order) from switching (gotcha
+#780); since the prune-and-fetch heal there is no queue to block.
 
 ⚠ **`A peer holds a different build` is logged when a holder's build CHANGES (or a
 record is re-added), not per announcement** — a peer that stops appearing in it has

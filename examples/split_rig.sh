@@ -124,8 +124,31 @@
 #          is the bug), B logged "Refusing to load", and both answers exactly
 #          what control did. Canonical healing is off on every node here, so
 #          nothing repairs B's header mid-run.
+#   disputed  a node serving a part whose bytes are NOT what its manifest says
+#          — the state a peer's gossip leaves behind (#382 adopts a
+#          contradicting hash for a held part; the re-check keeps the bytes).
+#          Same topology as `mixed`; B's LAST part is a corrupted COPY (never
+#          the hard link) under the unchanged manifest, so B's startup sweep
+#          finds the disagreement and keeps the bytes. v0.3.222 then announced
+#          the part under the MANIFEST's build: A counted B as a holder of the
+#          right bytes and routed the layers there — garbage. PASS = B recorded
+#          the dispute, A counts B as another build, alone (C excluded) is NOT
+#          a 200, and both answers exactly what control did.
+#   spliced  a node whose own manifest VOUCHES for parts that are not the
+#          upload's bytes — #775's splice (part i of one upload cut at another's
+#          offsets), the shape left on peers from before v0.3.221. B holds every
+#          part; its LAST part is zeroed (a copy, never the hard link) and B's
+#          manifest is rewritten to that part's real hash, so every hash check
+#          passes. Only B runs the canonical heal (HuggingFace needed): it finds
+#          the part's bytes are not the upload's. B is asked DIRECTLY the
+#          moment its heal says so — on v0.3.222 B answers from the wrong bytes
+#          (garbage) while it stages a replacement; fixed, B has DELETED the part
+#          and is fetching the upload's, so it cannot answer from it — and again
+#          once B holds the upload's copy. PASS = B deleted the part, the ask
+#          during the repair is not answered from the wrong bytes, B's part is
+#          then byte-identical to the upload's, and the ask after answers.
 #
-# usage: split_rig.sh split|kill|failover|failover_mid|context|whole|repeat|fetch|cache|remote|mixed <binary> [<binary for B>]
+# usage: split_rig.sh split|kill|failover|failover_mid|context|whole|repeat|fetch|cache|remote|mixed|disputed|spliced <binary> [<binary for B>]
 #   MODEL      model id (default: tinyllama for split, llama-3.2-3b for kill
 #              and failover)
 #   SHARDS_A   shard indices A holds, comma-separated (default 0; kill: 0,LAST)
@@ -146,12 +169,12 @@ set -u
 MODE="${1:?usage: split_rig.sh split|kill|failover|context|repeat|fetch|cache|remote|mixed <binary> [<binary for B>]}"
 BIN_A="${2:?binary}"
 BIN_B="${3:-$BIN_A}"
-case "$MODE" in split|kill|failover|failover_mid|context|whole|repeat|fetch|cache|remote|mixed) ;; *) echo "mode must be split, kill, failover, failover_mid, context, whole, repeat, fetch, cache, remote or mixed"; exit 2 ;; esac
+case "$MODE" in split|kill|failover|failover_mid|context|whole|repeat|fetch|cache|remote|mixed|disputed|spliced) ;; *) echo "mode must be split, kill, failover, failover_mid, context, whole, repeat, fetch, cache, remote, mixed, disputed or spliced"; exit 2 ;; esac
 if { [ "$MODE" = context ] || [ "$MODE" = whole ]; } && printf '%s' "${EXTRA_TOML:-}" | grep -q '^\[inference\]'; then
   echo "$MODE: EXTRA_TOML may not open [inference] — B's ceiling is written there"; exit 2
 fi
 [ -x "$BIN_A" ] && [ -x "$BIN_B" ] || { echo "binary not executable"; exit 2; }
-if [ "$MODE" = split ] || [ "$MODE" = mixed ]; then
+if [ "$MODE" = split ] || [ "$MODE" = mixed ] || [ "$MODE" = disputed ] || [ "$MODE" = spliced ]; then
   MODEL="${MODEL:-tinyllama-1.1b-chat-v1.0.q4-k-m}"
 elif [ "$MODE" = cache ]; then
   MODEL="${MODEL:-qwen2.5-0.5b-instruct-fp16}"
@@ -212,6 +235,12 @@ elif [ "$MODE" = remote ]; then
   SHARDS_B=$(part 0); SHARDS_C=$(part 1)
   [ "$RN" = 3 ] && SHARDS_D=$(part 2)
   GPU_A="${GPU_A:-0}"; GPU_B="${GPU_B:-0}"
+elif [ "$MODE" = spliced ]; then
+  SHARDS_A=0
+  SHARDS_B=$(echo "$SHARDS" | paste -sd,)
+  GPU_A="${GPU_A:-0}"; GPU_B="${GPU_B:-0}"
+  # A never heals; B does, and is started with this unset.
+  export SWARMLLM_CANONICAL_UPLOADS=0
 elif [ "$MODE" = whole ]; then
   # A holds the header only, so it knows the model's declared context but can
   # run none of it; B and C each hold all of it.
@@ -219,7 +248,7 @@ elif [ "$MODE" = whole ]; then
   SHARDS_B=$(echo "$SHARDS" | paste -sd,)
   SHARDS_C=$SHARDS_B
   GPU_A="${GPU_A:-0}"
-elif [ "$MODE" = mixed ]; then
+elif [ "$MODE" = mixed ] || [ "$MODE" = disputed ]; then
   # B and C both hold A's missing range; only B's header is from "another
   # upload". B holds EVERY part: a header shifted earlier then reads, for its
   # first tensors, bytes B holds (the part before, or the header) — nothing
@@ -229,7 +258,7 @@ elif [ "$MODE" = mixed ]; then
   SHARDS_B=$(echo "$SHARDS" | paste -sd,)
   SHARDS_C=$(echo "$SHARDS" | grep -vx 0 | paste -sd,)
   GPU_A="${GPU_A:-0}"; GPU_B="${GPU_B:-0}"
-  # Healing would replace B's planted header from HuggingFace mid-run.
+  # Healing would replace B's planted header (or part) from HuggingFace mid-run.
   export SWARMLLM_CANONICAL_UPLOADS=0
 else
   SHARDS_A="${SHARDS_A:-0,$LAST}"
@@ -363,9 +392,48 @@ if [ "$MODE" = mixed ]; then
   cmp -s "$SRC/gguf_header.bin" "$BASE/B/models/$MODEL/gguf_header.bin" \
     && { echo "mixed: the planted header is identical to the real one"; exit 2; }
 fi
+if [ "$MODE" = disputed ]; then
+  # A COPY, never the hard link: writing through it would corrupt the live
+  # node's part. Zeroed from 1 MiB to 1 MiB before the end, size unchanged.
+  PART="$BASE/B/models/$MODEL/$(printf 'shard_%03d.bin' "$LAST")"
+  rm -f "$PART"
+  cp "$SRC/$(printf 'shard_%03d.bin' "$LAST")" "$PART" || exit 2
+  SZ=$(stat -c %s "$PART")
+  dd if=/dev/zero of="$PART" bs=1M seek=1 count=$(( SZ / 1048576 - 2 )) conv=notrunc status=none || exit 2
+  [ "$(stat -c %s "$PART")" = "$SZ" ] || { echo "disputed: the corrupted part changed size"; exit 2; }
+  cmp -s "$SRC/$(printf 'shard_%03d.bin' "$LAST")" "$PART" && { echo "disputed: the part is unchanged"; exit 2; }
+fi
+if [ "$MODE" = spliced ]; then
+  # B's heal writes beside its parts (hf_source.json, the header, the manifest):
+  # COPIES, never the hard links, or it would write into the live node's files.
+  M="$BASE/B/models/$MODEL"
+  for f in gguf_header.bin hf_source.json manifest.json; do
+    [ -f "$M/$f" ] && { rm -f "$M/$f"; cp "$SRC/$f" "$M/$f"; }
+  done
+  PART="$M/$(printf 'shard_%03d.bin' "$LAST")"
+  rm -f "$PART"
+  cp "$SRC/$(printf 'shard_%03d.bin' "$LAST")" "$PART" || exit 2
+  SZ=$(stat -c %s "$PART")
+  dd if=/dev/zero of="$PART" bs=1M count=$(( SZ / 1048576 )) conv=notrunc status=none || exit 2
+  # The manifest vouches for these bytes: their real hash, and a zero
+  # manifest_hash (a locally loaded manifest may carry none).
+  python3 - "$M/manifest.json" "$PART" "$LAST" <<'PY' || exit 2
+import json, sys, blake3
+path, part, last = sys.argv[1], sys.argv[2], int(sys.argv[3])
+m = json.load(open(path))
+h = blake3.blake3(open(part, 'rb').read()).digest()
+for s in m['shards']:
+    if s['index'] == last:
+        s['hash'] = list(h)
+m['manifest_hash'] = [0] * 32
+json.dump(m, open(path, 'w'))
+print(f"spliced: B's part {last} zeroed, manifest hash {h.hex()[:16]}")
+PY
+fi
 # B alone serves a conversation shorter than the long prompt.
 { [ "$MODE" = context ] || [ "$MODE" = whole ]; } && printf '\n[inference]\nmax_seq_len_override = %s\n' "${CEIL_B:-512}" >> "$BASE/B/config.toml"
 # DELAY_B: B far from the nodes after it (remote mode: the delegate leading [B, C, D]).
+[ "$MODE" = spliced ] && unset SWARMLLM_CANONICAL_UPLOADS
 PB=$(SWARMLLM_TEST_TENSOR_DELAY_MS="${DELAY_B:-0}" start "$BASE/B" 8920 "$BIN_B" "${GPU_B:-}")
 up "$BASE/B" 8920 || exit 1
 PEERS_EXPECTED=1
@@ -389,12 +457,16 @@ if [ "$MODE" = failover ] || [ "$MODE" = context ] || [ "$MODE" = failover_mid ]
     echo "rig: E=[$SHARDS_E] gpu=${GPU_E:-0}"
   fi
 fi
-if [ "$MODE" = mixed ]; then
+if [ "$MODE" = mixed ] || [ "$MODE" = disputed ]; then
   make_node "$BASE/C" "$SHARDS_C" "\"$ADDR\""
   PC=$(start "$BASE/C" 8940 "$BIN_A" "${GPU_C:-0}")
   up "$BASE/C" 8940 || exit 1
   PEERS_EXPECTED=2
-  echo "rig: C=[$SHARDS_C] (the real header) gpu=${GPU_C:-0}; B's header is planted"
+  if [ "$MODE" = mixed ]; then
+    echo "rig: C=[$SHARDS_C] (the real header) gpu=${GPU_C:-0}; B's header is planted"
+  else
+    echo "rig: C=[$SHARDS_C] (real parts) gpu=${GPU_C:-0}; B's part $LAST is corrupted under its manifest"
+  fi
 fi
 if [ "$MODE" = remote ]; then
   make_node "$BASE/C" "$SHARDS_C" "\"$ADDR\""
@@ -487,6 +559,114 @@ checks = {
 for name, passed in checks.items():
     print(f"mixed:   {'ok  ' if passed else 'FAIL'} {name}")
 print("mixed: PASS" if all(checks.values()) else "mixed: FAIL")
+sys.exit(0 if all(checks.values()) else 1)
+PY
+  exit $?
+fi
+
+if [ "$MODE" = disputed ]; then
+  id8() { curl -s -m 5 -H "Authorization: Bearer $(cat "$1/api_key")" "localhost:$2/v1/status" \
+    | python3 -c 'import sys,json; print(json.load(sys.stdin)["node_id"][:8])'; }
+  IB=$(id8 "$BASE/B" 8920); IC=$(id8 "$BASE/C" 8940)
+  other_build() { curl -s -m 10 -H "Authorization: Bearer $KA" localhost:8900/api/admin/models \
+    | python3 -c "import sys,json; print(next((m.get('peers_other_build') or 0 for m in json.load(sys.stdin) if m['id']=='$MODEL'), 0))"; }
+  # B's startup sweep hashes every part it holds; wait until it has kept the
+  # corrupted one, then past two broadcast ticks so its announcement is out.
+  for _ in $(seq 1 90); do grep -q "keeping bytes the swarm disagrees with" "$BASE/B/node.log" && break; sleep 2; done
+  disputed=$(grep -c "keeping bytes the swarm disagrees with" "$BASE/B/node.log")
+  sleep 70
+  OB=$(other_build)
+  echo "disputed: A counts $OB holder(s) of another build of $MODEL (B=$IB, C=$IC)"
+  Q="Write a short Python function that returns the factorial of n."
+  RIG_ROUTE="{\"exclude_nodes\":[\"$IB\"]}" ask "$Q" 48 control | tee "$OUT/disputed.jsonl"
+  RIG_ROUTE="{\"exclude_nodes\":[\"$IC\"]}" ask "$Q" 48 alone | tee -a "$OUT/disputed.jsonl"
+  ask "$Q" 48 both | tee -a "$OUT/disputed.jsonl"
+  grep -a "keeping bytes the swarm disagrees with" "$BASE/B/node.log" | head -2 | cut -c1-260 | sed 's/^/disputed: B: /'
+  python3 - "$OUT/disputed.jsonl" "$disputed" "${OB:-0}" <<'PY'
+import json, sys
+control, alone, both = (json.loads(l) for l in open(sys.argv[1]))
+disputed, other = int(sys.argv[2]), int(sys.argv[3])
+ok = lambda r: r["status"].endswith("200 ok")
+print(f"disputed: control {control['status']}  route={control['route']}  content={str(control['content'])[:80]!r}")
+print(f"disputed: alone   {alone['status']}  route={alone['route']}  content={str(alone['content'])[:120]!r}")
+print(f"disputed: both    {both['status']}  route={both['route']}")
+checks = {
+    "control answered": ok(control),
+    "B recorded the dispute (its bytes are not its manifest's)": disputed > 0,
+    "A counts B as a holder of ANOTHER build": other > 0,
+    "alone was NOT answered (B is the only route, and its bytes are wrong)": not ok(alone),
+    "both answered exactly what control did": ok(both) and both["content"] == control["content"],
+}
+for name, passed in checks.items():
+    print(f"disputed:   {'ok  ' if passed else 'FAIL'} {name}")
+print("disputed: PASS" if all(checks.values()) else "disputed: FAIL")
+sys.exit(0 if all(checks.values()) else 1)
+PY
+  exit $?
+fi
+
+if [ "$MODE" = spliced ]; then
+  KB=$(cat "$BASE/B/api_key")
+  askb() { # label — straight to B, which holds the whole model
+    curl -s -m 600 -D "$OUT/$1.hdr" -H "Authorization: Bearer $KB" -H "Content-Type: application/json" \
+      -X POST localhost:8920/v1/chat/completions -o "$OUT/$1.body" \
+      -d "{\"model\":\"$MODEL\",\"max_tokens\":24,\"temperature\":0,\"messages\":[{\"role\":\"user\",\"content\":\"What is the capital of France? Answer in one sentence.\"}]}"
+    python3 -c 'import json,sys
+h=open(sys.argv[1]).read().lower()
+status=h.splitlines()[0].strip() if h else "no response"
+raw=open(sys.argv[2]).read()
+try: c=json.loads(raw)["choices"][0]["message"].get("content")
+except Exception: c="ERR "+raw[:300]
+print(json.dumps({"status":status,"content":c}))' "$OUT/$1.hdr" "$OUT/$1.body"
+  }
+  holding() { curl -s -m 10 -H "Authorization: Bearer $KB" localhost:8920/api/admin/models \
+    | python3 -c "import sys,json; m=next((m for m in json.load(sys.stdin) if m['id']=='$MODEL'), {}); print(((m.get('shared_copy') or {}).get('this_computer') or {}).get('state','?'))"; }
+  # Both arms ask at the same moment: right after B's heal finds its copy is
+  # not the upload's (v0.3.222 logs the first line, the fix the second).
+  VERDICT="same size as the canonical upload's but not its bytes|parts on this node are not the canonical upload's bytes"
+  for _ in $(seq 1 240); do grep -qE "$VERDICT" "$BASE/B/node.log" && break; sleep 1; done
+  found=$(grep -cE "$VERDICT" "$BASE/B/node.log")
+  sleep 1
+  echo "spliced: B's heal found the copy is not the upload's: $found; B holds: $(holding)"
+  askb during | tee "$OUT/spliced.jsonl"
+  echo "spliced: B holds after the ask: $(holding)"
+  # Done when B holds the part again at its full size and its heal has judged
+  # the copy (the remaining parts read `canonical` before the part is back, so
+  # that alone is not the end).
+  PARTF=$(printf 'shard_%03d.bin' "$LAST")
+  WANT=$(stat -c %s "$SRC/$PARTF")
+  T0=$(date +%s)
+  for _ in $(seq 1 120); do
+    [ "$(stat -c %s "$BASE/B/models/$MODEL/$PARTF" 2>/dev/null)" = "$WANT" ] && [ "$(holding)" = canonical ] && break
+    sleep 5
+  done
+  echo "spliced: B holds: $(holding); part back after $(( $(date +%s) - T0 )) s"
+  sleep 5
+  askb after | tee -a "$OUT/spliced.jsonl"
+  deleted=$(grep -c "deleted this node's parts that are not the canonical upload's" "$BASE/B/node.log")
+  grep -aE "Fetching from the model's origin|P2P shard download complete|deleted this node's parts" "$BASE/B/node.log" | cut -c1-220 | sed 's/^/spliced: B: /'
+  same=$(python3 -c 'import sys,blake3
+h=lambda p: blake3.blake3(open(p,"rb").read()).hexdigest()
+print(int(h(sys.argv[1])==h(sys.argv[2])))' "$SRC/$PARTF" "$BASE/B/models/$MODEL/$PARTF" 2>/dev/null || echo 0)
+  python3 - "$OUT/spliced.jsonl" "$found" "$deleted" "$same" <<'PY'
+import json, sys
+during, after = (json.loads(l) for l in open(sys.argv[1]))
+found, deleted, same = (int(x) for x in sys.argv[2:5])
+ok = lambda r: r["status"].endswith("200 ok")
+print(f"spliced: during {during['status']}  content={str(during['content'])[:120]!r}")
+print(f"spliced: after  {after['status']}  content={str(after['content'])[:120]!r}")
+print(f"spliced: heal verdicts {found}, deletions {deleted}, B's part is the upload's: {bool(same)}")
+checks = {
+    "B's heal found its copy is not the upload's": found > 0,
+    "B deleted the part": deleted > 0,
+    "the ask during the repair was NOT answered from the wrong bytes":
+        not ok(during) or during["content"] == after["content"],
+    "B's part is now byte-identical to the upload's": same == 1,
+    "the ask after the repair answered": ok(after) and bool(after["content"]),
+}
+for name, passed in checks.items():
+    print(f"spliced:   {'ok  ' if passed else 'FAIL'} {name}")
+print("spliced: PASS" if all(checks.values()) else "spliced: FAIL")
 sys.exit(0 if all(checks.values()) else 1)
 PY
   exit $?

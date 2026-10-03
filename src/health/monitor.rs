@@ -17,9 +17,16 @@ pub struct HealthMonitor {
     network_tx: mpsc::Sender<NetworkCommand>,
     rebalance_tx: mpsc::Sender<RebalanceEvent>,
     shutdown_rx: watch::Receiver<bool>,
-    /// Track last broadcast shard set for delta compression.
+    /// Track last broadcast shard set for delta compression — each part with
+    /// the build tag it went out under, so a tag that changes (a part falling
+    /// into dispute, or out of it) is re-announced on the next tick rather
+    /// than left standing until the full re-announce.
     /// Full re-announce only when set changes or every FULL_REANNOUNCE ticks.
-    last_announced_shards: std::collections::HashSet<crate::types::ShardId>,
+    last_announced_shards: std::collections::HashSet<(crate::types::ShardId, u64)>,
+    /// Models withheld from the swarm at the last broadcast
+    /// (`ModelRegistry::model_is_withheld`), so the DHT is told when one stops
+    /// or starts being offered.
+    last_withheld_models: std::collections::HashSet<crate::types::ModelId>,
     /// Counter for periodic full re-announce (ensures late-joining peers get data).
     shard_announce_counter: u64,
     /// `manifest_hash` of each model as this node last put it on the wire, so a
@@ -303,6 +310,7 @@ impl HealthMonitor {
             rebalance_tx,
             shutdown_rx,
             last_announced_shards: std::collections::HashSet::new(),
+            last_withheld_models: std::collections::HashSet::new(),
             shard_announce_counter: 0,
             last_announced_manifests: std::collections::HashMap::new(),
             manifest_announce_counter: 0,
@@ -757,6 +765,57 @@ impl HealthMonitor {
             }
         }
 
+        // A model whose copy here is not the swarm's upload is not offered —
+        // not in the capability, not in the announcement — while
+        // `auto_manage::canonical` switches it (`SharedState::
+        // note_canonical_holding`). `held_models` keeps it in the
+        // announcement's `complete_for_models`, which is what makes peers
+        // retract the parts they had from us; and the DHT stops naming us as
+        // its provider, since a provider record is believed with no build at
+        // all.
+        let held_models: std::collections::HashSet<crate::types::ModelId> =
+            hosted_shards.iter().map(|s| s.model_id.clone()).collect();
+        let registry = &self.shared_state.model_registry;
+        let withheld_now: std::collections::HashSet<crate::types::ModelId> = held_models
+            .iter()
+            .filter(|m| registry.model_is_withheld(m))
+            .cloned()
+            .collect();
+        let provide_change = |models: &std::collections::HashSet<crate::types::ModelId>| {
+            hosted_shards
+                .iter()
+                .filter(|s| models.contains(&s.model_id))
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        let stop = provide_change(
+            &withheld_now
+                .difference(&self.last_withheld_models)
+                .cloned()
+                .collect(),
+        );
+        let start = provide_change(
+            &self
+                .last_withheld_models
+                .difference(&withheld_now)
+                .cloned()
+                .collect(),
+        );
+        if !stop.is_empty() {
+            let _ = self
+                .network_tx
+                .send(NetworkCommand::StopProviding(stop))
+                .await;
+        }
+        if !start.is_empty() {
+            let _ = self
+                .network_tx
+                .send(NetworkCommand::StartProviding(start))
+                .await;
+        }
+        self.last_withheld_models = withheld_now;
+        hosted_shards.retain(|s| !registry.model_is_withheld(&s.model_id));
+
         // Can this node actually run a request right now? Two failures say no —
         // the graphics stack dying under us, and the dispatcher going deaf —
         // and both report themselves as health, so peers keep routing work that
@@ -1072,8 +1131,11 @@ impl HealthMonitor {
         // changes, or every 10 broadcast cycles as a full re-announce (ensures
         // late-joining peers get the full picture). At 10K peers with scaled
         // gossip interval (~240s), full re-announce happens every ~40 min.
-        if !hosted_shards.is_empty() {
-            let current_set: std::collections::HashSet<_> = hosted_shards.iter().cloned().collect();
+        if !held_models.is_empty() {
+            let current_set: std::collections::HashSet<_> = hosted_shards
+                .iter()
+                .map(|s| (s.clone(), registry.announced_build_tag(s)))
+                .collect();
             let shards_changed = current_set != self.last_announced_shards;
             self.shard_announce_counter += 1;
             // Full re-announce every `FULL_REANNOUNCE_EVERY_TICKS` broadcast
@@ -1089,12 +1151,11 @@ impl HealthMonitor {
                 // fires when shards are deleted, so this is what actually
                 // retracts them on peers — previously it re-sent the smaller
                 // set and receivers merged it, keeping the deleted shards.
-                let complete_for_models: Vec<crate::types::ModelId> = hosted_shards
-                    .iter()
-                    .map(|s| s.model_id.clone())
-                    .collect::<std::collections::HashSet<_>>()
-                    .into_iter()
-                    .collect();
+                //
+                // Every model this node HOLDS, offered or not: a withheld one
+                // goes out with none of its parts, which retracts them.
+                let complete_for_models: Vec<crate::types::ModelId> =
+                    held_models.iter().cloned().collect();
                 let announce = crate::model::manifest::shard_announce(
                     &self.shared_state.model_registry,
                     node_id,

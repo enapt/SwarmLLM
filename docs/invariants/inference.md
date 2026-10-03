@@ -2654,6 +2654,18 @@ retraction, and the caller's error does not say "Mixed model copy". Null control
 real copies: `every_real_copy_agrees_with_its_own_header` over the release node's 18
 models (MoE, GLM-4, Phi's fused layout, tables written since 2026-09-11) — 18 pass.
 
+**The check above cannot see the other half (2026-10-03, after v0.3.222).** A
+header and a table that are BOTH the upload's agree with each other while the part
+BYTES beside them were cut from another upload at this one's offsets — #775's
+splice, whose leftovers were measured live the same day (one upload's part in three
+byte versions on three peers, gotcha #782). Hash checks pass too: a node's manifest
+carries the hash of its own bytes. On the `spliced` rig such a copy answered
+`给给给…` on v0.3.222. Only `auto_manage::canonical`'s byte check against the upload
+sees it, and it now DELETES such parts at once — mid-request if need be — and
+re-fetches the upload's (`replace_parts`, `Doomed::WrongBytes`). A load-time refusal
+(a marker beside the parts) was built first and removed the same day: with the
+parts gone there is nothing to refuse.
+
 **What a change must keep.** Every load from parts goes through
 `load_from_shards_inner`; a new shard loader calls the check. Never compare by
 re-deriving the layout. The Display of `MixedModelCopy` must keep the word "shard"
