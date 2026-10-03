@@ -85,8 +85,24 @@ fn outvoted_by_checked_holders(ours: u64, checked: &[u64]) -> Option<u64> {
 /// For a node that CAN ask the origin: does every checked holder of this part
 /// hold other bytes than ours? One is enough — the dispute is settled by the
 /// upload's own bytes, never by the peer, so a wrong vote costs one download.
+///
+/// A part whose own tag is unknown (no hash in our manifest — accepted from a
+/// peer that had none) is not judged here: no tag of ours can equal a checked
+/// holder's, so every such part would be fetched again whatever its bytes are.
+/// It is judged the existing way — a manifest naming its hash queues a
+/// re-check, and the re-check records the dispute this pass then settles.
 fn disputed_by_checked_holders(ours: u64, checked: &[u64]) -> bool {
-    !checked.is_empty() && !checked.contains(&ours)
+    ours != swarmllm_types::BUILD_TAG_UNKNOWN && !checked.is_empty() && !checked.contains(&ours)
+}
+
+/// Split doomed parts by why they go: bytes that failed the byte check against
+/// the upload (`WrongBytes`, at once), and parts that passed it but are in
+/// dispute — with the swarm's hash or with every checked holder (`InDispute`,
+/// settled by the upload's own bytes once the model is idle). One failed part
+/// used to make the whole batch `WrongBytes`, and a disputed part then came
+/// back with no hash to check it by — from the very peers that disagreed.
+fn split_by_reason(doomed: &[u32], failed: &[u32]) -> (Vec<u32>, Vec<u32>) {
+    doomed.iter().copied().partition(|i| failed.contains(i))
 }
 
 /// Is this model served from a whole GGUF its owner gave this node (`-m`)?
@@ -615,16 +631,34 @@ async fn settle(
             "DIAG: parts on this node are not the canonical upload's bytes — deleting them and fetching the upload's"
         );
         checked.forget(model);
-        let why = if failed.is_empty() {
-            Doomed::InDispute
-        } else {
-            Doomed::WrongBytes
-        };
-        // What was deleted is fetched again from the upload itself. Only that
-        // is settled: a replacement that waits for the model to be idle, or a
-        // file that would not go, is judged again next pass.
-        let deleted = replace_parts(state, net_tx, model, Some(&build), &doomed, why).await;
-        checked.note_from_origin(model, &deleted);
+        let (wrong_bytes, in_dispute) = split_by_reason(&doomed, &failed);
+        if !wrong_bytes.is_empty() {
+            let _ = replace_parts(
+                state,
+                net_tx,
+                model,
+                Some(&build),
+                &wrong_bytes,
+                Doomed::WrongBytes,
+            )
+            .await;
+        }
+        if !in_dispute.is_empty() {
+            // A dispute is fetched again from the upload itself
+            // (`shard_p2p_failed`), and that settles it. Only what was actually
+            // deleted is settled: a replacement that waits for the model to be
+            // idle, or a file that would not go, is judged again next pass.
+            let deleted = replace_parts(
+                state,
+                net_tx,
+                model,
+                Some(&build),
+                &in_dispute,
+                Doomed::InDispute,
+            )
+            .await;
+            checked.note_from_origin(model, &deleted);
+        }
         return;
     }
     checked.record(model, &to_check, disputed);
@@ -1682,6 +1716,24 @@ mod tests {
         assert!(disputed_by_checked_holders(1, &[2]));
         assert!(!disputed_by_checked_holders(1, &[2, 1]));
         assert!(!disputed_by_checked_holders(1, &[]));
+        assert!(
+            !disputed_by_checked_holders(swarmllm_types::BUILD_TAG_UNKNOWN, &[2]),
+            "a part with no hash of ours can equal no checked tag — judging it would fetch \
+             every such part again, right bytes or not (pre-release review, 2026-10-04)"
+        );
+    }
+
+    /// A part that failed the byte check goes at once; a part that passed it
+    /// but is disputed is settled by the upload. One failed part used to make
+    /// the whole batch `WrongBytes` (pre-release review, 2026-10-04).
+    #[test]
+    fn a_disputed_part_is_not_swept_into_a_batch_of_wrong_bytes() {
+        let (wrong, disputed) = split_by_reason(&[1, 2, 3], &[2]);
+        assert_eq!(wrong, vec![2]);
+        assert_eq!(disputed, vec![1, 3]);
+        let (wrong, disputed) = split_by_reason(&[4], &[]);
+        assert!(wrong.is_empty());
+        assert_eq!(disputed, vec![4]);
     }
 
     /// A part the upload has settled this run is not asked about again because

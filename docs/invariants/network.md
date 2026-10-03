@@ -3279,7 +3279,20 @@ node with no origin to ask settles only parts of the swarm's LAYOUT: a copy of
 another layout is one upload's header, table and bytes, computes correctly, and
 cannot be replaced without the swarm's header, which only HuggingFace serves — it
 stays, announced as the build it is. A part with fewer than two connected checked
-holders is not settled on such a node. A rig cannot plant a wrong hash recorded as
+holders is not settled on such a node. Such a node trusts the checked quorum over its
+OWN origin record of a part (pre-release review, 2026-10-04): the splice-era parts were
+fetched from HuggingFace at another upload's offsets and carry origin records too, so
+honouring the record would leave exactly `9594e1ff`'s parts in place. The cost is that two
+checked holders agreeing on bytes that pass the 64 KB check but are wrong past it can
+outvote a right part — and that state dissolves on its own: each of them sees any
+checked holder of the right bytes disagree and re-fetches from the upload (change 3),
+after which the quorum names the right bytes. "Checked" is self-asserted, so two
+colluding identities could make such a node take their bytes for a part — the same trust
+an origin-less node already gives the first hash it hears when it fetches. Review fixes
+the same day: an unknown local tag is not judged by checked holders where the origin
+answers (it would re-fetch every hashless part), and a disputed part is no longer swept
+into a batch of failed ones (`split_by_reason`) — it used to come back with no hash, from
+the peers that disagreed. A rig cannot plant a wrong hash recorded as
 the ORIGIN's without editing a node's database, so change 3 is proven by unit tests
 and by the `InDispute` path it hands the part to (the `spliced` and `disputed` rigs).
 
