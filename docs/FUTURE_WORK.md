@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #214**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #215**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -819,6 +819,22 @@ stall per layer; TP off by default), and `VisionEncodeResponse` has no error fie
 image-encode refusal stays silent.
 
 ### API surface
+
+#### #214 — Qwen2.5-Coder-7B on Qwen's official upload answers a tool request in a wrapper nobody parses
+`P2` · api · **OPEN** — 2026-10-03 (the v0.3.222 gate)
+
+Since v0.3.221 moved every node to Qwen's official upload of `qwen2.5-coder-7b-instruct-q4-k-m`
+(4,683,073,536 B, chat template 2,509 chars, with a `tools` branch), conformance's tool check
+("Call get_time for zone UTC") gets `<{{"name": "get_time", "arguments": {"zone": "UTC"}}}}` back
+as content: no `tool_calls`. The previous (third-party) upload's reply parsed. Not a build
+regression — v0.3.221 and v0.3.222 answer identically on the current files (`~/swarmllm-gate-0222/
+qconf_{221,222}.log`), and on a plain prompt .222's reply equals llama.cpp's on the official file
+96/96 tokens. Next: render the same tool prompt through llama.cpp (llama-cpp-python, the GGUF's
+own template with `tools`) and compare its greedy reply — if llama.cpp produces the same wrapper,
+it is the model's habit and `tool_parse` may accept a `<{…}>`-wrapped JSON call (as it accepts
+other near-misses, `docs/invariants/api-surfaces.md`); if not, the prompt differs and that is the
+bug. Conformance's baseline (`~/swarmllm-gate-0221/conformance.log`) predates the switch — the
+next gate diffs against `~/swarmllm-gate-0222/conformance.log`.
 
 #### #189 — `/v1/models` reports no context length for a model this node does not hold
 `P2` · api · **OPEN** — 2026-08-12 · history: archive § "`max_model_len` is unknown for network-only models"
