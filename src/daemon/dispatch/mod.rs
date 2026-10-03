@@ -1684,8 +1684,11 @@ pub(crate) async fn dispatch_network_messages(
                                                 // against and fetched by, and the node holds a
                                                 // different file from everyone it should split
                                                 // with (`model::canonical`). Its holder is
-                                                // switching to the canonical upload too.
-                                                if shared_state.manifest_is_another_upload(&manifest) {
+                                                // switching to the canonical upload too. Nor
+                                                // may another build replace the manifest a
+                                                // download here is fetching against (#158).
+                                                let verdict = shared_state.judge_peer_manifest(&manifest);
+                                                if verdict != crate::daemon::state::PeerManifest::Adopt {
                                                     if crate::model::manifest::note_manifest_rejection(
                                                         crate::model::manifest::RejectionKey::Manifest {
                                                             model: manifest.id.clone(),
@@ -1694,13 +1697,24 @@ pub(crate) async fn dispatch_network_messages(
                                                     )
                                                     .is_some()
                                                     {
-                                                        tracing::info!(
-                                                            model = %manifest.id,
-                                                            publisher = %manifest.publisher,
-                                                            their_bytes = manifest.total_size_bytes,
-                                                            "Ignoring a manifest of another upload of this \
-                                                             model — the swarm uses one upload per model"
-                                                        );
+                                                        if verdict == crate::daemon::state::PeerManifest::AnotherUpload {
+                                                            tracing::info!(
+                                                                model = %manifest.id,
+                                                                publisher = %manifest.publisher,
+                                                                their_bytes = manifest.total_size_bytes,
+                                                                "Ignoring a manifest of another upload of this \
+                                                                 model — the swarm uses one upload per model"
+                                                            );
+                                                        } else {
+                                                            tracing::info!(
+                                                                model = %manifest.id,
+                                                                publisher = %manifest.publisher,
+                                                                their_bytes = manifest.total_size_bytes,
+                                                                "Ignoring a manifest of another build of this \
+                                                                 model while this node downloads it — its parts \
+                                                                 are fetched against the one it has"
+                                                            );
+                                                        }
                                                     }
                                                     continue;
                                                 }

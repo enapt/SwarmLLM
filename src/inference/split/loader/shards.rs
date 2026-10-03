@@ -144,6 +144,29 @@ impl SplitModel {
                     crate::inference::split::explain_gguf_parse_error(&e)
                 ))
             })?;
+            // The header and the tensor table must describe ONE upload before
+            // a single tensor is read (FUTURE_WORK #156). Every load from parts
+            // passes through here — this node's own requests and every peer's
+            // forward — so this is the one place to ask.
+            if let Some(disagreement) = first_header_disagreement(
+                |name| {
+                    ct.tensor_infos.get(name).map(|info| {
+                        (
+                            ct.tensor_data_offset + info.offset,
+                            crate::inference::split::tensor_byte_size(info),
+                        )
+                    })
+                },
+                tensor_entries,
+            ) {
+                tracing::warn!(
+                    model_dir = %model_dir.display(),
+                    %disagreement,
+                    "Refusing to load: this model's header and its tensor table describe \
+                     different uploads — every tensor would be read from the wrong place"
+                );
+                return Err(SwarmError::MixedModelCopy(disagreement));
+            }
             // Resolution needs the arch metadata block. If that can't be parsed
             // the model won't load anyway, so don't fail *here* — a non-tied
             // model on a node holding shard 0 loads fine without any of this.
@@ -192,8 +215,7 @@ impl SplitModel {
         // Diagnostic: log first few tensor offsets from Content vs tensor_map
         for (name, info) in ct.tensor_infos.iter().take(5) {
             let seek_pos = ct.tensor_data_offset + info.offset;
-            let size_in_bytes = info.ggml_dtype.type_size() * info.shape.elem_count()
-                / info.ggml_dtype.block_size();
+            let size_in_bytes = crate::inference::split::tensor_byte_size(info);
             let found = reader.find_shard(seek_pos);
             tracing::info!(
                 tensor = %name,
@@ -295,6 +317,199 @@ fn probe_tensor_name(layer_start: usize, has: impl Fn(&str) -> bool) -> Option<S
     }
     let first = "blk.0.attn_norm.weight".to_string();
     has(&first).then_some(first)
+}
+
+/// The first tensor the header places or sizes differently from the tensor
+/// table the parts were cut by — `None` when every tensor the parts hold sits
+/// exactly where the header says, at the size it says.
+///
+/// `header` answers, for a tensor name, where the header puts that tensor's
+/// data (absolute offset in the upload) and how many bytes it is
+/// (`tensor_byte_size`, the computation every table is cut by).
+///
+/// **Why this is the check.** A part file is a table's worth of tensor bytes;
+/// the loader asks the HEADER where each tensor is and `ShardReader` maps that
+/// position into whichever table entry covers it. Two descriptions of one file
+/// meet there, and nothing compared them: a header from another upload of the
+/// same model — measured 3,808 bytes longer at the .220 gate (gotcha #776) —
+/// moves every position inside its entry, and the reader returns shifted bytes
+/// rather than an error. That is FUTURE_WORK #156: splits through two peers
+/// answering `0000…` and NaN while every part hash matched. llama.cpp draws the
+/// same line on a whole file: `gguf_init_from_reader` refuses a header whose
+/// tensor offsets disagree with the data layout ("tensor '%s' has offset %…,
+/// expected %…") rather than read the wrong bytes.
+///
+/// Compared entry by entry, not by re-deriving the layout: a table written by
+/// an older build of the layout code must still load, and the only question
+/// that matters is whether header and table agree about the bytes the parts
+/// actually hold.
+pub(crate) fn first_header_disagreement(
+    header: impl Fn(&str) -> Option<(u64, u64)>,
+    tables: &[Vec<crate::types::ShardTensorEntry>],
+) -> Option<String> {
+    for entry in tables.iter().flatten() {
+        match header(&entry.name) {
+            None => {
+                return Some(format!(
+                    "the header has no tensor {} although a part holds it",
+                    entry.name
+                ))
+            }
+            Some((at, size)) if at != entry.gguf_offset || size != entry.size => {
+                return Some(format!(
+                    "{} is {size} bytes at byte {at} in the header, but {} bytes at byte {} \
+                     in the table its part was cut by",
+                    entry.name, entry.size, entry.gguf_offset
+                ))
+            }
+            Some(_) => {}
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod header_agreement_tests {
+    use super::first_header_disagreement;
+    use crate::types::ShardTensorEntry;
+
+    fn entry(name: &str, gguf_offset: u64, size: u64) -> ShardTensorEntry {
+        ShardTensorEntry {
+            name: name.into(),
+            gguf_offset,
+            shard_offset: 0,
+            size,
+        }
+    }
+
+    /// One upload: a header starting its data at `data_at`, three tensors.
+    fn header_at(data_at: u64) -> impl Fn(&str) -> Option<(u64, u64)> {
+        move |name| match name {
+            "blk.0.attn_q.weight" => Some((data_at, 4_608)),
+            "blk.0.attn_k.weight" => Some((data_at + 4_608, 1_152)),
+            "blk.1.attn_q.weight" => Some((data_at + 5_760, 4_608)),
+            _ => None,
+        }
+    }
+
+    fn parts_cut_at(data_at: u64) -> Vec<Vec<ShardTensorEntry>> {
+        vec![
+            vec![
+                entry("blk.0.attn_q.weight", data_at, 4_608),
+                entry("blk.0.attn_k.weight", data_at + 4_608, 1_152),
+            ],
+            vec![entry("blk.1.attn_q.weight", data_at + 5_760, 4_608)],
+        ]
+    }
+
+    #[test]
+    fn a_header_of_the_upload_the_parts_were_cut_from_loads() {
+        assert_eq!(
+            first_header_disagreement(header_at(7_000_000), &parts_cut_at(7_000_000)),
+            None
+        );
+    }
+
+    /// The measured shape: another upload's header, 3,808 bytes longer, so
+    /// every tensor sits 3,808 bytes later than the table says — inside the
+    /// right entry, which is why the reader never failed.
+    #[test]
+    fn another_uploads_header_is_refused_even_when_every_position_lands_in_a_part() {
+        let found =
+            first_header_disagreement(header_at(7_003_808), &parts_cut_at(7_000_000)).unwrap();
+        assert!(found.contains("blk.0.attn_q.weight"), "{found}");
+        assert!(
+            found.contains("7003808") && found.contains("7000000"),
+            "{found}"
+        );
+    }
+
+    /// Two uploads of one quantisation can type a tensor differently (one
+    /// keeps a layer at Q6_K); same offset, different size.
+    #[test]
+    fn a_tensor_the_header_types_differently_is_refused() {
+        let mut tables = parts_cut_at(7_000_000);
+        tables[0][1].size = 1_344;
+        assert!(first_header_disagreement(header_at(7_000_000), &tables).is_some());
+    }
+
+    #[test]
+    fn a_tensor_the_header_does_not_have_is_refused() {
+        let mut tables = parts_cut_at(7_000_000);
+        tables[1].push(entry("blk.1.attn_v.weight", 7_010_368, 1_152));
+        let found = first_header_disagreement(header_at(7_000_000), &tables).unwrap();
+        assert!(found.contains("blk.1.attn_v.weight"), "{found}");
+    }
+
+    /// The null control for the refusal, on real copies: every model directory
+    /// on a node — header, manifest table, both as the node holds them — must
+    /// pass. A check that refused a healthy copy would take every node holding
+    /// it out of the swarm, so this runs over every table, held or not, and
+    /// against tables written by every past build of the layout code.
+    ///
+    /// Ignored by default (`SWARMLLM_TEST_MODEL_DIR`, the convention of
+    /// `a_derived_tensor_table_matches_the_published_one`):
+    ///
+    /// ```text
+    /// SWARMLLM_TEST_MODEL_DIR=~/.local/share/swarmllm/models \
+    ///   cargo dev-test --lib every_real_copy -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "needs a populated model directory (SWARMLLM_TEST_MODEL_DIR)"]
+    fn every_real_copy_agrees_with_its_own_header() {
+        use crate::model::manifest::ModelManifestExt;
+        let root = std::env::var("SWARMLLM_TEST_MODEL_DIR")
+            .expect("set SWARMLLM_TEST_MODEL_DIR to a models directory");
+        let root = match root.strip_prefix("~/") {
+            Some(rest) => std::path::PathBuf::from(std::env::var("HOME").unwrap()).join(rest),
+            None => std::path::PathBuf::from(root),
+        };
+        let mut checked = 0usize;
+        for dir in std::fs::read_dir(&root).expect("models dir").flatten() {
+            let dir = dir.path();
+            let header = dir.join(crate::model::shard::HEADER_FILENAME);
+            let Ok(manifest) = crate::types::ModelManifest::load_from_dir(&dir) else {
+                continue;
+            };
+            let tables: Vec<Vec<ShardTensorEntry>> =
+                manifest.shards.iter().map(|s| s.tensors.clone()).collect();
+            if !header.exists() || tables.iter().all(|t| t.is_empty()) {
+                continue;
+            }
+            let ct = crate::inference::split::read_gguf_header(&header)
+                .unwrap_or_else(|e| panic!("{}: header does not parse: {e}", dir.display()));
+            let found = first_header_disagreement(
+                |name| {
+                    ct.tensor_infos.get(name).map(|info| {
+                        (
+                            ct.tensor_data_offset + info.offset,
+                            crate::inference::split::tensor_byte_size(info),
+                        )
+                    })
+                },
+                &tables,
+            );
+            assert_eq!(found, None, "{}: a healthy copy was refused", dir.display());
+            checked += 1;
+            println!("ok  {}", dir.display());
+        }
+        println!("checked {checked} models");
+        assert!(
+            checked > 0,
+            "nothing in {} had a header and a table",
+            root.display()
+        );
+    }
+
+    /// A table-less load (a whole GGUF as its own part, or a table derived
+    /// from this very header) has nothing to disagree with.
+    #[test]
+    fn no_table_means_nothing_to_compare() {
+        assert_eq!(
+            first_header_disagreement(header_at(7_000_000), &[Vec::new(), Vec::new()]),
+            None
+        );
+    }
 }
 
 #[cfg(test)]

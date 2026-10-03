@@ -545,6 +545,7 @@
   "error_hint.insufficient_credits": "你的积分余额过低。通过托管模型部分（自动进行）或为其他用户执行推理来赚取积分。可在面板查看余额。",
   "error_hint.insufficient_disk": "磁盘空间不足。请释放空间，或在「设置 → 高级 → max_disk_mb」中调高存储上限。",
   "error_hint.local_only": "此操作必须在运行 SwarmLLM 的那台计算机上执行，因为它作用于该机器本身。请在那台机器上打开控制台重试——您的 API 密钥没有问题。",
+  "error_hint.mixed_model_copy": "这台电脑上的模型副本是混杂的：其中一部分来自与其余部分不同版本的模型文件，因此在修复之前无法使用。只要能连接到 HuggingFace，SwarmLLM 会在几分钟内自动修复。如果一直如此，请删除该模型并重新下载。",
   "error_hint.model_incomplete_in_swarm": "此模型的一部分目前不在任何可连接的机器上。如果刚有一台计算机掉线，这可能很快会自行恢复。否则请在仪表盘的模型卡片上下载缺少的部分（或运行 `swarmllm get-model <名称> --all`），或者选择仪表盘标记为就绪的模型。",
   "error_hint.model_not_available": "该模型尚不可用。请在控制台打开「模型」标签页浏览并下载模型，或等待自动管理从网络中获取。",
   "error_hint.no_model_loaded": "尚未加载任何模型。请前往控制台选择一个模型下载，或连接更多电脑，以便从网络获得模型服务。",

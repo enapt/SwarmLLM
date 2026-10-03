@@ -1117,6 +1117,10 @@ fn failure_is_penalty_worthy(err: &SwarmError, had_remote_segment: bool) -> bool
         // and nobody else's, so it can never justify docking a peer — the same
         // reason its `ServiceUnavailable` sibling sits here.
         | SwarmError::LocalMemoryUnavailable(_)
+        // THIS node's own files disagree with each other. A peer's copy that
+        // does reaches us sanitised as missing shards, never as this variant,
+        // so it can only ever name our machine.
+        | SwarmError::MixedModelCopy(_)
         // The model's context window is a property of the MODEL, not of the
         // peer that happened to be computing when the reply reached it. Docking
         // a peer for a reply that ran to its natural length would penalise

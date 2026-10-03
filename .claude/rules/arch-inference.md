@@ -155,6 +155,12 @@ Never open-code it, and never estimate it.
 
 → `docs/invariants/inference.md` § "A model's RoPE frequency factors are applied — and reach a node without shard 0"
 
+## A header and its tensor table describe ONE upload — compared before a tensor is read (2026-10-03)
+
+`split::loader::shards::first_header_disagreement` runs in `load_from_shards_inner`, the one place every load from parts passes: every table entry the parts hold must sit at the header's offset with the header's size (`split::tensor_byte_size`, the size tables are cut by), or the load is refused as `SwarmError::MixedModelCopy`. A mismatch never fails on its own — each read lands shifted inside its entry and the model answers garbage (#156). Compare per entry, never by re-deriving the layout (older tables must load). Rig: `split_rig.sh mixed`; null control `every_real_copy_agrees_with_its_own_header`.
+
+→ `docs/invariants/inference.md` § "A header and its tensor table describe one upload"
+
 ## A RoPE layout is read off llama.cpp, per architecture
 
 **`ModelArch::use_rope_contiguous` is llama.cpp's `llama_model_rope_type`**

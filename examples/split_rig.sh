@@ -111,8 +111,21 @@
 #          logged leading it on every request, nothing fell back; control — no
 #          hand-off at all. Score both arms' replies against llama.cpp
 #          (score_against_reference.py, $OUT/remote.jsonl + prompt.txt).
+#   mixed  FUTURE_WORK #156: a node whose header describes ANOTHER upload than
+#          its parts. A holds shard 0; B holds every shard and C every shard but
+#          0, and B's gguf_header.bin is replaced (never edited — the rig's
+#          files are hard links to the live node's) by
+#          examples/plant_mixed_header.py's copy: by default one WITHOUT the
+#          chat template, so every tensor sits a few hundred bytes earlier and
+#          every read lands in bytes B holds (PLANT=3808: a longer header, the
+#          error shape of gotcha #776 instead). Three greedy asks through A:
+#          control (B excluded), alone (C excluded — B is the only route), both.
+#          PASS = alone is NOT a 200 (v0.3.221 answers it — with garbage, which
+#          is the bug), B logged "Refusing to load", and both answers exactly
+#          what control did. Canonical healing is off on every node here, so
+#          nothing repairs B's header mid-run.
 #
-# usage: split_rig.sh split|kill|failover|failover_mid|context|whole|repeat|fetch|cache|remote <binary> [<binary for B>]
+# usage: split_rig.sh split|kill|failover|failover_mid|context|whole|repeat|fetch|cache|remote|mixed <binary> [<binary for B>]
 #   MODEL      model id (default: tinyllama for split, llama-3.2-3b for kill
 #              and failover)
 #   SHARDS_A   shard indices A holds, comma-separated (default 0; kill: 0,LAST)
@@ -130,15 +143,15 @@
 # isolation (#352).
 set -u
 
-MODE="${1:?usage: split_rig.sh split|kill|failover|context|repeat|fetch|cache|remote <binary> [<binary for B>]}"
+MODE="${1:?usage: split_rig.sh split|kill|failover|context|repeat|fetch|cache|remote|mixed <binary> [<binary for B>]}"
 BIN_A="${2:?binary}"
 BIN_B="${3:-$BIN_A}"
-case "$MODE" in split|kill|failover|failover_mid|context|whole|repeat|fetch|cache|remote) ;; *) echo "mode must be split, kill, failover, failover_mid, context, whole, repeat, fetch, cache or remote"; exit 2 ;; esac
+case "$MODE" in split|kill|failover|failover_mid|context|whole|repeat|fetch|cache|remote|mixed) ;; *) echo "mode must be split, kill, failover, failover_mid, context, whole, repeat, fetch, cache, remote or mixed"; exit 2 ;; esac
 if { [ "$MODE" = context ] || [ "$MODE" = whole ]; } && printf '%s' "${EXTRA_TOML:-}" | grep -q '^\[inference\]'; then
   echo "$MODE: EXTRA_TOML may not open [inference] — B's ceiling is written there"; exit 2
 fi
 [ -x "$BIN_A" ] && [ -x "$BIN_B" ] || { echo "binary not executable"; exit 2; }
-if [ "$MODE" = split ]; then
+if [ "$MODE" = split ] || [ "$MODE" = mixed ]; then
   MODEL="${MODEL:-tinyllama-1.1b-chat-v1.0.q4-k-m}"
 elif [ "$MODE" = cache ]; then
   MODEL="${MODEL:-qwen2.5-0.5b-instruct-fp16}"
@@ -206,6 +219,18 @@ elif [ "$MODE" = whole ]; then
   SHARDS_B=$(echo "$SHARDS" | paste -sd,)
   SHARDS_C=$SHARDS_B
   GPU_A="${GPU_A:-0}"
+elif [ "$MODE" = mixed ]; then
+  # B and C both hold A's missing range; only B's header is from "another
+  # upload". B holds EVERY part: a header shifted earlier then reads, for its
+  # first tensors, bytes B holds (the part before, or the header) — nothing
+  # fails and the model computes on the wrong bytes, which is the silent shape
+  # this exists to catch. Processor everywhere, so the replies compare exactly.
+  SHARDS_A=0
+  SHARDS_B=$(echo "$SHARDS" | paste -sd,)
+  SHARDS_C=$(echo "$SHARDS" | grep -vx 0 | paste -sd,)
+  GPU_A="${GPU_A:-0}"; GPU_B="${GPU_B:-0}"
+  # Healing would replace B's planted header from HuggingFace mid-run.
+  export SWARMLLM_CANONICAL_UPLOADS=0
 else
   SHARDS_A="${SHARDS_A:-0,$LAST}"
   SHARDS_B="${SHARDS_B:-$(echo "$SHARDS" | paste -sd,)}"
@@ -326,6 +351,18 @@ ADDR=$(echo "$ADDRS" | grep -v "10\.255\.255\.254" | head -1)
 [ -z "$ADDR" ] && ADDR=$(echo "$ADDRS" | head -1)
 [ -n "$ADDR" ] || { echo "A published no address to dial"; exit 1; }
 make_node "$BASE/B" "$SHARDS_B" "\"$ADDR\""
+if [ "$MODE" = mixed ]; then
+  # Unlink first: B's header is a hard link to the live node's file, and
+  # writing through it would plant the bad header THERE.
+  # PLANT=shorter (default): reads land EARLIER, inside bytes B holds — the
+  # silent garbage of #156. PLANT=<bytes>: a longer header, reads land later and
+  # the last tensor runs off the end — an error (#776's shape).
+  rm -f "$BASE/B/models/$MODEL/gguf_header.bin"
+  python3 "$(dirname "$0")/plant_mixed_header.py" "$SRC/gguf_header.bin" \
+    "$BASE/B/models/$MODEL/gguf_header.bin" "${PLANT:-shorter}" || exit 2
+  cmp -s "$SRC/gguf_header.bin" "$BASE/B/models/$MODEL/gguf_header.bin" \
+    && { echo "mixed: the planted header is identical to the real one"; exit 2; }
+fi
 # B alone serves a conversation shorter than the long prompt.
 { [ "$MODE" = context ] || [ "$MODE" = whole ]; } && printf '\n[inference]\nmax_seq_len_override = %s\n' "${CEIL_B:-512}" >> "$BASE/B/config.toml"
 # DELAY_B: B far from the nodes after it (remote mode: the delegate leading [B, C, D]).
@@ -351,6 +388,13 @@ if [ "$MODE" = failover ] || [ "$MODE" = context ] || [ "$MODE" = failover_mid ]
     PEERS_EXPECTED=4
     echo "rig: E=[$SHARDS_E] gpu=${GPU_E:-0}"
   fi
+fi
+if [ "$MODE" = mixed ]; then
+  make_node "$BASE/C" "$SHARDS_C" "\"$ADDR\""
+  PC=$(start "$BASE/C" 8940 "$BIN_A" "${GPU_C:-0}")
+  up "$BASE/C" 8940 || exit 1
+  PEERS_EXPECTED=2
+  echo "rig: C=[$SHARDS_C] (the real header) gpu=${GPU_C:-0}; B's header is planted"
 fi
 if [ "$MODE" = remote ]; then
   make_node "$BASE/C" "$SHARDS_C" "\"$ADDR\""
@@ -386,7 +430,11 @@ echo "rig: A sees exactly its $PEERS_EXPECTED rig peer(s)"
 
 ask() { # prompt max_tokens label  (writes $OUT/<label>.{hdr,body}, prints a JSON line)
   local body
-  body=$(python3 -c 'import json,os,sys; print(json.dumps({"model":sys.argv[1],"max_tokens":int(sys.argv[3]),"temperature":float(os.environ.get("RIG_TEMPERATURE","0")),"messages":[{"role":"user","content":sys.argv[2]}]}))' "$MODEL" "$1" "$2")
+  # RIG_ROUTE: a `swarm_route` object for this ask (e.g. nodes to exclude).
+  body=$(python3 -c 'import json,os,sys
+b={"model":sys.argv[1],"max_tokens":int(sys.argv[3]),"temperature":float(os.environ.get("RIG_TEMPERATURE","0")),"messages":[{"role":"user","content":sys.argv[2]}]}
+if os.environ.get("RIG_ROUTE"): b["swarm_route"]=json.loads(os.environ["RIG_ROUTE"])
+print(json.dumps(b))' "$MODEL" "$1" "$2")
   curl -s -m 900 -D "$OUT/$3.hdr" -H "Authorization: Bearer $KA" -H "Content-Type: application/json" \
        -X POST localhost:8900/v1/chat/completions -d "$body" -o "$OUT/$3.body"
   python3 -c 'import json,sys
@@ -404,6 +452,44 @@ if [ "$MODE" = split ]; then
   ask "What is the capital of France? Answer in one sentence." 64 q1 | tee "$OUT/replies.jsonl"
   ask "Write a short Python function that returns the factorial of n." 64 q2 | tee -a "$OUT/replies.jsonl"
   exit 0
+fi
+
+if [ "$MODE" = mixed ]; then
+  id8() { curl -s -m 5 -H "Authorization: Bearer $(cat "$1/api_key")" "localhost:$2/v1/status" \
+    | python3 -c 'import sys,json; print(json.load(sys.stdin)["node_id"][:8])'; }
+  IB=$(id8 "$BASE/B" 8920); IC=$(id8 "$BASE/C" 8940)
+  Q="Write a short Python function that returns the factorial of n."
+  RIG_ROUTE="{\"exclude_nodes\":[\"$IB\"]}" ask "$Q" 48 control | tee "$OUT/mixed.jsonl"
+  RIG_ROUTE="{\"exclude_nodes\":[\"$IC\"]}" ask "$Q" 48 alone | tee -a "$OUT/mixed.jsonl"
+  ask "$Q" 48 both | tee -a "$OUT/mixed.jsonl"
+  refused=$(grep -c "Refusing to load: this model's header and its tensor table" "$BASE/B/node.log")
+  # The coordinator's half: it read B's refusal as "B cannot give those bytes"
+  # and retracted B's claim, so no later plan comes back to it.
+  retracted=$(grep -c "Retracted stale shard-holder claim after a missing-shard error.*holder=$IB" "$BASE/A/node.log")
+  python3 - "$OUT/mixed.jsonl" "$refused" "$retracted" <<'PY'
+import json, sys
+control, alone, both = (json.loads(l) for l in open(sys.argv[1]))
+refused, retracted = int(sys.argv[2]), int(sys.argv[3])
+ok = lambda r: r["status"].endswith("200 ok")
+print(f"mixed: control {control['status']}  route={control['route']}")
+print(f"mixed: alone   {alone['status']}  route={alone['route']}  content={str(alone['content'])[:120]!r}")
+print(f"mixed: both    {both['status']}  route={both['route']}")
+print(f"mixed: B logged the refusal {refused} time(s); A retracted B {retracted} time(s)")
+checks = {
+    "control answered": ok(control),
+    "alone was NOT answered (B is the only route, and its copy is mixed)": not ok(alone),
+    "B refused to load its mixed copy": refused > 0,
+    "A retracted B's claim": retracted > 0,
+    # A's own copy is fine: the caller must not be told theirs is mixed.
+    "the caller was not told its own copy is mixed": "Mixed model copy" not in str(alone["content"]),
+    "both answered exactly what control did": ok(both) and both["content"] == control["content"],
+}
+for name, passed in checks.items():
+    print(f"mixed:   {'ok  ' if passed else 'FAIL'} {name}")
+print("mixed: PASS" if all(checks.values()) else "mixed: FAIL")
+sys.exit(0 if all(checks.values()) else 1)
+PY
+  exit $?
 fi
 
 # ~560 prompt tokens: long enough to catch a prompt pass mid-way (failover), and

@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #213**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #214**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -33,20 +33,20 @@ residual).
 
 ## ▶ PRIORITIES — read this first
 
-Re-ranked 2026-10-02 after the verification. `docs/plans/` holds the multi-step designs; the
-entries point at them.
+Re-ranked 2026-10-02 after the verification, and 2026-10-03 when #156, #158 and #213 closed.
+`docs/plans/` holds the multi-step designs; the entries point at them.
 
 **P0 — wrong answers, silently**
-1. **#156** — a node computes with a header that describes another upload than its parts and
-   answers garbage or NaN. Verify the hypothesis (recipe in the entry), then build the
-   load-time consistency check.
-2. **Watch the live swarm converge (no code)**: `peers_other_build` → 0 per model as peers
-   run v0.3.221; splits through updated peers answer correctly. `docs/DIAGNOSTICS.md` §
-   "Which copy of this model does this node hold?".
+1. *(none open: #156 closed 2026-10-03 — a mixed copy is refused at load.)*
+2. **Watch the live swarm converge (no code)**: `peers_other_build` → 0 per model once peers
+   run the release after v0.3.221 — on .221 it did NOT (12 holdings on 3 peers after 13 h,
+   #213). A peer still counted a day after updating is one that cannot switch (disk,
+   HuggingFace, offline mode); `docs/DIAGNOSTICS.md` § "Which copy of this model does this
+   node hold?".
 
 **P1 — silent, or broken for a whole class of users**
-3. **#159** and **#158** — the two remaining ways a node can still act on another upload's
-   description of a model (#156's other doors).
+3. **#159** — the remaining way a node can act on another upload's description of a model
+   (#156's other door; #158 closed 2026-10-03).
 4. **#165** — prompt privacy is on by default for every node holding both ends of a model
    (58 of 78 holdings in the 2026-10-01 census) and costs 9-14× on a far middle peer; the
    notice that was meant to tell the user never fires.
@@ -84,35 +84,6 @@ maintenance or an idea with no user waiting on it.
 
 ### Wrong answers and the one-upload-per-model rule
 
-#### #156 — A node can compute with a header that describes another upload than its parts, and answer garbage
-`P0` · correctness · **OPEN** — seen live 2026-10-02 · history: archive row #156
-
-After v0.3.221 this node switched Qwen2.5-Coder-7B to the official upload (parts byte-checked
-against HuggingFace) and answers correctly alone. Splits that put a middle part on peers
-`9594e1ff` / `e561df35` — whose part build tags EQUAL ours, so the build filter rightly
-admits them — returned `0000…`, `[PAD152063]` or `Tensor contains non-finite values`.
-Hypothesis, not verified from their side: their `gguf_header.bin` / manifest describe another
-upload (a v0.3.218 node took its header from the first source it heard of —
-gotchas #775/#776). Two uploads with identical tensor bytes (Q8_0) pass every part check, so the
-header is the only witness that differs. Narrowed 11:44-11:55 UTC: still broken through two
-peers already on .221 (their check pass may not have reached the model yet), while a 2-node
-split of THIS machine's copy on .221 (`split_rig.sh split`, shards 0-3 / 4-7) is correct — the
-fault is in the peers' state.
-
-`daemon/shard_loader.rs` derives the tensor table from the header only as a fallback when the
-manifest has none; nothing compares the two.
-- **Verify**: re-send with `"swarm_route": {"pretend_local_holds": "none"}` once the peers'
-  passes have run (field `exclude_nodes`, not `exclude_node_prefixes` — a wrong field is
-  silently ignored). Still wrong → ask a peer operator for `/api/admin/models`
-  (`shared_copy`) and its `canonical` log lines.
-- **Build**: (a) a load-time check in `daemon::shard_loader` — derive the table from the local
-  header (`derive_tensor_entries`) and REFUSE to load on disagreement with the manifest's
-  table or part sizes, as a typed refusal the coordinator re-plans; (b) run the canonical
-  check on a model before its first load after start, not on the pass's own schedule;
-  (c) consider a feature bit so a coordinator hands segments only to nodes that do (a).
-  Needs a rig that plants a mismatched header (copy another upload's header into a node's
-  model dir).
-
 #### #159 — A coordinator holding none of a model routes on placeholder part hashes
 `P1` · routing · **OPEN** — 2026-10-02 · history: archive row #159
 
@@ -123,17 +94,6 @@ another upload until a canonical holder's gossip fills the hashes
 "One upload per model id"). Options: take part hashes from the first canonical-SHAPED
 manifest a peer gossips (shape is already the adoption test), or exclude holders whose tag is
 unknown when the canonical upload is known.
-
-#### #158 — A peer's manifest can replace ours while our own download of that model is in flight
-`P1` · correctness · **PARTIAL** — 2026-10-02 · history: archive row #158, gotcha #776
-
-The root of #776: a dashboard download of upload X registered X's manifest, a peer's manifest
-of Y arrived before any part landed and won (last writer wins), the download then wrote X's
-manifest to disk and its own re-registration was refused. v0.3.221 repairs the END state
-(`auto_manage::canonical::ensure_manifest`); the window remains. Fix at the source:
-`ModelRegistry::register_manifest` must not replace a manifest describing files a download
-is writing (`shard_download_claims` for that model), or the download handler re-asserts its
-manifest after the parts land. Read `register_manifest`'s origin adjudication first.
 
 #### #157 — A node switching copies fetches from HuggingFace even when peers hold the canonical upload
 `P2` · storage · **OPEN** — 2026-10-02 · history: archive row #157
@@ -1292,6 +1252,28 @@ archive under the named heading. Reopen one only with the evidence its line name
 Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 19-28 were
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
+
+**Closed 2026-10-03** (next release after v0.3.221; history in the archive's § "Closed after 2026-10-02")
+- #156 — a node computing with a header that describes another upload than its parts: the
+  shard loader now compares every tensor-table entry with the header (name, offset, size) and
+  refuses the load as `MixedModelCopy` (`split::loader::shards::first_header_disagreement`); a
+  peer's refusal reaches the coordinator as missing shards on both serving paths (a layer
+  forward and a whole-model hand-off), which retracts it and re-routes. `split_rig.sh mixed`
+  reproduces it on v0.3.221 (a 200 answer of one repeated character, as in the field) and
+  passes on the fix; 18 of 18 real copies on the release node pass the check. Of the entry's other parts, (b) a canonical check
+  before the first load is not needed (a mixed copy is refused whenever it loads) and (c) a
+  feature bit was decided against: it would exclude every not-yet-updated peer from splits for
+  each rollout, while the refusal already tells the coordinator. Not established from the two
+  peers' side which file was wrong there; the check covers every case of the shape.
+- #158 — a peer's manifest of another build replacing the one a running download fetches
+  against: refused while `model_download_under_way` (`SharedState::judge_peer_manifest`, the
+  dispatcher's one decision for a peer's manifest).
+- #213 — one model whose switch to the canonical upload could not go ahead blocked every model
+  after it, on every pass, for ever (the turn was taken before the attempt) and was retried
+  against HuggingFace every 2 minutes. Found live 13 h after v0.3.221: 12 holdings on 3 peers
+  never converged (gotcha #780). `SwitchQueue`: only a switch that fetched holds the turn; a
+  HuggingFace failure backs off 10 min → 6 h. The newcomer catch-up also carries the upload
+  claim with each manifest now.
 
 **Closed during the 2026-10-02 rebuild** (no longer open, though the archive still lists them so)
 - #11 — the KV store's "wandering" `allocated_bytes` was a store-wide figure read as one

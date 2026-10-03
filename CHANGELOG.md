@@ -2,6 +2,31 @@
 
 ## [Unreleased]
 
+**Fixed: a split could answer nonsense when one computer's copy of a model
+mixed two uploads of it.** A computer whose model parts came from one upload
+and the file describing them (`gguf_header.bin`) from another read every
+weight from the wrong place. A split running through it answered garbage or
+failed with "non-finite values", while every part passed its own check. A
+computer now checks that the two agree before it loads a model, and refuses if
+they do not; the request then goes to another computer. If your own copy is
+ever mixed, the request is refused with a message saying it is being repaired,
+instead of an answer that looks real and is not.
+
+**Fixed: one model that could not switch to the swarm's shared copy stopped
+every other model from switching.** Since v0.3.221 each computer moves the
+models it holds onto the one upload the rest of the swarm uses, one at a time.
+If one of them could not switch — not enough free disk, or HuggingFace not
+answering — it held the queue for good: the models after it never switched,
+and it was retried every two minutes. A switch that cannot go ahead now steps
+aside and is tried again after a growing wait (10 minutes, up to 6 hours).
+Computers that connect also hear which upload each model uses together with
+the model's description, instead of waiting for the next broadcast.
+
+**Fixed: a download could end up described by another upload's file list.** If
+another computer announced a different upload of a model while this one was
+downloading it, that announcement could replace the description the download
+was using. It no longer can while a download is running.
+
 **Fixed: new installs from the `.deb` package had batching switched off.** The
 `.deb` copies a starting configuration into a new node, and that file still
 said `max_batch_size = 1`, so every `.deb` install since 2026-07-28 served one

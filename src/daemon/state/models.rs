@@ -495,6 +495,29 @@ impl ModelMgmt {
             .any(|s| &s.model_id == model_id)
     }
 
+    /// Is a download of this model under way — a part being written now, OR a
+    /// download started within the last six hours and not finished, which
+    /// covers the gaps between its parts?
+    ///
+    /// The one answer for "do not change what this model's parts are
+    /// described by right now": the canonical heal waits on it, and a peer's
+    /// manifest of another build is refused on it (FUTURE_WORK #158). Claims
+    /// alone miss the gap before a download's first part and between parts —
+    /// exactly where the .220 gate's race landed (gotcha #776) — and only a
+    /// RECENT `Downloading` entry counts, so one a failed path left behind
+    /// cannot hold the model off for ever.
+    pub fn model_download_under_way(&self, model_id: &crate::types::ModelId) -> bool {
+        self.model_has_live_shard_download(model_id)
+            || self.acquisition_progress.get(model_id).is_some_and(|p| {
+                matches!(
+                    p.state,
+                    crate::model::acquisition::AcquisitionState::Downloading
+                ) && p.started_at.is_some_and(|t| {
+                    chrono::Utc::now().signed_duration_since(t) < chrono::Duration::hours(6)
+                })
+            })
+    }
+
     /// Check if a shard is currently being downloaded, pending, or verifying.
     /// Prevents races where multiple subsystems try to download the same shard.
     ///

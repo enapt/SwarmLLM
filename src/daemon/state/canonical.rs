@@ -14,6 +14,19 @@ use crate::types::ModelId;
 pub const ORIGIN_REFUSED_PERMANENT_SECS: u64 = 24 * 60 * 60;
 pub const ORIGIN_REFUSED_TRANSIENT_SECS: u64 = 30 * 60;
 
+/// [`SharedState::judge_peer_manifest`]'s answer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PeerManifest {
+    /// Register it (`register_manifest` still adjudicates against origin
+    /// knowledge).
+    Adopt,
+    /// It describes another upload than the one the swarm uses.
+    AnotherUpload,
+    /// It describes another build than the manifest a download running here
+    /// is fetching against.
+    ReplacesTheOneBeingDownloaded,
+}
+
 fn origin_key(source: &HfSource) -> String {
     format!("{}/{}", source.repo_id.to_lowercase(), source.filename)
 }
@@ -87,6 +100,34 @@ impl SharedState {
                 .canonical_builds
                 .get(&manifest.id)
                 .is_some_and(|b| !b.describes(manifest))
+    }
+
+    /// What this node does with a manifest a PEER sent — the one decision for
+    /// the dispatcher, the only door a peer's manifest comes in by.
+    pub fn judge_peer_manifest(&self, manifest: &crate::types::ModelManifest) -> PeerManifest {
+        if self.manifest_is_another_upload(manifest) {
+            return PeerManifest::AnotherUpload;
+        }
+        // Before the canonical upload is known there is nothing to compare a
+        // peer's manifest with, and adoption is last-writer-wins — except
+        // while this node is downloading the model: its parts are being
+        // fetched against the manifest registered now, and replacing that
+        // with another build's leaves the parts described by one upload and
+        // the registry by another (FUTURE_WORK #158, the root of gotcha #776).
+        // Origin knowledge settles the same question inside `register_manifest`
+        // once a part has landed; this closes the window before it does.
+        let ours_is_another_build =
+            self.model_registry
+                .get_manifest(&manifest.id)
+                .is_some_and(|ours| {
+                    crate::model::registry::ModelRegistry::describes_a_different_build(
+                        &ours, manifest,
+                    )
+                });
+        if ours_is_another_build && self.models.model_download_under_way(&manifest.id) {
+            return PeerManifest::ReplacesTheOneBeingDownloaded;
+        }
+        PeerManifest::Adopt
     }
 
     /// May this node fetch parts of `model_id` right now?
@@ -378,6 +419,95 @@ mod tests {
         );
         assert!(state.manifest_is_another_upload(&theirs));
         assert!(!state.manifest_is_another_upload(&shaped(1_000)));
+    }
+
+    /// FUTURE_WORK #158, the root of gotcha #776: before the canonical upload
+    /// is known, a peer's manifest of another build replaced the one a running
+    /// download was fetching against. While a download is under way — a part
+    /// being written, or the gap before or between parts — it may not; once
+    /// nothing is downloading, adoption is as before. A same-build manifest
+    /// (hash updates) is never held back.
+    #[test]
+    fn a_peers_manifest_of_another_build_never_replaces_the_one_being_downloaded() {
+        let state = test_state();
+        let id = ModelId("x-q8-0".into());
+        let shaped = |total: u64| {
+            crate::model::manifest::build_manifest_from_gguf(
+                crate::model::manifest::ManifestFromGguf {
+                    id: id.clone(),
+                    name: "x".into(),
+                    architecture: crate::types::ModelArchitecture::Llama,
+                    num_layers: 4,
+                    total_size_bytes: total,
+                    shard_count: 1,
+                    shards: vec![crate::types::ShardInfo {
+                        index: 0,
+                        layer_range: (0, 4),
+                        size_bytes: total - 10,
+                        hash: [0; 32],
+                        tensors: Vec::new(),
+                    }],
+                    publisher: crate::types::NodeId([0; 32]),
+                },
+            )
+        };
+        // Ours: the upload a dashboard download is fetching. Theirs: another
+        // upload, 3,808 bytes apart — the .220 gate's pair.
+        state
+            .model_registry
+            .register_manifest(shaped(1_321_079_200));
+        let theirs = shaped(1_321_083_008);
+        assert_eq!(
+            state.judge_peer_manifest(&theirs),
+            PeerManifest::Adopt,
+            "nothing downloading: last writer wins, as before"
+        );
+
+        let claim = state
+            .models
+            .claim_shard_download(&crate::types::ShardId {
+                model_id: id.clone(),
+                index: 0,
+            })
+            .unwrap();
+        assert_eq!(
+            state.judge_peer_manifest(&theirs),
+            PeerManifest::ReplacesTheOneBeingDownloaded
+        );
+        assert_eq!(
+            state.judge_peer_manifest(&shaped(1_321_079_200)),
+            PeerManifest::Adopt,
+            "the same build is not another build"
+        );
+        drop(claim);
+
+        // The gap before the first part (or between parts): no claim, but a
+        // download that began and has not finished.
+        state.models.acquisition_progress.insert(
+            id.clone(),
+            crate::model::acquisition::AcquisitionStatus::new_downloading(
+                id.clone(),
+                1,
+                1_321_079_200,
+                "huggingface",
+                "dashboard",
+                "test",
+            ),
+        );
+        assert_eq!(
+            state.judge_peer_manifest(&theirs),
+            PeerManifest::ReplacesTheOneBeingDownloaded
+        );
+
+        // And once the swarm's upload is known, another upload is that.
+        state.adopt_canonical_build(
+            &id,
+            build_for(src("bartowski/X-GGUF", "X-Q8_0.gguf"), 1_321_079_200),
+        );
+        assert_eq!(
+            state.judge_peer_manifest(&theirs),
+            PeerManifest::AnotherUpload
+        );
     }
 
     /// A refused upload is not "pending": a node whose HuggingFace access

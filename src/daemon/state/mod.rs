@@ -35,7 +35,7 @@ pub(crate) mod retained_replies;
 mod tp_allreduce;
 
 pub use activity::{ActivityEvent, DashboardSignal, LoadedModelInfo};
-pub use canonical::{ORIGIN_REFUSED_PERMANENT_SECS, ORIGIN_REFUSED_TRANSIENT_SECS};
+pub use canonical::{PeerManifest, ORIGIN_REFUSED_PERMANENT_SECS, ORIGIN_REFUSED_TRANSIENT_SECS};
 pub use capacity::{
     compute_swarm_capacity, refresh_swarm_capacity, HeadlineModel, ModelEntry, SwarmCapacity,
 };

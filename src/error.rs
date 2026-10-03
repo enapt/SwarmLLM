@@ -101,6 +101,22 @@ pub enum SwarmError {
     },
     #[error("Shard not found: {0:?}")]
     ShardNotFound(ShardId),
+    /// The header beside this node's parts of a model places or sizes a
+    /// tensor differently from the tensor table the parts were cut by: two
+    /// uploads of one model met on one node (`docs/FUTURE_WORK.md` #156).
+    /// Loading anyway does not fail — every tensor is read from where the
+    /// header says, which is somewhere else in the parts — and the model
+    /// answers garbage or NaN. The shard loader refuses instead
+    /// (`split::loader::shards::first_header_disagreement`).
+    ///
+    /// Only ever about THIS node's own files. A peer's refusal crosses the
+    /// wire sanitised to `PEER_FACING_MISSING_SHARDS` (the Display carries
+    /// "shard"), which retracts that peer's claim and re-routes — so this
+    /// variant never names a peer, and sits in `failure_is_penalty_worthy`'s
+    /// local-only list. Distinct from `ShardIntegrity`: the parts themselves
+    /// may be perfectly good, and quarantining them would be the wrong repair.
+    #[error("Mixed model copy: the header beside this model's shard files describes another upload — {0}")]
+    MixedModelCopy(String),
 
     // Credits
     #[error("Insufficient credits: balance={balance}, required={required}")]
@@ -382,6 +398,14 @@ pub fn reclassify_flattened_error(message: &str) -> Option<SwarmError> {
     }
     if let Some(d) = detail_after(message, "Model not available: ") {
         return Some(SwarmError::ModelNotAvailable(ModelId(d)));
+    }
+    // Raised inside the worker, so the IPC hop would otherwise turn the
+    // loader's refusal into a 500 `Inference` with no hint.
+    if let Some(d) = detail_after(
+        message,
+        "Mixed model copy: the header beside this model's shard files describes another upload — ",
+    ) {
+        return Some(SwarmError::MixedModelCopy(d));
     }
     if let Some(d) = detail_after(message, "Service unavailable: ") {
         return Some(SwarmError::ServiceUnavailable(d));
@@ -762,6 +786,13 @@ pub fn classify_error(err: &SwarmError) -> (StatusCode, String, &'static str) {
             err.to_string(),
             "service_unavailable",
         ),
+        // This node cannot serve the model from its own files until they are
+        // repaired — "this server can't serve", not a fault in our code.
+        SwarmError::MixedModelCopy(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            err.to_string(),
+            "server_error",
+        ),
         SwarmError::PipelineError(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             err.to_string(),
@@ -1089,6 +1120,16 @@ pub fn error_hint_with_key(err: &SwarmError) -> Option<(&'static str, &'static s
             "shard_incomplete",
             "A model file did not download completely and will be fetched again \
              automatically. This usually means the connection dropped part-way.",
+        )),
+        // Retrying cannot help until the files are repaired, so this says what
+        // repairs them and what to do if that does not happen.
+        SwarmError::MixedModelCopy(_) => Some((
+            "mixed_model_copy",
+            "This computer's copy of the model is mixed up: part of it comes from a \
+             different version of the model file than the rest, so it can't be used \
+             until it is repaired. SwarmLLM repairs it by itself within a few minutes \
+             when it can reach HuggingFace. If it stays like this, delete the model \
+             and download it again.",
         )),
         // The remaining pipeline failures are a mix of transient and permanent
         // causes, and we do not know which this one is. The old wording picked
@@ -1793,6 +1834,38 @@ mod tests {
             hint.to_lowercase().contains("try again"),
             "hint must advise the retry that helps: {hint}"
         );
+    }
+
+    /// A mixed copy (#156) is refused inside the WORKER, so the class has to
+    /// survive the IPC hop or the user gets a hintless 500. The advice is what
+    /// repairs it — the automatic repair, then deleting and re-downloading —
+    /// never "try again", which reproduces the refusal until the files change.
+    #[test]
+    fn a_mixed_copy_survives_the_worker_hop_and_says_what_repairs_it() {
+        let err = SwarmError::MixedModelCopy(
+            "blk.3.attn_q.weight is 4608 bytes at byte 7003808 in the header, but 4608 \
+             bytes at byte 7000000 in the table its part was cut by"
+                .into(),
+        );
+        let (status, _, _) = classify_error(&err);
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+
+        let flattened = format!("Inference error: Worker: {err}");
+        match reclassify_flattened_error(&flattened) {
+            Some(back @ SwarmError::MixedModelCopy(_)) => {
+                assert_eq!(back.to_string(), err.to_string(), "nothing doubled or lost")
+            }
+            other => panic!("expected MixedModelCopy back, got {other:?}"),
+        }
+
+        let hint = error_hint(&err)
+            .expect("a mixed copy needs a hint")
+            .to_lowercase();
+        assert!(
+            hint.contains("repairs it by itself") && hint.contains("download it again"),
+            "{hint}"
+        );
+        assert!(!hint.contains("try again"), "a retry cannot help: {hint}");
     }
 
     /// The second 500-shaped transient from the same report: a mid-pipeline

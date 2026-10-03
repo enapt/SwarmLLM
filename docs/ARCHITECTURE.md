@@ -115,6 +115,9 @@ swarmllm/
 │                 mid-reply (KILL=A|B|B_UNLOAD) — the release gate's split check (#93);
 │                 `failover` runs FOUR nodes for #17's composite stand-in (gotchas #706-708);
 │                 `context` gives that middle holder a SHORTER context than the prompt (#111);
+│                 `mixed` plants another upload's header beside one holder's parts (#156);
+│                 plant_mixed_header.py — writes that header: same tensors, data shifted
+│                 earlier (`shorter`, the silent garbage shape) or later (the error shape);
 │                 logits_reference_probe.rs + compare_logits_reference.py — our logits at
 │                 every position of a GGUF (one segment or split) against llama.cpp's, by
 │                 VALUE: how an architecture is verified on a tiny random model (#114);
@@ -2629,7 +2632,7 @@ Routes Claude model requests through a locally-authenticated `claude` CLI subpro
 - Cross-component calls: `App.componentName.method()`. Shared state: `App.state.*`. Utilities: `App.utils.*`.
 
 ### Frontend Features
-- **i18n**: 1401 translation keys (1403 entries per locale incl. `_lang` + `_dir`) across 21 languages (en, es, fr, de, pt, it, nl, ru, zh, ja, ko, ar, tr, pl, sv, th, hi, vi, id, uk, cs). Auto-detects browser language. `I18n.t()` + `data-i18n` DOM attributes. Interpolation via `{variable}` placeholders. Fallback chain: current language → English → raw key. "Continue in English" UX for non-English users who prefer English.
+- **i18n**: 1402 translation keys (1404 entries per locale incl. `_lang` + `_dir`) across 21 languages (en, es, fr, de, pt, it, nl, ru, zh, ja, ko, ar, tr, pl, sv, th, hi, vi, id, uk, cs). Auto-detects browser language. `I18n.t()` + `data-i18n` DOM attributes. Interpolation via `{variable}` placeholders. Fallback chain: current language → English → raw key. "Continue in English" UX for non-English users who prefer English.
 - **Theme**: Light / Dark / System toggle. `[data-theme="light"]` CSS overrides. Persisted in localStorage.
 - **Swarm background**: animated canvas flocking network behind the dashboard (`frontend/js/neural-bg.js`). Up to 90 boids (scaled by viewport area) with connecting links, feeler tendrils, gentle drift and mouse repulsion/glow. State-reactive colouring: blue (idle) → cyan (active inference) → red-orange (unhealthy/disconnected); peer count boosts vibrancy and active requests trigger firing pulses.
   **It is the one thing on the page with an ongoing power cost, so it is bounded at four levels.** It advances at 30 Hz rather than the browser's 60 while the pointer is in play; drops to 10 Hz once the pointer has been still for 4 s, which is the ordinary state of a dashboard left open; drops to 8 Hz whenever `state.active > 0` (this page is usually open on the machine running the node, so the decoration yields to the real work — the slowest applicable rate wins); and stops entirely when the tab is hidden. Users can switch it off in Settings (`App.SWARM_ANIM_KEY`), and it defaults to OFF where the device reports `prefers-reduced-motion: reduce` — a canvas loop is invisible to the CSS media query that honours that everywhere else on the page. Turning it off cancels the frame loop rather than hiding the canvas, since a hidden animation costs what a visible one does.

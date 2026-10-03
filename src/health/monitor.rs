@@ -161,6 +161,34 @@ fn region_summary_digest(summary: &crate::types::RegionShardSummary) -> u64 {
 /// and it is safe on the "changed" arm too: a change we LEARNED from gossip is
 /// one the swarm already has, while a change we made ourselves cannot have
 /// been heard by anyone yet and so still goes out.
+/// This node's claim of which HuggingFace upload `model` is — what
+/// `model::canonical` chooses from — as the message that carries it, or `None`
+/// when it knows no source. The ONE builder, for the broadcast round and the
+/// newcomer catch-up alike, so the two cannot disagree about what a node
+/// claims.
+///
+/// Cloned out of `hf_sources` before anything is sent: `network_tx.send` waits
+/// whenever the network loop is busy, and a `Ref` held across it blocks the
+/// dispatcher's `hf_sources.insert` on the same shard (clippy.toml).
+fn upload_claim(
+    state: &crate::daemon::SharedState,
+    model: &crate::types::ModelId,
+    our_id: &crate::types::NodeId,
+) -> Option<SwarmMessage> {
+    let source = state
+        .models
+        .hf_sources
+        .get(model)
+        .map(|s| s.value().clone())?;
+    Some(SwarmMessage::HfSourceGossip(crate::types::HfSourceGossip {
+        model_id: model.clone(),
+        repo_id: source.repo_id,
+        filename: source.filename,
+        publisher: our_id.clone(),
+        mmproj_filename: source.mmproj_filename,
+    }))
+}
+
 fn manifest_needs_broadcast(
     last_announced: Option<&[u8; 32]>,
     current_hash: &[u8; 32],
@@ -1217,24 +1245,8 @@ impl HealthMonitor {
             sent += 1;
 
             // Also broadcast HfSourceGossip so late-joining peers discover the HF source.
-            // Cloned out before the send: `network_tx.send` waits whenever the
-            // network loop is busy, and a `Ref` held across it blocks the
-            // dispatcher's `hf_sources.insert` on the same shard (clippy.toml).
-            let hf_source = self
-                .shared_state
-                .models
-                .hf_sources
-                .get(&manifest.id)
-                .map(|s| s.value().clone());
-            if let Some(hf_source) = hf_source {
-                let gossip = crate::types::HfSourceGossip {
-                    model_id: manifest.id.clone(),
-                    repo_id: hf_source.repo_id.clone(),
-                    filename: hf_source.filename.clone(),
-                    publisher: our_id.clone(),
-                    mmproj_filename: hf_source.mmproj_filename.clone(),
-                };
-                let msg = NetworkCommand::Broadcast(SwarmMessage::HfSourceGossip(gossip));
+            if let Some(claim) = upload_claim(&self.shared_state, &manifest.id, &our_id) {
+                let msg = NetworkCommand::Broadcast(claim);
                 if let Err(e) = self.network_tx.send(msg).await {
                     tracing::debug!(error = %e, model = %manifest.id, "DIAG: failed to broadcast HF source");
                 }
@@ -1259,12 +1271,31 @@ impl HealthMonitor {
             };
             let mut delivered = 0usize;
             for manifest in &manifests {
-                let msg = NetworkCommand::SendDirectMessage {
-                    target_peer_bytes: target_peer_bytes.clone(),
-                    message: SwarmMessage::ModelManifest(manifest.clone()),
-                    delivery_request_id: None,
-                };
-                if self.network_tx.send(msg).await.is_err() {
+                // The claim travels WITH the manifest. Without it a newcomer
+                // learned which upload a model is only from a broadcast, and
+                // those are suppressed while the swarm has heard the manifest
+                // (up to `MANIFEST_QUIET_WINDOW`): meanwhile it could register
+                // the first manifest it was sent and fetch against it. One
+                // upload per model is a max-register (`model::canonical`), and
+                // a max-register converges only on claims every node is
+                // eventually DELIVERED — this is that delivery's anti-entropy
+                // half, as Demers et al.'s epidemic algorithms pair rumour
+                // mongering with it.
+                let mut messages = vec![SwarmMessage::ModelManifest(manifest.clone())];
+                messages.extend(upload_claim(&self.shared_state, &manifest.id, &our_id));
+                let mut sent_all = true;
+                for message in messages {
+                    let msg = NetworkCommand::SendDirectMessage {
+                        target_peer_bytes: target_peer_bytes.clone(),
+                        message,
+                        delivery_request_id: None,
+                    };
+                    if self.network_tx.send(msg).await.is_err() {
+                        sent_all = false;
+                        break;
+                    }
+                }
+                if !sent_all {
                     break;
                 }
                 delivered += 1;

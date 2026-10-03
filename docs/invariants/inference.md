@@ -2598,6 +2598,68 @@ decode step's graphs. The drafter reads a short catch-up as single captured step
 
 → `docs/invariants/inference.md` § "A speculative check is captured too"
 
+## A header and its tensor table describe one upload — compared before a tensor is read (2026-10-03, #156)
+
+**The defect.** A node loading from parts has two descriptions of one file: the
+GGUF header (`gguf_header.bin` — every tensor's dtype, shape and offset) and the
+manifest's tensor table (which bytes of which part file hold each tensor). Candle
+reads the header and asks `ShardReader` for each tensor's bytes at the header's
+offset; the reader maps that position into whichever table entry covers it.
+Nothing compared the two. When they came from different uploads of one model —
+3,808 bytes apart at the .220 gate (gotcha #776) — every read moved inside its own
+entry, or into the one before it, and the reader returned shifted bytes rather
+than an error. Splits through two peers answered `0000…`, `[PAD152063]` or
+"Tensor contains non-finite values" with every part hash matching (2026-10-02).
+Parts are hash-checked against the manifest at startup and rescan; the header was
+checked against nothing.
+
+**The check.** `split::loader::shards::first_header_disagreement` runs in
+`load_from_shards_inner` — the one place every load from parts passes, a node's
+own request and every peer's forward alike — on the header the loader has just
+parsed: each table entry the parts hold must name a tensor the header has, at the
+header's absolute offset, with the header's size (`split::tensor_byte_size`, the
+same computation `GgufTensorMeta` and so every table are cut by). The first
+disagreement refuses the load as `SwarmError::MixedModelCopy` (503, its own hint,
+local-only for penalties). It compares entry by entry rather than re-deriving the
+layout, so a table written by an older build of the layout code still loads.
+llama.cpp draws the same line on a whole file: `gguf_init_from_reader` refuses a
+header whose tensor offsets disagree with the data layout ("tensor '%s' has offset
+%…, expected %…") instead of reading the wrong bytes.
+
+**On a peer** the refusal crosses the wire as `PEER_FACING_MISSING_SHARDS` on BOTH
+serving paths — `sanitize_peer_facing_error` on a layer forward (its "shard" rule),
+`worker_failure_for_the_coordinator` on a whole-model hand-off — and the
+coordinator's existing missing-shard path retracts that peer's claim for the range,
+bars it for the request and fails over. No new message and no feature bit
+(`a_peers_mixed_copy_refusal_reaches_the_coordinator_as_missing_shards`, twice).
+
+**Measured** (`split_rig.sh mixed`, TinyLlama, CPU, 2026-10-03; A holds part 0, B
+every part under the planted header, C parts 1+ under the real one; three greedy
+asks: control without B, alone without C, both).
+
+| planted header | v0.3.221 "alone" | this build "alone" |
+|---|---|---|
+| SHORTER (chat template dropped, data 448 bytes earlier) — the silent shape | **200 OK, `给给给给给…`** — one character repeated, the field's "output is a single repeated character" | 503 "No reachable node holds layers 12-21"; B logged the refusal once, A retracted B's claim, both == control |
+| LONGER (+3,872 bytes, `PLANT=3808`) — #776's shape | 503 — the file's last tensor `output_norm` ran past the data ("failed to fill whole buffer") | the same 503, preceded by B's refusal |
+
+So a longer header was already an error on either build; the shorter one is what
+answered garbage, and is the rig's default. **The rig found a second path the first
+cut missed**: a WHOLE-model hand-off (`remote_generate`) sends a worker's error back
+verbatim, so B's refusal reached A as a `MixedModelCopy` of A's own — no
+retraction, and a caller told "this computer's copy is mixed up" about a computer
+that was fine. `daemon::dispatch::remote_generate::worker_failure_for_the_coordinator`
+now translates that one refusal at the serving node (which also works for a
+coordinator on an older release), and the rig asserts both: A logged the
+retraction, and the caller's error does not say "Mixed model copy". Null control on
+real copies: `every_real_copy_agrees_with_its_own_header` over the release node's 18
+models (MoE, GLM-4, Phi's fused layout, tables written since 2026-09-11) — 18 pass.
+
+**What a change must keep.** Every load from parts goes through
+`load_from_shards_inner`; a new shard loader calls the check. Never compare by
+re-deriving the layout. The Display of `MixedModelCopy` must keep the word "shard"
+(the peer-facing translation depends on it, pinned by the tests above), and a new
+path that returns a worker's error to another node translates this refusal too.
+
 ## A context that will not fit is shrunk, not refused
 
 `inference::executor::context_retry_ladder` is the answer to "what context size

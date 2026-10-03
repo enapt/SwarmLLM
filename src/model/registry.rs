@@ -594,7 +594,10 @@ impl ModelRegistry {
     /// because they come from the GGUF layout — whereas a hash is only known
     /// for a shard its author actually holds, and is all-zero otherwise. So
     /// shape answers this question for a partial holder, where hashes cannot.
-    fn describes_a_different_build(ours: &ModelManifest, theirs: &ModelManifest) -> bool {
+    pub(crate) fn describes_a_different_build(
+        ours: &ModelManifest,
+        theirs: &ModelManifest,
+    ) -> bool {
         if ours.shard_count != theirs.shard_count
             || ours.total_size_bytes != theirs.total_size_bytes
         {

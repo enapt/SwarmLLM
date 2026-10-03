@@ -170,6 +170,28 @@ pub struct TensorLocation {
     pub size: u64,
 }
 
+/// How many bytes of tensor data a header's entry describes — the size every
+/// tensor table is cut by (`TensorLocation::size`, and through it
+/// `compute_layer_shard_layouts`), so the shard loader compares a table
+/// against its header with this same computation.
+///
+/// Checked arithmetic, because a header can arrive from a peer: a crafted
+/// shape must not overflow. `elem_count` is capped at 2^40 (~1 trillion) — no
+/// legitimate tensor exceeds it — and an impossible entry answers 0.
+pub(crate) fn tensor_byte_size(info: &candle_core::quantized::gguf_file::TensorInfo) -> u64 {
+    let block_size = info.ggml_dtype.block_size();
+    let elem_count = info.shape.elem_count();
+    const MAX_ELEM_COUNT: usize = 1 << 40;
+    if block_size == 0 || elem_count > MAX_ELEM_COUNT {
+        return 0;
+    }
+    info.ggml_dtype
+        .type_size()
+        .checked_mul(elem_count)
+        .map(|v| (v / block_size) as u64)
+        .unwrap_or(0)
+}
+
 impl GgufTensorMeta {
     /// Location of the tensor doubling as the output head on a weight-tied
     /// model, or `None` when the model ships a separate `output.weight`.
@@ -307,25 +329,11 @@ impl GgufTensorMeta {
 
         let mut tensors = HashMap::new();
         for (name, info) in &ct.tensor_infos {
-            // Use checked arithmetic to prevent integer overflow on crafted GGUF headers.
-            // Cap elem_count to 2^40 (~1 trillion) — no legitimate tensor exceeds this.
-            let block_size = info.ggml_dtype.block_size();
-            let elem_count = info.shape.elem_count();
-            const MAX_ELEM_COUNT: usize = 1 << 40;
-            let size = if block_size == 0 || elem_count > MAX_ELEM_COUNT {
-                0u64
-            } else {
-                info.ggml_dtype
-                    .type_size()
-                    .checked_mul(elem_count)
-                    .map(|v| (v / block_size) as u64)
-                    .unwrap_or(0)
-            };
             tensors.insert(
                 name.clone(),
                 TensorLocation {
                     offset: info.offset,
-                    size,
+                    size: tensor_byte_size(info),
                 },
             );
         }

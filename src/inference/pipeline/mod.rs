@@ -3477,6 +3477,30 @@ mod missing_shard_over_the_wire_tests {
         }
     }
 
+    /// A peer whose header and tensor table describe different uploads refuses
+    /// at load (FUTURE_WORK #156). What reaches the coordinator must read as
+    /// missing shard data, so the peer's claim is retracted, it is barred from
+    /// the retry and the request re-routes — the same fact (it cannot give the
+    /// bytes it advertised), and the response that keeps it out of every later
+    /// plan until it announces again. The raw form is the worker's own
+    /// `Display`, wrapped the way the IPC hop wraps it.
+    #[test]
+    fn a_peers_mixed_copy_refusal_reaches_the_coordinator_as_missing_shards() {
+        let raw = format!(
+            "Inference error: Worker: {}",
+            crate::error::SwarmError::MixedModelCopy(
+                "blk.3.attn_q.weight is 4608 bytes at byte 7003808 in the header, but 4608 \
+                 bytes at byte 7000000 in the table its part was cut by"
+                    .into()
+            )
+        );
+        let over_the_wire = sanitize_peer_facing_error(&raw);
+        assert!(
+            remote_error_means_missing_shard(&over_the_wire),
+            "raw {raw:?} was sanitised to {over_the_wire:?}"
+        );
+    }
+
     /// The converse still holds: an unrelated failure must not cost a healthy
     /// peer its claim. Retracting on the wrong error moves work off a good
     /// node, which is the failure this whole mechanism has to avoid.

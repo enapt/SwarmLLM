@@ -21,6 +21,31 @@
 /// four other peers could have served (gotcha #433).
 pub(crate) const REMOTE_GENERATE_NOT_HOSTED: &str = "model not hosted on target";
 
+/// What the coordinator is told when this node's worker failed the request.
+///
+/// Verbatim, as it always was — the coordinator recovers a class from the text
+/// (`reclassify_flattened_error`: a memory refusal, a context limit) — with ONE
+/// translation: a mixed copy (#156) becomes the peer-facing missing-shards
+/// refusal, exactly as `layer_forward` sends it. Raw, it reached the
+/// coordinator as a `MixedModelCopy` of ITS OWN: the claim was not retracted
+/// (the whole-model path re-picked this node on later plans) and the caller was
+/// told "this computer's copy is mixed up" about a computer that was fine
+/// (`split_rig.sh mixed`, 2026-10-03). Translated here rather than recognised
+/// there, so a coordinator still on an older release reacts correctly too.
+fn worker_failure_for_the_coordinator(e: &crate::error::SwarmError) -> String {
+    let text = e.to_string();
+    let mixed = matches!(e, crate::error::SwarmError::MixedModelCopy(_))
+        || matches!(
+            crate::error::reclassify_flattened_error(&text),
+            Some(crate::error::SwarmError::MixedModelCopy(_))
+        );
+    if mixed {
+        super::layer_forward::sanitize_peer_facing_error(&text)
+    } else {
+        text
+    }
+}
+
 use std::sync::Arc;
 
 use tokio::sync::mpsc;
@@ -428,7 +453,9 @@ async fn stream_reply_to_requester(
             StreamingToken {
                 request_id,
                 token_id: streamed_count,
-                finish_reason: Some(NetworkFinishReason::Error(e.to_string())),
+                finish_reason: Some(NetworkFinishReason::Error(
+                    worker_failure_for_the_coordinator(&e),
+                )),
                 text: String::new(),
                 usage: None,
                 matched_stop_sequence: None,
@@ -735,6 +762,57 @@ fn range_is_covered(covered: &[(usize, usize)], want: (usize, usize)) -> bool {
     covered
         .iter()
         .any(|&(start, end)| start <= want.0 && want.1 <= end)
+}
+
+#[cfg(test)]
+mod worker_failure_tests {
+    use super::worker_failure_for_the_coordinator;
+    use crate::error::SwarmError;
+
+    /// A whole-model hand-off to a node whose copy is mixed (#156): what the
+    /// coordinator hears must make it retract the claim and re-route — the
+    /// layer path's behaviour — and must not be a `MixedModelCopy` of its own,
+    /// whose hint tells the caller THEIR copy is broken.
+    #[test]
+    fn a_mixed_copy_reaches_the_coordinator_as_missing_shards() {
+        let mixed = || {
+            SwarmError::MixedModelCopy(
+                "token_embd.weight is 36864000 bytes at byte 55468992 in the header, but \
+                 36864000 bytes at byte 55469440 in the table its part was cut by"
+                    .into(),
+            )
+        };
+        for e in [
+            mixed(),
+            SwarmError::Inference(format!("Worker: {}", mixed())),
+        ] {
+            let sent = worker_failure_for_the_coordinator(&e);
+            assert!(
+                crate::inference::pipeline::remote_error_means_missing_shard(&sent),
+                "{sent:?}"
+            );
+            assert!(
+                !matches!(
+                    crate::error::reclassify_flattened_error(&sent),
+                    Some(SwarmError::MixedModelCopy(_))
+                ),
+                "{sent:?}"
+            );
+        }
+    }
+
+    /// Every other failure still travels verbatim: the coordinator recovers
+    /// its class from the text.
+    #[test]
+    fn other_failures_travel_verbatim() {
+        let memory = SwarmError::LocalMemoryUnavailable("not enough memory for 22 layers".into());
+        assert_eq!(
+            worker_failure_for_the_coordinator(&memory),
+            memory.to_string()
+        );
+        let ctx = SwarmError::Validation("prompt is 9000 tokens, this node serves 8192".into());
+        assert_eq!(worker_failure_for_the_coordinator(&ctx), ctx.to_string());
+    }
 }
 
 #[cfg(test)]

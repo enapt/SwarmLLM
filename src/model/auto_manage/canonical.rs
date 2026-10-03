@@ -22,10 +22,11 @@
 //!    when every new part is on disk and the model is idle. The old parts are
 //!    deleted in the swap. Nobody has to delete or re-download anything.
 //!
-//! One switch runs at a time, so a node with several models to move does not
-//! saturate its connection or its disk.
+//! One switch fetches at a time, so a node with several models to move does
+//! not saturate its connection or its disk — and a switch that CANNOT go ahead
+//! (no room on disk, HuggingFace refusing) holds nobody up ([`SwitchQueue`]).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -67,6 +68,7 @@ pub async fn run(
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
     let mut next = tokio::time::Instant::now() + FIRST_PASS_AFTER;
+    let mut queue = SwitchQueue::default();
     loop {
         tokio::select! {
             _ = shutdown_rx.changed() => {
@@ -75,14 +77,113 @@ pub async fn run(
                 }
             }
             _ = tokio::time::sleep_until(next) => {
-                pass(&state, &network_tx).await;
+                pass(&state, &network_tx, &mut queue).await;
                 next = tokio::time::Instant::now() + PASS_EVERY;
             }
         }
     }
 }
 
-async fn pass(state: &Arc<SharedState>, net_tx: &mpsc::Sender<NetworkCommand>) {
+/// What one turn at switching a model came to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SwitchTurn {
+    /// Bytes came from HuggingFace in this turn: the pass's one switch.
+    Fetched,
+    /// Nothing was fetched — every part was already staged (the swap ran, or
+    /// waits for the model to be idle), or there is no room on disk to stage
+    /// them. Re-checked next pass, which costs nothing.
+    NothingFetched,
+    /// HuggingFace could not give the switch what it needs (the header, a
+    /// part, the side files). Not asked again until its backoff runs out.
+    HuggingFaceFailed,
+}
+
+/// Which model may switch now. One switch FETCHES per pass; a switch that
+/// cannot go ahead never holds the turn, and one HuggingFace failed waits out
+/// a doubling backoff before it is tried again.
+///
+/// Before this, the turn was taken before the switch was attempted, whatever
+/// came of it — so the first model (in name order) that could not switch
+/// blocked every model after it, on every pass, for ever, and was itself
+/// retried against HuggingFace every two minutes. Measured on the live swarm
+/// 2026-10-03, 13 h after every peer reached v0.3.221: `9594e1ff` had switched
+/// all eight of its models, while `4a3ac72e` still held another upload of
+/// four — `llama-xlam-2-8b` first in name order, the other three behind it —
+/// and `bf7b3263` of `llama-xlam-2-8b` alone. Kubernetes met this as an
+/// unschedulable pod blocking the head of its scheduling queue
+/// (kubernetes#71486) and answered the same way: a failed attempt goes to a
+/// backoff queue with an exponentially growing wait, and the queue moves on.
+#[derive(Default)]
+struct SwitchQueue {
+    fetched_this_pass: bool,
+    /// Per model: when it may next ask HuggingFace, and the wait that set it.
+    backoff: HashMap<ModelId, (tokio::time::Instant, Duration)>,
+}
+
+/// The first wait after HuggingFace failed a switch, and the longest.
+const SWITCH_BACKOFF_FIRST: Duration = Duration::from_secs(10 * 60);
+const SWITCH_BACKOFF_MAX: Duration = Duration::from_secs(6 * 60 * 60);
+
+/// Whether a model's switch runs now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Turn {
+    Go,
+    /// Another switch fetched this pass.
+    Queued,
+    /// HuggingFace failed this switch recently.
+    BackedOff,
+}
+
+impl SwitchQueue {
+    fn new_pass(&mut self) {
+        self.fetched_this_pass = false;
+    }
+
+    fn turn_for(&self, model: &ModelId, now: tokio::time::Instant) -> Turn {
+        if self.fetched_this_pass {
+            Turn::Queued
+        } else if self
+            .backoff
+            .get(model)
+            .is_some_and(|(until, _)| now < *until)
+        {
+            Turn::BackedOff
+        } else {
+            Turn::Go
+        }
+    }
+
+    fn record(&mut self, model: &ModelId, turn: SwitchTurn, now: tokio::time::Instant) {
+        match turn {
+            SwitchTurn::Fetched => {
+                self.fetched_this_pass = true;
+                self.backoff.remove(model);
+            }
+            SwitchTurn::NothingFetched => {}
+            SwitchTurn::HuggingFaceFailed => {
+                let wait = self
+                    .backoff
+                    .get(model)
+                    .map_or(SWITCH_BACKOFF_FIRST, |(_, last)| {
+                        (*last * 2).min(SWITCH_BACKOFF_MAX)
+                    });
+                self.backoff.insert(model.clone(), (now + wait, wait));
+            }
+        }
+    }
+
+    /// The model is on the canonical upload now, or no longer this node's to
+    /// switch: whatever held it back is history.
+    fn forget(&mut self, model: &ModelId) {
+        self.backoff.remove(model);
+    }
+}
+
+async fn pass(
+    state: &Arc<SharedState>,
+    net_tx: &mpsc::Sender<NetworkCommand>,
+    queue: &mut SwitchQueue,
+) {
     if !canonical::canonical_uploads_enabled() {
         return;
     }
@@ -103,9 +204,9 @@ async fn pass(state: &Arc<SharedState>, net_tx: &mpsc::Sender<NetworkCommand>) {
             asked += 1;
         }
     }
-    let mut switched = false;
+    queue.new_pass();
     for model in &models {
-        settle(state, net_tx, model, &mut switched).await;
+        settle(state, net_tx, model, queue).await;
     }
 }
 
@@ -292,7 +393,7 @@ async fn settle(
     state: &Arc<SharedState>,
     net_tx: &mpsc::Sender<NetworkCommand>,
     model: &ModelId,
-    switched: &mut bool,
+    queue: &mut SwitchQueue,
 ) {
     let Some(build) = state.canonical_build(model) else {
         return;
@@ -312,20 +413,7 @@ async fn settle(
     // recent `Downloading` entry covers the gaps between parts, and only a
     // recent one, so an entry a failed path left behind cannot hold this
     // model off for ever.
-    let downloading = state.models.model_has_live_shard_download(model)
-        || state
-            .models
-            .acquisition_progress
-            .get(model)
-            .is_some_and(|p| {
-                matches!(
-                    p.state,
-                    crate::model::acquisition::AcquisitionState::Downloading
-                ) && p.started_at.is_some_and(|t| {
-                    chrono::Utc::now().signed_duration_since(t) < chrono::Duration::hours(6)
-                })
-            });
-    if downloading {
+    if state.models.model_download_under_way(model) {
         return;
     }
     let me = state.identity.node_id().clone();
@@ -339,7 +427,14 @@ async fn settle(
 
     if held.is_empty() {
         set_holding(state, model, Holding::Nothing);
-        if !manifest.as_ref().is_some_and(|m| build.describes(m)) {
+        queue.forget(model);
+        if manifest.as_ref().is_some_and(|m| build.describes(m)) {
+            // Nothing held and nothing to register: the header `verify_upload`
+            // staged has no further use. `register_for_fetching` clears it when
+            // it runs; on this branch it never did, and four staged headers
+            // (~7 MB each) sat in `<data_dir>/canonical/` on the live node.
+            let _ = std::fs::remove_dir_all(staging_dir(state, model));
+        } else {
             register_for_fetching(state, model, &build).await;
         }
         return;
@@ -362,7 +457,7 @@ async fn settle(
                     &build,
                     &held,
                     manifest.as_ref(),
-                    switched,
+                    queue,
                 )
                 .await;
                 return;
@@ -395,6 +490,7 @@ async fn settle(
         }
         tracing::info!(model = %model, parts = held.len(), "DIAG: this node's parts are the canonical upload's");
         set_holding(state, model, Holding::Canonical);
+        queue.forget(model);
         let _ = std::fs::remove_dir_all(staging_dir(state, model));
         return;
     }
@@ -406,7 +502,7 @@ async fn settle(
         &build,
         &held,
         manifest.as_ref(),
-        switched,
+        queue,
     )
     .await;
 }
@@ -418,7 +514,7 @@ async fn switch_when_possible(
     build: &CanonicalBuild,
     held: &[u32],
     manifest: Option<&crate::types::ModelManifest>,
-    switched: &mut bool,
+    queue: &mut SwitchQueue,
 ) {
     if matches!(
         holding(state, model),
@@ -428,22 +524,38 @@ async fn switch_when_possible(
     ) {
         return;
     }
-    if *switched {
-        // One switch at a time; say that this one is queued.
-        if !matches!(holding(state, model), Some(Holding::Switching { .. })) {
-            set_holding(
-                state,
-                model,
-                Holding::Switching {
-                    fetched: 0,
-                    needed: 0,
-                },
-            );
+    match queue.turn_for(model, tokio::time::Instant::now()) {
+        Turn::Go => {}
+        Turn::Queued => {
+            // One switch fetches at a time; say that this one is queued —
+            // unless it is stuck, which says more.
+            if !matches!(
+                holding(state, model),
+                Some(Holding::Switching { .. } | Holding::Stuck { .. })
+            ) {
+                set_holding(
+                    state,
+                    model,
+                    Holding::Switching {
+                        fetched: 0,
+                        needed: 0,
+                    },
+                );
+            }
+            return;
         }
-        return;
+        // Its `Stuck` state stays on show until it is tried again.
+        Turn::BackedOff => return,
     }
-    *switched = true;
-    switch_to(state, net_tx, model, build, held, manifest).await;
+    let turn = switch_to(state, net_tx, model, build, held, manifest).await;
+    if turn == SwitchTurn::HuggingFaceFailed {
+        tracing::info!(
+            model = %model,
+            "Switching this model to the canonical upload could not go ahead — trying the \
+             other models now, and this one again later"
+        );
+    }
+    queue.record(model, turn, tokio::time::Instant::now());
 }
 
 /// Is every held part's first tensor byte-identical to the upload's?
@@ -719,7 +831,8 @@ async fn ensure_header(state: &Arc<SharedState>, model: &ModelId, build: &Canoni
 }
 
 /// Fetch the canonical upload's parts covering the layers this node holds,
-/// then swap them in for the old ones.
+/// then swap them in for the old ones. Says what the turn came to, so a switch
+/// that cannot go ahead never holds up the others ([`SwitchQueue`]).
 async fn switch_to(
     state: &Arc<SharedState>,
     net_tx: &mpsc::Sender<NetworkCommand>,
@@ -727,17 +840,18 @@ async fn switch_to(
     build: &CanonicalBuild,
     held: &[u32],
     manifest: Option<&crate::types::ModelManifest>,
-) {
+) -> SwitchTurn {
     let header = match staged_header(state, model, build).await {
         Ok(h) => h,
         Err(e) => {
-            tracing::debug!(model = %model, error = %e, "Could not fetch the canonical header yet");
-            return;
+            tracing::info!(model = %model, error = %e, "Could not fetch the canonical upload's header to switch this model");
+            set_holding(state, model, Holding::Stuck { reason: "download" });
+            return SwitchTurn::HuggingFaceFailed;
         }
     };
     let Some(layouts) = build.layouts_from_header(&header) else {
         set_holding(state, model, Holding::Stuck { reason: "download" });
-        return;
+        return SwitchTurn::HuggingFaceFailed;
     };
     let ranges: Vec<(u32, u32)> = manifest
         .map(|m| {
@@ -775,7 +889,8 @@ async fn switch_to(
             );
         }
         set_holding(state, model, Holding::Stuck { reason: "disk" });
-        return;
+        // A smaller switch queued behind this one may still fit.
+        return SwitchTurn::NothingFetched;
     }
     if !matches!(holding(state, model), Some(Holding::Switching { needed, .. }) if needed > 0) {
         tracing::info!(
@@ -803,6 +918,7 @@ async fn switch_to(
     }
     let cancel = state.models.live_cancel_flag(model);
     let needed = targets.len() as u32;
+    let mut fetched_any = false;
     for (done, &index) in targets.iter().enumerate() {
         set_holding(
             state,
@@ -815,6 +931,7 @@ async fn switch_to(
         if part_is_staged(&staging, build, index) {
             continue;
         }
+        fetched_any = true;
         if let Err(e) = crate::model::huggingface::download_shard(
             &build.source.repo_id,
             &build.source.filename,
@@ -834,14 +951,17 @@ async fn switch_to(
                     reason: if cancelled { "cancelled" } else { "download" },
                 },
             );
-            return;
+            // A cancelled switch is the owner's decision and is not retried at
+            // all (`switch_when_possible`); either way it holds nobody up.
+            return SwitchTurn::HuggingFaceFailed;
         }
     }
     let meta = match crate::inference::split::GgufTensorMeta::from_gguf_file(&header) {
         Ok(m) => m,
         Err(e) => {
             tracing::warn!(model = %model, error = %e, "The canonical header does not parse");
-            return;
+            set_holding(state, model, Holding::Stuck { reason: "download" });
+            return SwitchTurn::HuggingFaceFailed;
         }
     };
     if let Err(e) = crate::model::huggingface::download_sidecar_tensors(
@@ -854,7 +974,7 @@ async fn switch_to(
     {
         tracing::warn!(model = %model, error = %e, "Fetching the canonical side files failed");
         set_holding(state, model, Holding::Stuck { reason: "download" });
-        return;
+        return SwitchTurn::HuggingFaceFailed;
     }
     set_holding(
         state,
@@ -866,10 +986,14 @@ async fn switch_to(
     );
     // Swap only while nothing is using the model and nothing else is writing
     // its parts; the staged parts wait for the next pass otherwise.
-    if state.model_is_in_use(model) || state.models.model_has_live_shard_download(model) {
-        return;
+    if !(state.model_is_in_use(model) || state.models.model_has_live_shard_download(model)) {
+        swap_in(state, net_tx, model, build, &targets, held).await;
     }
-    swap_in(state, net_tx, model, build, &targets, held).await;
+    if fetched_any {
+        SwitchTurn::Fetched
+    } else {
+        SwitchTurn::NothingFetched
+    }
 }
 
 fn part_is_staged(staging: &Path, build: &CanonicalBuild, index: u32) -> bool {
@@ -1088,6 +1212,89 @@ mod tests {
         );
         assert_eq!(read("hf_source.json").as_deref(), Some(&b"old"[..]));
         assert_eq!(read("notes.txt").as_deref(), Some(&b"old"[..]));
+    }
+
+    fn m(id: &str) -> ModelId {
+        ModelId(id.into())
+    }
+
+    /// The field shape (2026-10-03): the first model in name order cannot be
+    /// switched. The models behind it must still get their turn in the SAME
+    /// pass — before, the turn was taken before the attempt and the first
+    /// failure blocked the rest on every pass.
+    #[test]
+    fn a_switch_that_cannot_go_ahead_does_not_hold_up_the_ones_behind_it() {
+        let now = tokio::time::Instant::now();
+        let mut q = SwitchQueue::default();
+        q.new_pass();
+        let (stuck, small, big) = (
+            m("llama-xlam-2-8b-fc-r-q4-k-m"),
+            m("mistral-7b-instruct-v0.3-q4-k-m"),
+            m("thudm-glm-4-9b-0414-q4-k-m"),
+        );
+        assert_eq!(q.turn_for(&stuck, now), Turn::Go);
+        q.record(&stuck, SwitchTurn::HuggingFaceFailed, now);
+        assert_eq!(
+            q.turn_for(&small, now),
+            Turn::Go,
+            "the next model is not blocked"
+        );
+        q.record(&small, SwitchTurn::Fetched, now);
+        assert_eq!(
+            q.turn_for(&big, now),
+            Turn::Queued,
+            "one switch FETCHES per pass — the connection is still shared out"
+        );
+    }
+
+    /// A switch with no room on disk asked nobody anything: it holds no turn
+    /// and is re-checked next pass, so freeing space takes effect at once.
+    #[test]
+    fn no_room_on_disk_holds_no_turn_and_waits_out_no_backoff() {
+        let now = tokio::time::Instant::now();
+        let mut q = SwitchQueue::default();
+        let big = m("qwen2.5-14b-instruct-q4-k-m");
+        q.new_pass();
+        q.record(&big, SwitchTurn::NothingFetched, now);
+        assert_eq!(q.turn_for(&m("other"), now), Turn::Go);
+        q.new_pass();
+        assert_eq!(q.turn_for(&big, now + PASS_EVERY), Turn::Go);
+    }
+
+    /// HuggingFace failing a switch is not asked about it again every two
+    /// minutes: the wait doubles from ten minutes to six hours, and a success
+    /// (or the model no longer needing a switch) clears it.
+    #[test]
+    fn a_switch_huggingface_failed_backs_off_doubling_up_to_a_ceiling() {
+        let t0 = tokio::time::Instant::now();
+        let mut q = SwitchQueue::default();
+        let x = m("x-q4-k-m");
+        q.record(&x, SwitchTurn::HuggingFaceFailed, t0);
+        assert_eq!(q.turn_for(&x, t0 + PASS_EVERY), Turn::BackedOff);
+        assert_eq!(q.turn_for(&x, t0 + SWITCH_BACKOFF_FIRST), Turn::Go);
+
+        let t1 = t0 + SWITCH_BACKOFF_FIRST;
+        q.record(&x, SwitchTurn::HuggingFaceFailed, t1);
+        assert_eq!(
+            q.turn_for(&x, t1 + SWITCH_BACKOFF_FIRST),
+            Turn::BackedOff,
+            "the second wait is twice the first"
+        );
+        assert_eq!(q.turn_for(&x, t1 + 2 * SWITCH_BACKOFF_FIRST), Turn::Go);
+
+        let mut t = t1;
+        for _ in 0..20 {
+            q.record(&x, SwitchTurn::HuggingFaceFailed, t);
+            t += SWITCH_BACKOFF_MAX;
+        }
+        assert_eq!(q.backoff[&x].1, SWITCH_BACKOFF_MAX, "capped");
+
+        q.record(&x, SwitchTurn::Fetched, t);
+        q.new_pass();
+        assert_eq!(q.turn_for(&x, t), Turn::Go, "a success clears the backoff");
+        q.record(&x, SwitchTurn::HuggingFaceFailed, t);
+        q.forget(&x);
+        assert_eq!(q.turn_for(&x, t), Turn::Go, "and so does being canonical");
     }
 
     /// Parts staged for one upload are never swapped in for another: switching

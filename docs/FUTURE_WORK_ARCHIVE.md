@@ -16392,3 +16392,70 @@ the host's uptime, #755). Local decode rose more (to ~61), so the split's share 
 When an item in `docs/FUTURE_WORK.md` closes, its line moves to that file's § "Closed" and
 any history worth keeping — what was measured, what the fix replaced — is appended here
 under a heading naming its number.
+
+### #156 — a node computing with a header from another upload (closed 2026-10-03)
+
+**As the entry stood.** After v0.3.221 the release node switched Qwen2.5-Coder-7B to the
+official upload and answered correctly alone. Splits that put a middle part on peers
+`9594e1ff` / `e561df35` — whose part build tags EQUAL ours, so the build filter admitted them —
+returned `0000…`, `[PAD152063]` or `Tensor contains non-finite values` (2026-10-02 11:34-11:44
+UTC). Hypothesis: their `gguf_header.bin` / manifest described another upload (gotchas
+#775/#776); two uploads with identical tensor bytes (Q8_0) pass every part check, so the header
+is the only witness that differs. A 2-node split of the release node's own copy was correct.
+
+**Re-test 2026-10-03 00:41 UTC.** `pretend_local_holds: none` routed the whole model to
+`4a3ac72e` (one segment) and answered correctly; excluding it, no admissible peer held layers
+18-21 — the failing split could no longer be formed, so the hypothesis could be neither
+confirmed nor cleared from the field. Built instead from the mechanism, which needs no
+confirmation: the loader takes every tensor's dtype/shape/offset from the header and
+`ShardReader` maps that offset into the tensor table, and nothing compared the two.
+
+**The fix.** `split::loader::shards::first_header_disagreement` in `load_from_shards_inner`
+(name, absolute offset, size per table entry; size by `split::tensor_byte_size`, the same
+computation tables are cut by) → `SwarmError::MixedModelCopy` (503, local-only for penalties).
+Per entry rather than by re-deriving the layout, so a table an older layout build wrote still
+loads. On a peer the Display's "shard" makes `sanitize_peer_facing_error` send
+`PEER_FACING_MISSING_SHARDS`, and the coordinator's existing missing-shard path retracts the
+claim, bars the peer for the request and fails over — no protocol change, no feature bit.
+Precedent: llama.cpp's `gguf_init_from_reader` refuses a header whose tensor offsets disagree
+with the data layout. Rig: `examples/split_rig.sh mixed` with `examples/plant_mixed_header.py`.
+
+**Measured 2026-10-03** (TinyLlama, CPU, B holding every part under a planted header). A
+header 448 bytes SHORTER (chat template dropped): v0.3.221 answered the request routed only
+through B with 200 OK and `给给给给…` — one character repeated, the field's "output is a single
+repeated character"; the fix refused (B logged it once), A retracted B's claim, the caller got
+"No reachable node holds layers 12-21", and with the healthy holder up the reply equalled the
+control. A header 3,872 bytes LONGER failed on both builds ("failed to fill whole buffer" —
+the last tensor ran past the data), #776's error shape. The rig also found that a WHOLE-model
+hand-off returned the peer's worker error verbatim — no retraction, and the caller told its own
+copy was mixed — fixed at the serving node (`worker_failure_for_the_coordinator`).
+
+### #158 — a peer's manifest replacing ours mid-download (closed 2026-10-03)
+
+**As the entry stood.** The root of #776: a dashboard download of upload X registered X's
+manifest; a peer's manifest of Y arrived before any part landed and won (last writer wins —
+`register_manifest` refuses another build only once the model has origin knowledge); the
+download then wrote X's manifest to disk. v0.3.221 repaired the END state
+(`ensure_manifest`); the window remained, because a dashboard download fetches the clicked
+upload at once when no canonical upload is known yet.
+
+**The fix.** `SharedState::judge_peer_manifest` is the dispatcher's one decision for a peer's
+manifest: another upload than the canonical one → dropped (as before); otherwise, another
+BUILD than the registered manifest while `model_download_under_way` (a part claim, or a
+`Downloading` entry under 6 h old — the same predicate the canonical heal waits on, now one
+method) → dropped. Test `a_peers_manifest_of_another_build_never_replaces_the_one_being_downloaded`.
+
+### #213 — one model that could not switch blocked every switch behind it (opened and closed 2026-10-03)
+
+Found by checking P0-2 ("watch the swarm converge") 13 h after v0.3.221: every peer was on
+.221, yet `peers_other_build` summed to 12 over 9 models and `A peer holds a different build`
+re-logged hourly — `4a3ac72e` for GLM-4-9B, Mistral-7B, xLAM-2-3B and Llama-xLAM-8B,
+`e561df35` for Qwen2.5-14B, `bf7b3263` for Llama-xLAM-8B. `9594e1ff` had switched all eight of
+its models by 13:00. The peers' own claims named the same uploads this node had adopted, so
+the CHOICE had converged; the SWITCH had not. `switch_when_possible` set `switched = true`
+before `switch_to` ran, whatever came of it, so a model that failed every pass held the turn on
+every pass (retried against HuggingFace every 2 min) and every model after it in name order
+never had one. `4a3ac72e`'s stuck set begins at `llama-xlam-2-8b`, first in name order; its
+Qwen-Coder had healed because a header-only repair does not take the turn. The peers' own
+failure reasons were not observable from here. Fix: `SwitchQueue` (Kubernetes' backoff queue,
+kubernetes#71486); gotcha #780.

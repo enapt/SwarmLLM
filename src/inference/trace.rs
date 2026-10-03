@@ -876,6 +876,7 @@ pub fn error_kind(err: &crate::error::SwarmError) -> &'static str {
         E::InsufficientCapacity(_) => "InsufficientCapacity",
         E::LocalMemoryUnavailable(_) => "LocalMemoryUnavailable",
         E::LongerThanPeerServes(_) => "LongerThanPeerServes",
+        E::MixedModelCopy(_) => "MixedModelCopy",
         E::InsufficientCredits { .. } => "InsufficientCredits",
         E::InsufficientDisk { .. } => "InsufficientDisk",
         E::Internal(_) => "Internal",

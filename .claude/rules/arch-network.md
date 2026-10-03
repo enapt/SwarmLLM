@@ -81,7 +81,7 @@ The 100-entry `emit_activity` ring is the dashboard replay and the report's rece
 
 ## One upload per model id, on every node (2026-10-02)
 
-**`model::canonical`** is the single answer to "which file IS this model". `hf_sources` is written only through `note_origin_claim` / `adopt_canonical_build`; a header only through `fetch_model_header`; every download path asks `canonical_allows_acquisition`; `auto_manage::canonical` heals a node holding another upload. ⚠ **Never reorder `TRUSTED_HF_PUBLISHERS`** — its order is a swarm-wide contract (#151).
+**`model::canonical`** is the single answer to "which file IS this model". `hf_sources` is written only through `note_origin_claim` / `adopt_canonical_build`; a header only through `fetch_model_header`; every download path asks `canonical_allows_acquisition`; `auto_manage::canonical` heals a node holding another upload. ⚠ **Never reorder `TRUSTED_HF_PUBLISHERS`** — its order is a swarm-wide contract (#151). The heal's turn is taken only by a switch that FETCHED (`SwitchQueue`; a failure backs off and holds nobody up, #780); a peer's manifest goes through `SharedState::judge_peer_manifest` (another upload, or another build while a download here is under way — #158); the newcomer catch-up carries the claim with the manifest (`health::monitor::upload_claim`).
 
 → `docs/invariants/network.md` § "One upload per model id, on every node"
 

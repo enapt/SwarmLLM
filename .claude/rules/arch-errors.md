@@ -41,6 +41,7 @@ part of the type, not prose (#295).
 - `ProviderError {status, body}` → upstream returned an error OR its reply could not be parsed (`api/openai/responses/translate.rs`); preserves the upstream status. Not `Internal`, not `Validation`.
 - `Internal` → 500, actual bugs, only when no external party can be blamed (our own well-typed struct failing to serialize; NOT a subprocess crash).
 - `PeerUnresponsive` → 503, a peer took the request and went silent (ACK sweep, first-token deadline, `pipeline/local.rs::segment_timeout_error`). Penalty-ELIGIBLE, retried by TYPE (`router::peer_went_silent`, only after a remote segment was involved). ⚠ Every producer MUST call `blacklist_holder_for_request` on the silent peer FIRST, or the re-plan re-picks it and waits the deadline twice.
+- `MixedModelCopy` → 503, THIS node's header and tensor table describe two uploads; refused at load, never quarantined (the parts may be fine). Local-only for penalties: a peer's crosses the wire as missing shards — `sanitize_peer_facing_error` (layer forward), `worker_failure_for_the_coordinator` (whole-model hand-off) — which retracts that peer. A new path returning a worker's error to another node translates it too.
 - `SegmentFailoverExhausted` → 503, mid-pipeline holder failure with no standby. Not `ModelIncompleteInSwarm` (`assembly_failed_for_lack_of_holders` → a pointless DHT wait), not `ServiceUnavailable` (the peer-blacklist retry); penalty-exempt, it names no culprit.
 
 When unsure between `Internal`, `ProviderError` and `ServiceUnavailable`, follow

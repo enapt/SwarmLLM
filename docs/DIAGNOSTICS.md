@@ -371,10 +371,21 @@ should fall to 0 swarm-wide as nodes update.
 | WARN | `Replaced a header from another upload of this model` | the parts were right, `gguf_header.bin` was another upload's — replaced, model reloaded |
 | WARN | `Not fetching — this source is another upload than the manifest describes` | the old splice-two-uploads path, refused |
 | INFO | `Ignoring a manifest of another upload of this model` | a peer still on another upload (it switches too) |
+| INFO | `Ignoring a manifest of another build of this model while this node downloads it` | before the canonical upload is known, a peer's other build may not replace the manifest a running download fetches against (#158) |
+| INFO | `Could not fetch the canonical upload's header to switch this model` | the switch cannot start; state `stuck`/`download` |
+| INFO | `Switching this model to the canonical upload could not go ahead — trying the other models now, and this one again later` | HuggingFace failed the switch: it waits 10 min, doubling to 6 h, and holds no other model up (a disk shortfall waits for nothing and holds nobody up either) |
+| WARN | `Refusing to load: this model's header and its tensor table describe different uploads` | a MIXED copy (#156): loading would read every tensor from the wrong place. Locally a 503 (`mixed_model_copy`); on a peer, the coordinator sees `Required shards not available`, retracts it and re-routes |
+
+**A peer still counted in `peers_other_build` long after an update** is a peer
+that cannot switch — the count does not say why (disk, HuggingFace, or offline
+mode, which never switches). Its operator's `shared_copy.this_computer` does.
+Before v0.3.222, one such model also kept every model after it (in name order)
+from switching (gotcha #780).
 
 `SWARMLLM_CANONICAL_UPLOADS=0` switches all of it off (rigs and gates that link a
 node's files into throwaway nodes set it; it is also the A/B control). The
-header-source check (`fetch_model_header`) stays on either way.
+header-source check (`fetch_model_header`) and the load-time header check stay
+on either way.
 
 ## "Why is this node talking to a stranger?"
 

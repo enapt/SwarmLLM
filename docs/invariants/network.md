@@ -3052,6 +3052,37 @@ now makes the registry AND the disk manifest describe the canonical upload
 each part's first-tensor offset where a manifest carries its table. Verified on
 the same race: "Rewrote this model's manifest", then "Paris" whole and split.
 
+**The swarm did not converge on .221 — the heal's queue (2026-10-03, #213, gotcha
+#780).** 13 h after every peer reached v0.3.221, `peers_other_build` summed to 12
+over 9 models: three peers still held another upload of six models between them,
+while a fourth (`9594e1ff`) had switched all eight of its own. Their claims named
+the uploads this node had adopted — the CHOICE converged, the SWITCH did not.
+"One switch at a time" was taken before the attempt, whatever came of it, so a
+model that could not switch (no room to stage, HuggingFace refusing) held the
+turn on every pass and blocked every model after it in name order, for ever.
+`SwitchQueue` now gives the turn only to a switch that FETCHED; a disk shortfall
+holds none and is re-checked next pass; a HuggingFace failure holds none and backs
+off 10 min, doubling to 6 h — Kubernetes' scheduling queue met the same
+head-of-line blocking (an unschedulable pod at the head, kubernetes#71486) and
+answered with the same backoff queue. Test
+`a_switch_that_cannot_go_ahead_does_not_hold_up_the_ones_behind_it` fails with
+the old rule toggled back in ("the next model is not blocked": Queued, not Go).
+
+**Two more doors closed the same day.** A max-register converges only on claims
+every node is eventually delivered, and the newcomer catch-up carried manifests
+but not the claims — those rode only on broadcasts, which are suppressed while
+the swarm has heard the manifest. `health::monitor::upload_claim` is now the one
+builder of a node's claim, sent with every manifest on BOTH paths (Demers et
+al.'s anti-entropy beside rumour mongering). And #158: before the canonical
+upload is known, a peer's manifest of another BUILD may no longer replace the one
+a running download fetches against (`SharedState::judge_peer_manifest`,
+`ModelMgmt::model_download_under_way` — the predicate the heal already waited
+on, now one method).
+
+**What a change must keep:** a turn-limited heal step is taken only by work that
+started; a failure backs off and never blocks the queue. A peer's manifest is
+judged in ONE place. A node's claim travels wherever its manifests do.
+
 **Known limits (FUTURE_WORK #151):** a switch fetches from HuggingFace, not from
 canonical holders over P2P; a coordinator holding none of a model routes on a
 manifest with placeholder hashes until a holder's gossip fills them, so for that
