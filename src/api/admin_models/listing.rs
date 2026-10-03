@@ -16,7 +16,7 @@ use super::validate_model_id;
 /// model, while the same number with `other_build > 0` means plenty of people
 /// have it in a build whose bytes would fail our hash check. Reporting the
 /// first without the second is what let a filtered count read as reassurance.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Default)]
 struct ModelPeerCounts {
     /// Peers holding at least ONE part of this model whose copy we could fetch
     /// and verify. A partial holder is a real contributor — a split pipeline
@@ -35,8 +35,12 @@ struct ModelPeerCounts {
     /// complete copy. A reader who cannot see this pair cannot tell a model
     /// with five replicas from one with a single point of failure.
     complete: usize,
-    /// Peers that positively claim a different GGUF build of the same model id.
-    other_build: usize,
+    /// Peers that positively claim a different GGUF build of the same model id,
+    /// by node id, sorted — the count is this list's length, so the two cannot
+    /// disagree. Named, not only counted: on 2026-10-03, finding which peer
+    /// still held a wrong part after v0.3.223 took log archaeology, because the
+    /// conflict line is written only on a change (gotcha #780, FUTURE_WORK #215).
+    other_build: Vec<String>,
 }
 
 impl ModelPeerCounts {
@@ -51,7 +55,11 @@ impl ModelPeerCounts {
         Self {
             servable: servable.get(key).map_or(0, |s| s.len()),
             complete: complete.get(key).map_or(0, |s| s.len()),
-            other_build: other_build.get(key).map_or(0, |s| s.len()),
+            other_build: other_build.get(key).map_or_else(Vec::new, |s| {
+                let mut nodes: Vec<String> = s.iter().cloned().collect();
+                nodes.sort();
+                nodes
+            }),
         }
     }
 }
@@ -397,7 +405,10 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
             // because they cannot serve us, and reported here because a number
             // that silently drops is the one thing worse than a number that is
             // too high: the user is owed the reason.
-            "peers_other_build": peers.other_build,
+            "peers_other_build": peers.other_build.len(),
+            // WHICH computers those are, so a peer that never heals can be
+            // named without reading the log (FUTURE_WORK #215).
+            "peers_other_build_nodes": peers.other_build,
             "shards": shards,
             "trust_level": trust_level,
             "encrypted_pipeline": enc_info.0,
@@ -1640,5 +1651,42 @@ mod complete_holder_tests {
         all_parts.insert(model.clone(), parts(&[0, 1]));
 
         assert_eq!(complete_holders(&peer_parts, &all_parts)[&model].len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod other_build_tests {
+    use super::ModelPeerCounts;
+    use std::collections::{HashMap, HashSet};
+
+    /// The peers holding another build are NAMED, in a stable order, and the
+    /// count reported beside them is their number — one lookup, so the two
+    /// cannot disagree. The fixture is the 2026-10-03 reading: one peer that
+    /// never healed beside two that were still repairing.
+    #[test]
+    fn the_peers_holding_another_build_are_named_and_counted_from_one_lookup() {
+        let model = "qwen2.5-14b-instruct-q4-k-m";
+        let mut other: HashMap<String, HashSet<String>> = HashMap::new();
+        other.insert(
+            model.to_string(),
+            ["e561df35d8c9a3ac", "9594e1ffaa2d8156", "99aafc41aaaaaaaa"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        );
+        let none = HashMap::new();
+
+        let counts = ModelPeerCounts::for_model(model, &none, &none, &other);
+        assert_eq!(
+            counts.other_build,
+            vec!["9594e1ffaa2d8156", "99aafc41aaaaaaaa", "e561df35d8c9a3ac"],
+            "named and sorted, so two readings of one swarm compare line by line"
+        );
+
+        let unknown = ModelPeerCounts::for_model("not-heard-of", &none, &none, &other);
+        assert!(
+            unknown.other_build.is_empty(),
+            "a model nobody holds in another build names nobody"
+        );
     }
 }

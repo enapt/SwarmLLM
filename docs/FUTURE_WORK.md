@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #216**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #217**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -133,17 +133,39 @@ peers' claims and fetch canonical parts over P2P against a canonical-shaped mani
 repair queue already prefers peers when a part's hash is known; #157 closed 2026-10-03) — but
 it has no way to check a peer's bytes against the upload, only against a peer's hash. A
 workable bar: accept a hash for a part when holders whose own heal verified it agree on it
-(their announced tags are truthful since .223). Also worth a look first: whether the heal's
-HuggingFace calls can hang rather than fail (`read_public_range`, `probe_public_upload`) — a
-hang would stall the whole pass silently, and the observable is the same.
+(their announced tags are truthful since .223).
 
-#### #215 — `/api/admin/models` says how many peers hold another build, not which
-`P3` · diagnostics · **OPEN** — 2026-10-03
+**Narrowed 2026-10-03 13:00 UTC — not Windows, not a hang.** `9594e1ff` is no longer Docker:
+it reports `os: windows`, v0.3.223, restarted ~11:20 UTC, and announced the same 70 parts
+(same tags) ever since — its heal never reached `replace_parts`, which always withdraws what
+it deletes, even when the delete fails. Every model it holds in another build names the SAME
+HuggingFace repo as the canonical choice, and whole runs of parts differ (Llama-3.2-3B 0-1,
+Qwen2.5-14B 1-3 and 11-15). (1) The released Windows CPU build heals on Windows: on the
+project's Windows box a TinyLlama copy with its last part zeroed under a manifest vouching
+for it (`split_rig.sh spliced`'s shape) got the verdict 36 s after start, the part deleted,
+re-fetched from HuggingFace and byte-identical, `canonical`. (2) The HuggingFace calls cannot
+hang: `HF_META_CLIENT` has a 120 s total timeout, so a call is bounded at 4 attempts plus
+155 s of backoff (~10 min). What is left is local to that node, and its `/api/admin/models`
+`shared_copy.this_computer.state` tells the cases apart: absent or `nothing` with parts held →
+no upload ever verified (offline mode — `pass` returns at once — or no route to HuggingFace);
+`own_file` → served from the owner's own GGUF (`source_path`), never replaced by design;
+`replacing` → waiting for the model to be idle; `canonical` → its parts pass the 64 KB check and
+no dispute was recorded, i.e. bytes differing only past each part's first tensor slipped
+through both doors — a design gap, not a local condition. Ask the owner for that field
+before building the peer-sourced heal; which case it is decides whether that heal fixes it.
 
-`peers_other_build` is a count; finding WHICH peer still holds a wrong part took log archaeology
-on 2026-10-03 (the conflict line is written only on a change, gotcha #780). The listing already
-builds the set (`model_peers_other_build` in `api/admin_models/listing.rs`) — expose the node ids
-beside the count, additively.
+#### #216 — A part the heal deletes right after a restart waits up to 5 min to be fetched again
+`P3` · storage · **OPEN** — 2026-10-03
+
+The canonical heal's first pass runs 30 s after start and deletes a part whose bytes are not the
+upload's at once, but the repair queue is drained by `AutoShardManager::run`, which sleeps its
+per-node phase offset (0-300 s, BLAKE3 of the node id mod the interval) before its loop — and so
+before the notify arm that `mark_shard_for_repair` wakes. Measured on the Windows rig
+2026-10-03: deleted 12:38:26, loop started 12:42:35 (offset 284 s), fetch 12:42:50, part back
+12:43:02 — the model was a part short for 4.5 min. The offset exists to spread `evaluate()`'s
+HuggingFace requests across a fleet that booted together; a repair is one named part, not a
+scan. Fix: service the notify arm's repair calls (`verify_pending_shards`,
+`complete_pending_shard_fetches`) during the offset sleep, leaving `evaluate()` where it is.
 
 #### #179 — A greedy reply (`temperature: 0`) is not reproducible run to run on the processor
 `P3` · correctness · **OPEN** — 2026-08-18 · history: archive § "`temperature: 0` with a fixed seed is not reproducible", gotcha #327
@@ -1289,6 +1311,12 @@ archive under the named heading. Reopen one only with the evidence its line name
 Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 19-28 were
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
+
+**Closed 2026-10-03, after v0.3.223**
+- #215 — `/api/admin/models` named no peer behind `peers_other_build`: it now lists them as
+  `peers_other_build_nodes` (node ids, sorted), and the count is that list's length
+  (`ModelPeerCounts`), so the two cannot disagree. Finding the one peer that never healed after
+  v0.3.223 took log archaeology the same day (the conflict line is written only on a change).
 
 **Closed 2026-10-03, after v0.3.222** (`docs/invariants/network.md` § "A node vouches only for
 bytes that are the swarm's upload"; gotcha #782)
