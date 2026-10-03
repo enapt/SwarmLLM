@@ -135,15 +135,20 @@ it has no way to check a peer's bytes against the upload, only against a peer's 
 workable bar: accept a hash for a part when holders whose own heal verified it agree on it
 (their announced tags are truthful since .223).
 
-**Narrowed 2026-10-03 13:00 UTC — not Windows, not a hang.** `9594e1ff` is no longer Docker:
-it reports `os: windows`, v0.3.223, restarted ~11:20 UTC, and announced the same 70 parts
-(same tags) ever since — its heal never reached `replace_parts`, which always withdraws what
-it deletes, even when the delete fails. Every model it holds in another build names the SAME
-HuggingFace repo as the canonical choice, and whole runs of parts differ (Llama-3.2-3B 0-1,
-Qwen2.5-14B 1-3 and 11-15). (1) The released Windows CPU build heals on Windows: on the
-project's Windows box a TinyLlama copy with its last part zeroed under a manifest vouching
-for it (`split_rig.sh spliced`'s shape) got the verdict 36 s after start, the part deleted,
-re-fetched from HuggingFace and byte-identical, `canonical`. (2) The HuggingFace calls cannot
+**Narrowed 2026-10-03 13:00 UTC — not the build, not a hang.** `9594e1ff` runs v0.3.223,
+restarted ~11:20 UTC, and announced the same 70 parts (same tags) ever since — its heal never
+reached `replace_parts`, which always withdraws what it deletes, even when the delete fails.
+Every model it holds in another build names the SAME HuggingFace repo as the canonical
+choice, and whole runs of parts differ (Llama-3.2-3B 0-1, Qwen2.5-14B 1-3 and 11-15). How it
+runs is unsettled: its owner said on Discord it runs in Docker, and on 2026-10-01 it reported
+`os: linux` from `172.17.0.2`; on 10-03 it reports `os: windows` (`std::env::consts::OS`, a
+constant of the binary) from the host's own addresses — the identity has moved between a
+Windows install and a container at least once, or both run. Either way the build is not the
+cause: (1) the released Windows CPU build heals on Windows — on the project's Windows box a
+TinyLlama copy with its last part zeroed under a manifest vouching for it (`split_rig.sh
+spliced`'s shape) got the verdict 36 s after start, the part deleted, re-fetched from
+HuggingFace and byte-identical, `canonical`; the Linux build (what the container runs) passes
+the same rig and healed `e561df35` (Linux) the same day. (2) The HuggingFace calls cannot
 hang: `HF_META_CLIENT` has a 120 s total timeout, so a call is bounded at 4 attempts plus
 155 s of backoff (~10 min). What is left is local to that node, and its `/api/admin/models`
 `shared_copy.this_computer.state` tells the cases apart: absent or `nothing` with parts held →
@@ -151,8 +156,9 @@ no upload ever verified (offline mode — `pass` returns at once — or no route
 `own_file` → served from the owner's own GGUF (`source_path`), never replaced by design;
 `replacing` → waiting for the model to be idle; `canonical` → its parts pass the 64 KB check and
 no dispute was recorded, i.e. bytes differing only past each part's first tensor slipped
-through both doors — a design gap, not a local condition. Ask the owner for that field
-before building the peer-sourced heal; which case it is decides whether that heal fixes it.
+through both doors — a design gap, not a local condition. Ask the owner for that field, and
+how the node runs now (container or Windows app, and which data folder), before building the
+peer-sourced heal; which case it is decides whether that heal fixes it.
 
 #### #216 — A part the heal deletes right after a restart waits up to 5 min to be fetched again
 `P3` · storage · **OPEN** — 2026-10-03
