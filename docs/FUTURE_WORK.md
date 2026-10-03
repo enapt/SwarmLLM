@@ -39,8 +39,8 @@ Re-ranked 2026-10-02 after the verification, and 2026-10-03 when #156, #158 and 
 **P0 — wrong answers, silently**
 1. *(none open: #156 closed 2026-10-03 — a mixed copy is refused at load.)*
 2. **Watch the live swarm converge (no code)**: `peers_other_build` → 0 per model once peers
-   run the release after v0.3.221 — on .221 it did NOT (12 holdings on 3 peers after 13 h,
-   #213). A peer still counted a day after updating is one that cannot switch (disk,
+   run the release after v0.3.221 — on .221 it did NOT (12 holdings on at least 4 peers after
+   13 h, #213; `9594e1ff` switched none of its ~8 models). A peer still counted a day after updating is one that cannot switch (disk,
    HuggingFace, offline mode); `docs/DIAGNOSTICS.md` § "Which copy of this model does this
    node hold?".
 
@@ -1286,8 +1286,9 @@ grep `^| N |`).
   dispatcher's one decision for a peer's manifest).
 - #213 — one model whose switch to the canonical upload could not go ahead blocked every model
   after it, on every pass, for ever (the turn was taken before the attempt) and was retried
-  against HuggingFace every 2 minutes. Found live 13 h after v0.3.221: 12 holdings on 3 peers
-  never converged (gotcha #780). `SwitchQueue`: only a switch that fetched holds the turn; a
+  against HuggingFace every 2 minutes. Found live 13 h after v0.3.221: 12 holdings on at least
+  4 peers never converged, one of them (`9594e1ff`, Docker) having switched none of its ~8
+  models (gotcha #780). `SwitchQueue`: only a switch that fetched holds the turn; a
   HuggingFace failure backs off 10 min → 6 h. The newcomer catch-up also carries the upload
   claim with each manifest now.
 

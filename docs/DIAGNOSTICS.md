@@ -382,6 +382,12 @@ mode, which never switches). Its operator's `shared_copy.this_computer` does.
 Before v0.3.222, one such model also kept every model after it (in name order)
 from switching (gotcha #780).
 
+⚠ **`A peer holds a different build` is logged when a holder's build CHANGES (or a
+record is re-added), not per announcement** — a peer that stops appearing in it has
+not necessarily switched. Read the CURRENT state from `peers_other_build`; to see who,
+restart nothing and wait for a re-add, or compare its claimed builds after this node's
+next restart against the day before (the 2026-10-03 misreading, gotcha #780).
+
 `SWARMLLM_CANONICAL_UPLOADS=0` switches all of it off (rigs and gates that link a
 node's files into throwaway nodes set it; it is also the A/B control). The
 header-source check (`fetch_model_header`) and the load-time header check stay

@@ -3054,8 +3054,9 @@ the same race: "Rewrote this model's manifest", then "Paris" whole and split.
 
 **The swarm did not converge on .221 — the heal's queue (2026-10-03, #213, gotcha
 #780).** 13 h after every peer reached v0.3.221, `peers_other_build` summed to 12
-over 9 models: three peers still held another upload of six models between them,
-while a fourth (`9594e1ff`) had switched all eight of its own. Their claims named
+over 9 models, from at least four peers — one of them (`9594e1ff`, a Docker
+container) had switched NONE of its ~8 models (first misread as "all eight": its
+conflict line is logged only on a change, so its silence meant nothing). Their claims named
 the uploads this node had adopted — the CHOICE converged, the SWITCH did not.
 "One switch at a time" was taken before the attempt, whatever came of it, so a
 model that could not switch (no room to stage, HuggingFace refusing) held the

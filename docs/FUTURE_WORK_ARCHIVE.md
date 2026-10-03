@@ -16450,8 +16450,12 @@ method) → dropped. Test `a_peers_manifest_of_another_build_never_replaces_the_
 Found by checking P0-2 ("watch the swarm converge") 13 h after v0.3.221: every peer was on
 .221, yet `peers_other_build` summed to 12 over 9 models and `A peer holds a different build`
 re-logged hourly — `4a3ac72e` for GLM-4-9B, Mistral-7B, xLAM-2-3B and Llama-xLAM-8B,
-`e561df35` for Qwen2.5-14B, `bf7b3263` for Llama-xLAM-8B. `9594e1ff` had switched all eight of
-its models by 13:00. The peers' own claims named the same uploads this node had adopted, so
+`e561df35` for Qwen2.5-14B, `bf7b3263` for Llama-xLAM-8B. **Corrected the same day:** this first
+said `9594e1ff` had switched all eight of its models by 13:00, because it stopped appearing in
+the log — but that line is written only when a holder's build CHANGES, so its silence meant
+nothing. After this node restarted (05:52 UTC 10-03) `9594e1ff` (a Docker container on Windows)
+announced the SAME old hashes it had at 11:19 the day before: it had switched none of them —
+which fits the queue fault at least as well (every model behind its first failing one). The peers' own claims named the same uploads this node had adopted, so
 the CHOICE had converged; the SWITCH had not. `switch_when_possible` set `switched = true`
 before `switch_to` ran, whatever came of it, so a model that failed every pass held the turn on
 every pass (retried against HuggingFace every 2 min) and every model after it in name order

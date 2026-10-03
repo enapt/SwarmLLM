@@ -106,10 +106,12 @@ enum SwitchTurn {
 /// came of it — so the first model (in name order) that could not switch
 /// blocked every model after it, on every pass, for ever, and was itself
 /// retried against HuggingFace every two minutes. Measured on the live swarm
-/// 2026-10-03, 13 h after every peer reached v0.3.221: `9594e1ff` had switched
-/// all eight of its models, while `4a3ac72e` still held another upload of
-/// four — `llama-xlam-2-8b` first in name order, the other three behind it —
-/// and `bf7b3263` of `llama-xlam-2-8b` alone. Kubernetes met this as an
+/// 2026-10-03, 13 h after every peer reached v0.3.221: `peers_other_build`
+/// summed to 12 over 9 models, from at least four peers — `9594e1ff` (a
+/// Docker container) had switched NONE of its ~8 models, `4a3ac72e` still held
+/// another upload of four, `llama-xlam-2-8b` first in name order. (A first
+/// reading said `9594e1ff` had switched all eight: its conflict line is logged
+/// only on a CHANGE, so its silence meant nothing.) Kubernetes met this as an
 /// unschedulable pod blocking the head of its scheduling queue
 /// (kubernetes#71486) and answered the same way: a failed attempt goes to a
 /// backoff queue with an exponentially growing wait, and the queue moves on.
