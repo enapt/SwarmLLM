@@ -383,6 +383,14 @@ update.
 | WARN | `A peer's part matched our hash but is not the swarm's upload of this model` | the accept path's byte check: the hash our manifest held for that part was another upload's — the part is discarded and fetched from the upload itself; the peer is not penalised |
 | INFO | `This node is keeping bytes the swarm disagrees with … It announces the part as the bytes it is` (`bytes_build=`) | a dispute (#61): the part is announced under its OWN bytes' build tag (`unhashed` = a size mismatch, announced under a tag no peer expects) — before 2026-10-03 it was announced under the build it was told of |
 
+**Who is right about a part — settle it from the origin.** When peers disagree about a
+part's hash, hash the part's byte range straight from HuggingFace and compare: the range is
+the part's first tensor's `gguf_offset − shard_offset` and its `size_bytes` (manifest), fetched
+with `Range: bytes=start-end` from `resolve/main/<file>` and BLAKE3'd. First check the repo's
+commit history (`/api/models/<repo>/commits/main`): a file replaced in place would make both
+sides "right" for different dates. 2026-10-03: GLM-4 part 4 on this node = HuggingFace
+(`35f07d7f…`), repo unchanged since 2025-04-30 — the disagreeing peers held wrong bytes.
+
 **A peer still counted in `peers_other_build` long after an update** is a peer
 that cannot replace its parts — the count does not say why (HuggingFace unreachable
 from it, the model always in use, or offline mode, which never checks). Its

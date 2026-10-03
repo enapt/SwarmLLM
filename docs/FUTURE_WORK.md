@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #215**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #216**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -33,7 +33,8 @@ residual).
 
 ## ▶ PRIORITIES — read this first
 
-Re-ranked 2026-10-02 after the verification, and 2026-10-03 when #156, #158 and #213 closed.
+Re-ranked 2026-10-02 after the verification, and 2026-10-03 when #156, #158 and #213 closed,
+then again after v0.3.223 (#157 and #164 closed, #160 raised to P1 on the swarm reading).
 `docs/plans/` holds the multi-step designs; the entries point at them.
 
 **P0 — wrong answers, silently**
@@ -44,30 +45,35 @@ Re-ranked 2026-10-02 after the verification, and 2026-10-03 when #156, #158 and 
    byte-checked against the upload — `docs/invariants/network.md` § "One upload per model id". Rigs
    `split_rig.sh disputed` and `spliced`: v0.3.222 answered garbage through such a peer, and
    from such a copy on its own node (`给给给…`); the fix deletes and re-fetches.)*
-2. **Watch the live swarm converge (no code)**: `peers_other_build` → 0 per model once peers
-   run the release with the prune-and-fetch heal (after v0.3.222) — on .221 it did NOT (12
-   holdings on at least 4 peers after 13 h, #213; `9594e1ff` switched none of its ~8 models).
-   A peer still counted a day after updating is one that cannot replace its parts (HuggingFace
-   unreachable from it, the model always in use, offline mode); `docs/DIAGNOSTICS.md` § "Which
-   copy of this model does this node hold?". Also read whether the contested hashes for
-   Llama-3.1-8B part 7, GLM-4 parts 1/2/4/5/6, Mistral 4/6/7, Phi-3.5 part 2 stop
-   (`contradicts the one we took from the model's origin`) — the prediction that they were
-   other-upload/spliced bytes, not "corruption that spread" (gotchas #380-#384, #393).
+2. **Watch the live swarm converge (no code)**: `peers_other_build` → 0 per model now that
+   peers run v0.3.223 (the prune-and-fetch heal) — on .221 it did NOT (12 holdings on at least
+   4 peers after 13 h, #213). **First reading, 2026-10-03 12:25 UTC (~1.2 h after the five
+   connected peers updated): 11 holdings over 9 models.** `4a3ac72e`, `99aafc41` and `e561df35`
+   ARE repairing (they withdrew parts of Mistral, GLM-4, Qwen2.5-14B, Qwen-Coder, xLAM… and
+   re-announced them as they came back; one fetched Mistral parts from this node over P2P);
+   `9594e1ff` withdrew nothing and announced the same 70 parts throughout — its heal is not
+   acting, as on .221/.222, most likely because it cannot reach HuggingFace (→ #160). The
+   contested hashes (`contradicts the one we took from the model's origin`, 27-37 an hour) had
+   not stopped yet. This node's GLM-4 part 4 was hashed straight from HuggingFace the same day
+   and is byte-identical (`35f07d7f…`): the peers disagreeing with it hold wrong bytes — the
+   repo has not changed since 2025-04-30, so it is not a re-upload. Read again a few hours on;
+   a peer still counted a day later cannot replace its parts — `docs/DIAGNOSTICS.md` § "Which
+   copy of this model does this node hold?".
 
 **P1 — silent, or broken for a whole class of users**
 3. **#159** — the remaining way a node can act on another upload's description of a model
    (#156's other door; #158 closed 2026-10-03; narrowed the same day to hashes gossiped by
    holders on v0.3.222 and older, and DHT-only holders).
-4. **#165** — prompt privacy is on by default for every node holding both ends of a model
+4. **#160** — a node that cannot reach HuggingFace never replaces its wrong parts: `9594e1ff`
+   has replaced none on .221, .222 or .223. Re-fetch from peers whose own heal verified the part.
+5. **#165** — prompt privacy is on by default for every node holding both ends of a model
    (58 of 78 holdings in the 2026-10-01 census) and costs 9-14× on a far middle peer; the
    notice that was meant to tell the user never fires.
-5. **#117** — Qwen 3.5: a working dense implementation sits unmerged on branch
+6. **#117** — Qwen 3.5: a working dense implementation sits unmerged on branch
    `qwen35-support`; the most-downloaded family the swarm refuses.
-6. **#1** — every Mac runs on the processor; no GPU backend is compiled for Apple Silicon.
-7. **#153** — Windows: a worker that outlives the daemon holds its port, and the next start
+7. **#1** — every Mac runs on the processor; no GPU backend is compiled for Apple Silicon.
+8. **#153** — Windows: a worker that outlives the daemon holds its port, and the next start
    fails.
-8. **#164** — .deb installs from 2026-07-28 to 2026-10-02 run with batching off; the release
-   note ships with the next release, and the project's own Proxmox node needs the line removed.
 
 **P2 — speed and completeness**
 9. **#189** — `/v1/models` reports no context length for any model this node does not hold
@@ -111,14 +117,33 @@ update; a holder known only from a DHT provider record carries no build and is n
 Options for the rest: exclude holders whose tag is unknown when the canonical upload is known,
 or prefer hashes from holders whose announced tags agree with each other.
 
-#### #160 — A node in offline mode never verifies or replaces its copies
-`P3` · storage · **OPEN** — 2026-10-02 · history: archive row #160
+#### #160 — A node that cannot reach HuggingFace never verifies or replaces its copies
+`P1` · storage · **OPEN** — 2026-10-02 (raised to P1 2026-10-03) · history: archive row #160
+
+**Why P1 now:** `9594e1ff` (Docker on Windows) has never replaced a single part — not on .221,
+.222 or .223 — while every other peer's heal acts within the hour; offline mode, or no route to
+HuggingFace from its container, is the reading that fits. The user's instruction (2026-10-03):
+wrong parts are pruned and "auto redownload[ed] from peers or HF" — this is the node the "or
+HF" leaves out. Its announcements are truthful since .223, so coordinators exclude its wrong
+parts, but its owner's own requests use them.
 
 `auto_manage::canonical` needs HuggingFace (anonymous probe, byte check) and deletes nothing it
 could not fetch back from there. An offline node could still adopt the canonical choice from
 peers' claims and fetch canonical parts over P2P against a canonical-shaped manifest (the
 repair queue already prefers peers when a part's hash is known; #157 closed 2026-10-03) — but
-it has no way to check a peer's bytes against the upload, only against a peer's hash.
+it has no way to check a peer's bytes against the upload, only against a peer's hash. A
+workable bar: accept a hash for a part when holders whose own heal verified it agree on it
+(their announced tags are truthful since .223). Also worth a look first: whether the heal's
+HuggingFace calls can hang rather than fail (`read_public_range`, `probe_public_upload`) — a
+hang would stall the whole pass silently, and the observable is the same.
+
+#### #215 — `/api/admin/models` says how many peers hold another build, not which
+`P3` · diagnostics · **OPEN** — 2026-10-03
+
+`peers_other_build` is a count; finding WHICH peer still holds a wrong part took log archaeology
+on 2026-10-03 (the conflict line is written only on a change, gotcha #780). The listing already
+builds the set (`model_peers_other_build` in `api/admin_models/listing.rs`) — expose the node ids
+beside the count, additively.
 
 #### #179 — A greedy reply (`temperature: 0`) is not reproducible run to run on the processor
 `P3` · correctness · **OPEN** — 2026-08-18 · history: archive § "`temperature: 0` with a fixed seed is not reproducible", gotcha #327
@@ -941,21 +966,6 @@ Billing between pools waits on credits, which are dormant (`docs/CREDITS_DESIGN.
 
 ### Packaging, release and operations
 
-#### #164 — .deb installs made between 2026-07-28 and 2026-10-02 run with batching off
-`P1` · packaging · **PARTIAL** — 2026-10-02 · history: archive row #164
-
-Since `b29f183a` (2026-07-28) `packaging/deb/postinst` copies `/etc/swarmllm/default.toml` into a
-NEW install's `/var/lib/swarmllm/config.toml`, and that template said `max_batch_size = 1` until
-2026-10-02 — so those installs kept batching off when `f82e4199` (2026-08-21) made 8 the
-default ("about 40% more work from the same card"). Silent. The template is fixed for new
-installs (`aa1f75c8`); the release note is drafted in CHANGELOG `[Unreleased]` and ships with
-the next release. (1) The project's own Proxmox node is such an install: at its next deploy read
-`/var/lib/swarmllm/config.toml` and delete a `max_batch_size = 1` nobody chose. (2) Not added to
-`config::migrate_superseded_defaults`: its rule admits only a value nobody could have chosen on
-purpose, and `max_batch_size = 1` is a documented way to turn batching off. A migration keyed
-on that section still matching the old template byte for byte (proof it was never edited)
-would be the edit-proof addition.
-
 #### #162 — The release gate: a cloned gate loses its helpers, and step 12e cannot test a takeover on this box
 `P2` · process · **OPEN** — 2026-10-02 · absorbs #140; history: archive rows #162 and #140
 
@@ -1282,6 +1292,10 @@ grep `^| N |`).
 
 **Closed 2026-10-03, after v0.3.222** (`docs/invariants/network.md` § "A node vouches only for
 bytes that are the swarm's upload"; gotcha #782)
+- #164 — `.deb` installs made 2026-07-28 → 2026-10-02 with batching off: the template was fixed
+  for new installs (`aa1f75c8`) and the release note shipped with v0.3.222; the project's Proxmox
+  node had no `max_batch_size = 1` line at the .222 and .223 deploys. Not migrated automatically
+  (a value someone may have chosen on purpose).
 - #157 — a node holding another upload no longer stages the canonical copy from HuggingFace
   beside the old one: parts that are not the upload's bytes are DELETED and the upload's parts
   covering the same layers re-fetched through the repair queue — from peers when the part's
