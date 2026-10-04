@@ -13,7 +13,7 @@ pub use probe::{
     probe_failure_is_user_fixable, probe_gguf_file, probe_public_upload, read_public_range,
 };
 pub use search::{extract_quant_tag, search_gguf_models};
-pub use shards::{download_shard, download_shards, parse_retry_after};
+pub use shards::{download_shard, parse_retry_after, DownloadedPart};
 pub use watcher::{
     is_trusted_publisher, trusted_publisher_count, trusted_publisher_position, HfTrendingEntry,
     HfTrendingSnapshot, HfWatcher,

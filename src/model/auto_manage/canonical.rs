@@ -182,7 +182,11 @@ struct CheckedParts {
     /// Parts this run deleted and fetched again from the upload itself. The
     /// upload's own bytes have settled them: checked holders that still
     /// disagree are the ones holding something else, and asking the origin
-    /// again would only fetch the same bytes again, every pass.
+    /// again would only fetch the same bytes again, every pass. That holds
+    /// because a download that checked holders disagree with is kept only when
+    /// a second download agrees with it (`SharedState::accept_origin_part`);
+    /// before, the first download was believed, and a node kept two wrong
+    /// builds in a row under this exemption (FUTURE_WORK #217).
     from_origin: HashSet<ShardId>,
 }
 
@@ -664,7 +668,11 @@ async fn settle(
         ) {
             continue;
         }
-        if checked.came_from_origin(model, index) {
+        // Settled by the upload's own bytes: fetched again from it this run
+        // after a dispute, or downloaded twice from it with the same result
+        // where checked holders disagreed (`SharedState::accept_origin_part`
+        // keeps an uncorroborated download only then — FUTURE_WORK #217).
+        if checked.came_from_origin(model, index) || state.origin_part_downloaded_twice(&sid) {
             settled_by_origin.push(index);
         } else if state.models.shards_pending_verification.contains(&sid) {
             waits_for_recheck.push(index);

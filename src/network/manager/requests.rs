@@ -1086,8 +1086,23 @@ impl NetworkManager {
                                 let path = self
                                     .shard_store
                                     .shard_path(&shard_id.model_id, shard_id.index);
+                                let synced = path.clone();
                                 tokio::spawn(async move {
                                     let outcome = tokio::task::spawn_blocking(move || {
+                                        // The disk's word first: a write-back
+                                        // that failed is reported by `sync_all`
+                                        // and nothing else — Linux marks the
+                                        // pages clean after the error, so the
+                                        // hash below would read back bytes the
+                                        // disk does not hold ("fsyncgate",
+                                        // https://lwn.net/Articles/752063/;
+                                        // FUTURE_WORK #217). Opened for writing:
+                                        // Windows syncs only a writable handle.
+                                        std::fs::OpenOptions::new()
+                                            .write(true)
+                                            .open(&synced)
+                                            .and_then(|f| f.sync_all())
+                                            .map_err(crate::error::SwarmError::Io)?;
                                         // The accept gate for untrusted bytes:
                                         // these have just arrived from a peer and
                                         // nothing else holds them, so bytes that
@@ -1359,8 +1374,12 @@ impl NetworkManager {
             // one. Shares the one repair path with the
             // background sweep and the rescan.
             self.shared_state.mark_shard_for_repair(&shard_id);
-            // Our own hashing task failing is nobody's fault but ours.
-            let ours = matches!(e, crate::error::SwarmError::Internal(_));
+            // Our own hashing task failing, or our own disk refusing to read
+            // or sync the file, is nobody's fault but ours.
+            let ours = matches!(
+                e,
+                crate::error::SwarmError::Internal(_) | crate::error::SwarmError::Io(_)
+            );
             if !incomplete && !ours {
                 if let Some(node) = self.peer_to_node.get(&peer).map(|n| n.clone()) {
                     self.shared_state.credits.trust_manager.update_trust(

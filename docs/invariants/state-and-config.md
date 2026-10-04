@@ -60,10 +60,17 @@ THIS node fetched from the model's origin, which outranks any gossiped claim. Ap
 in `register_manifest` BEFORE change-detection, so a claim the origin has already
 disproved does not even provoke a re-check. Persisted (`ORIGIN_VERIFIED_TREE`) and
 loaded FIRST in `load_from_db`, or a restart hands the argument back to gossip.
-Recorded by `SharedState::record_origin_downloaded_shard` from BOTH origin-download
-paths — the auto-manage downloader and the admin "download this part" handler; the
-second recorded nothing until it was added, which is the same one-invariant-N-paths
-trap as everything else in this file.
+Recorded by `SharedState::accept_origin_part` (was `record_origin_downloaded_shard`)
+from BOTH origin-download paths — the auto-manage downloader and the admin "download
+this part" handler; the second recorded nothing until it was added, which is the same
+one-invariant-N-paths trap as everything else in this file. **Since 2026-10-04 an
+origin download is recorded only when something CORROBORATES it** — a connected holder
+that checked its copy holds these bytes, or the previous download of the part brought
+the same ones (`uncorroborated_origin_parts`); otherwise it is deleted and fetched again
+(FUTURE_WORK #217: one node's two downloads in a row came out as two different wrong
+builds, each recorded here as the origin's; huggingface/huggingface_hub#3643 reports the
+same shape — right size, a different hash per attempt). `huggingface::download_shard`
+itself now syncs the file and checks it reads back as the bytes that arrived.
 **Why**: manifest registration is last-writer-wins, and a real hash replaces a real
 hash (deliberately, for re-publishes). A peer that had self-certified a corrupt shard
 gossiped its wrong hash, our node adopted it over one verified against the origin, and

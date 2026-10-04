@@ -1,4 +1,3 @@
-use crate::model::manifest::ModelManifestExt;
 use crate::types::{ModelId, NetworkCommand, ShardId};
 
 use super::manager::{AutoShardManager, ShardCandidate};
@@ -625,7 +624,13 @@ impl AutoShardManager {
                         );
                     }
 
-                    match crate::model::huggingface::download_shard(
+                    let origin_sid = crate::types::ShardId {
+                        model_id: model_id.clone(),
+                        index: shard_idx,
+                    };
+                    // Kept only if something corroborates the bytes; a part
+                    // that is not kept fails like any other download.
+                    let downloaded = crate::model::huggingface::download_shard(
                         &repo_id,
                         &filename,
                         &dest,
@@ -634,8 +639,17 @@ impl AutoShardManager {
                         Some(hf_cancel.as_ref()),
                     )
                     .await
-                    {
-                        Ok(_shard_path) => {
+                    .and_then(|part| {
+                        if shared.accept_origin_part(&origin_sid, part) {
+                            Ok(())
+                        } else {
+                            Err("it arrived as other bytes than the computers that checked \
+                                 their copies hold — fetching it again"
+                                .to_string())
+                        }
+                    });
+                    match downloaded {
+                        Ok(()) => {
                             tracing::info!(
                                 model = %model_id,
                                 shard = shard_idx,
@@ -658,71 +672,6 @@ impl AutoShardManager {
                                     .with_detail_num(shard_idx as i64)
                                     .with_detail_str("huggingface".to_string()),
                                 );
-                            }
-
-                            // Skip pre-registration BLAKE3 verification for HF downloads.
-                            // The manifest hash may be stale (computed from a previous download
-                            // or copied from another node). We trust HF CDN integrity — the
-                            // hash is recomputed from the actual file below and the manifest
-                            // is updated to match, so future verifications will pass.
-
-                            // Compute BLAKE3 hash of the downloaded shard and update the manifest
-                            // so startup verification passes on restart.
-                            // block_in_place: streaming hash with 64KB buffer (avoids loading full shard into memory)
-                            let shard_path = dest.join(format!("shard_{:03}.bin", shard_idx));
-                            let hash_result: Option<[u8; 32]> = tokio::task::block_in_place(|| {
-                                crate::model::shard::hash_file_blake3(&shard_path).ok()
-                            });
-                            if let Some(hash) = hash_result {
-                                if let Some(mut manifest) =
-                                    shared.model_registry.get_manifest(&model_id)
-                                {
-                                    if let Some(si) =
-                                        manifest.shards.iter_mut().find(|s| s.index == shard_idx)
-                                    {
-                                        si.hash = hash;
-                                    }
-                                    // These bytes came from the model's ORIGIN,
-                                    // so this hash outranks anything a peer
-                                    // gossips — including a peer that
-                                    // self-certified a corrupt copy (#384).
-                                    shared.record_origin_verified_hash(
-                                        crate::types::ShardId {
-                                            model_id: model_id.clone(),
-                                            index: shard_idx,
-                                        },
-                                        hash,
-                                    );
-                                    manifest.manifest_hash = manifest.compute_hash();
-                                    let model_dir = crate::model::shard::model_dir(
-                                        &shared.config.node.data_dir,
-                                        &model_id.0,
-                                    );
-                                    if let Err(e) = manifest.save_to_dir(&model_dir) {
-                                        tracing::warn!(
-                                            model = %model_id,
-                                            error = %e,
-                                            "AutoShardManager: failed to persist manifest after shard hash update — hash in memory only"
-                                        );
-                                    }
-                                    shared.model_registry.register_manifest(manifest.clone());
-                                    // Persist the updated hash to redb so it survives restart.
-                                    // Without this, load_from_db restores the pre-download
-                                    // manifest hash and any peer that gossips the corrected
-                                    // manifest_hash will see a mismatch until a full rescan.
-                                    // The acquisition.rs path already does this; HF downloads
-                                    // had drifted.
-                                    if let Err(e) = shared
-                                        .model_registry
-                                        .persist_manifest(&shared.db, &manifest)
-                                    {
-                                        tracing::warn!(
-                                            model = %model_id,
-                                            error = %e,
-                                            "AutoShardManager: failed to persist manifest hash to DB after HF download"
-                                        );
-                                    }
-                                }
                             }
 
                             // Register + announce the shard to the network

@@ -48,6 +48,13 @@ pub struct ModelMgmt {
     /// Signals auto_manage to force the HF path even when peer holders are registered.
     /// Cleared when a download for the shard successfully completes.
     pub shard_p2p_failed: dashmap::DashSet<crate::types::ShardId>,
+    /// The hash of the last copy of each part this node downloaded from the
+    /// model's origin that nothing corroborated — no holder that checked its
+    /// own copy agreed. A second download of the same bytes is what lets such a
+    /// copy be kept (`SharedState::accept_origin_part`, the only reader and
+    /// writer). This run only: a restart costs one more download, never a
+    /// wrong part kept.
+    pub uncorroborated_origin_parts: DashMap<crate::types::ShardId, crate::types::Blake3Hash>,
     /// Shards whose bytes were found WRONG and which need a fresh, verified copy.
     ///
     /// Written only by `SharedState::mark_shard_for_repair`, from the three
@@ -1026,6 +1033,7 @@ mod tests {
             locked_shards: DashMap::new(),
             removed_by_user: DashMap::new(),
             shard_p2p_failed: dashmap::DashSet::new(),
+            uncorroborated_origin_parts: DashMap::new(),
             shards_needing_repair: dashmap::DashSet::new(),
             shards_pending_verification: dashmap::DashSet::new(),
             heal_verdicts: DashMap::new(),

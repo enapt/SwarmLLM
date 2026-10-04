@@ -1320,7 +1320,7 @@ been deleted and re-downloaded byte-identical. The full chain, from one log:
 
 Shard 1 survived and shard 0 did not because `origin_verified` only ever holds
 shards this node itself fetched from the ORIGIN (`record_origin_downloaded_shard`,
-and the repair path). Shard 0 had been acquired over P2P, so there was no record,
+now `accept_origin_part`, and the repair path). Shard 0 had been acquired over P2P, so there was no record,
 so `register_manifest` had nothing to refuse the claim with.
 
 ### How often — six for six, on one node, in 55 hours

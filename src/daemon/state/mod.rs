@@ -1346,6 +1346,7 @@ impl SharedState {
                 resource_schedule: RwLock::new(config.resources.schedule.clone()),
                 prune_history: RwLock::new(VecDeque::new()),
                 shard_p2p_failed: dashmap::DashSet::new(),
+                uncorroborated_origin_parts: DashMap::new(),
                 shards_needing_repair: dashmap::DashSet::new(),
                 shards_pending_verification: dashmap::DashSet::new(),
                 heal_verdicts: DashMap::new(),

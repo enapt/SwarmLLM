@@ -48,7 +48,10 @@ after v0.3.224 (#160, #215 and #216 closed; #217 and #218 opened from the swarm 
    `split_rig.sh disputed` and `spliced`: v0.3.222 answered garbage through such a peer, and
    from such a copy on its own node (`给给给…`); the fix deletes and re-fetches.)*
 2. **#217** — a node kept three parts that are not the upload's bytes for ~3 h on v0.3.224,
-   with two checked holders disagreeing, and replaced them within minutes of a restart. The
+   with two checked holders disagreeing, and replaced them within minutes of a restart. It
+   recurred at that node's next restart (09:01 UTC 10-04) as replacements that ARRIVED wrong
+   from HuggingFace, twice, and were kept — that mechanism is closed on main (a download is
+   kept only when corroborated; the downloader syncs and reads back). The
    swarm itself converged: `peers_other_build` 0 on every model at 06:19 UTC 2026-10-04 (all
    six nodes on .224; the watch this slot held is closed — its readings are in the archive,
    § "Closed after 2026-10-02" → "P0-2").
@@ -130,11 +133,36 @@ for a re-check (`shards_pending_verification`) or were already fetched from the 
 Verified on the rig: "no pass yet" → "the canonical upload" → "replacing parts: … in dispute
 [1]".
 
-Next: if it recurs on a node with that build, its `-- copy repair --` section names the cause.
-The journal for 02:30-05:45 UTC (`journalctl -u swarmllm | grep -E "auto_manage::canonical|
-contradicts the one we took|Fetching from the model's origin|shard download complete"`, asked
-of its owner) can still decide this occurrence. Still to rig: a replacement that ARRIVES wrong
-(the third build seen after the restart).
+**Recurred 2026-10-04 09:01 UTC — and a replacement ARRIVED wrong, twice.** `e561df35`
+restarts daily at ~09:00 UTC (its announces show it since 09-18). Six seconds after this
+restart it withdrew Gemma-2-2B part 0, Qwen2.5-14B part 1 and Qwen2.5-Coder-7B part 3 — parts
+it had announced as the upload for hours, so the startup BLAKE3 check found their files no
+longer matched their origin-backed hashes. Within ~40 s each came back as a wrong build
+(`31ac3faf…`, `f6c55cc8…`, `953ba1d6…`). The heal's second pass (~09:04) found them in dispute,
+deleted them and fetched them from HuggingFace again; they came back as three OTHER wrong builds
+(`aa9622c0…`, `67f41f50…`, `473b1184…`) and stayed for 4.5 h. That is the
+`CheckedParts::from_origin` door named above: a part re-fetched from the upload was exempt for
+the run whatever bytes had come back. And the HuggingFace download path believed whatever it
+wrote — hashed after the fact, recorded as the origin's own bytes — so two different wrong
+results each became "the upload's". Two downloads of one byte range giving two hashes means the
+bytes changed in transit or on that disk; which one is undetermined (huggingface/huggingface_hub#3643
+reports large downloads arriving the right size with a different hash on every attempt; a disk
+losing writes — a 30 GB LXC, #142 — looks the same, and would also explain the startup failures).
+
+**Fixed on main, not yet released (the mechanism, not that node's cause):**
+`huggingface::download_shard` hashes the bytes as they arrive, syncs the file and checks it reads
+back as them; the P2P accept syncs before hashing (a failed write-back is reported only there —
+PostgreSQL's fsyncgate). `SharedState::accept_origin_part`, the one step both HuggingFace paths
+pass, keeps a download only when something corroborates it — a connected holder that checked its
+copy holds those bytes, or the previous download of the part brought the same ones — and
+otherwise deletes it and fetches again, telling the owner when two downloads disagree. The heal's
+exemption now covers only a part the upload's bytes actually settled.
+
+Next: after the release, `e561df35`'s next 09:00 UTC restart is the field check — its parts should
+come back as the upload's, or not at all, with "came out different on two downloads" in its log.
+The 02:39-05:39 occurrence (parts announced as an OLD manifest's exact hashes for 3 h, never
+re-fetched) is not explained by this and stays open; its journal (asked of its owner once) or a
+recurrence's `-- copy repair --` decides it.
 
 #### #159 — A coordinator holding none of a model routes on placeholder part hashes
 `P1` · routing · **PARTIAL** — 2026-10-02 · history: archive row #159

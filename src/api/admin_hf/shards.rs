@@ -783,7 +783,15 @@ pub async fn hf_download_shards(
                 }
             });
 
-            match crate::model::huggingface::download_shard(
+            // These bytes came from the model's ORIGIN: kept — their hash
+            // recorded as the origin's, which outranks anything a peer gossips
+            // (#384) — only if something corroborates them, exactly as on the
+            // auto-manage path (`SharedState::accept_origin_part`).
+            let origin_sid = crate::types::ShardId {
+                model_id: download_mid.clone(),
+                index: shard_idx,
+            };
+            let downloaded = crate::model::huggingface::download_shard(
                 &repo_id,
                 &filename,
                 &dest_dir,
@@ -792,24 +800,19 @@ pub async fn hf_download_shards(
                 Some(cancel_flag.as_ref()),
             )
             .await
-            {
-                Ok(_shard_path) => {
+            .and_then(|part| {
+                if download_shared.accept_origin_part(&origin_sid, part) {
+                    Ok(())
+                } else {
+                    Err("it arrived as other bytes than the computers that checked \
+                         their copies hold — try again"
+                        .to_string())
+                }
+            });
+            match downloaded {
+                Ok(()) => {
                     progress_task.abort();
                     cumulative_downloaded += layout.size_bytes;
-
-                    // These bytes came from the model's ORIGIN, so their hash
-                    // outranks anything a peer gossips. Recording it here as
-                    // well as on the auto-manage download path is the whole
-                    // point: this is the path behind "Download this part", and
-                    // a shard fetched that way was left with no provenance at
-                    // all — so a peer that had self-certified a corrupt copy
-                    // could still displace its hash and get the good copy
-                    // quarantined (#384).
-                    let sid = crate::types::ShardId {
-                        model_id: download_mid.clone(),
-                        index: shard_idx,
-                    };
-                    download_shared.record_origin_downloaded_shard(&sid);
 
                     if let Some(mut entry) = download_shared
                         .models

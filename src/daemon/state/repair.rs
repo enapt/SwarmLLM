@@ -3,6 +3,40 @@
 use super::SharedState;
 use crate::types::ShardId;
 
+/// What an origin download's bytes are measured against, and the verdict
+/// ([`SharedState::accept_origin_part`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OriginPartVerdict {
+    /// No connected holder has checked its copy against the upload.
+    NothingToCompare,
+    /// A holder that checked its own copy holds these bytes.
+    Corroborated,
+    /// Checked holders hold other bytes, but the previous download of this
+    /// part brought exactly these.
+    Repeated,
+    /// Checked holders hold other bytes, and no earlier download agrees.
+    Uncorroborated,
+}
+
+/// Judge a part just downloaded from the origin: `hash` its bytes, `checked`
+/// the tags connected holders that checked their copies announce, `previous`
+/// the last uncorroborated download of this part.
+pub(crate) fn judge_origin_part(
+    hash: &crate::types::Blake3Hash,
+    checked: &[u64],
+    previous: Option<&crate::types::Blake3Hash>,
+) -> OriginPartVerdict {
+    if checked.is_empty() {
+        OriginPartVerdict::NothingToCompare
+    } else if checked.contains(&swarmllm_types::build_tag_from_hash(hash)) {
+        OriginPartVerdict::Corroborated
+    } else if previous == Some(hash) {
+        OriginPartVerdict::Repeated
+    } else {
+        OriginPartVerdict::Uncorroborated
+    }
+}
+
 impl SharedState {
     /// This shard's bytes are wrong — arrange for a fresh, verified copy.
     ///
@@ -119,48 +153,159 @@ impl SharedState {
             .record_origin_verified_hash(shard_id, hash);
     }
 
-    /// A shard's bytes have just been written from the model's ORIGIN: hash
-    /// them, record that hash as origin-derived, and put it in the manifest.
+    /// A part has just been written from the model's ORIGIN: keep it — record
+    /// its hash as origin-derived and put it in the manifest — or, when
+    /// nothing corroborates its bytes, delete it so it is fetched again.
+    /// Returns whether it was kept; a part that was not kept is a failed
+    /// download to the caller.
     ///
-    /// Called by BOTH origin-download paths — the auto-manage downloader and the
-    /// admin "download this part" handler. The second had no provenance
-    /// recording at all, and does not otherwise update the manifest hash for the
-    /// shard it just fetched, so a shard obtained that way could be argued out
-    /// of existence by a peer's self-certified claim (#384).
-    pub fn record_origin_downloaded_shard(&self, shard_id: &ShardId) {
-        let path = self
-            .shard_store()
-            .shard_path(&shard_id.model_id, shard_id.index);
-        let Ok(hash) = crate::model::shard::hash_file_blake3(&path) else {
-            tracing::warn!(
-                model = %shard_id.model_id,
-                shard = shard_id.index,
-                "Could not hash a shard just fetched from the origin — it keeps \
-                 no provenance, so a peer's claim could displace its hash"
-            );
+    /// **The one place a download from the origin becomes a part this node
+    /// vouches for**, called by BOTH origin-download paths — the auto-manage
+    /// downloader and the admin "download this part" handler (the second once
+    /// recorded no provenance at all, #384).
+    ///
+    /// Before this, a download from HuggingFace was believed outright: hashed
+    /// after the fact and recorded as the origin's own bytes. A node's parts
+    /// came out of two downloads in a row as two DIFFERENT wrong builds, and it
+    /// vouched for each; its heal then exempted the part for the rest of the
+    /// run as "settled by the upload" (FUTURE_WORK #217, 2026-10-04 09:01-09:05
+    /// UTC). Large HuggingFace downloads have been reported to arrive the right
+    /// size with different content on each attempt
+    /// (huggingface/huggingface_hub#3643: four attempts, four hashes); a disk
+    /// losing writes looks the same. So an origin download is kept when
+    /// something corroborates it ([`judge_origin_part`]): a connected holder
+    /// that checked its own copy against the upload holds these bytes, or the
+    /// previous download of this part brought the same ones — two corrupted
+    /// transfers do not agree on 500 MB. When no holder has checked a copy
+    /// there is nothing to compare with, and it is kept, as before.
+    pub fn accept_origin_part(
+        &self,
+        shard_id: &ShardId,
+        part: crate::model::huggingface::DownloadedPart,
+    ) -> bool {
+        let checked = self
+            .model_registry
+            .checked_holder_tags(shard_id, |n| self.peer_registry.contains_key(n));
+        let previous = self
+            .models
+            .uncorroborated_origin_parts
+            .get(shard_id)
+            .map(|h| *h);
+        let verdict = judge_origin_part(&part.hash, &checked, previous.as_ref());
+        match verdict {
+            OriginPartVerdict::Uncorroborated => {
+                self.models
+                    .uncorroborated_origin_parts
+                    .insert(shard_id.clone(), part.hash);
+                let _ = std::fs::remove_file(&part.path);
+                let tag = |h: &crate::types::Blake3Hash| {
+                    format!("{:016x}", swarmllm_types::build_tag_from_hash(h))
+                };
+                tracing::warn!(
+                    model = %shard_id.model_id,
+                    shard = shard_id.index,
+                    downloaded_build = %tag(&part.hash),
+                    previous_download = ?previous.as_ref().map(tag),
+                    checked_holders = ?checked.iter().map(|t| format!("{t:016x}")).collect::<Vec<_>>(),
+                    "DIAG: a part downloaded from HuggingFace is not the bytes the computers that checked theirs hold, and no earlier download agrees — discarded, fetching it again"
+                );
+                if previous.is_some() {
+                    // Two downloads of one part, two different results: the
+                    // transfer or this computer's disk is changing data.
+                    self.emit_activity(
+                        crate::daemon::state::ActivityEvent::new(
+                            "download",
+                            "origin_part_unstable",
+                            format!(
+                                "{}: part {} came out different on two downloads from HuggingFace —                                  discarded and fetched again. If this keeps happening, this computer's                                  disk or connection may be damaging data.",
+                                self.model_registry.display_name(&shard_id.model_id),
+                                crate::types::ShardId::display_index_short(shard_id.index),
+                            ),
+                        )
+                        .with_model(shard_id.model_id.0.clone())
+                        .with_detail_num(shard_id.index as i64)
+                        .with_toast("warning", 8000),
+                    );
+                }
+                false
+            }
+            OriginPartVerdict::Repeated => {
+                // Kept with the entry: a part held under this hash is the twice-
+                // downloaded copy, which the heal does not fetch again
+                // ([`Self::origin_part_downloaded_twice`]).
+                tracing::info!(
+                    model = %shard_id.model_id,
+                    shard = shard_id.index,
+                    checked_holders = ?checked.iter().map(|t| format!("{t:016x}")).collect::<Vec<_>>(),
+                    "DIAG: two downloads of this part from HuggingFace agree, though the computers that checked theirs hold other bytes — keeping it"
+                );
+                self.record_origin_part_hash(shard_id, part.hash);
+                true
+            }
+            OriginPartVerdict::Corroborated | OriginPartVerdict::NothingToCompare => {
+                tracing::info!(
+                    model = %shard_id.model_id,
+                    shard = shard_id.index,
+                    ?verdict,
+                    checked_holders = checked.len(),
+                    "DIAG: a part downloaded from HuggingFace is kept"
+                );
+                self.models.uncorroborated_origin_parts.remove(shard_id);
+                self.record_origin_part_hash(shard_id, part.hash);
+                true
+            }
+        }
+    }
+
+    /// Is the part held here the copy two downloads from the origin agreed on
+    /// ([`OriginPartVerdict::Repeated`])? The upload's own bytes have settled
+    /// it, so the heal does not fetch it again when checked holders disagree.
+    pub fn origin_part_downloaded_twice(&self, shard_id: &ShardId) -> bool {
+        let Some(twice) = self
+            .models
+            .uncorroborated_origin_parts
+            .get(shard_id)
+            .map(|h| *h)
+        else {
+            return false;
+        };
+        self.model_registry.origin_verified_hash(shard_id) == Some(twice)
+    }
+
+    /// Record a kept origin part's hash as origin-derived, and put it in the
+    /// manifest — in memory, on disk and in the database, so startup
+    /// verification passes after a restart and a peer's claim cannot displace
+    /// it (#384).
+    fn record_origin_part_hash(&self, shard_id: &ShardId, hash: crate::types::Blake3Hash) {
+        self.record_origin_verified_hash(shard_id.clone(), hash);
+        let Some(mut manifest) = self.model_registry.get_manifest(&shard_id.model_id) else {
             return;
         };
-        self.record_origin_verified_hash(shard_id.clone(), hash);
-        if let Some(mut manifest) = self.model_registry.get_manifest(&shard_id.model_id) {
-            if let Some(si) = manifest
-                .shards
-                .iter_mut()
-                .find(|s| s.index == shard_id.index)
-            {
-                if si.hash == hash {
-                    return;
-                }
-                si.hash = hash;
-            } else {
-                return;
-            }
-            manifest.manifest_hash =
-                crate::model::manifest::ModelManifestExt::compute_hash(&manifest);
-            let dir =
-                crate::model::shard::model_dir(&self.config.node.data_dir, &shard_id.model_id.0);
-            let _ = crate::model::manifest::ModelManifestExt::save_to_dir(&manifest, &dir);
-            self.model_registry.register_manifest(manifest.clone());
-            let _ = self.model_registry.persist_manifest(&self.db, &manifest);
+        match manifest
+            .shards
+            .iter_mut()
+            .find(|s| s.index == shard_id.index)
+        {
+            Some(si) if si.hash == hash => return,
+            Some(si) => si.hash = hash,
+            None => return,
+        }
+        manifest.manifest_hash = crate::model::manifest::ModelManifestExt::compute_hash(&manifest);
+        let dir = crate::model::shard::model_dir(&self.config.node.data_dir, &shard_id.model_id.0);
+        if let Err(e) = crate::model::manifest::ModelManifestExt::save_to_dir(&manifest, &dir) {
+            tracing::warn!(
+                model = %shard_id.model_id,
+                error = %e,
+                "Could not save the manifest after a part arrived from the origin — its hash is in memory only"
+            );
+        }
+        self.model_registry.register_manifest(manifest.clone());
+        if let Err(e) = self.model_registry.persist_manifest(&self.db, &manifest) {
+            tracing::warn!(
+                model = %shard_id.model_id,
+                error = %e,
+                "Could not store the manifest after a part arrived from the origin"
+            );
         }
     }
 
@@ -302,6 +447,183 @@ mod tests {
             model_id: ModelId("m".into()),
             index: 3,
         }
+    }
+
+    use super::{judge_origin_part, OriginPartVerdict};
+
+    /// What an origin download is measured against: a holder that checked
+    /// its copy, then the previous download — and with neither, nothing.
+    #[test]
+    fn an_origin_download_is_kept_only_when_something_corroborates_it() {
+        let (good, bad, worse) = ([1u8; 32], [2u8; 32], [3u8; 32]);
+        let good_tag = swarmllm_types::build_tag_from_hash(&good);
+        assert_eq!(
+            judge_origin_part(&bad, &[], None),
+            OriginPartVerdict::NothingToCompare,
+            "no checked holder: nothing to compare with, kept as before"
+        );
+        assert_eq!(
+            judge_origin_part(&good, &[good_tag], None),
+            OriginPartVerdict::Corroborated
+        );
+        assert_eq!(
+            judge_origin_part(&good, &[0xdead, good_tag], Some(&bad)),
+            OriginPartVerdict::Corroborated,
+            "one checked holder agreeing is enough, whatever came before"
+        );
+        assert_eq!(
+            judge_origin_part(&bad, &[good_tag], None),
+            OriginPartVerdict::Uncorroborated,
+            "the first download checked holders disagree with is not believed"
+        );
+        assert_eq!(
+            judge_origin_part(&worse, &[good_tag], Some(&bad)),
+            OriginPartVerdict::Uncorroborated,
+            "two downloads, two results: still nothing agrees"
+        );
+        assert_eq!(
+            judge_origin_part(&bad, &[good_tag], Some(&bad)),
+            OriginPartVerdict::Repeated,
+            "two downloads agreeing are the upload's bytes"
+        );
+    }
+
+    /// A state whose data directory is a temp dir — `accept_origin_part`
+    /// writes the manifest beside the parts.
+    fn state_in(dir: &std::path::Path) -> std::sync::Arc<crate::daemon::SharedState> {
+        let mut config = crate::config::Config::default();
+        config.node.data_dir = dir.to_path_buf();
+        let db = crate::storage::db::Database::open(dir).unwrap();
+        let executor = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::inference::executor::ModelExecutor::new(),
+        ));
+        let (state, _, _) = crate::daemon::SharedState::new(
+            config,
+            crate::identity::Identity::generate(),
+            db,
+            executor,
+            None,
+        );
+        state
+    }
+
+    /// **#217's field shape: two downloads from HuggingFace in a row, two
+    /// different wrong builds, each vouched for.** A part checked holders
+    /// disagree with is deleted until a second download brings the same bytes;
+    /// one they agree with is kept at once and ends the doubt.
+    #[test]
+    fn a_part_downloaded_from_the_origin_is_vouched_for_only_when_corroborated() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = state_in(temp.path());
+        register_with_hash(&state, [0u8; 32]);
+        let (good, bad, worse) = (
+            b"the upload's bytes",
+            b"other bytes, size",
+            b"third version, sz",
+        );
+        let hash = |b: &[u8]| -> [u8; 32] { *blake3::hash(b).as_bytes() };
+        let checker = crate::types::NodeId([7u8; 32]);
+        state.model_registry.record_shard_holder_with_build(
+            sid(),
+            checker.clone(),
+            swarmllm_types::build_tag_from_hash(&hash(good)),
+            Some(true),
+        );
+        // Connected now: only connected holders count.
+        state.peer_registry.insert(
+            checker.clone(),
+            crate::types::PeerInfo {
+                node_id: checker.clone(),
+                addresses: vec![],
+                capability: None,
+                last_seen: chrono::Utc::now(),
+                latency_ms: Some(50),
+                trust_score: 0.5,
+                peer_id_bytes: None,
+                ack_srtt_ms: None,
+                active_request_count: 0,
+                first_seen: 0,
+                verified_transaction_count: 0,
+                is_lan_peer: false,
+                goodput_bytes_per_sec: None,
+                goodput_samples: 0,
+            },
+        );
+        let path = temp.path().join("part.bin");
+        let arrive = |bytes: &[u8]| {
+            std::fs::write(&path, bytes).unwrap();
+            state.accept_origin_part(
+                &sid(),
+                crate::model::huggingface::DownloadedPart {
+                    path: path.clone(),
+                    hash: hash(bytes),
+                },
+            )
+        };
+
+        assert!(!arrive(bad), "the first wrong download is not kept");
+        assert!(!path.exists(), "and its file is gone, to be fetched again");
+        assert_eq!(state.model_registry.origin_verified_hash(&sid()), None);
+        assert!(
+            !arrive(worse),
+            "a second, different result is not kept either"
+        );
+        assert!(arrive(worse), "the same bytes twice are the upload's");
+        assert_eq!(
+            state.model_registry.origin_verified_hash(&sid()),
+            Some(hash(worse))
+        );
+        assert!(
+            state.origin_part_downloaded_twice(&sid()),
+            "the heal knows not to fetch it again"
+        );
+        assert_eq!(
+            state
+                .model_registry
+                .get_manifest(&ModelId("m".into()))
+                .unwrap()
+                .shards[3]
+                .hash,
+            hash(worse),
+            "and the manifest names its bytes"
+        );
+
+        assert!(
+            arrive(good),
+            "bytes a checked holder holds are kept at once"
+        );
+        assert_eq!(
+            state.model_registry.origin_verified_hash(&sid()),
+            Some(hash(good))
+        );
+        assert!(
+            !state.origin_part_downloaded_twice(&sid()),
+            "nothing left in doubt"
+        );
+    }
+
+    /// With no holder that checked its copy, an origin download is kept as it
+    /// always was — the first copy in the swarm has nothing to agree with.
+    #[test]
+    fn the_first_copy_in_the_swarm_is_kept() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = state_in(temp.path());
+        register_with_hash(&state, [0u8; 32]);
+        let path = temp.path().join("part.bin");
+        std::fs::write(&path, b"bytes").unwrap();
+        let hash = *blake3::hash(b"bytes").as_bytes();
+        assert!(state.accept_origin_part(
+            &sid(),
+            crate::model::huggingface::DownloadedPart {
+                path: path.clone(),
+                hash,
+            },
+        ));
+        assert!(path.exists());
+        assert_eq!(
+            state.model_registry.origin_verified_hash(&sid()),
+            Some(hash)
+        );
     }
 
     /// What `verify_shard` returns when it hashed bytes that are not the

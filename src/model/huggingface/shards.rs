@@ -1,9 +1,7 @@
 use std::time::SystemTime;
 
-use super::probe::{download_gguf_header, download_sidecar_tensors};
 use super::{
-    download_url, hf_headers, DownloadProgress, GgufFileInfo, BYTE_RANGE_COALESCE_GAP,
-    HF_DOWNLOAD_CLIENT,
+    download_url, hf_headers, DownloadProgress, BYTE_RANGE_COALESCE_GAP, HF_DOWNLOAD_CLIENT,
 };
 
 pub fn parse_retry_after(value: &str) -> Option<u64> {
@@ -134,6 +132,21 @@ pub(super) fn coalesce_byte_ranges(ranges: &[(u64, u64)], max_gap: u64) -> Vec<(
     merged
 }
 
+/// A part as it landed on disk from HuggingFace, with the BLAKE3 of the bytes
+/// HuggingFace sent for it.
+///
+/// Inside the swarm it is kept only through
+/// `SharedState::accept_origin_part`, which asks whether anything corroborates
+/// those bytes before this node vouches for them (FUTURE_WORK #217).
+#[must_use = "a part fetched from the origin is kept only through SharedState::accept_origin_part"]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DownloadedPart {
+    pub path: std::path::PathBuf,
+    /// BLAKE3 of the bytes as they arrived — equal to the file's, checked
+    /// after the file was synced to disk.
+    pub hash: [u8; 32],
+}
+
 /// Download a layer-aligned shard from HuggingFace.
 ///
 /// Takes a `LayerShardLayout` describing which tensors belong to this shard.
@@ -141,6 +154,17 @@ pub(super) fn coalesce_byte_ranges(ranges: &[(u64, u64)], max_gap: u64) -> Vec<(
 /// the tensor data sequentially into `shard_{idx:03}.bin`.
 ///
 /// Connection errors are retried up to 3 times with backoff.
+///
+/// **The bytes on disk are the bytes received, or this fails.** The bytes are
+/// hashed as they arrive; once written, the file is synced (`sync_all`) and
+/// hashed again, and the two must agree before the part is renamed into place.
+/// Without this a part could land different from what was sent and be
+/// recorded under the hash of whatever the disk held: a node's parts came out
+/// of two HuggingFace downloads in a row as two different wrong builds, and it
+/// vouched for both (FUTURE_WORK #217). The sync is where a failed write-back
+/// is reported — and reported once: PostgreSQL's "fsyncgate" (2018) is that
+/// Linux marks the pages clean after the error, so unchecked, the data is
+/// simply gone (https://lwn.net/Articles/752063/).
 pub async fn download_shard(
     repo_id: &str,
     filename: &str,
@@ -148,7 +172,7 @@ pub async fn download_shard(
     layout: &crate::inference::split::LayerShardLayout,
     progress_tx: Option<tokio::sync::mpsc::Sender<DownloadProgress>>,
     cancel_flag: Option<&std::sync::atomic::AtomicBool>,
-) -> Result<std::path::PathBuf, String> {
+) -> Result<DownloadedPart, String> {
     let client = &*HF_DOWNLOAD_CLIENT;
 
     let url = download_url(repo_id, filename)?;
@@ -336,6 +360,23 @@ pub async fn download_shard(
         f
     };
 
+    // What this download stands behind, hashed as it arrives. A resumed
+    // download stands behind the bytes of its earlier attempt too, read back
+    // from the partial file.
+    let mut as_sent = if ranges_to_skip > 0 {
+        let partial = tmp_path.clone();
+        tokio::task::spawn_blocking(move || -> std::io::Result<blake3::Hasher> {
+            let mut hasher = blake3::Hasher::new();
+            std::io::copy(&mut std::fs::File::open(&partial)?, &mut hasher)?;
+            Ok(hasher)
+        })
+        .await
+        .map_err(|e| format!("Hashing the partial download failed: {e}"))?
+        .map_err(|e| format!("Could not read the partial download back: {e}"))?
+    } else {
+        blake3::Hasher::new()
+    };
+
     // Account for already-downloaded bytes in progress tracking
     let mut downloaded: u64 = if ranges_to_skip > 0 {
         coalesced[..ranges_to_skip].iter().map(|(s, e)| e - s).sum()
@@ -450,6 +491,7 @@ pub async fn download_shard(
             .await
             .map(|m| m.len())
             .map_err(|e| format!("Failed to stat tmp file: {e}"))?;
+        let as_sent_before_range = as_sent.clone();
         let mut range_pos = *range_start;
         let mut range_bytes_written = 0u64;
         let mut stream = resp.bytes_stream();
@@ -473,6 +515,7 @@ pub async fn download_shard(
                 file.write_all(&data[s..s + l])
                     .await
                     .map_err(|e| format!("Write error: {e}"))?;
+                as_sent.update(&data[s..s + l]);
                 range_bytes_written += l as u64;
             }
             range_pos += data.len() as u64;
@@ -517,6 +560,7 @@ pub async fn download_shard(
             downloaded = downloaded.saturating_sub(received);
             range_bytes_written = 0;
             range_pos = *range_start;
+            as_sent = as_sent_before_range;
 
             let retry_resp = hf_headers(client.get(&url))
                 .header("Range", format!("bytes={}-{}", range_start, range_end - 1))
@@ -537,6 +581,7 @@ pub async fn download_shard(
                     file.write_all(&data[s..s + l])
                         .await
                         .map_err(|e| format!("Write error on retry: {e}"))?;
+                    as_sent.update(&data[s..s + l]);
                     range_bytes_written += l as u64;
                 }
                 range_pos += data.len() as u64;
@@ -567,6 +612,16 @@ pub async fn download_shard(
     file.flush()
         .await
         .map_err(|e| format!("Flush error: {e}"))?;
+    // The disk's word that it holds what was written. An error here is the
+    // only report a failed write-back gets (see the doc comment).
+    if let Err(e) = file.sync_all().await {
+        drop(file);
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+        let _ = tokio::fs::remove_file(&layout_path).await;
+        return Err(format!(
+            "Part {shard_index} could not be saved: the disk did not confirm the write ({e})"
+        ));
+    }
     drop(file);
 
     // Verify file size matches expected tensor data total
@@ -588,6 +643,29 @@ pub async fn download_shard(
         ));
     }
 
+    // The file must hold exactly the bytes that arrived.
+    let sent: [u8; 32] = *as_sent.finalize().as_bytes();
+    let on_disk = {
+        let path = tmp_path.clone();
+        tokio::task::spawn_blocking(move || crate::model::shard::hash_file_blake3(&path))
+            .await
+            .map_err(|e| format!("Hashing the downloaded part failed: {e}"))?
+            .map_err(|e| format!("Could not read the downloaded part back: {e}"))?
+    };
+    if on_disk != sent {
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+        let _ = tokio::fs::remove_file(&layout_path).await;
+        tracing::warn!(
+            shard = shard_index,
+            received = %hex::encode(&sent[..8]),
+            on_disk = %hex::encode(&on_disk[..8]),
+            "DIAG: a part downloaded from HuggingFace reads back different from the bytes that arrived — discarded"
+        );
+        return Err(format!(
+            "Part {shard_index} was not saved as it arrived: the file on disk differs from the bytes HuggingFace sent"
+        ));
+    }
+
     // Atomic rename .tmp → .bin
     tokio::fs::rename(&tmp_path, &dest_path)
         .await
@@ -603,102 +681,10 @@ pub async fn download_shard(
         "Downloaded layer-aligned shard from HuggingFace"
     );
 
-    Ok(dest_path)
-}
-
-/// Download header + specified shards from HuggingFace.
-///
-/// Main entry point for shard-level downloads:
-/// 1. Probes the remote file to get tensor metadata and layer-aligned shard layouts
-/// 2. Downloads the GGUF header
-/// 3. Downloads each requested shard via coalesced Range requests
-/// 4. Returns the model directory and file info
-pub async fn download_shards(
-    repo_id: &str,
-    filename: &str,
-    dest_dir: &std::path::Path,
-    shard_indices: &[u32],
-    info: &GgufFileInfo,
-    progress_tx: Option<tokio::sync::mpsc::Sender<DownloadProgress>>,
-) -> Result<std::path::PathBuf, String> {
-    // Download the GGUF header
-    download_gguf_header(repo_id, filename, dest_dir, info.header_size).await?;
-
-    // The shard-0 tensors a node without shard 0 still needs: the tied output
-    // head, the RoPE frequency factors.
-    if let Err(e) = download_sidecar_tensors(repo_id, filename, dest_dir, &info.tensor_meta).await {
-        tracing::warn!(error = %e, "Sidecar tensor download failed (non-fatal)");
-    }
-
-    let total_shard_bytes: u64 = shard_indices
-        .iter()
-        .filter_map(|&idx| info.layouts.get(idx as usize))
-        .map(|layout| layout.size_bytes)
-        .sum();
-
-    let mut cumulative_downloaded: u64 = 0;
-
-    for &shard_idx in shard_indices {
-        let layout = info.layouts.get(shard_idx as usize).ok_or_else(|| {
-            format!(
-                "Shard index {} out of range (max {})",
-                shard_idx,
-                info.layouts.len().saturating_sub(1)
-            )
-        })?;
-
-        // Idempotency: a shard already on disk at exactly the expected size is
-        // the shard we would download, so skip it (external report 2026-07-25:
-        // `swarmllm get-model` on an already-complete model re-fetched ~353MB
-        // byte-for-byte). Size is the right check here — the layout's
-        // `size_bytes` comes from the same remote GGUF we would fetch from, and
-        // a truncated/interrupted download lands in `<shard>.tmp` rather than at
-        // `dest_path`, so a full-size file at the final path was completed. The
-        // content is verified by BLAKE3 on every load regardless, so a corrupt
-        // same-size file is caught there rather than by re-downloading blind.
-        let dest_path = dest_dir.join(crate::model::shard::shard_filename(shard_idx));
-        if std::fs::metadata(&dest_path).is_ok_and(|m| m.len() == layout.size_bytes) {
-            tracing::info!(
-                shard = shard_idx,
-                size_bytes = layout.size_bytes,
-                path = %dest_path.display(),
-                "Shard already present at the expected size — skipping download"
-            );
-            cumulative_downloaded += layout.size_bytes;
-            // Keep the progress stream monotonic so the dashboard doesn't stall
-            // at 0% for a run where every shard is skipped.
-            if let Some(ref tx) = progress_tx {
-                let _ = tx.try_send(DownloadProgress {
-                    downloaded_bytes: cumulative_downloaded,
-                    total_bytes: total_shard_bytes,
-                });
-            }
-            continue;
-        }
-
-        // Per-shard progress mapping to cumulative
-        let (shard_tx, mut shard_rx) = tokio::sync::mpsc::channel::<DownloadProgress>(64);
-        let progress_tx = progress_tx.clone();
-        let base = cumulative_downloaded;
-        let total = total_shard_bytes;
-        let progress_task = tokio::spawn(async move {
-            while let Some(prog) = shard_rx.recv().await {
-                if let Some(ref tx) = progress_tx {
-                    let _ = tx.try_send(DownloadProgress {
-                        downloaded_bytes: base + prog.downloaded_bytes,
-                        total_bytes: total,
-                    });
-                }
-            }
-        });
-
-        download_shard(repo_id, filename, dest_dir, layout, Some(shard_tx), None).await?;
-        let _ = progress_task.await;
-
-        cumulative_downloaded += layout.size_bytes;
-    }
-
-    Ok(dest_dir.to_path_buf())
+    Ok(DownloadedPart {
+        path: dest_path,
+        hash: sent,
+    })
 }
 
 // ---- HF API response types ----
