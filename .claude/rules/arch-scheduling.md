@@ -164,7 +164,8 @@ State scoped to one attempt (e.g. `engine_drafter::draft_key`) is keyed by the a
 
 **`NodeCapability::memory_for_model_layers_mb` is the single answer to "how much
 memory can this peer give a model's layers"**, and `ram_model_budget_mb` is the
-figure a node without a graphics card puts behind it.
+figure a node without a graphics card puts behind it. That figure (`vram::live_headroom_mb`) is never more
+than the worker's own admission honours (`kv_budget::device_free_margin_bytes`; #219).
 
 → `docs/invariants/scheduling.md`
 

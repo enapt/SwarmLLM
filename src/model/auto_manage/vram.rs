@@ -515,16 +515,33 @@ pub struct RamBudget {
 /// subtracts a watermark — never by taking a maximum that inflates a live
 /// reading. Restore the old shape with `SWARMLLM_RAM_HEADROOM_FLOOR=1` if this
 /// turns out to refuse models that would have fitted.
+///
+/// **Never more than this node's own worker would let a conversation use**
+/// (FUTURE_WORK #219). This figure is what the node ADVERTISES
+/// (`node_model_budget_mb` → `NodeCapability::ram_model_budget_mb`), and the
+/// worker admits a prompt against the machine's available memory less
+/// `kv_budget::device_free_margin_bytes` (`budget_reconciled_with_device`) — 5 %
+/// of the machine, at least 256 MB. Below about 3.3 margins of available memory,
+/// 70 % of it is MORE than that, so the node offered room its worker refused:
+/// `9594e1ff` offered every TinyLlama layer and refused a 43-token prompt with
+/// "0 MB available for conversations" (2026-10-04). Petals announces
+/// `cache_tokens_left` from the very cache that admits (`server.py`,
+/// `memory_cache.bytes_left // bytes_per_token`); this is that rule here — the
+/// offer is bounded by the admission's own reserve.
 pub fn live_headroom_mb(available_mb: u64, total_mb: u64, with_floor: bool) -> u64 {
     if available_mb == 0 {
         return u64::MAX;
     }
     let live = available_mb / 100 * FREE_RAM_HEADROOM_PCT;
     if with_floor {
-        live.max(total_mb / 4)
-    } else {
-        live
+        return live.max(total_mb / 4);
     }
+    // Rounded UP to whole MB: truncating it offered 1 MB more than the worker
+    // honours (409.6 MB on an 8 GB machine).
+    let worker_margin_mb =
+        crate::inference::split::kv_budget::device_free_margin_bytes(total_mb << 20)
+            .div_ceil(1 << 20);
+    live.min(available_mb.saturating_sub(worker_margin_mb))
 }
 
 /// Is the removed `total/4` headroom floor switched back on?
@@ -2051,17 +2068,49 @@ mod floor_tests {
     /// which is the defect stated as an assertion.
     #[test]
     fn a_nearly_full_machine_refuses_a_model_that_would_swap() {
-        // 16 GB machine with 2 GB free: 70% of 2048 = 1433.
+        // 16 GB machine with 2 GB free: 70% of it is 1400 (the divide truncates
+        // first), but the worker keeps 819.2 MB (5% of 16 GB) free beside any
+        // conversation, so 1228 is all it would honour (#219).
         let loaded = RamBudget::from_machine(13107, 0, 16384, 2048);
-        assert_eq!(loaded.live_headroom_mb, 1400); // 2048/100*70, divide truncates first
+        assert_eq!(loaded.live_headroom_mb, 1228);
         assert!(
             !loaded.allows(0, 4000),
             "4000 MB against 2048 MB free is a swap, not an admission"
         );
         assert!(
-            loaded.allows(0, 1300),
+            loaded.allows(0, 1200),
             "what genuinely fits is still admitted"
         );
+        assert!(
+            !loaded.allows(0, 1300),
+            "1300 MB would leave the worker under its own margin, with no room \
+             for a single conversation"
+        );
+    }
+
+    /// The room a node offers the swarm is never more than its own worker would
+    /// let a conversation use (#219). `9594e1ff` offered every TinyLlama layer
+    /// and refused a 43-token prompt: "0 MB available for conversations".
+    /// Asserted over machine sizes and fill levels, against the worker's own
+    /// reconciliation, so a change to either side that breaks the pairing fails.
+    #[test]
+    fn a_node_never_offers_room_its_own_worker_would_refuse() {
+        use crate::inference::split::kv_budget::budget_reconciled_with_device;
+        for total in [4096u64, 8192, 16384, 32768, 65536] {
+            for available in (64..=total).step_by(64) {
+                let offered = live_headroom_mb(available, total, false);
+                let honoured =
+                    budget_reconciled_with_device(u64::MAX / 2, 0, 0, available << 20, total << 20)
+                        >> 20;
+                assert!(
+                    offered <= honoured,
+                    "{total} MB machine with {available} MB free offers {offered} MB, \
+                     its worker would honour {honoured} MB"
+                );
+            }
+        }
+        // The shape seen live: little free on a 16 GB machine offers nothing.
+        assert_eq!(live_headroom_mb(600, 16384, false), 0);
     }
 
     /// An idle machine is unaffected — the floor never decided there, so
@@ -2078,7 +2127,8 @@ mod floor_tests {
     #[test]
     fn the_floor_is_what_made_the_guard_inert() {
         let (available, total) = (2048, 16384);
-        assert_eq!(live_headroom_mb(available, total, false), 1400);
+        // 70% of 2048 is 1400; the worker's own 819.2 MB margin bounds it to 1228 (#219).
+        assert_eq!(live_headroom_mb(available, total, false), 1228);
         assert_eq!(
             live_headroom_mb(available, total, true),
             4096,

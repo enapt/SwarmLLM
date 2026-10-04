@@ -82,8 +82,6 @@ after v0.3.224 (#160, #215 and #216 closed; #217 and #218 opened from the swarm 
 15. **#3**, **#180** — the routing cost model charges a constant where the reply length
     belongs, which keeps partial ranges (load spreading) off.
 16. **#171** — the prompt pass through a split runs one stage at a time.
-17. **#219** — a peer offers room for a model it then refuses to run at all, so the
-    hint after its refusal says to retry when retrying cannot help.
 
 Everything else is ranked in its own entry. **P3** is narrow or cosmetic, **P4** is process,
 maintenance or an idea with no user waiting on it.
@@ -807,22 +805,6 @@ StarCoder2, inert while refused).
 
 ### Memory and admission
 
-#### #219 — A peer offers room for a model it then refuses to run at all
-`P2` · memory · **OPEN** — 2026-10-04 (inference test after v0.3.224)
-
-`9594e1ff` (Windows, i7-4770, processor only) offered `max_hostable_layers = 22` for
-TinyLlama-1.1B — every layer — and refused every whole-model request: "Not enough free memory
-on this node for a 43-token prompt (0 MB of conversation memory in use, 0 MB available for
-conversations once this model's weights are accounted for, short by 22 MB)". At its budget the
-weights leave nothing for a conversation, so the offer can never be honoured; half the model
-through it worked (layers 11-21). It breaks "a peer advertises the memory it will HONOUR"
-(`NodeCapability::memory_for_model_layers_mb`, `docs/invariants/scheduling.md`). Next: find
-where the offer is computed and whether it charges the conversation memory that
-`model_worker::prompt_refusal_message`'s admission then demands — a weights-only figure would
-offer every layer with 0 MB left. Since #218 the caller reads the holder's own words
-(`HoldersDeclined`), but the plan was inside the offers, so the hint says to retry, which
-cannot help here.
-
 #### #194 — An agent-sized prompt fills an 8 GB card with conversation memory
 `P2` · memory · **PARTIAL** — 2026-09-02 · absorbs the old survey's Tier 2F (KV quantisation); history: archive § "An agent-sized prompt fills an 8 GB card with KV cache, and decode crawls"
 
@@ -1308,8 +1290,22 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-04, after v0.3.224 — not yet released** (`docs/invariants/scheduling.md` §
+**Closed 2026-10-04, after v0.3.224 — not yet released** (#218, #219) (`docs/invariants/scheduling.md` §
 "A holder's refusal is reported as what it was")
+- #219 — a processor-only peer offered room it then refused: `9594e1ff` offered every
+  TinyLlama layer and refused a 43-token prompt, "0 MB available for conversations". The offer
+  (`live_headroom_mb`, 70 % of available memory) and the worker's admission (available less
+  `kv_budget::device_free_margin_bytes`, 5 % of the machine, at least 256 MB) were two rules;
+  below about 3.3 margins of free memory the first exceeded the second. The offer is now bounded
+  by the worker's reserve (rounded UP — truncating it over-offered 1 MB on an 8 GB machine, which
+  the new property test caught). Petals' rule: announce from the cache that admits
+  (`cache_tokens_left = memory_cache.bytes_left // bytes_per_token`). Test
+  `a_node_never_offers_room_its_own_worker_would_refuse` sweeps 4-64 GB machines against the
+  worker's own reconciliation; red without the bound. **Residual — field check after the next
+  release:** it changes what a PEER advertises, so it acts once `9594e1ff` runs it; read
+  `pipeline candidate node=9594e1ff … max_hostable_layers` for TinyLlama when it is short of
+  memory (0, not 22). This node has a card and advertises no RAM figure, so it could not be
+  observed here.
 - #218 — a request every holder turned down was reported as "No reachable node holds layers X-Y
   of … the peer that held that piece has gone", or as "Insufficient network capacity": the
   re-plan, with the refusing holders barred, described its own search, not the refusal. The

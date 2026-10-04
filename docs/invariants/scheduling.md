@@ -705,8 +705,9 @@ Tests: `a_holder_that_said_no_is_not_reported_as_gone`,
 `a_refused_plan_past_the_holders_offers_is_a_swarm_short_of_memory`,
 `a_re_plan_that_failed_another_way_is_reported_as_itself` — red with the peer
 refusal not kept; `a_plan_past_a_peers_offer_is_recognised_and_one_inside_it_is_not`
-on the Qwen3-30B holders' real figures. Open beside it: #219, a peer whose offer
-it can never honour (`9594e1ff`), so its refusal reads as "busy".
+on the Qwen3-30B holders' real figures. Its sibling #219 — a peer whose offer it
+could never honour, so its refusal read as "busy" — is closed under § "A peer
+advertises the memory it will HONOUR".
 
 ## The relaxation is scoped to the figures that are actually unreliable
 
@@ -1574,6 +1575,25 @@ which is what keeps a mixed-version swarm routable. The field is additive and
 `#[serde(default)]` per the protocol rule; the meaning of the existing field is
 deliberately NOT changed, because the peer list displays it as free memory and
 that reading is legitimate and different.
+
+**The offer is bounded by the worker's own reserve (2026-10-04, #219).** The
+figure behind `ram_model_budget_mb` is `vram::live_headroom_mb` — 70 % of
+available memory — while a processor worker admits a prompt against available
+memory less `kv_budget::device_free_margin_bytes` (5 % of the machine, at least
+256 MB). Two rules for one quantity: below about 3.3 margins of free memory the
+offer exceeded what the worker honours, and `9594e1ff` offered every TinyLlama
+layer, then refused a 43-token prompt with "0 MB available for conversations".
+`live_headroom_mb` now takes the smaller of the two, the margin rounded UP to
+whole MB (truncated, it over-offered by 1 MB on an 8 GB machine — the property
+test found it). Petals states the rule plainly: a server announces
+`cache_tokens_left` from the cache that admits (`server.py`,
+`memory_cache.bytes_left // bytes_per_token`). Guard:
+`a_node_never_offers_room_its_own_worker_would_refuse`, a sweep over 4-64 GB
+machines against `budget_reconciled_with_device` itself — so a change to EITHER
+side that breaks the pairing fails. It also refuses a RAM load that would leave
+the worker under its margin (`a_nearly_full_machine_refuses_a_model_that_would_swap`
+now refuses 1300 MB with 2 GB free on 16 GB): such a load could not have served
+a single conversation.
 
 ## A hand-off is priced as the shape it will be given, not as the whole model
 
