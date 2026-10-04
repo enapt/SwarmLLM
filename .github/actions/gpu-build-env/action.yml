@@ -119,7 +119,7 @@ runs:
   # what it must, so a too-loose key costs a rebuild, never a wrong binary.
   - name: Flash-attention kernel cache
     if: inputs.cuda-linux == 'true' || inputs.cuda-windows == 'true'
-    uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+    uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
     with:
       path: .flash-attn-build
       key: >-
@@ -251,7 +251,7 @@ runs:
         "visual_studio_integration"]'
   - name: Install Vulkan SDK
     if: inputs.vulkan == 'true'
-    uses: jakoch/install-vulkan-sdk-action@3c53c378c9bfbb2ea122a1cc164a837d4004c871 # v1.5.2
+    uses: jakoch/install-vulkan-sdk-action@37effcfa045411f8bfbbda26df2fd1b3bf3436fa # v1.6.0
     with:
       vulkan_version: ${{ inputs.vulkan-sdk-version }}
       install_runtime: true
