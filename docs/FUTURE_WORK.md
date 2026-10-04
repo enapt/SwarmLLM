@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #218**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #219**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -35,7 +35,7 @@ residual).
 
 Re-ranked 2026-10-02 after the verification, and 2026-10-03 when #156, #158 and #213 closed,
 then again after v0.3.223 (#157 and #164 closed, #160 raised to P1 on the swarm reading), and
-after v0.3.224 (#160, #215 and #216 closed; #217 opened from the swarm reading).
+after v0.3.224 (#160, #215 and #216 closed; #217 and #218 opened from the swarm reading and the inference test after it).
 `docs/plans/` holds the multi-step designs; the entries point at them.
 
 **P0 — wrong answers, silently**
@@ -56,11 +56,12 @@ after v0.3.224 (#160, #215 and #216 closed; #217 opened from the swarm reading).
 3. **#159** — the remaining way a node can act on another upload's description of a model
    (#156's other door; #158 closed 2026-10-03; narrowed the same day to hashes gossiped by
    holders on v0.3.222 and older, and DHT-only holders).
-4. *(#160 closed 2026-10-03 — a node with no origin to ask is healed by the holders that
-   checked theirs; see § "Closed".)*
-5. **#165** — prompt privacy is on by default for every node holding both ends of a model
+4. **#165** — prompt privacy is on by default for every node holding both ends of a model
    (58 of 78 holdings in the 2026-10-01 census) and costs 9-14× on a far middle peer; the
    notice that was meant to tell the user never fires.
+5. **#218** — when every computer holding part of a model refuses it for lack of memory, the
+   user is told that part has LEFT the swarm ("…the peer that held that piece has gone") —
+   five requests over three models on 2026-10-04.
 6. **#117** — Qwen 3.5: a working dense implementation sits unmerged on branch
    `qwen35-support`; the most-downloaded family the swarm refuses.
 7. **#1** — every Mac runs on the processor; no GPU backend is compiled for Apple Silicon.
@@ -848,6 +849,34 @@ stall per layer; TP off by default), and `VisionEncodeResponse` has no error fie
 image-encode refusal stays silent.
 
 ### API surface
+
+#### #218 — A part every holder refused for memory is reported as missing from the swarm
+`P1` · api · **OPEN** — 2026-10-04 (inference test after v0.3.224)
+
+When the peers holding a part refuse it for memory (`Service unavailable: N layers … need about
+X MB more than this node has left`, or `Not enough free memory on this node for a N-token
+prompt`), the router bars each for the request (`blacklist_holder_for_request`) and re-plans;
+once no holder is left, the scheduler's coverage walk (`inference/scheduler/mod.rs`, the
+`None =>` arm that builds `ModelIncompleteInSwarm`) answers 503 **"No reachable node holds
+layers 0-1 of … A model can be listed, and even loaded here, while the peer that held that
+piece has gone"**. Every holder was connected; the cause was memory, which a retry minutes
+later can cure, and the message says part of the model has left the swarm. Seen 2026-10-04
+06:26-06:30 UTC on five requests over three models: GLM-4 all-peer routes
+(`peer_path_matrix.sh`), Llama-3.1-8B and GLM-4 routes forced through `e561df35` (short
+3666 MB), Qwen3-30B-A3B on its DEFAULT route (`4a3ac72e`, the only complete holder, short of
+18.7 GB). The refusal is in hand when the walk fails (`last_failure`, the request's blacklist)
+and is dropped. (A segment that fails mid-pipeline — `SegmentFailoverExhausted` — does carry
+it: "…no standby available (last failure: … Not enough free memory …)".)
+
+Per `arch-errors.md` ("one variant carrying two causes that need opposite advice is two
+variants"): where no candidate is left for a range that a holder barred FOR THIS REQUEST
+covers, answer a variant saying every computer holding layers X-Y is out of memory right now
+(try again shortly, or a smaller model), carrying the last refusal; keep
+`ModelIncompleteInSwarm` for a range no connected computer holds. Its `error_hint` is a new
+i18n key (21 locales). Enumerate the paths first (`architecture.md` § "One invariant, N
+paths"): the scheduler walk, `router/distributed_exec.rs`'s handling of the variant, and
+`api/admin_models/listing.rs`. Test: plan with the only holder of a range barred for memory
+and assert the new variant — red on today's code.
 
 #### #214 — Qwen2.5-Coder-7B on Qwen's official upload answers a tool request in a wrapper nobody parses
 `P2` · api · **OPEN** — 2026-10-03 (the v0.3.222 gate)

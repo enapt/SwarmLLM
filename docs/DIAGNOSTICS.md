@@ -249,6 +249,18 @@ peers' cards in between.
 `segments=1` beside a local-only result is the search AGREEING with the fast
 path, not failing to run.
 
+## "No reachable node holds layers X-Y … the peer that held that piece has gone"
+
+⚠ **Often not true (#218).** The same 503 comes back when every holder of that range is
+connected but REFUSED it for memory: each refusal bars that holder for the request, and the
+re-plan, finding none left, reports the range as missing. Before believing a part has left
+the swarm, follow the request id: `grep -a "<request_id>" node.log | grep -E "need about .* MB
+more|Not enough free memory|Pipeline segment"` — a refusal there means "the holders are full
+right now", and a retry once their idle workers unload (or a smaller model) is the answer.
+`peers_hosting` in `/api/admin/models` says whether anyone holds it at all. Seen on five
+requests over three models on 2026-10-04, partly caused by the test's own back-to-back rows
+loading models on the peers.
+
 ## An ERROR that is not a fault: reads outside the shards this node holds
 
 `ShardReader` is a virtual view of a whole GGUF built from the shards this node
@@ -402,6 +414,19 @@ with `Range: bytes=start-end` from `resolve/main/<file>` and BLAKE3'd. First che
 commit history (`/api/models/<repo>/commits/main`): a file replaced in place would make both
 sides "right" for different dates. 2026-10-03: GLM-4 part 4 on this node = HuggingFace
 (`35f07d7f…`), repo unchanged since 2025-04-30 — the disagreeing peers held wrong bytes.
+2026-10-04: Llama-3.1-8B parts 0-1 and GLM-4 part 5 here = HuggingFace; the one peer
+disagreeing held wrong bytes (#217). A part is ONE range in these models, but not always —
+coalesce its tensors into runs and assert the byte count equals `size_bytes` (§ "Is a shard
+actually corrupt?").
+
+**Matching a log's build tag to a hash.** A build tag is the hash's first 8 bytes read
+LITTLE-endian (`swarmllm_types::build_tag_from_hash`), so `claimed_build="1374a189dd776009"`
+is hash `096077dd89a17413…` byte-reversed — `int.from_bytes(bytes.fromhex(h16),'little')`.
+That is how the tags a peer announced were tied to the hashes in a contested-hash warning.
+**`publisher=` in those warnings names who FIRST published the manifest, not who sent it**
+(it survives every hash merge): on 2026-10-04 it named THIS node's own id while the manifest
+arrived with a peer's catch-up — tie a manifest to its sender by timestamp against the
+`Heard of an upload` / `Peer connected` lines.
 
 **A peer still counted in `peers_other_build` long after an update** is a peer
 that cannot replace its parts — `peers_other_build_nodes` says which. Before v0.3.224
@@ -411,7 +436,11 @@ counted needs fewer than two connected checked holders of the part, holds anothe
 LAYOUT (its own header, table and bytes — consistent, and no way to fetch the swarm's
 header without HuggingFace), or — where it can ask HuggingFace — keeps a model with
 disputed parts in use (those wait for idle). Its operator's
-`shared_copy.this_computer` says which. Before v0.3.222, one model that could
+`shared_copy.this_computer` says which. **Or none of these:** on 2026-10-04 `e561df35`
+(HuggingFace reachable, two checked holders disagreeing, copy never withheld) kept three
+wrong parts ~3 h on v0.3.224 and replaced them within minutes of a restart — something
+that lives for one run of the heal (#217). Note the peer's `uptime_seconds`
+(`/api/admin/peers`) with every reading, so a restart is visible as the experiment it is. Before v0.3.222, one model that could
 not switch also kept every model after it (in name order) from switching (gotcha
 #780); since the prune-and-fetch heal there is no queue to block.
 
@@ -1678,7 +1707,7 @@ spread widens with it. See gotcha #422.
 | `examples/stream_bench.py MODEL [--reps N --max-tokens N --port P]` | what a user gets from a running node: streaming TTFT, decode tok/s (`(n-1)/(t_last-t_first)`, a client-side window — #312), whole-request tok/s, the card's memory before/after | reads the API key from the data dir. Compare arms WITHIN one session only (decode spreads ~9-19% on this box); verify the mechanism per arm — placement log lines, `vram_after_load_mb`, `cpu_placement_reason` — not just the number. Found #432 |
 | `examples/remote_checks.py [MODEL...]` | remote inference through the real swarm: route headers (`x-swarm-nodes`, `Server-Timing` per segment), one finish per stream (#414), multi-byte replies whole (#416) | non-streaming for the headers, streaming for the finish/duplication checks. ⚠ Run at steady state — ~60 s after a restart everything peer-held 503s "insufficient capacity" (rule 3). **Check the FAILURE paths too** (a model nobody holds, streaming): that is where #433 was |
 | `examples/frontend_load_check.js` | **loads every frontend module in `index.html`'s order and reports what throws.** `node -c`, which the pre-push check runs, is a syntax check and nothing more (#568): a reference to a deleted symbol at module scope passes it, and so does a component whose IIFE throws on load. Also checks `index.html` does not point at a missing script, and that a short list of exports other components depend on still exists | ⚠ **A pass is not "the frontend works".** The DOM stub is shallow on purpose. A missing `var U = App.utils` — the R111 regression — passes cleanly, because `U` is only referenced inside functions no load-time code runs; planted and confirmed. Each thing it DOES catch was verified by planting it, and the file lists which |
-| `examples/peer_path_matrix.sh [base] [model]` | **which computers actually serve one model, across every routing shape** — baseline, every layer elsewhere, first part local (the boomerang), and each peer excluded in turn. Reads `x-swarm-route` / `x-swarm-nodes` / `x-swarm-regions` off the response, so it needs no log access | Uses the `swarm_route` request field, so nothing moves on disk and nothing restarts — the whole matrix is a few short prompts. ⚠ **It can only make the candidate set SMALLER**: a row that fails may be saying the swarm has no route, not that routing is broken, so read NODES rather than just the result. A peer holding the whole model wins every route until excluded, which is what the per-peer rows are for. Treats a 200 with no text as a failure, not a pass |
+| `examples/peer_path_matrix.sh [base] [model]` | **which computers actually serve one model, across every routing shape** — baseline, every layer elsewhere, first part local (the boomerang), and each peer excluded in turn. Reads `x-swarm-route` / `x-swarm-nodes` / `x-swarm-regions` off the response, so it needs no log access | Uses the `swarm_route` request field, so nothing moves on disk and nothing restarts — the whole matrix is a few short prompts. ⚠ **It can only make the candidate set SMALLER**: a row that fails may be saying the swarm has no route, not that routing is broken, so read NODES rather than just the result. A peer holding the whole model wins every route until excluded, which is what the per-peer rows are for. Treats a 200 with no text as a failure, not a pass, and prints each reply's first 60 characters (since 2026-10-04) — READ them: a split through wrong bytes answered `给给给…` with a 200 (#156) |
 | `examples/smoke_test.sh [binary] [port]` | 9 end-to-end checks on an isolated node | run it on the DOWNLOADED release artifact, not a local build (#268) |
 | `examples/release_shapes.sh [binary] [port]` | 7 pre-release shape checks — cold start, long cold prompt, `prompt_tokens` agreeing cold and warm (#400), greedy determinism WITH a live control, tool-heavy | also on the DOWNLOADED artifact, BEFORE tagging. Local verification used to be a strict subset of CI's |
 | `examples/check_ci_gate.sh [owner/repo] [branch]` | **does branch protection still require the checks CI actually produces?** Reports drift BOTH ways — required-but-never-produced (blocks every PR for ever) and produced-but-not-required (the job runs and gates nothing) | A required check is matched to a job by NAME, so a rename leaves the rule naming a job that never reports. Two of this repo's were in that state on 2026-09-10 and every PR was unmergeable (gotcha #530). Reading protection needs admin rights the workflow `GITHUB_TOKEN` does not have, so this is a script you run, not a job — **part of the release gate**. Exit 1 on drift, 2 if it could not check |

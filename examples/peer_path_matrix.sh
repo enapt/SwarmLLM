@@ -72,16 +72,19 @@ run_case() {
     nodes=$(tr -d '\r' < "$hdrs" | awk 'BEGIN{IGNORECASE=1}/^x-swarm-nodes:/{print $2}')
     regions=$(tr -d '\r' < "$hdrs" | awk 'BEGIN{IGNORECASE=1}/^x-swarm-regions:/{print $2}')
 
-    local verdict
+    local verdict reply
     if [ "$code" = "200" ]; then
         # A 200 carrying no text is a failure wearing a success, so the verdict
-        # comes from the reply rather than from the status.
-        if python3 -c "
-import json,sys
+        # comes from the reply rather than from the status. And the reply is
+        # SHOWN: a split through a peer with the wrong bytes answered `给给给…`
+        # with a 200 (#156), which "ok" alone would have passed.
+        reply=$(python3 -c "
+import json
 d=json.load(open('$body'))
 c=(d.get('choices') or [{}])[0]
-sys.exit(0 if ((c.get('message') or {}).get('content') or '').strip() else 1)
-" 2>/dev/null; then verdict="ok"; else verdict="EMPTY REPLY"; fi
+print(' '.join(((c.get('message') or {}).get('content') or '').split())[:60])
+" 2>/dev/null)
+        if [ -n "$reply" ]; then verdict="ok: $reply"; else verdict="EMPTY REPLY"; fi
     else
         verdict="HTTP $code"
         # Say why, briefly — a refusal here is often the honest answer.
