@@ -35,7 +35,8 @@ residual).
 
 Re-ranked 2026-10-02 after the verification, and 2026-10-03 when #156, #158 and #213 closed,
 then again after v0.3.223 (#157 and #164 closed, #160 raised to P1 on the swarm reading), and
-after v0.3.224 (#160, #215 and #216 closed; #217 and #218 opened from the swarm reading and the inference test after it); #218 closed the same day, not yet released.
+after v0.3.224 (#160, #215 and #216 closed; #217 and #218 opened from the swarm reading and the inference test after it); later that day #165, #189,
+#218 and #219 closed and #129 narrowed on main, not yet released.
 `docs/plans/` holds the multi-step designs; the entries point at them.
 
 **P0 — wrong answers, silently**
