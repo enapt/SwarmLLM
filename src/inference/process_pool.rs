@@ -2084,6 +2084,11 @@ pub struct ModelProcessPool {
     /// disk, which a unit test must not depend on the developer's node for.
     #[cfg(test)]
     pub(crate) test_cost_curve: DashMap<ModelId, (u64, u64)>,
+    /// A model's whole-model geometry for a test, in place of its header on
+    /// disk — what `footprint_inputs` would read. Same reason as above.
+    #[cfg(test)]
+    pub(crate) test_footprint_inputs:
+        DashMap<ModelId, crate::model::auto_manage::vram::VramFootprintInputs>,
 }
 
 /// Command into the batch scheduler task.
@@ -2243,6 +2248,8 @@ impl ModelProcessPool {
             slow_card: Arc::new(crate::inference::cuda_pool::SlowCardNotice::default()),
             #[cfg(test)]
             test_cost_curve: DashMap::new(),
+            #[cfg(test)]
+            test_footprint_inputs: DashMap::new(),
         }
     }
 
@@ -2696,6 +2703,18 @@ impl ModelProcessPool {
         segment: Option<(u32, u32)>,
     ) -> Option<crate::model::auto_manage::vram::VramFootprintInputs> {
         use crate::model::auto_manage::vram::VramFootprintInputs;
+        #[cfg(test)]
+        if let Some(whole) = self.test_footprint_inputs.get(model_id) {
+            let mut i = *whole;
+            if let Some((start, end)) = segment {
+                let layers = u64::from(end.saturating_sub(start));
+                i.quantized_weight_bytes =
+                    whole.quantized_weight_bytes / whole.segment_layers.max(1) * layers;
+                i.segment_layers = layers;
+                i.is_first = start == 0;
+            }
+            return Some(i);
+        }
         let model_dir = crate::model::shard::model_dir(&self.data_dir, &model_id.0);
         let header = model_dir.join(crate::model::shard::HEADER_FILENAME);
         // ONE parse of the header, not two. This used to read the same file a
@@ -4173,7 +4192,28 @@ impl ModelProcessPool {
             budget.headroom_after(self.ram_committed_mb(), 0)
         };
         // The fixed terms are paid once, whatever the segment's length.
-        layers_that_fit(free_mb, fixed_mb, per_layer_mb)
+        let fit = layers_that_fit(free_mb, fixed_mb, per_layer_mb);
+        if !on_gpu {
+            return fit;
+        }
+        // **A model that does not fit the card whole is not refused by the
+        // loader — it is split** (`partial_gpu_layers`: its first layers on the
+        // card, the rest on the processor, whose share is not charged against
+        // the RAM budget). This bound counted the card alone, so for a cold
+        // model a little too large for it the planner was told this node could
+        // hold 17 of Mistral-7B's 32 layers, declared "a pipeline is the only
+        // route", and sent it through Italy at 44.7 s — having priced this
+        // node at 16.8 s against that chain's 29.8 (2026-10-04; warm, the same
+        // request ran here in 7.2 s). Asked of the loader's own decision, so
+        // the bound and the load cannot disagree (FUTURE_WORK #129).
+        let hybrid_total = self.estimated_gpu_mb(model_id).and_then(|estimated| {
+            self.partial_gpu_layers(model_id, None, estimated)
+                .map(|(_, total)| u32::try_from(total).unwrap_or(u32::MAX))
+        });
+        match (fit, hybrid_total) {
+            (Some(on_card), Some(total)) if on_card < total => Some(total),
+            _ => fit,
+        }
     }
 
     /// Retire a worker whose process is gone, releasing the memory it no
@@ -9294,6 +9334,63 @@ mod admission_tests {
             };
             assert_eq!(split_for_card(&unsplittable, three_gb), None, "{arch}");
         }
+    }
+
+    /// The planner is told this node can hold a model the loader would SPLIT
+    /// across the card and the processor (FUTURE_WORK #129). The bound counted
+    /// the card alone, so a cold Mistral-7B — 17 of 32 layers on an 8 GB card —
+    /// was declared "a pipeline is the only route" and sent through Italy at
+    /// 44.7 s, priced here at 16.8 s against that chain's 29.8 (2026-10-04).
+    #[test]
+    fn a_model_the_loader_would_split_is_one_this_node_can_hold() {
+        use crate::inference::model_arch::ModelArch;
+        use crate::inference::split::hybrid::arch_supports_hybrid;
+        let seven_b = crate::model::auto_manage::vram::VramFootprintInputs {
+            quantized_weight_bytes: 4_400 * 1024 * 1024,
+            unquantized_bytes_per_element: None,
+            vocab_size: 152_064,
+            embedding_length: 3584,
+            segment_layers: 28,
+            head_count_kv: 4,
+            head_count: 28,
+            head_dim: 128,
+            rope_dim: 128,
+            effective_context: 8192,
+            is_first: true,
+            embedding_gatherable: true,
+            splits_across_devices: arch_supports_hybrid(&ModelArch::Qwen2),
+        };
+        let pool_with = |inputs| {
+            let p = pool();
+            p.set_gpu_layers(-1);
+            p.set_vram_budget_mb(3000);
+            let m = ModelId("seven-b".into());
+            p.test_footprint_inputs.insert(m.clone(), inputs);
+            (p, m)
+        };
+
+        let (p, m) = pool_with(seven_b);
+        let on_card_alone = {
+            let (fixed, per_layer) = p.segment_cost_curve(&m, true).unwrap();
+            layers_that_fit(3000, fixed, per_layer).unwrap()
+        };
+        assert!(
+            on_card_alone < 28,
+            "fixture: the card alone holds {on_card_alone}"
+        );
+        assert_eq!(
+            p.max_local_hostable_layers(&m, true),
+            Some(28),
+            "the loader would place all 28 — part on the card, the rest on the processor"
+        );
+
+        // The control: an architecture the loader will not split is held to
+        // what the card alone takes, as before.
+        let (q, m) = pool_with(crate::model::auto_manage::vram::VramFootprintInputs {
+            splits_across_devices: false,
+            ..seven_b
+        });
+        assert_eq!(q.max_local_hostable_layers(&m, true), Some(on_card_alone));
     }
 
     /// The combined accessor and the single-answer methods must agree.

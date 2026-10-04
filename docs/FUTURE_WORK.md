@@ -350,14 +350,24 @@ split wins. Also feed observed per-layer latency into `compute_segment_timeout` 
 the fixed 2 s/layer guess. Depends on #3.
 
 #### #129 — A model a few MB too large for the card is sent on a boomerang across continents
-`P2` · routing · **OPEN** — 2026-09-27 · history: archive row #129
+`P2` · routing · **PARTIAL** — 2026-09-27, narrowed 2026-10-04 · history: archive row #129
 
-Instead of running a layer or two on the processor locally (a hybrid placement), the planner
-picks an intercontinental boomerang. #127 (pricing our own GPU from a cold load) is fixed, so
-first re-measure. Then price the local hybrid placement (`partial_gpu_layers`) as a candidate
-in the search, and charge a remote hop's network cost per token / per crossing rather than per
-segment (`docs/plans/regional_pipelines.md` § "What is actually missing", 2). Do not tune
-`ASSUMED_FORWARD_PASSES` (#3).
+**Fixed on main 2026-10-04 (not yet released):** the planner was never offered the local hybrid.
+`ModelProcessPool::max_local_hostable_layers` counted the card alone, so for a COLD model that
+does not fit the card whole this node "could not hold every layer", `local_route_available=false`,
+and the search's chain was taken even when it priced this node cheaper: Mistral-7B priced here
+at 16.8 s against a 29.8 s boomerang through `4a3ac72e` (Italy), took the boomerang (44.7 s for
+48 tokens); forced here it ran as a 17/32 hybrid, 7.2 s warm. Phi-3.5 the same (16.8 s vs
+44.8 s). The bound now asks the loader's own decision (`partial_gpu_layers`): a model it would
+split is one this node can hold. Test `a_model_the_loader_would_split_is_one_this_node_can_hold`
+(red without it; control: an architecture the loader will not split keeps the card-only bound).
+**Not yet verified on a CUDA build** — the dev build has no card path: at the next gate, a COLD
+Mistral-7B or Llama-3.1-8B request on this 8 GB node must answer `route=local`, not a boomerang.
+
+**Residual:** the local candidate is still priced at its processor speed (16.8 s) rather than
+as a hybrid — conservative, it won here anyway. And a remote hop's network cost is charged per
+segment rather than per token / per crossing (the regional-pipelines plan, § "What is actually
+missing", 2). Do not tune `ASSUMED_FORWARD_PASSES` (#3).
 
 #### #192 — Nothing routes on the distance between two peers
 `P2` · routing · **PARTIAL** — 2026-09-02 · absorbs archive § "Speeding up inference BETWEEN nodes" ideas 3 (ring decode) and 4 (peer-to-peer RTT); plan: `docs/plans/regional_pipelines.md`

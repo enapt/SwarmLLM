@@ -98,6 +98,19 @@ committed and too late to reshape it. The one candidate with the best
 information about its own memory was the only one priced as unbounded. `None`
 still means unknowable, never "no room".
 
+**The same rule from the other side (2026-10-04, #129): the bound must also say
+YES wherever the loader would.** On a card it counted the card alone, while the
+loader does not refuse a model that does not fit the card whole — it splits it
+(`partial_gpu_layers`: the first layers on the card, the rest on the processor,
+uncharged against the RAM budget). So a cold Mistral-7B on an 8 GB card bounded
+this node at 17 of 32 layers, `local_can_hold_every_layer` answered no, and the
+search's boomerang through Italy (29.8 s priced, 44.7 s measured) was taken over
+this node's own route priced at 16.8 s — which, forced, ran as a 17/32 hybrid in
+7.2 s warm. The bound now asks `partial_gpu_layers` itself, so a plan and the
+load cannot disagree in either direction. Guard:
+`a_model_the_loader_would_split_is_one_this_node_can_hold`, with an
+architecture the loader will not split as its control.
+
 **`process_pool::segment_shape` prices what the worker will actually map.**
 `VramFootprintInputs` has always documented `segment_layers` as "Layers in THIS
 segment, not the whole model" and `quantized_weight_bytes` as "the shard bytes
