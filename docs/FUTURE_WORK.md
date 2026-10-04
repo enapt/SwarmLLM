@@ -907,22 +907,6 @@ image-encode refusal stays silent.
 
 ### API surface
 
-#### #214 — Qwen2.5-Coder-7B on Qwen's official upload answers a tool request in a wrapper nobody parses
-`P2` · api · **OPEN** — 2026-10-03 (the v0.3.222 gate)
-
-Since v0.3.221 moved every node to Qwen's official upload of `qwen2.5-coder-7b-instruct-q4-k-m`
-(4,683,073,536 B, chat template 2,509 chars, with a `tools` branch), conformance's tool check
-("Call get_time for zone UTC") gets `<{{"name": "get_time", "arguments": {"zone": "UTC"}}}}` back
-as content: no `tool_calls`. The previous (third-party) upload's reply parsed. Not a build
-regression — v0.3.221 and v0.3.222 answer identically on the current files (`~/swarmllm-gate-0222/
-qconf_{221,222}.log`), and on a plain prompt .222's reply equals llama.cpp's on the official file
-96/96 tokens. Next: render the same tool prompt through llama.cpp (llama-cpp-python, the GGUF's
-own template with `tools`) and compare its greedy reply — if llama.cpp produces the same wrapper,
-it is the model's habit and `tool_parse` may accept a `<{…}>`-wrapped JSON call (as it accepts
-other near-misses, `docs/invariants/api-surfaces.md`); if not, the prompt differs and that is the
-bug. Conformance's baseline (`~/swarmllm-gate-0221/conformance.log`) predates the switch — the
-next gate diffs against `~/swarmllm-gate-0222/conformance.log`.
-
 #### #185 — Three API surfaces each implement streaming and non-streaming replies separately
 `P3` · api · **OPEN** — 2026-07-26 · history: archive § "Collapse the parallel response paths behind one core loop"
 
@@ -1333,8 +1317,18 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-04, after v0.3.224 — not yet released** (#218, #219, #165, #189) (`docs/invariants/scheduling.md` §
+**Closed 2026-10-04, after v0.3.224 — not yet released** (#214, #218, #219, #165, #189) (`docs/invariants/scheduling.md` §
 "A holder's refusal is reported as what it was")
+- #214 — Qwen2.5-Coder-7B (Qwen's official upload) answered a tool request as the text
+  `<{{"name": "get_time", "arguments": {"zone": "UTC"}}}}`, no `tool_calls`. The model's habit,
+  not our prompt: llama.cpp (llama-cpp-python 0.3.16) gives the identical reply on the
+  identical prompt rendered from the GGUF's own template, which shows its example call with
+  the braces doubled. `tool_parse::try_template_doubled_braces` reads that one shape when it
+  is the WHOLE reply (an optional `<` / `<tool_call>`, the doubled brace, one call object, only
+  closing braces after), and `retract_over_angle_opener` keeps the `<` out of the content.
+  Live, dev build: OpenAI plain + streamed and Anthropic plain + streamed all return the
+  call; v0.3.224 returned the text on all four. (The Anthropic stream's empty text block
+  before a `tool_use` is the preamble's, by design, and predates this — xLAM shows it too.)
 - #189 — `/v1/models` reported `max_model_len: null` for every model this node holds none of
   (no header to read), so OpenClaw assumed 128k and its agent turns were refused. The model's
   declared context now travels in its manifest: `ModelManifest::context_length`,

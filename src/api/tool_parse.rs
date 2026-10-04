@@ -248,6 +248,7 @@ pub fn parse_tool_calls(text: &str) -> Option<Vec<ParsedToolCall>> {
         .or_else(|| try_phi(trimmed))
         .or_else(|| try_llama3(trimmed))
         .or_else(|| try_invented_wrapper(trimmed))
+        .or_else(|| try_template_doubled_braces(trimmed))
         .filter(|calls| !calls.is_empty())
         .map(assign_unique_ids)
 }
@@ -359,6 +360,7 @@ pub fn content_prefix_len(text: &str) -> usize {
     // still found right where the cut lands.
     if safe < text.len() {
         safe = retract_over_array_opener(text, safe);
+        safe = retract_over_angle_opener(text, safe);
         safe = retract_over_fence_opener(text, safe);
     }
     // Never cut inside a character.
@@ -382,6 +384,20 @@ fn retract_over_array_opener(text: &str, safe: usize) -> usize {
     let head = text[..safe].trim_end();
     if head.ends_with('[') {
         head.len() - 1
+    } else {
+        safe
+    }
+}
+
+/// Move `safe` back over a `<` that touches the brace the cut lands on.
+///
+/// Qwen2.5-Coder-7B opens a call with the first character of `<tool_call>` and
+/// goes straight to the object: `<{{"name": …}}}` ([`try_template_doubled_braces`],
+/// #214). The `<` is the call's, not a word of the reply. Only a `<` touching the
+/// brace is taken: anything with a space between stays content.
+fn retract_over_angle_opener(text: &str, safe: usize) -> usize {
+    if text[..safe].ends_with('<') && text[safe..].starts_with('{') {
+        safe - 1
     } else {
         safe
     }
@@ -1259,6 +1275,51 @@ fn try_invented_wrapper(text: &str) -> Option<Vec<ParsedToolCall>> {
     single_object_call(body.trim(), 0).map(|call| vec![call])
 }
 
+/// A call written the way Qwen's chat template SHOWS one — braces doubled.
+///
+/// Qwen2.5's template prints its example call as
+/// `<tool_call>\n{{"name": <function-name>, "arguments": <args-json-object>}}\n</tool_call>`
+/// — the braces doubled — and Qwen2.5-Coder-7B copies them. Asked to call
+/// `get_time` for zone UTC it answers `<{{"name": "get_time", "arguments":
+/// {"zone": "UTC"}}}}`, and llama.cpp (llama-cpp-python 0.3.16) gives the
+/// identical reply on the identical prompt rendered from the GGUF's own
+/// template (#214, 2026-10-04), so it is the model, not our render. It is a
+/// known habit: Qwen2.5-Coder was not trained on a tool format, and vLLM users
+/// carry a separate parser for it (vllm-project/vllm#32926). llama.cpp's
+/// Hermes/Qwen parser searches for `{"name"` anywhere and would read this call
+/// with `<{` left over as content.
+///
+/// The rule is as tight as [`try_invented_wrapper`]'s: the WHOLE reply is the
+/// call — at most `<tool_call>` or a lone `<` before it, then the doubled
+/// brace, ONE object with a string `name`, then nothing but closing braces (the
+/// doubled one, and the extra one the model adds) and an optional
+/// `</tool_call>` or `>`. Prose before or after, or an echoed definition (its
+/// `name` nests under `function`), yields nothing.
+fn try_template_doubled_braces(text: &str) -> Option<Vec<ParsedToolCall>> {
+    let t = text.trim();
+    let t = t
+        .strip_prefix("<tool_call>")
+        .or_else(|| t.strip_prefix('<'))
+        .unwrap_or(t)
+        .trim_start();
+    let t = t.strip_prefix('{')?;
+    if !t.trim_start().starts_with('{') {
+        return None;
+    }
+    let mut objects = serde_json::Deserializer::from_str(t).into_iter::<Value>();
+    let v = objects.next()?.ok()?;
+    let rest = t[objects.byte_offset()..].trim();
+    let rest = rest
+        .strip_suffix("</tool_call>")
+        .or_else(|| rest.strip_suffix('>'))
+        .unwrap_or(rest)
+        .trim_end();
+    if rest.is_empty() || rest.len() > 2 || !rest.chars().all(|c| c == '}') {
+        return None;
+    }
+    single_value_call(&v, 0).map(|call| vec![call])
+}
+
 /// `[TOOL_CALLS][{"name": ..., "arguments": {...}}]` — Mistral.
 fn try_mistral(text: &str) -> Option<Vec<ParsedToolCall>> {
     let rest = text.split("[TOOL_CALLS]").nth(1)?.trim();
@@ -1546,6 +1607,53 @@ mod tests {
         let (deltas, mut buf) = deltas_for(reply, 2);
         let leftover = buf.pending_content().unwrap_or_default();
         assert_eq!(format!("{}{leftover}", deltas.concat()), "Checking.\n");
+    }
+
+    /// #214: Qwen2.5-Coder-7B copies its template's doubled braces —
+    /// `<{{"name": …}}}}`, llama.cpp's reply too on the same prompt. It is a
+    /// call, it streams nothing, and no `<` is left over as the reply.
+    #[test]
+    fn a_call_in_the_templates_doubled_braces_is_read_and_nothing_leaks() {
+        let reply = "<{{\"name\": \"get_time\", \"arguments\": {\"zone\": \"UTC\"}}}}";
+        let calls = super::parse_tool_calls(reply).expect("the conformance reply is a call");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "get_time");
+        assert_eq!(calls[0].arguments, "{\"zone\":\"UTC\"}");
+        assert_eq!(super::leading_content(reply), None);
+        for token_len in [1, 2, 3, 7] {
+            let (deltas, mut buf) = deltas_for(reply, token_len);
+            assert!(
+                deltas.is_empty(),
+                "token_len {token_len}: streamed {deltas:?}"
+            );
+            assert_eq!(buf.pending_content(), None, "token_len {token_len}");
+        }
+        for framed in [
+            "{{\"name\": \"get_time\", \"arguments\": {\"zone\": \"UTC\"}}}",
+            "<tool_call>\n{{\"name\": \"get_time\", \"arguments\": {\"zone\": \"UTC\"}}}\n</tool_call>",
+            "<{{\"name\": \"get_time\", \"arguments\": {\"zone\": \"UTC\"}}}>",
+        ] {
+            let calls = super::parse_tool_calls(framed).unwrap_or_default();
+            assert_eq!(calls.len(), 1, "{framed:?}");
+            assert_eq!(calls[0].name, "get_time", "{framed:?}");
+        }
+    }
+
+    /// The doubled-brace rule takes a whole reply that IS a call, never JSON
+    /// inside prose, and never an echoed definition.
+    #[test]
+    fn doubled_braces_in_prose_or_a_definition_are_not_a_call() {
+        for reply in [
+            "In Jinja write {{\"name\": \"x\"}} to print it.",
+            "{{\"name\": \"get_time\", \"arguments\": {}}} and then I will explain.",
+            "{{\"type\": \"function\", \"function\": {\"name\": \"get_time\"}}}",
+            "{{\"name\": \"get_time\", \"arguments\": {}}}}}}",
+        ] {
+            assert!(super::parse_tool_calls(reply).is_none(), "{reply:?}");
+        }
+        // A `<` with a space before the brace is a word of the reply.
+        let prose = "a < {\"b\": 1}";
+        assert_eq!(&prose[..super::content_prefix_len(prose)], "a < ");
     }
 
     /// A reply that OPENS with a marker spelled over several tokens leaked its
