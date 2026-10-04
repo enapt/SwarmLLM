@@ -251,15 +251,33 @@ path, not failing to run.
 
 ## "No reachable node holds layers X-Y … the peer that held that piece has gone"
 
-⚠ **Often not true (#218).** The same 503 comes back when every holder of that range is
-connected but REFUSED it for memory: each refusal bars that holder for the request, and the
-re-plan, finding none left, reports the range as missing. Before believing a part has left
-the swarm, follow the request id: `grep -a "<request_id>" node.log | grep -E "need about .* MB
-more|Not enough free memory|Pipeline segment"` — a refusal there means "the holders are full
-right now", and a retry once their idle workers unload (or a smaller model) is the answer.
-`peers_hosting` in `/api/admin/models` says whether anyone holds it at all. Seen on five
-requests over three models on 2026-10-04, partly caused by the test's own back-to-back rows
-loading models on the peers.
+⚠ **On v0.3.224 and older, often not true (#218).** The same 503 comes back when every holder
+of that range is connected but REFUSED it for memory: each refusal bars that holder for the
+request, and the re-plan, finding none left, reports the range as missing. Follow the request
+id: `grep -a "<request_id>" node.log | grep -E "need about .* MB more|Not enough free
+memory|Pipeline segment"` — a refusal there means the holders are full, not gone.
+`peers_hosting` in `/api/admin/models` says whether anyone holds it at all.
+
+**From the release after v0.3.224** a refusal is reported as itself: `Not enough memory in the
+swarm for <model>: the computers holding it have room for about N of its M layers` (the refused
+plan went past what the holders offer — retrying will not help) or `The computers holding the
+part of <model> … are online but turned it down — the last one said: …` (busy — retry later).
+The router logs `DIAG: re-plan after a refusal found no other route` with the re-plan's own
+error beside what it reported. "Has gone" is then true: a holder that DIED (connection closed)
+did not say no.
+
+## "Why is this route so slow?" — what prompt privacy adds (#165)
+
+With "Start and finish on this computer" on (auto-on where this node holds both ends of a
+model), a route through peers is a boomerang: the first and last layers run here, and every
+token comes back here twice. From the release after v0.3.224 each assembly that takes such a
+route logs `DIAG: what keeping the first and last layers here adds to the route taken` with
+`privacy_extra_ms` (the route taken minus the search's cheapest route with privacy OFF) and
+`without_privacy_ms`, in the router's own milliseconds. `privacy_extra_ms=0` says privacy is
+not the slow part — a far peer is; a large one, past 5 s AND past the route without it, also
+puts a "Starting and finishing replies on this computer is adding about Ns…" notice in the
+activity feed, once per model per ten minutes. The figure is never acted on: turning privacy
+off is the owner's choice (the model's card on the Dashboard).
 
 ## An ERROR that is not a fault: reads outside the shards this node holds
 

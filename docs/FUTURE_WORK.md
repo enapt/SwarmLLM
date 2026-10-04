@@ -56,32 +56,29 @@ after v0.3.224 (#160, #215 and #216 closed; #217 and #218 opened from the swarm 
 3. **#159** — the remaining way a node can act on another upload's description of a model
    (#156's other door; #158 closed 2026-10-03; narrowed the same day to hashes gossiped by
    holders on v0.3.222 and older, and DHT-only holders).
-4. **#165** — prompt privacy is on by default for every node holding both ends of a model
-   (58 of 78 holdings in the 2026-10-01 census) and costs 9-14× on a far middle peer; the
-   notice that was meant to tell the user never fires.
-5. **#117** — Qwen 3.5: a working dense implementation sits unmerged on branch
+4. **#117** — Qwen 3.5: a working dense implementation sits unmerged on branch
    `qwen35-support`; the most-downloaded family the swarm refuses.
-6. **#1** — every Mac runs on the processor; no GPU backend is compiled for Apple Silicon.
-7. **#153** — Windows: a worker that outlives the daemon holds its port, and the next start
+5. **#1** — every Mac runs on the processor; no GPU backend is compiled for Apple Silicon.
+6. **#153** — Windows: a worker that outlives the daemon holds its port, and the next start
    fails.
 
 **P2 — speed and completeness**
-8. **#189** — `/v1/models` reports no context length for any model this node does not hold
+7. **#189** — `/v1/models` reports no context length for any model this node does not hold
    (agents such as OpenClaw then guess 128k). Small, additive.
-9. **#152** — the continuous guess-check stream never runs on the split shapes the swarm
+8. **#152** — the continuous guess-check stream never runs on the split shapes the swarm
     actually makes (the boomerang above all).
-10. **#10** — conversation prefixes across computers: no routing to the peer holding the
+9. **#10** — conversation prefixes across computers: no routing to the peer holding the
     cache, and a split chain keeps no KV across turns (absorbs #139).
-11. **#162** — the release gate: a cloned gate loses its helpers, and step 12e cannot test a
+10. **#162** — the release gate: a cloned gate loses its helpers, and step 12e cannot test a
     takeover on this box (absorbs #140).
-12. **#155** — AutoNAT dial-backs denied by the per-peer cap every ~5 s, for the life of a node.
-13. **#194** — an agent-sized prompt fills an 8 GB card with conversation memory.
-14. **#147**, **#137**, **#138**, **#129** — prompt reading on the card, the processor half of
+11. **#155** — AutoNAT dial-backs denied by the per-peer cap every ~5 s, for the life of a node.
+12. **#194** — an agent-sized prompt fills an 8 GB card with conversation memory.
+13. **#147**, **#137**, **#138**, **#129** — prompt reading on the card, the processor half of
     a hybrid, MoE placement, and near-fit models sent across continents
     (`docs/plans/faster_than_local.md`).
-15. **#3**, **#180** — the routing cost model charges a constant where the reply length
+14. **#3**, **#180** — the routing cost model charges a constant where the reply length
     belongs, which keeps partial ranges (load spreading) off.
-16. **#171** — the prompt pass through a split runs one stage at a time.
+15. **#171** — the prompt pass through a split runs one stage at a time.
 
 Everything else is ranked in its own entry. **P3** is narrow or cosmetic, **P4** is process,
 maintenance or an idea with no user waiting on it.
@@ -306,23 +303,6 @@ frame, then add a receipt ACK or a per-frame read deadline mirroring request-res
 § 4 item 7); with V1Lazy (#136) request-response is as fast, so there is no speed reason to.
 
 ### Routing and placement
-
-#### #165 — Auto-enabled prompt privacy can cost 9-14× on a far middle peer, and the notice meant to say so never fires
-`P1` · routing · **OPEN** — 2026-09-05, reopened 2026-09-20 · absorbs the privacy bullet of archive § "Not bugs, and deliberately not ranked" and residual (1) of § "The whole-model hand-off is a yes/no gate…"; history: archive § "Auto-enabled prompt privacy can cost 6x on a long prompt"
-
-`encrypted_pipeline_auto` (default ON) keeps the first and last layers of a model on any node
-holding both ends — "Start and finish on this computer", which is STRUCTURAL, not
-cryptographic (CLAUDE.md). The cost is one round trip per token to the middle peer: measured
-2026-09-20 at 9× and 14× against handing the model over, 6× on a long prompt's reading.
-The policy is decided and stays: **tell the user, never downgrade automatically** — a
-downgrade triggered by slowness is one an adversary triggers by being slow (RFC 7507's
-reason for TLS); the figure is reported, never read by the router. What is broken is the
-telling: `report_privacy_cost`'s one call site is gated on `!search_will_decide`, and with
-`parallax_routing` on (default) and more than one candidate it is never reached — it fires
-only for single-candidate models. Fix: price the route the search actually chose against the
-cheapest plan without the boomerang (the search already prices both with `vertex_cost`) and
-report from there, keeping the existing rate limit (once per model per 10 min) and wording.
-This is wiring, not a policy change.
 
 #### #3 — The routing cost model's network term overestimates a boomerang: a constant stands where the reply length belongs
 `P2` · routing · **OPEN** — 2026-09-08 · history: archive row #3 and § "The routing cost model's network term overestimates a boomerang" (three dated measurements)
@@ -1290,8 +1270,22 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-04, after v0.3.224 — not yet released** (#218, #219) (`docs/invariants/scheduling.md` §
+**Closed 2026-10-04, after v0.3.224 — not yet released** (#218, #219, #165) (`docs/invariants/scheduling.md` §
 "A holder's refusal is reported as what it was")
+- #165 — the notice saying what prompt privacy costs never fired where the priced search
+  decides (parallax on, more than one candidate — the default): `report_privacy_cost` sat on
+  the gate's path only, so GLM-4-9B ran a five-segment boomerang at 95 s for 48 tokens with
+  nothing said. The plan actually taken is now priced at the planner's exit
+  (`privacy_cost_of_plan`: a plan that starts and ends here with someone else in the middle,
+  against the search's own cheapest route with privacy off, bounded rungs only, both through
+  `parallax::chain_cost_ms`), and said through the one `announce_privacy_cost` — same bars
+  (≥ 5 s and ≥ the route without it), same once-per-model-per-10-min limit, same translated
+  wording; previews never speak. Still reported, never acted on (RFC 7507's reason). A `DIAG:
+  what keeping the first and last layers here adds to the route taken` line gives both
+  figures per assembly. Live, dev build: Llama-3.1-8B through `4a3ac72e` priced
+  `privacy_extra_ms=0`, `without_privacy_ms=78060` — privacy was not the slow part there (the
+  far peer was), and nothing was said. Test `the_search_s_boomerang_says_what_privacy_costs`
+  is red without the call.
 - #219 — a processor-only peer offered room it then refused: `9594e1ff` offered every
   TinyLlama layer and refused a 43-token prompt, "0 MB available for conversations". The offer
   (`live_headroom_mb`, 70 % of available memory) and the worker's admission (available less

@@ -1292,7 +1292,9 @@ const PRIVACY_COST_REPORT_INTERVAL: std::time::Duration = std::time::Duration::f
 /// privacy is free.
 ///
 /// **This figure is REPORTED, never acted on.** See
-/// `docs/FUTURE_WORK.md` § "Auto-enabled prompt privacy" for why the option to
+/// `docs/FUTURE_WORK_ARCHIVE.md` § "Auto-enabled prompt privacy" (and
+/// `docs/invariants/scheduling.md` § "What prompt privacy costs is said for the
+/// route actually taken") for why the option to
 /// drop the guarantee automatically was researched and rejected: an automatic
 /// downgrade triggered by slowness is one an adversary can trigger by being
 /// slow, which is the failure RFC 7507 exists to prevent for TLS. The user is
@@ -1322,6 +1324,75 @@ fn privacy_cost_ms(
     let boomerang = shape(delegated_layer_span(num_layers, true))?;
     let whole_on_peer = shape(num_layers)?;
     Some(boomerang - whole_on_peer)
+}
+
+/// Is a privacy cost big enough to tell the user about? Both bars must clear: a
+/// wait a person notices, and privacy at least doubling it.
+fn privacy_cost_is_worth_saying(extra_ms: f32, without_ms: f32) -> bool {
+    extra_ms >= PRIVACY_COST_REPORT_MS
+        && without_ms > 0.0
+        && extra_ms / without_ms >= PRIVACY_COST_REPORT_RATIO
+}
+
+/// What prompt privacy adds to a plan, and what the plan without it costs.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct PrivacyCost {
+    extra_ms: f32,
+    without_ms: f32,
+}
+
+/// What keeping the ends here adds to the plan being taken (#165): `segments`
+/// priced against the cheapest route the search finds with privacy OFF, both
+/// through `parallax::chain_cost_ms` so the two figures are the same cost
+/// model's. `None` when the plan is not one privacy shaped — it must start and
+/// end here with someone else in the middle — when there is no prompt to price,
+/// or when no route exists without privacy inside what the peers offer.
+///
+/// REPORTED, never acted on, like [`privacy_cost_ms`]: the reasons a downgrade
+/// must not be automatic are written there.
+fn privacy_cost_of_plan(
+    segments: &[PipelineSegment],
+    candidates: &[NodeCandidate],
+    local_node_id: &NodeId,
+    num_layers: u32,
+    prompt_tokens: Option<u32>,
+    partial_ranges: bool,
+) -> Option<PrivacyCost> {
+    let starts_here = segments
+        .first()
+        .is_some_and(|s| s.node_id == *local_node_id);
+    let ends_here = segments.last().is_some_and(|s| s.node_id == *local_node_id);
+    let leaves = segments.iter().any(|s| s.node_id != *local_node_id);
+    if !(starts_here && ends_here && leaves) || prompt_tokens.is_none_or(|t| t == 0) {
+        return None;
+    }
+    let price = |plan: &[PipelineSegment]| {
+        parallax::chain_cost_ms(plan, candidates, local_node_id, num_layers, prompt_tokens)
+    };
+    // The bounded rungs only: a route past what the peers offered is one they
+    // would refuse, and is no fair price for "without privacy".
+    let without = [
+        parallax::CapacityBound::Everyone,
+        parallax::CapacityBound::PeersAtFaceValue,
+    ]
+    .into_iter()
+    .find_map(|bound| {
+        parallax::route_shortest_path(
+            num_layers,
+            candidates,
+            local_node_id,
+            false,
+            partial_ranges,
+            bound,
+            prompt_tokens,
+        )
+        .ok()
+    })?;
+    let without_ms = price(&without);
+    Some(PrivacyCost {
+        extra_ms: (price(segments) - without_ms).max(0.0),
+        without_ms,
+    })
 }
 
 /// Is the delegation price gate switched on?
@@ -1940,10 +2011,83 @@ impl PipelineScheduler {
             prompt_tokens,
         )
         .total();
-        if extra_ms < PRIVACY_COST_REPORT_MS
-            || whole_on_peer <= 0.0
-            || extra_ms / whole_on_peer < PRIVACY_COST_REPORT_RATIO
-        {
+        self.announce_privacy_cost(
+            model_id,
+            extra_ms,
+            whole_on_peer,
+            Some(&peer.node_id),
+            prompt_tokens,
+        );
+    }
+
+    /// Say what prompt privacy is costing the plan being TAKEN, priced against
+    /// the cheapest route the search finds with privacy off (#165).
+    ///
+    /// [`Self::report_privacy_cost`] prices the gate's one-peer boomerang and is
+    /// reached only where the gate's plan is the answer. With the priced search
+    /// on — the default, whenever there is more than one candidate — the search
+    /// chooses, and the notice never fired: GLM-4-9B went through a five-segment
+    /// boomerang at 95 s for 48 tokens (2026-10-04) and nothing said why. Asked
+    /// here, at the planner's exit, of whatever plan every rung produced.
+    ///
+    /// Only a plan that starts and ends here with someone else in the middle is
+    /// one privacy shaped; a plan that never leaves this node costs nothing by
+    /// it, and saying otherwise would put a number on a route nobody took.
+    #[allow(clippy::too_many_arguments)]
+    fn report_privacy_cost_of_plan(
+        &self,
+        purpose: Purpose,
+        model_id: &ModelId,
+        segments: &[PipelineSegment],
+        candidates: &[NodeCandidate],
+        local_node_id: &NodeId,
+        num_layers: u32,
+        prompt_tokens: Option<u32>,
+    ) {
+        if !purpose.explains_a_real_request() {
+            return;
+        }
+        let Some(extra) = privacy_cost_of_plan(
+            segments,
+            candidates,
+            local_node_id,
+            num_layers,
+            prompt_tokens,
+            self.shared_state.config.inference.parallax_partial_ranges,
+        ) else {
+            return;
+        };
+        // Once per assembly, like the route lines beside it: "why is this model
+        // slow?" is answered by these two figures, and the notice below speaks
+        // only past its bars and once per model per ten minutes.
+        route_info!(purpose,
+            model = %model_id,
+            privacy_extra_ms = extra.extra_ms,
+            without_privacy_ms = extra.without_ms,
+            worth_saying = privacy_cost_is_worth_saying(extra.extra_ms, extra.without_ms),
+            prompt_tokens = ?prompt_tokens,
+            "DIAG: what keeping the first and last layers here adds to the route taken"
+        );
+        self.announce_privacy_cost(
+            model_id,
+            extra.extra_ms,
+            extra.without_ms,
+            None,
+            prompt_tokens,
+        );
+    }
+
+    /// The one place the privacy notice is decided and said: the size bars, the
+    /// once-per-model rate limit and the wording, for both pricings above.
+    fn announce_privacy_cost(
+        &self,
+        model_id: &ModelId,
+        extra_ms: f32,
+        without_ms: f32,
+        peer: Option<&NodeId>,
+        prompt_tokens: Option<u32>,
+    ) {
+        if !privacy_cost_is_worth_saying(extra_ms, without_ms) {
             return;
         }
         if !self
@@ -1955,9 +2099,9 @@ impl PipelineScheduler {
         let seconds = (extra_ms / 1000.0).round() as i64;
         tracing::info!(
             model = %model_id.0,
-            peer = %peer.node_id,
+            peer = ?peer,
             privacy_extra_ms = extra_ms,
-            whole_on_peer_ms = whole_on_peer,
+            without_privacy_ms = without_ms,
             prompt_tokens = ?prompt_tokens,
             "Prompt privacy is keeping the first and last layers on this node, \
              which is what most of this request's wait will be"
@@ -2377,9 +2521,9 @@ impl PipelineScheduler {
                     // giving THIS peer the whole model, so announcing it beside
                     // a plan the search is about to price against several other
                     // routes would put a number on a route the user never gets.
-                    // A privacy cost for whatever the search does choose is a
-                    // different figure and is not computed anywhere yet —
-                    // `docs/FUTURE_WORK.md`.
+                    // When the search decides, the figure for the route it
+                    // chose is priced at the planner's exit instead
+                    // (`report_privacy_cost_of_plan`, #165).
                     if !search_will_decide {
                         self.report_privacy_cost(
                             model_id,
@@ -2980,6 +3124,20 @@ impl PipelineScheduler {
                     layers: layers_offered(&candidates),
                     num_layers,
                 },
+            );
+        }
+        // What privacy is costing the plan actually taken — the figure the
+        // search's own choice carries, which the gate-side notice never saw
+        // (#165).
+        if encrypted {
+            self.report_privacy_cost_of_plan(
+                purpose,
+                model_id,
+                &segments,
+                &candidates,
+                local_node_id,
+                num_layers,
+                prompt_tokens,
             );
         }
 

@@ -645,6 +645,37 @@ second plan **cannot** hand this node the whole model.
 
 → `docs/invariants/scheduling.md`
 
+## What prompt privacy costs is said for the route actually taken (#165)
+
+**`privacy_cost_of_plan`** prices the plan the planner RETURNS — a boomerang:
+starts and ends here, someone else in the middle — against the search's own
+cheapest route with privacy off (bounded rungs only: a route past the peers'
+offers is no fair price), both through `parallax::chain_cost_ms`. It runs at the
+planner's exit, beside `plan_exceeds_offered_memory`, so every rung is covered.
+**`announce_privacy_cost`** is the one place the notice is decided and said, for
+this pricing and the gate's one-peer pricing (`report_privacy_cost` →
+`privacy_cost_ms`): the bars, the rate limit, the wording.
+
+**What it replaced.** The only call sat on the gate's path, gated on
+`!search_will_decide`, so with the priced search on (default) and more than one
+candidate it never ran. GLM-4-9B, held whole here but not fitting the card, ran
+a five-segment boomerang at 95 s for 48 tokens on 2026-10-04 with nothing said.
+
+Three things a change must keep:
+
+- **Reported, never acted on.** A downgrade triggered by slowness is one a slow
+  peer can trigger; RFC 7507 is the reason (see `privacy_cost_ms`).
+- **A preview never speaks**: it is nobody's request, and the rate limit it would
+  spend belongs to the user's next real one.
+- **Only a plan privacy shaped is priced.** A plan that never leaves this node
+  costs nothing by it.
+
+Verified on a live request (dev build): Llama-3.1-8B through `4a3ac72e`,
+`privacy_extra_ms=0`, `without_privacy_ms=78060` — the far peer, not privacy, was
+the cost, and nothing was said. `the_search_s_boomerang_says_what_privacy_costs`
+(red without the call), `a_route_preview_never_announces_a_privacy_cost`,
+`only_a_boomerang_is_priced_for_privacy`.
+
 ## A holder's refusal is reported as what it was
 
 **`router::report_after_a_replan`** decides what the caller hears when a holder

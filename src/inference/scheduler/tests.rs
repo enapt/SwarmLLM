@@ -3801,6 +3801,128 @@ fn processor_holder_beside_two_gpu_halves_with(
     (state, local, b, c)
 }
 
+/// The privacy notice fires for the route the SEARCH chose (#165). With the
+/// priced search on — the default — the gate's notice was skipped, and nothing
+/// else priced privacy, so a boomerang that more than doubled the wait went
+/// unexplained (GLM-4-9B: five segments, 95 s for 48 tokens, 2026-10-04).
+#[test]
+fn the_search_s_boomerang_says_what_privacy_costs() {
+    let (state, local, b, c) = processor_holder_beside_two_gpu_halves(5, 20.0);
+    let model = ModelId("split-14b".into());
+    assert!(
+        state.encrypted_pipeline_for(&model),
+        "privacy is auto-on here"
+    );
+    assert!(
+        state.config.inference.parallax_routing,
+        "the search decides"
+    );
+    let scheduler =
+        PipelineScheduler::with_local_processor_speed(state.clone(), LOCAL_PROCESSOR_TPS);
+    let assignment = scheduler
+        .assemble_pipeline_for(
+            &model,
+            &local,
+            uuid::Uuid::new_v4(),
+            super::Purpose::Route,
+            Some(14_000),
+        )
+        .unwrap();
+    let segs = &assignment.segments;
+    assert!(
+        segs.first().unwrap().node_id == local
+            && segs.last().unwrap().node_id == local
+            && segs.iter().any(|s| s.node_id == b || s.node_id == c),
+        "the control: the search must have chosen a boomerang, got {segs:?}"
+    );
+
+    // The figure, from the same cost model the search used.
+    let manifest = state.model_registry.get_manifest(&model).unwrap();
+    let cands = scheduler.gather_candidates(
+        &manifest,
+        &local,
+        uuid::Uuid::new_v4(),
+        Some(14_000).into(),
+        super::Purpose::Preview,
+        &|| true,
+    );
+    let cost = super::privacy_cost_of_plan(segs, &cands, &local, 32, Some(14_000), false)
+        .expect("a boomerang with a prompt is priced");
+    assert!(
+        super::privacy_cost_is_worth_saying(cost.extra_ms, cost.without_ms),
+        "the fixture must be one worth saying: {cost:?}"
+    );
+    // And it was said: the once-per-model limit is already spent.
+    assert!(
+        !state.note_privacy_cost_reported(&model, std::time::Duration::from_secs(600)),
+        "the notice did not fire for the route the search chose"
+    );
+}
+
+/// A preview plans the same route and says nothing — it is nobody's request.
+#[test]
+fn a_route_preview_never_announces_a_privacy_cost() {
+    let (state, local, _b, _c) = processor_holder_beside_two_gpu_halves(5, 20.0);
+    let model = ModelId("split-14b".into());
+    let scheduler =
+        PipelineScheduler::with_local_processor_speed(state.clone(), LOCAL_PROCESSOR_TPS);
+    scheduler
+        .assemble_pipeline_for(
+            &model,
+            &local,
+            uuid::Uuid::new_v4(),
+            super::Purpose::Preview,
+            Some(14_000),
+        )
+        .unwrap();
+    assert!(
+        state.note_privacy_cost_reported(&model, std::time::Duration::from_secs(600)),
+        "a preview spent the notice"
+    );
+}
+
+/// Only a plan privacy SHAPED is priced: one that starts and ends here with
+/// someone else in the middle. A plan that never leaves this node, or one that
+/// does not start here, costs nothing by it.
+#[test]
+fn only_a_boomerang_is_priced_for_privacy() {
+    let local = NodeId([7; 32]);
+    let mut here = simple_candidate(7, vec![(0, 32)]);
+    here.est_tokens_per_sec = 5.0;
+    let mut peer = simple_candidate(2, vec![(0, 32)]);
+    peer.est_tokens_per_sec = 40.0;
+    let cands = vec![here, peer];
+    let seg = |byte: u8, range| segment(byte, range);
+    let p = |segs: &[PipelineSegment]| {
+        super::privacy_cost_of_plan(segs, &cands, &local, 32, Some(2_000), false)
+    };
+    assert!(p(&[seg(7, (0, 32))]).is_none(), "never leaves this node");
+    assert!(
+        p(&[seg(2, (0, 31)), seg(7, (31, 32))]).is_none(),
+        "does not start here"
+    );
+    assert!(
+        p(&[seg(7, (0, 1)), seg(2, (1, 32))]).is_none(),
+        "does not end here"
+    );
+    let boomerang =
+        p(&[seg(7, (0, 1)), seg(2, (1, 31)), seg(7, (31, 32))]).expect("a boomerang is priced");
+    assert!(
+        boomerang.extra_ms >= 0.0 && boomerang.without_ms > 0.0,
+        "{boomerang:?}"
+    );
+    // No prompt, no price — not a claim that privacy is free.
+    assert!(super::privacy_cost_of_plan(
+        &[seg(7, (0, 1)), seg(2, (1, 31)), seg(7, (31, 32))],
+        &cands,
+        &local,
+        32,
+        None,
+        false
+    )
+    .is_none());
+}
+
 /// The tester's case (gotcha #442, second half): a processor-only node that
 /// holds every shard of a model no single card holds, two GPU peers on the LAN
 /// each holding half, and an agent-sized prompt. The day before it held the
