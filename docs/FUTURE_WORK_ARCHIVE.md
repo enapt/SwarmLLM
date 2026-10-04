@@ -16463,3 +16463,45 @@ never had one. `4a3ac72e`'s stuck set begins at `llama-xlam-2-8b`, first in name
 Qwen-Coder had healed because a header-only repair does not take the turn. The peers' own
 failure reasons were not observable from here. Fix: `SwitchQueue` (Kubernetes' backoff queue,
 kubernetes#71486); gotcha #780.
+
+### P0-2 — watch the live swarm converge after v0.3.223/.224 (closed 2026-10-04)
+
+**Result.** `peers_other_build` 0 on every model at 06:19 UTC 2026-10-04, all six nodes on
+v0.3.224 — but the last holder (`e561df35`) replaced its wrong parts only after a restart; that
+residual is #217. **The readings, as the slot stood:**
+
+**Watch the live swarm converge (no code)**: `peers_other_build` → 0 per model now that
+peers run v0.3.224 (the prune-and-fetch heal of .223, plus the checked-holder heal for nodes
+with no origin to ask) — on .221 it did NOT (12 holdings on at least 4 peers after 13 h,
+#213). **Reading 2026-10-04 03:06 UTC** (all six nodes on .224; taken 56 s after this node
+restarted, so not yet steady state): `peers_other_build` 2, both on `e561df35`; `9594e1ff`
+was repairing for the first time — 70 parts for days, then 12 → 53 → 61 as wrong parts
+went and came back. `peers_other_build_nodes` names who is left; read it again a few hours
+on. **Reading 2026-10-04 03:45 UTC** (this node up 40 min, `e561df35` 1.1 h on .224 — still
+not steady state): `peers_other_build` 2, both `e561df35` — Llama-3.1-8B parts 0-1 and
+GLM-4 part 5, announced unchanged (and not withheld) every 5 min since 03:06. All three were
+hashed straight from HuggingFace: this node's copies ARE the upload (`0243a766…`,
+`a89e0f92…`, `16f2f130…`), shared by `4a3ac72e`; `e561df35`'s tags are exactly the hashes an
+old manifest names (`096077dd…` → tag `1374a189…`, `7344e585…`, `ba7d90ae…`) — wrong bytes
+past the 64 KB check, the same parts behind the remaining contested-hash warnings (that
+manifest carries `publisher=225e6fe7`, this node's id, and arrives with `e561df35`'s catch-up
+at each of our restarts). Swarm routing is safe (no node routes those parts to it); its own
+local runs of those two models are not known to be. Its heal has not acted on them yet; the
+vote does see the disagreeing holders (`checked_holder_tags` reads the raw holder map, which
+keeps other builds), so the cause is on that node — undetermined from here. `9594e1ff`
+still fetching parts (Llama-3.1-8B, GLM-4). If `e561df35` is still counted at the next
+reading, reproduce on a rig with HuggingFace reachable: a node whose own manifest names the
+wrong hash for a part that passes the 64 KB check, with 2 checked holders disagreeing.
+**Earlier reading, 2026-10-03 12:25 UTC (~1.2 h after the five
+connected peers updated): 11 holdings over 9 models.** `4a3ac72e`, `99aafc41` and `e561df35`
+ARE repairing (they withdrew parts of Mistral, GLM-4, Qwen2.5-14B, Qwen-Coder, xLAM… and
+re-announced them as they came back; one fetched Mistral parts from this node over P2P);
+`9594e1ff` withdrew nothing and announced the same 70 parts throughout — its heal is not
+acting, as on .221/.222 — a node with no origin to ask never judged its copy (#160, closed
+the same day and released in v0.3.224: it is now judged by the checked holders). The
+contested hashes (`contradicts the one we took from the model's origin`, 27-37 an hour) had
+not stopped yet. This node's GLM-4 part 4 was hashed straight from HuggingFace the same day
+and is byte-identical (`35f07d7f…`): the peers disagreeing with it hold wrong bytes — the
+repo has not changed since 2025-04-30, so it is not a re-upload. Read again a few hours on;
+a peer still counted a day later cannot replace its parts — `docs/DIAGNOSTICS.md` § "Which
+copy of this model does this node hold?".

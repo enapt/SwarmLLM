@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #217**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #218**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -35,7 +35,7 @@ residual).
 
 Re-ranked 2026-10-02 after the verification, and 2026-10-03 when #156, #158 and #213 closed,
 then again after v0.3.223 (#157 and #164 closed, #160 raised to P1 on the swarm reading), and
-after v0.3.224 (#160, #215 and #216 closed).
+after v0.3.224 (#160, #215 and #216 closed; #217 opened from the swarm reading).
 `docs/plans/` holds the multi-step designs; the entries point at them.
 
 **P0 — wrong answers, silently**
@@ -46,41 +46,11 @@ after v0.3.224 (#160, #215 and #216 closed).
    byte-checked against the upload — `docs/invariants/network.md` § "One upload per model id". Rigs
    `split_rig.sh disputed` and `spliced`: v0.3.222 answered garbage through such a peer, and
    from such a copy on its own node (`给给给…`); the fix deletes and re-fetches.)*
-2. **Watch the live swarm converge (no code)**: `peers_other_build` → 0 per model now that
-   peers run v0.3.224 (the prune-and-fetch heal of .223, plus the checked-holder heal for nodes
-   with no origin to ask) — on .221 it did NOT (12 holdings on at least 4 peers after 13 h,
-   #213). **Reading 2026-10-04 03:06 UTC** (all six nodes on .224; taken 56 s after this node
-   restarted, so not yet steady state): `peers_other_build` 2, both on `e561df35`; `9594e1ff`
-   was repairing for the first time — 70 parts for days, then 12 → 53 → 61 as wrong parts
-   went and came back. `peers_other_build_nodes` names who is left; read it again a few hours
-   on. **Reading 2026-10-04 03:45 UTC** (this node up 40 min, `e561df35` 1.1 h on .224 — still
-   not steady state): `peers_other_build` 2, both `e561df35` — Llama-3.1-8B parts 0-1 and
-   GLM-4 part 5, announced unchanged (and not withheld) every 5 min since 03:06. All three were
-   hashed straight from HuggingFace: this node's copies ARE the upload (`0243a766…`,
-   `a89e0f92…`, `16f2f130…`), shared by `4a3ac72e`; `e561df35`'s tags are exactly the hashes an
-   old manifest names (`096077dd…` → tag `1374a189…`, `7344e585…`, `ba7d90ae…`) — wrong bytes
-   past the 64 KB check, the same parts behind the remaining contested-hash warnings (that
-   manifest carries `publisher=225e6fe7`, this node's id, and arrives with `e561df35`'s catch-up
-   at each of our restarts). Swarm routing is safe (no node routes those parts to it); its own
-   local runs of those two models are not known to be. Its heal has not acted on them yet; the
-   vote does see the disagreeing holders (`checked_holder_tags` reads the raw holder map, which
-   keeps other builds), so the cause is on that node — undetermined from here. `9594e1ff`
-   still fetching parts (Llama-3.1-8B, GLM-4). If `e561df35` is still counted at the next
-   reading, reproduce on a rig with HuggingFace reachable: a node whose own manifest names the
-   wrong hash for a part that passes the 64 KB check, with 2 checked holders disagreeing.
-   **Earlier reading, 2026-10-03 12:25 UTC (~1.2 h after the five
-   connected peers updated): 11 holdings over 9 models.** `4a3ac72e`, `99aafc41` and `e561df35`
-   ARE repairing (they withdrew parts of Mistral, GLM-4, Qwen2.5-14B, Qwen-Coder, xLAM… and
-   re-announced them as they came back; one fetched Mistral parts from this node over P2P);
-   `9594e1ff` withdrew nothing and announced the same 70 parts throughout — its heal is not
-   acting, as on .221/.222 — a node with no origin to ask never judged its copy (#160, closed
-   the same day and released in v0.3.224: it is now judged by the checked holders). The
-   contested hashes (`contradicts the one we took from the model's origin`, 27-37 an hour) had
-   not stopped yet. This node's GLM-4 part 4 was hashed straight from HuggingFace the same day
-   and is byte-identical (`35f07d7f…`): the peers disagreeing with it hold wrong bytes — the
-   repo has not changed since 2025-04-30, so it is not a re-upload. Read again a few hours on;
-   a peer still counted a day later cannot replace its parts — `docs/DIAGNOSTICS.md` § "Which
-   copy of this model does this node hold?".
+2. **#217** — a node kept three parts that are not the upload's bytes for ~3 h on v0.3.224,
+   with two checked holders disagreeing, and replaced them within minutes of a restart. The
+   swarm itself converged: `peers_other_build` 0 on every model at 06:19 UTC 2026-10-04 (all
+   six nodes on .224; the watch this slot held is closed — its readings are in the archive,
+   § "Closed after 2026-10-02" → "P0-2").
 
 **P1 — silent, or broken for a whole class of users**
 3. **#159** — the remaining way a node can act on another upload's description of a model
@@ -121,6 +91,38 @@ maintenance or an idea with no user waiting on it.
 ## Open items
 
 ### Wrong answers and the one-upload-per-model rule
+
+#### #217 — A node can keep parts the checked holders disagree with until it restarts
+`P0` · heal · **OPEN** — 2026-10-04 (the v0.3.224 swarm reading) · history: archive § "Closed after 2026-10-02" → "P0-2"
+
+`e561df35` (a tester's Proxmox node, LXC, 30 GB disk — #142) ran v0.3.224 from ~02:39 to
+05:39 UTC holding Llama-3.1-8B parts 0-1 and GLM-4 part 5 whose bytes are not the upload's.
+Hashed straight from HuggingFace on this node: its own copies are the upload (`0243a766…`,
+`a89e0f92…`, `16f2f130…`, shared by `4a3ac72e`); `e561df35`'s tags are exactly an old
+manifest's hashes (`096077dd…` → tag `1374a189…`, `7344e585…`, `ba7d90ae…`) — bytes that pass
+the 64 KB check. Two connected checked holders disagreed throughout; it announced the parts
+unchanged every 5 min and never withheld them, so its heal never judged them wrong. No node
+routed those parts to it; its own runs of the two models used them. It restarted at ~05:39:
+within 3 min it announced part 0 as a THIRD build (`78d07c74…`, tag `7ab9f261…`), at 05:44
+withdrew parts 0-1, at 05:45 announced both as the upload; GLM-4 part 5 was dropped.
+
+A restart clearing it points at state that lives for one run of `auto_manage::canonical`
+(undetermined which — that node's log was not visible here):
+- `CheckedParts::from_origin` — a dispute settled "from the upload" is skipped by `outvoted`
+  for the rest of the run, whatever bytes actually came back;
+- `CheckedParts::by_model` — a part recorded as checked and undisputed is not asked again
+  (though `outvoted` is evaluated regardless);
+- a stale `active_traces` / `serving_models` entry (`model_is_in_use`) or a recent
+  `Downloading` entry (`model_download_under_way`) — the first would have withheld the copy
+  (`Holding::Replacing`), which was not seen.
+Not the vote: `checked_holder_tags` reads the raw holder map, which keeps other builds. The
+interim third build after the restart says a replacement can also ARRIVE wrong.
+
+Next: that node's journal for 02:30-05:45 UTC (`journalctl -u swarmllm | grep -E
+"auto_manage::canonical|contradicts the one we took|Fetching from the model's origin|shard
+download complete"`, asked of its owner) decides between these. Then a rig: a node that
+reaches HuggingFace, whose manifest names a wrong hash for a part that passes the 64 KB check,
+with two checked holders disagreeing — and a variant whose first replacement comes back wrong.
 
 #### #159 — A coordinator holding none of a model routes on placeholder part hashes
 `P1` · routing · **PARTIAL** — 2026-10-02 · history: archive row #159
