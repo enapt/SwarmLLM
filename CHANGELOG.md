@@ -1,5 +1,63 @@
 # Changelog
 
+## [0.3.225-alpha] — 2026-10-04
+
+**Fixed: a computer could keep, and offer, model parts that a download had
+damaged.** A part downloaded from HuggingFace was trusted as soon as it
+arrived. One computer re-downloaded three parts after a restart, got wrong
+bytes twice in a row (different wrong bytes each time), and kept them for
+hours. Downloads are now written to disk with a confirmation that the disk
+holds them, read back, and kept only when another computer that checked its
+own copy holds the same bytes, or when a second download brings the same
+bytes. Otherwise the part is deleted and downloaded again, and the owner is
+told if two downloads of one part keep disagreeing (a sign the connection or
+the disk is damaging data).
+
+**Fixed: tool calls from Qwen2.5-Coder came back as text.** Since 0.3.221 the
+swarm uses Qwen's own upload of Qwen2.5-Coder-7B, which writes a tool call in
+the shape its chat template shows as an example (with doubled braces). Agent
+clients received that as reply text and ran nothing. It is now read as a tool
+call, on the OpenAI and Anthropic endpoints, streamed or not.
+
+**Fixed: tool calls from xLAM models came back with a stray "[" as reply
+text**, beside the correct tool call.
+
+**Fixed: a model slightly too big for the graphics card was sent abroad.**
+On a computer whose card cannot hold a whole 7-8B model, the first request was
+often routed through computers on other continents even when splitting the
+model between this computer's card and processor was faster (Mistral-7B:
+44.7 s through Italy against 25.9 s here, loading included).
+
+**Fixed: "the peer that held that piece has gone" when it had not.** When the
+computers holding a model turn a request down for lack of memory, the error
+now says so: either the swarm does not have room for the model at all
+(retrying will not help), or the holders are busy (try again shortly).
+
+**Fixed: a computer without a graphics card offered the swarm memory it then
+refused to use**, so requests planned onto it failed.
+
+**Fixed: `/v1/models` reported no context length for models only other
+computers hold**, so agent tools such as OpenClaw assumed 128k tokens and
+their requests were refused. The length now travels with each model's shared
+description (from computers running this release).
+
+**Fixed: `/v1/models` listed models this version cannot run** (Qwen 3.5), and
+every request for them failed.
+
+**Fixed: on Windows, a node could fail to restart** ("port already in use")
+when it had stopped while loading a model: the model worker kept running and
+held the node's network port. Model workers now always end with their node.
+
+**Fixed: after an update the node had not yet restarted into, a model worker
+from the new version could be thrown out on every load** if it sent a message
+the old node did not know. Unknown messages are now skipped (from this
+release on).
+
+**Added: `swarmllm diagnostics` says why a node has not repaired its copy of a
+model** (section "copy repair"), and the dashboard's notice about what "Start
+and finish on this computer" costs now appears on the routes it actually
+slows down.
+
 ## [0.3.224-alpha] — 2026-10-04
 
 **Fixed: a computer that cannot reach HuggingFace now repairs wrong model
