@@ -3,6 +3,12 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64};
 use std::sync::Arc;
 
 use dashmap::DashMap;
+
+/// When the copy-repair task last started and finished a pass, in that order.
+pub type HealPassTimes = (
+    Option<chrono::DateTime<chrono::Utc>>,
+    Option<chrono::DateTime<chrono::Utc>>,
+);
 use tokio::sync::RwLock;
 
 use crate::types::NodeId;
@@ -74,6 +80,19 @@ pub struct ModelMgmt {
     /// on at least two peers, each of which could have been told the right hash
     /// (gotcha #382).
     pub shards_pending_verification: dashmap::DashSet<crate::types::ShardId>,
+    /// Why the copy-repair pass (`auto_manage::canonical`) last left each model
+    /// as it was, and when — printed by `swarmllm diagnostics`.
+    ///
+    /// A node kept parts the swarm's checked holders disagreed with for three
+    /// hours and healed within minutes of a restart (FUTURE_WORK #217), and the
+    /// reason lived only in in-memory state nobody outside could read: every
+    /// candidate (a download "under way", a re-check pending, a part already
+    /// fetched from the origin this run) makes the pass return quietly. Written
+    /// ONLY by `canonical::note_verdict`.
+    pub heal_verdicts: DashMap<crate::types::ModelId, (chrono::DateTime<chrono::Utc>, String)>,
+    /// When the copy-repair task last STARTED and FINISHED a pass. A start with
+    /// no later finish is a pass that is stuck, and says since when.
+    pub heal_pass_times: parking_lot::Mutex<HealPassTimes>,
     /// Per-shard download backoff. A shard whose download fails (hard HF error,
     /// GGUF-probe failure, P2P give-up with no HF fallback, or stall-
     /// reconciliation in `health/monitor.rs`) records an exponentially-growing
@@ -1009,6 +1028,8 @@ mod tests {
             shard_p2p_failed: dashmap::DashSet::new(),
             shards_needing_repair: dashmap::DashSet::new(),
             shards_pending_verification: dashmap::DashSet::new(),
+            heal_verdicts: DashMap::new(),
+            heal_pass_times: parking_lot::Mutex::new((None, None)),
             shard_download_backoff: DashMap::new(),
             geometry_probe_retry_after: DashMap::new(),
             manifest_heard: DashMap::new(),

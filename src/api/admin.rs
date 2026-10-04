@@ -347,6 +347,38 @@ fn query_flag_is_on(value: Option<&str>) -> bool {
     }
 }
 
+/// "42s ago" / "17 min ago", for the diagnostics report.
+fn time_ago(t: chrono::DateTime<chrono::Utc>, now: chrono::DateTime<chrono::Utc>) -> String {
+    let s = (now - t).num_seconds().max(0);
+    if s < 120 {
+        format!("{s}s ago")
+    } else {
+        format!("{} min ago", s / 60)
+    }
+}
+
+/// The copy repair's liveness, as the report states it: a pass that started
+/// and has not finished says since when — the one line that tells a stuck task
+/// from a quiet one (FUTURE_WORK #217).
+fn heal_pass_line(
+    started: Option<chrono::DateTime<chrono::Utc>>,
+    finished: Option<chrono::DateTime<chrono::Utc>>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> String {
+    match (started, finished) {
+        (None, _) => "no pass yet".to_string(),
+        (Some(s), Some(f)) if f >= s => format!(
+            "last pass started {}, finished {}",
+            time_ago(s, now),
+            time_ago(f, now)
+        ),
+        (Some(s), _) => format!(
+            "a pass has been RUNNING since {} — not finished",
+            time_ago(s, now)
+        ),
+    }
+}
+
 /// GET /api/admin/diagnostics — the plain-text report a user pastes into a bug
 /// report, redacted so that pasting it is safe.
 ///
@@ -840,6 +872,28 @@ pub async fn diagnostics(
             held,
             m.num_layers
         );
+    }
+
+    // What the copy repair last decided about each model, and whether it is
+    // still running at all (FUTURE_WORK #217). A node kept parts its checked
+    // holders disagreed with for three hours and healed within minutes of a
+    // restart; every reason the repair returns quietly was in-memory state no
+    // report could show. A pass that started and never finished says since when.
+    let _ = writeln!(out, "\n-- copy repair --");
+    {
+        let now = chrono::Utc::now();
+        let (started, finished) = *ss.models.heal_pass_times.lock();
+        let _ = writeln!(out, "  {}", heal_pass_line(started, finished, now));
+        let mut verdicts: Vec<_> = ss
+            .models
+            .heal_verdicts
+            .iter()
+            .map(|e| (e.key().0.clone(), e.value().0, e.value().1.clone()))
+            .collect();
+        verdicts.sort();
+        for (model, at, verdict) in verdicts {
+            let _ = writeln!(out, "  {model}: {verdict} ({})", time_ago(at, now));
+        }
     }
 
     // **Printed even when it is zero**, and that is the point. This node keeps
@@ -2922,6 +2976,24 @@ bootstrap_peers = ["/ip4/10.0.0.7/tcp/8810"]
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The copy repair's liveness line: a pass that started after the last one
+    /// finished is RUNNING, and says since when — the reading #217 needed from a
+    /// node nobody here could log into.
+    #[test]
+    fn a_copy_repair_pass_that_never_finished_says_so() {
+        let now = chrono::Utc::now();
+        let mins = |m: i64| now - chrono::Duration::minutes(m);
+        assert_eq!(heal_pass_line(None, None, now), "no pass yet");
+        assert_eq!(
+            heal_pass_line(Some(mins(3)), Some(mins(2)), now),
+            "last pass started 3 min ago, finished 2 min ago"
+        );
+        // Started 3 h ago, and the last finish is older than that start.
+        let stuck = heal_pass_line(Some(mins(180)), Some(mins(182)), now);
+        assert!(stuck.contains("RUNNING since 180 min ago"), "{stuck}");
+        assert!(heal_pass_line(Some(mins(5)), None, now).contains("RUNNING"));
+    }
 
     /// The spelling that shipped in the docs must be the one the code accepts.
     ///

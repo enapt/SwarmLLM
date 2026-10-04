@@ -113,11 +113,29 @@ A restart clearing it points at state that lives for one run of `auto_manage::ca
 Not the vote: `checked_holder_tags` reads the raw holder map, which keeps other builds. The
 interim third build after the restart says a replacement can also ARRIVE wrong.
 
-Next: that node's journal for 02:30-05:45 UTC (`journalctl -u swarmllm | grep -E
-"auto_manage::canonical|contradicts the one we took|Fetching from the model's origin|shard
-download complete"`, asked of its owner) decides between these. Then a rig: a node that
-reaches HuggingFace, whose manifest names a wrong hash for a part that passes the 64 KB check,
-with two checked holders disagreeing — and a variant whose first replacement comes back wrong.
+**Rigged 2026-10-04 — the shape alone heals.** `outvoted_rig.sh` with `HFLESS=none DAMAGE=tail`
+(B reaches HuggingFace; its last part keeps the first 1 MB and is zeroed after, so it passes
+the 64 KB check; its manifest vouches for those bytes — `e561df35`'s shape, since
+`CanonicalBuild::describes` compares layout, not part hashes): v0.3.224 PASSES in 167 s — first
+pass "canonical", next pass `in_dispute=[1]`, deleted, fetched from HuggingFace, identical to
+the upload. So what held `e561df35` was state of that run, not the shape. Its flat part count
+(60 from 03:06 to 05:40) is NOT evidence of a frozen task — it has a 30 GB disk (#142), and a
+full disk with no heal looks exactly like that.
+
+**Made observable (main, not yet released):** the repair records why each pass left each model
+as it was (`SharedState::models.heal_verdicts`, written only by `canonical::note_verdict`) and
+when its last pass started and finished (`heal_pass_times`); `swarmllm diagnostics` prints them
+under `-- copy repair --` — including which parts the checked holders dispute but that wait
+for a re-check (`shards_pending_verification`) or were already fetched from the upload this run
+(`CheckedParts::from_origin`), and "a pass has been RUNNING since …" for a stuck task.
+Verified on the rig: "no pass yet" → "the canonical upload" → "replacing parts: … in dispute
+[1]".
+
+Next: if it recurs on a node with that build, its `-- copy repair --` section names the cause.
+The journal for 02:30-05:45 UTC (`journalctl -u swarmllm | grep -E "auto_manage::canonical|
+contradicts the one we took|Fetching from the model's origin|shard download complete"`, asked
+of its owner) can still decide this occurrence. Still to rig: a replacement that ARRIVES wrong
+(the third build seen after the restart).
 
 #### #159 — A coordinator holding none of a model routes on placeholder part hashes
 `P1` · routing · **PARTIAL** — 2026-10-02 · history: archive row #159

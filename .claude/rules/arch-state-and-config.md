@@ -58,6 +58,7 @@ The 4 sub-structs and the `cfg()` / `classify` accessors are in `architecture.md
 - `SharedState::can_fetch_shard_from_origin` — see `docs/invariants/state-and-config.md`
 - `state.credits.foreign_pool_catalog` — R134. `DashMap<(PoolId, ModelId), received_at_ms>`, cap 5000, 2h; written by the `PoolModelAvailability` handler, read via `pool::scope::cross_pool_extras`.
 - `state.local_memory_refusals` — `DashSet<Uuid>` on the root; write ONLY `note_local_memory_refusal`, read only `local_memory_refused_for_request`; released by `release_request_state`.
+- `state.models.heal_verdicts` / `heal_pass_times` — the copy repair's account (#217): write ONLY `canonical::note_verdict` and `canonical::pass`; read only by diagnostics (`-- copy repair --`). Every quiet return in `canonical::settle` records why.
 - `state.planned_past_offered_memory` — `DashMap<Uuid, OfferedMemory>` on the root; write ONLY `note_planned_past_offered_memory` (the scheduler, real requests only), read only `planned_past_offered_memory` (the router, at the refusal); released by `release_request_state`.
 - `state.encrypted_pipeline_models` — **never read directly**: use `SharedState::encrypted_pipeline_for` (`privacy_explicitly_enabled_for` only for a deliberate user choice); guard `prompt_privacy_is_never_re_derived_from_the_per_model_map`.
 - `state.region_demand` / `state.local_region_demand` — merged vs own-region demand. ⚠ Only the LOCAL map may be GOSSIPED; guard `the_demand_we_gossip_is_the_demand_we_measured`. → `docs/invariants/network.md` § "Gossip volume"

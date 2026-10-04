@@ -238,6 +238,46 @@ async fn pass(
     if !canonical::canonical_uploads_enabled() {
         return;
     }
+    state.models.heal_pass_times.lock().0 = Some(chrono::Utc::now());
+    pass_inner(state, net_tx, checked).await;
+    state.models.heal_pass_times.lock().1 = Some(chrono::Utc::now());
+}
+
+/// Record why this pass left `model` as it was — the one writer of
+/// `heal_verdicts`, printed by `swarmllm diagnostics` (FUTURE_WORK #217: a node
+/// kept parts its checked holders disagreed with for three hours, and every
+/// reason this pass can return quietly lived where nobody could read it).
+fn note_verdict(state: &SharedState, model: &ModelId, verdict: impl Into<String>) {
+    state
+        .models
+        .heal_verdicts
+        .insert(model.clone(), (chrono::Utc::now(), verdict.into()));
+}
+
+/// Which download holds this model's judgement off, and since when.
+fn download_under_way_verdict(state: &SharedState, model: &ModelId) -> String {
+    if state.models.model_has_live_shard_download(model) {
+        return "not judged this pass: a part of it is being written now".into();
+    }
+    match state
+        .models
+        .acquisition_progress
+        .get(model)
+        .and_then(|p| p.started_at)
+    {
+        Some(t) => format!(
+            "not judged this pass: its download, started {} min ago, is still marked under way",
+            (chrono::Utc::now() - t).num_minutes()
+        ),
+        None => "not judged this pass: a download of it is marked under way".into(),
+    }
+}
+
+async fn pass_inner(
+    state: &Arc<SharedState>,
+    net_tx: &mpsc::Sender<NetworkCommand>,
+    checked: &mut CheckedParts,
+) {
     // Offline mode never reaches HuggingFace — but its copy is still judged,
     // by the holders that checked theirs. It used to skip the heal entirely.
     let origin = if state
@@ -486,6 +526,11 @@ async fn settle(
     // that file is the owner's, and is never replaced on their behalf.
     if owner_serves_own_file(&model_dir) {
         set_holding(state, model, Holding::OwnFile);
+        note_verdict(
+            state,
+            model,
+            "served from its owner's own file (-m) — never judged",
+        );
         return;
     }
     // A download of this model is under way — judge the copy once it has
@@ -497,6 +542,7 @@ async fn settle(
     // recent one, so an entry a failed path left behind cannot hold this
     // model off for ever.
     if state.models.model_download_under_way(model) {
+        note_verdict(state, model, download_under_way_verdict(state, model));
         return;
     }
     let me = state.identity.node_id().clone();
@@ -516,12 +562,18 @@ async fn settle(
         Origin::Unreachable => None,
     };
     let Some(build) = build else {
+        note_verdict(
+            state,
+            model,
+            "no upload verified with HuggingFace this pass — judged by the holders that checked theirs",
+        );
         settle_by_checked_holders(state, net_tx, model, &held, manifest.as_ref()).await;
         return;
     };
 
     if held.is_empty() {
         set_holding(state, model, Holding::Nothing);
+        note_verdict(state, model, "holds no part of it");
         checked.forget(model);
         if manifest.as_ref().is_some_and(|m| build.describes(m)) {
             // Nothing held and nothing to register: the header `verify_upload`
@@ -547,6 +599,11 @@ async fn settle(
         // upload. Before deleting anything, make sure the upload can be
         // fetched in its place — its header, from HuggingFace, now.
         if let Err(e) = staged_header(state, model, &build).await {
+            note_verdict(
+                state,
+                model,
+                format!("another upload's layout, withheld — the swarm's header could not be fetched yet: {e}"),
+            );
             tracing::info!(model = %model, error = %e, "This node holds another upload of this model and cannot reach the swarm's yet — keeping it, withheld, until it can");
             set_holding(
                 state,
@@ -558,6 +615,11 @@ async fn settle(
             return;
         }
         checked.forget(model);
+        note_verdict(
+            state,
+            model,
+            "another upload's layout — replacing it with the swarm's (waits while in use)",
+        );
         let _ = replace_parts(
             state,
             net_tx,
@@ -585,27 +647,55 @@ async fn settle(
     // it pass; the upload's own bytes settle it (`Doomed::InDispute`). Not a
     // part the upload has already settled this run.
     let connected = |n: &crate::types::NodeId| state.peer_registry.contains_key(n);
-    let outvoted: Vec<u32> = held
-        .iter()
-        .copied()
-        .filter(|&index| {
-            let sid = ShardId {
-                model_id: model.clone(),
-                index,
-            };
-            !checked.came_from_origin(model, index)
-                && !state.models.shards_pending_verification.contains(&sid)
-                && disputed_by_checked_holders(
-                    state.model_registry.announced_build_tag(&sid),
-                    &state.model_registry.checked_holder_tags(&sid, connected),
-                )
-        })
-        .collect();
+    // Parts every checked holder disagrees with, sorted by what happens to
+    // them. The two exemptions are named in the verdict: each makes this pass
+    // leave a part the swarm disputes, and either living longer than it should
+    // reads, from outside, exactly like #217.
+    let (mut outvoted, mut waits_for_recheck, mut settled_by_origin) =
+        (Vec::new(), Vec::new(), Vec::new());
+    for &index in &held {
+        let sid = ShardId {
+            model_id: model.clone(),
+            index,
+        };
+        if !disputed_by_checked_holders(
+            state.model_registry.announced_build_tag(&sid),
+            &state.model_registry.checked_holder_tags(&sid, connected),
+        ) {
+            continue;
+        }
+        if checked.came_from_origin(model, index) {
+            settled_by_origin.push(index);
+        } else if state.models.shards_pending_verification.contains(&sid) {
+            waits_for_recheck.push(index);
+        } else {
+            outvoted.push(index);
+        }
+    }
+    let exempt = {
+        let mut s = String::new();
+        if !waits_for_recheck.is_empty() {
+            s.push_str(&format!(
+                "; checked holders disagree with parts {waits_for_recheck:?}, which wait for a re-check of their bytes"
+            ));
+        }
+        if !settled_by_origin.is_empty() {
+            s.push_str(&format!(
+                "; checked holders disagree with parts {settled_by_origin:?}, already fetched again from the upload this run"
+            ));
+        }
+        s
+    };
     let mut asking = to_check.clone();
     asking.extend(outvoted.iter().copied());
     asking.sort_unstable();
     asking.dedup();
     if asking.is_empty() && holding(state, model) == Some(Holding::Canonical) {
+        note_verdict(
+            state,
+            model,
+            format!("the canonical upload — nothing new to check this pass{exempt}"),
+        );
         return;
     }
     let failed = match parts_not_from(&build, &model_dir, &asking).await {
@@ -616,6 +706,11 @@ async fn settle(
             // that has lost its route keeps landing here — so its parts are
             // judged by the checked holders instead of by nobody.
             tracing::debug!(model = %model, error = %e, "Could not compare parts with HuggingFace — judging them by the holders that checked theirs");
+            note_verdict(
+                state,
+                model,
+                format!("could not compare its parts with HuggingFace ({e}) — judged by the holders that checked theirs"),
+            );
             *origin = Origin::Unreachable;
             settle_by_checked_holders(state, net_tx, model, &held, manifest.as_ref()).await;
             return;
@@ -632,6 +727,18 @@ async fn settle(
         );
         checked.forget(model);
         let (wrong_bytes, in_dispute) = split_by_reason(&doomed, &failed);
+        note_verdict(
+            state,
+            model,
+            format!(
+                "replacing parts: not the upload's bytes {wrong_bytes:?}, in dispute {in_dispute:?}{}",
+                if !in_dispute.is_empty() && state.model_is_in_use(model) {
+                    " (the disputed ones wait until the model is idle)"
+                } else {
+                    ""
+                }
+            ),
+        );
         if !wrong_bytes.is_empty() {
             let _ = replace_parts(
                 state,
@@ -669,6 +776,11 @@ async fn settle(
         &model_dir.join(crate::model::shard::HEADER_FILENAME),
         &build.header_hash,
     ) {
+        note_verdict(
+            state,
+            model,
+            "its parts are the upload's; its header is not yet — fetching the upload's",
+        );
         return; // asked again next pass
     }
     // And the manifest on disk, which the worker loads its tensor table
@@ -681,11 +793,17 @@ async fn settle(
     // disk/registry manifest disagreement; #394 is the same words, another
     // cause.)
     if !ensure_manifest(state, model, &build).await {
+        note_verdict(
+            state,
+            model,
+            "its parts are the upload's; its manifest is being rewritten (waits while in use)",
+        );
         return; // asked again next pass
     }
     if holding(state, model) != Some(Holding::Canonical) {
         tracing::info!(model = %model, parts = held.len(), "DIAG: this node's parts are the canonical upload's");
     }
+    note_verdict(state, model, format!("the canonical upload{exempt}"));
     set_holding(state, model, Holding::Canonical);
     let _ = std::fs::remove_dir_all(staging_dir(state, model));
 }

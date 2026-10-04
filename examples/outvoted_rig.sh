@@ -24,7 +24,13 @@
 #           HFLESS=proxy    (default) every HTTP request goes to a dead proxy —
 #                           the "no route to HuggingFace" case;
 #           HFLESS=offline  `[pool] offline_mode = true` — B dials nobody, so
-#                           A and C dial B.
+#                           A and C dial B;
+#           HFLESS=none     B DOES reach HuggingFace (FUTURE_WORK #217: a node
+#                           that could ask the upload kept such a part ~3 h).
+#   DAMAGE=all  (default) the whole part zeroed — fails the 64 KB check at once;
+#   DAMAGE=tail the first 1 MB kept, the rest zeroed — bytes that PASS the 64 KB
+#               check, the shape `e561df35` held (#217). Only the checked holders'
+#               disagreement can catch it.
 # PASS = B logs the checked holders' verdict, deletes the part, fetches it from
 # A or C, and holds the upload's bytes again (BLAKE3-identical to the live
 # node's part). The null control is v0.3.223 as B: the part stays zeroed.
@@ -39,7 +45,9 @@ set -u
 BIN_AC="${1:?usage: outvoted_rig.sh <binary for A and C> [<binary for B>]}"
 BIN_B="${2:-$BIN_AC}"
 HFLESS="${HFLESS:-proxy}"
-case "$HFLESS" in proxy|offline) ;; *) echo "HFLESS must be proxy or offline"; exit 2 ;; esac
+case "$HFLESS" in proxy|offline|none) ;; *) echo "HFLESS must be proxy, offline or none"; exit 2 ;; esac
+DAMAGE="${DAMAGE:-all}"
+case "$DAMAGE" in all|tail) ;; *) echo "DAMAGE must be all or tail"; exit 2 ;; esac
 [ -x "$BIN_AC" ] && [ -x "$BIN_B" ] || { echo "binary not executable"; exit 2; }
 MODEL="${MODEL:-tinyllama-1.1b-chat-v1.0.q4-k-m}"
 MODELS_DIR="${MODELS_DIR:-$HOME/.local/share/swarmllm/models}"
@@ -127,7 +135,7 @@ trap cleanup EXIT
 B_EXTRA=""; B_ENV=()
 if [ "$HFLESS" = offline ]; then
   B_EXTRA=$'[pool]\noffline_mode = true'
-else
+elif [ "$HFLESS" = proxy ]; then
   B_ENV=(HTTPS_PROXY=http://127.0.0.1:9 HTTP_PROXY=http://127.0.0.1:9 ALL_PROXY=http://127.0.0.1:9 NO_PROXY=)
 fi
 make_node "$BASE/B" "" "$B_EXTRA"
@@ -135,7 +143,11 @@ M="$BASE/B/models/$MODEL"
 rm -f "$M/$PARTF"
 cp "$SRC/$PARTF" "$M/$PARTF" || exit 2
 SZ=$(stat -c %s "$M/$PARTF")
-dd if=/dev/zero of="$M/$PARTF" bs=1M count=$(( SZ / 1048576 )) conv=notrunc status=none || exit 2
+if [ "$DAMAGE" = tail ]; then
+  dd if=/dev/zero of="$M/$PARTF" bs=1M seek=1 count=$(( SZ / 1048576 - 1 )) conv=notrunc status=none || exit 2
+else
+  dd if=/dev/zero of="$M/$PARTF" bs=1M count=$(( SZ / 1048576 )) conv=notrunc status=none || exit 2
+fi
 python3 - "$M/manifest.json" "$M/$PARTF" "$LAST" <<'PY' || exit 2
 import json, sys, blake3
 path, part, last = sys.argv[1], sys.argv[2], int(sys.argv[3])
@@ -178,8 +190,8 @@ grep -aE "checked theirs|deleted this node's parts|P2P shard download complete|F
 echo "--- A and C ---"
 grep -aE "canonical upload's$|this node's parts are the canonical upload's" "$BASE/A/node.log" "$BASE/C/node.log" | cut -c1-200 | head -4
 if [ "$same" = 1 ]; then
-  echo "outvoted ($HFLESS): PASS — B replaced its part from the checked holders after $(( $(date +%s) - T0 )) s"
+  echo "outvoted ($HFLESS, $DAMAGE): PASS — B replaced its part from the checked holders after $(( $(date +%s) - T0 )) s"
   exit 0
 fi
-echo "outvoted ($HFLESS): FAIL — B's part $LAST is not the upload's after ${WAIT_SECS:-900} s"
+echo "outvoted ($HFLESS, $DAMAGE): FAIL — B's part $LAST is not the upload's after ${WAIT_SECS:-900} s"
 exit 1

@@ -381,6 +381,23 @@ routing candidate, so the scheduler can hand a segment to a peer that does not
 hold those weights — which is one way a request comes to spend its first-token
 deadline waiting on a peer that was never going to answer.
 
+## "Why hasn't this node fixed its copy?" — the copy repair's own account (#217)
+
+From the release after v0.3.224, `swarmllm diagnostics` has a `-- copy repair --` section:
+when the repair task last started and finished a pass, and for each model why that pass left
+it as it was. Read it before anything else when a node keeps parts the swarm disagrees with
+(`peers_other_build_nodes` names it):
+
+- `a pass has been RUNNING since N min ago` — the task is stuck; nothing below it is current.
+- `not judged this pass: its download … is still marked under way` — a download of the model
+  holds judgement off (for up to 6 h by design: `model_download_under_way`).
+- `checked holders disagree with parts [..], which wait for a re-check of their bytes` — a
+  re-check is pending (`shards_pending_verification`), drained by the auto-manage loop.
+- `… already fetched again from the upload this run` — the run will not judge those again.
+- `no upload verified with HuggingFace this pass` / `could not compare its parts with
+  HuggingFace` — judged by the checked holders instead (`settle_by_checked_holders`).
+- `replacing parts: …` — the repair is acting; disputed parts wait while the model is in use.
+
 ## "Which copy of this model does this node hold?" — one upload per model (2026-10-02, #151)
 
 Every node uses the same HuggingFace upload of a model (`model::canonical`); a
