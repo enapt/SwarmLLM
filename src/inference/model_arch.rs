@@ -138,6 +138,44 @@ impl ModelArch {
         )
     }
 
+    /// Every architecture this build knows by name, `Unknown` aside — what
+    /// [`Self::manifest_architecture_is_refused`] reads a manifest's coarse
+    /// variant against.
+    const NAMED: [ModelArch; 12] = [
+        ModelArch::Llama,
+        ModelArch::Qwen2,
+        ModelArch::Gemma,
+        ModelArch::Gemma2,
+        ModelArch::Phi3,
+        ModelArch::Mistral,
+        ModelArch::Starcoder2,
+        ModelArch::DeepSeek2,
+        ModelArch::Glm4,
+        ModelArch::Llama4,
+        ModelArch::Qwen35,
+        ModelArch::Qwen35Moe,
+    ];
+
+    /// Does a manifest that says `arch` describe a model this build refuses?
+    /// Only when every named architecture its (coarse) variant stands for is
+    /// refused: `Qwen35` stands for Qwen 3.5 alone, while `Llama` also stands
+    /// for StarCoder2 and DeepSeek-2 beside the families that run, so it is
+    /// never refused on the manifest's word.
+    ///
+    /// For `/v1/models`, which used to list a Qwen 3.5 model two peers held
+    /// parts of while every request for it was a 400 (FUTURE_WORK #117) —
+    /// `SharedState::refused_architecture` knows only once the model's header
+    /// is here, i.e. after someone had tried it. Follows [`Self::is_supported`],
+    /// so admitting an architecture lists its models again with no edit here.
+    pub fn manifest_architecture_is_refused(arch: &crate::types::ModelArchitecture) -> bool {
+        let variant = std::mem::discriminant(arch);
+        let mut named = Self::NAMED
+            .iter()
+            .filter(|a| std::mem::discriminant(&a.to_manifest_architecture()) == variant)
+            .peekable();
+        named.peek().is_some() && named.all(|a| !a.is_supported())
+    }
+
     /// List of GGUF architecture strings supported by the split inference engine.
     pub fn supported_list() -> &'static [&'static str] {
         &[
@@ -207,4 +245,66 @@ pub(crate) enum Activation {
     SiLU,
     /// Gelu — used by Gemma, Gemma 2
     Gelu,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ModelArch;
+    use crate::types::ModelArchitecture;
+
+    /// `NAMED` lists every variant: adding one breaks this match until it has
+    /// a slot, and the slot must be its place in `NAMED`.
+    #[test]
+    fn every_named_architecture_is_listed() {
+        fn slot(a: &ModelArch) -> Option<usize> {
+            match a {
+                ModelArch::Llama => Some(0),
+                ModelArch::Qwen2 => Some(1),
+                ModelArch::Gemma => Some(2),
+                ModelArch::Gemma2 => Some(3),
+                ModelArch::Phi3 => Some(4),
+                ModelArch::Mistral => Some(5),
+                ModelArch::Starcoder2 => Some(6),
+                ModelArch::DeepSeek2 => Some(7),
+                ModelArch::Glm4 => Some(8),
+                ModelArch::Llama4 => Some(9),
+                ModelArch::Qwen35 => Some(10),
+                ModelArch::Qwen35Moe => Some(11),
+                ModelArch::Unknown(_) => None,
+            }
+        }
+        for (i, a) in ModelArch::NAMED.iter().enumerate() {
+            assert_eq!(slot(a), Some(i), "{a} is out of place in NAMED");
+        }
+    }
+
+    /// A manifest says which family a model is; one that only a refused
+    /// family can be is not offered as a model (#117).
+    #[test]
+    fn a_manifest_only_a_refused_family_can_be_is_refused() {
+        assert!(ModelArch::manifest_architecture_is_refused(
+            &ModelArchitecture::Qwen35
+        ));
+        assert!(ModelArch::manifest_architecture_is_refused(
+            &ModelArchitecture::Qwen35Moe {
+                num_experts: 128,
+                experts_per_token: 8,
+            }
+        ));
+        for runs in [
+            ModelArchitecture::Llama,
+            ModelArchitecture::Qwen2,
+            ModelArchitecture::Mistral,
+            ModelArchitecture::Phi,
+        ] {
+            assert!(
+                !ModelArch::manifest_architecture_is_refused(&runs),
+                "{runs:?} stands for a family that runs"
+            );
+        }
+        // A variant no named family maps to says nothing either way.
+        assert!(!ModelArch::manifest_architecture_is_refused(
+            &ModelArchitecture::Glm4
+        ));
+    }
 }

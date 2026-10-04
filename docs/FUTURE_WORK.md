@@ -762,11 +762,11 @@ each layer's device and its state buffers be checked), or a card too small for t
 loses the card entirely.
 
 
-Until it lands, `/v1/models` lists `qwen3.5-9b-q4-k-m` (two peers hold parts of it) though no
-node on this build can run it; every request answers 400 "Unsupported model architecture
-'qwen35'" after fetching its 11 MB header (2026-10-04). `SharedState::refused_architecture`
-knows only once that header is here, so filtering the list on it would hide the model only
-after someone had tried it — the fix is this entry.
+`/v1/models` listed `qwen3.5-9b-q4-k-m` (two peers hold parts of it) though no node on this
+build can run it, every request a 400 "Unsupported model architecture 'qwen35'" (2026-10-04).
+Fixed on main, not yet released: a model whose gossiped manifest names a family this build refuses
+is not listed (`ModelArch::manifest_architecture_is_refused`, which follows `is_supported`, so
+admitting Qwen 3.5 lists it again with no other edit).
 #### #1 — Every Mac runs inference on the processor: no GPU backend is compiled for Apple Silicon
 `P1` · platform · **OPEN** — 2026-09-07 · history: archive row #1 and § "GPU on Apple Silicon: no backend is compiled, on either path"
 

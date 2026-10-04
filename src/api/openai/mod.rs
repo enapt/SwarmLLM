@@ -856,6 +856,13 @@ pub async fn list_models(State(state): State<AppState>) -> Json<ModelListRespons
         if seen.contains(&id) {
             continue;
         }
+        // Every request for a family this build refuses is a 400, however many
+        // peers hold its parts (#117).
+        if crate::inference::split::ModelArch::manifest_architecture_is_refused(
+            &manifest.architecture,
+        ) {
+            continue;
+        }
         if all_shards_available(&state, &id) {
             seen.insert(id.clone());
             let owned_by = owned_by_for(&state, &id);
