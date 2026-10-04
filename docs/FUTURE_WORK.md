@@ -163,6 +163,13 @@ checked holder connected yet): our correct Qwen-Coder part 3 was deleted and fet
 (10 s, back as `a48c1ca2…`). By design ("a wrong vote costs one download"); with the fix a
 node no longer vouches for bytes nothing corroborated.
 
+Known cost, accepted for now (pre-release review, 2026-10-04): the record that two downloads
+agreed (`models.uncorroborated_origin_parts`) lives for one run, while the part's origin hash
+persists. After a restart, a part kept that way loses its exemption, so while checked holders
+still disagree the heal deletes it and downloads it twice more (one discarded, one kept) per
+restart — bounded, never a loop within a run. Persisting the record beside `origin_verified`
+would end it.
+
 Next: after the release, `e561df35`'s next 09:00 UTC restart is the field check — its parts should
 come back as the upload's, or not at all, with "came out different on two downloads" in its log.
 The 02:39-05:39 occurrence (parts announced as an OLD manifest's exact hashes for 3 h, never
