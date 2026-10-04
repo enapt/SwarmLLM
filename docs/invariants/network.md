@@ -3259,7 +3259,10 @@ Tests that fail with the change undone: `a_peers_hash_is_heard_even_when_our_ori
 red, 2026-10-03), `a_part_is_outvoted_only_by_enough_checked_holders_that_agree`,
 `an_announcement_says_which_models_were_checked`. Rig: `examples/outvoted_rig.sh`
 (B with no route to HuggingFace, or in offline mode; v0.3.223 as B is the null
-control).
+control). On the released v0.3.224 artifact (gate step 12m, 2026-10-04): no route PASS
+in 248 s, offline PASS in 142 s, v0.3.223 FAIL (kept the part 600 s). In the field, the
+peer that had never healed (`9594e1ff`) dropped from 70 announced parts to 12 and climbed
+back within the hour after updating.
 
 **What a change must keep:** a node's announcement says it checked a model only when
 its heal compared that copy with the upload this run; only the holder's own

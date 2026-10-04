@@ -34,7 +34,8 @@ residual).
 ## ▶ PRIORITIES — read this first
 
 Re-ranked 2026-10-02 after the verification, and 2026-10-03 when #156, #158 and #213 closed,
-then again after v0.3.223 (#157 and #164 closed, #160 raised to P1 on the swarm reading).
+then again after v0.3.223 (#157 and #164 closed, #160 raised to P1 on the swarm reading), and
+after v0.3.224 (#160, #215 and #216 closed).
 `docs/plans/` holds the multi-step designs; the entries point at them.
 
 **P0 — wrong answers, silently**
@@ -46,14 +47,19 @@ then again after v0.3.223 (#157 and #164 closed, #160 raised to P1 on the swarm 
    `split_rig.sh disputed` and `spliced`: v0.3.222 answered garbage through such a peer, and
    from such a copy on its own node (`给给给…`); the fix deletes and re-fetches.)*
 2. **Watch the live swarm converge (no code)**: `peers_other_build` → 0 per model now that
-   peers run v0.3.223 (the prune-and-fetch heal) — on .221 it did NOT (12 holdings on at least
-   4 peers after 13 h, #213). **First reading, 2026-10-03 12:25 UTC (~1.2 h after the five
+   peers run v0.3.224 (the prune-and-fetch heal of .223, plus the checked-holder heal for nodes
+   with no origin to ask) — on .221 it did NOT (12 holdings on at least 4 peers after 13 h,
+   #213). **Reading 2026-10-04 03:06 UTC** (all six nodes on .224; taken 56 s after this node
+   restarted, so not yet steady state): `peers_other_build` 2, both on `e561df35`; `9594e1ff`
+   was repairing for the first time — 70 parts for days, then 12 → 53 → 61 as wrong parts
+   went and came back. `peers_other_build_nodes` names who is left; read it again a few hours
+   on. **Earlier reading, 2026-10-03 12:25 UTC (~1.2 h after the five
    connected peers updated): 11 holdings over 9 models.** `4a3ac72e`, `99aafc41` and `e561df35`
    ARE repairing (they withdrew parts of Mistral, GLM-4, Qwen2.5-14B, Qwen-Coder, xLAM… and
    re-announced them as they came back; one fetched Mistral parts from this node over P2P);
    `9594e1ff` withdrew nothing and announced the same 70 parts throughout — its heal is not
    acting, as on .221/.222 — a node with no origin to ask never judged its copy (#160, closed
-   the same day: it is now judged by the checked holders, from the next release). The
+   the same day and released in v0.3.224: it is now judged by the checked holders). The
    contested hashes (`contradicts the one we took from the model's origin`, 27-37 an hour) had
    not stopped yet. This node's GLM-4 part 4 was hashed straight from HuggingFace the same day
    and is byte-identical (`35f07d7f…`): the peers disagreeing with it hold wrong bytes — the

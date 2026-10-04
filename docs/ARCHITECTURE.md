@@ -116,6 +116,10 @@ swarmllm/
 │                 `failover` runs FOUR nodes for #17's composite stand-in (gotchas #706-708);
 │                 `context` gives that middle holder a SHORTER context than the prompt (#111);
 │                 `mixed` plants another upload's header beside one holder's parts (#156);
+│                 `disputed` / `spliced` give B parts that are not the upload's bytes (#782);
+│                 outvoted_rig.sh — a node with NO origin to ask (dead proxy / offline mode)
+│                 beside two that check theirs on HuggingFace: it must replace its wrong part
+│                 from them (#160); the release before .224 keeps it — the null control;
 │                 plant_mixed_header.py — writes that header: same tensors, data shifted
 │                 earlier (`shorter`, the silent garbage shape) or later (the error shape);
 │                 logits_reference_probe.rs + compare_logits_reference.py — our logits at
