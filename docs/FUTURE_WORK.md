@@ -158,6 +158,13 @@ copy holds those bytes, or the previous download of the part brought the same on
 otherwise deletes it and fetches again, telling the owner when two downloads disagree. The heal's
 exemption now covers only a part the upload's bytes actually settled.
 
+Its wrong parts also cost other nodes downloads: a node announcing a copy as checked counts
+as a checked holder, and one checked holder disagreeing is enough for a node that can ask the
+upload to re-fetch its own part. Seen here 13:55 UTC after a restart (`e561df35` the only
+checked holder connected yet): our correct Qwen-Coder part 3 was deleted and fetched again
+(10 s, back as `a48c1ca2…`). By design ("a wrong vote costs one download"); with the fix a
+node no longer vouches for bytes nothing corroborated.
+
 Next: after the release, `e561df35`'s next 09:00 UTC restart is the field check — its parts should
 come back as the upload's, or not at all, with "came out different on two downloads" in its log.
 The 02:39-05:39 occurrence (parts announced as an OLD manifest's exact hashes for 3 h, never
