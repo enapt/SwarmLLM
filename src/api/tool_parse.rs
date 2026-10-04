@@ -294,9 +294,13 @@ const FRAMED_CALL_MARKERS: [&str; 5] = [
 /// because of it is the bug this exists to fix. So hold back exactly the
 /// ambiguous suffix and no more.
 ///
-/// vLLM calls the same thing `partial_tag_overlap`; the technique is theirs.
+/// vLLM calls the same thing `partial_tag_overlap`; the technique is theirs,
+/// bound included: `min(len(tag) - 1, len(text))`. This read
+/// `min(marker, text) - 1`, which never looked at the WHOLE text — so a reply
+/// that OPENS with a marker arriving a token at a time (`[` of `[TOOL_CALLS]`,
+/// `f` of `functools`, xLAM's array `[`) streamed its first characters.
 fn partial_marker_overlap(text: &str, marker: &str) -> usize {
-    let max = marker.len().min(text.len()).saturating_sub(1);
+    let max = marker.len().saturating_sub(1).min(text.len());
     (1..=max)
         .rev()
         .find(|&n| {
@@ -351,7 +355,10 @@ pub fn content_prefix_len(text: &str) -> usize {
     //
     // Pulled back only when something follows: a trailing fence with nothing
     // after it is an ordinary unterminated code block and stays content.
+    // The array opener first, so a fence around an array (```json\n[{…}]) is
+    // still found right where the cut lands.
     if safe < text.len() {
+        safe = retract_over_array_opener(text, safe);
         safe = retract_over_fence_opener(text, safe);
     }
     // Never cut inside a character.
@@ -359,6 +366,25 @@ pub fn content_prefix_len(text: &str) -> usize {
         safe -= 1;
     }
     safe
+}
+
+/// Move `safe` back over a JSON array opener that ends the safe prefix.
+///
+/// The bracket is part of the call, not content. xLAM's trained call format is
+/// a bare array (`[{"name": …, "arguments": …}]`) and qwen2.5-14b wraps the
+/// object we ask for in one (`array_wrapped_calls`); `parse_tool_calls` reads
+/// both, but the prefix was cut at the first brace, so `xlam-2-3b-fc-r` answered
+/// `content: "["` beside a correct tool call, streamed and not (2026-10-04).
+/// vLLM's xLAM parser reads it the same way: output opening with `[` is the
+/// call and its content is `None` (`vllm/tool_parsers/xlam_tool_parser.py`,
+/// `preprocess_model_output`).
+fn retract_over_array_opener(text: &str, safe: usize) -> usize {
+    let head = text[..safe].trim_end();
+    if head.ends_with('[') {
+        head.len() - 1
+    } else {
+        safe
+    }
 }
 
 /// Move `safe` back over a code-fence opener that ends the safe prefix.
@@ -1465,6 +1491,8 @@ mod tests {
             "",
             "brace at the end {",
             "a partial marker at the end <tool_c",
+            "[{\"name\":\"f\"}]",
+            "a list [1, 2] then a bracket at the end [",
         ] {
             let (deltas, mut buf) = deltas_for(reply, 2);
             let mut seen = deltas.concat();
@@ -1495,6 +1523,49 @@ mod tests {
                 0,
                 "must hold back all of: {t}"
             );
+        }
+    }
+
+    /// xLAM's call format is a bare array, and its bracket went out as content
+    /// (`content: "["` beside the call, xlam-2-3b-fc-r, 2026-10-04) — streamed
+    /// as soon as the brace after it arrived.
+    #[test]
+    fn an_array_wrapped_call_streams_not_even_its_bracket() {
+        let reply = "[{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Paris\"}}]";
+        for token_len in [1, 2, 3, 7] {
+            let (deltas, mut buf) = deltas_for(reply, token_len);
+            assert!(
+                deltas.is_empty(),
+                "token_len {token_len}: streamed {deltas:?}"
+            );
+            assert!(super::parse_tool_calls(buf.reply_text()).is_some());
+            assert_eq!(buf.pending_content(), None, "token_len {token_len}");
+        }
+        // Prose before the array still goes out, and only the prose.
+        let reply = "Checking.\n[{\"name\": \"get_weather\", \"arguments\": {}}]";
+        let (deltas, mut buf) = deltas_for(reply, 2);
+        let leftover = buf.pending_content().unwrap_or_default();
+        assert_eq!(format!("{}{leftover}", deltas.concat()), "Checking.\n");
+    }
+
+    /// A reply that OPENS with a marker spelled over several tokens leaked its
+    /// first characters: the partial-marker check never considered the whole
+    /// text a prefix of a marker.
+    #[test]
+    fn a_marker_that_opens_the_reply_never_leaks_a_character() {
+        for reply in [
+            "[TOOL_CALLS][{\"name\": \"f\", \"arguments\": {}}]",
+            "functools[{\"name\": \"f\", \"arguments\": {}}]",
+            "<tool_call>{\"name\": \"f\", \"arguments\": {}}</tool_call>",
+            "<|python_tag|>{\"name\": \"f\", \"arguments\": {}}",
+        ] {
+            let (deltas, mut buf) = deltas_for(reply, 1);
+            assert!(deltas.is_empty(), "{reply:?} streamed {deltas:?}");
+            assert!(
+                super::parse_tool_calls(buf.reply_text()).is_some(),
+                "{reply:?}"
+            );
+            assert_eq!(buf.pending_content(), None, "{reply:?}");
         }
     }
 
@@ -2932,5 +3003,24 @@ mod leading_content_tests {
             leading_content("<tool_call>\n{\"name\": \"t\"}\n</tool_call>"),
             None
         );
+    }
+
+    /// The bracket of an array-wrapped call is the call's, not content —
+    /// `content: "["` was returned beside xlam-2-3b-fc-r's call (2026-10-04).
+    #[test]
+    fn the_bracket_of_an_array_wrapped_call_is_not_content() {
+        for reply in [
+            "[{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Paris\"}}]",
+            "[\n  {\"name\": \"get_weather\", \"arguments\": {}}\n]",
+            "```json\n[{\"name\": \"get_weather\", \"arguments\": {}}]\n```",
+        ] {
+            assert!(
+                super::parse_tool_calls(reply).is_some(),
+                "{reply:?} must parse"
+            );
+            assert_eq!(leading_content(reply), None, "{reply:?}");
+        }
+        let reply = "Checking the weather.\n[{\"name\": \"get_weather\", \"arguments\": {}}]";
+        assert_eq!(leading_content(reply), Some("Checking the weather."));
     }
 }

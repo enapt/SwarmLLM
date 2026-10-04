@@ -770,7 +770,7 @@ paths now keep the preamble as well, and the surfaces agree by being the shape
 clients already expect. Discarding it was throwing away text the model
 produced.
 
-Four things a change here must keep:
+Five things a change here must keep:
 
 - **A bare `{` is a marker.** `try_generic` and `try_llama3` accept an object
   with no marker at all, so an unadorned brace begins a possible call. The bare
@@ -781,6 +781,20 @@ Four things a change here must keep:
   at a time, so `<tool` must not go out. `partial_marker_overlap` withholds
   exactly the ambiguous tail and no more; vLLM calls the same thing
   `partial_tag_overlap`. Never emit a cut that lands inside a character.
+  **Its bound is vLLM's, `min(len(tag) - 1, len(text))`** — this read
+  `min(marker, text) - 1`, which never asked whether the WHOLE text so far was a
+  marker's prefix, so a reply that OPENED with a marker spelled over several
+  tokens (`[TOOL_CALLS]`, `functools`) streamed its first characters
+  (`a_marker_that_opens_the_reply_never_leaks_a_character`, 2026-10-04).
+- **A `[` that opens an array around the call is the call's.**
+  `retract_over_array_opener` pulls the cut back over it, as
+  `retract_over_fence_opener` does over a fence. xLAM's trained format is a bare
+  array (`[{"name", "arguments"}]`), and the brace-only cut answered
+  `content: "["` beside a correct call on all four paths (`xlam-2-3b-fc-r`,
+  2026-10-04). vLLM's xLAM parser reads output opening with `[` as the call,
+  content `None` (`vllm/tool_parsers/xlam_tool_parser.py`). Verified on the
+  live swarm with the fixed build: content `null`, no text delta, no Anthropic
+  text block; prose in a tools request still streamed (11 deltas).
 - **The emitter owns BOTH outcomes.** `emit_openai_tool_calls` /
   `emit_anthropic_tool_blocks` take the buffer by `&mut` and flush either the
   remaining prose (call found) or the whole remainder (no call). Splitting that
@@ -788,7 +802,7 @@ Four things a change here must keep:
   keeps being caught by.
 - **Nothing emitted twice, nothing lost.** `emitted + pending == text` is the
   invariant every caller depends on, pinned by
-  `nothing_is_ever_emitted_twice_or_lost` over six reply shapes.
+  `nothing_is_ever_emitted_twice_or_lost` over eight reply shapes.
 
 Verified end to end against the released binary as the control, same model and
 prompt: 1 delta → 99 (OpenAI), 1 → 55 (Anthropic), tool calls still emitted and
