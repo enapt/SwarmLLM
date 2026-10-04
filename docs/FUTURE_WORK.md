@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #219**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #220**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -35,7 +35,7 @@ residual).
 
 Re-ranked 2026-10-02 after the verification, and 2026-10-03 when #156, #158 and #213 closed,
 then again after v0.3.223 (#157 and #164 closed, #160 raised to P1 on the swarm reading), and
-after v0.3.224 (#160, #215 and #216 closed; #217 and #218 opened from the swarm reading and the inference test after it).
+after v0.3.224 (#160, #215 and #216 closed; #217 and #218 opened from the swarm reading and the inference test after it); #218 closed the same day, not yet released.
 `docs/plans/` holds the multi-step designs; the entries point at them.
 
 **P0 — wrong answers, silently**
@@ -59,32 +59,31 @@ after v0.3.224 (#160, #215 and #216 closed; #217 and #218 opened from the swarm 
 4. **#165** — prompt privacy is on by default for every node holding both ends of a model
    (58 of 78 holdings in the 2026-10-01 census) and costs 9-14× on a far middle peer; the
    notice that was meant to tell the user never fires.
-5. **#218** — when every computer holding part of a model refuses it for lack of memory, the
-   user is told that part has LEFT the swarm ("…the peer that held that piece has gone") —
-   five requests over three models on 2026-10-04.
-6. **#117** — Qwen 3.5: a working dense implementation sits unmerged on branch
+5. **#117** — Qwen 3.5: a working dense implementation sits unmerged on branch
    `qwen35-support`; the most-downloaded family the swarm refuses.
-7. **#1** — every Mac runs on the processor; no GPU backend is compiled for Apple Silicon.
-8. **#153** — Windows: a worker that outlives the daemon holds its port, and the next start
+6. **#1** — every Mac runs on the processor; no GPU backend is compiled for Apple Silicon.
+7. **#153** — Windows: a worker that outlives the daemon holds its port, and the next start
    fails.
 
 **P2 — speed and completeness**
-9. **#189** — `/v1/models` reports no context length for any model this node does not hold
+8. **#189** — `/v1/models` reports no context length for any model this node does not hold
    (agents such as OpenClaw then guess 128k). Small, additive.
-10. **#152** — the continuous guess-check stream never runs on the split shapes the swarm
+9. **#152** — the continuous guess-check stream never runs on the split shapes the swarm
     actually makes (the boomerang above all).
-11. **#10** — conversation prefixes across computers: no routing to the peer holding the
+10. **#10** — conversation prefixes across computers: no routing to the peer holding the
     cache, and a split chain keeps no KV across turns (absorbs #139).
-12. **#162** — the release gate: a cloned gate loses its helpers, and step 12e cannot test a
+11. **#162** — the release gate: a cloned gate loses its helpers, and step 12e cannot test a
     takeover on this box (absorbs #140).
-13. **#155** — AutoNAT dial-backs denied by the per-peer cap every ~5 s, for the life of a node.
-14. **#194** — an agent-sized prompt fills an 8 GB card with conversation memory.
-15. **#147**, **#137**, **#138**, **#129** — prompt reading on the card, the processor half of
+12. **#155** — AutoNAT dial-backs denied by the per-peer cap every ~5 s, for the life of a node.
+13. **#194** — an agent-sized prompt fills an 8 GB card with conversation memory.
+14. **#147**, **#137**, **#138**, **#129** — prompt reading on the card, the processor half of
     a hybrid, MoE placement, and near-fit models sent across continents
     (`docs/plans/faster_than_local.md`).
-16. **#3**, **#180** — the routing cost model charges a constant where the reply length
+15. **#3**, **#180** — the routing cost model charges a constant where the reply length
     belongs, which keeps partial ranges (load spreading) off.
-17. **#171** — the prompt pass through a split runs one stage at a time.
+16. **#171** — the prompt pass through a split runs one stage at a time.
+17. **#219** — a peer offers room for a model it then refuses to run at all, so the
+    hint after its refusal says to retry when retrying cannot help.
 
 Everything else is ranked in its own entry. **P3** is narrow or cosmetic, **P4** is process,
 maintenance or an idea with no user waiting on it.
@@ -745,6 +744,12 @@ add Qwen 3.5 to `hybrid::arch_supports_hybrid` (its `q35_cos`/`q35_sin` tables m
 each layer's device and its state buffers be checked), or a card too small for the model
 loses the card entirely.
 
+
+Until it lands, `/v1/models` lists `qwen3.5-9b-q4-k-m` (two peers hold parts of it) though no
+node on this build can run it; every request answers 400 "Unsupported model architecture
+'qwen35'" after fetching its 11 MB header (2026-10-04). `SharedState::refused_architecture`
+knows only once that header is here, so filtering the list on it would hide the model only
+after someone had tried it — the fix is this entry.
 #### #1 — Every Mac runs inference on the processor: no GPU backend is compiled for Apple Silicon
 `P1` · platform · **OPEN** — 2026-09-07 · history: archive row #1 and § "GPU on Apple Silicon: no backend is compiled, on either path"
 
@@ -802,6 +807,22 @@ StarCoder2, inert while refused).
 
 ### Memory and admission
 
+#### #219 — A peer offers room for a model it then refuses to run at all
+`P2` · memory · **OPEN** — 2026-10-04 (inference test after v0.3.224)
+
+`9594e1ff` (Windows, i7-4770, processor only) offered `max_hostable_layers = 22` for
+TinyLlama-1.1B — every layer — and refused every whole-model request: "Not enough free memory
+on this node for a 43-token prompt (0 MB of conversation memory in use, 0 MB available for
+conversations once this model's weights are accounted for, short by 22 MB)". At its budget the
+weights leave nothing for a conversation, so the offer can never be honoured; half the model
+through it worked (layers 11-21). It breaks "a peer advertises the memory it will HONOUR"
+(`NodeCapability::memory_for_model_layers_mb`, `docs/invariants/scheduling.md`). Next: find
+where the offer is computed and whether it charges the conversation memory that
+`model_worker::prompt_refusal_message`'s admission then demands — a weights-only figure would
+offer every layer with 0 MB left. Since #218 the caller reads the holder's own words
+(`HoldersDeclined`), but the plan was inside the offers, so the hint says to retry, which
+cannot help here.
+
 #### #194 — An agent-sized prompt fills an 8 GB card with conversation memory
 `P2` · memory · **PARTIAL** — 2026-09-02 · absorbs the old survey's Tier 2F (KV quantisation); history: archive § "An agent-sized prompt fills an 8 GB card with KV cache, and decode crawls"
 
@@ -849,34 +870,6 @@ stall per layer; TP off by default), and `VisionEncodeResponse` has no error fie
 image-encode refusal stays silent.
 
 ### API surface
-
-#### #218 — A part every holder refused for memory is reported as missing from the swarm
-`P1` · api · **OPEN** — 2026-10-04 (inference test after v0.3.224)
-
-When the peers holding a part refuse it for memory (`Service unavailable: N layers … need about
-X MB more than this node has left`, or `Not enough free memory on this node for a N-token
-prompt`), the router bars each for the request (`blacklist_holder_for_request`) and re-plans;
-once no holder is left, the scheduler's coverage walk (`inference/scheduler/mod.rs`, the
-`None =>` arm that builds `ModelIncompleteInSwarm`) answers 503 **"No reachable node holds
-layers 0-1 of … A model can be listed, and even loaded here, while the peer that held that
-piece has gone"**. Every holder was connected; the cause was memory, which a retry minutes
-later can cure, and the message says part of the model has left the swarm. Seen 2026-10-04
-06:26-06:30 UTC on five requests over three models: GLM-4 all-peer routes
-(`peer_path_matrix.sh`), Llama-3.1-8B and GLM-4 routes forced through `e561df35` (short
-3666 MB), Qwen3-30B-A3B on its DEFAULT route (`4a3ac72e`, the only complete holder, short of
-18.7 GB). The refusal is in hand when the walk fails (`last_failure`, the request's blacklist)
-and is dropped. (A segment that fails mid-pipeline — `SegmentFailoverExhausted` — does carry
-it: "…no standby available (last failure: … Not enough free memory …)".)
-
-Per `arch-errors.md` ("one variant carrying two causes that need opposite advice is two
-variants"): where no candidate is left for a range that a holder barred FOR THIS REQUEST
-covers, answer a variant saying every computer holding layers X-Y is out of memory right now
-(try again shortly, or a smaller model), carrying the last refusal; keep
-`ModelIncompleteInSwarm` for a range no connected computer holds. Its `error_hint` is a new
-i18n key (21 locales). Enumerate the paths first (`architecture.md` § "One invariant, N
-paths"): the scheduler walk, `router/distributed_exec.rs`'s handling of the variant, and
-`api/admin_models/listing.rs`. Test: plan with the only holder of a range barred for memory
-and assert the new variant — red on today's code.
 
 #### #214 — Qwen2.5-Coder-7B on Qwen's official upload answers a tool request in a wrapper nobody parses
 `P2` · api · **OPEN** — 2026-10-03 (the v0.3.222 gate)
@@ -1314,6 +1307,24 @@ archive under the named heading. Reopen one only with the evidence its line name
 Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 19-28 were
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
+
+**Closed 2026-10-04, after v0.3.224 — not yet released** (`docs/invariants/scheduling.md` §
+"A holder's refusal is reported as what it was")
+- #218 — a request every holder turned down was reported as "No reachable node holds layers X-Y
+  of … the peer that held that piece has gone", or as "Insufficient network capacity": the
+  re-plan, with the refusing holders barred, described its own search, not the refusal. The
+  router now keeps a peer's refusal as it keeps its own memory shortfall
+  (`router::a_refusal_the_caller_should_hear`), and when the re-plan finds nothing reports what
+  happened: `SwarmShortOfMemory` when the refused plan had gone past the memory the holders
+  OFFER — the scheduler records that per request (`plan_exceeds_offered_memory`,
+  `layers_offered`, `SharedState::planned_past_offered_memory`) and retrying cannot help — or
+  `HoldersDeclined`, in the last holder's own words, when the plan fitted their offers (usually
+  busy: retry later). Two hint keys in 21 locales. Verified live with the fixed build: Qwen3-30B-A3B
+  (18.7 GB) → "Not enough memory in the swarm … the computers holding it have room for about 43
+  of its 48 layers between them" (offers 19 + 11 + 8 + 5); TinyLlama through `9594e1ff` alone →
+  "… online but turned it down — the last one said: Not enough free memory on this node for a
+  43-token prompt (…)". The distinction came from the user's question: a refusal at a holder's
+  BUDGET can never succeed, a busy holder's can — opposite advice, so two variants.
 
 **Closed 2026-10-03, after v0.3.223** (`docs/invariants/network.md` § "A node with no
 origin to ask is healed by the holders that checked theirs")

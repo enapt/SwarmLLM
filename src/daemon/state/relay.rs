@@ -103,6 +103,7 @@ impl super::SharedState {
         self.request_holder_blacklist.remove(request_id);
         self.peer_vram_commitments.remove(request_id);
         self.local_memory_refusals.remove(request_id);
+        self.planned_past_offered_memory.remove(request_id);
         self.route_plan_overrides.remove(request_id);
         self.salvaged_replies.remove(request_id);
         self.retained_activations.release(*request_id);
@@ -163,6 +164,30 @@ impl super::SharedState {
     /// Has this node's loader already refused this request for memory?
     pub fn local_memory_refused_for_request(&self, request_id: uuid::Uuid) -> bool {
         self.local_memory_refusals.contains(&request_id)
+    }
+
+    /// This request was planned past the memory its holders offer.
+    ///
+    /// The FIRST plan's figures are kept: a re-plan runs with a refusing holder
+    /// barred, so its total describes fewer computers than hold the model.
+    pub fn note_planned_past_offered_memory(
+        &self,
+        request_id: uuid::Uuid,
+        offered: super::OfferedMemory,
+    ) {
+        self.planned_past_offered_memory
+            .entry(request_id)
+            .or_insert(offered);
+    }
+
+    /// What the holders offered, if this request was planned past it.
+    pub fn planned_past_offered_memory(
+        &self,
+        request_id: uuid::Uuid,
+    ) -> Option<super::OfferedMemory> {
+        self.planned_past_offered_memory
+            .get(&request_id)
+            .map(|o| *o)
     }
 
     /// Record what this request has committed to each peer's graphics memory,

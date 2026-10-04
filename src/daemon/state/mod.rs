@@ -100,6 +100,18 @@ const GEOMETRY_PROBE_COOLDOWN: std::time::Duration = std::time::Duration::from_s
 const INBOUND_REACHABILITY_TREE: &str = "network";
 const INBOUND_REACHABILITY_KEY: &str = "inbound_ever_observed";
 
+/// What the holders of a model offered when a request had to be planned past
+/// it — see [`SharedState::planned_past_offered_memory`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OfferedMemory {
+    /// Layers the holders said they could take between them, each computer
+    /// counted once. `None` when one of them did not say: an unknown figure is
+    /// not "no room", so no total can be stated.
+    pub layers: Option<u32>,
+    /// Layers the model has.
+    pub num_layers: u32,
+}
+
 /// One failed inference, retained for `GET /api/admin/diagnostics`.
 #[derive(Debug, Clone)]
 pub struct RequestFailure {
@@ -789,6 +801,21 @@ pub struct SharedState {
     /// [`SharedState::release_request_state`] with every other per-request map.
     pub local_memory_refusals: dashmap::DashSet<uuid::Uuid>,
 
+    /// Requests planned past the memory their holders OFFER, with what was offered.
+    ///
+    /// Written by the scheduler when a plan hands some computer more layers
+    /// than it advertised room for — the search found nothing inside the
+    /// offers and routed without them, a peer "may refuse and the request will
+    /// re-plan". A refusal of such a plan is the swarm confirming its own
+    /// figures: it has no room for this model, and a retry will not find any.
+    /// The router reads it to tell that apart from a holder that was merely
+    /// busy; "the peer that held that piece has gone" was the answer to both
+    /// (FUTURE_WORK #218).
+    ///
+    /// Write ONLY `note_planned_past_offered_memory`, read only
+    /// `planned_past_offered_memory`; released by `release_request_state`.
+    pub planned_past_offered_memory: DashMap<uuid::Uuid, OfferedMemory>,
+
     /// Per-request instructions to plan as if this node held less, or as if
     /// some peers were not there.
     ///
@@ -1417,6 +1444,7 @@ impl SharedState {
             perf_history: perf_history::PerfHistory::load(&db),
             request_holder_blacklist: DashMap::new(),
             local_memory_refusals: dashmap::DashSet::new(),
+            planned_past_offered_memory: DashMap::new(),
             route_plan_overrides: DashMap::new(),
             salvaged_replies: DashMap::new(),
             peer_vram_commitments: DashMap::new(),

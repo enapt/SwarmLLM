@@ -423,6 +423,88 @@ fn a_model_that_fits_nobody_is_still_assigned_rather_than_refused() {
     );
 }
 
+/// The Qwen3-30B-A3B holders as the live swarm offered them on 2026-10-04 —
+/// what each holds and what it said it could take — and the plan that was
+/// refused: all 48 layers to the computer offering 0 (FUTURE_WORK #218).
+fn qwen3_30b_holders() -> Vec<NodeCandidate> {
+    let holder = |byte, ranges: Vec<(u32, u32)>, offer| {
+        let mut c = simple_candidate(byte, ranges);
+        c.max_hostable_layers = Some(offer);
+        c.max_hostable_layers_at_face_value = Some(offer);
+        c
+    };
+    vec![
+        holder(1, vec![(0, 48)], 0),
+        holder(2, vec![(5, 7), (13, 15), (17, 19), (29, 33), (39, 47)], 11),
+        holder(3, vec![(19, 27), (33, 39), (42, 43)], 5),
+        holder(4, vec![(0, 3), (7, 13), (27, 29), (47, 48)], 1),
+    ]
+}
+
+fn segment(byte: u8, range: (u32, u32)) -> PipelineSegment {
+    PipelineSegment {
+        node_id: NodeId([byte; 32]),
+        shard_id: ShardId {
+            model_id: ModelId("test".into()),
+            index: 0,
+        },
+        layer_range: range,
+    }
+}
+
+/// What the caller is told is the figure the plan was checked against: each
+/// computer once, at the smaller of what it holds and what it offered.
+#[test]
+fn the_room_the_holders_offer_is_counted_once_each_and_capped_by_what_they_hold() {
+    assert_eq!(super::layers_offered(&qwen3_30b_holders()), Some(17));
+    // Overlapping ranges are layers held once, not twice.
+    let mut twice = simple_candidate(9, vec![(0, 10), (5, 15)]);
+    twice.max_hostable_layers_at_face_value = Some(40);
+    assert_eq!(super::layers_offered(&[twice.clone(), twice]), Some(15));
+    // A holder that did not say leaves no total to state.
+    let mut holders = qwen3_30b_holders();
+    holders[2].max_hostable_layers_at_face_value = None;
+    assert_eq!(super::layers_offered(&holders), None);
+}
+
+#[test]
+fn a_plan_past_a_peers_offer_is_recognised_and_one_inside_it_is_not() {
+    let holders = qwen3_30b_holders();
+    let local = NodeId([7; 32]);
+    // The refused plan: every layer to the computer that offered none.
+    assert!(super::plan_exceeds_offered_memory(
+        &[segment(1, (0, 48))],
+        &holders,
+        &local
+    ));
+    // Inside every offer.
+    assert!(!super::plan_exceeds_offered_memory(
+        &[segment(2, (5, 7)), segment(3, (19, 24))],
+        &holders,
+        &local
+    ));
+    // Per COMPUTER, not per segment: two segments that each fit, together do not.
+    assert!(super::plan_exceeds_offered_memory(
+        &[segment(3, (19, 22)), segment(3, (33, 36))],
+        &holders,
+        &local
+    ));
+    // Unknown is never "no room".
+    let mut unknown = holders.clone();
+    unknown[0].max_hostable_layers_at_face_value = None;
+    assert!(!super::plan_exceeds_offered_memory(
+        &[segment(1, (0, 48))],
+        &unknown,
+        &local
+    ));
+    // This node's figure is room to ADD, not a total — never read as an offer.
+    assert!(!super::plan_exceeds_offered_memory(
+        &[segment(1, (0, 48))],
+        &holders,
+        &NodeId([1; 32])
+    ));
+}
+
 /// `None` means UNKNOWN and must never exclude — an unreadable capability is
 /// not evidence that a node is small, which is the distinction
 /// [`max_hostable_layers`] exists to preserve.

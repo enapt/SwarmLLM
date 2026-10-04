@@ -249,6 +249,38 @@ pub enum SwarmError {
         span: String,
     },
 
+    /// The computers holding this model do not have the memory for it between
+    /// them: the search found no route inside what they offered, planned past
+    /// it, and the plan was refused (FUTURE_WORK #218).
+    ///
+    /// Its own variant, not `ModelIncompleteInSwarm`, because the advice is the
+    /// opposite: nothing is missing and nobody left, and retrying will not help
+    /// until a computer with more room holds the model. Seen on Qwen3-30B-A3B
+    /// (18.7 GB): its four holders offered room for 17 of its 48 layers, and
+    /// the caller was told "the peer that held that piece has gone".
+    #[error("Not enough memory in the swarm for {model_id}: {room}")]
+    SwarmShortOfMemory {
+        model_id: String,
+        /// Built by [`describe_offered_room`] from the figure the plan was
+        /// checked against.
+        room: String,
+    },
+
+    /// The computers holding the part of this model a request needs are
+    /// connected, but each one asked turned it down and the re-plan found no
+    /// other (FUTURE_WORK #218).
+    ///
+    /// Its own variant, not `ModelIncompleteInSwarm` — which is what the
+    /// re-plan's coverage walk answers once the refusing holders are barred,
+    /// and which says they have GONE. They had not; they had said no, usually
+    /// for memory they will have again shortly. Carries the last refusal in the
+    /// holder's own words.
+    #[error(
+        "The computers holding the part of {model_id} this request needs are online but \
+         turned it down — the last one said: {reason}"
+    )]
+    HoldersDeclined { model_id: String, reason: String },
+
     // Overload
     #[error("Service unavailable: {0}")]
     ServiceUnavailable(String),
@@ -440,6 +472,24 @@ pub fn describe_missing_layers(from: u32, to_exclusive: u32) -> String {
         format!("layer {from}")
     } else {
         format!("layers {}-{}", from, to_exclusive - 1)
+    }
+}
+
+/// Describe how much room a model's holders offered, the way a caller reads it.
+///
+/// Shared so the error and anything else stating the figure agree; `None` is
+/// "one of them did not say", which still leaves the plan's verdict — no route
+/// fitted what they did offer — true to state.
+pub fn describe_offered_room(offered_layers: Option<u32>, num_layers: u32) -> String {
+    match offered_layers {
+        Some(layers) => format!(
+            "the computers holding it have room for about {layers} of its {num_layers} layers \
+             between them"
+        ),
+        None => format!(
+            "the computers holding it do not have room for all {num_layers} of its layers \
+             between them"
+        ),
     }
 }
 
@@ -762,6 +812,14 @@ pub fn classify_error(err: &SwarmError) -> (StatusCode, String, &'static str) {
         // answered 500 until 2026-08-11, reporting a capacity shortfall as
         // a fault in the node the user is talking to.
         SwarmError::ModelIncompleteInSwarm { .. } => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            err.to_string(),
+            "server_error",
+        ),
+        // Its two siblings from #218: the holders are there, and either have
+        // no room for the model or turned this request down. Still "this
+        // server can't serve it", never a fault in the node or the request.
+        SwarmError::SwarmShortOfMemory { .. } | SwarmError::HoldersDeclined { .. } => (
             StatusCode::SERVICE_UNAVAILABLE,
             err.to_string(),
             "server_error",
@@ -1199,6 +1257,21 @@ pub fn error_hint_with_key(err: &SwarmError) -> Option<(&'static str, &'static s
              parts from the model's card on the Dashboard (or run \
              `swarmllm get-model <name> --all`), or pick a model the dashboard marks as ready.",
         )),
+        // Retrying cannot help, and the hint must say so — the opposite of
+        // `holders_declined` below, which is why these are two variants.
+        SwarmError::SwarmShortOfMemory { .. } => Some((
+            "swarm_short_of_memory",
+            "This model needs more memory than the computers holding it can set aside, so \
+             trying again won't help. Pick a smaller model, or wait until a computer with \
+             more memory holds this one. If one of them is yours, raising its Contribution \
+             Level in Settings gives the swarm more room.",
+        )),
+        SwarmError::HoldersDeclined { .. } => Some((
+            "holders_declined",
+            "The computers holding this part of the model are online but couldn't take the \
+             request — usually because they are busy running other models and are short of \
+             memory for now. Try again in a few minutes, or pick another model.",
+        )),
         SwarmError::PromptPrivacyUnavailable { .. } => Some((
             "prompt_privacy_unavailable",
             "“Start and finish on this computer” is on for this model, and that needs \
@@ -1335,6 +1408,14 @@ mod tests {
                 layer: 3,
                 span: crate::error::describe_missing_layers(3, 3 + 1),
             },
+            SwarmError::SwarmShortOfMemory {
+                model_id: "m".into(),
+                room: crate::error::describe_offered_room(Some(17), 48),
+            },
+            SwarmError::HoldersDeclined {
+                model_id: "m".into(),
+                reason: "short by 330 MB".into(),
+            },
             SwarmError::PromptPrivacyUnavailable {
                 model_id: "m".into(),
             },
@@ -1454,6 +1535,14 @@ mod tests {
             SwarmError::SegmentFailoverExhausted("no standby".into()),
             SwarmError::Network("upstream unreachable".into()),
             SwarmError::ServiceUnavailable("worker restarting".into()),
+            SwarmError::SwarmShortOfMemory {
+                model_id: "m".into(),
+                room: describe_offered_room(None, 48),
+            },
+            SwarmError::HoldersDeclined {
+                model_id: "m".into(),
+                reason: "busy".into(),
+            },
         ] {
             assert_eq!(failure_log_level(&err), FailureLevel::Warn, "{err}");
         }

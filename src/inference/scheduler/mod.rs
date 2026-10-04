@@ -745,6 +745,72 @@ fn primary_layer_commitments(segments: &[PipelineSegment]) -> HashMap<NodeId, u3
     m
 }
 
+/// Does this plan hand some PEER more layers than it offered to take?
+///
+/// The single reading of "planned past the swarm's memory" (#218), asked of the
+/// FINISHED plan so it holds whichever rung of the search, or the greedy
+/// fallback's unbounded pass, produced it. The offer is the peer's own figure
+/// with our margin spent (`max_hostable_layers_at_face_value`) — the line
+/// `parallax::CapacityBound` says no bounded pass may cross. A peer that did not
+/// say is never exceeded: unknown is not "no room".
+///
+/// This node is left out. Its figure is room to ADD beside what it already
+/// holds (`layers_it_would_add`), not a total, and its own loader's refusal
+/// already reaches the caller as `LocalMemoryUnavailable`.
+fn plan_exceeds_offered_memory(
+    segments: &[PipelineSegment],
+    candidates: &[NodeCandidate],
+    local_node_id: &NodeId,
+) -> bool {
+    primary_layer_commitments(segments)
+        .iter()
+        .filter(|(node, _)| *node != local_node_id)
+        .any(|(node, &given)| {
+            candidates
+                .iter()
+                .filter(|c| &c.node_id == node)
+                .filter_map(|c| c.max_hostable_layers_at_face_value)
+                .max()
+                .is_some_and(|offered| given > offered)
+        })
+}
+
+/// Layers the holders of a model offered to take between them: each computer
+/// counted once, at the smaller of the layers it holds and what it offered.
+/// `None` when any of them did not say — no total can be stated then.
+///
+/// What the caller is told when a plan past these offers is refused ("room for
+/// about 17 of its 48 layers"), so it reads the same figure the plan was
+/// checked against.
+fn layers_offered(candidates: &[NodeCandidate]) -> Option<u32> {
+    let mut held: HashMap<&NodeId, Vec<(u32, u32)>> = HashMap::new();
+    let mut offered: HashMap<&NodeId, u32> = HashMap::new();
+    for c in candidates {
+        let o = c.max_hostable_layers_at_face_value?;
+        held.entry(&c.node_id)
+            .or_default()
+            .extend(c.available_ranges.iter().copied());
+        let best = offered.entry(&c.node_id).or_insert(0);
+        *best = (*best).max(o);
+    }
+    Some(
+        held.into_iter()
+            .map(|(node, mut ranges)| {
+                // Distinct layers held, however the ranges overlap.
+                ranges.sort_unstable();
+                let (mut layers, mut end) = (0u32, 0u32);
+                for (a, b) in ranges {
+                    if b > end {
+                        layers += b - a.max(end);
+                        end = b;
+                    }
+                }
+                layers.min(offered[node])
+            })
+            .sum(),
+    )
+}
+
 /// Indices of the segments no standby covers — the ones whose holder failing
 /// takes the whole request down.
 ///
@@ -2899,6 +2965,23 @@ impl PipelineScheduler {
         // This avoids sending multiple LayerForward messages to the same node
         // when it handles its full layer range in one forward pass.
         let mut segments = Self::merge_contiguous(raw_segments);
+
+        // Whichever rung produced it, a plan that hands some computer more
+        // layers than it offered is the swarm planning past its own memory. If
+        // that plan is refused, the router must say there is no room for this
+        // model — not that a holder has gone (#218). A preview plans nothing
+        // for anyone and records nothing.
+        if purpose.explains_a_real_request()
+            && plan_exceeds_offered_memory(&segments, &candidates, local_node_id)
+        {
+            self.shared_state.note_planned_past_offered_memory(
+                request_id,
+                crate::daemon::state::OfferedMemory {
+                    layers: layers_offered(&candidates),
+                    num_layers,
+                },
+            );
+        }
 
         // Re-point each segment's `shard_id` at the first shard its layer range
         // actually covers. Candidates carry only their FIRST shard id, so a

@@ -190,22 +190,101 @@ fn peer_serves_shorter_context(err: &SwarmError) -> bool {
     matches!(err, SwarmError::LongerThanPeerServes(_))
 }
 
-/// What the caller hears when a re-plan after an informative refusal failed
-/// too — `first` is our own memory shortfall or a peer's context limit.
+/// Did a PEER turn this attempt down — say, with a reason, that it would not
+/// serve it? [`remote_peer_could_not_serve`] with the evidence its doc asks for
+/// (a remote segment took part), and never our own loader's refusal, which has
+/// its own variant and its own report.
+fn a_peer_declined(err: &SwarmError, used_remote_segment: bool) -> bool {
+    used_remote_segment && !local_memory_refused_the_load(err) && remote_peer_could_not_serve(err)
+}
+
+/// Is this failure one the caller should hear if the re-plan after it finds
+/// nothing better? The single answer for the dispatch loop's ONE slot: our own
+/// memory shortfall, a peer's context limit (#111), or a peer that said no
+/// (#218). Pure, so the rule is testable without building a router.
+fn a_refusal_the_caller_should_hear(err: &SwarmError, used_remote_segment: bool) -> bool {
+    local_memory_refused_the_load(err)
+        || peer_serves_shorter_context(err)
+        || a_peer_declined(err, used_remote_segment)
+}
+
+/// A holder's refusal in its own words: the text after the innermost
+/// "Service unavailable: " — the marker [`message_means_peer_cannot_serve`]
+/// reads. The wrappers a refusal collects on its way here ("Segment failover
+/// exhausted: … (last failure: Worker: …)") tell the caller nothing, and the
+/// closing bracket such a wrapper leaves unmatched is dropped with them.
+fn refusal_in_the_holders_words(err: &SwarmError) -> String {
+    const MARKER: &str = "Service unavailable: ";
+    let msg = err.to_string();
+    let words = msg
+        .rfind(MARKER)
+        .map_or(msg.as_str(), |at| &msg[at + MARKER.len()..])
+        .trim();
+    let unmatched = words.matches(')').count() > words.matches('(').count();
+    words
+        .strip_suffix(')')
+        .filter(|_| unmatched)
+        .unwrap_or(words)
+        .trim()
+        .to_string()
+}
+
+/// What the caller hears when a re-plan after a refusal failed too — `first`
+/// is our own memory shortfall, a peer's context limit, or a peer that said no.
 ///
-/// A peer's context refusal yields to the re-plan's own answer when that is
-/// one the caller can act on (a 4xx — typically this node's worker refusing at
-/// ITS limit, whose advice to raise `max_seq_len_override` here is then
-/// correct). Otherwise, and always for a memory shortfall, the original
-/// refusal: a "no route" 503 from the re-plan is a true statement about a
-/// search the caller never asked for, while the refusal names what stopped them.
-fn report_after_a_replan(first: SwarmError, later: SwarmError) -> SwarmError {
-    if peer_serves_shorter_context(&first)
-        && crate::error::classify_error(&later).0.is_client_error()
-    {
-        later
-    } else {
-        first
+/// A re-plan's answer the caller can act on (a 4xx) wins over a PEER's refusal:
+/// typically this node's worker refusing at ITS limit, whose advice to raise
+/// `max_seq_len_override` here is then correct. Our own memory shortfall is
+/// always reported: it names the footprint, the budget and what to raise.
+///
+/// A peer that said no (#218) is reported as what it was — the re-plan, with
+/// that peer barred, can only describe a search the caller never asked for,
+/// and its coverage walk said the peer "has gone". Where the refused plan had
+/// gone past the memory the holders OFFER (`offered`), the swarm has no room
+/// for this model and retrying will not find any: `SwarmShortOfMemory`, with
+/// their figure. Otherwise the holders were there and declined, usually for
+/// memory they will have again: `HoldersDeclined`, in the last one's words. A
+/// re-plan that failed some OTHER way (a peer went silent) is a different
+/// failure and is reported as itself.
+fn report_after_a_replan(
+    first: SwarmError,
+    later: SwarmError,
+    model_id: &str,
+    offered: Option<crate::daemon::state::OfferedMemory>,
+) -> SwarmError {
+    let later_is_actionable = crate::error::classify_error(&later).0.is_client_error();
+    if local_memory_refused_the_load(&first) {
+        return first;
+    }
+    if peer_serves_shorter_context(&first) {
+        return if later_is_actionable { later } else { first };
+    }
+    // A peer said no. Our own loader refusing the re-plan names a shortfall on
+    // THIS machine, which its owner can act on — that, or a 4xx, is the answer.
+    if later_is_actionable || local_memory_refused_the_load(&later) {
+        return later;
+    }
+    let declined_again = message_means_peer_cannot_serve(&later.to_string());
+    let no_route = matches!(
+        later,
+        SwarmError::ModelIncompleteInSwarm { .. } | SwarmError::InsufficientCapacity(_)
+    );
+    if !(declined_again || no_route) {
+        return later;
+    }
+    // Offers that add up to the whole model say the room exists and no route
+    // lined it up — not that the swarm lacks it — so that refusal is reported
+    // as the holders declining, which a later attempt may get past.
+    let short = offered.filter(|o| o.layers.is_none_or(|layers| layers < o.num_layers));
+    match short {
+        Some(o) => SwarmError::SwarmShortOfMemory {
+            model_id: model_id.to_string(),
+            room: crate::error::describe_offered_room(o.layers, o.num_layers),
+        },
+        None => SwarmError::HoldersDeclined {
+            model_id: model_id.to_string(),
+            reason: refusal_in_the_holders_words(if declined_again { &later } else { &first }),
+        },
     }
 }
 
@@ -1275,8 +1354,12 @@ impl InferenceRouter {
             // asked for. ONE slot, not one per kind: two slots each overwrote
             // the final answer in turn, so a request refused for memory, then
             // for length, then failing a third way reported the second refusal
-            // whatever really stopped it (review of #111, 2026-09-25).
+            // whatever really stopped it (review of #111, 2026-09-25). A peer
+            // that turned the request down is kept too (#218): the re-plan,
+            // with that peer barred, answered "the peer that held that piece has
+            // gone" about a peer that was still there.
             let mut first_refusal: Option<SwarmError> = None;
+            let mut offered_when_refused: Option<crate::daemon::state::OfferedMemory> = None;
             let mut replans = 0;
             while replans < MAX_REPLANS {
                 // A peer reporting it cannot serve is retryable, but only when a
@@ -1332,8 +1415,13 @@ impl InferenceRouter {
                     shared_state.note_local_memory_refusal(request.id);
                 }
                 if first_refusal.is_none()
-                    && (local_memory || output.as_ref().is_err_and(peer_serves_shorter_context))
+                    && output
+                        .as_ref()
+                        .is_err_and(|e| a_refusal_the_caller_should_hear(e, used_remote_segment))
                 {
+                    // Read NOW, while it describes the plan that was refused: the
+                    // re-plan runs with the refusing holder barred.
+                    offered_when_refused = shared_state.planned_past_offered_memory(request.id);
                     first_refusal = output.err();
                 }
                 replans += 1;
@@ -1356,7 +1444,12 @@ impl InferenceRouter {
                 output = match output {
                     Err(later) => {
                         let re_plan_error = later.to_string();
-                        let reported = report_after_a_replan(first, later);
+                        let reported = report_after_a_replan(
+                            first,
+                            later,
+                            &request.model_id.0,
+                            offered_when_refused,
+                        );
                         tracing::info!(
                             request_id = %request.id,
                             %re_plan_error,

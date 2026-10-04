@@ -900,6 +900,8 @@ pub fn error_kind(err: &crate::error::SwarmError) -> &'static str {
         E::PromptPrivacyUnavailable { .. } => "PromptPrivacyUnavailable",
         E::PromptPrivacyNeedsFinalShard { .. } => "PromptPrivacyNeedsFinalShard",
         E::ModelIncompleteInSwarm { .. } => "ModelIncompleteInSwarm",
+        E::SwarmShortOfMemory { .. } => "SwarmShortOfMemory",
+        E::HoldersDeclined { .. } => "HoldersDeclined",
         E::ProviderError { .. } => "ProviderError",
         E::Serialization(_) => "Serialization",
         E::ServiceUnavailable(_) => "ServiceUnavailable",

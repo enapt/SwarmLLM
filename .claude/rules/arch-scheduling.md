@@ -94,6 +94,12 @@ The whole-model hand-off waits in `hand_off` when the priced search will run; it
 
 → `docs/invariants/scheduling.md` § "A re-plan is warranted by a changed fact, never by a failed attempt"
 
+## A holder's refusal is reported as what it was (2026-10-04, #218)
+
+A re-plan with the refusing holder barred can only describe its own search ("has gone"). **`router::report_after_a_replan`** reports the refusal: `SwarmShortOfMemory` when the refused plan went past what the holders OFFER (`plan_exceeds_offered_memory`, recorded per request at the planner's exit), else `HoldersDeclined` in their own words. Ask `a_refusal_the_caller_should_hear`, never re-derive it.
+
+→ `docs/invariants/scheduling.md` § "A holder's refusal is reported as what it was"
+
 ## The relaxation is scoped to the figures that are actually unreliable
 
 **`parallax::CapacityBound`** (`Everyone`, `PeersAtFaceValue`, `PeersUnbounded`, `LocalUnbounded`) is walked in that order by `assemble_pipeline_for`; a ceiling is a split POINT too; a relaxation spends `DELEGATE_VRAM_MARGIN` (`max_hostable_layers_at_face_value`) before the peer's own number. Unknown is unbounded on every rung.

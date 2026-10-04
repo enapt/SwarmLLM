@@ -487,14 +487,14 @@ fn a_failed_re_plan_after_a_context_refusal_reports_the_limit_not_the_search() {
     // "No route" is about a search the caller never asked for.
     let no_route = SwarmError::SegmentFailoverExhausted("no standby".into());
     assert!(matches!(
-        super::report_after_a_replan(first(), no_route),
+        super::report_after_a_replan(first(), no_route, "m", None),
         SwarmError::LongerThanPeerServes(_)
     ));
     // This node's own worker refusing at ITS limit is the better answer: its
     // advice to raise the setting here is then correct.
     let ours = SwarmError::Validation("too long for m … against a limit of 8192".into());
     assert!(matches!(
-        super::report_after_a_replan(first(), ours),
+        super::report_after_a_replan(first(), ours, "m", None),
         SwarmError::Validation(_)
     ));
     // Our own memory shortfall is always what is reported: it names the
@@ -506,10 +506,180 @@ fn a_failed_re_plan_after_a_context_refusal_reports_the_limit_not_the_search() {
         SwarmError::LongerThanPeerServes("a peer's limit".into()),
     ] {
         assert!(matches!(
-            super::report_after_a_replan(shortfall(), later),
+            super::report_after_a_replan(shortfall(), later, "m", None),
             SwarmError::LocalMemoryUnavailable(_)
         ));
     }
+}
+
+/// A peer that turned a request down, followed by a re-plan that found nobody
+/// else, was reported as "the peer that held that piece has gone" — the
+/// re-plan's coverage walk, with the refusing peer barred (FUTURE_WORK #218).
+/// The three refusals below are the ones the live swarm gave on 2026-10-04,
+/// word for word up to the numbers: a whole-model hand-off, and a segment
+/// refused mid-pipeline (which arrives wrapped).
+#[test]
+fn a_holder_that_said_no_is_not_reported_as_gone() {
+    use crate::error::SwarmError;
+    let gone = || SwarmError::ModelIncompleteInSwarm {
+        model_id: "m".into(),
+        layer: 12,
+        span: crate::error::describe_missing_layers(12, 22),
+    };
+    let hand_off = || {
+        SwarmError::ServiceUnavailable(
+            "Not enough free memory on this node for a 43-token prompt (0 MB of conversation \
+             memory in use, 0 MB available for conversations once this model's weights are \
+             accounted for, short by 22 MB)."
+                .into(),
+        )
+    };
+    let mid_pipeline = || {
+        SwarmError::SegmentFailoverExhausted(
+            "Segment 1 failed with no standby available (last failure: Worker: Service \
+             unavailable: 10 layers 12..22 of m need about 330 MB more than this node has left \
+             (its worker is already holding 742 MB) — another holder will have to take that part)"
+                .into(),
+        )
+    };
+
+    // Each is a refusal the loop keeps — when a peer was involved.
+    for refusal in [hand_off(), mid_pipeline()] {
+        assert!(
+            super::a_refusal_the_caller_should_hear(&refusal, true),
+            "{refusal}"
+        );
+        assert!(
+            !super::a_refusal_the_caller_should_hear(&refusal, false),
+            "the same words from OUR worker are not a peer saying no: {refusal}"
+        );
+    }
+
+    for later in [
+        gone(),
+        SwarmError::InsufficientCapacity(crate::types::ModelId("m".into())),
+    ] {
+        match super::report_after_a_replan(hand_off(), later, "m", None) {
+            SwarmError::HoldersDeclined { model_id, reason } => {
+                assert_eq!(model_id, "m");
+                assert!(
+                    reason.starts_with("Not enough free memory on this node"),
+                    "{reason}"
+                );
+            }
+            other => panic!("a holder that said no was reported as {other}"),
+        }
+    }
+    // The wrapped refusal comes back in the holder's own words, its own
+    // brackets intact and the wrapper's unmatched one gone.
+    match super::report_after_a_replan(mid_pipeline(), gone(), "m", None) {
+        SwarmError::HoldersDeclined { reason, .. } => assert_eq!(
+            reason,
+            "10 layers 12..22 of m need about 330 MB more than this node has left (its worker \
+             is already holding 742 MB) — another holder will have to take that part"
+        ),
+        other => panic!("reported as {other}"),
+    }
+    // A second holder saying no in the re-plan: ITS words are the last ones.
+    match super::report_after_a_replan(mid_pipeline(), hand_off(), "m", None) {
+        SwarmError::HoldersDeclined { reason, .. } => {
+            assert!(reason.starts_with("Not enough free memory"), "{reason}")
+        }
+        other => panic!("reported as {other}"),
+    }
+}
+
+/// When the refused plan had gone past the memory the holders offered, the
+/// swarm has no room for the model and retrying will not find any — the
+/// Qwen3-30B-A3B shape: four holders offering room for 17 of its 48 layers.
+#[test]
+fn a_refused_plan_past_the_holders_offers_is_a_swarm_short_of_memory() {
+    use crate::error::SwarmError;
+    let refusal = SwarmError::ServiceUnavailable(
+        "m needs about 18719 MB of memory: … This node's budget allows 13107 MB".into(),
+    );
+    let gone = SwarmError::ModelIncompleteInSwarm {
+        model_id: "m".into(),
+        layer: 3,
+        span: crate::error::describe_missing_layers(3, 5),
+    };
+    let offered = crate::daemon::state::OfferedMemory {
+        layers: Some(17),
+        num_layers: 48,
+    };
+    let reported = super::report_after_a_replan(refusal, gone, "m", Some(offered));
+    assert!(
+        matches!(reported, SwarmError::SwarmShortOfMemory { .. }),
+        "got {reported}"
+    );
+    assert!(
+        reported.to_string().contains("about 17 of its 48 layers"),
+        "{reported}"
+    );
+    // Retrying cannot help, and the advice says so.
+    let (key, hint) = crate::error::error_hint_with_key(&reported).expect("a hint");
+    assert_eq!(key, "swarm_short_of_memory");
+    assert!(hint.contains("won't help"), "{hint}");
+
+    // Offers that add up to the whole model: the room exists, no route lined
+    // it up. Never "room for about 50 of its 48 layers" — the holders declined.
+    let enough = crate::daemon::state::OfferedMemory {
+        layers: Some(50),
+        num_layers: 48,
+    };
+    let reported = super::report_after_a_replan(
+        SwarmError::ServiceUnavailable("short of memory".into()),
+        SwarmError::InsufficientCapacity(crate::types::ModelId("m".into())),
+        "m",
+        Some(enough),
+    );
+    assert!(
+        matches!(reported, SwarmError::HoldersDeclined { .. }),
+        "got {reported}"
+    );
+}
+
+/// The controls: what is not a holder saying no keeps its own report.
+#[test]
+fn a_re_plan_that_failed_another_way_is_reported_as_itself() {
+    use crate::error::SwarmError;
+    let peer_said_no = || SwarmError::ServiceUnavailable("short of memory".into());
+    // A different failure in the re-plan — a peer went quiet — is that failure.
+    assert!(matches!(
+        super::report_after_a_replan(
+            peer_said_no(),
+            SwarmError::PeerUnresponsive("never acknowledged".into()),
+            "m",
+            None
+        ),
+        SwarmError::PeerUnresponsive(_)
+    ));
+    // Something the caller can act on wins.
+    assert!(matches!(
+        super::report_after_a_replan(
+            peer_said_no(),
+            SwarmError::Validation("x".into()),
+            "m",
+            None
+        ),
+        SwarmError::Validation(_)
+    ));
+    // Our own loader refusing the re-plan names a shortfall on THIS machine.
+    assert!(matches!(
+        super::report_after_a_replan(
+            peer_said_no(),
+            SwarmError::LocalMemoryUnavailable("short by 900 MB".into()),
+            "m",
+            None
+        ),
+        SwarmError::LocalMemoryUnavailable(_)
+    ));
+    // A peer that DIED mid-pipeline did not say no — "has gone" is then right,
+    // so its failure is not kept as a refusal at all.
+    let departed = SwarmError::SegmentFailoverExhausted(
+        "Segment 1 failed with no standby available (last failure: connection closed)".into(),
+    );
+    assert!(!super::a_refusal_the_caller_should_hear(&departed, true));
 }
 
 /// This node's own memory refusal is re-planned with no remote segment

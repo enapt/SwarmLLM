@@ -645,6 +645,69 @@ second plan **cannot** hand this node the whole model.
 
 → `docs/invariants/scheduling.md`
 
+## A holder's refusal is reported as what it was
+
+**`router::report_after_a_replan`** decides what the caller hears when a holder
+turned a request down and the re-plan found nothing; **`router::
+a_refusal_the_caller_should_hear`** decides which failure is kept for it. A
+peer's refusal (`a_peer_declined`: a remote segment took part, `Service
+unavailable` in its words, not our own loader) is kept beside our own memory
+shortfall and a peer's context limit, in the one slot.
+
+**What it replaced.** The refusing holder is barred for the request
+(`blacklist_holder_for_request`) so the re-plan cannot return to it — right for
+the retry, and the reason the re-plan's own answer was wrong for the caller. With
+the only holder of a range barred, the coverage walk said "No reachable node holds
+layers X-Y … the peer that held that piece has gone", or the candidate gather said
+"Insufficient network capacity", about computers that were connected and had
+answered in under a second. Seen 2026-10-04 on every route shape: a whole-model
+hand-off refused for memory (Qwen3-30B-A3B on `4a3ac72e`), a segment refused
+mid-pipeline (TinyLlama layers 12-21, arriving wrapped in
+`SegmentFailoverExhausted`), and a hand-off to the one remaining holder (TinyLlama
+on `9594e1ff`).
+
+**Two variants, because the advice is opposite** (`arch-errors.md`). The user
+asked whether those refusals meant the model could NEVER load there — and for two
+of the three it did: the M4's budget is 80 % of its 16 GB at Maximum contribution
+against an 18.7 GB model, and `9594e1ff`'s budget left 0 MB for a conversation
+after TinyLlama's weights. The swarm already knew in the first case: the search
+logged "no route fits even what the peers themselves advertised" and handed the
+M4 all 48 layers against an offer of 0. So the scheduler records, at its exit and
+for real requests only, that a plan hands some peer more layers than it offered
+(`plan_exceeds_offered_memory` — peers only: this node's figure is room to ADD,
+not a total — and `layers_offered`, the figure the caller is shown).
+
+- Refused plan past the offers → **`SwarmShortOfMemory`**, "the computers holding
+  it have room for about N of its M layers between them": retrying cannot help.
+- Refused plan inside the offers → **`HoldersDeclined`**, in the last holder's own
+  words (the innermost `Service unavailable: …`): usually busy, retry later.
+- Offers that add up to the whole model → `HoldersDeclined`: the room exists and no
+  route lined it up, which a later attempt may get past; never "room for about 50
+  of its 48 layers".
+
+Four things a change here must keep:
+
+- **The figure is read at the refusal**, not at the end: the re-plan runs with the
+  refusing holder barred, so a later total describes fewer computers.
+- **A re-plan that failed another way is that failure** — a peer that then went
+  silent, our own loader's shortfall (actionable on this machine), any 4xx.
+- **A peer that DIED did not say no.** `SegmentFailoverExhausted` with "connection
+  closed" is not kept, and "has gone" is then the right answer.
+- **Neither variant docks a peer** (`failure_is_penalty_worthy`): a holder's
+  admission check refusing is that check doing its job.
+
+Verified live with the fixed build (2026-10-04): Qwen3-30B-A3B → "Not enough
+memory in the swarm … room for about 43 of its 48 layers between them" (offers
+19 + 11 + 8 + 5; the re-plan's own error was "No reachable node holds layers
+0-4"); TinyLlama through `9594e1ff` alone → "… online but turned it down — the
+last one said: Not enough free memory on this node for a 43-token prompt (…)".
+Tests: `a_holder_that_said_no_is_not_reported_as_gone`,
+`a_refused_plan_past_the_holders_offers_is_a_swarm_short_of_memory`,
+`a_re_plan_that_failed_another_way_is_reported_as_itself` — red with the peer
+refusal not kept; `a_plan_past_a_peers_offer_is_recognised_and_one_inside_it_is_not`
+on the Qwen3-30B holders' real figures. Open beside it: #219, a peer whose offer
+it can never honour (`9594e1ff`), so its refusal reads as "busy".
+
 ## The relaxation is scoped to the figures that are actually unreliable
 
 **`parallax::CapacityBound`** says whose `max_hostable_layers` a routing pass

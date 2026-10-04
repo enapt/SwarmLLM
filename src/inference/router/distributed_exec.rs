@@ -1156,6 +1156,11 @@ fn failure_is_penalty_worthy(err: &SwarmError, had_remote_segment: bool) -> bool
         // Failover exhaustion is a summary naming no culprit — the segment
         // failure that triggered it carries its own attribution.
         | SwarmError::SegmentFailoverExhausted(_)
+        // Summaries the router writes after a failed re-plan (#218): the swarm
+        // has no room for the model, or its holders said no. Neither names a
+        // culprit, and a holder's refusal is its admission check doing its job.
+        | SwarmError::SwarmShortOfMemory { .. }
+        | SwarmError::HoldersDeclined { .. }
         | SwarmError::PipelineError(_) => false,
 
         // Everything else reaches the wire: network faults, timeouts waiting
