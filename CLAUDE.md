@@ -156,9 +156,9 @@ mmproj). Never edit a count without the run behind it (`completeness.md`).
   byte-equality.
 - ⚠ **Windows code is tested ON Windows before it ships** (MinGW cross-build, run
   natively from WSL — `memory/env_windows_test_node.md`); a reproduction must FAIL
-  on the broken build first. On Windows std's `Command` hands the child every
-  inheritable handle (#769) — a process that outlives us starts through
-  `update_restart::spawn_without_inherited_handles`.
+  on the broken build first. std's `Command` hands a Windows child every inheritable
+  handle (#769): an outliving process starts via `spawn_without_inherited_handles`
+  (`update_restart`); workers die with the daemon (job object, #153).
 - ⛔ **This PC had five unclean shutdowns under sustained load (2026-09-26 → 10-01),
   causes undetermined.** Every gate, rig, bench or long run uses the safety kit
   (`~/swarmllm-gate-common/safety.sh`); never 4 simultaneous chats (simultaneous

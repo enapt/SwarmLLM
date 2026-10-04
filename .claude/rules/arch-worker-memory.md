@@ -133,5 +133,6 @@ A second implementation of any of these is this codebase's most-repeated defect 
 - **`kv_budget::admit_prompt` + `PrefixCache::release`** — ONE decision per prompt.
 - **A prompt of known length is RESERVED** — `set_reserved_positions`; `SWARMLLM_KV_RESERVE=0`.
 - **`process_pool::worker_socket_path`** — the ONLY place the IPC socket path is built.
+- **`process_pool::end_with_this_daemon`** — on Windows every worker joins the daemon's kill-on-close job; a new spawn path calls it (#153).
 
 → `docs/invariants/memory.md` § "Single-source-of-truth helpers — Worker memory: graphics, RAM and the KV cache"

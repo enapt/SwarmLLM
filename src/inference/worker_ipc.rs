@@ -167,11 +167,14 @@ pub enum WorkerMsg {
     /// ⚠ **Sent only when the daemon said it reads it** ([`DAEMON_READS_CARD_PROBE`]).
     /// A worker is spawned from the binary on disk NOW (`current_exe_path`,
     /// gotcha #188), which after an update that has not restarted the daemon is
-    /// NEWER than the daemon; an older daemon's reader cannot decode this
-    /// variant, and `recv_framed` fails on the JSON before reading the payload,
-    /// so the stream is lost and the worker evicted on every load (pre-release
-    /// review, 2026-10-01). Gate every new worker-to-daemon message the same
-    /// way — the IPC twin of gating a new wire message on a peer's `features`.
+    /// NEWER than the daemon; a daemon before v0.3.225 cannot decode this
+    /// variant and fails on the JSON before reading the payload, so the stream
+    /// is lost and the worker evicted on every load (pre-release review,
+    /// 2026-10-01). From v0.3.225 the reader skips a message it does not know
+    /// (`recv_worker`, FUTURE_WORK #150) — but a daemon that old still runs in
+    /// the field after an update it has not restarted into, so gate every new
+    /// worker-to-daemon message the same way while any can: the IPC twin of
+    /// gating a new wire message on a peer's `features`.
     CardAllocationProbe { took_ms: u32 },
     /// Error for a specific request.
     ///
@@ -240,9 +243,9 @@ pub enum WorkerMsg {
     /// the daemon derives an ETA from the observed rate (it has the timing and
     /// the trace, the worker has neither).
     ///
-    /// Additive and fire-and-forget: a daemon that does not understand it loses
-    /// only the progress display, and a worker that never sends it (an older
-    /// binary) simply leaves the request's phase unset.
+    /// Additive and fire-and-forget: a worker that never sends it (an older
+    /// binary) simply leaves the request's phase unset. (A daemon that does not
+    /// know a message skips it only from v0.3.225 — see `CardAllocationProbe`.)
     Progress {
         request_id: Uuid,
         phase: ProgressPhase,
@@ -531,10 +534,82 @@ pub async fn recv_daemon<R: AsyncReadExt + Unpin>(
 }
 
 /// Read a WorkerMsg from the socket.
+///
+/// A message whose tag this build does not know comes back as an error that
+/// [`unknown_worker_msg`] recognises, with its whole frame consumed — so the
+/// stream stays aligned and the reader can skip it (FUTURE_WORK #150). A worker
+/// is spawned from the binary on disk (gotcha #188), so after an update this
+/// daemon has not restarted into it talks to a NEWER worker; one new side-band
+/// message used to desynchronise the stream and evict the worker on every load.
+/// A message with a KNOWN tag that fails to decode is still fatal: that is a
+/// broken stream, not a newer one.
 pub async fn recv_worker<R: AsyncReadExt + Unpin>(
     r: &mut R,
 ) -> std::io::Result<(WorkerMsg, Vec<u8>)> {
-    recv_framed(r).await
+    let (header, payload) = recv_frame(r).await?;
+    match serde_json::from_slice::<WorkerMsg>(&header) {
+        Ok(msg) => Ok((msg, payload)),
+        Err(e) => Err(match unknown_tag(&header) {
+            Some(tag) => std::io::Error::other(UnknownWorkerMsg { tag }),
+            None => std::io::Error::new(std::io::ErrorKind::InvalidData, e),
+        }),
+    }
+}
+
+/// A worker message whose tag this build does not know — from a newer worker.
+#[derive(Debug)]
+pub struct UnknownWorkerMsg {
+    pub tag: String,
+}
+
+impl std::fmt::Display for UnknownWorkerMsg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "a worker message this daemon does not know ({})",
+            self.tag
+        )
+    }
+}
+
+impl std::error::Error for UnknownWorkerMsg {}
+
+/// The tag of a message [`recv_worker`] skipped as unknown, if `e` is one.
+pub fn unknown_worker_msg(e: &std::io::Error) -> Option<&str> {
+    e.get_ref()?
+        .downcast_ref::<UnknownWorkerMsg>()
+        .map(|u| u.tag.as_str())
+}
+
+/// Every [`WorkerMsg`] tag, as its own type: whether a tag is one this build
+/// knows is decided by deserialising it, never by reading serde's error text
+/// (#295). Kept complete by `every_worker_message_has_a_tag`, whose exhaustive
+/// match fails to compile when a `WorkerMsg` variant is added without one.
+#[derive(Deserialize, Debug, PartialEq, Eq)]
+enum WorkerMsgTag {
+    Ready,
+    LayerResult,
+    BatchResult,
+    Drafted,
+    Token,
+    GenerateDone,
+    CardAllocationProbe,
+    Error,
+    PrefixManifestUpdate,
+    PrefixFetchProbe,
+    PrefixSnapshotResponse,
+    Progress,
+    Bye,
+}
+
+/// The `t` of a header that is a tagged object whose tag no [`WorkerMsgTag`]
+/// names; `None` for a known tag or a header with no readable tag.
+fn unknown_tag(header: &[u8]) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_slice(header).ok()?;
+    let tag = v.get("t")?.as_str()?;
+    serde_json::from_value::<WorkerMsgTag>(serde_json::Value::String(tag.to_string()))
+        .is_err()
+        .then(|| tag.to_string())
 }
 
 async fn send_framed<W: AsyncWriteExt + Unpin, T: Serialize>(
@@ -569,6 +644,15 @@ async fn send_framed<W: AsyncWriteExt + Unpin, T: Serialize>(
 async fn recv_framed<R: AsyncReadExt + Unpin, T: for<'de> Deserialize<'de>>(
     r: &mut R,
 ) -> std::io::Result<(T, Vec<u8>)> {
+    let (header, payload) = recv_frame(r).await?;
+    let msg: T = serde_json::from_slice(&header)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    Ok((msg, payload))
+}
+
+/// One whole frame — header and payload — read before either is decoded, so a
+/// header that does not decode leaves the stream at the next frame.
+async fn recv_frame<R: AsyncReadExt + Unpin>(r: &mut R) -> std::io::Result<(Vec<u8>, Vec<u8>)> {
     let mut buf4 = [0u8; 4];
     r.read_exact(&mut buf4).await?;
     let json_len = u32::from_le_bytes(buf4);
@@ -580,8 +664,6 @@ async fn recv_framed<R: AsyncReadExt + Unpin, T: for<'de> Deserialize<'de>>(
     }
     let mut json_buf = vec![0u8; json_len as usize];
     r.read_exact(&mut json_buf).await?;
-    let msg: T = serde_json::from_slice(&json_buf)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     r.read_exact(&mut buf4).await?;
     let payload_len = u32::from_le_bytes(buf4);
     if payload_len > MAX_PAYLOAD {
@@ -594,7 +676,7 @@ async fn recv_framed<R: AsyncReadExt + Unpin, T: for<'de> Deserialize<'de>>(
     if payload_len > 0 {
         r.read_exact(&mut payload).await?;
     }
-    Ok((msg, payload))
+    Ok((json_buf, payload))
 }
 
 /// Does this worker-side error message indicate the worker's device state is
@@ -719,6 +801,94 @@ pub fn permanent_gpu_failure(message: &str) -> Option<PermanentGpuFailure> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Write one frame by hand: a header this build may not know, and a payload.
+    async fn write_raw_frame(w: &mut tokio::io::DuplexStream, header: &[u8], payload: &[u8]) {
+        use tokio::io::AsyncWriteExt;
+        w.write_all(&(header.len() as u32).to_le_bytes())
+            .await
+            .unwrap();
+        w.write_all(header).await.unwrap();
+        w.write_all(&(payload.len() as u32).to_le_bytes())
+            .await
+            .unwrap();
+        w.write_all(payload).await.unwrap();
+    }
+
+    /// #150: a newer worker's message is skipped and the stream stays aligned —
+    /// the message after it (with its payload) is read correctly. Before, the
+    /// header failed to decode before its payload was read, the stream was lost
+    /// and the worker evicted.
+    #[tokio::test]
+    async fn a_message_this_daemon_does_not_know_is_skipped_and_the_next_one_read() {
+        let (mut worker, mut daemon) = tokio::io::duplex(1 << 16);
+        write_raw_frame(&mut worker, br#"{"t":"SomethingNewer","x":1}"#, b"12345").await;
+        send_worker(
+            &mut worker,
+            &WorkerMsg::CardAllocationProbe { took_ms: 7 },
+            b"after",
+        )
+        .await
+        .unwrap();
+        let skipped = recv_worker(&mut daemon).await.unwrap_err();
+        assert_eq!(unknown_worker_msg(&skipped), Some("SomethingNewer"));
+        let (next, payload) = recv_worker(&mut daemon).await.unwrap();
+        assert!(matches!(
+            next,
+            WorkerMsg::CardAllocationProbe { took_ms: 7 }
+        ));
+        assert_eq!(payload, b"after");
+    }
+
+    /// A KNOWN message that does not decode is a broken stream, not a newer
+    /// worker: it stays fatal.
+    #[tokio::test]
+    async fn a_known_message_that_does_not_decode_is_still_fatal() {
+        let (mut worker, mut daemon) = tokio::io::duplex(1 << 16);
+        write_raw_frame(&mut worker, br#"{"t":"Token"}"#, b"").await;
+        let e = recv_worker(&mut daemon).await.unwrap_err();
+        assert_eq!(unknown_worker_msg(&e), None);
+        assert_eq!(e.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    /// `WorkerMsgTag` names every `WorkerMsg` variant: this match stops
+    /// compiling when a variant is added without a tag, and a tag is what serde
+    /// writes as `t`.
+    #[test]
+    fn every_worker_message_has_a_tag() {
+        fn tag(m: &WorkerMsg) -> WorkerMsgTag {
+            match m {
+                WorkerMsg::Ready => WorkerMsgTag::Ready,
+                WorkerMsg::LayerResult(_) => WorkerMsgTag::LayerResult,
+                WorkerMsg::BatchResult { .. } => WorkerMsgTag::BatchResult,
+                WorkerMsg::Drafted { .. } => WorkerMsgTag::Drafted,
+                WorkerMsg::Token { .. } => WorkerMsgTag::Token,
+                WorkerMsg::GenerateDone { .. } => WorkerMsgTag::GenerateDone,
+                WorkerMsg::CardAllocationProbe { .. } => WorkerMsgTag::CardAllocationProbe,
+                WorkerMsg::Error { .. } => WorkerMsgTag::Error,
+                WorkerMsg::PrefixManifestUpdate { .. } => WorkerMsgTag::PrefixManifestUpdate,
+                WorkerMsg::PrefixFetchProbe { .. } => WorkerMsgTag::PrefixFetchProbe,
+                WorkerMsg::PrefixSnapshotResponse { .. } => WorkerMsgTag::PrefixSnapshotResponse,
+                WorkerMsg::Progress { .. } => WorkerMsgTag::Progress,
+                WorkerMsg::Bye => WorkerMsgTag::Bye,
+            }
+        }
+        for m in [
+            WorkerMsg::Ready,
+            WorkerMsg::Bye,
+            WorkerMsg::CardAllocationProbe { took_ms: 1 },
+            WorkerMsg::Drafted {
+                request_id: Uuid::nil(),
+                tokens: vec![],
+            },
+        ] {
+            let written = serde_json::to_value(&m).unwrap()["t"].clone();
+            assert_eq!(
+                serde_json::from_value::<WorkerMsgTag>(written).unwrap(),
+                tag(&m)
+            );
+        }
+    }
 
     #[test]
     fn a_worker_reports_its_card_probe_only_to_a_daemon_that_said_it_reads_it() {

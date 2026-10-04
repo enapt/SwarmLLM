@@ -1284,6 +1284,28 @@ because a peer that says nothing has not said no. Guard:
 `both_inference_outages_withdraw_through_one_predicate`.
 → `docs/FUTURE_WORK.md` #90 (#89 is closed).
 
+## On Windows a model worker ends with its daemon (2026-10-04, FUTURE_WORK #153)
+
+`process_pool::end_with_this_daemon` puts every worker `spawn_worker` starts in one Windows job
+object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`; the job handle is created NOT inheritable and
+never closed, so when the daemon exits — cleanly, killed or crashed — Windows terminates the
+workers. **A new place that starts a worker process calls it too.**
+
+What it replaced: std's `Command` passes a Windows child every inheritable handle, and the
+node's QUIC socket is one. A worker that outlived its daemon held UDP on the node's port, and
+the next start failed. Reproduced on Windows before the fix (`C:\temp\swarm153\worker153load.ps1`,
+GNU cross-build): daemon killed as its worker began loading Llama-3.2-3B → at +300 ms the
+worker alive and UDP 8950 still listed under the DEAD daemon's pid → the restart died on
+"Port 8950 is already in use". After: worker gone at +300 ms, the restart ready in 2 s.
+
+What a change must keep: (1) the job handle stays non-inheritable — a worker holding it would
+keep the job, and itself, alive; (2) a failed `AssignProcessToJobObject` (a host job that
+forbids it) warns and the worker runs as before — never fail the spawn on it; (3) the daemon
+itself is never put in the job, or the update hand-off's replacement would die with it.
+Killing a worker mid-GENERATION never reproduced the bug (it reads end-of-file and exits in
+~50 ms); the window is a phase that writes nothing to the pipe, such as a model load — test
+there.
+
 ## A reply between two forwards is in use, and a lost conversation is refused
 
 **The rule**: `.claude/rules/arch-worker-memory.md` § "A reply between two

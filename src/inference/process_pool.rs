@@ -748,6 +748,7 @@ async fn reader_actor(
         progress_tx,
         slow_card,
     } = side;
+    let mut skipped: std::collections::HashSet<String> = std::collections::HashSet::new();
     loop {
         match recv_worker(&mut reader).await {
             Ok((msg, payload)) => {
@@ -857,6 +858,22 @@ async fn reader_actor(
                             "Worker response for unknown request_id (caller dropped?)"
                         );
                     }
+                }
+            }
+            Err(e) if crate::inference::worker_ipc::unknown_worker_msg(&e).is_some() => {
+                // A newer worker's message (an update this daemon has not
+                // restarted into). Its frame was read whole, so the stream is
+                // still aligned: skip it, say so once per kind (#150).
+                let tag = crate::inference::worker_ipc::unknown_worker_msg(&e)
+                    .unwrap_or_default()
+                    .to_string();
+                if skipped.insert(tag.clone()) {
+                    tracing::warn!(
+                        model = %model_id,
+                        message = %tag,
+                        "A model worker sent a message this version does not know — ignoring it \
+                         (the worker is newer; restarting the node finishes the update)"
+                    );
                 }
             }
             Err(e) => {
@@ -997,6 +1014,88 @@ const WORKER_DRAIN_WAIT: std::time::Duration = std::time::Duration::from_secs(10
 
 /// Poll interval while waiting for a worker to be reaped.
 const WORKER_EXIT_POLL: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// Put a model worker in the one Windows job this daemon keeps, which ends
+/// every member when its last handle closes — when this daemon exits, however
+/// it exits (FUTURE_WORK #153).
+///
+/// `Command` hands a Windows child every inheritable handle, and the node's
+/// sockets turned out to be among them: a worker still busy when its daemon
+/// died — loading a model, writing a long reply — kept the node's port, and the
+/// next start failed on "already in use" until that work ended. A worker with
+/// no daemon has nobody to answer, so it ends with its daemon, by Windows' own
+/// mechanism for a process that must not outlive its owner
+/// (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, the documented way a parent takes its
+/// children with it). The job handle is created NOT inheritable: a worker
+/// holding it open would keep the job alive and itself with it.
+///
+/// Best effort: if the job cannot be made or joined (a host job that forbids
+/// it), the worker runs as before and the failure is logged once per worker.
+#[cfg(windows)]
+fn end_with_this_daemon(child: &tokio::process::Child) {
+    use std::sync::OnceLock;
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+
+    struct Job(HANDLE);
+    // SAFETY: a job handle is a kernel object handle, usable from any thread;
+    // this one is created once and never closed while the process runs.
+    unsafe impl Send for Job {}
+    unsafe impl Sync for Job {}
+    static JOB: OnceLock<Option<Job>> = OnceLock::new();
+
+    let job = JOB.get_or_init(|| {
+        // SAFETY: no security attributes (so the handle is NOT inheritable) and
+        // no name; both pointers may be null.
+        let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        if handle.is_null() {
+            tracing::warn!(
+                error = %std::io::Error::last_os_error(),
+                "Could not create the job that ends model workers with this node"
+            );
+            return None;
+        }
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        // SAFETY: `limits` is the struct this information class names, passed
+        // with its own size; `handle` was just created.
+        let set = unsafe {
+            SetInformationJobObject(
+                handle,
+                JobObjectExtendedLimitInformation,
+                &limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION as *const core::ffi::c_void,
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            )
+        };
+        if set == 0 {
+            tracing::warn!(
+                error = %std::io::Error::last_os_error(),
+                "Could not make model workers end with this node"
+            );
+            // SAFETY: created above and owned by nothing else.
+            unsafe { CloseHandle(handle) };
+            return None;
+        }
+        Some(Job(handle))
+    });
+    let (Some(job), Some(process)) = (job, child.raw_handle()) else {
+        return;
+    };
+    // SAFETY: the job handle lives for the whole process, and `child` owns the
+    // process handle for the duration of this call.
+    if unsafe { AssignProcessToJobObject(job.0, process as HANDLE) } == 0 {
+        tracing::warn!(
+            error = %std::io::Error::last_os_error(),
+            pid = child.id(),
+            "A model worker could not be tied to this node — if the node stops abruptly, \
+             it may hold the node's port until it finishes its work"
+        );
+    }
+}
 
 impl Drop for WorkerHandle {
     fn drop(&mut self) {
@@ -5435,6 +5534,8 @@ impl ModelProcessPool {
         let mut child = command
             .spawn()
             .map_err(|e| SwarmError::ServiceUnavailable(format!("spawn worker: {e}")))?;
+        #[cfg(windows)]
+        end_with_this_daemon(&child);
 
         // Wait for the worker to connect — or for it to die trying.
         //

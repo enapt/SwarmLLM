@@ -63,8 +63,6 @@ after v0.3.224 (#160, #215 and #216 closed; #217 and #218 opened from the swarm 
 4. **#117** — Qwen 3.5: a working dense implementation sits unmerged on branch
    `qwen35-support`; the most-downloaded family the swarm refuses.
 5. **#1** — every Mac runs on the processor; no GPU backend is compiled for Apple Silicon.
-6. **#153** — Windows: a worker that outlives the daemon holds its port, and the next start
-   fails.
 
 **P2 — speed and completeness**
 7. **#152** — the continuous guess-check stream never runs on the split shapes the swarm
@@ -202,34 +200,6 @@ Items".)
 
 ### Reliability and failover
 
-#### #153 — Windows: every child the daemon starts inherits its QUIC socket, model workers included
-`P1` · reliability · **OPEN** — 2026-10-01 · history: archive row #153
-
-`Command` on Windows calls `CreateProcessW` with `bInheritHandles = TRUE`, and the QUIC
-listener socket turned out inheritable although libp2p-quic creates it through
-`socket2::Socket::new` (which asks for `WSA_FLAG_NO_HANDLE_INHERIT`) — measured: an updated
-replacement held UDP 8950 until it was killed (`docs/DIAGNOSTICS.md` § "A Windows node that
-never updates"). A worker that outlives the daemon (crash, kill) holds the node's port, and
-the next start fails on "already in use" until it exits. Only the update hand-off uses
-`update_restart::spawn_without_inherited_handles` today.
-(a) Start workers through it (it restricts inheritance to stdio — check first that the worker
-IPC depends on no other inherited handle in `process_pool`'s spawn); (b) find WHY the socket
-is inheritable (`GetHandleInformation` on the socket after `listen_on`, on a real Windows
-node). Test on Windows with the MinGW build (`memory/env_windows_test_node.md`), never by
-reading; a reproduction must fail on the broken build first.
-
-**Design, 2026-10-04:** (a) cannot reuse `spawn_without_inherited_handles` as it stands — it
-returns only a pid, while `process_pool::spawn_worker` races `child.wait()` against the IPC
-accept and relies on `kill_on_drop`; workers inherit the daemon's own stdio (its log), which
-that function already passes on, and talk to it over `worker_socket_path`, not an inherited
-handle. std offers no stable alternative: `CommandExt::inherit_handles` and
-`spawn_with_attributes` are nightly-only (#146407, #114854 — stable docs, 2026-10-04; a comment
-in `update_restart.rs` had claimed the first was stabilised). So: a small Windows-only
-`WorkerChild` (process HANDLE from the same `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` spawn; `wait` =
-`WaitForSingleObject` on the blocking pool; `Drop` = `TerminateProcess`, matching
-`kill_on_drop`), used by `spawn_worker` and the reap at `child.wait()` (`process_pool.rs` ~1018),
-with the existing `tokio::process::Child` everywhere else.
-
 #### #167 — A speculative split decode has no mid-reply failover
 `P2` · reliability · **PARTIAL** — 2026-08-25 · history: archive § "Speculative distributed decode has no failover", archive row #149 item (d)
 
@@ -287,20 +257,6 @@ scores as an intact delivery; `daemon::state::peer_outliers` counts timeouts, ab
 forwards and silent whole-model replies only. Needs a typed refusal
 (`ForwardRefusal::ConversationLost` beside `Undecryptable`, gated at the sender on a feature
 bit) so the coordinator counts it without matching prose (#295's trap).
-
-#### #150 — The daemon's worker reader cannot skip a message it does not know
-`P3` · reliability · **OPEN** — 2026-10-01 · history: archive row #150, gotcha #765
-
-`worker_ipc::recv_framed` decodes the JSON header BEFORE reading the payload length, so an
-unknown `WorkerMsg` leaves the stream misaligned and `reader_actor` evicts the worker. A
-worker is spawned from the binary on disk now (gotcha #188), so after an update not yet
-restarted into, a NEWER worker talks to an OLDER daemon. Owed for daemons from .215 on: read
-the whole frame before decoding, and skip — with one warning — a SIDE-BAND variant that fails
-to decode as unknown, while a response-carrying one stays fatal and must wake its waiter.
-Settle first how to tell unknown from known-but-malformed without matching serde's error text
-(#295): pin the tag list with a test that serialises every variant through an exhaustive
-match. Until then **gate every new worker→daemon message at the sender** on something only a
-new-enough daemon sets (as `CardAllocationProbe` is, `SWARMLLM_DAEMON_READS_CARD_PROBE`).
 
 #### #146 — A stalling graphics card is guarded; the cause, the high-uptime reading and segment forwards are not
 `P3` · reliability · **PARTIAL** — 2026-09-28 · history: archive row #146 and § "A graphics card that stalls is handed more work (#146, 2026-09-28)"
@@ -1317,8 +1273,32 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-04, after v0.3.224 — not yet released** (#214, #218, #219, #165, #189) (`docs/invariants/scheduling.md` §
+**Closed 2026-10-04, after v0.3.224 — not yet released** (#150, #153, #214, #218, #219, #165, #189) (`docs/invariants/scheduling.md` §
 "A holder's refusal is reported as what it was")
+- #153 — on Windows a model worker that outlived its daemon held the node's QUIC port, so the
+  next start failed. `Command` passes every inheritable handle, and the QUIC socket is one (why,
+  despite `WSA_FLAG_NO_HANDLE_INHERIT`, is still unexplained — moot for workers now; other
+  children are short-lived). Reproduced on Windows first (GNU cross-build of `fc75e036`,
+  `C:\temp\swarm153\worker153load.ps1`): daemon killed the moment its worker started loading
+  Llama-3.2-3B → 300 ms later the worker alive and UDP 8950 still held under the dead daemon's
+  pid → the restart died on "Port 8950 is already in use". (Killed mid-GENERATION it does not
+  reproduce: a worker writing tokens reads end-of-file and exits in ~50 ms — only a blind phase
+  such as a load leaves the window.) Fixed with a Windows job object instead of the planned
+  `WorkerChild`: `process_pool::end_with_this_daemon` puts every worker in one job with
+  `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, its handle created non-inheritable, so Windows ends the
+  workers when the daemon exits, however it exits. Same harness on the fix: worker gone at
+  300 ms, port free, the restart ready in 2 s; an ordinary request is served normally and a
+  forced stop leaves no process behind.
+- #150 — the daemon's worker reader decoded a message's header before reading its payload, so
+  one message from a NEWER worker (an update the daemon has not restarted into spawns workers
+  from the new binary, gotcha #188) misaligned the stream and evicted the worker on every load
+  (gotcha #765). `worker_ipc::recv_worker` now reads the whole frame first; a header whose tag no
+  `WorkerMsgTag` names (decided by deserialising the tag, never by serde's error text — #295;
+  the mirror is kept complete by an exhaustive match in `every_worker_message_has_a_tag`) comes
+  back as `UnknownWorkerMsg`, which `reader_actor` skips with one warning per kind; a KNOWN tag
+  that fails to decode stays fatal. Test red without it: an unknown frame with a payload, then a
+  known one, read correctly. ⚠ Daemons up to v0.3.224 still evict, so a new worker→daemon
+  message is still gated at the sender (`DAEMON_READS_CARD_PROBE`'s pattern) while any runs.
 - #214 — Qwen2.5-Coder-7B (Qwen's official upload) answered a tool request as the text
   `<{{"name": "get_time", "arguments": {"zone": "UTC"}}}}`, no `tool_calls`. The model's habit,
   not our prompt: llama.cpp (llama-cpp-python 0.3.16) gives the identical reply on the

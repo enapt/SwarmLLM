@@ -249,7 +249,7 @@ libc = "0.2"
 # so the replacement held the port it then could not bind (#769). The version
 # already in the tree via tokio/mio; only the features are ours.
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Console", "Win32_System_Threading"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Console", "Win32_System_JobObjects", "Win32_System_Threading"] }
 
 [features]
 default = ["swarmllm-frontend/embedded"]
