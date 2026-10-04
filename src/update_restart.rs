@@ -315,8 +315,11 @@ pub fn exec_into(exe: &std::path::Path) -> std::io::Error {
 /// std's `Command` always calls `CreateProcessW` with `bInheritHandles = TRUE`,
 /// so the child receives every inheritable handle in the process; on Windows
 /// that included the QUIC socket, despite `socket2` asking for a non-inheritable
-/// one. `Command::inherit_handles(false)` was stabilised only in 2026-08
-/// (rust-lang/rust#161163), above this crate's minimum Rust. This is the
+/// one. std has no stable way to say otherwise: `CommandExt::inherit_handles`
+/// and `spawn_with_attributes` are both still nightly-only
+/// (`windows_process_extensions_inherit_handles`, rust-lang/rust#146407, and
+/// `…_raw_attribute`, #114854 — checked against the stable docs 2026-10-04;
+/// this comment used to say the first was stabilised, which it is not). This is the
 /// approach Python's `subprocess` takes (`close_fds` + `handle_list`):
 /// `bInheritHandles = TRUE` restricted by `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` to
 /// the stdio handles that are inheritable — logs redirected to a file keep

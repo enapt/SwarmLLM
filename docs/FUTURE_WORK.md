@@ -182,6 +182,18 @@ is inheritable (`GetHandleInformation` on the socket after `listen_on`, on a rea
 node). Test on Windows with the MinGW build (`memory/env_windows_test_node.md`), never by
 reading; a reproduction must fail on the broken build first.
 
+**Design, 2026-10-04:** (a) cannot reuse `spawn_without_inherited_handles` as it stands — it
+returns only a pid, while `process_pool::spawn_worker` races `child.wait()` against the IPC
+accept and relies on `kill_on_drop`; workers inherit the daemon's own stdio (its log), which
+that function already passes on, and talk to it over `worker_socket_path`, not an inherited
+handle. std offers no stable alternative: `CommandExt::inherit_handles` and
+`spawn_with_attributes` are nightly-only (#146407, #114854 — stable docs, 2026-10-04; a comment
+in `update_restart.rs` had claimed the first was stabilised). So: a small Windows-only
+`WorkerChild` (process HANDLE from the same `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` spawn; `wait` =
+`WaitForSingleObject` on the blocking pool; `Drop` = `TerminateProcess`, matching
+`kill_on_drop`), used by `spawn_worker` and the reap at `child.wait()` (`process_pool.rs` ~1018),
+with the existing `tokio::process::Child` everywhere else.
+
 #### #167 — A speculative split decode has no mid-reply failover
 `P2` · reliability · **PARTIAL** — 2026-08-25 · history: archive § "Speculative distributed decode has no failover", archive row #149 item (d)
 
