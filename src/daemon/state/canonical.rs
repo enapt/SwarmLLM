@@ -465,6 +465,7 @@ mod tests {
                         tensors: Vec::new(),
                     }],
                     publisher: crate::types::NodeId([0; 32]),
+                    context_length: None,
                 },
             )
         };
@@ -505,6 +506,7 @@ mod tests {
                         tensors: Vec::new(),
                     }],
                     publisher: crate::types::NodeId([0; 32]),
+                    context_length: None,
                 },
             )
         };

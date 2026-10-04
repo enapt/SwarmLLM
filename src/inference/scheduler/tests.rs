@@ -61,6 +61,7 @@ fn make_manifest(model_id: &str, num_layers: u32, shards: Vec<ShardInfo>) -> Mod
         publish_date: chrono::Utc::now(),
         license: "MIT".into(),
         mmproj: None,
+        context_length: None,
     }
 }
 

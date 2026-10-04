@@ -68,7 +68,7 @@ pub fn generate_and_register_local_manifest(
     // Extract model metadata from GGUF header (num_layers, architecture, etc.)
     // and compute layer-aligned shard layouts. The layout count determines shard_count
     // (NOT file_size / shard_size, which can differ from the actual layout count).
-    let (num_layers, architecture, shard_count, shards) =
+    let (num_layers, architecture, shard_count, shards, context_length) =
         match crate::inference::split::GgufTensorMeta::from_gguf_file(path) {
             Ok(meta) => {
                 let num_layers = meta.block_count as u32;
@@ -90,11 +90,13 @@ pub fn generate_and_register_local_manifest(
                 let shards =
                     crate::model::manifest::build_shard_infos_from_layouts(&model_dir, &layouts);
 
+                // Read before the metadata moves into the cache below.
+                let context_length = crate::model::manifest::declared_context(&meta);
                 // Store the metadata for later use in layer range computation
                 shared_state.gguf_meta.insert(model_id.clone(), meta);
                 // Map GGUF general.architecture string to our ModelArchitecture enum
                 let arch = map_gguf_architecture(path);
-                (num_layers, arch, actual_shard_count, shards)
+                (num_layers, arch, actual_shard_count, shards, context_length)
             }
             Err(e) => {
                 tracing::warn!(error = %e, "Failed to extract GGUF metadata, using defaults");
@@ -105,6 +107,7 @@ pub fn generate_and_register_local_manifest(
                     crate::types::ModelArchitecture::Llama,
                     shard_count,
                     shards,
+                    None,
                 )
             }
         };
@@ -119,6 +122,7 @@ pub fn generate_and_register_local_manifest(
             shard_count,
             shards,
             publisher: node_id.clone(),
+            context_length,
         },
     );
 
@@ -335,6 +339,7 @@ pub(super) fn regenerate_manifest_from_header(
             shard_count,
             shards,
             publisher: crate::types::NodeId([0u8; 32]),
+            context_length: crate::model::manifest::declared_context(meta),
         },
     );
 

@@ -483,6 +483,7 @@ mod tests {
                 publish_date: chrono::Utc::now(),
                 license: "MIT".into(),
                 mmproj: None,
+                context_length: None,
             });
         let me = state.identity.node_id().clone();
         let peer = crate::types::NodeId([9u8; 32]);

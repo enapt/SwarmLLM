@@ -111,6 +111,7 @@ pub(super) fn register_manifest_with_sized_shards(
         publish_date: chrono::Utc::now(),
         license: "MIT".into(),
         mmproj: None,
+        context_length: None,
     };
     let id = manifest.id.clone();
     state.model_registry.register_manifest(manifest);

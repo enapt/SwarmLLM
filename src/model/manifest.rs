@@ -107,6 +107,16 @@ pub struct ManifestFromGguf {
     pub shard_count: u32,
     pub shards: Vec<crate::types::ShardInfo>,
     pub publisher: crate::types::NodeId,
+    /// The context the model declares (`declared_context`), or `None` when the
+    /// header could not be read. Required, so every builder says which.
+    pub context_length: Option<u32>,
+}
+
+/// The context length a model declares in its header, for its manifest
+/// (`ModelManifest::context_length`, FUTURE_WORK #189). A header that declares
+/// none reads as 0, which is unknown, not a zero-token model.
+pub fn declared_context(meta: &crate::inference::split::GgufTensorMeta) -> Option<u32> {
+    u32::try_from(meta.context_length).ok().filter(|&c| c > 0)
 }
 
 /// A manifest for one upload, built from its GGUF header and the layouts its
@@ -141,6 +151,7 @@ pub fn manifest_from_header(
         shard_count: layouts.len() as u32,
         shards: build_shard_infos_from_layouts(model_dir, layouts),
         publisher,
+        context_length: declared_context(&meta),
     });
     Ok((manifest, meta))
 }
@@ -165,6 +176,7 @@ pub fn build_manifest_from_gguf(p: ManifestFromGguf) -> ModelManifest {
         publish_date: chrono::Utc::now(),
         license: "Unknown".to_string(),
         mmproj: None,
+        context_length: p.context_length,
     };
     manifest.manifest_hash = manifest.compute_hash();
     manifest
@@ -910,6 +922,7 @@ mod tests {
             publish_date: chrono::Utc::now(),
             license: "MIT".into(),
             mmproj: None,
+            context_length: None,
         }
     }
 

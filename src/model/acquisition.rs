@@ -340,6 +340,7 @@ impl AcquisitionManager {
                             publish_date: chrono::Utc::now(),
                             license: String::new(),
                             mmproj: None,
+                            context_length: None,
                         },
                         status,
                         shard_bytes: HashMap::new(),

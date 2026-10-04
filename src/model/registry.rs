@@ -467,6 +467,14 @@ impl ModelRegistry {
             Some(prev) => {
                 let recovered =
                     crate::model::manifest::merge_known_shard_hashes(&mut manifest, prev.value());
+                // The model's context length goes unknown → known, never back,
+                // as a hash does: a node predating the field gossips none, and
+                // its manifest must not erase what another holder said (#189).
+                if manifest.context_length.is_none()
+                    && !Self::describes_a_different_build(prev.value(), &manifest)
+                {
+                    manifest.context_length = prev.context_length;
+                }
                 let contested = if Self::describes_a_different_build(prev.value(), &manifest) {
                     0
                 } else {
@@ -1816,7 +1824,77 @@ mod tests {
             publish_date: chrono::Utc::now(),
             license: "MIT".into(),
             mmproj: None,
+            context_length: None,
         }
+    }
+
+    /// A model's context length goes unknown → known, never back (#189): a
+    /// manifest from a node predating the field must not erase what another
+    /// holder said — but another BUILD's figure is never inherited.
+    #[test]
+    fn a_manifest_without_a_context_length_does_not_erase_a_known_one() {
+        let registry = ModelRegistry::new();
+        let mut told = test_manifest("m", "M");
+        told.context_length = Some(2048);
+        registry.register_manifest(told);
+
+        registry.register_manifest(test_manifest("m", "M"));
+        assert_eq!(
+            registry
+                .get_manifest(&ModelId("m".into()))
+                .unwrap()
+                .context_length,
+            Some(2048),
+            "an older node's manifest erased the context another holder declared"
+        );
+
+        // A newer figure for the same build replaces it.
+        let mut newer = test_manifest("m", "M");
+        newer.context_length = Some(4096);
+        registry.register_manifest(newer);
+        assert_eq!(
+            registry
+                .get_manifest(&ModelId("m".into()))
+                .unwrap()
+                .context_length,
+            Some(4096)
+        );
+
+        // Another build (another shape) inherits nothing.
+        let mut other = test_manifest("m", "M");
+        other.total_size_bytes = 9_999;
+        registry.register_manifest(other);
+        assert_eq!(
+            registry
+                .get_manifest(&ModelId("m".into()))
+                .unwrap()
+                .context_length,
+            None
+        );
+    }
+
+    /// The field is additive on the wire: an older node's manifest (no field)
+    /// parses, and the manifest's own hash does not depend on it — or a node on
+    /// either side of the release would see every manifest as another version.
+    #[test]
+    fn the_context_length_is_outside_the_manifest_hash_and_optional_on_the_wire() {
+        use crate::model::manifest::ModelManifestExt;
+        let without = test_manifest("m", "M");
+        let mut with = without.clone();
+        with.context_length = Some(8192);
+        assert_eq!(without.compute_hash(), with.compute_hash());
+
+        let mut old_json = serde_json::to_value(&without).unwrap();
+        assert!(
+            old_json.get("context_length").is_none(),
+            "an unknown context is not sent at all"
+        );
+        old_json.as_object_mut().unwrap().remove("context_length");
+        let parsed: ModelManifest = serde_json::from_value(old_json).unwrap();
+        assert_eq!(parsed.context_length, None);
+        let round: ModelManifest =
+            serde_json::from_value(serde_json::to_value(&with).unwrap()).unwrap();
+        assert_eq!(round.context_length, Some(8192));
     }
 
     /// "Does anyone hold a part" is not "can the swarm run it": the model
@@ -3305,6 +3383,7 @@ mod servability_tests {
             publish_date: chrono::Utc::now(),
             license: "MIT".into(),
             mmproj: None,
+            context_length: None,
         }
     }
 
@@ -3402,6 +3481,7 @@ mod checked_holder_tests {
             publish_date: chrono::Utc::now(),
             license: "MIT".into(),
             mmproj: None,
+            context_length: None,
         }
     }
 

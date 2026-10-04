@@ -664,6 +664,7 @@ mod tests {
             publish_date: chrono::Utc::now(),
             license: "MIT".into(),
             mmproj: None,
+            context_length: None,
         };
 
         // Two variants of "llama-2-7b": Q4_K_M (~4 GB) and Q8_0 (~7 GB)
@@ -730,6 +731,7 @@ mod tests {
             publish_date: chrono::Utc::now(),
             license: "MIT".into(),
             mmproj: None,
+            context_length: None,
         };
 
         for (id, name, want) in [
@@ -785,6 +787,7 @@ mod tests {
             publish_date: chrono::Utc::now(),
             license: "MIT".into(),
             mmproj: None,
+            context_length: None,
         };
         assert_eq!(parse_quant_from_manifest(&m), Quantization::Q5KS);
     }

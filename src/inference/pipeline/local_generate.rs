@@ -361,6 +361,7 @@ mod tests {
             publish_date: chrono::Utc::now(),
             license: "MIT".into(),
             mmproj: None,
+            context_length: None,
         });
         for index in 0..shard_count {
             state.model_registry.record_shard_holder(

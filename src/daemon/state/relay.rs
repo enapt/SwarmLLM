@@ -959,6 +959,7 @@ mod tests {
             publish_date: chrono::Utc::now(),
             license: String::new(),
             mmproj: None,
+            context_length: None,
         };
         state.model_registry.register_manifest(manifest);
         for s in &shards {

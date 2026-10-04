@@ -177,6 +177,7 @@ fn available_layer_ranges_from_manifest_basic() {
         publish_date: chrono::Utc::now(),
         license: "MIT".into(),
         mmproj: None,
+        context_length: None,
     };
 
     // Single shard

@@ -2552,6 +2552,36 @@ impl SharedState {
             .filter(|&c| c > 0)
     }
 
+    /// Give each manifest this node can read a header for the context its model
+    /// declares, where the manifest carries none — one written before
+    /// `ModelManifest::context_length` existed, or gossiped by a node that
+    /// predates it (FUTURE_WORK #189). Run before this node gossips its
+    /// manifests, so what it sends says it: a node holding none of a model has
+    /// no header, and this field is how it learns. Idempotent and cheap — a
+    /// cached read per model, a stat where there is no header; the field is
+    /// outside `manifest_hash`, so re-registering changes nothing else.
+    pub fn fill_declared_contexts(&self) -> usize {
+        let missing: Vec<crate::types::ModelManifest> = self
+            .model_registry
+            .models()
+            .into_iter()
+            .filter(|m| m.context_length.is_none())
+            .collect();
+        let mut filled = 0;
+        for mut manifest in missing {
+            let Some(declared) = self
+                .model_declared_context(&manifest.id)
+                .and_then(|c| u32::try_from(c).ok())
+            else {
+                continue;
+            };
+            manifest.context_length = Some(declared);
+            self.model_registry.register_manifest(manifest);
+            filled += 1;
+        }
+        filled
+    }
+
     /// The GGUF architecture of `model_id` when this node KNOWS it and this
     /// build cannot run it (`ModelArch::is_supported`); `None` when it can, or
     /// when there is no header here to say.
@@ -4157,7 +4187,64 @@ mod manifest_persist_tests {
             publish_date: chrono::Utc::now(),
             license: "MIT".into(),
             mmproj: None,
+            context_length: None,
         }
+    }
+
+    /// A manifest written before `context_length` existed gains it from the
+    /// header this node holds, before the node gossips it (#189) — otherwise a
+    /// node holding a model would say nothing for as long as its manifest file
+    /// is older than the field, and a node holding none could never learn it.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_manifest_gains_the_context_its_model_declares_before_it_is_gossiped() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = crate::storage::db::Database::open(temp.path()).unwrap();
+        let executor = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::inference::executor::ModelExecutor::new(),
+        ));
+        let (state, _, _) = crate::daemon::SharedState::new(
+            crate::config::Config::default(),
+            crate::identity::Identity::generate(),
+            db,
+            executor,
+            None,
+        );
+        state.model_registry.register_manifest(manifest([7u8; 32]));
+        assert_eq!(
+            state.fill_declared_contexts(),
+            0,
+            "no header known: nothing to say"
+        );
+
+        state.gguf_meta.insert(
+            ModelId("m".into()),
+            crate::inference::split::GgufTensorMeta {
+                tensors: Default::default(),
+                tensor_data_offset: 0,
+                model_name: None,
+                head_count: 32,
+                head_count_kv: 4,
+                block_count: 22,
+                embedding_length: 2048,
+                head_dim: 64,
+                rope_dim: 64,
+                rope_freq_base: 10_000.0,
+                rms_norm_eps: 1e-5,
+                expert_count: 0,
+                architecture: "llama".into(),
+                context_length: 2048,
+            },
+        );
+        assert_eq!(state.fill_declared_contexts(), 1);
+        assert_eq!(
+            state
+                .model_registry
+                .get_manifest(&ModelId("m".into()))
+                .unwrap()
+                .context_length,
+            Some(2048)
+        );
+        assert_eq!(state.fill_declared_contexts(), 0, "idempotent");
     }
 
     /// #108(b): the persist hook runs inside `register_manifest`, which the

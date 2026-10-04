@@ -1252,6 +1252,9 @@ impl HealthMonitor {
         // Models we published OR hold a shard of. A publisher-only filter here
         // silently stopped model discovery for the whole swarm — see
         // `ModelRegistry::manifests_to_gossip`.
+        // Each manifest carries the context its model declares, so a node
+        // holding none of it can say how long a conversation it takes (#189).
+        self.shared_state.fill_declared_contexts();
         let manifests = self
             .shared_state
             .model_registry

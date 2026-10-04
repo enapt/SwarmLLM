@@ -821,6 +821,7 @@ mod tests {
             publish_date: chrono::Utc::now(),
             license: "MIT".into(),
             mmproj: None,
+            context_length: None,
         };
         serde_json::to_vec(&m).expect("serialise ModelManifest")
     }

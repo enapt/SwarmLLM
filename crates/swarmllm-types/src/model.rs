@@ -24,6 +24,14 @@ pub struct ModelManifest {
     /// Vision encoder (mmproj) metadata. Present only for VLM models.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mmproj: Option<MmprojInfo>,
+    /// The context length the model itself declares (`<arch>.context_length`
+    /// in its header), so a node that holds none of it — and so has no header
+    /// to read — can still say how long a conversation the model takes
+    /// (`/v1/models` → `max_model_len`, FUTURE_WORK #189). Additive: `None`
+    /// from an older node, and outside `manifest_hash` (like `mmproj`), so old
+    /// and new nodes agree on every manifest's hash.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_length: Option<u32>,
 }
 
 /// Metadata for a VLM vision encoder (mmproj GGUF file).

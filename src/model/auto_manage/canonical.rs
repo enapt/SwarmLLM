@@ -1708,6 +1708,7 @@ mod tests {
                     },
                 ],
                 publisher: crate::types::NodeId([0; 32]),
+                context_length: None,
             },
         );
         assert_eq!(

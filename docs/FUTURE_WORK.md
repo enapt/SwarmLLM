@@ -63,22 +63,20 @@ after v0.3.224 (#160, #215 and #216 closed; #217 and #218 opened from the swarm 
    fails.
 
 **P2 — speed and completeness**
-7. **#189** — `/v1/models` reports no context length for any model this node does not hold
-   (agents such as OpenClaw then guess 128k). Small, additive.
-8. **#152** — the continuous guess-check stream never runs on the split shapes the swarm
+7. **#152** — the continuous guess-check stream never runs on the split shapes the swarm
     actually makes (the boomerang above all).
-9. **#10** — conversation prefixes across computers: no routing to the peer holding the
+8. **#10** — conversation prefixes across computers: no routing to the peer holding the
     cache, and a split chain keeps no KV across turns (absorbs #139).
-10. **#162** — the release gate: a cloned gate loses its helpers, and step 12e cannot test a
+9. **#162** — the release gate: a cloned gate loses its helpers, and step 12e cannot test a
     takeover on this box (absorbs #140).
-11. **#155** — AutoNAT dial-backs denied by the per-peer cap every ~5 s, for the life of a node.
-12. **#194** — an agent-sized prompt fills an 8 GB card with conversation memory.
-13. **#147**, **#137**, **#138**, **#129** — prompt reading on the card, the processor half of
+10. **#155** — AutoNAT dial-backs denied by the per-peer cap every ~5 s, for the life of a node.
+11. **#194** — an agent-sized prompt fills an 8 GB card with conversation memory.
+12. **#147**, **#137**, **#138**, **#129** — prompt reading on the card, the processor half of
     a hybrid, MoE placement, and near-fit models sent across continents
     (`docs/plans/faster_than_local.md`).
-14. **#3**, **#180** — the routing cost model charges a constant where the reply length
+13. **#3**, **#180** — the routing cost model charges a constant where the reply length
     belongs, which keeps partial ranges (load spreading) off.
-15. **#171** — the prompt pass through a split runs one stage at a time.
+14. **#171** — the prompt pass through a split runs one stage at a time.
 
 Everything else is ranked in its own entry. **P3** is narrow or cosmetic, **P4** is process,
 maintenance or an idea with no user waiting on it.
@@ -877,17 +875,6 @@ other near-misses, `docs/invariants/api-surfaces.md`); if not, the prompt differ
 bug. Conformance's baseline (`~/swarmllm-gate-0221/conformance.log`) predates the switch — the
 next gate diffs against `~/swarmllm-gate-0222/conformance.log`.
 
-#### #189 — `/v1/models` reports no context length for a model this node does not hold
-`P2` · api · **OPEN** — 2026-08-12 · history: archive § "`max_model_len` is unknown for network-only models"
-
-`max_model_len_for` (`api/openai/mod.rs`) reads only the local `gguf_header.bin`, and
-`ModelManifest` carries no context length, so every network-only model — the swarm's main
-use — reports `max_model_len: null`. OpenClaw then assumes 128k and its agent turns are refused
-as too long unless `contextWindow` is set by hand. Add `context_length: Option<u32>` with
-`#[serde(default)]` to `ModelManifest` (additive, no version bump), fill it where the header is
-read (`daemon::manifest`, `huggingface::probe`), and fall back to it in `max_model_len_for` /
-`ModelInfo::new`. Mixed-version swarms stay null, so the API must keep tolerating it.
-
 #### #185 — Three API surfaces each implement streaming and non-streaming replies separately
 `P3` · api · **OPEN** — 2026-07-26 · history: archive § "Collapse the parallel response paths behind one core loop"
 
@@ -1298,8 +1285,20 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-04, after v0.3.224 — not yet released** (#218, #219, #165) (`docs/invariants/scheduling.md` §
+**Closed 2026-10-04, after v0.3.224 — not yet released** (#218, #219, #165, #189) (`docs/invariants/scheduling.md` §
 "A holder's refusal is reported as what it was")
+- #189 — `/v1/models` reported `max_model_len: null` for every model this node holds none of
+  (no header to read), so OpenClaw assumed 128k and its agent turns were refused. The model's
+  declared context now travels in its manifest: `ModelManifest::context_length`,
+  `#[serde(default)]`, outside `manifest_hash` (like `mmproj`) so old and new nodes agree on
+  every hash; set by the builders from the header (`ManifestFromGguf::context_length` is
+  required, `model::manifest::declared_context`); kept unknown → known by the registry merge;
+  filled into manifests written before the field by `SharedState::fill_declared_contexts` before
+  every manifest gossip; read by `max_model_len_for` when there is no header
+  (`context_from_manifest`). Rig (two dev nodes, A holding TinyLlama with an OLD-format manifest,
+  B holding nothing): B reported 2048 within 10 s; null control, v0.3.224 on both: B `null` for
+  90 s. Peers on older builds send none, so a network-only model reads `null` until a holder
+  of it runs this release.
 - #165 — the notice saying what prompt privacy costs never fired where the priced search
   decides (parallax on, more than one candidate — the default): `report_privacy_cost` sat on
   the gate's path only, so GLM-4-9B ran a five-segment boomerang at 95 s for 48 tokens with

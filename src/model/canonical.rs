@@ -529,6 +529,7 @@ mod tests {
             shard_count: sizes.len() as u32,
             shards,
             publisher: crate::types::NodeId([0; 32]),
+            context_length: None,
         })
     }
 

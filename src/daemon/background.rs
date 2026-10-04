@@ -675,6 +675,8 @@ pub(super) fn spawn_initial_announcements(
         // nodes propagate manifests to pure-consumer peers. Shared with the
         // health monitor's periodic broadcast — see
         // `ModelRegistry::manifests_to_gossip`.
+        // Each manifest carries the context its model declares (#189).
+        shared_state.fill_declared_contexts();
         for manifest in shared_state.model_registry.manifests_to_gossip(&node_id) {
             let _ = network_tx
                 .send(NetworkCommand::Broadcast(SwarmMessage::ModelManifest(

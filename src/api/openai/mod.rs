@@ -736,8 +736,9 @@ fn owned_by_for(state: &AppState, model_id: &str) -> String {
 ///
 /// The DECLARED value lives only in the model's GGUF header, so this reads it —
 /// cached, because `/v1/models` is polled by clients on a timer and a header
-/// read per model per poll would be pure waste. `None` for a model whose header
-/// is not on disk (a network-only model this node has never fetched), because a
+/// read per model per poll would be pure waste. A model whose header is not on
+/// disk (a network-only model this node has never fetched) falls back to the
+/// context its manifest carries; `None` only when neither says, because a
 /// guessed context is worse than an absent one.
 ///
 /// **Only the declared value is cached, and the cap is applied per call.** The
@@ -748,6 +749,16 @@ fn owned_by_for(state: &AppState, model_id: &str) -> String {
 /// is set when a worker spawns, so in the daemon it is always 0. Reading it
 /// reported 4096 on a node explicitly configured for 32768 — measured, and
 /// exactly the user who had already hit this problem once.
+/// The context a model's manifest says it declares — what a node with no header
+/// for it knows (#189). `None` from a manifest an older node published.
+fn context_from_manifest(shared: &crate::daemon::SharedState, model_id: &str) -> Option<usize> {
+    shared
+        .model_registry
+        .get_manifest(&crate::types::ModelId(model_id.to_string()))
+        .and_then(|m| m.context_length)
+        .map(|c| c as usize)
+}
+
 fn max_model_len_for(state: &AppState, model_id: &str) -> Option<usize> {
     use std::sync::OnceLock;
     static DECLARED: OnceLock<dashmap::DashMap<String, Option<usize>>> = OnceLock::new();
@@ -772,6 +783,11 @@ fn max_model_len_for(state: &AppState, model_id: &str) -> Option<usize> {
             read
         }
     };
+    // No header here — a model only peers hold, the swarm's main use: the
+    // context its holders declare in the manifest they gossip (FUTURE_WORK
+    // #189; OpenClaw assumed 128k on `null` and its agent turns were refused).
+    // Read on every call, never cached: it can arrive after the first poll.
+    let declared = declared.or_else(|| context_from_manifest(&state.shared_state, model_id));
     let override_cap = state
         .shared_state
         .cfg()
@@ -1026,6 +1042,53 @@ mod tests {
         }
         let mut req: ChatCompletionRequest = serde_json::from_str(&body("coder-v1")).unwrap();
         assert!(validate_chat_request(&mut req, &axum::http::HeaderMap::new()).is_ok());
+    }
+
+    /// A model only peers hold has no header here, and reported
+    /// `max_model_len: null` — OpenClaw then assumed 128k and its agent turns
+    /// were refused (#189). The context its manifest carries answers instead;
+    /// a manifest an older node published says nothing, and neither do we.
+    #[test]
+    fn a_model_held_only_by_peers_reports_the_context_its_manifest_declares() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = crate::storage::db::Database::open(temp.path()).unwrap();
+        let executor = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::inference::executor::ModelExecutor::new(),
+        ));
+        let (state, _, _) = crate::daemon::SharedState::new(
+            crate::config::Config::default(),
+            crate::identity::Identity::generate(),
+            db,
+            executor,
+            None,
+        );
+        let manifest = |id: &str, ctx: Option<u32>| crate::types::ModelManifest {
+            id: crate::types::ModelId(id.into()),
+            name: id.into(),
+            architecture: crate::types::ModelArchitecture::Llama,
+            num_layers: 22,
+            num_params_billions: 1.1,
+            quantization: crate::types::Quantization::Q4KM,
+            total_size_bytes: 1024,
+            shard_count: 1,
+            shards: vec![],
+            tokenizer_hash: [0u8; 32],
+            manifest_hash: [0u8; 32],
+            publisher: crate::types::NodeId([0u8; 32]),
+            publish_date: chrono::Utc::now(),
+            license: "MIT".into(),
+            mmproj: None,
+            context_length: ctx,
+        };
+        state
+            .model_registry
+            .register_manifest(manifest("told", Some(2048)));
+        state
+            .model_registry
+            .register_manifest(manifest("older", None));
+        assert_eq!(super::context_from_manifest(&state, "told"), Some(2048));
+        assert_eq!(super::context_from_manifest(&state, "older"), None);
+        assert_eq!(super::context_from_manifest(&state, "unheard-of"), None);
     }
 
     /// OpenClaw's self-hosted discovery reads `context_length`; vLLM-style
