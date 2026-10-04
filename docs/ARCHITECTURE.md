@@ -2327,8 +2327,11 @@ message rather than the chat page.
   is the field vLLM added for the same purpose, and the identical figure as
   `context_length`, the name OpenClaw's self-hosted model discovery reads (with
   it absent OpenClaw assumes 128,000 — 2026-09-02). `ModelInfo::new` sets both
-  from one value. Omitted when the model's declared context is unreadable, since
-  a wrong figure is worse than an absent one.
+  from one value. The declared context comes from the local header, else from the
+  model's manifest (`ModelManifest::context_length`, gossiped by its holders —
+  FUTURE_WORK #189), so a model only peers hold has a figure once a holder runs a
+  build that sends it. Omitted when neither says, since a wrong figure is worse
+  than an absent one.
 - `GET    /v1/providers` — List configured cloud providers and their available models
 - `GET    /v1/status` — SwarmLLM node status. `workers` (2026-09-03): every resident model-worker subprocess — `model`, `pid`, `device` (`graphics card`/`processor`), `cpu_reason`, `in_flight` (requests it is computing now, from the pool's own response map), `idle_secs`, `age_secs`, `dead`, `gpu_estimate_mb`. The answer to "what is my machine computing right now", and how a worker still busy for a client that has gone is found without `ps` (gotcha #445); retire one with `POST /api/admin/models/{id}/unload`. `swarmllm status` renders it. `network_traffic` (2026-09-12): bytes in and out since
   startup plus the current rate, from libp2p's transport counters — every protocol, not
@@ -2502,9 +2505,12 @@ Routes Claude model requests through a locally-authenticated `claude` CLI subpro
   counts with a reading of what zero means in context), peer cache (stored vs
   dialable), models, **recent completed requests** (last 50: route, per-phase
   timings, per-segment attribution), **per-peer serving performance** (RTT,
-  ms/layer, EWMA latency, samples, region — slowest first), and **served for
-  others** (segments/layers computed for peers, compute time, bytes out). This is
-  the single most useful thing to include in a bug report.
+  ms/layer, EWMA latency, samples, region — slowest first), **served for
+  others** (segments/layers computed for peers, compute time, bytes out), and
+  **copy repair** (when the canonical-upload repair last started and finished a
+  pass — "RUNNING since" for a stuck one — and why it left each model as it is;
+  FUTURE_WORK #217). This is the single most useful thing to include in a bug
+  report.
 - `GET     /api/admin/performance` — The JSON sibling of `diagnostics`, for the
   dashboard's Performance panel: `recent` (up to 50 traces), `peers`, `served`,
   and `hourly` (one bucket per hour for a week, persisted). Pulled on demand, not

@@ -246,6 +246,19 @@ its GPU memory) whenever the daemon unloads it by either path above.
 - The scheduler needs enough shard coverage to build a complete pipeline
 - Check `DIAG: assemble_pipeline_for` for candidate counts
 
+**"Not enough memory in the swarm for …" or "… are online but turned it down":**
+- *Not enough memory in the swarm* — the computers that hold this model cannot set
+  aside enough memory between them to run it (the message says how many of its
+  layers they have room for). Trying again will not help; pick a smaller model,
+  or wait until a computer with more memory holds this one.
+- *Online but turned it down* — the computers holding that part of the model are
+  connected but busy, usually running other models; the message quotes the last
+  one's own reason. Try again in a few minutes.
+- Versions up to v0.3.224 reported both cases as "No reachable node holds layers
+  X-Y … the peer that held that piece has gone", which was usually not true —
+  look in the log for `need about … MB more` or `Not enough free memory` beside
+  the request to tell.
+
 **Inference fails with "peer never acknowledged" or "silent drop":**
 - A `SendDirectMessage` was issued but neither a Response nor an
   `OutboundFailure` event arrived from libp2p within 10s
