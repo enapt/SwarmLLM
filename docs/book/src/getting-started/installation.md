@@ -6,8 +6,8 @@ Download the right file for your system from the [GitHub Releases page](https://
 
 | Your Computer | File Name |
 |---|---|
-| **Windows** (NVIDIA, AMD or Intel graphics card) | `swarmllm-windows-x86_64-gpu.zip` |
-| **Windows** (no graphics card, or not sure) | `swarmllm-windows-x86_64-cpu.zip` |
+| **Windows** (NVIDIA graphics card) | `swarmllm-windows-x86_64-gpu.zip` |
+| **Windows** (AMD or Intel graphics, no graphics card, or not sure) | `swarmllm-windows-x86_64-cpu.zip` |
 | **Mac** (Apple chip — M1 or newer) | `swarmllm-macos-aarch64.tar.gz` (runs on the processor; no graphics acceleration yet) |
 | **Mac** (Intel chip) | Not supported yet — build from source (best-effort) |
 | **Linux** (most distros) | `swarmllm-linux-x86_64.tar.gz` |
@@ -62,7 +62,7 @@ update whose signature it cannot verify.
 
 ### Windows
 
-1. Download `swarmllm-windows-x86_64-gpu.zip` (any NVIDIA, AMD or Intel graphics card — it bundles the NVIDIA libraries, so no CUDA Toolkit is needed) or `swarmllm-windows-x86_64-cpu.zip` (works on every PC).
+1. Download `swarmllm-windows-x86_64-gpu.zip` if your PC has an NVIDIA graphics card (it bundles the NVIDIA libraries, so no CUDA Toolkit is needed), otherwise `swarmllm-windows-x86_64-cpu.zip` (works on every PC, including ones with AMD or Intel graphics).
 2. Right-click it and choose **Extract All** — running it from inside the zip view does not work.
 3. Double-click `swarmllm.exe` in the extracted folder. SmartScreen shows *"Windows protected your PC"* because the program is not code-signed yet: click **More info** > **Run anyway**.
 4. A console window opens: that is SwarmLLM running. Keep it open (minimising is fine) — closing it stops SwarmLLM. The dashboard opens in your browser.

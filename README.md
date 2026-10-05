@@ -37,9 +37,9 @@ Pick the download for your computer from the
 
 **Windows**
 
-1. Download **`swarmllm-windows-x86_64-gpu.zip`** if your PC has a graphics
-   card from NVIDIA, AMD or Intel — most gaming PCs do. No graphics card, or
-   not sure? Take **`swarmllm-windows-x86_64-cpu.zip`**, which works on any PC.
+1. Download **`swarmllm-windows-x86_64-gpu.zip`** if your PC has an NVIDIA
+   graphics card — most gaming PCs do. AMD or Intel graphics, no graphics card,
+   or not sure? Take **`swarmllm-windows-x86_64-cpu.zip`**, which works on any PC.
 2. Right-click the downloaded file and choose **Extract All**.
 3. Open the extracted folder and double-click **`swarmllm.exe`**. Windows shows
    a blue box saying *"Windows protected your PC"* — it does that for programs
@@ -202,8 +202,9 @@ others](https://enapt.github.io/SwarmLLM/comparison.html).)
 
 **What do I need?** A Windows, Linux or Apple-chip Mac computer, ideally with
 8 GB of memory or more, and a few gigabytes of free disk space per model. A
-graphics card makes it much faster but isn't required: on Windows most cards
-work, on Linux it needs an NVIDIA RTX 30-series or newer. On a Mac it runs on
+graphics card makes it much faster but isn't required: it needs an NVIDIA RTX
+30-series or newer, on Windows and Linux alike, and any other card leaves the
+work to the processor. On a Mac it runs on
 the main processor for now — slower than a PC with a gaming card, but a
 MacBook Air can run the smaller models.
 

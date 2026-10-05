@@ -24,7 +24,7 @@
 | `peers` | List connected computers (`--json` for raw output) |
 | `diagnostics` | Print a report for a bug report — safe to post publicly (`--full` includes network addresses; don't post that) |
 | `get-model [smoke\|standard\|stress]` | Download a shared test model (no tier lists them; `--all` downloads every part) |
-| `privacy <model-id>` | Fetch the first and last parts of a model so prompt privacy can switch on for it |
+| `privacy <model-id>` | Fetch the first and last parts of a model so "Start and finish on this computer" can switch on for it |
 | `unload <model-id>` | Stop a model's worker and free its memory; the files stay |
 | `remove-model <model-id>` | Delete a model from this computer and tell the network it's gone (`-y` skips the question) |
 | `update` | Check for an update and install it (`--check-only` to only check) |

@@ -33,7 +33,7 @@ An early (alpha) version that improves every week and updates itself. Splitting 
 
 | Your computer | Download | Graphics card |
 |---|---|---|
-| Windows (64-bit) | Yes | NVIDIA, AMD or Intel for models on your own PC; splitting a model with other computers on the graphics card needs an NVIDIA RTX 30-series or newer |
+| Windows (64-bit) | Yes | NVIDIA RTX 30-series or newer; AMD, Intel and older NVIDIA cards fall back to the processor automatically |
 | Linux (64-bit Intel/AMD) | Yes | NVIDIA RTX 30-series or newer; older cards fall back to the processor automatically |
 | Mac with an Apple chip (M1 or newer) | Yes | Processor only for now |
 | Mac with an Intel chip | No — build from source (best-effort) | Processor only |
