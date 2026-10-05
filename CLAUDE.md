@@ -68,7 +68,7 @@ Three carry contracts, not just versions:
   sorted. Counts asserted — **update BOTH CLAUDE.md and `docs/ARCHITECTURE.md`**.
   A new key — from the frontend OR minted in Rust — MUST be translated into all 21; never rely on
   the runtime English fallback.
-- Payload ~1196 KB, capped by `frontend_payload_stays_within_budget` — a
+- Payload ~1213 KB, capped by `frontend_payload_stays_within_budget` — a
   regression budget, not a goal.
 
 ## Building and Testing

@@ -3000,7 +3000,7 @@ task that runs whether or not auto-manage is on — repair, like
   (`manifest_is_another_upload`); `canonical_allows_acquisition` holds every
   download path until the choice is made (`trigger_download`, the scorer).
 - A node holding parts of the same SHAPE has each held part's first 64 KB
-  compared with the upload's bytes on HuggingFace (`parts_are_from`) — uploads
+  compared with the upload's bytes on HuggingFace (`parts_not_from` / `part_is_from`) — uploads
   differ in tensor bytes everywhere, so this is decisive and costs 64 KB a part —
   and its header compared by BLAKE3 with the upload's; a wrong header (a
   peer-provisioned node's) is replaced with the upload's header and side files,
@@ -3079,9 +3079,9 @@ for bytes that are the swarm's upload"); a disk shortfall
 holds none and is re-checked next pass; a HuggingFace failure holds none and backs
 off 10 min, doubling to 6 h — Kubernetes' scheduling queue met the same
 head-of-line blocking (an unschedulable pod at the head, kubernetes#71486) and
-answered with the same backoff queue. Test
-`a_switch_that_cannot_go_ahead_does_not_hold_up_the_ones_behind_it` fails with
-the old rule toggled back in ("the next model is not blocked": Queued, not Go).
+answered with the same backoff queue. (The queue and its test,
+`a_switch_that_cannot_go_ahead_does_not_hold_up_the_ones_behind_it`, went the same
+day with `e4e508b1`: the prune-and-fetch heal has no queue to block.)
 
 **Two more doors closed the same day.** A max-register converges only on claims
 every node is eventually delivered, and the newcomer catch-up carried manifests
@@ -3094,8 +3094,8 @@ a running download fetches against (`SharedState::judge_peer_manifest`,
 `ModelMgmt::model_download_under_way` — the predicate the heal already waited
 on, now one method).
 
-**What a change must keep:** a turn-limited heal step is taken only by work that
-started; a failure backs off and never blocks the queue. A peer's manifest is
+**What a change must keep:** a failure backs off and never blocks another model's
+repair. A peer's manifest is
 judged in ONE place. A node's claim travels wherever its manifests do.
 
 **A node vouches only for bytes that are the swarm's upload (2026-10-03, after

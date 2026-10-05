@@ -187,7 +187,7 @@ hashes, so `expected_build_tag` is unknown and `shard_holders` cannot exclude ho
 another upload until a canonical holder's gossip fills the hashes
 (`merge_known_shard_hashes`) — and the first hashes heard win.
 
-**Narrowed 2026-10-03 (after v0.3.222):** a node on the next release withholds a copy of
+**Narrowed 2026-10-03 (after v0.3.222):** a node on v0.3.223 or later withholds a copy of
 another upload (no announcement, no manifest gossip, no serving) and refuses to load parts
 whose bytes are not its table's upload, so neither the holder nor its hashes can be taken for
 the swarm's; a part fetched against a hash that was another upload's is caught at accept by
@@ -438,6 +438,14 @@ on the live node after .226 spreads.
 hybrid — conservative. A remote hop's network cost is charged per segment rather than per
 token / per crossing (the regional-pipelines plan, § "What is actually missing", 2). Do not
 tune `ASSUMED_FORWARD_PASSES` (#3).
+
+**The field reading with peers, on .226 (2026-10-05 08:57 UTC, live node, every peer on
+.225/.226):** Qwen2.5-Coder-7B — every part here, two smaller models' workers on the card
+(~5.6 GB free) — went whole to `4a3ac72e` (Italy, 349 ms): `local_route_available=true`,
+`local_processor_cost_ms=18747` against `pipeline_cost_ms=5057`. The first answer took 58 s (the
+peer loaded the model), the next ones ~2 s. That is this residual deciding, not a regression of
+the fix above: the planner now SEES the local route and then prices it at processor speed.
+Pricing it as the loader's card/processor split is what would keep it here.
 
 #### #192 — Nothing routes on the distance between two peers
 `P2` · routing · **PARTIAL** — 2026-09-02 · absorbs archive § "Speeding up inference BETWEEN nodes" ideas 3 (ring decode) and 4 (peer-to-peer RTT); plan: `docs/plans/regional_pipelines.md`

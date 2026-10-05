@@ -37,8 +37,8 @@ pub struct NodeConfig {
     /// only. The node still participates fully in the P2P network (relay
     /// server, AutoNAT prober, DCUtR, DHT, gossip), so it helps the swarm
     /// bootstrap without exposing any inference surface to the internet. Set
-    /// via `--anchor`, `[node] anchor_mode = true`, or
-    /// `SWARMLLM_NODE_ANCHOR_MODE=true`. Default: false.
+    /// via `--anchor` or `[node] anchor_mode = true` — no environment variable
+    /// sets it (only seven named `SWARMLLM_*` ones exist, #722). Default: false.
     #[serde(default)]
     pub anchor_mode: bool,
 }

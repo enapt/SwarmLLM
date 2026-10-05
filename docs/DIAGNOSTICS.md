@@ -258,7 +258,7 @@ id: `grep -a "<request_id>" node.log | grep -E "need about .* MB more|Not enough
 memory|Pipeline segment"` — a refusal there means the holders are full, not gone.
 `peers_hosting` in `/api/admin/models` says whether anyone holds it at all.
 
-**From the release after v0.3.224** a refusal is reported as itself: `Not enough memory in the
+**From v0.3.225** a refusal is reported as itself: `Not enough memory in the
 swarm for <model>: the computers holding it have room for about N of its M layers` (the refused
 plan went past what the holders offer — retrying will not help) or `The computers holding the
 part of <model> … are online but turned it down — the last one said: …` (busy — retry later).
@@ -270,7 +270,7 @@ did not say no.
 
 With "Start and finish on this computer" on (auto-on where this node holds both ends of a
 model), a route through peers is a boomerang: the first and last layers run here, and every
-token comes back here twice. From the release after v0.3.224 each assembly that takes such a
+token comes back here twice. From v0.3.225 each assembly that takes such a
 route logs `DIAG: what keeping the first and last layers here adds to the route taken` with
 `privacy_extra_ms` (the route taken minus the search's cheapest route with privacy OFF) and
 `without_privacy_ms`, in the router's own milliseconds. `privacy_extra_ms=0` says privacy is
@@ -383,7 +383,7 @@ deadline waiting on a peer that was never going to answer.
 
 ## "Why hasn't this node fixed its copy?" — the copy repair's own account (#217)
 
-From the release after v0.3.224, `swarmllm diagnostics` has a `-- copy repair --` section:
+From v0.3.225, `swarmllm diagnostics` has a `-- copy repair --` section:
 when the repair task last started and finished a pass, and for each model why that pass left
 it as it was. Read it before anything else when a node keeps parts the swarm disagrees with
 (`peers_other_build_nodes` names it):
