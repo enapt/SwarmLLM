@@ -2671,6 +2671,13 @@ launches updated in place, replies byte-identical, 3/3. **What a change must kee
 `alloc` / `alloc_fully_overwritten`; one that truly needs zeros belongs before the capture. The rest
 rule stays as the backstop, and its refusal line names the node type.
 
+**On the shape it hurt most** (split speculation, 7B shards 0-3 + fp16 drafter on the card, B on
+the processor, `~/swarmllm-gpu-1005/dsd221.sh`, 4 arms × 3 requests on `703b511d`): the 7B segment
+updated 179 of 182 launches in place at 3.8-4.0 ms recording (10-04, same shape: 19-59 of 90-257
+updated, 43-108 ms), the drafter 554 of 555; 12/12 replies, 0 driver events. Requests 46.9-51.4 s
+(first) and 31.4-32.7 s, against 50-124 s and 32.6-64.5 s on 10-04 — which also ran with ~9 GB less
+free RAM, so the time difference is not attributed to this alone.
+
 ## A header and its tensor table describe one upload — compared before a tensor is read (2026-10-03, #156)
 
 **The defect.** A node loading from parts has two descriptions of one file: the

@@ -318,6 +318,16 @@ dashboard and CLI wording in all 21 locales; (3) whether two CUDA
 processes switching on one card (target + drafter) is what the FECS events have in common — the
 08:25:56 one on 10-04 also came 3 s after a third worker started.
 
+**After #221 (2026-10-05, `~/swarmllm-gpu-1005/dsd221.sh`, the same shape on `703b511d`, safety kit
+with the driver stop):** 4 arms, 12/12 replies, 0 card faults, 0 nvlddmkm events (confirmed by a
+direct `Get-WinEvent` query; the telemetry ran throughout, peak 73 °C). The 7B's checks now update
+their graphs in place — 179 of 182 launches, 3.8-4.0 ms recording each, where 10-04's arms rebuilt
+71-197 launches at 43-108 ms. Requests 46.9-51.4 s (first) and 31.4-32.7 s, against 50-124 s and
+32.6-64.5 s on 10-04. Evidence, not proof: with faults in half of 10-04's arms, four clean arms
+would come by chance ~6% of the time, and 10-04 ran with ~3.5 GB free RAM against ~12.8 GB here.
+The constant graph rebuilding — driver work on every launch — is now the leading suspect for the
+FECS events; the illegal access stays unexplained.
+
 #### #193 — A whole-model reply travels as independent messages; only the serving node dying now loses it
 `P3` · reliability · **PARTIAL** — 2026-09-02 · absorbs archive § "The reply stream has no reliability layer…" and § "Intermittent token loss on the remote-generate fast path"; history: archive § "Replies truncated on the remote-generate fast path"
 
