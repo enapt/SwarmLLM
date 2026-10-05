@@ -328,7 +328,8 @@ async fn tool_compare(state: &AppState, id: Option<Value>, args: Value) -> JsonR
 }
 
 /// Research tool: fan-out a question to multiple models, collect all responses.
-/// If no models specified, auto-selects available models (local first, then cloud).
+/// If no models specified, auto-selects models on this node or the swarm — never a paid
+/// cloud model, which only an explicit `models` list can name.
 async fn tool_research(state: &AppState, id: Option<Value>, args: Value) -> JsonRpcResponse {
     let question = match args.get("question").and_then(|v| v.as_str()) {
         Some(q) if q.len() <= MCP_MAX_PROMPT_BYTES => q.to_string(),

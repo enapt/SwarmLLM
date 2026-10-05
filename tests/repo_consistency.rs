@@ -11888,8 +11888,13 @@ fn placeholder_names(s: &str) -> BTreeSet<String> {
         rest = &rest[open + 1..];
         let Some(close) = rest.find('}') else { break };
         let name = &rest[..close];
-        if name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
-            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        // Any script: a placeholder translated into `{узел}` or `{ノード}` is
+        // the same mistake as `{computer}`, and an ASCII-only reader passed it
+        // (gotcha #413). Whitespace or a quote means JSON or prose, not a name.
+        if !name.is_empty()
+            && !name
+                .chars()
+                .any(|c| c.is_whitespace() || c == '"' || c == '{')
         {
             out.insert(name.to_string());
         }
@@ -11957,6 +11962,11 @@ fn the_placeholder_check_catches_a_translated_placeholder_name() {
         serde_json::from_str(r#"{"a": "Computer: {computer}", "b": "one event"}"#).unwrap();
     let found = placeholders_english_does_not_supply(&english, &planted);
     assert_eq!(found, vec![("a".to_string(), vec!["computer".to_string()])]);
+    // A placeholder translated into another script is caught the same way.
+    let planted: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_str(r#"{"a": "Узел: {узел}"}"#).unwrap();
+    let found = placeholders_english_does_not_supply(&english, &planted);
+    assert_eq!(found, vec![("a".to_string(), vec!["узел".to_string()])]);
 }
 
 /// The CLI's subcommands as a user types them, from `enum Commands` in
@@ -12009,6 +12019,10 @@ fn unusable_cli_mentions(text: &str, commands: &BTreeSet<String>) -> Vec<String>
         let Some(command) = words.next() else {
             continue;
         };
+        // `swarmllm --version`, `swarmllm -p 8800`: a global flag, not a command.
+        if command.starts_with('-') {
+            continue;
+        }
         if !commands.contains(command) {
             out.push(format!("`swarmllm {}` — no such command", &chunk[..end]));
         } else if command == "get-model"
@@ -12051,7 +12065,8 @@ fn a_hint_tells_the_reader_to_run_only_a_command_that_works() {
 fn the_cli_mention_check_catches_a_model_name_given_to_get_model() {
     let commands = cli_subcommands();
     let planted = "Download it (or run `swarmllm get-model <name> --all`), or `swarmllm fetch x`. \
-                   `swarmllm privacy <name>` and `swarmllm get-model standard` are fine.";
+                   `swarmllm privacy <name>`, `swarmllm get-model standard` and \
+                   `swarmllm --version` are fine.";
     let found = unusable_cli_mentions(planted, &commands);
     assert_eq!(found.len(), 2, "{found:?}");
 }
