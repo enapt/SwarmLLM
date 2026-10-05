@@ -164,7 +164,7 @@ pub struct DownloadedPart {
 /// vouched for both (FUTURE_WORK #217). The sync is where a failed write-back
 /// is reported — and reported once: PostgreSQL's "fsyncgate" (2018) is that
 /// Linux marks the pages clean after the error, so unchecked, the data is
-/// simply gone (https://lwn.net/Articles/752063/).
+/// simply gone (<https://lwn.net/Articles/752063/>).
 pub async fn download_shard(
     repo_id: &str,
     filename: &str,

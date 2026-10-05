@@ -472,7 +472,7 @@ fn is_tag_name(name: &str) -> bool {
 
 /// Where a call opener that has not finished arriving begins, if the reply so
 /// far ends in one: an opening tag or a fence opener with only whitespace after
-/// it (and a fence before the tag, as in "```json\n<tools>\n"), or the first
+/// it (and a fence before the tag, as in `` ```json\n<tools>\n ``), or the first
 /// characters of either — `<too`, a lone `` ` `` or ` `` `.
 ///
 /// The streaming half of the retractions above, and the same thing llama.cpp
