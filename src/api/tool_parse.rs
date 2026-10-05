@@ -361,7 +361,17 @@ pub fn content_prefix_len(text: &str) -> usize {
     if safe < text.len() {
         safe = retract_over_array_opener(text, safe);
         safe = retract_over_angle_opener(text, safe);
+        safe = retract_over_tag_opener(text, safe);
         safe = retract_over_fence_opener(text, safe);
+    } else if let Some(start) = unfinished_opener_start(text) {
+        // Nothing in the reply can start a call YET, but its end may be the
+        // scaffolding of one still arriving — `<tools>\n  ` or "```json\n"
+        // with the brace a token away. Released, it can no longer be taken
+        // back when the brace comes: Qwen2.5-Coder-7B's streamed replies
+        // carried `<tools>\n  ` (temperature 0, every run) and "```json\n"
+        // beside a correct call (2026-10-05). Held only until the next token
+        // shows it is not followed by a call; the end of a stream releases it.
+        safe = start;
     }
     // Never cut inside a character.
     while safe > 0 && !text.is_char_boundary(safe) {
@@ -403,6 +413,27 @@ fn retract_over_angle_opener(text: &str, safe: usize) -> usize {
     }
 }
 
+/// Move `safe` back over an opening tag (and the whitespace after it) that ends
+/// the safe prefix.
+///
+/// Qwen2.5-Coder-7B wraps its call in the tag it was shown its DEFINITIONS in —
+/// `<tools>\n  {"name": …}\n</tools>`, reproducibly at temperature 0 — or in one
+/// it makes up (`<xml>`, [`try_invented_wrapper`]). Both parse, but the cut
+/// landed on the brace, so `content: "<tools>"` went out beside a correct call
+/// on all four surfaces (2026-10-05). llama.cpp's Hermes parser consumes the
+/// same openers as part of the call (`common/chat.cpp`,
+/// `common_chat_parse_hermes_2_pro`: `<tool_call>|<function_call>|<tool>|<tools>|
+/// <response>|<json>|<xml>|<JSON>` before `\s*\{\s*"name"`); the tag here is
+/// [`is_tag_name`], the rule [`try_invented_wrapper`] reads a wrapper by, so a
+/// tag the parser accepts is never left behind as content.
+fn retract_over_tag_opener(text: &str, safe: usize) -> usize {
+    let head = text[..safe].trim_end();
+    match trailing_open_tag(head) {
+        Some(at) => at,
+        None => safe,
+    }
+}
+
 /// Move `safe` back over a code-fence opener that ends the safe prefix.
 ///
 /// Recognises the two shapes a model actually emits before a fenced tool call:
@@ -410,15 +441,68 @@ fn retract_over_angle_opener(text: &str, safe: usize) -> usize {
 /// is left alone, so a fence with real prose before it keeps that prose.
 fn retract_over_fence_opener(text: &str, safe: usize) -> usize {
     let head = text[..safe].trim_end_matches(['\n', '\r']);
-    let Some(at) = head.rfind("```") else {
-        return safe;
-    };
-    // Everything between the backticks and the cut must be a bare language tag.
-    if head[at + 3..].chars().all(|c| c.is_ascii_alphanumeric()) {
-        at
-    } else {
-        safe
+    trailing_fence_opener(head).unwrap_or(safe)
+}
+
+/// Where a `` ``` `` or `` ```<lang> `` that ends `head` begins.
+fn trailing_fence_opener(head: &str) -> Option<usize> {
+    let at = head.rfind("```")?;
+    // Everything between the backticks and the end must be a bare language tag.
+    head[at + 3..]
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric())
+        .then_some(at)
+}
+
+/// Where an opening tag `<name>` that ends `head` begins. Not a closing tag,
+/// and not one with attributes.
+fn trailing_open_tag(head: &str) -> Option<usize> {
+    let inner = head.strip_suffix('>')?;
+    let at = inner.rfind('<')?;
+    is_tag_name(&inner[at + 1..]).then_some(at)
+}
+
+/// A tag name as a model writes one: letters, digits, `_`, `-`, `:`.
+fn is_tag_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == ':')
+}
+
+/// Where a call opener that has not finished arriving begins, if the reply so
+/// far ends in one: an opening tag or a fence opener with only whitespace after
+/// it (and a fence before the tag, as in "```json\n<tools>\n"), or the first
+/// characters of either — `<too`, a lone `` ` `` or ` `` `.
+///
+/// The streaming half of the retractions above, and the same thing llama.cpp
+/// does with its opener regex: a reply that ends in a PARTIAL match is not
+/// released until the rest arrives (`common_regex` partial matching). Without
+/// it the retractions only work when tag and brace arrive in one token.
+fn unfinished_opener_start(text: &str) -> Option<usize> {
+    // A tag or fence still being spelled. A space ends the possibility: a tag
+    // with attributes is not one we read.
+    if let Some(at) = text.rfind('<') {
+        let name = &text[at + 1..];
+        if name.is_empty() || is_tag_name(name) {
+            return Some(fence_before(text, at));
+        }
     }
+    let ticks = text.len() - text.trim_end_matches('`').len();
+    if ticks == 1 || ticks == 2 {
+        return Some(text.len() - ticks);
+    }
+    // A complete tag or fence opener, then nothing but whitespace.
+    let head = text.trim_end();
+    if let Some(at) = trailing_open_tag(head) {
+        return Some(fence_before(text, at));
+    }
+    trailing_fence_opener(head)
+}
+
+/// `at`, moved back over a fence opener directly before it.
+fn fence_before(text: &str, at: usize) -> usize {
+    trailing_fence_opener(text[..at].trim_end()).unwrap_or(at)
 }
 
 /// A tool-carrying reply as it is generated, releasing the part that is
@@ -1266,11 +1350,7 @@ fn try_invented_wrapper(text: &str) -> Option<Vec<ParsedToolCall>> {
     let name = open_tag
         .split([' ', '\t', '\n', '/'])
         .next()
-        .filter(|n| !n.is_empty())
-        .filter(|n| {
-            n.chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == ':')
-        })?;
+        .filter(|n| is_tag_name(n))?;
     let body = body.strip_suffix(&format!("</{name}>"))?;
     single_object_call(body.trim(), 0).map(|call| vec![call])
 }
@@ -1291,10 +1371,15 @@ fn try_invented_wrapper(text: &str) -> Option<Vec<ParsedToolCall>> {
 ///
 /// The rule is as tight as [`try_invented_wrapper`]'s: the WHOLE reply is the
 /// call — at most `<tool_call>` or a lone `<` before it, then the doubled
-/// brace, ONE object with a string `name`, then nothing but closing braces (the
+/// brace, ONE object with a string `name`, then at most two closing braces (the
 /// doubled one, and the extra one the model adds) and an optional
 /// `</tool_call>` or `>`. Prose before or after, or an echoed definition (its
 /// `name` nests under `function`), yields nothing.
+///
+/// None at all is the model's too: sampled, it also answers
+/// `{{"name": "get_weather", "arguments": {"city": "Paris"}}` — the doubled
+/// opener, then only the object's own close — and that came back as text with
+/// no call while this rule required at least one brace after (2026-10-05).
 fn try_template_doubled_braces(text: &str) -> Option<Vec<ParsedToolCall>> {
     let t = text.trim();
     let t = t
@@ -1314,7 +1399,7 @@ fn try_template_doubled_braces(text: &str) -> Option<Vec<ParsedToolCall>> {
         .or_else(|| rest.strip_suffix('>'))
         .unwrap_or(rest)
         .trim_end();
-    if rest.is_empty() || rest.len() > 2 || !rest.chars().all(|c| c == '}') {
+    if rest.len() > 2 || !rest.chars().all(|c| c == '}') {
         return None;
     }
     single_value_call(&v, 0).map(|call| vec![call])
@@ -1630,6 +1715,8 @@ mod tests {
         }
         for framed in [
             "{{\"name\": \"get_time\", \"arguments\": {\"zone\": \"UTC\"}}}",
+            // Sampled, the model also closes only the object (2026-10-05).
+            "{{\"name\": \"get_time\", \"arguments\": {\"zone\": \"UTC\"}}",
             "<tool_call>\n{{\"name\": \"get_time\", \"arguments\": {\"zone\": \"UTC\"}}}\n</tool_call>",
             "<{{\"name\": \"get_time\", \"arguments\": {\"zone\": \"UTC\"}}}>",
         ] {
@@ -1874,12 +1961,83 @@ mod tests {
         assert_eq!(super::leading_content(reply), Some("Here is the call:"));
     }
 
-    /// An unterminated fence with nothing after it is an ordinary code block
-    /// being written, not a call being set up, and stays content.
+    /// An unterminated fence with nothing after it is either a code block being
+    /// written or a call being set up, and the reply so far cannot say which. It
+    /// waits for the next token — released, it could not be taken back when a
+    /// brace followed (Qwen2.5-Coder-7B streamed "```json\n" beside its call,
+    /// 2026-10-05) — and is content as soon as the code arrives.
     #[test]
-    fn a_trailing_fence_with_nothing_after_it_stays_content() {
-        assert_eq!(super::content_prefix_len("```json"), 7);
-        assert_eq!(super::content_prefix_len("answer:\n```"), 11);
+    fn a_trailing_fence_waits_for_what_follows_it() {
+        assert_eq!(super::content_prefix_len("```json"), 0);
+        assert_eq!(super::content_prefix_len("```json\n  "), 0);
+        assert_eq!(super::content_prefix_len("answer:\n```"), "answer:\n".len());
+        assert_eq!(super::content_prefix_len("answer:\n``"), "answer:\n".len());
+        let reply = "answer:\n```python\nprint(1)\n```\nDone.";
+        for token_len in [1, 2, 3, 7] {
+            let (deltas, mut buf) = deltas_for(reply, token_len);
+            let streamed = deltas.concat();
+            assert!(
+                streamed.contains("```python\nprint(1)"),
+                "token_len {token_len}: the code block must stream, got {streamed:?}"
+            );
+            assert!(super::parse_tool_calls(buf.reply_text()).is_none());
+            let rest = buf.pending_all().unwrap_or_default();
+            assert_eq!(format!("{streamed}{rest}"), reply, "token_len {token_len}");
+        }
+    }
+
+    /// The tag a call is wrapped in is the call's, like the fence: `<tools>` is
+    /// what Qwen2.5-Coder-7B answers in at temperature 0, `<xml>` one it made up,
+    /// and both went out as `content` beside a correct call — on all four
+    /// surfaces, streamed or not (2026-10-05). llama.cpp's Hermes parser consumes
+    /// the same openers with the call.
+    #[test]
+    fn the_tag_a_call_is_wrapped_in_is_not_content() {
+        for reply in [
+            "<tools>\n  {\"name\": \"get_weather\", \"arguments\": {\"city\": \"Paris\"}}\n</tools>",
+            "<xml>\n  {\"name\": \"get_weather\", \"arguments\": {\"city\": \"Paris\"}}\n</xml>",
+            "```json\n<tools>\n{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Paris\"}}\n</tools>\n```",
+        ] {
+            let calls = super::parse_tool_calls(reply).unwrap_or_default();
+            assert_eq!(calls.len(), 1, "{reply:?}");
+            assert_eq!(calls[0].name, "get_weather", "{reply:?}");
+            assert_eq!(super::leading_content(reply), None, "{reply:?}");
+            for token_len in [1, 2, 3, 7] {
+                let (deltas, mut buf) = deltas_for(reply, token_len);
+                assert!(
+                    deltas.is_empty(),
+                    "{reply:?} token_len {token_len}: streamed {deltas:?}"
+                );
+                assert!(super::parse_tool_calls(buf.reply_text()).is_some());
+                assert_eq!(buf.pending_content(), None, "{reply:?} {token_len}");
+            }
+        }
+        // Prose before the tag is still the reply's.
+        let reply = "Checking.\n<tools>\n{\"name\": \"get_weather\", \"arguments\": {}}\n</tools>";
+        assert_eq!(super::leading_content(reply), Some("Checking."));
+        let (deltas, mut buf) = deltas_for(reply, 2);
+        let leftover = buf.pending_content().unwrap_or_default();
+        assert_eq!(format!("{}{leftover}", deltas.concat()), "Checking.\n");
+    }
+
+    /// Holding a tag back is for one token, not for the reply: markup in an
+    /// ordinary answer still streams, and nothing is lost or doubled.
+    #[test]
+    fn markup_in_an_ordinary_reply_still_streams() {
+        for reply in [
+            "Use <b>bold</b> for emphasis, and a<b for less-than.",
+            "<p>hi</p> then more words after it",
+            "Run `ls` and then ``x`` to list.",
+        ] {
+            for token_len in [1, 2, 3] {
+                let (deltas, mut buf) = deltas_for(reply, token_len);
+                assert!(deltas.len() > 3, "{reply:?} {token_len}: {deltas:?}");
+                assert!(super::parse_tool_calls(buf.reply_text()).is_none());
+                let rest = buf.pending_all().unwrap_or_default();
+                assert!(rest.len() <= 3, "{reply:?} {token_len}: held {rest:?}");
+                assert_eq!(format!("{}{rest}", deltas.concat()), reply);
+            }
+        }
     }
 
     /// Phi-4-mini-instruct is trained by its publisher for function calling and

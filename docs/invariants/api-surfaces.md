@@ -770,7 +770,7 @@ paths now keep the preamble as well, and the surfaces agree by being the shape
 clients already expect. Discarding it was throwing away text the model
 produced.
 
-Five things a change here must keep:
+Six things a change here must keep:
 
 - **A bare `{` is a marker.** `try_generic` and `try_llama3` accept an object
   with no marker at all, so an unadorned brace begins a possible call. The bare
@@ -795,6 +795,21 @@ Five things a change here must keep:
   content `None` (`vllm/tool_parsers/xlam_tool_parser.py`). Verified on the
   live swarm with the fixed build: content `null`, no text delta, no Anthropic
   text block; prose in a tools request still streamed (11 deltas).
+- **So is the tag or fence a call is wrapped in — and while streaming it is HELD
+  until the next token decides.** `retract_over_tag_opener` takes back an opening
+  tag before the cut (`<tools>`, `<xml>` — any name `try_invented_wrapper` reads),
+  and `unfinished_opener_start` holds a reply that ENDS in a tag or fence opener
+  (or the first characters of one): a retraction only fires once the brace is in
+  the buffer, and by then a streamed `<tools>\n  ` had already gone out.
+  Qwen2.5-Coder-7B at temperature 0 answered `content: "<tools>"` beside a correct
+  call on all four paths, and sampled, a streamed "```json\n" (v0.3.226,
+  2026-10-05; the fixed dev build 0 of 8). llama.cpp does both halves: its Hermes
+  opener regex consumes `(```(xml|json)?\n\s*)?(<tool_call>|<tools>|<xml>|…)?` with
+  the call (`common/chat.cpp`, `common_chat_parse_hermes_2_pro`, b6500), and a
+  PARTIAL match at the end of the text is not released. A trailing fence in an
+  ordinary answer now waits one token instead of none
+  (`a_trailing_fence_waits_for_what_follows_it`,
+  `markup_in_an_ordinary_reply_still_streams`).
 - **The emitter owns BOTH outcomes.** `emit_openai_tool_calls` /
   `emit_anthropic_tool_blocks` take the buffer by `&mut` and flush either the
   remaining prose (call found) or the whole remainder (no call). Splitting that
