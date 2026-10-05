@@ -68,9 +68,20 @@ fi
 # replaced by a newer push, and PR runs still cancel — so the filter stays.
 # Only a run that completed without being cancelled or skipped answers; with a
 # sha, only that commit's run.
-run=$(gh run list --repo "$REPO" --workflow=CI --branch "$BRANCH" \
-        --limit 30 --json databaseId,status,conclusion,headSha \
-        --jq "map(select(.status == \"completed\" and .conclusion != \"cancelled\" and .conclusion != \"skipped\" and (\"$SHA\" == \"\" or .headSha == \"$SHA\"))) | .[0].databaseId" 2>/dev/null)
+#
+# With a sha the run is found BY THAT SHA (the runs API's `head_sha` filter),
+# not by scanning the branch's list: on 2026-10-05 `gh run list --branch main`
+# served a page whose newest run was two days old, the tagged commit's green
+# run was not in it, and the v0.3.227 chain stopped here although CI had passed
+# (`--commit` returns nothing at all, gotcha #575).
+if [ -n "$SHA" ]; then
+  run=$(gh api "repos/$REPO/actions/runs?head_sha=$SHA&per_page=50" \
+          --jq "[.workflow_runs[] | select(.name == \"CI\" and .status == \"completed\" and .conclusion != \"cancelled\" and .conclusion != \"skipped\")] | .[0].id" 2>/dev/null)
+else
+  run=$(gh run list --repo "$REPO" --workflow=CI --branch "$BRANCH" \
+          --limit 30 --json databaseId,status,conclusion \
+          --jq "map(select(.status == \"completed\" and .conclusion != \"cancelled\" and .conclusion != \"skipped\")) | .[0].databaseId" 2>/dev/null)
+fi
 if [ -z "${run:-}" ] || [ "$run" = "null" ]; then
   echo "COULD NOT CHECK: no COMPLETED CI run found on $BRANCH to read job names" >&2
   echo "from. A run still in flight cannot answer this — it has not created all" >&2
