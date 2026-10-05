@@ -111,6 +111,21 @@ load cannot disagree in either direction. Guard:
 `a_model_the_loader_would_split_is_one_this_node_can_hold`, with an
 architecture the loader will not split as its control.
 
+**And it must be asked on the device the loader uses, not the device the
+request is priced at (2026-10-05).** v0.3.225 shipped the above and the field
+check failed: the planner passed `serves_on_cpu` — the SPEED answer, which is
+"processor" for a model too big for the card (#444) — as the device to weigh
+room on. With TinyLlama already on the card, Mistral-7B "did not fit", RAM
+alone held 29 of 32 layers, `local_route_available=false`, and the request went
+through Italy at 47 s. The fix lived in the card branch; its test called that
+branch directly. The planner now asks `max_hostable_layers_for_planning` /
+`held_layer_ranges_for_planning`, which choose the device themselves
+(`planning_on_card`: the card whenever one is in play — whole or split — the
+processor when there is none or the model neither fits nor splits). Guard
+`the_planner_weighs_a_local_model_the_loader_would_split_on_the_card` goes
+through `gather_candidates` with the speed answer "processor" and RAM for
+nothing: red (`Some(0)`) on the old call, `Some(32)` now.
+
 **`process_pool::segment_shape` prices what the worker will actually map.**
 `VramFootprintInputs` has always documented `segment_layers` as "Layers in THIS
 segment, not the whole model" and `quantized_weight_bytes` as "the shard bytes

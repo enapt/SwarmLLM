@@ -2188,6 +2188,10 @@ pub struct ModelProcessPool {
     #[cfg(test)]
     pub(crate) test_footprint_inputs:
         DashMap<ModelId, crate::model::auto_manage::vram::VramFootprintInputs>,
+    /// A test's stand-in for a usable graphics card (`card_in_play`), which a
+    /// build without the CUDA feature never has.
+    #[cfg(test)]
+    pub(crate) test_card_in_play: std::sync::atomic::AtomicBool,
 }
 
 /// Command into the batch scheduler task.
@@ -2349,6 +2353,8 @@ impl ModelProcessPool {
             test_cost_curve: DashMap::new(),
             #[cfg(test)]
             test_footprint_inputs: DashMap::new(),
+            #[cfg(test)]
+            test_card_in_play: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -3188,20 +3194,75 @@ impl ModelProcessPool {
     /// asking either way. The peer-side gates (whole coverage, direct
     /// reachability, trust, room or a wide speed margin) are unchanged.
     pub fn serves_on_cpu(&self, model_id: &ModelId) -> bool {
-        if !cfg!(feature = "candle-cuda") {
+        !self.card_in_play() || self.is_cpu_bound_for_lack_of_vram(model_id)
+    }
+
+    /// Can any model use this node's graphics card at all: one detected, one
+    /// our kernels run on, in a build that has them, and not switched off
+    /// (`inference.gpu_layers = 0`)? Whether a particular model FITS it is a
+    /// separate question (`is_cpu_bound_for_lack_of_vram`).
+    fn card_in_play(&self) -> bool {
+        #[cfg(test)]
+        if self
+            .test_card_in_play
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
             return true;
+        }
+        if !cfg!(feature = "candle-cuda") {
+            return false;
         }
         if !self.gpu_detected.load(std::sync::atomic::Ordering::Relaxed) {
-            return true;
+            return false;
         }
         if self.gpu_layers.load(std::sync::atomic::Ordering::Relaxed) == 0 {
-            return true;
+            return false;
         }
         #[cfg(feature = "candle-cuda")]
         if !crate::daemon::gpu_support::local_gpu_is_supported() {
+            return false;
+        }
+        true
+    }
+
+    /// How many of `model_id`'s layers this node can hold, weighed on the
+    /// device the LOADER would put them on — **the planner's one question
+    /// about this node's room** (FUTURE_WORK #129).
+    ///
+    /// Not [`Self::serves_on_cpu`]: that answers which SPEED a request gets
+    /// here, and a model too big for the card is rightly priced near the
+    /// processor (gotcha #444). The loader still puts it partly ON the card
+    /// (`partial_gpu_layers`), so its room is the card's plus the split, never
+    /// the processor budget alone. The planner passed the speed answer to the
+    /// room question: with a small model already on the card, a cold
+    /// Mistral-7B "did not fit", was bounded by RAM alone at 29 of 32 layers,
+    /// and went through Italy at 47 s — on v0.3.225, whose #129 fix lived in
+    /// the card branch this path never took (2026-10-05).
+    pub fn max_hostable_layers_for_planning(&self, model_id: &ModelId) -> Option<u32> {
+        self.max_local_hostable_layers(model_id, self.planning_on_card(model_id))
+    }
+
+    /// The ranges a live worker of `model_id` already holds, on the same device
+    /// [`Self::max_hostable_layers_for_planning`] weighs — the room and what
+    /// already occupies it are read on one device or the charge is wrong.
+    pub fn held_layer_ranges_for_planning(&self, model_id: &ModelId) -> Vec<HeldRange> {
+        self.held_layer_ranges(model_id, self.planning_on_card(model_id))
+    }
+
+    /// The device the loader would put `model_id`'s layers on, for weighing
+    /// room: the card whenever one is in play — whole, or split across it and
+    /// the processor — and the processor when there is none, or when the model
+    /// neither fits the card whole nor is split by the loader.
+    fn planning_on_card(&self, model_id: &ModelId) -> bool {
+        if !self.card_in_play() {
+            return false;
+        }
+        if !self.is_cpu_bound_for_lack_of_vram(model_id) {
             return true;
         }
-        self.is_cpu_bound_for_lack_of_vram(model_id)
+        self.estimated_gpu_mb(model_id)
+            .and_then(|estimated| self.partial_gpu_layers(model_id, None, estimated))
+            .is_some()
     }
 
     pub fn is_cpu_bound_for_lack_of_vram(&self, model_id: &ModelId) -> bool {

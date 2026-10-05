@@ -6040,3 +6040,94 @@ fn a_peer_failing_a_model_every_time_is_left_out_unless_it_is_the_only_way() {
     assert!(!state.peer_ejected_from_model(&c, &model));
     assert_eq!(holders_of_part_1(), vec![c]);
 }
+
+/// **#129 on the path the planner takes**: a node whose card is in play, holding
+/// all of a 32-layer model too big for that card but one the loader SPLITS, has
+/// room for all 32 layers — whatever the speed answer says.
+///
+/// The field case (v0.3.225, 2026-10-05): with TinyLlama already on the 8 GB card
+/// a cold Mistral-7B "did not fit", so `serves_on_cpu` said processor — rightly,
+/// for its SPEED (#444). The planner passed that same answer to the room
+/// question, was told RAM alone held 29 of 32 layers, called a pipeline "the
+/// only route" and sent the request through Italy at 47 s. The pool's #129 fix
+/// lived in the card branch, which this call never reached; its own test called
+/// that branch directly. Here the RAM budget holds nothing, so only the split
+/// can answer 32.
+#[test]
+fn the_planner_weighs_a_local_model_the_loader_would_split_on_the_card() {
+    use crate::inference::model_arch::ModelArch;
+    use crate::inference::split::hybrid::arch_supports_hybrid;
+    let state = make_shared_state_with(|c| c.resources.max_ram_mb = 40);
+    let local = state.identity.node_id().clone();
+    let mid = ModelId("seven-b-too-big-for-the-card".into());
+    state.model_registry.register_manifest(make_manifest(
+        &mid.0,
+        32,
+        vec![ShardInfo {
+            index: 0,
+            layer_range: (0, 32),
+            size_bytes: 4_400_000_000,
+            hash: [0u8; 32],
+            tensors: vec![],
+        }],
+    ));
+    state.model_registry.record_shard_holder(
+        ShardId {
+            model_id: mid.clone(),
+            index: 0,
+        },
+        local.clone(),
+    );
+    let pool = &state.model_process_pool;
+    pool.test_card_in_play
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    pool.set_gpu_layers(-1);
+    pool.set_vram_budget_mb(3000);
+    pool.test_footprint_inputs.insert(
+        mid.clone(),
+        crate::model::auto_manage::vram::VramFootprintInputs {
+            quantized_weight_bytes: 4_400 * 1024 * 1024,
+            unquantized_bytes_per_element: None,
+            vocab_size: 32_768,
+            embedding_length: 4096,
+            segment_layers: 32,
+            head_count_kv: 8,
+            head_count: 32,
+            head_dim: 128,
+            rope_dim: 128,
+            effective_context: 8192,
+            is_first: true,
+            embedding_gatherable: true,
+            splits_across_devices: arch_supports_hybrid(&ModelArch::Llama),
+        },
+    );
+    assert!(
+        pool.serves_on_cpu(&mid),
+        "fixture: the speed answer must be 'processor', as in the field"
+    );
+    assert_eq!(
+        pool.max_local_hostable_layers(&mid, false).unwrap_or(0),
+        0,
+        "fixture: RAM alone holds nothing here, so only the split can answer 32"
+    );
+    let manifest = state.model_registry.get_manifest(&mid).unwrap();
+    let scheduler = PipelineScheduler::new(state.clone());
+    let ours = scheduler
+        .gather_candidates(
+            &manifest,
+            &local,
+            uuid::Uuid::new_v4(),
+            None.into(),
+            super::Purpose::Route,
+            &|| true,
+        )
+        .into_iter()
+        .find(|c| c.node_id == local)
+        .unwrap();
+    assert!(!ours.has_gpu, "priced at the processor's speed (#444)");
+    assert_eq!(
+        ours.max_hostable_layers,
+        Some(32),
+        "but its room is the card's plus the split: all 32 layers"
+    );
+}

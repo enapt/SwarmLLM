@@ -359,24 +359,29 @@ split wins. Also feed observed per-layer latency into `compute_segment_timeout` 
 the fixed 2 s/layer guess. Depends on #3.
 
 #### #129 — A model a few MB too large for the card is sent on a boomerang across continents
-`P2` · routing · **PARTIAL** — 2026-09-27, narrowed 2026-10-04 · history: archive row #129
+`P2` · routing · **PARTIAL** — 2026-09-27, narrowed 2026-10-04 and 2026-10-05 · history: archive row #129
 
-**Fixed on main 2026-10-04 (not yet released):** the planner was never offered the local hybrid.
-`ModelProcessPool::max_local_hostable_layers` counted the card alone, so for a COLD model that
-does not fit the card whole this node "could not hold every layer", `local_route_available=false`,
-and the search's chain was taken even when it priced this node cheaper: Mistral-7B priced here
-at 16.8 s against a 29.8 s boomerang through `4a3ac72e` (Italy), took the boomerang (44.7 s for
-48 tokens); forced here it ran as a 17/32 hybrid, 7.2 s warm. Phi-3.5 the same (16.8 s vs
-44.8 s). The bound now asks the loader's own decision (`partial_gpu_layers`): a model it would
-split is one this node can hold. Test `a_model_the_loader_would_split_is_one_this_node_can_hold`
-(red without it; control: an architecture the loader will not split keeps the card-only bound).
-**Not yet verified on a CUDA build** — the dev build has no card path: at the next gate, a COLD
-Mistral-7B or Llama-3.1-8B request on this 8 GB node must answer `route=local`, not a boomerang.
+**v0.3.225 shipped half the fix, and the field check after deploy failed** (2026-10-05 01:30
+UTC): a cold Mistral-7B on this 8 GB node still went through `4a3ac72e` (Italy), 47 s. The
+pool's bound (`max_local_hostable_layers`) learned to count the loader's card/processor split
+(`partial_gpu_layers`) — but only in its card branch, and the planner asked with the SPEED
+answer `serves_on_cpu`, which is "processor" for any model that does not fit the card whole
+(#444). With TinyLlama already on the card, Mistral "did not fit", RAM alone held 29 of 32
+layers, `local_route_available=false`. (On 10-04 the same request asked the card and got 17
+— the card alone — which is the case the first fix covered.)
 
-**Residual:** the local candidate is still priced at its processor speed (16.8 s) rather than
-as a hybrid — conservative, it won here anyway. And a remote hop's network cost is charged per
-segment rather than per token / per crossing (the regional-pipelines plan, § "What is actually
-missing", 2). Do not tune `ASSUMED_FORWARD_PASSES` (#3).
+**Fixed on main 2026-10-05 (not yet released):** the planner asks
+`ModelProcessPool::max_hostable_layers_for_planning` and `held_layer_ranges_for_planning`,
+which choose the device the LOADER would use (`planning_on_card`). Test
+`the_planner_weighs_a_local_model_the_loader_would_split_on_the_card` goes through
+`gather_candidates`: `Some(0)` on the old call, `Some(32)` now. **Gate item for the next
+release, on the CUDA artifact:** a cold Mistral-7B with another model on the card answers
+`route=local` (the dev build has no card path).
+
+**Residual:** the local candidate is still priced at its processor speed rather than as a
+hybrid — conservative. A remote hop's network cost is charged per segment rather than per
+token / per crossing (the regional-pipelines plan, § "What is actually missing", 2). Do not
+tune `ASSUMED_FORWARD_PASSES` (#3).
 
 #### #192 — Nothing routes on the distance between two peers
 `P2` · routing · **PARTIAL** — 2026-09-02 · absorbs archive § "Speeding up inference BETWEEN nodes" ideas 3 (ring decode) and 4 (peer-to-peer RTT); plan: `docs/plans/regional_pipelines.md`

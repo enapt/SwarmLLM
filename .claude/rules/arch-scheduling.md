@@ -24,7 +24,7 @@ measured at, and what a change must keep — lives in `docs/invariants/`.
 
 ## The component that will refuse must be asked while the plan can still change
 
-Admission runs at load time, too late to reshape a plan (#452). **`ModelProcessPool::max_local_hostable_layers`** bounds the LOCAL node from the loader's own estimator and budgets (`None` = unknowable, never "no room"); **`process_pool::segment_shape`** prices the segment the worker will actually map, never the whole model.
+Admission runs at load time, too late to reshape a plan (#452). **`ModelProcessPool::max_hostable_layers_for_planning`** (+ `held_layer_ranges_for_planning`) bounds the LOCAL node from the loader's own estimator and budgets, weighed on the device the LOADER would use — never on `serves_on_cpu`, which is the SPEED answer (#444 vs #129) (`None` = unknowable, never "no room"); **`process_pool::segment_shape`** prices the segment the worker will actually map, never the whole model.
 
 → `docs/invariants/scheduling.md` § "The component that will refuse must be asked while the plan can still change"
 

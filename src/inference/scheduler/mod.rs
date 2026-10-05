@@ -3776,10 +3776,14 @@ impl PipelineScheduler {
                     })
                 })
             };
+            // Room is weighed on the device the LOADER would use, which is not
+            // the device `has_gpu` prices the speed of: a model too big for the
+            // card is priced near the processor (#444) yet placed partly on the
+            // card (#129).
             let held_ranges = if is_local {
                 self.shared_state
                     .model_process_pool
-                    .held_layer_ranges(&manifest.id, has_gpu)
+                    .held_layer_ranges_for_planning(&manifest.id)
             } else {
                 reported
                     .as_ref()
@@ -3800,7 +3804,7 @@ impl PipelineScheduler {
                     let ours = self
                         .shared_state
                         .model_process_pool
-                        .max_local_hostable_layers(&manifest.id, has_gpu);
+                        .max_hostable_layers_for_planning(&manifest.id);
                     (ours, ours)
                 } else {
                     // What the peer SAYS it has resident beats what we can
