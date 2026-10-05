@@ -135,7 +135,7 @@ A second implementation of any of these is this codebase's most-repeated defect 
 - **`daemon::shard_loader::force_cpu_for`** — `inference.gpu_layers` → `force_cpu`.
 - **`daemon::gpu_support::MIN_COMPUTE_CAP` + `local_gpu_is_supported`** — can this card run OUR kernels?
 - **`model::auto_manage::vram::ADMISSION_KV_CONTEXT`** — the context admission charges KV for.
-- **`ModelProcessPool::free_vram_for_admission` + `plan_vram_reclaim`** — reclaim idle models first.
+- **`ModelProcessPool::free_vram_for_admission` + `plan_vram_reclaim`** — reclaim idle models first; **`fits_in_budget`** (every fit verdict, so `serves_on_cpu`) and the planner's ceiling count that reclaim (`reclaimable_vram_mb` / `idle_vram_reclaimable_mb`), or a model held here goes abroad (#125, #129).
 - **`should_return_to_gpu` + `worker_should_return_to_gpu`** — asked in `get_or_spawn`, not on a timer.
 - **Graphics memory has ONE owner: `ModelProcessPool`.**
 - **A worker's growth is weighed by the budget its spawn charged** — `WorkerHandle::holds_gpu_memory`, never `placed_on_cpu_because` (`a_live_workers_growth_is_weighed_by_the_budget_its_spawn_charged`).

@@ -3044,11 +3044,32 @@ impl ModelProcessPool {
     /// in the answer, and a second copy of this comparison is how they would.
     /// `None` means unknowable — no budget set, or no local geometry to read —
     /// and never "no".
-    fn fits_in_budget(&self, estimated_mb: u64, budget_mb: u64) -> Option<bool> {
+    ///
+    /// **It fits if admission would MAKE the room.** A refused admission first
+    /// reclaims idle models (`free_vram_for_admission`), and this counted that
+    /// memory as spent — so with two small models idle on the card, Coder-7B
+    /// "did not fit", the planner priced this node at processor speed (27 s) and
+    /// sent the request to a cold peer in Italy (46 s), while the same request
+    /// kept here had the loader free both models and answer in 13 s, load
+    /// included (2026-10-05, FUTURE_WORK #129). The room is the reclaim's own
+    /// dry run (`reclaimable_vram_mb`: same candidates, same idle floor, never a
+    /// busy worker, all or nothing), as the planner's ceiling already counted it
+    /// (#125). Ollama's scheduler places a model the same way: it unloads idle
+    /// runners to make room before it settles for less (`server/sched.go`,
+    /// `findRunnerToUnload`).
+    fn fits_in_budget(
+        &self,
+        model_id: &ModelId,
+        estimated_mb: u64,
+        budget_mb: u64,
+    ) -> Option<bool> {
         if budget_mb == 0 || estimated_mb == 0 {
             return None;
         }
-        Some(self.vram_committed_mb().saturating_add(estimated_mb) <= budget_mb)
+        if self.vram_committed_mb().saturating_add(estimated_mb) <= budget_mb {
+            return Some(true);
+        }
+        Some(self.reclaimable_vram_mb(model_id, estimated_mb, budget_mb) > 0)
     }
 
     /// Both halves of "how big is this model, and does it fit" from ONE reading
@@ -3077,7 +3098,7 @@ impl ModelProcessPool {
         let fits = if resident_on_gpu == Some(true) {
             Some(true)
         } else {
-            self.fits_in_budget(estimated, budget)
+            self.fits_in_budget(model_id, estimated, budget)
         };
         ((estimated != 0).then_some(estimated), fits)
     }
@@ -3089,16 +3110,18 @@ impl ModelProcessPool {
     /// serve a request well before it commits to serving it alone.
     ///
     /// Returns:
-    /// - `Some(true)`  — it fits, or a worker for it is already live and paid for
+    /// - `Some(true)`  — it fits, admission would free idle models to make it
+    ///   fit (`fits_in_budget`), or a worker for it is already live and paid for
     /// - `Some(false)` — it would be refused and fall back to the CPU
     /// - `None`        — no budget configured, or the geometry could not be read,
     ///   which must NOT be read as "no". Refusing to route on an unreadable file
     ///   would be a worse failure than the one being avoided, and matches how
     ///   `admit_to_gpu` treats the same gap.
     ///
-    /// Deliberately shares `estimate_gpu_footprint_mb` and `vram_committed_mb`
-    /// with the admission gate, so the scheduler's view and the loader's view
-    /// cannot drift apart and disagree about whether a request could have run.
+    /// Deliberately shares `estimate_gpu_footprint_mb`, `vram_committed_mb` and
+    /// the reclaim's dry run with the admission gate, so the scheduler's view
+    /// and the loader's view cannot drift apart and disagree about whether a
+    /// request could have run.
     pub fn would_fit_on_gpu(&self, model_id: &ModelId) -> Option<bool> {
         // Already resident ON THE GPU means already charged: running it costs
         // no new memory, whatever the budget currently says.
@@ -3142,7 +3165,11 @@ impl ModelProcessPool {
         // The early returns above are about avoiding WORK — pricing a model
         // means reading its header off disk. The verdict itself is shared, so
         // this and `gpu_estimate_and_fit` cannot answer differently.
-        self.fits_in_budget(self.estimate_gpu_footprint_mb(model_id, None), budget)
+        self.fits_in_budget(
+            model_id,
+            self.estimate_gpu_footprint_mb(model_id, None),
+            budget,
+        )
     }
 
     /// This model's real GPU footprint in MB, or `None` when its geometry
@@ -8048,6 +8075,88 @@ mod tests {
         );
     }
 
+    /// **A model fits if admission would make the room** (FUTURE_WORK #129,
+    /// 2026-10-05). With small models idle on the card, the fit verdict counted
+    /// their memory as spent, so `serves_on_cpu` said "processor", the local fast
+    /// path stood aside and the router sent Coder-7B to a cold peer abroad —
+    /// while admission, asked, freed them and put it on the card. The verdict,
+    /// the speed answer and the admin listing now count what the reclaim would
+    /// free. Two controls, the reclaim's own: a model in use gives nothing back,
+    /// and neither does one used moments ago (the idle floor).
+    #[tokio::test]
+    async fn a_model_fits_the_card_if_admission_would_free_an_idle_one_for_it() {
+        let hour = std::time::Duration::from_secs(3600);
+        let wanted = ModelId("coder-7b".into());
+        let idle = ModelId("small-idle".into());
+        let setup = |name: &str| {
+            let p = ModelProcessPool::new(std::path::PathBuf::from(format!(
+                "/tmp/swarmllm-fit-reclaim-{name}"
+            )));
+            p.test_card_in_play
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            p.set_gpu_layers(-1);
+            p.test_footprint_inputs.insert(
+                wanted.clone(),
+                crate::model::auto_manage::vram::VramFootprintInputs {
+                    quantized_weight_bytes: 4_400 * 1024 * 1024,
+                    unquantized_bytes_per_element: None,
+                    vocab_size: 152_064,
+                    embedding_length: 3584,
+                    segment_layers: 28,
+                    head_count_kv: 4,
+                    head_count: 28,
+                    head_dim: 128,
+                    rope_dim: 128,
+                    effective_context: 8192,
+                    is_first: true,
+                    embedding_gatherable: true,
+                    splits_across_devices: true,
+                },
+            );
+            let estimate = p
+                .estimated_gpu_mb(&wanted)
+                .expect("fixture: a priced model");
+            // Room for the 7B alone, not for the 7B beside the idle model.
+            p.set_vram_budget_mb(estimate + 1000);
+            (p, estimate)
+        };
+
+        let (p, _) = setup("idle");
+        admit_and_insert_gpu_worker(&p, &idle, 2000, hour).await;
+        assert_eq!(
+            p.would_fit_on_gpu(&wanted),
+            Some(true),
+            "idle for an hour: admission frees it, so the 7B fits"
+        );
+        assert!(
+            !p.serves_on_cpu(&wanted),
+            "and the speed answer is the card's"
+        );
+        assert_eq!(
+            p.gpu_estimate_and_fit(&wanted).1,
+            Some(true),
+            "the listing agrees"
+        );
+
+        let (busy, _) = setup("busy");
+        let h = admit_and_insert_gpu_worker(&busy, &idle, 2000, hour).await;
+        h.note_conversation(Uuid::new_v4());
+        assert_eq!(
+            busy.would_fit_on_gpu(&wanted),
+            Some(false),
+            "a model in use keeps the card"
+        );
+        assert!(busy.serves_on_cpu(&wanted));
+
+        let (recent, _) = setup("recent");
+        admit_and_insert_gpu_worker(&recent, &idle, 2000, std::time::Duration::ZERO).await;
+        assert_eq!(
+            recent.would_fit_on_gpu(&wanted),
+            Some(false),
+            "used moments ago: the idle floor protects it"
+        );
+    }
+
     /// **A worker another request grew after it refused us is not retired.**
     /// That request's range fit where ours did not, and between its charge and
     /// registering its use `in_use` reads false — so the decision is taken under
@@ -9585,19 +9694,29 @@ mod admission_tests {
     #[test]
     fn an_unknown_size_or_budget_is_never_reported_as_not_fitting() {
         let p = pool();
-        assert_eq!(p.fits_in_budget(0, 6000), None, "no geometry is unknowable");
-        assert_eq!(p.fits_in_budget(4000, 0), None, "no budget is unknowable");
-        assert_eq!(p.fits_in_budget(4000, 6000), Some(true));
-        assert_eq!(p.fits_in_budget(6001, 6000), Some(false));
+        let m = ModelId("asked-for".into());
         assert_eq!(
-            p.fits_in_budget(6000, 6000),
+            p.fits_in_budget(&m, 0, 6000),
+            None,
+            "no geometry is unknowable"
+        );
+        assert_eq!(
+            p.fits_in_budget(&m, 4000, 0),
+            None,
+            "no budget is unknowable"
+        );
+        assert_eq!(p.fits_in_budget(&m, 4000, 6000), Some(true));
+        assert_eq!(p.fits_in_budget(&m, 6001, 6000), Some(false));
+        assert_eq!(
+            p.fits_in_budget(&m, 6000, 6000),
             Some(true),
             "exactly full fits"
         );
-        // Charged models are counted against the budget, not ignored.
+        // Charged models are counted against the budget, not ignored — a charge
+        // with no live worker behind it (a spawn under way) is never reclaimable.
         assert!(p.admit_to_gpu(&ModelId("resident".into()), 4000));
-        assert_eq!(p.fits_in_budget(2500, 6000), Some(false));
-        assert_eq!(p.fits_in_budget(2000, 6000), Some(true));
+        assert_eq!(p.fits_in_budget(&m, 2500, 6000), Some(false));
+        assert_eq!(p.fits_in_budget(&m, 2000, 6000), Some(true));
     }
 
     /// With no budget configured, behaviour must be exactly as before — this

@@ -1567,6 +1567,29 @@ the credit removed. ⚠ `max_local_hostable_layers` also feeds what this node
 ADVERTISES; peers now see the same room, and their segment triggers the same
 reclaim here — consistent with "graphics memory has ONE owner".
 
+### The fit verdict's half (2026-10-05, FUTURE_WORK #129)
+
+The ceiling counted the reclaim; the FIT VERDICT did not. `fits_in_budget` —
+behind `would_fit_on_gpu`, `gpu_estimate_and_fit`, and through
+`is_cpu_bound_for_lack_of_vram` behind `serves_on_cpu` (the local fast path's
+gate, the router's local price, the hand-off trigger) — compared
+`committed + estimate` with the budget, an idle model's charge included. With
+qwen2.5-0.5b and qwen3-1.7b idle on the card, a cold Coder-7B held here "did not
+fit": the fast path stood aside, the router priced this node at processor speed
+(`local_processor_cost_ms=27025`) and sent the request to a cold peer in Italy
+(46.5 s for 120 tokens, `predicted_ms=4495`). Kept here, the loader freed both
+(`freed_mb=3754`), admitted the 7B whole (`estimated_mb=5232 budget_mb=6354`) and
+answered in 13.2 s, load included — the same release binary, the same hour.
+`fits_in_budget` now answers "fits" when admission would MAKE the room:
+`reclaimable_vram_mb` is the reclaim's own dry run (`vram_reclaim_candidates`,
+`plan_vram_reclaim`: idle floor, never busy, all or nothing). Ollama places a
+model the same way — it unloads idle runners before it settles for less
+(`server/sched.go`, `findRunnerToUnload`). Test:
+`a_model_fits_the_card_if_admission_would_free_an_idle_one_for_it` (controls: in
+use, and used moments ago); red with the reclaim term removed. ⚠ The dashboard's
+"fits on your GPU" now reads yes for a model that would displace an idle one —
+which is what loading it does.
+
 ### Hardened in pre-release review (same day)
 
 Two races a `code-reviewer` pass found in the fix, both closed and tested:

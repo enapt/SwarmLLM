@@ -408,7 +408,7 @@ split wins. Also feed observed per-layer latency into `compute_segment_timeout` 
 the fixed 2 s/layer guess. Depends on #3.
 
 #### #129 — A model a few MB too large for the card is sent on a boomerang across continents
-`P2` · routing · **PARTIAL** — 2026-09-27, narrowed 2026-10-04 and 2026-10-05 · history: archive row #129
+`P2` · routing · **PARTIAL** — 2026-09-27, narrowed 2026-10-04 and 2026-10-05 (fit verdict fixed on main) · history: archive row #129
 
 **v0.3.225 shipped half the fix, and the field check after deploy failed** (2026-10-05 01:30
 UTC): a cold Mistral-7B on this 8 GB node still went through `4a3ac72e` (Italy), 47 s. The
@@ -459,6 +459,25 @@ pool's admission WITH the idle-model reclaim (`planning_on_card` / `serves_on_cp
 re-pricing a split; a cold peer's load time is also unpriced (46 s against 4.5 s predicted) — a
 second contributor. Measure with `scratchpad hybrid129.py`'s shape: warm two small models, then the
 7B cold, normal routing vs `swarm_route.exclude_nodes` = every peer.
+
+**Fixed on main 2026-10-05, not yet released — the fit verdict counts what admission would
+reclaim:** `ModelProcessPool::fits_in_budget` (behind `would_fit_on_gpu`, `gpu_estimate_and_fit`
+and `serves_on_cpu`) answers "fits" when the reclaim's own dry run (`reclaimable_vram_mb`) would
+make the room, as the planner's ceiling already did (#125). Test
+`a_model_fits_the_card_if_admission_would_free_an_idle_one_for_it` (red without the reclaim term).
+**Verified 13:36 UTC on a `--features cuda` build run as the live node, same shape, safety kit, 0
+driver events** (`~/swarmllm-129b/verify129b.sh`): the cold Coder-7B stayed **local in 11.0 s**
+(`sched_ms=0` — the local fast path took it), the loader freed both idle models (791 + 2963 MB) and
+admitted the 7B whole; warm 2.2 s for 120 tokens. Release binary, same shape: Italy, 46.5 s.
+
+**Residual (two parts):** (1) **a cold peer's load time is not priced** — `PeerResidency` bounds a
+peer's MEMORY, never its time, so a peer that must first load the model is predicted like a warm
+one (4.5 s predicted, 46 s taken). ServerlessLLM (OSDI '24) schedules on each server's estimated
+startup time from where its checkpoint sits and how fast that tier loads; the shape here is a
+measured load rate in `NodeCapability` (`#[serde(default)]`, measured from this node's own loads)
+times the model's bytes, added only for a peer not holding the model resident — verifiable only
+once peers run a release that advertises it. (2) A model that does NOT fit even after the reclaim
+is still priced at processor speed rather than as the loader's card/processor split (above).
 
 #### #192 — Nothing routes on the distance between two peers
 `P2` · routing · **PARTIAL** — 2026-09-02 · absorbs archive § "Speeding up inference BETWEEN nodes" ideas 3 (ring decode) and 4 (peer-to-peer RTT); plan: `docs/plans/regional_pipelines.md`
