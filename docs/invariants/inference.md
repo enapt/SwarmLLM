@@ -2654,7 +2654,22 @@ type CU_GRAPH_NODE_TYPE_MEMSET`, then `keep being rebuilt … positions=5 rest_s
 `launched=227 updated_in_place=212 instantiated=15 uncaptured=4`. Replies byte-identical to v0.3.225,
 3/3; no card fault, no driver event. Speed in THIS shape is unchanged within one sample (n-gram
 request 47.0 s → 40.2 s, its prompt pass on the processor node varying by as much; plain requests
-31.7 / 31.8 s → 31.7 / 31.5 s): here the churn was mild. The memset is FUTURE_WORK #221.
+31.7 / 31.8 s → 31.7 / 31.5 s): here the churn was mild.
+
+**The cause, found the same day (#221): a memset into memory the captured step allocates.** A
+probe (`graph_memset.cu`) captured `cudaMallocAsync` + `cudaMemsetAsync` + a kernel + free, then
+updated in place 39 times: refused 39/39 at the MEMSET node — at a CONSTANT size as much as a
+growing one — while the same memset into a buffer allocated outside the graph updated 39/39. Each
+re-capture gives its allocation a new address, and a memset node cannot be re-pointed to it (a
+kernel node can). The memset in a check was candle-flash-attn's `softmax_lse = alloc_zeros(…)`,
+which every several-position flash call makes; the one-position step (our own decode kernel) has
+none, which is why decode updated and checks did not. With `num_splits = 1` the forward kernel only
+writes `softmax_lse` and nothing reads it, so it is allocated uninitialized now (both paths;
+upstream flash-attn uses `torch::empty`). After (`verify221b.sh`, same rig): 0 refusals, 225 of 227
+launches updated in place, replies byte-identical, 3/3. **What a change must keep: no `alloc_zeros`
+(or any memset) on memory a captured step allocates** — a buffer the next kernel fully writes is
+`alloc` / `alloc_fully_overwritten`; one that truly needs zeros belongs before the capture. The rest
+rule stays as the backstop, and its refusal line names the node type.
 
 ## A header and its tensor table describe one upload — compared before a tensor is read (2026-10-03, #156)
 

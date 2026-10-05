@@ -48,7 +48,10 @@
 //! saves; after [`REBUILDS_BEFORE_RESTING`] among its last [`CHURN_WINDOW`]
 //! launches it rests — runs the ordinary way — for [`REST_STEPS`], then is
 //! tried again. The first refusal of each kind is logged with the driver's
-//! reason.
+//! reason. **A memset on memory the step allocates makes a graph impossible
+//! to update** — a re-capture moves the allocation and a memset node cannot
+//! follow it (a kernel node can) — so nothing inside a captured step may
+//! zero-fill a fresh buffer (flash-attn's `softmax_lse`, FUTURE_WORK #221).
 //!
 //! ON by default since 2026-09-30, after the gate ran on a `--features cuda`
 //! build (v0.3.199 shipped a stream change that every test and a cheaper build

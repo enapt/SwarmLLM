@@ -143,7 +143,18 @@ impl FlashAttn {
 
         let elem_count = out_shape.elem_count();
         let dst = unsafe { dev.alloc::<T>(elem_count)? };
-        let softmax_lse = dev.alloc_zeros::<f32>(b_sz * 128 * num_heads * seqlen_q)?;
+        // SwarmLLM patch: uninitialized, not zeroed (upstream flash-attn's
+        // `mha_fwd` allocates it with `torch::empty` too). With
+        // `num_splits = 1` (`flash_api.cu`) the forward kernel only WRITES
+        // the log-sum-exp (`flash_fwd_kernel.h`: `gLSE(row) = …`); its one
+        // reader is the split-combine kernel, which never runs, and nothing
+        // here returns or reads it after. The zero-fill was a memset into
+        // memory a captured step allocates, and the driver refuses to update
+        // a graph whose memset targets a new allocation — so every speculative
+        // check on a card was rebuilt at 10-100 ms instead of updated
+        // (FUTURE_WORK #221, `docs/invariants/inference.md` § "A graph pays
+        // only when it is updated").
+        let softmax_lse = unsafe { dev.alloc::<f32>(b_sz * 128 * num_heads * seqlen_q)? };
 
         let is_bf16 = if is_bf16 { 1 } else { 0 };
 
@@ -617,7 +628,9 @@ impl FlashAttnVarLen {
 
         let elem_count = out_shape.elem_count();
         let dst = unsafe { dev.alloc::<T>(elem_count)? };
-        let softmax_lse = dev.alloc_zeros::<f32>(num_heads * total_q)?;
+        // SwarmLLM patch: uninitialized — write-only with `num_splits = 1`,
+        // as in the fixed-length path above (FUTURE_WORK #221).
+        let softmax_lse = unsafe { dev.alloc::<f32>(num_heads * total_q)? };
 
         let is_bf16 = if is_bf16 { 1 } else { 0 };
 

@@ -635,24 +635,6 @@ single-row `mul_mat_vec_q4_K` per layer; an int8 tensor-core MMQ port (large). S
 GLM-4-9B disagrees with llama.cpp at a few positions on every path (tokenizer
 re-tokenisation is the lead) — pre-existing.
 
-#### #221 — A speculative check's CUDA graph cannot be updated in place: a memset in it changes size
-`P2` · perf-local · **OPEN** — 2026-10-05 · evidence: `docs/invariants/inference.md` § "A graph pays only when it is updated"
-
-The driver refuses the in-place update of a several-position check's graph with
-`CU_GRAPH_EXEC_UPDATE_ERROR` at a node of type `CU_GRAPH_NODE_TYPE_MEMSET` (first logged
-2026-10-05 by the new `why_not_updated` line: Qwen2.5-Coder-7B layers 0-14 on the card, a
-5-position n-gram check). CUDA allows a 1-D memset's size to change on update only within the
-work resources allocated at instantiation, and a 2-D memset's not at all — so some zero-fill
-inside the check grows with the conversation. Since 2026-10-05 such a shape RESTS
-(`cuda_graph::REBUILDS_BEFORE_RESTING`), which caps the cost (the .225 gate's split rig had rebuilt
-105 of 135 launches at 65-108 ms each) but also gives up the graph's ~3 ms a step for those checks.
-Find the node: dump a refused capture with `cuGraphDebugDotPrint` (a debug env switch in
-`cuda_graph::Session::end_and_launch`), then make that memset's size fixed or move it before the
-capture. Not it, by reading: flash-attn's `softmax_lse` (sized by query positions), the KV cache's
-zero-length `zeros` (never grows), the quantized matmul's q8_1 buffers (no longer zeroed). The
-one-position step churned too on a Qwen2.5-14B segment served for peers (177 of 183, live node
-2026-10-01) — check whether it is the same node.
-
 #### #137 — A model split between card and processor reads its processor layers at ~17 GB/s, a third of what the memory can do
 `P2` · perf-local · **OPEN** — 2026-09-27 · history: archive row #137; plan: `docs/plans/faster_than_local.md` § 3.3
 
@@ -1345,6 +1327,21 @@ archive under the named heading. Reopen one only with the evidence its line name
 Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 19-28 were
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
+
+**Closed 2026-10-05, unreleased** (#221) (`docs/invariants/inference.md` § "A graph pays only when it is updated")
+- #221 — a speculative check's CUDA graph could never be updated in place: candle-flash-attn
+  zero-filled its `softmax_lse` scratch with `alloc_zeros` inside the captured step, and the
+  driver refuses to update ANY graph whose memset targets memory the graph allocates — 39/39
+  refused even at a constant size, 39/39 updated when the memset's target was allocated outside
+  (probe `graph_memset.cu`, 2026-10-05). So every several-position check on a card (split
+  speculation, n-gram over a split) was rebuilt at 10-100 ms instead of updated — the .225 gate's
+  split rig rebuilt 105 of 135 launches. With `num_splits = 1` the forward kernel only writes
+  `softmax_lse` and nothing reads it, so it is now allocated uninitialized (both paths in
+  `vendor/candle-flash-attn/src/lib.rs`; upstream flash-attn uses `torch::empty`). Verified on a
+  `--features cuda` build (`~/swarmllm-gpu-1005/verify221b.sh`, n-gram split rig, one CUDA
+  process): before, `positions=5 … CU_GRAPH_EXEC_UPDATE_ERROR at a node of type
+  CU_GRAPH_NODE_TYPE_MEMSET` then rested; after, 225 of 227 launches updated in place, 0 rebuilt;
+  replies byte-identical to v0.3.225 and to the build before, 3/3.
 
 **Closed 2026-10-04, released in v0.3.225 (2026-10-05)** (#150, #153, #214, #218, #219, #165, #189) (`docs/invariants/scheduling.md` §
 "A holder's refusal is reported as what it was")
