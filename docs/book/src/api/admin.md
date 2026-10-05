@@ -1,6 +1,6 @@
 # Admin API
 
-Admin endpoints are CORS-protected. Most read-only endpoints don't require Bearer auth; write operations do.
+Every `/api/admin/*` endpoint needs `Authorization: Bearer <key>` — the key is the `api_key` file in the data directory — reads included. The one exception is the WebSocket upgrade `/api/admin/ws`, which takes a single-use ticket from `POST /api/admin/ws-ticket` instead. Admin endpoints are also CORS-protected.
 
 ## Node Management
 
@@ -56,12 +56,18 @@ Response:
       "coverage_gaps": [],
       "replication_target": { "tinyllama-1.1b-q4-k-m": 2 }
     }
-  }
+  },
+  "recent_routes": [
+    { "model": "qwen2.5-coder-7b-instruct-q4-k-m", "regions": ["TH", "IT"], "ok": true }
+  ]
 }
 ```
 
+`recent_routes` lists this node's recent requests that left its region: the
+regions each one crossed, starting here, and whether it succeeded.
+
 ### GET/PUT /api/admin/config
-Read or update daemon configuration. PUT requires Bearer auth.
+Read or update daemon configuration. Both need the API key.
 
 ### POST /api/admin/config/reload
 Re-read `config.toml` and apply it to the running node. Bearer auth required.
@@ -176,8 +182,8 @@ Resource schedule management.
 
 ## HuggingFace Integration
 
-### GET /api/admin/hf/search?query=...
-Search HuggingFace for GGUF models. Returns results grouped by repository with quantization variants, recommended variant, and VRAM fitness indicator.
+### GET /api/admin/hf/search?q=...
+Search HuggingFace for GGUF models. The parameter is `q` — `query` is ignored, and a missing or empty `q` returns `[]`. Optional `tasks=chat,code,vision,multilingual,reasoning` narrows the results. Returns results grouped by repository with quantization variants, recommended variant, and VRAM fitness indicator.
 
 Response format:
 ```json
@@ -291,7 +297,7 @@ Response:
 Status values: `up`, `rate_limited`, `overloaded`, `timeout`, `unreachable`, `error_<code>`.
 
 ### POST /api/admin/provider-model-status
-Probe availability and latency for a list of specific cloud model IDs (up to 20 per request). Sends a `max_tokens=1` request to each model's provider endpoint. Anthropic models are skipped (no cloud proxy probing). Bearer auth not required.
+Probe availability and latency for a list of specific cloud model IDs (up to 20 per request). Sends a `max_tokens=1` request to each model's provider endpoint. Anthropic models are skipped (no cloud proxy probing). Needs the API key, like every admin endpoint.
 
 Request body: `{ "models": ["gpt-5.4", "claude-sonnet-5", "deepseek-v4-flash"] }`
 

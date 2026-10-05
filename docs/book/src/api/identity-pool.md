@@ -59,7 +59,7 @@ Current pool membership state. Returns `in_pool`, member list with device names,
 Create a new device pool. Body: `{"name": "My Devices"}`
 
 #### POST /api/pool/generate-code
-Generate an invite code (owner only). Returns: `{"code": "A3F7K2M9"}`. Max 5 active codes.
+Generate an invite code (owner only). Returns `{"status": "ok", "code": "swarmpool://…"}` — the whole link the other device pastes, not the short token inside it. Max 5 active codes.
 
 #### POST /api/pool/join
 Join a pool using an invite code. Body: `{"code": "A3F7K2M9"}`

@@ -13,7 +13,7 @@ integration, and conversation chaining via `previous_response_id`.
 | `POST` | `/v1/responses` | Create a response (streaming or not, foreground or background) |
 | `GET` | `/v1/responses/{id}` | Fetch a stored response. With `?stream=true&starting_after=N`, resume the SSE stream from event `N` (V5). |
 | `DELETE` | `/v1/responses/{id}` | Delete a stored response. |
-| `POST` | `/v1/responses/{id}/cancel` | Cancel a background response (M9). The cancel flag is checked at completion time; per-token interruption is deferred. |
+| `POST` | `/v1/responses/{id}/cancel` | Cancel a background response (M9). The generation stops: a reply split across computers checks the flag at every decode step, and a model running on this computer has its worker told to stop. |
 | `GET` | `/v1/responses/{id}/input_items` | Paginated input-item listing (V4) for chained `previous_response_id` flows. |
 | `GET` | `/api/admin/responses` | Admin: list all stored response records (used by the dashboard). |
 
@@ -93,8 +93,8 @@ lines). Caps:
 | `truncation`, `service_tier` | ≤64 chars each |
 | `metadata` | ≤64 KB total (keys + values) |
 
-Stop / temperature / top_p / max_tokens are clamped or validated at the
-sampling-params layer.
+Stop / temperature / top_p / max_tokens are validated as on
+`/v1/chat/completions`: a value out of range is refused (400), never clamped.
 
 ## Dashboard
 
@@ -106,9 +106,6 @@ actions.
 ## Deferred
 
 - `POST /v1/responses/compact` (V9) — no concrete caller has asked for it.
-- Token-level cancel for background inference — current cancel flips a
-  flag checked at completion time; per-token interruption needs hooks in
-  `chat_completions` that are out of v2 plan scope.
 - Server-side `conversation` resource CRUD — OpenAI's `conversation`
   parameter forwards through cloud proxy verbatim today; a local
   conversation type with its own endpoints is a separate design.

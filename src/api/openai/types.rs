@@ -49,9 +49,11 @@ pub struct ChatCompletionRequest {
     /// Number of top log probabilities to return per token (0-20). Requires logprobs=true.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub top_logprobs: Option<u32>,
-    /// Structured output format. Supports:
-    /// - `{"type": "json_object"}` — model outputs valid JSON
-    /// - `{"type": "json_schema", "json_schema": {"name": "...", "schema": {...}}}` — constrained to schema
+    /// Structured output format. For a model run here or in the swarm it is an
+    /// INSTRUCTION, not a constraint: `to_internal_messages` prepends a system
+    /// message asking for JSON (and the schema), and nothing checks the reply.
+    /// - `{"type": "json_object"}` — asks for JSON only
+    /// - `{"type": "json_schema", "json_schema": {"name": "...", "schema": {...}}}` — asks for that schema
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_format: Option<ResponseFormat>,
     /// Optional session ID for multi-turn KV-cache reuse.

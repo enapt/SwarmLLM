@@ -15,10 +15,14 @@ SwarmLLM exposes a Prometheus-compatible metrics endpoint at `GET /metrics`. It 
 | `swarmllm_network_bytes_total{direction="in"\|"out"}` | counter | Bytes sent and received over the peer network. Counted at the transport, so it covers every protocol — gossip, DHT maintenance, shard transfers, inference — not only what this node's own code writes. **Omitted entirely when nothing is counting** rather than reported as zero: a flat line at 0 would be read as "no traffic" when it means "not measured" |
 | `swarmllm_inference_latency_seconds` | histogram | Inference request latency |
 | `swarmllm_inference_requests_by_route_total{route,outcome}` | counter | Completed requests by route and outcome |
+| `swarmllm_empty_replies_total` | counter | Replies the model generated that finalisation removed entirely (control tokens, or a stop sequence matching at once) — delivered to the client as an empty success |
+| `swarmllm_shard_bytes_total{direction="in"\|"out"}` | counter | Bytes of model parts served to peers and fetched from them — the only traffic `resources.max_bandwidth_mbps` throttles |
+| `swarmllm_gossip_bytes_total{topic,direction}` | counter | Gossip bytes by topic and direction (message length only; framing and encryption are in `swarmllm_network_bytes_total`) |
+| `swarmllm_credits_earned_total`, `swarmllm_credits_reserved_total`, `swarmllm_credits_returned_total` | counter | The dormant credit ledger's lifetime figures — they gate nothing |
 
 `route` is one of `local`, `split`, `distributed`, `relayed`, `cloud`; `outcome`
-is `ok`, `error` or `cancelled`. Both are closed sets, so this metric is 20
-series regardless of how large the swarm grows. **Per-peer, per-model and
+is `ok`, `error`, `cancelled` or `pending`. Both are closed sets, so this metric
+is 20 series regardless of how large the swarm grows. **Per-peer, per-model and
 per-shard breakdowns are deliberately not exported here** — that label set grows
 with the swarm and would eventually break the scrape. Fetch them from
 `GET /api/admin/performance` instead, which is served on request and retains

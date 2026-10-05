@@ -40,6 +40,12 @@ curl http://localhost:8800/v1/chat/completions \
 | `logprobs` | boolean | no | `false` | Log probabilities per output token. **Cloud models only** — a request for these against a model running locally is refused with a 400 explaining why, rather than answered without them |
 | `top_logprobs` | integer | no | — | Number of top log probabilities per token (0-20, requires `logprobs: true`). Cloud models only, as above |
 | `session_id` | string | no | — | Reuse KV-cache from a previous request |
+| `max_completion_tokens` | integer | no | — | Same as `max_tokens` (the spelling current OpenAI SDKs send) |
+| `n` | integer | no | `1` | Only `1`: one completion per request; a larger value is refused (400) |
+| `logit_bias` | object | no | — | Not supported; a non-empty value is refused (400) rather than ignored |
+| `response_format` | object | no | — | `{"type": "json_object"}` or `{"type": "json_schema", …}`. For a model on this node or in the swarm it is an instruction added to the prompt, not a constraint: the reply is not guaranteed to be valid JSON or to match the schema |
+| `stream_options` | object | no | — | `{"include_usage": true}` adds a last chunk with `usage` and empty `choices` |
+| `seed` | integer | no | — | Forwarded to cloud providers; not used by local and swarm models |
 | `lora_adapter` | string | no | — | The id of an adapter registered on this computer (`POST /api/admin/adapters`). The reply is computed on this computer alone, so it must hold the whole model; a 400 says why when it cannot be used (not registered, model not whole here, or made for a different model) |
 
 ### Response (non-streaming)

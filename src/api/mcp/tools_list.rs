@@ -124,7 +124,7 @@ pub(super) fn handle_tools_list(id: Option<Value>) -> JsonRpcResponse {
                             },
                             "models": {
                                 "type": "array",
-                                "description": "Array of model IDs to query. If omitted, uses all available models (local + cloud).",
+                                "description": "Array of model IDs to query. If omitted, uses up to max_models models on this node or the swarm; paid cloud models are never chosen automatically, so name them here to use them.",
                                 "items": { "type": "string" }
                             },
                             "max_models": {

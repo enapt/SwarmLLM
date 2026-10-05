@@ -19,6 +19,8 @@ ANTHROPIC_BASE_URL=http://localhost:8800 ANTHROPIC_AUTH_TOKEN="$SWARMLLM_KEY" \
 | `ANTHROPIC_AUTH_TOKEN` | Your node's API key (from Settings or `/api/admin/api-key`) |
 | `ANTHROPIC_MODEL` | Default model to use |
 
+The node accepts its key as `Authorization: Bearer <key>` or as `x-api-key: <key>`, which is what the Anthropic SDKs send.
+
 ## POST /v1/messages
 
 ### Request Body
@@ -32,11 +34,12 @@ ANTHROPIC_BASE_URL=http://localhost:8800 ANTHROPIC_AUTH_TOKEN="$SWARMLLM_KEY" \
 | `stream` | boolean | no | Enable SSE streaming |
 | `temperature` | float | no | Sampling temperature |
 | `top_p` | float | no | Nucleus sampling |
+| `top_k` | integer | no | Top-k sampling (used locally and forwarded to cloud providers) |
 | `stop_sequences` | array | no | Stop sequences, 1–256 chars each, max 16 |
 | `tools` | array | no | Tool definitions for function calling |
 | `tool_choice` | object | no | Tool selection strategy |
-| `metadata` | object | no | Request metadata |
-| `thinking` | object | no | Extended thinking configuration |
+| `metadata` | object | no | Forwarded to cloud providers; not used by local and swarm models |
+| `thinking` | object | no | Forwarded to Claude / Anthropic only; a local or swarm model does not use it |
 
 ### Content Block Types
 
@@ -83,24 +86,21 @@ Messages can contain these content block types:
 
 ## Model Routing
 
-Requests are routed based on the model name:
+A model this node or the swarm holds is always used first. Only a name that is
+neither goes to a cloud provider, chosen by its name:
 
 | Model Pattern | Route | Details |
 |---|---|---|
-| Local GGUF model | Local inference | Tool calls and thinking blocks converted to text |
+| A model on this node or in the swarm | Local or swarm inference | Tool calls the model makes come back as `tool_use` blocks; earlier `tool_use`, `tool_result` and `thinking` blocks in the conversation are given to the model as text |
 | `claude-*` | Anthropic API | Full pass-through (all fields preserved including tools and thinking) |
-| `gpt-*`, `o1-*`, `o3-*`, `o4-*` | OpenAI | Anthropic→OpenAI format translation |
-| `deepseek-*` | DeepSeek | Anthropic→OpenAI format translation |
-| `mistral-*`, `codestral-*`, `pixtral-*` | Mistral | Anthropic→OpenAI format translation |
-| `llama-*`, `groq-*` | Groq | Anthropic→OpenAI format translation |
-| `nim-*` | NVIDIA NIM | Anthropic→OpenAI format translation |
-| `cerebras-*` | Cerebras | Anthropic→OpenAI format translation |
-| `samba-*` | SambaNova | Anthropic→OpenAI format translation |
-| `fireworks-*`, `accounts/fireworks/*` | Fireworks AI | Anthropic→OpenAI format translation |
-| `together-*` | Together AI | Anthropic→OpenAI format translation |
-| `deepinfra-*` | DeepInfra | Anthropic→OpenAI format translation |
-| `moonshot-*`, `kimi-*` | Moonshot/Kimi | Anthropic→OpenAI format translation |
-| Network model | Distributed inference | Routed through swarm P2P network |
+| `gpt-*`, `o1-*`, `o3-*`, `o4-*`, `o1`, `o3`, `o4` | OpenAI | Anthropic→OpenAI format translation |
+| `deepseek*` | DeepSeek | Anthropic→OpenAI format translation |
+| `mistral*`, `magistral*`, `ministral*`, `codestral*`, `pixtral*` | Mistral | Anthropic→OpenAI format translation |
+| `nvidia/*`, `nim/*`, a name containing `nemotron`; with NIM set up, any `org/model` name | NVIDIA NIM | Anthropic→OpenAI format translation |
+| `llama-*`, `gemma*` (only when Groq is set up) | Groq | Anthropic→OpenAI format translation |
+| `moonshot-*`, `kimi*`, `k2*` | Moonshot/Kimi | Anthropic→OpenAI format translation |
+| `accounts/fireworks/*` | Fireworks AI | Anthropic→OpenAI format translation |
+| `provider:model`, e.g. `cerebras:llama3.1-8b` | That provider | The only way to reach Cerebras, SambaNova, Together, DeepInfra and custom providers; it also overrides the name rules above |
 
 All 12 cloud providers are supported. Configure API keys via the dashboard Settings page or by placing a `.env` file in the data directory (`~/.local/share/swarmllm/.env`) with standard variable names (e.g., `OPENAI_API_KEY`, `DEEPSEEK_API_KEY`).
 

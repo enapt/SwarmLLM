@@ -76,7 +76,7 @@ Send the same prompt to multiple models concurrently and get side-by-side result
 
 ### `research`
 
-Fan out a research question to multiple models in parallel. Designed for knowledge gathering — offload questions to cheap/fast models to get diverse perspectives without using expensive model tokens. If `models` is omitted, auto-selects available models (local first, then cloud).
+Fan out a research question to multiple models in parallel. Designed for knowledge gathering — offload questions to cheap/fast models to get diverse perspectives without using expensive model tokens. If `models` is omitted, it picks up to `max_models` (default 5) models on this node or the swarm. It never picks a paid cloud model by itself — name cloud models in `models` to use them.
 
 ```json
 {
@@ -191,8 +191,8 @@ Offload a task to the most appropriate model based on a tier preference. Tiers: 
 }
 ```
 
-**Tiers:**
-- `fast` — lowest-latency local model (default)
+**Tiers** (`tier` is required):
+- `fast` — lowest-latency local model
 - `cheap` — smallest/free model available
 - `smart` — most capable model (may use cloud provider)
 
@@ -205,7 +205,7 @@ Get detailed information about the SwarmLLM node: loaded models, connected peers
   "jsonrpc": "2.0",
   "method": "tools/call",
   "params": { "name": "node_info", "arguments": {} },
-  "id": 6
+  "id": 7
 }
 ```
 
@@ -229,7 +229,7 @@ Currently connected computers, with latency, trust, load and shard information.
   "jsonrpc": "2.0",
   "method": "resources/read",
   "params": { "uri": "swarmllm://status" },
-  "id": 7
+  "id": 8
 }
 ```
 

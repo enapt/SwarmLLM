@@ -2325,7 +2325,7 @@ message rather than the chat page.
 - `POST   /v1/responses/{id}/cancel` — Cancel a background response
 - `GET    /v1/responses/{id}/input_items` — Paginated list of the original input items (synthetic ids `item_N`)
 - `POST   /v1/messages` — Anthropic Messages API (full Claude Code compatibility — tools, tool_choice, thinking, cache_control, metadata)
-- `POST   /v1/embeddings` — Text embeddings
+- `POST   /v1/embeddings` — always `501 Not Implemented`: this build serves no embedding model (inference runs in worker subprocesses). Kept so an SDK gets a typed error; point embeddings at a cloud provider
 - `GET    /v1/models` — List available models. Each entry carries `max_model_len`
   (the effective context this node will serve for that model — prompt plus reply,
   after the shipped 8192 default and any `inference.max_seq_len_override`), which
@@ -2409,7 +2409,7 @@ support is three pieces, shared by the OpenAI and Anthropic layers:
    conversation; models do not do that (llama-3.2-3b emits `call_1`, `call_2`,
    `call_3` for every tool-using reply it gives).
 
-### MCP Server (Protocol v2025-11-05)
+### MCP Server (Protocol v2025-11-25)
 - `POST /mcp` — JSON-RPC 2.0 MCP endpoint for AI agent frameworks (Claude Code, VS Code Copilot, Cursor, etc.)
 - `GET /mcp` → 405 (this server never opens a server-initiated stream); `DELETE /mcp` → 200 (requests are
   stateless, so ending a session has nothing to release)
