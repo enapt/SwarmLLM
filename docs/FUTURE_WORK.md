@@ -36,8 +36,8 @@ residual).
 Re-ranked 2026-10-02 after the verification, and 2026-10-03 when #156, #158 and #213 closed,
 then again after v0.3.223 (#157 and #164 closed, #160 raised to P1 on the swarm reading), and
 after v0.3.224 (#160, #215 and #216 closed; #217 and #218 opened from the swarm reading and the inference test after it). #150, #153,
-#165, #189, #214, #218 and #219 closed in v0.3.225 (released 2026-10-05); #129's second half is on main after its field
-check on v0.3.225 failed.
+#165, #189, #214, #218 and #219 closed in v0.3.225 (released 2026-10-05); #221 closed and #129's second half shipped in
+v0.3.226 (released 2026-10-05), #220 opened from the .225 gate's unrecorded driver resets.
 `docs/plans/` holds the multi-step designs; the entries point at them.
 
 **P0 — wrong answers, silently**
@@ -419,7 +419,7 @@ answer `serves_on_cpu`, which is "processor" for any model that does not fit the
 layers, `local_route_available=false`. (On 10-04 the same request asked the card and got 17
 — the card alone — which is the case the first fix covered.)
 
-**Fixed on main 2026-10-05 (not yet released):** the planner asks
+**Fixed in v0.3.226 (released 2026-10-05):** the planner asks
 `ModelProcessPool::max_hostable_layers_for_planning` and `held_layer_ranges_for_planning`,
 which choose the device the LOADER would use (`planning_on_card`). Test
 `the_planner_weighs_a_local_model_the_loader_would_split_on_the_card` goes through
@@ -429,7 +429,10 @@ TinyLlama on the card, a cold Mistral-7B answered `route=local segments=1` in 6.
 included (v0.3.225: Italy, 47 s); admission put it on the card whole beside TinyLlama
 (`committed_mb=1044 estimated_mb=5517 budget_mb=6561 headroom_mb=0` — it fitted with nothing
 to spare; that build's daemon no longer holds the 137 MiB context, and this one run cannot say
-whether that is what made the difference). **Gate item for the next release, on the CUDA artifact:** the same check.
+whether that is what made the difference). The .226 gate's 12q ran it on the artifact in an
+isolated node: `route=local`, admitted whole (headroom 24 MB) — but .225 also runs locally with no
+peers to send it to, so only a node WITH peers can tell the two apart; re-read a cold 7-8B's route
+on the live node after .226 spreads.
 
 **Residual:** the local candidate is still priced at its processor speed rather than as a
 hybrid — conservative. A remote hop's network cost is charged per segment rather than per
@@ -1338,7 +1341,7 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-05, unreleased** (#221) (`docs/invariants/inference.md` § "A graph pays only when it is updated")
+**Closed 2026-10-05, released in v0.3.226 (2026-10-05)** (#221) (`docs/invariants/inference.md` § "A graph pays only when it is updated")
 - #221 — a speculative check's CUDA graph could never be updated in place: candle-flash-attn
   zero-filled its `softmax_lse` scratch with `alloc_zeros` inside the captured step, and the
   driver refuses to update ANY graph whose memset targets memory the graph allocates — 39/39
