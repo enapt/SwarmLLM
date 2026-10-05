@@ -1199,8 +1199,7 @@ pub fn error_hint_with_key(err: &SwarmError) -> Option<(&'static str, &'static s
             "The route to run this model couldn't be put together. If a peer dropped out \
              this will fix itself — try once more. If it fails the same way again, the \
              model is missing a part: download it from the model's card on the \
-             Dashboard (or run `swarmllm get-model <name> --all`), or pick a model \
-             marked as ready in the dashboard.",
+             Dashboard, or pick a model marked as ready in the dashboard.",
         )),
         // Unlike `PipelineError`, this one is KNOWN to be transient — a peer
         // took the work and went silent — so the hint can promise the retry
@@ -1247,15 +1246,14 @@ pub fn error_hint_with_key(err: &SwarmError) -> Option<(&'static str, &'static s
              work if it was a brief hiccup — but if it keeps failing, this model \
              is being held by too few machines right now. Pick a model the \
              dashboard marks as ready, or download this one's parts from its card \
-             on the Dashboard (or run `swarmllm get-model <name> --all`) so it no \
-             longer depends on them.",
+             on the Dashboard so it no longer depends on them.",
         )),
         SwarmError::ModelIncompleteInSwarm { .. } => Some((
             "model_incomplete_in_swarm",
             "Part of this model isn't on any machine that's reachable right now. If a peer \
              just dropped out this may fix itself shortly. Otherwise download its missing \
-             parts from the model's card on the Dashboard (or run \
-             `swarmllm get-model <name> --all`), or pick a model the dashboard marks as ready.",
+             parts from the model's card on the Dashboard, or pick a model the dashboard \
+             marks as ready.",
         )),
         // Retrying cannot help, and the hint must say so — the opposite of
         // `holders_declined` below, which is why these are two variants.
@@ -1277,7 +1275,7 @@ pub fn error_hint_with_key(err: &SwarmError) -> Option<(&'static str, &'static s
             "“Start and finish on this computer” is on for this model, and that needs \
              the model's first part stored here — which it isn't. Either click “Get the \
              missing parts” on the model's card in the Dashboard (or run \
-             `swarmllm get-model <name>`), or turn the setting off there to let the swarm \
+             `swarmllm privacy <name>`), or turn the setting off there to let the swarm \
              run it. Retrying as-is won't help.",
         )),
         // The sibling, naming the other end. Same shape and same two ways out,
@@ -1288,7 +1286,7 @@ pub fn error_hint_with_key(err: &SwarmError) -> Option<(&'static str, &'static s
             "“Start and finish on this computer” is on for this model, and that needs \
              the model's last part stored here — which it isn't. Either click “Get the \
              missing parts” on the model's card in the Dashboard (or run \
-             `swarmllm get-model <name>`), or turn the setting off there to let the swarm \
+             `swarmllm privacy <name>`), or turn the setting off there to let the swarm \
              run it. Retrying as-is won't help.",
         )),
         // The only refusal that had no hint, and its message is the least
@@ -1304,8 +1302,7 @@ pub fn error_hint_with_key(err: &SwarmError) -> Option<(&'static str, &'static s
             "private_mode_unavailable",
             "Private mode keeps your prompts on your own devices, and none of them has \
              all of this model. Either download it here from the model's card on the \
-             Dashboard (or run `swarmllm get-model <name>`), or add the device that has \
-             it to your pool. You can also turn private mode off on the My Devices page \
+             Dashboard, or add the device that has it to your pool. You can also turn private mode off on the My Devices page \
              — but then your prompts can be sent to other people's machines to run.",
         )),
         SwarmError::InferenceTimeout(_) => Some((
@@ -1987,7 +1984,7 @@ mod tests {
             "a genuinely transient case must still be offered a retry: {hint}"
         );
         assert!(
-            lower.contains("get-model") || lower.contains("dashboard"),
+            lower.contains("dashboard"),
             "and a way out that does not depend on the same machines coming \
              back, for when retrying does not help: {hint}"
         );
@@ -2046,7 +2043,7 @@ mod tests {
         .expect("private mode refusal needs a hint like every other refusal");
         let lower = hint.to_lowercase();
         assert!(
-            lower.contains("get-model") || lower.contains("pool"),
+            lower.contains("pool"),
             "must name a way to keep private mode on, got {hint:?}"
         );
         assert!(

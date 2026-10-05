@@ -11879,3 +11879,179 @@ fn nvidia_smi_is_asked_only_through_the_bounded_helper() {
          driver does: {offenders:?}"
     );
 }
+
+/// The `{name}` placeholders in a translation string.
+fn placeholder_names(s: &str) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    let mut rest = s;
+    while let Some(open) = rest.find('{') {
+        rest = &rest[open + 1..];
+        let Some(close) = rest.find('}') else { break };
+        let name = &rest[..close];
+        if name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
+            out.insert(name.to_string());
+        }
+        rest = &rest[close + 1..];
+    }
+    out
+}
+
+/// Placeholders a locale uses that English does not, per key. The code fills in
+/// only the names English uses, so any other is shown to the reader as typed:
+/// nl and id had translated `{node}` into `{computer}` / `{komputer}` in five
+/// activity and route strings (2026-10-05). Leaving one OUT is allowed — a
+/// singular can say "one event" with no `{count}`.
+fn placeholders_english_does_not_supply(
+    english: &serde_json::Map<String, serde_json::Value>,
+    locale: &serde_json::Map<String, serde_json::Value>,
+) -> Vec<(String, Vec<String>)> {
+    let mut out = Vec::new();
+    for (key, value) in locale {
+        let (Some(text), Some(en)) = (value.as_str(), english.get(key).and_then(|v| v.as_str()))
+        else {
+            continue;
+        };
+        let extra: Vec<String> = placeholder_names(text)
+            .difference(&placeholder_names(en))
+            .cloned()
+            .collect();
+        if !extra.is_empty() {
+            out.push((key.clone(), extra));
+        }
+    }
+    out
+}
+
+fn locale_map(path: &PathBuf) -> serde_json::Map<String, serde_json::Value> {
+    let raw = std::fs::read_to_string(path)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+    serde_json::from_str(&raw).unwrap_or_else(|e| panic!("{} is not JSON: {e}", path.display()))
+}
+
+#[test]
+fn every_locale_uses_only_the_placeholders_english_supplies() {
+    let english = locale_map(&repo_root().join("frontend/i18n/en.json"));
+    let mut offenders = Vec::new();
+    for path in locale_files() {
+        for (key, extra) in placeholders_english_does_not_supply(&english, &locale_map(&path)) {
+            offenders.push(format!(
+                "{} {key}: {extra:?}",
+                path.file_name().unwrap().to_string_lossy()
+            ));
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "these translations use placeholders the code never fills in, so the reader sees \
+         them raw — keep English's `{{name}}` exactly: {offenders:#?}"
+    );
+}
+
+#[test]
+fn the_placeholder_check_catches_a_translated_placeholder_name() {
+    let english: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_str(r#"{"a": "Peer: {node}", "b": "{count} events"}"#).unwrap();
+    let planted: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_str(r#"{"a": "Computer: {computer}", "b": "one event"}"#).unwrap();
+    let found = placeholders_english_does_not_supply(&english, &planted);
+    assert_eq!(found, vec![("a".to_string(), vec!["computer".to_string()])]);
+}
+
+/// The CLI's subcommands as a user types them, from `enum Commands` in
+/// `src/main.rs` (clap derives kebab-case names from the variants).
+fn cli_subcommands() -> BTreeSet<String> {
+    let src = std::fs::read_to_string(repo_root().join("src/main.rs")).expect("read main.rs");
+    let start = src
+        .find("enum Commands {")
+        .expect("main.rs defines `enum Commands`");
+    let body = &src[start..];
+    let body = &body[..body
+        .find("\n}\n")
+        .expect("`enum Commands` closes in column 0")];
+    let mut out = BTreeSet::new();
+    for line in body.lines().skip(1) {
+        // A variant sits at exactly one level of indentation.
+        let Some(t) = line.strip_prefix("    ") else {
+            continue;
+        };
+        if !t.starts_with(|c: char| c.is_ascii_uppercase()) {
+            continue;
+        }
+        let name: String = t
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric())
+            .collect();
+        let mut kebab = String::new();
+        for (i, c) in name.chars().enumerate() {
+            if c.is_ascii_uppercase() && i > 0 {
+                kebab.push('-');
+            }
+            kebab.push(c.to_ascii_lowercase());
+        }
+        out.insert(kebab);
+    }
+    out
+}
+
+/// Every `` `swarmllm <command> …` `` in `text` that would not work as written:
+/// a command that does not exist, or `get-model` given anything but a tier.
+/// Six error hints told the reader to run `swarmllm get-model <name> --all` to
+/// fetch a model's missing parts — `get-model` takes a reference TIER (smoke,
+/// standard, stress; `model::reference`) and answered "Unknown tier"
+/// (2026-10-05).
+fn unusable_cli_mentions(text: &str, commands: &BTreeSet<String>) -> Vec<String> {
+    let mut out = Vec::new();
+    for chunk in text.split("`swarmllm ").skip(1) {
+        let Some(end) = chunk.find('`') else { continue };
+        let mut words = chunk[..end].split_whitespace();
+        let Some(command) = words.next() else {
+            continue;
+        };
+        if !commands.contains(command) {
+            out.push(format!("`swarmllm {}` — no such command", &chunk[..end]));
+        } else if command == "get-model"
+            && words
+                .next()
+                .is_some_and(|a| !matches!(a, "smoke" | "standard" | "stress" | "<tier>"))
+        {
+            out.push(format!(
+                "`swarmllm {}` — get-model takes a tier",
+                &chunk[..end]
+            ));
+        }
+    }
+    out
+}
+
+#[test]
+fn a_hint_tells_the_reader_to_run_only_a_command_that_works() {
+    let commands = cli_subcommands();
+    assert!(
+        commands.contains("get-model") && commands.contains("privacy") && commands.len() > 8,
+        "the subcommand reader no longer sees `enum Commands`: {commands:?}"
+    );
+    let mut sources: Vec<PathBuf> = locale_files();
+    sources.push(repo_root().join("src/error.rs"));
+    let mut offenders = Vec::new();
+    for path in sources {
+        let text = std::fs::read_to_string(&path).expect("readable");
+        for bad in unusable_cli_mentions(&text, &commands) {
+            offenders.push(format!("{}: {bad}", path.display()));
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "a hint tells the reader to run a command that does not work as written: {offenders:#?}"
+    );
+}
+
+#[test]
+fn the_cli_mention_check_catches_a_model_name_given_to_get_model() {
+    let commands = cli_subcommands();
+    let planted = "Download it (or run `swarmllm get-model <name> --all`), or `swarmllm fetch x`. \
+                   `swarmllm privacy <name>` and `swarmllm get-model standard` are fine.";
+    let found = unusable_cli_mentions(planted, &commands);
+    assert_eq!(found.len(), 2, "{found:?}");
+}
