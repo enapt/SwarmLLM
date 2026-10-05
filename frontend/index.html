@@ -976,7 +976,7 @@
       <!-- Chat view -->
       <div class="view" id="view-chat" style="display:none">
         <div class="mobile-model-bar">
-          <select id="mobile-model-select" data-i18n-title="nav.active_model" title="Active model" aria-label="Active model"><option value="" data-i18n="models.select_model">Select model...</option></select>
+          <select id="mobile-model-select" data-i18n-title="nav.active_model" title="Active model" data-i18n-aria-label="nav.active_model" aria-label="Active model"><option value="" data-i18n="models.select_model">Select model...</option></select>
           <button class="btn btn-sm" id="btn-mobile-browse" data-i18n-title="nav.find_models_aria" data-i18n-aria-label="nav.find_models_aria" title="Browse models" aria-label="Find models">+</button>
         </div>
         <div class="chat-container">
@@ -1362,7 +1362,7 @@
                      than in the chrome of every page. The dot alone said
                      nothing without a hover, which is the one thing NN/g tells
                      you not to do with an icon. -->
-                <button class="btn btn-ghost btn-sm" id="btn-auto-manage-status" data-i18n-title="nav.auto_manage_idle_ok" title="Auto-manage: idle" aria-label="Auto-manage status">
+                <button class="btn btn-ghost btn-sm" id="btn-auto-manage-status" data-i18n-title="nav.auto_manage_idle_ok" title="Auto-manage: idle" data-i18n-aria-label="nav.auto_manage_label" aria-label="Auto-manage">
                   <!-- No class here on purpose: render() assigns
                        `dot.className = state`, which replaces the list. The
                        dot's base styling is on the ID selector for that
@@ -1742,7 +1742,7 @@
                 <input type="text" id="browse-search-input" class="browse-search-input"
                   placeholder="Search for a model by name…"
                   data-i18n-placeholder="browse.search_placeholder">
-                <label class="browse-fit-toggle" title="Hide models too large for your current swarm">
+                <label class="browse-fit-toggle">
                   <input type="checkbox" id="browse-fit-only" checked>
                   <span data-i18n="browse.fit_only">Only show what my swarm can run</span>
                 </label>
