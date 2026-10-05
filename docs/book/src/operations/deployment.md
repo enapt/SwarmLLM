@@ -270,7 +270,7 @@ Note: the proxy only carries HTTP. P2P must still be reachable directly: TCP 881
 
 To use cloud model fallback, configure provider API keys via:
 
-1. **Dashboard:** Settings page in the web UI
+1. **Dashboard:** click the gear icon (Settings) and open **Cloud Providers**
 2. **Environment file:** Place a `.env` file in the data directory with standard variable names:
 
 ```bash

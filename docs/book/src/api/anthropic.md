@@ -102,7 +102,7 @@ neither goes to a cloud provider, chosen by its name:
 | `accounts/fireworks/*` | Fireworks AI | Anthropic→OpenAI format translation |
 | `provider:model`, e.g. `cerebras:llama3.1-8b` | That provider | The only way to reach Cerebras, SambaNova, Together, DeepInfra and custom providers; it also overrides the name rules above |
 
-All 12 cloud providers are supported. Configure API keys via the dashboard Settings page or by placing a `.env` file in the data directory (`~/.local/share/swarmllm/.env`) with standard variable names (e.g., `OPENAI_API_KEY`, `DEEPSEEK_API_KEY`).
+All 12 cloud providers are supported. Configure API keys in the dashboard (the gear icon, Settings → **Cloud Providers**) or by placing a `.env` file in the data directory (`~/.local/share/swarmllm/.env`) with standard variable names (e.g., `OPENAI_API_KEY`, `DEEPSEEK_API_KEY`).
 
 ## System Blocks with Cache Control
 

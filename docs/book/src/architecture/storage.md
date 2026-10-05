@@ -5,7 +5,7 @@
 ```
 ~/.local/share/swarmllm/
 ├── config.toml          # User configuration
-├── identity.key         # Ed25519 keypair
+├── identity.key         # Ed25519 secret key: 32 raw bytes, owner-only (mode 0600)
 ├── api_key              # Bearer token (auto-generated)
 ├── db.redb              # redb database (migrated from sled db/ directory)
 ├── canonical/           # the swarm's copy's header and side files, staged while
@@ -22,21 +22,25 @@
 
 ## Database Tables (redb)
 
-| Table | Key | Value |
+Every tree below lives in ONE redb table named `data`, keyed `"{tree}\0{key}"`.
+The node's identity key is not in the database: it is the `identity.key` file
+above. Which parts a node holds is read from the `models/` directory, not stored.
+
+| Tree | Key | Value |
 |---|---|---|
 | config | `"config"` | Config |
 | config | `"api_key"` | Bearer token string |
-| identity | `"keypair"` | Encrypted Ed25519 key |
 | credits | `"balance"` | CreditBalance |
 | credit_txns | `{uuid}` | CreditTransaction |
-| peer_trust | `{node_id_hex}` | TrustScore |
 | peer_cache | `{multiaddr}` | () presence key |
-| shard_meta | `{model_id}/{index}` | ShardInfo + path |
 | model_meta | `{model_id}` | ModelManifest |
-| sessions | `{session_id}` | KV-cache metadata |
+| kv_sessions | `{session_id}` | KV-cache metadata |
 | nicknames | `{node_id_hex}` | NicknameRecord |
-| pool_state | `"pool"` | PoolState |
-| trust_scores | `{node_id_hex}` | f64 trust score |
+| identity_prefs | — | this node's own identity preferences |
+| pool_state | `"my_pool"` | PoolState |
+| pool_invitations, pool_invite_codes, pool_forwards, pool_removal_replays | — | device-pool bookkeeping; invite codes are keyed by their hash, so a pending join survives the owner restarting |
+| node_modes | `"private_mode"`, `"offline_mode"` | bool |
+| trust_scores | `{node_id_hex}` | f32 trust score |
 | escrow | `{escrow_id}` | EscrowEntry |
 | hf_sources | `{model_id}` | HfSource — the upload this node fetches the model from; since v0.3.221 always the canonical one once verified |
 | canonical_builds | `{model_id}` | CanonicalBuild — the upload the whole swarm uses (size, part sizes and layers, first-tensor offsets, header BLAKE3) |
@@ -45,6 +49,9 @@
 | removed_shards | `{shard_id_json}` | bool — the user deleted this shard; auto-manage leaves it alone until it is asked for again |
 | resource_schedule | `"current"` | ResourceSchedule |
 | model_trust | `{model_id}` | ModelTrustEntry (level, request count, last seen) |
+| responses | `{response_id}` | stored `/v1/responses` records (30-day TTL) |
+| network | — | whether a remote computer has ever dialled this node in, kept across restarts |
+| update | — | update-check bookkeeping |
 
 ## Model Acquisition Pipeline
 

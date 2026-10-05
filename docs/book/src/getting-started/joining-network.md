@@ -62,9 +62,11 @@ private_mode_allow_lan = false   # default is true, and "LAN" includes any
                                  # other SwarmLLM computer on the same network
 ```
 
-Then link the machines into a group (**More → My Devices** → create a group,
-add your other devices with its invite code) and switch on **Private Mode**
-there. That is an explicit list of computers, checked before any work is
+Then link the computers into a group: on the first one, open **More → My
+Devices**, click **Link My Devices**, then **Create**, and click **Add Another
+Device** for an invite code. On each other computer, open **More → My Devices**,
+click **Join Existing Group**, paste the code and click **Link This Device**.
+Then switch on **Private Mode** there. That is an explicit list of computers, checked before any work is
 handed out, and it is the only thing that decides where your prompts go. Use
 both together for a private cluster: `gossip_network_id` to keep the
 announcements separate, Private Mode to keep the work in.

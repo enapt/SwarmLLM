@@ -10,9 +10,12 @@ libp2p Swarm
 ├── mDNS — optional LAN peer discovery
 ├── connection_limits — `network.max_connections_per_peer` (default 3; below 2 disables hole punching), `max_peers` total (150 / 300 / 500 by contribution level)
 ├── Identify — protocol identification
-├── AutoNAT — NAT detection
+├── AutoNAT (v2 client + server) — NAT detection
 ├── DCUtR — hole punching
-└── relay::client — circuit relay
+├── UPnP — optional port mapping on the home router (`network.enable_upnp`)
+├── stream — `/swarmllm/pipeline/1.0.0`, one long-lived stream per split request (`persistent_pipeline_stream`, off by default)
+├── relay::client — circuit relay (reaching others through a relay)
+└── relay (server) — relaying connections for peers behind firewalls (`network.enable_relay`, its limits)
 ```
 
 ## Protocol Format
@@ -27,6 +30,7 @@ The unified protocol uses a type-tag byte on every frame
 | `0x02` | `WIRE_TAG_TENSOR_COMPRESSED` | Q8_0 activation frame (flag-gated `activation_compression`) — ~3.76× smaller than `0x01` |
 | `0x03` | `WIRE_TAG_SHARD` | Raw shard bytes (ShardResponse payload; parts are sent in 8 MiB chunks, and this frame type may carry up to 256 MB — it bypasses the 4 MB JSON cap) |
 | `0x04` | `WIRE_TAG_PREFIX_KV` | Cross-node prefix-KV snapshot. Frame body's flag byte: `0` = miss, `1` = raw f32, `2` = zstd-compressed f32 (gated on `NetworkConfig::prefix_kv_compression`, default off). Receivers always decompress regardless of the send-side flag. |
+| `0x06` | `WIRE_TAG_RELAYED_TENSOR` | A tensor forward or result routed through a relay: `[relay_to:32][origin:32][request_id:16][is_result:1][ephemeral_pub:32][sealed…]`. Sent only to peers that advertise `features::TENSOR_RELAY` |
 
 Receivers auto-dispatch on the leading byte; senders choose based on
 config + request kind. Only the `0x00` frame carries a JSON body; the

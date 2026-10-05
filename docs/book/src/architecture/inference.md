@@ -13,7 +13,7 @@ ModelProcessPool.forward()   ─────►  runs forward passes / full deco
 unload_model()               ─────►  kill process → OS frees all VRAM
 ```
 
-**IPC**: Unix domain socket with binary framing — `[4B json_len][json header][4B payload_len][raw tensor bytes]`. JSON carries message metadata; the payload carries raw activation bytes to avoid base64 overhead.
+**IPC**: a local socket (a Unix domain socket on Linux and macOS, a named pipe on Windows) with binary framing — `[4B json_len][json header][4B payload_len][raw tensor bytes]`. JSON carries message metadata; the payload carries raw activation bytes to avoid base64 overhead.
 
 **Message types** (`src/inference/worker_ipc.rs`):
 
@@ -185,7 +185,7 @@ speedup** on CPU-CPU localhost).
 - **Cross-request Prefix Cache** — default-on: see "Prefix-Cache KV Sharing" above for the cross-node extension; the local cache alone is a 29.4× wall-clock win on prompt re-submission
 - **Activation Compression (Q8_0)** — Intermediate pipeline activations wire-quantized ~3.76× (`activation_compression`, on by default)
 - **Flash Attention** — CPU and GPU fast paths (GQA-native, no `repeat_kv`)
-- **PagedAttention** — Deferred; `paged-attn` feature flag reserved for future use (module removed, never wired to production)
+- **PagedAttention** — Not implemented. A vendored kernel crate (`vendor/candle-paged-attention`) is in the workspace, but nothing references it and there is no feature flag for it (#257)
 - **Logprobs** — NOT returned by local inference. The sampler can compute them (`sample_token_with_logprobs`) and the response type serializes them, but every local execution path pins `token_logprobs: vec![]`, so nothing reaches the response. `/v1/chat/completions` therefore REFUSES `logprobs` for a locally-served model rather than answering 200 with the field absent, which is indistinguishable from a request that never asked. Cloud-routed models still return them. See `docs/ARCHITECTURE.md` § Deferred Items
 - **Pipeline Error Broadcast** — On distributed inference failure, `broadcast_pipeline_error()` notifies all participants so peers can update shard availability and route around failures
 - **Local Embedding Privacy** — When `local_embedding_privacy: true`, the requesting node performs token→embedding locally (~1ms) and sends pre-embedded hidden-state activations instead of raw token IDs to the first pipeline segment. Remote nodes never receive the prompt as text or token IDs, but they still compute on hidden states that can be turned back into much of it. See [Security > Local Embedding Privacy](../architecture/security.md#local-embedding-privacy)
