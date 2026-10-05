@@ -246,6 +246,28 @@ class TestEmbeddings:
 
 class TestErrors:
     def test_api_error(self):
+        # The envelope the server actually sends (OpenAI's): the message is
+        # inside `error`, and `e.message` must be that string, not the dict.
+        c = SwarmLLM()
+        mock_resp = _mock_response(
+            json_data={
+                "error": {
+                    "message": "model not found",
+                    "type": "not_found_error",
+                    "param": None,
+                    "code": "not_found_error",
+                }
+            },
+            status_code=404,
+            ok=False,
+        )
+        with patch.object(c._session, "get", return_value=mock_resp):
+            with pytest.raises(SwarmLLMError) as exc_info:
+                c.models()
+        assert exc_info.value.status_code == 404
+        assert exc_info.value.message == "model not found"
+
+    def test_api_error_with_a_bare_string(self):
         c = SwarmLLM()
         mock_resp = _mock_response(
             json_data={"error": "model not found"},
@@ -255,8 +277,7 @@ class TestErrors:
         with patch.object(c._session, "get", return_value=mock_resp):
             with pytest.raises(SwarmLLMError) as exc_info:
                 c.models()
-        assert exc_info.value.status_code == 404
-        assert "model not found" in exc_info.value.message
+        assert exc_info.value.message == "model not found"
 
     def test_no_models_error(self):
         c = SwarmLLM()
@@ -344,6 +365,15 @@ class TestAdminClient:
         assert isinstance(storage, ShardStorage)
         assert storage.total_local_bytes == 5000000000
         assert len(storage.models) == 1
+
+    def test_hf_search_sends_the_parameter_the_server_reads(self):
+        # The server's parameter is `q`; `query` was ignored and every search
+        # came back empty.
+        c = SwarmLLM()
+        mock_resp = _mock_response(json_data=[{"repo_id": "ggml-org/tiny-llamas"}])
+        with patch.object(c._session, "get", return_value=mock_resp) as mock_get:
+            c.admin.hf_search("tinyllama")
+        assert mock_get.call_args[1]["params"] == {"q": "tinyllama"}
 
     def test_hf_download_shards(self):
         c = SwarmLLM()

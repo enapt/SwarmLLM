@@ -182,12 +182,16 @@ class TestAsyncErrors:
     @pytest.mark.asyncio
     async def test_api_error(self):
         c = AsyncSwarmLLM()
-        resp = _mock_json_response({"error": "not found"}, status=404)
+        resp = _mock_json_response(
+            {"error": {"message": "not found", "type": "not_found_error", "param": None, "code": "not_found_error"}},
+            status=404,
+        )
         c._session = _make_session(resp)
 
         with pytest.raises(SwarmLLMError) as exc_info:
             await c.models()
         assert exc_info.value.status_code == 404
+        assert exc_info.value.message == "not found"
 
 
 # ---- Admin client ----

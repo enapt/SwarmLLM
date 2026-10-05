@@ -12,6 +12,37 @@ import type {
 } from "./types";
 import { SwarmLLMError } from "./types";
 
+/**
+ * The error a failed response stands for.
+ *
+ * The server answers every failure in OpenAI's envelope,
+ * `{"error": {"message", "type", "param", "code"}}`. `String(body.error)` made
+ * that "[object Object]", so the message is read from inside it, as the OpenAI
+ * SDKs do; a bare string under `error` is still accepted. The body is read once
+ * as text: after a failed `response.json()` the stream is spent, and the
+ * `response.text()` fallback threw instead of reporting the error.
+ */
+async function errorFrom(response: Response): Promise<SwarmLLMError> {
+  const text = await response.text().catch(() => "");
+  let body: unknown = text;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    // Not JSON: the text is the message.
+  }
+  let msg = text || response.statusText;
+  if (typeof body === "object" && body !== null && "error" in body) {
+    const err = (body as Record<string, unknown>).error;
+    if (typeof err === "string" && err) {
+      msg = err;
+    } else if (typeof err === "object" && err !== null) {
+      const inner = (err as Record<string, unknown>).message;
+      if (typeof inner === "string" && inner) msg = inner;
+    }
+  }
+  return new SwarmLLMError(response.status, msg, body);
+}
+
 export class SwarmLLMClient {
   private baseUrl: string;
   private apiKey?: string;
@@ -61,17 +92,7 @@ export class SwarmLLMClient {
   async _request<T>(path: string, init: RequestInit = {}): Promise<T> {
     const response = await this._fetch(path, init);
     if (!response.ok) {
-      let body: unknown;
-      try {
-        body = await response.json();
-      } catch {
-        body = await response.text();
-      }
-      const msg =
-        typeof body === "object" && body !== null && "error" in body
-          ? String((body as Record<string, unknown>).error)
-          : String(body);
-      throw new SwarmLLMError(response.status, msg, body);
+      throw await errorFrom(response);
     }
     return response.json() as Promise<T>;
   }
@@ -119,17 +140,7 @@ export class SwarmLLMClient {
     });
 
     if (!response.ok) {
-      let body: unknown;
-      try {
-        body = await response.json();
-      } catch {
-        body = await response.text();
-      }
-      const msg =
-        typeof body === "object" && body !== null && "error" in body
-          ? String((body as Record<string, unknown>).error)
-          : String(body);
-      throw new SwarmLLMError(response.status, msg, body);
+      throw await errorFrom(response);
     }
 
     yield* parseSSEStream(response);

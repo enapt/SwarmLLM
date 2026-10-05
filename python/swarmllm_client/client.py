@@ -26,6 +26,25 @@ class SwarmLLMError(Exception):
         super().__init__(f"SwarmLLM API error ({status_code}): {message}")
 
 
+def _error_message(body: Any, fallback: str) -> str:
+    """The human-readable message of an error response.
+
+    The server answers every failure in OpenAI's envelope,
+    ``{"error": {"message", "type", "param", "code"}}``. Taking ``body["error"]``
+    whole made ``SwarmLLMError.message`` a dict, so ``print(e.message)`` showed
+    its repr. The message is read from inside it, as the OpenAI SDKs do; a bare
+    string under ``error`` is still accepted.
+    """
+    err = body.get("error") if isinstance(body, dict) else None
+    if isinstance(err, dict):
+        msg = err.get("message")
+        if isinstance(msg, str) and msg:
+            return msg
+    if isinstance(err, str) and err:
+        return err
+    return fallback
+
+
 class SwarmLLM:
     """Synchronous SwarmLLM client.
 
@@ -69,8 +88,7 @@ class SwarmLLM:
     def _handle_response(self, resp: requests.Response) -> Any:
         if not resp.ok:
             try:
-                body = resp.json()
-                msg = body.get("error", resp.text)
+                msg = _error_message(resp.json(), resp.text)
             except Exception:
                 msg = resp.text
             raise SwarmLLMError(resp.status_code, msg)
@@ -209,7 +227,7 @@ class SwarmLLM:
         )
         if not resp.ok:
             try:
-                msg = resp.json().get("error", resp.text)
+                msg = _error_message(resp.json(), resp.text)
             except Exception:
                 msg = resp.text
             raise SwarmLLMError(resp.status_code, msg)

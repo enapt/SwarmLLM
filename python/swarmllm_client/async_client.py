@@ -7,7 +7,7 @@ from typing import Any, AsyncIterator, Optional, Union
 
 import aiohttp
 
-from swarmllm_client.client import SwarmLLMError
+from swarmllm_client.client import SwarmLLMError, _error_message
 from swarmllm_client.types import (
     ChatMessage,
     ChatResponse,
@@ -149,7 +149,8 @@ class AsyncAdminClient:
 
     async def hf_search(self, query: str) -> list[dict[str, Any]]:
         """GET /api/admin/hf/search — Search HuggingFace for GGUF models."""
-        return await self._p._get("/api/admin/hf/search", params={"query": query})
+        # The server reads `q`; `query` was ignored and every search returned [].
+        return await self._p._get("/api/admin/hf/search", params={"q": query})
 
     async def hf_probe(self, repo_id: str, filename: str) -> dict[str, Any]:
         """GET /api/admin/hf/probe — Probe a remote GGUF file."""
@@ -362,9 +363,8 @@ class AsyncSwarmLLM:
         if resp.status >= 400:
             text = await resp.text()
             try:
-                body = json.loads(text)
-                msg = body.get("error", text)
-            except (json.JSONDecodeError, AttributeError):
+                msg = _error_message(json.loads(text), text)
+            except json.JSONDecodeError:
                 msg = text
             raise SwarmLLMError(resp.status, msg)
         content_type = resp.headers.get("content-type", "")
@@ -501,7 +501,11 @@ class AsyncSwarmLLM:
         ) as resp:
             if resp.status >= 400:
                 text = await resp.text()
-                raise SwarmLLMError(resp.status, text)
+                try:
+                    msg = _error_message(json.loads(text), text)
+                except json.JSONDecodeError:
+                    msg = text
+                raise SwarmLLMError(resp.status, msg)
             async for line_bytes in resp.content:
                 line = line_bytes.decode("utf-8").strip()
                 if not line or line.startswith(":"):

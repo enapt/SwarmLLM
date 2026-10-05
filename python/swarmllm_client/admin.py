@@ -148,7 +148,9 @@ class AdminClient:
 
     def hf_search(self, query: str) -> list[dict[str, Any]]:
         """GET /api/admin/hf/search — Search HuggingFace for GGUF models."""
-        return self._p._get("/api/admin/hf/search", params={"query": query})
+        # The server reads `q` (`HfSearchParams`); `query` was ignored, so every
+        # search returned [].
+        return self._p._get("/api/admin/hf/search", params={"q": query})
 
     def hf_probe(self, repo_id: str, filename: str) -> dict[str, Any]:
         """GET /api/admin/hf/probe — Probe a remote GGUF file for shard info."""
