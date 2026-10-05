@@ -1,5 +1,43 @@
 # Changelog
 
+## [0.3.227-alpha] — 2026-10-05
+
+**Fixed: a model on this computer was sent to a slower computer abroad when
+idle models sat on the graphics card.** With two small models loaded but
+unused, the node decided a bigger model it holds would not fit the card,
+priced running it here at processor speed, and sent the request to another
+computer. The model loader would have unloaded the idle models and run it on
+the card. The node now counts that memory when it decides. Measured with
+Qwen2.5-Coder-7B: 46.5 s through a computer in Italy before, 11 s on this
+computer now (loading included), then about 2 s per reply.
+
+**Fixed: tool calls no longer leave a stray `<tools>` tag in the reply.** When
+a model wrapped its tool call in a tag (Qwen2.5-Coder-7B does), the call was
+read correctly but the tag also came back as reply text — on the OpenAI and
+Anthropic endpoints, streamed or not. A streamed reply could also start with a
+stray ```` ```json ```` line, and a call written with a doubled opening brace
+and closed once came back as text instead of a call.
+
+**Fixed: error advice that named a command which could not help.** Six
+messages suggested `swarmllm get-model <name>`, which only fetches the shared
+test models. The two "Start and finish on this computer" messages now name
+`swarmllm privacy <name>`, the others the model's card in the dashboard.
+
+**Clearer: private mode says it includes your local network.** By default it
+keeps your requests on your own devices and on computers on your local
+network, but the switch, its confirmation and its error said "your devices
+only". In every language.
+
+**Fixed: small dashboard things.** A graphics-memory reading that timed out
+showed "0 MB … measured live"; it now shows "—". Dutch and Indonesian showed
+a raw `{computer}` where a computer's name belongs. The "not enough disk space"
+advice named a setting by its config key instead of its label.
+
+**Docs:** the download pages no longer send Windows computers with AMD or
+Intel graphics to the graphics download (their models run on the processor),
+the API reference matches the endpoints, and three pages no longer recommend a
+setting value the node refuses to start with.
+
 ## [0.3.226-alpha] — 2026-10-05
 
 **Faster: checking guesses on a graphics card no longer redoes its setup on
