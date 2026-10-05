@@ -37,7 +37,8 @@ Re-ranked 2026-10-02 after the verification, and 2026-10-03 when #156, #158 and 
 then again after v0.3.223 (#157 and #164 closed, #160 raised to P1 on the swarm reading), and
 after v0.3.224 (#160, #215 and #216 closed; #217 and #218 opened from the swarm reading and the inference test after it). #150, #153,
 #165, #189, #214, #218 and #219 closed in v0.3.225 (released 2026-10-05); #221 closed and #129's second half shipped in
-v0.3.226 (released 2026-10-05), #220 opened from the .225 gate's unrecorded driver resets.
+v0.3.226 (released 2026-10-05), #220 opened from the .225 gate's unrecorded driver resets; #129's fit verdict (idle-model
+reclaim) shipped in v0.3.227 (released 2026-10-05 23:45 UTC).
 `docs/plans/` holds the multi-step designs; the entries point at them.
 
 **P0 — wrong answers, silently**
@@ -408,7 +409,7 @@ split wins. Also feed observed per-layer latency into `compute_segment_timeout` 
 the fixed 2 s/layer guess. Depends on #3.
 
 #### #129 — A model a few MB too large for the card is sent on a boomerang across continents
-`P2` · routing · **PARTIAL** — 2026-09-27, narrowed 2026-10-04 and 2026-10-05 (fit verdict fixed on main) · history: archive row #129
+`P2` · routing · **PARTIAL** — 2026-09-27, narrowed 2026-10-04 and 2026-10-05 (fit verdict fixed in v0.3.227) · history: archive row #129
 
 **v0.3.225 shipped half the fix, and the field check after deploy failed** (2026-10-05 01:30
 UTC): a cold Mistral-7B on this 8 GB node still went through `4a3ac72e` (Italy), 47 s. The
@@ -460,7 +461,7 @@ re-pricing a split; a cold peer's load time is also unpriced (46 s against 4.5 s
 second contributor. Measure with `scratchpad hybrid129.py`'s shape: warm two small models, then the
 7B cold, normal routing vs `swarm_route.exclude_nodes` = every peer.
 
-**Fixed on main 2026-10-05, not yet released — the fit verdict counts what admission would
+**Fixed in v0.3.227 (released 2026-10-05 23:45 UTC) — the fit verdict counts what admission would
 reclaim:** `ModelProcessPool::fits_in_budget` (behind `would_fit_on_gpu`, `gpu_estimate_and_fit`
 and `serves_on_cpu`) answers "fits" when the reclaim's own dry run (`reclaimable_vram_mb`) would
 make the room, as the planner's ceiling already did (#125). Test
