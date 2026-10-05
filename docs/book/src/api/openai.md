@@ -156,8 +156,8 @@ shipped 8192-token default and any `inference.max_seq_len_override`. The
 first is the name vLLM clients read, the second the name OpenClaw's model
 discovery reads. Both are omitted when the model's declared context cannot be
 read, rather than guessed. Up to v0.3.224 that is every model no part of which
-is on this machine; from the release after it, such a model reports the context
-its holders declare, once they run that release too.
+is on this machine; from v0.3.225 such a model reports the context its holders
+declare, once they run v0.3.225 or later too.
 
 It is THIS node's limit. When a model is split, each computer applies its own,
 and each advertises it: a prompt is not sent to a computer that has said it

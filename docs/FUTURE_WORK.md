@@ -35,8 +35,9 @@ residual).
 
 Re-ranked 2026-10-02 after the verification, and 2026-10-03 when #156, #158 and #213 closed,
 then again after v0.3.223 (#157 and #164 closed, #160 raised to P1 on the swarm reading), and
-after v0.3.224 (#160, #215 and #216 closed; #217 and #218 opened from the swarm reading and the inference test after it); later that day #165, #189,
-#218 and #219 closed and #129 narrowed on main, not yet released.
+after v0.3.224 (#160, #215 and #216 closed; #217 and #218 opened from the swarm reading and the inference test after it). #150, #153,
+#165, #189, #214, #218 and #219 closed in v0.3.225 (released 2026-10-05); #129's second half is on main after its field
+check on v0.3.225 failed.
 `docs/plans/` holds the multi-step designs; the entries point at them.
 
 **P0 — wrong answers, silently**
@@ -50,7 +51,7 @@ after v0.3.224 (#160, #215 and #216 closed; #217 and #218 opened from the swarm 
 2. **#217** — a node kept three parts that are not the upload's bytes for ~3 h on v0.3.224,
    with two checked holders disagreeing, and replaced them within minutes of a restart. It
    recurred at that node's next restart (09:01 UTC 10-04) as replacements that ARRIVED wrong
-   from HuggingFace, twice, and were kept — that mechanism is closed on main (a download is
+   from HuggingFace, twice, and were kept — that mechanism is closed in v0.3.225 (a download is
    kept only when corroborated; the downloader syncs and reads back). The
    swarm itself converged: `peers_other_build` 0 on every model at 06:19 UTC 2026-10-04 (all
    six nodes on .224; the watch this slot held is closed — its readings are in the archive,
@@ -122,7 +123,7 @@ the upload. So what held `e561df35` was state of that run, not the shape. Its fl
 (60 from 03:06 to 05:40) is NOT evidence of a frozen task — it has a 30 GB disk (#142), and a
 full disk with no heal looks exactly like that.
 
-**Made observable (main, not yet released):** the repair records why each pass left each model
+**Made observable (v0.3.225):** the repair records why each pass left each model
 as it was (`SharedState::models.heal_verdicts`, written only by `canonical::note_verdict`) and
 when its last pass started and finished (`heal_pass_times`); `swarmllm diagnostics` prints them
 under `-- copy repair --` — including which parts the checked holders dispute but that wait
@@ -147,7 +148,7 @@ bytes changed in transit or on that disk; which one is undetermined (huggingface
 reports large downloads arriving the right size with a different hash on every attempt; a disk
 losing writes — a 30 GB LXC, #142 — looks the same, and would also explain the startup failures).
 
-**Fixed on main, not yet released (the mechanism, not that node's cause):**
+**Fixed in v0.3.225 (the mechanism, not that node's cause):**
 `huggingface::download_shard` hashes the bytes as they arrive, syncs the file and checks it reads
 back as them; the P2P accept syncs before hashing (a failed write-back is reported only there —
 PostgreSQL's fsyncgate). `SharedState::accept_origin_part`, the one step both HuggingFace paths
@@ -170,7 +171,7 @@ still disagree the heal deletes it and downloads it twice more (one discarded, o
 restart — bounded, never a loop within a run. Persisting the record beside `origin_verified`
 would end it.
 
-Next: after the release, `e561df35`'s next 09:00 UTC restart is the field check — its parts should
+Next: `e561df35`'s first 09:00 UTC restart on v0.3.225 (from 2026-10-05) is the field check — its parts should
 come back as the upload's, or not at all, with "came out different on two downloads" in its log.
 The 02:39-05:39 occurrence (parts announced as an OLD manifest's exact hashes for 3 h, never
 re-fetched) is not explained by this and stays open; its journal (asked of its owner once) or a
@@ -767,7 +768,7 @@ loses the card entirely.
 
 `/v1/models` listed `qwen3.5-9b-q4-k-m` (two peers hold parts of it) though no node on this
 build can run it, every request a 400 "Unsupported model architecture 'qwen35'" (2026-10-04).
-Fixed on main, not yet released: a model whose gossiped manifest names a family this build refuses
+Fixed in v0.3.225: a model whose gossiped manifest names a family this build refuses
 is not listed (`ModelArch::manifest_architecture_is_refused`, which follows `is_supported`, so
 admitting Qwen 3.5 lists it again with no other edit).
 #### #1 — Every Mac runs inference on the processor: no GPU backend is compiled for Apple Silicon
@@ -1285,7 +1286,7 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-04, after v0.3.224 — not yet released** (#150, #153, #214, #218, #219, #165, #189) (`docs/invariants/scheduling.md` §
+**Closed 2026-10-04, released in v0.3.225 (2026-10-05)** (#150, #153, #214, #218, #219, #165, #189) (`docs/invariants/scheduling.md` §
 "A holder's refusal is reported as what it was")
 - #153 — on Windows a model worker that outlived its daemon held the node's QUIC port, so the
   next start failed. `Command` passes every inheritable handle, and the QUIC socket is one (why,
