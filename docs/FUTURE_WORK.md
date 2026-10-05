@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #220**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #222**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -64,6 +64,8 @@ check on v0.3.225 failed.
 4. **#117** — Qwen 3.5: a working dense implementation sits unmerged on branch
    `qwen35-support`; the most-downloaded family the swarm refuses.
 5. **#1** — every Mac runs on the processor; no GPU backend is compiled for Apple Silicon.
+6. **#220** — a worker's card faulted once (illegal memory access) and the driver took 14 minutes
+   to reset; the kernel is unknown until a sanitizer run (needs the owner's administrator rights).
 
 **P2 — speed and completeness**
 7. **#152** — the continuous guess-check stream never runs on the split shapes the swarm
@@ -278,7 +280,43 @@ shape, gotcha #754/#755). Open: (1) the pool's effect at ~2 days of uptime
 stress test: safety kit, live node stopped); (2) split-pipeline segment forwards
 (`Forward`/`BatchForward`) are neither observed nor refused, and sequential `handle_generate`
 per-token forwards are unobserved; (3) the daemon does not advertise a tripped card to peers.
-The stalls' root cause stays unknown and the guard does not need it.
+The stalls' root cause stays unknown and the guard does not need it. A card FAULT (not a stall)
+and the 14-minute driver reset after it are #220.
+
+#### #220 — A worker's card faulted once (illegal memory access), and the driver then took 14 minutes to reset
+`P1` · reliability · **OPEN** — 2026-10-05 · history: gotcha #790
+
+On 2026-10-04 at 18:52:06 UTC, in the .225 gate's baselines (`~/swarmllm-gate-0225/repro_b5_old2_w6`,
+the v0.3.224 binary: Qwen2.5-Coder-7B layers 0-14 on the card, an fp16 Qwen2.5-0.5B drafter in a
+second process on the same card, split speculation to a processor node), node A's 7B worker failed
+with `CUDA_ERROR_ILLEGAL_ADDRESS`, surfaced at the copy of the step's output to the host ("Encode
+Q8_0" — CUDA reports a kernel's fault at the next synchronising call, so the fault was in that
+step's forward, not in the encoder). One second later Windows logged nvlddmkm 14 and "UCodeReset
+TDR"; the reset finished only at 19:06:16 ("Reset" / "Restarting TDR"), and A's re-plan sat in its
+next card call for those 14 minutes. Three "Graphics FECS Exception" events (18:34:19, 18:42:21,
+18:47:05) each fell in the same second as a speculation request ending and the next starting on
+that worker pair, in three other arms — .224 and .225 alike, so not a regression. The gate record
+mentioned none of it: the safety kit watched temperatures only (it now stops at the first driver
+event, `~/swarmllm-gate-common/safety.sh`).
+
+Known: one illegal access in every log on this machine; FECS events also arrive with no work of
+ours (13:09:31 the same day, 16 s after a laptop power-source change; 13:25:11 idle). Ruled out:
+graph updates ignoring a grown allocation (`docs/invariants/inference.md` § "A graph pays only when
+it is updated"). Unknown: which kernel. Next, in order: (1) run that rig shape under
+`compute-sanitizer --tool memcheck --target-processes all` — on WSL2 it first needs the WDDM
+debugger interface, two DWORD 1 registry values set as administrator
+(`HKLM\SYSTEM\CurrentControlSet\Services\nvlddmkm` `EnableDebugInterface`,
+`HKLM\SOFTWARE\NVIDIA Corporation\GPUDebugger` `EnableInterface`), which is the owner's hands;
+(2) the re-plan sat in GPU admission because `nvidia-smi` waits as long as the driver does — FIXED
+2026-10-05: `vram::nvidia_smi` bounds it at 10 s and never runs two at once (while a stuck one
+lives the next reading is unknown at once; `docs/invariants/memory.md` § "nvidia-smi is asked
+through one bounded helper"). Still open: on "unknown" admission lets the spawn go to the card,
+and a worker started on a resetting driver blocks in its own context creation (the pool gives it
+30 s). Placing it on the processor while the stuck `nvidia-smi` lives needs a `CpuReason` of its
+own — `GpuUnavailable` tells the owner to restart, which a reset does not need — with its
+dashboard and CLI wording in all 21 locales; (3) whether two CUDA
+processes switching on one card (target + drafter) is what the FECS events have in common — the
+08:25:56 one on 10-04 also came 3 s after a third worker started.
 
 #### #193 — A whole-model reply travels as independent messages; only the serving node dying now loses it
 `P3` · reliability · **PARTIAL** — 2026-09-02 · absorbs archive § "The reply stream has no reliability layer…" and § "Intermittent token loss on the remote-generate fast path"; history: archive § "Replies truncated on the remote-generate fast path"
@@ -375,9 +413,13 @@ layers, `local_route_available=false`. (On 10-04 the same request asked the card
 `ModelProcessPool::max_hostable_layers_for_planning` and `held_layer_ranges_for_planning`,
 which choose the device the LOADER would use (`planning_on_card`). Test
 `the_planner_weighs_a_local_model_the_loader_would_split_on_the_card` goes through
-`gather_candidates`: `Some(0)` on the old call, `Some(32)` now. **Gate item for the next
-release, on the CUDA artifact:** a cold Mistral-7B with another model on the card answers
-`route=local` (the dev build has no card path).
+`gather_candidates`: `Some(0)` on the old call, `Some(32)` now. **Verified 2026-10-05 on a
+`--features cuda` build of main run as the live node** (`~/swarmllm-gpu-1005/verify129.sh`): with
+TinyLlama on the card, a cold Mistral-7B answered `route=local segments=1` in 6.7 s, loading
+included (v0.3.225: Italy, 47 s); admission put it on the card whole beside TinyLlama
+(`committed_mb=1044 estimated_mb=5517 budget_mb=6561 headroom_mb=0` — it fitted with nothing
+to spare; that build's daemon no longer holds the 137 MiB context, and this one run cannot say
+whether that is what made the difference). **Gate item for the next release, on the CUDA artifact:** the same check.
 
 **Residual:** the local candidate is still priced at its processor speed rather than as a
 hybrid — conservative. A remote hop's network cost is charged per segment rather than per
@@ -592,6 +634,24 @@ across q/k/v and gate/up; remove 8 `ucopy_f32` per layer in the prompt pass; one
 single-row `mul_mat_vec_q4_K` per layer; an int8 tensor-core MMQ port (large). Separately,
 GLM-4-9B disagrees with llama.cpp at a few positions on every path (tokenizer
 re-tokenisation is the lead) — pre-existing.
+
+#### #221 — A speculative check's CUDA graph cannot be updated in place: a memset in it changes size
+`P2` · perf-local · **OPEN** — 2026-10-05 · evidence: `docs/invariants/inference.md` § "A graph pays only when it is updated"
+
+The driver refuses the in-place update of a several-position check's graph with
+`CU_GRAPH_EXEC_UPDATE_ERROR` at a node of type `CU_GRAPH_NODE_TYPE_MEMSET` (first logged
+2026-10-05 by the new `why_not_updated` line: Qwen2.5-Coder-7B layers 0-14 on the card, a
+5-position n-gram check). CUDA allows a 1-D memset's size to change on update only within the
+work resources allocated at instantiation, and a 2-D memset's not at all — so some zero-fill
+inside the check grows with the conversation. Since 2026-10-05 such a shape RESTS
+(`cuda_graph::REBUILDS_BEFORE_RESTING`), which caps the cost (the .225 gate's split rig had rebuilt
+105 of 135 launches at 65-108 ms each) but also gives up the graph's ~3 ms a step for those checks.
+Find the node: dump a refused capture with `cuGraphDebugDotPrint` (a debug env switch in
+`cuda_graph::Session::end_and_launch`), then make that memset's size fixed or move it before the
+capture. Not it, by reading: flash-attn's `softmax_lse` (sized by query positions), the KV cache's
+zero-length `zeros` (never grows), the quantized matmul's q8_1 buffers (no longer zeroed). The
+one-position step churned too on a Qwen2.5-14B segment served for peers (177 of 183, live node
+2026-10-01) — check whether it is the same node.
 
 #### #137 — A model split between card and processor reads its processor layers at ~17 GB/s, a third of what the memory can do
 `P2` · perf-local · **OPEN** — 2026-09-27 · history: archive row #137; plan: `docs/plans/faster_than_local.md` § 3.3

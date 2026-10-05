@@ -8,12 +8,14 @@ use crate::types::SamplingParams;
 /// Thread-safe handle to the model executor.
 pub type SharedExecutor = Arc<Mutex<ModelExecutor>>;
 
-/// Detected GPU information.
+/// Detected GPU information — what does not change while the node runs. Free
+/// memory is not here: a figure kept from startup is stale the moment a model
+/// loads (it once made every node advertise zero room, `health::monitor`), so
+/// it is read live (`vram::query_gpu_vram_free_mb`).
 #[derive(Clone, Debug)]
 pub struct GpuInfo {
     pub name: String,
     pub vram_total_mb: u64,
-    pub vram_free_mb: u64,
     pub backend: String,
 }
 
@@ -29,7 +31,6 @@ pub fn detect_gpu() -> Option<GpuInfo> {
                 return Some(GpuInfo {
                     name: dev.description.clone(),
                     vram_total_mb: (dev.memory_total / (1024 * 1024)) as u64,
-                    vram_free_mb: (dev.memory_free / (1024 * 1024)) as u64,
                     backend: dev.backend.clone(),
                 });
             }

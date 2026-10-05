@@ -2598,6 +2598,64 @@ decode step's graphs. The drafter reads a short catch-up as single captured step
 
 → `docs/invariants/inference.md` § "A speculative check is captured too"
 
+## A graph pays only when it is updated — a shape that keeps being rebuilt rests (2026-10-05)
+
+**What was seen.** The 60-second `decode graph` line counts launches that updated every group's
+graph in place (`updated_in_place`) against launches where at least one group was built afresh
+(`instantiated`). Where a shape keeps changing, nearly every launch was a rebuild, and the
+recording time per launch — which the card waits for — went from ~1-6 ms to 12-108 ms:
+
+| where | launched | updated | rebuilt | recording ms/launch |
+|---|---|---|---|---|
+| .225 gate baseline, 7B first segment on the card, split speculation (`repro767.sh`) | 135 | 30 | 105 | 65.4 |
+| the same, other arms | 90 / 256 / 126 / 257 | 19 / 59 / 26 / 59 | 71 / 197 / 100 / 198 | 85-108 / 43 / 100 / 53 |
+| its fp16 drafter beside it (one position) | 404 | 403 | 1 | 5.9 |
+| live node 2026-10-01, Qwen2.5-14B layers 22-44 served for peers | 183 | 6 | 177 | 12.7 |
+| live node 2026-10-01 morning, one position, steady | 942 | 888 | 54 | 1.2 |
+
+A rebuild is `cuGraphInstantiate` (10-100 ms here); an update ~1 ms. On a card-bound 7B a graph
+saves ~3 ms a step (§ "recorded in groups": 49-51 → 56-57 tok/s), so a shape rebuilt on most
+launches costs far more than it ever saves — and every rebuild is driver work over WSL2's GPU
+channel on a card that also drives the desktop.
+
+**What it is NOT.** The suspicion that `cuGraphExecUpdate` accepts a graph whose captured
+allocations GREW but keeps the sizes it was built with — which would make a kernel write past its
+buffer — was tested and refuted (2026-10-05, `graph_alloc_growth.cu` in that session's scratch,
+RTX 3070 Laptop, CUDA 13.0): a capture allocating A (growing each step) then B, updated in place 63
+times, never corrupted B; each capture lays B out after A's NEW size; and growth past the graph
+pool's 32 MB chunk grew its backing (`cudaGraphMemAttrUsedMemCurrent` 32 → 96 MB). CUDA's guide:
+graph allocations have fixed addresses for the life of their NODE, assigned at node creation — a
+re-capture makes new nodes, and the update adopts them.
+
+**The rule.** llama.cpp's current one (`ggml_backend_cuda_graph_compute`, llama-cpp-sys-2 0.1.156)
+never pays for a graph that will not be reused: a graph whose node properties changed runs
+UNcaptured until two calls in a row agree. Ours keeps re-capturing every token (it must — the KV
+length changes the arguments every step) and so learns from the driver instead: a number of
+positions whose update the driver refused on `REBUILDS_BEFORE_RESTING` (3) of its last
+`CHURN_WINDOW` (8) launches rests for `REST_STEPS` (256) of its own steps, run the ordinary way,
+then is tried again; each further rest doubles, up to 16×, and `CLEAN_LAUNCHES_TO_FORGET` (64) clean
+launches in a row start the rests over. A window, not a run in a row: the review of this change
+pointed out that clean launches in between would keep breaking a run while a shape rebuilt on half
+its launches still loses ~30 ms a step. A shape that churns costs three rebuilds per rest; a
+rebuild now and then (one in 64) never rests; a shape that churned for a moment — 50 of the 54 above
+came inside one minute (04:53-04:54 UTC) — gets its graphs back. `DecodeGraph::declines` is
+the one question the caller asks (it covers the program-defect give-up too). The first refusal of
+each kind is logged at info with the driver's result code and the node type it named
+(`why_not_updated`), so the next churn says what changed. Test:
+`a_shape_rebuilt_every_launch_rests_then_is_tried_again` (red with the rest disabled).
+
+**Verified on a `--features cuda` build** (2026-10-05, `~/swarmllm-gpu-1005/verify.sh`, safety kit,
+live node stopped, one CUDA process: `split_rig.sh repeat`, Qwen2.5-Coder-7B shards 0-3 on the card,
+4-7 on the processor, REPEAT=3 — the first request takes the n-gram path, whose checks are
+captured). The mechanism fired: `could not be updated in place — rebuilt (first of this kind)
+positions=5 why=CUDA_ERROR_GRAPH_EXEC_UPDATE_FAILURE … CU_GRAPH_EXEC_UPDATE_ERROR at a node of
+type CU_GRAPH_NODE_TYPE_MEMSET`, then `keep being rebuilt … positions=5 rest_steps=256`; counters
+`launched=217 updated_in_place=212 instantiated=5 rebuilt=3 rested=1 uncaptured=14` against v0.3.225's
+`launched=227 updated_in_place=212 instantiated=15 uncaptured=4`. Replies byte-identical to v0.3.225,
+3/3; no card fault, no driver event. Speed in THIS shape is unchanged within one sample (n-gram
+request 47.0 s → 40.2 s, its prompt pass on the processor node varying by as much; plain requests
+31.7 / 31.8 s → 31.7 / 31.5 s): here the churn was mild. The memset is FUTURE_WORK #221.
+
 ## A header and its tensor table describe one upload — compared before a tensor is read (2026-10-03, #156)
 
 **The defect.** A node loading from parts has two descriptions of one file: the

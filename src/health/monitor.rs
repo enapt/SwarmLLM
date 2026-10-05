@@ -864,11 +864,12 @@ impl HealthMonitor {
                 let bandwidth = crate::model::auto_manage::vram::gpu_memory_bandwidth_gbps(&g.name);
                 // Ask the card, here, every broadcast.
                 //
-                // `SharedState::gpu_info.vram_free_mb` is set ONCE at startup and
-                // hardcoded to 0 there (`daemon/mod.rs`), so every node in the swarm
-                // advertised zero free VRAM for as long as this field has existed.
-                // Nothing read it, so nothing went wrong — until something did, and
-                // then it silently answered "no room" for every peer, everywhere.
+                // `SharedState::gpu_info` used to carry a `vram_free_mb` set ONCE at
+                // startup and hardcoded to 0 there (`daemon/mod.rs`), so every node
+                // in the swarm advertised zero free VRAM for as long as that field
+                // existed. Nothing read it, so nothing went wrong — until something
+                // did, and then it silently answered "no room" for every peer,
+                // everywhere. The field is gone (2026-10-05) so it cannot be read.
                 //
                 // Free VRAM is the one figure here that is meaningless stale: it is
                 // exactly the quantity that changes as models load and unload. This

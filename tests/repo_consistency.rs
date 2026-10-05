@@ -11828,3 +11828,54 @@ fn the_frontend_leaves_no_debug_output_in_the_console() {
         offenders.join("\n  ")
     );
 }
+
+/// `nvidia-smi` blocks for as long as the graphics driver does — 14 minutes
+/// during one card reset on 2026-10-04, while a node's re-plan sat in GPU
+/// admission behind it (FUTURE_WORK #220). `vram::nvidia_smi` bounds the wait
+/// and never runs two copies at once; a bare `Command::new("nvidia-smi")`
+/// anywhere else in the daemon brings the unbounded wait back. The launcher is
+/// a separate binary that asks once, before the daemon exists.
+#[test]
+fn nvidia_smi_is_asked_only_through_the_bounded_helper() {
+    let root = repo_root();
+    let shape = |stmt: &str| {
+        let flat: String = stmt.chars().filter(|c| !c.is_whitespace()).collect();
+        // Open-ended: rustfmt adds a trailing comma when it wraps the argument.
+        // A word boundary before it: the helper's own `BoundedCommand::new(...)`
+        // is the sanctioned way in.
+        let needle = "Command::new(\"nvidia-smi\"";
+        flat.match_indices(needle).any(|(at, _)| {
+            !flat[..at]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_alphanumeric() || c == '_')
+        })
+    };
+    let planted = "let out = std::process::Command::new(\n    \"nvidia-smi\",\n)\n.args([\"--query-gpu=memory.used\"])\n.output();";
+    assert!(
+        statements(planted).iter().any(|(_, s)| shape(s)),
+        "the scan cannot see a spawn rustfmt wrapped across lines"
+    );
+    let mut offenders = Vec::new();
+    for path in rust_files_under(&root.join("src")) {
+        let rel = path
+            .strip_prefix(&root)
+            .unwrap_or(&path)
+            .display()
+            .to_string();
+        if rel.replace('\\', "/") == "src/bin/launcher.rs" {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).expect("read source");
+        for (line, stmt) in statements(&text) {
+            if shape(&stmt) {
+                offenders.push(format!("{rel}:{line}"));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "nvidia-smi spawned outside `vram::nvidia_smi` — it waits for as long as the \
+         driver does: {offenders:?}"
+    );
+}

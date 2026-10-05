@@ -1833,6 +1833,67 @@ Any reading of "free for this process" adds `cuda_pool::reusable_bytes`. Guard:
 `every_split_model_reaches_the_card_through_load_device`; A/B:
 `SWARMLLM_CUDA_POOL_KEEP=0`.
 
+## The daemon holds no CUDA context (2026-10-05)
+
+**What it cost.** The daemon never runs a model — its workers do — yet `nvidia-smi` listed it as a
+compute process. Startup detection asked llama.cpp's device list
+(`llama_cpp_2::list_llama_ggml_backend_devices`, linked into every release CUDA build through the
+`cuda` feature), which reads free memory and so creates the CUDA runtime's primary context; the
+runtime keeps that until the process exits. Measured 2026-10-05, RTX 3070 Laptop 8 GB, WSL2: the
+card read 1021 MiB used with the idle daemon up and 884 MiB with it stopped — **137 MiB**, exactly
+what one idle `cudaFree(0)` context costs on its own (1018 → 1155 MiB). That is card memory a
+model's layers or its conversation could use, held for the node's whole life, on every CUDA node —
+and on an 8 GB card the difference between a model fitting and going abroad (#129). It was also
+one more context on a card whose context-switch engine has logged faults under load (FUTURE_WORK
+#146, #220).
+
+**The rule.** `gpu_support::describe_local_gpu` asks the driver API — `cuInit`, `cuDeviceGetName`,
+`cuDeviceTotalMem` — none of which makes a context, guarded by `is_culib_present` because
+cudarc's loader panics when the driver library is missing. llama.cpp's list answers only on a
+build without candle's CUDA. `Device::cuda_if_available` is not used either: it, too, makes a
+context. Free memory is read live where it is needed (`vram::query_gpu_vram_free_mb`, nvidia-smi)
+and `GpuInfo` no longer carries a free figure at all — the startup one had already made every node
+advertise zero room once (`health::monitor`), and a stale field nobody can read cannot do that
+again. The diagnostics report reads it live; the dashboard's fallback no longer subtracts it.
+
+**Verified on a `--features cuda` build** (2026-10-05, an isolated idle daemon, nothing else
+starting): v0.3.225 card 1929 → 2066 MiB (+137) and its pid listed by `nvidia-smi
+--query-compute-apps`; the new build 1929 → 1929 MiB, not listed — twice. A program that only calls
+`cuInit`, `cuDeviceGetName` and `cuDeviceTotalMem` costs +0 MiB. Still `GPU detected gpu=NVIDIA
+GeForce RTX 3070 Laptop GPU vram_mb=8191 backend=CUDA`.
+
+**One deliberate change of answer.** The Windows GPU build carries candle's CUDA AND llama.cpp's
+Vulkan (`windows-gpu`). On a Windows machine with an AMD or Intel card and no NVIDIA driver, the
+old detection reported the Vulkan device as "GPU detected" — but the workers that serve shards are
+candle and can only use CUDA, so the node planned and advertised graphics memory its models never
+ran in. It now reports no card there (`is_culib_present` is false), which is what its workers do.
+A build without candle's CUDA (macOS, Metal) still asks llama.cpp.
+
+## nvidia-smi is asked through one bounded helper (2026-10-05)
+
+**What happened.** At 18:52:06 UTC on 2026-10-04 a worker died of an illegal memory access and
+the graphics driver began resetting the card ("UCodeReset TDR"); the reset finished at 19:06:16.
+The node's re-plan logged "Starting pipeline execution" at 18:52:06.7 and its next line for that
+request — "admitting model to GPU" — at 19:06:16.5, the second the driver came back: GPU admission
+reads the card's free memory through `nvidia-smi` (`compute_vram_budget` →
+`query_gpu_vram_free_mb`), and `nvidia-smi` does not answer while the driver resets. Every
+`nvidia-smi` in the crate was a bare `Command::output()` — no bound — and several run on async
+threads: the capability broadcast every cycle, admission, the dashboard's stats. During a reset
+each one parks its thread for the reset's length, and each new call starts one more process
+waiting on a driver that is trying to recover (FUTURE_WORK #220).
+
+**The rule.** `vram::nvidia_smi` runs it through a `BoundedCommand`: at most 10 s (it answers in
+~90 ms; the bound is generous on purpose), then `None` — the "unknown" every caller already handles
+(admission charges no other program; the broadcast advertises 0 room; the dashboard shows nothing).
+The timed-out process is killed and KEPT: a process blocked in the driver dies only when the driver
+answers, so while it is still alive the next reading is `None` at once instead of a second process
+queued on the same driver, and when it has gone readings resume ("answers again after a stall",
+with the stall's length — which dates the reset in the node's own log). The lock is held for the
+whole run, so two never overlap. Test: `a_reading_that_does_not_answer_is_unknown_and_never_asked_twice_at_once`;
+guard: `nvidia_smi_is_asked_only_through_the_bounded_helper` (green on the tree, red on a planted
+bare spawn). The launcher (`src/bin/launcher.rs`) is exempt: it asks once, before the daemon
+exists.
+
 ## The owner is told when the card has become slow to hand out memory (2026-10-01)
 
 **Why.** The pool above and `card_pace` defend the node against a host whose fresh card

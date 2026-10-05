@@ -11,6 +11,7 @@ paths:
   - "src/inference/cancel.rs"
   - "src/inference/prefill_pacer.rs"
   - "src/inference/thermal.rs"
+  - "src/inference/route_override.rs"
 ---
 
 # Scheduling, routing and failover

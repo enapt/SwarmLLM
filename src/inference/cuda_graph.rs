@@ -43,6 +43,13 @@
 //! back where it was and runs the step the ordinary way — the same kernels in
 //! the same order, so the same answer.
 //!
+//! **A graph pays only when it is UPDATED.** A shape the driver keeps refusing
+//! to update is rebuilt every launch at 10-100 ms, against the ~3 ms a graph
+//! saves; after [`REBUILDS_BEFORE_RESTING`] among its last [`CHURN_WINDOW`]
+//! launches it rests — runs the ordinary way — for [`REST_STEPS`], then is
+//! tried again. The first refusal of each kind is logged with the driver's
+//! reason.
+//!
 //! ON by default since 2026-09-30, after the gate ran on a `--features cuda`
 //! build (v0.3.199 shipped a stream change that every test and a cheaper build
 //! passed while every reply was garbage, gotcha #683): byte-identical replies on
@@ -84,6 +91,42 @@ const REPORT_EVERY: Duration = Duration::from_secs(60);
 /// systematic one would leak a buffer a token. A forward that fails on its own
 /// (a cancelled request, the end of the context) is not counted.
 const DEFECTS_BEFORE_GIVING_UP: u32 = 3;
+
+/// Launches, among the last [`CHURN_WINDOW`] of one number of positions, whose
+/// graph the driver would not update in place and had to be built again. At
+/// this many, forwards of that many positions REST — run the ordinary way — for
+/// [`REST_STEPS`]. A window rather than a run in a row: a shape rebuilt on half
+/// its launches loses as much as one rebuilt on all of them, and clean launches
+/// in between would keep breaking a run.
+///
+/// A graph pays only when it is updated: an update is ~1 ms of recording on a
+/// 7B step that saves ~3 ms of submissions, while a rebuild
+/// (`cuGraphInstantiate`) costs 10-100 ms. Measured 2026-10-04/05: the 7B's
+/// speculative checks on the .225 gate's split rig rebuilt 105 of 135 launches
+/// at 65-108 ms of recording each (the drafter beside it: 1 of 404, ~6 ms), and
+/// a Qwen2.5-14B segment served for peers rebuilt 177 of 183 at 12.7 ms. A shape
+/// that keeps changing is never worth capturing — llama.cpp's own rule
+/// (`ggml_backend_cuda_graph_compute`, llama-cpp-sys-2 0.1.156) runs a graph
+/// whose node properties changed UNcaptured until two calls in a row agree.
+const REBUILDS_BEFORE_RESTING: u32 = 3;
+
+/// How many recent launches of one number of positions [`REBUILDS_BEFORE_RESTING`]
+/// counts over. A rebuild now and then — one in 64 when a step grows its KV
+/// chunk count — never reaches it.
+const CHURN_WINDOW: u32 = 8;
+
+/// Clean launches in a row after which a number of positions' rests start
+/// again from [`REST_STEPS`]: a shape that has settled is not punished for
+/// churn it showed hours ago.
+const CLEAN_LAUNCHES_TO_FORGET: u32 = 64;
+
+/// Steps of one number of positions run the ordinary way once it rests, before
+/// capture is tried again — doubled each time it comes back to rest, up to
+/// 16× (forgotten after [`CLEAN_LAUNCHES_TO_FORGET`]). Bounds what a shape that
+/// always churns costs (three rebuilds per rest)
+/// while a shape that churned for a moment — a burst of 50 rebuilds in one
+/// minute among 980 updates, live node 2026-10-01 — gets its graphs back.
+const REST_STEPS: u32 = 256;
 
 /// The refusal that is the forward's own failure, not the capture's.
 pub(crate) const FORWARD_FAILED: &str = "the forward failed inside the capture";
@@ -207,6 +250,27 @@ pub(crate) struct Refusal {
     pub(crate) detail: String,
 }
 
+/// What a launched capture did: whether every group's graph was updated in
+/// place, and — for each existing graph the driver would NOT update — why: its
+/// result code and the type of the node it named (`cuGraphExecUpdate`'s
+/// `resultInfo`), as one line. A group with no graph yet is built without a
+/// refusal. Logged once per kind, so the next churn names its cause.
+type Launched = (bool, Vec<String>);
+
+/// One number of positions' run of rebuilds, and its rest.
+#[derive(Default)]
+struct Churn {
+    /// The last [`CHURN_WINDOW`] launches, newest in the lowest bit: 1 where at
+    /// least one group's update was refused.
+    recent: u8,
+    /// Launches in a row with no refused update.
+    clean_in_a_row: u32,
+    /// Steps still to run the ordinary way before capture is tried again.
+    rest_left: u32,
+    /// How many rests it has taken — doubles the next.
+    rests: u32,
+}
+
 #[derive(Default)]
 struct Stats {
     launched: u64,
@@ -214,6 +278,11 @@ struct Stats {
     instantiated: u64,
     uncaptured: u64,
     refused: u64,
+    /// Launches where the driver refused to update an existing graph.
+    rebuilt: u64,
+    /// Rests begun ([`REBUILDS_BEFORE_RESTING`]).
+    rested: u64,
+    update_refusals_seen: Vec<String>,
     /// Host time from the start of a capture to its launch, summed over the
     /// launched ones. The card waits for all of it — a graph starts nothing
     /// until the step is recorded — so it is the cost to set against the
@@ -255,6 +324,10 @@ pub(crate) struct DecodeGraph {
     /// the one-position step, and giving the whole model up threw away the
     /// decode graphs with it.
     defects: HashMap<usize, u32>,
+    /// Rebuilds and rests, per number of positions — see
+    /// [`REBUILDS_BEFORE_RESTING`]. Per positions for the same reason as
+    /// `defects`: the checks churned while the one-position step updated.
+    churn: HashMap<usize, Churn>,
     stats: Stats,
 }
 
@@ -280,10 +353,13 @@ impl DecodeGraph {
         false
     }
 
-    /// True once forwards of `positions` have been refused often enough, for
-    /// reasons of the program's making, that they should stop being captured.
-    pub(crate) fn gave_up(&self, positions: usize) -> bool {
+    /// True when forwards of `positions` are not to be captured now: they were
+    /// refused often enough, for reasons of the program's making, to be given
+    /// up for good — or their graphs kept having to be rebuilt and they are
+    /// resting ([`REBUILDS_BEFORE_RESTING`]).
+    pub(crate) fn declines(&self, positions: usize) -> bool {
         self.defects.get(&positions).copied().unwrap_or(0) >= DEFECTS_BEFORE_GIVING_UP
+            || self.churn.get(&positions).is_some_and(|c| c.rest_left > 0)
     }
 
     /// The two boundary buffers for a `[1, positions, hidden]` residual
@@ -314,14 +390,69 @@ impl DecodeGraph {
         self.templates.get(&(all_positions, positions))
     }
 
-    /// A step that ran the ordinary way: remember its output's shape.
+    /// A step that ran the ordinary way: remember its output's shape, and count
+    /// it off a rest.
     pub(crate) fn note_uncaptured(&mut self, all_positions: bool, positions: usize, out: &Tensor) {
         self.templates.insert(
             (all_positions, positions),
             (out.dims().to_vec(), out.dtype()),
         );
+        if let Some(churn) = self.churn.get_mut(&positions) {
+            churn.rest_left = churn.rest_left.saturating_sub(1);
+        }
         self.stats.uncaptured += 1;
         self.report();
+    }
+
+    /// A launched capture: count its rebuilds, and put its number of positions
+    /// to rest once the driver has refused to update it
+    /// [`REBUILDS_BEFORE_RESTING`] times among its last [`CHURN_WINDOW`] launches.
+    fn note_launched(&mut self, positions: usize, refused_updates: &[String]) {
+        let churn = self.churn.entry(positions).or_default();
+        let rebuilt = !refused_updates.is_empty();
+        let window = (1u16 << CHURN_WINDOW) - 1;
+        churn.recent = (((u16::from(churn.recent) << 1) | u16::from(rebuilt)) & window) as u8;
+        if !rebuilt {
+            churn.clean_in_a_row += 1;
+            if churn.clean_in_a_row >= CLEAN_LAUNCHES_TO_FORGET {
+                churn.rests = 0;
+            }
+            return;
+        }
+        churn.clean_in_a_row = 0;
+        self.stats.rebuilt += 1;
+        for refused in refused_updates {
+            if !self.stats.update_refusals_seen.contains(refused) {
+                tracing::info!(
+                    positions,
+                    why = %refused,
+                    "DIAG: decode graph could not be updated in place — rebuilt (first of this kind)"
+                );
+                self.stats.update_refusals_seen.push(refused.clone());
+            }
+        }
+        if churn.recent.count_ones() < REBUILDS_BEFORE_RESTING {
+            return;
+        }
+        churn.recent = 0;
+        churn.rest_left = REST_STEPS << churn.rests.min(4);
+        churn.rests += 1;
+        self.stats.rested += 1;
+        if churn.rests == 1 {
+            tracing::info!(
+                positions,
+                rest_steps = churn.rest_left,
+                "DIAG: decode graph: forwards of this many positions keep being rebuilt — they \
+                 run the ordinary way for a while, then capture is tried again"
+            );
+        } else {
+            tracing::debug!(
+                positions,
+                rest_steps = churn.rest_left,
+                rests = churn.rests,
+                "DIAG: decode graph: still rebuilt every launch — resting again"
+            );
+        }
     }
 
     /// Capture `forward` on `device`'s stream and launch it — in GROUPS: each
@@ -351,7 +482,7 @@ impl DecodeGraph {
             }),
         };
         #[cfg(not(feature = "candle-cuda"))]
-        let outcome = {
+        let outcome: Result<Launched, Refusal> = {
             let _ = (
                 device,
                 positions,
@@ -366,14 +497,15 @@ impl DecodeGraph {
             })
         };
         match &outcome {
-            Ok(updated) => {
+            Ok((all_updated, refused_updates)) => {
                 self.stats.launched += 1;
                 self.stats.recording += started.elapsed();
-                if *updated {
+                if *all_updated {
                     self.stats.updated += 1;
                 } else {
                     self.stats.instantiated += 1;
                 }
+                self.note_launched(positions, refused_updates);
             }
             Err(refusal) => {
                 self.stats.refused += 1;
@@ -426,6 +558,8 @@ impl DecodeGraph {
             ),
             updated_in_place = s.updated,
             instantiated = s.instantiated,
+            rebuilt = s.rebuilt,
+            rested = s.rested,
             uncaptured = s.uncaptured,
             refused = s.refused,
             "DIAG: decode graph"
@@ -512,6 +646,29 @@ mod cuda {
         }
     }
 
+    /// The driver's reason for refusing an update: the call's own error, its
+    /// update result, and the type of the node it names (a node of the NEW
+    /// graph, still alive here). The call's error leads because a call that
+    /// failed before judging the graph leaves the zeroed result reading
+    /// SUCCESS. `cuGraphNodeGetType` needs no context and exists since CUDA 10.
+    fn why_not_updated(
+        error: &impl std::fmt::Display,
+        info: &sys::CUgraphExecUpdateResultInfo,
+    ) -> String {
+        let node = if info.errorNode.is_null() {
+            "none named".to_string()
+        } else {
+            let mut kind = std::mem::MaybeUninit::<sys::CUgraphNodeType>::uninit();
+            // SAFETY: a node of the graph the update was asked about.
+            match unsafe { sys::cuGraphNodeGetType(info.errorNode, kind.as_mut_ptr()) }.result() {
+                // SAFETY: the driver wrote it.
+                Ok(()) => format!("{:?}", unsafe { kind.assume_init() }),
+                Err(e) => format!("unknown ({e})"),
+            }
+        };
+        format!("{error}: {:?} at a node of type {node}", info.result)
+    }
+
     /// One step's capture, group by group. Dropping it mid-capture (an error
     /// or a panic in the forward) ends the capture and discards it: a stream
     /// left capturing refuses everything after.
@@ -523,6 +680,7 @@ mod cuda {
         capturing: bool,
         refusal: Option<Refusal>,
         all_updated: bool,
+        refused_updates: Vec<String>,
     }
 
     impl Session<'_> {
@@ -586,9 +744,13 @@ mod cuda {
                 // struct, and the driver writes it before returning.
                 let mut info: sys::CUgraphExecUpdateResultInfo = unsafe { std::mem::zeroed() };
                 // SAFETY: both handles are live.
-                unsafe { sys::cuGraphExecUpdate_v2(x.0, graph.0, &mut info) }
-                    .result()
-                    .is_ok()
+                match unsafe { sys::cuGraphExecUpdate_v2(x.0, graph.0, &mut info) }.result() {
+                    Ok(()) => true,
+                    Err(e) => {
+                        self.refused_updates.push(why_not_updated(&e, &info));
+                        false
+                    }
+                }
             });
             if !updated {
                 // A refused update leaves the old graph in an unspecified
@@ -651,13 +813,13 @@ mod cuda {
         }
     }
 
-    /// `Ok(true)` when every group's graph was updated in place, `Ok(false)`
-    /// when at least one had to be built.
+    /// On `Ok`, whether every group's graph was updated in place, and why any
+    /// existing one could not be.
     pub(super) fn capture_in_groups(
         dev: &candle_core::CudaDevice,
         execs: &mut Vec<Option<Exec>>,
         forward: impl FnOnce(&mut super::Cutter<'_>) -> Result<(), SwarmError>,
-    ) -> Result<bool, Refusal> {
+    ) -> Result<super::Launched, Refusal> {
         let mut session = Session {
             dev,
             execs,
@@ -666,6 +828,7 @@ mod cuda {
             capturing: false,
             refusal: None,
             all_updated: true,
+            refused_updates: Vec::new(),
         };
         session.begin()?;
         let mut cutter = super::Cutter { session };
@@ -679,7 +842,10 @@ mod cuda {
             return Err(refused(super::FORWARD_FAILED, e));
         }
         session.end_and_launch()?;
-        Ok(session.all_updated)
+        Ok((
+            session.all_updated,
+            std::mem::take(&mut session.refused_updates),
+        ))
     }
 }
 
@@ -715,6 +881,75 @@ mod tests {
             graph.follows_previous_step("a", 15),
             "so does a step after a several-position pass"
         );
+    }
+
+    /// A shape the driver keeps refusing to update rests — runs the ordinary
+    /// way — once REBUILDS_BEFORE_RESTING of its last CHURN_WINDOW launches
+    /// were rebuilds, for REST_STEPS of its own steps, then is tried again; a
+    /// second rest is twice as long, and a long clean stretch forgets that.
+    /// Rebuilds spread wider than the window never rest it; clean launches in
+    /// between do not hide a shape rebuilt on half its launches; another
+    /// shape is untouched.
+    #[test]
+    fn a_shape_rebuilt_every_launch_rests_then_is_tried_again() {
+        let mut graph = DecodeGraph::default();
+        let refused = vec!["CU_GRAPH_EXEC_UPDATE_ERROR_TOPOLOGY_CHANGED".to_string()];
+        let step = Tensor::zeros((1, 3, 4), DType::F32, &Device::Cpu).unwrap();
+        let clean = |graph: &mut DecodeGraph, n: u32| {
+            for _ in 0..n {
+                graph.note_launched(3, &[]);
+            }
+        };
+
+        // Two rebuilds, then one more after the window has moved past them.
+        graph.note_launched(3, &refused);
+        graph.note_launched(3, &refused);
+        clean(&mut graph, CHURN_WINDOW - 2);
+        graph.note_launched(3, &refused);
+        assert!(!graph.declines(3), "rebuilds spread wider than the window");
+        clean(&mut graph, CHURN_WINDOW);
+
+        // Every other launch rebuilt: rests on the third.
+        for _ in 0..REBUILDS_BEFORE_RESTING {
+            assert!(!graph.declines(3));
+            graph.note_launched(3, &refused);
+            clean(&mut graph, 1);
+        }
+        assert!(graph.declines(3), "rebuilt on half its launches: resting");
+        assert!(
+            !graph.declines(1),
+            "another number of positions is untouched"
+        );
+
+        for _ in 0..REST_STEPS {
+            assert!(graph.declines(3));
+            graph.note_uncaptured(false, 3, &step);
+        }
+        assert!(
+            !graph.declines(3),
+            "the rest is over: capture is tried again"
+        );
+
+        for _ in 0..REBUILDS_BEFORE_RESTING {
+            graph.note_launched(3, &refused);
+        }
+        for _ in 0..2 * REST_STEPS - 1 {
+            graph.note_uncaptured(false, 3, &step);
+        }
+        assert!(graph.declines(3), "the second rest is twice as long");
+        graph.note_uncaptured(false, 3, &step);
+        assert!(!graph.declines(3));
+        assert_eq!(graph.stats.rested, 2);
+
+        // A long clean stretch: the next rest is the first length again.
+        clean(&mut graph, CLEAN_LAUNCHES_TO_FORGET);
+        for _ in 0..REBUILDS_BEFORE_RESTING {
+            graph.note_launched(3, &refused);
+        }
+        for _ in 0..REST_STEPS {
+            graph.note_uncaptured(false, 3, &step);
+        }
+        assert!(!graph.declines(3), "a settled shape's rests start over");
     }
 
     /// The switch is off unless asked for, and a model that is not on a card

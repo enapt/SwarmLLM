@@ -505,10 +505,22 @@ pub async fn diagnostics(
         }
         match &ss.gpu_info {
             Some(g) => {
+                // Free memory is read now — a figure kept from startup was stale
+                // the moment a model loaded. `nvidia-smi` blocks for ~90 ms.
+                let free = tokio::task::spawn_blocking(
+                    crate::model::auto_manage::vram::query_gpu_vram_free_mb,
+                )
+                .await
+                .ok()
+                .flatten()
+                .map_or_else(
+                    || "free unreadable".to_string(),
+                    |mb| format!("{mb} MB free now"),
+                );
                 let _ = writeln!(
                     out,
-                    "  gpu: {} ({} MB total, {} MB free, backend {})",
-                    g.name, g.vram_total_mb, g.vram_free_mb, g.backend
+                    "  gpu: {} ({} MB total, {free}, backend {})",
+                    g.name, g.vram_total_mb, g.backend
                 );
             }
             None => {
@@ -2092,18 +2104,15 @@ pub(crate) fn detect_hardware(shared_state: &crate::daemon::SharedState) -> serd
     }
     let used_disk_mb = total_disk_mb.saturating_sub(available_disk_mb);
 
-    // GPU info from llama.cpp device detection (set at startup)
-    // Falls back to nvidia-smi when gpu_info is None (e.g. non-CUDA build)
+    // The card's name and size from startup detection; how much of it is in
+    // use is read live (nvidia-smi), and unknown stays unknown. Falls back to
+    // nvidia-smi for all three when gpu_info is None (e.g. non-CUDA build).
     let (gpu_name, gpu_vram_mb, gpu_vram_used_mb) = match &shared_state.gpu_info {
-        Some(gpu) => {
-            // Query live VRAM usage via nvidia-smi for an up-to-date reading
-            let used = crate::model::auto_manage::vram::query_gpu_vram_used();
-            (
-                Some(gpu.name.clone()),
-                Some(gpu.vram_total_mb),
-                used.or(Some(gpu.vram_total_mb.saturating_sub(gpu.vram_free_mb))),
-            )
-        }
+        Some(gpu) => (
+            Some(gpu.name.clone()),
+            Some(gpu.vram_total_mb),
+            crate::model::auto_manage::vram::query_gpu_vram_used(),
+        ),
         None => {
             // One `nvidia-smi` spawn, not two: this branch used to ask for the
             // name and total with one call and the usage with another, on an
@@ -2181,16 +2190,6 @@ pub(crate) fn detect_hardware(shared_state: &crate::daemon::SharedState) -> serd
         "cpu_cores": cpu_cores,
     })
 }
-
-/// Fallback GPU detection via nvidia-smi when llama.cpp gpu_info is unavailable.
-///
-/// The only remaining consumer is `daemon/mod.rs`, and it sits inside
-/// `#[cfg(feature = "candle-cuda")]` — so every default build reports this
-/// re-export as unused and every default build is wrong about it (gotcha #264).
-/// Deleting it on that advice breaks the CUDA build, which nothing local
-/// compiles.
-#[cfg_attr(not(feature = "candle-cuda"), allow(unused_imports))]
-pub(crate) use crate::model::auto_manage::vram::detect_gpu_nvidia_smi;
 
 /// POST /api/admin/rescan-shards — Scan the models directory for new shard files.
 ///

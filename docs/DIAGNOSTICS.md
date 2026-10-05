@@ -605,6 +605,31 @@ read calls" both fit the symptom, look identical in the source, and no amount of
 reading distinguishes them. It is also why the optimised release binary was no
 faster than a debug build on that path — optimisation cannot remove a syscall.
 
+## "Did the graphics card fault?" — read the driver's events by their data (WSL2 / Windows)
+
+`DIAG:` A worker that dies with `CUDA_ERROR_ILLEGAL_ADDRESS` (or any card error) reports it
+at the NEXT call that waits for the card — "Encode Q8_0" is just the copy of a step's output
+to the host, so the fault was in that step's forward, not in the encoder. Whether the
+DRIVER noticed too is in Windows' System log, and an nvlddmkm event's `Message` is EMPTY on
+these machines — its text is in the event's data:
+
+```bash
+powershell.exe -NoProfile -Command 'Get-WinEvent -FilterHashtable @{LogName="System"; ProviderName="nvlddmkm"; StartTime=(Get-Date).AddDays(-2)} | ForEach-Object { "{0:u} id={1} {2}" -f $_.TimeCreated.ToUniversalTime(), $_.Id, $_.Properties[1].Value }'
+```
+
+Id 13 is an engine exception ("Graphics FECS Exception" = the context-switch engine); 14
+carries a raw dump; **153 is a TDR — the driver resetting the card**, with its stages
+("UCodeReset", "Resetting", "Reset", "Restarting"). On 2026-10-04 a reset took 14 minutes, and
+every CUDA call on the machine — a node's next worker spawn included — waited it out
+(FUTURE_WORK #220). Times print in UTC, to match the node's log; match them to the second.
+`Kernel-Power` id 105 ("power source change") is worth listing beside them on a laptop.
+
+**Which kernel faulted** needs `compute-sanitizer --tool memcheck --target-processes all`
+around the daemon (it follows the workers). On WSL2 it refuses ("Failed to initialize WDDM
+debugger interface") until two registry values are set to DWORD 1 as administrator:
+`HKLM\SYSTEM\CurrentControlSet\Services\nvlddmkm` `EnableDebugInterface` and
+`HKLM\SOFTWARE\NVIDIA Corporation\GPUDebugger` `EnableInterface`.
+
 ## No log file? Use the endpoint
 
 `GET /api/admin/diagnostics` renders plain text for a shell, and includes the

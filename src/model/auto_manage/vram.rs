@@ -918,6 +918,103 @@ pub fn global_pool_vram_mb(shared: &SharedState) -> u64 {
     total
 }
 
+/// The longest `nvidia-smi` may take before its reading counts as unknown.
+///
+/// It answers in ~90 ms here. It does not answer at all while the graphics
+/// driver is resetting the card (a TDR), and on 2026-10-04 one reset took 14
+/// minutes: a node's re-plan sat in GPU admission (`compute_vram_budget`) for
+/// all of it, and every other caller — the capability broadcast, the dashboard
+/// — would have queued behind the driver the same way (FUTURE_WORK #220). A
+/// bound turns "the driver is busy" into the `None` every caller already
+/// treats as unknown.
+const NVIDIA_SMI_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// A program asked for a reading, with a bound on how long the asker waits and
+/// never two copies running at once.
+pub(crate) struct BoundedCommand {
+    program: &'static str,
+    timeout: std::time::Duration,
+    /// The copy that outlived `timeout`, and when it started, while it still
+    /// runs. While it does, whatever it asks is still not answering (for
+    /// `nvidia-smi`: the driver is still resetting); starting another would only
+    /// add one more process waiting on it, so the next reading is `None` at
+    /// once. The lock is held for the whole run, so calls never overlap.
+    unanswered: std::sync::Mutex<Option<(std::process::Child, std::time::Instant)>>,
+}
+
+impl BoundedCommand {
+    pub(crate) const fn new(program: &'static str, timeout: std::time::Duration) -> Self {
+        Self {
+            program,
+            timeout,
+            unanswered: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// What the program printed — `None` when it is not installed, fails, does
+    /// not answer within the bound, or a previous copy still has not. Meant for
+    /// queries that print a line or two, so the pipe never fills before it exits.
+    pub(crate) fn run(&self, args: &[&str]) -> Option<String> {
+        use std::io::Read as _;
+        let mut unanswered = self.unanswered.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((child, since)) = unanswered.as_mut() {
+            if let Ok(None) = child.try_wait() {
+                return None;
+            }
+            tracing::info!(
+                program = self.program,
+                stalled_secs = since.elapsed().as_secs(),
+                "answers again after a stall"
+            );
+            *unanswered = None;
+        }
+        let mut child = std::process::Command::new(self.program)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .ok()?;
+        let started = std::time::Instant::now();
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    let mut out = String::new();
+                    child.stdout.take()?.read_to_string(&mut out).ok()?;
+                    return status.success().then_some(out);
+                }
+                Ok(None) if started.elapsed() < self.timeout => {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                Ok(None) => {
+                    // A process blocked in the driver dies only once the driver
+                    // answers; one stuck anywhere else dies now.
+                    let _ = child.kill();
+                    tracing::warn!(
+                        program = self.program,
+                        timeout_secs = self.timeout.as_secs(),
+                        "did not answer — for nvidia-smi, the graphics driver may be resetting \
+                         the card; its readings count as unknown until it answers again"
+                    );
+                    *unanswered = Some((child, started));
+                    return None;
+                }
+                Err(_) => return None,
+            }
+        }
+    }
+}
+
+static NVIDIA_SMI: BoundedCommand = BoundedCommand::new("nvidia-smi", NVIDIA_SMI_TIMEOUT);
+
+/// Run `nvidia-smi` with `args` and return what it printed, or `None` (see
+/// [`BoundedCommand::run`]). **The one way this crate asks `nvidia-smi`
+/// anything**: a bare `Command::new` blocks its thread for as long as the
+/// driver does. Guard: `nvidia_smi_is_asked_only_through_the_bounded_helper`.
+pub(crate) fn nvidia_smi(args: &[&str]) -> Option<String> {
+    NVIDIA_SMI.run(args)
+}
+
 /// Get local VRAM in MB, with nvidia-smi fallback when gpu_info is None.
 pub fn local_vram_mb(shared: &SharedState) -> u64 {
     if let Some(ref gpu) = shared.gpu_info {
@@ -955,16 +1052,13 @@ pub(crate) fn detect_gpu_nvidia_smi() -> (Option<String>, Option<u64>) {
 /// CUDA, so `gpu_info` is `None` while `nvidia-smi` still answers. On a machine
 /// with no card at all the spawn fails immediately and costs nothing.
 pub(crate) fn detect_gpu_nvidia_smi_with_used() -> (Option<String>, Option<u64>, Option<u64>) {
-    let output = std::process::Command::new("nvidia-smi")
-        .args([
-            "--query-gpu=name,memory.total,memory.used",
-            "--format=csv,noheader,nounits",
-        ])
-        .output();
+    let output = nvidia_smi(&[
+        "--query-gpu=name,memory.total,memory.used",
+        "--format=csv,noheader,nounits",
+    ]);
 
     match output {
-        Ok(out) if out.status.success() => {
-            let text = String::from_utf8_lossy(&out.stdout);
+        Some(text) => {
             let mut fields = text.trim().split(',');
             let name = fields.next().map(|f| f.trim().to_string());
             let total = fields.next().and_then(|f| f.trim().parse::<u64>().ok());
@@ -997,14 +1091,7 @@ pub(crate) fn detect_gpu_nvidia_smi_with_used() -> (Option<String>, Option<u64>,
 /// capability floor to compare against, so asking would be meaningless work.
 #[cfg(feature = "candle-cuda")]
 pub(crate) fn detect_gpu_compute_cap() -> Option<(u32, u32)> {
-    let output = std::process::Command::new("nvidia-smi")
-        .args(["--query-gpu=compute_cap", "--format=csv,noheader"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&output.stdout);
+    let text = nvidia_smi(&["--query-gpu=compute_cap", "--format=csv,noheader"])?;
     // Multi-GPU hosts print one line per card. We only ever bind device 0.
     crate::daemon::gpu_support::parse_compute_cap(text.lines().next()?)
 }
@@ -1014,14 +1101,7 @@ pub(crate) fn detect_gpu_compute_cap() -> Option<(u32, u32)> {
 /// Called on each auto-manage tick (~5 min) for accurate VRAM pressure.
 /// Returns None if nvidia-smi is unavailable or fails.
 pub(crate) fn query_gpu_vram_used() -> Option<u64> {
-    let output = std::process::Command::new("nvidia-smi")
-        .args(["--query-gpu=memory.used", "--format=csv,noheader,nounits"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&output.stdout);
+    let text = nvidia_smi(&["--query-gpu=memory.used", "--format=csv,noheader,nounits"])?;
     text.trim().parse::<u64>().ok()
 }
 
@@ -1037,17 +1117,10 @@ pub(crate) fn query_gpu_vram_used() -> Option<u64> {
 /// (`inference::split::kv_budget`). Returns None when nvidia-smi is
 /// unavailable, which the caller must treat as "unknown", never as "zero".
 pub(crate) fn query_gpu_vram_free_mb() -> Option<u64> {
-    let output = std::process::Command::new("nvidia-smi")
-        .args([
-            "--query-gpu=memory.total,memory.used",
-            "--format=csv,noheader,nounits",
-        ])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&output.stdout);
+    let text = nvidia_smi(&[
+        "--query-gpu=memory.total,memory.used",
+        "--format=csv,noheader,nounits",
+    ])?;
     let line = text.trim().lines().next()?;
     let (total, used) = line.split_once(',')?;
     let total = total.trim().parse::<u64>().ok()?;
@@ -1232,6 +1305,54 @@ pub fn ram_budget_now(shared: &crate::daemon::SharedState) -> Option<RamBudget> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A reading that does not come back within its bound is unknown, and the
+    /// asker is not held for longer; while that copy is still running (a
+    /// driver mid-reset keeps nvidia-smi blocked even after it is killed) the
+    /// next reading is unknown AT ONCE rather than a second process queued on
+    /// the same driver; once it has gone, readings resume.
+    #[cfg(unix)]
+    #[test]
+    fn a_reading_that_does_not_answer_is_unknown_and_never_asked_twice_at_once() {
+        use std::time::{Duration, Instant};
+        let sleeper = BoundedCommand::new("sleep", Duration::from_millis(200));
+
+        let asked = Instant::now();
+        assert_eq!(sleeper.run(&["30"]), None);
+        assert!(
+            asked.elapsed() < Duration::from_secs(5),
+            "bounded by the timeout"
+        );
+
+        // Stand in for a copy the kill cannot end yet: one still running.
+        let still_running = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        *sleeper.unanswered.lock().unwrap() = Some((still_running, Instant::now()));
+        let asked = Instant::now();
+        assert_eq!(sleeper.run(&["0"]), None, "a stuck copy means unknown");
+        assert!(
+            asked.elapsed() < Duration::from_millis(150),
+            "answered at once, without starting another copy"
+        );
+
+        let (mut stuck, _) = sleeper.unanswered.lock().unwrap().take().unwrap();
+        stuck.kill().unwrap();
+        stuck.wait().unwrap();
+        *sleeper.unanswered.lock().unwrap() = Some((stuck, Instant::now()));
+        assert_eq!(
+            sleeper.run(&["0"]),
+            Some(String::new()),
+            "it has gone: asked again"
+        );
+        assert!(sleeper.unanswered.lock().unwrap().is_none());
+
+        let failing = BoundedCommand::new("false", Duration::from_secs(5));
+        assert_eq!(failing.run(&[]), None, "a failed run is no reading");
+        let missing = BoundedCommand::new("no-such-program-swarmllm", Duration::from_secs(5));
+        assert_eq!(missing.run(&[]), None);
+    }
 
     /// A mixture-of-experts model needs memory for every expert, not the few a
     /// token uses: they are all resident. Pinned against the discount this

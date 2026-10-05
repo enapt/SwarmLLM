@@ -606,7 +606,7 @@ impl SplitModel {
         let template = match graph.template(all_positions, positions) {
             Some(t)
                 if follows
-                    && !graph.gave_up(positions)
+                    && !graph.declines(positions)
                     && kv_cache_store.every_cache_holds(&cache_key, index_pos + positions) =>
             {
                 t.clone()

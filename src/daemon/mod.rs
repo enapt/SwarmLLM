@@ -159,35 +159,33 @@ impl Daemon {
             model_info.clone()
         };
 
-        // Detect GPU via llama.cpp backend; fall back to candle CUDA probe
+        // Detect the GPU. A CUDA build asks the driver directly and leaves no
+        // context behind in the daemon (`gpu_support::describe_local_gpu`);
+        // llama.cpp's device list — which does — answers only where candle's
+        // CUDA is not built.
         let gpu_info = {
-            let llama_gpu = crate::inference::executor::detect_gpu();
             #[cfg(feature = "candle-cuda")]
-            let gpu_info = llama_gpu.or_else(|| {
+            let gpu_info = {
                 // Ask whether the card can run OUR kernels before asking
-                // whether a CUDA device exists — `cuda_if_available` succeeds on
-                // a pre-Ampere card and only module load fails, so without this
-                // the node would advertise a GPU it cannot use. Probed here so
-                // the explanation lands in the startup log next to the rest of
-                // the hardware detection, rather than at the first request.
-                let cuda_ok = crate::daemon::gpu_support::local_gpu_is_supported()
-                    && candle_core::Device::cuda_if_available(0)
-                        .map(|d| d.is_cuda())
-                        .unwrap_or(false);
-                if cuda_ok {
-                    let (name, vram_mb) = crate::api::admin::detect_gpu_nvidia_smi();
-                    Some(crate::inference::executor::GpuInfo {
-                        name: name.unwrap_or_else(|| "NVIDIA GPU".to_string()),
-                        vram_total_mb: vram_mb.unwrap_or(0),
-                        vram_free_mb: 0,
-                        backend: "CUDA".to_string(),
+                // whether a CUDA device exists — a pre-Ampere card has one and
+                // fails only at module load, so without this the node would
+                // advertise a GPU it cannot use. Probed here so the explanation
+                // lands in the startup log next to the rest of the hardware
+                // detection, rather than at the first request.
+                if crate::daemon::gpu_support::local_gpu_is_supported() {
+                    crate::daemon::gpu_support::describe_local_gpu().map(|(name, vram_total_mb)| {
+                        crate::inference::executor::GpuInfo {
+                            name,
+                            vram_total_mb,
+                            backend: "CUDA".to_string(),
+                        }
                     })
                 } else {
                     None
                 }
-            });
+            };
             #[cfg(not(feature = "candle-cuda"))]
-            let gpu_info = llama_gpu;
+            let gpu_info = crate::inference::executor::detect_gpu();
             gpu_info
         };
         if let Some(ref gpu) = gpu_info {

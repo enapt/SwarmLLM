@@ -26,6 +26,10 @@ paths:
   - "src/inference/local_embedder.rs"
   - "src/inference/swift.rs"
   - "src/inference/mod.rs"
+  - "src/inference/cuda_graph.rs"
+  - "src/inference/prefill_attn.rs"
+  - "src/inference/residual_norm.rs"
+  - "src/inference/coupled_noise.rs"
 ---
 
 # Inference kernels, caches and the tokenizer
@@ -76,9 +80,9 @@ Vendored `quantized/cuda.rs::dequantize_matmul` sends ≥ 64 activation rows to 
 
 ## A decode step goes to the card as CUDA graphs — ON by default since 2026-09-30
 
-`inference::cuda_graph` + `SplitModel::forward_decode_as_graph`: ON by default, `SWARMLLM_CUDA_GRAPH=0` off (the legacy stream, which cannot be captured, goes with it). Recorded in groups (`cuda_graph::group_layers`, `Cutter::cut`). ⛔ A pageable host→device copy inside a capture is replayed from the host address — silent garbage: `htod_copies_so_far` discards such a capture; a new `clone_htod` on the decode path turns capture off. Capture only where `KvCacheStore::every_cache_holds`; catch the mirror up BEFORE recording (`LayerKv::catch_up_mirror`, #761).
+`inference::cuda_graph` + `SplitModel::forward_decode_as_graph`: ON by default, `SWARMLLM_CUDA_GRAPH=0` off (the legacy stream, which cannot be captured, goes with it). Recorded in groups (`cuda_graph::group_layers`, `Cutter::cut`). ⛔ A pageable host→device copy inside a capture is replayed from the host address — silent garbage: `htod_copies_so_far` discards such a capture; a new `clone_htod` on the decode path turns capture off. Capture only where `KvCacheStore::every_cache_holds`; catch the mirror up BEFORE recording (`LayerKv::catch_up_mirror`, #761). **A graph pays only when it is UPDATED**: a shape the driver keeps refusing to update rests (`DecodeGraph::declines`, `REBUILDS_BEFORE_RESTING`, `REST_STEPS`) — a rebuild costs 10-100 ms against the ~3 ms a graph saves (2026-10-05).
 
-→ `docs/invariants/inference.md` § "A decode step can go to the card as one CUDA graph"
+→ `docs/invariants/inference.md` § "A decode step can go to the card as one CUDA graph" and § "A graph pays only when it is updated"
 
 ## A decoded token's attention on a card is ONE kernel, and never keeps the mirror in step (2026-09-29)
 

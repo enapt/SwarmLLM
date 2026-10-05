@@ -82,6 +82,18 @@ Whenever code waits for a subprocess, handle it dying instead (`spawn_worker` ra
 
 → `docs/invariants/memory.md` § "A card's free memory is read after a synchronize"
 
+## The daemon holds no CUDA context — only workers do (2026-10-05)
+
+**`gpu_support::describe_local_gpu`** (driver API: `cuInit`, name, total — no context) is how the daemon learns its card. Never llama.cpp's device list or `Device::cuda_if_available` in the daemon: each leaves a context that held 137 MiB of an 8 GB card for the node's life. Free card memory is read live (`vram::query_gpu_vram_free_mb`), never kept from startup — `GpuInfo` has no free field.
+
+→ `docs/invariants/memory.md` § "The daemon holds no CUDA context (2026-10-05)"
+
+## nvidia-smi is asked through one bounded helper (2026-10-05)
+
+**`vram::nvidia_smi`** (a `BoundedCommand`: 10 s, never two copies at once — while a stuck one lives, the next reading is `None` at once) is the only way the daemon and workers run `nvidia-smi`; a bare `Command::new("nvidia-smi")` waits as long as the driver does — 14 min during one card reset. Guard: `nvidia_smi_is_asked_only_through_the_bounded_helper`.
+
+→ `docs/invariants/memory.md` § "nvidia-smi is asked through one bounded helper (2026-10-05)"
+
 ## A card that stalls is given less work, not more (2026-09-28)
 
 **`inference::card_pace::CardPace` is the one answer to "may this worker start another generation on its card now"**: a device-bound step ≥ 2 s halves the ceiling. The gate sits in the `Generate` arm BEFORE the batched/sequential choice; a new device-bound step is timed into it, a new generation path gated by it. Refusal = `LocalMemoryUnavailable`. A/B `SWARMLLM_CARD_PACE=0`.

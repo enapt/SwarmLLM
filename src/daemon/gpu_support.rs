@@ -183,6 +183,40 @@ pub fn local_gpu_is_supported() -> bool {
     )
 }
 
+/// The local card's name and total memory in MB, asked of the CUDA driver
+/// WITHOUT creating a context — `None` when there is no driver or no device.
+///
+/// **Why not llama.cpp's device list or `Device::cuda_if_available`.** Both make
+/// a CUDA context in the DAEMON (llama.cpp's to read free memory), and the CUDA
+/// runtime keeps its primary context until the process exits. The daemon never
+/// runs a model — its workers do — so that context held card memory for the
+/// node's whole life: 137 MiB of an 8 GB RTX 3070 Laptop (2026-10-05: 1021 →
+/// 884 MiB with the daemon stopped; one idle `cudaFree(0)` context alone is
+/// 137 MiB), room a model's layers or conversation could use, and one more
+/// context on a card whose context-switch engine has faulted under load
+/// (FUTURE_WORK #146). `cuDeviceGetName` and `cuDeviceTotalMem` need only
+/// `cuInit`. Free memory needs a context, so it is read live where it is
+/// needed (`vram::query_gpu_vram_free_mb`), never kept from startup.
+#[cfg(feature = "candle-cuda")]
+pub fn describe_local_gpu() -> Option<(String, u64)> {
+    use candle_core::cuda_backend::cudarc::driver::{result, sys};
+    // cudarc's loader panics when the driver library is missing — a CUDA
+    // build on a machine with no NVIDIA driver — so ask first.
+    // SAFETY: only tries to open the library.
+    if !unsafe { sys::is_culib_present() } {
+        return None;
+    }
+    result::init().ok()?;
+    if result::device::get_count().ok()? < 1 {
+        return None;
+    }
+    let device = result::device::get(0).ok()?;
+    let name = result::device::get_name(device).ok()?;
+    // SAFETY: a device `get` returned.
+    let total = unsafe { result::device::total_mem(device) }.ok()?;
+    Some((name, (total >> 20) as u64))
+}
+
 /// How long to give the `--version` probe below. Generous: it is only ever run
 /// on a path that has already failed, and the answer decides what the owner is
 /// told, so a timeout that fires early would mislabel a slow machine.

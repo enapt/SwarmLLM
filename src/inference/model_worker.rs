@@ -799,19 +799,15 @@ fn worker_force_cpu() -> bool {
 /// there. Sound enough to bracket a single load in a process that does one at a
 /// time; not sound as a live admission input.
 fn current_vram_used_mb() -> Option<u64> {
-    let out = std::process::Command::new("nvidia-smi")
-        .args(["--query-gpu=memory.used", "--format=csv,noheader,nounits"])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .next()?
-        .trim()
-        .parse()
-        .ok()
+    crate::model::auto_manage::vram::nvidia_smi(&[
+        "--query-gpu=memory.used",
+        "--format=csv,noheader,nounits",
+    ])?
+    .lines()
+    .next()?
+    .trim()
+    .parse()
+    .ok()
 }
 
 /// GPU memory this load appears to have cost, in MB.

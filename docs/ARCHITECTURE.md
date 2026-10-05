@@ -1023,6 +1023,11 @@ fails everything. So:
 - `ModelProcessPool::effective_gpu_layers` returns 0 for an unsupported card, so
   workers spawn on the CPU. This is the same choke point that handles the
   `gpu_layers` config and OOM CPU-pinning.
+- The daemon names the card with `daemon::gpu_support::describe_local_gpu` (CUDA
+  driver API, no context) and never holds a CUDA context itself — only workers
+  do; one idle context costs 137 MiB of an 8 GB card. `nvidia-smi` is run only
+  through `vram::nvidia_smi`, bounded at 10 s, because it waits as long as a
+  resetting driver does (FUTURE_WORK #220).
 - `worker_ipc::permanent_gpu_failure` classifies an architecture-mismatch error
   as permanently GPU-fatal (distinct from OOM, which gets different user-facing
   copy), so a card that slips past the probe falls back on first failure rather

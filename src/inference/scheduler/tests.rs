@@ -4429,7 +4429,6 @@ fn the_local_candidate_is_priced_by_the_device_the_request_would_use() {
     let card = crate::inference::executor::GpuInfo {
         name: "NVIDIA GeForce RTX 3070".into(),
         vram_total_mb: 8192,
-        vram_free_mb: 7000,
         backend: "cuda".into(),
     };
     let (state, _, _) = SharedState::new(Config::default(), identity, db, executor, Some(card));
