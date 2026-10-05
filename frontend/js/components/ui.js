@@ -239,7 +239,11 @@
         stateDetail = I18n.t('netstatus.detail_lan');
       } else if (privateMode) {
         stateKey = 'private';
-        stateName = I18n.t('netstatus.private');
+        // Private mode admits computers on the local network by default
+        // (`private_mode_allow_lan`), so the headline names them when it does.
+        stateName = allowLan
+          ? I18n.t('netstatus.private_with_lan')
+          : I18n.t('netstatus.private');
         stateDetail = allowLan
           ? I18n.t('netstatus.detail_private_with_lan')
           : I18n.t('netstatus.detail_private');

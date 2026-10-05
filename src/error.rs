@@ -1145,7 +1145,7 @@ pub fn error_hint_with_key(err: &SwarmError) -> Option<(&'static str, &'static s
         SwarmError::InsufficientDisk { .. } => Some((
             "insufficient_disk",
             "Not enough disk space. Free up space or increase the storage limit \
-             in Settings → Advanced → max_disk_mb.",
+             in Settings → Advanced → Max Disk.",
         )),
         SwarmError::Unauthorized(_) => Some((
             "unauthorized",
@@ -1300,8 +1300,8 @@ pub fn error_hint_with_key(err: &SwarmError) -> Option<(&'static str, &'static s
         // without telling them.
         SwarmError::PrivateModeUnavailable { .. } => Some((
             "private_mode_unavailable",
-            "Private mode keeps your prompts on your own devices, and none of them has \
-             all of this model. Either download it here from the model's card on the \
+            "Private mode keeps your prompts on your own devices and your local network, \
+             and none of those computers has all of this model. Either download it here from the model's card on the \
              Dashboard, or add the device that has it to your pool. You can also turn private mode off on the My Devices page \
              — but then your prompts can be sent to other people's machines to run.",
         )),
@@ -1765,7 +1765,8 @@ mod tests {
             need_mb: 1000,
             have_mb: 100,
         };
-        assert!(error_hint(&err).unwrap().contains("max_disk_mb"));
+        // The control's label, not its config key: the reader is in Settings.
+        assert!(error_hint(&err).unwrap().contains("Max Disk"));
     }
 
     #[test]

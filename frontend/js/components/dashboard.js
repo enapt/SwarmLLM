@@ -520,7 +520,13 @@
             }
           }
           if (hw.gpu_vram_mb) {
-            var vramUsed = hw.gpu_vram_used_mb || 0;
+            // `null` is a reading that failed: nvidia-smi gives up after 10 s
+            // and answers nothing while the driver resets the card. The node
+            // reports that as unknown, and it stays unknown here — `|| 0`
+            // drew "0 MB … (measured live)" through a reset.
+            var vramKnown = hw.gpu_vram_used_mb != null;
+            var vramUsed = vramKnown ? hw.gpu_vram_used_mb : 0;
+            var vramUsedText = vramKnown ? U.formatMB(vramUsed) : '—';
             var vramTotal = hw.gpu_vram_mb;
             var vramEl = document.getElementById('node-vram');
 
@@ -551,11 +557,13 @@
                   if (m.status === 'loaded' && m.estimated_vram_mb) activeVramMb += m.estimated_vram_mb;
                 });
               }
-              vramEl.textContent = U.formatMB(vramUsed) + ' / ' + U.formatMB(vramTotal);
+              vramEl.textContent = vramUsedText + ' / ' + U.formatMB(vramTotal);
               // The committed estimate is still worth surfacing — it's what
               // auto-manage budgets against — but only ever as clearly
               // labelled secondary context, never as the headline figure.
-              if (activeVramMb > 0) {
+              if (!vramKnown) {
+                vramEl.removeAttribute('title');
+              } else if (activeVramMb > 0) {
                 vramEl.title = I18n.t('hw.vram_live_tip', {
                   used: U.formatMB(vramUsed),
                   committed: U.formatMB(activeVramMb)
@@ -564,9 +572,10 @@
                 vramEl.title = I18n.t('hw.vram_live_only_tip', { used: U.formatMB(vramUsed) });
               }
             } else {
-              // The card is present but idle — driver baseline only.
+              // The card is present but not running our models: what is on it
+              // is every other program's (nvidia-smi `memory.used`).
               if (vramLabel) vramLabel.textContent = I18n.t('hw.vram_idle');
-              vramEl.textContent = U.formatMB(vramUsed) + ' / ' + U.formatMB(vramTotal);
+              vramEl.textContent = vramUsedText + ' / ' + U.formatMB(vramTotal);
               vramEl.title = I18n.t('hw.vram_idle_tip');
             }
           }
