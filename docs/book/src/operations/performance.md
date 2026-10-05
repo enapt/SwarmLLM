@@ -94,8 +94,10 @@ B verifies BLAKE3 + NaN/Inf → hydrates KV → prefill suffix only
   73 MB f32 snapshot transfers in ~1 s while 640-token Qwen-7B CPU
   prefill runs ~150 s.
 - **Config:** `inference.cross_node_prefix_trust_min = 0.5` (default —
-  gates peers by trust score; set to `2.0` to disable the fetch path
-  entirely).
+  gates peers by trust score; it accepts 0.0-1.0, and a value outside that
+  range stops the node starting). The path runs only between peers that set
+  `share_prefix_cache_with_peers = true`; leaving that off (the default)
+  takes it out entirely.
 
 The fetch path uses three chained timeouts (worker probe 3000 ms, daemon
 network 2500 ms, serving IPC 2000 ms) sized for 7B-class f32 snapshots.
@@ -322,8 +324,10 @@ falls back to sequential when concurrency is 1. If you suspect one is
 the cause of a regression:
 
 - **Prefix cache off:** `inference.prefix_cache_enabled = false`
-- **Cross-node fetch off:** `inference.cross_node_prefix_trust_min = 2.0`
-  (gates every peer out)
+- **Cross-node fetch off:** `inference.share_prefix_cache_with_peers = false`
+  on the peers (the default — nothing is offered to fetch). Not
+  `cross_node_prefix_trust_min = 2.0`: a node refuses to start with a value
+  outside 0.0-1.0
 - **Continuous batching off:** `inference.continuous_batching = false`
   (also disables Phase 4 fusion)
 - **Phase 4 fusion off, keep continuous batching:**

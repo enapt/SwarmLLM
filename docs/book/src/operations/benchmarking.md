@@ -84,7 +84,10 @@ spreading.
 [`docs/plans/benchmarks/round6.md`](https://github.com/enapt/SwarmLLM/blob/main/docs/plans/benchmarks/round6.md)
 
 Two-daemon loopback TCP. Measures iter-1 TTFT with the cross-node fetch
-path enabled vs gated off (via `cross_node_prefix_trust_min = 2.0`).
+path enabled vs gated off. Round 6 gated it with
+`cross_node_prefix_trust_min = 2.0`, which current builds refuse at startup
+(the accepted range is 0.0-1.0); gate it off by leaving
+`share_prefix_cache_with_peers = false` on node A instead.
 Sharing is OFF by default, so both nodes need
 `share_prefix_cache_with_peers = true` first.
 Same recipe runs against TinyLlama (fast-GPU corner case: fetch is
@@ -100,14 +103,16 @@ for d in /tmp/swarm_a /tmp/swarm_b; do
   mkdir -p $d && printf '[inference]\nshare_prefix_cache_with_peers = true\n' > $d/config.toml
 done
 
-# Node A on 8800
-SWARMLLM_NODE_DATA_DIR=/tmp/swarm_a ./target/release/swarmllm run -p 8800 -v &
+# Node A on 8800 (its log is where B finds A's identity)
+SWARMLLM_NODE_DATA_DIR=/tmp/swarm_a ./target/release/swarmllm run -p 8800 -v \
+    > /tmp/swarm_a.log 2>&1 &
 
-# Node B on 8900, bootstrapped off A
-A_MADDR=$(grep -oE "peer_id=12D3KooW[A-Za-z0-9]+" /tmp/swarm_a.log | \
-    head -1 | sed 's/peer_id=/\/ip4\/127.0.0.1\/tcp\/8810\/p2p\//')
+# Node B on 8900, bootstrapped off A — wait for A to log its own peer id first
+until grep -q "Initializing network peer_id=" /tmp/swarm_a.log; do sleep 1; done
+A_MADDR=$(grep -oE "Initializing network peer_id=12D3KooW[A-Za-z0-9]+" /tmp/swarm_a.log | \
+    head -1 | sed 's/.*peer_id=/\/ip4\/127.0.0.1\/tcp\/8810\/p2p\//')
 SWARMLLM_NODE_DATA_DIR=/tmp/swarm_b ./target/release/swarmllm run \
-    -p 8900 -v --bootstrap "$A_MADDR" &
+    -p 8900 -v --bootstrap "$A_MADDR" > /tmp/swarm_b.log 2>&1 &
 
 # Copy shards into both data dirs (or download via /api/admin/hf/download-shards)
 cp -r ~/.local/share/swarmllm/models/<model-id> /tmp/swarm_a/models/

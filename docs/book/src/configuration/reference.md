@@ -82,6 +82,7 @@ value it booted with.
 | `listen_address` | string | `"0.0.0.0"` | Address to bind peer-to-peer listeners on. Set to `127.0.0.1` on WSL2 to avoid binding unreliable NAT adapters |
 | `enable_quic` | boolean | `true` | QUIC transport. Disabling it on WSL2 avoids a race where the faster QUIC handshake displaces the TCP connection |
 | `enable_upnp` | boolean | `true` | Ask the home router to open the peer-to-peer ports automatically, and confirm the resulting public address with the swarm. The zero-configuration path to being reachable from the internet |
+| `external_addresses` | list | `[]` | Addresses this node is reachable at from the internet, for a port-forwarded computer, a server or a dynamic-DNS name — IP or DNS multiaddrs without `/p2p/<id>` (the node appends its own), e.g. `["/dns4/node.example.net/tcp/8810", "/dns4/node.example.net/udp/8800/quic-v1"]`. Advertised to peers and put in invite codes. Empty leaves it to UPnP, AutoNAT and the relay. `external_address` is accepted too |
 | `max_connections_per_peer` | integer | `3` | Simultaneous connections to a single peer. **Must be at least 2 for NAT hole punching**: the upgrade dials a direct connection while the relayed one is still open, so `1` kills one of them |
 | `relay_forwarding` | boolean | `false` | Carry *inference* messages between two peers that cannot reach each other. Distinct from `enable_relay`, which carries the connection itself |
 | `relay_forwarding_auto` | boolean | `true` | Donate that relay capacity automatically once this node is confirmed reachable from the open internet |
@@ -135,7 +136,7 @@ value it booted with.
 | `prefix_cache_max_prompt_tokens` | integer | `0` | Most tokens of one prompt kept; a longer prompt keeps its opening. `0` = no token ceiling, `prefix_cache_max_mb` decides |
 | `prefix_cache_block_tokens` | integer | `64` | Block alignment for the chained-hash manifest, and the granularity of a partial hit |
 | `prefix_cache_min_tokens` | integer | `32` | Shortest prefix worth caching |
-| `cross_node_prefix_trust_min` | float | `0.5` | Minimum peer trust score before accepting a prefix-KV snapshot fetched from that peer |
+| `cross_node_prefix_trust_min` | float | `0.5` | Minimum peer trust score before accepting a prefix-KV snapshot fetched from that peer. 0.0-1.0; a value outside that range stops the node starting |
 | `share_prefix_cache_with_peers` | bool | `false` | Offer this node's prompt prefix cache to other nodes. Off by default: turning it on announces hashes of the prompts this node caches to the whole swarm, and serves those prompts' token IDs and key/value cache to any peer that asks. Your own local prefix cache works either way |
 
 ### `[inference]` — speculative decoding
@@ -237,7 +238,7 @@ a tailnet — devices you authorised — which is why the LAN case stays opt-in.
 | `max_storage_mb` | integer | `0` | Cap on shard storage held. `0` = a share of `max_disk_mb` by contribution level (25% minimal / 50% moderate / 75% maximum); a set value is honoured as written, up to `max_disk_mb` |
 | `interval_minutes` | integer | `5` | Check interval for new shards |
 | `interval_seconds` | integer | none | Testing override for `interval_minutes`. Takes precedence when set |
-| `model_policies` | table | `{}` | Per-model overrides keyed by model id, e.g. `[auto_manage.model_policies."llama-3.1-8b"]` |
+| `model_policies` | table | `{}` | Per-model overrides keyed by model id, e.g. `[auto_manage.model_policies."llama-3.1-8b"]`, each with `enabled` (default `true`: auto-manage may download its parts), `max_shards` (default `0`: no per-model limit) and `prune_enabled` (default `true`: auto-manage may delete extra copies) |
 | `max_shards` | integer | `0` | Max shards. `0` = unlimited |
 | `max_concurrent_downloads` | integer | `3` | Max parallel downloads |
 | `prune_enabled` | boolean | `true` | Auto-remove over-replicated shards |
@@ -340,6 +341,16 @@ anything.)
 | Option | Type | Default | Description |
 |---|---|---|---|
 | `region` | string | none | Country code for network map (e.g., `"US"`) |
+
+## `[providers]` — Cloud Providers
+
+Set from the dashboard (Settings → Cloud Providers) or `PUT /api/admin/providers`, which write this section for you. Keys can also come from the environment or a `.env` file in the data directory, under the standard names (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, …).
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `key_source` | string | `"auto"` | Which key wins when both exist: `auto` (the dashboard's, then the environment's), `env` (the environment always wins) or `dashboard` (the environment is ignored) |
+| `anthropic`, `openai`, `deepseek`, `mistral`, `groq`, `nvidia_nim`, `cerebras`, `sambanova`, `fireworks`, `together`, `deepinfra`, `moonshot` | table | none | One per provider: `api_key`, and an optional `default_model` |
+| `custom` | list | `[]` | Any other OpenAI-compatible service: `name`, `base_url`, `api_key`, optional `default_model` |
 
 ## `[providers.claude_subscription]` — Claude Subscription (feature-gated)
 

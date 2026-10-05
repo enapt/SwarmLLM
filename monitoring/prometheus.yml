@@ -3,7 +3,10 @@
 # Usage:
 #   prometheus --config.file=prometheus.yml
 #
-# SwarmLLM exposes metrics at GET /metrics (no auth required).
+# SwarmLLM serves GET /metrics without a key only to a request made on the node's
+# own machine (and not even then with api.metrics_auth_required = true). A
+# Prometheus elsewhere, or in a container, must send the API key as a bearer
+# token — see docs/book/src/operations/monitoring.md.
 # Default scrape interval of 15s matches the metric update cadence.
 
 global:

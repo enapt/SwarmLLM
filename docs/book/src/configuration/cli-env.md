@@ -17,7 +17,7 @@
 
 | Command | Description |
 |---|---|
-| `run` | Start SwarmLLM (the default when no subcommand is given). `--anchor` runs a relay-only computer with no models |
+| `run` | Start SwarmLLM (the default when no subcommand is given). `--anchor` runs a relay-only computer with no models; `--no-update-check` turns update checking off for that run |
 | `status` | Show what the running SwarmLLM is doing (`--json` for raw output) |
 | `chat` | Chat in the terminal with streaming replies |
 | `bench` | Measure speed against the running SwarmLLM |
@@ -29,7 +29,7 @@
 | `remove-model <model-id>` | Delete a model from this computer and tell the network it's gone (`-y` skips the question) |
 | `update` | Check for an update and install it (`--check-only` to only check) |
 | `pool` | Link your own devices into a private group |
-| `test-split` | Developer diagnostic: test split inference locally |
+| `test-split` | Developer diagnostic: test split inference locally (`--max-tokens`, default 20; `--prompt`) |
 | `version` | Print version |
 
 ### `chat` Options
@@ -82,8 +82,12 @@ swarmllm pool join 'swarmpool://…'
 
 A small, fixed set of options — the ones a headless or Docker deployment needs
 before a config file exists — can be set with a `SWARMLLM_` environment
-variable. **This table is the complete list**; any other `SWARMLLM_*` variable
-is ignored. Everything else is set in `config.toml` or from the dashboard.
+variable. **This table is the complete list of settings** that can be given
+this way — there is no general `SWARMLLM_<SECTION>_<KEY>` rule, and any other
+setting goes in `config.toml` or the dashboard. A few diagnostic switches are
+also read (for example `SWARMLLM_HYBRID_OFFLOAD`, see `gpu_layers` in the
+[configuration reference](reference.md)), and `SWARMLLM_PORT` is the port
+`swarmllm update` checks for a running node (default 8800).
 
 | Config Path | Environment Variable | Notes |
 |---|---|---|
