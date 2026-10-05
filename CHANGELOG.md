@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.3.226-alpha] — 2026-10-05
+
+**Faster: checking guesses on a graphics card no longer redoes its setup on
+every step.** When a computer with an NVIDIA card checks the guesses of
+speculative decoding (on by default when a model is split between
+computers), each check is sent to the card as a prepared batch of work. A
+detail inside that batch made the card's driver refuse to reuse it, so it
+was rebuilt from scratch every time: 40-100 ms per check instead of about 4.
+In a test split with the guessing model on the card, replies took 31-33 s
+where the same setup took 33-65 s before. Replies are unchanged.
+
+**Fixed: a model slightly too big for the graphics card was still sent
+abroad when another model was already on the card.** v0.3.225 fixed this
+only when the card was empty. With TinyLlama on the card, a cold Mistral-7B
+now answers on this computer in 6.7 s, where v0.3.225 sent it through a
+computer in Italy (47 s).
+
+**More graphics memory for models.** The node itself kept 137 MB of the
+graphics card for its whole life, unused. It no longer does, so that memory
+is free for a model's layers or its conversations.
+
+**Steadier when the graphics driver resets the card.** Windows sometimes
+resets a graphics card that stops responding, and one such reset took 14
+minutes. Every reading of the card's memory waited for it, so a request
+waited too. Readings now give up after 10 seconds and the node carries on.
+
+**Windows graphics builds name their CUDA backend** in the dashboard. On a
+Windows computer with an AMD or Intel card, the node no longer reports a
+graphics card it cannot use for its models (they run on the processor, as
+before).
+
 ## [0.3.225-alpha] — 2026-10-04
 
 **Fixed: a computer could keep, and offer, model parts that a download had
