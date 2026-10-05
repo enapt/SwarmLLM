@@ -2905,7 +2905,7 @@ Windows was designed around a three-binary installer (`SwarmLLM-Setup.exe`) to s
 - **`swarmllm-cpu.exe`** — CPU-only, works on any Windows PC
 - **`swarmllm.exe`** (launcher) — detects `nvcuda.dll` in System32 at startup, transparently execs the appropriate binary
 
-**AMD/Intel on Windows**: Local inference is GPU-accelerated via Vulkan. Split/distributed inference falls back to CPU — acceptable since serious multi-GPU distributed setups are predominantly NVIDIA.
+**AMD/Intel on Windows**: the models the swarm manages (shards, served by candle workers) run on the CPU — candle's card path is CUDA only. llama.cpp's Vulkan backend serves only a whole model file loaded with `-m` / `inference.model_path`, and takes its card layers from `inference.gpu_layers`, not from detection. Since v0.3.226 the daemon names its card through the CUDA driver (`gpu_support::describe_local_gpu`, no context), so such a machine reports **no** graphics card — the truth for its workers; before, llama.cpp's device list reported the Vulkan device and the node planned graphics memory its models never ran in.
 
 ### Future: wgpu/WebGPU Backend for Split Inference
 

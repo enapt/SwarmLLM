@@ -160,9 +160,9 @@ mmproj). Never edit a count without the run behind it (`completeness.md`).
   handle (#769): an outliving process starts via `spawn_without_inherited_handles`
   (`update_restart`); workers die with the daemon (job object, #153).
 - ⛔ **This PC had five unclean shutdowns under sustained load (2026-09-26 → 10-01),
-  causes undetermined.** Every gate, rig, bench or long run uses the safety kit
-  (`~/swarmllm-gate-common/safety.sh`); never 4 simultaneous chats (simultaneous
-  requests to a node ARE a stress test); ONE cargo build at a time (#684).
+  causes undetermined.** Every gate, rig, bench or long run sources the safety kit
+  (`~/swarmllm-gate-common/safety.sh` — it stops at the first GPU-driver event, #790; no 4
+  simultaneous chats: concurrent requests ARE a stress test); ONE cargo build at a time (#684).
   ⛔ **Do NOT ask for a go-ahead or a restart, and never refuse on uptime**
   (user, 2026-10-02) — run it and log the uptime (#146).
 

@@ -33,10 +33,11 @@ Download the right file for your system from the [GitHub Releases page](https://
 >
 > **An older card is not a problem** — nothing breaks and there is nothing to
 > configure. SwarmLLM checks the card when it starts, tells you in the log and
-> on the dashboard that it is using the processor instead, and carries on. On
-> Windows, running a model locally goes through Vulkan and works on any GPU
-> regardless; the CUDA requirement applies to inference split across several
-> machines.
+> on the dashboard that it is using the processor instead, and carries on. The
+> models the swarm manages for you run through this CUDA path on every system.
+> The Windows graphics build also carries a Vulkan backend that works on any
+> graphics card, but it is used only for a single model file you load yourself
+> with `-m`.
 >
 > To check your card: `nvidia-smi --query-gpu=name,compute_cap --format=csv`.
 > A number of 8.0 or higher gets GPU acceleration.
