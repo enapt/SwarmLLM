@@ -445,7 +445,20 @@ tune `ASSUMED_FORWARD_PASSES` (#3).
 `local_processor_cost_ms=18747` against `pipeline_cost_ms=5057`. The first answer took 58 s (the
 peer loaded the model), the next ones ~2 s. That is this residual deciding, not a regression of
 the fix above: the planner now SEES the local route and then prices it at processor speed.
-Pricing it as the loader's card/processor split is what would keep it here.
+
+**Reproduced and narrowed 2026-10-05 11:44 UTC (release binary, live node, peers on .226) —
+the planner and the loader disagree about what FITS, before any question of hybrid pricing:**
+with qwen2.5-0.5b and qwen3-1.7b idle on the card (3.8 GB used), Coder-7B (cold) was judged "does
+not fit our GPU", priced `local_processor_cost_ms=27025` against `pipeline_cost_ms=4495`, and sent
+to `4a3ac72e` — which was cold too: **46.5 s** for 120 tokens (`predicted_ms=4495`). The same
+request with every peer excluded: the LOADER freed both idle workers ("Freeing graphics memory from
+an idle model so the requested one can use the GPU", `freed_mb=3754`), admitted the 7B whole on the
+card (`estimated_mb=5232 budget_mb=6354`) and answered in **13.2 s, load included**; warm, both
+routes then stayed local at ~60 tok/s (150 tokens in 2.5 s). So the fix is the planner asking the
+pool's admission WITH the idle-model reclaim (`planning_on_card` / `serves_on_cpu` ignore it), not
+re-pricing a split; a cold peer's load time is also unpriced (46 s against 4.5 s predicted) — a
+second contributor. Measure with `scratchpad hybrid129.py`'s shape: warm two small models, then the
+7B cold, normal routing vs `swarm_route.exclude_nodes` = every peer.
 
 #### #192 — Nothing routes on the distance between two peers
 `P2` · routing · **PARTIAL** — 2026-09-02 · absorbs archive § "Speeding up inference BETWEEN nodes" ideas 3 (ring decode) and 4 (peer-to-peer RTT); plan: `docs/plans/regional_pipelines.md`
