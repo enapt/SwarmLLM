@@ -227,7 +227,8 @@ can cap how fast it shares model parts in Settings, and it uses nothing while
 it is closed.
 
 **How much disk space?** SwarmLLM keeps what it stores within a disk limit —
-50 GB by default — which you can change in Settings.
+50 GB by default — which you can change in Settings. Whatever the limit, it
+always leaves at least a tenth of your disk free.
 
 **Is it a virus?** No. Every line of the program is public for anyone to
 inspect, and SwarmLLM's automatic updates only install releases signed by the
