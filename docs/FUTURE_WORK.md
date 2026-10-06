@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #224**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #225**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -38,7 +38,8 @@ then again after v0.3.223 (#157 and #164 closed, #160 raised to P1 on the swarm 
 after v0.3.224 (#160, #215 and #216 closed; #217 and #218 opened from the swarm reading and the inference test after it). #150, #153,
 #165, #189, #214, #218 and #219 closed in v0.3.225 (released 2026-10-05); #221 closed and #129's second half shipped in
 v0.3.226 (released 2026-10-05), #220 opened from the .225 gate's unrecorded driver resets; #129's fit verdict (idle-model
-reclaim) shipped in v0.3.227 (released 2026-10-05 23:45 UTC).
+reclaim) shipped in v0.3.227 (released 2026-10-05 23:45 UTC); #222 (a node near its storage limit deleting and
+re-fetching parts) and #223 closed in v0.3.228 (released 2026-10-06 09:42 UTC), #224 opened from its gate.
 `docs/plans/` holds the multi-step designs; the entries point at them.
 
 **P0 — wrong answers, silently**
@@ -196,6 +197,24 @@ the byte check. **Residual:** holders on v0.3.222 and older still gossip such ha
 update; a holder known only from a DHT provider record carries no build and is not judged.
 Options for the rest: exclude holders whose tag is unknown when the canonical upload is known,
 or prefer hashes from holders whose announced tags agree with each other.
+
+#### #224 — A node that cannot reach HuggingFace sometimes never takes the checked holders' verdict
+`P3` · heal · **OPEN** — 2026-10-06 · history: the v0.3.228 gate, step 12m
+
+`examples/outvoted_rig.sh` with `HFLESS=proxy` (B behind a dead proxy, holding a zeroed part; A
+and C checking theirs on HuggingFace) FAILED twice in the .228 gate, 15:35-16:05 local: B with
+.228 and B with .227 (A and C .228 both times) — B logged `An upload of this model could not be
+checked on HuggingFace` once and never `parts on this node differ from what the holders that
+checked theirs … agree on`, in 900 s. The offline arm passed between them (281 s). Re-run at
+16:33 with the live node stopped: all-.227 PASS (231 s), all-.228 PASS (250 s); every earlier
+gate (.224-.227) passed it. So not .228's doing (only `auto_manage` storage/prune code changed,
+none of it on this path), and not deterministic. Both failing runs had A and C announce their
+checked copies 30 s after start, as the passing ones did. One difference seen: B's "Our copy of
+this shard disagrees with the hash the swarm reports … asking the model's origin to settle it"
+landed 14 ms BEFORE its background shard verification finished, where the passing run had it
+after — a candidate race on `shards_pending_verification`, which `settle_by_checked_holders`
+skips. Next: run the proxy arm ~10 times with B at `-v` and log why `settle_by_checked_holders`
+returned (pending / no checked tags / `heard_hash_with_tag` None — the last is `debug!`).
 
 #### #179 — A greedy reply (`temperature: 0`) is not reproducible run to run on the processor
 `P3` · correctness · **OPEN** — 2026-08-18 · history: archive § "`temperature: 0` with a fixed seed is not reproducible", gotcha #327
@@ -1382,7 +1401,7 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-06, not yet released** (#222, #223) (`docs/invariants/memory.md` § "`AutoShardManager::would_shed_copy` is the ONE answer")
+**Closed 2026-10-06, released in v0.3.228 (2026-10-06)** (#222, #223) (`docs/invariants/memory.md` § "`AutoShardManager::would_shed_copy` is the ONE answer")
 - #222 — a node near its storage limit deleted parts and fetched the same parts back, for ever.
   Found in the post-v0.3.227 swarm check from peers' announcements in our own log: a tester's 30 GB
   node (`e561df35`) sawed 62 → 59 → 62 parts every ~25-30 min from 02:00 UTC (one Qwen3-30B-A3B
