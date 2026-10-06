@@ -799,6 +799,17 @@ pub fn gpu_memory_bandwidth_gbps(name: &str) -> f32 {
 /// now has two machines and three model/size combinations behind it. The
 /// graphics figure is **one card**; treat its third digit as unearned.
 ///
+/// **The graphics constant went stale when card decode got faster (2026-10-06,
+/// FUTURE_WORK #225).** Own stream and pipelined CUDA graphs (default on since
+/// 2026-09-30) took the same card at the same shape from 35.32 to **59.53
+/// tok/s** — re-measured with the harness below on a `--features cuda` release
+/// build, live node stopped, two runs of three, identical best (16.8 ms/token
+/// at ~912 KV): 0.585 of the roofline. 0.35 had every card advertising ~60% of
+/// what it does — a tester's RTX 3060 advertised 28.64 tok/s and decoded an
+/// 8B Q4 at ~60. **0.55**, like the processor's 0.75, sits deliberately under
+/// the measurement. The tester's figure came over HTTP and is not calibration
+/// data; it only agrees the old constant was low.
+///
 /// Re-measure with:
 /// ```text
 /// SWARM_BENCH_MODEL=<7B Q4 dir> SWARM_BENCH_PROMPT=896 SWARM_BENCH_DECODE=32 \
@@ -813,7 +824,7 @@ pub fn estimate_tokens_per_sec_7b(bandwidth_gbps: f32, is_gpu: bool) -> f32 {
                                        // *less* efficient per byte than a processor at batch 1, because one query
                                        // row cannot fill it and the per-layer kernel launches dominate — which is
                                        // the opposite of what the old pair of constants asserted.
-    let efficiency = if is_gpu { 0.35 } else { 0.75 };
+    let efficiency = if is_gpu { 0.55 } else { 0.75 };
     bandwidth_gbps / MODEL_SIZE_7B_Q4 * efficiency
 }
 
@@ -1442,7 +1453,7 @@ mod tests {
     fn speed_estimation_sanity() {
         // RTX 3070: 448 GB/s, 7B Q4 ≈ 4.4GB
         let tps = estimate_tokens_per_sec_7b(448.0, true);
-        assert!(tps > 20.0 && tps < 50.0, "Expected ~35 t/s, got {tps}");
+        assert!(tps > 40.0 && tps < 70.0, "Expected ~56 t/s, got {tps}");
     }
 
     /// The constants are calibrated against `prefill_bench` on one machine, at
@@ -1457,11 +1468,13 @@ mod tests {
             (4.7..=5.7).contains(&cpu),
             "processor estimate {cpu} no longer reproduces the measured 5.26 tok/s"
         );
-        // RTX 3070 Laptop, 448 GB/s table figure, 35.32 tok/s observed.
+        // RTX 3070 Laptop, 448 GB/s table figure, 59.53 tok/s observed on
+        // 2026-10-06 (35.32 before the CUDA-graph decode work — #225). Under the
+        // measurement by design, like the processor's.
         let gpu = estimate_tokens_per_sec_7b(448.0, true);
         assert!(
-            (32.0..=38.0).contains(&gpu),
-            "card estimate {gpu} no longer reproduces the measured 35.32 tok/s"
+            (53.5..=59.6).contains(&gpu),
+            "card estimate {gpu} no longer sits just under the measured 59.53 tok/s"
         );
     }
 

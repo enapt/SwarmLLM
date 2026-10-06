@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #225**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #228**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -40,7 +40,7 @@ after v0.3.224 (#160, #215 and #216 closed; #217 and #218 opened from the swarm 
 v0.3.226 (released 2026-10-05), #220 opened from the .225 gate's unrecorded driver resets; #129's fit verdict (idle-model
 reclaim) shipped in v0.3.227 (released 2026-10-05 23:45 UTC); #222 (a node near its storage limit deleting and
 re-fetching parts) and #223 closed in v0.3.228 (released 2026-10-06 09:42 UTC), #224 opened from its gate;
-#225, #226 and #227 opened from a tester's two reports the same day; #226 closed on main that night.
+#225, #226 and #227 opened from a tester's two reports the same day; #225 and #226 closed on main that night.
 `docs/plans/` holds the multi-step designs; the entries point at them.
 
 **P0 — wrong answers, silently**
@@ -85,8 +85,6 @@ re-fetching parts) and #223 closed in v0.3.228 (released 2026-10-06 09:42 UTC), 
 13. **#3**, **#180** — the routing cost model charges a constant where the reply length
     belongs, which keeps partial ranges (load spreading) off.
 14. **#171** — the prompt pass through a split runs one stage at a time.
-15. **#225** — a graphics card advertises about half the speed it decodes at (stale since the
-    CUDA-graph work; re-measure, then change the constant).
 
 Everything else is ranked in its own entry. **P3** is narrow or cosmetic, **P4** is process,
 maintenance or an idea with no user waiting on it.
@@ -427,24 +425,6 @@ is an upper bound on its decode passes — capping the 64 by it is a bound the r
 the tuning this entry rules out; it does not replace the reply-length estimator. He also saw
 `max_hostable_layers` read 97-103 cold, 14 008 warm, and `Some(145)` for a 32-layer request —
 unverified here; check whether it is a capacity bound never capped at the model's layer count.
-
-#### #225 — A graphics card advertises about half the speed it decodes at
-`P2` · routing · **OPEN** — 2026-10-06 · history: a tester's report, 2026-10-06
-
-`vram::estimate_tokens_per_sec_7b` prices a card at 0.35 × `bandwidth / 4.4 GB`, calibrated on
-2026-09-01 with `examples/prefill_bench` on this laptop's RTX 3070 (35.32 tok/s, 896-token
-prompt, ~912 positions). Card decode has gained ~1.7x since — own stream and pipelined CUDA
-graphs, default on 2026-09-30 (Qwen2.5-7B 61.0-61.3 tok/s in `graph_ab.sh`'s chats, 97% of
-llama.cpp; `memory/stage4_cuda_graphs_handoff.md`) — and the constant was never re-measured. A
-tester's RTX 3060 (360 GB/s, bare-metal Linux, 0.3.228) advertises 28.64 tok/s and decodes
-Llama-3.1-8B Q4 at 57.9-61.6 tok/s. Both point at ~0.6-0.8, not 0.35. It is read by routing's
-compute cost for a peer with no observed figure and by the delegation gate
-(`scheduler::mod.rs`, `DELEGATE_MIN_CPU_SPEEDUP`); the local card's own estimate moves with it,
-so the effect is mainly card against processor. **Next:** re-measure with the harness the
-constant's comment names (release `--features cuda,flash-attn` build, live node stopped, safety
-kit), then change the constant AND `the_efficiencies_reproduce_the_measurements_they_were_taken_from`.
-Both figures above came over HTTP, which the comment rules out as calibration data (n-gram
-drafting, prefix cache) — they say the constant is stale, not what it should be.
 
 #### #180 — A node holding the whole model takes every request for it; partial ranges stay off by default
 `P2` · routing · **PARTIAL** — 2026-07-28 · history: archive § "A node holding every shard monopolises the model"
@@ -1459,7 +1439,14 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-06 on main, not yet released** (#226)
+**Closed 2026-10-06 on main, not yet released** (#225, #226)
+- #225 — a graphics card advertised about half the speed it decodes at. The 0.35 in
+  `vram::estimate_tokens_per_sec_7b` was calibrated on 2026-09-01 (35.32 tok/s, RTX 3070 Laptop,
+  `prefill_bench`, Coder-7B Q4_K_M, 896 prompt, ~912 KV); the CUDA-graph decode work took the same
+  card at the same shape to **59.53 tok/s** (re-measured 2026-10-06 on a `--features cuda` release
+  build, live node stopped, safety kit, two runs of three with identical best — 0.585 of the
+  roofline; Windows up 5 d 14 h). Now **0.55**, under the measurement as the processor's 0.75 is.
+  A tester's RTX 3060 advertised 28.64 against ~60 measured over HTTP (not calibration data).
 - #226 — every contribution counter restarted with the daemon, so an operator could not tell
   whether their node had ever served anyone (a tester's node: `99.3 ms per layer served` →
   `(no segments served yet)` after an update). `daemon::state::lifetime`: the serving totals as
