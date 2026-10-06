@@ -891,7 +891,7 @@ impl AutoShardManager {
     /// Instead of zeroing counters, we blend: new_rate = old * EMA_DECAY + fresh * EMA_FRESH.
     /// A spike of 100 requests persists ~30min and drops to noise after ~2h.
     pub(super) fn decay_request_counts(&self) {
-        let our_region = self.our_region().unwrap_or_else(|| "??".to_string());
+        let our_region = self.demand_region();
 
         for entry in self.shared_state.models.model_request_counts.iter() {
             let model_id = entry.key().clone();
@@ -1082,6 +1082,22 @@ impl AutoShardManager {
         self.shared_state
             .effective_region_sync()
             .map(|r| r.to_uppercase())
+    }
+
+    /// **The region this node's demand is filed under in `region_demand`** —
+    /// its region, or `"??"` when it has none. The one key for the writer
+    /// (`decay_request_counts`) and every reader (the replica target, prune's
+    /// demand penalty, the idle-VRAM unload).
+    ///
+    /// The writer used `"??"` and the three readers `""`, so a node whose
+    /// region could not be found (no configured region, geolocation failed)
+    /// filed its demand where nothing looked: its replica target fell back to
+    /// the raw counter, which the same decay had just zeroed, and its idle
+    /// unload never saw that a model was wanted (found 2026-10-06 while
+    /// building the gotcha #795 rig, whose nodes have no region; nothing in
+    /// gotchas, closed findings or the sweep log had it).
+    pub(super) fn demand_region(&self) -> String {
+        self.our_region().unwrap_or_else(|| "??".to_string())
     }
 
     /// Count shard holders that are in the same region as us.

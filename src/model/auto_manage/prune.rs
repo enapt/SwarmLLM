@@ -504,22 +504,19 @@ impl AutoShardManager {
                 // Regional demand penalty: protect shards for models with active
                 // demand in our region. Higher demand -> harder to prune.
                 {
-                    let our_region = self.our_region().unwrap_or_default();
-                    if !our_region.is_empty() {
-                        let demand_key = (manifest.id.clone(), our_region);
-                        let ema_rate = self
-                            .shared_state
-                            .region_demand
-                            .get(&demand_key)
-                            .map(|v| *v)
-                            .unwrap_or(0.0);
-                        if ema_rate > 10.0 {
-                            score -= 1.0; // High demand -- strongly resist pruning
-                        } else if ema_rate > 1.0 {
-                            score -= 0.5; // Moderate demand
-                        } else if ema_rate > 0.1 {
-                            score -= 0.2; // Low but non-zero demand
-                        }
+                    let demand_key = (manifest.id.clone(), self.demand_region());
+                    let ema_rate = self
+                        .shared_state
+                        .region_demand
+                        .get(&demand_key)
+                        .map(|v| *v)
+                        .unwrap_or(0.0);
+                    if ema_rate > 10.0 {
+                        score -= 1.0; // High demand -- strongly resist pruning
+                    } else if ema_rate > 1.0 {
+                        score -= 0.5; // Moderate demand
+                    } else if ema_rate > 0.1 {
+                        score -= 0.2; // Low but non-zero demand
                     }
                 }
 
@@ -1431,7 +1428,7 @@ impl AutoShardManager {
             active_models.insert(model_id);
         }
 
-        let our_region = self.our_region().unwrap_or_default();
+        let our_region = self.demand_region();
         let now = chrono::Utc::now();
         let local_id = self.shared_state.identity.node_id().clone();
         let residency: std::collections::HashMap<ModelId, u64> =

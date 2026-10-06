@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #223**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #224**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -1382,7 +1382,7 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-06, not yet released** (#222) (`docs/invariants/memory.md` § "`AutoShardManager::would_shed_copy` is the ONE answer")
+**Closed 2026-10-06, not yet released** (#222, #223) (`docs/invariants/memory.md` § "`AutoShardManager::would_shed_copy` is the ONE answer")
 - #222 — a node near its storage limit deleted parts and fetched the same parts back, for ever.
   Found in the post-v0.3.227 swarm check from peers' announcements in our own log: a tester's 30 GB
   node (`e561df35`) sawed 62 → 59 → 62 parts every ~25-30 min from 02:00 UTC (one Qwen3-30B-A3B
@@ -1397,6 +1397,13 @@ grep `^| N |`).
   `downloading_until_the_budget_says_stop_leaves_a_tenth_of_the_disk_free`, each red with its fix
   switched off. Field check after the release: `e561df35`'s `Peer retracted shards` count in our
   log (gotcha #795, `docs/DIAGNOSTICS.md`).
+- #223 — a node with no region forgot its own demand every ten minutes. The decay filed it in
+  `region_demand` under `"??"`; the replica target, prune's demand penalty and the idle-VRAM unload
+  read it under `""`. So such a node's target fell back to the raw counter the decay had just
+  zeroed, and its idle unload never saw a model was wanted. One key now
+  (`AutoShardManager::demand_region`); guard
+  `a_node_with_no_region_reads_back_the_demand_it_filed`. Found building the #222 rig, whose
+  nodes have no region.
 
 **Closed 2026-10-05, released in v0.3.226 (2026-10-05)** (#221) (`docs/invariants/inference.md` § "A graph pays only when it is updated")
 - #221 — a speculative check's CUDA graph could never be updated in place: candle-flash-attn

@@ -911,9 +911,9 @@ impl AutoShardManager {
         };
 
         // Use EMA demand from region_demand (smoothed) if available,
-        // falling back to raw request counter.
-        let our_region = self.our_region().unwrap_or_default();
-        let demand_key = (model_id.clone(), our_region);
+        // falling back to raw request counter. Under the key the decay files
+        // it under (`demand_region`), or a node with no region never reads it.
+        let demand_key = (model_id.clone(), self.demand_region());
         let ema_rate = self
             .shared_state
             .region_demand
@@ -1332,5 +1332,35 @@ mod fetch_what_prune_keeps {
         let taken = fetched(&manager, &state, 7_000);
         assert_eq!(taken.len(), 1, "{taken:?}");
         assert!(taken[0] == (a, 1) || taken[0] == (b, 1));
+    }
+
+    /// A node with no region files its demand under `"??"` when the counter
+    /// decays every ten minutes. The replica target read it under `""`, found
+    /// nothing, and fell back to the counter the decay had just zeroed — so on
+    /// such a node demand lasted until the next decay and was then forgotten.
+    /// Same model, same three nodes, same three requests: three copies wanted
+    /// before the decay, and still three after it.
+    #[test]
+    fn a_node_with_no_region_reads_back_the_demand_it_filed() {
+        let (state, manager) = manager_with(Config::default());
+        let mid = busy_model(&state, &manager, "regionless-model");
+        assert!(manager.our_region().is_none(), "fixture: no region");
+        let pool = crate::pool::scope::effective_pool_size(&state);
+
+        manager.decay_request_counts();
+        assert_eq!(
+            state
+                .models
+                .model_request_counts
+                .get(&mid)
+                .map(|c| c.load(Relaxed)),
+            Some(0),
+            "the decay moved the requests out of the counter"
+        );
+        assert_eq!(
+            manager.geo_target_replicas(&mid, 2, pool),
+            3,
+            "and the target still sees them, through the demand the decay filed"
+        );
     }
 }
