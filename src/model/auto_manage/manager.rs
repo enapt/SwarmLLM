@@ -853,9 +853,9 @@ impl AutoShardManager {
                 budget_from = %report.budget.limited_by,
                 max_shards = report.max_shards,
                 max_shards_reached = report.max_shards_reached,
-                "AutoShardManager: the storage budget is full, so nothing more is downloaded \
-                 — raise the disk limit or the contribution level in Settings, or remove a \
-                 model, to make room"
+                "AutoShardManager: this node's storage is full, so nothing more is downloaded \
+                 — {}",
+                report.advice_when_full()
             );
             return;
         }

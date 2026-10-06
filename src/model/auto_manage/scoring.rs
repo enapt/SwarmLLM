@@ -44,6 +44,41 @@ impl BudgetReport {
             self.budget.remaining(self.held_bytes)
         }
     }
+
+    /// What the owner can do when [`Self::remaining_bytes`] is zero — about
+    /// the limit that actually bound. One fixed sentence ("raise the disk
+    /// limit or the contribution level in Settings") answered every case, and
+    /// a tester at `max_shards_reached=true` with an explicit
+    /// `max_storage_mb` was pointed at two settings that moved neither limit
+    /// (2026-10-06).
+    pub fn advice_when_full(&self) -> String {
+        use super::StorageLimit;
+        if self.max_shards_reached {
+            return format!(
+                "it holds {} parts and [auto_manage] max_shards = {} in config.toml allows no \
+                 more — raise it, or set it to 0 for no count limit (lowering it never deletes \
+                 parts, it only stops downloads)",
+                self.held_shards, self.max_shards
+            );
+        }
+        let fix = match &self.budget.limited_by {
+            StorageLimit::Explicit { .. } => {
+                "raise [auto_manage] max_storage_mb in config.toml, or set it to 0 to follow the \
+                 disk limit and contribution level in Settings"
+            }
+            StorageLimit::ContributionShare { .. } => {
+                "raise the disk limit or the contribution level in Settings"
+            }
+            StorageLimit::MaxDisk { .. } | StorageLimit::NothingConfigured => {
+                "raise the disk limit in Settings"
+            }
+            StorageLimit::FreeDisk { .. } => {
+                "the disk itself is nearly full (a tenth of it is always left free) — free space \
+                 on it"
+            }
+        };
+        format!("{fix}, or remove a model")
+    }
 }
 
 impl AutoShardManager {
@@ -961,6 +996,49 @@ mod tests {
     };
     use crate::config::Config;
     use crate::types::{NodeId, ShardId};
+
+    /// A full node's advice names the limit that bound. The tester's figures:
+    /// 60 parts at `max_shards = 60`, an explicit `max_storage_mb = 28000`,
+    /// 28 220 MB held — told to raise "the disk limit or the contribution
+    /// level", neither of which moved either limit.
+    #[test]
+    fn a_full_node_is_told_about_the_limit_that_bound() {
+        const MB: u64 = 1024 * 1024;
+        let report = |max_storage_mb: u64, max_shards: u32, held_shards: u32| {
+            let reading = super::super::StorageReading {
+                max_storage_mb,
+                max_disk_mb: 50_000,
+                contribution: swarmllm_types::ContributionMode::Moderate,
+                disk: None,
+                held_bytes: 28_220 * MB,
+            };
+            super::BudgetReport {
+                held_bytes: reading.held_bytes,
+                held_shards,
+                budget: reading.budget(),
+                max_shards,
+                max_shards_reached: max_shards > 0 && held_shards >= max_shards,
+                reading,
+            }
+        };
+
+        let at_count_cap = report(28_000, 60, 60).advice_when_full();
+        assert!(at_count_cap.contains("max_shards = 60"), "{at_count_cap}");
+        assert!(!at_count_cap.contains("Settings"), "{at_count_cap}");
+
+        let explicit = report(28_000, 0, 60).advice_when_full();
+        assert!(
+            explicit.starts_with("raise [auto_manage] max_storage_mb"),
+            "{explicit}"
+        );
+
+        // No explicit figure: a share of the disk limit, which Settings sets.
+        let share = report(0, 0, 60).advice_when_full();
+        assert!(
+            share.starts_with("raise the disk limit or the contribution level in Settings"),
+            "{share}"
+        );
+    }
 
     /// Local holds shard 0 of a two-shard model, a connected peer holds shard 1:
     /// the gap-filling rule makes shard 1 a candidate. That is exactly the
