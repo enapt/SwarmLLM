@@ -871,7 +871,7 @@ impl AutoShardManager {
         }
 
         // 3. Select the best candidates within budget
-        let selected = self.select_within_budget(candidates, budget, config.max_shards);
+        let selected = self.select_within_budget(candidates, &report, config.max_shards);
         if selected.is_empty() {
             return;
         }

@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #222**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #223**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -1381,6 +1381,22 @@ archive under the named heading. Reopen one only with the evidence its line name
 Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 19-28 were
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
+
+**Closed 2026-10-06, not yet released** (#222) (`docs/invariants/memory.md` § "`AutoShardManager::would_shed_copy` is the ONE answer")
+- #222 — a node near its storage limit deleted parts and fetched the same parts back, for ever.
+  Found in the post-v0.3.227 swarm check from peers' announcements in our own log: a tester's 30 GB
+  node (`e561df35`) sawed 62 → 59 → 62 parts every ~25-30 min from 02:00 UTC (one Qwen3-30B-A3B
+  part dropped per 5-min prune cooldown, the same indices back once their 30-min protection
+  lapsed, ~1.6 GB a cycle); `9594e1ff` had done ~100 parts a day across 7 models for days. Three
+  causes, all fixed: the download pass fetched below the RAW replica target while prune shed above
+  the pressure-adjusted one (now both ask `AutoShardManager::would_shed_copy`, the download side
+  at the disk pressure after the fetch); prune judged files by graphics-memory pressure too (now
+  disk only); and the free-disk clamp (held + 80% of free) filled a disk-limited node to 99.5%,
+  into the tester's own fill safeguard (now the filesystem's last 10% is never taken — kubelet's
+  `nodefs.available<10%`). Guards `fetch_what_prune_keeps::*` and
+  `downloading_until_the_budget_says_stop_leaves_a_tenth_of_the_disk_free`, each red with its fix
+  switched off. Field check after the release: `e561df35`'s `Peer retracted shards` count in our
+  log (gotcha #795, `docs/DIAGNOSTICS.md`).
 
 **Closed 2026-10-05, released in v0.3.226 (2026-10-05)** (#221) (`docs/invariants/inference.md` § "A graph pays only when it is updated")
 - #221 — a speculative check's CUDA graph could never be updated in place: candle-flash-attn

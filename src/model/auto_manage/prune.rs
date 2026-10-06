@@ -210,9 +210,18 @@ impl AutoShardManager {
             .into_iter()
             .collect();
 
+        // Two pressures for two kinds of action. Graphics memory is relieved by
+        // narrowing what is LOADED (phase 0, on the combined figure as it
+        // always was); a file is deleted for DISK pressure alone. Deleting a
+        // part frees no graphics memory — prune even prefers parts that are not
+        // loaded — and judging deletion by a card that fills whenever a model
+        // is resident shed parts the download pass fetched straight back
+        // (gotcha #795).
         let resource_pressure = self.compute_resource_pressure(live_vram_used);
-        let pressure_urgent = resource_pressure > PRESSURE_URGENT;
+        let disk_pressure = self.disk_pressure();
+        let pressure_urgent = disk_pressure > PRESSURE_URGENT;
         tracing::info!(
+            disk_pressure = %format_args!("{:.2}", disk_pressure),
             resource_pressure = %format_args!("{:.2}", resource_pressure),
             pressure_urgent,
             "DIAG: evaluate_and_prune starting"
@@ -222,7 +231,7 @@ impl AutoShardManager {
         // When VRAM pressure is moderate (SOFT_UNLOAD..URGENT), try narrowing the shard
         // window for loaded models instead of deleting files. This frees VRAM while
         // keeping shards on disk for the network.
-        if resource_pressure > PRESSURE_SOFT_UNLOAD && !pressure_urgent {
+        if resource_pressure > PRESSURE_SOFT_UNLOAD && resource_pressure <= PRESSURE_URGENT {
             self.try_vram_soft_unload(resource_pressure).await;
         }
 
@@ -321,49 +330,10 @@ impl AutoShardManager {
                 };
 
                 // Only consider shards we hold locally
-                let holders = registry.shard_holders(&shard_id);
-                if !holders.contains(&local_node_id) {
+                if !registry.shard_holders(&shard_id).contains(&local_node_id) {
                     continue;
                 }
-                // Private mode: filter holders to allowed set for replica counting
-                let holders = crate::pool::scope::filter_allowed_holders(holders, &allowed_set);
-                // SEC: count only LIVE holders (gotcha #86 / scheduler-liveness
-                // oracle pattern). `shard_holders` returns the gossip-cached
-                // list including peers that have been offline for hours
-                // (registry entries persist until LRU eviction or explicit
-                // remove). The previous logic counted offline peers toward
-                // `holder_count`, so a shard whose 3 cached holders were all
-                // disconnected passed the `holder_count <= adjusted_target`
-                // guard and got pruned — losing the only live copy. Filter
-                // against `connected_node_ids` (always include self).
-                let holders: Vec<crate::types::NodeId> = holders
-                    .into_iter()
-                    .filter(|h| {
-                        *h == local_node_id || self.shared_state.connected_node_ids.contains(h)
-                    })
-                    .collect();
-
-                // Skip locked/pinned shards
-                if self
-                    .shared_state
-                    .models
-                    .locked_shards
-                    .contains_key(&shard_id)
-                {
-                    continue;
-                }
-
-                // Skip shards pinned to this node via pool shard pinning.
-                // Uses the cached snapshot from above — see SEC note there.
-                {
-                    let local_id = self.shared_state.identity.node_id();
-                    if shard_pins_cached
-                        .iter()
-                        .any(|p| p.matches(&manifest.id.0, local_id, shard.index))
-                    {
-                        continue;
-                    }
-                }
+                let holders = self.live_holders_with_us(&shard_id, &allowed_set);
 
                 // Skip shards that are actively being downloaded by this node
                 let is_downloading = self
@@ -386,72 +356,28 @@ impl AutoShardManager {
                     continue;
                 }
 
-                // Prompt privacy needs BOTH ends of the model on this node, so
-                // pruning an end strands the setting: it stays on, nothing can
-                // satisfy it, and every request for the model then fails at
-                // pipeline assembly.
-                //
-                // This used to read `encrypted_pipeline_models` directly, which
-                // sees ONLY an explicit per-model toggle. Privacy has been ON BY
-                // DEFAULT wherever a node holds both ends since 2026-07-27
-                // (`encrypted_pipeline_auto`), and that map is empty for it — so
-                // the models most likely to have privacy in force were exactly
-                // the ones this did not protect. `privacy_required_shards` is the
-                // shared rule, and `delete_shard` refuses on the same answer.
-                if privacy_holds_shard(
-                    self.shared_state.privacy_required_shards(&manifest.id),
-                    self.shared_state
-                        .privacy_explicitly_enabled_for(&manifest.id),
-                    shard_id.index,
-                ) {
+                // Is this copy surplus at all? The standing exemptions (locked,
+                // pinned, privacy's ends, a user-pinned model, the configured
+                // range), the replica count at DISK pressure, and the last copy
+                // in our region — the one answer the download pass asks too, so
+                // a part it fetches is never one this sheds (gotcha #795). The
+                // pins are the cached snapshot from above — see SEC note there.
+                if !self.would_shed_copy(&shard_id, &holders, disk_pressure, &shard_pins_cached) {
                     continue;
-                }
-
-                // Skip shards for models the user explicitly pinned/trusted
-                if self
-                    .shared_state
-                    .models
-                    .model_trust
-                    .get(&manifest.id)
-                    .map(|t| t.pinned_by_user)
-                    .unwrap_or(false)
-                {
-                    continue;
-                }
-
-                // Skip if in configured --shards range
-                if let Some((start, end)) = self.shared_state.config.inference.shard_range {
-                    if shard.index >= start && shard.index <= end {
-                        continue;
-                    }
                 }
 
                 let holder_count = holders.len();
-
-                // Compute the effective target for THIS shard. In auto mode,
-                // a shard over-replicated by ≥SATURATION_FACTOR_AUTO×target
-                // bypasses the RELAXED nudge and uses the raw target — so a
-                // node with zero local pressure still sheds shards once the
-                // swarm has plenty. Severe saturation (≥SATURATION_FACTOR_
-                // SEVERE×target) gets a score bonus below to break ties
-                // against not-quite-as-saturated shards.
+                // The effective target behind that answer, for the score and the
+                // execution-time re-check. Severe saturation
+                // (≥SATURATION_FACTOR_SEVERE×target) gets a score bonus below to
+                // break ties against not-quite-as-saturated shards.
                 let effective_target = effective_prune_target(
                     target,
-                    resource_pressure,
+                    disk_pressure,
                     holder_count,
                     contribution_auto,
                     config.min_replicas,
                 );
-
-                // Skip if at or below effective target
-                if holder_count <= effective_target as usize {
-                    continue;
-                }
-
-                // Region-aware: block if we'd eliminate last holder in our region
-                if self.would_eliminate_region(&shard_id, &local_node_id, &holders) {
-                    continue;
-                }
 
                 // Load-aware: block if remaining holders are busy
                 if self.remaining_holders_busy(
@@ -513,7 +439,7 @@ impl AutoShardManager {
                 }
 
                 // Resource pressure bonus
-                score += 0.5 * (resource_pressure + schedule_pressure);
+                score += 0.5 * (disk_pressure + schedule_pressure);
 
                 // Pipeline completeness penalty
                 if shard.index == 0 || shard.index == manifest.shard_count.saturating_sub(1) {
@@ -684,9 +610,9 @@ impl AutoShardManager {
                     .join(crate::model::shard::MMPROJ_FILENAME);
                     if mmproj_path.exists() {
                         // Higher floor: at least 3 replicas (or pool_size, whichever is smaller)
-                        let mmproj_min = (config.min_replicas + 1).min(pool_size as u32).max(3);
+                        let mmproj_min = mmproj_prune_floor(config.min_replicas, pool_size);
                         let mmproj_holder_count = mmproj_holders.len();
-                        if mmproj_holder_count > mmproj_min as usize && pressure_urgent {
+                        if mmproj_sheds_at(disk_pressure, mmproj_holder_count, mmproj_min) {
                             let mmproj_size =
                                 manifest.mmproj.as_ref().map(|m| m.size_bytes).unwrap_or(0);
                             prune_candidates.push(PruneCandidate {
@@ -743,7 +669,7 @@ impl AutoShardManager {
             // (`daemon::background::spawn_failed_download_reclaim`).
             let (budget, held_bytes, _) = super::storage_budget_now(&self.shared_state);
             tracing::warn!(
-                resource_pressure = format!("{resource_pressure:.2}"),
+                disk_pressure = format!("{disk_pressure:.2}"),
                 held_mb = held_bytes / (1024 * 1024),
                 budget_mb = budget.bytes / (1024 * 1024),
                 limited_by = %budget.limited_by,
@@ -808,10 +734,9 @@ impl AutoShardManager {
             // As we prune candidates earlier in this cycle, local disk usage
             // drops and pressure-adjusted_target may have grown (i.e., we no
             // longer need to shed). Re-using the snapshot taken at scan time
-            // could cause over-pruning. We re-use the cached VRAM read
-            // (live_vram_used) — VRAM is not affected by file deletes, only
-            // by reload/unload, which doesn't happen mid-cycle.
-            let fresh_pressure = self.compute_resource_pressure(live_vram_used);
+            // could cause over-pruning. Disk pressure, as at scan time: a
+            // file delete frees disk, never graphics memory (gotcha #795).
+            let fresh_pressure = self.disk_pressure();
             let target_now = self.pressure_adjusted_target(
                 self.geo_target_replicas(&candidate.model_id, config.min_replicas, pool_size),
                 fresh_pressure,
@@ -1092,7 +1017,10 @@ impl AutoShardManager {
         pressure_adjusted_target(target, pressure, min_replicas)
     }
 
-    /// Compute resource pressure (0.0-1.0) based on VRAM and disk usage.
+    /// Combined resource pressure (0.0-1.0): the larger of disk and graphics
+    /// memory. Gates the graphics-memory action (phase 0's soft-unload) only —
+    /// whether a FILE is deleted or fetched is judged by [`Self::disk_pressure`]
+    /// alone (gotcha #795).
     pub(super) fn compute_resource_pressure(&self, live_vram_used: Option<u64>) -> f64 {
         // Disk pressure, measured against THE storage budget — the same
         // figure the download pass refuses against. This used to be its own
@@ -1102,12 +1030,7 @@ impl AutoShardManager {
         // downloading and at 36% for pruning, so it refused every download
         // and pruned nothing, indefinitely (gotcha #448). One figure, or the
         // two passes wedge exactly where they disagree.
-        let (budget, held_bytes, _) = super::storage_budget_now(&self.shared_state);
-        let disk_pressure = if budget.bytes > 0 {
-            held_bytes as f64 / budget.bytes as f64
-        } else {
-            0.0
-        };
+        let disk_pressure = self.disk_pressure();
 
         // VRAM pressure -- prefer live nvidia-smi data over internal model tracking
         let vram_pressure = if let Some(ref gpu) = self.shared_state.gpu_info {
@@ -1248,6 +1171,186 @@ impl AutoShardManager {
             }
         }
         false
+    }
+
+    /// Disk pressure on this node now, 0.0-1.0: held over the storage budget.
+    /// What every decision to delete or fetch a part is judged by.
+    pub(super) fn disk_pressure(&self) -> f64 {
+        super::StorageReading::now(&self.shared_state).pressure()
+    }
+
+    /// The live holders of `shard_id` as prune counts them, with this node
+    /// among them.
+    ///
+    /// SEC: count only LIVE holders (gotcha #86 / scheduler-liveness oracle
+    /// pattern). `shard_holders` returns the gossip-cached list including peers
+    /// that have been offline for hours (registry entries persist until LRU
+    /// eviction or explicit remove). Counting offline peers toward the holder
+    /// count let a shard whose 3 cached holders were all disconnected pass the
+    /// replica guard and be pruned — losing the only live copy. Private mode
+    /// counts only the allowed set.
+    pub(super) fn live_holders_with_us(
+        &self,
+        shard_id: &ShardId,
+        allowed_set: &Option<std::collections::HashSet<NodeId>>,
+    ) -> Vec<NodeId> {
+        let local_node_id = self.shared_state.identity.node_id();
+        let holders = self.shared_state.model_registry.shard_holders(shard_id);
+        let mut holders: Vec<NodeId> =
+            crate::pool::scope::filter_allowed_holders(holders, allowed_set)
+                .into_iter()
+                .filter(|h| h == local_node_id || self.shared_state.connected_node_ids.contains(h))
+                .collect();
+        if !holders.contains(local_node_id) {
+            holders.push(local_node_id.clone());
+        }
+        holders
+    }
+
+    /// **The one answer to "would prune shed this node's copy of `shard_id`?"**,
+    /// given its live `holders` with this node among them, at disk `pressure`.
+    ///
+    /// Asked by the prune pass of a part it holds, and by the download pass of
+    /// a part it is about to fetch, judged at the pressure that fetch would
+    /// leave behind ([`Self::would_shed_once_fetched`]). The two passes used to
+    /// answer "how many copies are enough?" each in their own way: prune shed
+    /// above the PRESSURE-ADJUSTED target (one fewer copy above 0.8, two above
+    /// 0.95) while the download pass fetched below the RAW target. A part in
+    /// between was surplus to one and missing to the other. A tester's node
+    /// deleted one every five minutes (`prune_cooldown_secs`) and fetched the
+    /// same parts back once their 30-minute protection lapsed, ~1.6 GB a cycle,
+    /// and two other peers churned ~100 parts a day the same way (2026-10-06,
+    /// gotcha #795) — #448's shape: two accountants disagree, and the node
+    /// oscillates exactly where they do.
+    ///
+    /// It covers what DECIDES a prune — the standing exemptions, the replica
+    /// count, the last copy in this region. The guards that only POSTPONE one
+    /// (cooldown, a download in flight, a part in use, busy holders, a recent
+    /// request, a way to re-fetch) stay in the prune loop: a part they shield
+    /// today is shed tomorrow, so the download pass must not count on them.
+    pub(super) fn would_shed_copy(
+        &self,
+        shard_id: &ShardId,
+        holders: &[NodeId],
+        pressure: f64,
+        shard_pins: &[crate::types::ShardPin],
+    ) -> bool {
+        let live = self.shared_state.cfg();
+        if !live.auto_manage.prune_enabled {
+            return false;
+        }
+        if self
+            .shared_state
+            .models
+            .model_auto_manage_policies
+            .get(&shard_id.model_id)
+            .is_some_and(|policy| !policy.prune_enabled)
+        {
+            return false;
+        }
+        if self
+            .shared_state
+            .models
+            .locked_shards
+            .contains_key(shard_id)
+        {
+            return false;
+        }
+        // Pool shard pinning: the caller passes the pins it read. Prune reads
+        // them with the BLOCKING variant — see the SEC note where it does.
+        let local_node_id = self.shared_state.identity.node_id();
+        if shard_pins
+            .iter()
+            .any(|p| p.matches(&shard_id.model_id.0, local_node_id, shard_id.index))
+        {
+            return false;
+        }
+        // Prompt privacy needs BOTH ends of the model on this node, so
+        // pruning an end strands the setting: it stays on, nothing can
+        // satisfy it, and every request for the model then fails at
+        // pipeline assembly.
+        //
+        // This used to read `encrypted_pipeline_models` directly, which
+        // sees ONLY an explicit per-model toggle. Privacy has been ON BY
+        // DEFAULT wherever a node holds both ends since 2026-07-27
+        // (`encrypted_pipeline_auto`), and that map is empty for it — so
+        // the models most likely to have privacy in force were exactly
+        // the ones this did not protect. `privacy_required_shards` is the
+        // shared rule, and `delete_shard` refuses on the same answer.
+        if privacy_holds_shard(
+            self.shared_state
+                .privacy_required_shards(&shard_id.model_id),
+            self.shared_state
+                .privacy_explicitly_enabled_for(&shard_id.model_id),
+            shard_id.index,
+        ) {
+            return false;
+        }
+        // A model the user explicitly pinned/trusted.
+        if self
+            .shared_state
+            .models
+            .model_trust
+            .get(&shard_id.model_id)
+            .is_some_and(|t| t.pinned_by_user)
+        {
+            return false;
+        }
+        // The configured `--shards` range.
+        if let Some((start, end)) = self.shared_state.config.inference.shard_range {
+            if shard_id.index >= start && shard_id.index <= end {
+                return false;
+            }
+        }
+        let pool_size = crate::pool::scope::effective_pool_size(&self.shared_state);
+        let target =
+            self.geo_target_replicas(&shard_id.model_id, live.auto_manage.min_replicas, pool_size);
+        // In auto mode, a shard over-replicated by ≥SATURATION_FACTOR_AUTO×
+        // target bypasses the RELAXED nudge and uses the raw target — so a
+        // node with zero local pressure still sheds once the swarm has plenty.
+        if !sheds_at(
+            target,
+            pressure,
+            holders.len(),
+            live.node.contribution_auto,
+            live.auto_manage.min_replicas,
+        ) {
+            return false;
+        }
+        // Region-aware: never the last holder in our region.
+        !self.would_eliminate_region(shard_id, local_node_id, holders)
+    }
+
+    /// Would prune shed `candidate` again once it had landed — counted among
+    /// its live holders, at `pressure_after`, the disk pressure with this
+    /// fetch (and the others chosen beside it) on disk? The download pass's
+    /// side of [`Self::would_shed_copy`]; a part it answers `true` for is not
+    /// fetched, which is what ends the loop gotcha #795 describes.
+    pub(super) fn would_shed_once_fetched(
+        &self,
+        candidate: &super::manager::ShardCandidate,
+        pressure_after: f64,
+        shard_pins: &[crate::types::ShardPin],
+    ) -> bool {
+        let shard_id = ShardId {
+            model_id: candidate.model_id.clone(),
+            index: candidate.shard_index,
+        };
+        let allowed_set = crate::pool::scope::allowed_node_set(&self.shared_state);
+        let holders = self.live_holders_with_us(&shard_id, &allowed_set);
+        if candidate.shard_index == crate::types::MMPROJ_SHARD_INDEX {
+            let live = self.shared_state.cfg();
+            return live.auto_manage.prune_enabled
+                && mmproj_sheds_at(
+                    pressure_after,
+                    holders.len(),
+                    mmproj_prune_floor(
+                        live.auto_manage.min_replicas,
+                        crate::pool::scope::effective_pool_size(&self.shared_state),
+                    ),
+                );
+        }
+        self.would_shed_copy(&shard_id, &holders, pressure_after, shard_pins)
     }
 
     /// Check if we can re-acquire this shard if needed later.
@@ -1625,6 +1728,40 @@ pub(crate) fn effective_prune_target(
     } else {
         pressure_adjusted_target(target, pressure, min_replicas)
     }
+}
+
+/// Is a part held by `holder_count` live nodes (this one among them) a copy
+/// too many, at disk pressure `pressure`? The replica-count half of
+/// [`AutoShardManager::would_shed_copy`], kept pure so the property that ends
+/// the download/prune loop can be checked over every input
+/// (`no_part_is_both_fetched_and_shed`).
+pub(crate) fn sheds_at(
+    target: u32,
+    pressure: f64,
+    holder_count: usize,
+    contribution_auto: bool,
+    min_replicas: u32,
+) -> bool {
+    holder_count
+        > effective_prune_target(
+            target,
+            pressure,
+            holder_count,
+            contribution_auto,
+            min_replicas,
+        ) as usize
+}
+
+/// The fewest live copies of a vision projector prune keeps — it is needed by
+/// every node that answers an image, so its floor sits above a shard's.
+pub(crate) fn mmproj_prune_floor(min_replicas: u32, pool_size: usize) -> u32 {
+    (min_replicas + 1).min(pool_size as u32).max(3)
+}
+
+/// Is a projector held by `holder_count` live nodes one copy too many? Only
+/// under urgent disk pressure, and only above [`mmproj_prune_floor`].
+pub(crate) fn mmproj_sheds_at(pressure: f64, holder_count: usize, floor: u32) -> bool {
+    pressure > PRESSURE_URGENT && holder_count > floor as usize
 }
 
 #[cfg(test)]

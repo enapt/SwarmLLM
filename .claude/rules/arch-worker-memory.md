@@ -118,6 +118,12 @@ Whenever code waits for a subprocess, handle it dying instead (`spawn_worker` ra
 
 → `docs/invariants/memory.md` § "A lone decode stream is never held for a batch (2026-09-29)"
 
+## The download pass fetches only what prune would keep (2026-10-06)
+
+**`AutoShardManager::would_shed_copy` is the one answer to "would prune shed this copy?"** — prune asks it of what it holds; `select_within_budget` asks it before every fetch, at the disk pressure AFTER the fetch (cumulative per cycle). Every file decision reads DISK pressure, never graphics memory; the filesystem's last 10% is never ours (`FREE_DISK_RESERVE_PCT`). Guards: `fetch_what_prune_keeps::*`.
+
+→ `docs/invariants/memory.md` § "`AutoShardManager::would_shed_copy` is the ONE answer"
+
 ## A model is admitted against the card as it stands NOW (2026-09-29)
 
 **`ModelProcessPool::vram_budget_now`** is what `admit_to_gpu` weighs a model against, re-read at admission. Never cache a live condition at startup.

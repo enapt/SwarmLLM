@@ -1275,7 +1275,8 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
 
 | Level | What | Fields |
 |-------|------|--------|
-| INFO  | `DIAG: evaluate_and_prune` | `resource_pressure`, `pressure_urgent` |
+| INFO  | `DIAG: evaluate_and_prune` | `disk_pressure` (decides every file), `resource_pressure` (max with VRAM — gates soft-unload only), `pressure_urgent` (disk) |
+| DEBUG | `Not fetching a part prune would delete again once it landed` | `model`, `shard`, `holders`, `pressure_after` (gotcha #795) |
 | DEBUG | `DIAG: register_local_shard` | `model`, `shard` |
 | INFO  | `DIAG: check_and_load_model` | `model`, `available_shards`, `missing_shards`, `total_shards`, `ranges`, `ready`, `local_shard_indices` |
 | DEBUG | `Skipping model — insufficient trust for auto-manage` | `model`, `trust` |
@@ -1285,6 +1286,23 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
 | WARN  | `HfSourceGossip dropped — hf_sources at capacity` | `model`, `cap` (R141 — fires alongside `activity.hf_sources_cap_reached`) |
 | WARN  | `Auto-manage: released stalled P2P download permit; HF fallback will fire next cycle` | `model`, `shard`, `stall_secs` (R141 — `P2P_PERMIT_STALL_SECS = 180`) |
 | INFO  | `On-demand loading: model has shards on disk but not loaded` | `request_id`, `model` |
+
+`DIAG:` **Is a node deleting and re-fetching the same parts?** It cannot be seen
+from that node's activity feed, but every peer logs it. Count, per peer, the two
+halves of the cycle in YOUR node.log:
+
+```bash
+grep -a "Peer retracted shards" ~/.local/share/swarmllm/node.log | grep -o "node_id=[0-9a-f]\{8\}" | sort | uniq -c
+grep -a "was reinstated" ~/.local/share/swarmllm/node.log | grep -o "node=[0-9a-f]\{8\}" | sort | uniq -c
+```
+
+A peer near-equal in both, steadily (tens a day), with `dropped=1` every ~5 min
+(`prune_cooldown_secs`) is churning; its announced totals (`Received shard
+announce … shards=N`) saw-tooth. A burst on one day is more often a canonical
+heal (wrong parts deleted and re-fetched, once). Before v0.3.228 the cause was
+gotcha #795: the download pass fetched below the raw replica target while prune
+shed above the pressure-adjusted one. On the node itself,
+`DIAG: evaluate_and_prune starting` shows the pressure it shed at.
 
 ## API Subsystem Diagnostics
 

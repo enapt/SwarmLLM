@@ -593,9 +593,11 @@ precedent — a number the user typed is not silently scaled by a level they
 may not connect to it); otherwise 25 / 50 / 75% of `max_disk_mb` by
 contribution level, the shares the setup wizard has always promised
 (`contribution_disk_share_pct`); never above `max_disk_mb`; never above
-held + 80% of free disk — the held term makes the clamp invariant under our
-own holdings, where the old form subtracted held from a figure that already
-excluded it. **A refusal must name its arithmetic**: `held_mb`,
+held + what is free beyond 10% of the filesystem (`FREE_DISK_RESERVE_PCT`,
+2026-10-06 — it was held + 80% of free, which had no floor; see the next
+section) — the held term makes the clamp invariant under our own holdings,
+where the old form subtracted held from a figure that already excluded it.
+**A refusal must name its arithmetic**: `held_mb`,
 `budget_mb`, `budget_from`, and what to do about it. A competent reader
 handed a bare "no remaining budget" will build a theory from the numbers
 they CAN see.
@@ -604,6 +606,66 @@ Two siblings fixed in the same pass: `evaluate_and_download` read
 binding the live-config guard cannot see (#281's shape); and the quarantine
 sweep named only `.quarantine`, so `.mismatched` files (2026-07-27) were
 never reclaimed — `QUARANTINE_EXTENSIONS` now lists both.
+
+## `AutoShardManager::would_shed_copy` is the ONE answer to "would prune shed this copy?" — and the download pass asks it before every fetch
+
+(2026-10-06, gotcha #795.) Prune asks it of each part it holds; the download
+pass asks it in `select_within_budget` of each part it is about to fetch,
+counting this node among the live holders and judging at the disk pressure
+that part — and the others chosen the same cycle — would leave behind
+(`StorageReading::with_added`). A part prune would shed is not fetched.
+Guards: `fetch_what_prune_keeps::*` in `auto_manage/scoring.rs` (each fails
+with its half of the fix switched off, checked 2026-10-06).
+
+**Why**: the two passes answered "how many copies are enough?" separately.
+Prune shed above `pressure_adjusted_target` — one copy fewer above 0.8 disk
+pressure, two above 0.95 — while `gather_candidates` fetched below the RAW
+`geo_target_replicas`. A part between the two was surplus to one pass and
+missing to the other. Field evidence, all from the live node's log of peer
+announcements: a tester's 30 GB container (`e561df35`) went 62 → 59 → 62
+parts every ~25-30 min from 02:00 UTC 2026-10-06, one Qwen3-30B-A3B part
+dropped per `prune_cooldown_secs` (300 s) and the SAME indices re-fetched once
+`SHARD_RECENTLY_ACQUIRED_SECS` (30 min) lapsed — shard 4 re-fetched 04:03,
+dropped 04:37, back 04:38; ~1.6 GB a cycle. It began when the same tester's
+second Australian node took copies of those parts, which stopped
+`would_eliminate_region` blocking the prune. Two other peers showed the same
+signature for days (`9594e1ff` ~100 parts a day across 7 models,
+`bf7b3263` 170 on 10-01). It is #448's shape again: two accountants for one
+decision, and the node oscillates exactly where they disagree.
+
+What the shared method covers, and what it deliberately does not:
+- **In**: what DECIDES a prune — prune disabled, the per-model policy, a locked
+  part, a pool pin to this node, prompt privacy's ends, a user-pinned model,
+  the configured `--shards` range, the replica count at disk pressure
+  (`sheds_at`, over `effective_prune_target`), and the last copy in the
+  region. A download refused on any of these would under-fetch a part prune
+  keeps — `a_part_prune_never_deletes_is_fetched_at_any_pressure` pins the
+  configured-range case.
+- **Out**: what only POSTPONES one — cooldown, a download in flight, a part on
+  an active pipeline, busy holders, a recent request, a way to re-fetch. A
+  part they shield today is shed tomorrow; the download pass must not count on
+  them.
+- **Pressure is DISK pressure for every file decision.** Prune used
+  `max(disk, vram)`: deleting a part frees no graphics memory (prune even
+  prefers parts that are not loaded), and a card fills whenever a model is
+  resident, so a GPU node shed parts the download pass fetched back as soon as
+  its card emptied. `max(disk, vram)` now gates only phase 0's soft-unload,
+  unchanged.
+- **The reserve is a FLOOR on free space, not a share of it.** "Held + 80% of
+  free" kept offering room while a part fit in 80% of what was left: 550 MB
+  parts filled a 30 GB container (3 GB of system) to 148 MB free, 99.5% —
+  into the tester's own fill safeguard, and to disk pressure ~1.0 where prune
+  is most eager. Kubernetes' kubelet treats a node filesystem under 10%
+  available as a hard eviction threshold (`evictionHard: nodefs.available<10%`,
+  KubeletConfiguration default), and its image GC deletes above 85% and stops
+  under 80% — a delete trigger above the point acquisition stops at, which is
+  the property `select_within_budget` now gives this pair. The same container
+  now stops at 88.8% (`downloading_until_the_budget_says_stop_leaves_a_tenth_of_the_disk_free`).
+
+What a change must keep: one method answers for both passes; the download
+side judges at the pressure AFTER the fetch, cumulatively within a cycle
+(`parts_chosen_together_are_judged_together`); file decisions never read
+graphics memory.
 
 ## `model::auto_manage::prune::effective_idle_secs` — residency is a hard UPPER BOUND on "idle since", and the worker's own `last_used` is the signal that moves
 

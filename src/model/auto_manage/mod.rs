@@ -57,11 +57,40 @@ pub(crate) fn shard_size_exact(path: &std::path::Path, expected_size: u64) -> bo
             .unwrap_or(false)
 }
 
-/// Fraction of genuinely-free disk the shard budget may claim.
+/// Share of the FILESYSTEM this node's files never take: it stays free for the
+/// OS, logs, the database, an in-flight download and whatever else the owner
+/// runs on that disk.
 ///
-/// The rest is left for the OS, logs, the database and an in-flight download —
-/// filling a disk to the last byte breaks far more than shard acquisition.
-const FREE_DISK_HEADROOM_PCT: u64 = 80;
+/// The figure is Kubernetes' — the kubelet treats a node filesystem with under
+/// 10% available as a hard eviction threshold (`evictionHard:
+/// nodefs.available<10%`, the KubeletConfiguration default): below it the
+/// machine is in trouble whatever is using the space.
+///
+/// The rule this replaced, "held + 80% of what is free", had no floor. The
+/// room it offered shrank with every download but stayed open while a part fit
+/// in 80% of what was left, so a node whose limit was the disk itself filled it
+/// to within 1.25 parts of full — 99.5% of a 30 GB container with 550 MB parts
+/// — into whatever its owner had put there to stop exactly that, and its disk
+/// pressure sat at
+/// the top of the range, where prune sheds and the download pass refilled
+/// (2026-10-06, gotcha #795).
+const FREE_DISK_RESERVE_PCT: u64 = 10;
+
+/// The filesystem holding the data directory, as it stands now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DiskSpace {
+    /// What may still be written (`available`, i.e. after any root reserve).
+    pub free_bytes: u64,
+    /// The filesystem's size.
+    pub total_bytes: u64,
+}
+
+impl DiskSpace {
+    /// What this node's files leave free on this filesystem, always.
+    pub fn reserve_bytes(&self) -> u64 {
+        self.total_bytes / 100 * FREE_DISK_RESERVE_PCT
+    }
+}
 
 /// The share of `max_disk_mb` auto-manage may fill when `max_storage_mb` is
 /// left at 0, by contribution level.
@@ -97,7 +126,7 @@ pub enum StorageLimit {
     /// The configured figure exceeded `max_disk_mb`, the ceiling on everything.
     MaxDisk { max_disk_mb: u64 },
     /// The filesystem has less room than the configuration asks for.
-    FreeDisk { free_mb: u64 },
+    FreeDisk { free_mb: u64, reserve_mb: u64 },
     /// Neither `max_storage_mb` nor `max_disk_mb` is set — nothing may be held.
     NothingConfigured,
 }
@@ -118,9 +147,13 @@ impl std::fmt::Display for StorageLimit {
                 contribution_name(contribution)
             ),
             Self::MaxDisk { max_disk_mb } => write!(f, "resources.max_disk_mb = {max_disk_mb}"),
-            Self::FreeDisk { free_mb } => write!(
+            Self::FreeDisk {
+                free_mb,
+                reserve_mb,
+            } => write!(
                 f,
-                "{FREE_DISK_HEADROOM_PCT}% of the {free_mb} MB free on disk"
+                "the disk: {free_mb} MB free, and {reserve_mb} MB \
+                 ({FREE_DISK_RESERVE_PCT}% of it) is always left free"
             ),
             Self::NothingConfigured => write!(f, "max_disk_mb is 0 — no storage configured"),
         }
@@ -171,20 +204,22 @@ impl StorageBudget {
 /// 2. Otherwise `max_disk_mb` × [`contribution_disk_share_pct`].
 /// 3. Never more than `max_disk_mb`, the ceiling on everything (Maximum used
 ///    to grant 150% of an explicit figure, above the disk limit).
-/// 4. Never more than what is HELD plus 80% of what is FREE. `max_disk_mb`
-///    was taken at face value: 50 GB was accepted on a 20 GB filesystem
-///    with ~15 GB free and the node kept accepting shards until `ENOSPC`
-///    rather than pruning (reported 2026-07-30). The held term is what
-///    makes the clamp invariant under our own holdings — free space
-///    already excludes them, so clamping the TOTAL to a fraction of free
-///    and then subtracting held again under-counted the room by exactly
-///    what was held. `None` for free space means it could not be read;
-///    do not invent a limit from a failed syscall.
+/// 4. Never more than what is HELD plus what is FREE beyond
+///    [`FREE_DISK_RESERVE_PCT`] of the filesystem. `max_disk_mb` was taken at
+///    face value: 50 GB was accepted on a 20 GB filesystem with ~15 GB free
+///    and the node kept accepting shards until `ENOSPC` rather than pruning
+///    (reported 2026-07-30). The held term is what makes the clamp invariant
+///    under our own holdings — free space already excludes them, so a part
+///    downloaded or deleted moves bytes between the two terms and leaves the
+///    budget where it was. The reserve is a FLOOR on free space, not a share
+///    of it: "80% of what is free" never closed while a part still fit, and
+///    filled a container to 99.5% (gotcha #795). `None` means the disk could
+///    not be read; do not invent a limit from a failed syscall.
 pub fn storage_budget(
     auto_max_storage_mb: u64,
     max_disk_mb: u64,
     contribution: &swarmllm_types::ContributionMode,
-    free_disk_bytes: Option<u64>,
+    disk: Option<DiskSpace>,
     held_bytes: u64,
 ) -> StorageBudget {
     let mib = |mb: u64| mb.saturating_mul(1024).saturating_mul(1024);
@@ -212,16 +247,82 @@ pub fn storage_budget(
         bytes = mib(max_disk_mb);
         limited_by = StorageLimit::MaxDisk { max_disk_mb };
     }
-    if let Some(free) = free_disk_bytes {
-        let by_disk = held_bytes.saturating_add(free / 100 * FREE_DISK_HEADROOM_PCT);
+    if let Some(disk) = disk {
+        let by_disk =
+            held_bytes.saturating_add(disk.free_bytes.saturating_sub(disk.reserve_bytes()));
         if by_disk < bytes {
             bytes = by_disk;
             limited_by = StorageLimit::FreeDisk {
-                free_mb: free / (1024 * 1024),
+                free_mb: disk.free_bytes / (1024 * 1024),
+                reserve_mb: disk.reserve_bytes() / (1024 * 1024),
             };
         }
     }
     StorageBudget { bytes, limited_by }
+}
+
+/// Everything the storage budget is computed from, read ONCE.
+///
+/// Both auto-manage passes judge a part by the disk pressure on this node, and
+/// the download pass has to ask what that pressure WOULD be once a part has
+/// landed — the question that keeps it from fetching what prune sheds next
+/// (`prune::AutoShardManager::would_shed_copy`, gotcha #795). The budget itself
+/// cannot answer it: the free-disk rule makes it depend on what is held, so
+/// "after this download" means re-deriving it from its inputs, which is what
+/// [`StorageReading::with_added`] does.
+#[derive(Clone, Debug)]
+pub struct StorageReading {
+    max_storage_mb: u64,
+    max_disk_mb: u64,
+    contribution: swarmllm_types::ContributionMode,
+    disk: Option<DiskSpace>,
+    /// Bytes under the models directory (`held_disk_bytes`).
+    pub held_bytes: u64,
+}
+
+impl StorageReading {
+    /// This node's storage as it stands now: live config, live contribution
+    /// level, the disk it is on, and what it holds.
+    pub fn now(state: &crate::daemon::SharedState) -> Self {
+        let live = state.cfg();
+        Self {
+            max_storage_mb: live.auto_manage.max_storage_mb,
+            max_disk_mb: live.resources.max_disk_mb,
+            contribution: state.contribution(),
+            disk: disk_space_for(&state.config.node.data_dir),
+            held_bytes: held_disk_bytes(&state.config.node.data_dir),
+        }
+    }
+
+    pub fn budget(&self) -> StorageBudget {
+        storage_budget(
+            self.max_storage_mb,
+            self.max_disk_mb,
+            &self.contribution,
+            self.disk,
+            self.held_bytes,
+        )
+    }
+
+    /// Disk pressure, 0.0-1.0: what is held over the budget. 0 when there is
+    /// no budget to measure against — nothing configured is not "full".
+    pub fn pressure(&self) -> f64 {
+        let budget = self.budget();
+        if budget.bytes == 0 {
+            return 0.0;
+        }
+        (self.held_bytes as f64 / budget.bytes as f64).min(1.0)
+    }
+
+    /// The same node with `bytes` more on its disk — held, and no longer free.
+    pub fn with_added(&self, bytes: u64) -> Self {
+        let mut next = self.clone();
+        next.held_bytes = next.held_bytes.saturating_add(bytes);
+        if let Some(disk) = next.disk.as_mut() {
+            disk.free_bytes = disk.free_bytes.saturating_sub(bytes);
+        }
+        next
+    }
 }
 
 /// Bytes and count of the shards `node_id` holds, priced by the manifest.
@@ -310,20 +411,13 @@ pub fn held_disk_bytes(data_dir: &std::path::Path) -> u64 {
 /// header as a shard.
 pub fn storage_budget_now(state: &crate::daemon::SharedState) -> (StorageBudget, u64, u32) {
     let (_manifest_bytes, held_shards) = held_shard_bytes(state, state.identity.node_id());
-    let held_bytes = held_disk_bytes(&state.config.node.data_dir);
-    let live = state.cfg();
-    let budget = storage_budget(
-        live.auto_manage.max_storage_mb,
-        live.resources.max_disk_mb,
-        &state.contribution(),
-        free_disk_bytes_for(&state.config.node.data_dir),
-        held_bytes,
-    );
-    (budget, held_bytes, held_shards)
+    let reading = StorageReading::now(state);
+    (reading.budget(), reading.held_bytes, held_shards)
 }
 
-/// Free bytes on the filesystem holding `path`, or `None` if it cannot be read.
-pub fn free_disk_bytes_for(path: &std::path::Path) -> Option<u64> {
+/// The filesystem holding `path` — free and total bytes — or `None` if it
+/// cannot be read.
+pub fn disk_space_for(path: &std::path::Path) -> Option<DiskSpace> {
     let mut disks = sysinfo::Disks::new_with_refreshed_list();
     disks.refresh(true);
     // Longest matching mount point wins, so a nested mount is preferred over `/`.
@@ -332,7 +426,10 @@ pub fn free_disk_bytes_for(path: &std::path::Path) -> Option<u64> {
         .iter()
         .filter(|d| path.starts_with(d.mount_point()))
         .max_by_key(|d| d.mount_point().as_os_str().len())
-        .map(|d| d.available_space())
+        .map(|d| DiskSpace {
+            free_bytes: d.available_space(),
+            total_bytes: d.total_space(),
+        })
 }
 
 #[cfg(test)]
@@ -389,6 +486,13 @@ mod tests {
         n.saturating_mul(1024).saturating_mul(1024)
     }
 
+    fn disk(free_mb: u64, total_mb: u64) -> Option<DiskSpace> {
+        Some(DiskSpace {
+            free_bytes: mib(free_mb),
+            total_bytes: mib(total_mb),
+        })
+    }
+
     /// The reported case (gotcha #448): `max_storage_mb = 50000`, contribution
     /// Minimal, 18 GB held, 158 GB free. The old rule quartered the explicit
     /// figure to 12.5 GB and refused every download; a number the user typed
@@ -400,7 +504,7 @@ mod tests {
             ContributionMode::Moderate,
             ContributionMode::Maximum,
         ] {
-            let b = storage_budget(50_000, 50_000, &level, Some(mib(158_000)), mib(18_000));
+            let b = storage_budget(50_000, 50_000, &level, disk(158_000, 500_000), mib(18_000));
             assert_eq!(b.bytes, mib(50_000), "{level:?}");
             assert_eq!(
                 b.limited_by,
@@ -457,37 +561,124 @@ mod tests {
         );
     }
 
-    /// A 50 GB ceiling configured on a filesystem with ~15 GB free. A ceiling
-    /// is not a promise the space exists; with the shard caps unlimited the
-    /// node filled the disk instead of pruning (reported 2026-07-30).
+    /// A 50 GB ceiling configured on a 20 GB filesystem with ~15 GB free. A
+    /// ceiling is not a promise the space exists; with the shard caps unlimited
+    /// the node filled the disk instead of pruning (reported 2026-07-30).
     #[test]
     fn budget_is_clamped_to_free_disk() {
-        let free = mib(15_000);
-        let b = storage_budget(50_000, 0, &ContributionMode::Moderate, Some(free), 0);
+        let b = storage_budget(
+            50_000,
+            0,
+            &ContributionMode::Moderate,
+            disk(15_000, 20_000),
+            0,
+        );
         assert!(b.bytes < mib(50_000));
-        assert_eq!(b.bytes, free / 100 * FREE_DISK_HEADROOM_PCT);
-        assert!(b.bytes < free, "must leave headroom, not fill the disk");
-        assert_eq!(b.limited_by, StorageLimit::FreeDisk { free_mb: 15_000 });
+        assert_eq!(
+            b.bytes,
+            mib(15_000) - mib(20_000) / 100 * FREE_DISK_RESERVE_PCT
+        );
+        assert!(
+            b.bytes < mib(15_000),
+            "must leave headroom, not fill the disk"
+        );
+        assert_eq!(
+            b.limited_by,
+            StorageLimit::FreeDisk {
+                free_mb: 15_000,
+                reserve_mb: 2_000
+            }
+        );
     }
 
     /// Free space already excludes what this node holds, so the clamp is on
-    /// held + 80% of free. Clamping the TOTAL to 80% of free and subtracting
-    /// held again under-counted the room by exactly what was held: 18 GB
-    /// held with 30 GB free used to leave 6 GB of room, not 24.
+    /// held + free beyond the reserve. Clamping the TOTAL and subtracting held
+    /// again under-counted the room by exactly what was held: 18 GB held with
+    /// 30 GB free used to leave 6 GB of room, not 24.
     #[test]
     fn the_free_disk_clamp_counts_what_is_already_held() {
         let held = mib(18_000);
-        let free = mib(30_000);
-        let b = storage_budget(200_000, 0, &ContributionMode::Moderate, Some(free), held);
-        assert_eq!(b.bytes, held + free / 100 * FREE_DISK_HEADROOM_PCT);
-        assert_eq!(b.remaining(held), free / 100 * FREE_DISK_HEADROOM_PCT);
+        let b = storage_budget(
+            200_000,
+            0,
+            &ContributionMode::Moderate,
+            disk(30_000, 60_000),
+            held,
+        );
+        assert_eq!(b.bytes, held + mib(30_000) - mib(6_000));
+        assert_eq!(b.remaining(held), mib(24_000));
+    }
+
+    /// **The defect the reserve replaced** (gotcha #795). A tester's 30 GB
+    /// container whose limit was the disk itself: download 550 MB parts for as
+    /// long as the budget offers room. "Held + 80% of free" kept offering room
+    /// while a part fit in 80% of what was left: 50 parts, 148 MB free, the
+    /// disk 99.5% full, into the owner's own fill safeguard. Now: 44 parts and
+    /// 88.8% — a tenth of the disk stays free however long the node downloads.
+    #[test]
+    fn downloading_until_the_budget_says_stop_leaves_a_tenth_of_the_disk_free() {
+        const PART: u64 = 550 * 1024 * 1024;
+        let total = mib(30_720);
+        // 3 GB of operating system and other files; everything else ours to take.
+        let mut reading = StorageReading {
+            max_storage_mb: 500_000,
+            max_disk_mb: 500_000,
+            contribution: ContributionMode::Maximum,
+            disk: Some(DiskSpace {
+                free_bytes: total - mib(3_072),
+                total_bytes: total,
+            }),
+            held_bytes: 0,
+        };
+        let mut parts = 0;
+        while reading.budget().remaining(reading.held_bytes) >= PART {
+            reading = reading.with_added(PART);
+            parts += 1;
+        }
+        let free = reading.disk.unwrap().free_bytes;
+        assert!(
+            free >= total / 10,
+            "{parts} parts left {} MB free on a {} MB disk — under the tenth it must keep",
+            free / mib(1),
+            total / mib(1)
+        );
+        assert!(
+            free < total / 10 + PART,
+            "and it fills up to the reserve, not short of it ({} MB free)",
+            free / mib(1)
+        );
+    }
+
+    /// A part this node downloads or deletes moves bytes between "held" and
+    /// "free", so a disk-limited budget must not move with it. If it did, the
+    /// pressure prune reads would shift under each part it acts on.
+    #[test]
+    fn a_disk_limited_budget_does_not_move_with_what_this_node_holds() {
+        let reading = StorageReading {
+            max_storage_mb: 500_000,
+            max_disk_mb: 500_000,
+            contribution: ContributionMode::Moderate,
+            disk: disk(12_000, 30_000),
+            held_bytes: mib(15_000),
+        };
+        let before = reading.budget();
+        assert!(matches!(before.limited_by, StorageLimit::FreeDisk { .. }));
+        let after = reading.with_added(mib(550));
+        assert_eq!(after.budget().bytes, before.bytes);
+        assert!(after.pressure() > reading.pressure());
     }
 
     /// Plenty of free space must leave the configured budget untouched — this
     /// clamp is a safety net, not a second policy.
     #[test]
     fn ample_free_disk_does_not_reduce_the_budget() {
-        let b = storage_budget(1024, 0, &ContributionMode::Moderate, Some(mib(500_000)), 0);
+        let b = storage_budget(
+            1024,
+            0,
+            &ContributionMode::Moderate,
+            disk(500_000, 1_000_000),
+            0,
+        );
         assert_eq!(b.bytes, mib(1024));
         assert_eq!(
             b.limited_by,

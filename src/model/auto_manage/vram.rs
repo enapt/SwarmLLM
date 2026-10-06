@@ -1242,11 +1242,12 @@ pub fn compute_vram_budget(shared: &crate::daemon::SharedState) -> Option<u64> {
 
 /// Percentage of *currently free* system RAM a configured budget may claim.
 ///
-/// Mirrors `FREE_DISK_HEADROOM_PCT`: a configured ceiling is a ceiling, not a
-/// promise the memory exists. Lower than the disk figure because the operating
-/// system and every other process on the box need headroom to keep running,
-/// and the failure mode when they do not get it is swapping — which degrades
-/// the whole machine rather than just this daemon.
+/// The memory twin of the storage budget's free-disk clamp
+/// (`auto_manage::FREE_DISK_RESERVE_PCT`): a configured ceiling is a ceiling,
+/// not a promise the memory exists. The operating system and every other
+/// process on the box need headroom to keep running, and the failure mode when
+/// they do not get it is swapping — which degrades the whole machine rather
+/// than just this daemon.
 pub const FREE_RAM_HEADROOM_PCT: u64 = 70;
 
 /// Effective system-RAM budget for CPU model loading, in MB.

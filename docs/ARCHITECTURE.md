@@ -1656,7 +1656,7 @@ score = model_popularity × rarity_bonus × configured_bonus × vram_fitness
   (both at startup and in `generate_and_register_local_manifest`)
 - **VRAM estimation**: `model_size × 1.15` (quantized weights + ~15% KV-cache overhead)
 - **nvidia-smi fallback**: If `gpu_info` is None, falls back to `nvidia-smi` for local VRAM
-- **Budget limits**: ONE storage budget (`auto_manage::storage_budget` — `max_storage_mb` as written, else 25/50/75% of `max_disk_mb` by contribution level, capped at `max_disk_mb` and at held + 80% of free disk) shared by the download pass, prune pressure, the settings bar, the pool page and the diagnostics report (gotcha #448); max_shards_per_cycle (2); skips in-progress acquisitions
+- **Budget limits**: ONE storage budget (`auto_manage::storage_budget` — `max_storage_mb` as written, else 25/50/75% of `max_disk_mb` by contribution level, capped at `max_disk_mb` and at held + what is free beyond 10% of the filesystem, which this node never takes — `FREE_DISK_RESERVE_PCT`, gotcha #795) shared by the download pass, prune pressure, the settings bar, the pool page and the diagnostics report (gotcha #448); max_shards_per_cycle (2); skips in-progress acquisitions
 - **mmproj support**: Vision encoder (mmproj.gguf) treated as download candidate with 5x priority bonus; full-file HF download (not byte-range); higher pruning floor (min 3 replicas), only pruned under extreme pressure (>0.95)
 - **Download priority**: HuggingFace CDN first (fast, doesn't burden peers). If no HF source available but peers hold the shard, falls back to P2P `ShardRequest` to a random holder. P2P is single-source per shard (future: multi-source parallel download)
 - **Upload bandwidth cap**: `max_bandwidth_mbps` config enforced on shard serving via proportional delay after chunk reads. Tensor forwards exempt (latency-critical). Default 0 = unlimited
@@ -1681,7 +1681,7 @@ from the regional request-rate EMA (`region_demand`, requests per 10 min): <0.1 
 ```
 + redundancy_ratio (holder_count / effective_target)
 + 1.0 if not loaded in VRAM (cold shard)
-+ 0.5 × resource_pressure
++ 0.5 × disk_pressure
 + 1.0 if contribution_auto && holder_count ≥ 2 × target  (R121, severe saturation)
 - 0.5 if first/last shard (pipeline completeness)
 - 0.3 if rarest shard for the model
@@ -1709,13 +1709,25 @@ min_replicas)` in `model/auto_manage/prune.rs`.
 - Shard is in configured `--shards` range
 - `holder_count <= adjusted_target_replicas`
 - Would eliminate last holder in this node's region
+
+The standing exemptions, the replica count and the region rule are ONE method,
+`AutoShardManager::would_shed_copy` — and the download pass asks it too:
+`select_within_budget` fetches a part only if prune would KEEP it once it had
+landed, judged at the disk pressure that part (with the others chosen that
+cycle) leaves behind. The download pass's own filter is the RAW target; prune
+sheds against the pressure-adjusted one, so without this a part between the
+two was fetched and deleted every cycle (gotcha #795). The guards below only
+postpone a prune, so they stay in the prune loop:
 - Average remaining holder load > `max_holder_load_for_prune`
 - Model actively loaded and used in last 5 minutes
 - No re-acquisition path available (no HF source or reachable peers)
 - Cooldown not expired (5 min per model)
 
-**Resource Pressure** — `max(disk_pressure, vram_pressure)`:
-- VRAM pressure uses live `nvidia-smi` query (every 5 min tick) for actual GPU memory usage, with fallback to internal loaded-model tracking when nvidia-smi is unavailable
+**Resource Pressure** — two figures for two kinds of action:
+- **Disk pressure** (held ÷ storage budget) decides every file: which parts prune deletes, which the download pass fetches, the urgent tier, the score. Deleting a part frees no graphics memory, and a card fills whenever a model is resident, so judging deletion by it shed parts the download pass fetched straight back (gotcha #795).
+- **`max(disk_pressure, vram_pressure)`** gates only phase 0's VRAM soft-unload (narrowing what is loaded, files kept). VRAM pressure uses live `nvidia-smi` query (every 5 min tick) for actual GPU memory usage, with fallback to internal loaded-model tracking when nvidia-smi is unavailable
+
+The replica-target tiers, by disk pressure:
 - < 0.5: relaxed (+1 to target, keep extras)
 - 0.5–0.8: normal
 - 0.8–0.95: eager (-1 from target)

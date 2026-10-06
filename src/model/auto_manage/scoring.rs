@@ -29,6 +29,9 @@ pub(super) struct BudgetReport {
     pub budget: super::StorageBudget,
     pub max_shards: u32,
     pub max_shards_reached: bool,
+    /// What `budget` was computed from, so selection can judge each part at
+    /// the pressure it would leave behind (`select_within_budget`).
+    pub reading: super::StorageReading,
 }
 
 impl BudgetReport {
@@ -59,21 +62,15 @@ impl AutoShardManager {
         // manifest while prune measures the directory.
         let (_manifest_bytes, held_shards) =
             super::held_shard_bytes(&self.shared_state, local_node_id);
-        let held_bytes = super::held_disk_bytes(&self.shared_state.config.node.data_dir);
-        let budget = super::storage_budget(
-            config.max_storage_mb,
-            self.shared_state.cfg().resources.max_disk_mb,
-            &self.shared_state.contribution(),
-            super::free_disk_bytes_for(&self.shared_state.config.node.data_dir),
-            held_bytes,
-        );
+        let reading = super::StorageReading::now(&self.shared_state);
         let max_shards_reached = config.max_shards > 0 && held_shards >= config.max_shards;
         BudgetReport {
-            held_bytes,
+            held_bytes: reading.held_bytes,
             held_shards,
-            budget,
+            budget: reading.budget(),
             max_shards: config.max_shards,
             max_shards_reached,
+            reading,
         }
     }
 
@@ -379,8 +376,10 @@ impl AutoShardManager {
                     None => false,
                 };
 
-                // Compute target replicas using the unified geo-aware formula.
-                // Same calculation used by both download and prune paths.
+                // Compute target replicas using the unified geo-aware formula —
+                // the RAW target, a first filter only. Prune sheds against the
+                // pressure-adjusted one, so whether prune would keep a part is
+                // asked again in `select_within_budget` (gotcha #795).
                 let target_replicas =
                     self.geo_target_replicas(&manifest.id, min_replicas as u32, pool_size) as usize;
 
@@ -736,13 +735,27 @@ impl AutoShardManager {
         candidates
     }
 
-    /// Select candidates that fit within the remaining budget.
+    /// Select candidates that fit within the remaining budget — and that the
+    /// prune pass would KEEP once they had landed.
+    ///
+    /// Every part the download pass fetches passes through here, so this is
+    /// where it asks prune's own question (`would_shed_once_fetched`), at the
+    /// disk pressure the part would leave behind together with the others
+    /// chosen this cycle. `gather_candidates` filters by the raw replica
+    /// target, which prune does not use above 0.8 pressure; without this
+    /// check a node fetched parts prune deleted again, every cycle
+    /// (gotcha #795).
     pub(super) fn select_within_budget(
         &self,
         candidates: Vec<ShardCandidate>,
-        mut budget_bytes: u64,
+        report: &BudgetReport,
         max_shards: u32,
     ) -> Vec<ShardCandidate> {
+        let mut budget_bytes = report.remaining_bytes();
+        // Bytes chosen so far this cycle, so each further part is judged at
+        // the pressure all of them leave behind.
+        let mut chosen_bytes = 0u64;
+        let shard_pins = super::manager::read_shard_pins(&self.shared_state);
         let mut selected = Vec::new();
         let max = if max_shards > 0 {
             max_shards as usize
@@ -844,7 +857,22 @@ impl AutoShardManager {
                         continue;
                     }
                     if candidate.shard_size_bytes <= budget_bytes {
+                        let pressure_after = report
+                            .reading
+                            .with_added(chosen_bytes.saturating_add(candidate.shard_size_bytes))
+                            .pressure();
+                        if self.would_shed_once_fetched(candidate, pressure_after, &shard_pins) {
+                            tracing::debug!(
+                                model = %candidate.model_id,
+                                shard = candidate.shard_index,
+                                holders = candidate.holder_count,
+                                pressure_after = %format_args!("{pressure_after:.2}"),
+                                "Not fetching a part prune would delete again once it landed"
+                            );
+                            continue;
+                        }
                         budget_bytes -= candidate.shard_size_bytes;
+                        chosen_bytes = chosen_bytes.saturating_add(candidate.shard_size_bytes);
                         selected.push(candidate.clone());
                         any_taken = true;
                         break; // move to next model
@@ -1122,5 +1150,187 @@ mod contiguity {
         let contiguous_common = bonus(&held, 1) * 1.0; // gap fill, plentiful
         let scattered_rare = 1.0 * 10.0; // no contiguity, rarest possible
         assert!(scattered_rare > contiguous_common);
+    }
+}
+
+/// The download pass fetches only what the prune pass would keep (gotcha #795).
+#[cfg(test)]
+mod fetch_what_prune_keeps {
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+    use std::sync::Arc;
+
+    use super::super::test_support::{
+        make_test_manager_with_config, register_manifest_with_sized_shards, write_sparse_shards,
+    };
+    use super::super::{DiskSpace, StorageReading};
+    use super::{AutoShardManager, BudgetReport};
+    use crate::config::Config;
+    use crate::daemon::SharedState;
+    use crate::types::{ContributionMode, ModelId, NodeId, ShardId};
+
+    const MIB: u64 = 1024 * 1024;
+    const PART: u64 = 500 * MIB;
+
+    /// A connected peer 10 ms away holding shard 1 of `mid`. Close, so the
+    /// region guard's no-region fallback (two holders under 200 ms) lets prune
+    /// shed this node's copy, as it did on the tester's node.
+    fn close_peer_holding_shard_1(state: &Arc<SharedState>, byte: u8, mid: &ModelId) {
+        let peer = NodeId([byte; 32]);
+        state.peer_registry.insert(
+            peer.clone(),
+            crate::types::PeerInfo {
+                node_id: peer.clone(),
+                addresses: vec![],
+                capability: None,
+                last_seen: chrono::Utc::now(),
+                latency_ms: Some(10),
+                trust_score: 0.8,
+                peer_id_bytes: None,
+                ack_srtt_ms: None,
+                active_request_count: 0,
+                first_seen: 0,
+                verified_transaction_count: 0,
+                is_lan_peer: false,
+                goodput_bytes_per_sec: None,
+                goodput_samples: 0,
+            },
+        );
+        state.connected_node_ids.insert(peer.clone());
+        state.model_registry.record_shard_holder(
+            ShardId {
+                model_id: mid.clone(),
+                index: 1,
+            },
+            peer,
+        );
+    }
+
+    /// A two-part model: this node holds part 0, two close peers hold part 1,
+    /// and enough demand that the swarm wants THREE copies of each part.
+    fn busy_model(state: &Arc<SharedState>, manager: &AutoShardManager, name: &str) -> ModelId {
+        let mid = register_manifest_with_sized_shards(state, name, 16, &[(0, 8), (8, 16)], PART);
+        state.model_registry.record_shard_holder(
+            ShardId {
+                model_id: mid.clone(),
+                index: 0,
+            },
+            state.identity.node_id().clone(),
+        );
+        // On disk too, or the download pass offers part 0 as a gap to refill.
+        write_sparse_shards(state, &mid, [0], PART);
+        close_peer_holding_shard_1(state, 7, &mid);
+        close_peer_holding_shard_1(state, 8, &mid);
+        state
+            .models
+            .model_request_counts
+            .insert(mid.clone(), AtomicU64::new(3));
+        assert_eq!(
+            manager.geo_target_replicas(&mid, 2, crate::pool::scope::effective_pool_size(state)),
+            3,
+            "fixture: three nodes and some demand put the target at three copies"
+        );
+        mid
+    }
+
+    fn manager_with(config: Config) -> (Arc<SharedState>, AutoShardManager) {
+        let (state, manager) = make_test_manager_with_config(config);
+        state.models.auto_manage_default_model_cap.store(0, Relaxed);
+        (state, manager)
+    }
+
+    /// A 10,000 MB budget holding `held_mb`, on a disk with room to spare.
+    fn report_holding(held_mb: u64) -> BudgetReport {
+        let reading = StorageReading {
+            max_storage_mb: 10_000,
+            max_disk_mb: 50_000,
+            contribution: ContributionMode::Minimal,
+            disk: Some(DiskSpace {
+                free_bytes: 400_000 * MIB,
+                total_bytes: 1_000_000 * MIB,
+            }),
+            held_bytes: held_mb * MIB,
+        };
+        BudgetReport {
+            held_bytes: reading.held_bytes,
+            held_shards: 1,
+            budget: reading.budget(),
+            max_shards: 0,
+            max_shards_reached: false,
+            reading,
+        }
+    }
+
+    fn fetched(
+        manager: &AutoShardManager,
+        state: &Arc<SharedState>,
+        held_mb: u64,
+    ) -> Vec<(ModelId, u32)> {
+        let local = state.identity.node_id().clone();
+        manager
+            .select_within_budget(
+                manager.gather_candidates(&local, 0),
+                &report_holding(held_mb),
+                0,
+            )
+            .into_iter()
+            .map(|c| (c.model_id, c.shard_index))
+            .collect()
+    }
+
+    /// **The loop** (gotcha #795). A third copy is wanted by the RAW target, so
+    /// the download pass offered it at any pressure. But 8,000 MB held plus
+    /// this 500 MB part is 85% of the budget, where prune keeps two copies —
+    /// it would delete this one five minutes after it landed, and the next
+    /// cycle would fetch it again. A tester's node did that all night.
+    #[test]
+    fn a_part_prune_would_delete_again_is_not_fetched() {
+        let (state, manager) = manager_with(Config::default());
+        let mid = busy_model(&state, &manager, "busy-model");
+
+        assert_eq!(
+            fetched(&manager, &state, 2_000),
+            vec![(mid.clone(), 1)],
+            "control: with room to spare (25% after it lands) the third copy is fetched"
+        );
+        assert!(
+            fetched(&manager, &state, 8_000).is_empty(),
+            "at 85% after it lands, prune keeps two copies: a third is not fetched"
+        );
+    }
+
+    /// The exemptions prune honours are part of the answer: a part in the
+    /// configured `--shards` range is never pruned, so the download pass must
+    /// fetch it whatever the pressure — refusing it would leave the configured
+    /// split without its own part.
+    #[test]
+    fn a_part_prune_never_deletes_is_fetched_at_any_pressure() {
+        let mut config = Config::default();
+        config.inference.shard_range = Some((1, 1));
+        let (state, manager) = manager_with(config);
+        let mid = busy_model(&state, &manager, "configured-model");
+        assert_eq!(fetched(&manager, &state, 8_000), vec![(mid, 1)]);
+    }
+
+    /// Parts chosen in one cycle are judged at the pressure ALL of them leave:
+    /// at 7,000 MB held, the first part lands at 75% (prune keeps three
+    /// copies) and the second at 80% (prune keeps two), so only one is taken.
+    /// Judged one at a time, both looked like 75%.
+    #[test]
+    fn parts_chosen_together_are_judged_together() {
+        let mut config = Config::default();
+        // Two parts per cycle with fewer than five peers.
+        config.node.contribution = ContributionMode::Maximum;
+        let (state, manager) = manager_with(config);
+        let a = busy_model(&state, &manager, "model-a");
+        let b = busy_model(&state, &manager, "model-b");
+
+        assert_eq!(
+            fetched(&manager, &state, 2_000).len(),
+            2,
+            "control: with room, both third copies are fetched in one cycle"
+        );
+        let taken = fetched(&manager, &state, 7_000);
+        assert_eq!(taken.len(), 1, "{taken:?}");
+        assert!(taken[0] == (a, 1) || taken[0] == (b, 1));
     }
 }
