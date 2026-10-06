@@ -22,6 +22,7 @@ mod credits;
 mod events;
 pub(crate) mod forward_streams;
 mod hf;
+pub(crate) mod lifetime;
 mod metrics;
 mod models;
 mod peer_outliers;
@@ -1203,6 +1204,7 @@ impl SharedState {
                 segment_serve_micros: AtomicU64::new(0),
                 segment_bytes_out: AtomicU64::new(0),
                 tokens_served: AtomicU64::new(0),
+                lifetime_served: lifetime::LifetimeLedger::load(&db),
                 channel_metrics: ChannelMetricsSet::new(),
                 last_dispatch_at_ms: std::sync::atomic::AtomicI64::new(0),
                 last_dispatch_kind: parking_lot::Mutex::new("none"),

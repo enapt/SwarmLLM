@@ -557,6 +557,10 @@ impl HealthMonitor {
                     // sampled whenever someone opened the dashboard would
                     // divide by whatever interval that happened to be.
                     self.shared_state.metrics.bandwidth.refresh();
+                    // What this node has served, kept across restarts (#226):
+                    // written only when it changed, so an idle node writes
+                    // nothing, and a crash loses at most one tick of it.
+                    self.shared_state.persist_served_lifetime();
 
                     // Peer speed estimates go stale the same way, with an extra
                     // twist: the estimate is only refreshed when we route to a

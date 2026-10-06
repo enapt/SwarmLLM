@@ -910,9 +910,22 @@
     // What this node has contributed. Distinct from everything below, which is
     // about requests this node made.
     var served = data.served || {};
+    // The same work since this computer FIRST started (#226). `served` restarts
+    // with the daemon — about daily, with auto-update — so on its own it told
+    // an owner whose node had served for weeks that it had never served at all.
+    var life = data.served_lifetime || {};
+    var lifeLine = '';
+    if (life.segments && life.since) {
+      lifeLine = I18n.t('perf.served_lifetime', {
+        date: new Date(life.since).toLocaleDateString(),
+        tokens: (life.tokens || 0).toLocaleString(),
+        requests: (life.requests || 0).toLocaleString(),
+      });
+    }
     html += '<h3 class="text-sm mb-1">' + I18n.t('perf.served_title') + '</h3>';
     if (!served.segments) {
-      html += '<div class="text-muted text-sm mb-3">' + I18n.t('perf.served_none') + '</div>';
+      html += '<div class="text-muted text-sm ' + (lifeLine ? 'mb-1' : 'mb-3') + '">'
+        + I18n.t(lifeLine ? 'perf.served_none_this_run' : 'perf.served_none') + '</div>';
     } else {
       // Lead with what a person actually wants to know — how much work, how
       // fast — and keep the engine-room figures below it, labelled. The old
@@ -951,6 +964,9 @@
         layers: served.layers,
         per_layer: served.ms_per_layer ? served.ms_per_layer.toFixed(1) : '—',
       }) + '</div>';
+    }
+    if (lifeLine) {
+      html += '<div class="text-muted text-sm mb-3">' + U.escapeHtml(lifeLine) + '</div>';
     }
 
     // Peers, slowest first — the reason to open this panel is to find the drag.

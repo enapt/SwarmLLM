@@ -306,7 +306,24 @@ pub async fn performance(State(state): State<AppState>) -> impl axum::response::
                 None
             },
         },
+        // The same work since this node FIRST started, kept across restarts
+        // (#226) — `served` above restarts with the daemon, about daily.
+        "served_lifetime": served_lifetime_json(&ss.served_lifetime()),
     }))
+}
+
+/// The lifetime serving record as the performance panel reads it.
+fn served_lifetime_json(
+    record: &crate::daemon::state::lifetime::LifetimeServed,
+) -> serde_json::Value {
+    let t = &record.totals;
+    serde_json::json!({
+        "since": record.since.to_rfc3339(),
+        "requests": t.requests,
+        "segments": t.segments,
+        "tokens": t.tokens,
+        "compute_secs": t.serve_micros as f64 / 1_000_000.0,
+    })
 }
 
 /// Query for [`diagnostics`]. `full=1` opts in to the unredacted report.
@@ -761,6 +778,18 @@ pub async fn diagnostics(
                 (micros as f64 / 1000.0) / layers.max(1) as f64
             );
         }
+        // Everything above restarts with the daemon (about daily, with
+        // auto-update); this does not (#226).
+        let life = ss.served_lifetime();
+        let _ = writeln!(
+            out,
+            "  since {}: {} requests, {} tokens, {} segments, {:.1} min of compute (kept across restarts)",
+            life.since.format("%Y-%m-%d"),
+            life.totals.requests,
+            life.totals.tokens,
+            life.totals.segments,
+            life.totals.serve_micros as f64 / 60_000_000.0,
+        );
     }
 
     // Per-peer serving performance. `segment_latency` carries EWMA latency per

@@ -732,11 +732,15 @@ impl Daemon {
             shutdown_rx.clone(),
         );
 
-        supervisor::run(subsystems, shutdown_rx, shared_state).await;
+        supervisor::run(subsystems, shutdown_rx, shared_state.clone()).await;
 
         // Drain the background JoinSet so panics surface and tasks get a
         // brief window to run their own cleanup paths before exit.
         background::drain(background_tasks).await;
+
+        // The last tick's worth of serving, which the monitor's next write would
+        // have carried (#226). Every task that serves has stopped by now.
+        shared_state.persist_served_lifetime();
 
         // redb writes are durable on commit — no flush needed
 

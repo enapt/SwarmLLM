@@ -40,7 +40,7 @@ after v0.3.224 (#160, #215 and #216 closed; #217 and #218 opened from the swarm 
 v0.3.226 (released 2026-10-05), #220 opened from the .225 gate's unrecorded driver resets; #129's fit verdict (idle-model
 reclaim) shipped in v0.3.227 (released 2026-10-05 23:45 UTC); #222 (a node near its storage limit deleting and
 re-fetching parts) and #223 closed in v0.3.228 (released 2026-10-06 09:42 UTC), #224 opened from its gate;
-#225, #226 and #227 opened from a tester's two reports the same day.
+#225, #226 and #227 opened from a tester's two reports the same day; #226 closed on main that night.
 `docs/plans/` holds the multi-step designs; the entries point at them.
 
 **P0 — wrong answers, silently**
@@ -87,8 +87,6 @@ re-fetching parts) and #223 closed in v0.3.228 (released 2026-10-06 09:42 UTC), 
 14. **#171** — the prompt pass through a split runs one stage at a time.
 15. **#225** — a graphics card advertises about half the speed it decodes at (stale since the
     CUDA-graph work; re-measure, then change the constant).
-16. **#226** — every contribution counter restarts with the daemon, so an operator cannot tell
-    whether their node has ever served anyone.
 
 Everything else is ranked in its own entry. **P3** is narrow or cosmetic, **P4** is process,
 maintenance or an idea with no user waiting on it.
@@ -1088,20 +1086,6 @@ chunk, without breaking the OpenAI/Anthropic wire shapes.
 
 ### Dashboard and first-hour experience
 
-#### #226 — A node cannot tell what it has contributed: every counter restarts with the daemon
-`P2` · ux · **OPEN** — 2026-10-06 · history: a tester's report, 2026-10-06
-
-`-- served for others --`, request counts, `uptime_seconds` and the traffic totals all live in
-memory, so each restart zeroes them (his node: `99.3 ms per layer served` → `(no segments served
-yet)`, `8.37 GB sent` → `37.1 MB`). Auto-update restarts a node about daily, so "has my computer
-ever served anyone?" — the question an operator deciding whether to keep running it asks — has
-no answer, and a node that served badly loses the evidence at the next update. Wanted: lifetime
-totals (segments and layers served for peers, tokens, bytes relayed, requests answered) persisted
-in redb, written on a timer and at shutdown, shown beside this session's figures in diagnostics
-and the dashboard. Research before building: how long-running P2P clients keep all-time totals
-across restarts (qBittorrent's `alltime_ul`/`alltime_dl`). ⚠ Credits are dormant
-(`docs/CREDITS_DESIGN.md`) — a contribution total must not become, or be read as, a credit.
-
 #### #62 — The Network map is blank on a node that has not served across regions
 `P3` · ux · **PARTIAL** — 2026-09-13 · history: archive row #62 and § "The Network map is blank on a node that has not served across regions"
 
@@ -1474,6 +1458,17 @@ archive under the named heading. Reopen one only with the evidence its line name
 Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 19-28 were
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
+
+**Closed 2026-10-06 on main, not yet released** (#226)
+- #226 — every contribution counter restarted with the daemon, so an operator could not tell
+  whether their node had ever served anyone (a tester's node: `99.3 ms per layer served` →
+  `(no segments served yet)` after an update). `daemon::state::lifetime`: the serving totals as
+  this run found them in redb (`lifetime/served`) plus this run's counters, written as one
+  absolute figure on the health monitor's 30 s tick when changed and at shutdown — a crash loses
+  at most a tick, nothing counts twice. Shown in `swarmllm diagnostics` (`since <date>: …`), in
+  `/api/admin/performance` (`served_lifetime`) and on the dashboard's "Served for the swarm" panel
+  (two keys, 21 locales). A description of work, not a balance — credits stay dormant. Tests
+  `lifetime::tests::*`. Traffic totals (bytes sent/received) are still per run.
 
 **Closed 2026-10-06, released in v0.3.228 (2026-10-06)** (#222, #223) (`docs/invariants/memory.md` § "`AutoShardManager::would_shed_copy` is the ONE answer")
 - #222 — a node near its storage limit deleted parts and fetched the same parts back, for ever.

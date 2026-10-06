@@ -114,6 +114,11 @@ pub struct MetricsProviders {
     /// It was already in hand at the one place serving is recorded, and thrown
     /// away.
     pub tokens_served: AtomicU64,
+    /// The serving totals as this run found them on disk, so the counters
+    /// above can be reported since the node FIRST started, not since its last
+    /// restart (FUTURE_WORK #226). Read through `SharedState::served_lifetime`,
+    /// written through `persist_served_lifetime` — `daemon::state::lifetime`.
+    pub lifetime_served: super::lifetime::LifetimeLedger,
     pub channel_metrics: ChannelMetricsSet,
     /// Message-dispatcher liveness: when it last took a message off
     /// `network_out`, in epoch millis, and which variant that was.
