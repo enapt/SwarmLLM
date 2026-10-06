@@ -1382,6 +1382,23 @@ new crates, everything else already being in the tree.
 - **`pycompat` is required, not optional.** Chat templates call Python string
   methods — `split`, `lstrip`, `startswith`. minijinja implements no Python
   methods natively; the shim is what makes real templates work.
+- **The Jinja LANGUAGE is part of the contract too, not only the settings
+  (2026-10-06, gotcha #798).** The crate is built with `default-features =
+  false`, and its feature list had left out `macros`: Qwen 3.5's template opens
+  with `{% macro render_content %}`, so it failed to PARSE ("unknown statement
+  macro"), every request fell back to ChatML, and the empty `<think></think>`
+  its generation prompt ends with was lost — Qwen3.5-4B then reasoned at length
+  where its publisher's template asks it to answer. Nothing said why: the parse
+  error was discarded (`add_template(..).ok()?`) and `test-split` had its own
+  silent ChatML fallback, so the check meant to catch it agreed with llama.cpp
+  on the fallback's text. Now `macros`, `adjacent_loop_items` and (for the
+  `fuel` + `macros` combination to compile) `multi_template` are on — jinja2 has
+  all of them — a parse failure is logged beside a render failure, `test-split`
+  says when it falls back, and `the_qwen35_template_renders_exactly_as_jinja2_does`
+  pins four conversations to jinja2's output (red without `macros`). **A new
+  feature list must keep every Jinja statement and loop attribute jinja2
+  has**; check a new family's template with a jinja2 render before trusting a
+  fallback-free log.
 - **Undefined must be falsy, not an error.** Templates guard optional fields
   (`message.reasoning_content`) and probe for callables with `is defined`.
 - **`raise_exception` must fail the render.** It is how Gemma and Mistral

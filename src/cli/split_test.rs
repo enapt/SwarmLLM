@@ -48,7 +48,13 @@ pub async fn test_split_inference(
         swarmllm::inference::chat_template::apply_chat_template(
             template, &messages, bos, eos, true, None,
         )
-        .unwrap_or_else(|| format!("<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"))
+        .unwrap_or_else(|| {
+            // Said out loud: a diagnostic that quietly substitutes ChatML for the
+            // model's own template hid exactly that failure from the check meant
+            // to catch it (Qwen 3.5, gotcha #798).
+            println!("Chat template FAILED to apply — using a ChatML fallback, not the model's own format");
+            format!("<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n")
+        })
     } else {
         format!("<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n")
     };

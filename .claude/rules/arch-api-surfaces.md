@@ -49,7 +49,7 @@ measured at, and what a change must keep — lives in `docs/invariants/`.
 
 ## Chat templates render on minijinja, and its settings are part of the contract
 
-`minijinja` + `minijinja-contrib` `pycompat`, never a hand-rolled subset. Keep `trim_blocks`, `lstrip_blocks`, `keep_trailing_newline` and the `pycompat` callback; `raise_exception` fails the render, a bad `strftime_now` does not. A template is untrusted input AND a program: output, instructions and source are bounded.
+`minijinja` + `minijinja-contrib` `pycompat`, never a hand-rolled subset. Keep `trim_blocks`, `lstrip_blocks`, `keep_trailing_newline`, the `pycompat` callback and every Jinja feature jinja2 has (`macros` — Qwen 3.5's template did not PARSE without it, #798); `raise_exception` fails the render, a bad `strftime_now` does not. A template is untrusted input AND a program: output, instructions and source are bounded.
 
 → `docs/invariants/api-surfaces.md` § "Chat templates render on minijinja, not on a subset of our own"
 

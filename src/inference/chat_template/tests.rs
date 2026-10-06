@@ -2465,3 +2465,56 @@ fn ensure_ascii_escapes_an_astral_character_as_a_surrogate_pair() {
     );
     assert_eq!(rendered.as_deref(), Some(r#"["\ud83d\ude42"]"#));
 }
+
+/// Qwen 3.5's template, as its GGUFs ship it (`ggml-org/Qwen3.5-0.8B-GGUF`),
+/// renders exactly as jinja2 renders it — HuggingFace's environment:
+/// `ImmutableSandboxedEnvironment(trim_blocks, lstrip_blocks)` with loop
+/// controls. It opens with `{% macro render_content %}`: before the `macros`
+/// feature it failed to PARSE, every request fell back to ChatML, and the empty
+/// `<think></think>` its generation prompt ends with was lost — Qwen3.5-4B then
+/// reasoned at length where the template asks it to answer (gotcha #798).
+#[test]
+fn the_qwen35_template_renders_exactly_as_jinja2_does() {
+    let tmpl = include_str!("fixtures/qwen35_gguf_shipped.jinja");
+    let render = |msgs: &[ChatMessage]| {
+        apply_chat_template(tmpl, msgs, "", "<|im_end|>", true, None).expect("renders")
+    };
+    let msg = |role: Role, c: &str| ChatMessage {
+        role,
+        content: c.into(),
+        images: vec![],
+    };
+
+    assert_eq!(
+        render(&[msg(Role::User, "Hi there")]),
+        "<|im_start|>user\nHi there<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+    );
+    assert_eq!(
+        render(&[
+            msg(Role::System, "You are terse."),
+            msg(Role::User, "Hi there")
+        ]),
+        "<|im_start|>system\nYou are terse.<|im_end|>\n<|im_start|>user\nHi there<|im_end|>\n\
+         <|im_start|>assistant\n<think>\n\n</think>\n\n"
+    );
+    let expected_multi =
+        "<|im_start|>user\nWhat is 2+2?<|im_end|>\n<|im_start|>assistant\n4<|im_end|>\n\
+         <|im_start|>user\nAnd 3+3?<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n";
+    assert_eq!(
+        render(&[
+            msg(Role::User, "What is 2+2?"),
+            msg(Role::Assistant, "4"),
+            msg(Role::User, "And 3+3?")
+        ]),
+        expected_multi
+    );
+    // An earlier turn's reasoning is not carried into the next prompt.
+    assert_eq!(
+        render(&[
+            msg(Role::User, "What is 2+2?"),
+            msg(Role::Assistant, "<think>\nadding\n</think>\n\n4"),
+            msg(Role::User, "And 3+3?"),
+        ]),
+        expected_multi
+    );
+}

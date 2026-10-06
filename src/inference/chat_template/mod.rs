@@ -110,7 +110,14 @@ pub fn apply_chat_template(
     }
     env.set_fuel(Some(TEMPLATE_FUEL));
 
-    env.add_template("chat", template).ok()?;
+    // A template that does not PARSE is declined like one that does not render
+    // — and says why, at the same level: a missing engine feature (`macros`,
+    // gotcha #798) failed here in silence while the caller's "chat template
+    // failed" warning named no cause.
+    if let Err(e) = env.add_template("chat", template) {
+        tracing::debug!(error = %e, "chat template did not parse");
+        return None;
+    }
     let tmpl = env.get_template("chat").ok()?;
     let rendered = tmpl
         .render(minijinja::context! {
