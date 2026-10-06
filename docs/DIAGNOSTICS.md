@@ -1304,6 +1304,14 @@ gotcha #795: the download pass fetched below the raw replica target while prune
 shed above the pressure-adjusted one. On the node itself,
 `DIAG: evaluate_and_prune starting` shows the pressure it shed at.
 
+Which pass fetched it back, on the node itself: `AutoShardManager: downloading
+shards` before the fetch is the download pass; `Fetching from the model's origin
+— no peer copy could be verified` is the pending-fetch pass (a part once refused
+from a peer). On v0.3.228 the second kept looping after #795's fix (gotcha #797,
+fixed after .228; a restart empties the in-memory set). `Not fetching a part
+prune would delete again once it landed — dropped from the pending fetches` is
+that fix firing.
+
 ## API Subsystem Diagnostics
 
 ### Server (server.rs)

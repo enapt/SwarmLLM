@@ -617,6 +617,27 @@ that part — and the others chosen the same cycle — would leave behind
 Guards: `fetch_what_prune_keeps::*` in `auto_manage/scoring.rs` (each fails
 with its half of the fix switched off, checked 2026-10-06).
 
+**The download pass was not the only way in (found the same day, on v0.3.228,
+gotcha #797).** `complete_pending_shard_fetches` finishes fetches a peer
+transfer could not prove intact, from `shard_p2p_failed`, and asked nobody.
+That set was drained only by a successful PEER transfer, so a part fetched
+from the origin stayed in it for the node's life, and "the file is on disk"
+was the only thing stopping a re-fetch. On a tester's RTX 4050 node
+(`bf7b3263`, disk pressure 0.56, nothing to do with the storage limit), prune
+deleted Qwen3-30B part 17 as surplus (`holders=3 target=2`) and the pass
+fetched it back from HuggingFace 15 s later (`Fetching from the model's
+origin — no peer copy could be verified`; the auto-manage cycle itself logged
+`0 download(s) started`) — every ~5-6 min from 11:36 UTC, ~4 GB an hour. Two
+changes: `SharedState::announce_shard_acquired`, where every origin download
+ends, removes the part from the set (its own doc already said "cleared when
+a download for the shard successfully completes"); and the pending pass asks
+`would_shed_once_fetched` and DROPS an entry prune would delete again —
+dropped, because a stale entry also keeps the evaluation cooldown bypassed
+(the tester's log shows prune evaluating every ~15 s). Guards:
+`pending_fetches_follow_prune::*` in `auto_manage/manager.rs`, each red with
+its half switched off. **A change must keep**: any new automatic fetch path
+asks `would_shed_copy` too — this rule is about FETCHING, not about one pass.
+
 **Why**: the two passes answered "how many copies are enough?" separately.
 Prune shed above `pressure_adjusted_target` — one copy fewer above 0.8 disk
 pressure, two above 0.95 — while `gather_candidates` fetched below the RAW

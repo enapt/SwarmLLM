@@ -1477,6 +1477,11 @@ grep `^| N |`).
 
 **Closed 2026-10-06, released in v0.3.228 (2026-10-06)** (#222, #223) (`docs/invariants/memory.md` § "`AutoShardManager::would_shed_copy` is the ONE answer")
 - #222 — a node near its storage limit deleted parts and fetched the same parts back, for ever.
+  **A second way in, found on v0.3.228 the same day and fixed on main (not yet released):** a part
+  once refused from a peer stayed in `shard_p2p_failed` after it was fetched from HuggingFace, and
+  the pending-fetch pass re-fetched it whenever prune deleted it as surplus — a tester's node
+  (`bf7b3263`), ~4 GB an hour at disk pressure 0.56 (gotcha #797; the set lives in memory, so a
+  restart stops it until the release).
   Found in the post-v0.3.227 swarm check from peers' announcements in our own log: a tester's 30 GB
   node (`e561df35`) sawed 62 → 59 → 62 parts every ~25-30 min from 02:00 UTC (one Qwen3-30B-A3B
   part dropped per 5-min prune cooldown, the same indices back once their 30-min protection

@@ -615,13 +615,57 @@ impl AutoShardManager {
             return;
         }
         let store = self.shared_state.shard_store();
+        let shard_pins = read_shard_pins(&self.shared_state);
         for sid in pending {
-            // Already on disk — nothing to fetch. This is also what stops the
-            // set re-triggering forever: it is cleared only by a SUCCESSFUL
-            // P2P transfer, so a shard fetched from the origin instead stays
-            // in it, and presence on disk is the terminating condition.
+            // Already on disk — nothing to fetch. A completed download leaves
+            // `shard_p2p_failed` from either source (the peer-transfer success
+            // path, and `announce_shard_acquired` for the origin); this check
+            // covers a part that reached the disk some other way. It used to be
+            // the ONLY stop for an origin-fetched part, so a part prune deleted
+            // was fetched again (gotcha #797).
             if store.shard_path(&sid.model_id, sid.index).exists() {
                 // Back on disk — the repair is done.
+                self.shared_state.clear_shard_repair(&sid);
+                continue;
+            }
+            let Some(manifest) = self.shared_state.model_registry.get_manifest(&sid.model_id)
+            else {
+                continue;
+            };
+            let Some(info) = manifest.shards.iter().find(|s| s.index == sid.index) else {
+                continue;
+            };
+            let candidate = ShardCandidate {
+                model_id: sid.model_id.clone(),
+                model_name: manifest.name.clone(),
+                shard_index: sid.index,
+                shard_size_bytes: info.size_bytes,
+                holder_count: self.shared_state.model_registry.shard_holders(&sid).len(),
+                // Not a scored choice: this shard was already asked for, and
+                // `trigger_download` does not rank, it fetches.
+                score: 0.0,
+            };
+            // Prune's own question, asked as the download pass asks it
+            // (`select_within_budget`, gotcha #795): a part this node would
+            // delete again as surplus once it landed is not a fetch to finish.
+            // This pass was the other way in — a part prune deleted came
+            // straight back from HuggingFace every five minutes (gotcha #797).
+            // DROPPED, not skipped: an entry left in either set keeps this
+            // pass, and the evaluation cooldown that is bypassed while
+            // `shard_p2p_failed` is non-empty, running for nothing.
+            let pressure_after = super::StorageReading::now(&self.shared_state)
+                .with_added(candidate.shard_size_bytes)
+                .pressure();
+            if self.would_shed_once_fetched(&candidate, pressure_after, &shard_pins) {
+                tracing::info!(
+                    model = %sid.model_id,
+                    shard = sid.index,
+                    holders = candidate.holder_count,
+                    pressure_after = %format_args!("{pressure_after:.2}"),
+                    "Not fetching a part prune would delete again once it landed — \
+                     dropped from the pending fetches"
+                );
+                self.shared_state.models.shard_p2p_failed.remove(&sid);
                 self.shared_state.clear_shard_repair(&sid);
                 continue;
             }
@@ -644,23 +688,6 @@ impl AutoShardManager {
             {
                 continue;
             }
-            let Some(manifest) = self.shared_state.model_registry.get_manifest(&sid.model_id)
-            else {
-                continue;
-            };
-            let Some(info) = manifest.shards.iter().find(|s| s.index == sid.index) else {
-                continue;
-            };
-            let candidate = ShardCandidate {
-                model_id: sid.model_id.clone(),
-                model_name: manifest.name.clone(),
-                shard_index: sid.index,
-                shard_size_bytes: info.size_bytes,
-                holder_count: self.shared_state.model_registry.shard_holders(&sid).len(),
-                // Not a scored choice: this shard was already asked for, and
-                // `trigger_download` does not rank, it fetches.
-                score: 0.0,
-            };
             // Say where it is going. This line read "Fetching from the model's
             // origin" for every repair, and a repair with a hash and holders
             // goes to a peer (`trigger_download`) — on the 2026-10-03 rig the
@@ -1459,5 +1486,111 @@ mod tests {
             score: 1.5, // low redundancy, first shard penalty
         };
         assert!(cold_redundant.score > warm_less_redundant.score);
+    }
+}
+
+/// A fetch the pending-fetch pass finishes is one prune would keep, and a
+/// finished origin download leaves the pending set (gotcha #797).
+#[cfg(test)]
+mod pending_fetches_follow_prune {
+    use std::sync::Arc;
+
+    use super::super::test_support::{make_test_manager, register_manifest_with_sized_shards};
+    use crate::daemon::SharedState;
+    use crate::types::{ModelId, NodeId, ShardId};
+
+    const PART: u64 = 335 * 1024 * 1024;
+
+    /// A connected peer 10 ms away — close, so the region guard's no-region
+    /// fallback (two holders under 200 ms) lets prune shed this node's copy.
+    fn close_peer(state: &Arc<SharedState>, byte: u8) -> NodeId {
+        let peer = NodeId([byte; 32]);
+        state.peer_registry.insert(
+            peer.clone(),
+            crate::types::PeerInfo {
+                node_id: peer.clone(),
+                addresses: vec![],
+                capability: None,
+                last_seen: chrono::Utc::now(),
+                latency_ms: Some(10),
+                trust_score: 0.8,
+                peer_id_bytes: None,
+                ack_srtt_ms: None,
+                active_request_count: 0,
+                first_seen: 0,
+                verified_transaction_count: 0,
+                is_lan_peer: false,
+                goodput_bytes_per_sec: None,
+                goodput_samples: 0,
+            },
+        );
+        state.connected_node_ids.insert(peer.clone());
+        peer
+    }
+
+    fn part(mid: &ModelId, index: u32) -> ShardId {
+        ShardId {
+            model_id: mid.clone(),
+            index,
+        }
+    }
+
+    /// The tester's shape: a part whose peer copy could not be checked once,
+    /// so it sits in `shard_p2p_failed`; prune deleted this node's copy as
+    /// surplus (3 holders, target 2); the pass must not fetch it back.
+    #[tokio::test]
+    async fn a_pending_fetch_prune_would_delete_again_is_dropped() {
+        let (state, manager) = make_test_manager();
+        let mid =
+            register_manifest_with_sized_shards(&state, "qwen3-like", 16, &[(0, 8), (8, 16)], PART);
+        let a = close_peer(&state, 7);
+        let b = close_peer(&state, 8);
+        assert_eq!(
+            manager.geo_target_replicas(&mid, 2, crate::pool::scope::effective_pool_size(&state)),
+            2,
+            "fixture: three nodes and no demand put the target at two copies"
+        );
+
+        // Part 0: ONE peer holds it — fetched, this node's copy would be the
+        // second of two, which prune keeps. Part 1: TWO peers hold it — this
+        // node's would be a third, which prune deletes.
+        state
+            .model_registry
+            .record_shard_holder(part(&mid, 0), a.clone());
+        state.model_registry.record_shard_holder(part(&mid, 1), a);
+        state.model_registry.record_shard_holder(part(&mid, 1), b);
+        state.models.shard_p2p_failed.insert(part(&mid, 0));
+        state.models.shard_p2p_failed.insert(part(&mid, 1));
+
+        manager.complete_pending_shard_fetches().await;
+
+        assert!(
+            !state.models.shard_p2p_failed.contains(&part(&mid, 1)),
+            "a part prune would delete again once it landed is dropped, not fetched"
+        );
+        assert!(
+            state.models.shard_p2p_failed.contains(&part(&mid, 0)),
+            "control: a part prune would keep stays pending (no origin here, so it waits)"
+        );
+    }
+
+    /// An origin download that lands ends the pending fetch it stood for — the
+    /// set's contract. Only a peer transfer used to clear it, so the entry
+    /// outlived the download and re-fetched the part whenever it left the disk.
+    #[test]
+    fn an_origin_download_ends_the_pending_fetch() {
+        let (state, _manager) = make_test_manager();
+        let mid =
+            register_manifest_with_sized_shards(&state, "qwen3-like", 16, &[(0, 8), (8, 16)], PART);
+        state.models.shard_p2p_failed.insert(part(&mid, 1));
+        let (net_tx, _net_rx) = tokio::sync::mpsc::channel(16);
+
+        state.announce_shard_acquired(&net_tx, &part(&mid, 1));
+
+        assert!(!state.models.shard_p2p_failed.contains(&part(&mid, 1)));
+        assert!(state
+            .model_registry
+            .shard_holders(&part(&mid, 1))
+            .contains(state.identity.node_id()));
     }
 }

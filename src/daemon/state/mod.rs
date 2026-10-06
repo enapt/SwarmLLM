@@ -3915,11 +3915,24 @@ impl SharedState {
     ///
     /// Steps: record in model_registry, broadcast ShardAnnounce, start DHT providing,
     /// signal dashboard ModelsChanged. Uses `try_send` on the network channel.
+    ///
+    /// Every download from the model's origin ends here — auto-manage's, the
+    /// pending-fetch pass's, and the admin HuggingFace endpoint's — so this is
+    /// where the part leaves `shard_p2p_failed`, as that set's contract says
+    /// ("cleared when a download for the shard successfully completes"). Only
+    /// the peer-transfer success path cleared it. An origin fetch left the
+    /// entry behind for the node's life, with presence on disk the only thing
+    /// stopping `complete_pending_shard_fetches` from fetching it again — so
+    /// once prune deleted the part as surplus, that pass fetched it straight
+    /// back from HuggingFace, every `prune_cooldown_secs`, ~4 GB an hour on a
+    /// tester's node (2026-10-06, gotcha #797; #583 is the same trap: read
+    /// what DRAINS a set).
     pub fn announce_shard_acquired(
         &self,
         net_tx: &mpsc::Sender<crate::types::NetworkCommand>,
         shard_id: &crate::types::ShardId,
     ) {
+        self.models.shard_p2p_failed.remove(shard_id);
         let node_id = self.identity.node_id().clone();
         self.model_registry
             .record_shard_holder(shard_id.clone(), node_id.clone());
