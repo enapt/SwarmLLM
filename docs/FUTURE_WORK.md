@@ -39,7 +39,8 @@ after v0.3.224 (#160, #215 and #216 closed; #217 and #218 opened from the swarm 
 #165, #189, #214, #218 and #219 closed in v0.3.225 (released 2026-10-05); #221 closed and #129's second half shipped in
 v0.3.226 (released 2026-10-05), #220 opened from the .225 gate's unrecorded driver resets; #129's fit verdict (idle-model
 reclaim) shipped in v0.3.227 (released 2026-10-05 23:45 UTC); #222 (a node near its storage limit deleting and
-re-fetching parts) and #223 closed in v0.3.228 (released 2026-10-06 09:42 UTC), #224 opened from its gate.
+re-fetching parts) and #223 closed in v0.3.228 (released 2026-10-06 09:42 UTC), #224 opened from its gate;
+#225, #226 and #227 opened from a tester's two reports the same day.
 `docs/plans/` holds the multi-step designs; the entries point at them.
 
 **P0 — wrong answers, silently**
@@ -84,6 +85,10 @@ re-fetching parts) and #223 closed in v0.3.228 (released 2026-10-06 09:42 UTC), 
 13. **#3**, **#180** — the routing cost model charges a constant where the reply length
     belongs, which keeps partial ranges (load spreading) off.
 14. **#171** — the prompt pass through a split runs one stage at a time.
+15. **#225** — a graphics card advertises about half the speed it decodes at (stale since the
+    CUDA-graph work; re-measure, then change the constant).
+16. **#226** — every contribution counter restarts with the daemon, so an operator cannot tell
+    whether their node has ever served anyone.
 
 Everything else is ranked in its own entry. **P3** is narrow or cosmetic, **P4** is process,
 maintenance or an idea with no user waiting on it.
@@ -414,6 +419,35 @@ segment's pace, so a term linear in layers cannot express it. This gates turning
 route that did not finish in 580 s. Method: `memory/perf_baseline_0920_post192.md`,
 gotchas #658-#660.
 
+**Field evidence, 2026-10-06 (a tester, two nodes, 0.3.173 and 0.3.228):** the flat 64 passes
+multiply the COMPUTE term too, not only the network one — `cost_compute_ms = observed_ms_per_layer
+× 32 layers × 64` reproduces his logged figures to the digit (44.52 × 32 × 64 = 91 180.8). His
+requests carried `max_tokens=24` and produced 2 tokens: a warm peer (with an observed per-layer
+figure) was priced 16.6-19.5x too slow, a cold one (falling back to `est_tokens_per_sec`) 2.8-3.1x
+too fast. On 0.3.228: `predicted_ms=2817` against `total_ms=7107`. A request's own `max_tokens`
+is an upper bound on its decode passes — capping the 64 by it is a bound the request states, not
+the tuning this entry rules out; it does not replace the reply-length estimator. He also saw
+`max_hostable_layers` read 97-103 cold, 14 008 warm, and `Some(145)` for a 32-layer request —
+unverified here; check whether it is a capacity bound never capped at the model's layer count.
+
+#### #225 — A graphics card advertises about half the speed it decodes at
+`P2` · routing · **OPEN** — 2026-10-06 · history: a tester's report, 2026-10-06
+
+`vram::estimate_tokens_per_sec_7b` prices a card at 0.35 × `bandwidth / 4.4 GB`, calibrated on
+2026-09-01 with `examples/prefill_bench` on this laptop's RTX 3070 (35.32 tok/s, 896-token
+prompt, ~912 positions). Card decode has gained ~1.7x since — own stream and pipelined CUDA
+graphs, default on 2026-09-30 (Qwen2.5-7B 61.0-61.3 tok/s in `graph_ab.sh`'s chats, 97% of
+llama.cpp; `memory/stage4_cuda_graphs_handoff.md`) — and the constant was never re-measured. A
+tester's RTX 3060 (360 GB/s, bare-metal Linux, 0.3.228) advertises 28.64 tok/s and decodes
+Llama-3.1-8B Q4 at 57.9-61.6 tok/s. Both point at ~0.6-0.8, not 0.35. It is read by routing's
+compute cost for a peer with no observed figure and by the delegation gate
+(`scheduler::mod.rs`, `DELEGATE_MIN_CPU_SPEEDUP`); the local card's own estimate moves with it,
+so the effect is mainly card against processor. **Next:** re-measure with the harness the
+constant's comment names (release `--features cuda,flash-attn` build, live node stopped, safety
+kit), then change the constant AND `the_efficiencies_reproduce_the_measurements_they_were_taken_from`.
+Both figures above came over HTTP, which the comment rules out as calibration data (n-gram
+drafting, prefix cache) — they say the constant is stale, not what it should be.
+
 #### #180 — A node holding the whole model takes every request for it; partial ranges stay off by default
 `P2` · routing · **PARTIAL** — 2026-07-28 · history: archive § "A node holding every shard monopolises the model"
 
@@ -498,6 +532,11 @@ measured load rate in `NodeCapability` (`#[serde(default)]`, measured from this 
 times the model's bytes, added only for a peer not holding the model resident — verifiable only
 once peers run a release that advertises it. (2) A model that does NOT fit even after the reclaim
 is still priced at processor speed rather than as the loader's card/processor split (above).
+
+**Field evidence for (1), 2026-10-06 (a tester, CPU node, five runs to one peer):** cold 19.7 s and
+19.7 s against warm 5.9, 6.3 and 5.2 s — the first segment alone 16.9-17.3 s cold vs 2.4-2.8 s warm.
+The peer unloaded between 6 and 16 min idle (he predicted warm after a 3.5 min gap and got 5.2 s).
+His point for anyone benchmarking: a first-touch figure reads ~3x worse than steady state.
 
 #### #192 — Nothing routes on the distance between two peers
 `P2` · routing · **PARTIAL** — 2026-09-02 · absorbs archive § "Speeding up inference BETWEEN nodes" ideas 3 (ring decode) and 4 (peer-to-peer RTT); plan: `docs/plans/regional_pipelines.md`
@@ -1049,6 +1088,20 @@ chunk, without breaking the OpenAI/Anthropic wire shapes.
 
 ### Dashboard and first-hour experience
 
+#### #226 — A node cannot tell what it has contributed: every counter restarts with the daemon
+`P2` · ux · **OPEN** — 2026-10-06 · history: a tester's report, 2026-10-06
+
+`-- served for others --`, request counts, `uptime_seconds` and the traffic totals all live in
+memory, so each restart zeroes them (his node: `99.3 ms per layer served` → `(no segments served
+yet)`, `8.37 GB sent` → `37.1 MB`). Auto-update restarts a node about daily, so "has my computer
+ever served anyone?" — the question an operator deciding whether to keep running it asks — has
+no answer, and a node that served badly loses the evidence at the next update. Wanted: lifetime
+totals (segments and layers served for peers, tokens, bytes relayed, requests answered) persisted
+in redb, written on a timer and at shutdown, shown beside this session's figures in diagnostics
+and the dashboard. Research before building: how long-running P2P clients keep all-time totals
+across restarts (qBittorrent's `alltime_ul`/`alltime_dl`). ⚠ Credits are dormant
+(`docs/CREDITS_DESIGN.md`) — a contribution total must not become, or be read as, a credit.
+
 #### #62 — The Network map is blank on a node that has not served across regions
 `P3` · ux · **PARTIAL** — 2026-09-13 · history: archive row #62 and § "The Network map is blank on a node that has not served across regions"
 
@@ -1186,6 +1239,17 @@ coordinator received (`stream.emitted()`). Belongs with credits enforcement.
 Open, but nothing to build until the named evidence arrives. Write field reports with their
 leading zero (report #033 ≠ FUTURE_WORK #33).
 
+#### #227 — An advertised cloud model answered 404 in ~1 ms, and the cloud catalogue read 0 until a restart
+`P3` · api · **PARKED: unconfirmed since 0.3.224-0.3.228** — 2026-10-06 · history: a tester's report, 2026-10-06
+
+On a tester's CPU node (since retired, with the provider key): `cloud_models_available` read 0 for
+days and 80 after a restart (stale cached state that reads exactly like a dead API key). With 80
+advertised, `mistralai/mistral-large` and `deepseek-ai/deepseek-v4-flash-0731` answered HTTP 404
+in ~1 ms with a body listing only local models — never reaching the provider; `openai/gpt-oss-20b`
+routed but returned `status: ok` with empty content after spending its whole token budget (a
+reasoning model's output may have gone to its scratchpad). Needs a node with a provider key to
+reproduce: compare `/v1/models` with what the router resolves for each listed cloud id.
+
 #### #90 — The message dispatcher once stopped consuming for 45 minutes while the node reported itself healthy
 `P2` · reliability · **PARKED: waiting for a recurrence** — 2026-09-18 · history: archive row #90, `memory/next_up.md` § "#90 — what is ELIMINATED"
 
@@ -1210,6 +1274,16 @@ measures the directory, with an orphan reclaim pass). Needed: whether `Peer retu
 data` precedes the stalls in the reporter's log (a stale DHT provider record — see #177) or
 nothing from the peer does (a vanishing request). If it recurs, check the new directory-based
 disk pressure against the orphan reclaim pass first.
+
+**The reporter's fuller account, 2026-10-06** (his CPU node, ~0.3.173, since retired):
+`auto_manage.max_storage_mb = 8000` with 7839 held, `resource_pressure=0.98 pressure_urgent=true`;
+afterwards gemma-2-2b-it lacked shard 0 and qwen2.5-0.5b its shard 2 — two models he believes it
+was the sole holder of. Re-fetching gemma's shard 0 looped `stalled shard download — cancelling +
+retrying … stall_secs=30` against two different peers, both stalling rather than refusing. He
+recovered it through `/api/admin/hf/download-shards`. The question above is asked of him again
+(he offered logs). Since then, on the code side: a sole live holder cannot be shed (`sheds_at`
+needs more live holders than a target that never drops below `min_replicas`), and the stall
+loop is the shape of a stale provider record.
 
 #### A disputed shard is kept but the disagreement is never settled (#61)
 `P3` · storage · **PARKED: no field reading yet** — 2026-09-13 · history: archive row #61 and § "A disputed shard is kept but the disagreement is never settled"
