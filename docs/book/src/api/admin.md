@@ -69,6 +69,12 @@ regions each one crossed, starting here, and whether it succeeded.
 ### GET/PUT /api/admin/config
 Read or update daemon configuration. Both need the API key.
 
+`PUT` changes only the settings the dashboard exposes (contribution level, disk,
+bandwidth, concurrency, auto-manage, update mode, relaying, LAN trust, …). A key
+it does not apply is refused with a 400 naming it; for a `config.toml` setting
+such as `network.enable_upnp` or `network.external_addresses`, the message says
+which section of `config.toml` to put it in.
+
 ### POST /api/admin/config/reload
 Re-read `config.toml` and apply it to the running node. Bearer auth required.
 

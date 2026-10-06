@@ -1442,10 +1442,74 @@ fn base_for_partial_update(
     }
 }
 
+/// Read a settings change, refusing a key this endpoint does not apply.
+///
+/// serde drops unknown fields by default, so `{"enable_upnp": true}` answered
+/// 200 and changed nothing, and a tester concluded the setting had been
+/// removed (2026-10-06) — it lives in config.toml's `[network]` table. The
+/// loader tolerates unknown keys in the FILE on purpose
+/// (`config::collect_unknown_config_keys`: a key from a later release must not
+/// stop a node starting); a request has a caller waiting for its answer, and
+/// "saved" for a change that did nothing is the one answer that cannot be
+/// right.
+fn parse_config_update(
+    raw: serde_json::Value,
+    live: &crate::config::Config,
+) -> Result<ConfigUpdate, crate::error::SwarmError> {
+    if let serde_json::Value::Object(map) = &raw {
+        for key in map.keys() {
+            // Every field is an `Option`, so `null` deserializes for each key
+            // the struct knows and fails only for one it does not: the struct
+            // is its own list of accepted keys.
+            let mut probe = serde_json::Map::new();
+            probe.insert(key.clone(), serde_json::Value::Null);
+            if let Err(e) = serde_json::from_value::<ConfigUpdate>(serde_json::Value::Object(probe))
+            {
+                return Err(crate::error::SwarmError::Validation(
+                    unknown_setting_message(key, live, &e),
+                ));
+            }
+        }
+    }
+    serde_json::from_value(raw)
+        .map_err(|e| crate::error::SwarmError::Validation(format!("Invalid settings: {e}")))
+}
+
+/// What to tell a caller who sent a key [`parse_config_update`] does not
+/// apply: where it IS set, when it is a config.toml setting, and otherwise the
+/// keys this endpoint accepts (serde's own message lists them).
+fn unknown_setting_message(
+    key: &str,
+    live: &crate::config::Config,
+    serde_err: &serde_json::Error,
+) -> String {
+    let sections: Vec<String> = toml::Value::try_from(live)
+        .ok()
+        .and_then(|schema| {
+            schema.as_table().map(|top| {
+                top.iter()
+                    .filter(|(_, v)| v.as_table().is_some_and(|t| t.contains_key(key)))
+                    .map(|(name, _)| format!("[{name}]"))
+                    .collect()
+            })
+        })
+        .unwrap_or_default();
+    if sections.is_empty() {
+        return format!("`{key}` is not a setting this endpoint changes: {serde_err}");
+    }
+    format!(
+        "`{key}` cannot be changed through this endpoint — it is set in config.toml in the \
+         data directory, under {}. Edit it there and restart the node (or POST \
+         /api/admin/config/reload, whose reply says what took effect).",
+        sections.join(" or ")
+    )
+}
+
 pub async fn update_config(
     State(state): State<AppState>,
-    JsonBody(body): JsonBody<ConfigUpdate>,
+    JsonBody(raw): JsonBody<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    let body = parse_config_update(raw, &state.shared_state.cfg()).map_err(ApiError)?;
     // Persist the updated config to the config TOML file.
     // Note: most config changes take effect after daemon restart.
     let config_path = state.config.node.data_dir.join("config.toml");
@@ -1936,7 +2000,11 @@ pub async fn get_api_key(State(state): State<AppState>) -> Json<serde_json::Valu
 
 // ---- Request types ----
 
+/// What `PUT /api/admin/config` applies. Every field stays an `Option` —
+/// [`parse_config_update`] relies on it to tell a known key from an unknown
+/// one.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ConfigUpdate {
     pub contribution: Option<String>,
     pub contribution_auto: Option<bool>,
@@ -3042,6 +3110,56 @@ mod tests {
         // The mapping expired: the event still says public, the node is not.
         assert_eq!(nat_headline(false, Some("Public (UPnP-mapped)")), "Private");
         assert_eq!(nat_headline(false, None), "unknown");
+    }
+
+    /// A key the settings endpoint does not apply is refused by name — the
+    /// tester's `enable_upnp` answered 200 and changed nothing — and a
+    /// config.toml setting says where it lives.
+    #[test]
+    fn a_setting_this_endpoint_does_not_apply_is_refused_by_name() {
+        let live = crate::config::Config::default();
+        let refused = |body: serde_json::Value| match parse_config_update(body, &live) {
+            Err(crate::error::SwarmError::Validation(msg)) => msg,
+            other => panic!("expected a Validation refusal, got {other:?}"),
+        };
+
+        let upnp = refused(serde_json::json!({ "enable_upnp": true }));
+        assert!(upnp.contains("`enable_upnp`"), "{upnp}");
+        assert!(upnp.contains("[network]"), "{upnp}");
+        assert!(upnp.contains("config.toml"), "{upnp}");
+
+        // Not a setting anywhere: the message lists what IS accepted.
+        let typo = refused(serde_json::json!({ "max_disk_mbb": 1, "max_disk_mb": 2 }));
+        assert!(typo.contains("`max_disk_mbb`"), "{typo}");
+        assert!(typo.contains("max_disk_mb"), "{typo}");
+
+        // A known key with the wrong type is still a readable 400.
+        let wrong_type = refused(serde_json::json!({ "max_disk_mb": "lots" }));
+        assert!(wrong_type.starts_with("Invalid settings"), "{wrong_type}");
+    }
+
+    /// Every key the dashboard's Settings panel and the setup wizard send is
+    /// one this endpoint applies — refusing unknown keys must not break them.
+    /// Keys from `settings.js::_readForm` and `setup.js::submit`.
+    #[test]
+    fn every_setting_the_dashboard_sends_is_accepted() {
+        let live = crate::config::Config::default();
+        let body = serde_json::json!({
+            "contribution": "moderate",
+            "contribution_auto": true,
+            "max_concurrent_requests": 4,
+            "max_bandwidth_mbps": 100,
+            "max_disk_mb": 50_000,
+            "auto_manage_shards": true,
+            "dashboard_trust_lan": false,
+            "relay_forwarding_auto": true,
+            "update_mode": "install",
+        });
+        let update = parse_config_update(body, &live).expect("the dashboard's keys");
+        assert_eq!(update.max_disk_mb, Some(50_000));
+        assert_eq!(update.update_mode.as_deref(), Some("install"));
+        // An empty save is legitimate (nickname/providers go elsewhere).
+        assert!(parse_config_update(serde_json::json!({}), &live).is_ok());
     }
 
     /// The spelling that shipped in the docs must be the one the code accepts.
