@@ -24,7 +24,7 @@ fn a_family_no_real_file_loads_is_recognised_but_not_offered() {
     }
     assert!(!ModelArch::supported_list().contains(&"deepseek2"));
     // Qwen 3.5 (#117) and StarCoder2 (#118) the same way.
-    for arch in ["qwen35", "qwen35moe", "starcoder2"] {
+    for arch in ["qwen35moe", "starcoder2"] {
         assert!(!ModelArch::from_gguf_arch(arch).is_supported(), "{arch}");
         assert!(!ModelArch::supported_list().contains(&arch), "{arch}");
     }

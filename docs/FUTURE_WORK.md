@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #228**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #229**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -40,7 +40,7 @@ after v0.3.224 (#160, #215 and #216 closed; #217 and #218 opened from the swarm 
 v0.3.226 (released 2026-10-05), #220 opened from the .225 gate's unrecorded driver resets; #129's fit verdict (idle-model
 reclaim) shipped in v0.3.227 (released 2026-10-05 23:45 UTC); #222 (a node near its storage limit deleting and
 re-fetching parts) and #223 closed in v0.3.228 (released 2026-10-06 09:42 UTC), #224 opened from its gate;
-#225, #226 and #227 opened from a tester's two reports the same day; #225 and #226 closed on main that night.
+#225, #226 and #227 opened from a tester's two reports the same day; #225 and #226 closed on main that night, and #117 (Qwen 3.5, dense) with #228 opened for what it leaves out.
 `docs/plans/` holds the multi-step designs; the entries point at them.
 
 **P0 — wrong answers, silently**
@@ -64,27 +64,27 @@ re-fetching parts) and #223 closed in v0.3.228 (released 2026-10-06 09:42 UTC), 
 3. **#159** — the remaining way a node can act on another upload's description of a model
    (#156's other door; #158 closed 2026-10-03; narrowed the same day to hashes gossiped by
    holders on v0.3.222 and older, and DHT-only holders).
-4. **#117** — Qwen 3.5: a working dense implementation sits unmerged on branch
-   `qwen35-support`; the most-downloaded family the swarm refuses.
-5. **#1** — every Mac runs on the processor; no GPU backend is compiled for Apple Silicon.
-6. **#220** — a worker's card faulted once (illegal memory access) and the driver took 14 minutes
+4. **#1** — every Mac runs on the processor; no GPU backend is compiled for Apple Silicon.
+5. **#220** — a worker's card faulted once (illegal memory access) and the driver took 14 minutes
    to reset; the kernel is unknown until a sanitizer run (needs the owner's administrator rights).
 
 **P2 — speed and completeness**
-7. **#152** — the continuous guess-check stream never runs on the split shapes the swarm
+6. **#152** — the continuous guess-check stream never runs on the split shapes the swarm
     actually makes (the boomerang above all).
-8. **#10** — conversation prefixes across computers: no routing to the peer holding the
+7. **#10** — conversation prefixes across computers: no routing to the peer holding the
     cache, and a split chain keeps no KV across turns (absorbs #139).
-9. **#162** — the release gate: a cloned gate loses its helpers, and step 12e cannot test a
+8. **#162** — the release gate: a cloned gate loses its helpers, and step 12e cannot test a
     takeover on this box (absorbs #140).
-10. **#155** — AutoNAT dial-backs denied by the per-peer cap every ~5 s, for the life of a node.
-11. **#194** — an agent-sized prompt fills an 8 GB card with conversation memory.
-12. **#147**, **#137**, **#138**, **#129** — prompt reading on the card, the processor half of
+9. **#155** — AutoNAT dial-backs denied by the per-peer cap every ~5 s, for the life of a node.
+10. **#194** — an agent-sized prompt fills an 8 GB card with conversation memory.
+11. **#147**, **#137**, **#138**, **#129** — prompt reading on the card, the processor half of
     a hybrid, MoE placement, and near-fit models sent across continents
     (`docs/plans/faster_than_local.md`).
-13. **#3**, **#180** — the routing cost model charges a constant where the reply length
+12. **#3**, **#180** — the routing cost model charges a constant where the reply length
     belongs, which keeps partial ranges (load spreading) off.
-14. **#171** — the prompt pass through a split runs one stage at a time.
+13. **#171** — the prompt pass through a split runs one stage at a time.
+14. **#228** — Qwen 3.5's first version leaves out its MoE models, the card/processor split and
+    speculation.
 
 Everything else is ranked in its own entry. **P3** is narrow or cosmetic, **P4** is process,
 maintenance or an idea with no user waiting on it.
@@ -876,33 +876,25 @@ deleting.)
 
 ### Model families and platforms
 
+#### #228 — Qwen 3.5: what the first version leaves out
+`P2` · model-support · **OPEN** — 2026-10-06 · history: #117 (closed); plan: `docs/plans/qwen35_support.md`
+
+Dense Qwen 3.5 runs since #117. Still out: (1) `qwen35moe` stays refused until checked against a
+real file (HF: `Flexan/kshitijthakkar-qwen3.5-moe-0.87B-d0.8B-GGUF`); (2) the card/processor split —
+`hybrid::arch_supports_hybrid` excludes it, so a card too small for the whole model runs it on the
+processor (its `q35_cos`/`q35_sin` tables must follow each layer's device and its state buffers be
+checked); (3) the delta rule runs token by token — correct, slow for a long prompt on a card
+(llama.cpp's `build_delta_net_chunking` is the reference); (4) decode is never captured as a CUDA
+graph ("a layer type the capture has not been checked on"); (5) no speculation of any kind — a
+snapshot of the recurrent state per draft would allow it. Re-check with
+`~/llama.cpp-ref/{dump_logits,ref_generate}` (llama-cpp-python 0.3.16 cannot load `qwen35`), and
+render a new template with jinja2 first (gotcha #798).
+
 A family in `supported_list` is a claim — check it against a REAL file's header (#715), and
 never flip `ModelArch::is_supported` without a real-file comparison against llama.cpp
 (`examples/logits_reference_probe.rs` + `compare_logits_reference.py`; replies with
 `score_against_reference.py`).
 
-#### #117 — Qwen 3.5 is refused on main; a working dense implementation sits unmerged on a branch
-`P1` · model-support · **PARTIAL** — 2026-09-25 · history: archive row #117; plan: `docs/plans/qwen35_support.md`
-
-Among the most-downloaded GGUFs of 2026 (Qwen3.5-4B/9B), and refused today
-(`model_arch.rs` refuses `qwen35` and `qwen35moe`). Branch `qwen35-support` (local, 2 commits on
-merge-base `aa2eac32`, last 2026-09-26): `824489b5` rewrites dense Qwen 3.5 against llama.cpp
-("model math verified, serving path not yet safe"; CUDA 0.8B passes) and `b5ced886` refuses
-speculation on a model with recurrent state and refuses truncation while such state is held.
-To merge: finish the serving path for recurrent state (no speculation, no KV truncation or
-prefix reuse, split-boundary handling, session expiry), rebase onto current main, verify the
-0.8B and a 4B against llama.cpp master (`~/llama.cpp-ref/dump_logits` +
-`compare_f32_logits.py`), then admit dense `qwen35`; `qwen35moe` stays refused. After it lands:
-add Qwen 3.5 to `hybrid::arch_supports_hybrid` (its `q35_cos`/`q35_sin` tables must follow
-each layer's device and its state buffers be checked), or a card too small for the model
-loses the card entirely.
-
-
-`/v1/models` listed `qwen3.5-9b-q4-k-m` (two peers hold parts of it) though no node on this
-build can run it, every request a 400 "Unsupported model architecture 'qwen35'" (2026-10-04).
-Fixed in v0.3.225: a model whose gossiped manifest names a family this build refuses
-is not listed (`ModelArch::manifest_architecture_is_refused`, which follows `is_supported`, so
-admitting Qwen 3.5 lists it again with no other edit).
 #### #1 — Every Mac runs inference on the processor: no GPU backend is compiled for Apple Silicon
 `P1` · platform · **OPEN** — 2026-09-07 · history: archive row #1 and § "GPU on Apple Silicon: no backend is compiled, on either path"
 
@@ -1439,7 +1431,18 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-06 on main, not yet released** (#225, #226)
+**Closed 2026-10-06 on main, not yet released** (#117, #225, #226)
+- #117 — Qwen 3.5 (dense) was refused; it runs now. The local branch's rewrite against llama.cpp
+  master rebased onto main and was checked again: logits (`~/llama.cpp-ref/dump_logits`) — 0.8B F32
+  worst cos 0.999999 and top-1 24/24, Q8_0 median 0.99965 24/24 whole and split at layer 10
+  (identical), 4B Q4_K_M median 0.99943 20/24 with the four misses near-ties (llama.cpp's own gap
+  0.008-0.061); `test-split` against llama.cpp's tokenizer and greedy reply
+  (`~/llama.cpp-ref/ref_generate`) on the processor and the card — prompt tokens identical, replies
+  identical up to near-ties (gaps 0.009-0.10); an isolated daemon fetched the 0.8B from HuggingFace
+  and answered, a second turn and streaming included. That check found the template not parsing
+  (gotcha #798, fixed beside it). Speculation of every kind is refused for recurrent state
+  (`speculation_can_roll_back`, `SplitModel::carries_recurrent_state`), truncation refuses while it is
+  held, the prefix cache never snapshots it. What is left: #228.
 - #225 — a graphics card advertised about half the speed it decodes at. The 0.35 in
   `vram::estimate_tokens_per_sec_7b` was calibrated on 2026-09-01 (35.32 tok/s, RTX 3070 Laptop,
   `prefill_bench`, Coder-7B Q4_K_M, 896 prompt, ~912 KV); the CUDA-graph decode work took the same

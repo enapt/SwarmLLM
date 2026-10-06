@@ -1076,83 +1076,71 @@ pub(crate) enum LayerVariant {
     },
 }
 
-/// Qwen 3.5 full-attention layer weights.
-/// Similar to standard attention but with output gating from Q projection.
+/// Qwen 3.5 full-attention layer weights (llama.cpp `qwen35.cpp`
+/// `build_layer_attn`; tensor names are the GGUF's, not llama.cpp's members).
 #[derive(Debug, Clone)]
 pub(crate) struct Qwen35AttnWeights {
-    /// Fused QKV + gate projection: hidden → (q_dim + k_dim + v_dim + gate_dim)
-    pub(crate) wqkv: Option<QMatMul>,
-    /// Separate Q/K/V projections (used when fused QKV not available)
-    pub(crate) wq: Option<QMatMul>,
-    pub(crate) wk: Option<QMatMul>,
-    pub(crate) wv: Option<QMatMul>,
+    /// `attn_q`: hidden → per head `[q | gate]`, head by head (2·head_dim each).
+    pub(crate) wq_gate: QMatMul,
+    /// `attn_k`, `attn_v`, `attn_output`.
+    pub(crate) wk: QMatMul,
+    pub(crate) wv: QMatMul,
     pub(crate) wo: QMatMul,
-    /// Output gate weights (sigmoid applied before O projection)
-    pub(crate) attn_gate: Tensor,
-    /// Q/K head normalization (RmsNorm per-head before RoPE)
-    pub(crate) q_norm: Option<RmsNorm>,
-    pub(crate) k_norm: Option<RmsNorm>,
+    /// `attn_q_norm` / `attn_k_norm`: per-head RMSNorm, BEFORE RoPE.
+    pub(crate) q_norm: RmsNorm,
+    pub(crate) k_norm: RmsNorm,
     pub(crate) n_head: usize,
     pub(crate) n_kv_head: usize,
     pub(crate) head_dim: usize,
     pub(crate) cos: Tensor,
     pub(crate) sin: Tensor,
-    /// Partial RoPE: only first `rope_dim` of head_dim get rotated
+    /// Partial RoPE: only the first `rope_dim` of `head_dim` rotate.
     pub(crate) rope_dim: usize,
 }
 
-/// Gated Delta Network (SSM) layer weights for Qwen 3.5 linear-attention layers.
-///
-/// Forward pass:
-/// 1. Project input → Q, K, V, Z (gating) via fused projection
-/// 2. Apply 1D causal convolution (conv1d with kernel_size typically 4)
-/// 3. Compute state transition: alpha = softplus(ssm_alpha + ssm_dt), beta = sigmoid(ssm_beta)
-/// 4. Run delta net scan: state = alpha * state + beta * (v ⊗ k), output = state @ q
-/// 5. Apply gated normalization: norm(output) * silu(z)
-/// 6. Project through ssm_out
+/// Qwen 3.5 Gated DeltaNet ("linear attention") layer weights (llama.cpp
+/// `build_layer_attn_linear`; `docs/plans/qwen35_support.md`).
 #[derive(Debug, Clone)]
 pub(crate) struct DeltaNetWeights {
-    /// Fused QKV+Z projection: hidden → (q_dim + k_dim + v_dim + z_dim)
-    pub(crate) wqkv: Option<QMatMul>,
-    /// Separate Q/K/V projections (used when fused QKV not available)
-    pub(crate) wq: Option<QMatMul>,
-    pub(crate) wk: Option<QMatMul>,
-    pub(crate) wv: Option<QMatMul>,
-    /// SSM state transition parameter A (decay): [hidden, conv_kernel_dim]
-    pub(crate) ssm_alpha: Tensor,
-    /// SSM input gate B: [hidden, conv_kernel_dim]
-    pub(crate) ssm_beta: Tensor,
-    /// Delta time-step parameter: enables input-dependent state transitions
-    pub(crate) ssm_dt: QMatMul,
-    /// 1D causal convolution kernel: [n_heads, 1, conv_kernel_dim]
-    pub(crate) ssm_conv1d: Tensor,
-    /// Gated output normalization
+    /// `attn_qkv`: hidden → q (k_heads·k_dim) | k (same) | v (v_heads·v_dim),
+    /// the causal convolution's input.
+    pub(crate) wqkv: QMatMul,
+    /// `attn_gate`: hidden → z (v_heads·v_dim), the output gate.
+    pub(crate) wz: QMatMul,
+    /// `ssm_beta`: hidden → v_heads; sigmoid → each head's write strength.
+    pub(crate) w_beta: QMatMul,
+    /// `ssm_alpha`: hidden → v_heads; with `dt_bias` and `a`, the log-decay.
+    pub(crate) w_alpha: QMatMul,
+    /// `ssm_dt.bias` `[v_heads]`.
+    pub(crate) dt_bias: Tensor,
+    /// `ssm_a` `[v_heads]` — already `-exp(A_log)`.
+    pub(crate) a: Tensor,
+    /// `ssm_conv1d` `[channels, kernel]`, one filter per channel.
+    pub(crate) conv1d: Tensor,
+    /// `ssm_norm` `[v_dim]`, applied per value head and gated by silu(z).
     pub(crate) ssm_norm: RmsNorm,
-    /// Output projection: recurrent_dim → hidden
+    /// `ssm_out`: v_heads·v_dim → hidden.
     pub(crate) ssm_out: QMatMul,
-    /// Number of Q heads for the linear attention
-    pub(crate) n_head: usize,
-    /// Number of K heads (may differ from Q)
-    pub(crate) n_kv_head: usize,
-    /// Number of V heads (may differ from K in Qwen 3.5)
-    pub(crate) n_v_head: usize,
-    /// Key head dimension
-    pub(crate) key_head_dim: usize,
-    /// Value head dimension
-    pub(crate) value_head_dim: usize,
-    /// Convolution kernel size (typically 4)
-    pub(crate) conv_kernel_dim: usize,
+    /// `ssm.group_count` / `ssm.time_step_rank` heads; both head dims are
+    /// `ssm.state_size`.
+    pub(crate) n_k_heads: usize,
+    pub(crate) k_head_dim: usize,
+    pub(crate) n_v_heads: usize,
+    pub(crate) v_head_dim: usize,
+    /// `ssm.conv_kernel`.
+    pub(crate) conv_kernel: usize,
+    /// The model's RMS epsilon — also the L2 norm's (`build_gdn_l2_norm`).
+    pub(crate) eps: f64,
 }
 
 /// Per-request SSM (delta net) recurrent state for Qwen 3.5 hybrid models.
 /// Analogous to KV-cache for attention layers, but stores conv state + recurrent state.
 #[derive(Debug, Clone)]
 pub(crate) struct SsmState {
-    /// 1D convolution buffer: [batch, n_heads * head_dim, conv_kernel_dim - 1]
-    /// Stores the last (kernel_size - 1) inputs for causal conv.
+    /// The last `kernel − 1` convolution inputs: `[batch, channels, kernel − 1]`.
     pub conv_state: Tensor,
-    /// Recurrent state matrix: [batch, n_kv_heads, value_head_dim, key_head_dim]
-    /// The running "memory" of the delta network.
+    /// Per value head `S` `[batch, v_heads, v_dim, k_dim]` — the delta rule's
+    /// running memory.
     pub recurrent_state: Tensor,
 }
 

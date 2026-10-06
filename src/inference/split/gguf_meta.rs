@@ -300,6 +300,12 @@ impl GgufTensorMeta {
                 "GGUF metadata error: block_count={block_count} exceeds cap {MAX_BLOCK_COUNT}"
             )));
         }
+        // Next-token-prediction (MTP) blocks are stored as extra decoder blocks
+        // after the model's own and are NOT run by an ordinary forward —
+        // llama.cpp: `n_layer() = n_layer_all - n_layer_nextn`, "loaded as extra
+        // decoder blocks but not executed in the main pass" (`models/qwen35.cpp`).
+        // Every planner and loader reads this count as the layers to run.
+        let block_count = block_count.saturating_sub(md_u32("nextn_predict_layers").unwrap_or(0));
         let embedding_length = md_u32("embedding_length")?;
         if embedding_length == 0 || embedding_length > MAX_EMBEDDING_LENGTH {
             return Err(SwarmError::Inference(format!(

@@ -149,58 +149,6 @@ fn segment_weight_bytes(
     total
 }
 
-/// Bundle returned by [`load_qkv_weights`]: either fused `wqkv` is Some, or
-/// all three of `wq/wk/wv` are Some.
-type QkvWeights = (
-    Option<QTensor>,
-    Option<QMatMul>,
-    Option<QMatMul>,
-    Option<QMatMul>,
-);
-
-/// Load attn_qkv.weight (fused) or attn_q/k/v.weight (split) for a layer.
-/// Used by Qwen35 hybrid architecture (SSM + full-attention layers).
-/// Returns (wqkv, wq, wk, wv). Errors if neither fused nor individual weights are present.
-fn load_qkv_weights<R: std::io::Read + std::io::Seek>(
-    ct: &gguf_file::Content,
-    file: &mut R,
-    device: &Device,
-    prefix: &str,
-) -> Result<QkvWeights, SwarmError> {
-    fn load_qm<R: std::io::Read + std::io::Seek>(
-        ct: &gguf_file::Content,
-        file: &mut R,
-        device: &Device,
-        name: &str,
-    ) -> Result<Option<QMatMul>, SwarmError> {
-        ct.tensor(file, name, device)
-            .ok()
-            .map(|t| {
-                QMatMul::from_qtensor(t)
-                    .map_err(|e| SwarmError::Internal(format!("QMatMul load failed: {e}")))
-            })
-            .transpose()
-    }
-    let wqkv = ct
-        .tensor(file, &format!("{prefix}.attn_qkv.weight"), device)
-        .ok();
-    let (wq, wk, wv) = if wqkv.is_none() {
-        (
-            load_qm(ct, file, device, &format!("{prefix}.attn_q.weight"))?,
-            load_qm(ct, file, device, &format!("{prefix}.attn_k.weight"))?,
-            load_qm(ct, file, device, &format!("{prefix}.attn_v.weight"))?,
-        )
-    } else {
-        (None, None, None)
-    };
-    if wqkv.is_none() && (wq.is_none() || wk.is_none() || wv.is_none()) {
-        return Err(SwarmError::Internal(format!(
-            "{prefix}: missing attn_qkv and individual attn_q/k/v weights"
-        )));
-    }
-    Ok((wqkv, wq, wk, wv))
-}
-
 /// One of a GGUF's stacked expert tensors (`ffn_{gate,up,down}_exps`), cut into
 /// one QUANTIZED matrix per expert and placed on `device`.
 ///
@@ -1407,96 +1355,70 @@ impl SplitModel {
                 }));
             }
         } else if model_arch.is_hybrid_ssm() {
-            // ── Qwen 3.5 hybrid: attention + SSM (Gated Delta Network) loading ──
-            // Read linear attention config from GGUF metadata
-            let linear_conv_kernel_dim = ct
-                .metadata
-                .get(&format!("{arch}.ssm.conv_kernel"))
-                .and_then(|v| v.to_u32().ok())
-                .unwrap_or(4) as usize;
-            let linear_key_head_dim = ct
-                .metadata
-                .get(&format!("{arch}.ssm.inner_size"))
-                .and_then(|v| v.to_u32().ok())
-                .map(|v| v as usize)
-                .unwrap_or(128);
-            let linear_n_kv_head = ct
-                .metadata
-                .get(&format!("{arch}.attention.head_count_kv"))
-                .and_then(|v| v.to_u32().ok())
-                .unwrap_or(head_count_kv as u32) as usize;
-            let linear_n_v_head = linear_n_kv_head; // typically same as K heads for SSM
-            let linear_value_head_dim = linear_key_head_dim;
-
-            // Partial RoPE for Qwen 3.5: partial_rotary_factor * head_dim
-            let partial_rotary_factor = ct
-                .metadata
-                .get(&format!("{arch}.rope.partial_rotary_factor"))
-                .and_then(|v| v.to_f32().ok())
-                .unwrap_or(0.25);
-            let qwen35_rope_dim = (head_dim as f32 * partial_rotary_factor) as usize;
-            let (q35_cos, q35_sin) =
-                precompute_freqs_cis(qwen35_rope_dim, rope_freq_base, context_length, &device)
-                    .map_err(SwarmError::internal)?;
-
-            // Determine layer types from GGUF metadata
-            // Qwen 3.5 pattern: every 4th layer is full_attention, rest are linear_attention
-            // We detect this per-layer by checking tensor presence
+            // ── Qwen 3.5: Gated DeltaNet layers + a full-attention layer every
+            // `full_attention_interval`-th — written against llama.cpp's
+            // `models/qwen35.cpp` and a real file's tensor list
+            // (`docs/plans/qwen35_support.md`, FUTURE_WORK #117). The names
+            // below are the GGUF's; llama.cpp's C++ members differ
+            // (`attn_post_norm` ← `post_attention_norm`, `ssm_dt` ←
+            // `ssm_dt.bias`), and reading the members as names is how the
+            // first version of this loader could load no real file.
+            let md_usize = |suffix: &str| -> Result<usize, SwarmError> {
+                md_get(suffix)
+                    .and_then(|v| v.to_u32().map_err(SwarmError::internal))
+                    .map(|v| v as usize)
+            };
+            let conv_kernel = md_usize("ssm.conv_kernel")?;
+            let state_size = md_usize("ssm.state_size")?;
+            let n_k_heads = md_usize("ssm.group_count")?;
+            let n_v_heads = md_usize("ssm.time_step_rank")?;
             let is_moe = matches!(model_arch, ModelArch::Qwen35Moe);
-
             tracing::info!(
-                linear_conv_kernel_dim,
-                linear_key_head_dim,
-                linear_n_kv_head,
-                qwen35_rope_dim,
+                conv_kernel,
+                state_size,
+                n_k_heads,
+                n_v_heads,
+                rope_dim,
                 is_moe,
-                "Loading Qwen 3.5 hybrid SSM+attention model"
+                "Loading Qwen 3.5 (Gated DeltaNet + attention)"
             );
+            let q35_tensor = |file: &mut R, name: String, device: &Device| {
+                ct.tensor(file, &name, device)
+                    .map_err(|e| SwarmError::Internal(format!("{name}: {e}")))
+            };
+            let q35_dense = |file: &mut R, name: String, device: &Device| {
+                q35_tensor(file, name, device)?
+                    .dequantize(device)
+                    .map_err(SwarmError::internal)
+            };
+            let q35_mm = |file: &mut R, name: String, device: &Device| {
+                QMatMul::from_qtensor(q35_tensor(file, name, device)?).map_err(SwarmError::internal)
+            };
 
             for layer_idx in layer_start..layer_end {
-                // Per-layer placement, applied by shadowing so that every
-                // tensor load below picks up the right device with no
-                // per-call-site edit — see `hybrid::LayerPlacement`.
-                // Qwen 3.5 is not eligible for hybrid placement — it builds
-                // its own `q35_cos`/`q35_sin` outside this loop, which a
-                // per-layer shadow cannot reach, so a split model would leave a
-                // card-resident layer's RoPE on the processor. See
-                // `hybrid::arch_supports_hybrid`. This therefore always
-                // resolves to the one segment device; it is kept so that
-                // enabling the architecture is a change here and nowhere else.
+                // Per-layer placement, applied by shadowing — see
+                // `hybrid::LayerPlacement`. Qwen 3.5 stays off the hybrid
+                // allowlist until a split run has been checked.
                 let device = placement.device_for(layer_idx);
+                let (cos, sin) = placement.rope_for(layer_idx);
                 let prefix = format!("blk.{layer_idx}");
-
-                // Detect if this layer is SSM (linear_attention) or full attention
-                // SSM layers have ssm_alpha.weight, attention layers have attn_q.weight
-                let is_ssm_layer = ct
+                let is_deltanet = ct
                     .tensor_infos
                     .contains_key(&format!("{prefix}.ssm_alpha.weight"));
 
-                // Load norms (shared by both layer types)
-                let attn_norm = ct
-                    .tensor(&mut file, &format!("{prefix}.attn_norm.weight"), &device)
-                    .map_err(|e| SwarmError::Internal(format!("{prefix}.attn_norm: {e}")))?;
-                let post_attn_norm = ct
-                    .tensor(
-                        &mut file,
-                        &format!("{prefix}.attn_post_norm.weight"),
-                        &device,
-                    )
-                    .map_err(|e| SwarmError::Internal(format!("{prefix}.attn_post_norm: {e}")))?;
-
-                // Load FFN (dense or MoE)
+                let attn_norm =
+                    q35_tensor(&mut *file, format!("{prefix}.attn_norm.weight"), &device)?;
+                let post_attn_norm = q35_tensor(
+                    &mut *file,
+                    format!("{prefix}.post_attention_norm.weight"),
+                    &device,
+                )?;
                 let ffn = if is_moe
                     && ct
                         .tensor_infos
                         .contains_key(&format!("{prefix}.ffn_gate_exps.weight"))
                 {
-                    // MoE FFN
-                    let n_experts_used = ct
-                        .metadata
-                        .get(&format!("{arch}.expert_used_count"))
-                        .and_then(|v| v.to_u32().ok())
-                        .unwrap_or(2) as usize;
+                    let n_experts_used = md_usize("expert_used_count").unwrap_or(2);
                     FfnVariant::MoE(load_moe_ffn(
                         &ct,
                         &mut file,
@@ -1506,140 +1428,94 @@ impl SplitModel {
                         moe_routing,
                     )?)
                 } else {
-                    // Dense FFN
-                    let ffn_gate = ct
-                        .tensor(&mut file, &format!("{prefix}.ffn_gate.weight"), &device)
-                        .map_err(|e| SwarmError::Internal(format!("{prefix}.ffn_gate: {e}")))?;
-                    let ffn_down = ct
-                        .tensor(&mut file, &format!("{prefix}.ffn_down.weight"), &device)
-                        .map_err(|e| SwarmError::Internal(format!("{prefix}.ffn_down: {e}")))?;
-                    let ffn_up = ct
-                        .tensor(&mut file, &format!("{prefix}.ffn_up.weight"), &device)
-                        .map_err(|e| SwarmError::Internal(format!("{prefix}.ffn_up: {e}")))?;
                     FfnVariant::Dense(Mlp {
-                        ffn_gate: Some(
-                            QMatMul::from_qtensor(ffn_gate).map_err(SwarmError::internal)?,
-                        ),
-                        ffn_down: QMatMul::from_qtensor(ffn_down).map_err(SwarmError::internal)?,
-                        ffn_up: QMatMul::from_qtensor(ffn_up).map_err(SwarmError::internal)?,
+                        ffn_gate: Some(q35_mm(
+                            &mut *file,
+                            format!("{prefix}.ffn_gate.weight"),
+                            &device,
+                        )?),
+                        ffn_down: q35_mm(&mut *file, format!("{prefix}.ffn_down.weight"), &device)?,
+                        ffn_up: q35_mm(&mut *file, format!("{prefix}.ffn_up.weight"), &device)?,
                         activation,
                     })
                 };
 
-                if is_ssm_layer {
-                    // SSM / Gated Delta Network layer
-                    let (wqkv, wq, wk, wv) = load_qkv_weights(&ct, &mut file, &device, &prefix)?;
-
-                    let ssm_alpha = ct
-                        .tensor(&mut file, &format!("{prefix}.ssm_alpha.weight"), &device)
-                        .map_err(|e| SwarmError::Internal(format!("{prefix}.ssm_alpha: {e}")))?
-                        .dequantize(&device)
-                        .map_err(SwarmError::internal)?;
-                    let ssm_beta = ct
-                        .tensor(&mut file, &format!("{prefix}.ssm_beta.weight"), &device)
-                        .map_err(|e| SwarmError::Internal(format!("{prefix}.ssm_beta: {e}")))?
-                        .dequantize(&device)
-                        .map_err(SwarmError::internal)?;
-                    let ssm_dt = ct
-                        .tensor(&mut file, &format!("{prefix}.ssm_dt.weight"), &device)
-                        .map_err(|e| SwarmError::Internal(format!("{prefix}.ssm_dt: {e}")))?;
-                    let ssm_conv1d = ct
-                        .tensor(&mut file, &format!("{prefix}.ssm_conv1d.weight"), &device)
-                        .map_err(|e| SwarmError::Internal(format!("{prefix}.ssm_conv1d: {e}")))?
-                        .dequantize(&device)
-                        .map_err(SwarmError::internal)?;
-                    let ssm_norm_t = ct
-                        .tensor(&mut file, &format!("{prefix}.ssm_norm.weight"), &device)
-                        .map_err(|e| SwarmError::Internal(format!("{prefix}.ssm_norm: {e}")))?;
-                    let ssm_out = ct
-                        .tensor(&mut file, &format!("{prefix}.ssm_out.weight"), &device)
-                        .map_err(|e| SwarmError::Internal(format!("{prefix}.ssm_out: {e}")))?;
-
+                if is_deltanet {
+                    let conv1d =
+                        q35_dense(&mut *file, format!("{prefix}.ssm_conv1d.weight"), &device)?;
                     layers.push(LayerVariant::Qwen35Ssm {
                         weights: DeltaNetWeights {
-                            wqkv: wqkv
-                                .map(|t| {
-                                    QMatMul::from_qtensor(t).map_err(|e| {
-                                        SwarmError::Internal(format!("QMatMul load failed: {e}"))
-                                    })
-                                })
-                                .transpose()?,
-                            wq,
-                            wk,
-                            wv,
-                            ssm_alpha,
-                            ssm_beta,
-                            ssm_dt: QMatMul::from_qtensor(ssm_dt).map_err(SwarmError::internal)?,
-                            ssm_conv1d,
-                            ssm_norm: RmsNorm::from_qtensor(ssm_norm_t, rms_norm_eps)
-                                .map_err(SwarmError::internal)?,
-                            ssm_out: QMatMul::from_qtensor(ssm_out)
-                                .map_err(SwarmError::internal)?,
-                            n_head: head_count,
-                            n_kv_head: linear_n_kv_head,
-                            n_v_head: linear_n_v_head,
-                            key_head_dim: linear_key_head_dim,
-                            value_head_dim: linear_value_head_dim,
-                            conv_kernel_dim: linear_conv_kernel_dim,
+                            wqkv: q35_mm(&mut *file, format!("{prefix}.attn_qkv.weight"), &device)?,
+                            wz: q35_mm(&mut *file, format!("{prefix}.attn_gate.weight"), &device)?,
+                            w_beta: q35_mm(
+                                &mut *file,
+                                format!("{prefix}.ssm_beta.weight"),
+                                &device,
+                            )?,
+                            w_alpha: q35_mm(
+                                &mut *file,
+                                format!("{prefix}.ssm_alpha.weight"),
+                                &device,
+                            )?,
+                            dt_bias: q35_dense(
+                                &mut *file,
+                                format!("{prefix}.ssm_dt.bias"),
+                                &device,
+                            )?,
+                            a: q35_dense(&mut *file, format!("{prefix}.ssm_a"), &device)?,
+                            conv1d,
+                            ssm_norm: RmsNorm::from_qtensor(
+                                q35_tensor(
+                                    &mut *file,
+                                    format!("{prefix}.ssm_norm.weight"),
+                                    &device,
+                                )?,
+                                rms_norm_eps,
+                            )
+                            .map_err(SwarmError::internal)?,
+                            ssm_out: q35_mm(
+                                &mut *file,
+                                format!("{prefix}.ssm_out.weight"),
+                                &device,
+                            )?,
+                            n_k_heads,
+                            k_head_dim: state_size,
+                            n_v_heads,
+                            v_head_dim: state_size,
+                            conv_kernel,
+                            eps: rms_norm_eps,
                         },
                         ffn,
                         attention_norm: make_norm(attn_norm, rms_norm_eps)?,
                         post_attention_norm: make_norm(post_attn_norm, rms_norm_eps)?,
                     });
                 } else {
-                    // Full attention layer (every 4th layer in Qwen 3.5)
-                    let (wqkv, wq, wk, wv) = load_qkv_weights(&ct, &mut file, &device, &prefix)?;
-                    let wo = ct
-                        .tensor(&mut file, &format!("{prefix}.attn_output.weight"), &device)
-                        .map_err(|e| SwarmError::Internal(format!("{prefix}.attn_output: {e}")))?;
-                    let attn_gate_t = ct
-                        .tensor(&mut file, &format!("{prefix}.attn_gate.weight"), &device)
-                        .map_err(|e| SwarmError::Internal(format!("{prefix}.attn_gate: {e}")))?
-                        .dequantize(&device)
-                        .map_err(SwarmError::internal)?;
-
-                    // Q/K norms (optional)
-                    let q_norm = ct
-                        .tensor(&mut file, &format!("{prefix}.attn_q_norm.weight"), &device)
-                        .ok()
-                        .map(|t| {
-                            RmsNorm::from_qtensor(t, rms_norm_eps).map_err(|e| {
-                                SwarmError::Internal(format!("RmsNorm load failed: {e}"))
-                            })
-                        })
-                        .transpose()?;
-                    let k_norm = ct
-                        .tensor(&mut file, &format!("{prefix}.attn_k_norm.weight"), &device)
-                        .ok()
-                        .map(|t| {
-                            RmsNorm::from_qtensor(t, rms_norm_eps).map_err(|e| {
-                                SwarmError::Internal(format!("RmsNorm load failed: {e}"))
-                            })
-                        })
-                        .transpose()?;
-
+                    let norm = |file: &mut R, name: String| {
+                        RmsNorm::from_qtensor(q35_tensor(file, name, &device)?, rms_norm_eps)
+                            .map_err(SwarmError::internal)
+                    };
                     layers.push(LayerVariant::Qwen35Attn {
                         weights: Qwen35AttnWeights {
-                            wqkv: wqkv
-                                .map(|t| {
-                                    QMatMul::from_qtensor(t).map_err(|e| {
-                                        SwarmError::Internal(format!("QMatMul load failed: {e}"))
-                                    })
-                                })
-                                .transpose()?,
-                            wq,
-                            wk,
-                            wv,
-                            wo: QMatMul::from_qtensor(wo).map_err(SwarmError::internal)?,
-                            attn_gate: attn_gate_t,
-                            q_norm,
-                            k_norm,
+                            wq_gate: q35_mm(
+                                &mut *file,
+                                format!("{prefix}.attn_q.weight"),
+                                &device,
+                            )?,
+                            wk: q35_mm(&mut *file, format!("{prefix}.attn_k.weight"), &device)?,
+                            wv: q35_mm(&mut *file, format!("{prefix}.attn_v.weight"), &device)?,
+                            wo: q35_mm(
+                                &mut *file,
+                                format!("{prefix}.attn_output.weight"),
+                                &device,
+                            )?,
+                            q_norm: norm(&mut *file, format!("{prefix}.attn_q_norm.weight"))?,
+                            k_norm: norm(&mut *file, format!("{prefix}.attn_k_norm.weight"))?,
                             n_head: head_count,
                             n_kv_head: head_count_kv,
                             head_dim,
-                            cos: q35_cos.clone(),
-                            sin: q35_sin.clone(),
-                            rope_dim: qwen35_rope_dim,
+                            cos: cos.clone(),
+                            sin: sin.clone(),
+                            rope_dim,
                         },
                         ffn,
                         attention_norm: make_norm(attn_norm, rms_norm_eps)?,

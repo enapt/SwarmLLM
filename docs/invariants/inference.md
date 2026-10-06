@@ -2860,6 +2860,30 @@ non-existent temp dir with `CANDLE_FLASH_ATTN_CHECK_ONLY=1`, which exercises thi
 patch in ~50 s on every push — nothing else in CI compiles that crate, because
 compiling it is the cost being avoided.
 
+## A model whose state cannot be wound back is never speculated
+
+(2026-10-06, FUTURE_WORK #117.) Qwen 3.5's Gated DeltaNet layers (three of every four) carry a
+recurrent state per request — a running summary, not a list of positions — so the tokens a rejected
+draft wrote into it cannot be taken back. Every speculative path takes a rejection back by
+truncating the attention caches; on such a model that would leave the two describing different
+histories, a silently wrong reply.
+
+- **Coordinator**: `pipeline::distributed::speculation_can_roll_back(architecture)` is asked ONCE in
+  `execute_distributed`, after the delegated-split hand-off and ahead of DSD (stream included),
+  single-segment speculative and n-gram-only — "one invariant, N paths", so it sits where all three
+  pass. A delegated split's head asks the same on its own node.
+- **Worker**: `ngram_spec_eligible` (slot admission AND the decode loop) and SWIFT ask
+  `SplitModel::carries_recurrent_state`. ⚠ Slot admission can run before the model has loaded
+  (observed 2026-10-06: the first request was admitted to the n-gram path with no model loaded); the
+  decode loop's own check, made with the model in hand, is what declines it — keep both.
+- **Backstop**: `KvCacheEntry::truncate_to` refuses while any `ssm_states` entry is held, so a path
+  added later that truncates fails loudly instead of answering from the wrong history.
+- **Prefix cache**: a snapshot is never taken of an entry holding SSM state, so a second turn reads
+  its prompt in full. A prompt pass at position 0 clears the entry (state included), which is also
+  how a failover replay rebuilds it on a stand-in.
+
+Allowing speculation would need a snapshot of the recurrent state per draft (#228).
+
 ## Single-source-of-truth helpers — Inference kernels, caches and the tokenizer
 
 Each names the ONE place a decision is made. A second implementation of any of

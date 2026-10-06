@@ -132,7 +132,6 @@ impl ModelArch {
             self,
             ModelArch::Unknown(_)
                 | ModelArch::DeepSeek2
-                | ModelArch::Qwen35
                 | ModelArch::Qwen35Moe
                 | ModelArch::Starcoder2
         )
@@ -180,7 +179,7 @@ impl ModelArch {
     pub fn supported_list() -> &'static [&'static str] {
         &[
             "llama", "qwen2", "qwen3", "qwen2moe", "qwen3moe", "gemma", "gemma2", "phi3",
-            "mistral", "glm4", "llama4",
+            "mistral", "glm4", "llama4", "qwen35",
         ]
     }
 
@@ -279,12 +278,10 @@ mod tests {
     }
 
     /// A manifest says which family a model is; one that only a refused
-    /// family can be is not offered as a model (#117).
+    /// family can be is not offered as a model (#117). Dense Qwen 3.5 runs
+    /// since #117; its mixture-of-experts sibling is still refused.
     #[test]
     fn a_manifest_only_a_refused_family_can_be_is_refused() {
-        assert!(ModelArch::manifest_architecture_is_refused(
-            &ModelArchitecture::Qwen35
-        ));
         assert!(ModelArch::manifest_architecture_is_refused(
             &ModelArchitecture::Qwen35Moe {
                 num_experts: 128,
@@ -294,6 +291,7 @@ mod tests {
         for runs in [
             ModelArchitecture::Llama,
             ModelArchitecture::Qwen2,
+            ModelArchitecture::Qwen35,
             ModelArchitecture::Mistral,
             ModelArchitecture::Phi,
         ] {

@@ -663,13 +663,13 @@ The SplitModel loader detects the model architecture from GGUF metadata
 
 | Feature | Llama | Llama 4 | Qwen2 | Qwen 3.5 | Gemma/Gemma2 | Phi-3 | Mistral | Starcoder2 | DeepSeek-V2/V3 | GLM-4 |
 |---------|-------|---------|-------|-----------|--------------|-------|---------|------------|----------------|-------|
-| RoPE variant | Interleaved (`rope_i`) | Interleaved (iRoPE) | Contiguous (`rope`) | Partial (25% head_dim) | Interleaved | Su/YaRN | Interleaved | Contiguous | Interleaved (MLA split; YaRN NOT implemented) | Interleaved (partial) |
-| QKV biases | None | None | Yes | Yes | None | Yes | None | Yes | None (MLA projections) | Yes |
-| Attention | Standard MHA/GQA | Standard GQA | Standard MHA | Standard + output gate | Standard MHA | Standard MHA | Standard GQA | Standard MHA | MLA (low-rank Q/KV) | Extreme GQA (16:1) |
+| RoPE variant | Interleaved (`rope_i`) | Interleaved (iRoPE) | Contiguous (`rope`) | IMROPE, sections [11,11,10,0] over 64 of 256 dims (text positions only) | Interleaved | Su/YaRN | Interleaved | Contiguous | Interleaved (MLA split; YaRN NOT implemented) | Interleaved (partial) |
+| QKV biases | None | None | Yes | None | None | Yes | None | Yes | None (MLA projections) | Yes |
+| Attention | Standard MHA/GQA | Standard GQA | Standard MHA | Gated: 3 of 4 layers Gated DeltaNet (recurrent state), every 4th softmax attention with a per-head output gate | Standard MHA | Standard MHA | Standard GQA | Standard MHA | MLA (low-rank Q/KV) | Extreme GQA (16:1) |
 | FFN | Dense | Dense + MoE (mixed) | Dense | Dense | Dense | Dense | Dense | Dense | MoE (top-k) + shared | Dense |
 | Context length | 4096 (default) | 131072 | 32768 | 131072 | 8192 | 4096 | 32768 | 16384 | 163840 | 131072 |
 | Special | — | NoPE every 4th layer; Q/K RMS-normalised after RoPE; sigmoid top-k, expert weighted on its INPUT | — | Hybrid SSM+attention | Embedding scaling (sqrt(d)), Gemma RmsNorm (+1), attn + final logit softcap, EOS 107, Gemma chat template | Fused QKV/FFN | — | — | Per-layer dense/MLA | Partial RoPE (50%) |
-| E2E verified | ✅ | tiny random model vs llama.cpp only (#114) | ✅ | ⛔ not supported (#117) | ✅ (Gemma2) | ✅ | — | ⛔ not supported (#118) | ⛔ not supported (#116) | ✅ |
+| E2E verified | ✅ | tiny random model vs llama.cpp only (#114) | ✅ | ✅ dense vs llama.cpp (0.8B, 4B); `qwen35moe` ⛔ (#228) | ✅ (Gemma2) | ✅ | — | ⛔ not supported (#118) | ⛔ not supported (#116) | ✅ |
 
 > **Phi-3 fused tensors**: Phi-3 GGUF models store `attn_qkv.weight` (Q+K+V concatenated) and `ffn_up.weight` (gate+up concatenated, no `ffn_gate.weight`). The loader dequantizes on CPU, splits by head dimensions, and re-quantizes to Q4_0 on the target device.
 
@@ -710,22 +710,30 @@ Llama 4 introduces two novel mechanisms within the standard dense `LayerVariant`
 
 ### Qwen 3.5 Hybrid SSM+Attention Support
 
-⛔ **Recognised, NOT supported** (`docs/FUTURE_WORK.md` #117) — refused by the loader,
-shard downloads and auto-manage. The code below was written against a guessed tensor
-layout and loads no real file: real Qwen 3.5 GGUFs carry `post_attention_norm` (we ask
-`attn_post_norm`), `attn_qkv` + `ssm_a` + `ssm_dt.bias` in their DeltaNet layers, fold
-the attention output gate into `attn_q` (we ask a separate `attn_gate`), and rotate by
-`rope.dimension_sections`. Kept as the starting point; what follows describes it.
+**Dense `qwen35` runs since 2026-10-06 (`docs/FUTURE_WORK.md` #117); `qwen35moe` is still refused
+(#228).** Written against llama.cpp master (`src/models/qwen35.cpp`, `delta-net-base.cpp`) and
+checked against it on real files: logits for Qwen3.5-0.8B F32 agree to cosine 0.999999, Q8_0 and
+4B Q4_K_M to rounding-level near-ties, whole and split across two segments; replies through
+`test-split` and through a daemon match llama.cpp's greedy reply up to near-ties. Map and
+references: `docs/plans/qwen35_support.md`.
 
-Qwen 3.5 introduces a hybrid architecture combining SSM (Gated Delta Networks) with standard attention:
-
-- **Layer pattern**: 3 SSM (DeltaNet) layers + 1 full attention layer per 4-layer group
-- **GGUF arch strings**: `"qwen35"` (dense), `"qwen35moe"` (MoE variant)
-- **SSM forward**: conv1d → delta_net_scan (recurrent) → gated_norm → output projection
-- **Attention layers**: Standard attention with sigmoid output gate + partial RoPE (25% of head_dim)
-- **State management**: `SsmState` (conv_state + recurrent_state) alongside KV-cache for attention layers
-- **Per-layer detection**: SSM vs attention determined by presence of `ssm_alpha.weight` tensor in GGUF
-- **Per-step alpha/beta gating**: `ssm_alpha.weight` and `ssm_beta.weight` tensors are read from the GGUF and applied per timestep via the Gated DeltaNet formula: decay `g_t = exp(-softplus(α + dt))`, prediction error `error = β_v·v - g·S@(β_k·k)`, state update `S_t = g·S + error ⊗ (β_k·k)^T`.
+- **Layer pattern**: three Gated DeltaNet layers, then a softmax-attention layer (`(il + 1) % 4 == 0`);
+  the last block is a next-token-prediction layer that ordinary decoding skips (dropped from the
+  layer count in `GgufTensorMeta`), as llama.cpp's main graph does.
+- **DeltaNet layer**: `attn_qkv` and `attn_gate` (z) projections, causal depthwise conv (`ssm_conv1d`,
+  kernel 4, state carried across steps) + SiLU, L2-normalised q/k (key heads TILED to value heads,
+  as llama.cpp's kernel does — interleaving them is the null control that fails), `beta =
+  sigmoid(ssm_beta·x)`, `g = softplus(ssm_alpha·x + ssm_dt.bias) · ssm_a`, the gated delta rule
+  token by token, `ssm_norm` gated by SiLU(z), `ssm_out`.
+- **Attention layer**: `attn_q` projects Q and an output gate interleaved PER HEAD; per-head RMS norm
+  on Q and K; IMROPE over 64 of 256 dims; output × sigmoid(gate).
+- **State**: `SsmState` (conv + recurrent) per request beside the attention KV cache. It cannot be
+  wound back, so **every speculative path refuses such a model** (`pipeline::distributed::
+  speculation_can_roll_back`, `SplitModel::carries_recurrent_state` for the worker's own n-gram and
+  SWIFT), `KvCacheEntry::truncate_to` refuses while it is held, and the prefix cache never
+  snapshots it. A prompt pass at position 0 clears the entry, so a failover replay rebuilds it.
+- **Not yet**: the card/processor split (`hybrid::arch_supports_hybrid`), CUDA-graph capture of its
+  layers, the chunked delta rule for long prompts on a card — #228.
 
 ### Tensor Parallelism (AllReduce)
 
@@ -2986,7 +2994,7 @@ The list is split into **open** (will be addressed) and **won't fix unless a con
 
 - **StarCoder2 — recognised, refused** — `docs/FUTURE_WORK.md` #118: a LayerNorm model with biases the loader does not read, and a metadata key (`layer_norm_epsilon`) the shared parser does not accept.
 
-- **Qwen 3.5 (dense `qwen35`, MoE `qwen35moe`) — recognised, refused on main** — `docs/FUTURE_WORK.md` #117. `ModelArch::is_supported` refuses both. Dense Qwen 3.5 has been rewritten against llama.cpp on the local branch `qwen35-support` (model math verified; its serving path for recurrent state is not yet safe), and is admitted only when that branch merges; `qwen35moe` stays refused.
+- **Qwen 3.5 — dense runs, `qwen35moe` recognised and refused** — `docs/FUTURE_WORK.md` #228: the MoE variant, the card/processor split, CUDA-graph capture of its layers, the chunked delta rule, and speculation (a snapshot of the recurrent state per draft would allow it).
 
 - **DeepSeek-2 (V2/V2-Lite/V3, Kimi-K2, GLM-4.7-Flash) — recognised, refused, code kept** — see `docs/FUTURE_WORK.md` #116 for the list of what a real file needs. The loader's MLA branch, `MlaWeights` and `LayerVariant::DeepSeek` stay as its starting point and are unreachable until `ModelArch::is_supported` admits the family again.
 

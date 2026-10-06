@@ -1,5 +1,9 @@
+//! Qwen 3.5 layers, written op by op against llama.cpp's `src/models/qwen35.cpp`
+//! and `delta-net-base.cpp` (master `4b1a27f`) — the plan and its reasoning are
+//! in `docs/plans/qwen35_support.md` (FUTURE_WORK #117).
+
 use crate::inference::split::kv_cache::LayerKv;
-use candle_core::{DType, Device, Result as CandleResult, Tensor};
+use candle_core::{DType, Device, Result as CandleResult, Tensor, D};
 use candle_nn::Module;
 
 use super::{run_attention, DeltaNetWeights, Qwen35AttnWeights, SsmState};
@@ -11,6 +15,9 @@ impl Qwen35AttnWeights {
         let (_b_sz, _n_head, seq_len, _head_dim) = x.dims4()?;
         let cos = self.cos.narrow(0, index_pos, seq_len)?;
         let sin = self.sin.narrow(0, index_pos, seq_len)?;
+        // IMROPE with every position component equal to the token index —
+        // what text is — rotates each pair by `pos * base^(-2i/n_rot)`, i.e.
+        // plain NEOX-style partial RoPE over the first `rope_dim` dims.
         super::rope_over_heads(x, &cos, &sin, self.rope_dim, true)
     }
 
@@ -24,53 +31,37 @@ impl Qwen35AttnWeights {
         kv_reserve: usize,
     ) -> CandleResult<Tensor> {
         let (b_sz, seq_len, _hidden) = x.dims3()?;
+        let hd = self.head_dim;
 
-        // Project Q, K, V (and gate from Q)
-        let (q, k, v, gate) = if let Some(ref wqkv) = self.wqkv {
-            let qkv = wqkv.forward(x)?;
-            let q_dim = self.n_head * self.head_dim;
-            let k_dim = self.n_kv_head * self.head_dim;
-            let v_dim = k_dim;
-            let q = qkv.narrow(2, 0, q_dim)?;
-            let k = qkv.narrow(2, q_dim, k_dim)?;
-            let v = qkv.narrow(2, q_dim + k_dim, v_dim)?;
-            let gate = qkv.narrow(2, q_dim + k_dim + v_dim, q_dim)?;
-            (q, k, v, gate)
-        } else {
-            // Separate Q/K/V projections without fused QKV — gate not available.
-            // The gate will only use the learned attn_gate bias (sigmoid(0 + bias)).
-            // This produces degraded but functional output for GGUFs with split Q/K/V.
-            let q = self.wq.as_ref().unwrap().forward(x)?;
-            let k = self.wk.as_ref().unwrap().forward(x)?;
-            let v = self.wv.as_ref().unwrap().forward(x)?;
-            let gate = q.zeros_like()?;
-            (q, k, v, gate)
-        };
-
-        // Reshape to heads
-        let mut q = q.reshape((b_sz, seq_len, self.n_head, self.head_dim))?;
-        let mut k = k.reshape((b_sz, seq_len, self.n_kv_head, self.head_dim))?;
-        let v = v
-            .reshape((b_sz, seq_len, self.n_kv_head, self.head_dim))?
+        // `attn_q` answers [q | gate] per head, interleaved head by head
+        // (llama.cpp views the even and odd head_dim halves).
+        let q_gate = self
+            .wq_gate
+            .forward(x)?
+            .reshape((b_sz, seq_len, self.n_head, 2 * hd))?;
+        let q = q_gate.narrow(3, 0, hd)?.contiguous()?;
+        let gate =
+            q_gate
+                .narrow(3, hd, hd)?
+                .contiguous()?
+                .reshape((b_sz, seq_len, self.n_head * hd))?;
+        let k = self
+            .wk
+            .forward(x)?
+            .reshape((b_sz, seq_len, self.n_kv_head, hd))?;
+        let v = self
+            .wv
+            .forward(x)?
+            .reshape((b_sz, seq_len, self.n_kv_head, hd))?
             .transpose(1, 2)?
             .contiguous()?;
 
-        // Q/K head normalization
-        if let Some(ref qn) = self.q_norm {
-            q = qn.forward(&q)?;
-        }
-        if let Some(ref kn) = self.k_norm {
-            k = kn.forward(&k)?;
-        }
-
-        let q = q.transpose(1, 2)?.contiguous()?;
-        let k = k.transpose(1, 2)?.contiguous()?;
-
-        // Partial RoPE
+        // Per-head RMSNorm with weights, BEFORE RoPE.
+        let q = self.q_norm.forward(&q)?.transpose(1, 2)?.contiguous()?;
+        let k = self.k_norm.forward(&k)?.transpose(1, 2)?.contiguous()?;
         let q = self.apply_rotary_emb(&q, index_pos)?;
         let k = self.apply_rotary_emb(&k, index_pos)?;
 
-        // KV-cache
         let (k, v) = match kv_cache {
             None => {
                 let mut cache = super::new_kv_cache(
@@ -91,7 +82,6 @@ impl Qwen35AttnWeights {
             }
         };
 
-        // Attention
         let mirror = kv_cache.as_ref().and_then(|c| c.flash_operands());
         let y = run_attention(
             &q,
@@ -100,28 +90,32 @@ impl Qwen35AttnWeights {
             mask,
             self.n_head,
             self.n_kv_head,
-            self.head_dim,
+            hd,
             None,
             mirror.as_ref().map(|(k, v)| (k, v)),
         )?;
-
-        // Apply output gate: sigmoid(gate + attn_gate_bias) * attn_output
-        let attn_out_dim = self.n_head * self.head_dim;
-        let y = y.transpose(1, 2)?.reshape(&[b_sz, seq_len, attn_out_dim])?;
-        let gate_sig = gate
-            .reshape((b_sz, seq_len, attn_out_dim))?
-            .broadcast_add(&self.attn_gate)?;
-        let gate_sig = candle_nn::ops::sigmoid(&gate_sig)?;
-        let gated = (y * gate_sig)?;
-
+        let y = y
+            .transpose(1, 2)?
+            .reshape((b_sz, seq_len, self.n_head * hd))?;
+        // Output gated by sigmoid(gate), then `attn_output`.
+        let gated = (y * candle_nn::ops::sigmoid(&gate)?)?;
         self.wo.forward(&gated)
     }
 }
 
-// ── Qwen 3.5 Gated Delta Network (SSM) layer forward ──
+// ── Qwen 3.5 Gated DeltaNet ("linear attention") layer forward ──
 
 impl DeltaNetWeights {
-    /// Forward pass for the Gated Delta Network (linear attention / SSM layer).
+    fn key_dim(&self) -> usize {
+        self.n_k_heads * self.k_head_dim
+    }
+
+    fn value_dim(&self) -> usize {
+        self.n_v_heads * self.v_head_dim
+    }
+
+    /// `build_layer_attn_linear`: projections, causal conv, L2-normalised
+    /// q/k, the gated delta rule, gated RMSNorm, `ssm_out`.
     pub(crate) fn forward_deltanet(
         &self,
         x: &Tensor,
@@ -129,293 +123,230 @@ impl DeltaNetWeights {
     ) -> CandleResult<Tensor> {
         let (b_sz, seq_len, _hidden) = x.dims3()?;
         let device = x.device();
+        let (nk, kd, nv, vd) = (
+            self.n_k_heads,
+            self.k_head_dim,
+            self.n_v_heads,
+            self.v_head_dim,
+        );
 
-        // Project to Q, K, V, Z
-        let (q, k, v, z) = if let Some(ref wqkv) = self.wqkv {
-            let proj = wqkv.forward(x)?;
-            let q_dim = self.n_head * self.key_head_dim;
-            let k_dim = self.n_kv_head * self.key_head_dim;
-            let v_dim = self.n_v_head * self.value_head_dim;
-            let z_dim = v_dim;
-            let q = proj.narrow(2, 0, q_dim)?;
-            let k = proj.narrow(2, q_dim, k_dim)?;
-            let v = proj.narrow(2, q_dim + k_dim, v_dim)?;
-            let z = proj.narrow(2, q_dim + k_dim + v_dim, z_dim)?;
-            (q, k, v, z)
+        let mixed = self.wqkv.forward(x)?; // [b, seq, 2·nk·kd + nv·vd]
+        let z = self.wz.forward(x)?; // [b, seq, nv·vd]
+        let beta = candle_nn::ops::sigmoid(&self.w_beta.forward(x)?)?; // [b, seq, nv]
+                                                                       // g = softplus(alpha + dt_bias) · a, with a = -exp(A_log): a log-decay ≤ 0.
+        let alpha = self.w_alpha.forward(x)?.broadcast_add(&self.dt_bias)?;
+        let g = softplus(&alpha)?.broadcast_mul(&self.a)?; // [b, seq, nv]
+
+        let (conv, conv_state) = self.causal_conv(&mixed, ssm_state.as_ref(), device)?;
+        let conv = candle_nn::ops::silu(&conv)?; // [b, seq, C]
+
+        let q = conv
+            .narrow(2, 0, self.key_dim())?
+            .reshape((b_sz, seq_len, nk, kd))?;
+        let k = conv
+            .narrow(2, self.key_dim(), self.key_dim())?
+            .reshape((b_sz, seq_len, nk, kd))?;
+        let v = conv
+            .narrow(2, 2 * self.key_dim(), self.value_dim())?
+            .reshape((b_sz, seq_len, nv, vd))?;
+        let q = l2_norm(&q, self.eps)?;
+        let k = l2_norm(&k, self.eps)?;
+        // More value heads than key heads: llama.cpp TILES the key heads
+        // (`ggml_repeat_4d`), value head h reading key head h % nk.
+        let (q, k) = if nv > nk {
+            let r = nv / nk;
+            let tile = |t: &Tensor| Tensor::cat(&vec![t; r], 2);
+            (tile(&q)?, tile(&k)?)
         } else {
-            let q = self.wq.as_ref().unwrap().forward(x)?;
-            let k = self.wk.as_ref().unwrap().forward(x)?;
-            let v = self.wv.as_ref().unwrap().forward(x)?;
-            let z = v.zeros_like()?;
-            (q, k, v, z)
+            (q, k)
         };
+        let q = (q * (1.0 / (kd as f64).sqrt()))?;
 
-        // Apply 1D causal convolution over the QKV concatenation
-        let qkv_cat = Tensor::cat(&[&q, &k, &v], 2)?;
-        let (conv_out, new_conv_state) = self.apply_conv1d(&qkv_cat, ssm_state, device)?;
+        let state = match ssm_state.as_ref() {
+            Some(s) => s.recurrent_state.clone(),
+            None => Tensor::zeros((b_sz, nv, vd, kd), DType::F32, device)?,
+        };
+        let (out, state) = delta_rule(&q, &k, &v, &g, &beta, state)?; // out [b, seq, nv, vd]
 
-        // Split back into Q, K, V after convolution
-        let q_dim = self.n_head * self.key_head_dim;
-        let k_dim = self.n_kv_head * self.key_head_dim;
-        let v_dim = self.n_v_head * self.value_head_dim;
-        let q = conv_out.narrow(2, 0, q_dim)?;
-        let k = conv_out.narrow(2, q_dim, k_dim)?;
-        let v = conv_out.narrow(2, q_dim + k_dim, v_dim)?;
+        // Gated RMSNorm per value head: RMSNorm(o, ssm_norm) · silu(z).
+        let z = z.reshape((b_sz, seq_len, nv, vd))?;
+        let normed = self.ssm_norm.forward(&out)?;
+        let gated = (normed * candle_nn::ops::silu(&z)?)?;
+        let gated = gated.reshape((b_sz, seq_len, nv * vd))?;
 
-        // Reshape to heads: [b, seq, n_head, head_dim] → [b, n_head, seq, head_dim]
-        let q = q
-            .reshape((b_sz, seq_len, self.n_head, self.key_head_dim))?
-            .transpose(1, 2)?;
-        let k = k
-            .reshape((b_sz, seq_len, self.n_kv_head, self.key_head_dim))?
-            .transpose(1, 2)?;
-        let v = v
-            .reshape((b_sz, seq_len, self.n_v_head, self.value_head_dim))?
-            .transpose(1, 2)?;
-
-        // Compute state transition: alpha = softplus(ssm_alpha + ssm_dt(x))
-        let dt = self.ssm_dt.forward(x)?;
-        // ssm_alpha broadcast to [b, seq, dim], then softplus
-        let alpha_base = self.ssm_alpha.broadcast_as(dt.shape())?;
-        let alpha = softplus(&(&alpha_base + &dt)?)?;
-
-        // beta = sigmoid(ssm_beta)
-        let beta_base = self
-            .ssm_beta
-            .broadcast_as((b_sz, seq_len, q_dim + k_dim + v_dim))?;
-        let beta = candle_nn::ops::sigmoid(&beta_base)?;
-
-        // Run the delta net recurrent scan
-        let output =
-            self.delta_net_scan(&q, &k, &v, &alpha, &beta, ssm_state, b_sz, seq_len, device)?;
-
-        // output shape: [b, n_head, seq, value_head_dim]
-        let out_dim = self.n_v_head * self.value_head_dim;
-        let output = output
-            .transpose(1, 2)?
-            .contiguous()?
-            .reshape((b_sz, seq_len, out_dim))?;
-
-        // Gated normalization: norm(output) * silu(z)
-        let normed = self.ssm_norm.forward(&output)?;
-        let z_act = candle_nn::ops::silu(&z)?;
-        let gated = (normed * z_act)?;
-
-        // Update SSM state
-        if let Some(state) = ssm_state {
-            state.conv_state = new_conv_state;
-        } else {
-            *ssm_state = Some(SsmState {
-                conv_state: new_conv_state,
-                recurrent_state: Tensor::zeros(
-                    (b_sz, self.n_kv_head, self.value_head_dim, self.key_head_dim),
-                    DType::F32,
-                    device,
-                )?,
-            });
-        }
-
-        // Project to hidden dim
+        *ssm_state = Some(SsmState {
+            conv_state,
+            recurrent_state: state,
+        });
         self.ssm_out.forward(&gated)
     }
 
-    /// Apply 1D causal convolution with state for autoregressive mode.
-    pub(crate) fn apply_conv1d(
+    /// Causal depthwise convolution with the previous `kernel − 1` inputs as
+    /// state (`ggml_ssm_conv`): output t reads inputs t−(K−1) … t, tap j
+    /// weighing input t−(K−1)+j. Returns `[b, seq, C]` and the new state
+    /// `[b, C, K−1]` — the last K−1 inputs, carried to the next call.
+    pub(crate) fn causal_conv(
         &self,
         x: &Tensor,
-        ssm_state: &Option<SsmState>,
+        ssm_state: Option<&SsmState>,
         device: &Device,
     ) -> CandleResult<(Tensor, Tensor)> {
         let (b_sz, seq_len, channels) = x.dims3()?;
-        let kernel_size = self.conv_kernel_dim;
-        let pad = kernel_size - 1;
-
-        if seq_len == 1 {
-            // Autoregressive: use conv state buffer
-            let prev_state = if let Some(state) = ssm_state {
-                state.conv_state.clone()
-            } else {
-                Tensor::zeros((b_sz, channels, pad), DType::F32, device)?
-            };
-
-            let x_t = x.transpose(1, 2)?; // [b, channels, 1]
-            let new_state = if pad > 1 {
-                let shifted = prev_state.narrow(2, 1, pad - 1)?;
-                Tensor::cat(&[&shifted, &x_t], 2)?
-            } else {
-                x_t.clone()
-            };
-
-            let full_input = Tensor::cat(&[&new_state.narrow(2, 0, pad)?, &x_t], 2)?;
-            let kernel = self.ssm_conv1d.reshape((channels, kernel_size))?;
-            let conv_out = (&full_input
-                * &kernel.unsqueeze(0)?.broadcast_as(full_input.shape())?)?
-                .sum(2)?
-                .unsqueeze(1)?; // [b, 1, channels]
-            let conv_out = candle_nn::ops::silu(&conv_out)?;
-
-            Ok((conv_out, new_state))
-        } else {
-            // Prefill: full causal convolution
-            let x_t = x.transpose(1, 2)?.contiguous()?; // [b, channels, seq]
-
-            let padding = if let Some(state) = ssm_state {
-                state.conv_state.clone()
-            } else {
-                Tensor::zeros((b_sz, channels, pad), DType::F32, device)?
-            };
-            let padded = Tensor::cat(&[&padding, &x_t], 2)?;
-
-            // Grouped conv1d: each channel independent
-            let kernel = self.ssm_conv1d.reshape((channels, 1, kernel_size))?;
-            let mut conv_outputs = Vec::with_capacity(seq_len);
-            for t in 0..seq_len {
-                let window = padded.narrow(2, t, kernel_size)?;
-                let prod = (&window * &kernel.broadcast_as(window.shape())?)?;
-                let summed = prod.sum(2)?;
-                conv_outputs.push(summed);
-            }
-            let conv_out = Tensor::stack(&conv_outputs, 1)?; // [b, seq, channels]
-            let conv_out = candle_nn::ops::silu(&conv_out)?;
-
-            let new_conv_state = if seq_len >= pad {
-                x_t.narrow(2, seq_len - pad, pad)?
-            } else {
-                let old_kept = padding.narrow(2, seq_len, pad - seq_len)?;
-                Tensor::cat(&[&old_kept, &x_t], 2)?
-            };
-
-            Ok((conv_out, new_conv_state))
+        let k = self.conv_kernel;
+        let pad = k - 1;
+        let prev = match ssm_state {
+            Some(s) => s.conv_state.clone(),
+            None => Tensor::zeros((b_sz, channels, pad), x.dtype(), device)?,
+        };
+        let x_t = x.transpose(1, 2)?.contiguous()?; // [b, C, seq]
+        let padded = Tensor::cat(&[&prev, &x_t], 2)?; // [b, C, seq + K − 1]
+        let w = self.conv1d.reshape((1, channels, k))?;
+        let mut acc: Option<Tensor> = None;
+        for j in 0..k {
+            let tap = padded
+                .narrow(2, j, seq_len)?
+                .broadcast_mul(&w.narrow(2, j, 1)?)?;
+            acc = Some(match acc {
+                None => tap,
+                Some(a) => (a + tap)?,
+            });
         }
-    }
-
-    /// Delta net recurrent scan with per-timestep alpha (decay) and beta (input gate).
-    ///
-    /// alpha: `[b, seq, n_head * key_head_dim]` — softplus(ssm_alpha + ssm_dt(x))
-    /// beta:  `[b, seq, q_dim + k_dim + v_dim]` — sigmoid(ssm_beta)
-    ///
-    /// State update: `state_t = diag(alpha_t) * state_{t-1} + (beta_v * v) ⊗ (beta_k * k)`
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn delta_net_scan(
-        &self,
-        q: &Tensor, // [b, n_head, seq, key_head_dim]
-        k: &Tensor, // [b, n_kv_head, seq, key_head_dim]
-        v: &Tensor, // [b, n_v_head, seq, value_head_dim]
-        alpha: &Tensor,
-        beta: &Tensor,
-        ssm_state: &mut Option<SsmState>,
-        b_sz: usize,
-        seq_len: usize,
-        device: &Device,
-    ) -> CandleResult<Tensor> {
-        let mut state = if let Some(ref s) = ssm_state {
-            s.recurrent_state.clone()
-        } else {
-            Tensor::zeros(
-                (b_sz, self.n_kv_head, self.value_head_dim, self.key_head_dim),
-                DType::F32,
-                device,
-            )?
-        };
-
-        // Repeat KV heads for GQA
-        let k = if self.n_head > self.n_kv_head {
-            candle_transformers::utils::repeat_kv(k.clone(), self.n_head / self.n_kv_head)?
-        } else {
-            k.clone()
-        };
-        let v = if self.n_head > self.n_v_head {
-            candle_transformers::utils::repeat_kv(v.clone(), self.n_head / self.n_v_head)?
-        } else {
-            v.clone()
-        };
-
-        // Pre-split beta into Q/K/V portions along dim 2
-        let q_dim = self.n_head * self.key_head_dim;
-        let k_dim = self.n_kv_head * self.key_head_dim;
-        let v_dim = self.n_v_head * self.value_head_dim;
-        let beta_k_all = beta.narrow(2, q_dim, k_dim)?;
-        let beta_v_all = beta.narrow(2, q_dim + k_dim, v_dim)?;
-
-        // Reshape beta_k/v to per-head: [b, seq, n_heads, head_dim]
-        let beta_k_heads = beta_k_all
-            .reshape((b_sz, seq_len, self.n_kv_head, self.key_head_dim))?
-            .transpose(1, 2)?;
-        let beta_v_heads = beta_v_all
-            .reshape((b_sz, seq_len, self.n_v_head, self.value_head_dim))?
-            .transpose(1, 2)?;
-
-        // Repeat KV beta heads for GQA to match expanded k/v
-        let beta_k_heads = if self.n_head > self.n_kv_head {
-            candle_transformers::utils::repeat_kv(beta_k_heads, self.n_head / self.n_kv_head)?
-        } else {
-            beta_k_heads
-        };
-        let beta_v_heads = if self.n_head > self.n_v_head {
-            candle_transformers::utils::repeat_kv(beta_v_heads, self.n_head / self.n_v_head)?
-        } else {
-            beta_v_heads
-        };
-
-        // Reshape alpha: [b, seq, n_head * key_head_dim] → [b, n_head, seq, key_head_dim]
-        let alpha_heads = alpha
-            .reshape((b_sz, seq_len, self.n_head, self.key_head_dim))?
-            .transpose(1, 2)?;
-
-        let mut outputs = Vec::with_capacity(seq_len);
-
-        for t in 0..seq_len {
-            let q_t = q.narrow(2, t, 1)?.squeeze(2)?;
-            let k_t = k.narrow(2, t, 1)?.squeeze(2)?;
-            let v_t = v.narrow(2, t, 1)?.squeeze(2)?;
-
-            // Alpha decay: g_t = exp(-alpha_t) ∈ (0, 1]
-            let alpha_t = alpha_heads.narrow(2, t, 1)?.squeeze(2)?; // [b, n_head, key_head_dim]
-            let decay = alpha_t.neg()?.exp()?;
-            // Broadcast decay over value_head_dim: [b, n_head, 1, key_head_dim]
-            let decay_expanded = decay.unsqueeze(2)?;
-
-            // Decay the state: decayed = g_t * S_{t-1}
-            let decayed_state = (&state * &decay_expanded)?;
-
-            // Beta gates for K and V at this timestep
-            let bk_t = beta_k_heads.narrow(2, t, 1)?.squeeze(2)?; // [b, n_head, key_head_dim]
-            let bv_t = beta_v_heads.narrow(2, t, 1)?.squeeze(2)?; // [b, n_head, value_head_dim]
-
-            // Gate K and V with beta: k_gated = β_k * k, v_gated = β_v * v
-            let k_gated = (&k_t * &bk_t)?;
-            let v_gated = (&v_t * &bv_t)?;
-
-            // Prediction error (delta rule): error = v_gated - decayed_state @ k_gated
-            let k_col = k_gated.unsqueeze(3)?; // [b, n_head, key_head_dim, 1]
-            let prediction = decayed_state.matmul(&k_col)?.squeeze(3)?; // [b, n_head, value_head_dim]
-            let error = (&v_gated - &prediction)?;
-
-            // Error-correcting state update: S_t = decayed + error ⊗ k_gated^T
-            let err_col = error.unsqueeze(3)?; // [b, n_head, value_head_dim, 1]
-            let k_row = k_gated.unsqueeze(2)?; // [b, n_head, 1, key_head_dim]
-            let update = err_col.matmul(&k_row)?; // [b, n_head, value_head_dim, key_head_dim]
-            state = (&decayed_state + &update)?;
-
-            // Output: state @ q → [b, n_head, value_head_dim]
-            let q_col = q_t.unsqueeze(3)?;
-            let out_t = state.matmul(&q_col)?.squeeze(3)?;
-            outputs.push(out_t);
-        }
-
-        let output = Tensor::stack(&outputs, 2)?;
-
-        if let Some(ref mut s) = ssm_state {
-            s.recurrent_state = state;
-        }
-
-        Ok(output)
+        let out = acc
+            .expect("kernel has at least one tap")
+            .transpose(1, 2)?
+            .contiguous()?;
+        let new_state = padded.narrow(2, seq_len, pad)?.contiguous()?;
+        Ok((out, new_state))
     }
 }
 
-/// Softplus activation: log(1 + exp(x))
+/// The gated delta rule, token by token (`build_delta_net_autoregressive`),
+/// per value head with state `S` `[v_dim, k_dim]`:
+///
+/// ```text
+/// S = S · exp(g)          e = (v − S·k) · beta
+/// S = S + e ⊗ k           o = S · q
+/// ```
+///
+/// q/k/v `[b, seq, heads, dim]`, g/beta `[b, seq, heads]`, state
+/// `[b, heads, v_dim, k_dim]`. Returns `[b, seq, heads, v_dim]` and the state.
+fn delta_rule(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    g: &Tensor,
+    beta: &Tensor,
+    mut state: Tensor,
+) -> CandleResult<(Tensor, Tensor)> {
+    let seq_len = q.dim(1)?;
+    let mut outs = Vec::with_capacity(seq_len);
+    for t in 0..seq_len {
+        let q_t = q.narrow(1, t, 1)?.squeeze(1)?.unsqueeze(3)?; // [b, h, kd, 1]
+        let k_t = k.narrow(1, t, 1)?.squeeze(1)?; // [b, h, kd]
+        let v_t = v.narrow(1, t, 1)?.squeeze(1)?; // [b, h, vd]
+        let decay = g
+            .narrow(1, t, 1)?
+            .squeeze(1)?
+            .exp()?
+            .unsqueeze(2)?
+            .unsqueeze(3)?; // [b, h, 1, 1]
+        let beta_t = beta.narrow(1, t, 1)?.squeeze(1)?.unsqueeze(2)?; // [b, h, 1]
+        state = state.broadcast_mul(&decay)?;
+        let sk = state.matmul(&k_t.unsqueeze(3)?)?.squeeze(3)?; // [b, h, vd]
+        let e = (v_t - sk)?.broadcast_mul(&beta_t)?; // [b, h, vd]
+        state = (state + e.unsqueeze(3)?.matmul(&k_t.unsqueeze(2)?)?)?;
+        outs.push(state.matmul(&q_t)?.squeeze(3)?); // [b, h, vd]
+    }
+    Ok((Tensor::stack(&outs, 1)?, state))
+}
+
+/// `build_gdn_l2_norm`: `x / sqrt(Σx² + eps)` over the last dimension
+/// (llama.cpp spells it `rms_norm(x, eps/n) / sqrt(n)`).
+fn l2_norm(x: &Tensor, eps: f64) -> CandleResult<Tensor> {
+    let sum_sq = x.sqr()?.sum_keepdim(D::Minus1)?;
+    x.broadcast_div(&(sum_sq + eps)?.sqrt()?)
+}
+
+/// Softplus, `log(1 + exp(x))`, in the form that cannot overflow:
+/// `max(x, 0) + log(1 + exp(−|x|))` (ggml switches to `x` above 20).
 fn softplus(x: &Tensor) -> CandleResult<Tensor> {
-    let ones = x.ones_like()?;
-    let exp_x = x.exp()?;
-    (&exp_x + &ones)?.log()
+    x.relu()? + (x.abs()?.neg()?.exp()? + 1.0)?.log()?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn weights(device: &Device) -> DeltaNetWeights {
+        let (hidden, nk, kd, nv, vd, k) = (8usize, 2usize, 4usize, 4usize, 4usize, 4usize);
+        let c = 2 * nk * kd + nv * vd;
+        let mm = |o: usize, i: usize| {
+            super::super::QMatMul::from_dense(Tensor::randn(0f32, 0.3, (o, i), device).unwrap())
+        };
+        DeltaNetWeights {
+            wqkv: mm(c, hidden),
+            wz: mm(nv * vd, hidden),
+            w_beta: mm(nv, hidden),
+            w_alpha: mm(nv, hidden),
+            dt_bias: Tensor::randn(0f32, 0.3, (nv,), device).unwrap(),
+            a: Tensor::randn(0f32, 0.3, (nv,), device)
+                .unwrap()
+                .abs()
+                .unwrap()
+                .neg()
+                .unwrap(),
+            conv1d: Tensor::randn(0f32, 0.3, (c, k), device).unwrap(),
+            ssm_norm: crate::inference::residual_norm::RmsNorm::from_qtensor(
+                candle_core::quantized::QTensor::quantize(
+                    &Tensor::ones((vd,), DType::F32, device).unwrap(),
+                    candle_core::quantized::GgmlDType::F32,
+                )
+                .unwrap(),
+                1e-6,
+            )
+            .unwrap(),
+            ssm_out: mm(hidden, nv * vd),
+            n_k_heads: nk,
+            k_head_dim: kd,
+            n_v_heads: nv,
+            v_head_dim: vd,
+            conv_kernel: k,
+            eps: 1e-6,
+        }
+    }
+
+    /// A prompt run in one pass and the same prompt run as a prefix pass plus
+    /// single-token steps must give the same outputs: the decode path carries
+    /// the convolution's last `kernel − 1` inputs and the delta rule's state.
+    /// The first version fed the current token twice and dropped the oldest
+    /// tap on every decode step, which no prefill-only check could see.
+    #[test]
+    fn a_deltanet_decoded_step_by_step_matches_one_pass() {
+        let device = Device::Cpu;
+        let w = weights(&device);
+        let x = Tensor::randn(0f32, 1.0, (1, 7, 8), &device).unwrap();
+        let mut whole_state = None;
+        let whole = w.forward_deltanet(&x, &mut whole_state).unwrap();
+
+        let mut state = None;
+        let mut parts = vec![w
+            .forward_deltanet(&x.narrow(1, 0, 3).unwrap(), &mut state)
+            .unwrap()];
+        for t in 3..7 {
+            parts.push(
+                w.forward_deltanet(&x.narrow(1, t, 1).unwrap(), &mut state)
+                    .unwrap(),
+            );
+        }
+        let stepped = Tensor::cat(&parts, 1).unwrap();
+        let diff: f32 = (whole - stepped)
+            .unwrap()
+            .abs()
+            .unwrap()
+            .max_all()
+            .unwrap()
+            .to_scalar()
+            .unwrap();
+        assert!(diff < 1e-5, "stepped decode drifts from one pass by {diff}");
+    }
 }

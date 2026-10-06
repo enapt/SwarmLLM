@@ -1,9 +1,11 @@
 # Qwen 3.5 support (FUTURE_WORK #117) — the plan, read off llama.cpp
 
-> **Status 2026-10-02:** implemented on the local branch `qwen35-support` (math
-> checked against llama.cpp master; the 0.8B passes on CUDA), **not merged**:
-> `main` still refuses `qwen35`. Open: the serving path for recurrent state, then a rebase and a 4B
-> check (`docs/FUTURE_WORK.md` #117, PARTIAL).
+> **Status 2026-10-06: MERGED — dense `qwen35` runs** (`docs/FUTURE_WORK.md` #117, closed). Rebased
+> onto main and re-checked against llama.cpp master the same night: logits (0.8B F32 exact; Q8_0 and
+> 4B Q4_K_M to rounding-level near-ties, whole and split), replies on the processor, the card and
+> through an isolated daemon that fetched the 0.8B from HuggingFace. That check also found the chat
+> template failing to PARSE (minijinja without `macros`, gotcha #798), fixed alongside. Reference
+> tools: `~/llama.cpp-ref/{dump_logits,ref_generate}`. What is left is FUTURE_WORK #228.
 
 Written 2026-09-25 night, when Qwen 3.5 was REFUSED because no real file could
 load: the loader had been written against a guessed layout, and several of its
@@ -14,6 +16,61 @@ master `4b1a27f` (`src/models/qwen35.cpp`, `src/models/delta-net-base.cpp`,
 `llama_model_rope_type`) and the real header of `unsloth/Qwen3.5-4B-GGUF` /
 `ggml-org/Qwen3.5-0.8B-GGUF`. Re-read those files before implementing — this is
 a map, not a substitute.
+
+## Status (2026-09-25 night, branch `qwen35-support`, LOCAL — not pushed)
+
+**The model math is done and verified against llama.cpp master** on real files,
+with `logits_reference_probe` + `dump_logits`:
+
+| file | whole | split at layer 10 |
+|---|---|---|
+| Qwen3.5-0.8B, F32 (from the official BF16 via `llama-quantize`) | worst cos 0.999999, top-1 24/24 | 0.999999, 24/24 |
+| Qwen3.5-0.8B, Q8_0 | median 0.99965, 24/24 (rounding) | — |
+| Qwen3.5-4B, Q4_K_M (16 key heads, 32 value heads) | median 0.99947, 21/24 (rounding) | — |
+
+The 24 positions include 4 single-token decode steps (carried conv + recurrent
+state). Null control: HF-style INTERLEAVED key heads on the 4B → median 0.69,
+top-1 2/24 — llama.cpp TILES them (`iq1 = iv1 % neq1` in its fused kernel), as
+the branch does. Next-token-prediction blocks are dropped from the layer count
+(`GgufTensorMeta`), as llama.cpp's main pass drops them.
+
+**Serving-path safety (same night, second pass on the branch):**
+
+- ✅ **Speculation is refused for models with recurrent state, at every entry:**
+  the coordinator asks `pipeline::distributed::speculation_can_roll_back` once
+  ahead of DSD, single-segment speculative AND n-gram-only; the worker's own
+  n-gram speculation (`ngram_spec_eligible`, both its call sites incl. the
+  slot-admission gate) and SWIFT ask `SplitModel::carries_recurrent_state`.
+  Backstop: `KvCacheEntry::truncate_to` refuses while recurrent state is held,
+  so a future path that truncates fails loudly instead of answering from the
+  wrong history. Tests for all three.
+- ✅ **Position 0 already starts fresh** — by reading, not new code: the segment
+  holder `clear_request`s the whole entry (KV AND `ssm_states`) on every prompt
+  pass (`fwd.sequence_num == 0`, which a failover replay also sends), a local
+  request starts from a new entry, and prefix-cache snapshots skip SSM state
+  (`prefix_cache.rs`). Re-check if a path ever calls `forward` at index 0 on a
+  live entry.
+
+**Still to do before merging:**
+
+1. ~~Speculative decoding rolls back~~ — done above. (Original note:) **Speculative decoding rolls back rejected tokens; a recurrent state cannot
+   be rolled back.** `model_worker::ngram_spec_eligible` does not look at the
+   architecture, so a Qwen 3.5 request would be speculated and a rejected draft
+   would leave its tokens in the DeltaNet state — a silently wrong reply. Every
+   speculative path must refuse models with recurrent state (worker n-gram,
+   pipeline `ngram_only_spec`, DSD, SWIFT — find them all; "one invariant, N
+   paths"), or the state must be snapshotted per draft.
+2. ~~Position 0~~ — covered above. (Original note:) **A prompt pass at position 0 must start from fresh DeltaNet state** — the
+   attention caches `reset()` there; `forward_deltanet` continues from whatever
+   state the entry holds (replay after failover, re-verify). Reset in BOTH
+   executor paths (single and batched).
+3. CUDA build check (`test-split` + a `dump_logits`-based scorer; score_ids.py
+   uses llama-cpp-python 0.3.16, which cannot load `qwen35`).
+4. The delta rule runs token by token (~10 small ops per token per DeltaNet
+   layer) — correct, slow for long prompts on a card; llama.cpp's chunked form
+   (`build_delta_net_chunking`) is the follow-up.
+5. `qwen35moe` stays refused until checked (HF:
+   `Flexan/kshitijthakkar-qwen3.5-moe-0.87B-d0.8B-GGUF`).
 
 ## The reference is ready
 

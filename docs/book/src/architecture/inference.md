@@ -120,7 +120,7 @@ The RoPE column is llama.cpp's per-architecture choice (`llama_model_rope_type`)
 | **Llama 4** | Interleaved; iRoPE (NoPE every 4th) | No | MoE FFN |
 | **Qwen2 / Qwen3** | Contiguous | Yes (Qwen2) | EOS 151643+151645; per-head q/k norm (Qwen3) |
 | **Qwen2-MoE / Qwen3-MoE** | Contiguous | Yes (Qwen2-MoE) | The same layout with routed experts per layer; Qwen2-MoE adds a gated shared expert and does not renormalise its top-k weights |
-| **Qwen 3.5** | Contiguous | No | Not supported yet — recognised and refused (no real file loads; the layout was guessed) |
+| **Qwen 3.5** | Contiguous (IMROPE over 64 of 256 dims; text positions only) | No | Dense models only: three of every four layers are Gated DeltaNet, which keeps a running state per conversation, and the fourth is gated attention. Speculative decoding is off for it (that state cannot be wound back), and a card too small for the whole model runs it on the processor (no card/processor split yet). Checked against llama.cpp on Qwen3.5-0.8B and 4B. The mixture-of-experts models (`qwen35moe`) are still refused |
 | **Gemma/Gemma2** | Contiguous | No | Embedding scaling (sqrt(d)), Gemma RmsNorm (+1), EOS 107, attention + final logit softcapping, Gemma chat template fallback |
 | **Phi-3** | Contiguous, Su/YaRN scaling | Yes | Fused QKV/FFN tensors |
 | **Mistral** | Interleaved | No | GQA |

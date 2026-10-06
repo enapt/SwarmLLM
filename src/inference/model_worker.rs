@@ -2382,8 +2382,13 @@ pub(crate) fn ngram_spec_eligible(
     sampling: &crate::types::SamplingParams,
     ngram_cfg: &crate::inference::ngram_lookup::NgramLookupConfig,
     swift_cfg: &SwiftConfig,
+    carries_recurrent_state: bool,
 ) -> bool {
-    ngram_cfg.num_pred_tokens > 0
+    // A rejected draft is taken back by truncating the KV cache; a model with
+    // recurrent state (`SplitModel::carries_recurrent_state`) cannot take it
+    // back, and would answer from a history that includes the rejected tokens.
+    !carries_recurrent_state
+        && ngram_cfg.num_pred_tokens > 0
         && ngram_cfg.max_ngram_size >= ngram_cfg.min_ngram_size
         && !sampling.logprobs
         && !(swift_cfg.enabled && sampling.temperature == 0.0)
@@ -3251,6 +3256,9 @@ async fn handle_generate(
     // active. `force_standard_attn` is the manual override; SWIFT auto-enables
     // it because draft and verify must produce identical logits.
     let swift_active = swift_cfg.enabled
+        // SWIFT verifies drafts and rolls rejected ones back — impossible over
+        // recurrent state (`SplitModel::carries_recurrent_state`).
+        && !model.carries_recurrent_state()
         && gen.sampling.temperature == 0.0
         && model.total_layers >= 8
         && gen.sampling.max_tokens >= (swift_cfg.gamma + 1);
@@ -3379,7 +3387,12 @@ async fn handle_generate(
         // speculative-sampling rejection rule itself, not an approximation of
         // it. See the note on `ngram_spec_eligible`.
         let spec_cfg = *ngram_cfg;
-        let spec_active = ngram_spec_eligible(&gen.sampling, ngram_cfg, swift_cfg) && !swift_active;
+        let spec_active = ngram_spec_eligible(
+            &gen.sampling,
+            ngram_cfg,
+            swift_cfg,
+            model.carries_recurrent_state(),
+        ) && !swift_active;
         // Context the lookup searches: prompt then generation, in order, so its
         // tail is always the most recent token. Only built when it will be used
         // — it is a copy of the whole prompt.
@@ -3988,6 +4001,7 @@ fn slot_admission_eligible(
     swift_cfg: &SwiftConfig,
     ngram_cfg: &crate::inference::ngram_lookup::NgramLookupConfig,
     slot_table: &SlotTable,
+    carries_recurrent_state: bool,
 ) -> bool {
     if gen.sampling.max_tokens == 0 {
         tracing::debug!(request_id = %gen.request_id, "slot admission refused: max_tokens=0");
@@ -4026,7 +4040,7 @@ fn slot_admission_eligible(
     // that, and against an empty table batching has nothing to amortise
     // anyway — there is no second request to share the weight read with.
     if slot_table.is_empty()
-        && ngram_spec_eligible(&gen.sampling, ngram_cfg, swift_cfg)
+        && ngram_spec_eligible(&gen.sampling, ngram_cfg, swift_cfg, carries_recurrent_state)
         && spec_payoff_justifies_diverting()
     {
         tracing::debug!(
@@ -4939,7 +4953,11 @@ async fn handle_daemon_msg(
             if batch_generate
                 && pending
                     .as_ref()
-                    .map(|g| slot_admission_eligible(g, swift_cfg, ngram_cfg, slot_table))
+                    .map(|g| {
+                        // One worker serves one model family.
+                        let recurrent = models.values().any(SplitModel::carries_recurrent_state);
+                        slot_admission_eligible(g, swift_cfg, ngram_cfg, slot_table, recurrent)
+                    })
                     .unwrap_or(false)
             {
                 let g = pending.take().expect("checked above");
@@ -5567,7 +5585,7 @@ mod local_speculation_tests {
     /// so it loses batching and gains nothing.
     #[test]
     fn eligibility_is_one_predicate_both_callers_share() {
-        assert!(ngram_spec_eligible(&greedy(), &on(), &swift_off()));
+        assert!(ngram_spec_eligible(&greedy(), &on(), &swift_off(), false));
 
         // Sampling on is FINE, and this is the case that matters: 0.7 and 1.0
         // are the two API defaults, so gating on greedy left the feature inert
@@ -5577,21 +5595,21 @@ mod local_speculation_tests {
         // `accepting_only_on_a_match_preserves_the_sampled_distribution`.
         let mut warm = greedy();
         warm.temperature = 0.7;
-        assert!(ngram_spec_eligible(&warm, &on(), &swift_off()));
+        assert!(ngram_spec_eligible(&warm, &on(), &swift_off(), false));
 
         // Logprobs asked for: accepted tokens carry none back out, and
         // answering `null` where a client asked for numbers is worse than
         // declining to speculate.
         let mut lp = greedy();
         lp.logprobs = true;
-        assert!(!ngram_spec_eligible(&lp, &on(), &swift_off()));
+        assert!(!ngram_spec_eligible(&lp, &on(), &swift_off(), false));
 
         // SWIFT is already speculating for this request.
         let swift_on = SwiftConfig {
             enabled: true,
             ..Default::default()
         };
-        assert!(!ngram_spec_eligible(&greedy(), &on(), &swift_on));
+        assert!(!ngram_spec_eligible(&greedy(), &on(), &swift_on, false));
 
         // `inference.ngram_lookup_enabled = false` arrives as a zero width, so
         // the switch cannot disagree with the shape.
@@ -5599,7 +5617,10 @@ mod local_speculation_tests {
             num_pred_tokens: 0,
             ..NgramLookupConfig::default()
         };
-        assert!(!ngram_spec_eligible(&greedy(), &off, &swift_off()));
+        assert!(!ngram_spec_eligible(&greedy(), &off, &swift_off(), false));
+        // A model with recurrent state cannot take a rejected draft back
+        // (Qwen 3.5's DeltaNet, FUTURE_WORK #117) — whatever else holds.
+        assert!(!ngram_spec_eligible(&greedy(), &on(), &swift_off(), true));
     }
 
     #[test]

@@ -847,6 +847,19 @@ impl KvCacheEntry {
         mode: TruncateMode,
         target_len: usize,
     ) -> Result<(), crate::error::SwarmError> {
+        // A recurrent state (Qwen 3.5's DeltaNet) cannot give tokens back.
+        // Shortening the attention caches beside it would leave the two
+        // describing different histories — a silently wrong reply — so refuse.
+        // Every path that truncates is gated away from such models first
+        // (`SplitModel::carries_recurrent_state`, `speculation_can_roll_back`,
+        // no prefix snapshot of SSM state); this makes a new one loud.
+        if self.ssm_states.iter().any(Option::is_some) {
+            return Err(crate::error::SwarmError::Internal(
+                "cannot take tokens back out of a model with recurrent state \
+                 (FUTURE_WORK #117)"
+                    .into(),
+            ));
+        }
         match mode {
             TruncateMode::InPlace => {
                 for kv in self.layers.iter_mut().flatten() {
@@ -2120,6 +2133,25 @@ mod tests {
     /// Compared against the old implementation rather than against a
     /// hand-computed expectation, so the equivalence is between the two
     /// things that actually changed places.
+    /// A recurrent state cannot be truncated, so an entry holding one refuses
+    /// to shorten its attention caches rather than let the two disagree.
+    #[test]
+    fn an_entry_with_recurrent_state_refuses_to_be_truncated() {
+        let dev = candle_core::Device::Cpu;
+        let state = SsmState {
+            conv_state: Tensor::zeros((1, 4, 3), candle_core::DType::F32, &dev).unwrap(),
+            recurrent_state: Tensor::zeros((1, 2, 4, 4), candle_core::DType::F32, &dev).unwrap(),
+        };
+        let mut entry = KvCacheEntry {
+            layers: vec![Some(filled(&dev, 8)), None],
+            ssm_states: vec![None, Some(state)],
+            last_accessed: std::time::Instant::now(),
+        };
+        assert!(entry.truncate_to(5).is_err());
+        entry.ssm_states[1] = None;
+        entry.truncate_to(5).unwrap();
+    }
+
     #[test]
     fn an_in_place_truncation_keeps_the_prefix_bitwise_and_the_next_append_continues_from_it() {
         let dev = candle_core::Device::Cpu;

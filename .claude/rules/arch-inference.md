@@ -159,6 +159,12 @@ Never open-code it, and never estimate it.
 
 → `docs/invariants/inference.md` § "A model's RoPE frequency factors are applied — and reach a node without shard 0"
 
+## A model whose state cannot be wound back is never speculated (2026-10-06)
+
+Qwen 3.5's DeltaNet layers keep a recurrent state per request, and a rejected draft would leave its tokens in it. **`pipeline::distributed::speculation_can_roll_back`** is asked once ahead of every coordinator speculative path; the worker's own n-gram (`ngram_spec_eligible`, both call sites) and SWIFT ask **`SplitModel::carries_recurrent_state`**; `KvCacheEntry::truncate_to` refuses while such state is held, so a new path that truncates fails loudly. A new speculative path asks one of the two.
+
+→ `docs/invariants/inference.md` § "A model whose state cannot be wound back is never speculated"
+
 ## A header and its tensor table describe ONE upload — compared before a tensor is read (2026-10-03)
 
 `split::loader::shards::first_header_disagreement` runs in `load_from_shards_inner`, the one place every load from parts passes: every table entry the parts hold must sit at the header's offset with the header's size (`split::tensor_byte_size`, the size tables are cut by), or the load is refused as `SwarmError::MixedModelCopy`. A mismatch never fails on its own — each read lands shifted inside its entry and the model answers garbage (#156). Compare per entry, never by re-deriving the layout (older tables must load). Rig: `split_rig.sh mixed`; null control `every_real_copy_agrees_with_its_own_header`. Parts whose BYTES are not the table's upload (a splice — header and table both agree) are invisible to it: `auto_manage::canonical`'s byte check deletes and re-fetches them (gotcha #782; rig `split_rig.sh spliced`).

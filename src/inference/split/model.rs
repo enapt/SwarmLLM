@@ -335,6 +335,17 @@ impl SplitModel {
         }
     }
 
+    /// Does this model carry RECURRENT state between forwards — state a later
+    /// token cannot be taken back out of? Qwen 3.5's DeltaNet layers do. The
+    /// KV cache of an attention layer can be truncated after a rejected
+    /// speculative draft; a recurrent state cannot, so no speculative path may
+    /// run on such a model (FUTURE_WORK #117).
+    pub fn carries_recurrent_state(&self) -> bool {
+        self.layers
+            .iter()
+            .any(|l| matches!(l, super::LayerVariant::Qwen35Ssm { .. }))
+    }
+
     /// Build an input tensor from an already-tokenized token id slice.
     /// Mirrors `tokenize()`'s output shape (1, seq_len), i64 dtype. Returns
     /// an error if `ids` is empty.
