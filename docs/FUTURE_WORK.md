@@ -458,8 +458,8 @@ card (`estimated_mb=5232 budget_mb=6354`) and answered in **13.2 s, load include
 routes then stayed local at ~60 tok/s (150 tokens in 2.5 s). So the fix is the planner asking the
 pool's admission WITH the idle-model reclaim (`planning_on_card` / `serves_on_cpu` ignore it), not
 re-pricing a split; a cold peer's load time is also unpriced (46 s against 4.5 s predicted) — a
-second contributor. Measure with `scratchpad hybrid129.py`'s shape: warm two small models, then the
-7B cold, normal routing vs `swarm_route.exclude_nodes` = every peer.
+second contributor. Measure that shape: warm two small models, then the 7B cold, normal routing vs
+`swarm_route.exclude_nodes` = every peer (on the live node with peers; the isolated gate step 12s reads `fits_on_gpu`).
 
 **Fixed in v0.3.227 (released 2026-10-05 23:45 UTC) — the fit verdict counts what admission would
 reclaim:** `ModelProcessPool::fits_in_budget` (behind `would_fit_on_gpu`, `gpu_estimate_and_fit`
