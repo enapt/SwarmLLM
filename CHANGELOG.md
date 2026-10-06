@@ -1,5 +1,69 @@
 # Changelog
 
+## [0.3.229-alpha] — 2026-10-07
+
+**New: Qwen 3.5 runs on the swarm.** Qwen 3.5's dense models (0.8B, 4B, 9B
+and the rest of the family) used to be recognised and refused. They now run,
+computed the way llama.cpp computes them: on the 0.8B and 4B, answers match
+llama.cpp's word for word until the two choose between next words that are
+practically tied — on the processor, on a graphics card, and on a computer
+that downloaded the model's parts from HuggingFace. Two limits for now:
+speculative decoding stays off for these models (three of every four of
+their layers keep a running memory of the conversation that cannot be wound
+back), and a graphics card too small for the whole model runs it on the
+processor instead of splitting it. Qwen 3.5's mixture-of-experts models are
+still refused.
+
+**New: your computer's contribution is counted across restarts.** Everything
+your computer served for other people — requests, tokens, compute time — used
+to restart from zero whenever the program did, and automatic updates restart
+it about once a day. So the morning after an update the dashboard said "You
+haven't served any work for other computers yet", however long you had been
+contributing. The totals are now kept on disk and shown since your computer
+first started, in the dashboard's "Served for the swarm" panel and in
+`swarmllm diagnostics`. They are a record of work done, not a balance.
+
+**Fixed: a part downloaded from HuggingFace was downloaded again every time it
+was pruned.** A part whose copy from another computer could not be checked is
+fetched from HuggingFace instead — but the node never crossed it off its
+to-fetch list, so whenever the part was later removed as surplus, it came
+straight back. One node did this every five minutes, about 4 GB an hour, with
+its disk only half full. 0.3.228 fixed the same loop in the regular download
+step; this was a second way in. Restarting a node also stops it.
+
+**Fixed: a graphics card advertised about 60% of its real speed.** Each
+computer tells the others how fast it would run a 7B model, and they use that
+figure to decide where to send work before they have measured it themselves.
+For graphics cards the figure dated from before September's decode work made
+cards about 1.7x faster — a tester's RTX 3060 claimed 28.6 tokens a second
+and produced about 60. Re-measured with the same tool, model and prompt, the
+estimate now sits just under what the card does.
+
+**Fixed: chat templates written with Jinja macros are used again.** A model
+whose chat template defines a macro had its template rejected, and every
+request fell back to a generic format. Qwen 3.5's template does this — so its
+prompts lost the empty thinking block they should end with, and Qwen3.5-4B
+reasoned at length where its publisher's template asks it to answer.
+
+**Fixed: `swarmllm diagnostics` no longer says a reachable computer is behind
+NAT.** Its `nat:` line showed whichever reachability test finished last, and
+those test one address at a time — so after the router opened a port, a failed
+test of a different address could leave the line reading "Private (relay)"
+for as long as the node ran, four lines above "publicly reachable: true".
+
+**Fixed: the settings API refuses a setting it cannot change instead of
+answering "ok".** `PUT /api/admin/config` accepted any key and silently
+ignored the ones it does not handle, so a setting like `enable_upnp` looked
+saved and did nothing. It now answers with an error naming the key — and for a
+setting that lives in `config.toml` (such as `network.enable_upnp` or
+`network.external_addresses`), which section to put it in.
+
+**Fixed: a full node's log names the limit that is full.** When auto-manage
+stopped downloading, the log always advised raising the disk limit or the
+contribution level, even when the limit was `max_shards` or an explicit
+`max_storage_mb`, which neither setting changes. It now names the limit that
+bound, and says that lowering `max_shards` never deletes anything.
+
 ## [0.3.228-alpha] — 2026-10-06
 
 **Fixed: a computer close to its storage limit no longer deletes parts of a
