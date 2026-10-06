@@ -992,6 +992,16 @@ impl NetworkManager {
                 self.refresh_listen_multiaddrs();
             }
 
+            // The other half: an address that stops being external must lower
+            // `publicly_reachable` too, or the node keeps saying it is reachable
+            // (and keeps donating relay capacity) on an address it has lost.
+            // UPnP's own expiry already refreshed; this arm fell to the
+            // catch-all.
+            SwarmEvent::ExternalAddrExpired { address } => {
+                tracing::info!(%address, "External address expired");
+                self.refresh_listen_multiaddrs();
+            }
+
             SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
                 tracing::debug!(
                     ?peer_id, %error,

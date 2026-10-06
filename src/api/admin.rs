@@ -379,6 +379,30 @@ fn heal_pass_line(
     }
 }
 
+/// The report's `nat:` headline.
+///
+/// **Whether this node is reachable is `publicly_reachable`'s answer** — a
+/// confirmed public external address exists, the figure the `-- NAT traversal
+/// --` section prints. `last_nat_event` may only add HOW (UPnP-mapped, behind
+/// CGNAT). Printed on its own it contradicted that section: it is whichever
+/// event wrote last, and AutoNAT v2 judges ONE address per probe
+/// (libp2p-autonat 0.15, `v2::client::Event::tested_addr`; a success confirms
+/// that address, a failure says nothing about the others). After UPnP mapped a
+/// tester's forwarded ports, a failed probe of the port his router stamped on
+/// outbound traffic wrote "Private (relay)" over it, and a reachable node that
+/// was donating relay capacity reported itself unreachable for as long as it
+/// ran (2026-10-06).
+fn nat_headline(publicly_reachable: bool, last_nat_event: Option<&str>) -> &str {
+    match last_nat_event {
+        Some(event) if publicly_reachable && event.starts_with("Public") => event,
+        _ if publicly_reachable => "Public",
+        Some(event) if event.starts_with("Private") => event,
+        // The public address an earlier event reported has gone since.
+        Some(_) => "Private",
+        None => "unknown",
+    }
+}
+
 /// GET /api/admin/diagnostics — the plain-text report a user pastes into a bug
 /// report, redacted so that pasting it is safe.
 ///
@@ -414,7 +438,11 @@ pub async fn diagnostics(
         let _ = writeln!(
             out,
             "nat:     {}",
-            stats.nat_status.as_deref().unwrap_or("unknown")
+            nat_headline(
+                ss.publicly_reachable
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                stats.nat_status.as_deref()
+            )
         );
         let _ = writeln!(out, "requests: {}", stats.requests_made);
     }
@@ -2992,6 +3020,28 @@ mod tests {
         let stuck = heal_pass_line(Some(mins(180)), Some(mins(182)), now);
         assert!(stuck.contains("RUNNING since 180 min ago"), "{stuck}");
         assert!(heal_pass_line(Some(mins(5)), None, now).contains("RUNNING"));
+    }
+
+    /// The `nat:` headline says what the `publicly reachable:` line says. The
+    /// tester's sequence: UPnP mapped the forwarded ports (reachable), then an
+    /// AutoNAT probe of ANOTHER address failed and wrote last.
+    #[test]
+    fn the_nat_headline_agrees_with_public_reachability() {
+        assert_eq!(nat_headline(true, Some("Private (relay)")), "Public");
+        // How it became public survives while it still is.
+        assert_eq!(
+            nat_headline(true, Some("Public (UPnP-mapped)")),
+            "Public (UPnP-mapped)"
+        );
+        // A declared external address confirms with no NAT event at all.
+        assert_eq!(nat_headline(true, None), "Public");
+        assert_eq!(
+            nat_headline(false, Some("Private (CGNAT — relay required)")),
+            "Private (CGNAT — relay required)"
+        );
+        // The mapping expired: the event still says public, the node is not.
+        assert_eq!(nat_headline(false, Some("Public (UPnP-mapped)")), "Private");
+        assert_eq!(nat_headline(false, None), "unknown");
     }
 
     /// The spelling that shipped in the docs must be the one the code accepts.

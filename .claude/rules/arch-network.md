@@ -261,6 +261,7 @@ The per-shard tensor table is ~92% of a manifest and is derived, not sent: **`da
 
 Each names the ONE place a decision is made; a second implementation is this codebase's most-repeated defect (`.claude/rules/architecture.md` § "One invariant, N paths"). Read the topic file before changing one.
 
+- **`SharedState::publicly_reachable`** — is this node reachable from the internet (a confirmed public external address). `node_stats.nat_status` is the last per-address NAT event, never the answer (`api::admin::nat_headline`, gotcha #796).
 - **`inference::pipeline::remote_generate::StreamReassembler`** — puts a remote reply's token stream back in order.
 - **A hole in a peer-served reply is FILLED, not waited out** — `RetainedReplies`, `SwarmMessage::ResendTokens`.
 - **`NodeCapability.cpu`** — a processor described like a graphics card.

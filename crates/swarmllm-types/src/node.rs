@@ -629,7 +629,9 @@ pub struct NodeStats {
     pub peers_connected: u32,
     pub requests_made: u64,
     pub uptime_start: chrono::DateTime<chrono::Utc>,
-    /// NAT status detected by AutoNAT ("Public", "Private", "Unknown").
+    /// The LAST NAT event (AutoNAT, UPnP), e.g. "Public (UPnP-mapped)". Each
+    /// describes one address, so it is not the node's reachability — the
+    /// diagnostics headline combines it with `SharedState::publicly_reachable`.
     #[serde(default)]
     pub nat_status: Option<String>,
 }
