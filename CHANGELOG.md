@@ -1,5 +1,38 @@
 # Changelog
 
+## [0.3.228-alpha] — 2026-10-06
+
+**Fixed: a computer close to its storage limit no longer deletes parts of a
+model and downloads them straight back.** Above 80% of its storage limit, a
+node keeps one copy fewer of each part the swarm already has plenty of — but
+its download step still aimed for the full number, so it fetched the part it
+had just deleted, and deleted it again a few minutes later. One node in the
+swarm did this all night with a 30 GB model, about 1.6 GB every half hour on
+its owner's connection; another had done it for days. Answers were never
+affected — only bandwidth and disk writes. Now both steps ask the same
+question, and a node fetches a part only if it would keep it once it has
+arrived. Measured on three test computers holding the same model, one at 87%
+of its limit: 0.3.227 deleted and re-fetched the same part 14 times in 15
+minutes; this version deletes it once and stops.
+
+**Changed: SwarmLLM now always leaves 10% of your disk free.** When the disk
+itself was the limit, a node kept downloading until less than one part's worth
+of space was left — 99.5% full on a 30 GB disk, which can get in the way of
+everything else on the computer. If your disk is already more than 90% full,
+this version removes parts of models that other computers hold enough copies
+of, and nothing else.
+
+**Fixed: deleting files no longer depends on how full the graphics card is.**
+A card is nearly full whenever a model is loaded, and deleting files frees none
+of it — but it counted as a reason to remove parts, which were then downloaded
+again once the card emptied. Graphics memory is still freed the usual way, by
+unloading models you are not using.
+
+**Fixed: a computer that could not work out its region forgot how often its
+models were asked for.** It recorded demand under one name and read it back
+under another, so every ten minutes it treated its models as unused when
+deciding how many copies the swarm needs and whether to keep a model loaded.
+
 ## [0.3.227-alpha] — 2026-10-05
 
 **Fixed: a model on this computer was sent to a slower computer abroad when
