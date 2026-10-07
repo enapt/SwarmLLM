@@ -15,6 +15,12 @@ are told straight away that the swarm doesn't have the memory for it,
 instead of after a wasted round trip. This takes effect as computers update
 to 0.3.230.
 
+**Fixed: model sizes for models you don't hold were far too small.** The
+model list showed a 9B model needing 1.3 GB and "fits on your graphics
+card" when this computer held none of it. A computer holding only part of a
+model also set aside too little memory when it ran that part. Sizes now come
+from the model's own description, the same on every computer.
+
 **Fixed: a request handed to a computer that is still loading the model no
 longer fails after two minutes.** When your request went to another computer
 that first had to read the model into memory — because it had just restarted,

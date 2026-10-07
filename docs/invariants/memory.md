@@ -1993,6 +1993,30 @@ candle and can only use CUDA, so the node planned and advertised graphics memory
 ran in. It now reports no card there (`is_culib_present` is false), which is what its workers do.
 A build without candle's CUDA (macOS, Metal) still asks llama.cpp.
 
+## A model's weights are its header's, on every node (2026-10-07)
+
+**What happened.** `ModelProcessPool::footprint_inputs` — the one source of a model's memory
+footprint, for admission, the local planner (`segment_cost_curve`), the model list
+(`estimated_vram_mb`, `fits_on_gpu`) and `would_fit_on_gpu` — took a model's weight bytes from the
+shard FILES on this node's disk, and `segment_shape` charges a segment those bytes over ALL the
+model's layers. That is the model only on a node holding all of it:
+
+- a node holding NONE of a model still has its header — routing fetches it to price peers
+  (`ensure_model_geometry`) — and was charged no weights at all: our node's list showed Qwen 3.5 9B
+  needing 1346 MB and Qwen3-30B 1092 MB, both `fits_on_gpu: true` (2026-10-07, v0.3.229);
+- a node holding PART was charged about that part's share of its part: `xlam-2-3b` held 2 of 4
+  parts, 951 of 1840 MiB on disk, so a segment of the half it held was charged about half its
+  weights — an under-charge at admission on exactly the partial holders a split uses;
+- and the same disk read made the first cut of #230's peer pricing compute nothing on a coordinator
+  holding none of the model (gotcha #803).
+
+**The rule.** The weights are summed from the header's tensor table
+(`split::tensor_byte_size`, the size the tables are cut by): a property of the MODEL, identical on
+every node, and what a load's shards carry. Measured against the files on a node holding whole
+models: TinyLlama 636 vs 638 MiB, Mistral-7B 4170 vs 4170 MiB. Test
+`a_models_weights_are_its_headers_whatever_this_node_holds` (none, part, and a segment's share of
+the WHOLE model; red with a disk sum restored).
+
 ## nvidia-smi is asked through one bounded helper (2026-10-05)
 
 **What happened.** At 18:52:06 UTC on 2026-10-04 a worker died of an illegal memory access and

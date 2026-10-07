@@ -3626,13 +3626,16 @@ impl PipelineScheduler {
         }
 
         let mut candidates = Vec::new();
-        // The model's geometry, which a peer's advertised ceiling is weighed
-        // with through that peer's own admission arithmetic
-        // (`process_pool::processor_cost_curve_for`). Read once per plan, and
-        // only if a peer advertises a ceiling: it parses the model's header,
-        // which a coordinator holding none of the model has fetched before
-        // planning (`ensure_model_geometry`).
-        let footprint_base = std::cell::OnceCell::new();
+        // What a PEER's processor admission charges for N layers of this model
+        // — the curve its advertised ceiling is weighed with. Ours computes the
+        // same one: weights come from the model's header, never from what a
+        // node holds, so every node prices a model alike. The processor's, not
+        // a card's: it carries no f16 KV mirror, so a card peer is never
+        // weighed more strictly than its own admission weighs it. Read once
+        // per plan, and only if a peer advertises a ceiling (it parses the
+        // header, which a coordinator holding none of the model fetched before
+        // planning — `ensure_model_geometry`).
+        let ceiling_curve = std::cell::OnceCell::new();
 
         for (node_id, mut shard_indices) in node_shards {
             shard_indices.sort();
@@ -3998,26 +4001,11 @@ impl PipelineScheduler {
                 })
             };
             let max_hostable_layers_at_ceiling = advertised_ceiling_mb.and_then(|ceiling_mb| {
-                let base = footprint_base
-                    .get_or_init(|| {
-                        self.shared_state
-                            .model_process_pool
-                            .model_footprint_base(&manifest.id)
-                    })
-                    .as_ref()?;
-                // Its admission weighs the shards IT holds, not ours — this
-                // node may hold none of the model.
-                let held_weight_bytes: u64 = manifest
-                    .shards
-                    .iter()
-                    .filter(|s| shard_indices.contains(&s.index))
-                    .map(|s| s.size_bytes)
-                    .sum();
-                let (fixed_mb, per_layer_mb) =
-                    crate::inference::process_pool::processor_cost_curve_for(
-                        base,
-                        held_weight_bytes,
-                    )?;
+                let (fixed_mb, per_layer_mb) = (*ceiling_curve.get_or_init(|| {
+                    self.shared_state
+                        .model_process_pool
+                        .segment_cost_curve(&manifest.id, false)
+                }))?;
                 crate::inference::process_pool::layers_that_fit(ceiling_mb, fixed_mb, per_layer_mb)
                     .map(|layers| layers.min(manifest.num_layers))
             });

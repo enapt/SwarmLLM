@@ -1849,9 +1849,8 @@ pub(crate) fn segment_shape(
 }
 
 /// `(fixed_mb, per_layer_mb)` that `estimate` charges a MIDDLE segment of the
-/// model `base` describes (its whole-model inputs), when the node asked holds
-/// `weight_bytes` of its shards — weights charged in proportion to the layers,
-/// as `segment_shape` charges them at admission. The estimate is affine in the
+/// model `base` describes (its whole-model inputs) — weights charged in
+/// proportion to the layers, as `segment_shape` charges them at admission. The estimate is affine in the
 /// layer count — weights and KV scale with it, the process overhead does not —
 /// so two points determine it, and taking them from the estimator itself means
 /// nothing here restates its arithmetic.
@@ -1866,7 +1865,6 @@ pub(crate) fn segment_shape(
 /// rounding bends a slope taken over a single layer.
 fn cost_curve_of(
     base: &crate::model::auto_manage::vram::VramFootprintInputs,
-    weight_bytes: u64,
     estimate: fn(&crate::model::auto_manage::vram::VramFootprintInputs) -> u64,
 ) -> Option<(u64, u64)> {
     let total = base.segment_layers;
@@ -1877,7 +1875,7 @@ fn cost_curve_of(
         let mut i = *base;
         i.segment_layers = layers;
         i.is_first = false;
-        i.quantized_weight_bytes = weight_bytes / total * layers;
+        i.quantized_weight_bytes = base.quantized_weight_bytes / total * layers;
         i.kv_layers = base.kv_layers * layers / total;
         estimate(&i)
     };
@@ -1894,23 +1892,6 @@ fn cost_curve_of(
     // admission weighs it.
     let per_layer = at_whole.saturating_sub(at_half).div_ceil(total - half);
     Some((at_whole.saturating_sub(per_layer * total), per_layer))
-}
-
-/// What a PROCESSOR admission charges for this model on a peer holding
-/// `held_weight_bytes` of its shards — the peer's own arithmetic
-/// ([`cost_curve_of`] over `estimate_worker_ram_mb`), which the planner weighs
-/// that peer's advertised ceiling with (a tester's report, 2026-10-07). The
-/// processor's because it carries no f16 KV mirror, so it never charges a card
-/// peer more than that peer's own admission would.
-pub(crate) fn processor_cost_curve_for(
-    base: &crate::model::auto_manage::vram::VramFootprintInputs,
-    held_weight_bytes: u64,
-) -> Option<(u64, u64)> {
-    cost_curve_of(
-        base,
-        held_weight_bytes,
-        crate::model::auto_manage::vram::estimate_worker_ram_mb,
-    )
 }
 
 /// How many layers fit in `free_mb` once the fixed terms are paid.
@@ -2951,7 +2932,8 @@ impl ModelProcessPool {
         Some((cpu_footprint(&inputs), inputs.effective_context, source))
     }
 
-    /// Read a model's real geometry from its GGUF header and on-disk shards.
+    /// Read a model's real geometry — its weights included — from its GGUF
+    /// header alone.
     ///
     /// Shared by both footprint estimators so the GPU and CPU figures can never
     /// disagree about the model's shape — only about the per-process overhead
@@ -3024,52 +3006,22 @@ impl ModelProcessPool {
                 .unwrap_or(0)
         });
 
-        // Only the shards actually on disk will be mapped.
-        // A shard that has GONE contributes nothing — that is the honest
-        // answer, and the everyday one: auto-manage prunes and downloads in the
-        // same directory, so a file can disappear between the listing and the
-        // stat. A shard we merely cannot READ is a different fact, and summing
-        // it as zero understates the model's size — which is a memory figure a
-        // placement decision and a budget charge are made from, so it admits a
-        // model bigger than believed. That is #586's failure shape from a
-        // different feed.
-        //
-        // Unknown is not zero: answering `None` puts this on the same footing
-        // as an unreadable header, which the callers already treat as "do not
-        // judge" rather than as "it costs nothing".
-        let mut shard_bytes: u64 = 0;
-        let Ok(entries) = std::fs::read_dir(&model_dir) else {
-            tracing::warn!(
-                model = %model_id,
-                dir = %model_dir.display(),
-                "Cannot list this model's directory — its size is unknown, not zero"
-            );
-            return None;
-        };
-        for entry in entries.filter_map(Result::ok) {
-            let is_shard = entry
-                .file_name()
-                .to_str()
-                .is_some_and(|n| n.starts_with("shard_") && n.ends_with(".bin"));
-            if !is_shard {
-                continue;
-            }
-            match entry.metadata() {
-                Ok(m) => shard_bytes += m.len(),
-                // Pruned or deleted between the listing and the stat.
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => {
-                    tracing::warn!(
-                        model = %model_id,
-                        path = %entry.path().display(),
-                        error = %e,
-                        "Cannot read a shard's size — this model's memory footprint is \
-                         unknown, not zero"
-                    );
-                    return None;
-                }
-            }
-        }
+        // The model's weights, from the header's tensor table: a property of
+        // the MODEL, the same on every node. They used to be the shard files
+        // on THIS node's disk, which is the whole model only on a node holding
+        // all of it. `segment_shape` charges a segment those bytes over ALL the
+        // layers, so a node holding half a model was charged about half of
+        // what its half needs (2026-10-07: xlam-2-3b held 2 of 4 parts, 951 of
+        // 1840 MiB), and a node holding none — which still has the header,
+        // fetched to route (`ensure_model_geometry`) — was charged no weights
+        // at all: the model list showed a 9B needing 1346 MB and "fits on your
+        // card" (gotcha #803's sibling). The shards a load maps carry exactly
+        // these tensors.
+        let shard_bytes: u64 = ct
+            .tensor_infos
+            .values()
+            .map(crate::inference::split::tensor_byte_size)
+            .sum();
 
         // Is this an UNQUANTIZED checkpoint? Read it off the largest tensor,
         // which on any architecture is one of the big linear weights: in a
@@ -4344,18 +4296,7 @@ impl ModelProcessPool {
         } else {
             estimate_worker_ram_mb
         };
-        cost_curve_of(&base, base.quantized_weight_bytes, estimate)
-    }
-
-    /// The model's footprint inputs as this node reads them from its header,
-    /// for pricing a PEER — whose weights are the shards IT holds, not those on
-    /// this node's disk, which may be none ([`processor_cost_curve_for`]).
-    /// `None` when this node has no header for the model.
-    pub(crate) fn model_footprint_base(
-        &self,
-        model_id: &ModelId,
-    ) -> Option<crate::model::auto_manage::vram::VramFootprintInputs> {
-        self.footprint_inputs(model_id, None)
+        cost_curve_of(&base, estimate)
     }
 
     /// The most layers of `model_id` this node could admit right now, on the
@@ -9324,6 +9265,80 @@ mod tests {
         );
     }
 
+    /// A model's weights are read from its HEADER — the same on every node —
+    /// never from the shard files this node happens to hold. From the disk, a
+    /// node holding NONE (which still has the header, fetched to route) priced
+    /// a 9B at 1346 MB and "fits on your card", and a node holding HALF was
+    /// charged about half of what its half needs (xlam-2-3b: 951 of 1840 MiB
+    /// on disk, 2026-10-07).
+    #[test]
+    fn a_models_weights_are_its_headers_whatever_this_node_holds() {
+        use candle_core::quantized::{gguf_file, GgmlDType, QTensor};
+        let dev = candle_core::Device::Cpu;
+        let q8 = |rows: usize, cols: usize| {
+            QTensor::quantize(
+                &candle_core::Tensor::zeros((rows, cols), candle_core::DType::F32, &dev).unwrap(),
+                GgmlDType::Q8_0,
+            )
+            .unwrap()
+        };
+        let (embd, l0, l1, out) = (q8(256, 64), q8(64, 64), q8(64, 64), q8(256, 64));
+        let u32v = gguf_file::Value::U32;
+        let metadata = [
+            (
+                "general.architecture",
+                gguf_file::Value::String("llama".into()),
+            ),
+            ("llama.block_count", u32v(2)),
+            ("llama.embedding_length", u32v(64)),
+            ("llama.attention.head_count", u32v(4)),
+            ("llama.attention.head_count_kv", u32v(4)),
+            (
+                "llama.attention.layer_norm_rms_epsilon",
+                gguf_file::Value::F32(1e-5),
+            ),
+        ];
+        let mut header = std::io::Cursor::new(Vec::new());
+        gguf_file::write(
+            &mut header,
+            &metadata.iter().map(|(k, v)| (*k, v)).collect::<Vec<_>>(),
+            &[
+                ("token_embd.weight", &embd),
+                ("blk.0.attn_q.weight", &l0),
+                ("blk.1.attn_q.weight", &l1),
+                ("output.weight", &out),
+            ],
+        )
+        .unwrap();
+        // Q8_0: 34 bytes per 32 weights.
+        let model_bytes = ((256 * 64 + 64 * 64 * 2 + 256 * 64) / 32 * 34) as u64;
+
+        let data_dir =
+            std::env::temp_dir().join(format!("swarmllm-weights-{}", std::process::id()));
+        let model = ModelId("weights-from-header".into());
+        let dir = crate::model::shard::model_dir(&data_dir, &model.0);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(crate::model::shard::HEADER_FILENAME),
+            header.into_inner(),
+        )
+        .unwrap();
+        let pool = ModelProcessPool::new(data_dir.clone());
+        let weights = |segment| {
+            pool.footprint_inputs(&model, segment)
+                .expect("the header alone is enough")
+                .quantized_weight_bytes
+        };
+
+        assert_eq!(weights(None), model_bytes, "holding none of the model");
+        // Holding part of it: a shard file a fraction of the model's size.
+        std::fs::write(dir.join("shard_000.bin"), vec![0u8; 1000]).unwrap();
+        assert_eq!(weights(None), model_bytes, "holding part of the model");
+        // A segment is charged its share of the WHOLE model, not of the part.
+        assert_eq!(weights(Some((1, 2))), model_bytes / 2);
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
     /// The curve the planner and the incremental charge both read is taken from
     /// the estimator, not restated — and its PER-LAYER term carries the KV
     /// cache. Once the estimator charged KV by `kv_layers` (#228), a curve that
@@ -9356,8 +9371,7 @@ mod tests {
             i.kv_layers = inputs.kv_layers * layers / 28;
             estimate_worker_ram_mb(&i)
         };
-        let (fixed, per_layer) =
-            super::processor_cost_curve_for(&whole, whole.quantized_weight_bytes).unwrap();
+        let (fixed, per_layer) = super::cost_curve_of(&whole, estimate_worker_ram_mb).unwrap();
         // The line is the estimator's: exact for the whole model, and for any
         // shorter segment never above it and within a MB a layer below it (the
         // slope is a whole MB, rounded up).
@@ -9375,18 +9389,12 @@ mod tests {
             ..whole
         };
         let (fixed_q, per_layer_q) =
-            super::processor_cost_curve_for(&quarter, whole.quantized_weight_bytes).unwrap();
+            super::cost_curve_of(&quarter, estimate_worker_ram_mb).unwrap();
         assert!(per_layer_q < per_layer, "{per_layer_q} vs {per_layer}");
         // Within the slope's rounding — a cache left in the fixed term would be
         // hundreds of MB here.
         assert!(fixed_q.abs_diff(fixed) <= 28, "{fixed_q} vs {fixed}");
         assert!((fixed_q + per_layer_q * 28).abs_diff(segment(&quarter, 28)) <= 1);
-        // A peer's curve is weighed with ITS shards: holding half the weights,
-        // it is charged half of them per layer.
-        let (_, per_layer_half) =
-            super::processor_cost_curve_for(&whole, whole.quantized_weight_bytes / 2).unwrap();
-        assert!(per_layer_half < per_layer);
-
         // A flat estimate has no per-layer term, which is unknowable rather
         // than unlimited.
         assert_eq!(super::layers_that_fit(7910, 300, 0), None);

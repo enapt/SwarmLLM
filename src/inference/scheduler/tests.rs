@@ -6267,9 +6267,10 @@ fn two_whole_model_card_peers() -> (Arc<SharedState>, NodeId, NodeId, NodeId, Mo
     (state, local, b, c, ModelId(model.into()))
 }
 
-/// A tester's report, 2026-10-07, end to end: the model's real geometry, each
-/// holder's 4 GB of shards (from the manifest — this node holds none) and the
-/// estimator its admission runs (`process_pool::processor_cost_curve_for`).
+/// A tester's report, 2026-10-07, end to end: the model's real geometry and the
+/// estimator every node's admission runs on it (`segment_cost_curve` — weights
+/// from the header, so this node prices a peer as the peer prices itself, holding
+/// none of the model).
 ///
 /// - At a ceiling worth 24 layers to each: the model is SPLIT between them,
 ///   neither given more than 24 — where v0.3.229 handed one of them all 32 (the
@@ -6301,9 +6302,11 @@ fn a_model_no_holder_could_ever_hold_is_refused_by_the_planner() {
         .model_process_pool
         .test_footprint_inputs
         .insert(model.clone(), geometry);
-    // Each holder holds both 2 GB shards: what its admission charges.
-    let (fixed, per_layer) =
-        crate::inference::process_pool::processor_cost_curve_for(&geometry, 4_000_000_000).unwrap();
+    // What each holder's admission charges, from the model's own geometry.
+    let (fixed, per_layer) = state
+        .model_process_pool
+        .segment_cost_curve(&model, false)
+        .unwrap();
     let worth = |layers: u64| fixed + per_layer * layers;
     let advertise = |ceiling: Option<u64>| {
         for n in [&b, &c] {
@@ -6344,7 +6347,7 @@ fn a_model_no_holder_could_ever_hold_is_refused_by_the_planner() {
         assert_eq!(
             cand.max_hostable_layers_at_ceiling,
             Some(24),
-            "the peer's own admission arithmetic, over the shards IT holds"
+            "the peer's own admission arithmetic, from the model's header"
         );
     }
     let split = plan().expect("24 + 24 holds 32 layers");

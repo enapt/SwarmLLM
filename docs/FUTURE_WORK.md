@@ -1523,8 +1523,8 @@ grep `^| N |`).
   capacity rung held peers to NOTHING (report #025's rescue), and the current-figure arithmetic
   (file bytes per layer) let both through. Each node now advertises
   `NodeCapability::model_memory_ceiling_mb` (its RAM cap; card + memory on a card node); the
-  planner weighs it with the peer's own admission arithmetic over the shards IT holds
-  (`process_pool::processor_cost_curve_for`), never plans past it on any rung or greedy pass
+  planner weighs it with the peer's own admission arithmetic (`segment_cost_curve`; a model's
+  weights now come from its header on every node), never plans past it on any rung or greedy pass
   (`NodeCandidate::within_ceiling`), splits across holders where their ceilings add up, and
   refuses as `SwarmShortOfMemory` before asking anyone where they do not. Rig
   `examples/ceiling_test.sh`: 784 MB cap against a 980 MB footprint → 503 in 0.1 s, server asked

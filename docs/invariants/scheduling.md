@@ -906,11 +906,12 @@ the whole machine's memory on a card node, whose loader splits a model across
 both and does not charge the processor's share to the RAM budget. An upper
 bound by construction, because a ceiling set too low would refuse routes the
 peer would accept. The planner weighs it with the PEER's own admission
-arithmetic: `process_pool::processor_cost_curve_for` over the model's geometry
-(read once per plan from the header) and the bytes of the shards THAT peer holds
-— its admission divides its own shard bytes, not ours, and a coordinator often
-holds none (the first version read this node's disk and computed nothing for
-exactly the report's case; the rig caught it). The processor curve, because it
+arithmetic, which is now ours too: `segment_cost_curve(model, processor)`, read
+once per plan — a model's weights come from its HEADER on every node
+(`footprint_inputs`, `docs/invariants/memory.md` § "A model's weights are its
+header's"), so a coordinator holding none of the model prices a peer exactly as
+the peer prices itself (the first version read this node's DISK and computed
+nothing for exactly the report's case; the rig caught it, gotcha #803). The processor curve, because it
 has no f16 KV mirror, so a card peer is never weighed more strictly than its own
 admission weighs it; the slope is rounded UP, so the line is exact for the whole
 model and never above the estimator for a shorter segment.
