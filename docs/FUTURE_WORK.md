@@ -40,7 +40,7 @@ after v0.3.224 (#160, #215 and #216 closed; #217 and #218 opened from the swarm 
 v0.3.226 (released 2026-10-05), #220 opened from the .225 gate's unrecorded driver resets; #129's fit verdict (idle-model
 reclaim) shipped in v0.3.227 (released 2026-10-05 23:45 UTC); #222 (a node near its storage limit deleting and
 re-fetching parts) and #223 closed in v0.3.228 (released 2026-10-06 09:42 UTC), #224 opened from its gate;
-#225, #226 and #227 opened from a tester's two reports the same day; #225 and #226 closed on main that night, and #117 (Qwen 3.5, dense) with #228 opened for what it leaves out.
+#225, #226 and #227 opened from a tester's two reports the same day; #117 (Qwen 3.5, dense), #225 and #226 closed in v0.3.229 (released 2026-10-07 00:00 UTC), #228 opened for what Qwen 3.5 leaves out.
 `docs/plans/` holds the multi-step designs; the entries point at them.
 
 **P0 — wrong answers, silently**
@@ -1431,7 +1431,7 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-06 on main, not yet released** (#117, #225, #226)
+**Closed 2026-10-06, released in v0.3.229 (2026-10-07)** (#117, #225, #226)
 - #117 — Qwen 3.5 (dense) was refused; it runs now. The local branch's rewrite against llama.cpp
   master rebased onto main and was checked again: logits (`~/llama.cpp-ref/dump_logits`) — 0.8B F32
   worst cos 0.999999 and top-1 24/24, Q8_0 median 0.99965 24/24 whole and split at layer 10
@@ -1462,7 +1462,7 @@ grep `^| N |`).
 
 **Closed 2026-10-06, released in v0.3.228 (2026-10-06)** (#222, #223) (`docs/invariants/memory.md` § "`AutoShardManager::would_shed_copy` is the ONE answer")
 - #222 — a node near its storage limit deleted parts and fetched the same parts back, for ever.
-  **A second way in, found on v0.3.228 the same day and fixed on main (not yet released):** a part
+  **A second way in, found on v0.3.228 the same day and fixed in v0.3.229:** a part
   once refused from a peer stayed in `shard_p2p_failed` after it was fetched from HuggingFace, and
   the pending-fetch pass re-fetched it whenever prune deleted it as surplus — a tester's node
   (`bf7b3263`), ~4 GB an hour at disk pressure 0.56 (gotcha #797; the set lives in memory, so a
