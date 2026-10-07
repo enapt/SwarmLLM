@@ -573,7 +573,10 @@ impl SplitModel {
         // below — a card's guard must not count the cache of layers it
         // does not hold.
         let per_token = {
-            let seg_layers = device_layers;
+            // The layers on `device` that keep a KV cache — not a recurrent
+            // layer's fixed state (`split::layers_keeping_kv`).
+            let seg_layers =
+                super::layers_keeping_kv(&ct, layer_start, layer_start + device_layers);
             let (k_elems, v_elems) = if matches!(model_arch, ModelArch::DeepSeek2) {
                 let key_length = md_get("attention.key_length")
                     .and_then(|v| v.to_u32().map_err(SwarmError::internal))
@@ -1403,9 +1406,7 @@ impl SplitModel {
                 let device = placement.device_for(layer_idx);
                 let (cos, sin) = placement.rope_for(layer_idx);
                 let prefix = format!("blk.{layer_idx}");
-                let is_deltanet = ct
-                    .tensor_infos
-                    .contains_key(&format!("{prefix}.ssm_alpha.weight"));
+                let is_deltanet = super::layer_is_recurrent(&ct, layer_idx);
 
                 let attn_norm =
                     q35_tensor(&mut *file, format!("{prefix}.attn_norm.weight"), &device)?;

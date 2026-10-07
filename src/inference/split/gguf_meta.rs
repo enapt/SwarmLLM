@@ -126,6 +126,33 @@ pub fn gguf_arch_str(ct: &gguf_file::Content) -> String {
         .unwrap_or_else(|| "llama".to_string())
 }
 
+/// Is layer `layer_idx` a RECURRENT layer — Qwen 3.5's Gated DeltaNet, which
+/// carries a fixed-size state instead of a KV cache that grows per position?
+///
+/// Read off the tensor table: the loader builds a DeltaNet layer exactly where
+/// `blk.N.ssm_alpha.weight` exists, so this is the loader's own test, and a
+/// header answers it for a segment whose parts are not on disk. llama.cpp
+/// derives the same layers from `full_attention_interval`
+/// (`(il + 1) % interval != 0`); the file is the stronger witness.
+pub(crate) fn layer_is_recurrent(ct: &gguf_file::Content, layer_idx: usize) -> bool {
+    ct.tensor_infos
+        .contains_key(&format!("blk.{layer_idx}.ssm_alpha.weight"))
+}
+
+/// How many of layers `[start, end)` keep a KV cache: all of them for a
+/// transformer, the full-attention ones only for a model that interleaves
+/// recurrent layers ([`layer_is_recurrent`]). The ONE answer for everything
+/// that charges a card for conversation memory — admission
+/// (`VramFootprintInputs::kv_layers`), the split planner (`split_for_card`) and
+/// the loader's KV budget. Charging every layer of Qwen 3.5 3B-9B as attention
+/// overstated it fourfold: ~805 MB at the admission context for the 9B, the
+/// margin by which it missed an 8 GB card (FUTURE_WORK #228).
+pub(crate) fn layers_keeping_kv(ct: &gguf_file::Content, start: usize, end: usize) -> usize {
+    (start..end)
+        .filter(|&layer| !layer_is_recurrent(ct, layer))
+        .count()
+}
+
 /// Metadata extracted from GGUF header, stored in manifest for all nodes.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct GgufTensorMeta {
@@ -1143,5 +1170,62 @@ mod eos_fallback_tests {
                 "{ordinary:?} must not be treated as a turn marker"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod kv_layer_tests {
+    use super::*;
+
+    /// A header whose tensor table names `names`.
+    fn header(names: &[String]) -> gguf_file::Content {
+        gguf_file::Content {
+            magic: gguf_file::VersionedMagic::GgufV3,
+            metadata: HashMap::new(),
+            tensor_infos: names
+                .iter()
+                .map(|n| {
+                    (
+                        n.clone(),
+                        gguf_file::TensorInfo {
+                            ggml_dtype: candle_core::quantized::GgmlDType::F32,
+                            shape: candle_core::Shape::from(1usize),
+                            offset: 0,
+                        },
+                    )
+                })
+                .collect(),
+            tensor_data_offset: 0,
+        }
+    }
+
+    /// Qwen 3.5's shape: a full-attention layer every fourth (llama.cpp:
+    /// recurrent where `(il + 1) % 4 != 0`), told apart as the loader tells
+    /// them — by `ssm_alpha`.
+    #[test]
+    fn only_a_models_attention_layers_keep_a_kv_cache() {
+        let names: Vec<String> = (0..8)
+            .map(|il| {
+                if (il + 1) % 4 != 0 {
+                    format!("blk.{il}.ssm_alpha.weight")
+                } else {
+                    format!("blk.{il}.attn_k.weight")
+                }
+            })
+            .collect();
+        let ct = header(&names);
+        assert!(layer_is_recurrent(&ct, 0));
+        assert!(!layer_is_recurrent(&ct, 3));
+        assert_eq!(layers_keeping_kv(&ct, 0, 8), 2);
+        assert_eq!(layers_keeping_kv(&ct, 0, 4), 1);
+        assert_eq!(layers_keeping_kv(&ct, 4, 7), 0);
+    }
+
+    /// A transformer: every layer keeps one.
+    #[test]
+    fn every_layer_of_a_transformer_keeps_a_kv_cache() {
+        let names: Vec<String> = (0..6).map(|il| format!("blk.{il}.attn_k.weight")).collect();
+        assert_eq!(layers_keeping_kv(&header(&names), 0, 6), 6);
+        assert_eq!(layers_keeping_kv(&header(&names), 2, 5), 3);
     }
 }

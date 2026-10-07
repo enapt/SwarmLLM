@@ -1958,8 +1958,9 @@ pub struct WorkerSummary {
 /// **Only for an architecture the loader will split.** It loads any other one
 /// WHOLE on the card (`hybrid::arch_supports_hybrid`, with a warning), so a
 /// split offered here put a model that does not fit onto the card anyway — a
-/// failed load and a respawn on the processor at best. Qwen 3.5 and
-/// DeepSeek-2 are the two today (review of #104, 2026-09-25).
+/// failed load and a respawn on the processor at best. DeepSeek-2 and Qwen 3.5's
+/// MoE variant are the ones today (review of #104, 2026-09-25; dense Qwen 3.5
+/// joined the allowlist 2026-10-07, #228).
 fn split_for_card(
     inputs: &crate::model::auto_manage::vram::VramFootprintInputs,
     available_bytes: u64,
@@ -1971,8 +1972,11 @@ fn split_for_card(
     if layers == 0 {
         return None;
     }
-    // KV geometry per layer, in the units `kv_bytes_per_token` takes.
-    let kv_elems = (inputs.head_count_kv * inputs.head_dim) as usize;
+    // KV geometry per layer, in the units `kv_bytes_per_token` takes —
+    // averaged over the segment's layers, because only `kv_layers` of them
+    // keep a cache (a recurrent layer holds a fixed state; Qwen 3.5, #228).
+    let kv_elems = ((inputs.head_count_kv * inputs.head_dim).saturating_mul(inputs.kv_layers))
+        .div_ceil(inputs.segment_layers.max(1)) as usize;
     // The card also holds the flash-attention f16 mirror of that cache for
     // a grouped-query model — the loader charges it (`split::loader`, its
     // KV budget), so the split must, or it leaves the card less room for a
@@ -2898,6 +2902,7 @@ impl ModelProcessPool {
                 i.quantized_weight_bytes =
                     whole.quantized_weight_bytes / whole.segment_layers.max(1) * layers;
                 i.segment_layers = layers;
+                i.kv_layers = whole.kv_layers * layers / whole.segment_layers.max(1);
                 i.is_first = start == 0;
             }
             return Some(i);
@@ -3036,6 +3041,15 @@ impl ModelProcessPool {
         // back whenever `is_first`.
         let (segment_layers, is_first, segment_weight_bytes) =
             segment_shape(tensor_meta.block_count as u64, shard_bytes, segment);
+        // The same segment's layers that keep a KV cache — the loader's own
+        // count (`split::layers_keeping_kv`), so admission and the KV budget
+        // charge the same layers.
+        let first_layer = segment.map_or(0, |(start, _)| start as usize);
+        let kv_layers = crate::inference::split::layers_keeping_kv(
+            &ct,
+            first_layer,
+            first_layer + segment_layers as usize,
+        ) as u64;
 
         Some(VramFootprintInputs {
             quantized_weight_bytes: segment_weight_bytes,
@@ -3044,6 +3058,7 @@ impl ModelProcessPool {
             vocab_size: vocab,
             embedding_length: tensor_meta.embedding_length as u64,
             segment_layers,
+            kv_layers,
             head_count_kv: tensor_meta.head_count_kv as u64,
             head_count: tensor_meta.head_count as u64,
             head_dim: tensor_meta.head_dim as u64,
@@ -8188,6 +8203,7 @@ mod tests {
                     vocab_size: 152_064,
                     embedding_length: 3584,
                     segment_layers: 28,
+                    kv_layers: 28,
                     head_count_kv: 4,
                     head_count: 28,
                     head_dim: 128,
@@ -9670,6 +9686,7 @@ mod admission_tests {
             vocab_size: 152_064,
             embedding_length: 3584,
             segment_layers: 28,
+            kv_layers: 28,
             head_count_kv: 4,
             head_count: 28,
             head_dim: 128,
@@ -9696,6 +9713,15 @@ mod admission_tests {
             ..splittable
         };
         assert!(split_for_card(&qwen35, three_gb).is_some());
+        // ...and only the layers that keep a KV cache are charged one: a
+        // quarter of them for Qwen 3.5, so more of its layers fit the card.
+        let quarter_kv = crate::model::auto_manage::vram::VramFootprintInputs {
+            kv_layers: qwen35.segment_layers / 4,
+            ..qwen35
+        };
+        let (all_kv, _) = split_for_card(&qwen35, three_gb).unwrap();
+        let (some_kv, _) = split_for_card(&quarter_kv, three_gb).unwrap();
+        assert!(some_kv > all_kv, "{some_kv} layers vs {all_kv}");
     }
 
     /// The planner is told this node can hold a model the loader would SPLIT
@@ -9713,6 +9739,7 @@ mod admission_tests {
             vocab_size: 152_064,
             embedding_length: 3584,
             segment_layers: 28,
+            kv_layers: 28,
             head_count_kv: 4,
             head_count: 28,
             head_dim: 128,

@@ -2007,11 +2007,18 @@ logs "not verified for this architecture" and loads the whole model on the card
 split 12/24: all three prompts PASS (prompt tokens identical, worst gap 0.012).
 4B Q4_K_M split 16/32: France and Fibonacci PASS (gap 0); Mars FAILS the 0.05
 margin at one position by **0.16411 — identically whole on the card, whole on the
-processor and split 16**, and 0.13/0.22 split 8/24: a difference between our Qwen
-3.5 and llama.cpp at one near-tie that shipped in v0.3.229, not the split's. The
-split reproduces the unsplit reply. Not yet sized for Qwen 3.5: the placement
-charges every layer an attention layer's KV, where three in four are DeltaNet with
-a fixed state — fewer layers go on the card than would fit (safe direction).
+processor and split 16**, and 0.13/0.22 split 8/24 — not the split's. Nor a Qwen
+3.5 defect: on six prompts Llama-3.2-3B Q4_K_M misses the same margin by 0.306,
+and the unquantized 0.8B matches llama.cpp exactly. ⚠ **`score_ids_dump.py`'s
+0.05 margin flags 4-bit near-ties on ANY family** — judge a Q4 file against an
+established family's distribution on the same prompts, and settle correctness on
+an F32/Q8 file. The
+split reproduces the unsplit reply. Sized the same day: admission, the split
+planner (`process_pool::split_for_card`) and the loader's KV budget charged every
+layer an attention layer's KV, where three in four are DeltaNet with a fixed state
+— 805 MB too much for the 9B at the admission context. All three ask
+`split::layers_keeping_kv` now, from the tensor table (`blk.N.ssm_alpha.weight`,
+the loader's own test, `split::layer_is_recurrent`).
 
 ## One prefix-cache snapshot is sized by bytes, and keeps the opening (2026-09-26)
 

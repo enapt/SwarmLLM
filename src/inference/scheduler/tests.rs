@@ -6114,6 +6114,7 @@ fn the_planner_weighs_a_local_model_the_loader_would_split_on_the_card() {
             vocab_size: 32_768,
             embedding_length: 4096,
             segment_layers: 32,
+            kv_layers: 32,
             head_count_kv: 8,
             head_count: 32,
             head_dim: 128,

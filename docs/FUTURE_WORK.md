@@ -914,16 +914,21 @@ Dense Qwen 3.5 runs since #117. Still out: (1) `qwen35moe` stays refused until c
 real file (HF: `Flexan/kshitijthakkar-qwen3.5-moe-0.87B-d0.8B-GGUF`); (2) ~~the card/processor
 split~~ — **on main 2026-10-07, not yet released**: dense Qwen 3.5 is on `arch_supports_hybrid`,
 checked split on the card against llama.cpp (`docs/invariants/inference.md` § "A card/processor
-split is placed in every per-layer loop"). Left of it: the placement charges every layer an
-attention layer's KV while three in four are DeltaNet with a fixed state, so fewer layers go on
-the card than would fit — size `hybrid::plan_gpu_layers` per layer kind; (3) the delta rule runs token by token — correct, slow for a long prompt on a card
+split is placed in every per-layer loop"). Its sizing followed the same day:
+admission, the split planner and the loader's KV budget charged every layer an attention
+layer's KV while three in four are DeltaNet with a fixed state — ~805 MB too much for the 9B at
+the admission context, the margin by which it missed an 8 GB card. All three now ask
+`split::layers_keeping_kv` (the real 9B header: attention at layers 3, 7, …, 31, llama.cpp's
+rule). Still uncharged: each DeltaNet layer's per-request state (~2 MB a layer for the 9B,
+covered by the forward-buffer reserve); (3) the delta rule runs token by token — correct, slow for a long prompt on a card
 (llama.cpp's `build_delta_net_chunking` is the reference); (4) decode is never captured as a CUDA
 graph ("a layer type the capture has not been checked on"); (5) no speculation of any kind — a
-snapshot of the recurrent state per draft would allow it; (6) observed 2026-10-07: 4B Q4_K_M,
-"List three facts about the planet Mars.", one position 0.164 behind llama.cpp's first choice —
-identical on the card, the processor and split, so ours is self-consistent and the difference
-is with llama.cpp. Every other prompt scored ≤ 0.012. Sample more prompts on the 4B before
-calling it a defect (`~/llama.cpp-ref/score_ids_dump.py`). Re-check with
+snapshot of the recurrent state per draft would allow it; (6) ~~the 4B's gap to llama.cpp~~ —
+checked 2026-10-07, not a defect: six prompts scored on the processor against llama.cpp master
+(`score_ids_dump.py`, margin 0.05) — Qwen 3.5 4B Q4_K_M misses on 3 (gaps 0.11-0.21), and
+Llama-3.2-3B Q4_K_M, a long-verified family, misses on 1 by MORE (0.306, "why the sky is blue").
+Unquantized, the 0.8B matches llama.cpp exactly (worst cos 0.999999), at Q8_0 within 0.012: the
+model's arithmetic is right and 4-bit near-ties fall the other way through our kernels' rounding. Re-check with
 `~/llama.cpp-ref/{dump_logits,ref_generate}` (llama-cpp-python 0.3.16 cannot load `qwen35`), and
 render a new template with jinja2 first (gotcha #798).
 

@@ -47,6 +47,7 @@ pub use self::gguf_meta::{
     save_gguf_header, GgufTensorMeta, GgufTokenizerMeta, SidecarSpec, TensorLocation,
     ROPE_FREQS_FILENAME, TIED_OUTPUT_FILENAME,
 };
+pub(crate) use self::gguf_meta::{layer_is_recurrent, layers_keeping_kv};
 pub use self::kv_cache::{KvCacheStore, KvOccupancy};
 pub use self::model::SplitModel;
 pub use self::prefix_cache::{

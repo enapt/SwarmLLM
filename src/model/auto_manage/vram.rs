@@ -68,6 +68,10 @@ pub struct VramFootprintInputs {
     pub embedding_length: u64,
     /// Layers in THIS segment, not the whole model.
     pub segment_layers: u64,
+    /// Of `segment_layers`, those that keep a KV cache — every one for a
+    /// transformer, the full-attention ones of a model that interleaves
+    /// recurrent layers (`split::layers_keeping_kv`, Qwen 3.5: one in four).
+    pub kv_layers: u64,
     /// `{arch}.attention.head_count_kv`.
     pub head_count_kv: u64,
     /// `{arch}.attention.head_count` — with `head_count_kv`, whether the cache
@@ -294,8 +298,11 @@ fn resident_footprint(
     // the only place this estimator deliberately charges less than the worst
     // case, and it is allowed to because a GPU worker has a runtime check that
     // catches the difference.
+    // Only the layers that keep one (`kv_layers`): a recurrent layer carries a
+    // fixed state instead, and charging it a cache overstated Qwen 3.5 9B by
+    // ~805 MB here — the margin by which it missed an 8 GB card (#228).
     let kv_bytes = i
-        .segment_layers
+        .kv_layers
         .saturating_mul(2)
         .saturating_mul(i.head_count_kv)
         .saturating_mul(i.head_dim)
@@ -1552,6 +1559,36 @@ mod tests {
 mod footprint_tests {
     use super::*;
 
+    /// A recurrent layer keeps no KV cache, and admission charges none for it:
+    /// only `kv_layers` are charged. Qwen 3.5 9B's 32 layers hold 8 attention
+    /// layers; charging all 32 overstated it by ~805 MB at the admission
+    /// context, the margin by which it missed an 8 GB card (#228).
+    #[test]
+    fn admission_charges_a_kv_cache_only_for_the_layers_that_keep_one() {
+        let dense = VramFootprintInputs {
+            segment_layers: 32,
+            kv_layers: 32,
+            head_count_kv: 4,
+            head_count: 16,
+            head_dim: 256,
+            effective_context: 8192,
+            ..tinyllama()
+        };
+        let qwen35 = VramFootprintInputs {
+            kv_layers: 8,
+            ..dense
+        };
+        let kv =
+            |i: &VramFootprintInputs| resident_footprint(i, true, ADMISSION_KV_CONTEXT).kv_bytes;
+        assert_eq!(kv(&qwen35) * 4, kv(&dense));
+        // 24 recurrent layers × K and V × 4 heads × 256 × 4,096 positions × f32:
+        // 805 MB no longer charged.
+        assert_eq!(
+            kv(&dense) - kv(&qwen35),
+            24 * 2 * 4 * 256 * ADMISSION_KV_CONTEXT * 4
+        );
+    }
+
     /// tinyllama-1.1b-q4 as it actually sits on disk: 636 MB of shards, 32k
     /// vocabulary, 22 layers, 4 KV heads, head_dim 64, 2048 context.
     fn tinyllama() -> VramFootprintInputs {
@@ -1561,6 +1598,7 @@ mod footprint_tests {
             vocab_size: 32_000,
             embedding_length: 2048,
             segment_layers: 22,
+            kv_layers: 22,
             head_count_kv: 4,
             head_count: 4,
             head_dim: 64,
@@ -1581,6 +1619,7 @@ mod footprint_tests {
             vocab_size: 128_256,
             embedding_length: 2048,
             segment_layers: 16,
+            kv_layers: 16,
             head_count_kv: 8,
             head_count: 8,
             head_dim: 64,
@@ -1601,6 +1640,7 @@ mod footprint_tests {
             vocab_size: 32_064,
             embedding_length: 3072,
             segment_layers: 32,
+            kv_layers: 32,
             head_count_kv: 32,
             head_count: 32,
             head_dim: 96,
@@ -1814,6 +1854,7 @@ mod footprint_tests {
             vocab_size: 256_000,
             embedding_length: 2304,
             segment_layers: 26,
+            kv_layers: 26,
             head_count_kv: 4,
             head_count: 4,
             head_dim: 256,
@@ -1869,6 +1910,7 @@ mod footprint_tests {
             vocab_size: 0,
             embedding_length: 0,
             segment_layers: 0,
+            kv_layers: 0,
             head_count_kv: 0,
             head_count: 0,
             head_dim: 0,
@@ -1889,6 +1931,7 @@ mod footprint_tests {
             vocab_size: u64::MAX,
             embedding_length: u64::MAX,
             segment_layers: u64::MAX,
+            kv_layers: u64::MAX,
             head_count_kv: u64::MAX,
             head_count: u64::MAX,
             head_dim: u64::MAX,
@@ -1959,6 +2002,7 @@ mod footprint_tests {
             vocab_size: 151_936,
             embedding_length: 896,
             segment_layers: 24,
+            kv_layers: 24,
             head_count_kv: 2,
             head_count: 2,
             head_dim: 64,
@@ -2083,6 +2127,7 @@ mod footprint_tests {
             vocab_size: 32064,
             embedding_length: 3072,
             segment_layers: 32,
+            kv_layers: 32,
             head_count_kv: 32,
             head_count: 32,
             head_dim: 96,
