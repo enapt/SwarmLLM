@@ -160,8 +160,9 @@ model-worker: Model loaded ... device=Cuda(...) | device=Cpu  vram_after_load_mb
 `reason=` is one of `not_enough_vram`, `configured_cpu_only`,
 `gpu_too_old_for_this_build`, `gpu_stopped_responding` and (v0.3.230+)
 `driver_not_answering` — the graphics driver is resetting the card (an
-`nvidia-smi` still blocked past its 10 s bound); it clears when the driver
-answers and the model moves back by itself. Different situations that all
+`nvidia-smi` blocked for 60 s or more; one slow answer past its 10 s bound is
+waited out on the card, gotcha #802); it clears when the driver answers and
+the model moves back by itself. Different situations that all
 produce `--gpu-layers 0` and were indistinguishable before v0.3.x.
 **`device=` in the worker's own line is the answer**, not the daemon's intent.
 

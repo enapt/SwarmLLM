@@ -947,6 +947,21 @@ pub fn global_pool_vram_mb(shared: &SharedState) -> u64 {
 /// treats as unknown.
 const NVIDIA_SMI_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// How long an `nvidia-smi` must have been stuck before placement treats the
+/// driver as not answering ([`graphics_driver_not_answering`]). One slow answer
+/// is not a reset: in the v0.3.230 gate (Windows up 151 h, gotcha #802) the
+/// node's call outlived its 10 s bound while a 9B model's worker handed back
+/// 5.3 GB, the driver answered again within seconds, and the next model — one
+/// that fits only on the card — was sent to the processor and refused for lack
+/// of memory. Windows detects a hung card after `TdrDelay` (2 s) and gives
+/// threads `TdrDdiDelay` (5 s) to leave the driver (Microsoft, "TDR registry
+/// keys"); a real reset that morning held `nvidia-smi` 4-8 s, the one this
+/// exists for (2026-10-04) 14 minutes. Like a health probe's failure threshold,
+/// the condition must persist before it is acted on: a worker that meets a
+/// short stall waits it out on the card.
+#[cfg(any(all(test, unix), feature = "candle-cuda"))]
+const DRIVER_NOT_ANSWERING_AFTER: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// A program asked for a reading, with a bound on how long the asker waits and
 /// never two copies running at once.
 pub(crate) struct BoundedCommand {
@@ -969,8 +984,9 @@ impl BoundedCommand {
         }
     }
 
-    /// Is a copy that outlived the bound still running — for `nvidia-smi`, is
-    /// the graphics driver still not answering?
+    /// Is a copy that outlived the bound still running, started at least
+    /// `for_at_least` ago — for `nvidia-smi`, has the graphics driver not
+    /// answered for that long?
     ///
     /// `false` when it cannot tell without waiting: [`Self::run`] holds the
     /// lock for its whole run (up to the bound), and a placement question must
@@ -980,13 +996,15 @@ impl BoundedCommand {
     /// Windows test build without `candle-cuda` has no caller (Windows CI's
     /// clippy failed on exactly that).
     #[cfg(any(all(test, unix), feature = "candle-cuda"))]
-    pub(crate) fn still_not_answering(&self) -> bool {
+    pub(crate) fn still_not_answering(&self, for_at_least: std::time::Duration) -> bool {
         let Ok(mut unanswered) = self.unanswered.try_lock() else {
             return false;
         };
         matches!(
-            unanswered.as_mut().map(|(child, _)| child.try_wait()),
-            Some(Ok(None))
+            unanswered
+                .as_mut()
+                .map(|(child, since)| (child.try_wait(), since.elapsed() >= for_at_least)),
+            Some((Ok(None), true))
         )
     }
 
@@ -1055,14 +1073,16 @@ pub(crate) fn nvidia_smi(args: &[&str]) -> Option<String> {
 }
 
 /// Is the graphics driver not answering right now — an `nvidia-smi` that
-/// outlived [`NVIDIA_SMI_TIMEOUT`] still waiting on it? While it is, a worker
-/// started on the card blocks in its own context creation, for as long as a
-/// reset takes (14 minutes on 2026-10-04, FUTURE_WORK #220), so the pool puts
-/// new workers on the processor (`CpuReason::DriverNotAnswering`). A build
-/// that cannot drive a card never places on one, so it never asks.
+/// outlived [`NVIDIA_SMI_TIMEOUT`] still waiting on it, and for at least
+/// [`DRIVER_NOT_ANSWERING_AFTER`]? While it is, a worker started on the card
+/// blocks in its own context creation, for as long as a reset takes (14 minutes
+/// on 2026-10-04, FUTURE_WORK #220), so the pool puts new workers on the
+/// processor (`CpuReason::DriverNotAnswering`). A shorter stall is waited out
+/// on the card. A build that cannot drive a card never places on one, so it
+/// never asks.
 #[cfg(feature = "candle-cuda")]
 pub(crate) fn graphics_driver_not_answering() -> bool {
-    fault_driver_not_answering() || NVIDIA_SMI.still_not_answering()
+    fault_driver_not_answering() || NVIDIA_SMI.still_not_answering(DRIVER_NOT_ANSWERING_AFTER)
 }
 
 /// `SWARMLLM_FAULT_DRIVER_NOT_ANSWERING=1`: report the graphics driver as not
@@ -1379,20 +1399,24 @@ mod tests {
     #[test]
     fn a_driver_that_has_not_answered_is_reported_without_waiting_for_it() {
         use std::time::{Duration, Instant};
+        let any_age = Duration::ZERO;
         let sleeper = BoundedCommand::new("sleep", Duration::from_millis(200));
-        assert!(!sleeper.still_not_answering(), "nothing has been asked");
+        assert!(
+            !sleeper.still_not_answering(any_age),
+            "nothing has been asked"
+        );
 
         let still_running = std::process::Command::new("sleep")
             .arg("30")
             .spawn()
             .unwrap();
         *sleeper.unanswered.lock().unwrap() = Some((still_running, Instant::now()));
-        assert!(sleeper.still_not_answering());
+        assert!(sleeper.still_not_answering(any_age));
 
         // A run in progress holds the lock: no answer rather than a wait.
         let held = sleeper.unanswered.lock().unwrap();
         let asked = Instant::now();
-        assert!(!sleeper.still_not_answering());
+        assert!(!sleeper.still_not_answering(any_age));
         assert!(asked.elapsed() < Duration::from_millis(50));
         drop(held);
 
@@ -1400,7 +1424,38 @@ mod tests {
         stuck.kill().unwrap();
         stuck.wait().unwrap();
         *sleeper.unanswered.lock().unwrap() = Some((stuck, Instant::now()));
-        assert!(!sleeper.still_not_answering(), "it has gone");
+        assert!(!sleeper.still_not_answering(any_age), "it has gone");
+    }
+
+    /// One slow answer is not a reset (the v0.3.230 gate, gotcha #802): a copy
+    /// stuck past its bound counts as the driver not answering — and sends new
+    /// workers to the processor — only once it has been stuck for
+    /// `DRIVER_NOT_ANSWERING_AFTER`. Before that, the next worker waits the
+    /// stall out on the card.
+    #[cfg(unix)]
+    #[test]
+    fn a_driver_that_answers_late_is_not_reported_as_not_answering() {
+        use std::time::{Duration, Instant};
+        let sleeper = BoundedCommand::new("sleep", Duration::from_millis(200));
+        let still_running = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        *sleeper.unanswered.lock().unwrap() = Some((still_running, Instant::now()));
+        assert!(
+            !sleeper.still_not_answering(DRIVER_NOT_ANSWERING_AFTER),
+            "stuck for a moment is a slow answer, not a reset"
+        );
+
+        let stuck_since = Instant::now()
+            .checked_sub(DRIVER_NOT_ANSWERING_AFTER + Duration::from_secs(1))
+            .expect("the monotonic clock has run longer than a minute");
+        sleeper.unanswered.lock().unwrap().as_mut().unwrap().1 = stuck_since;
+        assert!(sleeper.still_not_answering(DRIVER_NOT_ANSWERING_AFTER));
+
+        let (mut stuck, _) = sleeper.unanswered.lock().unwrap().take().unwrap();
+        stuck.kill().unwrap();
+        stuck.wait().unwrap();
     }
 
     /// A reading that does not come back within its bound is unknown, and the

@@ -90,7 +90,7 @@ Whenever code waits for a subprocess, handle it dying instead (`spawn_worker` ra
 
 ## nvidia-smi is asked through one bounded helper (2026-10-05)
 
-**`vram::nvidia_smi`** (a `BoundedCommand`: 10 s, never two copies at once — while a stuck one lives, the next reading is `None` at once) is the only way the daemon and workers run `nvidia-smi`; a bare `Command::new("nvidia-smi")` waits as long as the driver does — 14 min during one card reset. Guard: `nvidia_smi_is_asked_only_through_the_bounded_helper`. While a stuck copy lives, `vram::graphics_driver_not_answering` is true and new workers go to the processor (`CpuReason::DriverNotAnswering`, transient — promotion brings them back).
+**`vram::nvidia_smi`** (a `BoundedCommand`: 10 s, never two copies at once — while a stuck one lives, the next reading is `None` at once) is the only way the daemon and workers run `nvidia-smi`; a bare `Command::new("nvidia-smi")` waits as long as the driver does — 14 min during one card reset. Guard: `nvidia_smi_is_asked_only_through_the_bounded_helper`. Once a copy has been stuck for 60 s (`DRIVER_NOT_ANSWERING_AFTER` — one slow answer is not a reset, #802), `vram::graphics_driver_not_answering` is true and new workers go to the processor (`CpuReason::DriverNotAnswering`, transient — promotion brings them back); a shorter stall is waited out on the card.
 
 → `docs/invariants/memory.md` § "nvidia-smi is asked through one bounded helper (2026-10-05)"
 

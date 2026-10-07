@@ -112,7 +112,11 @@ Pipeline assignment uses shortest-path dynamic programming over observed
 per-layer latencies (EMA over recent forwards) rather than a greedy
 pick-the-closest-peer heuristic. Cross-gossip of top-32 observed
 latencies via `NodeCapability.observed_latencies` lets every node keep
-a current view of the network's compute profile. A soft acquire/prune
+a current view of the network's compute profile. Since 0.3.230 a computer
+that would first have to load the model is also charged for the load: each
+node times its own model loads and advertises the rate
+(`NodeCapability.model_load_ms_per_gib`), so a warm computer can beat a
+faster one that is cold. A soft acquire/prune
 bias in `AutoShardManager` driven by a per-shard stability counter
 (≥3 consistent ticks before it acts) drifts shards toward where they're
 actually used without violating existing hard constraints.

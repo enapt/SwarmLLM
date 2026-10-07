@@ -40,9 +40,10 @@ it off an 8 GB card. Routing made the same mistake about other computers.
 **Fixed: while the graphics driver is resetting the card, models start on the
 processor.** A graphics driver can reset the card — for a few seconds, and once
 here for 14 minutes. A model that started during a reset tried to use the card
-and stalled for up to 30 seconds before failing. Models that start while the
-driver is not answering now run on the processor, and move back to the card by
-themselves once it answers. The dashboard and `swarmllm status` say why.
+and stalled for up to 30 seconds before failing. Models that start once the
+driver has not answered for a minute now run on the processor, and move back to
+the card by themselves once it answers; a pause of a few seconds is simply
+waited out on the card. The dashboard and `swarmllm status` say why.
 
 **Fixed: a long reply forwarded from a member of your pool is no longer cut off
 mid-answer.** When the swarm cannot cover a model, your computer can forward

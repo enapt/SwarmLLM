@@ -332,8 +332,10 @@ debugger interface, two DWORD 1 registry values set as administrator
 2026-10-05: `vram::nvidia_smi` bounds it at 10 s and never runs two at once (while a stuck one
 lives the next reading is unknown at once; `docs/invariants/memory.md` § "nvidia-smi is asked
 through one bounded helper"). And FIXED on main 2026-10-07 (not yet released): while that
-stuck `nvidia-smi` lives (`vram::graphics_driver_not_answering`, asked without waiting on the
-helper's lock), a new worker is placed on the processor with `CpuReason::DriverNotAnswering`
+stuck `nvidia-smi` lives and has for a minute (`vram::graphics_driver_not_answering`, asked
+without waiting on the helper's lock; `DRIVER_NOT_ANSWERING_AFTER` — the release gate caught
+the first draft acting on one 10-15 s stall and sending a card-only model to a processor it did
+not fit, gotcha #802), a new worker is placed on the processor with `CpuReason::DriverNotAnswering`
 (`driver_not_answering`; amber on the dashboard, `placement.driver_not_answering` in all 21
 locales, the CLI's words) instead of blocking in its context creation on a resetting driver;
 the reason clears when the driver answers, and promotion (`reason_still_holds`) moves the model

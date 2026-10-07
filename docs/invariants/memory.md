@@ -2018,6 +2018,23 @@ guard: `nvidia_smi_is_asked_only_through_the_bounded_helper` (green on the tree,
 bare spawn). The launcher (`src/bin/launcher.rs`) is exempt: it asks once, before the daemon
 exists.
 
+**Placement while the driver is not answering (v0.3.230, FUTURE_WORK #220 (2)).** A worker started
+on the card during a reset blocks in its context creation for as long as the reset takes, so
+`vram::graphics_driver_not_answering` puts new workers on the processor
+(`CpuReason::DriverNotAnswering`; promotion moves them back). It asks
+`BoundedCommand::still_not_answering` with `try_lock` — a placement question never queues behind
+the driver it is asking about — and only once the stuck copy has been stuck for
+`DRIVER_NOT_ANSWERING_AFTER` (60 s). **One slow answer is not a reset** (gotcha #802): the first
+draft of v0.3.230 acted on the 10 s bound alone, and in its gate (Windows up 151 h) the node's
+`nvidia-smi` outlived it while a 9B worker handed back 5.3 GB; 34 ms later Mistral-7B — which fits
+only on the card — went to the processor and was refused for lack of system memory, where v0.3.229
+had served it. The driver answered within ~15 s (the safety kit's own readings). Windows detects
+a hung card after `TdrDelay` (2 s) and gives threads `TdrDdiDelay` (5 s) to leave the driver
+(Microsoft, "TDR registry keys"); a real reset that morning held `nvidia-smi` 4-8 s, while the one
+the rule exists for (2026-10-04) held it 14 minutes — so the threshold separates them, like a
+health probe's failure threshold. Tests: `a_driver_that_has_not_answered_is_reported_without_waiting_for_it`,
+`a_driver_that_answers_late_is_not_reported_as_not_answering` (red with the threshold ignored).
+
 ## The owner is told when the card has become slow to hand out memory (2026-10-01)
 
 **Why.** The pool above and `card_pace` defend the node against a host whose fresh card

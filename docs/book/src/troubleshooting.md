@@ -118,7 +118,7 @@ and so does `swarmllm status`. The reasons, and what to do:
 | Set to use the processor only | `inference.gpu_layers = 0` | Change it in Settings if you did not mean it |
 | Card older than this build supports | This build's kernels need a newer card (on Linux, RTX 30-series or newer) | Nothing; the processor is used |
 | Lost access to the graphics card | The graphics libraries went away, usually a driver update while SwarmLLM ran | Restart SwarmLLM |
-| The graphics driver is not answering (0.3.230+) | The driver is resetting the card; `nvidia-smi` hangs meanwhile | Nothing: it moves back once the driver answers |
+| The graphics driver is not answering (0.3.230+) | The driver has not answered for a minute or more (it is resetting the card); a pause of a few seconds is waited out on the card instead | Nothing: it moves back once the driver answers |
 
 A model too big for the card whole runs partly on it ("N of M layers on the
 graphics card") rather than wholly on the processor; that is a split, not one of
