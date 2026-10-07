@@ -975,7 +975,11 @@ impl BoundedCommand {
     /// `false` when it cannot tell without waiting: [`Self::run`] holds the
     /// lock for its whole run (up to the bound), and a placement question must
     /// not queue behind the very driver it is asking about.
-    #[cfg(any(test, feature = "candle-cuda"))]
+    ///
+    /// Its test spawns `sleep`, so it is `unix`-only — and so is the gate: a
+    /// Windows test build without `candle-cuda` has no caller (Windows CI's
+    /// clippy failed on exactly that).
+    #[cfg(any(all(test, unix), feature = "candle-cuda"))]
     pub(crate) fn still_not_answering(&self) -> bool {
         let Ok(mut unanswered) = self.unanswered.try_lock() else {
             return false;
