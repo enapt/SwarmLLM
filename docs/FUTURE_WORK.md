@@ -911,13 +911,19 @@ deleting.)
 `P2` · model-support · **OPEN** — 2026-10-06 · history: #117 (closed); plan: `docs/plans/qwen35_support.md`
 
 Dense Qwen 3.5 runs since #117. Still out: (1) `qwen35moe` stays refused until checked against a
-real file (HF: `Flexan/kshitijthakkar-qwen3.5-moe-0.87B-d0.8B-GGUF`); (2) the card/processor split —
-`hybrid::arch_supports_hybrid` excludes it, so a card too small for the whole model runs it on the
-processor (its `q35_cos`/`q35_sin` tables must follow each layer's device and its state buffers be
-checked); (3) the delta rule runs token by token — correct, slow for a long prompt on a card
+real file (HF: `Flexan/kshitijthakkar-qwen3.5-moe-0.87B-d0.8B-GGUF`); (2) ~~the card/processor
+split~~ — **on main 2026-10-07, not yet released**: dense Qwen 3.5 is on `arch_supports_hybrid`,
+checked split on the card against llama.cpp (`docs/invariants/inference.md` § "A card/processor
+split is placed in every per-layer loop"). Left of it: the placement charges every layer an
+attention layer's KV while three in four are DeltaNet with a fixed state, so fewer layers go on
+the card than would fit — size `hybrid::plan_gpu_layers` per layer kind; (3) the delta rule runs token by token — correct, slow for a long prompt on a card
 (llama.cpp's `build_delta_net_chunking` is the reference); (4) decode is never captured as a CUDA
 graph ("a layer type the capture has not been checked on"); (5) no speculation of any kind — a
-snapshot of the recurrent state per draft would allow it. Re-check with
+snapshot of the recurrent state per draft would allow it; (6) observed 2026-10-07: 4B Q4_K_M,
+"List three facts about the planet Mars.", one position 0.164 behind llama.cpp's first choice —
+identical on the card, the processor and split, so ours is self-consistent and the difference
+is with llama.cpp. Every other prompt scored ≤ 0.012. Sample more prompts on the 4B before
+calling it a defect (`~/llama.cpp-ref/score_ids_dump.py`). Re-check with
 `~/llama.cpp-ref/{dump_logits,ref_generate}` (llama-cpp-python 0.3.16 cannot load `qwen35`), and
 render a new template with jinja2 first (gotcha #798).
 

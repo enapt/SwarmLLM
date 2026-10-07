@@ -143,9 +143,9 @@ pub(crate) fn layers_on_device(
 /// **Deny by default, and a new architecture is denied until someone checks
 /// it.** The loader applies placement by shadowing `device`, `cos` and `sin`
 /// at the head of each per-layer loop, which is safe exactly when the loop's
-/// tensor loads go through those names. Qwen 3.5 does not: it builds its own
-/// `q35_cos`/`q35_sin` outside the loop, so a split model would put a
-/// card-resident layer's RoPE tables on the processor.
+/// tensor loads go through those names. Qwen 3.5's first loop did not: it
+/// built its own `q35_cos`/`q35_sin` outside the loop, so a split model would
+/// have put a card-resident layer's RoPE tables on the processor.
 ///
 /// That failure is invisible until runtime — candle only objects when two
 /// tensors from different devices meet inside an op — which is precisely the
@@ -171,9 +171,17 @@ pub(crate) fn arch_supports_hybrid(arch: &crate::inference::model_arch::ModelArc
         | A::Starcoder2
         | A::Glm4
         | A::Llama4 => true,
-        // Own RoPE tables (`q35_cos`/`q35_sin`) built outside the loop, plus a
-        // state-space path whose buffers have not been checked.
-        A::Qwen35 | A::Qwen35Moe => false,
+        // Qwen 3.5 (dense), read 2026-10-07 (FUTURE_WORK #228): the rewritten
+        // loop loads every tensor through the shadowed `device` and takes its
+        // attention layers' RoPE from the shadowed `cos`/`sin` (the separate
+        // `q35_cos`/`q35_sin` this entry once excluded it for are gone), and a
+        // DeltaNet layer creates its recurrent and convolution state on its
+        // INPUT's device (`layers::qwen35`), which the executor moves to the
+        // layer's device before any layer kind runs. Checked split on a real
+        // card against llama.cpp — the numbers are in FUTURE_WORK #228.
+        A::Qwen35 => true,
+        // Refused outright until checked against a real file (#228 (1)).
+        A::Qwen35Moe => false,
         // MLA attention with its own projection set; unverified.
         A::DeepSeek2 => false,
         // An architecture we do not recognise is one whose loop nobody has

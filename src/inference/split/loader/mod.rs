@@ -1397,8 +1397,9 @@ impl SplitModel {
 
             for layer_idx in layer_start..layer_end {
                 // Per-layer placement, applied by shadowing — see
-                // `hybrid::LayerPlacement`. Qwen 3.5 stays off the hybrid
-                // allowlist until a split run has been checked.
+                // `hybrid::LayerPlacement`. Every tensor below loads through
+                // these names; that is what puts Qwen 3.5 on the hybrid
+                // allowlist (`hybrid::arch_supports_hybrid`, FUTURE_WORK #228).
                 let device = placement.device_for(layer_idx);
                 let (cos, sin) = placement.rope_for(layer_idx);
                 let prefix = format!("blk.{layer_idx}");

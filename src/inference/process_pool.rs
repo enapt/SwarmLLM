@@ -9683,13 +9683,19 @@ mod admission_tests {
         let (n, total) = split_for_card(&splittable, three_gb).expect("Qwen2 splits");
         assert!(n > 0 && n < total, "{n} of {total}");
 
-        for arch in [ModelArch::Qwen35, ModelArch::DeepSeek2] {
+        for arch in [ModelArch::Qwen35Moe, ModelArch::DeepSeek2] {
             let unsplittable = crate::model::auto_manage::vram::VramFootprintInputs {
                 splits_across_devices: arch_supports_hybrid(&arch),
                 ..splittable
             };
             assert_eq!(split_for_card(&unsplittable, three_gb), None, "{arch}");
         }
+        // Dense Qwen 3.5 splits since 2026-10-07, checked on a card (#228).
+        let qwen35 = crate::model::auto_manage::vram::VramFootprintInputs {
+            splits_across_devices: arch_supports_hybrid(&ModelArch::Qwen35),
+            ..splittable
+        };
+        assert!(split_for_card(&qwen35, three_gb).is_some());
     }
 
     /// The planner is told this node can hold a model the loader would SPLIT

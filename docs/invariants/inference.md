@@ -1993,6 +1993,26 @@ with `swarmllm test-split --gpu-layers N` + `score_ids.py`.
 
 → `docs/invariants/inference.md` § "A card/processor split is placed in every per-layer loop"
 
+**Qwen 3.5 (dense) joined the allowlist 2026-10-07 (FUTURE_WORK #228 (2)).** Its
+first loop built `q35_cos`/`q35_sin` outside the loop, which is why it was left
+off; the rewritten loop loads every tensor through the shadowed names, and a
+DeltaNet layer creates its recurrent and convolution state on its INPUT's device
+(`layers::qwen35::forward_deltanet`), which the executor's per-layer move puts on
+the layer's device before any layer kind runs — so the state lives where its
+layer does with no code of its own. Checked on the RTX 3070 against llama.cpp
+master (`test-split --gpu-layers=N`, `~/llama.cpp-ref/score_ids_dump.py`, safety
+kit, live node stopped, 0 driver events): the v0.3.229 binary asked for 12 layers
+logs "not verified for this architecture" and loads the whole model on the card
+(the control); this build logs "first 12 layers on the graphics card". 0.8B Q8_0
+split 12/24: all three prompts PASS (prompt tokens identical, worst gap 0.012).
+4B Q4_K_M split 16/32: France and Fibonacci PASS (gap 0); Mars FAILS the 0.05
+margin at one position by **0.16411 — identically whole on the card, whole on the
+processor and split 16**, and 0.13/0.22 split 8/24: a difference between our Qwen
+3.5 and llama.cpp at one near-tie that shipped in v0.3.229, not the split's. The
+split reproduces the unsplit reply. Not yet sized for Qwen 3.5: the placement
+charges every layer an attention layer's KV, where three in four are DeltaNet with
+a fixed state — fewer layers go on the card than would fit (safe direction).
+
 ## One prefix-cache snapshot is sized by bytes, and keeps the opening (2026-09-26)
 
 `PrefixCache::positions_ceiling` is the most positions one snapshot keeps: the
