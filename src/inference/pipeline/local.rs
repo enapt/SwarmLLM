@@ -41,6 +41,79 @@ const COLD_MODEL_LOAD_ALLOWANCE_SECS: u64 = 240;
 /// believe is warm generally still is.
 const PEER_MODEL_WARM_TTL_SECS: u64 = 900;
 
+/// What a wait on a peer's FIRST answer must add for the model loads that
+/// answer may queue behind — the one reading for every such wait: a segment
+/// forward ([`SegmentBudget::for_forward`]), a hand-off's first token and an
+/// HTTP forward to a pool peer (`remote_generate::first_token_timeout`, which
+/// takes one as a REQUIRED argument).
+///
+/// The 2026-08-01 fix gave a cold peer room to load on the segment path only.
+/// The whole-model hand-off — the path most single-model requests take — kept a
+/// flat 120 s, and on 2026-10-07 a peer that had restarted six minutes earlier
+/// gave no first token inside it, was penalised, and the request failed with
+/// no other holder to re-plan onto; asked again 47 s later it answered in
+/// 2.7 s (FUTURE_WORK #129).
+///
+/// Constructible only by asking about the peers, so a caller cannot hand a
+/// budget a bare `Duration` and skip the question.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LoadAllowance {
+    /// How many of the answer's machines may first have to load their layers.
+    cold: u32,
+}
+
+impl LoadAllowance {
+    /// One peer, one model: cold unless it has answered a forward of this model
+    /// within [`PEER_MODEL_WARM_TTL_SECS`].
+    pub(crate) fn for_peer(
+        state: &SharedState,
+        node_id: &crate::types::NodeId,
+        model_id: &crate::types::ModelId,
+    ) -> Self {
+        let warm = state.peer_model_is_warm(
+            node_id,
+            model_id,
+            Duration::from_secs(PEER_MODEL_WARM_TTL_SECS),
+        );
+        Self {
+            cold: u32::from(!warm),
+        }
+    }
+
+    /// Every segment a hand-off's first token waits behind. Summed, because a
+    /// prompt pass reaches each segment in turn and each loads on its first
+    /// forward. This node's own segments are never charged: its loader runs
+    /// under no deadline of ours.
+    pub(crate) fn for_segments(
+        state: &SharedState,
+        segments: &[crate::types::PipelineSegment],
+    ) -> Self {
+        let local = state.identity.node_id();
+        let cold = segments
+            .iter()
+            .filter(|s| s.node_id != *local)
+            .map(|s| Self::for_peer(state, &s.node_id, &s.shard_id.model_id).cold)
+            .sum();
+        Self { cold }
+    }
+
+    /// Nothing to load — for a test, or a wait that is not on a peer.
+    #[cfg(test)]
+    pub(crate) fn none() -> Self {
+        Self { cold: 0 }
+    }
+
+    /// How many machines may have to load first.
+    pub(crate) fn cold_loads(self) -> u32 {
+        self.cold
+    }
+
+    /// The time added to the wait.
+    pub(crate) fn duration(self) -> Duration {
+        Duration::from_secs(COLD_MODEL_LOAD_ALLOWANCE_SECS).saturating_mul(self.cold)
+    }
+}
+
 /// What `activation_bytes` is counting.
 ///
 /// The prefill coefficient in `daemon::state::peer_speed` is measured in
@@ -128,16 +201,12 @@ impl SegmentBudget {
             ),
         };
 
-        let warm = state.peer_model_is_warm(
-            node_id,
-            model_id,
-            Duration::from_secs(PEER_MODEL_WARM_TTL_SECS),
-        );
-        let (total, basis) = if warm {
+        let load = LoadAllowance::for_peer(state, node_id, model_id);
+        let (total, basis) = if load.cold_loads() == 0 {
             (base, basis)
         } else {
             (
-                base + Duration::from_secs(COLD_MODEL_LOAD_ALLOWANCE_SECS),
+                base + load.duration(),
                 if basis == "measured" {
                     "measured+coldload"
                 } else {
@@ -148,12 +217,7 @@ impl SegmentBudget {
 
         // A cold load can legitimately exceed the warm ceiling, so the
         // allowance is added on top of it rather than being clipped away by it.
-        let ceiling = Duration::from_secs(SEGMENT_TIMEOUT_MAX_SECS)
-            + Duration::from_secs(if warm {
-                0
-            } else {
-                COLD_MODEL_LOAD_ALLOWANCE_SECS
-            });
+        let ceiling = Duration::from_secs(SEGMENT_TIMEOUT_MAX_SECS) + load.duration();
         // ...but never beyond what the transport will hold the request open
         // for. `RR_REQUEST_TIMEOUT_SECS` is the request_response protocol
         // timeout: past it libp2p fails the send regardless, so a larger budget
@@ -1404,6 +1468,77 @@ mod segment_budget_tests {
             cold.duration()
         );
         assert!(cold.basis().contains("coldload"));
+    }
+
+    /// The hand-off's first token and a segment forward wait on the SAME
+    /// question about the same peer. The 2026-08-01 allowance reached only the
+    /// segment path, and on 2026-10-07 a whole-model hand-off to a peer that had
+    /// just restarted failed inside a flat 120 s (FUTURE_WORK #129).
+    #[test]
+    fn a_hand_off_and_a_segment_give_a_cold_peer_the_same_room_to_load() {
+        use crate::inference::pipeline::remote_generate::first_token_timeout;
+        let state = test_state();
+        let node = NodeId([7u8; 32]);
+        let model = ModelId("qwen3.5-9b-q4-k-m".into());
+
+        let load = LoadAllowance::for_peer(&state, &node, &model);
+        assert_eq!(load.cold_loads(), 1, "never seen serving it: cold");
+        let segment = SegmentBudget::for_forward(
+            &state,
+            &node,
+            &model,
+            WorkKind::Prefill,
+            8,
+            213_268,
+            ActivationUnits::HiddenStates,
+        );
+        assert!(segment.basis().contains("coldload"));
+        // 24 prompt tokens, the request that failed live: 132 s warm, and the
+        // cold load on top of it.
+        assert_eq!(
+            first_token_timeout(24, load),
+            first_token_timeout(24, LoadAllowance::none()) + load.duration()
+        );
+        assert!(first_token_timeout(24, load) > Duration::from_secs(300));
+
+        // Once it has answered a forward of this model, neither path charges it.
+        state.record_peer_segment_latency(&node, &model, WorkKind::Delegated, 2_700, 32, 0);
+        assert_eq!(
+            LoadAllowance::for_peer(&state, &node, &model).cold_loads(),
+            0
+        );
+        assert_eq!(
+            first_token_timeout(24, LoadAllowance::for_peer(&state, &node, &model)),
+            first_token_timeout(24, LoadAllowance::none())
+        );
+    }
+
+    /// A delegate leading a split waits behind every segment's load, in turn;
+    /// this node's own segments are never charged.
+    #[test]
+    fn a_plans_allowance_counts_each_cold_remote_segment() {
+        use crate::types::{PipelineSegment, ShardId};
+        let state = test_state();
+        let model = ModelId("m".into());
+        let local = state.identity.node_id().clone();
+        let a = NodeId([3u8; 32]);
+        let b = NodeId([4u8; 32]);
+        let seg = |node: &NodeId, range: (u32, u32)| PipelineSegment {
+            node_id: node.clone(),
+            shard_id: ShardId {
+                model_id: model.clone(),
+                index: 0,
+            },
+            layer_range: range,
+        };
+        let plan = vec![seg(&a, (0, 13)), seg(&b, (13, 25)), seg(&a, (25, 32))];
+        assert_eq!(LoadAllowance::for_segments(&state, &plan).cold_loads(), 3);
+
+        state.record_peer_segment_latency(&b, &model, WorkKind::Prefill, 5_000, 12, 200_000);
+        assert_eq!(LoadAllowance::for_segments(&state, &plan).cold_loads(), 2);
+
+        let ours = vec![seg(&local, (0, 32))];
+        assert_eq!(LoadAllowance::for_segments(&state, &ours).cold_loads(), 0);
     }
 
     /// Once the peer has served the model and been measured, the deadline

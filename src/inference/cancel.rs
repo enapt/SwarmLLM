@@ -35,8 +35,8 @@
 //! **The fourth and fifth are the peer paths, and they were missed the same
 //! way** (gotcha #468). `remote_generate`'s token loop — how a whole-model peer
 //! serves a request — DID read the flag, at the top of the loop, immediately
-//! before a wait that for the first token is `first_token_timeout(prompt_tokens)`
-//! and reaches ten minutes; and `vision::encode_remote` waits two minutes for a
+//! before a wait that for the first token is `first_token_timeout(prompt_tokens, load)`
+//! and reaches ten minutes, more for a cold peer; and `vision::encode_remote` waits two minutes for a
 //! peer's image embeddings with no check at all. Both now go through
 //! [`unless_cancelled`].
 //!

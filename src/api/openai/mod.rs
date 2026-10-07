@@ -446,16 +446,17 @@ pub async fn chat_completions(
         // Priority 2: Forward to a peer that hosts shards for this model.
         // That peer can handle inference locally or build its own pipeline.
         if !is_forwarded {
-            if let Some(peer_url) = find_peer_with_model(&state, &req.model) {
+            if let Some(peer) = find_peer_with_model(&state, &req.model) {
                 tracing::info!(
                     request_id = %request_id,
-                    peer_url = %peer_url,
+                    peer_url = %peer.url,
+                    cold_loads = peer.load.cold_loads(),
                     "Forwarding request to peer"
                 );
                 let auth = headers
                     .get(axum::http::header::AUTHORIZATION)
                     .and_then(|v| v.to_str().ok());
-                return forward_to_peer(&peer_url, &req, req.stream, auth).await;
+                return forward_to_peer(&peer, &req, req.stream, auth).await;
             }
         }
 
@@ -521,17 +522,18 @@ pub async fn chat_completions(
             }
             // Re-check peer forwarding
             if !is_forwarded {
-                if let Some(peer_url) = find_peer_with_model(&state, &req.model) {
+                if let Some(peer) = find_peer_with_model(&state, &req.model) {
                     tracing::info!(
                         request_id = %request_id,
-                        peer_url = %peer_url,
+                        peer_url = %peer.url,
+                        cold_loads = peer.load.cold_loads(),
                         wait_ms = attempt * 500,
                         "Found peer after cold-start wait"
                     );
                     let auth = headers
                         .get(axum::http::header::AUTHORIZATION)
                         .and_then(|v| v.to_str().ok());
-                    return forward_to_peer(&peer_url, &req, req.stream, auth).await;
+                    return forward_to_peer(&peer, &req, req.stream, auth).await;
                 }
             }
         }

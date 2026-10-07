@@ -2153,6 +2153,56 @@ missing within-plan piece, and it is not double-counting for a warm peer either,
 since a warm peer's advertised free memory excludes its resident weights but not
 the KV the new segment will claim.
 
+## A wait on a peer's first answer allows for its load, on every path
+
+**Rule.** `pipeline::LoadAllowance` is the single answer to "may this peer
+first have to load the model before it can answer?" — cold unless the peer
+answered a forward of the model within `PEER_MODEL_WARM_TTL_SECS` (15 min),
+worth `COLD_MODEL_LOAD_ALLOWANCE_SECS` (240 s) per cold machine. Every wait on a
+peer's FIRST answer asks it: `SegmentBudget::for_forward` (a driven split's
+forward), and `remote_generate::first_token_timeout`, which takes it as a
+REQUIRED argument — the whole-model hand-off (one segment), a delegated split
+(every remote segment, summed: a prompt pass reaches each in turn) and the HTTP
+forward to a pool peer (`resolver::PeerTarget::load`, asked where the peer is
+chosen). Outside tests a `LoadAllowance` can only be built by asking about
+peers (`none()` is `#[cfg(test)]`), so no caller can pass a bare duration.
+The allowance is added ON TOP of the prompt's cap, as on the segment path.
+
+**What it replaced.** The 2026-08-01 fix (archive § "The three follow-ups",
+1) gave the allowance to the segment path only, for "a CPU peer took ~120 s to
+load an 8B model and was cut off by a flat 120 s deadline". The hand-off — the
+path most single-model requests take — kept a flat `FIRST_TOKEN_TIMEOUT`
+(120 s + 0.5 s per prompt token) whose comment still claimed it covered "model
+load". On 2026-10-07 00:23 UTC (v0.3.229, live node): Qwen 3.5 9B handed whole
+to an Apple M4 peer that had restarted six minutes earlier (its measured latency
+10-30 s while it settled) gave no first token in 132 s, was penalised, and the
+re-plan had no other holder of layers 13-24 → 503; asked again 47 s later it
+answered in 2.7 s. One invariant, three paths, one of them fixed.
+
+**The wait ends when the peer leaves.** A serving node aborts a hand-off the
+moment its last connection to the requester closes (no route back for tokens —
+`connections::handle_connection_closed`), but the requester waited out its whole
+budget, which with the allowance is minutes. The first-token wait is taken in
+`PEER_PRESENCE_CHECK` (5 s) slices against an absolute deadline
+(`first_token_wait`): a slice that ends with the peer out of
+`connected_node_ids` fails at once as `PeerUnresponsive` ("disconnected before
+its first token"), barred from the retry like any silent peer. Only the
+first-token wait does this: closing the token channel from the network manager
+instead would have turned a mid-reply disconnect into a truncated reply
+returned as a normal `stop` (the loop treats a closed channel after tokens as
+the end of the stream).
+
+**Being generous is cheap.** An unreachable peer is still failed by the 10 s
+ACK fast-fail; a vanished one by the presence check. The allowance only extends
+the wait on a peer that is connected and silent — a busy machine loading, which
+is the case it exists for.
+
+**Verify** with `examples/cold_load_test.sh <server> <client>` (two nodes in a
+private network namespace; the server's load delayed by
+`SWARMLLM_FAULT_LOAD_DELAY_SECS`). A client predating the fix must fail the
+`load` arm at ~132 s and sit out the `leave` arm for ~132 s, or the run cannot
+see the fix.
+
 ## The units decide whether a forward is a prefill, not the byte count
 
 **`inference::pipeline::local::PipelineExecutor::forward_is_prefill(activation_bytes, units)`**

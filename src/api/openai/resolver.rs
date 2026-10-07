@@ -3,10 +3,19 @@ use crate::types::ModelId;
 
 use super::peer_forward::peer_http_url;
 
-/// Find a peer that hosts shards for this model and return its HTTP base URL.
+/// A pool peer to forward a request to, and what waiting on it must allow for.
+pub(super) struct PeerTarget {
+    /// Its HTTP base URL.
+    pub(super) url: String,
+    /// Whether it may first have to load the model — asked here, where the
+    /// peer and the model are both known, so the forward cannot skip it.
+    pub(super) load: crate::inference::pipeline::LoadAllowance,
+}
+
+/// Find a peer that hosts shards for this model and return how to reach it.
 /// This is a fallback for when not all layers are covered network-wide — the
 /// peer may be able to handle the request directly or assemble its own pipeline.
-pub(super) fn find_peer_with_model(state: &AppState, model: &str) -> Option<String> {
+pub(super) fn find_peer_with_model(state: &AppState, model: &str) -> Option<PeerTarget> {
     for entry in state.shared_state.peer_registry.iter() {
         // SECURITY: forwarding sends this node's `Authorization` header
         // verbatim, and that header carries `shared_state.api_key` — the SAME
@@ -39,7 +48,12 @@ pub(super) fn find_peer_with_model(state: &AppState, model: &str) -> Option<Stri
             let has_model = cap.hosted_shards.iter().any(|s| s.model_id.0 == model);
             if has_model {
                 if let Some(url) = peer_http_url(peer) {
-                    return Some(url);
+                    let load = crate::inference::pipeline::LoadAllowance::for_peer(
+                        &state.shared_state,
+                        entry.key(),
+                        &ModelId(model.to_string()),
+                    );
+                    return Some(PeerTarget { url, load });
                 }
             }
         }

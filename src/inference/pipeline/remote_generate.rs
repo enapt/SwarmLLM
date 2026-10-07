@@ -431,8 +431,10 @@ pub(super) fn eligible(exec: &PipelineExecutor) -> bool {
     true
 }
 
-/// Base budget for the first token: connection, model load, and the decode of
-/// a short prompt. Ample for 2048-token generations on CPU with a 7B model.
+/// Base budget for the first token: connection, queueing and the decode of a
+/// short prompt on a peer believed WARM. A peer that may first have to load the
+/// model is given `LoadAllowance` on top — this base used to claim the load as
+/// well, and 120 s did not cover one on a busy machine (FUTURE_WORK #129).
 const FIRST_TOKEN_TIMEOUT: Duration = Duration::from_secs(120);
 /// Extra first-token budget per estimated prompt token.
 ///
@@ -461,11 +463,57 @@ const PROMPT_CHARS_PER_TOKEN: usize = 2;
 ///
 /// Only ever extends the base budget, never shortens it, so short prompts keep
 /// exactly the previous behaviour.
-pub(crate) fn first_token_timeout(prompt_tokens: usize) -> Duration {
+///
+/// `load` is what the answer may wait behind before any of that starts: a
+/// machine that must first read the model into memory. Added ON TOP of the
+/// ceiling, as the segment path does — a cold load is not prompt work and must
+/// not be clipped away by the prompt's cap. Required, so no caller can wait on
+/// a peer's first answer without having asked whether that peer is cold.
+pub(crate) fn first_token_timeout(prompt_tokens: usize, load: super::LoadAllowance) -> Duration {
     let tokens = u32::try_from(prompt_tokens).unwrap_or(u32::MAX);
     FIRST_TOKEN_TIMEOUT
         .saturating_add(PREFILL_ALLOWANCE_PER_TOKEN.saturating_mul(tokens))
         .min(FIRST_TOKEN_TIMEOUT_MAX)
+        .saturating_add(load.duration())
+}
+
+/// How often a wait for a peer's first token looks up whether the peer is
+/// still connected.
+///
+/// A serving node aborts a hand-off the moment its last connection to the
+/// requester closes — there is no route left to send tokens back on
+/// (`connections::handle_connection_closed`). The requester kept waiting out
+/// the whole first-token budget all the same, and that budget now includes a
+/// cold-load allowance of minutes. Waking this often turns "the peer left" into
+/// a retry within seconds, without touching the budget a working peer gets.
+const PEER_PRESENCE_CHECK: Duration = Duration::from_secs(5);
+
+/// What a wait for a peer's first token does when one of its slices runs out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FirstTokenWait {
+    /// Still inside the budget and the peer is still connected: wait again,
+    /// at most this long.
+    Again(Duration),
+    /// The peer's last connection has closed — it has dropped the request.
+    PeerLeft,
+    /// The budget is spent.
+    Expired,
+}
+
+/// Decide [`FirstTokenWait`] at `now`. Pure, so the rule is tested without a
+/// network.
+fn first_token_wait(
+    now: std::time::Instant,
+    deadline: std::time::Instant,
+    peer_connected: bool,
+) -> FirstTokenWait {
+    if now >= deadline {
+        FirstTokenWait::Expired
+    } else if !peer_connected {
+        FirstTokenWait::PeerLeft
+    } else {
+        FirstTokenWait::Again((deadline - now).min(PEER_PRESENCE_CHECK))
+    }
 }
 
 /// Estimate the prompt's token count from characters, for when the tokenizer
@@ -677,7 +725,14 @@ impl PipelineExecutor {
             .standalone_tokenizer(&self.request.model_id)
             .map(|tk| tk.encode(&prompt).len())
             .unwrap_or_else(|| estimate_prompt_tokens(&prompt));
-        let first_token_budget = first_token_timeout(prompt_tokens_est);
+        // Whom the first token waits behind: the one peer for a whole model,
+        // every segment of the plan for a delegate that will lead it.
+        let waited_on = match hand_off {
+            HandOff::WholeModel => &self.assignment.segments[..1],
+            HandOff::DelegatedSplit => &self.assignment.segments[..],
+        };
+        let load = super::LoadAllowance::for_segments(&self.shared_state, waited_on);
+        let first_token_budget = first_token_timeout(prompt_tokens_est, load);
 
         // Register an inbound StreamingToken channel before sending the
         // request so we never miss an early token.
@@ -751,6 +806,8 @@ impl PipelineExecutor {
             %wire_id,
             target = %segment.node_id,
             ?hand_off,
+            first_token_budget_s = first_token_budget.as_secs(),
+            cold_loads = load.cold_loads(),
             "remote-generate fast path: request sent"
         );
 
@@ -771,6 +828,8 @@ impl PipelineExecutor {
         // gossiped to it second-hand. That blindness is what made the routing
         // decision this feeds a guess rather than a measurement.
         let sent_at = std::time::Instant::now();
+        // Absolute, so the slices the wait is taken in cannot restart it.
+        let first_token_deadline = sent_at + first_token_budget;
         let mut first_token_at: Option<std::time::Instant> = None;
 
         // Reassembly of an unordered stream — see `StreamReassembler`.
@@ -863,7 +922,12 @@ impl PipelineExecutor {
             } else if stream.done_seen() {
                 STRAGGLER_TIMEOUT
             } else if first {
-                first_token_budget
+                // In slices, so a peer that has left is noticed in seconds
+                // rather than at the end of a budget that may hold a cold load.
+                match first_token_wait(std::time::Instant::now(), first_token_deadline, true) {
+                    FirstTokenWait::Again(slice) => slice,
+                    FirstTokenWait::PeerLeft | FirstTokenWait::Expired => Duration::ZERO,
+                }
             } else {
                 inter_token_timeout
             };
@@ -890,6 +954,22 @@ impl PipelineExecutor {
             // answers still reaches the deadlines below.
             if maybe.is_err() && resend.can_ask() && stream.resend_range().is_some() {
                 continue;
+            }
+            // A slice of the first-token wait ran out: wait again while the
+            // budget lasts and the peer is still connected to us.
+            let mut peer_left = false;
+            if maybe.is_err() && first {
+                match first_token_wait(
+                    std::time::Instant::now(),
+                    first_token_deadline,
+                    self.shared_state
+                        .connected_node_ids
+                        .contains(&segment.node_id),
+                ) {
+                    FirstTokenWait::Again(_) => continue,
+                    FirstTokenWait::PeerLeft => peer_left = true,
+                    FirstTokenWait::Expired => {}
+                }
             }
             let tok = match maybe {
                 Ok(Some(t)) => t,
@@ -985,6 +1065,18 @@ impl PipelineExecutor {
                     if whole_model || self.hand_off_emitted > 0 {
                         self.shared_state
                             .blacklist_holder_for_request(request_id, &segment.node_id);
+                    }
+                    if peer_left {
+                        tracing::warn!(
+                            %request_id,
+                            peer = %segment.node_id,
+                            waited_ms = sent_at.elapsed().as_millis() as u64,
+                            "remote-generate: the peer disconnected before its first token — \
+                             it has dropped the request, so retrying now"
+                        );
+                        return Err(SwarmError::PeerUnresponsive(
+                            "remote-generate: the peer disconnected before its first token".into(),
+                        ));
                     }
                     return Err(SwarmError::PeerUnresponsive(format!(
                         "remote-generate timed out waiting for token (first={first})"
@@ -1351,11 +1443,87 @@ impl PipelineExecutor {
 mod first_token_budget_tests {
     use super::*;
 
+    fn warm() -> super::super::LoadAllowance {
+        super::super::LoadAllowance::none()
+    }
+
+    /// The cold load is added ON TOP of the prompt's cap, as on the segment
+    /// path: a load is not prompt work.
+    #[test]
+    fn a_cold_load_is_added_beyond_the_prompt_ceiling() {
+        use crate::inference::pipeline::LoadAllowance;
+        // Two machines to load, via the only constructor a caller can reach.
+        let state = test_state();
+        let cold = LoadAllowance::for_segments(&state, &[segment([1u8; 32]), segment([2u8; 32])]);
+        assert_eq!(cold.cold_loads(), 2);
+        assert_eq!(
+            first_token_timeout(usize::MAX, cold),
+            FIRST_TOKEN_TIMEOUT_MAX + cold.duration()
+        );
+        assert_eq!(
+            first_token_timeout(0, cold),
+            FIRST_TOKEN_TIMEOUT + cold.duration()
+        );
+    }
+
+    #[test]
+    fn a_first_token_wait_is_taken_in_slices_that_never_pass_the_deadline() {
+        let now = std::time::Instant::now();
+        let far = now + Duration::from_secs(300);
+        assert_eq!(
+            first_token_wait(now, far, true),
+            FirstTokenWait::Again(PEER_PRESENCE_CHECK)
+        );
+        let near = now + Duration::from_secs(2);
+        assert_eq!(
+            first_token_wait(now, near, true),
+            FirstTokenWait::Again(Duration::from_secs(2))
+        );
+        assert_eq!(first_token_wait(near, near, true), FirstTokenWait::Expired);
+    }
+
+    /// The serving node drops the request when its last connection to us
+    /// closes, so waiting out a budget that holds a cold load would be minutes
+    /// spent on an answer that cannot come.
+    #[test]
+    fn a_peer_that_left_ends_the_wait_before_its_budget_does() {
+        let now = std::time::Instant::now();
+        let far = now + Duration::from_secs(372);
+        assert_eq!(first_token_wait(now, far, false), FirstTokenWait::PeerLeft);
+        // At the deadline the budget is what ran out, whatever the link.
+        assert_eq!(first_token_wait(far, far, false), FirstTokenWait::Expired);
+    }
+
+    fn segment(node: [u8; 32]) -> crate::types::PipelineSegment {
+        crate::types::PipelineSegment {
+            node_id: crate::types::NodeId(node),
+            shard_id: crate::types::ShardId {
+                model_id: crate::types::ModelId("m".into()),
+                index: 0,
+            },
+            layer_range: (0, 32),
+        }
+    }
+
+    fn test_state() -> std::sync::Arc<crate::daemon::SharedState> {
+        use crate::inference::executor::ModelExecutor;
+        let temp = tempfile::tempdir().unwrap();
+        let db = crate::storage::db::Database::open(temp.path()).unwrap();
+        let (state, _, _) = crate::daemon::SharedState::new(
+            crate::config::Config::default(),
+            crate::identity::Identity::generate(),
+            db,
+            std::sync::Arc::new(tokio::sync::Mutex::new(ModelExecutor::new())),
+            None,
+        );
+        state
+    }
+
     #[test]
     fn short_prompt_keeps_the_original_budget() {
         // A handful of tokens must not shift the long-standing default.
-        assert_eq!(first_token_timeout(0), FIRST_TOKEN_TIMEOUT);
-        assert!(first_token_timeout(10) < FIRST_TOKEN_TIMEOUT + Duration::from_secs(6));
+        assert_eq!(first_token_timeout(0, warm()), FIRST_TOKEN_TIMEOUT);
+        assert!(first_token_timeout(10, warm()) < FIRST_TOKEN_TIMEOUT + Duration::from_secs(6));
     }
 
     /// CJK sits near one token per character, so a divisor tuned for Latin
@@ -1386,7 +1554,7 @@ mod first_token_budget_tests {
     fn budget_never_shrinks_below_the_base() {
         for tokens in [0, 1, 10, 100, 1_000, 100_000] {
             assert!(
-                first_token_timeout(tokens) >= FIRST_TOKEN_TIMEOUT,
+                first_token_timeout(tokens, warm()) >= FIRST_TOKEN_TIMEOUT,
                 "prompt of {tokens} tokens shortened the budget"
             );
         }
@@ -1396,7 +1564,7 @@ mod first_token_budget_tests {
     /// a 6-core CPU node and was cut off by the flat 120s budget.
     #[test]
     fn covers_the_prompt_that_timed_out_live() {
-        let budget = first_token_timeout(613);
+        let budget = first_token_timeout(613, warm());
         assert!(
             budget > Duration::from_secs(285),
             "budget {budget:?} still cuts off the prompt that measured 285s"
@@ -1406,7 +1574,7 @@ mod first_token_budget_tests {
     /// A second live measurement, on a longer prompt: 1322 tokens took 319s.
     #[test]
     fn covers_the_longer_measured_prompt() {
-        let budget = first_token_timeout(1322);
+        let budget = first_token_timeout(1322, warm());
         assert!(
             budget > Duration::from_secs(319),
             "budget {budget:?} cuts off a prompt measured at 319s"
@@ -1417,7 +1585,7 @@ mod first_token_budget_tests {
     fn budget_is_monotonic_in_prompt_length() {
         let mut prev = Duration::ZERO;
         for tokens in [0, 100, 500, 1_000, 5_000, 50_000] {
-            let b = first_token_timeout(tokens);
+            let b = first_token_timeout(tokens, warm());
             assert!(b >= prev, "budget went backwards at {tokens} tokens");
             prev = b;
         }
@@ -1426,8 +1594,14 @@ mod first_token_budget_tests {
     #[test]
     fn absurd_prompt_is_capped_not_overflowed() {
         // A dead peer must still be detected in bounded time.
-        assert_eq!(first_token_timeout(usize::MAX), FIRST_TOKEN_TIMEOUT_MAX);
-        assert_eq!(first_token_timeout(10_000_000), FIRST_TOKEN_TIMEOUT_MAX);
+        assert_eq!(
+            first_token_timeout(usize::MAX, warm()),
+            FIRST_TOKEN_TIMEOUT_MAX
+        );
+        assert_eq!(
+            first_token_timeout(10_000_000, warm()),
+            FIRST_TOKEN_TIMEOUT_MAX
+        );
     }
 }
 

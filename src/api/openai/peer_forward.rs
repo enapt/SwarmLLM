@@ -101,13 +101,13 @@ fn get_peer_client() -> &'static reqwest::Client {
 /// Authorization header (e.g. unauthed local probe) we still fail loudly at
 /// the receiver — that's correct behavior, not a regression.
 pub(super) async fn forward_to_peer(
-    peer_url: &str,
+    peer: &super::resolver::PeerTarget,
     req: &ChatCompletionRequest,
     stream: bool,
     auth_header: Option<&str>,
 ) -> Result<axum::response::Response, ApiError> {
     let client = get_peer_client();
-    let url = format!("{}/v1/chat/completions", peer_url);
+    let url = format!("{}/v1/chat/completions", peer.url);
 
     // Reading the prompt (prefill) dominates the wait and grows with the prompt,
     // so a flat timeout here fails long prompts against a peer that is working
@@ -120,8 +120,10 @@ pub(super) async fn forward_to_peer(
     // (JSON punctuation, base64) — the safe direction here, since the budget is
     // capped anyway and an image prompt genuinely is the expensive kind.
     let prompt_chars = serde_json::to_string(req).map(|s| s.len()).unwrap_or(0);
-    let budget =
-        crate::inference::pipeline::remote_generate::first_token_timeout(prompt_chars.div_ceil(2));
+    let budget = crate::inference::pipeline::remote_generate::first_token_timeout(
+        prompt_chars.div_ceil(2),
+        peer.load,
+    );
 
     let mut builder = client
         .post(&url)

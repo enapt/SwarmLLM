@@ -10,6 +10,7 @@ mod dsd;
 mod dsd_stream;
 mod engine_drafter;
 mod local;
+pub(crate) use local::LoadAllowance;
 mod local_generate;
 mod ngram_only_spec;
 mod prompt;

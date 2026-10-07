@@ -876,6 +876,22 @@ fn ensure_whole_model_for_generate(
     )))
 }
 
+/// `SWARMLLM_FAULT_LOAD_DELAY_SECS=<n>`: every model load in this node's
+/// workers first waits `n` seconds — a cold load as slow as a busy machine's,
+/// on demand. The network-level test for a requester waiting out a peer's load
+/// (`examples/cold_load_test.sh`, FUTURE_WORK #129). Unset in production; read
+/// once.
+fn fault_load_delay_secs() -> Option<u64> {
+    use std::sync::OnceLock;
+    static SECS: OnceLock<Option<u64>> = OnceLock::new();
+    *SECS.get_or_init(|| {
+        std::env::var("SWARMLLM_FAULT_LOAD_DELAY_SECS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .filter(|s| *s > 0)
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 /// Ensure a SplitModel is loaded for the given model_id, layer range, and TP config.
 /// Non-TP uses (0, 1). TP uses the actual (rank, size).
@@ -893,6 +909,14 @@ fn ensure_model_loaded(
     let key = (layer_start, layer_end, tp_rank, tp_size);
     if models.contains_key(&key) {
         return Ok(());
+    }
+    if let Some(secs) = fault_load_delay_secs() {
+        tracing::warn!(
+            model = %model_id,
+            secs,
+            "FAULT INJECTION: delaying this model load (SWARMLLM_FAULT_LOAD_DELAY_SECS)"
+        );
+        std::thread::sleep(std::time::Duration::from_secs(secs));
     }
 
     // A range that SUBSUMES ranges we already hold makes them redundant, and

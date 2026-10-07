@@ -226,6 +226,12 @@ to separate: `standby_covers` asks whether a node HOLDS the range,
 
 → `docs/invariants/scheduling.md` § "A count and an outcome that disagree are two different questions"
 
+## A wait on a peer's first answer allows for its load, on every path (2026-10-07)
+
+**`pipeline::LoadAllowance` is the single answer to "may this peer first have to load the model"**: a REQUIRED argument of `remote_generate::first_token_timeout` (hand-off, HTTP pool forward), asked by `SegmentBudget::for_forward`; outside tests it is built only by asking (`for_peer` / `for_segments`). The first-token wait ends when the peer's last connection closes. Rig: `examples/cold_load_test.sh`.
+
+→ `docs/invariants/scheduling.md` § "A wait on a peer's first answer allows for its load, on every path"
+
 ## The units decide whether a forward is a prefill, not the byte count
 
 **`inference::pipeline::local::PipelineExecutor::forward_is_prefill(activation_bytes, units)`**

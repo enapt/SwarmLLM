@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #229**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #230**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -511,6 +511,28 @@ times the model's bytes, added only for a peer not holding the model resident �
 once peers run a release that advertises it. (2) A model that does NOT fit even after the reclaim
 is still priced at processor speed rather than as the loader's card/processor split (above).
 
+**(1)'s other half — the DEADLINE — fixed on main 2026-10-07 (not yet released):** a cold load
+did not only cost time, it could fail the request. Live on v0.3.229 (00:23 UTC): Qwen 3.5 9B
+handed whole to `4a3ac72e` (Apple M4, restarted ~6 min earlier, its measured latency 10-30 s
+while it settled) gave no first token inside 132 s (`FIRST_TOKEN_TIMEOUT` 120 s + 0.5 s × 24
+prompt tokens), was penalised, and the re-plan had no other holder of layers 13-24 → 503
+`model_incomplete_in_swarm`; asked again 47 s later, 2.7 s. The segment path had been given a
+240 s cold-load allowance on 2026-08-01 for the same failure ("a CPU peer took ~120 s to load an
+8B model"); the hand-off — the path most single-model requests take — and the HTTP forward to a
+pool peer never were. Now `pipeline::LoadAllowance` is the one reading (cold unless the peer
+answered a forward of the model within 15 min), a REQUIRED argument of `first_token_timeout`
+and asked by `SegmentBudget::for_forward`; a delegated split is charged per cold segment. The
+first-token wait is taken in 5 s slices and ends at once when the peer's last connection closes
+(the serving node aborts the generation then — `handle_connection_closed`), so the longer
+budget never makes a vanished peer cost more. Rig: `examples/cold_load_test.sh` (the server's
+load delayed by `SWARMLLM_FAULT_LOAD_DELAY_SECS`), run 2026-10-07 at 150 s, safety kit, 0 driver
+events: the fix answered (200, 146.5 s wall; client logged `first_token_budget_s=388
+cold_loads=1`) where the v0.3.229 client failed (503 at 143 s, `timed out waiting for token
+(first=true)` after 148 s); server killed 20 s into its load — the fix gave up at 23.1 s
+(`disconnected before its first token`), v0.3.229 at 144 s. The harness default is now 200 s
+for margin over the old ~148 s budget (this VM's monotonic clock ran ~10% fast against the
+log's wall clock: a 150 s sleep spanned 139 s of timestamps).
+
 **Field evidence for (1), 2026-10-06 (a tester, CPU node, five runs to one peer):** cold 19.7 s and
 19.7 s against warm 5.9, 6.3 and 5.2 s — the first segment alone 16.9-17.3 s cold vs 2.4-2.8 s warm.
 The peer unloaded between 6 and 16 min idle (he predicted warm after a 3.5 min gap and got 5.2 s).
@@ -999,6 +1021,22 @@ stall per layer; TP off by default), and `VisionEncodeResponse` has no error fie
 image-encode refusal stays silent.
 
 ### API surface
+
+#### #229 — A request forwarded to a pool peer over HTTP is cut off at its first-token budget, mid-reply
+`P3` · api · **OPEN** — 2026-10-07 · history: none (found while fixing #129's deadline)
+
+`api::openai::peer_forward::forward_to_peer` sets the first-token budget as reqwest's
+REQUEST timeout, and in reqwest 0.12.28 that runs "from when the request starts connecting
+until the response body has finished" (`RequestBuilder::timeout`, registry source). The
+peer's body is relayed as it streams (`build_passthrough_response`), so a streamed reply
+longer than 120 s + 0.5 s per prompt token (+ 240 s for a cold peer) is cut off mid-stream;
+`PEER_CLIENT` also carries a client-wide total `INFERENCE_FORWARD_TIMEOUT_SECS`. Gotcha #190's
+provider-proxy shape on the one path it did not reach. Narrow: only a pool member is ever
+forwarded to, and only when the swarm cannot cover every layer. The fix is the provider proxy's
+— bound the time to the response HEADERS by the budget and the body by inactivity — but a
+non-streamed reply sends its headers only when it is complete, so the body rule has to tell
+the two apart (or the peer must send keep-alives on both). Measure with a pool rig before
+choosing.
 
 #### #185 — Three API surfaces each implement streaming and non-streaming replies separately
 `P3` · api · **OPEN** — 2026-07-26 · history: archive § "Collapse the parallel response paths behind one core loop"
