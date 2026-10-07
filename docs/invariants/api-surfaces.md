@@ -1635,7 +1635,13 @@ found in one night (2026-07-27, gotcha #190):
   sustained ~3.1 MB/s. Anyone slower could **never** complete an update.
 - `HF_DOWNLOAD_TIMEOUT_SECS = 3600` required ~145 KB/s for a 512 MB shard.
 - `INFERENCE_FORWARD_TIMEOUT_SECS = 120` capped a question forwarded to a peer
-  regardless of prompt length.
+  regardless of prompt length. Its fix — the prompt-scaled first-token budget —
+  was still set as reqwest's REQUEST timeout, which in reqwest 0.12 runs until
+  the body has finished, so a long STREAMED reply was cut mid-stream (#229,
+  2026-10-07). Now a streamed forward is bounded by inactivity
+  (`peer_forward::PEER_STREAM_IDLE_SECS`, four of the peer's 15 s keep-alives)
+  and a non-streamed one — silent until complete, headers included — by the
+  budget plus its `max_tokens` at 0.5 tok/s, capped (`forward_deadline`).
 - `PROVIDER_PROXY_TIMEOUT_SECS = 300` was documented as being about time to the
   first token but enforced on the whole exchange, cutting off cloud replies that
   were still streaming.

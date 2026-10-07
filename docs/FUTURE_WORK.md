@@ -1031,22 +1031,6 @@ image-encode refusal stays silent.
 
 ### API surface
 
-#### #229 — A request forwarded to a pool peer over HTTP is cut off at its first-token budget, mid-reply
-`P3` · api · **OPEN** — 2026-10-07 · history: none (found while fixing #129's deadline)
-
-`api::openai::peer_forward::forward_to_peer` sets the first-token budget as reqwest's
-REQUEST timeout, and in reqwest 0.12.28 that runs "from when the request starts connecting
-until the response body has finished" (`RequestBuilder::timeout`, registry source). The
-peer's body is relayed as it streams (`build_passthrough_response`), so a streamed reply
-longer than 120 s + 0.5 s per prompt token (+ 240 s for a cold peer) is cut off mid-stream;
-`PEER_CLIENT` also carries a client-wide total `INFERENCE_FORWARD_TIMEOUT_SECS`. Gotcha #190's
-provider-proxy shape on the one path it did not reach. Narrow: only a pool member is ever
-forwarded to, and only when the swarm cannot cover every layer. The fix is the provider proxy's
-— bound the time to the response HEADERS by the budget and the body by inactivity — but a
-non-streamed reply sends its headers only when it is complete, so the body rule has to tell
-the two apart (or the peer must send keep-alives on both). Measure with a pool rig before
-choosing.
-
 #### #185 — Three API surfaces each implement streaming and non-streaming replies separately
 `P3` · api · **OPEN** — 2026-07-26 · history: archive § "Collapse the parallel response paths behind one core loop"
 
@@ -1477,6 +1461,15 @@ archive under the named heading. Reopen one only with the evidence its line name
 Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 19-28 were
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
+
+**Closed 2026-10-07, on main (not yet released)** (#229)
+- #229 — a request forwarded to a pool member over HTTP was cut off mid-reply at its first-token
+  budget: reqwest 0.12's REQUEST timeout runs until the body has finished. A streamed forward is
+  now bounded by inactivity (`peer_forward::PEER_STREAM_IDLE_SECS`, four of the peer's 15 s
+  keep-alives, on a second client — `read_timeout` is per client and also covers the wait for
+  headers, which a streaming peer sends before its first token); a non-streamed one, silent until
+  complete, by the first-token budget plus its `max_tokens` at 0.5 tok/s, capped at an hour
+  (`forward_deadline`). The client-wide 600 s total is gone. Tests `forward_deadline_tests`.
 
 **Closed 2026-10-06, released in v0.3.229 (2026-10-07)** (#117, #225, #226)
 - #117 — Qwen 3.5 (dense) was refused; it runs now. The local branch's rewrite against llama.cpp

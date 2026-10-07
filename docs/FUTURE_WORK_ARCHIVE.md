@@ -16505,3 +16505,21 @@ and is byte-identical (`35f07d7f…`): the peers disagreeing with it hold wrong 
 repo has not changed since 2025-04-30, so it is not a re-upload. Read again a few hours on;
 a peer still counted a day later cannot replace its parts — `docs/DIAGNOSTICS.md` § "Which
 copy of this model does this node hold?".
+
+### #229 (closed 2026-10-07) — the entry as it stood
+
+#### #229 — A request forwarded to a pool peer over HTTP is cut off at its first-token budget, mid-reply
+`P3` · api · **OPEN** — 2026-10-07 · history: none (found while fixing #129's deadline)
+
+`api::openai::peer_forward::forward_to_peer` sets the first-token budget as reqwest's
+REQUEST timeout, and in reqwest 0.12.28 that runs "from when the request starts connecting
+until the response body has finished" (`RequestBuilder::timeout`, registry source). The
+peer's body is relayed as it streams (`build_passthrough_response`), so a streamed reply
+longer than 120 s + 0.5 s per prompt token (+ 240 s for a cold peer) is cut off mid-stream;
+`PEER_CLIENT` also carries a client-wide total `INFERENCE_FORWARD_TIMEOUT_SECS`. Gotcha #190's
+provider-proxy shape on the one path it did not reach. Narrow: only a pool member is ever
+forwarded to, and only when the swarm cannot cover every layer. The fix is the provider proxy's
+— bound the time to the response HEADERS by the budget and the body by inactivity — but a
+non-streamed reply sends its headers only when it is complete, so the body rule has to tell
+the two apart (or the peer must send keep-alives on both). Measure with a pool rig before
+choosing.
