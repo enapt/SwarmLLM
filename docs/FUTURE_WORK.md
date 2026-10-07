@@ -75,7 +75,7 @@ re-fetching parts) and #223 closed in v0.3.228 (released 2026-10-06 09:42 UTC), 
     cache, and a split chain keeps no KV across turns (absorbs #139).
 8. **#162** — the release gate: a cloned gate loses its helpers, and step 12e cannot test a
     takeover on this box (absorbs #140).
-9. **#155** — AutoNAT dial-backs denied by the per-peer cap every ~5 s, for the life of a node.
+9. *(#155 narrowed to P3 on 2026-10-07 — not seen on the swarm, see its entry.)*
 10. **#194** — an agent-sized prompt fills an 8 GB card with conversation memory.
 11. **#147**, **#137**, **#138**, **#129** — prompt reading on the card, the processor half of
     a hybrid, MoE placement, and near-fit models sent across continents
@@ -650,7 +650,25 @@ case wrong).
 ### Network and transport
 
 #### #155 — AutoNAT redials a peer this node is already connected to, and the per-peer cap denies it, every ~5 s
-`P2` · network · **OPEN** — 2026-10-02 · history: archive row #155, gotcha #774
+`P3` · network · **PARTIAL** — 2026-10-02, narrowed 2026-10-07 (measured on the swarm: not seen there) · history: archive row #155, gotcha #774
+
+**Narrowed 2026-10-07.** Settled in the pinned source (libp2p-autonat 0.15.0, `v2`): the server
+dials back with `PeerCondition::Always` (`server/behaviour.rs`), our per-peer cap then denies the
+connection, the swarm reports `DialFailure`, the server answers `E_DIAL_ERROR`, and the client
+records `AddressNotReachable { NoConnection }` — status `Failed`, not retried
+(`client/handler/dial_request.rs`, `client/behaviour.rs`). So a denied dial-back IS a false
+"unreachable" for a reachable node whose server already holds three connections to it, and our
+handler then turns the relay listener on. **But it was not seen on the swarm:** a probe node
+joined at `-vv` for 5 min (04:45-04:51 UTC, 9 peers): 13 denials — 11 from the live node on the
+same machine over loopback (`127.0.0.1:8810`), 1 a hole-punch upgrade's extra connection
+(`count=3` just before), 1 unattributed; 0 AutoNAT dial-backs denied; every AutoNAT verdict
+true (the probe is behind NAT, no UPnP). The every-~5 s pattern is co-located nodes: the AutoNAT
+client asks servers to test non-internet candidates (loopback, LAN — our handler already
+ignores those verdicts, "probed a non-internet address"), and a server on the same host can
+dial them. Left: raise the cap to 4 only with evidence from a reachable node (a VPS peer's
+log); the loopback churn only matters for two nodes on one machine.
+
+**As filed:**
 
 Seen on the rig at `-vv`: `request_response: forgetting a connection the swarm denied` every
 ~5 s per peer, each preceded on the dialling node by `AutoNAT server: served a dial-back
