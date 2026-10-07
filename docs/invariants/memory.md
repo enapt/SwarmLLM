@@ -638,6 +638,24 @@ dropped, because a stale entry also keeps the evaluation cooldown bypassed
 its half switched off. **A change must keep**: any new automatic fetch path
 asks `would_shed_copy` too — this rule is about FETCHING, not about one pass.
 
+**And an entry nothing can fetch is dropped (2026-10-07, the residual).** The
+pass skipped (`continue`) an entry whose model had no recorded origin, and its
+own check was `hf_sources.contains_key` — not `can_fetch_shard_from_origin`,
+the single answer, so offline mode slipped through too. Such an entry is not
+pending, it is stuck, and worse than the CPU cost recorded first: the
+download pass reads the set as "peers are exhausted for this part" and goes
+straight to the origin, so with no origin the part was never fetched again
+for the node's life. It arises from the stalled-permit sweep, which adds an
+entry with no regard for an origin — a model with no HuggingFace source, or
+an offline node, whose peer download stalls once. Now the pass asks
+`pending_fetch_can_proceed` (a repair, or `can_fetch_shard_from_origin`) and
+drops what it cannot serve; the part is the download pass's again, and with no
+origin the accept path keeps a peer's copy. Guards
+`a_pending_fetch_with_no_origin_goes_back_to_its_peers`,
+`an_offline_node_hands_a_pending_fetch_back_to_its_peers` (both red with the
+predicate forced true); the prune test now gives its model an origin, so the
+prune check — not the missing origin — is what drops its part.
+
 **Why**: the two passes answered "how many copies are enough?" separately.
 Prune shed above `pressure_adjusted_target` — one copy fewer above 0.8 disk
 pressure, two above 0.95 — while `gather_candidates` fetched below the RAW

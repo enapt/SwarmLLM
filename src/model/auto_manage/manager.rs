@@ -80,6 +80,16 @@ pub(super) async fn read_shard_pins_blocking(state: &SharedState) -> Vec<crate::
 /// retries get a chance before the outer permit gives up.
 const P2P_PERMIT_STALL_SECS: u64 = 180;
 
+/// Can a fetch pending in `shard_p2p_failed` / `shards_needing_repair` be made
+/// from here? A repair can — a peer's copy is checked against the hash whose
+/// mismatch found the corruption. An entry that only says "peers are
+/// exhausted" needs the ORIGIN, and `can_fetch_shard_from_origin` is the single
+/// answer to that (a recorded source AND not offline mode). Asked by
+/// `complete_pending_shard_fetches`; an entry answering no is dropped.
+fn pending_fetch_can_proceed(state: &SharedState, sid: &ShardId, needs_repair: bool) -> bool {
+    needs_repair || state.can_fetch_shard_from_origin(&sid.model_id)
+}
+
 /// Sweep `p2p_download_permits` for entries older than `P2P_PERMIT_STALL_SECS`.
 /// Releases the permit (drop semantics on the OwnedSemaphorePermit) and
 /// clears the matching `acquisition_progress` shard entry so the next
@@ -120,7 +130,8 @@ pub(super) fn sweep_stalled_p2p_permits(state: &SharedState) {
             model = %sid.model_id,
             shard = sid.index,
             stall_secs = P2P_PERMIT_STALL_SECS,
-            "Auto-manage: released stalled P2P download permit; HF fallback will fire next cycle"
+            "Auto-manage: released stalled P2P download permit; the next pass fetches it from the \
+             model's origin, or from its peers again when there is no origin to ask"
         );
         // Wake the manager loop so the HF retry can fire promptly rather
         // than waiting for the next periodic interval.
@@ -581,7 +592,9 @@ impl AutoShardManager {
     }
 
     /// Fetch, from the model's origin, shards a peer transfer could not prove
-    /// intact — **even when auto-manage is switched off**.
+    /// intact — **even when auto-manage is switched off**. An entry nothing
+    /// here can fetch ([`pending_fetch_can_proceed`]) is dropped back to the
+    /// download pass, never left to block it.
     ///
     /// That switch means "do not decide what to fetch on my behalf". It does
     /// not mean "abandon a shard this node already decided it wants and has
@@ -628,13 +641,36 @@ impl AutoShardManager {
                 self.shared_state.clear_shard_repair(&sid);
                 continue;
             }
-            let Some(manifest) = self.shared_state.model_registry.get_manifest(&sid.model_id)
-            else {
+            let needs_repair = self
+                .shared_state
+                .models
+                .shards_needing_repair
+                .contains(&sid);
+            // A fetch nothing here can make is not pending; it is stuck. An
+            // entry in `shard_p2p_failed` also tells the download pass that
+            // peers are exhausted for this part, so one the origin cannot serve
+            // (no recorded source, or offline mode) left the part unfetchable
+            // for the node's life — and bypassed the evaluation cooldown every
+            // pass (gotcha #797's residual). Dropped, the part is the download
+            // pass's again: it tries peers, and with no origin the accept path
+            // keeps a peer's copy (`classify_p2p_shard_acceptance`).
+            let manifest = self.shared_state.model_registry.get_manifest(&sid.model_id);
+            let info = manifest
+                .as_ref()
+                .and_then(|m| m.shards.iter().find(|s| s.index == sid.index).cloned());
+            let (Some(manifest), Some(info)) = (manifest, info) else {
+                self.shared_state.models.shard_p2p_failed.remove(&sid);
                 continue;
             };
-            let Some(info) = manifest.shards.iter().find(|s| s.index == sid.index) else {
+            if !pending_fetch_can_proceed(&self.shared_state, &sid, needs_repair) {
+                tracing::info!(
+                    model = %sid.model_id,
+                    shard = sid.index,
+                    "No origin to fetch this part from — it goes back to the peers that hold it"
+                );
+                self.shared_state.models.shard_p2p_failed.remove(&sid);
                 continue;
-            };
+            }
             let candidate = ShardCandidate {
                 model_id: sid.model_id.clone(),
                 model_name: manifest.name.clone(),
@@ -667,25 +703,6 @@ impl AutoShardManager {
                 );
                 self.shared_state.models.shard_p2p_failed.remove(&sid);
                 self.shared_state.clear_shard_repair(&sid);
-                continue;
-            }
-            // An origin is required only for the "could not be verified" case:
-            // the accept path keeps the peer's copy when there is none, so
-            // nothing is pending. A REPAIR has no such requirement — it may
-            // legitimately be fetched from a peer and checked against the hash
-            // whose mismatch is what detected the corruption.
-            let needs_repair = self
-                .shared_state
-                .models
-                .shards_needing_repair
-                .contains(&sid);
-            if !needs_repair
-                && !self
-                    .shared_state
-                    .models
-                    .hf_sources
-                    .contains_key(&sid.model_id)
-            {
                 continue;
             }
             // Say where it is going. This line read "Fetching from the model's
@@ -1561,6 +1578,8 @@ mod pending_fetches_follow_prune {
         state.model_registry.record_shard_holder(part(&mid, 1), b);
         state.models.shard_p2p_failed.insert(part(&mid, 0));
         state.models.shard_p2p_failed.insert(part(&mid, 1));
+        // An origin to fetch from, or both parts would leave for having none.
+        with_origin(&state, &mid);
 
         manager.complete_pending_shard_fetches().await;
 
@@ -1570,8 +1589,74 @@ mod pending_fetches_follow_prune {
         );
         assert!(
             state.models.shard_p2p_failed.contains(&part(&mid, 0)),
-            "control: a part prune would keep stays pending (no origin here, so it waits)"
+            "control: a part prune would keep, from a model with an origin, stays pending"
         );
+    }
+
+    /// The model's origin, named so that its upload is still to be validated:
+    /// `canonical_allows_acquisition` then refuses, so no test here starts a
+    /// real download.
+    fn with_origin(state: &Arc<SharedState>, mid: &ModelId) {
+        state.models.hf_sources.insert(
+            mid.clone(),
+            crate::daemon::state::HfSource {
+                repo_id: "test/origin".into(),
+                filename: format!("{}.gguf", mid.0),
+                mmproj_filename: None,
+            },
+        );
+        assert!(state.can_fetch_shard_from_origin(mid));
+        assert!(
+            !state.canonical_allows_acquisition(mid),
+            "fixture: the upload is unvalidated, so nothing is fetched for real"
+        );
+    }
+
+    /// One peer holds part 0 and prune would keep this node's copy — but the
+    /// entry says peers are exhausted and there is no origin to ask. Left in
+    /// the set, the download pass skipped the peers and the origin skipped the
+    /// part: unfetchable for the node's life, the evaluation cooldown bypassed
+    /// on every pass (gotcha #797's residual). It goes back to the peers.
+    #[tokio::test]
+    async fn a_pending_fetch_with_no_origin_goes_back_to_its_peers() {
+        let (state, manager) = make_test_manager();
+        let mid =
+            register_manifest_with_sized_shards(&state, "qwen3-like", 16, &[(0, 8), (8, 16)], PART);
+        let a = close_peer(&state, 7);
+        state.model_registry.record_shard_holder(part(&mid, 0), a);
+        state.models.shard_p2p_failed.insert(part(&mid, 0));
+        assert!(
+            !state.can_fetch_shard_from_origin(&mid),
+            "fixture: no origin"
+        );
+
+        manager.complete_pending_shard_fetches().await;
+
+        assert!(
+            state.models.shard_p2p_failed.is_empty(),
+            "nothing left to keep the cooldown bypassed or the peers skipped"
+        );
+    }
+
+    /// Offline mode has an origin on record and will not use it
+    /// (`can_fetch_shard_from_origin`): the same stuck entry by the other door.
+    #[tokio::test]
+    async fn an_offline_node_hands_a_pending_fetch_back_to_its_peers() {
+        let (state, manager) = make_test_manager();
+        let mid =
+            register_manifest_with_sized_shards(&state, "qwen3-like", 16, &[(0, 8), (8, 16)], PART);
+        let a = close_peer(&state, 7);
+        state.model_registry.record_shard_holder(part(&mid, 0), a);
+        state.models.shard_p2p_failed.insert(part(&mid, 0));
+        with_origin(&state, &mid);
+        state
+            .credits
+            .offline_mode
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+
+        manager.complete_pending_shard_fetches().await;
+
+        assert!(!state.models.shard_p2p_failed.contains(&part(&mid, 0)));
     }
 
     /// An origin download that lands ends the pending fetch it stood for — the

@@ -1284,7 +1284,7 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
 | INFO  | `HfWatcher: promoted to DemandVerified` | `model`, `repo`, `downloads` (R141 — fires at 10k for trusted publishers, 100k for unknown) |
 | DEBUG | `HfWatcher: re-promotion blocked by failed-promotion cooldown` | `model`, `repo` |
 | WARN  | `HfSourceGossip dropped — hf_sources at capacity` | `model`, `cap` (R141 — fires alongside `activity.hf_sources_cap_reached`) |
-| WARN  | `Auto-manage: released stalled P2P download permit; HF fallback will fire next cycle` | `model`, `shard`, `stall_secs` (R141 — `P2P_PERMIT_STALL_SECS = 180`) |
+| WARN  | `Auto-manage: released stalled P2P download permit; the next pass fetches it from the model's origin` | `model`, `shard`, `stall_secs` (R141 — `P2P_PERMIT_STALL_SECS = 180`). With no origin to ask (none recorded, or offline mode) the next pass logs `No origin to fetch this part from` and the part goes back to its peers (gotcha #797's residual, 2026-10-07) |
 | INFO  | `On-demand loading: model has shards on disk but not loaded` | `request_id`, `model` |
 
 `DIAG:` **Is a node deleting and re-fetching the same parts?** It cannot be seen

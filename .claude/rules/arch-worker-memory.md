@@ -120,7 +120,7 @@ Whenever code waits for a subprocess, handle it dying instead (`spawn_worker` ra
 
 ## The download pass fetches only what prune would keep (2026-10-06)
 
-**`AutoShardManager::would_shed_copy` is the one answer to "would prune shed this copy?"** — prune asks it of what it holds; EVERY automatic fetch path asks it before fetching, at the disk pressure AFTER the fetch: `select_within_budget` (cumulative per cycle) and `complete_pending_shard_fetches` (which DROPS the entry). A finished origin download leaves `shard_p2p_failed` in `announce_shard_acquired` (gotcha #797). Every file decision reads DISK pressure, never graphics memory; the filesystem's last 10% is never ours (`FREE_DISK_RESERVE_PCT`). Guards: `fetch_what_prune_keeps::*`.
+**`AutoShardManager::would_shed_copy` is the one answer to "would prune shed this copy?"** — prune asks it of what it holds; EVERY automatic fetch path asks it before fetching, at the disk pressure AFTER the fetch: `select_within_budget` (cumulative per cycle) and `complete_pending_shard_fetches` (which DROPS the entry). A finished origin download leaves `shard_p2p_failed` in `announce_shard_acquired` (gotcha #797); an entry the origin cannot serve (`pending_fetch_can_proceed` → `can_fetch_shard_from_origin`) is dropped back to the peers, never left to block them. Every file decision reads DISK pressure, never graphics memory; the filesystem's last 10% is never ours (`FREE_DISK_RESERVE_PCT`). Guards: `fetch_what_prune_keeps::*`.
 
 → `docs/invariants/memory.md` § "`AutoShardManager::would_shed_copy` is the ONE answer"
 
