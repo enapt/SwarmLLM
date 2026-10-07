@@ -472,6 +472,20 @@ pub struct NodeCapability {
     /// such a node is still a candidate, exactly as before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_ceiling_tokens: Option<u32>,
+
+    /// How long this node takes to read one GiB of a model into memory, from
+    /// its own loads (an average; the daemon's `process_pool::LoadRate`).
+    ///
+    /// A peer that must first LOAD a model was predicted like a warm one — 4.5 s
+    /// predicted, 46 s taken (FUTURE_WORK #129) — and loads differ twentyfold
+    /// between machines, so a coordinator prices a cold candidate's load with
+    /// the candidate's own figure, as ServerlessLLM (OSDI '24) schedules on each
+    /// server's measured loading speed.
+    ///
+    /// `None` from a node predating the field or one that has not yet timed a
+    /// load; a coordinator then uses its prior. Never zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_load_ms_per_gib: Option<u32>,
 }
 
 /// The serde default for [`NodeCapability::can_serve_inference`].

@@ -2203,6 +2203,58 @@ private network namespace; the server's load delayed by
 `load` arm at ~132 s and sit out the `leave` arm for ~132 s, or the run cannot
 see the fix.
 
+## A candidate that must first load the model is charged for it
+
+**Rule.** `parallax::vertex_cost` adds `cold_load_ms` =
+`NodeCandidate::cold_load_ms_per_layer` × `layers_it_would_add(range)`: the
+layers of the range the candidate does not hold, at its own load speed. Charged
+ONCE and never multiplied by `expected_attempts` (a retry finds the model
+loaded). Every price goes through `vertex_cost` — the search's vertices,
+`chain_cost_ms`, the local processor price `local_ms` and the hand-off gate's
+`delegated_shape_cost_ms` — so all of them see it.
+
+**One residency reading.** `gather_candidates` sets the per-layer figure from the
+same `PeerResidency` it bounds memory with: published ranges decide which
+layers are held (`layers_it_would_add` applies the loader's own rule — a range
+that strictly contains a held one re-reads all of it); `WarmAmountUnknown`
+(seen serving it, nothing published) is 0, as it is "every layer exempt" for
+memory; a count with no ranges covering the whole model is 0. A pricing that
+read residency differently from the bound would let them disagree about the
+same layers.
+
+**The rate is measured, per node, by that node.** A worker times each load
+inside `ensure_model_loaded` (not the process start or a card's first context —
+FUTURE_WORK #212's reverted attempt recorded those) and reports
+`WorkerMsg::ModelLoadTimed` (gated on `DAEMON_READS_LOAD_TIMING`, the IPC twin of a
+feature bit); `process_pool::LoadRate` averages ms per GiB over loads of at
+least 256 MiB; the health monitor advertises it as
+`NodeCapability::model_load_ms_per_gib` (`#[serde(default)]`). Bytes are the
+model's size × the share of layers loaded — the basis the planner prices on, so
+the units cancel. ServerlessLLM (OSDI '24) schedules on each server's measured
+loading speed for the same reason: it varies too much to assume. Measured from
+this node's own log on 2026-10-07 (335 loads): ~1.3 s/GiB onto the card, ~4 s/GiB
+onto the processor; the field's slow end is ~26 s/GiB (an 8B on a processor
+peer, 2026-08-01) and over 25 s/GiB (a busy Mac just restarted, 2026-10-07).
+
+**This node is charged too.** With only peers charged, a cold local route would
+look free beside a cold peer — the direction #129 already erred in (a peer
+predicted at 4.5 s took 46 s, loading included).
+
+**Unknown is the prior, not zero.** `UNMEASURED_LOAD_MS_PER_GIB` (10 s/GiB) stands
+in for a node that has reported no rate (an older build, or no load timed yet —
+this node too, until its first). Zero would break the symmetry above as soon as
+this node measures itself; the slowest figure ever seen would rule out every
+cold peer on an older build. Like `UNKNOWN_COMPUTE_MS` it sits on the pessimistic
+side of the measured spread, so an unknown never outranks a measured fast
+loader (gotcha #734: know what stands in when the figure is missing).
+
+**What a test must do.** A routing test that plans through `gather_candidates`
+now sees real load charges: pin rates where the subject is something else
+(`the_search_s_boomerang_says_what_privacy_costs` gives every node 1 ms/GiB —
+at the prior, ~37 s of loading entered the plan without privacy too and the
+privacy notice's ratio fell under its threshold, which is true of a first
+request and not that test's subject).
+
 ## The units decide whether a forward is a prefill, not the byte count
 
 **`inference::pipeline::local::PipelineExecutor::forward_is_prefill(activation_bytes, units)`**

@@ -432,6 +432,9 @@ pub async fn run_worker(
     let daemon_reads_card_probe = crate::inference::worker_ipc::daemon_reads_card_probe(
         std::env::var_os(crate::inference::worker_ipc::DAEMON_READS_CARD_PROBE).as_deref(),
     );
+    let daemon_reads_load_timing = crate::inference::worker_ipc::daemon_reads_card_probe(
+        std::env::var_os(crate::inference::worker_ipc::DAEMON_READS_LOAD_TIMING).as_deref(),
+    );
 
     // Whether the card's pool may hold memory freed since the last hand-back:
     // set by any message or tick, cleared by `cuda_pool::trim` once the worker
@@ -534,6 +537,18 @@ pub async fn run_worker(
                 .await
                 {
                     tracing::debug!(error = %e, "model-worker: could not report the card probe");
+                }
+            }
+            // Every load this batch ran, for the rate this node advertises
+            // (#129) — the same drain point, the same gate.
+            if daemon_reads_load_timing {
+                for (bytes, ms) in take_load_timings() {
+                    if let Err(e) =
+                        send_worker(&mut writer, &WorkerMsg::ModelLoadTimed { bytes, ms }, &[])
+                            .await
+                    {
+                        tracing::debug!(error = %e, "model-worker: could not report a load timing");
+                    }
                 }
             }
         } else if slot_table.is_empty() {
@@ -892,6 +907,31 @@ fn fault_load_delay_secs() -> Option<u64> {
     })
 }
 
+/// Loads this worker has timed and not yet reported, as `(bytes, ms)`.
+/// Filled by [`ensure_model_loaded`] — the one place a model is loaded — and
+/// drained by the main loop beside the card probe (`WorkerMsg::ModelLoadTimed`).
+static LOAD_TIMINGS: std::sync::Mutex<Vec<(u64, u32)>> = std::sync::Mutex::new(Vec::new());
+
+/// Cap on unreported timings, so a daemon that never drains (one that does
+/// not read them) cannot grow this without bound.
+const LOAD_TIMINGS_MAX: usize = 16;
+
+fn record_load_timing(bytes: u64, took: std::time::Duration) {
+    let ms = u32::try_from(took.as_millis()).unwrap_or(u32::MAX);
+    if let Ok(mut q) = LOAD_TIMINGS.lock() {
+        if q.len() < LOAD_TIMINGS_MAX {
+            q.push((bytes, ms));
+        }
+    }
+}
+
+fn take_load_timings() -> Vec<(u64, u32)> {
+    LOAD_TIMINGS
+        .lock()
+        .map(|mut q| std::mem::take(&mut *q))
+        .unwrap_or_default()
+}
+
 #[allow(clippy::too_many_arguments)]
 /// Ensure a SplitModel is loaded for the given model_id, layer range, and TP config.
 /// Non-TP uses (0, 1). TP uses the actual (rank, size).
@@ -910,6 +950,9 @@ fn ensure_model_loaded(
     if models.contains_key(&key) {
         return Ok(());
     }
+    // From here on this IS a load; the fault delay below stands in for a slow
+    // disk, so it is timed like one.
+    let load_started = std::time::Instant::now();
     if let Some(secs) = fault_load_delay_secs() {
         tracing::warn!(
             model = %model_id,
@@ -1112,9 +1155,17 @@ fn ensure_model_loaded(
         tp_size,
         device = ?model.device(),
         vram_after_load_mb,
+        load_ms = load_started.elapsed().as_millis() as u64,
         "model-worker: Model loaded"
     );
     models.insert(key, model);
+    // On the planner's basis — the model's size × the share of its layers —
+    // so a rate measured here prices a load there in the same units.
+    let bytes = manifest
+        .total_size_bytes
+        .saturating_mul(layer_end.saturating_sub(layer_start) as u64)
+        / (total_layers.max(1) as u64);
+    record_load_timing(bytes, load_started.elapsed());
     Ok(())
 }
 

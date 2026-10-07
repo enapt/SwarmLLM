@@ -117,6 +117,12 @@ pub(crate) fn daemon_reads_card_probe(v: Option<&std::ffi::OsStr>) -> bool {
     v.is_some_and(|v| v == "1")
 }
 
+/// Set by the daemon in every worker's environment: this daemon decodes
+/// `WorkerMsg::ModelLoadTimed`. Gated for the same reason as
+/// [`DAEMON_READS_CARD_PROBE`] and read by the same rule
+/// ([`daemon_reads_card_probe`]).
+pub(crate) const DAEMON_READS_LOAD_TIMING: &str = "SWARMLLM_DAEMON_READS_LOAD_TIMING";
+
 /// Message from worker → daemon.
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "t")]
@@ -176,6 +182,17 @@ pub enum WorkerMsg {
     /// worker-to-daemon message the same way while any can: the IPC twin of
     /// gating a new wire message on a peer's `features`.
     CardAllocationProbe { took_ms: u32 },
+    /// How long one model load took this worker and how much of the model it
+    /// read (`bytes`: the model's size × the share of its layers loaded — the
+    /// basis the planner prices a load on). Timed inside the load itself, so a
+    /// process start or a card's first context is not in it (FUTURE_WORK #212's
+    /// reverted attempt recorded those). Side-band, sent after the message that
+    /// loaded the model; the daemon folds it into the rate it advertises
+    /// (`NodeCapability::model_load_ms_per_gib`, FUTURE_WORK #129).
+    ///
+    /// ⚠ Sent only when the daemon said it reads it
+    /// ([`DAEMON_READS_LOAD_TIMING`]) — see `CardAllocationProbe`.
+    ModelLoadTimed { bytes: u64, ms: u32 },
     /// Error for a specific request.
     ///
     /// `fatal` marks a failure that corrupted or exhausted the worker's device
@@ -594,6 +611,7 @@ enum WorkerMsgTag {
     Token,
     GenerateDone,
     CardAllocationProbe,
+    ModelLoadTimed,
     Error,
     PrefixManifestUpdate,
     PrefixFetchProbe,
@@ -865,6 +883,7 @@ mod tests {
                 WorkerMsg::Token { .. } => WorkerMsgTag::Token,
                 WorkerMsg::GenerateDone { .. } => WorkerMsgTag::GenerateDone,
                 WorkerMsg::CardAllocationProbe { .. } => WorkerMsgTag::CardAllocationProbe,
+                WorkerMsg::ModelLoadTimed { .. } => WorkerMsgTag::ModelLoadTimed,
                 WorkerMsg::Error { .. } => WorkerMsgTag::Error,
                 WorkerMsg::PrefixManifestUpdate { .. } => WorkerMsgTag::PrefixManifestUpdate,
                 WorkerMsg::PrefixFetchProbe { .. } => WorkerMsgTag::PrefixFetchProbe,
@@ -877,6 +896,10 @@ mod tests {
             WorkerMsg::Ready,
             WorkerMsg::Bye,
             WorkerMsg::CardAllocationProbe { took_ms: 1 },
+            WorkerMsg::ModelLoadTimed {
+                bytes: 1 << 30,
+                ms: 2_500,
+            },
             WorkerMsg::Drafted {
                 request_id: Uuid::nil(),
                 tokens: vec![],

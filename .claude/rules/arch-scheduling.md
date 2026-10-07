@@ -232,6 +232,12 @@ to separate: `standby_covers` asks whether a node HOLDS the range,
 
 → `docs/invariants/scheduling.md` § "A wait on a peer's first answer allows for its load, on every path"
 
+## A candidate that must first load the model is CHARGED for it (2026-10-07)
+
+**`NodeCandidate::cold_load_ms_per_layer` × `layers_it_would_add`** is `parallax::vertex_cost`'s `cold_load_ms` — once per request, never × `expected_attempts` — set in `gather_candidates` from the SAME residency reading as the memory bound (`WarmAmountUnknown` → 0). The rate is the node's own (`process_pool::LoadRate` → `NodeCapability::model_load_ms_per_gib`), else `UNMEASURED_LOAD_MS_PER_GIB`; this node is charged its own too. Rig: `cold_load_test.sh … price`.
+
+→ `docs/invariants/scheduling.md` § "A candidate that must first load the model is charged for it"
+
 ## The units decide whether a forward is a prefill, not the byte count
 
 **`inference::pipeline::local::PipelineExecutor::forward_is_prefill(activation_bytes, units)`**

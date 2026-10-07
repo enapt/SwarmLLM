@@ -360,6 +360,7 @@ fn simple_candidate(byte: u8, ranges: Vec<(u32, u32)>) -> NodeCandidate {
         held_ranges: Vec::new(),
         published_room: None,
         cached_prefix_tokens: 0,
+        cold_load_ms_per_layer: 0.0,
         goodput_bytes_per_sec: None,
     }
 }
@@ -560,6 +561,7 @@ fn greedy_assign_multi_range_candidate() {
             held_ranges: Vec::new(),
             published_room: None,
             cached_prefix_tokens: 0,
+            cold_load_ms_per_layer: 0.0,
             goodput_bytes_per_sec: None,
         },
         NodeCandidate {
@@ -590,6 +592,7 @@ fn greedy_assign_multi_range_candidate() {
             held_ranges: Vec::new(),
             published_room: None,
             cached_prefix_tokens: 0,
+            cold_load_ms_per_layer: 0.0,
             goodput_bytes_per_sec: None,
         },
     ];
@@ -777,6 +780,7 @@ fn slow_peer_capability(node: &NodeId) -> crate::types::NodeCapability {
         can_serve_inference: true,
         resident_layers: Vec::new(),
         context_ceiling_tokens: None,
+        model_load_ms_per_gib: None,
     }
 }
 
@@ -1556,6 +1560,7 @@ fn cost_cand(
         held_ranges: Vec::new(),
         published_room: None,
         cached_prefix_tokens: 0,
+        cold_load_ms_per_layer: 0.0,
         goodput_bytes_per_sec: None,
     }
 }
@@ -2825,6 +2830,7 @@ fn one_node_is_not_made_standby_for_more_layers_than_it_can_run() {
         held_ranges: Vec::new(),
         published_room: None,
         cached_prefix_tokens: 0,
+        cold_load_ms_per_layer: 0.0,
         goodput_bytes_per_sec: None,
     };
 
@@ -2918,6 +2924,7 @@ fn a_node_with_room_still_stands_in_for_every_segment() {
         held_ranges: Vec::new(),
         published_room: None,
         cached_prefix_tokens: 0,
+        cold_load_ms_per_layer: 0.0,
         goodput_bytes_per_sec: None,
     };
     let seg = |byte: u8, r: (u32, u32)| PipelineSegment {
@@ -3011,6 +3018,7 @@ fn a_standby_is_chosen_by_cost_not_by_ping() {
         held_ranges: Vec::new(),
         published_room: None,
         cached_prefix_tokens: 0,
+        cold_load_ms_per_layer: 0.0,
         goodput_bytes_per_sec: None,
     };
 
@@ -3113,6 +3121,7 @@ fn capability_with_gpu(free_mb: Option<u64>) -> crate::types::NodeCapability {
         can_serve_inference: true,
         resident_layers: Vec::new(),
         context_ceiling_tokens: None,
+        model_load_ms_per_gib: None,
     }
 }
 
@@ -3809,6 +3818,21 @@ fn processor_holder_beside_two_gpu_halves_with(
 #[test]
 fn the_search_s_boomerang_says_what_privacy_costs() {
     let (state, local, b, c) = processor_holder_beside_two_gpu_halves(5, 20.0);
+    // Everyone loads instantly: this is about privacy's cost in steady state.
+    // With every machine cold at the 10 s/GiB prior, ~37 s of loading lands
+    // in the plan WITHOUT privacy too and the ratio falls under the notice's
+    // threshold — true of a first request, not what this test is about.
+    for n in [&b, &c] {
+        state
+            .peer_registry
+            .get_mut(n)
+            .unwrap()
+            .capability
+            .as_mut()
+            .unwrap()
+            .model_load_ms_per_gib = Some(1);
+    }
+    state.model_process_pool.observe_load_for_test(1 << 30, 1);
     let model = ModelId("split-14b".into());
     assert!(
         state.encrypted_pipeline_for(&model),
@@ -6128,5 +6152,195 @@ fn the_planner_weighs_a_local_model_the_loader_would_split_on_the_card() {
         ours.max_hostable_layers,
         Some(32),
         "but its room is the card's plus the split: all 32 layers"
+    );
+}
+
+/// Two card peers holding every part of a 32-layer model (4 GB, so 125 MB a
+/// layer), neither holding a part here. `b` is FASTER than `c`.
+fn two_whole_model_card_peers() -> (Arc<SharedState>, NodeId, NodeId, NodeId, ModelId) {
+    let state = make_shared_state();
+    let local = state.identity.node_id().clone();
+    let b = NodeId([0xB2; 32]);
+    let c = NodeId([0xC2; 32]);
+    let model = "cold-or-warm-7b";
+    let shards = vec![
+        ShardInfo {
+            index: 0,
+            layer_range: (0, 16),
+            size_bytes: 2_000_000_000,
+            hash: [0u8; 32],
+            tensors: vec![],
+        },
+        ShardInfo {
+            index: 1,
+            layer_range: (16, 32),
+            size_bytes: 2_000_000_000,
+            hash: [1u8; 32],
+            tensors: vec![],
+        },
+    ];
+    state
+        .model_registry
+        .register_manifest(make_manifest(model, 32, shards));
+    for (n, tps) in [(&b, 40.0), (&c, 30.0)] {
+        for i in 0..2 {
+            state.model_registry.record_shard_holder(
+                ShardId {
+                    model_id: ModelId(model.into()),
+                    index: i,
+                },
+                n.clone(),
+            );
+        }
+        state
+            .peer_registry
+            .insert(n.clone(), gpu_holder_info(n, 50, tps));
+        state.connected_node_ids.insert(n.clone());
+    }
+    (state, local, b, c, ModelId(model.into()))
+}
+
+fn publish_resident(state: &SharedState, node: &NodeId, model: &ModelId, range: (u32, u32)) {
+    let mut p = state.peer_registry.get_mut(node).unwrap();
+    let cap = p.capability.as_mut().unwrap();
+    cap.resident_layers = vec![swarmllm_types::ResidentModelLayers {
+        model_id: model.0.clone(),
+        layers: range.1 - range.0,
+        ranges: vec![swarmllm_types::ResidentLayerRange {
+            start: range.0,
+            end: range.1,
+            releasable_layers: 0,
+        }],
+    }];
+}
+
+fn whole_model_cold_load_ms(cands: &[NodeCandidate], node: &NodeId, local: &NodeId) -> f32 {
+    let c = cands.iter().find(|c| &c.node_id == node).unwrap();
+    parallax::vertex_cost(c, (0, 32), local, 32, None).cold_load_ms
+}
+
+/// FUTURE_WORK #129: a candidate that must first read the model in is charged
+/// for it — at ITS OWN measured rate where it reports one, at the prior where
+/// it does not — and a candidate holding the layers is charged nothing.
+#[test]
+fn a_cold_candidate_is_charged_its_own_load_and_a_warm_one_nothing() {
+    let (state, local, b, c, model) = two_whole_model_card_peers();
+    // b is cold and reports loading at 2 s/GiB; c is cold and reports nothing.
+    state
+        .peer_registry
+        .get_mut(&b)
+        .unwrap()
+        .capability
+        .as_mut()
+        .unwrap()
+        .model_load_ms_per_gib = Some(2_000);
+    let scheduler =
+        PipelineScheduler::with_local_processor_speed(state.clone(), LOCAL_PROCESSOR_TPS);
+    let manifest = state.model_registry.get_manifest(&model).unwrap();
+    let cands = || {
+        scheduler.gather_candidates(
+            &manifest,
+            &local,
+            uuid::Uuid::new_v4(),
+            None.into(),
+            super::Purpose::Preview,
+            &|| true,
+        )
+    };
+    let gib_per_model = 4_000_000_000f32 / (1u64 << 30) as f32;
+    let at = |rate: f32| rate * gib_per_model;
+    let got = cands();
+    let b_ms = whole_model_cold_load_ms(&got, &b, &local);
+    let c_ms = whole_model_cold_load_ms(&got, &c, &local);
+    assert!((b_ms - at(2_000.0)).abs() < 1.0, "its own rate: {b_ms}");
+    assert!(
+        (c_ms - at(super::UNMEASURED_LOAD_MS_PER_GIB as f32)).abs() < 1.0,
+        "no rate reported: the prior, {c_ms}"
+    );
+
+    // Holding every layer (published): nothing to load.
+    publish_resident(&state, &c, &model, (0, 32));
+    assert_eq!(whole_model_cold_load_ms(&cands(), &c, &local), 0.0);
+    // Holding the first half: that half is free, the other half is charged.
+    // (The whole model would be charged in full — a worker asked for [0..32)
+    // while holding [0..16) drops it and reads all 32, the loader's own rule,
+    // `layers_it_would_add`.)
+    publish_resident(&state, &c, &model, (0, 16));
+    let got = cands();
+    let cand = got.iter().find(|x| x.node_id == c).unwrap();
+    let cost = |range| parallax::vertex_cost(cand, range, &local, 32, None).cold_load_ms;
+    assert_eq!(cost((0, 16)), 0.0);
+    let half = cost((16, 32));
+    assert!(
+        (half - at(super::UNMEASURED_LOAD_MS_PER_GIB as f32) / 2.0).abs() < 1.0,
+        "{half}"
+    );
+    assert!((cost((0, 32)) - at(super::UNMEASURED_LOAD_MS_PER_GIB as f32)).abs() < 1.0);
+
+    // Seen serving it recently but publishing nothing: priced as resident,
+    // as the memory bound prices it (`PeerResidency::WarmAmountUnknown`).
+    state.record_peer_segment_latency(
+        &b,
+        &model,
+        crate::daemon::state::peer_speed::WorkKind::Delegated,
+        2_000,
+        32,
+        0,
+    );
+    assert_eq!(whole_model_cold_load_ms(&cands(), &b, &local), 0.0);
+}
+
+/// This node is charged its own figure too, from its own timed loads — or
+/// the prior until it has one. Leaving it out would price a cold peer against
+/// a free local load, the direction #129 already erred in.
+#[test]
+fn this_node_is_charged_its_own_load_rate() {
+    let state = make_shared_state();
+    let local = state.identity.node_id().clone();
+    let mut here = simple_candidate(0, vec![(0, 32)]);
+    here.node_id = local.clone();
+    let bytes_per_layer = 125_000_000u64;
+    here.cold_load_ms_per_layer =
+        super::cold_load_ms_per_layer(state.model_process_pool.load_ms_per_gib(), bytes_per_layer);
+    let prior = parallax::vertex_cost(&here, (0, 32), &local, 32, None).cold_load_ms;
+    state
+        .model_process_pool
+        .observe_load_for_test(1 << 30, 1_500);
+    here.cold_load_ms_per_layer =
+        super::cold_load_ms_per_layer(state.model_process_pool.load_ms_per_gib(), bytes_per_layer);
+    let measured = parallax::vertex_cost(&here, (0, 32), &local, 32, None).cold_load_ms;
+    assert!(
+        measured < prior / 5.0,
+        "1.5 s/GiB measured must replace the 10 s/GiB prior: {measured} vs {prior}"
+    );
+}
+
+/// The decision #129 got wrong, in miniature: a faster peer that must first
+/// load the model against a slower one that holds it. Unpriced, the cold one
+/// wins on speed; priced, the warm one does.
+#[test]
+fn a_warm_peer_beats_a_faster_cold_one_once_the_load_is_priced() {
+    let (state, local, b, c, model) = two_whole_model_card_peers();
+    publish_resident(&state, &c, &model, (0, 32));
+    let scheduler =
+        PipelineScheduler::with_local_processor_speed(state.clone(), LOCAL_PROCESSOR_TPS);
+    let assignment = scheduler
+        .assemble_pipeline_for(
+            &model,
+            &local,
+            uuid::Uuid::new_v4(),
+            super::Purpose::Preview,
+            Some(200),
+        )
+        .unwrap();
+    let chosen: Vec<_> = assignment
+        .segments
+        .iter()
+        .map(|s| s.node_id.clone())
+        .collect();
+    assert_eq!(
+        chosen,
+        vec![c.clone()],
+        "the warm peer, not the faster cold one ({b:?}): got {chosen:?}"
     );
 }

@@ -7,10 +7,16 @@
 # the request failed with no other holder to re-plan onto, and the same
 # question 47 s later was answered in 2.7 s.
 #
-# Two arms, each run with the client binary under test:
+# Three arms, each run with the client binary under test:
 #   load   the server's load takes DELAY s; the reply must arrive.
 #   leave  the server is killed LEAVE_AFTER s into its load; the client must
 #          give up within seconds of that, not at the end of its budget.
+#   price  what a client CHARGES the server for a cold load when choosing a
+#          route (#129's other half): a client that has heard no rate from it
+#          prices it at the prior; after the server has timed its own (slowed,
+#          PRICE_DELAY s) load, unloaded the model and gossiped its rate, a
+#          fresh client prices it at that rate. Read from each client's
+#          `pipeline candidate … cold_load_ms=` line.
 # Run it once with the build under test as the client and once with a release
 # that predates the fix: the control must fail `load` at ~132 s and sit out
 # `leave` for ~132 s, or this test cannot see the fix.
@@ -21,7 +27,8 @@
 # server only; auto-manage and the canonical heal off on both. Placement is
 # pinned to the processor on both nodes.
 #
-# usage: examples/cold_load_test.sh <server-binary> <client-binary> [load|leave|both]
+# usage: examples/cold_load_test.sh <server-binary> <client-binary> [load|leave|price|both]
+#        (`both` = load + leave; `price` needs a client with the cold-load price)
 set -u
 SERVER_BIN="${1:?server binary (must have SWARMLLM_FAULT_LOAD_DELAY_SECS)}"
 CLIENT_BIN="${2:?client binary}"
@@ -72,11 +79,11 @@ up() { # dir port
   echo "node on $2 never came up"; tail -20 "$1/log"; return 1
 }
 
-start_server() { # arm
+start_server() { # arm [load delay, default DELAY]
   S="$BASE/$1-server"; mkdir -p "$S/models/$MODEL"
   cp "$SRC"/* "$S/models/$MODEL/"
   config "$S" ""
-  SWARMLLM_FAULT_LOAD_DELAY_SECS=$DELAY SWARMLLM_NODE_DATA_DIR="$S" "$SERVER_BIN" run -p $SP -v >> "$S/log" 2>&1 &
+  SWARMLLM_FAULT_LOAD_DELAY_SECS=${2:-$DELAY} SWARMLLM_NODE_DATA_DIR="$S" "$SERVER_BIN" run -p $SP -v >> "$S/log" 2>&1 &
   SPID=$!; PIDS="$PIDS $SPID"
   up "$S" $SP || exit 1
   local id=""
@@ -155,12 +162,46 @@ arm_leave() {
   kill -9 "$CPID" 2>/dev/null; kill_workers_under "$BASE"; sleep 2
 }
 
-LOAD_RESULT=skipped; LEAVE_RESULT=skipped
+# The cold-load price a client's planner put on the server, from its own log.
+cold_price_of_server() { # client log
+  grep -a "DIAG: pipeline candidate node=${SNODE}" "$1" | tail -1 | grep -oE "cold_load_ms=[0-9.]+" | cut -d= -f2
+}
+
+arm_price() {
+  local d=${PRICE_DELAY:-20}
+  echo "=== ARM price: what a client charges the server for loading (its load slowed to ${d}s) ==="
+  start_server price "$d"
+  SK=$(cat "$S/api_key")
+  SNODE=$(curl -s -m 5 -H "Authorization: Bearer $SK" "localhost:$SP/v1/status" | python3 -c 'import sys,json; print(json.load(sys.stdin)["node_id"][:16])')
+  GIB=$(python3 -c "import json; print(json.load(open('$S/models/$MODEL/manifest.json'))['total_size_bytes']/2**30)")
+  start_client price-a
+  read -r CODE WALL < <(ask price-a)
+  local a; a=$(cold_price_of_server "$C/log")
+  echo "client A (heard no rate): http=$CODE wall=${WALL}s, priced the server's cold load at ${a:-?} ms (prior 10000 ms/GiB x ${GIB} GiB)"
+  local rate; rate=$(grep -a "DIAG: model load timed" "$S/log" | tail -1 | grep -oE "ms_per_gib=Some\([0-9]+\)" | grep -oE "[0-9]+")
+  echo "server timed its own load: ${rate:-?} ms/GiB"
+  curl -s -m 10 -X POST -H "Authorization: Bearer $SK" "localhost:$SP/api/admin/models/$MODEL/unload" >/dev/null
+  kill -9 "$CPID" 2>/dev/null
+  echo "server unloaded the model; waiting 40 s for its next capability broadcast"; sleep 40
+  start_client price-b
+  read -r CODE WALL < <(ask price-b)
+  local b; b=$(cold_price_of_server "$C/log")
+  echo "client B (heard the rate): http=$CODE wall=${WALL}s, priced the server's cold load at ${b:-?} ms (expect ${rate:-?} x ${GIB})"
+  PRICE_RESULT=$(python3 -c "
+a=float('${a:-nan}'); b=float('${b:-nan}'); r=float('${rate:-nan}'); g=$GIB
+ok_a=abs(a-10000*g)<1; ok_b=abs(b-r*g)<0.01*r*g+1
+print(f'prior {a:.0f}~{10000*g:.0f} {\"ok\" if ok_a else \"WRONG\"}; measured {b:.0f}~{r*g:.0f} {\"ok\" if ok_b else \"WRONG\"}')")
+  echo "$PRICE_RESULT"
+  kill -9 "$CPID" "$SPID" 2>/dev/null; kill_workers_under "$BASE"; sleep 2
+}
+
+LOAD_RESULT=skipped; LEAVE_RESULT=skipped; PRICE_RESULT=skipped
 case "$ARMS" in
   load) arm_load ;;
   leave) arm_leave ;;
+  price) arm_price ;;
   *) arm_load; arm_leave ;;
 esac
 echo
-echo "RESULT client=$CLIENT_BIN load: $LOAD_RESULT ; leave: $LEAVE_RESULT (fix: load 200 at ~${DELAY}s; leave gives up within ~$((LEAVE_AFTER + 10))s)"
+echo "RESULT client=$CLIENT_BIN load: $LOAD_RESULT ; leave: $LEAVE_RESULT ; price: $PRICE_RESULT (fix: load 200 at ~${DELAY}s; leave gives up within ~$((LEAVE_AFTER + 10))s)"
 echo "logs kept under $BASE"

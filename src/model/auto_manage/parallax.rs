@@ -341,6 +341,7 @@ mod tests {
                     can_serve_inference: true,
                     resident_layers: Vec::new(),
                     context_ceiling_tokens: None,
+                    model_load_ms_per_gib: None,
                 }),
                 last_seen: chrono::Utc::now(),
                 latency_ms: Some(10),

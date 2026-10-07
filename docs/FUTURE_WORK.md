@@ -440,7 +440,7 @@ split wins. Also feed observed per-layer latency into `compute_segment_timeout` 
 the fixed 2 s/layer guess. Depends on #3.
 
 #### #129 — A model a few MB too large for the card is sent on a boomerang across continents
-`P2` · routing · **PARTIAL** — 2026-09-27, narrowed 2026-10-04 and 2026-10-05 (fit verdict fixed in v0.3.227) · history: archive row #129
+`P2` · routing · **PARTIAL** — 2026-09-27, narrowed 2026-10-04 and 2026-10-05 (fit verdict fixed in v0.3.227), 2026-10-07 (cold loads waited for and priced, on main) · history: archive row #129
 
 **v0.3.225 shipped half the fix, and the field check after deploy failed** (2026-10-05 01:30
 UTC): a cold Mistral-7B on this 8 GB node still went through `4a3ac72e` (Italy), 47 s. The
@@ -502,14 +502,23 @@ driver events** (`~/swarmllm-129b/verify129b.sh`): the cold Coder-7B stayed **lo
 (`sched_ms=0` — the local fast path took it), the loader freed both idle models (791 + 2963 MB) and
 admitted the 7B whole; warm 2.2 s for 120 tokens. Release binary, same shape: Italy, 46.5 s.
 
-**Residual (two parts):** (1) **a cold peer's load time is not priced** — `PeerResidency` bounds a
-peer's MEMORY, never its time, so a peer that must first load the model is predicted like a warm
-one (4.5 s predicted, 46 s taken). ServerlessLLM (OSDI '24) schedules on each server's estimated
-startup time from where its checkpoint sits and how fast that tier loads; the shape here is a
-measured load rate in `NodeCapability` (`#[serde(default)]`, measured from this node's own loads)
-times the model's bytes, added only for a peer not holding the model resident — verifiable only
-once peers run a release that advertises it. (2) A model that does NOT fit even after the reclaim
-is still priced at processor speed rather than as the loader's card/processor split (above).
+**Residual (one part left):** A model that does NOT fit even after the reclaim is still priced
+at processor speed rather than as the loader's card/processor split (above).
+
+**(1) — a cold candidate's load was not priced — fixed on main 2026-10-07 (not yet released).**
+`PeerResidency` bounded a peer's MEMORY, never its time, so a peer that must first load the
+model was predicted like a warm one (4.5 s predicted, 46 s taken). Now `parallax::vertex_cost`
+charges `cold_load_ms` = the candidate's own ms-per-layer × the layers it would ADD, once per
+request, from the same residency reading as the memory bound; this node is charged its own
+too. Each node times its loads in the worker (`WorkerMsg::ModelLoadTimed`), averages them
+(`process_pool::LoadRate`) and advertises `NodeCapability::model_load_ms_per_gib`; a node that
+reports none is charged `UNMEASURED_LOAD_MS_PER_GIB` (10 s/GiB, the pessimistic side of a
+measured 1.3-26 s/GiB spread). ServerlessLLM (OSDI '24) schedules on each server's measured
+loading speed for the same reason. Verified end to end (`cold_load_test.sh … price`, netns,
+2026-10-07): a client that had heard no rate priced the server's cold TinyLlama load at 6,229 ms
+(the prior); the server timed its own slowed load at 33,818 ms/GiB; a fresh client then priced
+the same load at 21,064 ms — that rate × 0.62 GiB. The field reading needs peers on the release:
+a cold 7-8B peer should then lose to a warm one or to a local route that is truly cheaper.
 
 **(1)'s other half — the DEADLINE — fixed on main 2026-10-07 (not yet released):** a cold load
 did not only cost time, it could fail the request. Live on v0.3.229 (00:23 UTC): Qwen 3.5 9B

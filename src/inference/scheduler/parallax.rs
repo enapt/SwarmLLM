@@ -53,11 +53,24 @@ pub(super) struct VertexCost {
     /// why this is its own term instead of joining `network_ms`, which is
     /// multiplied by `ASSUMED_FORWARD_PASSES`.
     pub(super) transfer_ms: f32,
+    /// Reading the model's weights into memory before the first pass, for the
+    /// layers this candidate does not already hold (FUTURE_WORK #129).
+    /// `NodeCandidate::cold_load_ms_per_layer` × `layers_it_would_add`.
+    ///
+    /// **Charged ONCE and never scaled by `expected_attempts`**: a retry finds
+    /// the model already loaded. Not to be confused with `load_ms`, which is
+    /// the candidate's queue of other requests.
+    pub(super) cold_load_ms: f32,
 }
 
 impl VertexCost {
     pub(super) fn total(self) -> f32 {
-        self.network_ms + self.compute_ms + self.load_ms + self.prefill_ms + self.transfer_ms
+        self.network_ms
+            + self.compute_ms
+            + self.load_ms
+            + self.prefill_ms
+            + self.transfer_ms
+            + self.cold_load_ms
     }
 }
 
@@ -532,6 +545,11 @@ pub(super) fn vertex_cost(
     } else {
         1.0
     };
+    // What the candidate must read in before it can start: the layers of this
+    // range it does not hold, at its own load speed. This node is charged its
+    // own figure too — leaving it out would make a cold peer look cheaper than
+    // a cold local route, the direction #129 already erred in.
+    let cold_load_ms = c.cold_load_ms_per_layer * c.layers_it_would_add(range) as f32;
     VertexCost {
         network_ms: network_ms * attempts,
         compute_ms: compute_ms * attempts,
@@ -539,6 +557,7 @@ pub(super) fn vertex_cost(
         prefill_ms: prefill_ms * attempts,
         // Scaled like the rest: a lost reply wastes the bytes already moved.
         transfer_ms: transfer_ms * attempts,
+        cold_load_ms,
     }
 }
 
@@ -1324,6 +1343,7 @@ mod tests {
             held_ranges: Vec::new(),
             published_room: None,
             cached_prefix_tokens: 0,
+            cold_load_ms_per_layer: 0.0,
             goodput_bytes_per_sec: None,
         }
     }
@@ -3401,6 +3421,7 @@ mod transfer_cost_tests {
             held_ranges: Vec::new(),
             published_room: None,
             cached_prefix_tokens: 0,
+            cold_load_ms_per_layer: 0.0,
         }
     }
 

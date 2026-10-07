@@ -1099,6 +1099,9 @@ impl HealthMonitor {
                     .model_process_pool
                     .served_context_ceiling(),
             ),
+            // How fast this node's own loads have been (#129), so a
+            // coordinator can price waiting for it to load a model.
+            model_load_ms_per_gib: self.shared_state.model_process_pool.load_ms_per_gib(),
             // Advertise the protocol epoch + the optional features this build
             // implements, so peers negotiate new message types additively.
             protocol_version: swarmllm_types::PROTOCOL_VERSION,

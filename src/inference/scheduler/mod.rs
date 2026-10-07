@@ -212,6 +212,39 @@ struct NodeCandidate {
     /// split never does. **Never set it for a peer** — `cached_prefix`'s module
     /// doc says why a peer's cache would be priced and not delivered.
     cached_prefix_tokens: u32,
+    /// What reading ONE layer of this model into memory costs this candidate
+    /// before it can run it, in ms — [`cold_load_ms_per_layer`] of its own
+    /// rate. `parallax::vertex_cost` charges it, once per request, on the
+    /// layers the candidate would ADD (`layers_it_would_add`), so held layers
+    /// are free. 0 where [`PeerResidency`] says warm but cannot say which
+    /// layers: that reading prices weights as resident, and so does this.
+    ///
+    /// A peer that must first load was predicted like a warm one — 4.5 s
+    /// predicted, 46 s taken (FUTURE_WORK #129).
+    cold_load_ms_per_layer: f32,
+}
+
+/// Assumed load speed for a node that has not reported its own
+/// (`NodeCapability::model_load_ms_per_gib` is `None` — a build before it, or
+/// a node that has not yet timed a load), and for this node until its first
+/// load is timed.
+///
+/// On the pessimistic side of a measured spread, as `UNKNOWN_COMPUTE_MS` is
+/// for compute: this node's own 335 timed loads (2026-10-07) ran ~1.3 s/GiB
+/// onto the card and ~4 s/GiB onto the processor; the slow end of the field is
+/// ~26 s/GiB (an 8B on a processor peer, 2026-08-01) and over 25 s/GiB on a busy
+/// Mac that had just restarted (2026-10-07). An unknown node is charged worse
+/// than a typical measured one, so it never outranks a measured fast loader,
+/// but not the worst ever seen, which would rule out every cold peer still on
+/// an older build.
+pub(super) const UNMEASURED_LOAD_MS_PER_GIB: u32 = 10_000;
+
+/// What loading one layer costs a node, in ms: its rate (`ms_per_gib`, or
+/// [`UNMEASURED_LOAD_MS_PER_GIB`] when it has none) × the model's bytes per
+/// layer.
+fn cold_load_ms_per_layer(ms_per_gib: Option<u32>, bytes_per_layer: u64) -> f32 {
+    let rate = ms_per_gib.unwrap_or(UNMEASURED_LOAD_MS_PER_GIB) as f64;
+    (rate * bytes_per_layer as f64 / (1u64 << 30) as f64) as f32
 }
 
 /// How much a peer that PUBLISHED its resident ranges can take on, in the
@@ -3799,13 +3832,22 @@ impl PipelineScheduler {
                     .unwrap_or_default()
             };
             let mut published_room = None;
-            let (max_hostable_layers, max_hostable_layers_at_face_value) =
+            // Room, and what loading the model would cost, from ONE residency
+            // reading per candidate, so the memory bound and the load price
+            // cannot disagree about what is already held.
+            let (max_hostable_layers, max_hostable_layers_at_face_value, cold_load_per_layer) =
                 if node_id == *local_node_id {
                     let ours = self
                         .shared_state
                         .model_process_pool
                         .max_hostable_layers_for_planning(&manifest.id);
-                    (ours, ours)
+                    // Our own held ranges say what is resident here exactly;
+                    // our own loads say how fast the rest would arrive.
+                    let load = cold_load_ms_per_layer(
+                        self.shared_state.model_process_pool.load_ms_per_gib(),
+                        bytes_per_layer,
+                    );
+                    (ours, ours, load)
                 } else {
                     // What the peer SAYS it has resident beats what we can
                     // infer from having seen it serve the model recently. A peer
@@ -3860,9 +3902,28 @@ impl PipelineScheduler {
                             },
                         });
                     }
+                    // Its own measured load speed, where it reports one.
+                    let advertised_rate =
+                        self.shared_state.peer_registry.get(&node_id).and_then(|p| {
+                            p.capability.as_ref().and_then(|c| c.model_load_ms_per_gib)
+                        });
+                    let load = match residency {
+                        // Warm by the only signal there is, amount unknown:
+                        // priced as resident, as the memory bound prices it.
+                        PeerResidency::WarmAmountUnknown => 0.0,
+                        // A count with no ranges (a build before #99) covering
+                        // the whole model is the whole model.
+                        PeerResidency::Layers(n)
+                            if held_ranges.is_empty() && n >= manifest.num_layers =>
+                        {
+                            0.0
+                        }
+                        _ => cold_load_ms_per_layer(advertised_rate, bytes_per_layer),
+                    };
                     (
                         bound(residency, DELEGATE_VRAM_MARGIN),
                         bound(residency, 1.0),
+                        load,
                     )
                 };
             let gpu_vram_available_mb = if node_id == *local_node_id {
@@ -3925,6 +3986,7 @@ impl PipelineScheduler {
                 published_room,
                 // Ours only — see the field.
                 cached_prefix_tokens: if is_local { prompt.cached_locally } else { 0 },
+                cold_load_ms_per_layer: cold_load_per_layer,
             });
         }
 
@@ -3987,6 +4049,9 @@ impl PipelineScheduler {
                 // THIS, not `max_hostable_layers` (#99). Absent for everyone
                 // else, which is how the two pricings tell apart in a log.
                 new_layer_room = ?c.published_room.map(|r| r.new_layers),
+                // What reading the whole model in would cost it now (#129):
+                // 0 for a candidate holding every layer.
+                cold_load_ms = whole.cold_load_ms,
                 expected_attempts = c.expected_attempts,
                 // The COUNT beside the multiplier, because the multiplier
                 // alone cannot distinguish "this peer is reliable" from

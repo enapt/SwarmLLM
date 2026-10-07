@@ -716,8 +716,59 @@ fn worker_msg_request_id(msg: &WorkerMsg) -> Option<Uuid> {
         | WorkerMsg::PrefixFetchProbe { .. }
         | WorkerMsg::Progress { .. }
         | WorkerMsg::CardAllocationProbe { .. }
+        | WorkerMsg::ModelLoadTimed { .. }
         | WorkerMsg::Ready
         | WorkerMsg::Bye => None,
+    }
+}
+
+/// How fast this node reads a model into memory: an average of milliseconds
+/// per GiB over its workers' own load timings (`WorkerMsg::ModelLoadTimed`).
+///
+/// The one figure behind both halves of FUTURE_WORK #129's pricing: this node
+/// advertises it (`NodeCapability::model_load_ms_per_gib`) and the planner
+/// charges a cold candidate with it (`NodeCandidate::cold_load_ms_per_layer`).
+/// It varies twentyfold across the fleet — measured from this node's own log
+/// 2026-10-07, 335 loads: ~1.3 s/GiB onto the card and ~4 s/GiB onto the
+/// processor, against ~26 s/GiB for an 8B on a processor peer (2026-08-01) and
+/// over 25 s/GiB on a busy Mac that had just restarted (2026-10-07) — which is
+/// why it is measured per node rather than assumed.
+///
+/// An AVERAGE, because a load time is a latency (`AckRttEstimator` vs
+/// `GoodputEstimator`): a page-cache-warm reload is a real, fast load, and a
+/// cold one a real, slow one. Loads under [`Self::MIN_BYTES`] are skipped —
+/// their fixed costs (opening the header, laying out the tensors) would read
+/// as a slow disk.
+#[derive(Default)]
+pub(crate) struct LoadRate {
+    ms_per_gib: std::sync::Mutex<Option<f64>>,
+}
+
+impl LoadRate {
+    /// The smallest load that says anything about per-byte speed.
+    const MIN_BYTES: u64 = 256 << 20;
+    /// Weight of the newest sample — `peer_speed`'s EMA weight.
+    const ALPHA: f64 = 0.3;
+
+    pub(crate) fn observe(&self, bytes: u64, ms: u32) {
+        if bytes < Self::MIN_BYTES {
+            return;
+        }
+        let sample = f64::from(ms) / (bytes as f64 / (1u64 << 30) as f64);
+        if !sample.is_finite() {
+            return;
+        }
+        if let Ok(mut slot) = self.ms_per_gib.lock() {
+            *slot = Some(match *slot {
+                Some(prev) => Self::ALPHA * sample + (1.0 - Self::ALPHA) * prev,
+                None => sample,
+            });
+        }
+    }
+
+    pub(crate) fn ms_per_gib(&self) -> Option<u32> {
+        let v = (*self.ms_per_gib.lock().ok()?)?;
+        Some(v.round().clamp(1.0, f64::from(u32::MAX)) as u32)
     }
 }
 
@@ -729,6 +780,7 @@ struct SideBand {
     prefix_probe_tx: Option<mpsc::Sender<PrefixProbeEvent>>,
     progress_tx: Option<mpsc::Sender<ProgressEvent>>,
     slow_card: Arc<crate::inference::cuda_pool::SlowCardNotice>,
+    load_rate: Arc<LoadRate>,
 }
 
 /// Reader actor: owns the read half of the worker socket, dispatches each
@@ -747,6 +799,7 @@ async fn reader_actor(
         prefix_probe_tx,
         progress_tx,
         slow_card,
+        load_rate,
     } = side;
     let mut skipped: std::collections::HashSet<String> = std::collections::HashSet::new();
     loop {
@@ -812,6 +865,18 @@ async fn reader_actor(
                 // for the health monitor to tell the owner.
                 if let WorkerMsg::CardAllocationProbe { took_ms } = msg {
                     slow_card.record(std::time::Duration::from_millis(u64::from(took_ms)));
+                    continue;
+                }
+                // One model load, timed inside the worker (#129).
+                if let WorkerMsg::ModelLoadTimed { bytes, ms } = msg {
+                    load_rate.observe(bytes, ms);
+                    tracing::debug!(
+                        model = %model_id,
+                        bytes,
+                        ms,
+                        ms_per_gib = ?load_rate.ms_per_gib(),
+                        "DIAG: model load timed"
+                    );
                     continue;
                 }
                 // Worker-initiated cross-node probe (Item 8 Phase 2b).
@@ -2178,6 +2243,10 @@ pub struct ModelProcessPool {
     /// was last told (#762) — written by every reader actor, read by the
     /// health monitor through [`Self::slow_card_notice`].
     slow_card: Arc<crate::inference::cuda_pool::SlowCardNotice>,
+    /// How fast this node reads a model into memory, from its workers' own
+    /// load timings — written by every reader actor, advertised by the health
+    /// monitor and priced by the planner through [`Self::load_ms_per_gib`].
+    load_rate: Arc<LoadRate>,
     /// A model's `(fixed_mb, per_layer_mb)` for a test that needs the growth
     /// path to weigh something. The real curve is read off a GGUF header on
     /// disk, which a unit test must not depend on the developer's node for.
@@ -2349,6 +2418,7 @@ impl ModelProcessPool {
             progress_tx: std::sync::OnceLock::new(),
             prefix_probe_tx: std::sync::OnceLock::new(),
             slow_card: Arc::new(crate::inference::cuda_pool::SlowCardNotice::default()),
+            load_rate: Arc::new(LoadRate::default()),
             #[cfg(test)]
             test_cost_curve: DashMap::new(),
             #[cfg(test)]
@@ -2373,6 +2443,18 @@ impl ModelProcessPool {
     /// (`cuda_pool::SlowCardNotice`); the health monitor reads it each tick.
     pub(crate) fn slow_card_notice(&self) -> &crate::inference::cuda_pool::SlowCardNotice {
         &self.slow_card
+    }
+
+    /// How long this node takes to read one GiB of a model into memory, from
+    /// its own loads; `None` until a load big enough to say has been timed.
+    pub(crate) fn load_ms_per_gib(&self) -> Option<u32> {
+        self.load_rate.ms_per_gib()
+    }
+
+    /// Feed one load timing in, as a worker report would.
+    #[cfg(test)]
+    pub(crate) fn observe_load_for_test(&self, bytes: u64, ms: u32) {
+        self.load_rate.observe(bytes, ms);
     }
 
     /// Install the prefix-probe sink. Daemon owns the receiver and answers
@@ -5619,6 +5701,8 @@ impl ModelProcessPool {
         // This daemon reads the worker's card probe report; a worker spawned by
         // an older daemon (an update not yet restarted into) must not send it.
         command.env(crate::inference::worker_ipc::DAEMON_READS_CARD_PROBE, "1");
+        // ...and its load timings (#129), for the same reason.
+        command.env(crate::inference::worker_ipc::DAEMON_READS_LOAD_TIMING, "1");
         let mut child = command
             .spawn()
             .map_err(|e| SwarmError::ServiceUnavailable(format!("spawn worker: {e}")))?;
@@ -5730,6 +5814,7 @@ impl ModelProcessPool {
                 prefix_probe_tx: self.prefix_probe_tx.get().cloned(),
                 progress_tx: self.progress_tx.get().cloned(),
                 slow_card: self.slow_card.clone(),
+                load_rate: self.load_rate.clone(),
             },
         ));
         Ok(WorkerHandle {
@@ -10125,5 +10210,35 @@ mod admission_tests {
         // A build without CUDA runs everything on the processor; with CUDA, a
         // card that is present and not known to be too small is not degraded.
         assert_eq!(pool.serves_on_cpu(&model), !cfg!(feature = "candle-cuda"));
+    }
+}
+
+#[cfg(test)]
+mod load_rate_tests {
+    use super::LoadRate;
+
+    /// A small load is mostly fixed cost — opening the header, laying out the
+    /// tensors — and would read as a slow disk.
+    #[test]
+    fn a_small_load_says_nothing_about_how_fast_this_node_loads() {
+        let r = LoadRate::default();
+        r.observe(100 << 20, 5_000);
+        assert_eq!(r.ms_per_gib(), None);
+        r.observe(2 << 30, 4_000);
+        assert_eq!(r.ms_per_gib(), Some(2_000));
+    }
+
+    /// An average over this node's loads, newest weighted like `peer_speed`.
+    #[test]
+    fn the_load_rate_follows_this_nodes_loads() {
+        let r = LoadRate::default();
+        r.observe(1 << 30, 2_000);
+        r.observe(1 << 30, 4_000);
+        assert_eq!(r.ms_per_gib(), Some(2_600));
+        // Never zero, even from an instant load: zero would price a cold
+        // candidate as warm.
+        let fast = LoadRate::default();
+        fast.observe(4 << 30, 0);
+        assert_eq!(fast.ms_per_gib(), Some(1));
     }
 }
