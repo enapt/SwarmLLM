@@ -58,7 +58,7 @@ Client → API Server → InferenceRouter → Pipeline Assembly
 3. Query model_registry.shard_holders for hosting nodes
 4. **Liveness filter**: drop holders that aren't in `connected_node_ids` (the libp2p truth — DHT can re-inject providers for peers that just disconnected, and `peer_registry` is intentionally preserved across mid-pipeline disconnects for reconnect attempts)
 5. Fetch node load/latency from peer_registry
-6. **Parallax scheduler**: shortest-path dynamic programming over observed per-layer latencies (EMA over recent forwards), rather than a greedy latency-only sort. Cross-gossips top-32 observed latencies via `NodeCapability.observed_latencies` so every node has a current view of the network's compute profile
+6. **Parallax scheduler**: shortest-path dynamic programming over observed per-layer latencies (EMA over recent forwards), rather than a greedy latency-only sort. Cross-gossips top-32 observed latencies via `NodeCapability.observed_latencies` so every node has a current view of the network's compute profile. Since 0.3.230 a candidate that must first load the model is also charged for the load: each node times its own loads and advertises `NodeCapability.model_load_ms_per_gib`, and the layers a candidate does not hold are priced at that rate (10 s/GB for a node that has not reported one) — this node included
 7. **Start-and-finish check** (`encrypted_pipeline`): if enabled for this model, force first and last segments to the local node (boomerang topology)
 8. Assignment: widest contiguous layer range per node, merging on same-node
 9. Identify standby nodes per segment (failover)
@@ -86,7 +86,8 @@ Independently, streaming-tracked `SendDirectMessage` sends carry a
 `delivery_request_id`; if the receiver doesn't ACK within
 `RR_ACK_TIMEOUT_SECS` (10s), the daemon closes the caller's
 streaming channel — converting a first-token-deadline hang (120 s
-plus 0.5 s per prompt token, at most 600 s) into a fast-fail in ~10–20s. This handles the rare case where
+plus 0.5 s per prompt token, at most 600 s, plus 240 s per computer that may
+first have to load the model) into a fast-fail in ~10–20s. This handles the rare case where
 libp2p `request_response` accepts a `send_request` call but never
 delivers it (no `OutboundFailure` event fires).
 
@@ -120,7 +121,7 @@ The RoPE column is llama.cpp's per-architecture choice (`llama_model_rope_type`)
 | **Llama 4** | Interleaved; iRoPE (NoPE every 4th) | No | MoE FFN |
 | **Qwen2 / Qwen3** | Contiguous | Yes (Qwen2) | EOS 151643+151645; per-head q/k norm (Qwen3) |
 | **Qwen2-MoE / Qwen3-MoE** | Contiguous | Yes (Qwen2-MoE) | The same layout with routed experts per layer; Qwen2-MoE adds a gated shared expert and does not renormalise its top-k weights |
-| **Qwen 3.5** | Contiguous (IMROPE over 64 of 256 dims; text positions only) | No | Dense models only: three of every four layers are Gated DeltaNet, which keeps a running state per conversation, and the fourth is gated attention. Speculative decoding is off for it (that state cannot be wound back), and a card too small for the whole model runs it on the processor (no card/processor split yet). Checked against llama.cpp on Qwen3.5-0.8B and 4B. The mixture-of-experts models (`qwen35moe`) are still refused |
+| **Qwen 3.5** | Contiguous (IMROPE over 64 of 256 dims; text positions only) | No | Dense models only: three of every four layers are Gated DeltaNet, which keeps a running state per conversation, and the fourth is gated attention. Speculative decoding is off for it (that state cannot be wound back). A card too small for the whole model takes as many layers as fit and the processor the rest (since 0.3.230), and only the attention layers are charged conversation memory. Checked against llama.cpp on Qwen3.5-0.8B and 4B. The mixture-of-experts models (`qwen35moe`) are still refused |
 | **Gemma/Gemma2** | Contiguous | No | Embedding scaling (sqrt(d)), Gemma RmsNorm (+1), EOS 107, attention + final logit softcapping, Gemma chat template fallback |
 | **Phi-3** | Contiguous, Su/YaRN scaling | Yes | Fused QKV/FFN tensors |
 | **Mistral** | Interleaved | No | GQA |

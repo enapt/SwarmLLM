@@ -107,6 +107,23 @@ stream, because a header cannot be revised once sent.
 export LD_LIBRARY_PATH=/usr/local/cuda/lib64:/usr/lib/wsl/lib:$LD_LIBRARY_PATH
 ```
 
+## A Model Runs on the Processor Although There Is a Graphics Card
+
+The model's card on the Dashboard says why ("Running on the processor — …"),
+and so does `swarmllm status`. The reasons, and what to do:
+
+| Reason shown | Means | Do |
+|---|---|---|
+| Needs more graphics memory than was free | Other models or programs held the card's memory when this one started | Nothing: it moves to the card once memory frees up |
+| Set to use the processor only | `inference.gpu_layers = 0` | Change it in Settings if you did not mean it |
+| Card older than this build supports | This build's kernels need a newer card (on Linux, RTX 30-series or newer) | Nothing; the processor is used |
+| Lost access to the graphics card | The graphics libraries went away, usually a driver update while SwarmLLM ran | Restart SwarmLLM |
+| The graphics driver is not answering (0.3.230+) | The driver is resetting the card; `nvidia-smi` hangs meanwhile | Nothing: it moves back once the driver answers |
+
+A model too big for the card whole runs partly on it ("N of M layers on the
+graphics card") rather than wholly on the processor; that is a split, not one of
+the reasons above.
+
 ## Port Already in Use
 
 ```bash
@@ -266,7 +283,11 @@ its GPU memory) whenever the daemon unloads it by either path above.
   automatically retries once with a fresh pipeline assembly that
   filters out the unreachable peer. If retry also fails, the user
   sees the error within ~20s (vs the first-token deadline: 120 s plus
-  0.5 s per prompt token, at most 600 s).
+  0.5 s per prompt token, at most 600 s — plus 240 s for each computer that
+  may first have to load the model, since 0.3.230).
+- A peer that DISCONNECTS while you wait for its first token is noticed
+  within 5 s (0.3.230+): the log says `the peer disconnected before its
+  first token` and the request is retried elsewhere.
 - Most common cause: the target peer was killed or partitioned and
   the local libp2p connection state hasn't yet caught up.
 - Look for `DIAG: rr ACK timeout — closing streaming caller` in

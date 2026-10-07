@@ -732,8 +732,13 @@ references: `docs/plans/qwen35_support.md`.
   speculation_can_roll_back`, `SplitModel::carries_recurrent_state` for the worker's own n-gram and
   SWIFT), `KvCacheEntry::truncate_to` refuses while it is held, and the prefix cache never
   snapshots it. A prompt pass at position 0 clears the entry, so a failover replay rebuilds it.
-- **Not yet**: the card/processor split (`hybrid::arch_supports_hybrid`), CUDA-graph capture of its
-  layers, the chunked delta rule for long prompts on a card — #228.
+- **Card/processor split since v0.3.230** (`hybrid::arch_supports_hybrid`): every tensor the loop
+  loads goes through the shadowed `device`/`cos`/`sin`, and a DeltaNet layer makes its state on its
+  input's device. Memory is charged only to the layers that keep a KV cache
+  (`split::layers_keeping_kv`, one in four) — admission, the split planner, the loader's KV budget
+  and the scheduler's peer bound alike.
+- **Not yet**: CUDA-graph capture of its layers, the chunked delta rule for long prompts on a card —
+  #228.
 
 ### Tensor Parallelism (AllReduce)
 
@@ -2994,7 +2999,7 @@ The list is split into **open** (will be addressed) and **won't fix unless a con
 
 - **StarCoder2 — recognised, refused** — `docs/FUTURE_WORK.md` #118: a LayerNorm model with biases the loader does not read, and a metadata key (`layer_norm_epsilon`) the shared parser does not accept.
 
-- **Qwen 3.5 — dense runs, `qwen35moe` recognised and refused** — `docs/FUTURE_WORK.md` #228: the MoE variant, the card/processor split, CUDA-graph capture of its layers, the chunked delta rule, and speculation (a snapshot of the recurrent state per draft would allow it).
+- **Qwen 3.5 — dense runs (card/processor split since v0.3.230), `qwen35moe` recognised and refused** — `docs/FUTURE_WORK.md` #228: the MoE variant, CUDA-graph capture of its layers, the chunked delta rule, and speculation (a snapshot of the recurrent state per draft would allow it).
 
 - **DeepSeek-2 (V2/V2-Lite/V3, Kimi-K2, GLM-4.7-Flash) — recognised, refused, code kept** — see `docs/FUTURE_WORK.md` #116 for the list of what a real file needs. The loader's MLA branch, `MlaWeights` and `LayerVariant::DeepSeek` stay as its starting point and are unreachable until `ModelArch::is_supported` admits the family again.
 
