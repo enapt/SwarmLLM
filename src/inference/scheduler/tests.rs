@@ -453,6 +453,19 @@ fn a_model_past_every_holders_ceiling_is_refused_before_anyone_is_asked() {
         "the caller is told what the holders could hold: {err}"
     );
 
+    // Its current figure unknown, its ceiling known: the ceiling alone is a
+    // cap, so the second pass still runs and says what it is — not a generic
+    // planner error read as "a peer went offline" (review of #230).
+    let mut ceiling_only = only.clone();
+    ceiling_only.max_hostable_layers = None;
+    let err = scheduler
+        .greedy_assign(48, &[ceiling_only], false, false, super::Purpose::Route)
+        .expect_err("past the ceiling either way");
+    assert!(
+        matches!(err, crate::error::SwarmError::SwarmShortOfMemory { .. }),
+        "{err:?}"
+    );
+
     // Short only of what it can reclaim: still assigned, past its current
     // figure, up to its ceiling (report #025's rescue).
     only.max_hostable_layers_at_ceiling = Some(48);
@@ -6349,6 +6362,18 @@ fn a_model_no_holder_could_ever_hold_is_refused_by_the_planner() {
             Some(24),
             "the peer's own admission arithmetic, from the model's header"
         );
+        // Every figure another path reads — delegation, the whole-model
+        // disqualifier, the standbys read `max_hostable_layers` directly — is
+        // held to it where the candidate is built, not only the search's rungs.
+        for (what, figure) in [
+            ("max_hostable_layers", cand.max_hostable_layers),
+            ("at face value", cand.max_hostable_layers_at_face_value),
+        ] {
+            assert!(
+                figure.is_some_and(|layers| layers <= 24),
+                "{what} past the ceiling: {figure:?}"
+            );
+        }
     }
     let split = plan().expect("24 + 24 holds 32 layers");
     assert_eq!(split.segments.last().unwrap().layer_range.1, 32);

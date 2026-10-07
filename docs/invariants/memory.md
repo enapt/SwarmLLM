@@ -2024,13 +2024,27 @@ only when the connected swarm's ceilings could carry it at all:
   part is held), and any copy whose holder adds to what carries the model while it would fall short
   without it. The download pass asks the same function before each fetch, so the two agree and a
   carried part is never shed and refetched (gotcha #795's loop).
+- **A carrier keeps its lease only by progress.** A machine whose own storage budget or disk
+  reserve will not take its plan never fetches, and nothing it gossips says so — it stayed elected
+  for ever in the first cut (the review). After `CARRIER_PATIENCE` (20 min) with no part gained and
+  none being fetched (`peer_shard_downloads`, this node's own claims), every node passes it over for
+  `PASSED_OVER_FOR` (2 h) and the next in the same ranking carries: a stalled leader replaced the way
+  a lease does it (Kubernetes' leader lease, CRUSH re-placing data off an "out" OSD).
+- **In scope only.** In private mode the carrier candidates and "could the swarm carry it" are the
+  pool's (`pool::scope::allowed_node_set`, which `holdings` already applied): a machine outside the
+  pool was electable in the first cut.
+- **A partial mesh can elect two.** Nodes that see different machines can rank different winners;
+  the cost is duplicate parts, bounded by the shortfall, never a loop.
 - **Unknown changes nothing**: no header here, or any machine with no ceiling advertised (older than
   v0.3.230) — no carrying, no protection, everything as before.
 
 **Evidence.** `coverage::tests::*` — the carrier is the machine that can, not the holder that
 cannot nor one without room; 8 layers short, a carrier with room for 16 is offered part 0 alone,
 and 24 short it is offered the two parts its room holds; nothing with no demand; prune keeps a
-carrying copy and sheds it once another holder can; an unknown ceiling changes nothing. The carrier
+carrying copy and sheds it once another holder can; an unknown ceiling changes nothing; a
+carrier with no progress past the patience is passed over (one that gained a part is not); a
+machine outside the pool is never the carrier (red with the scope removed; the lease test red
+with the lease never lapsing). The carrier
 test is red with carrying switched off and again with the shortfall ignored; the prune test red with
 the protection switched off (its first version passed both ways — two holders, where prune would
 not shed anyway; three make it real). Rig `examples/carry_test.sh`, three nodes in a private

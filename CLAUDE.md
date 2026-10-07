@@ -88,7 +88,7 @@ cargo dev-test                        # lib + integration; counts below come fro
 cargo dev-run -- run -p 8800 -v       # start a daemon serving the frontend from disk
 ```
 
-**Counts, measured at v0.3.230 (dev,claude-subscription)**: **3266 lib** (+16 ignored),
+**Counts, measured at v0.3.230 (dev,claude-subscription)**: **3274 lib** (+16 ignored),
 79 integration (31 + 34 + 14 `yamux_substream`), **200 repo-consistency**,
 1 `api_key_side_effects`, 58 `swarmllm-types`, and 12 in the vendored
 request-response patch — plus 17 in the `swarmllm` BIN target (`cli::*`, counted

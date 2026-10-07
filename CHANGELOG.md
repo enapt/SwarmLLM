@@ -22,7 +22,10 @@ asked for is held only by computers that cannot run it, one computer with
 room fetches just the missing part, and another if one is not enough. The
 model ends up spread across computers able to run their part, and no
 computer is made to hold all of it. This only happens for models people have
-asked for, and only when the swarm has the memory to carry them. In a
+asked for, and only when the swarm has the memory to carry them. A computer
+that is chosen but makes no progress for 20 minutes (its own storage limit
+can stop it) is passed over for the next one, and in private mode only the
+computers in your pool are asked. In a
 three-computer test, the first request was refused at once, a computer with
 room fetched the missing part, and the next request was answered.
 

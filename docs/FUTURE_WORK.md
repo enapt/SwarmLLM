@@ -1522,9 +1522,13 @@ grep `^| N |`).
   ceiling (never the whole model because it has room: "no machine holds the whole model"), past the
   replica target and the hash ring, still through the trust gate, the budget and `would_shed_copy`;
   and `would_shed_copy` keeps every copy
-  the model would fall short without (`copy_carries_model`), so download and prune agree. Unit tests
+  the model would fall short without (`copy_carries_model`), so download and prune agree. Only
+  machines in scope are candidates (the pool's, in private mode), and a carrier keeps the role only
+  by progress: 20 min with no part gained or being fetched and every node passes it over for 2 h
+  (`DIAG: the machine chosen to carry this model has made no progress`). Unit tests
   `coverage::tests::*` (the carrier test red with carrying off and again with the shortfall
-  ignored, the prune test red with the protection off). Rig `examples/carry_test.sh` (three nodes, private network namespace): the first
+  ignored, the prune test red with the protection off, the lease and scope tests red without
+  theirs). Rig `examples/carry_test.sh` (three nodes, private network namespace): the first
   request refused in 0.0 s ("room for about 19 of its 22 layers"), the carrier named carrying 30 s
   after the client's demand reached it (score 1500 against routine 30) and fetched the part, the
   next request served in 1.2 s; with routine replication already satisfied it had fetched nothing
@@ -1538,7 +1542,7 @@ grep `^| N |`).
   `NodeCapability::model_memory_ceiling_mb` (its RAM cap; card + memory on a card node); the
   planner weighs it with the peer's own admission arithmetic (`segment_cost_curve`; a model's
   weights now come from its header on every node), never plans past it on any rung or greedy pass
-  (`NodeCandidate::within_ceiling`), splits across holders where their ceilings add up, and
+  (clamped where candidates are built, so delegation and the standbys inherit it), splits across holders where their ceilings add up, and
   refuses as `SwarmShortOfMemory` before asking anyone where they do not. Rig
   `examples/ceiling_test.sh`: 784 MB cap against a 980 MB footprint → 503 in 0.1 s, server asked
   0 times (v0.3.229 client: 3); 1044 MB → served. Also fixed: the cost curve put the whole KV cache

@@ -172,6 +172,12 @@ pub struct AutoShardManager {
     /// Each model's processor cost curve, kept a few minutes (`coverage`, #231):
     /// it parses the model's header, and prune asks about every part it holds.
     pub(super) carry_curves: dashmap::DashMap<ModelId, (std::time::Instant, Option<(u64, u64)>)>,
+    /// Each model's chosen carrier and when it last made progress
+    /// (`coverage`, #231): the lease a carrier keeps only by gaining parts.
+    pub(super) carrier_leases: dashmap::DashMap<ModelId, super::coverage::CarrierLease>,
+    /// Carriers passed over for a model after their lease lapsed, and when.
+    pub(super) carriers_passed_over:
+        dashmap::DashMap<(ModelId, crate::types::NodeId), std::time::Instant>,
 }
 
 /// A candidate shard identified for auto-download.
@@ -220,6 +226,8 @@ impl AutoShardManager {
             download_semaphore,
             last_over_budget_warning: std::sync::Mutex::new(None),
             carry_curves: dashmap::DashMap::new(),
+            carrier_leases: dashmap::DashMap::new(),
+            carriers_passed_over: dashmap::DashMap::new(),
         }
     }
 

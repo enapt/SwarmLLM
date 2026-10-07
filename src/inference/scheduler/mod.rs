@@ -295,15 +295,11 @@ impl NodeCandidate {
     }
 
     /// `figure` — whatever bound a pass holds this candidate to — never past
-    /// what it could EVER hold ([`Self::max_hostable_layers_at_ceiling`]): the
-    /// smaller of the two when both are known, the one that is known
-    /// otherwise, `None` (unknown, never "no room") when neither is. The one
-    /// place every pass applies the ceiling, so none can skip it.
+    /// what it could EVER hold ([`Self::max_hostable_layers_at_ceiling`]).
+    /// The routine figures are already clamped where candidates are built;
+    /// this is for a figure a rung computes itself (`None` on the last two).
     fn within_ceiling(&self, figure: Option<u32>) -> Option<u32> {
-        match (figure, self.max_hostable_layers_at_ceiling) {
-            (Some(figure), Some(ceiling)) => Some(figure.min(ceiling)),
-            (figure, ceiling) => figure.or(ceiling),
-        }
+        clamp_to_ceiling(figure, self.max_hostable_layers_at_ceiling)
     }
 
     /// What `range` costs this candidate against the cap the pipeline search
@@ -866,6 +862,16 @@ fn layers_offered_at(
         held.into_iter()
             .map(|(node, ranges)| (ranges, offered[node])),
     ))
+}
+
+/// A peer's `figure` never past its `ceiling` — what it could EVER hold: the
+/// smaller of the two when both are known, the one that is known otherwise,
+/// `None` (unknown, never "no room") when neither is.
+fn clamp_to_ceiling(figure: Option<u32>, ceiling: Option<u32>) -> Option<u32> {
+    match (figure, ceiling) {
+        (Some(figure), Some(ceiling)) => Some(figure.min(ceiling)),
+        (figure, ceiling) => figure.or(ceiling),
+    }
 }
 
 /// Layers a set of computers could carry between them: each counted once, at
@@ -4019,6 +4025,25 @@ impl PipelineScheduler {
                 crate::inference::process_pool::layers_that_fit(ceiling_mb, fixed_mb, per_layer_mb)
                     .map(|layers| layers.min(manifest.num_layers))
             });
+            // Every figure a reader bounds a peer by is held to its ceiling
+            // HERE, once — the search and greedy, but also delegation, the
+            // whole-model disqualifier and the standbys, which read
+            // `max_hostable_layers` directly. A peer whose current room is
+            // unknown but whose ceiling is known was still handed a whole model
+            // on those paths (review of the ceiling change, 2026-10-07).
+            let max_hostable_layers =
+                clamp_to_ceiling(max_hostable_layers, max_hostable_layers_at_ceiling);
+            let max_hostable_layers_at_face_value = clamp_to_ceiling(
+                max_hostable_layers_at_face_value,
+                max_hostable_layers_at_ceiling,
+            );
+            if let Some(room) = published_room.as_mut() {
+                room.new_layers = clamp_to_ceiling(room.new_layers, max_hostable_layers_at_ceiling);
+                room.new_layers_at_face_value = clamp_to_ceiling(
+                    room.new_layers_at_face_value,
+                    max_hostable_layers_at_ceiling,
+                );
+            }
             let gpu_vram_available_mb = if node_id == *local_node_id {
                 // Never used for the local node — the loader's own admission
                 // check is the authority on whether WE can fit a model, and it
@@ -4378,7 +4403,11 @@ impl PipelineScheduler {
             Err(capped_err) => {
                 // Only worth a second pass if a cap could have been what
                 // stopped it; with no caps in play the two runs are identical.
-                if !candidates.iter().any(|c| c.max_hostable_layers.is_some()) {
+                // A ceiling is a cap too: the second pass is the one that says
+                // `SwarmShortOfMemory` when no holder could ever take a layer.
+                if !candidates.iter().any(|c| {
+                    c.max_hostable_layers.is_some() || c.max_hostable_layers_at_ceiling.is_some()
+                }) {
                     return Err(capped_err);
                 }
                 route_info!(

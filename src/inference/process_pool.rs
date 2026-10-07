@@ -1889,7 +1889,13 @@ fn cost_curve_of(
     // Rounded UP to a whole MB, so the line is exact for the whole model and
     // within a MB a layer BELOW the estimator for any shorter segment — never
     // above it: a peer's ceiling must not be weighed more strictly than its own
-    // admission weighs it.
+    // admission weighs it. The cost is on the LOCAL bound
+    // (`max_local_hostable_layers`), which may offer a segment up to a MB a
+    // layer more than admission then grants — a refusal the router re-plans
+    // around (`note_local_memory_refusal`); the one-and-two-layer points this
+    // replaced erred by as much in either direction. The proportional
+    // `kv_layers` is a floor too: a recurrent model's real segment can keep
+    // one more cache than its share.
     let per_layer = at_whole.saturating_sub(at_half).div_ceil(total - half);
     Some((at_whole.saturating_sub(per_layer * total), per_layer))
 }

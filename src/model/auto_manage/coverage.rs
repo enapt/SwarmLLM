@@ -50,6 +50,31 @@ const CARRY_CURVE_TTL: std::time::Duration = std::time::Duration::from_secs(600)
 /// model, so they are chosen ahead of routine replication within its budget.
 pub(super) const CARRY_BONUS: f64 = 50.0;
 
+/// How long a chosen carrier may make no progress on a model — no part gained,
+/// none being fetched — before every node passes it over and the next machine
+/// in the same ranking steps in. A carrier whose own storage budget or disk
+/// reserve will not take its plan never fetches, and nothing it gossips says
+/// so; without a lease it stayed elected for ever (review of #231). A lease
+/// renewed by progress is how a stalled leader is replaced elsewhere
+/// (Kubernetes' leader lease; CRUSH re-placing data off an "out" OSD). Part
+/// downloads take minutes at the peers' serving rate, and one in flight renews
+/// the lease, so a working carrier is not passed over.
+const CARRIER_PATIENCE: std::time::Duration = std::time::Duration::from_secs(20 * 60);
+
+/// How long a passed-over carrier stays passed over for that model — long
+/// enough for the next one to finish, short enough that a machine whose budget
+/// has since grown is asked again.
+const PASSED_OVER_FOR: std::time::Duration = std::time::Duration::from_secs(2 * 60 * 60);
+
+/// A model's chosen carrier, when its lease lapses unless renewed, and the
+/// layers it held at the last renewal.
+#[derive(Debug, Clone)]
+pub(super) struct CarrierLease {
+    node: NodeId,
+    lapses_at: std::time::Instant,
+    held_layers: u32,
+}
+
 impl AutoShardManager {
     /// The model's processor admission curve, `(fixed_mb, per_layer_mb)`, the
     /// same one every node's admission computes from the header (#230).
@@ -201,17 +226,30 @@ impl AutoShardManager {
                 .is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed) > 0)
     }
 
-    /// Could the connected swarm — this node included — carry the model at
+    /// This node and the connected machines in scope — in private mode, the
+    /// pool's only (`pool::scope::allowed_node_set`, which `holdings` applies
+    /// too): a machine outside the pool must neither be chosen to carry the
+    /// pool's model nor count toward whether it could be carried.
+    fn machines_in_scope(&self) -> Vec<NodeId> {
+        let allowed = crate::pool::scope::allowed_node_set(&self.shared_state);
+        let local = self.shared_state.identity.node_id().clone();
+        std::iter::once(local.clone())
+            .chain(
+                self.shared_state
+                    .connected_node_ids
+                    .iter()
+                    .map(|n| n.clone())
+                    .filter(|n| *n != local),
+            )
+            .filter(|n| allowed.as_ref().is_none_or(|a| a.contains(n)) || *n == local)
+            .collect()
+    }
+
+    /// Could the machines in scope — this node included — carry the model at
     /// all? Unknown for any machine is "cannot tell", so no.
     fn swarm_could_carry(&self, manifest: &ModelManifest, curve: (u64, u64)) -> bool {
-        let local = self.shared_state.identity.node_id().clone();
         let mut total = 0u32;
-        for node in std::iter::once(local).chain(
-            self.shared_state
-                .connected_node_ids
-                .iter()
-                .map(|n| n.clone()),
-        ) {
+        for node in self.machines_in_scope() {
             match self.ceiling_layers(&node, manifest, curve) {
                 Some(layers) => total = total.saturating_add(layers),
                 None => return false,
@@ -234,23 +272,24 @@ impl AutoShardManager {
             && self.swarm_could_carry(manifest, curve)
     }
 
-    /// The machine that should fetch more of `manifest` now: the highest
-    /// rendezvous weight among connected machines (and this one) whose carry
-    /// plan (`parts_to_carry`) is not empty and fits the disk they advertise.
+    /// The machine that should fetch more of `manifest` now: in rendezvous
+    /// order (`blake3(model ‖ node)`), the first machine in scope whose carry
+    /// plan (`parts_to_carry`) is not empty and fits the disk it advertises,
+    /// and which has not let its lease lapse ([`CARRIER_PATIENCE`]).
+    ///
+    /// Every node ranks the same machines the same way, so they agree — except
+    /// where they do not see the same machines (a partial mesh): two carriers
+    /// may then fetch at once, which costs duplicate parts, bounded by the
+    /// shortfall, and never a loop.
     pub(super) fn carrier_for(&self, manifest: &ModelManifest) -> Option<NodeId> {
         let curve = self.carry_curve(&manifest.id)?;
         let shortfall = manifest
             .num_layers
             .saturating_sub(self.carried_layers(manifest, None)?);
         let holdings = self.holdings(manifest);
-        let local = self.shared_state.identity.node_id().clone();
-        std::iter::once(local)
-            .chain(
-                self.shared_state
-                    .connected_node_ids
-                    .iter()
-                    .map(|n| n.clone()),
-            )
+        let mut ranked: Vec<NodeId> = self
+            .machines_in_scope()
+            .into_iter()
             .filter(|node| {
                 let plan = self.parts_to_carry(manifest, node, curve, &holdings, shortfall);
                 let bytes: u64 = plan.iter().map(|(_, size)| size).sum();
@@ -259,12 +298,94 @@ impl AutoShardManager {
                         .advertised(node)
                         .is_some_and(|(_, disk_mb)| disk_mb.saturating_mul(1024 * 1024) > bytes)
             })
-            .max_by_key(|node| {
-                let mut h = blake3::Hasher::new();
-                h.update(manifest.id.0.as_bytes());
-                h.update(&node.0);
-                *h.finalize().as_bytes()
-            })
+            .collect();
+        ranked.sort_by_key(|node| {
+            let mut h = blake3::Hasher::new();
+            h.update(manifest.id.0.as_bytes());
+            h.update(&node.0);
+            std::cmp::Reverse(*h.finalize().as_bytes())
+        });
+        ranked
+            .into_iter()
+            .find(|node| self.carrier_keeps_its_lease(manifest, node, &holdings))
+    }
+
+    /// Does `node` keep (or take) the lease to carry `manifest`? It is renewed
+    /// whenever the node holds more of the model than at the last renewal or
+    /// is fetching a part of it; after [`CARRIER_PATIENCE`] with neither, the
+    /// node is passed over for [`PASSED_OVER_FOR`].
+    fn carrier_keeps_its_lease(
+        &self,
+        manifest: &ModelManifest,
+        node: &NodeId,
+        holdings: &HashMap<NodeId, HashSet<u32>>,
+    ) -> bool {
+        let key = (manifest.id.clone(), node.clone());
+        if let Some(when) = self.carriers_passed_over.get(&key).map(|w| *w) {
+            if when.elapsed() < PASSED_OVER_FOR {
+                return false;
+            }
+            self.carriers_passed_over.remove(&key);
+        }
+        let none = HashSet::new();
+        let held_layers = crate::inference::scheduler::layers_carried([(
+            ranges_of(manifest, holdings.get(node).unwrap_or(&none)),
+            u32::MAX,
+        )]);
+        let now = std::time::Instant::now();
+        let renewed = CarrierLease {
+            node: node.clone(),
+            lapses_at: now + CARRIER_PATIENCE,
+            held_layers,
+        };
+        let lapsed = match self.carrier_leases.get(&manifest.id).map(|l| l.clone()) {
+            Some(lease) if &lease.node == node => {
+                if held_layers > lease.held_layers || self.is_fetching_part_of(manifest, node) {
+                    self.carrier_leases.insert(manifest.id.clone(), renewed);
+                    false
+                } else {
+                    now >= lease.lapses_at
+                }
+            }
+            _ => {
+                self.carrier_leases.insert(manifest.id.clone(), renewed);
+                false
+            }
+        };
+        if lapsed {
+            tracing::info!(
+                model = %manifest.id,
+                carrier = %node,
+                "DIAG: the machine chosen to carry this model has made no progress — \
+                 passing it over for the next (#231)"
+            );
+            self.carrier_leases.remove(&manifest.id);
+            self.carriers_passed_over.insert(key, now);
+        }
+        !lapsed
+    }
+
+    /// Is `node` fetching a part of `manifest` right now — this node from its
+    /// own download claims, a peer from the progress it gossips?
+    fn is_fetching_part_of(&self, manifest: &ModelManifest, node: &NodeId) -> bool {
+        let local = self.shared_state.identity.node_id();
+        manifest.shards.iter().any(|s| {
+            if node == local {
+                return self
+                    .shared_state
+                    .models
+                    .is_shard_in_progress(&manifest.id, s.index);
+            }
+            let sid = ShardId {
+                model_id: manifest.id.clone(),
+                index: s.index,
+            };
+            self.shared_state
+                .models
+                .peer_shard_downloads
+                .get(&sid)
+                .is_some_and(|v| v.iter().any(|(n, _)| n == node))
+        })
     }
 
     /// The parts THIS node fetches now as `manifest`'s carrier — none unless
@@ -612,5 +733,67 @@ mod tests {
         assert_eq!(manager.carried_layers(&manifest, None), None);
         assert!(!manager.needs_carrier(&manifest));
         assert!(offered(&manager, &state).is_empty());
+    }
+
+    /// A carrier that makes no progress — its own budget will not take the
+    /// plan, and nothing it gossips says so — is passed over after
+    /// `CARRIER_PATIENCE` by the same ranking, and the next machine carries.
+    /// One that gains a part keeps its lease.
+    #[test]
+    fn a_carrier_that_makes_no_progress_is_passed_over() {
+        let (state, manager, mid, small) = the_reported_shape(0);
+        let manifest = state.model_registry.get_manifest(&mid).unwrap();
+        // The holder carries 8 of 32: 24 short, so one part is progress, not
+        // the end of carrying.
+        state
+            .peer_registry
+            .get_mut(&small)
+            .unwrap()
+            .capability
+            .as_mut()
+            .unwrap()
+            .model_memory_ceiling_mb = Some(ceiling_for(8));
+        peer(&state, 3, Some(ceiling_for(32)));
+        peer(&state, 4, Some(ceiling_for(32)));
+        let first = manager.carrier_for(&manifest).expect("a carrier");
+
+        // Progress keeps the lease: it now holds part 0.
+        holds(&state, &mid, &first, &[0]);
+        // Past its patience, without backdating a clock a just-booted host
+        // cannot represent.
+        let aged = |manager: &AutoShardManager| {
+            let mut lease = manager.carrier_leases.get_mut(&mid).unwrap();
+            lease.lapses_at = std::time::Instant::now();
+        };
+        aged(&manager);
+        assert_eq!(
+            manager.carrier_for(&manifest).as_ref(),
+            Some(&first),
+            "it gained a part"
+        );
+
+        // No progress since: passed over, and the other machine carries.
+        aged(&manager);
+        let next = manager.carrier_for(&manifest).expect("the next carrier");
+        assert_ne!(next, first);
+        assert_eq!(manager.carrier_for(&manifest), Some(next), "and keeps it");
+    }
+
+    /// In private mode a machine outside the pool is neither chosen to carry
+    /// the pool's model nor counted toward whether it could be carried.
+    #[test]
+    fn a_machine_outside_the_pool_is_never_the_carrier() {
+        let (state, manager, mid, _small) = the_reported_shape(0);
+        let manifest = state.model_registry.get_manifest(&mid).unwrap();
+        let outsider = peer(&state, 3, Some(ceiling_for(32)));
+        assert_eq!(
+            manager.carrier_for(&manifest),
+            Some(outsider),
+            "control: open swarm"
+        );
+
+        state.credits.private_mode.store(true, Relaxed);
+        assert!(!manager.needs_carrier(&manifest));
+        assert_eq!(manager.carrier_for(&manifest), None);
     }
 }

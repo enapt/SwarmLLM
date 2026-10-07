@@ -915,8 +915,14 @@ nothing for exactly the report's case; the rig caught it, gotcha #803). The proc
 has no f16 KV mirror, so a card peer is never weighed more strictly than its own
 admission weighs it; the slope is rounded UP, so the line is exact for the whole
 model and never above the estimator for a shorter segment.
-`NodeCandidate::within_ceiling` applies it on EVERY rung and in both greedy
-passes — a peer whose current figure is unknown is still held to it — and a plan
+It is applied ONCE, where candidates are built (`clamp_to_ceiling` in
+`gather_candidates`, over `max_hostable_layers`, the face value and a published room), so
+every reader inherits it — the rungs and greedy, and delegation, the whole-model disqualifier
+and the standbys, which read `max_hostable_layers` directly and were missed by the first cut
+(the review of these commits; a peer with an unknown current figure and a known ceiling was
+still handed a whole model there). A peer whose current figure is unknown is held to its
+ceiling everywhere; greedy's second pass runs whenever a ceiling is known (it was skipped,
+and the caller got a generic planner error); and a plan
 no ceiling fits is answered by the planner itself as `SwarmShortOfMemory`
 (`scheduler::short_of_memory`), "retrying won't help", before any peer is asked.
 Where the holders' ceilings add up, the model is SPLIT across them instead of
@@ -932,8 +938,9 @@ Pinned by `a_peer_is_never_handed_more_than_it_could_ever_hold` (parallax; null
 control: an older peer stays unbounded), `a_model_past_every_holders_ceiling_is_refused_before_anyone_is_asked`
 (greedy) and `a_model_no_holder_could_ever_hold_is_refused_by_the_planner` (end to
 end through `gather_candidates`: split at 24 + 24 of 32, refused at 11 + 11,
-control unbounded) — all three red with `within_ceiling` ignoring the ceiling,
-the last also red with a peer priced from zero bytes. Rig:
+control unbounded; every routine figure out of `gather_candidates` is within the ceiling —
+red without the clamp, `Some(32)` against 24) — all three red with `within_ceiling` ignoring
+the ceiling, the last also red with a peer priced from zero bytes. Rig:
 `examples/ceiling_test.sh` (two nodes, private network namespace, the server's
 cap at 80% of and just above its own admission footprint).
 
