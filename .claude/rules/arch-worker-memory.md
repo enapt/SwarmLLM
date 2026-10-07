@@ -141,7 +141,7 @@ A second implementation of any of these is this codebase's most-repeated defect 
 - **`daemon::shard_loader::force_cpu_for`** — `inference.gpu_layers` → `force_cpu`.
 - **`daemon::gpu_support::MIN_COMPUTE_CAP` + `local_gpu_is_supported`** — can this card run OUR kernels?
 - **`model::auto_manage::vram::ADMISSION_KV_CONTEXT`** — the context admission charges KV for.
-- **`split::layers_keeping_kv`** — the layers charged a KV cache, by admission (`VramFootprintInputs::kv_layers`), the split planner and the loader's KV budget alike; a recurrent layer (Qwen 3.5's DeltaNet, `split::layer_is_recurrent`) keeps none (#228).
+- **`split::layers_keeping_kv`** (+ `GgufTensorMeta::layers_keeping_kv`, same marker) — the layers charged a KV cache, by admission (`VramFootprintInputs::kv_layers`), the split planner, the loader's KV budget and the scheduler's peer bound (`kv_bytes_per_position_per_layer`) alike; a recurrent layer (Qwen 3.5's DeltaNet, `split::layer_is_recurrent`) keeps none (#228).
 - **`ModelProcessPool::free_vram_for_admission` + `plan_vram_reclaim`** — reclaim idle models first; **`fits_in_budget`** (every fit verdict, so `serves_on_cpu`) and the planner's ceiling count that reclaim (`reclaimable_vram_mb` / `idle_vram_reclaimable_mb`), or a model held here goes abroad (#125, #129).
 - **`should_return_to_gpu` + `worker_should_return_to_gpu`** — asked in `get_or_spawn`, not on a timer.
 - **Graphics memory has ONE owner: `ModelProcessPool`.**

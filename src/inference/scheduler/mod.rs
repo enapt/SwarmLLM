@@ -483,7 +483,14 @@ fn kv_bytes_per_position_per_layer(
         crate::inference::split::kv_budget::standard_kv_elems(meta.head_count_kv, meta.head_dim);
     let mirrored = on_gpu
         && crate::inference::layers::model_wants_kv_mirror(meta.head_count, meta.head_count_kv);
-    crate::inference::split::kv_budget::kv_bytes_per_token(1, k, v, mirrored)
+    let attention_layer = crate::inference::split::kv_budget::kv_bytes_per_token(1, k, v, mirrored);
+    // An AVERAGE over the model's layers, because the bound it feeds counts
+    // layers: only `layers_keeping_kv` of them keep a cache — one in four for
+    // Qwen 3.5, whose others carry a fixed state (#228; the same count
+    // admission and the loader charge, `split::layers_keeping_kv`).
+    let layers = meta.block_count.max(1) as u64;
+    let keeping = meta.layers_keeping_kv(0, meta.block_count) as u64;
+    attention_layer.saturating_mul(keeping).div_ceil(layers)
 }
 
 /// How far away a peer may be and still be handed a whole model, in ms.

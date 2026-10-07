@@ -136,7 +136,14 @@ pub fn gguf_arch_str(ct: &gguf_file::Content) -> String {
 /// (`(il + 1) % interval != 0`); the file is the stronger witness.
 pub(crate) fn layer_is_recurrent(ct: &gguf_file::Content, layer_idx: usize) -> bool {
     ct.tensor_infos
-        .contains_key(&format!("blk.{layer_idx}.ssm_alpha.weight"))
+        .contains_key(&recurrent_layer_marker(layer_idx))
+}
+
+/// The tensor whose presence marks layer `layer_idx` as recurrent — the ONE
+/// spelling, for the header ([`layer_is_recurrent`]) and the manifest's
+/// tensor table ([`GgufTensorMeta::layers_keeping_kv`]) alike.
+fn recurrent_layer_marker(layer_idx: usize) -> String {
+    format!("blk.{layer_idx}.ssm_alpha.weight")
 }
 
 /// How many of layers `[start, end)` keep a KV cache: all of them for a
@@ -220,6 +227,15 @@ pub(crate) fn tensor_byte_size(info: &candle_core::quantized::gguf_file::TensorI
 }
 
 impl GgufTensorMeta {
+    /// [`layers_keeping_kv`], read off the manifest's tensor table — for a
+    /// node that prices a model from its manifest rather than its header (the
+    /// scheduler's peer bound, `kv_bytes_per_position_per_layer`).
+    pub(crate) fn layers_keeping_kv(&self, start: usize, end: usize) -> usize {
+        (start..end)
+            .filter(|&layer| !self.tensors.contains_key(&recurrent_layer_marker(layer)))
+            .count()
+    }
+
     /// Location of the tensor doubling as the output head on a weight-tied
     /// model, or `None` when the model ships a separate `output.weight`.
     ///

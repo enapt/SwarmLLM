@@ -3668,11 +3668,32 @@ fn a_prompt_position_is_priced_like_the_worker_charges_it() {
     let mha = crate::inference::split::GgufTensorMeta {
         head_count: 8,
         head_count_kv: 8,
-        ..meta
+        ..meta.clone()
     };
     assert_eq!(
         super::kv_bytes_per_position_per_layer(&mha, true),
         2 * 8 * 256 * 4
+    );
+    // Qwen 3.5's shape: three in four layers recurrent (`ssm_alpha`), keeping
+    // a fixed state rather than a cache — so a layer costs a quarter of an
+    // attention layer on average (#228).
+    let recurrent = (0..24u32)
+        .filter(|il| (il + 1) % 4 != 0)
+        .map(|il| {
+            (
+                format!("blk.{il}.ssm_alpha.weight"),
+                crate::inference::split::TensorLocation { offset: 0, size: 1 },
+            )
+        })
+        .collect();
+    let qwen35 = crate::inference::split::GgufTensorMeta {
+        tensors: recurrent,
+        block_count: 24,
+        ..meta.clone()
+    };
+    assert_eq!(
+        super::kv_bytes_per_position_per_layer(&qwen35, false),
+        2 * 4 * 256 * 4 / 4
     );
 }
 

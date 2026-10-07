@@ -917,8 +917,9 @@ checked split on the card against llama.cpp (`docs/invariants/inference.md` § "
 split is placed in every per-layer loop"). Its sizing followed the same day:
 admission, the split planner and the loader's KV budget charged every layer an attention
 layer's KV while three in four are DeltaNet with a fixed state — ~805 MB too much for the 9B at
-the admission context, the margin by which it missed an 8 GB card. All three now ask
-`split::layers_keeping_kv` (the real 9B header: attention at layers 3, 7, …, 31, llama.cpp's
+the admission context, the margin by which it missed an 8 GB card. All three, and the
+scheduler's bound on a peer (`kv_bytes_per_position_per_layer`, from the manifest's tensor
+table), now ask `split::layers_keeping_kv` (the real 9B header: attention at layers 3, 7, …, 31, llama.cpp's
 rule). Still uncharged: each DeltaNet layer's per-request state (~2 MB a layer for the 9B,
 covered by the forward-buffer reserve); (3) the delta rule runs token by token — correct, slow for a long prompt on a card
 (llama.cpp's `build_delta_net_chunking` is the reference); (4) decode is never captured as a CUDA
