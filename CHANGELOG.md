@@ -1,5 +1,63 @@
 # Changelog
 
+## [0.3.230-alpha] — 2026-10-07
+
+**Fixed: a request handed to a computer that is still loading the model no
+longer fails after two minutes.** When your request went to another computer
+that first had to read the model into memory — because it had just restarted,
+or had set the model aside after a while unused — the request failed if that
+took longer than about two minutes, even though the other computer was
+working normally. This happened on the day 0.3.229 came out: Qwen 3.5 9B on a
+Mac that had restarted six minutes earlier gave no answer in 132 seconds and
+the request failed; a minute later the same question was answered in 2.7
+seconds. Your computer now allows such a computer four more minutes to load,
+the allowance requests split across several computers have had since August.
+And if the other computer disconnects while you wait, your computer notices
+within five seconds and tries elsewhere, instead of waiting out the whole time.
+
+**Improved: routing counts the time a computer needs to load a model.** A
+computer that would first have to load the model was priced as if it already
+had it in memory, so a request could go to a peer predicted to answer in 4.5
+seconds that took 46. Each computer now measures how fast it loads models,
+tells the others, and the time to load whatever it is missing is added to its
+price — this computer's own included, so a cold local route and a cold peer are
+compared fairly. A computer that has not reported a speed yet (every one still
+on an older release) is counted at a cautious 10 seconds per GB.
+
+**New: Qwen 3.5 can share a graphics card with the processor.** A graphics card
+too small for a whole Qwen 3.5 model used to sit unused while the processor ran
+every layer. As many layers as fit now go on the card and the rest on the
+processor, as for the other model families. Checked against llama.cpp on an
+RTX 3070.
+
+**Fixed: Qwen 3.5 was charged for memory it does not use.** Three in four of
+Qwen 3.5's layers keep a small fixed state instead of the conversation memory
+that grows with every word. Your computer charged every layer as if it kept the
+growing kind when deciding whether a model fits the graphics card and how long a
+conversation it can hold — about 800 MB too much for Qwen 3.5 9B, enough to keep
+it off an 8 GB card. Routing made the same mistake about other computers.
+
+**Fixed: while the graphics driver is resetting the card, models start on the
+processor.** A graphics driver can reset the card — for a few seconds, and once
+here for 14 minutes. A model that started during a reset tried to use the card
+and stalled for up to 30 seconds before failing. Models that start while the
+driver is not answering now run on the processor, and move back to the card by
+themselves once it answers. The dashboard and `swarmllm status` say why.
+
+**Fixed: a long reply forwarded from a member of your pool is no longer cut off
+mid-answer.** When the swarm cannot cover a model, your computer can forward
+the request to a member of your pool. A reply longer than about two minutes was
+cut off part-way. A streamed reply is now ended only if the pool member goes
+silent for a minute; a non-streamed one gets time to write the length you asked
+for.
+
+**Fixed: a part whose download stalled is fetched again on a node with no
+HuggingFace source.** If a part's download from another computer stalled, the
+node marked it to be fetched from HuggingFace instead. On a node in offline mode,
+or for a model with no HuggingFace source, that never happened — and the mark
+also stopped it asking other computers again, so the part stayed missing until
+the node restarted. It now goes back to the computers that hold it.
+
 ## [0.3.229-alpha] — 2026-10-07
 
 **New: Qwen 3.5 runs on the swarm.** Qwen 3.5's dense models (0.8B, 4B, 9B
