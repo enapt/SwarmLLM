@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #233**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #234**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -40,7 +40,7 @@ after v0.3.224 (#160, #215 and #216 closed; #217 and #218 opened from the swarm 
 v0.3.226 (released 2026-10-05), #220 opened from the .225 gate's unrecorded driver resets; #129's fit verdict (idle-model
 reclaim) shipped in v0.3.227 (released 2026-10-05 23:45 UTC); #222 (a node near its storage limit deleting and
 re-fetching parts) and #223 closed in v0.3.228 (released 2026-10-06 09:42 UTC), #224 opened from its gate;
-#225, #226 and #227 opened from a tester's two reports the same day; #117 (Qwen 3.5, dense), #225 and #226 closed in v0.3.229 (released 2026-10-07 00:00 UTC), #228 opened for what Qwen 3.5 leaves out.
+#225, #226 and #227 opened from a tester's two reports the same day; #117 (Qwen 3.5, dense), #225 and #226 closed in v0.3.229 (released 2026-10-07 00:00 UTC), #228 opened for what Qwen 3.5 leaves out; #129's cold loads (waited for and priced), #228 (2) and (2b), #220 (2), #229, #230 and #231 shipped in v0.3.230 (released 2026-10-07 16:38 UTC), #232 parked from their report.
 `docs/plans/` holds the multi-step designs; the entries point at them.
 
 **P0 — wrong answers, silently**
@@ -331,7 +331,7 @@ debugger interface, two DWORD 1 registry values set as administrator
 (2) the re-plan sat in GPU admission because `nvidia-smi` waits as long as the driver does — FIXED
 2026-10-05: `vram::nvidia_smi` bounds it at 10 s and never runs two at once (while a stuck one
 lives the next reading is unknown at once; `docs/invariants/memory.md` § "nvidia-smi is asked
-through one bounded helper"). And FIXED on main 2026-10-07 (not yet released): while that
+through one bounded helper"). And FIXED 2026-10-07, released in v0.3.230: while that
 stuck `nvidia-smi` lives and has for a minute (`vram::graphics_driver_not_answering`, asked
 without waiting on the helper's lock; `DRIVER_NOT_ANSWERING_AFTER` — the release gate caught
 the first draft acting on one 10-15 s stall and sending a card-only model to a processor it did
@@ -447,7 +447,7 @@ split wins. Also feed observed per-layer latency into `compute_segment_timeout` 
 the fixed 2 s/layer guess. Depends on #3.
 
 #### #129 — A model a few MB too large for the card is sent on a boomerang across continents
-`P2` · routing · **PARTIAL** — 2026-09-27, narrowed 2026-10-04 and 2026-10-05 (fit verdict fixed in v0.3.227), 2026-10-07 (cold loads waited for and priced, on main) · history: archive row #129
+`P2` · routing · **PARTIAL** — 2026-09-27, narrowed 2026-10-04 and 2026-10-05 (fit verdict fixed in v0.3.227), 2026-10-07 (cold loads waited for and priced, released in v0.3.230) · history: archive row #129
 
 **v0.3.225 shipped half the fix, and the field check after deploy failed** (2026-10-05 01:30
 UTC): a cold Mistral-7B on this 8 GB node still went through `4a3ac72e` (Italy), 47 s. The
@@ -512,7 +512,7 @@ admitted the 7B whole; warm 2.2 s for 120 tokens. Release binary, same shape: It
 **Residual (one part left):** A model that does NOT fit even after the reclaim is still priced
 at processor speed rather than as the loader's card/processor split (above).
 
-**(1) — a cold candidate's load was not priced — fixed on main 2026-10-07 (not yet released).**
+**(1) — a cold candidate's load was not priced — fixed 2026-10-07, released in v0.3.230.**
 `PeerResidency` bounded a peer's MEMORY, never its time, so a peer that must first load the
 model was predicted like a warm one (4.5 s predicted, 46 s taken). Now `parallax::vertex_cost`
 charges `cold_load_ms` = the candidate's own ms-per-layer × the layers it would ADD, once per
@@ -527,7 +527,7 @@ loading speed for the same reason. Verified end to end (`cold_load_test.sh … p
 the same load at 21,064 ms — that rate × 0.62 GiB. The field reading needs peers on the release:
 a cold 7-8B peer should then lose to a warm one or to a local route that is truly cheaper.
 
-**(1)'s other half — the DEADLINE — fixed on main 2026-10-07 (not yet released):** a cold load
+**(1)'s other half — the DEADLINE — fixed 2026-10-07, released in v0.3.230:** a cold load
 did not only cost time, it could fail the request. Live on v0.3.229 (00:23 UTC): Qwen 3.5 9B
 handed whole to `4a3ac72e` (Apple M4, restarted ~6 min earlier, its measured latency 10-30 s
 while it settled) gave no first token inside 132 s (`FIRST_TOKEN_TIMEOUT` 120 s + 0.5 s × 24
@@ -835,6 +835,21 @@ per chunk and restarts the middle on a miss; `peer_walks_at_tail` no longer appl
 remote-head shape after it. Write the design into `split_speculation.md` § 4b first; measure
 on the TH↔IT link with `~/swarmllm-wan-1001/ab149.sh`'s method (one binary, env switch).
 
+#### #233 — Guess-and-check across a split on one card reads slower than it did at v0.3.222
+`P3` · perf-split · **OPEN** — measured 2026-10-07 · history: none (first measured at the v0.3.230 gate)
+
+The gate's split rig with both halves on one card and an emulated 24 ms link (step 12h, last run
+at v0.3.222) now reads rounds 21-29 tok/s and stream 20-23, against .222's 22-35 and 22-28.
+Replies are unchanged (scored against llama.cpp). It is not v0.3.230: an alternating A/B
+(.229, .230 ×2, Windows up 4 h) read stream identical (140 guesses, 77 accepted, on both) and
+rounds within run-to-run noise. One .230 rounds run stepped aside after a request whose
+acceptance dipped (0.598 → 0.580, γ → 0), which is the controller working as designed. With B
+on the processor, both builds read the stream faster than rounds (13-16 vs 12-13 tok/s), as
+expected. So something between .222 and .229 moved it, or .222's single run was high. Next:
+the same rig on .222, .225 and .227 from their release assets, alternating with .229 on one
+boot (`~/swarmllm-gate-0230/h12_ab.sh` is the harness; under the safety kit). First candidate:
+.226's decode-graph reuse (#221), which changed how the card's checks are submitted.
+
 #### #10 — Conversation prefixes across computers: no routing to the peer holding the cache, no cache in a split chain
 `P2` · perf-split · **PARTIAL** — 2026-09-07 · absorbs #139 and archive § "Speeding up inference BETWEEN nodes" idea 1 (prefix-keyed remote KV); history: archive row #10 and § "A conversation's later turns do not seek out the peer holding its prefix"
 
@@ -937,7 +952,7 @@ deleting.)
 
 Dense Qwen 3.5 runs since #117. Still out: (1) `qwen35moe` stays refused until checked against a
 real file (HF: `Flexan/kshitijthakkar-qwen3.5-moe-0.87B-d0.8B-GGUF`); (2) ~~the card/processor
-split~~ — **on main 2026-10-07, not yet released**: dense Qwen 3.5 is on `arch_supports_hybrid`,
+split~~ — **released in v0.3.230 (2026-10-07)**: dense Qwen 3.5 is on `arch_supports_hybrid`,
 checked split on the card against llama.cpp (`docs/invariants/inference.md` § "A card/processor
 split is placed in every per-layer loop"). Its sizing followed the same day:
 admission, the split planner and the loader's KV budget charged every layer an attention
@@ -1043,6 +1058,14 @@ contribution-derived budget; nobody tried to reconcile them, and no end-to-end r
 real pressure was ever constructed. Put both on one number, then occupy card memory before a
 load so the estimator passes but the runtime budget binds, and watch the refusal. Narrow
 (multi-model or another program on the card); the guard is a backstop.
+
+Measured 2026-10-07 (the v0.3.230 gate's GLM-4-9B step, freshly booted card): admission charged
+6514 MB including 4096 tokens of cache (`ADMISSION_KV_CONTEXT`) against a 6688 MB budget and
+placed the model WHOLE on the card, while the loader's own head-room then covered only 3262 of
+its 8192 tokens (5872 MiB of weights, ~1.1 GB reserve). On a busier card the same build places
+35 of 40 layers there and keeps ~8000 tokens. So the two bases disagree in exactly the marginal
+case, and a whole-card fit can cost ~60% of the context a slightly smaller split keeps. Same
+figures on v0.3.229 and v0.3.230.
 
 #### #122 — Four short chats at once on one card: the fourth is refused, not queued
 `P3` · memory · **PARTIAL** — 2026-09-26 · history: archive row #122
@@ -1510,7 +1533,7 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-07, on main (not yet released)** (#229, #230, #231)
+**Closed 2026-10-07, released in v0.3.230 (2026-10-07)** (#229, #230, #231)
 - #231 — a model its holders cannot run was never fetched by a machine that could (the report
   behind #230: the 9B's one holder capped below it, three graphics cards with room holding none of
   it). Replicas counted copies, not whether a holder can run the model. `auto_manage::coverage`:
@@ -1592,6 +1615,11 @@ grep `^| N |`).
   the pending-fetch pass re-fetched it whenever prune deleted it as surplus — a tester's node
   (`bf7b3263`), ~4 GB an hour at disk pressure 0.56 (gotcha #797; the set lives in memory, so a
   restart stops it until the release).
+  **A third way in, fixed in v0.3.230:** a pending fetch the ORIGIN cannot serve (a model with no
+  HuggingFace source, or a node in offline mode) blocked that part for the node's life — the
+  download pass read the entry as "peers exhausted" and never asked them again. It now goes back
+  to the peers (`pending_fetch_can_proceed` → `can_fetch_shard_from_origin`, which the pass had
+  re-derived as `hf_sources.contains_key` and so missed offline mode).
   Found in the post-v0.3.227 swarm check from peers' announcements in our own log: a tester's 30 GB
   node (`e561df35`) sawed 62 → 59 → 62 parts every ~25-30 min from 02:00 UTC (one Qwen3-30B-A3B
   part dropped per 5-min prune cooldown, the same indices back once their 30-min protection
