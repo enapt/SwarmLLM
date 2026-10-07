@@ -817,6 +817,7 @@
   "perf.th_samples": "Próbki",
   "perf.ttft_label": "pierwszy token {value}",
   "placement.configured": "Ustawiłeś ten komputer na korzystanie wyłącznie z procesora.",
+  "placement.driver_not_answering": "Sterownik grafiki nie odpowiada — być może resetuje kartę. W tym czasie ten model korzysta z procesora i sam wróci na kartę graficzną.",
   "placement.gpu_too_old": "Ta karta graficzna jest starsza niż obsługuje ta wersja, więc używany jest procesor.",
   "placement.gpu_unavailable": "SwarmLLM stracił dostęp do karty graficznej — zwykle dlatego, że sterownik zaktualizował się w trakcie działania. Uruchom SwarmLLM ponownie, aby to naprawić.",
   "placement.hybrid": "{on} z {total} warstw na karcie graficznej",

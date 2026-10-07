@@ -817,6 +817,7 @@
   "perf.th_samples": "Metingen",
   "perf.ttft_label": "eerste token {value}",
   "placement.configured": "Je hebt deze computer ingesteld om alleen de processor te gebruiken.",
+  "placement.driver_not_answering": "Het grafische stuurprogramma reageert niet — mogelijk wordt de kaart opnieuw ingesteld. Intussen gebruikt dit model de processor en gaat het vanzelf terug naar de grafische kaart.",
   "placement.gpu_too_old": "Deze grafische kaart is ouder dan deze versie ondersteunt, dus de processor wordt gebruikt.",
   "placement.gpu_unavailable": "SwarmLLM heeft geen toegang meer tot de grafische kaart, meestal doordat het stuurprogramma tijdens het draaien is bijgewerkt. Start SwarmLLM opnieuw om dit op te lossen.",
   "placement.hybrid": "{on} van {total} lagen op de grafische kaart",

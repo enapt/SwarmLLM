@@ -817,6 +817,7 @@
   "perf.th_samples": "Échantillons",
   "perf.ttft_label": "premier jeton {value}",
   "placement.configured": "Vous avez configuré cet ordinateur pour n'utiliser que le processeur.",
+  "placement.driver_not_answering": "Le pilote graphique ne répond pas — il est peut-être en train de réinitialiser la carte. En attendant, ce modèle utilise le processeur et reviendra de lui-même sur la carte graphique.",
   "placement.gpu_too_old": "Cette carte graphique est plus ancienne que ce que cette version prend en charge : le processeur est utilisé à la place.",
   "placement.gpu_unavailable": "SwarmLLM n'a plus accès à la carte graphique : le pilote a généralement été mis à jour pendant son exécution. Redémarrez SwarmLLM pour corriger cela.",
   "placement.hybrid": "{on} couches sur {total} sur la carte graphique",

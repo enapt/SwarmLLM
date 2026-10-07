@@ -303,6 +303,10 @@ fn cpu_reason_in_words(tag: &str) -> String {
         "gpu_stopped_responding" => {
             "the graphics card stopped responding — restart SwarmLLM".to_string()
         }
+        "driver_not_answering" => {
+            "the graphics driver is not answering (it may be resetting the card) — back on the card once it does"
+                .to_string()
+        }
         other => other.to_string(),
     }
 }

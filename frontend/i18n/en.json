@@ -817,6 +817,7 @@
   "perf.th_samples": "Samples",
   "perf.ttft_label": "first token {value}",
   "placement.configured": "You have set this computer to use its processor only.",
+  "placement.driver_not_answering": "The graphics driver is not answering — it may be resetting the card. This model uses the processor meanwhile and moves back to the graphics card on its own.",
   "placement.gpu_too_old": "This graphics card is older than this build supports, so the processor is used instead.",
   "placement.gpu_unavailable": "SwarmLLM lost access to the graphics card — usually the driver was updated while it was running. Restart SwarmLLM to fix it.",
   "placement.hybrid": "{on} of {total} layers on the graphics card",

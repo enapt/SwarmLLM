@@ -817,6 +817,7 @@
   "perf.th_samples": "サンプル数",
   "perf.ttft_label": "最初のトークン {value}",
   "placement.configured": "このコンピューターはプロセッサーのみを使う設定になっています。",
+  "placement.driver_not_answering": "グラフィックドライバーが応答していません。カードをリセットしている可能性があります。その間このモデルはプロセッサーで動作し、応答が戻ると自動的にグラフィックカードへ戻ります。",
   "placement.gpu_too_old": "このグラフィックカードはこのビルドが対応するより古いため、プロセッサーを使用します。",
   "placement.gpu_unavailable": "SwarmLLM がグラフィックカードを使えなくなりました。多くは動作中にドライバーが更新されたためです。SwarmLLM を再起動すると直ります。",
   "placement.hybrid": "{total} 層のうち {on} 層がグラフィックカード上",

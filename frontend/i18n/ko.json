@@ -817,6 +817,7 @@
   "perf.th_samples": "샘플",
   "perf.ttft_label": "첫 토큰 {value}",
   "placement.configured": "이 컴퓨터를 프로세서만 사용하도록 설정했습니다.",
+  "placement.driver_not_answering": "그래픽 드라이버가 응답하지 않습니다. 카드를 재설정하는 중일 수 있습니다. 그동안 이 모델은 프로세서를 사용하며, 이후 자동으로 그래픽 카드로 돌아갑니다.",
   "placement.gpu_too_old": "이 그래픽 카드는 이 빌드가 지원하는 것보다 오래되어 프로세서를 사용합니다.",
   "placement.gpu_unavailable": "SwarmLLM이 그래픽 카드를 사용할 수 없게 되었습니다. 보통 실행 중에 드라이버가 업데이트된 경우입니다. SwarmLLM을 다시 시작하면 해결됩니다.",
   "placement.hybrid": "{total}개 레이어 중 {on}개가 그래픽 카드에서 실행",

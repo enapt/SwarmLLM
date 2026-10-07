@@ -817,6 +817,7 @@
   "perf.th_samples": "Örnek",
   "perf.ttft_label": "ilk token {value}",
   "placement.configured": "Bu bilgisayarı yalnızca işlemciyi kullanacak şekilde ayarladınız.",
+  "placement.driver_not_answering": "Grafik sürücüsü yanıt vermiyor — kartı sıfırlıyor olabilir. Bu sırada bu model işlemciyi kullanır ve kendiliğinden grafik kartına geri döner.",
   "placement.gpu_too_old": "Bu ekran kartı bu sürümün desteklediğinden eski, bu yüzden işlemci kullanılıyor.",
   "placement.gpu_unavailable": "SwarmLLM ekran kartına erişimini kaybetti; genellikle çalışırken sürücü güncellenmiştir. Düzeltmek için SwarmLLM'i yeniden başlatın.",
   "placement.hybrid": "{total} katmandan {on} tanesi ekran kartında",

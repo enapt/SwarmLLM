@@ -2016,6 +2016,15 @@ pub enum CpuReason {
     /// The model's estimated footprint exceeds the free VRAM budget. Unlike the
     /// others this clears itself once memory frees up.
     NotEnoughVram,
+    /// The graphics driver is not answering — an `nvidia-smi` is still blocked
+    /// in it past its bound, which is what a card reset (a TDR) looks like from
+    /// here (`vram::graphics_driver_not_answering`). A worker started on the
+    /// card now would block in its context creation for as long as the reset
+    /// takes — 14 minutes once (FUTURE_WORK #220). Clears itself when the
+    /// driver answers, and the model then returns to the card through the
+    /// ordinary promotion (`reason_still_holds`). Distinct from
+    /// [`Self::GpuUnavailable`], whose advice is a restart a reset does not need.
+    DriverNotAnswering,
 }
 
 impl CpuReason {
@@ -2027,6 +2036,7 @@ impl CpuReason {
             CpuReason::GpuTooOld => "gpu_too_old_for_this_build",
             CpuReason::GpuUnavailable => "gpu_stopped_responding",
             CpuReason::NotEnoughVram => "not_enough_vram",
+            CpuReason::DriverNotAnswering => "driver_not_answering",
         }
     }
 }
@@ -2769,6 +2779,14 @@ impl ModelProcessPool {
         #[cfg(feature = "candle-cuda")]
         if crate::daemon::gpu_support::gpu_runtime_has_failed() {
             return Some(CpuReason::GpuUnavailable);
+        }
+        // The driver is busy resetting the card: a worker sent there now waits
+        // in its context creation for the whole reset. Transient — the next
+        // spawn after it answers goes to the card, and promotion moves this one
+        // back (#220).
+        #[cfg(feature = "candle-cuda")]
+        if crate::model::auto_manage::vram::graphics_driver_not_answering() {
+            return Some(CpuReason::DriverNotAnswering);
         }
         #[cfg(feature = "candle-cuda")]
         if !crate::daemon::gpu_support::local_gpu_is_supported() {

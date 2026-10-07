@@ -817,6 +817,7 @@
   "perf.th_samples": "样本数",
   "perf.ttft_label": "首个 token {value}",
   "placement.configured": "你已将此电脑设置为仅使用处理器。",
+  "placement.driver_not_answering": "显卡驱动没有响应——它可能正在重置显卡。在此期间，该模型使用处理器运行，之后会自动回到显卡。",
   "placement.gpu_too_old": "这张显卡比此版本支持的更旧，因此改用处理器。",
   "placement.gpu_unavailable": "SwarmLLM 无法再使用显卡，通常是运行期间显卡驱动被更新了。重启 SwarmLLM 即可恢复。",
   "placement.hybrid": "{total} 层中有 {on} 层在显卡上",

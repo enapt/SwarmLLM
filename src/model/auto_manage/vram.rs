@@ -969,6 +969,23 @@ impl BoundedCommand {
         }
     }
 
+    /// Is a copy that outlived the bound still running — for `nvidia-smi`, is
+    /// the graphics driver still not answering?
+    ///
+    /// `false` when it cannot tell without waiting: [`Self::run`] holds the
+    /// lock for its whole run (up to the bound), and a placement question must
+    /// not queue behind the very driver it is asking about.
+    #[cfg(any(test, feature = "candle-cuda"))]
+    pub(crate) fn still_not_answering(&self) -> bool {
+        let Ok(mut unanswered) = self.unanswered.try_lock() else {
+            return false;
+        };
+        matches!(
+            unanswered.as_mut().map(|(child, _)| child.try_wait()),
+            Some(Ok(None))
+        )
+    }
+
     /// What the program printed — `None` when it is not installed, fails, does
     /// not answer within the bound, or a previous copy still has not. Meant for
     /// queries that print a line or two, so the pipe never fills before it exits.
@@ -1031,6 +1048,31 @@ static NVIDIA_SMI: BoundedCommand = BoundedCommand::new("nvidia-smi", NVIDIA_SMI
 /// driver does. Guard: `nvidia_smi_is_asked_only_through_the_bounded_helper`.
 pub(crate) fn nvidia_smi(args: &[&str]) -> Option<String> {
     NVIDIA_SMI.run(args)
+}
+
+/// Is the graphics driver not answering right now — an `nvidia-smi` that
+/// outlived [`NVIDIA_SMI_TIMEOUT`] still waiting on it? While it is, a worker
+/// started on the card blocks in its own context creation, for as long as a
+/// reset takes (14 minutes on 2026-10-04, FUTURE_WORK #220), so the pool puts
+/// new workers on the processor (`CpuReason::DriverNotAnswering`). A build
+/// that cannot drive a card never places on one, so it never asks.
+#[cfg(feature = "candle-cuda")]
+pub(crate) fn graphics_driver_not_answering() -> bool {
+    fault_driver_not_answering() || NVIDIA_SMI.still_not_answering()
+}
+
+/// `SWARMLLM_FAULT_DRIVER_NOT_ANSWERING=1`: report the graphics driver as not
+/// answering, as it is mid-reset. A reset cannot be caused on demand, and a
+/// stuck `nvidia-smi` cannot be faked: the real one blocked in the driver
+/// survives SIGKILL, which is what [`BoundedCommand`] detects, while any
+/// stand-in dies on the kill. Unset in production; read once.
+#[cfg(feature = "candle-cuda")]
+fn fault_driver_not_answering() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("SWARMLLM_FAULT_DRIVER_NOT_ANSWERING").is_ok_and(|v| v.trim() == "1")
+    })
 }
 
 /// Get local VRAM in MB, with nvidia-smi fallback when gpu_info is None.
@@ -1324,6 +1366,38 @@ pub fn ram_budget_now(shared: &crate::daemon::SharedState) -> Option<RamBudget> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// "Is the driver still not answering?" is true exactly while a copy that
+    /// outlived its bound still runs — what puts new workers on the processor
+    /// during a card reset (`CpuReason::DriverNotAnswering`, #220) — and never
+    /// waits: while a run holds the lock it answers no rather than queue.
+    #[cfg(unix)]
+    #[test]
+    fn a_driver_that_has_not_answered_is_reported_without_waiting_for_it() {
+        use std::time::{Duration, Instant};
+        let sleeper = BoundedCommand::new("sleep", Duration::from_millis(200));
+        assert!(!sleeper.still_not_answering(), "nothing has been asked");
+
+        let still_running = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        *sleeper.unanswered.lock().unwrap() = Some((still_running, Instant::now()));
+        assert!(sleeper.still_not_answering());
+
+        // A run in progress holds the lock: no answer rather than a wait.
+        let held = sleeper.unanswered.lock().unwrap();
+        let asked = Instant::now();
+        assert!(!sleeper.still_not_answering());
+        assert!(asked.elapsed() < Duration::from_millis(50));
+        drop(held);
+
+        let (mut stuck, _) = sleeper.unanswered.lock().unwrap().take().unwrap();
+        stuck.kill().unwrap();
+        stuck.wait().unwrap();
+        *sleeper.unanswered.lock().unwrap() = Some((stuck, Instant::now()));
+        assert!(!sleeper.still_not_answering(), "it has gone");
+    }
 
     /// A reading that does not come back within its bound is unknown, and the
     /// asker is not held for longer; while that copy is still running (a

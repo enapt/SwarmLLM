@@ -817,6 +817,7 @@
   "perf.th_samples": "Campioni",
   "perf.ttft_label": "primo token {value}",
   "placement.configured": "Hai impostato questo computer per usare solo il processore.",
+  "placement.driver_not_answering": "Il driver grafico non risponde: potrebbe star reimpostando la scheda. Nel frattempo questo modello usa il processore e tornerà da solo sulla scheda grafica.",
   "placement.gpu_too_old": "Questa scheda grafica è più vecchia di quanto questa versione supporti, quindi viene usato il processore.",
   "placement.gpu_unavailable": "SwarmLLM ha perso l'accesso alla scheda grafica, di solito perché il driver è stato aggiornato mentre era in funzione. Riavvia SwarmLLM per risolvere.",
   "placement.hybrid": "{on} livelli su {total} sulla scheda grafica",

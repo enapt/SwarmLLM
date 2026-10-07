@@ -817,6 +817,7 @@
   "perf.th_samples": "Mẫu",
   "perf.ttft_label": "token đầu {value}",
   "placement.configured": "Bạn đã đặt máy tính này chỉ dùng bộ xử lý.",
+  "placement.driver_not_answering": "Trình điều khiển đồ họa không phản hồi — có thể nó đang khởi động lại card. Trong lúc đó, mô hình này dùng bộ xử lý và sẽ tự quay lại card đồ họa.",
   "placement.gpu_too_old": "Card đồ họa này cũ hơn mức bản dựng này hỗ trợ, nên bộ xử lý được dùng thay thế.",
   "placement.gpu_unavailable": "SwarmLLM không còn dùng được card đồ họa, thường là do trình điều khiển được cập nhật khi đang chạy. Khởi động lại SwarmLLM để khắc phục.",
   "placement.hybrid": "{on} trong {total} lớp chạy trên card đồ họa",

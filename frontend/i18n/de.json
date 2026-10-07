@@ -817,6 +817,7 @@
   "perf.th_samples": "Messwerte",
   "perf.ttft_label": "erstes Token {value}",
   "placement.configured": "Sie haben diesen Computer so eingestellt, dass nur der Prozessor verwendet wird.",
+  "placement.driver_not_answering": "Der Grafiktreiber antwortet nicht – möglicherweise setzt er die Karte gerade zurück. So lange nutzt dieses Modell den Prozessor und wechselt danach von selbst zurück auf die Grafikkarte.",
   "placement.gpu_too_old": "Diese Grafikkarte ist älter als von dieser Version unterstützt, daher wird der Prozessor verwendet.",
   "placement.gpu_unavailable": "SwarmLLM hat den Zugriff auf die Grafikkarte verloren – meist wurde der Treiber während des Betriebs aktualisiert. Starten Sie SwarmLLM neu, um das zu beheben.",
   "placement.hybrid": "{on} von {total} Schichten auf der Grafikkarte",
