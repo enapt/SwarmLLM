@@ -771,7 +771,7 @@ advertises the memory it will HONOUR".
 ## The relaxation is scoped to the figures that are actually unreliable
 
 **`parallax::CapacityBound`** says whose `max_hostable_layers` a routing pass
-honours, in four rungs: `Everyone`, `PeersAtFaceValue`, `PeersUnbounded`,
+honours, in four rungs: `Everyone`, `PeersAtFaceValue`, `PeersAtCeiling`,
 `LocalUnbounded`. `assemble_pipeline_for` walks them in that order, and the
 local layer budget is enforced INSIDE the DP — carried along the best path,
 exactly as the capped-peer bitmask is — as well as by the exact summed check
@@ -873,12 +873,76 @@ place beyond what the machine reported.
 **But it is a preference, not a wall**, and report #025 is why. There the only
 route ran across a peer whose figure refused it, and relaxing that figure kept
 the request alive. A self-report we cannot re-ask must not fail a request
-outright. So `PeersUnbounded` is still the third rung and still does exactly
-what it used to; it is simply no longer reached while a route that respects the
-peers' own numbers exists. Pinned by
+outright. So the third rung (`PeersUnbounded` until v0.3.230, `PeersAtCeiling`
+since) still rescues #025; it is simply no longer reached while a route that
+respects the peers' own numbers exists. Pinned by
 `a_peer_is_not_handed_more_than_it_says_it_can_hold_while_a_route_exists`, whose
 null control — making `PeersAtFaceValue` return `None` — hands a peer
 advertising 9 layers all 48.
+
+**Never past what a peer could EVER hold** (v0.3.230, a tester's report of
+2026-10-07 on v0.3.229). #025's rescue never needed "held to nothing": a peer's
+CURRENT figure can sit below what its admission will grant because it is stale,
+or because an idle model holds memory admission will reclaim — but never by more
+than the peer's whole ceiling. The rung relaxed to nothing, and a plan past the
+ceiling is a refusal booked in advance:
+
+- the one holder of a whole Qwen 3.5 9B was a 6 GB processor-only peer in
+  Australia capped at `max_ram_mb = 5200`; the model needs 6688 MB at its
+  admission; handed over, refused 8.8 s later, no other route;
+- a 30B was planned 1 / 46 / 1 layers, the 46 to a 16 GB machine ~16.5 GB short
+  of them; refused after 87 s;
+- our own node (also v0.3.229) planned the same 9B to the same peer.
+
+The current-figure arithmetic could not see it: it charges the model's FILE bytes
+per layer plus the prompt's KV, which is lighter than admission's footprint (KV
+for the admission context, output head, overhead) — so 22 of TinyLlama's 22
+layers "fit" a cap of 784 MB against a 980 MB footprint in the rig below.
+
+So each node advertises `NodeCapability::model_memory_ceiling_mb` (additive,
+`#[serde(default)]`; `vram::node_model_memory_ceiling_mb`): the RAM cap on a
+processor node — exactly what admission refuses past — and the whole card plus
+the whole machine's memory on a card node, whose loader splits a model across
+both and does not charge the processor's share to the RAM budget. An upper
+bound by construction, because a ceiling set too low would refuse routes the
+peer would accept. The planner weighs it with the PEER's own admission
+arithmetic: `process_pool::processor_cost_curve_for` over the model's geometry
+(read once per plan from the header) and the bytes of the shards THAT peer holds
+— its admission divides its own shard bytes, not ours, and a coordinator often
+holds none (the first version read this node's disk and computed nothing for
+exactly the report's case; the rig caught it). The processor curve, because it
+has no f16 KV mirror, so a card peer is never weighed more strictly than its own
+admission weighs it; the slope is rounded UP, so the line is exact for the whole
+model and never above the estimator for a shorter segment.
+`NodeCandidate::within_ceiling` applies it on EVERY rung and in both greedy
+passes — a peer whose current figure is unknown is still held to it — and a plan
+no ceiling fits is answered by the planner itself as `SwarmShortOfMemory`
+(`scheduler::short_of_memory`), "retrying won't help", before any peer is asked.
+Where the holders' ceilings add up, the model is SPLIT across them instead of
+handed whole to one.
+
+What it needs, and what happens without it: the model's header on the
+coordinator. `ensure_model_geometry` fetches it from HuggingFace before planning
+(8 s budget) and keeps it, so a connected node has it from its first request; a
+coordinator without it, and a peer that advertises no ceiling (older than
+v0.3.230), are bounded exactly as before — unknown is never "no room".
+
+Pinned by `a_peer_is_never_handed_more_than_it_could_ever_hold` (parallax; null
+control: an older peer stays unbounded), `a_model_past_every_holders_ceiling_is_refused_before_anyone_is_asked`
+(greedy) and `a_model_no_holder_could_ever_hold_is_refused_by_the_planner` (end to
+end through `gather_candidates`: split at 24 + 24 of 32, refused at 11 + 11,
+control unbounded) — all three red with `within_ceiling` ignoring the ceiling,
+the last also red with a peer priced from zero bytes. Rig:
+`examples/ceiling_test.sh` (two nodes, private network namespace, the server's
+cap at 80% of and just above its own admission footprint).
+
+The same work found the cost curve itself bent by #228 (2b): the estimator
+charges KV by `kv_layers`, and `segment_cost_curve` scaled the layer count but
+not `kv_layers`, so every point charged the WHOLE model's cache and a partial
+segment was charged all of it (the local planner under-counted what fits).
+`process_pool::cost_curve_of` scales it, from points at the whole model and half
+of it — Pinned by `the_segment_cost_curve_recovers_the_fixed_and_per_layer_terms`
+(red without the scaling).
 
 A note on what was NOT built. Learning from the refusal itself (Omega's other
 half) would need the coordinator to tell a memory refusal from any other 503,
@@ -888,6 +952,8 @@ from a spawn failure or a broken pipe. Recovering it from the message prose is
 the #295 trap. Carrying it structurally is an additive protocol change, and the
 benefit it buys — roughly one second on a request that fails either way — did
 not justify it against the risk of refusing routes that would have worked.
+(The 2026-10-07 report measured that second at 8.8 s and 87 s; the ceiling above
+answers it without learning from the refusal at all.)
 
 **Why the DP, and not only the check after it.** The local node is exempt from
 "a capped candidate appears at most once" — prompt privacy needs it at both ends
@@ -911,7 +977,7 @@ Four things a change here must keep.
   hide a costlier one that would have fitted — the same approximation
   `used_capped` already makes. Both backstops behind it are unchanged: the
   exact summed check, and the next relaxation.
-- **Every pass says which one it is.** The `PeersUnbounded` line promises a
+- **Every pass says which one it is.** The `PeersAtCeiling` line promises a
   re-plan and can now keep it: the only refusal it invites is a peer's, and
   `should_retry_after` retries that. The `PeersAtFaceValue` line says the
   margin has been spent and no more. The `LocalUnbounded` line promises
@@ -927,7 +993,7 @@ constraint checked after a search kills the search instead of the candidate.
 **From the rules file (moved 2026-10-02):**
 
 **`parallax::CapacityBound`** says whose `max_hostable_layers` a routing pass
-honours, in four rungs: `Everyone`, `PeersAtFaceValue`, `PeersUnbounded`,
+honours, in four rungs: `Everyone`, `PeersAtFaceValue`, `PeersAtCeiling`,
 `LocalUnbounded`. `assemble_pipeline_for` walks them in that order, and the
 local layer budget is enforced INSIDE the DP — carried along the best path,
 exactly as the capped-peer bitmask is — as well as by the exact summed check
@@ -944,7 +1010,7 @@ it is not expressible, and every rung refuses down to the one binding nobody.
 **A relaxation spends the safety margin before it spends the peer's own
 number.** `max_hostable_layers_at_face_value` is the peer taken at its word with
 `DELEGATE_VRAM_MARGIN` spent, and `PeersAtFaceValue` sits above
-`PeersUnbounded` so a route that respects what peers actually claimed is always
+`PeersAtCeiling` so a route that respects what peers actually claimed is always
 preferred to one that does not. Unknown is unbounded on every rung and always
 was — `max_hostable_layers` answers `None` for an absent capability, a gossiped
 zero, or an uncomputable per-layer size — so a relaxation can only ever act on a

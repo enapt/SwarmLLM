@@ -486,6 +486,24 @@ pub struct NodeCapability {
     /// load; a coordinator then uses its prior. Never zero.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_load_ms_per_gib: Option<u32>,
+
+    /// The most memory this node could EVER give one model, in MB: its
+    /// admission ceiling with nothing else loaded — the system-memory cap
+    /// (`resources.max_ram_mb`, or the size it was auto-sized to), plus the
+    /// graphics budget where models go to a card (whose loader splits a model
+    /// across the two). Not what is free now: that is
+    /// [`Self::memory_for_model_layers_mb`], which a stale reading or an idle
+    /// model can leave below what admission will actually grant.
+    ///
+    /// A coordinator may plan past a peer's CURRENT figure, because memory may
+    /// have been freed since it was sent; it never plans past this one, which
+    /// no amount of freeing can raise. On v0.3.229 a 6 GB processor-only peer
+    /// capped at 5200 MB was handed a model needing 6688 MB, and refused it
+    /// 8.8 s later from another continent (a tester's report, 2026-10-07).
+    ///
+    /// `None` from a node predating the field: unknown, never "no room".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_memory_ceiling_mb: Option<u64>,
 }
 
 /// The serde default for [`NodeCapability::can_serve_inference`].

@@ -2,6 +2,19 @@
 
 ## [0.3.230-alpha] — 2026-10-07
 
+**Fixed: a model is no longer sent to a computer that could never hold it.**
+A tester reported two requests that failed for this reason. The only
+computer holding a whole Qwen 3.5 9B was a 6 GB machine whose memory limit
+is 5.2 GB, while the model needs 6.7 GB. The request went to it anyway, from
+another continent, and was turned down 8.8 seconds later. In the second
+request, 46 of a 30B model's 48 layers went to one 16 GB machine. Each
+computer now tells the others the most memory it could ever give a model,
+and a model is never planned past that. Where the computers holding a model
+can carry it between them, it is split across them. Where they cannot, you
+are told straight away that the swarm doesn't have the memory for it,
+instead of after a wasted round trip. This takes effect as computers update
+to 0.3.230.
+
 **Fixed: a request handed to a computer that is still loading the model no
 longer fails after two minutes.** When your request went to another computer
 that first had to read the model into memory — because it had just restarted,

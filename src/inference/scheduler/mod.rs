@@ -170,12 +170,20 @@ struct NodeCandidate {
     /// its word rather than held to a safety margin on top of it. `None` on
     /// exactly the same "we cannot tell" inputs as the field above.
     ///
-    /// This is the ONLY loosening a routing pass may apply to a peer, and it
-    /// exists because the margin above is what the relaxation was always
-    /// really trying to reclaim: a figure a moment out of date, where the peer
-    /// may have freed memory since. Past this number the figure is no longer
-    /// the peer's, so no pass may go there — see [`parallax::CapacityBound`].
+    /// The first loosening a routing pass applies to a peer, because the margin
+    /// above is what a relaxation is mostly trying to reclaim: a figure a
+    /// moment out of date, where the peer may have freed memory since. Only
+    /// the ceiling below lies past it — see [`parallax::CapacityBound`].
     max_hostable_layers_at_face_value: Option<u32>,
+    /// The most layers of this model the peer could EVER hold: its admission
+    /// estimator (`ModelProcessPool::segment_cost_curve`) applied to
+    /// `NodeCapability::model_memory_ceiling_mb`. What the last two rungs of
+    /// [`parallax::CapacityBound`] hold a peer to — they may plan past what it
+    /// says is free NOW (an idle model it can unload, a stale reading), never
+    /// past what no amount of freeing can give (a tester's report,
+    /// 2026-10-07). `None` for this node, whose loader decides, and for a peer
+    /// that advertises no ceiling: unknown, never "no room".
+    max_hostable_layers_at_ceiling: Option<u32>,
     /// MEASURED prefill coefficient for this peer, ms per (layer x activation
     /// byte). `None` until this node has prefilled through it — see
     /// `parallax::vertex_cost` for what stands in meanwhile.
@@ -284,6 +292,18 @@ impl NodeCandidate {
     /// nothing.
     fn layers_it_would_add(&self, range: (u32, u32)) -> u32 {
         crate::inference::process_pool::layers_added_by(range, &self.held_ranges)
+    }
+
+    /// `figure` — whatever bound a pass holds this candidate to — never past
+    /// what it could EVER hold ([`Self::max_hostable_layers_at_ceiling`]): the
+    /// smaller of the two when both are known, the one that is known
+    /// otherwise, `None` (unknown, never "no room") when neither is. The one
+    /// place every pass applies the ceiling, so none can skip it.
+    fn within_ceiling(&self, figure: Option<u32>) -> Option<u32> {
+        match (figure, self.max_hostable_layers_at_ceiling) {
+            (Some(figure), Some(ceiling)) => Some(figure.min(ceiling)),
+            (figure, ceiling) => figure.or(ceiling),
+        }
     }
 
     /// What `range` costs this candidate against the cap the pipeline search
@@ -823,10 +843,19 @@ fn plan_exceeds_offered_memory(
 /// about 17 of its 48 layers"), so it reads the same figure the plan was
 /// checked against.
 fn layers_offered(candidates: &[NodeCandidate]) -> Option<u32> {
+    layers_offered_at(candidates, |c| c.max_hostable_layers_at_face_value)
+}
+
+/// [`layers_offered`] at any figure — what a plan that cannot be made at the
+/// holders' CEILINGS reports (`short_of_memory`), with the same arithmetic.
+fn layers_offered_at(
+    candidates: &[NodeCandidate],
+    figure: impl Fn(&NodeCandidate) -> Option<u32>,
+) -> Option<u32> {
     let mut held: HashMap<&NodeId, Vec<(u32, u32)>> = HashMap::new();
     let mut offered: HashMap<&NodeId, u32> = HashMap::new();
     for c in candidates {
-        let o = c.max_hostable_layers_at_face_value?;
+        let o = figure(c)?;
         held.entry(&c.node_id)
             .or_default()
             .extend(c.available_ranges.iter().copied());
@@ -849,6 +878,22 @@ fn layers_offered(candidates: &[NodeCandidate]) -> Option<u32> {
             })
             .sum(),
     )
+}
+
+/// The answer when no plan fits what the holders could EVER hold: not enough
+/// memory among them, and retrying cannot help (#218's variant, raised before
+/// any peer is asked rather than after one refuses).
+fn short_of_memory(candidates: &[NodeCandidate], num_layers: u32) -> SwarmError {
+    SwarmError::SwarmShortOfMemory {
+        model_id: candidates
+            .first()
+            .map(|c| c.shard_id.model_id.0.clone())
+            .unwrap_or_else(|| "this model".to_string()),
+        room: crate::error::describe_offered_room(
+            layers_offered_at(candidates, |c| c.max_hostable_layers_at_ceiling),
+            num_layers,
+        ),
+    }
 }
 
 /// Indices of the segments no standby covers — the ones whose holder failing
@@ -2854,18 +2899,20 @@ impl PipelineScheduler {
                         Ok(segs)
                     }
                     Err(face_value_err) => {
-                        match route_with(parallax::CapacityBound::PeersUnbounded) {
+                        match route_with(parallax::CapacityBound::PeersAtCeiling) {
                             Ok(segs) => {
                                 // The rung report #025 needs, and the one that
                                 // can produce a placement a peer's own figure
-                                // has already refused (report #028). Both are
-                                // true, which is why it is reached only here.
+                                // has already refused (report #028) — though
+                                // never past what that peer could ever hold.
+                                // Both are true, which is why it is reached
+                                // only here.
                                 route_info!(purpose,
                                     model = %model_id,
                                     constrained_err = %face_value_err,
                                     "DIAG: no route fits even what the peers themselves \
-                                     advertised — routing without their bound; a peer may \
-                                     refuse and the request will re-plan"
+                                     advertised — routing up to what each could ever hold; \
+                                     a peer may refuse and the request will re-plan"
                                 );
                                 Ok(segs)
                             }
@@ -3579,6 +3626,13 @@ impl PipelineScheduler {
         }
 
         let mut candidates = Vec::new();
+        // The model's geometry, which a peer's advertised ceiling is weighed
+        // with through that peer's own admission arithmetic
+        // (`process_pool::processor_cost_curve_for`). Read once per plan, and
+        // only if a peer advertises a ceiling: it parses the model's header,
+        // which a coordinator holding none of the model has fetched before
+        // planning (`ensure_model_geometry`).
+        let footprint_base = std::cell::OnceCell::new();
 
         for (node_id, mut shard_indices) in node_shards {
             shard_indices.sort();
@@ -3933,6 +3987,40 @@ impl PipelineScheduler {
                         load,
                     )
                 };
+            // Copied out first: no registry guard is held while the header is read.
+            let advertised_ceiling_mb = if is_local {
+                None
+            } else {
+                self.shared_state.peer_registry.get(&node_id).and_then(|p| {
+                    p.capability
+                        .as_ref()
+                        .and_then(|c| c.model_memory_ceiling_mb)
+                })
+            };
+            let max_hostable_layers_at_ceiling = advertised_ceiling_mb.and_then(|ceiling_mb| {
+                let base = footprint_base
+                    .get_or_init(|| {
+                        self.shared_state
+                            .model_process_pool
+                            .model_footprint_base(&manifest.id)
+                    })
+                    .as_ref()?;
+                // Its admission weighs the shards IT holds, not ours — this
+                // node may hold none of the model.
+                let held_weight_bytes: u64 = manifest
+                    .shards
+                    .iter()
+                    .filter(|s| shard_indices.contains(&s.index))
+                    .map(|s| s.size_bytes)
+                    .sum();
+                let (fixed_mb, per_layer_mb) =
+                    crate::inference::process_pool::processor_cost_curve_for(
+                        base,
+                        held_weight_bytes,
+                    )?;
+                crate::inference::process_pool::layers_that_fit(ceiling_mb, fixed_mb, per_layer_mb)
+                    .map(|layers| layers.min(manifest.num_layers))
+            });
             let gpu_vram_available_mb = if node_id == *local_node_id {
                 // Never used for the local node — the loader's own admission
                 // check is the authority on whether WE can fit a model, and it
@@ -3987,6 +4075,7 @@ impl PipelineScheduler {
                 gpu_vram_available_mb,
                 max_hostable_layers,
                 max_hostable_layers_at_face_value,
+                max_hostable_layers_at_ceiling,
                 observed_prefill_ms_per_layer_byte,
                 has_gpu,
                 held_ranges,
@@ -4044,6 +4133,7 @@ impl PipelineScheduler {
                 observed_prefill_ms_per_layer_byte = ?c.observed_prefill_ms_per_layer_byte,
                 has_gpu = c.has_gpu,
                 max_hostable_layers = ?c.max_hostable_layers,
+                max_hostable_layers_at_ceiling = ?c.max_hostable_layers_at_ceiling,
                 // Beside the bound, because the bound is room for NEW layers:
                 // `Some(0)` next to held ranges is a node that can still run
                 // the split it is already holding (#95), not one with no room.
@@ -4337,6 +4427,17 @@ impl PipelineScheduler {
         // `peer_vram_commitments` already use: what a plan has COMMITTED counts
         // against what the next segment may ask for.
         let mut assigned: std::collections::HashMap<NodeId, u32> = std::collections::HashMap::new();
+        // What a node may be given in this pass: its advertised room, or once
+        // that bound is relaxed, what a peer could ever hold — the same
+        // ceiling `parallax::CapacityBound::PeersAtCeiling` holds the search
+        // to. This node has no ceiling here: its loader decides, as before.
+        let cap_of = |c: &NodeCandidate| {
+            c.within_ceiling(if respect_capacity {
+                c.max_hostable_layers
+            } else {
+                None
+            })
+        };
 
         while current_layer < num_layers {
             let is_first_segment = current_layer == 0;
@@ -4432,27 +4533,29 @@ impl PipelineScheduler {
 
             // Prefer a node that still has room, before any other preference:
             // one already given everything it can hold should not be picked
-            // again while another candidate could take this layer. Only a
-            // preference — if NOTHING has room left, the options stand and the
-            // segment goes somewhere rather than the request being refused,
-            // which is what the relaxed pass and the holder's own admission
-            // check are for.
-            if respect_capacity {
-                let with_room: Vec<_> = options
-                    .iter()
-                    .filter(|(c, _)| match c.max_hostable_layers {
-                        Some(cap) => {
-                            cap.saturating_sub(assigned.get(&c.node_id).copied().unwrap_or(0)) > 0
-                        }
-                        // Unknown capacity never excludes — the standing
-                        // contract of `max_hostable_layers`.
-                        None => true,
-                    })
-                    .cloned()
-                    .collect();
-                if !with_room.is_empty() {
-                    options = with_room;
-                }
+            // again while another candidate could take this layer. In the
+            // bounded pass only a preference — if NOTHING has room left, the
+            // options stand and the layer cap below fails the pass, which the
+            // relaxed pass answers. That pass holds a peer to what it could
+            // EVER hold, and there it is a wall: a layer no holder could ever
+            // take is not handed to one of them to refuse (a tester's report,
+            // 2026-10-07 — 46 of a 30B's 48 layers to a 16 GB machine).
+            let with_room: Vec<_> = options
+                .iter()
+                .filter(|(c, _)| match cap_of(c) {
+                    Some(cap) => {
+                        cap.saturating_sub(assigned.get(&c.node_id).copied().unwrap_or(0)) > 0
+                    }
+                    // Unknown capacity never excludes — the standing
+                    // contract of `max_hostable_layers`.
+                    None => true,
+                })
+                .cloned()
+                .collect();
+            if !with_room.is_empty() {
+                options = with_room;
+            } else if !respect_capacity && !options.is_empty() {
+                return Err(short_of_memory(candidates, num_layers));
             }
 
             // If this range could reach the end, prefer nodes that can be last.
@@ -4609,8 +4712,8 @@ impl PipelineScheduler {
                     // unreadable capability is not evidence a node is small
                     // (see [`max_hostable_layers`]). At least one layer always
                     // moves, or the loop cannot terminate.
-                    let layer_end = match candidate.max_hostable_layers {
-                        Some(cap) if respect_capacity => {
+                    let layer_end = match cap_of(candidate) {
+                        Some(cap) => {
                             // What this node may still take, after everything
                             // this plan has already given it.
                             let already = assigned.get(&candidate.node_id).copied().unwrap_or(0);
@@ -4625,11 +4728,15 @@ impl PipelineScheduler {
                                 // bound, it would only FRAGMENT the overage
                                 // into one-layer segments and still exceed it,
                                 // which is worse than both alternatives. The
-                                // caller answers this by re-running without the
-                                // bound (`greedy_assign`), which is the same
+                                // caller answers this by re-running at the
+                                // holders' ceilings (`greedy_assign`), the same
                                 // constrained-then-relaxed shape the DP uses,
                                 // and the holder's own admission check is the
-                                // backstop after that.
+                                // backstop after that. At the ceilings there is
+                                // nothing further to relax.
+                                if !respect_capacity {
+                                    return Err(short_of_memory(candidates, num_layers));
+                                }
                                 return Err(SwarmError::PipelineError(format!(
                                     "greedy: no node can take layer {current_layer} \
                                      within the memory it advertises"

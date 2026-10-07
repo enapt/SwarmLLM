@@ -1289,6 +1289,26 @@ pub fn node_model_budget_mb(shared: &crate::daemon::SharedState) -> Option<u64> 
     Some(mb)
 }
 
+/// The most memory this node could EVER give one model — the figure behind
+/// `NodeCapability::model_memory_ceiling_mb`, which a coordinator never plans
+/// past. An upper bound by construction, because a ceiling set too low would
+/// refuse routes this node would accept:
+///
+/// - models on the processor: the RAM cap admission refuses past
+///   (`RamBudget::cap_mb` — `resources.max_ram_mb`, or what it auto-sized to);
+/// - models on a card: the whole card plus the whole machine's memory. The
+///   loader splits a model the card cannot hold across the card and the
+///   processor, and the processor's share is not charged against the RAM
+///   budget, so nothing tighter is certain.
+pub fn node_model_memory_ceiling_mb(shared: &crate::daemon::SharedState) -> Option<u64> {
+    let ram = ram_budget_now(shared)?;
+    if models_go_to_the_card(shared) {
+        let card = shared.gpu_info.as_ref()?.vram_total_mb;
+        return Some(card.saturating_add(ram.total_mb.max(ram.cap_mb)));
+    }
+    Some(ram.cap_mb)
+}
+
 pub fn compute_vram_budget(shared: &crate::daemon::SharedState) -> Option<u64> {
     let gpu_total = shared
         .gpu_info

@@ -189,9 +189,19 @@ pub(super) const MAX_SUBRANGE_VERTICES: usize = 4096;
 /// the same coin: there the only route ran across a peer whose figure refused
 /// it, and relaxing that figure was what kept the request alive. A self-report
 /// we cannot re-ask must not fail a request outright. Hence four rungs rather
-/// than a bound: [`PeersUnbounded`](Self::PeersUnbounded) still exists and still
-/// rescues #025, it is simply no longer reached while a route that respects the
-/// peers' own numbers is available.
+/// than a bound: [`PeersAtCeiling`](Self::PeersAtCeiling) still rescues #025, it
+/// is simply no longer reached while a route that respects the peers' own
+/// numbers is available.
+///
+/// **But not past what a peer could EVER hold** (a tester's report,
+/// 2026-10-07). The rung was "peers held to nothing", and #025's rescue never
+/// needed that: a current figure can be low because it is stale or because an
+/// idle model holds memory admission will reclaim — never by more than the
+/// peer's whole ceiling (`NodeCapability::model_memory_ceiling_mb`). Past
+/// that, a plan is a refusal booked in advance: a whole Qwen 3.5 9B (6688 MB)
+/// sent to a processor-only peer capped at 5200 MB, refused 8.8 s later from
+/// another continent; 46 of a 30B's 48 layers sent to a 16 GB machine. A peer
+/// advertising no ceiling (older than v0.3.230) stays unbounded, as before.
 ///
 /// This is the shape every cluster scheduler settled on. Kubernetes filters
 /// nodes on fit and never relaxes the memory predicate to place a pod — an
@@ -215,14 +225,17 @@ pub(super) enum CapacityBound {
     /// Peers are held to what they actually advertised, the margin spent;
     /// this node is still held to its loader's answer.
     PeersAtFaceValue,
-    /// Peers are held to nothing. This is the rung that rescues report #025's
-    /// machine, where the only route runs across a peer whose figure refuses
-    /// it — and a self-report we cannot re-ask is not allowed to fail a
-    /// request outright. It sits BELOW `PeersAtFaceValue` so a route that fits
-    /// what peers actually claimed is always preferred to one that does not.
-    PeersUnbounded,
+    /// Peers are held only to what they could EVER hold
+    /// (`NodeCandidate::max_hostable_layers_at_ceiling`). This is the rung
+    /// that rescues report #025's machine, where the only route runs across a
+    /// peer whose CURRENT figure refuses it — and a self-report we cannot
+    /// re-ask is not allowed to fail a request outright. It sits BELOW
+    /// `PeersAtFaceValue` so a route that fits what peers actually claimed is
+    /// always preferred to one that does not.
+    PeersAtCeiling,
     /// ...and this node's bound is released too. The loader decides, and its
-    /// refusal names the shortfall.
+    /// refusal names the shortfall. Peers stay at their ceiling: no loader of
+    /// theirs is here to name anything.
     LocalUnbounded,
 }
 
@@ -235,20 +248,22 @@ impl CapacityBound {
     /// How many layers may this PEER be given under this bound? `None` means
     /// we cannot tell and so must not exclude it — never "no room".
     ///
-    /// There is no variant that returns `None` for a peer whose figure is
-    /// known: that is the invariant this enum exists to carry.
-    ///
     /// A peer that published its resident ranges is held to its room for NEW
     /// layers and charged `NodeCandidate::capacity_charge`; one that did not is
     /// held to its total and charged the width, as before (FUTURE_WORK #99).
+    /// The ceiling is a total either way — resident layers occupy it too — so a
+    /// peer charged its new layers is held to it LENIENTLY, never wrongly.
     fn peer_cap(self, c: &NodeCandidate) -> Option<u32> {
-        match (self, c.published_room) {
+        let figure = match (self, c.published_room) {
             (Self::Everyone, Some(room)) => room.new_layers,
             (Self::PeersAtFaceValue, Some(room)) => room.new_layers_at_face_value,
             (Self::Everyone, None) => c.max_hostable_layers,
             (Self::PeersAtFaceValue, None) => c.max_hostable_layers_at_face_value,
-            (Self::PeersUnbounded | Self::LocalUnbounded, _) => None,
-        }
+            (Self::PeersAtCeiling | Self::LocalUnbounded, _) => None,
+        };
+        // Every rung, not only the last two: a peer whose CURRENT figure is
+        // unknown is still never handed more than it could ever hold.
+        c.within_ceiling(figure)
     }
 }
 
@@ -1338,6 +1353,7 @@ mod tests {
             gpu_vram_available_mb: None,
             max_hostable_layers: None,
             max_hostable_layers_at_face_value: None,
+            max_hostable_layers_at_ceiling: None,
             observed_prefill_ms_per_layer_byte: None,
             has_gpu: false,
             held_ranges: Vec::new(),
@@ -2281,7 +2297,7 @@ mod tests {
             &local,
             false,
             true,
-            CapacityBound::PeersUnbounded,
+            CapacityBound::PeersAtCeiling,
             None,
         )
         .expect("the unbounded rung still routes");
@@ -2289,6 +2305,74 @@ mod tests {
             !unbounded.is_empty(),
             "the last-resort rung must still produce a plan: {unbounded:?}"
         );
+    }
+
+    /// A tester's report, 2026-10-07 (v0.3.229): the one holder of a whole
+    /// Qwen 3.5 9B — 6688 MB at its own admission — was a processor-only peer
+    /// capped at 5200 MB, and it was handed the model anyway and refused it
+    /// 8.8 s later from another continent. The last peer rung held peers to
+    /// NOTHING. It now holds them to what they could EVER hold
+    /// (`max_hostable_layers_at_ceiling`), on every rung, so a range past that
+    /// is not planned at all — and #025's rescue, a CURRENT figure below what
+    /// admission will grant, still routes.
+    #[test]
+    fn a_peer_is_never_handed_more_than_it_could_ever_hold() {
+        let local = NodeId([1u8; 32]);
+        let mut me = cand(1, vec![], 0, 0.0, false, false, 4.0);
+        me.node_id = local.clone();
+        let rungs = [
+            CapacityBound::Everyone,
+            CapacityBound::PeersAtFaceValue,
+            CapacityBound::PeersAtCeiling,
+            CapacityBound::LocalUnbounded,
+        ];
+        let route = |cands: &[NodeCandidate], rung| {
+            route_shortest_path(32, cands, &local, false, true, rung, None)
+        };
+
+        // The report's shape: the only holder, short now AND for ever.
+        let mut capped = cand(2, vec![(0, 32)], 5, 0.0, true, true, 50.0);
+        capped.max_hostable_layers = Some(20);
+        capped.max_hostable_layers_at_face_value = Some(24);
+        capped.max_hostable_layers_at_ceiling = Some(25);
+        for rung in rungs {
+            assert!(
+                route(&[me.clone(), capped.clone()], rung).is_err(),
+                "{rung:?} planned 32 layers onto a peer that could only ever hold 25"
+            );
+        }
+
+        // Its current figure unknown — never "no room" — but its ceiling known:
+        // the ceiling still holds on the routine rungs too.
+        let mut unknown_now = capped.clone();
+        unknown_now.max_hostable_layers = None;
+        unknown_now.max_hostable_layers_at_face_value = None;
+        for rung in rungs {
+            assert!(
+                route(&[me.clone(), unknown_now.clone()], rung).is_err(),
+                "{rung:?} planned past the ceiling of a peer whose current room is unknown"
+            );
+        }
+
+        // #025's rescue: short NOW (an idle model admission will reclaim, a
+        // stale reading), but able to hold the whole model. Still routed.
+        let mut short_now = capped.clone();
+        short_now.max_hostable_layers_at_ceiling = Some(32);
+        let rescued = route(
+            &[me.clone(), short_now.clone()],
+            CapacityBound::PeersAtCeiling,
+        )
+        .expect("a peer short only of what it can reclaim is still the route");
+        assert!(
+            rescued.iter().all(|s| s.node_id == short_now.node_id),
+            "{rescued:?}"
+        );
+
+        // Null control: a peer that advertises no ceiling (older than
+        // v0.3.230) is unbounded on the last rungs, exactly as before.
+        let mut older = capped.clone();
+        older.max_hostable_layers_at_ceiling = None;
+        assert!(route(&[me, older], CapacityBound::PeersAtCeiling).is_ok());
     }
 
     /// Report #029: a route everyone can afford must be EXPRESSIBLE, not merely
@@ -2464,7 +2548,7 @@ mod tests {
             &local,
             true,
             true,
-            CapacityBound::PeersUnbounded,
+            CapacityBound::PeersAtCeiling,
             None,
         )
         .expect("a boomerang across the peer that holds every layer still routes");
@@ -3417,6 +3501,7 @@ mod transfer_cost_tests {
             gpu_vram_available_mb: None,
             max_hostable_layers: None,
             max_hostable_layers_at_face_value: None,
+            max_hostable_layers_at_ceiling: None,
             has_gpu: true,
             held_ranges: Vec::new(),
             published_room: None,

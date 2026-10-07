@@ -1848,14 +1848,69 @@ pub(crate) fn segment_shape(
     (layers, start == 0, weights)
 }
 
-/// `(fixed_mb, per_layer_mb)` from the cost of a one-layer and a two-layer
-/// segment. The estimate is affine in the layer count — weights and KV scale
-/// with it, the process overhead does not — so two points determine it, and
-/// taking them from the estimator itself means nothing here restates its
-/// arithmetic.
-pub(crate) fn cost_curve_from(one_layer_mb: u64, two_layer_mb: u64) -> (u64, u64) {
-    let per_layer = two_layer_mb.saturating_sub(one_layer_mb);
-    (one_layer_mb.saturating_sub(per_layer), per_layer)
+/// `(fixed_mb, per_layer_mb)` that `estimate` charges a MIDDLE segment of the
+/// model `base` describes (its whole-model inputs), when the node asked holds
+/// `weight_bytes` of its shards — weights charged in proportion to the layers,
+/// as `segment_shape` charges them at admission. The estimate is affine in the
+/// layer count — weights and KV scale with it, the process overhead does not —
+/// so two points determine it, and taking them from the estimator itself means
+/// nothing here restates its arithmetic.
+///
+/// **The layers that keep a KV cache scale with the segment too.** The
+/// estimator charges KV by `kv_layers` (#228: three in four of Qwen 3.5's
+/// layers carry a fixed state instead); left at the whole model's count, every
+/// point charged the WHOLE cache, so the curve put all of it in the fixed term
+/// and a partial segment was charged the model's entire cache. And the two
+/// points are the whole model and half of it, not one layer and two: a
+/// proportion of `kv_layers` rounds to zero at one layer of Qwen 3.5, and MB
+/// rounding bends a slope taken over a single layer.
+fn cost_curve_of(
+    base: &crate::model::auto_manage::vram::VramFootprintInputs,
+    weight_bytes: u64,
+    estimate: fn(&crate::model::auto_manage::vram::VramFootprintInputs) -> u64,
+) -> Option<(u64, u64)> {
+    let total = base.segment_layers;
+    if total == 0 {
+        return None;
+    }
+    let at = |layers: u64| {
+        let mut i = *base;
+        i.segment_layers = layers;
+        i.is_first = false;
+        i.quantized_weight_bytes = weight_bytes / total * layers;
+        i.kv_layers = base.kv_layers * layers / total;
+        estimate(&i)
+    };
+    let half = total / 2;
+    if half == 0 {
+        // A one-layer model: no slope to separate from the fixed terms, so
+        // charge all of it as the one layer.
+        return Some((0, at(1)));
+    }
+    let (at_half, at_whole) = (at(half), at(total));
+    // Rounded UP to a whole MB, so the line is exact for the whole model and
+    // within a MB a layer BELOW the estimator for any shorter segment — never
+    // above it: a peer's ceiling must not be weighed more strictly than its own
+    // admission weighs it.
+    let per_layer = at_whole.saturating_sub(at_half).div_ceil(total - half);
+    Some((at_whole.saturating_sub(per_layer * total), per_layer))
+}
+
+/// What a PROCESSOR admission charges for this model on a peer holding
+/// `held_weight_bytes` of its shards — the peer's own arithmetic
+/// ([`cost_curve_of`] over `estimate_worker_ram_mb`), which the planner weighs
+/// that peer's advertised ceiling with (a tester's report, 2026-10-07). The
+/// processor's because it carries no f16 KV mirror, so it never charges a card
+/// peer more than that peer's own admission would.
+pub(crate) fn processor_cost_curve_for(
+    base: &crate::model::auto_manage::vram::VramFootprintInputs,
+    held_weight_bytes: u64,
+) -> Option<(u64, u64)> {
+    cost_curve_of(
+        base,
+        held_weight_bytes,
+        crate::model::auto_manage::vram::estimate_worker_ram_mb,
+    )
 }
 
 /// How many layers fit in `free_mb` once the fixed terms are paid.
@@ -4284,23 +4339,23 @@ impl ModelProcessPool {
             return Some(*curve);
         }
         let base = self.footprint_inputs(model_id, None)?;
-        if base.segment_layers == 0 {
-            return None;
-        }
-        let at = |layers: u64| {
-            let mut i = base;
-            i.segment_layers = layers;
-            i.is_first = false;
-            i.quantized_weight_bytes = base.quantized_weight_bytes / base.segment_layers * layers;
-            if on_gpu {
-                estimate_worker_vram_mb(&i)
-            } else {
-                estimate_worker_ram_mb(&i)
-            }
+        let estimate = if on_gpu {
+            estimate_worker_vram_mb
+        } else {
+            estimate_worker_ram_mb
         };
-        // Two points on a line that is affine in the layer count: the weights
-        // and the KV cache both scale with it, everything else does not.
-        Some(cost_curve_from(at(1), at(2)))
+        cost_curve_of(&base, base.quantized_weight_bytes, estimate)
+    }
+
+    /// The model's footprint inputs as this node reads them from its header,
+    /// for pricing a PEER — whose weights are the shards IT holds, not those on
+    /// this node's disk, which may be none ([`processor_cost_curve_for`]).
+    /// `None` when this node has no header for the model.
+    pub(crate) fn model_footprint_base(
+        &self,
+        model_id: &ModelId,
+    ) -> Option<crate::model::auto_manage::vram::VramFootprintInputs> {
+        self.footprint_inputs(model_id, None)
     }
 
     /// The most layers of `model_id` this node could admit right now, on the
@@ -9270,14 +9325,70 @@ mod tests {
     }
 
     /// The curve the planner and the incremental charge both read is taken from
-    /// the estimator, not restated.
+    /// the estimator, not restated — and its PER-LAYER term carries the KV
+    /// cache. Once the estimator charged KV by `kv_layers` (#228), a curve that
+    /// scaled the layers but not `kv_layers` put the whole model's cache in the
+    /// fixed term, so a partial segment paid all of it.
     #[test]
     fn the_segment_cost_curve_recovers_the_fixed_and_per_layer_terms() {
-        // cost(n) = 300 + 210n
-        assert_eq!(super::cost_curve_from(510, 720), (300, 210));
+        use crate::model::auto_manage::vram::{estimate_worker_ram_mb, VramFootprintInputs};
+        let whole = VramFootprintInputs {
+            quantized_weight_bytes: 4_400 * 1024 * 1024,
+            unquantized_bytes_per_element: None,
+            vocab_size: 152_064,
+            embedding_length: 3584,
+            segment_layers: 28,
+            kv_layers: 28,
+            head_count_kv: 4,
+            head_count: 28,
+            head_dim: 128,
+            rope_dim: 128,
+            effective_context: 8192,
+            is_first: true,
+            embedding_gatherable: true,
+            splits_across_devices: true,
+        };
+        let segment = |inputs: &VramFootprintInputs, layers: u64| {
+            let mut i = *inputs;
+            i.segment_layers = layers;
+            i.is_first = false;
+            i.quantized_weight_bytes = inputs.quantized_weight_bytes / 28 * layers;
+            i.kv_layers = inputs.kv_layers * layers / 28;
+            estimate_worker_ram_mb(&i)
+        };
+        let (fixed, per_layer) =
+            super::processor_cost_curve_for(&whole, whole.quantized_weight_bytes).unwrap();
+        // The line is the estimator's: exact for the whole model, and for any
+        // shorter segment never above it and within a MB a layer below it (the
+        // slope is a whole MB, rounded up).
+        for layers in [1, 7, 14, 27, 28] {
+            let (line, est) = (fixed + per_layer * layers, segment(&whole, layers));
+            assert!(
+                line <= est + 1 && est <= line + (28 - layers) + 1,
+                "{layers} layers: curve {line} vs estimator {est}"
+            );
+        }
+        // One layer in four keeping a cache (Qwen 3.5's shape): the per-layer
+        // term carries a quarter of it, and the fixed term none of it.
+        let quarter = VramFootprintInputs {
+            kv_layers: 7,
+            ..whole
+        };
+        let (fixed_q, per_layer_q) =
+            super::processor_cost_curve_for(&quarter, whole.quantized_weight_bytes).unwrap();
+        assert!(per_layer_q < per_layer, "{per_layer_q} vs {per_layer}");
+        // Within the slope's rounding — a cache left in the fixed term would be
+        // hundreds of MB here.
+        assert!(fixed_q.abs_diff(fixed) <= 28, "{fixed_q} vs {fixed}");
+        assert!((fixed_q + per_layer_q * 28).abs_diff(segment(&quarter, 28)) <= 1);
+        // A peer's curve is weighed with ITS shards: holding half the weights,
+        // it is charged half of them per layer.
+        let (_, per_layer_half) =
+            super::processor_cost_curve_for(&whole, whole.quantized_weight_bytes / 2).unwrap();
+        assert!(per_layer_half < per_layer);
+
         // A flat estimate has no per-layer term, which is unknowable rather
         // than unlimited.
-        assert_eq!(super::cost_curve_from(400, 400), (400, 0));
         assert_eq!(super::layers_that_fit(7910, 300, 0), None);
         // 7910 MB of headroom, 300 fixed, 210 a layer → 36.
         assert_eq!(super::layers_that_fit(7910, 300, 210), Some(36));

@@ -1138,6 +1138,7 @@ mod tests {
             resident_layers: Vec::new(),
             context_ceiling_tokens: None,
             model_load_ms_per_gib: None,
+            model_memory_ceiling_mb: None,
         }
     }
 

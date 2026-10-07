@@ -1102,6 +1102,11 @@ impl HealthMonitor {
             // How fast this node's own loads have been (#129), so a
             // coordinator can price waiting for it to load a model.
             model_load_ms_per_gib: self.shared_state.model_process_pool.load_ms_per_gib(),
+            // The most a model could ever be given here, which a coordinator
+            // never plans past (a tester's report, 2026-10-07).
+            model_memory_ceiling_mb: crate::model::auto_manage::vram::node_model_memory_ceiling_mb(
+                &self.shared_state,
+            ),
             // Advertise the protocol epoch + the optional features this build
             // implements, so peers negotiate new message types additively.
             protocol_version: swarmllm_types::PROTOCOL_VERSION,

@@ -1773,8 +1773,10 @@ a request's own model name; `auto` was the one reader using it to CHOOSE.
 directory — "held whole" checks shard files on disk.
 
 **Still true** (#120 is closed; its half (b) was a recorded decision, not open work): with nothing servable here, the planner's
-`PeersUnbounded` rung can still hand a whole model to a peer that advertised too
-little room — a recorded decision (report #025), not an oversight. The other half,
+`PeersAtCeiling` rung can still hand a whole model to a peer that advertised too
+little room NOW — a recorded decision (report #025), not an oversight — but since
+v0.3.230 never one past what that peer could EVER hold (`docs/invariants/scheduling.md`
+§ "Never past what a peer could EVER hold"). The other half,
 a peer that had published no capability yet, is narrowed by sending ours on
 identify (`docs/invariants/network.md` § "A newcomer is told our capability").
 

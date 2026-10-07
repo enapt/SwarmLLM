@@ -103,7 +103,7 @@ A re-plan with the refusing holder barred can only describe its own search ("has
 
 ## The relaxation is scoped to the figures that are actually unreliable
 
-**`parallax::CapacityBound`** (`Everyone`, `PeersAtFaceValue`, `PeersUnbounded`, `LocalUnbounded`) is walked in that order by `assemble_pipeline_for`; a ceiling is a split POINT too; a relaxation spends `DELEGATE_VRAM_MARGIN` (`max_hostable_layers_at_face_value`) before the peer's own number. Unknown is unbounded on every rung.
+**`parallax::CapacityBound`** (`Everyone`, `PeersAtFaceValue`, `PeersAtCeiling`, `LocalUnbounded`) is walked in that order by `assemble_pipeline_for`; a ceiling is a split POINT too; a relaxation spends `DELEGATE_VRAM_MARGIN` (`max_hostable_layers_at_face_value`) before the peer's own number. **No rung, and no greedy pass, goes past what a peer could EVER hold** — `NodeCapability::model_memory_ceiling_mb` weighed by its own admission arithmetic (`process_pool::processor_cost_curve_for`, over the shards IT holds), applied in one place: `NodeCandidate::within_ceiling`. A plan nobody's ceiling fits is `SwarmShortOfMemory` from the planner (`scheduler::short_of_memory`). Unknown is unbounded on every rung.
 
 → `docs/invariants/scheduling.md` § "The relaxation is scoped to the figures that are actually unreliable"
 

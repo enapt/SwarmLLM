@@ -355,6 +355,7 @@ fn simple_candidate(byte: u8, ranges: Vec<(u32, u32)>) -> NodeCandidate {
         gpu_vram_available_mb: None,
         max_hostable_layers: None,
         max_hostable_layers_at_face_value: None,
+        max_hostable_layers_at_ceiling: None,
         observed_prefill_ms_per_layer_byte: None,
         has_gpu: false,
         held_ranges: Vec::new(),
@@ -423,6 +424,42 @@ fn a_model_that_fits_nobody_is_still_assigned_rather_than_refused() {
         48,
         "the whole model must be covered by the fallback"
     );
+}
+
+/// ...but never past what the holder could EVER hold (a tester's report,
+/// 2026-10-07: a whole 9B to a peer capped below it, 46 of a 30B's 48 layers to a
+/// 16 GB machine). The relaxed pass lifts a holder's CURRENT figure — stale, or
+/// low because of an idle model admission will reclaim — to its ceiling, not
+/// past it. A model past every holder's ceiling is refused at once as
+/// `SwarmShortOfMemory`, whose advice says retrying cannot help, instead of being
+/// sent to a holder that refuses it a round trip later.
+#[test]
+fn a_model_past_every_holders_ceiling_is_refused_before_anyone_is_asked() {
+    let scheduler = PipelineScheduler::new(make_shared_state());
+    let mut only = simple_candidate(1, vec![(0, 48)]);
+    only.max_hostable_layers = Some(8);
+    only.max_hostable_layers_at_ceiling = Some(30);
+
+    let err = scheduler
+        .greedy_assign(48, &[only.clone()], false, false, super::Purpose::Route)
+        .expect_err("no holder could ever take layers 30-47");
+    assert!(
+        matches!(err, crate::error::SwarmError::SwarmShortOfMemory { .. }),
+        "{err:?}"
+    );
+    assert!(
+        err.to_string()
+            .contains("room for about 30 of its 48 layers"),
+        "the caller is told what the holders could hold: {err}"
+    );
+
+    // Short only of what it can reclaim: still assigned, past its current
+    // figure, up to its ceiling (report #025's rescue).
+    only.max_hostable_layers_at_ceiling = Some(48);
+    let segments = scheduler
+        .greedy_assign(48, &[only], false, false, super::Purpose::Route)
+        .expect("a holder whose ceiling holds the model is still the route");
+    assert_eq!(segments.last().unwrap().layer_range.1, 48);
 }
 
 /// The Qwen3-30B-A3B holders as the live swarm offered them on 2026-10-04 —
@@ -556,6 +593,7 @@ fn greedy_assign_multi_range_candidate() {
             gpu_vram_available_mb: None,
             max_hostable_layers: None,
             max_hostable_layers_at_face_value: None,
+            max_hostable_layers_at_ceiling: None,
             observed_prefill_ms_per_layer_byte: None,
             has_gpu: false,
             held_ranges: Vec::new(),
@@ -587,6 +625,7 @@ fn greedy_assign_multi_range_candidate() {
             gpu_vram_available_mb: None,
             max_hostable_layers: None,
             max_hostable_layers_at_face_value: None,
+            max_hostable_layers_at_ceiling: None,
             observed_prefill_ms_per_layer_byte: None,
             has_gpu: false,
             held_ranges: Vec::new(),
@@ -781,6 +820,7 @@ fn slow_peer_capability(node: &NodeId) -> crate::types::NodeCapability {
         resident_layers: Vec::new(),
         context_ceiling_tokens: None,
         model_load_ms_per_gib: None,
+        model_memory_ceiling_mb: None,
     }
 }
 
@@ -1555,6 +1595,7 @@ fn cost_cand(
         gpu_vram_available_mb: None,
         max_hostable_layers: None,
         max_hostable_layers_at_face_value: None,
+        max_hostable_layers_at_ceiling: None,
         observed_prefill_ms_per_layer_byte: None,
         has_gpu: false,
         held_ranges: Vec::new(),
@@ -2825,6 +2866,7 @@ fn one_node_is_not_made_standby_for_more_layers_than_it_can_run() {
         gpu_vram_available_mb: None,
         max_hostable_layers: cap,
         max_hostable_layers_at_face_value: cap,
+        max_hostable_layers_at_ceiling: None,
         observed_prefill_ms_per_layer_byte: None,
         has_gpu: false,
         held_ranges: Vec::new(),
@@ -2919,6 +2961,7 @@ fn a_node_with_room_still_stands_in_for_every_segment() {
         gpu_vram_available_mb: None,
         max_hostable_layers: cap,
         max_hostable_layers_at_face_value: cap,
+        max_hostable_layers_at_ceiling: None,
         observed_prefill_ms_per_layer_byte: None,
         has_gpu: false,
         held_ranges: Vec::new(),
@@ -3013,6 +3056,7 @@ fn a_standby_is_chosen_by_cost_not_by_ping() {
         gpu_vram_available_mb: None,
         max_hostable_layers: None,
         max_hostable_layers_at_face_value: None,
+        max_hostable_layers_at_ceiling: None,
         observed_prefill_ms_per_layer_byte: None,
         has_gpu: gpu,
         held_ranges: Vec::new(),
@@ -3122,6 +3166,7 @@ fn capability_with_gpu(free_mb: Option<u64>) -> crate::types::NodeCapability {
         resident_layers: Vec::new(),
         context_ceiling_tokens: None,
         model_load_ms_per_gib: None,
+        model_memory_ceiling_mb: None,
     }
 }
 
@@ -6220,6 +6265,119 @@ fn two_whole_model_card_peers() -> (Arc<SharedState>, NodeId, NodeId, NodeId, Mo
         state.connected_node_ids.insert(n.clone());
     }
     (state, local, b, c, ModelId(model.into()))
+}
+
+/// A tester's report, 2026-10-07, end to end: the model's real geometry, each
+/// holder's 4 GB of shards (from the manifest — this node holds none) and the
+/// estimator its admission runs (`process_pool::processor_cost_curve_for`).
+///
+/// - At a ceiling worth 24 layers to each: the model is SPLIT between them,
+///   neither given more than 24 — where v0.3.229 handed one of them all 32 (the
+///   report's whole 9B) or 46 of 48 (its 30B).
+/// - At a ceiling worth 11 to each, 22 between them: the planner refuses the
+///   request itself as `SwarmShortOfMemory`, before any holder is asked.
+/// - The control: holders that advertise no ceiling (older than v0.3.230) are
+///   planned exactly as before.
+#[test]
+fn a_model_no_holder_could_ever_hold_is_refused_by_the_planner() {
+    let (state, local, b, c, model) = two_whole_model_card_peers();
+    let geometry = crate::model::auto_manage::vram::VramFootprintInputs {
+        quantized_weight_bytes: 4_000_000_000,
+        unquantized_bytes_per_element: None,
+        vocab_size: 32_000,
+        embedding_length: 4096,
+        segment_layers: 32,
+        kv_layers: 32,
+        head_count_kv: 8,
+        head_count: 32,
+        head_dim: 128,
+        rope_dim: 128,
+        effective_context: 4096,
+        is_first: true,
+        embedding_gatherable: true,
+        splits_across_devices: true,
+    };
+    state
+        .model_process_pool
+        .test_footprint_inputs
+        .insert(model.clone(), geometry);
+    // Each holder holds both 2 GB shards: what its admission charges.
+    let (fixed, per_layer) =
+        crate::inference::process_pool::processor_cost_curve_for(&geometry, 4_000_000_000).unwrap();
+    let worth = |layers: u64| fixed + per_layer * layers;
+    let advertise = |ceiling: Option<u64>| {
+        for n in [&b, &c] {
+            state
+                .peer_registry
+                .get_mut(n)
+                .unwrap()
+                .capability
+                .as_mut()
+                .unwrap()
+                .model_memory_ceiling_mb = ceiling;
+        }
+    };
+    let scheduler =
+        PipelineScheduler::with_local_processor_speed(state.clone(), LOCAL_PROCESSOR_TPS);
+    let manifest = state.model_registry.get_manifest(&model).unwrap();
+    let plan = || {
+        scheduler.assemble_pipeline_for(
+            &model,
+            &local,
+            uuid::Uuid::new_v4(),
+            super::Purpose::Route,
+            None,
+        )
+    };
+
+    advertise(Some(worth(24)));
+    let cands = scheduler.gather_candidates(
+        &manifest,
+        &local,
+        uuid::Uuid::new_v4(),
+        None.into(),
+        super::Purpose::Preview,
+        &|| true,
+    );
+    for n in [&b, &c] {
+        let cand = cands.iter().find(|x| &x.node_id == n).unwrap();
+        assert_eq!(
+            cand.max_hostable_layers_at_ceiling,
+            Some(24),
+            "the peer's own admission arithmetic, over the shards IT holds"
+        );
+    }
+    let split = plan().expect("24 + 24 holds 32 layers");
+    assert_eq!(split.segments.last().unwrap().layer_range.1, 32);
+    for n in [&b, &c] {
+        let given: u32 = split
+            .segments
+            .iter()
+            .filter(|s| &s.node_id == n)
+            .map(|s| s.layer_range.1 - s.layer_range.0)
+            .sum();
+        assert!(
+            given <= 24,
+            "a holder was given {given} of the 24 it could ever hold: {split:?}"
+        );
+    }
+
+    advertise(Some(worth(11)));
+    let err = plan().expect_err("11 + 11 can never hold 32 layers");
+    assert!(
+        matches!(err, SwarmError::SwarmShortOfMemory { .. }),
+        "refused before anyone is asked, as the shortage it is: {err:?}"
+    );
+    assert!(
+        err.to_string()
+            .contains("room for about 22 of its 32 layers"),
+        "{err}"
+    );
+
+    // THE CONTROL: no ceiling advertised — the same holders are planned as before.
+    advertise(None);
+    let assignment = plan().expect("an older holder is still the route");
+    assert_eq!(assignment.segments.last().unwrap().layer_range.1, 32);
 }
 
 fn publish_resident(state: &SharedState, node: &NodeId, model: &ModelId, range: (u32, u32)) {
