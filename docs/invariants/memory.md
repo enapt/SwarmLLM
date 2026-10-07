@@ -1993,6 +1993,60 @@ candle and can only use CUDA, so the node planned and advertised graphics memory
 ran in. It now reports no card there (`is_culib_present` is false), which is what its workers do.
 A build without candle's CUDA (macOS, Metal) still asks llama.cpp.
 
+## A model its holders cannot run is fetched by a machine that can (2026-10-07, #231)
+
+**What happened.** A tester's report on v0.3.229: the only computer holding a whole Qwen 3.5 9B
+was a 6 GB processor-only peer capped at 5200 MB (the model needs 6688 MB at its admission),
+while an RTX 3060, an RTX 4060 and the reporter's RTX 4050 held none of it. Every part had a
+holder, so the replica target (`geo_target_replicas`) was met and nothing asked a machine that
+could RUN the model to fetch it. #230 made the request refuse at once ("not enough memory in the
+swarm") instead of being sent to be refused — honest, and still no answer.
+
+**The rule** (`auto_manage::coverage`). Replicas count copies; carrying counts what the copies can
+DO: the layers a model's live holders could ever carry between them, each at the smaller of the
+layers it holds and its ceiling (`NodeCapability::model_memory_ceiling_mb` weighed with the
+model's admission curve — the planner's arithmetic, `scheduler::layers_carried`). When that falls
+short of the model, for a model somebody asked for (regional demand, or this node's requests) and
+only when the connected swarm's ceilings could carry it at all:
+
+- **One carrier at a time, fetching only the shortfall.** `parts_to_carry` is the ONE plan: the
+  parts a machine lacks, in model order, until they close the shortfall, never past its room (its
+  ceiling less what it holds). The carrier is the highest rendezvous weight
+  (`blake3(model ‖ node)`) among machines whose plan is not empty and fits the disk they advertise,
+  judged from the figures every node gossips — its own included (`local_capability`) — so all of
+  them pick the same one, and the one picked is one that will fetch. Its parts skip the replica
+  target and the hash ring, still through the trust gate, the budget and `would_shed_copy`. **Only
+  the shortfall** — a machine with room for the whole model is not asked to hold it: "no machine
+  holds the whole model" (the user, 2026-09-28, `docs/plans/wan_parallel.md`); the first cut
+  fetched up to the carrier's ceiling and was changed before release.
+- **Prune keeps what carries.** `would_shed_copy` asks `copy_carries_model` before the replica
+  count: the chosen carrier's parts while the model needs one (the download pass asks BEFORE the
+  part is held), and any copy whose holder adds to what carries the model while it would fall short
+  without it. The download pass asks the same function before each fetch, so the two agree and a
+  carried part is never shed and refetched (gotcha #795's loop).
+- **Unknown changes nothing**: no header here, or any machine with no ceiling advertised (older than
+  v0.3.230) — no carrying, no protection, everything as before.
+
+**Evidence.** `coverage::tests::*` — the carrier is the machine that can, not the holder that
+cannot nor one without room; 8 layers short, a carrier with room for 16 is offered part 0 alone,
+and 24 short it is offered the two parts its room holds; nothing with no demand; prune keeps a
+carrying copy and sheds it once another holder can; an unknown ceiling changes nothing. The carrier
+test is red with carrying switched off and again with the shortfall ignored; the prune test red with
+the protection switched off (its first version passed both ways — two holders, where prune would
+not shed anyway; three make it real). Rig `examples/carry_test.sh`, three nodes in a private
+network namespace (S whole but capped at half its footprint, C holding part 0, client K in another
+region): first request refused in 0.0 s ("room for about 19 of its 22 layers"); C named carrying
+30 s after K's demand reached it (K decays its counts every 600 s, then gossips) and fetched part 1
+at score 1500 against routine 30; the next request was served in 1.2 s. With routine replication
+satisfied C had fetched nothing for ten minutes. **The rig's first run left `min_replicas` at 2,
+and C fetched the part by ROUTINE replication 30 s in, before any request — the right outcome for
+the wrong reason, caught only by the mechanism check** (the carry line in C's log); the rig now
+asserts it.
+
+**A change must keep**: a new rule about which copies matter goes in `coverage.rs` and is asked by
+BOTH passes; carrying never bypasses the trust gate, the storage budget or `would_shed_copy`, and
+never asks a machine for more than the shortfall.
+
 ## A model's weights are its header's, on every node (2026-10-07)
 
 **What happened.** `ModelProcessPool::footprint_inputs` — the one source of a model's memory

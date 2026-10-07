@@ -5,6 +5,7 @@
 //! over-replicated ones.
 
 pub mod canonical;
+mod coverage;
 mod download;
 mod parallax;
 mod prune;

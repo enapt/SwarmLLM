@@ -37,7 +37,7 @@ swarmllm/
 │   │   └── state/        (mod, activity, canonical (which upload of each model this node uses — the only writer of `hf_sources`, `origin_claims`, `canonical_builds`; `fetch_model_header`), capacity, capacity_plan, credits, events, forward_streams (a streamed verify's forwards run in their stream's order, #4b), hf, lifetime (what this node served for others since it FIRST started, kept across restarts — #226), metrics, models, peer_outliers (a peer failing a model on consecutive requests is left out of its plans for a while — Envoy's outlier ejection, never for a part only it holds), peer_speed, perf_history, relay, removed_shards, repair, retained_activations (what was sent to each segment, so a stand-in can be replayed it and take over mid-reply), retained_replies (fast-path replies kept for ResendTokens, #438), tp_allreduce)
 │   ├── network/   (manager/{mod,events,requests,tensors,identify,commands,connections,dht,shard_transfer,relay}, behaviour, discovery, protocol/{mod,encrypted,layer_forward,layer_result}, transport, relay, peer_cache, redact (address redaction for the pasteable diagnostics report), bandwidth (what this node actually puts on the wire — libp2p's transport counters, read back), helpers, pipeline_stream)
 │   ├── model/     (manifest, shard, distribution, registry, acquisition, reference (R150 get-model), canonical (one upload per model id: the swarm-wide ranking of uploads, `CanonicalBuild`, #151), huggingface/, auto_manage/, lora)
-│   │   ├── auto_manage/  (mod, manager, scoring, download, prune, scan, vram, parallax, wishlist, quant (R133 recommender), test_support (test fixtures), canonical (background task: verify the swarm's upload of each model on HuggingFace, check every held part against it, and DELETE parts that are not its bytes — re-fetched through the repair queue from peers or HuggingFace; header staged in `<data_dir>/canonical/<model>`))
+│   │   ├── auto_manage/  (mod, manager, scoring, download, prune, scan, vram, parallax, wishlist, quant (R133 recommender), coverage (#231: a model its holders cannot run is fetched by the one machine chosen to carry it, and prune keeps the copies that carry it), test_support (test fixtures), canonical (background task: verify the swarm's upload of each model on HuggingFace, check every held part against it, and DELETE parts that are not its bytes — re-fetched through the repair queue from peers or HuggingFace; header staged in `<data_dir>/canonical/<model>`))
 │   │   └── huggingface/  (mod, download, private_types, probe, search, shards, watcher, tests)
 │   ├── inference/ (executor, sampling, route_override (a request's `swarm_route` override), coupled_noise (Philox4x64-10 Gumbel noise keyed by (seed, absolute position, token id) — the shared randomness that lets a drafter reproduce a remote sampler's draw), kv_cache, speculative, swift, dsd_controller (incl. `best_gamma_for_check`: guess-run length from measured round costs, the check fitted as fixed + per-position cost), quant, tokenizer, tensor_util, shard_layout, model_arch, vision, allreduce, attn_kernel, attn_softmax (fused scale+softcap+mask+softmax CPU kernel), decode_attn (single-position attention straight over the KV cache, each row read once per KV group — on the CPU, and on a card through `kernels/decode_attn.cu`), prefill_attn (CPU attention for several query positions, tiled over the keys so the score matrix is never written out — +17% on a 6K-token prompt), fast_math (AVX2 expf + fused SiLU×up), residual_norm (the residual stream carried between norm points; residual add + RMS norm as ONE CUDA kernel), cpu_pools (per-phase rayon pools: prefill wide, decode narrow), local_embedder, mem_bandwidth (measured memory bandwidth — what a CPU node advertises as its speed, replacing a hardcoded 50 GB/s assumption), model_worker, process_pool, slot_table, worker_ipc, ngram_lookup (R136 L1), segment_latency (per-peer forward latency for the performance table; hedged dispatch removed 2026-09-24, FUTURE_WORK #94), prefetch (R136 L3), trace (per-request route + timing record), prof (SWARMLLM_PROFILE=1 per-stage forward-pass profiler), cancel (the one cancellation signal), card_pace (how many generations a worker runs on its card at once, halved when one step stalls ≥ 2 s — FUTURE_WORK #146), cuda_pool (the card's memory pool keeps what a worker frees while it serves and hands it back after 60 s idle; its unused part counts as free for the KV budget — FUTURE_WORK #146), cuda_graph (decode steps and speculative checks sent to the card as CUDA graphs, `SWARMLLM_CUDA_GRAPH_GROUP` layers per graph, default 2 — ON by default, `SWARMLLM_CUDA_GRAPH=0` turns it off; a capture that made a host→device copy is thrown away), prefill_pacer, thermal)
 │   │   ├── router/       (mod, types, batch, local_exec, distributed_exec, spot_check, tests)
@@ -1646,7 +1646,7 @@ automatically acquires missing shards based on a VRAM-aware scoring algorithm.
 The module is split into: `manager.rs` (struct + run loop + housekeeping),
 `scoring.rs` (candidate ranking), `download.rs` (download orchestration),
 `prune.rs` (shard pruning logic), `scan.rs` (local shard scanning + model loading),
-`vram.rs` (VRAM budget utilities).
+`vram.rs` (VRAM budget utilities), `coverage.rs` (carrying, below).
 
 ### Scoring Formula
 
@@ -1689,6 +1689,18 @@ from the regional request-rate EMA (`region_demand`, requests per 10 min): <0.1 
 (or, from the raw request counter in the first window: 0 → 1.0, 1-5 → 1.5, 6-20 → 2.0,
 21-100 → 2.5, more → 3.0), <1 → 1.5, <5 → 2.0, <20 → 2.5, else 3.0; clamped to
 `[min_replicas, max(pool_size, min_replicas)]`.
+
+**Carrying** (v0.3.230, `coverage.rs`, FUTURE_WORK #231). Replicas count copies, not whether any
+holder can RUN the model. The layers a model's live holders could ever carry between them — each at
+the smaller of what it holds and its advertised ceiling (`NodeCapability::model_memory_ceiling_mb`,
+weighed with the model's own admission curve) — when short of the model, for a model somebody asked
+for and the connected swarm could carry: ONE carrier at a time (highest rendezvous weight among
+machines with room and disk, judged from the figures everyone gossips) fetches the parts it lacks in
+model order until the shortfall is closed — within its own ceiling, never the whole model just
+because it has room — past the replica target and the hash ring (still through the trust gate, the
+budget and `would_shed_copy`); and `would_shed_copy` keeps any copy the model would fall short
+without (`copy_carries_model`), so the two passes agree. Unknown — no header, a machine with no
+ceiling — changes nothing.
 
 **Prune Scoring** (highest score pruned first):
 ```

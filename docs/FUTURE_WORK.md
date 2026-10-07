@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #232**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #233**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -407,23 +407,6 @@ frame, then add a receipt ACK or a per-frame read deadline mirroring request-res
 § 4 item 7); with V1Lazy (#136) request-response is as fast, so there is no speed reason to.
 
 ### Routing and placement
-
-#### #231 — A model its holders cannot run is never fetched by a machine that could
-`P2` · placement · **OPEN** — 2026-10-07 · history: a tester's report the same day (with #230)
-
-On v0.3.229 the only computer holding a whole Qwen 3.5 9B was a 6 GB processor-only peer capped at
-5200 MB; the model needs 6688 MB at its admission. Three graphics cards on the swarm — an RTX 3060
-(11.6 GB), an RTX 4060 (8 GB) and the reporter's RTX 4050 (5.7 GB) — sat idle and held none of its
-parts (our own node's view: 2 holders, 1 complete). Since #230 the request is refused at once as
-`SwarmShortOfMemory` ("not enough memory in the swarm") instead of being sent to be refused — the
-honest answer, but still no answer. Nothing makes a machine that COULD run a model acquire it when
-its holders cannot: the replica target (`geo_target_replicas`) counts holders and demand, never
-whether any holder can actually host the model. The fix has to weigh holders by what they could
-ever hold (the same `model_memory_ceiling_mb` #230 added) when choosing what a capable node should
-fetch, and stay inside the shard system (never a full-model download, CLAUDE.md). Same report: a
-14B split between a CPU peer (L0-11) and the 3060 (L11-40) took 48 s for no tokens, against 6 tok/s
-on the CPU peer alone — a WAN split (`docs/plans/faster_than_local.md`) plus a cold load (#129's
-price, v0.3.230); re-check that shape once both nodes run v0.3.230 before treating it as new.
 
 #### #3 — The routing cost model's network term overestimates a boomerang: a constant stands where the reply length belongs
 `P2` · routing · **OPEN** — 2026-09-08 · history: archive row #3 and § "The routing cost model's network term overestimates a boomerang" (three dated measurements)
@@ -1280,6 +1263,17 @@ coordinator received (`stream.emitted()`). Belongs with credits enforcement.
 Open, but nothing to build until the named evidence arrives. Write field reports with their
 leading zero (report #033 ≠ FUTURE_WORK #33).
 
+#### #232 — A 14B split across a processor peer and an RTX 3060 took 48 s and gave no tokens
+`P3` · routing · **PARKED** (field data) — 2026-10-07 · history: the report behind #230 and #231
+
+A tester's `qwen3-14b` request on v0.3.229 split `4a3ac72e` (processor) L0-11 + `aa3d1e66` (RTX 3060)
+L11-40: 48 s, 0.0 tok/s, where the processor peer alone gave 5.9-6.2 tok/s (95 s to a first token
+when cold). No logs from either node. Two v0.3.230 changes bear on it — a computer that must first
+load the model is waited for (+240 s) and charged for the load in routing (#129) — and a WAN split
+is slow by design where the machines are far apart (`docs/plans/faster_than_local.md`). Re-check the
+same shape once both peers run v0.3.230 (the coordinator's `pipeline candidate … cold_load_ms=` lines
+and `DIAG: request complete`) before treating it as a defect.
+
 #### #227 — An advertised cloud model answered 404 in ~1 ms, and the cloud catalogue read 0 until a restart
 `P3` · api · **PARKED: unconfirmed since 0.3.224-0.3.228** — 2026-10-06 · history: a tester's report, 2026-10-06
 
@@ -1516,7 +1510,26 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-07, on main (not yet released)** (#229, #230)
+**Closed 2026-10-07, on main (not yet released)** (#229, #230, #231)
+- #231 — a model its holders cannot run was never fetched by a machine that could (the report
+  behind #230: the 9B's one holder capped below it, three graphics cards with room holding none of
+  it). Replicas counted copies, not whether a holder can run the model. `auto_manage::coverage`:
+  the layers a model's live holders could ever carry between them (`scheduler::layers_carried`,
+  each holder at the smaller of what it holds and its ceiling); when short, for a model somebody
+  asked for and the connected swarm could carry, ONE carrier at a time — highest rendezvous weight
+  among machines with room for a part and the disk, judged from the gossiped figures, its own
+  included — fetches the parts it lacks in model order until the SHORTFALL is closed, within its
+  ceiling (never the whole model because it has room: "no machine holds the whole model"), past the
+  replica target and the hash ring, still through the trust gate, the budget and `would_shed_copy`;
+  and `would_shed_copy` keeps every copy
+  the model would fall short without (`copy_carries_model`), so download and prune agree. Unit tests
+  `coverage::tests::*` (the carrier test red with carrying off and again with the shortfall
+  ignored, the prune test red with the protection off). Rig `examples/carry_test.sh` (three nodes, private network namespace): the first
+  request refused in 0.0 s ("room for about 19 of its 22 layers"), the carrier named carrying 30 s
+  after the client's demand reached it (score 1500 against routine 30) and fetched the part, the
+  next request served in 1.2 s; with routine replication already satisfied it had fetched nothing
+  for ten minutes. (The rig's first run left `min_replicas` at 2 and the part was fetched by
+  ROUTINE replication before any request — caught by the mechanism check, not the outcome.)
 - #230 — a peer was handed a model it could never hold (a tester's report, v0.3.229): a whole
   Qwen 3.5 9B (6688 MB at its admission) to a 6 GB peer capped at 5200 MB, refused 8.8 s later from
   another continent; 46 of a 30B's 48 layers to a 16 GB machine, refused after 87 s. The last

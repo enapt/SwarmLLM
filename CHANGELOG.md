@@ -15,6 +15,17 @@ are told straight away that the swarm doesn't have the memory for it,
 instead of after a wasted round trip. This takes effect as computers update
 to 0.3.230.
 
+**New: a model the computers holding it cannot run is now fetched by one
+that can.** In the same report, three graphics cards with room to spare held
+none of the model, so nothing could answer. Now, when a model someone has
+asked for is held only by computers that cannot run it, one computer with
+room fetches just the missing part, and another if one is not enough. The
+model ends up spread across computers able to run their part, and no
+computer is made to hold all of it. This only happens for models people have
+asked for, and only when the swarm has the memory to carry them. In a
+three-computer test, the first request was refused at once, a computer with
+room fetched the missing part, and the next request was answered.
+
 **Fixed: model sizes for models you don't hold were far too small.** The
 model list showed a 9B model needing 1.3 GB and "fits on your graphics
 card" when this computer held none of it. A computer holding only part of a

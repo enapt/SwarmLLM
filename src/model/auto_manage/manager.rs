@@ -169,6 +169,9 @@ pub struct AutoShardManager {
     /// the first run, which is the same log-flooding shape fixed for rr
     /// failures in v0.3.73.
     pub(super) last_over_budget_warning: std::sync::Mutex<Option<std::time::Instant>>,
+    /// Each model's processor cost curve, kept a few minutes (`coverage`, #231):
+    /// it parses the model's header, and prune asks about every part it holds.
+    pub(super) carry_curves: dashmap::DashMap<ModelId, (std::time::Instant, Option<(u64, u64)>)>,
 }
 
 /// A candidate shard identified for auto-download.
@@ -216,6 +219,7 @@ impl AutoShardManager {
             notify,
             download_semaphore,
             last_over_budget_warning: std::sync::Mutex::new(None),
+            carry_curves: dashmap::DashMap::new(),
         }
     }
 
@@ -659,7 +663,11 @@ impl AutoShardManager {
                 .as_ref()
                 .and_then(|m| m.shards.iter().find(|s| s.index == sid.index).cloned());
             let (Some(manifest), Some(info)) = (manifest, info) else {
+                // No description of the part: nothing can fetch it or check a
+                // copy against it — from either set, or a repair entry was
+                // looked at again every pass for as long as the node ran.
                 self.shared_state.models.shard_p2p_failed.remove(&sid);
+                self.shared_state.clear_shard_repair(&sid);
                 continue;
             };
             if !pending_fetch_can_proceed(&self.shared_state, &sid, needs_repair) {
@@ -1636,6 +1644,25 @@ mod pending_fetches_follow_prune {
             state.models.shard_p2p_failed.is_empty(),
             "nothing left to keep the cooldown bypassed or the peers skipped"
         );
+    }
+
+    /// A repair waiting on a model this node no longer has any description of
+    /// can never be made — nothing to fetch, nothing to check a copy against —
+    /// so it is forgotten, not looked at again every pass (the review of
+    /// v0.3.230's pending-fetch change).
+    #[tokio::test]
+    async fn a_repair_for_a_model_with_no_manifest_is_forgotten() {
+        let (state, manager) = make_test_manager();
+        let gone = ShardId {
+            model_id: ModelId("deleted-model".into()),
+            index: 3,
+        };
+        state.models.shards_needing_repair.insert(gone.clone());
+        assert!(state.model_registry.get_manifest(&gone.model_id).is_none());
+
+        manager.complete_pending_shard_fetches().await;
+
+        assert!(!state.models.shards_needing_repair.contains(&gone));
     }
 
     /// Offline mode has an origin on record and will not use it

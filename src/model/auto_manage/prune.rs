@@ -1299,6 +1299,13 @@ impl AutoShardManager {
                 return false;
             }
         }
+        // A copy that carries a model somebody asked for — its holders could
+        // not run it without this one, or this node is fetching it to (#231).
+        // Before the replica count, which says nothing about whether any
+        // holder can actually run the model.
+        if self.copy_carries_model(shard_id, local_node_id) {
+            return false;
+        }
         let pool_size = crate::pool::scope::effective_pool_size(&self.shared_state);
         let target =
             self.geo_target_replicas(&shard_id.model_id, live.auto_manage.min_replicas, pool_size);

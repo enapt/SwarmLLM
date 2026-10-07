@@ -862,22 +862,32 @@ fn layers_offered_at(
         let best = offered.entry(&c.node_id).or_insert(0);
         *best = (*best).max(o);
     }
-    Some(
+    Some(layers_carried(
         held.into_iter()
-            .map(|(node, mut ranges)| {
-                // Distinct layers held, however the ranges overlap.
-                ranges.sort_unstable();
-                let (mut layers, mut end) = (0u32, 0u32);
-                for (a, b) in ranges {
-                    if b > end {
-                        layers += b - a.max(end);
-                        end = b;
-                    }
+            .map(|(node, ranges)| (ranges, offered[node])),
+    ))
+}
+
+/// Layers a set of computers could carry between them: each counted once, at
+/// the smaller of the DISTINCT layers it holds (however its ranges overlap) and
+/// what it could take. The one arithmetic behind "room for about N of its L
+/// layers" (`layers_offered_at`) and auto-manage's "do its holders carry this
+/// model" (`auto_manage::coverage`, #231).
+pub(crate) fn layers_carried(holdings: impl IntoIterator<Item = (Vec<(u32, u32)>, u32)>) -> u32 {
+    holdings
+        .into_iter()
+        .map(|(mut ranges, could_take)| {
+            ranges.sort_unstable();
+            let (mut layers, mut end) = (0u32, 0u32);
+            for (a, b) in ranges {
+                if b > end {
+                    layers += b - a.max(end);
+                    end = b;
                 }
-                layers.min(offered[node])
-            })
-            .sum(),
-    )
+            }
+            layers.min(could_take)
+        })
+        .sum()
 }
 
 /// The answer when no plan fits what the holders could EVER hold: not enough

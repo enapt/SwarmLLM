@@ -311,6 +311,23 @@ impl AutoShardManager {
                 }
             }
 
+            // #231: the parts this node fetches as the model's chosen carrier —
+            // its holders cannot run it, somebody asked for it, and this node
+            // could carry more of it (`coverage`). The ones it lacks in model
+            // order until they close the shortfall, within its own ceiling —
+            // never the whole model just because it has room. They skip the
+            // replica target and the hash ring below — the target counts copies,
+            // not whether any of them can run — and nothing else.
+            let carry_parts = self.parts_this_node_carries(&manifest);
+            if !carry_parts.is_empty() {
+                tracing::info!(
+                    model = %manifest.id,
+                    parts = carry_parts.len(),
+                    "DIAG: the computers holding this model cannot run it — fetching \
+                     parts of it to carry it (#231)"
+                );
+            }
+
             // -- Spread bonus: deprioritize models we already have many shards of --
             let local_fraction = if manifest.shard_count > 0 {
                 local_shard_count as f64 / manifest.shard_count as f64
@@ -421,7 +438,8 @@ impl AutoShardManager {
                 // Skip shards that already meet the replica target.
                 // Using >= target_replicas (not > 0) ensures min_replicas drives
                 // replication: each shard is spread across target_replicas nodes.
-                if holder_count >= target_replicas && !in_configured_range {
+                let carried_part = carry_parts.contains(&shard.index);
+                if holder_count >= target_replicas && !in_configured_range && !carried_part {
                     tracing::debug!(
                         model = %manifest.id,
                         shard = shard.index,
@@ -445,6 +463,7 @@ impl AutoShardManager {
                     && peers > 0
                     && !in_configured_range
                     && !already_hosting_model
+                    && !carried_part
                 {
                     let replicas_needed =
                         (target_replicas as u32).saturating_sub(holder_count as u32);
@@ -680,6 +699,11 @@ impl AutoShardManager {
                     1.0
                 };
 
+                let carry_bonus = if carried_part {
+                    super::coverage::CARRY_BONUS
+                } else {
+                    1.0
+                };
                 let score = model_popularity
                     * regional_rarity
                     * configured_bonus
@@ -689,6 +713,7 @@ impl AutoShardManager {
                     * spread_bonus
                     * source_bonus
                     * parallax_bonus
+                    * carry_bonus
                     + jitter;
 
                 candidates.push(ShardCandidate {
