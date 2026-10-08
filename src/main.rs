@@ -35,6 +35,12 @@ struct Cli {
     #[arg(short, long, action = clap::ArgAction::Count, global = true)]
     verbose: u8,
 
+    /// Write the node's log to this file as well as the window ("off": the
+    /// window only). Default: logs/swarmllm.log in the data directory, rotated
+    /// at 50 MB with three older files kept. Overrides `logging.file`.
+    #[arg(long, global = true, value_name = "PATH")]
+    log_file: Option<String>,
+
     /// Path to a GGUF model file to load
     //
     // String, not PathBuf, deliberately. This is a GLOBAL `--model`, and
@@ -331,7 +337,38 @@ fn main() -> anyhow::Result<()> {
 }
 
 async fn async_main(mut cli: Cli) -> anyhow::Result<()> {
-    init_tracing(cli.verbose);
+    // The config file the daemon will load — the `--config` / `--data-dir`
+    // this command names — read here only for how to log.
+    let data_dir = swarmllm::config::resolve_data_dir(cli.data_dir.as_deref());
+    let config_toml = std::fs::read_to_string(
+        cli.config
+            .clone()
+            .unwrap_or_else(|| data_dir.join("config.toml")),
+    )
+    .ok()
+    .and_then(|contents| toml::from_str::<toml::Value>(&contents).ok());
+    let logging_key = |key: &str| {
+        config_toml
+            .as_ref()
+            .and_then(|v| v.get("logging"))
+            .and_then(|l| l.get(key))
+            .and_then(|s| s.as_str().map(String::from))
+    };
+    // Only the daemon keeps a file; a model worker's output reaches it through
+    // the daemon (`swarmllm::logging`), and a client command has nothing to keep.
+    let runs_the_daemon = matches!(cli.command, None | Some(Commands::Run { .. }));
+    let log_file = if runs_the_daemon {
+        swarmllm::logging::log_file_path(
+            cli.log_file
+                .clone()
+                .or_else(|| logging_key("file"))
+                .as_deref(),
+            &data_dir,
+        )
+    } else {
+        None
+    };
+    init_tracing(cli.verbose, logging_key("level"), log_file);
 
     let no_update_check = matches!(
         &cli.command,
@@ -575,27 +612,16 @@ async fn async_main(mut cli: Cli) -> anyhow::Result<()> {
     }
 }
 
-fn init_tracing(verbose: u8) {
+/// `config_level` is `logging.level` from the config file this command names
+/// (its `--data-dir` / `--config`, else `SWARMLLM_NODE_DATA_DIR`'s or the
+/// default) — so a multi-node setup gets each node's own level. Without this,
+/// node2 silently inherited node1's config (or fell through to "info").
+/// `log_file`: also write the log there (`swarmllm::logging`).
+fn init_tracing(verbose: u8, config_level: Option<String>, log_file: Option<PathBuf>) {
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
     swarmllm::DAEMON_VERBOSITY.store(verbose, std::sync::atomic::Ordering::Relaxed);
-    // Read logging.level from the resolved data dir, NOT a hardcoded default.
-    // resolve_data_dir() picks up SWARMLLM_NODE_DATA_DIR so a multi-node setup
-    // gets each node's own log level. Without this, node2 silently inherited
-    // node1's config (or fell through to "info"). Note: this runs before CLI
-    // parsing, so a `--data-dir` flag isn't available yet — we accept that
-    // limitation for the bootstrap log filter; the env-var case (which is the
-    // common multi-node testing pattern) is what matters here.
-    let config_level = if verbose > 0 {
-        None
-    } else {
-        std::fs::read_to_string(swarmllm::config::resolve_data_dir(None).join("config.toml"))
-            .ok()
-            .and_then(|contents| toml::from_str::<toml::Value>(&contents).ok())
-            .and_then(|v| {
-                v.get("logging")
-                    .and_then(|l| l.get("level"))
-                    .and_then(|l| l.as_str().map(String::from))
-            })
-    };
+    let config_level = config_level.filter(|_| verbose == 0);
     let env_level = std::env::var("SWARMLLM_LOGGING_LEVEL").ok();
     let filter = swarmllm::config::log_filter_directive(
         verbose,
@@ -608,12 +634,45 @@ fn init_tracing(verbose: u8) {
     let use_ansi =
         std::env::var("NO_COLOR").is_err() && std::io::IsTerminal::is_terminal(&std::io::stdout());
 
-    tracing_subscriber::fmt()
-        .with_env_filter(&filter)
-        .with_target(true)
-        .with_thread_ids(false)
-        .with_ansi(use_ansi)
+    // The file gets the same lines, without colour codes.
+    let mut file_failed = None;
+    let file_layer = log_file.and_then(|path| match swarmllm::logging::install(&path) {
+        Ok(()) => Some(
+            tracing_subscriber::fmt::layer()
+                .with_target(true)
+                .with_thread_ids(false)
+                .with_ansi(false)
+                .with_writer(swarmllm::logging::FileWriter),
+        ),
+        Err(e) => {
+            file_failed = Some((path, e));
+            None
+        }
+    });
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::EnvFilter::new(&filter))
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_target(true)
+                .with_thread_ids(false)
+                .with_ansi(use_ansi),
+        )
+        .with(file_layer)
         .init();
+    if let Some(path) = swarmllm::logging::file_path() {
+        tracing::info!(
+            path = %path.display(),
+            "Writing the log to a file as well (rotated at 50 MB, three older files kept) — \
+             `logging.file` in config.toml or --log-file moves it, \"off\" turns it off"
+        );
+    }
+    if let Some((path, e)) = file_failed {
+        tracing::warn!(
+            path = %path.display(),
+            error = %e,
+            "Could not open the log file — logging to this window only"
+        );
+    }
 }
 
 #[cfg(test)]

@@ -36,8 +36,9 @@ max_storage_mb = 50000
 max_concurrent_downloads = 5
 
 [logging]
-level = "info"             # logs go to the console — under systemd, `journalctl -u swarmllm`
-                           # (`format` and `file` are not applied yet — see the configuration reference)
+level = "info"             # logs go to the console — under systemd, `journalctl -u swarmllm` —
+                           # and to logs/swarmllm.log in the data directory (`file = "off"` stops that;
+                           # `format` is not applied yet — see the configuration reference)
 
 [ui]
 open_browser_on_start = false

@@ -15,6 +15,11 @@ pub struct LoggingConfig {
     pub level: String,
     #[serde(default = "default_log_format")]
     pub format: String,
+    /// Where the daemon writes its log besides the window: unset is
+    /// `logs/swarmllm.log` under the data directory, a relative path is under
+    /// it, `"off"` keeps the log to the window. Read at startup, before this
+    /// struct exists (`main::async_main` → `logging::log_file_path`); the
+    /// `--log-file` flag overrides it.
     #[serde(default)]
     pub file: Option<String>,
 }

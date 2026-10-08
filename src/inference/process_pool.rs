@@ -5879,9 +5879,25 @@ impl ModelProcessPool {
         command.env(crate::inference::worker_ipc::DAEMON_READS_CARD_PROBE, "1");
         // ...and its load timings (#129), for the same reason.
         command.env(crate::inference::worker_ipc::DAEMON_READS_LOAD_TIMING, "1");
+        // With a log file, the worker's output comes through this daemon into
+        // the window AND the file — one writer for the file, so it can rotate.
+        let piped = crate::logging::pipes_worker_output();
+        if piped {
+            command
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped());
+        }
         let mut child = command
             .spawn()
             .map_err(|e| SwarmError::ServiceUnavailable(format!("spawn worker: {e}")))?;
+        if piped {
+            if let Some(out) = child.stdout.take() {
+                crate::logging::forward_worker_output(out);
+            }
+            if let Some(err) = child.stderr.take() {
+                crate::logging::forward_worker_output(err);
+            }
+        }
         #[cfg(windows)]
         end_with_this_daemon(&child);
 

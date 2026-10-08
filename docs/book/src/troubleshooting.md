@@ -2,9 +2,10 @@
 
 ## Start here: why was that request slow, or where did it fail?
 
-SwarmLLM logs to the window it runs in. To keep a file on Linux or macOS,
-start it with `./swarmllm run >> node.log 2>&1`. Docker: `docker compose logs`;
-.deb package: `journalctl -u swarmllm`.
+SwarmLLM logs to the window it runs in and to `logs/swarmllm.log` in the data directory — `~/.local/share/swarmllm/` on Linux, `~/Library/Application Support/swarmllm/` on macOS, `%APPDATA%\swarmllm\` on Windows (it starts over
+at 50 MB and keeps three older ones, `swarmllm.log.1` the newest). Docker:
+`docker compose logs` as well; .deb package: `journalctl -u swarmllm` as well.
+The examples below call that file `node.log`.
 
 Every completed request writes **one** summary line. Read it before anything
 else — it usually identifies the problem on its own:

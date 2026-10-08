@@ -29,7 +29,7 @@ swarmllm/
 │   ├── swarmllm-frontend/  (embedded + dev-mode frontend asset serving)
 │   └── swarmllm-types/     (shared types crate: NodeId, ModelManifest, SwarmMessage, etc.)
 ├── src/
-│   ├── main.rs, lib.rs, error.rs, http.rs, types.rs, update.rs, update_restart.rs, update_signature.rs (minisign check of a downloaded release)
+│   ├── main.rs, lib.rs, error.rs, http.rs, types.rs, update.rs, update_restart.rs, update_signature.rs (minisign check of a downloaded release), logging.rs (the log in `<data dir>/logs/swarmllm.log` as well as the window, rotated at 50 MB; model processes' output forwarded through the daemon)
 │   ├── bin/       (launcher.rs — Windows GPU/CPU auto-selecting launcher)
 │   ├── cli/       (mod, run, status, chat, bench, peers, pool, split_test, update, get_model, remove_model, privacy, unload_model (`swarmllm unload` — retire a worker, keep the files), diagnostics (pasteable node report) — R150 `swarmllm get-model` reference-model opt-in)
 │   ├── config/    (mod, providers, credit, network, ops, node, inference)

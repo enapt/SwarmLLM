@@ -244,8 +244,7 @@ pub(crate) fn collect_unknown_config_keys(
 /// defaults omits every `Option` field that defaults to `None` — which made
 /// the check report working settings as ignored. Observed 2026-07-29:
 /// `inference.max_seq_len_override`, `api.rate_limit_rpm` and `node.region`
-/// were announced as "being IGNORED" while taking effect (as was `logging.file`,
-/// which is a recognised key that nothing applies yet — see the reference page),
+/// were announced as "being IGNORED" while taking effect (as was `logging.file`),
 /// whereas `inference.kv_cache_ttl_secs` (default `Some`) was not — telling a
 /// user their API rate limit does nothing is worse than saying nothing.
 ///

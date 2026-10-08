@@ -12,6 +12,7 @@
 | `--bootstrap <ADDR>` | | Bootstrap peer address (repeatable) |
 | `--shards <RANGE>` | | Advanced: shard range for split inference (e.g., `"0-4"`; `all` clears a saved range) |
 | `--verbose` | `-v` | Increase log verbosity (`-v`, `-vv`, `-vvv`) |
+| `--log-file <PATH>` | | Write the log to this file as well as the window (`off`: the window only). Default: `logs/swarmllm.log` in the data directory; overrides `logging.file` |
 
 ## Subcommands
 

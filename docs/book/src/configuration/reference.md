@@ -185,7 +185,7 @@ value it booted with.
 |---|---|---|---|
 | `level` | string | `"info"` | Log level: `"error"`, `"warn"`, `"info"`, `"debug"`, `"trace"` |
 | `format` | string | `"pretty"` | Log format: `"pretty"` or `"json"`. Not applied yet — logs always go to the console in the readable format |
-| `file` | path | none | Not applied yet — logs always go to the console. To keep a file, redirect it: `swarmllm run >> node.log 2>&1` |
+| `file` | path | `logs/swarmllm.log` | The log is written here as well as to the window. A relative path is under the data directory; `"off"` keeps it to the window only. The file starts over at 50 MB, keeping three older ones (`.1` the newest). `--log-file <path>` overrides it for one run |
 
 ## `[ui]` — Web Interface
 

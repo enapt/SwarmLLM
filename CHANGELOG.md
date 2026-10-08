@@ -41,6 +41,14 @@ after five, the log and activity list say which ports were refused and how to
 fix it (run the second node on another port, `swarmllm run -p 8801`), and a
 node that stops cleanly hands its ports back to the router.
 
+**New: the log is kept in a file.** SwarmLLM now writes its log to
+`logs/swarmllm.log` in its data folder as well as to its window, so a
+problem that comes and goes is still there after the window is closed. The
+file starts over at 50 MB and keeps three older ones, so it never takes more
+than about 200 MB. `logging.file` in `config.toml`, or `--log-file`, moves
+it; `"off"` keeps the log to the window as before. The model processes'
+output goes into the same file. Requested by a tester.
+
 **Fixed: a model too big for the graphics card is priced as it actually
 runs.** Such a model runs partly on the card and partly on the processor.
 When choosing where a request goes, this computer priced it as if it all ran

@@ -55,6 +55,8 @@ pub mod identity;
 #[doc(hidden)]
 pub mod inference;
 #[doc(hidden)]
+pub mod logging;
+#[doc(hidden)]
 pub mod model;
 #[doc(hidden)]
 pub mod network;
