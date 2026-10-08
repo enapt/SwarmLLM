@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #240**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #241**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -40,7 +40,7 @@ after v0.3.224 (#160, #215 and #216 closed; #217 and #218 opened from the swarm 
 v0.3.226 (released 2026-10-05), #220 opened from the .225 gate's unrecorded driver resets; #129's fit verdict (idle-model
 reclaim) shipped in v0.3.227 (released 2026-10-05 23:45 UTC); #222 (a node near its storage limit deleting and
 re-fetching parts) and #223 closed in v0.3.228 (released 2026-10-06 09:42 UTC), #224 opened from its gate;
-#225, #226 and #227 opened from a tester's two reports the same day; #117 (Qwen 3.5, dense), #225 and #226 closed in v0.3.229 (released 2026-10-07 00:00 UTC), #228 opened for what Qwen 3.5 leaves out; #129's cold loads (waited for and priced), #228 (2) and (2b), #220 (2), #229, #230 and #231 shipped in v0.3.230 (released 2026-10-07 16:38 UTC), #232 parked from their report; #234, #235 and #239 closed on 2026-10-08 from two tester reports, #236-#238 opened from the second.
+#225, #226 and #227 opened from a tester's two reports the same day; #117 (Qwen 3.5, dense), #225 and #226 closed in v0.3.229 (released 2026-10-07 00:00 UTC), #228 opened for what Qwen 3.5 leaves out; #129's cold loads (waited for and priced), #228 (2) and (2b), #220 (2), #229, #230 and #231 shipped in v0.3.230 (released 2026-10-07 16:38 UTC), #232 parked from their report; #234, #235, #239 and #240 closed on 2026-10-08 from two tester reports and the card check after them, #236-#238 opened from the second.
 `docs/plans/` holds the multi-step designs; the entries point at them.
 
 **P0 — wrong answers, silently**
@@ -1586,7 +1586,14 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-08, on main (not yet released)** (#234, #235, #239)
+**Closed 2026-10-08, on main (not yet released)** (#234, #235, #239, #240)
+- #240 — a worker split across the card and the processor was charged nothing against the card
+  budget, so its card share read as another program's memory: a configured `max_gpu_vram_mb` was
+  overrun by that share (a 14B split took 5,782 MB against a 5,000 MB cap, found by the #234 card
+  rig) and an idle split worker was never a reclaim candidate. The spawn now charges the first `n`
+  layers by the admission estimator, within the room the split was sized for. Card check: the next
+  admission read `committed_mb=0` on v0.3.230 and `committed_mb=3691` (of a 3,851 MB measured
+  share) on the fix. `docs/invariants/memory.md` § "Graphics memory has ONE owner".
 - #239 — a node behind a router that refused its UPnP mapping said nothing, asked again without
   pause for its whole life, and a node that stopped kept its ports on the router for up to an hour
   (a tester's two nodes behind one router, 2026-10-08). libp2p-upnp is now the direct 0.6

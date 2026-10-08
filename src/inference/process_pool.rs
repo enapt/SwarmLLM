@@ -2771,6 +2771,29 @@ impl ModelProcessPool {
     /// `(layers on the card, layers in total)` for a model that does not fit
     /// whole but partly does; `None` when it fits, when nothing fits, or when
     /// hybrid placement is switched off.
+    /// What a card/processor split of `segment` puts on the card: its first
+    /// `on_card` layers, by the admission estimator, never more than the room
+    /// the split was sized against (`partial_gpu_layers`) — so the charge
+    /// keeps the committed total inside the budget, as a whole-card admission
+    /// does.
+    fn card_share_of_split_mb(
+        &self,
+        model_id: &ModelId,
+        segment: (u32, u32),
+        on_card: usize,
+    ) -> u64 {
+        let end = segment
+            .0
+            .saturating_add(u32::try_from(on_card).unwrap_or(u32::MAX))
+            .min(segment.1);
+        let room = self
+            .vram_budget_mb
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .saturating_sub(self.vram_committed_mb());
+        self.estimate_gpu_footprint_mb(model_id, Some((segment.0, end)))
+            .min(room)
+    }
+
     fn partial_gpu_layers(
         &self,
         model_id: &ModelId,
@@ -5127,6 +5150,15 @@ impl ModelProcessPool {
                          layers there and the rest on the processor"
                     );
                     hybrid_layers = Some((n, total));
+                    // The card holds its first `n` layers, so the card budget
+                    // is charged for them. It was charged nothing: the share
+                    // then read as ANOTHER program's memory, which overran a
+                    // configured `max_gpu_vram_mb` by exactly that share (a
+                    // 14B split here took 5782 MB against a 5000 MB cap,
+                    // 2026-10-08) and left an idle split worker out of every
+                    // reclaim, whose candidates are workers with a charge.
+                    charged_vram_mb = self.card_share_of_split_mb(model_id, segment, n);
+                    add_reserved(&self.vram_reserved_mb, model_id, charged_vram_mb);
                     // It IS going to the card, just not all of it, so this is
                     // not a CPU fallback and must not be reported as one.
                     admitted = true;
@@ -10080,6 +10112,59 @@ mod admission_tests {
         });
         assert_eq!(q.fresh_run_layers_for_planning(&m), None);
         assert_eq!(q.max_local_hostable_layers(&m, true), Some(on_card_alone));
+    }
+
+    /// A card/processor split charges the card for the layers it puts there
+    /// (2026-10-08): the first `n` of the segment by the admission estimator,
+    /// and never past the room the split was sized against. Charged nothing,
+    /// a 14B split overran a 5000 MB `max_gpu_vram_mb` by its whole share.
+    #[test]
+    fn a_split_charges_the_card_for_the_layers_it_puts_there() {
+        use crate::inference::model_arch::ModelArch;
+        use crate::inference::split::hybrid::arch_supports_hybrid;
+        let p = pool();
+        p.set_gpu_layers(-1);
+        p.set_vram_budget_mb(3000);
+        let m = ModelId("seven-b-split".into());
+        p.test_footprint_inputs.insert(
+            m.clone(),
+            crate::model::auto_manage::vram::VramFootprintInputs {
+                quantized_weight_bytes: 4_400 * 1024 * 1024,
+                unquantized_bytes_per_element: None,
+                vocab_size: 152_064,
+                embedding_length: 3584,
+                segment_layers: 28,
+                kv_layers: 28,
+                head_count_kv: 4,
+                head_count: 28,
+                head_dim: 128,
+                rope_dim: 128,
+                effective_context: 8192,
+                is_first: true,
+                embedding_gatherable: true,
+                splits_across_devices: arch_supports_hybrid(&ModelArch::Qwen2),
+            },
+        );
+        let estimated = p.estimate_gpu_footprint_mb(&m, Some((0, 28)));
+        let (n, _) = p
+            .partial_gpu_layers(&m, Some((0, 28)), estimated)
+            .expect("fixture: the model splits");
+        let share = p.card_share_of_split_mb(&m, (0, 28), n);
+        assert!(share > 0, "the card share is charged");
+        assert_eq!(
+            share,
+            p.estimate_gpu_footprint_mb(&m, Some((0, n as u32)))
+                .min(3000),
+            "as the first {n} layers, by the admission estimator"
+        );
+        assert!(
+            share <= 3000,
+            "never past the room the split was sized against"
+        );
+
+        // With 2500 MB already committed, the charge stays inside what is left.
+        assert!(p.admit_to_gpu(&ModelId("other".into()), 2500));
+        assert!(p.card_share_of_split_mb(&m, (0, 28), n) <= 500);
     }
 
     /// A memory refusal is remembered as the layers it would have ADDED, the

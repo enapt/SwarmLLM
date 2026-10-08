@@ -387,6 +387,21 @@ model that had answered a request three seconds earlier, which
 `free_vram_for_admission` refuses by design. Worse, it was placement-blind, so
 registering a metadata entry for a segment bound for the PROCESSOR killed a
 model running happily on the card (gotcha #402).
+**And it charges what it places, a split included (2026-10-08, #240).** A worker
+the pool placed part on the card and part on the processor (`partial_gpu_layers`)
+was charged NOTHING — the spawn's `charged_vram_mb` stayed 0 on that branch. The
+card share then read as ANOTHER program's memory (`compute_vram_budget`'s
+`other_process_mb` is the card's used total less what WE charged), which hides it
+from two decisions: a configured `max_gpu_vram_mb` caps only what is charged, so a
+14B split on the card took 5,782 MB against a 5,000 MB cap once a further range
+grew onto the card (found by the #234 rig); and the reclaim's candidates are
+workers WITH a charge, so an idle split worker could never be unloaded for another
+model. The share is now the first `n` layers of the segment by the admission
+estimator, never past the room the split was sized against
+(`card_share_of_split_mb`). Measured on the card with TinyLlama admitted beside a
+14B split (16 of 48 layers on the card, 3,851 MB measured): v0.3.230's admission
+read `committed_mb=0 budget_mb=2666`, the fix `committed_mb=3691 budget_mb=5000`.
+Test `a_split_charges_the_card_for_the_layers_it_puts_there`.
 **Researched, not guessed.** Ollama's scheduler is the direct analogue and
 keeps one owner: a single centralised free-space tracker, `runnerRef.vramSize`
 reported by the runner, victims chosen by refCount (in-flight) → keep-alive →

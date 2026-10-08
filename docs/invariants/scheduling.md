@@ -152,6 +152,17 @@ figure — hands the node both stretches; red with the one-run limit off),
 `a_worker_in_use_withdraws_the_fresh_worker_split`, and the pool's
 `a_model_the_loader_would_split_is_one_this_node_can_hold`.
 
+**On the card** (`~/swarmllm-rig-234/run.sh`, 2026-10-08, safety kit, 0 driver
+events): a node holding Qwen2.5-14B layers 0..32 and 38..48 with
+`max_gpu_vram_mb = 5000`, beside a processor node holding all 48. v0.3.230
+planned BOTH stretches here — a [0..32) split (16 layers on the card) and
+[38..48) grown onto the card — and answered, but only by overrunning the cap:
+5,782 MB on the card, because the split's share was charged nothing (#240, fixed
+beside this). The refusal the tester saw needs a CHARGED worker beside another
+model, which this card did not reproduce. The fix planned [0..12) and [38..48) —
+22 layers, the card's room in two runs — and 26 on the peer: 200 both, 5,114 MB,
+16.2 s for 64 tokens against the overrun's 13.2 s.
+
 **`process_pool::segment_shape` prices what the worker will actually map.**
 `VramFootprintInputs` has always documented `segment_layers` as "Layers in THIS
 segment, not the whole model" and `quantized_weight_bytes` as "the shard bytes

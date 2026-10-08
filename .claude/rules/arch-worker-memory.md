@@ -151,7 +151,7 @@ A second implementation of any of these is this codebase's most-repeated defect 
 - **`split::layers_keeping_kv`** (+ `GgufTensorMeta::layers_keeping_kv`, same marker) — the layers charged a KV cache, by admission (`VramFootprintInputs::kv_layers`), the split planner, the loader's KV budget, the scheduler's peer bound (`kv_bytes_per_position_per_layer`) and the cost curve (`process_pool::cost_curve_of` scales `kv_layers` with the segment, or the whole cache lands in its fixed term) alike; a recurrent layer (Qwen 3.5's DeltaNet, `split::layer_is_recurrent`) keeps none (#228).
 - **`ModelProcessPool::free_vram_for_admission` + `plan_vram_reclaim`** — reclaim idle models first; **`fits_in_budget`** (every fit verdict, so `serves_on_cpu`) and the planner's ceiling count that reclaim (`reclaimable_vram_mb` / `idle_vram_reclaimable_mb`), or a model held here goes abroad (#125, #129).
 - **`should_return_to_gpu` + `worker_should_return_to_gpu`** — asked in `get_or_spawn`, not on a timer.
-- **Graphics memory has ONE owner: `ModelProcessPool`.**
+- **Graphics memory has ONE owner: `ModelProcessPool`** — and every admission that says yes charges it, a card/processor split included (`card_share_of_split_mb`, #240).
 - **A worker's growth is weighed by the budget its spawn charged** — `WorkerHandle::holds_gpu_memory`, never `placed_on_cpu_because` (`a_live_workers_growth_is_weighed_by_the_budget_its_spawn_charged`).
 - **`model::auto_manage::storage_budget` / `held_disk_bytes`** — the ONE answer to shard storage; counted kinds must be reclaimable.
 - **`prune::effective_idle_secs`** — residency is a hard UPPER BOUND on "idle since".
