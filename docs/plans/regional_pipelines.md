@@ -26,6 +26,13 @@ Measured here today: **0.35 tok/s** on a 4-segment chain whose peers were
 
 ## Why distance costs so much (the thing that is easy to get wrong)
 
+(A WHOLE model handed to one peer — `route=distributed segments=1` with that
+peer as the only segment — is not a split in this sense: the peer runs every
+layer and streams the reply back, so the round trip is paid once per request,
+not per token. A tester measured it at 0.70 s and 22.9 tok/s for a warm
+intercontinental TinyLlama, 2026-10-08. Everything below is about chains of two
+or more machines.)
+
 A split does **not** reduce the compute for one token — it relocates it. The
 8B is 32 layers ≈ 28 ms/token on this card whether one machine does it or four.
 
