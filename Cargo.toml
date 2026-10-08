@@ -161,7 +161,14 @@ zeroize = { version = "1", features = ["derive"] }
 rand = "0.8"
 
 # LLM inference
-llama-cpp-2 = { version = "0.1", optional = true }
+# Pinned EXACTLY: 0.1.158 — a patch release — moved tokenisation onto
+# `LlamaModel::vocab()` (`str_to_token`, `token_eos`, `token_to_piece` and
+# `AddBos` gone from the model), which the llama-gated executor and the
+# speculative path call twelve times; Dependabot's grouped bump failed the
+# llama compile-check (PR #34, 2026-10-08). Moving means a new llama.cpp under
+# every CUDA build too, so it is a deliberate task (FUTURE_WORK #241), not a
+# weekly bump — `.github/dependabot.yml` ignores this crate like candle.
+llama-cpp-2 = { version = "=0.1.157", optional = true }
 
 # CUDA runtime dynamic loading — cudarc dlopens the CUDA redist DLLs (cudart,
 # cublas, cublasLt, curand, nvrtc + builtins) at runtime rather than linking

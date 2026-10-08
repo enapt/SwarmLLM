@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #241**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #242**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -1216,6 +1216,19 @@ dashboard control or consent banner exists. Add the toggle with its consent word
 Billing between pools waits on credits, which are dormant (`docs/CREDITS_DESIGN.md`).
 
 ### Packaging, release and operations
+
+#### #241 — llama-cpp-2 is pinned at 0.1.157; 0.1.158 moved tokenisation onto the vocabulary
+`P4` · build · **OPEN** — 2026-10-08 · history: Dependabot PR #34 (its llama compile-check failed)
+
+`llama-cpp-2` 0.1.158 — a PATCH release — removed `LlamaModel::str_to_token`, `token_eos`,
+`token_to_piece` and `AddBos`; they live on `LlamaModel::vocab()` now (`LlamaVocab::tokenize(bytes,
+add_special, parse_special)`, `eos()`, `token_to_piece(..)`). Twelve call sites in
+`inference/executor.rs` and `inference/pipeline/speculative.rs` (llama-gated). Pinned `=0.1.157` in
+`Cargo.toml` and ignored in `.github/dependabot.yml` so the weekly grouped bump stops failing.
+Moving: map each call to the vocabulary API keeping the old semantics (read 0.1.157's
+`str_to_token` for what `AddBos` and special-token parsing meant), then build `--features cuda`
+(a new llama-cpp-sys rebuilds llama.cpp's CUDA kernels — cold, about an hour here) and run the
+gate's llama-path steps on the artifact.
 
 #### #162 — The release gate: a cloned gate loses its helpers, and step 12e cannot test a takeover on this box
 `P2` · process · **OPEN** — 2026-10-02 · absorbs #140; history: archive rows #162 and #140

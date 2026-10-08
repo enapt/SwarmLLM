@@ -48,3 +48,8 @@ updates:
       - dependency-name: "*"
         update-types: ["version-update:semver-major"]
       - dependency-name: "candle-*"
+      # llama-cpp-2 breaks its API in PATCH releases (0.1.158 moved
+      # tokenisation onto the vocabulary) and every bump rebuilds llama.cpp's
+      # CUDA kernels: pinned exactly in Cargo.toml, moved by hand
+      # (docs/FUTURE_WORK.md #241).
+      - dependency-name: "llama-cpp-2"
