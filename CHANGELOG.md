@@ -1,5 +1,57 @@
 # Changelog
 
+## [0.3.231-alpha] — unreleased
+
+**Fixed: a reply whose computer fails partway through now carries on
+elsewhere.** When the computer generating a reply ran out of memory, its
+model process crashed, or it stopped answering, the reader got the start of
+the answer and then an error. Now the reply is continued on another computer
+from exactly what the reader has already received, on the same stream and
+within the same token budget, at most twice per reply. In a three-computer
+test where the serving computer's model process was killed partway through,
+the other computer took over 25 ms later and finished all 300 tokens with no
+repeated text.
+
+**Fixed: a large model split across computers no longer fails on every
+request when one of them holds part of it.** A computer holding part of a
+large model was planned more of it than its running model process could take
+on, refused, and was planned the same parts again. The planner now offers a
+computer only what it can actually load, and after a refusal it gives that
+computer fewer new layers.
+
+**Fixed: conversations that have ended no longer hold memory a live reply
+needs.** A computer running part of a model for another computer's request
+was never told when the reply finished, and its model process never expired
+old conversations, so a live reply could be refused partway through for lack
+of memory those finished conversations still held. The computer that led a
+request now tells every computer it used when the request ends, model
+processes expire old conversations, and a conversation silent for two
+minutes gives its memory to a live one before anything is refused.
+
+**Fixed: a model split between the graphics card and the processor is now
+counted against the card's memory limit.** The card's share was counted as
+another program's memory, so a limit set in Settings could be overrun (a 14B
+model took 5,782 MB against a 5,000 MB limit in a test), and an idle split
+model was never unloaded to make room for another.
+
+**Fixed: two nodes behind one router.** A router gives a port to one computer
+only. The second node's UPnP request was refused silently and then repeated
+without pause for as long as it ran. Now it waits between attempts and stops
+after five, the log and activity list say which ports were refused and how to
+fix it (run the second node on another port, `swarmllm run -p 8801`), and a
+node that stops cleanly hands its ports back to the router.
+
+**Fixed: guessing ahead across a split on a graphics card is fast again.**
+Since 0.3.226, the small model that guesses ahead lost a speed-up after its
+first request: each guess took about 15 ms instead of 6, and the node then
+stopped guessing ahead. On the release test rig replies streamed about a
+fifth slower (19.5-21.9 tokens a second against 25.3-28.0 on 0.3.224); they
+are as fast as on 0.3.224 again. The cause was token ids reaching that model
+in two number formats, which kept changing the shape of its recorded graph,
+and a rule meant for large models that then switched the graph off. The ids
+now take one format first, and that rule now measures what a graph saves
+against what rebuilding it costs before switching one off.
+
 ## [0.3.230-alpha] — 2026-10-07
 
 **Fixed: a model is no longer sent to a computer that could never hold it.**
