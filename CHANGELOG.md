@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.3.231-alpha] — unreleased
+## [0.3.231-alpha] — 2026-10-08
 
 **Fixed: a reply whose computer fails partway through now carries on
 elsewhere.** When the computer generating a reply ran out of memory, its
