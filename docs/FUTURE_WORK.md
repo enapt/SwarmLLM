@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #244**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #245**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -216,6 +216,11 @@ landed 14 ms BEFORE its background shard verification finished, where the passin
 after — a candidate race on `shards_pending_verification`, which `settle_by_checked_holders`
 skips. Next: run the proxy arm ~10 times with B at `-v` and log why `settle_by_checked_holders`
 returned (pending / no checked tags / `heard_hash_with_tag` None — the last is `debug!`).
+**Recurred at the v0.3.231 gate (2026-10-08 21:21-21:53 local)**: proxy arm FAIL with B = .231
+(900 s) and with B = .230 (A, C = .231; 600 s), the same signature (B's disagreement 339 ms
+before its background verification finished; `could not be checked` once, never `differ from what
+the holders`). Re-run with the live node stopped: all-.230 PASS (262 s), all-.231 PASS (263 s).
+Eight gates have run it (.224 on); it failed at two (.228, .231), on both builds each time.
 
 #### #179 — A greedy reply (`temperature: 0`) is not reproducible run to run on the processor
 `P3` · correctness · **OPEN** — 2026-08-18 · history: archive § "`temperature: 0` with a fixed seed is not reproducible", gotcha #327
@@ -845,6 +850,22 @@ Only worth it if concurrent local serving becomes common.
 Designs: `docs/plans/split_speculation.md` (guess-and-check across a split),
 `docs/plans/wan_parallel.md` (parallelise the reply, not the token), `docs/plans/regional_pipelines.md`
 (placement by distance, #192), `docs/plans/faster_than_local.md` (the ranked list).
+
+#### #244 — A third streamed guess-check request in a row runs at the old speed
+`P3` · perf-split · **OPEN** — 2026-10-08 · history: the v0.3.231 release check after #233
+
+After #233 the drafter keeps guessing on every request (final_gamma 1, not 0). But in the 12h
+shape (7B split A/B on one card, 24 ms emulated link, 0.5B q8 drafter on A, streamed checks), the
+third request of each run reads 17.8-21.5 tok/s, while the first two read 24.5-27.6. The old-rule
+arm reads 18.4-21.7 for all three. Measured on the downloaded v0.3.231 build, one binary, arms
+old / weigh / fixed ×2 (`~/swarmllm-gate-0231/h12_post.sh`, Windows up 27 h, 0 driver events).
+The same rig on a main build at 18 h uptime that morning (`~/swarmllm-bisect233/h12_three.sh`) had
+all three fast (25.3-28.4). Not the graph rest: in run 12 the rest began 0.8 s into request 3 on
+the count rule ("no ordinary step timed yet") and was ended 0.19 s later by the weighing (graph
+4.1 ms vs ordinary 13.1 ms). Accepted guesses are identical across the three requests (139/81), so
+the time per step changed, not the guessing. Next: per-step card timings for request 3 vs 2
+(draft and check `_ms` in the DSD line), and the same rig at low uptime, to separate machine state
+from code.
 
 #### #152 — The continuous guess-check stream never runs on the split shapes the swarm actually makes
 `P2` · perf-split · **OPEN** — measured 2026-10-01 · history: archive row #152

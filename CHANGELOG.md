@@ -80,16 +80,18 @@ its 48 layers on an 8 GB card is predicted at about 4.6 tokens a second and
 delivers about 4.0 (before: 3.0, and 56 once loaded). This is what decides
 whether another computer's card is worth handing the request to.
 
-**Fixed: guessing ahead across a split on a graphics card is fast again.**
+**Fixed: guessing ahead across a split on a graphics card keeps working.**
 Since 0.3.226, the small model that guesses ahead lost a speed-up after its
 first request: each guess took about 15 ms instead of 6, and the node then
-stopped guessing ahead. On the release test rig replies streamed about a
-fifth slower (19.5-21.9 tokens a second against 25.3-28.0 on 0.3.224); they
-are as fast as on 0.3.224 again. The cause was token ids reaching that model
-in two number formats, which kept changing the shape of its recorded graph,
-and a rule meant for large models that then switched the graph off. The ids
-now take one format first, and that rule now measures what a graph saves
-against what rebuilding it costs before switching one off.
+stopped guessing ahead. The cause was token ids reaching that model in two
+number formats, which kept changing the shape of its recorded graph, and a
+rule meant for large models that then switched the graph off. The ids now
+take one format first, and that rule now measures what a graph saves against
+what rebuilding it costs before switching one off. On the release test rig
+the node now keeps guessing on every request. In streamed replies, the first
+two requests run at 25-28 tokens a second, as on 0.3.224, against 18-22
+before. A third request in a row is still no faster (about 18), and that is
+being investigated.
 
 ## [0.3.230-alpha] — 2026-10-07
 
