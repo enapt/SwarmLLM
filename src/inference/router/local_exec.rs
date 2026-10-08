@@ -274,7 +274,8 @@ pub(super) async fn execute_local_batch(
         }
         shared_state.publish_request_trace(&trace);
 
-        finalize_request(&shared_state, &request, &output, None).await;
+        // The in-process executor: nothing of this request reached a peer.
+        finalize_request(&shared_state, None, &request, &output, None).await;
         shared_state.release_request_state(&request.id);
         cleanup.complete_one();
         deliver_result(&request, result_tx, output, &trace, "local_batch");

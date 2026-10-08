@@ -103,6 +103,7 @@ impl super::SharedState {
         self.request_holder_blacklist.remove(request_id);
         self.peer_vram_commitments.remove(request_id);
         self.local_memory_refusals.remove(request_id);
+        self.request_peers.remove(request_id);
         // A refusal the router never took into its record (no re-plan followed).
         let _ = self.model_process_pool.take_layers_refused(*request_id);
         self.planned_past_offered_memory.remove(request_id);
@@ -192,6 +193,30 @@ impl super::SharedState {
         self.local_memory_refusals
             .get(&request_id)
             .and_then(|kept| *kept)
+    }
+
+    /// Remember the peers an attempt at this request ran segments on.
+    ///
+    /// Accumulated across attempts — a retry may plan other peers, and the
+    /// first attempt's still hold its cache — and read once, when the request
+    /// is over (`take_request_peers`). Never this node.
+    pub fn note_request_peers(
+        &self,
+        request_id: uuid::Uuid,
+        peers: impl IntoIterator<Item = crate::types::NodeId>,
+    ) {
+        let me = self.identity.node_id();
+        let mut entry = self.request_peers.entry(request_id).or_default();
+        entry.extend(peers.into_iter().filter(|p| p != me));
+    }
+
+    /// Every peer this request ran segments on, taken: asked once, when the
+    /// request is over.
+    pub fn take_request_peers(&self, request_id: uuid::Uuid) -> Vec<crate::types::NodeId> {
+        self.request_peers
+            .remove(&request_id)
+            .map(|(_, peers)| peers.into_iter().collect())
+            .unwrap_or_default()
     }
 
     /// This request was planned past the memory its holders offer.

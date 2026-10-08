@@ -440,6 +440,10 @@ pub async fn run_worker(
     // set by any message or tick, cleared by `cuda_pool::trim` once the worker
     // has had nothing to do for `cuda_pool::IDLE_TRIM` (#146).
     let mut pool_may_hold_freed = false;
+    // Cancelled requests whose caches this loop has already released, so the
+    // release runs once per cancel rather than on every tick it is retained.
+    let mut kv_released_for_cancel: std::collections::HashSet<uuid::Uuid> =
+        std::collections::HashSet::new();
 
     loop {
         // Either block on the next IPC message (no slots are decoding) OR race
@@ -575,9 +579,13 @@ pub async fn run_worker(
                     kv_store.clear_request(&slot.model_key, &slot.req_id_str);
                 }
             }
+            // Here, in the main loop and between messages, no forward of a
+            // cancelled request can be running in this worker.
+            release_caches_of_cancelled(&cancelled, &mut kv_released_for_cancel, &kv_store);
             // Sweep cancels that never matched a request (the request had
             // already finished when the cancel arrived).
             cancelled.retain(|_, at| at.elapsed().as_secs() < CANCEL_RETENTION_SECS);
+            kv_released_for_cancel.retain(|id| cancelled.contains_key(id));
         }
 
         // What the KV cache is holding, in bytes.
@@ -811,6 +819,27 @@ fn set_worker_force_cpu(gpu_layers: i32) {
 /// Should models load on the CPU regardless of GPU availability?
 fn worker_force_cpu() -> bool {
     WORKER_FORCE_CPU.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Drop the cache of every cancelled request this worker has not released yet.
+///
+/// A cancelled request's conversation is never read again, so its cache goes
+/// now rather than at the TTL. This is also how a node serving a SEGMENT
+/// learns that a request ended: its coordinator cancels it on every peer of the
+/// request once it is over (#238). Called from the main loop between messages,
+/// where no forward of the request can be running; a forward still queued is
+/// skipped by the cancel mark, which outlives this release. Once per cancel:
+/// `released` remembers which marks have been acted on.
+fn release_caches_of_cancelled(
+    cancelled: &CancelledSet,
+    released: &mut std::collections::HashSet<Uuid>,
+    kv_store: &KvCacheStore,
+) {
+    for request_id in cancelled.iter().map(|e| *e.key()).collect::<Vec<_>>() {
+        if released.insert(request_id) {
+            kv_store.cleanup_request_id(&request_id.to_string());
+        }
+    }
 }
 
 /// Whole-device GPU memory in use, in MB, or `None` when there is no GPU to ask.
@@ -5928,5 +5957,50 @@ mod argmax_walk_tests {
         )
         .unwrap();
         assert_eq!(argmax_walk(&[], &picks[..1]), one);
+    }
+}
+
+#[cfg(test)]
+mod cancel_release_tests {
+    use super::release_caches_of_cancelled;
+    use crate::inference::split::KvCacheStore;
+    use candle_core::{Device, Tensor};
+    use std::sync::Arc;
+
+    fn conversation(store: &KvCacheStore, request: &uuid::Uuid) {
+        let mut entry = store.get_or_create("m", &request.to_string(), 1);
+        let mut kv = crate::inference::split::kv_cache::LayerKv::with_capacity(2, 64, 64);
+        let k = Tensor::zeros((1usize, 2, 4, 4), candle_core::DType::F32, &Device::Cpu).unwrap();
+        kv.append(&k, &k.clone()).unwrap();
+        entry.layers[0] = Some(kv);
+    }
+
+    /// A cancel is also how a node serving a segment learns the request ended
+    /// (#238): the cancelled request's cache goes at once, another request's
+    /// stays, and the release runs once per cancel however long the mark is
+    /// kept to skip a forward still queued.
+    #[test]
+    fn a_cancelled_requests_cache_is_released_once() {
+        let store = KvCacheStore::new(std::time::Duration::from_secs(600));
+        let (ended, live) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+        conversation(&store, &ended);
+        conversation(&store, &live);
+        let cancelled: super::CancelledSet = Arc::new(dashmap::DashMap::new());
+        cancelled.insert(ended, std::time::Instant::now());
+        let mut released = std::collections::HashSet::new();
+
+        release_caches_of_cancelled(&cancelled, &mut released, &store);
+        assert!(!store.request_holds_state("m", &ended.to_string()));
+        assert!(store.request_holds_state("m", &live.to_string()));
+        assert!(
+            cancelled.contains_key(&ended),
+            "the mark stays, to skip a queued forward"
+        );
+
+        // Once per cancel: a cache the same id builds afterwards is not
+        // touched again by the same mark.
+        conversation(&store, &ended);
+        release_caches_of_cancelled(&cancelled, &mut released, &store);
+        assert!(store.request_holds_state("m", &ended.to_string()));
     }
 }

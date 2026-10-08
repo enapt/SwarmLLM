@@ -1303,7 +1303,29 @@ impl PipelineExecutor {
     /// 4. Repeat until stop condition or max_tokens
     ///
     /// If `token_tx` is provided, tokens are sent incrementally for SSE streaming.
+    ///
+    /// Whatever the outcome, the peers this attempt ran segments on — as
+    /// planned, and any that took a segment over — are recorded for the end of
+    /// the REQUEST, when they are told it is over (#238). Not now: a retry of
+    /// the same request id may still use them (gotcha #749).
     pub async fn execute(
+        &mut self,
+        token_tx: Option<StreamingTokenTx>,
+    ) -> Result<InferenceOutput, SwarmError> {
+        let planned: Vec<crate::types::NodeId> = self
+            .assignment
+            .segments
+            .iter()
+            .map(|s| s.node_id.clone())
+            .collect();
+        let outcome = self.execute_attempt(token_tx).await;
+        let ended_with = self.assignment.segments.iter().map(|s| s.node_id.clone());
+        self.shared_state
+            .note_request_peers(self.request.id, planned.into_iter().chain(ended_with));
+        outcome
+    }
+
+    async fn execute_attempt(
         &mut self,
         token_tx: Option<StreamingTokenTx>,
     ) -> Result<InferenceOutput, SwarmError> {

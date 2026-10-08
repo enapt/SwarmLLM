@@ -40,7 +40,7 @@ after v0.3.224 (#160, #215 and #216 closed; #217 and #218 opened from the swarm 
 v0.3.226 (released 2026-10-05), #220 opened from the .225 gate's unrecorded driver resets; #129's fit verdict (idle-model
 reclaim) shipped in v0.3.227 (released 2026-10-05 23:45 UTC); #222 (a node near its storage limit deleting and
 re-fetching parts) and #223 closed in v0.3.228 (released 2026-10-06 09:42 UTC), #224 opened from its gate;
-#225, #226 and #227 opened from a tester's two reports the same day; #117 (Qwen 3.5, dense), #225 and #226 closed in v0.3.229 (released 2026-10-07 00:00 UTC), #228 opened for what Qwen 3.5 leaves out; #129's cold loads (waited for and priced), #228 (2) and (2b), #220 (2), #229, #230 and #231 shipped in v0.3.230 (released 2026-10-07 16:38 UTC), #232 parked from their report; #234, #235, #239 and #240 closed on 2026-10-08 from two tester reports and the card check after them, #236-#238 opened from the second.
+#225, #226 and #227 opened from a tester's two reports the same day; #117 (Qwen 3.5, dense), #225 and #226 closed in v0.3.229 (released 2026-10-07 00:00 UTC), #228 opened for what Qwen 3.5 leaves out; #129's cold loads (waited for and priced), #228 (2) and (2b), #220 (2), #229, #230 and #231 shipped in v0.3.230 (released 2026-10-07 16:38 UTC), #232 parked from their report; #234, #235, #239 and #240 closed on 2026-10-08 from two tester reports and the card check after them, #236-#238 opened from the second (#238 closed the same day).
 `docs/plans/` holds the multi-step designs; the entries point at them.
 
 **P0 — wrong answers, silently**
@@ -1075,19 +1075,6 @@ StarCoder2, inert while refused).
 
 ### Memory and admission
 
-#### #238 — A node serving a segment learns that the reply ended only from its own timers
-`P3` · memory · **OPEN** — 2026-10-08 · history: #235
-
-`ModelProcessPool::release_request_kv` tells the COORDINATOR's workers that a request is over;
-every peer that ran a segment of it keeps the conversation's cache until it is silent for
-`CONVERSATION_GAP_SECS` and another conversation needs the room, or for the worker's TTL
-(#235). That is bounded now, but the memory reads as in use meanwhile (to the node's own
-admission and to what it advertises). Shape: at the end of a request, send each remote segment
-holder the existing `CancelInference` (every version handles it: nothing in flight is aborted,
-the conversation is forgotten) and have the worker drop a cancelled request's cache. Check the
-peer's cancel path logs nothing alarming for a normal end, and that a router retry (same request
-id) cannot be cancelled by the first attempt's release.
-
 #### #194 — An agent-sized prompt fills an 8 GB card with conversation memory
 `P2` · memory · **PARTIAL** — 2026-09-02 · absorbs the old survey's Tier 2F (KV quantisation); history: archive § "An agent-sized prompt fills an 8 GB card with KV cache, and decode crawls"
 
@@ -1586,7 +1573,15 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-08, on main (not yet released)** (#234, #235, #239, #240)
+**Closed 2026-10-08, on main (not yet released)** (#234, #235, #238, #239, #240)
+- #238 — a node serving a segment learned that the reply had ended only from its own timers (#235
+  bounded that). Each attempt's executor now records the peers it ran segments on, stand-ins
+  included (`SharedState::note_request_peers`), and the request's end tells each of them once with
+  the existing `CancelInference` (`router::release_request_on_peers`, from `finalize_request`); the
+  worker drops a cancelled request's cache between messages (`release_caches_of_cancelled`). Only
+  at the REQUEST's end, never an attempt's: a worker skips the next forward of a cancelled id, and a
+  retry reuses the id (gotcha #749 — the research that placed it). Older peers forget the
+  conversation and keep the cache to their timers. Tests red with each half off.
 - #240 — a worker split across the card and the processor was charged nothing against the card
   budget, so its card share read as another program's memory: a configured `max_gpu_vram_mb` was
   overrun by that share (a 14B split took 5,782 MB against a 5,000 MB cap, found by the #234 card

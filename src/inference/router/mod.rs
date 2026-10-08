@@ -1534,7 +1534,14 @@ impl InferenceRouter {
                 }
             }
 
-            finalize_request(&shared_state, &request, &output, escrow_id).await;
+            finalize_request(
+                &shared_state,
+                Some(&network_tx),
+                &request,
+                &output,
+                escrow_id,
+            )
+            .await;
 
             // Release escrow on success. Refund on failure is handled by
             // finalize_request — calling refund_escrow again here races and

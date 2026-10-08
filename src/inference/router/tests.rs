@@ -972,3 +972,50 @@ fn only_a_prompt_peer_refusal_earns_a_second_replan() {
     assert!(super::should_retry_after(&silent, true, false, false));
     assert!(!super::a_further_replan_is_earned(&silent, true, quick));
 }
+
+/// A request's peers are told it is over once, when it is over (#238): one
+/// `CancelInference` per peer any attempt ran a segment on, this node never,
+/// and nothing for a second call — the record is taken. A peer serving a
+/// segment is told nothing else, and kept the conversation's cache while its
+/// timers allowed (report #005).
+#[tokio::test]
+async fn a_finished_request_tells_each_of_its_peers_once() {
+    use crate::types::{NetworkCommand, NodeId, SwarmMessage};
+    let (state, _temp) = make_test_shared_state(crate::config::Config::default());
+    let (a, b) = (NodeId([0xA1; 32]), NodeId([0xB2; 32]));
+    state.peer_id_map.insert(a.clone(), vec![1, 2, 3]);
+    state.peer_id_map.insert(b.clone(), vec![4, 5, 6]);
+    let me = state.identity.node_id().clone();
+    // Resolvable, so only the exclusion keeps this node from being told.
+    state.peer_id_map.insert(me.clone(), vec![9, 9, 9]);
+    let rid = uuid::Uuid::new_v4();
+    // Two attempts: the first ran on a and here, the retry on b and a.
+    state.note_request_peers(rid, [a.clone(), me]);
+    state.note_request_peers(rid, [b.clone(), a.clone()]);
+
+    let (tx, mut rx) = mpsc::channel(8);
+    super::distributed_exec::release_request_on_peers(&state, &tx, rid);
+    let mut told = Vec::new();
+    while let Ok(cmd) = rx.try_recv() {
+        match cmd {
+            NetworkCommand::SendDirectMessage {
+                target_peer_bytes,
+                message: SwarmMessage::CancelInference(c),
+                ..
+            } => {
+                assert_eq!(c.request_id, rid);
+                told.push(target_peer_bytes);
+            }
+            other => panic!("unexpected command {other:?}"),
+        }
+    }
+    told.sort();
+    assert_eq!(
+        told,
+        vec![vec![1, 2, 3], vec![4, 5, 6]],
+        "each peer once, never this node"
+    );
+
+    super::distributed_exec::release_request_on_peers(&state, &tx, rid);
+    assert!(rx.try_recv().is_err(), "told once: the record was taken");
+}

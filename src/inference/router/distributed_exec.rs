@@ -25,10 +25,17 @@ const MODEL_LOAD_WAIT_SECS: u64 = 60;
 /// direct charge to avoid double-billing the local API consumer.
 pub(super) async fn finalize_request(
     shared_state: &SharedState,
+    // `None` only on the in-process local path, whose requests never reach a
+    // peer. Every path that can plan peers passes its sender, so the peers it
+    // ran segments on are told the request is over (`release_request_on_peers`).
+    network_tx: Option<&mpsc::Sender<NetworkCommand>>,
     request: &InferenceRequest,
     output: &Result<InferenceOutput, SwarmError>,
     escrow_id: Option<uuid::Uuid>,
 ) {
+    if let Some(network_tx) = network_tx {
+        release_request_on_peers(shared_state, network_tx, request.id);
+    }
     if let Err(ref e) = output {
         crate::log_failure!(
             e,
@@ -243,6 +250,48 @@ pub(super) async fn finalize_request(
     }
 }
 
+/// Tell every peer this request ran segments on, in any attempt, that it is
+/// over — so each frees the conversation's cache now (#238).
+///
+/// A peer serving a SEGMENT is told nothing else: `release_request_kv` reaches
+/// only this node's workers, and a peer's cache for a finished reply stayed for
+/// as long as its own timers allowed, refusing live conversations meanwhile
+/// (report #005). The message is the existing `CancelInference`, which every
+/// version handles — nothing is in flight to abort, the peer's pool forgets
+/// the conversation, and its worker drops the cache. Called once per REQUEST,
+/// after its last attempt: a cancel by request id reaches every worker, and a
+/// retry under the same id must never meet one (gotcha #749). Best effort and
+/// never waits: a full network queue only leaves the peer to its timers.
+pub(super) fn release_request_on_peers(
+    shared_state: &SharedState,
+    network_tx: &mpsc::Sender<NetworkCommand>,
+    request_id: uuid::Uuid,
+) {
+    let peers = shared_state.take_request_peers(request_id);
+    let mut told = 0usize;
+    for peer in &peers {
+        let Some(target_peer_bytes) = shared_state.resolve_peer_id_bytes(peer) else {
+            continue;
+        };
+        let sent = network_tx.try_send(NetworkCommand::SendDirectMessage {
+            target_peer_bytes,
+            message: crate::types::SwarmMessage::CancelInference(swarmllm_types::CancelInference {
+                request_id,
+            }),
+            delivery_request_id: None,
+        });
+        told += usize::from(sent.is_ok());
+    }
+    if !peers.is_empty() {
+        tracing::debug!(
+            %request_id,
+            peers = peers.len(),
+            told,
+            "Told the peers this request ran on that it is over, so they free its memory"
+        );
+    }
+}
+
 /// Execute a batch of distributed inference requests concurrently.
 ///
 /// Each request gets its own pipeline. They share the active_count
@@ -283,7 +332,7 @@ pub(super) async fn execute_distributed_batch(
 
                 let output = execute_request(
                     shared_state.clone(),
-                    network_tx,
+                    network_tx.clone(),
                     scheduler,
                     request.clone(),
                     token_tx,
@@ -311,7 +360,7 @@ pub(super) async fn execute_distributed_batch(
                 }
                 shared_state.publish_request_trace(&trace);
 
-                finalize_request(&shared_state, &request, &output, None).await;
+                finalize_request(&shared_state, Some(&network_tx), &request, &output, None).await;
                 shared_state.release_request_state(&request.id);
                 // Decrement active_count and wake drain_queue so the next queued
                 // request can dispatch (without notify, the queue stalls until a

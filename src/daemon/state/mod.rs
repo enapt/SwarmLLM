@@ -805,6 +805,17 @@ pub struct SharedState {
     /// per-request map.
     pub local_memory_refusals: dashmap::DashMap<uuid::Uuid, Option<u32>>,
 
+    /// The peers each request THIS node led ran segments on, across every
+    /// attempt — what it tells, once the request is over, that the request is
+    /// over (`router::release_request_on_peers`, #238). A peer serving a segment
+    /// is told nothing else, and kept the conversation's cache for as long as
+    /// its own timers allowed. Written ONLY by
+    /// [`SharedState::note_request_peers`] (each attempt's executor, as it
+    /// ends), taken ONLY by [`SharedState::take_request_peers`]; released by
+    /// [`SharedState::release_request_state`].
+    pub request_peers:
+        dashmap::DashMap<uuid::Uuid, std::collections::HashSet<crate::types::NodeId>>,
+
     /// Requests planned past the memory their holders OFFER, with what was offered.
     ///
     /// Written by the scheduler when a plan hands some computer more layers
@@ -1452,6 +1463,7 @@ impl SharedState {
             perf_history: perf_history::PerfHistory::load(&db),
             request_holder_blacklist: DashMap::new(),
             local_memory_refusals: dashmap::DashMap::new(),
+            request_peers: dashmap::DashMap::new(),
             planned_past_offered_memory: DashMap::new(),
             route_plan_overrides: DashMap::new(),
             salvaged_replies: DashMap::new(),

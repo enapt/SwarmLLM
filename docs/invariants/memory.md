@@ -109,9 +109,25 @@ way: the request that can be recomputed gives way to the one being served.
 Tests: `a_finished_conversation_gives_its_room_to_a_live_one` (red with the release
 off; controls: a conversation silent for half the gap keeps its cache and the claim
 is refused as before, and the claimant's own cache is never released),
-`the_ttl_sweep_removes_a_conversation_nobody_released`. What it does not do: tell a
-segment peer the reply ended (#238), or see the peer's room before choosing it
-(#237); a reply whose peer refuses mid-stream still ends (#236).
+`the_ttl_sweep_removes_a_conversation_nobody_released`.
+
+**And the peer is now told (#238).** Each attempt's executor records the peers it
+ran segments on — as planned and as it ended, so a stand-in that took a segment
+over is included (`SharedState::note_request_peers`). When the REQUEST is over,
+`finalize_request` sends each of them the existing `CancelInference` once
+(`router::release_request_on_peers`), and the worker drops a cancelled request's
+cache in its main loop, between messages (`release_caches_of_cancelled`). It is the
+request's end and never an attempt's: a worker skips the next forward of an id it
+saw cancelled (60 s), and a router retry reuses the request id — gotcha #749's
+shape, which is what placed it. An older peer forgets the conversation and keeps
+the cache to its own timers. Tests `a_finished_request_tells_each_of_its_peers_once`,
+`a_cancelled_requests_cache_is_released_once` (each red with its half off). Rig
+(`~/swarmllm-rig-234/release238.sh`, TinyLlama split over two processor nodes, debug
+logs): for each of two requests the coordinator logged `told=1` as it finished and
+the peer logged that request's `CancelInference` ~10 ms later, its worker
+`request cancelled by daemon`; both replies 200. What
+remains: seeing the peer's room before choosing it (#237); a reply whose peer
+refuses mid-stream still ends (#236).
 
 ## `inference::worker_ipc::worker_error_is_fatal`
 

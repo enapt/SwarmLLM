@@ -78,7 +78,7 @@ Whenever code waits for a subprocess, handle it dying instead (`spawn_worker` ra
 
 ## A conversation that is over gives its room to one that is not (2026-10-08)
 
-**`KvCacheStore::release_finished_conversations`** runs before a prompt is refused (`ensure_room_for_prompt`) and before a growth claim is (`claim_room`, whose `claimant` is REQUIRED): caches silent for `FINISHED_CONVERSATION_AFTER` (= `process_pool::CONVERSATION_GAP_SECS`, the one figure) go first — a segment served for another computer is never released by its coordinator. The worker runs its store's TTL sweep (`cleanup_expired`) on its 30 s tick; it never had (#235). Guard: `a_workers_kv_store_is_swept_by_the_worker_that_builds_it`.
+**`KvCacheStore::release_finished_conversations`** runs before a prompt is refused (`ensure_room_for_prompt`) and before a growth claim is (`claim_room`, whose `claimant` is REQUIRED): caches silent for `FINISHED_CONVERSATION_AFTER` (= `process_pool::CONVERSATION_GAP_SECS`, the one figure) go first — a segment served for another computer is never released by its coordinator. The worker runs its store's TTL sweep (`cleanup_expired`) on its 30 s tick; it never had (#235). Guard: `a_workers_kv_store_is_swept_by_the_worker_that_builds_it`. At a REQUEST's end (never an attempt's — #749) the coordinator tells every peer it ran segments on (`router::release_request_on_peers`, `CancelInference`), and a worker drops a cancelled request's cache (`release_caches_of_cancelled`, #238).
 
 → `docs/invariants/memory.md` § "A conversation that is over gives its room to one that is not"
 
