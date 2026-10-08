@@ -12106,3 +12106,65 @@ fn the_kv_sweep_guard_catches_a_store_nobody_sweeps() {
     let wrapped = "{\n    let kv_store = Arc::new(KvCacheStore::new(ttl));\n    kv_store\n        .cleanup_expired();\n}";
     assert!(builds_and_sweeps_a_kv_store(wrapped));
 }
+
+/// The first libp2p-upnp release that backs off a mapping the router refused
+/// (libp2p PR 6128). 0.5.0 re-asked the moment each refusal came back, for the
+/// node's whole life.
+const UPNP_BACKS_OFF: (u64, u64) = (0, 6);
+
+/// The libp2p-upnp versions in a `cargo tree --prefix none` listing older than
+/// [`UPNP_BACKS_OFF`]. Read from the TREE, which is feature-resolved: the
+/// lockfile still lists the facade's 0.5.0 (named only through a weak
+/// `libp2p-upnp?/tokio` feature, rust-lang/cargo#10801) though nothing builds it.
+fn upnp_versions_without_the_backoff(tree: &str) -> Vec<String> {
+    tree.lines()
+        .filter_map(|line| line.trim().strip_prefix("libp2p-upnp v"))
+        .filter_map(|rest| rest.split_whitespace().next())
+        .filter(|version| {
+            let mut parts = version.split('.').map(|p| p.parse::<u64>().unwrap_or(0));
+            let major_minor = (parts.next().unwrap_or(0), parts.next().unwrap_or(0));
+            major_minor < UPNP_BACKS_OFF
+        })
+        .map(str::to_string)
+        .collect()
+}
+
+/// UPnP is the release that backs off (2026-10-08). On 0.5.0 a node whose ports
+/// another device held — a second node behind the same router — asked the
+/// router for them again as soon as each refusal arrived, for as long as it ran,
+/// and said nothing at the default log level. Re-enabling the facade's `upnp`
+/// feature, or pinning the direct dependency back, brings that loop back.
+#[test]
+fn upnp_is_the_release_that_backs_off() {
+    let out = std::process::Command::new(env!("CARGO"))
+        .args([
+            "tree", "-e", "normal", "--prefix", "none", "--format", "{p}", "--frozen",
+        ])
+        .current_dir(repo_root())
+        .output()
+        .expect("cargo tree");
+    assert!(
+        out.status.success(),
+        "cargo tree failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let tree = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        tree.lines().any(|l| l.trim().starts_with("libp2p-upnp v")),
+        "no libp2p-upnp in the build — if UPnP was removed on purpose, remove this guard"
+    );
+    let old = upnp_versions_without_the_backoff(&tree);
+    assert!(
+        old.is_empty(),
+        "libp2p-upnp {old:?} is built — it retries a refused mapping without pause. Keep the \
+         facade's `upnp` feature OFF and the direct `libp2p-upnp` dependency at 0.6 or later"
+    );
+}
+
+/// The guard above, against the listing it exists to catch — planted.
+#[test]
+fn the_upnp_guard_catches_the_release_without_the_backoff() {
+    let planted =
+        "libp2p v0.56.0\nlibp2p-upnp v0.5.0\nlibp2p-upnp v0.6.0\nlibp2p-upnp v0.10.1 (*)\n";
+    assert_eq!(upnp_versions_without_the_backoff(planted), vec!["0.5.0"]);
+}

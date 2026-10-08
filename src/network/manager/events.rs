@@ -680,9 +680,13 @@ impl NetworkManager {
 
             // ── UPnP gateway port-mapping ──
             SwarmEvent::Behaviour(SwarmBehaviourEvent::Upnp(event)) => {
-                use libp2p::upnp::Event as UpnpEvent;
+                use libp2p_upnp::Event as UpnpEvent;
                 match event {
-                    UpnpEvent::NewExternalAddr(addr) => {
+                    UpnpEvent::NewExternalAddr {
+                        external_addr: addr,
+                        ..
+                    } => {
+                        self.upnp_watch.note_mapped();
                         // The UPnP behaviour has already confirmed this address
                         // with the swarm (ExternalAddrConfirmed), which our
                         // handler above catches. Refresh explicitly too so the
@@ -704,17 +708,23 @@ impl NetworkManager {
                             .with_toast("success", 6000),
                         );
                     }
-                    UpnpEvent::ExpiredExternalAddr(addr) => {
+                    UpnpEvent::ExpiredExternalAddr {
+                        external_addr: addr,
+                        ..
+                    } => {
+                        self.upnp_watch.note_expired();
                         tracing::warn!(%addr, "UPnP external address mapping expired");
                         self.refresh_listen_multiaddrs();
                     }
                     UpnpEvent::GatewayNotFound => {
+                        self.upnp_watch.note_answered();
                         tracing::info!(
                             "UPnP: no IGD gateway found — router has UPnP disabled or none is present. \
                              Internet peers will need a relay or a manually port-forwarded address."
                         );
                     }
                     UpnpEvent::NonRoutableGateway => {
+                        self.upnp_watch.note_answered();
                         // The gateway exists but is itself behind another NAT —
                         // the classic carrier-grade NAT (CGNAT) signature. Port
                         // mapping cannot make this node publicly reachable.

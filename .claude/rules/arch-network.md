@@ -155,6 +155,12 @@ Every kind of peer work takes a `PeerWorkSlot`, and a refusal is ANSWERED — `l
 
 → `docs/invariants/network.md` § "Work a serving node will not run is refused OUT LOUD, and counted per peer whatever its kind"
 
+## UPnP that the router refuses is said out loud, and a stopping node hands its ports back (2026-10-08)
+
+UPnP is the DIRECT `libp2p-upnp` ≥ 0.6 dependency (it backs off a refused mapping; the facade's 0.5.0 asked again without pause, for ever) — the facade's `upnp` feature stays OFF; guard `upnp_is_the_release_that_backs_off`. A refused mapping emits no event, so **`network::manager::upnp_watch::UpnpWatch`** explains the silence once (`UPNP_QUIET_AFTER`), and `release_upnp_mappings` closes the P2P listeners at a clean shutdown so the router gets the ports back (#239).
+
+→ `docs/invariants/network.md` § "UPnP that the router refuses is said out loud"
+
 ## "Is this connection direct?" — `network::relay::addr_is_direct_transport`
 
 **`network::relay::addr_is_direct_transport`** is the single answer, for both layers that choose a connection: a real `/ip4`, `/ip6` or `/dns*` hop AND no circuit. `is_relay_circuit_addr` alone misses the listener's view; the vendored request-response inbound handler records the send-back address. `peer_direct_conns` is gated on it; any new "prefer direct" logic uses it (gotchas #356, #179). Keep the loop-stall tripwire in `NetworkManager::run`.

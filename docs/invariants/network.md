@@ -3689,6 +3689,46 @@ Full evidence: `docs/invariants/network.md`
 - **`ModelRegistry::describes_a_different_build`** — is this manifest the same FILE as ours, or another build wearing the same name? A model id comes from a display name (`slugify_model_name`), so every independent GGUF build collapses into one identity. Compares SHAPE, never hashes, and is gated on `has_origin_knowledge`.
 - **`model::manifest::is_backup_artifact_id`** — canonical check for a model id that is a copied-folder backup (`<model>.FULLBACKUP`, `<model>.old`, `<model>~`, `… copy`) rather than a real model identity. Netted at `ModelRegistry::register_manifest`, the one point every adoption path funnels through.
 
+## UPnP that the router refuses is said out loud
+
+(2026-10-08, FUTURE_WORK #239.) A tester ran two nodes behind one router. The
+first was mapped; the second logged nothing about UPnP at all — no mapping, no
+failure — and they spent days looking at firewalls and Docker interfaces. When the
+first node stopped, the second was mapped only ~40 minutes later. Three things,
+all confirmed in the registry source of libp2p-upnp 0.5.0:
+
+- **A refused mapping is silent.** `GatewayEvent::MapFailure` for a mapping that
+  was never active is logged at `debug` and produces no `Event` (the enum has
+  `NewExternalAddr`, `ExpiredExternalAddr`, `GatewayNotFound`,
+  `NonRoutableGateway` — nothing for a refusal; still true in 0.6/0.7).
+- **0.5.0 retried without pause.** A `Failed` mapping is re-requested by `renew`
+  at the end of every `poll`, and the gateway's reply wakes that poll, so a node
+  whose port another device held asked the router again as soon as each refusal
+  arrived, for its whole life. 0.6.0's changelog: "Fix excessive retry attempts
+  for failed port mappings by implementing exponential backoff … This prevents
+  continuous retry loops" (libp2p PR 6128) — 30 s doubling, five attempts, then a
+  `warn!` and no more. 0.6.0 builds on libp2p-swarm 0.47 / core 0.43, the versions
+  libp2p 0.56 pins, so it is taken as a DIRECT dependency with the facade's `upnp`
+  feature off. The lockfile still lists the facade's 0.5.0 — it is named through a
+  weak `libp2p-upnp?/tokio` feature (rust-lang/cargo#10801) — but nothing builds
+  it, which is why the guard reads `cargo tree`, not the lockfile.
+- **A stopped node kept its ports.** Mappings are leased for an hour and renewed
+  every half hour, and the daemon left without closing its listeners, so the
+  router held the ports until the lease ran out — the 40 minutes.
+
+So: `UpnpWatch` records every UPnP outcome; with UPnP on, nothing heard for
+`UPNP_QUIET_AFTER` (three minutes: the gateway search is over in 10 s and three
+refused attempts have passed) and no public address by any route, the router
+answered and would not map — the node says which ports and the way out (another
+port with `-p`, or stop the other node and restart this one; 0.6 has stopped
+asking by then). And at a clean shutdown with a mapping held, the P2P listeners
+are removed and the swarm runs for `UPNP_RELEASE_WAIT` so libp2p-upnp's
+`RemoveMapping` reaches the router. Tests: `upnp_watch::tests::*`; guard
+`upnp_is_the_release_that_backs_off` with its planted twin (re-enabling the
+facade feature puts 0.5.0 back in `cargo tree` — checked). Not done: picking
+another EXTERNAL port when the router refuses ours — libp2p-upnp maps external
+= internal and has no option for it.
+
 ## ACK-Timeout Fast-Fail for rr Sends
 
 `SendDirectMessage` carries `delivery_request_id: Option<uuid::Uuid>`.

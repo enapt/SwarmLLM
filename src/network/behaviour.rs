@@ -5,8 +5,10 @@ use libp2p::identity::Keypair;
 use libp2p::kad::store::MemoryStore;
 use libp2p::swarm::NetworkBehaviour;
 use libp2p::{
-    autonat, dcutr, gossipsub, identify, kad, mdns, relay, request_response, upnp, StreamProtocol,
+    autonat, dcutr, gossipsub, identify, kad, mdns, relay, request_response, StreamProtocol,
 };
+// The direct dependency, not the facade's re-export: see Cargo.toml.
+use libp2p_upnp as upnp;
 
 use crate::config::NetworkConfig;
 use crate::network::protocol::SwarmCodec;
@@ -276,7 +278,10 @@ pub fn build_behaviour(
     // UPnP/IGD gateway port-mapping (toggleable — disable on WSL2). On a
     // cooperative home router this opens the P2P ports on the gateway and
     // confirms the public address with the swarm automatically. On routers
-    // without UPnP it emits GatewayNotFound and is otherwise inert.
+    // without UPnP it emits GatewayNotFound and is otherwise inert. A router
+    // that REFUSES the mapping is retried with a backoff and then given up on
+    // (libp2p-upnp 0.6), and says nothing — `NetworkManager` notices that
+    // silence and says why (`upnp_watch`).
     let upnp_behaviour = if enable_upnp {
         Some(upnp::tokio::Behaviour::default())
     } else {

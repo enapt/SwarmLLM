@@ -32,6 +32,7 @@ mod relay;
 mod requests;
 mod shard_transfer;
 mod tensors;
+mod upnp_watch;
 
 /// Maximum in-flight shard chunk requests before dropping new ones.
 const MAX_PENDING_SHARD_REQUESTS: usize = 1024;
@@ -568,6 +569,12 @@ pub struct NetworkManager {
     /// relay-service provider (only if it forwards relay traffic). Retried each
     /// discovery tick until Kademlia has peers, then latched.
     relay_provider_registered: bool,
+    /// What UPnP has done for this node: explains a router that stays silent,
+    /// and says whether there is a mapping to hand back at shutdown.
+    upnp_watch: upnp_watch::UpnpWatch,
+    /// The P2P listeners `run` opened — closed at a clean shutdown so UPnP
+    /// hands their port mappings back (see `release_upnp_mappings`).
+    p2p_listeners: Vec<libp2p::core::transport::ListenerId>,
     /// NETWORKING_PLAN Phase 3 — the in-flight `get_providers` query for the
     /// relay-service key, so its `GetProviders` results are recognized as relay
     /// discovery (dial the peers) rather than shard-holder resolution.
@@ -891,6 +898,8 @@ impl NetworkManager {
             dht_query_rx,
             pending_provider_queries: HashMap::new(),
             relay_provider_registered: false,
+            upnp_watch: upnp_watch::UpnpWatch::new(enable_upnp, std::time::Instant::now()),
+            p2p_listeners: Vec::new(),
             pending_relay_provider_query: None,
             pending_prefix_kv_outbound: HashMap::new(),
             pending_prefix_kv_inbound: HashMap::new(),
@@ -1129,6 +1138,56 @@ impl NetworkManager {
         }
     }
 
+    /// Say why UPnP has not made this node reachable — once, when the router
+    /// has stayed silent (`upnp_watch`). A refused mapping is otherwise said
+    /// only at libp2p's `debug` level, and a tester read that silence as "this
+    /// computer cannot do UPnP" for days (2026-10-08).
+    fn explain_a_silent_router(&mut self) {
+        let reachable = self
+            .shared_state
+            .publicly_reachable
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if !self
+            .upnp_watch
+            .silence_to_explain(std::time::Instant::now(), reachable)
+        {
+            return;
+        }
+        let port = self.shared_state.config.node.listen_port;
+        let message = upnp_watch::refused_mapping_message(port, port.saturating_add(10));
+        tracing::info!("{message}");
+        self.shared_state
+            .emit_activity(crate::daemon::state::ActivityEvent::new(
+                "network",
+                "upnp_refused",
+                message,
+            ));
+    }
+
+    /// Hand this node's port mappings back to the router on a clean shutdown.
+    ///
+    /// A mapping is leased for an hour and renewed every half hour, so a node
+    /// that simply stopped kept its ports on the router for up to an hour — and
+    /// another node behind the same router, waiting for them, could not have
+    /// them: a tester's second node was mapped ~40 min after the first one was
+    /// stopped (2026-10-08). Closing the P2P listeners is what makes
+    /// libp2p-upnp remove their mappings, and the network has to keep running
+    /// for the router's answer. Bounded, and only when there is a mapping.
+    async fn release_upnp_mappings(&mut self) {
+        if !self.upnp_watch.holds_a_mapping() {
+            return;
+        }
+        for listener in std::mem::take(&mut self.p2p_listeners) {
+            self.swarm.remove_listener(listener);
+        }
+        let deadline = tokio::time::Instant::now() + upnp_watch::UPNP_RELEASE_WAIT;
+        while tokio::time::timeout_at(deadline, self.swarm.select_next_some())
+            .await
+            .is_ok()
+        {}
+        tracing::info!("UPnP: asked the router to release this node's port mappings");
+    }
+
     /// Start the network manager event loop. Listens for inbound libp2p
     /// `SwarmEvent`s, daemon `NetworkCommand`s, internal commands, and
     /// `dht_query_rx` model IDs, dispatching each to the appropriate
@@ -1152,20 +1211,25 @@ impl NetworkManager {
             let quic_addr: Multiaddr = format!("/ip4/{listen_ip}/udp/{port}/quic-v1")
                 .parse()
                 .map_err(|e| SwarmError::Network(format!("Invalid QUIC address: {e}")))?;
-            self.swarm.listen_on(quic_addr.clone()).map_err(|e| {
+            let quic = self.swarm.listen_on(quic_addr.clone()).map_err(|e| {
                 SwarmError::Network(listen_failure_message("QUIC", listen_ip, port, &e))
             })?;
+            self.p2p_listeners.push(quic);
 
             match self.swarm.listen_on(tcp_addr.clone()) {
-                Ok(_) => tracing::info!(%quic_addr, %tcp_addr, "Listening for P2P connections"),
+                Ok(tcp) => {
+                    self.p2p_listeners.push(tcp);
+                    tracing::info!(%quic_addr, %tcp_addr, "Listening for P2P connections")
+                }
                 Err(e) => {
                     tracing::warn!(%quic_addr, error = %e, "TCP listen unavailable, using QUIC only");
                 }
             }
         } else {
-            self.swarm.listen_on(tcp_addr.clone()).map_err(|e| {
+            let tcp = self.swarm.listen_on(tcp_addr.clone()).map_err(|e| {
                 SwarmError::Network(listen_failure_message("TCP", listen_ip, tcp_port, &e))
             })?;
+            self.p2p_listeners.push(tcp);
             tracing::info!(%tcp_addr, "Listening for P2P connections (QUIC disabled)");
         }
 
@@ -1380,6 +1444,7 @@ impl NetworkManager {
                     if *self.shutdown_rx.borrow() {
                         self.save_peer_cache();
                         tracing::info!(target: "swarmllm::network::manager", "NetworkManager shutting down");
+                        self.release_upnp_mappings().await;
                         break;
                     }
                 }
@@ -1398,6 +1463,7 @@ impl NetworkManager {
                         // Offline mode: skip bootstrap/cache redials, rely on mDNS only
                     } else {
                         tracing::debug!("Discovery tick");
+                        self.explain_a_silent_router();
                         let _ = discovery::trigger_bootstrap(&mut self.swarm);
                         // Re-dial cached peers that we're not currently connected to.
                         // This handles peers that went offline and came back.

@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #239**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #240**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -40,7 +40,7 @@ after v0.3.224 (#160, #215 and #216 closed; #217 and #218 opened from the swarm 
 v0.3.226 (released 2026-10-05), #220 opened from the .225 gate's unrecorded driver resets; #129's fit verdict (idle-model
 reclaim) shipped in v0.3.227 (released 2026-10-05 23:45 UTC); #222 (a node near its storage limit deleting and
 re-fetching parts) and #223 closed in v0.3.228 (released 2026-10-06 09:42 UTC), #224 opened from its gate;
-#225, #226 and #227 opened from a tester's two reports the same day; #117 (Qwen 3.5, dense), #225 and #226 closed in v0.3.229 (released 2026-10-07 00:00 UTC), #228 opened for what Qwen 3.5 leaves out; #129's cold loads (waited for and priced), #228 (2) and (2b), #220 (2), #229, #230 and #231 shipped in v0.3.230 (released 2026-10-07 16:38 UTC), #232 parked from their report; #234 and #235 closed on 2026-10-08 from two tester reports, #236-#238 opened from the second.
+#225, #226 and #227 opened from a tester's two reports the same day; #117 (Qwen 3.5, dense), #225 and #226 closed in v0.3.229 (released 2026-10-07 00:00 UTC), #228 opened for what Qwen 3.5 leaves out; #129's cold loads (waited for and priced), #228 (2) and (2b), #220 (2), #229, #230 and #231 shipped in v0.3.230 (released 2026-10-07 16:38 UTC), #232 parked from their report; #234, #235 and #239 closed on 2026-10-08 from two tester reports, #236-#238 opened from the second.
 `docs/plans/` holds the multi-step designs; the entries point at them.
 
 **P0 — wrong answers, silently**
@@ -1586,7 +1586,14 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-08, on main (not yet released)** (#234, #235)
+**Closed 2026-10-08, on main (not yet released)** (#234, #235, #239)
+- #239 — a node behind a router that refused its UPnP mapping said nothing, asked again without
+  pause for its whole life, and a node that stopped kept its ports on the router for up to an hour
+  (a tester's two nodes behind one router, 2026-10-08). libp2p-upnp is now the direct 0.6
+  dependency (backoff, five tries; libp2p PR 6128; guard `upnp_is_the_release_that_backs_off`),
+  `upnp_watch` explains a silent router once after three minutes, and a clean shutdown hands the
+  mappings back. Book + `docs/NETWORKING.md`: run a second node on another port.
+  `docs/invariants/network.md` § "UPnP that the router refuses is said out loud".
 - #234 — a node holding PART of a model was planned ranges its worker could not grow into, and the
   re-plan repeated them (a tester's report, v0.3.229: an RTX 3060 holding 28 of a 30B's 34 parts,
   refused layers 19..27 and 43..48 — "another holder will have to take that part" — five requests

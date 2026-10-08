@@ -2624,7 +2624,7 @@ dependencies = [
  "libp2p-request-response",
  "libp2p-swarm",
  "libp2p-tcp",
- "libp2p-upnp",
+ "libp2p-upnp 0.5.0",
  "libp2p-yamux",
  "multiaddr",
  "pin-project",
@@ -3054,6 +3054,21 @@ name = "libp2p-upnp"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4757e65fe69399c1a243bbb90ec1ae5a2114b907467bf09f3575e899815bb8d3"
+dependencies = [
+ "futures",
+ "futures-timer",
+ "igd-next",
+ "libp2p-core",
+ "libp2p-swarm",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "libp2p-upnp"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "682749d0ae1111388f46b2fae45c77cef55c980b9efe852aed44484ae03be468"
 dependencies = [
  "futures",
  "futures-timer",
@@ -4949,6 +4964,7 @@ dependencies = [
  "libp2p",
  "libp2p-gossipsub",
  "libp2p-stream",
+ "libp2p-upnp 0.6.0",
  "llama-cpp-2",
  "memmap2",
  "mimalloc",

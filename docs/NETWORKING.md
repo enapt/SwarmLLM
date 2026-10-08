@@ -183,6 +183,14 @@ AutoNAT/DCUtR/relay — become discoverable to each other.
 - **UPnP does nothing** — router has UPnP disabled, or you're behind CGNAT
   (§2). Check the logs for `no IGD gateway found` (UPnP off) vs
   `gateway is not routable` (CGNAT).
+- **Two nodes behind one router** — a router gives a port to ONE computer, so
+  the second node's UPnP request is refused: its log says `UPnP: the router did
+  not open port 8800 (UDP) or 8810 (TCP)` about three minutes after it starts.
+  Run the second node on a different port (`swarmllm run -p 8801` → TCP 8811 +
+  UDP 8801) and both can be reachable directly. A node that stops cleanly hands
+  its ports back to the router; one that was killed keeps them for up to an hour
+  (the mapping's lease), and the other node's UPnP gives up after five refused
+  attempts — restart it once the port is free.
 - **Port-forwarded but still unreachable** — almost always CGNAT (§2). Confirm
   the router's WAN IP equals your public IP.
 - **Nodes on the same Wi-Fi don't need any of this** — mDNS finds them

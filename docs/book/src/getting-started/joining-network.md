@@ -78,7 +78,7 @@ reload it (`POST /api/admin/config/reload`).
 
 SwarmLLM needs **TCP port 8810** (P2P primary transport) and optionally **UDP port 8800** (QUIC) open. On the same LAN, computers find each other by themselves — no ports to open. To be reachable **across the internet**, SwarmLLM tries these by itself — usually there is nothing to do:
 
-- **UPnP** (on by default) — opens the port on a cooperative home router automatically.
+- **UPnP** (on by default) — opens the port on a cooperative home router automatically. A router gives a port to **one** computer only, so if you run **two** SwarmLLM computers behind the same router, start the second on a different port (`swarmllm run -p 8801`) or only the first can be reached directly. The log says so when this happens (`UPnP: the router did not open port …`).
 - **A relay** (on by default) — if your computer can't be reached directly, even behind CGNAT, it is reached through a publicly-reachable SwarmLLM computer.
 - **Manual port-forward** (TCP 8810 + UDP 8800 to your machine) plus `external_address` in config, if you want a direct connection the router won't open by itself.
 

@@ -57,7 +57,7 @@ libp2p = { version = "0.56", features = [
     "identify",
     "autonat",
     "dcutr",
-    "upnp",
+    # NOT "upnp": the facade's is libp2p-upnp 0.5.0 — see the direct dependency below.
     "relay",
     "noise",
     "dns",
@@ -77,6 +77,15 @@ libp2p-stream = "0.4.0-alpha"
 # TWO copies and the counters we read are not the ones the swarm writes — a
 # silent zero. `the_gossip_counters_come_from_the_same_crate_libp2p_uses` pins it.
 libp2p-gossipsub = { version = "0.49", features = ["metrics"] }
+# Direct, and NOT through the facade's `upnp` feature (which pins 0.5.0): 0.5.0
+# re-asks the router for a mapping it has refused the moment the refusal comes
+# back, for ever — a node whose port another device holds (a second node behind
+# the same router, or a Docker bridge address the router will not map) sent
+# AddPortMapping requests back to back for its whole life, and said nothing at
+# the default log level. 0.6.0 backs off (30 s doubling, five tries, then a
+# warning; libp2p PR 6128) and builds on the same libp2p-swarm 0.47 / core 0.43
+# as libp2p 0.56. `upnp_is_the_release_that_backs_off` pins it.
+libp2p-upnp = { version = "0.6", features = ["tokio"] }
 # The registry libp2p's bandwidth counters are registered into. Pinned to the
 # version libp2p itself depends on — two copies would give us a registry libp2p
 # cannot write to, and the failure would be a silent zero.
