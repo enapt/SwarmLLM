@@ -278,6 +278,13 @@ pub struct RequestTrace {
     /// with a relaxed load per token instead of taking a lock.
     ttft_us: AtomicU64,
     inner: Mutex<TraceInner>,
+    /// The reply text the reader has been sent, and how many events carried
+    /// it — what a continuation resumes from when the machine generating the
+    /// reply fails mid-stream (FUTURE_WORK #236). Written only by the token
+    /// channel after a successful send (`router::StreamingTokenTx`). Kept apart
+    /// from `inner` so no snapshot can ever carry reply text into diagnostics,
+    /// and dropped when the request finishes.
+    streamed: Mutex<crate::types::ReplyContinuation>,
 }
 
 impl RequestTrace {
@@ -289,7 +296,27 @@ impl RequestTrace {
             t_admitted: Instant::now(),
             ttft_us: AtomicU64::new(0),
             inner: Mutex::new(TraceInner::default()),
+            streamed: Mutex::new(crate::types::ReplyContinuation::default()),
         }
+    }
+
+    /// Text the reader has been sent. Called by the token channel once a send
+    /// has succeeded — never for text that did not reach the reader.
+    pub fn note_streamed(&self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        let mut s = self.streamed.lock().unwrap_or_else(|e| e.into_inner());
+        s.text.push_str(text);
+        s.tokens = s.tokens.saturating_add(1);
+    }
+
+    /// Everything the reader has been sent so far.
+    pub fn streamed_so_far(&self) -> crate::types::ReplyContinuation {
+        self.streamed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// Poisoning can only happen if a thread panicked mid-update. The trace is
@@ -525,6 +552,10 @@ impl RequestTrace {
         g.outcome = outcome;
         g.prompt_tokens = prompt_tokens;
         g.completion_tokens = completion_tokens;
+        drop(g);
+        // A finished request is continued no more; the reply text goes.
+        *self.streamed.lock().unwrap_or_else(|e| e.into_inner()) =
+            crate::types::ReplyContinuation::default();
     }
 
     /// Immutable view for rendering. Taken once per surface.

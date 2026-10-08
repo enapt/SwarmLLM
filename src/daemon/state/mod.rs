@@ -3471,6 +3471,11 @@ impl SharedState {
         if request.lora_adapter.is_some() {
             return false;
         }
+        // It renders the conversation itself and knows nothing of a reply to
+        // continue; the pipeline executor appends one (FUTURE_WORK #236).
+        if request.continuation.is_some() {
+            return false;
+        }
         if !self.model_loaded.load(std::sync::atomic::Ordering::Acquire) {
             return false;
         }

@@ -40,7 +40,7 @@ after v0.3.224 (#160, #215 and #216 closed; #217 and #218 opened from the swarm 
 v0.3.226 (released 2026-10-05), #220 opened from the .225 gate's unrecorded driver resets; #129's fit verdict (idle-model
 reclaim) shipped in v0.3.227 (released 2026-10-05 23:45 UTC); #222 (a node near its storage limit deleting and
 re-fetching parts) and #223 closed in v0.3.228 (released 2026-10-06 09:42 UTC), #224 opened from its gate;
-#225, #226 and #227 opened from a tester's two reports the same day; #117 (Qwen 3.5, dense), #225 and #226 closed in v0.3.229 (released 2026-10-07 00:00 UTC), #228 opened for what Qwen 3.5 leaves out; #129's cold loads (waited for and priced), #228 (2) and (2b), #220 (2), #229, #230 and #231 shipped in v0.3.230 (released 2026-10-07 16:38 UTC), #232 parked from their report; #234, #235, #239 and #240 closed on 2026-10-08 from two tester reports and the card check after them, #236-#238 opened from the second (#238 closed the same day).
+#225, #226 and #227 opened from a tester's two reports the same day; #117 (Qwen 3.5, dense), #225 and #226 closed in v0.3.229 (released 2026-10-07 00:00 UTC), #228 opened for what Qwen 3.5 leaves out; #129's cold loads (waited for and priced), #228 (2) and (2b), #220 (2), #229, #230 and #231 shipped in v0.3.230 (released 2026-10-07 16:38 UTC), #232 parked from their report; #234, #235, #239 and #240 closed on 2026-10-08 from two tester reports and the card check after them, #236-#238 opened from the second (#236 and #238 closed the same day).
 `docs/plans/` holds the multi-step designs; the entries point at them.
 
 **P0 — wrong answers, silently**
@@ -230,27 +230,6 @@ sampled replies is a separate, deliberately deferred item: `docs/ARCHITECTURE.md
 Items".)
 
 ### Reliability and failover
-
-#### #236 — A reply whose peer refuses or leaves mid-stream ends; it is never continued elsewhere
-`P2` · reliability · **OPEN** — 2026-10-08 · history: report #005 (a tester, v0.3.230 code)
-
-A whole-model hand-off that fails after its first token is the request's failure:
-`should_retry_after` refuses a retry once `ttft_ms` is set (a retry would restart a reply the
-reader has seen begin), so the client gets the partial reply and an error. Report #005: a 30B
-handed to a peer, refused 71 s in (24.5 s to the first token, 46.8 s decoding) for KV memory —
-the main cause of that refusal is closed in #235, but a peer that leaves, restarts or runs out
-of memory mid-reply still ends the reply. **Petals does not end it**: its `InferenceSession`
-keeps each server session's input `history`, and on a failure `_update_sequence` builds a new
-route for the failed blocks and hands the new session that history, which it replays before
-the next step (`petals/client/inference_session.py`); vLLM's preemption RECOMPUTES a sequence's
-cache from its tokens. Here the coordinator holds everything a replay needs — the rendered
-prompt it sent and every token it has emitted. Shape: on a mid-stream failure, bar the peer
-(`blacklist_holder_for_request`) and send a continuation — the prompt plus the reply so far,
-`max_tokens` less what was delivered — to the next route, appending its tokens to the SAME
-stream. To settle first: re-tokenising prompt + reply text at the boundary (send token ids if
-the request can carry them), a sampler that reads history (penalties) or a fixed seed, usage
-merged across both peers, and the salvage path (`salvaged_reply_if_lost`). Next step: a design
-note in `docs/plans/`, then the whole-model hand-off first (#167 is the split's half).
 
 #### #167 — A speculative split decode has no mid-reply failover
 `P2` · reliability · **PARTIAL** — 2026-08-25 · history: archive § "Speculative distributed decode has no failover", archive row #149 item (d)
@@ -1586,7 +1565,15 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-08, on main (not yet released)** (#234, #235, #238, #239, #240)
+**Closed 2026-10-08, on main (not yet released)** (#234, #235, #236, #238, #239, #240)
+- #236 — a streamed reply whose machine refused, restarted or went silent mid-reply ended with an
+  error after part of it was shown (report #005). It is now CONTINUED on a fresh route from exactly
+  what the reader received (Petals' history replay, vLLM's recompute): `StreamingTokenTx` records
+  delivered text, `router::continuation_after` decides, `InferenceRequest::continuation` is appended
+  in the one prompt builder, at most twice, with the budget less what was sent. Rig `split_rig.sh
+  continue`: v0.3.230 ended the stream with an error after the serving worker was killed; main
+  continued it on the other peer 25 ms later, 300 chunks, no repeat, the join seamless.
+  `docs/invariants/scheduling.md` § "A reply whose machine failed mid-stream is continued".
 - #238 — a node serving a segment learned that the reply had ended only from its own timers (#235
   bounded that). Each attempt's executor now records the peers it ran segments on, stand-ins
   included (`SharedState::note_request_peers`), and the request's end tells each of them once with

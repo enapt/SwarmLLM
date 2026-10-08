@@ -78,6 +78,16 @@
 #          and not a 503. Ask 2, with C up: PASS = 200, and when A's plan tried
 #          B first, A logged B's refusal and re-planned onto C. Run BIN_A = an
 #          older release for the baseline (B's refusal comes back as the 400).
+#   continue  FUTURE_WORK #236: a reply whose machine fails MID-STREAM is
+#          continued on another, from what its reader received. A holds the
+#          header only (every plan is one peer running all of it), B and C each
+#          hold every part, all on the processor. One long STREAMED reply through
+#          A; once ~KILL_AFTER (default 24) chunks have arrived, the worker of the
+#          peer A handed it to is killed. PASS = the stream ends with a finish and
+#          no error, chunks kept arriving after the kill, the reply does not begin
+#          again (its opening appears once), A logged the continuation, and the
+#          other peer served it. BIN_A = v0.3.230 is the control: the stream
+#          ends with an error after the kill.
 #   fetch  A holds every part, B only part 0; B is asked to download part
 #          FETCH_SHARD (default 1) from A over P2P. Prints whether it landed and
 #          every `network event loop stalled` line B logged meanwhile — the hash
@@ -148,7 +158,7 @@
 #          during the repair is not answered from the wrong bytes, B's part is
 #          then byte-identical to the upload's, and the ask after answers.
 #
-# usage: split_rig.sh split|kill|failover|failover_mid|context|whole|repeat|fetch|cache|remote|mixed|disputed|spliced <binary> [<binary for B>]
+# usage: split_rig.sh split|kill|failover|failover_mid|context|whole|continue|repeat|fetch|cache|remote|mixed|disputed|spliced <binary> [<binary for B>]
 #   MODEL      model id (default: tinyllama for split, llama-3.2-3b for kill
 #              and failover)
 #   SHARDS_A   shard indices A holds, comma-separated (default 0; kill: 0,LAST)
@@ -169,7 +179,7 @@ set -u
 MODE="${1:?usage: split_rig.sh split|kill|failover|context|repeat|fetch|cache|remote|mixed <binary> [<binary for B>]}"
 BIN_A="${2:?binary}"
 BIN_B="${3:-$BIN_A}"
-case "$MODE" in split|kill|failover|failover_mid|context|whole|repeat|fetch|cache|remote|mixed|disputed|spliced) ;; *) echo "mode must be split, kill, failover, failover_mid, context, whole, repeat, fetch, cache, remote, mixed, disputed or spliced"; exit 2 ;; esac
+case "$MODE" in split|kill|failover|failover_mid|context|whole|continue|repeat|fetch|cache|remote|mixed|disputed|spliced) ;; *) echo "mode must be split, kill, failover, failover_mid, context, whole, continue, repeat, fetch, cache, remote, mixed, disputed or spliced"; exit 2 ;; esac
 if { [ "$MODE" = context ] || [ "$MODE" = whole ]; } && printf '%s' "${EXTRA_TOML:-}" | grep -q '^\[inference\]'; then
   echo "$MODE: EXTRA_TOML may not open [inference] — B's ceiling is written there"; exit 2
 fi
@@ -248,6 +258,12 @@ elif [ "$MODE" = whole ]; then
   SHARDS_B=$(echo "$SHARDS" | paste -sd,)
   SHARDS_C=$SHARDS_B
   GPU_A="${GPU_A:-0}"
+elif [ "$MODE" = continue ]; then
+  # As `whole`, with both holders at the default ceiling and on the processor.
+  SHARDS_A=""
+  SHARDS_B=$(echo "$SHARDS" | paste -sd,)
+  SHARDS_C=$SHARDS_B
+  GPU_A="${GPU_A:-0}"; GPU_B="${GPU_B:-0}"; GPU_C="${GPU_C:-0}"
 elif [ "$MODE" = mixed ] || [ "$MODE" = disputed ]; then
   # B and C both hold A's missing range; only B's header is from "another
   # upload". B holds EVERY part: a header shifted earlier then reads, for its
@@ -366,7 +382,7 @@ fi
 # tokenize, and it is a SEGMENT path (its own failover covers #111 there). The
 # whole-model path under test is what a coordinator runs once that path is off
 # for it — no header, or its payoff check has switched it off.
-[ "$MODE" = whole ] && printf '\n[inference]\nngram_lookup_enabled = false\n' >> "$BASE/A/config.toml"
+{ [ "$MODE" = whole ] || [ "$MODE" = continue ]; } && printf '\n[inference]\nngram_lookup_enabled = false\n' >> "$BASE/A/config.toml"
 # DELAY_A: A far from the others — every tensor it sends waits this long.
 PA=$(SWARMLLM_TEST_TENSOR_DELAY_MS="${DELAY_A:-0}" start "$BASE/A" 8900 "$BIN_A" "${GPU_A:-}")
 up "$BASE/A" 8900 || exit 1
@@ -437,6 +453,12 @@ fi
 PB=$(SWARMLLM_TEST_TENSOR_DELAY_MS="${DELAY_B:-0}" start "$BASE/B" 8920 "$BIN_B" "${GPU_B:-}")
 up "$BASE/B" 8920 || exit 1
 PEERS_EXPECTED=1
+if [ "$MODE" = continue ]; then
+  make_node "$BASE/C" "$SHARDS_C" "\"$ADDR\""
+  PC=$(start "$BASE/C" 8940 "$BIN_A" "${GPU_C:-0}")
+  up "$BASE/C" 8940 || exit 1
+  PEERS_EXPECTED=2
+fi
 if [ "$MODE" = failover ] || [ "$MODE" = context ] || [ "$MODE" = failover_mid ]; then
   # Processor only unless asked otherwise (all four nodes): four daemons on
   # one card is #104's setup, and a KV refusal there would read as a failover
@@ -820,6 +842,62 @@ else:
     print(f"remote: delegated arm — A handed {handed}/{n}, B led {led}/{n}, fell back {fell_back}")
 print("remote: PASS" if ok and mech else "remote: FAIL")
 sys.exit(0 if ok and mech else 1)
+PY
+  exit $?
+fi
+
+if [ "$MODE" = continue ]; then
+  id16() { curl -s -m 5 -H "Authorization: Bearer $(cat "$1")" "localhost:$2/api/admin/stats" \
+    | python3 -c 'import sys,json; print(json.load(sys.stdin)["node_id"][:16])'; }
+  IB=$(id16 "$BASE/B/api_key" 8920); IC=$(id16 "$BASE/C/api_key" 8940)
+  Q="Explain in detail how a refrigerator works, step by step, covering the compressor, the condenser, the expansion valve and the evaporator."
+  BODY=$(python3 -c 'import json,sys; print(json.dumps({"model":sys.argv[1],"max_tokens":300,"temperature":0,"stream":True,"messages":[{"role":"user","content":sys.argv[2]}]}))' "$MODEL" "$Q")
+  : > "$OUT/continue.sse"
+  curl -s -N -m 900 -H "Authorization: Bearer $KA" -H "Content-Type: application/json" \
+    -X POST localhost:8900/v1/chat/completions -d "$BODY" > "$OUT/continue.sse" &
+  CURL=$!
+  chunks() { grep -c '"content"' "$OUT/continue.sse" 2>/dev/null || echo 0; }
+  for _ in $(seq 1 600); do [ "$(chunks)" -ge "${KILL_AFTER:-24}" ] && break; kill -0 $CURL 2>/dev/null || break; sleep 0.5; done
+  SERVER=$(grep -a 'remote-generate fast path: request sent' "$BASE/A/node.log" | tail -1 | grep -oE 'target=[0-9a-f]+' | cut -d= -f2)
+  case "$SERVER" in "$IB"*) VICTIM=$PB; OTHER=$IC ;; "$IC"*) VICTIM=$PC; OTHER=$IB ;; *) VICTIM=""; OTHER="" ;; esac
+  AT_KILL=$(chunks)
+  WPID=$( [ -n "$VICTIM" ] && pgrep -P "$VICTIM" -f model-worker | head -1 )
+  echo "continue: A handed it to ${SERVER:-?}; killing its worker (pid ${WPID:-none}) after $AT_KILL chunks"
+  [ -n "$WPID" ] && kill -9 "$WPID"
+  wait $CURL
+  continued=$(grep -c "continuing it on a fresh route" "$BASE/A/node.log")
+  served_by_other=$(grep -a 'remote-generate fast path: request sent' "$BASE/A/node.log" | grep -c "target=${OTHER:-none}")
+  python3 - "$OUT/continue.sse" "$AT_KILL" "$continued" "$served_by_other" "${WPID:-}" <<'PY'
+import json, sys
+path, at_kill, continued, other, wpid = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4]), sys.argv[5]
+text, chunks, finish, error = "", 0, None, None
+for line in open(path, errors="replace"):
+    line = line.strip()
+    if not line.startswith("data:") or line == "data: [DONE]":
+        continue
+    try:
+        ev = json.loads(line[5:])
+    except Exception:
+        continue
+    if "error" in ev:
+        error = ev["error"]
+        continue
+    for ch in ev.get("choices", []):
+        c = (ch.get("delta") or {}).get("content")
+        if c:
+            text += c
+            chunks += 1
+        if ch.get("finish_reason"):
+            finish = ch["finish_reason"]
+opening = text[:40]
+once = bool(opening) and text.count(opening) == 1
+after = chunks - at_kill
+print(f"continue: {chunks} chunks ({after} after the kill), finish={finish}, error={'yes' if error else 'no'}, opening once={once}")
+print(f"continue: A continued {continued} time(s); the other peer was handed the request {other} time(s)")
+print("continue: reply: " + text[:400].replace("\n", " "))
+ok = bool(wpid) and error is None and finish is not None and after > 0 and once and continued >= 1 and other >= 1
+print("continue: PASS" if ok else "continue: FAIL" + ("" if wpid else " (no worker was killed)"))
+sys.exit(0 if ok else 1)
 PY
   exit $?
 fi

@@ -3193,6 +3193,7 @@ mod salvage_tests {
             tools: None,
             cancel: None,
             route_override: None,
+            continuation: None,
         };
         let (tx, _rx) = tokio::sync::mpsc::channel::<NetworkCommand>(8);
         let assignment = PipelineAssignment {

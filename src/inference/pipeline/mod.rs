@@ -1432,6 +1432,7 @@ mod tests {
             tools: None,
             cancel: None,
             route_override: None,
+            continuation: None,
         }
     }
 
@@ -1616,6 +1617,92 @@ mod tests {
                 .local_executor_serves(&request_for(&state, "anything"))
                 .await
         );
+    }
+
+    /// A continuation is honoured in the ONE place every path's prompt comes
+    /// from (FUTURE_WORK #236): the reply so far follows the rendered prompt,
+    /// inside the assistant turn, character for character. And the singleton
+    /// executor, which renders elsewhere, stands aside for it (the delegated
+    /// split's half is in `a_split_none_of_which_is_ours_is_led_by_its_head_and_only_that`).
+    #[tokio::test]
+    async fn a_continuation_follows_the_rendered_prompt_and_nothing_else_renders_it() {
+        let state = make_test_state();
+        let (tx, _rx) = mpsc::channel::<NetworkCommand>(64);
+        let assignment = |id| PipelineAssignment {
+            request_id: id,
+            segments: vec![],
+            standbys: vec![],
+            tp_groups: vec![],
+            supports_speculative: false,
+        };
+        let plain = make_test_request(&state);
+        let rendered = PipelineExecutor::new(
+            state.clone(),
+            tx.clone(),
+            plain.clone(),
+            assignment(plain.id),
+        )
+        .build_prompt_with_header(None)
+        .await;
+
+        let mut continued = plain.clone();
+        continued.continuation = Some(crate::types::ReplyContinuation {
+            text: "The capital of Fr".into(),
+            tokens: 5,
+        });
+        let exec =
+            PipelineExecutor::new(state.clone(), tx, continued.clone(), assignment(plain.id));
+        assert_eq!(
+            exec.build_prompt_with_header(None).await,
+            format!("{rendered}The capital of Fr")
+        );
+
+        // The singleton executor renders its own prompt too: never handed one.
+        *state.loaded_model_info.write().await = Some(crate::daemon::state::LoadedModelInfo {
+            name: "test".into(),
+            size_bytes: 0,
+            eos_tokens: vec![],
+            chat_template: None,
+            bos_token: String::new(),
+            eos_token: String::new(),
+        });
+        state
+            .model_loaded
+            .store(true, std::sync::atomic::Ordering::Release);
+        assert!(
+            state.local_executor_serves(&plain).await,
+            "fixture: it serves the plain request"
+        );
+        assert!(!state.local_executor_serves(&continued).await);
+    }
+
+    /// Every attempt records the peers it ran segments on — as planned and as
+    /// it ended — for the request's end, where they are told it is over (#238).
+    #[tokio::test]
+    async fn an_attempt_records_the_peers_it_was_planned_on() {
+        let state = make_test_state();
+        let (tx, _rx) = mpsc::channel::<NetworkCommand>(64);
+        let request = make_test_request(&state);
+        let peer = crate::types::NodeId([0x7E; 32]);
+        let assignment = PipelineAssignment {
+            request_id: request.id,
+            segments: vec![PipelineSegment {
+                node_id: peer.clone(),
+                shard_id: ShardId {
+                    model_id: request.model_id.clone(),
+                    index: 0,
+                },
+                layer_range: (0, 1),
+            }],
+            standbys: vec![],
+            tp_groups: vec![],
+            supports_speculative: false,
+        };
+        let rid = request.id;
+        let mut executor = PipelineExecutor::new(state.clone(), tx, request, assignment);
+        // It fails — the peer is unknown here — and records the peer anyway.
+        let _ = executor.execute(None).await;
+        assert_eq!(state.take_request_peers(rid), vec![peer]);
     }
 
     #[tokio::test]

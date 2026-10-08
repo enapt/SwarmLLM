@@ -367,6 +367,12 @@ pub(crate) fn delegation_eligible(exec: &PipelineExecutor) -> bool {
     if exec.request.route_override.is_some() {
         return false;
     }
+    // The delegate renders the conversation itself from `messages`, so a
+    // continuation — the reply so far appended to the prompt HERE — would be
+    // lost; this node coordinates it instead (FUTURE_WORK #236).
+    if exec.request.continuation.is_some() {
+        return false;
+    }
     let head = &segments[0];
     if head.layer_range.0 != 0 {
         return false;

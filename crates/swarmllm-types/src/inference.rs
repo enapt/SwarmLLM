@@ -56,6 +56,24 @@ pub struct InferenceRequest {
     /// `#[serde(skip)]` it is not a protocol change and needs no feature bit.
     #[serde(skip)]
     pub route_override: Option<RoutePlanOverride>,
+    /// The reply so far, when this request is a CONTINUATION of one whose
+    /// machine failed mid-stream: the executor renders the prompt as usual and
+    /// appends this, inside the assistant turn, so the model goes on from where
+    /// the reader's stream stopped (FUTURE_WORK #236, the mid-reply
+    /// continuation plan). Local only, like `route_override`: never a protocol
+    /// change.
+    #[serde(skip)]
+    pub continuation: Option<ReplyContinuation>,
+}
+
+/// What a continued request has already sent its reader.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ReplyContinuation {
+    /// The raw text streamed so far, exactly as the reader received it.
+    pub text: String,
+    /// How many text events carried it — the tokens already generated, as
+    /// near as the stream can say (an event is one token on every path).
+    pub tokens: u32,
 }
 
 impl InferenceRequest {
@@ -89,6 +107,7 @@ impl InferenceRequest {
             tools,
             cancel: None,
             route_override: None,
+            continuation: None,
         }
     }
 

@@ -342,6 +342,54 @@ fn should_retry_after(
 /// already decided was warranted, not to keep dialling.
 const MAX_REPLANS: u32 = 2;
 
+/// How many times one reply may be continued after its machine failed
+/// mid-stream (`continuation_after`). Each continuation re-reads the whole
+/// conversation so far, so a reply whose every route fails is ended after two
+/// rather than walked around the swarm.
+const MAX_CONTINUATIONS: u32 = 2;
+
+/// Should a reply that has already reached its reader, and then failed, be
+/// CONTINUED on a fresh route (FUTURE_WORK #236)? The single answer, pure so
+/// the rule is testable without a router; returns what the continuation
+/// resumes from.
+///
+/// A re-plan restarts from the prompt, so `should_retry_after` refuses one once
+/// text has been streamed — the reader would watch the answer begin again. A
+/// continuation resumes from exactly what the reader received instead
+/// (Petals replays a failed server's input history to its replacement; vLLM
+/// recomputes a preempted sequence from its tokens). It takes the failures a
+/// different route could answer — the classes `should_retry_after` re-plans —
+/// and one more: a reply that lost tokens in transit, where continuing from
+/// what the reader saw is exactly right. A peer's context limit is not one of
+/// them: the continuation is longer still.
+fn continuation_after(
+    output: &Result<InferenceOutput, SwarmError>,
+    streamed: crate::types::ReplyContinuation,
+    used_remote_segment: bool,
+    cancelled: bool,
+    continuations: u32,
+    max_tokens: u32,
+) -> Option<crate::types::ReplyContinuation> {
+    let Err(err) = output else {
+        return None;
+    };
+    if cancelled || continuations >= MAX_CONTINUATIONS || streamed.text.is_empty() {
+        return None;
+    }
+    if streamed.tokens >= max_tokens {
+        // The reply reached its budget: there is nothing left to continue.
+        return None;
+    }
+    let another_route_could_answer = is_transient_remote_failure(err)
+        || local_memory_refused_the_load(err)
+        || matches!(err, SwarmError::ReplyTruncated(_))
+        || (used_remote_segment
+            && (remote_peer_could_not_serve(err)
+                || segment_ran_out_of_machines(err)
+                || peer_went_silent(err)));
+    another_route_could_answer.then_some(streamed)
+}
+
 /// A refusal that arrives this fast cost a round trip, not a deadline.
 ///
 /// Peer round-trips on this swarm run 0.6–1.7 s and the measured refusal took
@@ -1437,6 +1485,59 @@ impl InferenceRouter {
                 )
                 .await;
                 attempt_took = started.elapsed();
+            }
+            // A reply already under way whose machine failed is CONTINUED on a
+            // fresh route from exactly what its reader received, on the same
+            // token channel, rather than ended after part of it was shown
+            // (FUTURE_WORK #236; `continuation_after` is the rule). Whoever
+            // produced the error has already barred the machine that failed.
+            let mut continuations = 0;
+            while let Some(resume) = continuation_after(
+                &output,
+                trace.streamed_so_far(),
+                trace.snapshot().remote_segments() > 0,
+                request.is_cancelled(),
+                continuations,
+                request.sampling_params.max_tokens,
+            ) {
+                continuations += 1;
+                if output.as_ref().is_err_and(local_memory_refused_the_load) {
+                    shared_state.note_local_memory_refusal(request.id);
+                }
+                tracing::warn!(
+                    request_id = %request.id,
+                    error = %output.as_ref().err().map(ToString::to_string).unwrap_or_default(),
+                    continuation = continuations,
+                    tokens_sent = resume.tokens,
+                    "DIAG: the reply's machine failed mid-stream — continuing it on a fresh route \
+                     from what the reader has received"
+                );
+                let mut continued = request.clone();
+                continued.sampling_params.max_tokens = request
+                    .sampling_params
+                    .max_tokens
+                    .saturating_sub(resume.tokens);
+                continued.continuation = Some(resume.clone());
+                output = execute_request(
+                    shared_state.clone(),
+                    network_tx.clone(),
+                    scheduler.clone(),
+                    continued,
+                    token_tx.clone(),
+                    None,
+                    trace.clone(),
+                )
+                .await;
+                if let Ok(ref mut whole) = output {
+                    // The reply is everything the reader received, finalised
+                    // once, as a reply from one machine is.
+                    let streamed = trace.streamed_so_far();
+                    let mut text = streamed.text;
+                    crate::inference::finalize_reply_text(&mut text, &[]);
+                    whole.content = text;
+                    whole.completion_tokens = streamed.tokens.max(whole.completion_tokens);
+                    whole.prompt_tokens = whole.prompt_tokens.saturating_sub(resume.tokens);
+                }
             }
             // Nowhere else could serve it either — report the refusal that
             // actually stopped the request.

@@ -1335,6 +1335,46 @@ model alone.
 
 → `docs/invariants/scheduling.md`
 
+## A reply whose machine failed mid-stream is continued
+
+(2026-10-08, FUTURE_WORK #236; design `docs/plans/mid_reply_continuation.md`.) Once a
+streamed reply has started, `should_retry_after` refuses a re-plan — a retry from the
+prompt would show the reader the answer beginning again — so a peer that refused,
+restarted or went silent mid-reply ended the reply with an error after part of it was
+shown (report #005: 71 s in). Petals does not end it: `InferenceSession` replays a
+failed server's input history to its replacement; vLLM recomputes a preempted sequence
+from its tokens. Both resume from what was generated.
+
+So the router resumes from what the READER RECEIVED, the one record that is exact:
+`StreamingTokenTx` — the sender every emit site already goes through for TTFT —
+appends each event's text to the trace once its send SUCCEEDED (a token that never
+reached the reader is never resumed past; `try_send` on a full channel is the case),
+kept out of every snapshot and dropped when the request finishes. `continuation_after`
+decides: the re-plan's failure classes, plus a reply that lost tokens in transit, not a
+peer's context limit (the continuation is longer), never once the caller left, the
+budget is spent or `MAX_CONTINUATIONS` (2) is reached. The continued request carries the
+text as `InferenceRequest::continuation` (`#[serde(skip)]`, local) and `max_tokens` less
+what was sent; `PipelineExecutor::build_prompt_with_header` — every path's prompt —
+appends it inside the opened assistant turn. A delegated split (the delegate renders
+`messages`) and the in-process executor stand aside. The reply reported at the end is
+everything the reader received, finalised once.
+
+**This is not the takeover below.** That one moves a segment's KV state to a stand-in
+mid-pipeline and refuses a partial replay; a continuation re-reads the whole
+conversation from text on a fresh route, so it needs no retained state at all.
+
+Rig `split_rig.sh continue` (TinyLlama, A holds the header, B and C hold the model, all
+on the processor; the serving peer's worker is killed mid-reply): v0.3.230 — 32 chunks,
+then an error, no continuation; main — killed after 27 chunks, continued on the other
+peer 25 ms later, 300 chunks in all (`finish=length`: the budget held across both parts),
+no error, the opening once, joined as "…evaporator to cool" + " a space. The compressor
+is responsible". Tests: `a_reply_under_way_is_continued_only_when_another_route_could_answer`,
+`the_token_channel_records_only_what_reached_the_reader`,
+`a_continuation_follows_the_rendered_prompt_and_nothing_else_renders_it`, the delegated
+split's case in `a_split_none_of_which_is_ours_is_led_by_its_head_and_only_that` (each
+red with its half off). Not covered: the batched dispatch path, which has no re-plan of
+any kind.
+
 ## A reply under way is never moved to a machine that cannot continue it
 
 `distributed::failover_can_restore_state(sequence_num)` — true only on the

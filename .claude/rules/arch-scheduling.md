@@ -131,6 +131,12 @@ A re-plan with the refusing holder barred can only describe its own search ("has
 
 → `docs/invariants/scheduling.md` § "A forward the peer could not open goes to it again, once the link is re-keyed"
 
+## A reply whose machine failed mid-stream is CONTINUED from what its reader received (2026-10-08)
+
+**`router::continuation_after` is the single answer** to "may a reply that already reached its reader go on after a failure": the re-plan's failure classes plus `ReplyTruncated`, at most `MAX_CONTINUATIONS`, from `RequestTrace::streamed_so_far` — text recorded by `StreamingTokenTx` only after a send SUCCEEDED. The continued request carries `InferenceRequest::continuation`, honoured ONLY in `PipelineExecutor::build_prompt_with_header` (every path's prompt); a path rendering elsewhere stands aside (`delegation_eligible`, `local_executor_serves`). Rig: `split_rig.sh continue` (#236).
+
+→ `docs/invariants/scheduling.md` § "A reply whose machine failed mid-stream is continued"
+
 ## A reply under way is never moved to a machine that cannot continue it
 
 `distributed::failover_can_restore_state(sequence_num)` is asked by `failover_segment` BEFORE looking for a stand-in; else `SegmentFailoverExhausted`. A stand-in is given state only by `assemble_replay` over `state.retained_activations` (keyed by LAYER RANGE; `restorable_history` must be contiguous). Never a partial replay.

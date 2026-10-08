@@ -215,6 +215,7 @@ mod tests {
             tools: None,
             cancel: None,
             route_override: None,
+            continuation: None,
         };
         let (tx, _rx) = tokio::sync::mpsc::channel::<NetworkCommand>(8);
         let assignment = PipelineAssignment {
@@ -550,6 +551,16 @@ mod tests {
         assert!(
             !delegation_eligible(&exec),
             "an adapter is this node's own, so the request stays here"
+        );
+        let mut exec = executor_for(state.clone(), split.clone());
+        exec.request.continuation = Some(crate::types::ReplyContinuation {
+            text: "The capital".into(),
+            tokens: 2,
+        });
+        assert!(
+            !delegation_eligible(&exec),
+            "a continuation's reply so far is appended here; the delegate renders the messages \
+             itself and would lose it (#236)"
         );
 
         state

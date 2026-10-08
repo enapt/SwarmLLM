@@ -285,7 +285,27 @@ impl PipelineExecutor {
     }
 
     /// Build chat prompt using pre-parsed GGUF header data or loaded_model_info fallback.
+    ///
+    /// **The one place every path's prompt comes from** — local whole model,
+    /// hand-off, split, speculation — so it is where a CONTINUATION is honoured:
+    /// a reply whose machine failed mid-stream is rendered as usual and the
+    /// text the reader has already been sent is appended, inside the opened
+    /// assistant turn, so the model goes on from there (FUTURE_WORK #236). The
+    /// paths that render elsewhere stand aside for a continuation
+    /// (`remote_generate::delegation_eligible`,
+    /// `SharedState::local_executor_serves`).
     pub(super) async fn build_prompt_with_header(
+        &self,
+        header_data: Option<&(Option<String>, String, String)>,
+    ) -> String {
+        let mut prompt = self.render_messages_prompt(header_data).await;
+        if let Some(c) = &self.request.continuation {
+            prompt.push_str(&c.text);
+        }
+        prompt
+    }
+
+    async fn render_messages_prompt(
         &self,
         header_data: Option<&(Option<String>, String, String)>,
     ) -> String {

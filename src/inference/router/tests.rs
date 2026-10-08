@@ -61,6 +61,7 @@ fn make_request(priority: PriorityTier) -> InferenceRequest {
         tools: None,
         cancel: None,
         route_override: None,
+        continuation: None,
     }
 }
 
@@ -83,6 +84,7 @@ fn make_request_with_model(priority: PriorityTier, model: &str) -> InferenceRequ
         tools: None,
         cancel: None,
         route_override: None,
+        continuation: None,
     }
 }
 
@@ -1018,4 +1020,140 @@ async fn a_finished_request_tells_each_of_its_peers_once() {
 
     super::distributed_exec::release_request_on_peers(&state, &tx, rid);
     assert!(rx.try_recv().is_err(), "told once: the record was taken");
+}
+
+/// What `continuation_after` continues, and what it leaves ended (FUTURE_WORK
+/// #236). A reply under way whose machine failed in a way another route could
+/// answer is continued from what its reader received — and never when nothing
+/// was sent, the caller left, the budget is spent, the cap is reached, or the
+/// failure is one no route fixes.
+#[test]
+fn a_reply_under_way_is_continued_only_when_another_route_could_answer() {
+    use super::continuation_after;
+    use crate::error::SwarmError;
+    use crate::types::ReplyContinuation;
+    let sent = || ReplyContinuation {
+        text: "The capital of".into(),
+        tokens: 4,
+    };
+    let went_silent = || {
+        Err(SwarmError::PeerUnresponsive(
+            "timed out waiting for token".into(),
+        ))
+    };
+    let refused = || {
+        Err(SwarmError::ServiceUnavailable(
+            "Not enough free memory on this node to continue this conversation".into(),
+        ))
+    };
+
+    assert_eq!(
+        continuation_after(&went_silent(), sent(), true, false, 0, 64),
+        Some(sent())
+    );
+    assert_eq!(
+        continuation_after(&refused(), sent(), true, false, 0, 64),
+        Some(sent())
+    );
+    assert!(
+        continuation_after(
+            &Err(SwarmError::ReplyTruncated("3 of 9".into())),
+            sent(),
+            true,
+            false,
+            0,
+            64
+        )
+        .is_some(),
+        "tokens lost in transit: continuing from what the reader saw is exactly right"
+    );
+    assert!(
+        continuation_after(
+            &Err(SwarmError::LocalMemoryUnavailable("ours".into())),
+            sent(),
+            false,
+            false,
+            0,
+            64
+        )
+        .is_some(),
+        "our own memory refusing mid-reply re-plans onto peers"
+    );
+
+    // Nothing left to resume from, or nobody to resume for.
+    let nothing = ReplyContinuation::default();
+    assert!(continuation_after(&went_silent(), nothing, true, false, 0, 64).is_none());
+    assert!(continuation_after(&went_silent(), sent(), true, true, 0, 64).is_none());
+    assert!(
+        continuation_after(&went_silent(), sent(), true, false, 0, 4).is_none(),
+        "budget spent"
+    );
+    assert!(continuation_after(
+        &went_silent(),
+        sent(),
+        true,
+        false,
+        super::MAX_CONTINUATIONS,
+        64
+    )
+    .is_none());
+    // A failure no route fixes, a peer's word with no peer in the plan, and success.
+    assert!(continuation_after(
+        &Err(SwarmError::Validation("bad".into())),
+        sent(),
+        true,
+        false,
+        0,
+        64
+    )
+    .is_none());
+    assert!(continuation_after(&refused(), sent(), false, false, 0, 64).is_none());
+    assert!(
+        continuation_after(
+            &Err(SwarmError::LongerThanPeerServes("8192".into())),
+            sent(),
+            true,
+            false,
+            0,
+            64
+        )
+        .is_none(),
+        "a continuation is longer still"
+    );
+}
+
+/// The token channel records text the reader was HANDED — and nothing that
+/// failed to reach it, or a continuation would resume past words never shown.
+#[tokio::test]
+async fn the_token_channel_records_only_what_reached_the_reader() {
+    use super::types::{StreamingTokenEvent, StreamingTokenTx};
+    let trace = std::sync::Arc::new(crate::inference::trace::RequestTrace::new(
+        uuid::Uuid::new_v4(),
+        "m",
+        "chat",
+    ));
+    let (tx, mut rx) = StreamingTokenTx::channel(1);
+    let tx = tx.with_trace(trace.clone());
+    let ev = |t: &str| StreamingTokenEvent {
+        text: t.into(),
+        finish_reason: None,
+        matched_stop_sequence: None,
+    };
+    tx.send(ev("Paris")).await.unwrap();
+    assert!(
+        tx.try_send(ev(" is")).is_err(),
+        "fixture: the one slot is full"
+    );
+    let _ = rx.recv().await;
+    tx.try_send(ev(" big")).unwrap();
+    let so_far = trace.streamed_so_far();
+    assert_eq!(so_far.text, "Paris big");
+    assert_eq!(so_far.tokens, 2);
+
+    // Gone when the request finishes: a finished reply is continued no more.
+    trace.mark_finished(crate::inference::trace::Outcome::Ok, 0, 0);
+    assert_eq!(
+        trace.streamed_so_far(),
+        crate::types::ReplyContinuation::default()
+    );
 }

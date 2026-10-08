@@ -59,12 +59,27 @@ impl StreamingTokenTx {
         }
     }
 
+    /// Record text the reader has now been handed — what a continuation
+    /// resumes from (FUTURE_WORK #236). Only after the send succeeded: a token
+    /// that never reached the reader must not be resumed past.
+    #[inline]
+    fn delivered(&self, text: &str) {
+        if let Some(ref t) = self.trace {
+            t.note_streamed(text);
+        }
+    }
+
     pub async fn send(
         &self,
         event: StreamingTokenEvent,
     ) -> Result<(), mpsc::error::SendError<StreamingTokenEvent>> {
         self.stamp(&event);
-        self.inner.send(event).await
+        let text = event.text.clone();
+        let sent = self.inner.send(event).await;
+        if sent.is_ok() {
+            self.delivered(&text);
+        }
+        sent
     }
 
     pub fn try_send(
@@ -72,7 +87,12 @@ impl StreamingTokenTx {
         event: StreamingTokenEvent,
     ) -> Result<(), mpsc::error::TrySendError<StreamingTokenEvent>> {
         self.stamp(&event);
-        self.inner.try_send(event)
+        let text = event.text.clone();
+        let sent = self.inner.try_send(event);
+        if sent.is_ok() {
+            self.delivered(&text);
+        }
+        sent
     }
 
     /// Hand a token to the consumer from a synchronous generation loop,
@@ -88,7 +108,12 @@ impl StreamingTokenTx {
         // Stamp before the offer, as `try_send` does: TTFT is when the token
         // was ready, not when a busy consumer got round to taking it.
         self.stamp(&event);
-        crate::api::sse_send_live_blocking(&self.inner, event)
+        let text = event.text.clone();
+        let sent = crate::api::sse_send_live_blocking(&self.inner, event);
+        if sent {
+            self.delivered(&text);
+        }
+        sent
     }
 
     pub fn is_closed(&self) -> bool {
