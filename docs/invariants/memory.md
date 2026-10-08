@@ -72,6 +72,47 @@ one local failure the router re-plans, and in the reported case a five-segment
 route across peers had been priced one line earlier in the same scheduling pass
 and was discarded when the refusal read as final.
 
+## A conversation that is over gives its room to one that is not
+
+(2026-10-08, FUTURE_WORK #235, report #005.) A reply 71 s into a whole-model
+hand-off was refused by the peer serving it — "other conversations on this node
+are using 330 MB of the 469 MB budget. It fits once they finish" — and, already
+streaming, could not be re-planned. Two things made those conversations hold the
+room, and neither is the peer's fault:
+
+- **A node serving a SEGMENT is never told the reply finished.** `ReleaseRequestKv`
+  (above) is sent by `release_request_kv` to the COORDINATOR's own workers; a peer
+  running layers for that request keeps the cache. The section above assumed a
+  ten-minute idle sweep would bound it.
+- **A worker never ran that sweep.** Its `KvCacheStore` was built with the TTL
+  (`--kv-cache-ttl`, 600 s) since the store's first version, and `cleanup_expired`
+  was called only on the DAEMON's store (`router/mod.rs`'s cache tick). So every
+  segment a node served for another computer stayed in its worker's store for as
+  long as that worker lived, and counted as "other conversations" against every
+  live one.
+
+Fixed on both sides of the trade. The worker sweeps on its 30 s occupancy tick
+(guard `a_workers_kv_store_is_swept_by_the_worker_that_builds_it`, with a planted
+self-test). And when a live conversation needs the room — a prompt's admission, a
+reply's growth claim — caches silent for `FINISHED_CONVERSATION_AFTER` go first,
+before the prefix cache's snapshots (which may yet be reused) and before any
+refusal. That figure IS `process_pool::CONVERSATION_GAP_SECS`, the daemon's
+reading of "this conversation is over", so the two cannot disagree.
+
+**The trade, stated.** A conversation that was only WAITING that long — a long
+prompt pass on a later machine of its chain — loses its cache here and is refused
+at its next forward (`forward_lacks_its_conversation`, visibly, never decoded from
+nothing). It has shown its reader nothing yet, so the router re-plans it. A reply
+refused mid-stream cannot be re-planned at all. vLLM's preemption chooses the same
+way: the request that can be recomputed gives way to the one being served.
+
+Tests: `a_finished_conversation_gives_its_room_to_a_live_one` (red with the release
+off; controls: a conversation silent for half the gap keeps its cache and the claim
+is refused as before, and the claimant's own cache is never released),
+`the_ttl_sweep_removes_a_conversation_nobody_released`. What it does not do: tell a
+segment peer the reply ended (#238), or see the peer's room before choosing it
+(#237); a reply whose peer refuses mid-stream still ends (#236).
+
 ## `inference::worker_ipc::worker_error_is_fatal`
 
 (R146) — the single

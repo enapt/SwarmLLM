@@ -798,9 +798,12 @@ pub struct SharedState {
     /// the failover it is meant to be.
     ///
     /// Read by [`crate::inference::scheduler`] when deciding whether this node
-    /// may take the whole model; released by
-    /// [`SharedState::release_request_state`] with every other per-request map.
-    pub local_memory_refusals: dashmap::DashSet<uuid::Uuid>,
+    /// may take the whole model, and how many NEW layers it may take in a split
+    /// — the value is the fewest layers the loader refused to add, when the
+    /// refusal came from a load (`ModelProcessPool::take_layers_refused`);
+    /// released by [`SharedState::release_request_state`] with every other
+    /// per-request map.
+    pub local_memory_refusals: dashmap::DashMap<uuid::Uuid, Option<u32>>,
 
     /// Requests planned past the memory their holders OFFER, with what was offered.
     ///
@@ -1448,7 +1451,7 @@ impl SharedState {
             local_capability: arc_swap::ArcSwapOption::empty(),
             perf_history: perf_history::PerfHistory::load(&db),
             request_holder_blacklist: DashMap::new(),
-            local_memory_refusals: dashmap::DashSet::new(),
+            local_memory_refusals: dashmap::DashMap::new(),
             planned_past_offered_memory: DashMap::new(),
             route_plan_overrides: DashMap::new(),
             salvaged_replies: DashMap::new(),

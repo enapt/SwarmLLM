@@ -842,7 +842,7 @@ impl SplitModel {
                 // device memory, and charged nowhere until gotcha #440 —
                 // and evictable, which `claim_room` does before refusing.
                 if let Err(refused) =
-                    kv_cache_store.claim_room(budget, self.kv_bytes_per_token, claiming)
+                    kv_cache_store.claim_room(budget, self.kv_bytes_per_token, claiming, request_id)
                 {
                     let in_use = refused.in_use_bytes;
                     // Whether OTHER conversations hold the room this one needs

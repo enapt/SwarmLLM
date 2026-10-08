@@ -588,6 +588,14 @@ impl std::ops::DerefMut for LayerKv {
     }
 }
 
+/// How long a conversation's cache may sit untouched before it counts as OVER
+/// when another needs the room — the daemon's own figure
+/// (`process_pool::CONVERSATION_GAP_SECS`), so the two never disagree about
+/// whether a conversation is still going. See
+/// [`KvCacheStore::release_finished_conversations`].
+pub(crate) const FINISHED_CONVERSATION_AFTER: std::time::Duration =
+    std::time::Duration::from_secs(crate::inference::process_pool::CONVERSATION_GAP_SECS);
+
 /// Concurrent per-request KV-cache storage.
 ///
 /// Instead of storing KV-cache inside `LayerWeights` (which couples cache lifetime
@@ -1119,11 +1127,17 @@ impl KvCacheStore {
     /// because the guard could see the cached prompts and not shrink them,
     /// where the release before had served it (slowly). A refusal names what
     /// the device held so the message can say so.
+    ///
+    /// Before either, conversations that are OVER give their room up
+    /// ([`Self::release_finished_conversations`]): they are worth less than a
+    /// cached prompt, which may yet be reused, and far less than the reply
+    /// `claimant` is in the middle of.
     pub(crate) fn claim_room(
         &self,
         budget_bytes: u64,
         kv_bytes_per_token: u64,
         positions: usize,
+        claimant: &str,
     ) -> Result<(), ClaimRefused> {
         use super::kv_budget::claim_exceeds_headroom;
         let claim = kv_bytes_per_token.saturating_mul(positions as u64);
@@ -1132,6 +1146,13 @@ impl KvCacheStore {
         if !claim_exceeds_headroom(budget_bytes, in_use(&occ), kv_bytes_per_token, positions) {
             return Ok(());
         }
+        if self.release_finished_conversations(FINISHED_CONVERSATION_AFTER, claimant) > 0 {
+            let occ = self.occupancy();
+            if !claim_exceeds_headroom(budget_bytes, in_use(&occ), kv_bytes_per_token, positions) {
+                return Ok(());
+            }
+        }
+        let occ = self.occupancy();
         let excess = in_use(&occ).saturating_add(claim) - budget_bytes;
         if occ.external_bytes > 0 {
             let freed = match self.external_evictor.lock() {
@@ -1339,6 +1360,63 @@ impl KvCacheStore {
         self.owner_requests.remove(request_id);
     }
 
+    /// Drop the cache of every conversation nobody has touched for `idle` — a
+    /// reply that is over — except `keep`'s, with the bookkeeping of each
+    /// request left with no cache at all. Returns the bytes freed.
+    ///
+    /// **A node serving a SEGMENT of another computer's request is never told
+    /// that the reply finished.** `ReleaseRequestKv` reaches only the
+    /// coordinator's own workers, and a worker's store never ran its TTL sweep
+    /// at all — so those caches stayed for as long as the worker lived, and a
+    /// live reply on the same worker was refused for "other conversations on
+    /// this node" that had ended (report #005, 2026-10-07: 330 MB of a 469 MB
+    /// budget, 71 s into a reply that had already streamed, so nothing could
+    /// re-plan it).
+    ///
+    /// Asked only when a live conversation needs the room — at prompt admission
+    /// and at a growth claim — and only of caches silent for
+    /// [`FINISHED_CONVERSATION_AFTER`], the daemon's own reading of a finished
+    /// conversation. One that was in fact only waiting (a long prompt pass on a
+    /// later machine of the chain) is refused at its next forward
+    /// (`model_worker::forward_lacks_its_conversation`) before any of its reply
+    /// has reached anyone, which the router re-plans; a reply refused mid-stream
+    /// is lost. That is the trade, and it is vLLM's direction too: it preempts
+    /// the request that can be recomputed, not the one being served.
+    pub(crate) fn release_finished_conversations(
+        &self,
+        idle: std::time::Duration,
+        keep: &str,
+    ) -> u64 {
+        let mut freed = 0u64;
+        let mut finished: Vec<String> = Vec::new();
+        self.caches.retain(|key, entry| {
+            let request = key.split('\0').nth(1).unwrap_or_default();
+            if request == keep || entry.last_accessed.elapsed() < idle {
+                return true;
+            }
+            freed = freed.saturating_add(entry.occupancy().0);
+            finished.push(request.to_string());
+            false
+        });
+        finished.sort_unstable();
+        finished.dedup();
+        for request in &finished {
+            let suffix = format!("\0{request}");
+            if !self.caches.iter().any(|e| e.key().ends_with(&suffix)) {
+                self.forget_request_bookkeeping(request);
+            }
+        }
+        if !finished.is_empty() {
+            tracing::info!(
+                conversations = finished.len(),
+                freed_mb = freed / (1024 * 1024),
+                idle_secs = idle.as_secs(),
+                "DIAG: KV cache — released conversations that had ended, for one that needs the room"
+            );
+        }
+        freed
+    }
+
     /// Remove all cache entries for a given request_id (across all models).
     pub fn cleanup_request_id(&self, request_id: &str) {
         self.forget_request_bookkeeping(request_id);
@@ -1403,7 +1481,7 @@ mod tests {
 
         // A budget of zero refuses anything, which is all this needs.
         let refused = store
-            .claim_room(0, 1024, 1)
+            .claim_room(0, 1024, 1, "r")
             .expect_err("a zero budget must refuse");
         assert_eq!(
             refused.in_use_bytes,
@@ -1811,22 +1889,95 @@ mod tests {
             }));
         }
         // Budget covers live + cached + a claim of 10 at 1 byte: fits, no eviction.
-        assert!(store.claim_room(live + 1000 + 10, 1, 10).is_ok());
+        assert!(store.claim_room(live + 1000 + 10, 1, 10, "r").is_ok());
         assert_eq!(evictor_calls.load(Ordering::Relaxed), 0);
         // 300 over: the evictor gives back 300 and the claim is admitted.
-        assert!(store.claim_room(live + 1000 + 10 - 300, 1, 10).is_ok());
+        assert!(store.claim_room(live + 1000 + 10 - 300, 1, 10, "r").is_ok());
         assert_eq!(store.occupancy().external_bytes, 700);
         // Now 800 over what remains: only 300 more can go; refused, naming
         // what the device still holds after the eviction.
         let refused = store
-            .claim_room(live + 700 + 10 - 800, 1, 10)
+            .claim_room(live + 700 + 10 - 800, 1, 10, "r")
             .expect_err("cannot fit even with every evictable byte gone");
         assert_eq!(store.occupancy().external_bytes, 400);
         assert_eq!(refused.in_use_bytes, live + 400);
         // With no evictor installed a store refuses as it always did.
         let bare = KvCacheStore::new(std::time::Duration::from_secs(60));
         bare.set_external_reserved(1000);
-        assert!(bare.claim_room(500, 1, 10).is_err());
+        assert!(bare.claim_room(500, 1, 10, "r").is_err());
+    }
+
+    /// A cache for `request`, last touched `idle` ago, holding `n` positions.
+    fn conversation(store: &KvCacheStore, request: &str, n: usize, idle: std::time::Duration) {
+        let mut entry = store.get_or_create("m", request, 1);
+        let k = Tensor::zeros((1usize, 2, n, 4), DType::F32, &Device::Cpu).unwrap();
+        let mut kv = new_kv_cache(4096, true, 0);
+        kv.append(&k, &k.clone()).unwrap();
+        entry.layers[0] = Some(kv);
+        entry.last_accessed = std::time::Instant::now()
+            .checked_sub(idle)
+            .expect("a clock old enough to express the idle time");
+    }
+
+    /// **A conversation that is over gives its room to one that is not**
+    /// (report #005, 2026-10-07). A node serving a segment of another
+    /// computer's request is never told the reply ended, and a worker never
+    /// swept its store, so a live reply 71 s in was refused for 330 MB of
+    /// "other conversations" that had finished. Two controls: a conversation
+    /// touched recently keeps its cache and the claim is refused as before,
+    /// and the claimant's own cache is never released, however old.
+    #[test]
+    fn a_finished_conversation_gives_its_room_to_a_live_one() {
+        let gap = FINISHED_CONVERSATION_AFTER;
+        let long_ago = gap + std::time::Duration::from_secs(1);
+        let store = KvCacheStore::new(std::time::Duration::from_secs(600));
+        conversation(&store, "ended", 4, long_ago);
+        let one = store.occupancy().allocated_bytes;
+        conversation(&store, "live", 4, std::time::Duration::ZERO);
+        store.set_reserved_positions("ended", 1024);
+        // Room for both caches only: a claim of 10 more bytes does not fit
+        // until the ended conversation goes.
+        assert!(store.claim_room(2 * one, 1, 10, "live").is_ok());
+        let occ = store.occupancy();
+        assert_eq!(
+            occ.entries, 1,
+            "the ended conversation's cache was released"
+        );
+        assert!(store.request_holds_state("m", "live"));
+        assert!(!store.request_holds_state("m", "ended"));
+        assert_eq!(
+            store.reserved_positions("ended"),
+            0,
+            "its bookkeeping went with it"
+        );
+
+        // THE CONTROL: the same claim beside a conversation still going.
+        let busy = KvCacheStore::new(std::time::Duration::from_secs(600));
+        conversation(&busy, "other", 4, gap / 2);
+        conversation(&busy, "live", 4, std::time::Duration::ZERO);
+        assert!(busy.claim_room(2 * one, 1, 10, "live").is_err());
+        assert_eq!(busy.occupancy().entries, 2);
+
+        // The claimant's own cache stays, however long it was silent.
+        let own = KvCacheStore::new(std::time::Duration::from_secs(600));
+        conversation(&own, "live", 4, long_ago);
+        assert_eq!(own.release_finished_conversations(gap, "live"), 0);
+        assert!(own.request_holds_state("m", "live"));
+    }
+
+    /// The TTL sweep the worker now runs removes what nobody released.
+    #[test]
+    fn the_ttl_sweep_removes_a_conversation_nobody_released() {
+        let store = KvCacheStore::new(std::time::Duration::from_secs(600));
+        conversation(
+            &store,
+            "served-for-a-peer",
+            4,
+            std::time::Duration::from_secs(601),
+        );
+        conversation(&store, "recent", 4, std::time::Duration::ZERO);
+        assert_eq!(store.cleanup_expired(), 1);
+        assert!(store.request_holds_state("m", "recent"));
     }
 
     /// An empty store reports nothing rather than dividing by zero.

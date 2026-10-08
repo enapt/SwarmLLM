@@ -589,6 +589,12 @@ pub async fn run_worker(
         // idle worker blocks on IPC so it does not run at all.
         if last_kv_report.elapsed().as_secs() >= KV_OCCUPANCY_REPORT_SECS {
             last_kv_report = std::time::Instant::now();
+            // The store's TTL sweep. It was configured (`--kv-cache-ttl`)
+            // and never run in a worker — only the daemon's own store was
+            // swept — so a conversation nobody released (a segment served for
+            // another computer, whose coordinator releases only its own
+            // workers) stayed for the worker's whole life (report #005).
+            kv_store.cleanup_expired();
             let occ = kv_store.occupancy();
             if occ.entries > 0 {
                 tracing::debug!(
@@ -2962,7 +2968,7 @@ fn ensure_room_for_prompt(
     // memory the previous one has already been promised. Drawn down by what
     // each has actually allocated, so nothing is charged twice.
     let promised = kv_store.outstanding_admission_bytes();
-    let live = occupancy.allocated_bytes.saturating_add(promised);
+    let mut live = occupancy.allocated_bytes.saturating_add(promised);
     let cached = prefix_cache.bytes_total() as u64;
     // Nothing of THIS request is in the store yet, so anything live belongs to
     // an earlier one — a request still decoding, or one whose cache outlived
@@ -2992,7 +2998,20 @@ fn ensure_room_for_prompt(
     let load_time_budget = model.kv_budget().0.unwrap_or(budget);
     let mb = |b: u64| b / (1024 * 1024);
     use crate::inference::split::kv_budget::{admit_prompt, PromptAdmission};
-    let verdict = admit_prompt(budget, live, cached, per_token, positions);
+    let mut verdict = admit_prompt(budget, live, cached, per_token, positions);
+    // Conversations that are over give their room up before a cached prompt
+    // does, and before this one is refused: a node serving segments for other
+    // computers is never told their replies ended (report #005).
+    if !matches!(verdict, PromptAdmission::Fits) {
+        let freed = kv_store.release_finished_conversations(
+            crate::inference::split::kv_cache::FINISHED_CONVERSATION_AFTER,
+            request_id,
+        );
+        if freed > 0 {
+            live = live.saturating_sub(freed);
+            verdict = admit_prompt(budget, live, cached, per_token, positions);
+        }
+    }
     // Record what this prompt has been promised, so the NEXT one is weighed
     // against it rather than against memory it is about to take. Released by
     // `clear_request`, which every path that finishes or abandons a request

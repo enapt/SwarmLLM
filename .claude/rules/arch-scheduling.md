@@ -25,7 +25,7 @@ measured at, and what a change must keep — lives in `docs/invariants/`.
 
 ## The component that will refuse must be asked while the plan can still change
 
-Admission runs at load time, too late to reshape a plan (#452). **`ModelProcessPool::max_hostable_layers_for_planning`** (+ `held_layer_ranges_for_planning`) bounds the LOCAL node from the loader's own estimator and budgets, weighed on the device the LOADER would use — never on `serves_on_cpu`, which is the SPEED answer (#444 vs #129) (`None` = unknowable, never "no room"); **`process_pool::segment_shape`** prices the segment the worker will actually map, never the whole model.
+Admission runs at load time, too late to reshape a plan (#452). **`ModelProcessPool::max_hostable_layers_for_planning`** (+ `held_layer_ranges_for_planning`) bounds the LOCAL node from the loader's own estimator and budgets, weighed on the device the LOADER would use — never on `serves_on_cpu`, which is the SPEED answer (#444 vs #129) (`None` = unknowable, never "no room"); **`process_pool::segment_shape`** prices the segment the worker will actually map, never the whole model. On a card that bound is what a RUNNING worker can ADD — the card alone; the card/processor split is a fresh worker's, for ONE run of layers: **`fresh_run_layers_for_planning`** → `NodeCandidate::fresh_run_layers`, held to one run by the search (`parallax::local_fits`) and by `local_can_hold_every_layer` (#234).
 
 → `docs/invariants/scheduling.md` § "The component that will refuse must be asked while the plan can still change"
 
@@ -91,7 +91,7 @@ The whole-model hand-off waits in `hand_off` when the priced search will run; it
 
 ## A re-plan is warranted by a changed fact, never by a failed attempt
 
-`SwarmError::LocalMemoryUnavailable` is the one local failure `should_retry_after` re-plans; the router first calls `SharedState::note_local_memory_refusal(request_id)` so `local_can_hold_every_layer` stops the second plan handing this node the whole model.
+`SwarmError::LocalMemoryUnavailable` is the one local failure `should_retry_after` re-plans; the router first calls `SharedState::note_local_memory_refusal(request_id)` so `local_can_hold_every_layer` stops the second plan handing this node the whole model — and, where a LOAD refused (`ModelProcessPool::note_load_refusal`), gives it fewer new layers than it refused to add and no fresh-worker split (`local_layers_refused_for_request`), or a node holding PART of a model is re-planned the ranges it just refused (#234).
 
 → `docs/invariants/scheduling.md` § "A re-plan is warranted by a changed fact, never by a failed attempt"
 

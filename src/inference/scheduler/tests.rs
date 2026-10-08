@@ -362,6 +362,7 @@ fn simple_candidate(byte: u8, ranges: Vec<(u32, u32)>) -> NodeCandidate {
         published_room: None,
         cached_prefix_tokens: 0,
         cold_load_ms_per_layer: 0.0,
+        fresh_run_layers: None,
         goodput_bytes_per_sec: None,
     }
 }
@@ -613,6 +614,7 @@ fn greedy_assign_multi_range_candidate() {
             published_room: None,
             cached_prefix_tokens: 0,
             cold_load_ms_per_layer: 0.0,
+            fresh_run_layers: None,
             goodput_bytes_per_sec: None,
         },
         NodeCandidate {
@@ -645,6 +647,7 @@ fn greedy_assign_multi_range_candidate() {
             published_room: None,
             cached_prefix_tokens: 0,
             cold_load_ms_per_layer: 0.0,
+            fresh_run_layers: None,
             goodput_bytes_per_sec: None,
         },
     ];
@@ -1615,6 +1618,7 @@ fn cost_cand(
         published_room: None,
         cached_prefix_tokens: 0,
         cold_load_ms_per_layer: 0.0,
+        fresh_run_layers: None,
         goodput_bytes_per_sec: None,
     }
 }
@@ -2886,6 +2890,7 @@ fn one_node_is_not_made_standby_for_more_layers_than_it_can_run() {
         published_room: None,
         cached_prefix_tokens: 0,
         cold_load_ms_per_layer: 0.0,
+        fresh_run_layers: None,
         goodput_bytes_per_sec: None,
     };
 
@@ -2981,6 +2986,7 @@ fn a_node_with_room_still_stands_in_for_every_segment() {
         published_room: None,
         cached_prefix_tokens: 0,
         cold_load_ms_per_layer: 0.0,
+        fresh_run_layers: None,
         goodput_bytes_per_sec: None,
     };
     let seg = |byte: u8, r: (u32, u32)| PipelineSegment {
@@ -3076,6 +3082,7 @@ fn a_standby_is_chosen_by_cost_not_by_ping() {
         published_room: None,
         cached_prefix_tokens: 0,
         cold_load_ms_per_layer: 0.0,
+        fresh_run_layers: None,
         goodput_bytes_per_sec: None,
     };
 
@@ -6157,6 +6164,57 @@ fn a_peer_failing_a_model_every_time_is_left_out_unless_it_is_the_only_way() {
 /// can answer 32.
 #[test]
 fn the_planner_weighs_a_local_model_the_loader_would_split_on_the_card() {
+    let (state, local, mid) = a_card_holder_of_a_model_it_must_split();
+    let pool = &state.model_process_pool;
+    assert!(
+        pool.serves_on_cpu(&mid),
+        "fixture: the speed answer must be 'processor', as in the field"
+    );
+    assert_eq!(
+        pool.max_local_hostable_layers(&mid, false).unwrap_or(0),
+        0,
+        "fixture: RAM alone holds nothing here, so only the split can answer 32"
+    );
+    let ours = local_candidate_for(&state, &local, &mid, uuid::Uuid::new_v4());
+    assert!(!ours.has_gpu, "priced at the processor's speed (#444)");
+    assert_eq!(
+        ours.fresh_run_layers,
+        Some(32),
+        "but its room is the card's plus the split: all 32 layers, in one run"
+    );
+    assert_eq!(
+        ours.max_hostable_layers,
+        pool.max_local_hostable_layers(&mid, true),
+        "and what a running worker can ADD is the card's room alone"
+    );
+    assert!(ours.max_hostable_layers.is_some_and(|k| k < 32));
+}
+
+/// This node as the planner sees it for `request_id`.
+fn local_candidate_for(
+    state: &Arc<SharedState>,
+    local: &NodeId,
+    model: &ModelId,
+    request_id: uuid::Uuid,
+) -> NodeCandidate {
+    let manifest = state.model_registry.get_manifest(model).unwrap();
+    PipelineScheduler::new(state.clone())
+        .gather_candidates(
+            &manifest,
+            local,
+            request_id,
+            None.into(),
+            super::Purpose::Route,
+            &|| true,
+        )
+        .into_iter()
+        .find(|c| &c.node_id == local)
+        .unwrap()
+}
+
+/// A node whose card is in play (3000 MB), holding all of a 32-layer model too
+/// big for it that the loader SPLITS, with RAM for nothing.
+fn a_card_holder_of_a_model_it_must_split() -> (Arc<SharedState>, NodeId, ModelId) {
     use crate::inference::model_arch::ModelArch;
     use crate::inference::split::hybrid::arch_supports_hybrid;
     let state = make_shared_state_with(|c| c.resources.max_ram_mb = 40);
@@ -6204,35 +6262,48 @@ fn the_planner_weighs_a_local_model_the_loader_would_split_on_the_card() {
             splits_across_devices: arch_supports_hybrid(&ModelArch::Llama),
         },
     );
+    (state, local, mid)
+}
+
+/// **A re-plan after this node's loader refused part of a split gives it fewer
+/// new layers than it refused** (2026-10-08). A tester's node holding 28 of a
+/// 30B's 34 parts refused layers 19..27 and 43..48 — "another holder will have
+/// to take that part" — and the re-plan handed it the same ranges, because the
+/// recorded refusal only barred it from the WHOLE model. Here the refusal is of
+/// 8 layers on a node whose card estimate would offer more: the re-plan may add
+/// at most 7, and the fresh-worker split (what may itself have been refused) is
+/// off the table.
+#[test]
+fn a_replan_after_a_refused_range_gives_this_node_fewer_new_layers() {
+    let (state, local, mid) = a_card_holder_of_a_model_it_must_split();
+    let pool = &state.model_process_pool;
+    let rid = uuid::Uuid::new_v4();
+
+    // THE CONTROL: before any refusal, the card's estimate and the split stand.
+    let before = local_candidate_for(&state, &local, &mid, rid);
+    let estimate = before.max_hostable_layers.expect("fixture: a card bound");
     assert!(
-        pool.serves_on_cpu(&mid),
-        "fixture: the speed answer must be 'processor', as in the field"
+        estimate > 7,
+        "fixture: the estimate must offer more than the re-plan may, got {estimate}"
     );
-    assert_eq!(
-        pool.max_local_hostable_layers(&mid, false).unwrap_or(0),
-        0,
-        "fixture: RAM alone holds nothing here, so only the split can answer 32"
+    assert_eq!(before.fresh_run_layers, Some(32));
+
+    let refused: Result<(), crate::error::SwarmError> = Err(
+        crate::error::SwarmError::LocalMemoryUnavailable("8 layers 20..28".into()),
     );
-    let manifest = state.model_registry.get_manifest(&mid).unwrap();
-    let scheduler = PipelineScheduler::new(state.clone());
-    let ours = scheduler
-        .gather_candidates(
-            &manifest,
-            &local,
-            uuid::Uuid::new_v4(),
-            None.into(),
-            super::Purpose::Route,
-            &|| true,
-        )
-        .into_iter()
-        .find(|c| c.node_id == local)
-        .unwrap();
-    assert!(!ours.has_gpu, "priced at the processor's speed (#444)");
-    assert_eq!(
-        ours.max_hostable_layers,
-        Some(32),
-        "but its room is the card's plus the split: all 32 layers"
-    );
+    pool.note_load_refusal(rid, &mid, (20, 28), &refused);
+    state.note_local_memory_refusal(rid);
+
+    let after = local_candidate_for(&state, &local, &mid, rid);
+    assert_eq!(after.max_hostable_layers, Some(7));
+    assert_eq!(after.fresh_run_layers, None);
+    assert!(!super::local_can_hold_every_layer(
+        pool, &mid, &after, 32, true
+    ));
+
+    // Another request is planned as before: the record is this request's.
+    let other = local_candidate_for(&state, &local, &mid, uuid::Uuid::new_v4());
+    assert_eq!(other.max_hostable_layers, Some(estimate));
 }
 
 /// Two card peers holding every part of a 32-layer model (4 GB, so 125 MB a

@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #234**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #239**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -40,7 +40,7 @@ after v0.3.224 (#160, #215 and #216 closed; #217 and #218 opened from the swarm 
 v0.3.226 (released 2026-10-05), #220 opened from the .225 gate's unrecorded driver resets; #129's fit verdict (idle-model
 reclaim) shipped in v0.3.227 (released 2026-10-05 23:45 UTC); #222 (a node near its storage limit deleting and
 re-fetching parts) and #223 closed in v0.3.228 (released 2026-10-06 09:42 UTC), #224 opened from its gate;
-#225, #226 and #227 opened from a tester's two reports the same day; #117 (Qwen 3.5, dense), #225 and #226 closed in v0.3.229 (released 2026-10-07 00:00 UTC), #228 opened for what Qwen 3.5 leaves out; #129's cold loads (waited for and priced), #228 (2) and (2b), #220 (2), #229, #230 and #231 shipped in v0.3.230 (released 2026-10-07 16:38 UTC), #232 parked from their report.
+#225, #226 and #227 opened from a tester's two reports the same day; #117 (Qwen 3.5, dense), #225 and #226 closed in v0.3.229 (released 2026-10-07 00:00 UTC), #228 opened for what Qwen 3.5 leaves out; #129's cold loads (waited for and priced), #228 (2) and (2b), #220 (2), #229, #230 and #231 shipped in v0.3.230 (released 2026-10-07 16:38 UTC), #232 parked from their report; #234 and #235 closed on 2026-10-08 from two tester reports, #236-#238 opened from the second.
 `docs/plans/` holds the multi-step designs; the entries point at them.
 
 **P0 — wrong answers, silently**
@@ -231,6 +231,27 @@ Items".)
 
 ### Reliability and failover
 
+#### #236 — A reply whose peer refuses or leaves mid-stream ends; it is never continued elsewhere
+`P2` · reliability · **OPEN** — 2026-10-08 · history: report #005 (a tester, v0.3.230 code)
+
+A whole-model hand-off that fails after its first token is the request's failure:
+`should_retry_after` refuses a retry once `ttft_ms` is set (a retry would restart a reply the
+reader has seen begin), so the client gets the partial reply and an error. Report #005: a 30B
+handed to a peer, refused 71 s in (24.5 s to the first token, 46.8 s decoding) for KV memory —
+the main cause of that refusal is closed in #235, but a peer that leaves, restarts or runs out
+of memory mid-reply still ends the reply. **Petals does not end it**: its `InferenceSession`
+keeps each server session's input `history`, and on a failure `_update_sequence` builds a new
+route for the failed blocks and hands the new session that history, which it replays before
+the next step (`petals/client/inference_session.py`); vLLM's preemption RECOMPUTES a sequence's
+cache from its tokens. Here the coordinator holds everything a replay needs — the rendered
+prompt it sent and every token it has emitted. Shape: on a mid-stream failure, bar the peer
+(`blacklist_holder_for_request`) and send a continuation — the prompt plus the reply so far,
+`max_tokens` less what was delivered — to the next route, appending its tokens to the SAME
+stream. To settle first: re-tokenising prompt + reply text at the boundary (send token ids if
+the request can carry them), a sampler that reads history (penalties) or a fixed seed, usage
+merged across both peers, and the salvage path (`salvaged_reply_if_lost`). Next step: a design
+note in `docs/plans/`, then the whole-model hand-off first (#167 is the split's half).
+
 #### #167 — A speculative split decode has no mid-reply failover
 `P2` · reliability · **PARTIAL** — 2026-08-25 · history: archive § "Speculative distributed decode has no failover", archive row #149 item (d)
 
@@ -407,6 +428,25 @@ frame, then add a receipt ACK or a per-frame read deadline mirroring request-res
 § 4 item 7); with V1Lazy (#136) request-response is as fast, so there is no speed reason to.
 
 ### Routing and placement
+
+#### #237 — A peer's room for a conversation is not advertised, and the hand-off counts the prompt only
+`P2` · routing · **OPEN** — 2026-10-08 · history: report #005 (a tester, v0.3.230 code); related #194
+
+The coordinator handed a 30B whole to a peer advertising `free_vram_mb=7598` and priced it at
+48 layers (`max_hostable_layers`: the PROMPT's KV per layer against the advertised free memory)
+while that peer's worker admitted conversations against a 469 MB KV budget. Nothing in
+`NodeCapability` says how much conversation memory a peer's worker for a model would give, and
+nothing reserves the REPLY on the coordinator's side (the worker itself reserves
+`reply_reserve_positions` — at most one 512-position quantum — at admission, and claims the rest
+as it grows). Petals' server publishes `ServerInfo.cache_tokens_left` and its client routes with
+`cache_tokens_needed = max_length` (prompt + new tokens): a server without that room is
+PENALISED (`alloc_delay`, 10 s on the edge), not excluded (`client/routing/sequence_manager.py`
+`_has_cache_for`). Shape: a `#[serde(default)]` figure per resident model
+(`ResidentModelLayers`, which is already gossiped) — the positions its worker would admit now —
+reported by the worker over IPC; the hand-off and the search charge prompt + reply reserve
+against it, and price (not bar) prompt + `max_tokens` beyond it, the stale-figure argument
+Petals makes. #235 removed the way that room most often vanished (finished conversations kept
+for the worker's life), so measure how often a refusal still happens before building this.
 
 #### #3 — The routing cost model's network term overestimates a boomerang: a constant stands where the reply length belongs
 `P2` · routing · **OPEN** — 2026-09-08 · history: archive row #3 and § "The routing cost model's network term overestimates a boomerang" (three dated measurements)
@@ -1035,6 +1075,19 @@ StarCoder2, inert while refused).
 
 ### Memory and admission
 
+#### #238 — A node serving a segment learns that the reply ended only from its own timers
+`P3` · memory · **OPEN** — 2026-10-08 · history: #235
+
+`ModelProcessPool::release_request_kv` tells the COORDINATOR's workers that a request is over;
+every peer that ran a segment of it keeps the conversation's cache until it is silent for
+`CONVERSATION_GAP_SECS` and another conversation needs the room, or for the worker's TTL
+(#235). That is bounded now, but the memory reads as in use meanwhile (to the node's own
+admission and to what it advertises). Shape: at the end of a request, send each remote segment
+holder the existing `CancelInference` (every version handles it: nothing in flight is aborted,
+the conversation is forgotten) and have the worker drop a cancelled request's cache. Check the
+peer's cancel path logs nothing alarming for a normal end, and that a router retry (same request
+id) cannot be cancelled by the first attempt's release.
+
 #### #194 — An agent-sized prompt fills an 8 GB card with conversation memory
 `P2` · memory · **PARTIAL** — 2026-09-02 · absorbs the old survey's Tier 2F (KV quantisation); history: archive § "An agent-sized prompt fills an 8 GB card with KV cache, and decode crawls"
 
@@ -1532,6 +1585,28 @@ archive under the named heading. Reopen one only with the evidence its line name
 Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 19-28 were
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
+
+**Closed 2026-10-08, on main (not yet released)** (#234, #235)
+- #234 — a node holding PART of a model was planned ranges its worker could not grow into, and the
+  re-plan repeated them (a tester's report, v0.3.229: an RTX 3060 holding 28 of a 30B's 34 parts,
+  refused layers 19..27 and 43..48 — "another holder will have to take that part" — five requests
+  in a row, the other holder 0.31 ms away). Two defects. (1) The planner's room for this node on a
+  card was the card/processor split's width (#129) for every plan, but only a SPAWN splits, and
+  only its one range; a further range grows that worker on the card alone. Now
+  `max_hostable_layers` is the card's room and `fresh_run_layers` the split's, for ONE local run
+  (`parallax::local_fits`, `local_can_hold_every_layer`), offered only while a spawn can be had.
+  (2) The re-plan's record said only "cannot run the whole model"; the pool now records the
+  layers a load refused to ADD (`note_load_refusal`) and the re-plan gives this node fewer, with
+  no split. Tests red with each half off. `docs/invariants/scheduling.md` § "The component that
+  will refuse…" and § "A re-plan is warranted by a changed fact".
+- #235 — a live reply was refused for conversations that had ended (report #005: 330 MB of a
+  469 MB budget, 71 s into a reply, on a peer serving a 30B). A worker never ran its KV store's
+  TTL sweep, and a node serving a segment for another computer is never told the reply ended, so
+  those caches stayed for the worker's life. The worker sweeps on its 30 s tick (guard
+  `a_workers_kv_store_is_swept_by_the_worker_that_builds_it`), and caches silent for
+  `CONVERSATION_GAP_SECS` give way to a live prompt or a reply's growth before anything is
+  refused (`KvCacheStore::release_finished_conversations`). What it leaves: #236, #237, #238.
+  `docs/invariants/memory.md` § "A conversation that is over gives its room to one that is not".
 
 **Closed 2026-10-07, released in v0.3.230 (2026-10-07)** (#229, #230, #231)
 - #231 — a model its holders cannot run was never fetched by a machine that could (the report

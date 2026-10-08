@@ -103,6 +103,8 @@ impl super::SharedState {
         self.request_holder_blacklist.remove(request_id);
         self.peer_vram_commitments.remove(request_id);
         self.local_memory_refusals.remove(request_id);
+        // A refusal the router never took into its record (no re-plan followed).
+        let _ = self.model_process_pool.take_layers_refused(*request_id);
         self.planned_past_offered_memory.remove(request_id);
         self.route_plan_overrides.remove(request_id);
         self.salvaged_replies.remove(request_id);
@@ -157,13 +159,39 @@ impl super::SharedState {
     /// memory figures have not moved (admission refused before allocating
     /// anything), so without it the second plan is the first plan and the
     /// retry simply re-attempts the load that just failed.
+    ///
+    /// When the refusal came from a LOAD, the record also says how many layers
+    /// the loader would not add (`ModelProcessPool::take_layers_refused`), and
+    /// the re-plan holds this node below that in a split as well — "cannot run
+    /// the whole model" alone barred nothing from a node holding PART of one,
+    /// which was re-planned the very ranges it had refused (2026-10-07). The
+    /// fewest across refusals is kept, so a second refusal can only tighten it.
     pub fn note_local_memory_refusal(&self, request_id: uuid::Uuid) {
-        self.local_memory_refusals.insert(request_id);
+        let refused = self.model_process_pool.take_layers_refused(request_id);
+        self.local_memory_refusals
+            .entry(request_id)
+            .and_modify(|kept| {
+                *kept = match (*kept, refused) {
+                    (Some(a), Some(b)) => Some(a.min(b)),
+                    (a, b) => a.or(b),
+                }
+            })
+            .or_insert(refused);
     }
 
     /// Has this node's loader already refused this request for memory?
     pub fn local_memory_refused_for_request(&self, request_id: uuid::Uuid) -> bool {
-        self.local_memory_refusals.contains(&request_id)
+        self.local_memory_refusals.contains_key(&request_id)
+    }
+
+    /// The fewest layers this node's loader refused to ADD for this request, if
+    /// a load refused it. `None` both when nothing was refused and when the
+    /// refusal named no layer count (a conversation's memory, say) — ask
+    /// [`Self::local_memory_refused_for_request`] for the first.
+    pub fn local_layers_refused_for_request(&self, request_id: uuid::Uuid) -> Option<u32> {
+        self.local_memory_refusals
+            .get(&request_id)
+            .and_then(|kept| *kept)
     }
 
     /// This request was planned past the memory its holders offer.

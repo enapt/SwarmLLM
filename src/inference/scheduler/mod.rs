@@ -230,6 +230,18 @@ struct NodeCandidate {
     /// A peer that must first load was predicted like a warm one — 4.5 s
     /// predicted, 46 s taken (FUTURE_WORK #129).
     cold_load_ms_per_layer: f32,
+    /// For THIS node only: how wide one run of layers a fresh worker would take,
+    /// card and processor together, for a model the loader would split across
+    /// them (`ModelProcessPool::fresh_run_layers_for_planning`). `None` for every
+    /// peer and wherever no such split is on offer.
+    ///
+    /// An allowance beside `max_hostable_layers`, not a larger value of it: the
+    /// split is a spawn's and covers the one range a spawn loads, while every
+    /// further range grows the worker on the card alone, which is what
+    /// `max_hostable_layers` measures. So a plan giving this node a single run
+    /// may use the run's WIDTH up to this; a plan giving it two or more is held
+    /// to `max_hostable_layers` in layers added, as before (2026-10-08).
+    fresh_run_layers: Option<u32>,
 }
 
 /// Assumed load speed for a node that has not reported its own
@@ -1860,7 +1872,9 @@ struct RoutePrices {
 ///
 /// The bound is weighed against the layers the whole model would ADD, not its
 /// width: a worker already holding part of it pays for the rest only, by the
-/// same rule the loader applies when the range arrives (FUTURE_WORK #95).
+/// same rule the loader applies when the range arrives (FUTURE_WORK #95). The
+/// whole model is ONE run, so the split a fresh worker would make of a model
+/// too big for the card answers yes too (`NodeCandidate::fresh_run_layers`).
 fn local_can_hold_every_layer(
     pool: &crate::inference::process_pool::ModelProcessPool,
     model_id: &ModelId,
@@ -1870,6 +1884,9 @@ fn local_can_hold_every_layer(
 ) -> bool {
     !already_refused
         && (pool.hosts_whole_model(model_id, num_layers)
+            || local_cand
+                .fresh_run_layers
+                .is_some_and(|width| width >= num_layers)
             || local_cand
                 .max_hostable_layers
                 .is_none_or(|k| k >= local_cand.layers_it_would_add((0, num_layers))))
@@ -3915,19 +3932,53 @@ impl PipelineScheduler {
             // Room, and what loading the model would cost, from ONE residency
             // reading per candidate, so the memory bound and the load price
             // cannot disagree about what is already held.
+            // The split a fresh worker would make of a model too big for the
+            // card — ONE run of layers, card and processor together. Not on
+            // offer once this request's loader has refused: what it refused may
+            // have been exactly that spawn.
+            let fresh_run_layers = if is_local
+                && !self
+                    .shared_state
+                    .local_memory_refused_for_request(request_id)
+            {
+                self.shared_state
+                    .model_process_pool
+                    .fresh_run_layers_for_planning(&manifest.id)
+            } else {
+                None
+            };
             let (max_hostable_layers, max_hostable_layers_at_face_value, cold_load_per_layer) =
                 if node_id == *local_node_id {
-                    let ours = self
+                    let mut ours = self
                         .shared_state
                         .model_process_pool
                         .max_hostable_layers_for_planning(&manifest.id);
+                    // The loader's verdict on an earlier attempt at THIS request
+                    // outranks the estimate it contradicted: a re-plan may give
+                    // this node fewer new layers than it refused to add, never as
+                    // many — or a node holding part of the model is planned the
+                    // ranges it just refused (2026-10-07).
+                    if let Some(refused) = self
+                        .shared_state
+                        .local_layers_refused_for_request(request_id)
+                    {
+                        let below = refused.saturating_sub(1);
+                        ours = Some(ours.map_or(below, |k| k.min(below)));
+                    }
                     // Our own held ranges say what is resident here exactly;
                     // our own loads say how fast the rest would arrive.
                     let load = cold_load_ms_per_layer(
                         self.shared_state.model_process_pool.load_ms_per_gib(),
                         bytes_per_layer,
                     );
-                    (ours, ours, load)
+                    // What this node OFFERS, read by "room for about N of its L
+                    // layers": the most any plan may give it, the split's width
+                    // included.
+                    let offered = match (ours, fresh_run_layers) {
+                        (Some(add), Some(run)) => Some(add.max(run)),
+                        (ours, _) => ours,
+                    };
+                    (ours, offered, load)
                 } else {
                     // What the peer SAYS it has resident beats what we can
                     // infer from having seen it serve the model recently. A peer
@@ -4106,6 +4157,7 @@ impl PipelineScheduler {
                 // Ours only — see the field.
                 cached_prefix_tokens: if is_local { prompt.cached_locally } else { 0 },
                 cold_load_ms_per_layer: cold_load_per_layer,
+                fresh_run_layers,
             });
         }
 
@@ -4157,6 +4209,9 @@ impl PipelineScheduler {
                 has_gpu = c.has_gpu,
                 max_hostable_layers = ?c.max_hostable_layers,
                 max_hostable_layers_at_ceiling = ?c.max_hostable_layers_at_ceiling,
+                // This node only: the one run a fresh worker would split across
+                // card and processor; any further run is held to the bound above.
+                fresh_run_layers = ?c.fresh_run_layers,
                 // Beside the bound, because the bound is room for NEW layers:
                 // `Some(0)` next to held ranges is a node that can still run
                 // the split it is already holding (#95), not one with no room.

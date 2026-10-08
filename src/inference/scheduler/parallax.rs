@@ -874,12 +874,23 @@ pub(super) fn route_shortest_path(
         // any other peer the width, since its figure already folds in what it
         // has resident (`PeerResidency`).
         let charged = |range: (u32, u32)| -> u32 { c.capacity_charge(range) };
-        let over_capacity = cap.is_some_and(|k| charged((lo, hi)) > k);
+        // This node's other allowance: ONE run a fresh worker would split across
+        // card and processor, weighed by its width (`fresh_run_layers`). A
+        // range inside it is a vertex; whether the chain keeps it to one run is
+        // the DP's to enforce, below.
+        let fresh_run = if is_local && capacity.binds_local() {
+            c.fresh_run_layers
+        } else {
+            None
+        };
+        let fits = |range: (u32, u32)| -> bool {
+            cap.is_none_or(|k| charged(range) <= k)
+                || fresh_run.is_some_and(|w| range.1 - range.0 <= w)
+        };
+        let over_capacity = !fits((lo, hi));
         let mut push = |range: (u32, u32)| {
-            if let Some(k) = cap {
-                if charged(range) > k {
-                    return;
-                }
+            if !fits(range) {
+                return;
             }
             vertices.push(Vertex {
                 cand_idx,
@@ -1108,6 +1119,37 @@ pub(super) fn route_shortest_path(
     let local_total = |base: u32, run_start: Option<u32>, end: u32| -> u32 {
         run_start.map_or(base, |s| base.saturating_add(local_added((s, end))))
     };
+    // This node's other allowance (`NodeCandidate::fresh_run_layers`): a chain
+    // giving it exactly ONE run may take that run's WIDTH up to this, whatever
+    // the run adds — a fresh worker loads all of it, part on the card and part
+    // on the processor. A second run grows that worker on the card alone, so a
+    // chain with two or more is held to `local_cap` in layers added, the split
+    // included. Offering the split to every chain is what had a 12 GB card
+    // handed two more ranges of a 30B it could not grow into (2026-10-07).
+    let local_fresh_run: Option<u32> = if capacity.binds_local() {
+        candidates
+            .iter()
+            .find(|c| &c.node_id == local_node_id)
+            .and_then(|c| c.fresh_run_layers)
+    } else {
+        None
+    };
+    // Does a chain's share for this node fit? `runs` counts its local runs (2
+    // meaning two or more), `closed_width` is the width of its one run once
+    // that run has closed.
+    let local_fits = |base: u32, run: Option<u32>, end: u32, runs: u8, closed_width: u32| -> bool {
+        if local_cap.is_none_or(|cap| local_total(base, run, end) <= cap) {
+            return true;
+        }
+        let Some(width) = local_fresh_run else {
+            return false;
+        };
+        match (runs, run) {
+            (1, Some(start)) => end - start <= width,
+            (1, None) => closed_width <= width,
+            _ => false,
+        }
+    };
     // One pass of the search, seeded from the sources `apply_trust` allows.
     // Everything else — the forward relaxation, both memory bounds, the sink
     // choice — is identical, because trust is a statement about who may take
@@ -1123,19 +1165,25 @@ pub(super) fn route_shortest_path(
         // local run began (`None` when the path's last vertex is a peer's).
         let mut local_base = vec![0u32; n];
         let mut local_run: Vec<Option<u32>> = vec![None; n];
+        // How many local runs the path has (two meaning two or more), and the
+        // width of its one run once closed — see `local_fits`.
+        let mut local_runs = vec![0u8; n];
+        let mut closed_width = vec![0u32; n];
 
         // Initialize sources.
         for i in 0..n {
             if source_ok(&vertices[i], apply_trust) {
                 let run = is_local_vertex(i).then_some(vertices[i].range.0);
-                let ours = local_total(0, run, vertices[i].range.1);
-                if local_cap.is_some_and(|cap| ours > cap) {
+                let runs = u8::from(run.is_some());
+                if !local_fits(0, run, vertices[i].range.1, runs, 0) {
                     continue;
                 }
                 best_cost[i] = vertices[i].cost_ms;
                 used_capped[i] = bit_of(i);
                 local_base[i] = 0;
                 local_run[i] = run;
+                local_runs[i] = runs;
+                closed_width[i] = 0;
             }
         }
 
@@ -1163,13 +1211,28 @@ pub(super) fn route_shortest_path(
                 // Extending a local run keeps its start; stepping onto a
                 // local vertex from a peer's starts a new run, and stepping
                 // onto a peer's closes the run into the base.
-                let (base, run) = match (is_local_vertex(w_idx), local_run[v_idx]) {
-                    (true, Some(s)) => (local_base[v_idx], Some(s)),
-                    (true, None) => (local_base[v_idx], Some(vertices[w_idx].range.0)),
-                    (false, run) => (local_total(local_base[v_idx], run, v_end), None),
+                let (runs_before, width_before) = (local_runs[v_idx], closed_width[v_idx]);
+                let (base, run, runs, width) = match (is_local_vertex(w_idx), local_run[v_idx]) {
+                    (true, Some(s)) => (local_base[v_idx], Some(s), runs_before, width_before),
+                    (true, None) => (
+                        local_base[v_idx],
+                        Some(vertices[w_idx].range.0),
+                        runs_before.saturating_add(1).min(2),
+                        width_before,
+                    ),
+                    (false, Some(s)) => (
+                        local_total(local_base[v_idx], Some(s), v_end),
+                        None,
+                        runs_before,
+                        if runs_before == 1 {
+                            v_end - s
+                        } else {
+                            width_before
+                        },
+                    ),
+                    (false, None) => (local_base[v_idx], None, runs_before, width_before),
                 };
-                let ours = local_total(base, run, vertices[w_idx].range.1);
-                if local_cap.is_some_and(|cap| ours > cap) {
+                if !local_fits(base, run, vertices[w_idx].range.1, runs, width) {
                     // Extending here would give this node more layers, across all
                     // its segments, than its own loader will take.
                     continue;
@@ -1181,6 +1244,8 @@ pub(super) fn route_shortest_path(
                     used_capped[w_idx] = used_capped[v_idx] | w_bit;
                     local_base[w_idx] = base;
                     local_run[w_idx] = run;
+                    local_runs[w_idx] = runs;
+                    closed_width[w_idx] = width;
                 }
             }
         }
@@ -1287,8 +1352,13 @@ pub(super) fn route_shortest_path(
                     _ => local_runs.push(s.layer_range),
                 }
             }
+            // One run a fresh worker would split is the other way to fit.
+            let one_fresh_run = match local_runs.as_slice() {
+                [(start, end)] => local_fresh_run.is_some_and(|width| end - start <= width),
+                _ => false,
+            };
             let ours: u32 = local_runs.into_iter().map(local_added).sum();
-            if ours > cap.max(1) {
+            if ours > cap.max(1) && !one_fresh_run {
                 return Err(SwarmError::PipelineError(format!(
                     "parallax: this node would take {ours} layers across its segments, \
                      more than the {cap} it can hold"
@@ -1360,6 +1430,7 @@ mod tests {
             published_room: None,
             cached_prefix_tokens: 0,
             cold_load_ms_per_layer: 0.0,
+            fresh_run_layers: None,
             goodput_bytes_per_sec: None,
         }
     }
@@ -2373,6 +2444,101 @@ mod tests {
         let mut older = capped.clone();
         older.max_hostable_layers_at_ceiling = None;
         assert!(route(&[me, older], CapacityBound::PeersAtCeiling).is_ok());
+    }
+
+    /// How many separate runs of layers `segs` hands `node` — adjacent segments
+    /// merged, as `merge_contiguous` merges them — and how many layers in all.
+    fn runs_and_layers(segs: &[PipelineSegment], node: &NodeId) -> (usize, u32) {
+        let mut runs: Vec<(u32, u32)> = Vec::new();
+        for s in segs.iter().filter(|s| &s.node_id == node) {
+            match runs.last_mut() {
+                Some(last) if last.1 == s.layer_range.0 => last.1 = s.layer_range.1,
+                _ => runs.push(s.layer_range),
+            }
+        }
+        (runs.len(), runs.iter().map(|r| r.1 - r.0).sum())
+    }
+
+    /// **The split a fresh worker would make is ONE run's** (2026-10-08). A
+    /// tester's 12 GB card held 28 of a 30B's 34 parts in two stretches. Its
+    /// bound was the split's width — the whole model — so the search handed it
+    /// both stretches; the second had to GROW the worker the first had spawned,
+    /// on a card that split had filled, and every request was refused.
+    ///
+    /// Here this node holds [0..20) and [30..40) and is ten times cheaper per
+    /// layer than the peer holding everything; its card can add 4 layers to a
+    /// running worker, a fresh one would split all 40.
+    #[test]
+    fn the_split_a_fresh_worker_would_make_covers_one_local_run() {
+        let local = NodeId([1u8; 32]);
+        let mut me = cand(1, vec![(0, 20), (30, 40)], 0, 0.0, true, true, 40.0);
+        me.node_id = local.clone();
+        let peer = cand(2, vec![(0, 40)], 30, 0.0, true, true, 4.0);
+        let route = |me: &NodeCandidate| {
+            route_shortest_path(
+                40,
+                &[me.clone(), peer.clone()],
+                &local,
+                false,
+                true,
+                CapacityBound::Everyone,
+                None,
+            )
+            .expect("the peer covers everything")
+        };
+
+        // THE CONTROL — the bound as it was: the split's width as room for
+        // any number of runs. Both stretches go here, 30 layers in two runs.
+        let mut was = me.clone();
+        was.max_hostable_layers = Some(40);
+        assert_eq!(
+            runs_and_layers(&route(&was), &local),
+            (2, 30),
+            "fixture: the old figure hands this node both stretches"
+        );
+
+        // Now: one run may use the split; a second would have to grow on the
+        // card, which takes 4 layers in all.
+        let mut now = me.clone();
+        now.max_hostable_layers = Some(4);
+        now.fresh_run_layers = Some(40);
+        let segs = route(&now);
+        let (runs, layers) = runs_and_layers(&segs, &local);
+        assert_eq!(
+            runs, 1,
+            "one stretch, on the fresh worker's split: {segs:?}"
+        );
+        assert_eq!(layers, 20, "{segs:?}");
+
+        // Without the split on offer it is the card's 4 layers and no more.
+        let mut card_only = me;
+        card_only.max_hostable_layers = Some(4);
+        let (_, layers) = runs_and_layers(&route(&card_only), &local);
+        assert!(layers <= 4, "{layers} layers against a card that adds 4");
+    }
+
+    /// The other half of the same allowance: a model too big for the card that
+    /// this node holds WHOLE is still one run, so the split keeps it here rather
+    /// than sending most of it through a slower peer (#129's case).
+    #[test]
+    fn a_whole_model_the_card_would_split_stays_one_local_run() {
+        let local = NodeId([1u8; 32]);
+        let mut me = cand(1, vec![(0, 32)], 0, 0.0, true, true, 40.0);
+        me.node_id = local.clone();
+        me.max_hostable_layers = Some(4);
+        me.fresh_run_layers = Some(32);
+        let peer = cand(2, vec![(0, 32)], 30, 0.0, true, true, 4.0);
+        let segs = route_shortest_path(
+            32,
+            &[me, peer],
+            &local,
+            false,
+            true,
+            CapacityBound::Everyone,
+            None,
+        )
+        .expect("routable");
+        assert_eq!(runs_and_layers(&segs, &local), (1, 32), "{segs:?}");
     }
 
     /// Report #029: a route everyone can afford must be EXPRESSIBLE, not merely
@@ -3507,6 +3673,7 @@ mod transfer_cost_tests {
             published_room: None,
             cached_prefix_tokens: 0,
             cold_load_ms_per_layer: 0.0,
+            fresh_run_layers: None,
         }
     }
 

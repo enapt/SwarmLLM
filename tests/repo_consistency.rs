@@ -12070,3 +12070,39 @@ fn the_cli_mention_check_catches_a_model_name_given_to_get_model() {
     let found = unusable_cli_mentions(planted, &commands);
     assert_eq!(found.len(), 2, "{found:?}");
 }
+
+/// Does a function body that builds a `KvCacheStore` also sweep it? Whitespace
+/// is removed first, so a chain rustfmt wrapped (`kv_store\n.cleanup_expired()`)
+/// still reads as one.
+fn builds_and_sweeps_a_kv_store(body: &str) -> bool {
+    let flat: String = body.chars().filter(|c| !c.is_whitespace()).collect();
+    flat.contains("KvCacheStore::new(") && flat.contains(".cleanup_expired()")
+}
+
+/// A worker's KV-cache store is swept (report #005, 2026-10-07). Its TTL was
+/// configured and never run — only the daemon's own store was swept — so a
+/// conversation nobody released stayed for the worker's whole life: every
+/// segment a node served for another computer, whose coordinator releases only
+/// its own workers. On a peer serving a 30B, a reply 71 s in was refused for
+/// "other conversations" that had ended.
+#[test]
+fn a_workers_kv_store_is_swept_by_the_worker_that_builds_it() {
+    let src = std::fs::read_to_string(repo_root().join("src/inference/model_worker.rs"))
+        .expect("read model_worker.rs");
+    let body = fn_body(&src, "pub async fn run_worker(")
+        .expect("run_worker moved — move this guard with it");
+    assert!(
+        builds_and_sweeps_a_kv_store(body),
+        "`run_worker` builds the worker's KvCacheStore and must run its TTL sweep \
+         (`cleanup_expired`) — nothing else in the worker process ever does"
+    );
+}
+
+/// The guard above, against the defect it exists to catch — planted.
+#[test]
+fn the_kv_sweep_guard_catches_a_store_nobody_sweeps() {
+    let unswept = "{\n    let kv_store = Arc::new(KvCacheStore::new(\n        ttl,\n    ));\n    loop { kv_store.occupancy(); }\n}";
+    assert!(!builds_and_sweeps_a_kv_store(unswept));
+    let wrapped = "{\n    let kv_store = Arc::new(KvCacheStore::new(ttl));\n    kv_store\n        .cleanup_expired();\n}";
+    assert!(builds_and_sweeps_a_kv_store(wrapped));
+}

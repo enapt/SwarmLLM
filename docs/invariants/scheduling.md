@@ -126,6 +126,32 @@ processor when there is none or the model neither fits nor splits). Guard
 through `gather_candidates` with the speed answer "processor" and RAM for
 nothing: red (`Some(0)`) on the old call, `Some(32)` now.
 
+**And the split is a SPAWN's, for ONE range (2026-10-08, #234).** The #129 bound
+answered with the split's width for every plan, but only a spawn splits — and only
+the range it is spawned for. A further range GROWS that worker, and
+`charge_additional_segment` weighs growth against the card alone: there is no
+processor rung for growth. So a plan giving this node a second run had it grow a
+worker whose card the split had just filled. A tester's RTX 3060 (v0.3.229),
+holding 28 of a Qwen3-30B-A3B's 34 parts beside a worker already holding 16
+layers, was planned layers 19..27 and 43..48 as well; both were refused ("need
+about 2608 MB more … another holder will have to take that part"), and every
+request failed.
+
+Now the two answers are two fields. `max_hostable_layers` (`max_local_hostable_layers`)
+is the card's room — what a running worker can ADD, in any number of ranges.
+`fresh_run_layers` (`fresh_run_layers_for_planning`) is the split's WIDTH, offered
+only while a spawn can be had (no live worker of the model, or an idle one on the
+card, which `grow_worker` retires and replaces; never one in use, never one
+charged to system memory). The search keeps the local share of a chain to ONE run
+when it leans on the split (`parallax::local_fits`, carried along the DP as the
+run count and the closed run's width, and re-checked after reconstruction);
+`local_can_hold_every_layer` accepts the whole model as that one run. Tests:
+`the_split_a_fresh_worker_would_make_covers_one_local_run` (its control — the old
+figure — hands the node both stretches; red with the one-run limit off),
+`a_whole_model_the_card_would_split_stays_one_local_run`,
+`a_worker_in_use_withdraws_the_fresh_worker_split`, and the pool's
+`a_model_the_loader_would_split_is_one_this_node_can_hold`.
+
 **`process_pool::segment_shape` prices what the worker will actually map.**
 `VramFootprintInputs` has always documented `segment_layers` as "Layers in THIS
 segment, not the whole model" and `quantized_weight_bytes` as "the shard bytes
@@ -661,6 +687,21 @@ Verified live: a node whose budget refused a 3074 MB model against 2200 MB
 answered the request after the re-plan — `assemblies=2`, `segments=1` becoming
 `segments=3`, the middle segment on a peer. And on a node with no peers at all,
 the constrained-node harness confirms the refusal message is unchanged.
+
+**The fact must bar what was refused, not only the whole model (2026-10-08, #234).**
+"Cannot run the whole model" was the only record, and it bars nothing from a node
+that holds PART of one: the tester's node above was re-planned the very ranges it
+had refused, and the request failed with the advice "another holder will have to
+take that part" never acted on, though the other holder sat 0.31 ms away. The pool
+now records what a LOAD refused — the layers it would have ADDED to what the
+worker holds, on the planner's device (`ModelProcessPool::note_load_refusal`, at
+`forward_for_request`, `forward_batch` and `generate_attempt`); the router's
+`note_local_memory_refusal` takes it into `local_memory_refusals` (the fewest across
+refusals), and the re-plan gives this node at most one layer fewer to add and no
+fresh-worker split. A refusal that named no layers (a conversation's memory) keeps
+the old effect alone. Test: `a_replan_after_a_refused_range_gives_this_node_fewer_new_layers`
+(red with the cap ignored; its control plans the estimate, and another request is
+untouched).
 
 **From the rules file (moved 2026-10-02):**
 

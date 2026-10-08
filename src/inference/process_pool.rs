@@ -98,7 +98,17 @@ pub const DEFAULT_KV_CACHE_TTL_SECS: u64 = 600;
 /// for memory for ten minutes. A reply silent past this and then resumed on a
 /// retired worker is refused by the worker (`forward_lacks_its_conversation`),
 /// visibly — never decoded from nothing.
-const CONVERSATION_GAP_SECS: u64 = 120;
+///
+/// The worker reads the same figure for its own caches: one this silent gives
+/// way when a live conversation needs the room
+/// (`KvCacheStore::release_finished_conversations`).
+pub(crate) const CONVERSATION_GAP_SECS: u64 = 120;
+
+/// How many refusals `ModelProcessPool::layers_refused` holds before it drops
+/// the stale ones. The router takes each entry within a second of the refusal,
+/// so anything older than [`LAYERS_REFUSED_FOR`] is one no router will take.
+const LAYERS_REFUSED_KEPT: usize = 64;
+const LAYERS_REFUSED_FOR: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// Per-request buffered channel capacity for multiplexed worker responses.
 /// Long decode streams emit one WorkerMsg::Token per generated token; 256 gives
@@ -2133,6 +2143,11 @@ pub struct ModelProcessPool {
     /// `WORKER_CONNECT_TIMEOUT_SECS` on every arriving request. First
     /// successful spawn clears the entry.
     spawn_failures: DashMap<ModelId, (std::time::Instant, u32)>,
+    /// Layers this node's loader refused to ADD for a request — the fewest, when
+    /// it refused more than once — kept until the router takes them into its
+    /// record of the refusal (`take_layers_refused`). See
+    /// [`Self::note_load_refusal`].
+    layers_refused: DashMap<Uuid, (u32, std::time::Instant)>,
     data_dir: PathBuf,
     /// Active shard windows: which shards each model worker should load.
     /// If absent, the worker loads all on-disk shards (default behavior).
@@ -2431,6 +2446,7 @@ impl ModelProcessPool {
             workers: DashMap::new(),
             spawn_lock: Mutex::new(()),
             spawn_failures: DashMap::new(),
+            layers_refused: DashMap::new(),
             data_dir,
             active_shard_windows: DashMap::new(),
             gpu_layers: std::sync::atomic::AtomicI32::new(-1),
@@ -4305,41 +4321,6 @@ impl ModelProcessPool {
         cost_curve_of(&base, estimate)
     }
 
-    /// The most layers of `model_id` this node could admit right now, on the
-    /// device a request for it would actually use.
-    ///
-    /// **The scheduler's answer to the question the loader will be asked**, and
-    /// deliberately built from the same estimator and the same budgets — so a
-    /// plan this node makes is a plan it can load.
-    ///
-    /// Before this existed, the local candidate was the ONE candidate the
-    /// pipeline search priced as memory-unconstrained: every peer carried a
-    /// `max_hostable_layers` from its advertised free memory, and the local
-    /// node carried `None`, on the reasoning that our own admission check is
-    /// the authority. That reasoning is right about WHO decides and wrong about
-    /// WHEN: admission runs at load time, after the plan is committed and too
-    /// late to reshape it. Reported from the field — a 16 GB processor-only Mac
-    /// mini holding every shard of a 48-layer 14B was assigned 36 of its
-    /// layers, refused them at load, retried, and produced the identical plan
-    /// (gotcha #452). This node has the BEST information about its own memory,
-    /// not the worst; it should be the most accurately bounded candidate.
-    ///
-    /// `None` means unknowable — no budget, or geometry that could not be read
-    /// — and never "no room", the same reading `max_hostable_layers` gives an
-    /// unreadable peer.
-    /// Is a live worker already holding this whole model?
-    ///
-    /// A fact, not a prediction — the same distinction `live_worker` exists
-    /// for. It matters because [`Self::max_local_hostable_layers`] weighs a
-    /// SPAWN against what is already committed, and a resident model's own
-    /// weights are part of that: ask the bound about a model this node is
-    /// currently running and it answers with the room left BESIDE it, which
-    /// is close to none. Reading that as "cannot hold it" would push a node
-    /// off the model it is happily serving.
-    ///
-    /// This is gotcha #329's distinction on the local node — "is it loaded?"
-    /// and "would it fit?" are different questions — and the peer side has
-    /// drawn it since #447 through `already_warm`.
     /// Layers of each loaded model this node currently holds in memory.
     ///
     /// Gossiped as `NodeCapability::resident_layers` so a peer pricing our
@@ -4387,6 +4368,19 @@ impl ModelProcessPool {
         out
     }
 
+    /// Is a live worker already holding this whole model?
+    ///
+    /// A fact, not a prediction — the same distinction `live_worker` exists
+    /// for. It matters because [`Self::max_local_hostable_layers`] weighs a
+    /// SPAWN against what is already committed, and a resident model's own
+    /// weights are part of that: ask the bound about a model this node is
+    /// currently running and it answers with the room left BESIDE it, which
+    /// is close to none. Reading that as "cannot hold it" would push a node
+    /// off the model it is happily serving.
+    ///
+    /// This is gotcha #329's distinction on the local node — "is it loaded?"
+    /// and "would it fit?" are different questions — and the peer side has
+    /// drawn it since #447 through `already_warm`.
     pub fn hosts_whole_model(&self, model_id: &ModelId, num_layers: u32) -> bool {
         self.live_worker(model_id).is_some_and(|h| {
             h.charged_segments
@@ -4461,6 +4455,39 @@ impl ModelProcessPool {
             .collect()
     }
 
+    /// The most layers of `model_id` this node could ADD right now, on the
+    /// device a request for it would actually use — in any number of ranges.
+    ///
+    /// **The scheduler's answer to the question the loader will be asked**, and
+    /// deliberately built from the same estimator and the same budgets — so a
+    /// plan this node makes is a plan it can load.
+    ///
+    /// Before this existed, the local candidate was the ONE candidate the
+    /// pipeline search priced as memory-unconstrained: every peer carried a
+    /// `max_hostable_layers` from its advertised free memory, and the local
+    /// node carried `None`, on the reasoning that our own admission check is
+    /// the authority. That reasoning is right about WHO decides and wrong about
+    /// WHEN: admission runs at load time, after the plan is committed and too
+    /// late to reshape it. Reported from the field — a 16 GB processor-only Mac
+    /// mini holding every shard of a 48-layer 14B was assigned 36 of its
+    /// layers, refused them at load, retried, and produced the identical plan
+    /// (gotcha #452). This node has the BEST information about its own memory,
+    /// not the worst; it should be the most accurately bounded candidate.
+    ///
+    /// **On the card this is the card's room alone**, because that is all a
+    /// RUNNING worker can grow into: `charge_additional_segment` weighs a new
+    /// range against the card and has no processor rung. The card-and-processor
+    /// split belongs to a fresh worker and to ONE range —
+    /// [`Self::fresh_run_layers_for_planning`]. This bound used to answer with
+    /// the split's width for every plan (#129), and a plan that gave this node a
+    /// second range then had it grow a worker whose card the split had already
+    /// filled: a tester's RTX 3060 was handed layers 19..27 and 43..48 of a 30B
+    /// beside the 16 its worker held, refused both, and the re-plan handed them
+    /// to it again (v0.3.229, 2026-10-07).
+    ///
+    /// `None` means unknowable — no budget, or geometry that could not be read
+    /// — and never "no room", the same reading `max_hostable_layers` gives an
+    /// unreadable peer.
     pub fn max_local_hostable_layers(&self, model_id: &ModelId, on_gpu: bool) -> Option<u32> {
         let (fixed_mb, per_layer_mb) = self.segment_cost_curve(model_id, on_gpu)?;
         // A live worker on this device has already paid the fixed terms, and
@@ -4496,28 +4523,92 @@ impl ModelProcessPool {
             budget.headroom_after(self.ram_committed_mb(), 0)
         };
         // The fixed terms are paid once, whatever the segment's length.
-        let fit = layers_that_fit(free_mb, fixed_mb, per_layer_mb);
-        if !on_gpu {
-            return fit;
+        layers_that_fit(free_mb, fixed_mb, per_layer_mb)
+    }
+
+    /// How wide ONE range of `model_id` a fresh worker here would take — card
+    /// and processor together — for a model the loader would split across
+    /// them; `None` when it would not split it, or when no fresh worker can be
+    /// had for this request.
+    ///
+    /// **A model that does not fit the card whole is not refused by the loader
+    /// — it is split** (`partial_gpu_layers`: its first layers on the card, the
+    /// rest on the processor, whose share is not charged against the RAM
+    /// budget). Counting the card alone, the planner was told this node could
+    /// hold 17 of a cold Mistral-7B's 32 layers, declared "a pipeline is the
+    /// only route", and sent it through Italy at 44.7 s — having priced this
+    /// node at 16.8 s against that chain's 29.8 (2026-10-04; warm, the same
+    /// request ran here in 7.2 s; FUTURE_WORK #129).
+    ///
+    /// **But only a SPAWN splits, and only the one range it is spawned for.** A
+    /// further range grows that worker on the card alone
+    /// ([`Self::max_local_hostable_layers`]), so this is an allowance for a plan
+    /// giving this node ONE run of layers, weighed by its width — a spawn loads
+    /// all of it. It needs a spawn to be possible: no live worker for the model,
+    /// or one nothing is using, which `grow_worker` retires so the range is
+    /// placed afresh. A worker in use keeps its refusal (#93), and one charged
+    /// to system memory is never retired for growth at all, so then there is no
+    /// allowance.
+    pub fn fresh_run_layers_for_planning(&self, model_id: &ModelId) -> Option<u32> {
+        if !self.planning_on_card(model_id) {
+            return None;
         }
-        // **A model that does not fit the card whole is not refused by the
-        // loader — it is split** (`partial_gpu_layers`: its first layers on the
-        // card, the rest on the processor, whose share is not charged against
-        // the RAM budget). This bound counted the card alone, so for a cold
-        // model a little too large for it the planner was told this node could
-        // hold 17 of Mistral-7B's 32 layers, declared "a pipeline is the only
-        // route", and sent it through Italy at 44.7 s — having priced this
-        // node at 16.8 s against that chain's 29.8 (2026-10-04; warm, the same
-        // request ran here in 7.2 s). Asked of the loader's own decision, so
-        // the bound and the load cannot disagree (FUTURE_WORK #129).
-        let hybrid_total = self.estimated_gpu_mb(model_id).and_then(|estimated| {
-            self.partial_gpu_layers(model_id, None, estimated)
-                .map(|(_, total)| u32::try_from(total).unwrap_or(u32::MAX))
-        });
-        match (fit, hybrid_total) {
-            (Some(on_card), Some(total)) if on_card < total => Some(total),
-            _ => fit,
+        if self
+            .live_worker(model_id)
+            .is_some_and(|h| !h.holds_gpu_memory() || h.in_use(self.conversation_window()))
+        {
+            return None;
         }
+        let estimated = self.estimated_gpu_mb(model_id)?;
+        let (_, total) = self.partial_gpu_layers(model_id, None, estimated)?;
+        Some(u32::try_from(total).unwrap_or(u32::MAX))
+    }
+
+    /// Remember what this node's loader just refused a request — the layers the
+    /// refused range would have ADDED to what the worker holds, on the device
+    /// the planner weighs — when `outcome` is a memory refusal.
+    ///
+    /// **What makes the router's re-plan a different plan for a node that holds
+    /// PART of a model.** The record the re-plan used to get said only "this
+    /// node cannot run the whole model", which bars nothing from a split: a
+    /// tester's node holding 28 of a 30B's 34 parts was planned the same two
+    /// ranges it had just refused, and the request failed with the advice
+    /// "another holder will have to take that part" un-acted on (2026-10-07).
+    /// Taken by `SharedState::note_local_memory_refusal`, which holds the
+    /// re-plan to fewer new layers than this.
+    pub(crate) fn note_load_refusal<T>(
+        &self,
+        request_id: Uuid,
+        model_id: &ModelId,
+        range: (u32, u32),
+        outcome: &Result<T, SwarmError>,
+    ) {
+        if !matches!(outcome, Err(SwarmError::LocalMemoryUnavailable(_))) {
+            return;
+        }
+        let added = layers_added_by(range, &self.held_layer_ranges_for_planning(model_id));
+        // Never left to grow: an entry is taken when the router re-plans, and
+        // one for a request no router of ours runs (a peer's segment) or that
+        // was not re-planned goes stale here.
+        if self.layers_refused.len() > LAYERS_REFUSED_KEPT {
+            self.layers_refused
+                .retain(|_, (_, at)| at.elapsed() < LAYERS_REFUSED_FOR);
+        }
+        self.layers_refused
+            .entry(request_id)
+            .and_modify(|(layers, at)| {
+                *layers = (*layers).min(added);
+                *at = std::time::Instant::now();
+            })
+            .or_insert((added, std::time::Instant::now()));
+    }
+
+    /// The layers this node's loader refused to add for `request_id`, if it
+    /// refused any — taken, so a later refusal starts afresh.
+    pub fn take_layers_refused(&self, request_id: Uuid) -> Option<u32> {
+        self.layers_refused
+            .remove(&request_id)
+            .map(|(_, (layers, _))| layers)
     }
 
     /// Retire a worker whose process is gone, releasing the memory it no
@@ -6006,7 +6097,9 @@ impl ModelProcessPool {
         crate::inference::cancel::bail_if_cancelled(cancel.as_ref())?;
         let handle = self
             .get_or_spawn(&model_id, forward.layer_range, Tenancy::Tenant)
-            .await?;
+            .await;
+        self.note_load_refusal(forward.request_id, &model_id, forward.layer_range, &handle);
+        let handle = handle?;
         crate::inference::cancel::bail_if_cancelled(cancel.as_ref())?;
 
         // Destructure to avoid cloning activations (can be large tensor data)
@@ -6291,7 +6384,11 @@ impl ModelProcessPool {
         // `batch_eligible`, which is what put them in one batch.
         let handle = self
             .get_or_spawn(&model_id, forwards[0].layer_range, Tenancy::Tenant)
-            .await?;
+            .await;
+        for f in &forwards {
+            self.note_load_refusal(f.request_id, &model_id, f.layer_range, &handle);
+        }
+        let handle = handle?;
         if handle.dead.load(Ordering::Acquire) {
             self.retire_dead_worker(&model_id).await;
             return Err(SwarmError::ServiceUnavailable("worker is dead".into()));
@@ -6553,7 +6650,9 @@ impl ModelProcessPool {
     ) -> Result<crate::inference::router::InferenceOutput, SwarmError> {
         let handle = self
             .get_or_spawn(model_id, layer_range, Tenancy::Tenant)
-            .await?;
+            .await;
+        self.note_load_refusal(request_id, model_id, layer_range, &handle);
+        let handle = handle?;
 
         // Kept for the post-generation stop-marker trim below; `sampling` is
         // moved into the IPC message.
@@ -8192,6 +8291,53 @@ mod tests {
         assert_eq!(
             recent.max_local_hostable_layers(&wanted, true),
             with_it_resident
+        );
+    }
+
+    /// The split is a SPAWN's, so it is on offer only while a spawn can be had:
+    /// an idle worker of the model is retired for one (`grow_worker`), a worker
+    /// in use keeps its refusal (#93) and the plan gets the card's room alone.
+    #[tokio::test]
+    async fn a_worker_in_use_withdraws_the_fresh_worker_split() {
+        use crate::inference::model_arch::ModelArch;
+        use crate::inference::split::hybrid::arch_supports_hybrid;
+        let p = ModelProcessPool::new(std::path::PathBuf::from("/tmp/swarmllm-fresh-run-in-use"));
+        p.test_card_in_play
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        p.set_gpu_layers(-1);
+        p.set_vram_budget_mb(3000);
+        let m = ModelId("seven-b-in-use".into());
+        p.test_footprint_inputs.insert(
+            m.clone(),
+            crate::model::auto_manage::vram::VramFootprintInputs {
+                quantized_weight_bytes: 4_400 * 1024 * 1024,
+                unquantized_bytes_per_element: None,
+                vocab_size: 152_064,
+                embedding_length: 3584,
+                segment_layers: 28,
+                kv_layers: 28,
+                head_count_kv: 4,
+                head_count: 28,
+                head_dim: 128,
+                rope_dim: 128,
+                effective_context: 8192,
+                is_first: true,
+                embedding_gatherable: true,
+                splits_across_devices: arch_supports_hybrid(&ModelArch::Qwen2),
+            },
+        );
+        let h =
+            admit_and_insert_gpu_worker(&p, &m, 900, std::time::Duration::from_secs(3600)).await;
+        assert_eq!(
+            p.fresh_run_layers_for_planning(&m),
+            Some(28),
+            "an idle worker is replaced by a fresh one, which splits the model"
+        );
+        h.note_conversation(Uuid::new_v4());
+        assert_eq!(
+            p.fresh_run_layers_for_planning(&m),
+            None,
+            "a worker in use can only grow, on the card"
         );
     }
 
@@ -9872,6 +10018,9 @@ mod admission_tests {
     /// the card alone, so a cold Mistral-7B — 17 of 32 layers on an 8 GB card —
     /// was declared "a pipeline is the only route" and sent through Italy at
     /// 44.7 s, priced here at 16.8 s against that chain's 29.8 (2026-10-04).
+    ///
+    /// And it is told so for ONE range only (2026-10-08): what a running worker
+    /// can ADD is the card's room alone, so that stays the growth bound.
     #[test]
     fn a_model_the_loader_would_split_is_one_this_node_can_hold() {
         use crate::inference::model_arch::ModelArch;
@@ -9894,6 +10043,8 @@ mod admission_tests {
         };
         let pool_with = |inputs| {
             let p = pool();
+            p.test_card_in_play
+                .store(true, std::sync::atomic::Ordering::Relaxed);
             p.set_gpu_layers(-1);
             p.set_vram_budget_mb(3000);
             let m = ModelId("seven-b".into());
@@ -9911,9 +10062,14 @@ mod admission_tests {
             "fixture: the card alone holds {on_card_alone}"
         );
         assert_eq!(
-            p.max_local_hostable_layers(&m, true),
+            p.fresh_run_layers_for_planning(&m),
             Some(28),
-            "the loader would place all 28 — part on the card, the rest on the processor"
+            "a fresh worker would place all 28 — part on the card, the rest on the processor"
+        );
+        assert_eq!(
+            p.max_local_hostable_layers(&m, true),
+            Some(on_card_alone),
+            "but a worker growing into a further range has only the card"
         );
 
         // The control: an architecture the loader will not split is held to
@@ -9922,7 +10078,33 @@ mod admission_tests {
             splits_across_devices: false,
             ..seven_b
         });
+        assert_eq!(q.fresh_run_layers_for_planning(&m), None);
         assert_eq!(q.max_local_hostable_layers(&m, true), Some(on_card_alone));
+    }
+
+    /// A memory refusal is remembered as the layers it would have ADDED, the
+    /// fewest when a request is refused twice, and handed over once: the
+    /// router's re-plan holds this node below it (2026-10-08). Any other failure
+    /// is not a memory fact and records nothing.
+    #[test]
+    fn a_memory_refusal_is_remembered_as_the_layers_it_would_have_added() {
+        let p = pool();
+        let m = ModelId("thirty-b".into());
+        let rid = Uuid::new_v4();
+        let refused: Result<(), SwarmError> =
+            Err(SwarmError::LocalMemoryUnavailable("8 layers 19..27".into()));
+        p.note_load_refusal(rid, &m, (19, 27), &refused);
+        let smaller: Result<(), SwarmError> =
+            Err(SwarmError::LocalMemoryUnavailable("5 layers 43..48".into()));
+        p.note_load_refusal(rid, &m, (43, 48), &smaller);
+        let other = Uuid::new_v4();
+        let dead: Result<(), SwarmError> = Err(SwarmError::ServiceUnavailable("dead".into()));
+        p.note_load_refusal(other, &m, (0, 48), &dead);
+        p.note_load_refusal(other, &m, (0, 48), &Ok::<(), SwarmError>(()));
+
+        assert_eq!(p.take_layers_refused(rid), Some(5));
+        assert_eq!(p.take_layers_refused(rid), None, "taken once");
+        assert_eq!(p.take_layers_refused(other), None);
     }
 
     /// The combined accessor and the single-answer methods must agree.
