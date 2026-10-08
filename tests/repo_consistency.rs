@@ -1413,6 +1413,79 @@ fn the_geometry_accessor_guard_catches_a_wrapped_read() {
     );
 }
 
+/// Statements in `text`'s production code (before the first `#[cfg(test)]`)
+/// that parse a whole `Config` with a bare `toml::from_str`.
+fn bare_config_parses(text: &str) -> Vec<(usize, String)> {
+    let prod = text.split("#[cfg(test)]").next().unwrap_or(text);
+    statements(prod)
+        .into_iter()
+        .filter(|(_, l)| {
+            l.contains("toml::from_str")
+                && (l.contains("::<Config>")
+                    || l.contains("::<crate::config::Config>")
+                    || l.contains(": Config =")
+                    || l.contains(": crate::config::Config ="))
+        })
+        .collect()
+}
+
+/// #242: config.toml is read by the loader, a dashboard save, a reload and the
+/// settings read, and only the loader repaired a value a past release had
+/// stored in place of the user's choice — every save put it back. All of them
+/// go through `config::parse_config_file`, which applies the repairs.
+#[test]
+fn the_config_file_is_read_through_one_parser() {
+    let root = repo_root();
+    let mut stack = vec![root.join("src")];
+    let mut offenders: Vec<String> = Vec::new();
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for e in rd.filter_map(|e| e.ok()) {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+                continue;
+            }
+            if !p.extension().is_some_and(|x| x == "rs") {
+                continue;
+            }
+            let rel = p
+                .strip_prefix(&root)
+                .unwrap_or(&p)
+                .to_string_lossy()
+                .replace('\\', "/");
+            let Ok(text) = std::fs::read_to_string(&p) else {
+                continue;
+            };
+            for (line_no, l) in bare_config_parses(&text) {
+                // The parser itself, and the unknown-key check, which only
+                // round-trips the document to learn its schema.
+                let allowed = rel == "src/config/mod.rs"
+                    && (l.contains("let mut config: Config = toml::from_str(text)?")
+                        || l.contains("let Ok(parsed) = toml::from_str::<Config>(contents)"));
+                if !allowed {
+                    offenders.push(format!("{rel}:{line_no}: {}", l.trim()));
+                }
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "read config.toml through config::parse_config_file — a bare parse skips \
+         the repair of values a past release stored in place of the user's choice:\n{}",
+        offenders.join("\n")
+    );
+}
+
+/// The scan above must see the shape that shipped (`base_for_partial_update`).
+#[test]
+fn the_config_parser_guard_catches_a_bare_parse() {
+    let src = "fn f(text: &str) {\n    match toml::from_str::<crate::config::Config>(text) {\n        _ => {}\n    }\n}\n";
+    assert_eq!(bare_config_parses(src).len(), 1);
+}
+
 /// Statements that decide to hand a request to the singleton executor on the
 /// bare `model_loaded` flag, in a file that hands requests to it. Production
 /// code only (cut at the first `#[cfg(test)]`, where tests SET the flag).

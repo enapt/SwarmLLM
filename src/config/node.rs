@@ -57,8 +57,9 @@ pub struct ResourceConfig {
     /// [`ResourceConfig::shard_upload_mbps`] is its only consumer, applied at
     /// the shard-transfer path in `network::manager::requests`. Inference
     /// traffic, gossip, DHT maintenance and manifest announcements are all
-    /// outside it. A user capped it at 1 Mbps, measured 11 Mbps of traffic and
-    /// reasonably concluded the setting did nothing (2026-09-11 suggestion);
+    /// outside it. A user found it at 1 Mbps (stored for "Unlimited" by #242's
+    /// defect), measured 11 Mbps of traffic and reasonably concluded the
+    /// setting did nothing (2026-09-11 suggestion);
     /// the settings panel and the config file now say which traffic it covers,
     /// and `network::bandwidth` is how anyone can see the rest.
     #[serde(default)]

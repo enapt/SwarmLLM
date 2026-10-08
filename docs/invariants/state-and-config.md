@@ -240,6 +240,9 @@ Rules that follow:
    an entry to `migrate_superseded_defaults` — and only when the old value was
    the daemon's, never something a user could plausibly have chosen, because
    silently overriding a deliberate setting is worse than a stale default.
+   The entries apply wherever the file is read, because `parse_config_file` is
+   its one reader (until 2026-10-08 only the loader applied them, and the next
+   dashboard save put the old value back — #242).
 5. **Unknown keys warn, they do not fail.** `deny_unknown_fields` would refuse
    to start on a config mentioning a later release's key. `warn_unknown_keys_in`
    names the key and continues.
@@ -661,6 +664,47 @@ setting must be added there**. Every environment override targets a
 startup-only setting today, so none is needed for them.
 
 → `docs/invariants/state-and-config.md`
+
+## config.toml has ONE reader, and a setting's meaningful 0 is never floored
+
+**Rule:** `.claude/rules/arch-state-and-config.md` § "config.toml has ONE reader,
+and a setting's meaningful 0 is never floored".
+
+### What happened (report #006, fixed 2026-10-08, FUTURE_WORK #242)
+
+`PUT /api/admin/config` clamped `max_bandwidth_mbps` to `1..=100_000` since an
+April sweep added the bounds. In August `0` became AUTOMATIC (10 / 50 Mbps / no
+cap by contribution level) — and the floor turned every choice of it into a
+1 Mbps cap on serving model parts. The Settings slider labels 0 "Unlimited",
+steps by 10 and snaps a stored 1 back to 0, so the panel kept saying
+"Unlimited" over a node seeding at 125 KB/s; the request answered `ok`. Before
+v0.3.180 every save sent every field, so saving ANY setting did it. A user found
+the cap "already set to 1" on 2026-09-11 and was told the setting covers only
+model-part serving, which was true and missed this. The same floor hit
+`auto_manage_max_storage_mb` (0 = a share of the disk) and `batch_timeout_ms`
+(0 = at once).
+
+### Why the repair needed a second fix
+
+`migrate_superseded_defaults` exists for exactly this, a value the daemon wrote
+that no person chose. But only the LOADER applied it. A dashboard save
+(`base_for_partial_update`), a reload and `GET /api/admin/config` each parsed the
+file with a bare `toml::from_str`, so the first save after a start put the
+stranded value back into the live config and wrote it to disk again. Every
+migration ever added had been undone by the next save. `parse_config_file` is
+now the one reader. Its log lines fire once per process, because the settings
+read re-parses on every poll.
+
+### What a change must keep
+
+- **A floor belongs only on a setting with no meaning at 0** (`max_concurrent_requests`,
+  `max_batch_size`). Before clamping a field, read its doc comment for "0 =".
+- **A value a defect stored is repaired only where no UI could produce it.**
+  The slider cannot make 1, and 1 MB holds no model part. A deliberate 1 Mbps
+  cap is lost, so the smallest honoured cap is 2. That trade is written in the
+  book.
+- `unknown_config_keys` is the one other parse, and it only round-trips the
+  document to learn its schema.
 
 ## A platform predicate answers "what kernel is this", not "where am I running"
 

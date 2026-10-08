@@ -2,6 +2,16 @@
 
 ## [0.3.231-alpha] — 2026-10-08
 
+**Fixed: choosing "Unlimited" for model sharing no longer sets a 1 Mbps
+limit.** Picking "Unlimited" on the bandwidth slider in Settings stored a
+limit of 1 Mbps on how fast this computer sends model parts to others, and
+the slider went on showing "Unlimited". Before 0.3.180, saving any setting
+did it. A node carrying that 1 now returns to the automatic rate by itself:
+10 Mbps at Minimal, 50 at Moderate, no limit at Maximum. The slider now calls
+that setting Automatic, which is what it always was. The same mistake could
+store a 1 MB storage budget through the settings API, and that is repaired the
+same way. Reported by a tester.
+
 **Fixed: a reply whose computer fails partway through now carries on
 elsewhere.** When the computer generating a reply ran out of memory, its
 model process crashed, or it stopped answering, the reader got the start of

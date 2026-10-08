@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #242**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #243**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -40,7 +40,7 @@ after v0.3.224 (#160, #215 and #216 closed; #217 and #218 opened from the swarm 
 v0.3.226 (released 2026-10-05), #220 opened from the .225 gate's unrecorded driver resets; #129's fit verdict (idle-model
 reclaim) shipped in v0.3.227 (released 2026-10-05 23:45 UTC); #222 (a node near its storage limit deleting and
 re-fetching parts) and #223 closed in v0.3.228 (released 2026-10-06 09:42 UTC), #224 opened from its gate;
-#225, #226 and #227 opened from a tester's two reports the same day; #117 (Qwen 3.5, dense), #225 and #226 closed in v0.3.229 (released 2026-10-07 00:00 UTC), #228 opened for what Qwen 3.5 leaves out; #129's cold loads (waited for and priced), #228 (2) and (2b), #220 (2), #229, #230 and #231 shipped in v0.3.230 (released 2026-10-07 16:38 UTC), #232 parked from their report; #234, #235, #239 and #240 closed on 2026-10-08 from two tester reports and the card check after them, #236-#238 opened from the second (#236 and #238 closed the same day).
+#225, #226 and #227 opened from a tester's two reports the same day; #117 (Qwen 3.5, dense), #225 and #226 closed in v0.3.229 (released 2026-10-07 00:00 UTC), #228 opened for what Qwen 3.5 leaves out; #129's cold loads (waited for and priced), #228 (2) and (2b), #220 (2), #229, #230 and #231 shipped in v0.3.230 (released 2026-10-07 16:38 UTC), #232 parked from their report; #234, #235, #239 and #240 closed on 2026-10-08 from two tester reports and the card check after them, #236-#238 opened from the second (#236 and #238 closed the same day); #242 opened and closed the same day from report #006 (a 1 Mbps cap stored for "Unlimited").
 `docs/plans/` holds the multi-step designs; the entries point at them.
 
 **P0 — wrong answers, silently**
@@ -1556,7 +1556,20 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-08, on main (not yet released)** (#233, #234, #235, #236, #238, #239, #240)
+**Closed 2026-10-08, on main (not yet released)** (#233, #234, #235, #236, #238, #239, #240, #242)
+- #242 — choosing "Unlimited" for model sharing stored a 1 Mbps cap (report #006, a tester). The
+  settings API floored `max_bandwidth_mbps` at 1 since April (`4dc09cab`), but 0 means AUTOMATIC
+  (10 / 50 Mbps / none by contribution level, since `8853d345`) — and before v0.3.180 every
+  Settings save sent the slider, so saving ANY setting stored it. The slider steps by 10, so 1 was
+  never the panel's choice, and it went on showing "Unlimited" (it snaps 1 to 0). The same floor
+  hit `auto_manage_max_storage_mb` (0 = a share of the disk) and `batch_timeout_ms` (0 = at once).
+  Fixed: `api::admin::apply_numeric_limits` keeps a meaningful 0 and enforces only ceilings; a 1 on
+  disk reads back as automatic through `config::parse_config_file`, now the ONE reader of
+  config.toml — a dashboard save, a reload and the settings read each parsed it raw, so only the
+  loader had ever applied `migrate_superseded_defaults` (a save put a stranded value back live);
+  guard `the_config_file_is_read_through_one_parser`. The slider says Automatic and its hint gives
+  the three rates (21 locales). Repro on a throwaway node: .230 PUT 0 → GET 1; fix → 0, a stored 1
+  → 0 at start, the next save drops it from the file, one log line.
 - #233 — guess-and-check across a split on one card had read slower since v0.3.226 (bisected: .224
   fast, .226 slow, one boot). The drafter's decode graph changed shape at every switch between
   host-fed (i64) and card-fed (u32) token ids — the embedding's cast was inside the capture — and

@@ -46,7 +46,9 @@
       v = parseInt(v, 10) || 0;
       switch (fmt) {
         case 'int': return String(v);
-        case 'mbps': return v === 0 ? I18n.t('settings.slider_unlimited') : v + ' Mbps';
+        // 0 is AUTOMATIC — the cap follows the contribution level (10 / 50 /
+        // none) — and was labelled "Unlimited", which it is only at Maximum (#242).
+        case 'mbps': return v === 0 ? I18n.t('settings.slider_bandwidth_auto') : v + ' Mbps';
         case 'gb': return (v / 1000).toFixed(v < 10000 ? 1 : 0) + ' GB';
         case 'sec-off': return v === 0 ? I18n.t('settings.slider_off') : v + ' s';
         default: return String(v);

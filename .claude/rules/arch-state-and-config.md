@@ -111,6 +111,12 @@ The daemon must write **only values that differ from the compiled default**.
 
 → `docs/invariants/state-and-config.md` § "A partial config update builds on the FILE, not on what the daemon remembers"
 
+## config.toml has ONE reader, and a setting's meaningful 0 is never floored (2026-10-08)
+
+**`config::parse_config_file`** is the only parse of the document — loader, dashboard save, reload and the settings read — because it applies `migrate_superseded_defaults`; guard `the_config_file_is_read_through_one_parser`. **`api::admin::apply_numeric_limits`** keeps a 0 that means automatic / at once and enforces only ceilings (#242: "Unlimited" stored a 1 Mbps cap for six months).
+
+→ `docs/invariants/state-and-config.md` § "config.toml has ONE reader, and a setting's meaningful 0 is never floored"
+
 ## Single-source-of-truth helpers — SharedState, live config and credits
 
 Each names the ONE place a decision is made; a second implementation is this codebase's most-repeated defect (`architecture.md` § "One invariant, N paths").

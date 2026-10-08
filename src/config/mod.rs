@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 
 use crate::error::SwarmError;
 // Re-export ContributionMode from swarmllm-types crate
@@ -51,7 +52,7 @@ pub fn reload_operational_params(config_path: &Path) -> Result<OperationalParams
         )));
     }
     let contents = std::fs::read_to_string(config_path).map_err(SwarmError::Io)?;
-    let config: Config = toml::from_str(&contents).map_err(|e| {
+    let config = parse_config_file(&contents, "config.toml").map_err(|e| {
         SwarmError::Config(format!("Failed to parse {}: {e}", config_path.display()))
     })?;
     Ok(OperationalParams::from_config(&config))
@@ -146,13 +147,32 @@ pub fn to_minimal_toml(config: &Config) -> Result<String, SwarmError> {
         .map_err(|e| SwarmError::Internal(format!("Failed to serialize config to TOML: {e}")))
 }
 
+/// Read a `config.toml` document — the ONE parser for it.
+///
+/// The loader, a dashboard save (`api::admin::base_for_partial_update`) and a
+/// reload all re-read the file, and each did it with a bare `toml::from_str`,
+/// so only the loader repaired a stranded value: the next save read it back
+/// raw and put it into the live config again (#242).
+pub(crate) fn parse_config_file(text: &str, source: &str) -> Result<Config, toml::de::Error> {
+    let mut config: Config = toml::from_str(text)?;
+    migrate_superseded_defaults(&mut config, source);
+    Ok(config)
+}
+
+/// A repair is logged once per process: every settings read and save re-reads
+/// the file, and the old value stays on disk until the next save rewrites it.
+fn first_time(logged: &AtomicBool) -> bool {
+    !logged.swap(true, std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Reset values that are stranded copies of a superseded default.
 ///
 /// The pruning above stops this recurring, but it cannot help a config that
 /// already carries the old value — that key is present, so it keeps winning.
-/// Each entry here is a default the daemon itself wrote, which a later release
-/// changed, and which was never exposed in any UI — so a value matching the old
-/// default is overwhelmingly the daemon's, not a deliberate choice.
+/// Each entry here is a value the daemon itself wrote — a default a later
+/// release changed, or a value a defect stored in place of the user's choice —
+/// in a form no UI could produce, so a value matching it is overwhelmingly the
+/// daemon's, not a deliberate choice.
 ///
 /// Keep this list SHORT and delete entries once the affected installs are gone.
 /// Anything that a user could plausibly have chosen on purpose does not belong
@@ -164,12 +184,15 @@ pub(crate) fn migrate_superseded_defaults(config: &mut Config, source: &str) {
     if config.updates.check_interval_hours == SUPERSEDED_UPDATE_INTERVAL_HOURS {
         let fresh = UpdateConfig::default().check_interval_hours;
         if fresh != SUPERSEDED_UPDATE_INTERVAL_HOURS {
-            tracing::info!(
-                from = SUPERSEDED_UPDATE_INTERVAL_HOURS,
-                to = fresh,
-                source,
-                "Update-check interval was a stranded copy of an old default; using the current default"
+            static LOGGED: AtomicBool = AtomicBool::new(false);
+            if first_time(&LOGGED) {
+                tracing::info!(
+                    from = SUPERSEDED_UPDATE_INTERVAL_HOURS,
+                    to = fresh,
+                    source,
+                    "Update-check interval was a stranded copy of an old default; using the current default"
             );
+            }
             config.updates.check_interval_hours = fresh;
         }
     }
@@ -186,12 +209,50 @@ pub(crate) fn migrate_superseded_defaults(config: &mut Config, source: &str) {
     // daemon's, not the user's.
     const SUPERSEDED_MAX_PEERS: u32 = 200;
     if config.network.max_peers == Some(SUPERSEDED_MAX_PEERS) {
-        tracing::info!(
-            source,
-            "max_peers was a stranded copy of an old default (and was never enforced \
-             until now); resolving it from the contribution mode instead"
-        );
+        static LOGGED: AtomicBool = AtomicBool::new(false);
+        if first_time(&LOGGED) {
+            tracing::info!(
+                source,
+                "max_peers was a stranded copy of an old default (and was never enforced \
+                 until now); resolving it from the contribution mode instead"
+            );
+        }
         config.network.max_peers = None;
+    }
+
+    // #242: the settings API floored `max_bandwidth_mbps` at 1, so from April
+    // to October 2026 choosing "Unlimited" (0, which means automatic: 10 / 50
+    // Mbps / no cap by contribution level) stored a 1 Mbps cap on serving model
+    // parts — and before 2026-09-14 every Settings save sent the slider, so
+    // saving ANY setting did it. The slider's steps are 0, 10, 20 …, so 1 was
+    // never something the panel could choose; a tester found it on their node,
+    // and a user found it "already set" on theirs (2026-09-11).
+    const DEFECT_WRITTEN_BANDWIDTH_MBPS: u64 = 1;
+    if config.resources.max_bandwidth_mbps == DEFECT_WRITTEN_BANDWIDTH_MBPS {
+        static LOGGED: AtomicBool = AtomicBool::new(false);
+        if first_time(&LOGGED) {
+            tracing::info!(
+                source,
+                "max_bandwidth_mbps = 1 was stored by a defect when \"Unlimited\" was chosen \
+                 (0.3.230 and earlier); sharing model parts at the automatic rate instead. \
+                 A deliberate cap needs 2 Mbps or more"
+            );
+        }
+        config.resources.max_bandwidth_mbps = 0;
+    }
+    // The same floor on `auto_manage.max_storage_mb`, whose 0 is a share of
+    // `max_disk_mb`: 1 MB holds no part of any model, so it is never a choice.
+    const DEFECT_WRITTEN_STORAGE_MB: u64 = 1;
+    if config.auto_manage.max_storage_mb == DEFECT_WRITTEN_STORAGE_MB {
+        static LOGGED: AtomicBool = AtomicBool::new(false);
+        if first_time(&LOGGED) {
+            tracing::info!(
+                source,
+                "auto_manage.max_storage_mb = 1 was stored by a defect when automatic (0) was \
+                 chosen; using the automatic share of max_disk_mb instead"
+            );
+        }
+        config.auto_manage.max_storage_mb = 0;
     }
 }
 
@@ -460,11 +521,10 @@ impl Config {
         if path.exists() {
             let contents = std::fs::read_to_string(&path).map_err(SwarmError::Io)?;
             config_text = contents.clone();
-            config = toml::from_str(&contents).map_err(|e| {
+            config = parse_config_file(&contents, "config.toml").map_err(|e| {
                 SwarmError::Config(format!("Failed to parse {}: {e}", path.display()))
             })?;
             warn_unknown_keys_in(&contents);
-            migrate_superseded_defaults(&mut config, "config.toml");
             // Re-apply data_dir overrides since toml::from_str replaces the entire config
             if let Some(dir) = cli_data_dir {
                 config.node.data_dir = dir.to_path_buf();
@@ -2000,6 +2060,27 @@ mod config_default_hygiene {
             other.updates.check_interval_hours, 24,
             "a value that was never a default must be left alone"
         );
+    }
+
+    /// #242: the 1 a defect stored for "Unlimited" bandwidth (and for the
+    /// automatic storage budget) reads back as automatic, through the one
+    /// parser every reader of config.toml uses; a real cap is kept.
+    #[test]
+    fn a_value_a_defect_stored_for_automatic_reads_back_as_automatic() {
+        let c = crate::config::parse_config_file(
+            "[resources]\nmax_bandwidth_mbps = 1\n\n[auto_manage]\nmax_storage_mb = 1\n",
+            "test",
+        )
+        .unwrap();
+        assert_eq!(c.resources.max_bandwidth_mbps, 0);
+        assert_eq!(c.auto_manage.max_storage_mb, 0);
+        let kept = crate::config::parse_config_file(
+            "[resources]\nmax_bandwidth_mbps = 2\n\n[auto_manage]\nmax_storage_mb = 2000\n",
+            "test",
+        )
+        .unwrap();
+        assert_eq!(kept.resources.max_bandwidth_mbps, 2);
+        assert_eq!(kept.auto_manage.max_storage_mb, 2000);
     }
 
     /// Any config, once pruned, must reload to exactly the same effective

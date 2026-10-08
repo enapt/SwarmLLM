@@ -757,14 +757,14 @@
           <div class="form-group">
             <label for="settings-bandwidth">
               <span data-i18n="settings.max_bandwidth_short">Max Bandwidth</span>
-              <output class="slider-output" id="settings-bandwidth-out">Unlimited</output>
+              <output class="slider-output" id="settings-bandwidth-out">Automatic</output>
             </label>
             <input type="range" id="settings-bandwidth" class="slider" value="0" min="0" max="1000" step="10" data-slider-format="mbps">
             <!-- What it actually caps. Labelled "Max Bandwidth" it read as a
                  limit on everything this node sends, which it is not: a user
-                 set it to 1 Mbps, measured 11 Mbps, and reasonably concluded
+                 found it at 1 Mbps (stored by #242's defect), measured 11 Mbps, and reasonably concluded
                  the setting did nothing (2026-09-11 suggestion). -->
-            <span class="text-muted field-hint" data-i18n="settings.max_bandwidth_help">Caps how fast this computer sends model parts to others. It does not limit inference or the background traffic that keeps it connected — the Network figure on the dashboard shows uploads and downloads separately.</span>
+            <span class="text-muted field-hint" data-i18n="settings.max_bandwidth_help">Caps how fast this computer sends model parts to others. It does not limit inference or the background traffic that keeps it connected — the Network figure on the dashboard shows uploads and downloads separately. Automatic follows your contribution level: 10 Mbps at Minimal, 50 at Moderate, no limit at Maximum.</span>
           </div>
           <!-- Donating relay capacity used to be on by default with no way to
                decline short of hand-editing config.toml, and nothing on any

@@ -1339,7 +1339,7 @@ pub async fn get_config(State(state): State<AppState>) -> Json<serde_json::Value
         .await
         .ok()
         .and_then(|r| r.ok())
-        .and_then(|s| toml::from_str::<crate::config::Config>(&s).ok())
+        .and_then(|s| crate::config::parse_config_file(&s, "config.toml").ok())
         .unwrap_or_else(|| state.config.clone());
     let config = &config;
     let contribution = match config.node.contribution {
@@ -1450,7 +1450,10 @@ fn base_for_partial_update(
     path_for_log: &std::path::Path,
 ) -> crate::config::Config {
     match file_text {
-        Some(text) => match toml::from_str::<crate::config::Config>(text) {
+        // Through the loader's own parser, so a value a past release wrote in
+        // place of the user's choice is repaired here too — re-reading it raw
+        // put the stranded value back into the live config on every save.
+        Some(text) => match crate::config::parse_config_file(text, "config.toml") {
             Ok(parsed) => parsed,
             Err(e) => {
                 // NOT a reason to refuse the save: the operator is mid-edit, or
@@ -1468,6 +1471,44 @@ fn base_for_partial_update(
             }
         },
         None => live.clone(),
+    }
+}
+
+/// Apply the numeric limits a settings change names, each held inside what
+/// this endpoint accepts.
+///
+/// ⚠ **A setting whose `0` MEANS something keeps its `0`; only its ceiling is
+/// enforced.** `max_bandwidth_mbps = 0` is automatic (from the contribution
+/// level), `auto_manage_max_storage_mb = 0` is a share of `max_disk_mb`,
+/// `max_gpu_vram_mb = 0` is 80% of the card, `batch_timeout_ms = 0` is "at
+/// once". From April to October 2026 the first was clamped to at least 1, so
+/// choosing "Unlimited" in Settings stored a 1 Mbps cap on serving model parts
+/// — answered `{"status":"ok"}`, and the slider went on showing "Unlimited"
+/// (#242). A floor belongs only on a setting with no meaning at 0.
+fn apply_numeric_limits(config: &mut crate::config::Config, body: &ConfigUpdate) {
+    if let Some(max_reqs) = body.max_concurrent_requests {
+        config.inference.max_concurrent_requests = max_reqs.clamp(1, MAX_CONCURRENT_REQUESTS_CAP);
+    }
+    if let Some(bw) = body.max_bandwidth_mbps {
+        config.resources.max_bandwidth_mbps = bw.min(MAX_BANDWIDTH_MBPS_CAP);
+    }
+    if let Some(disk) = body.max_disk_mb {
+        config.resources.max_disk_mb = disk.clamp(MIN_DISK_MB, MAX_DISK_MB);
+    }
+    if let Some(vram) = body.max_gpu_vram_mb {
+        // Cap at 1 TB so a stray UI value can't disable VRAM accounting
+        // entirely on the dashboard side; the inference path will still honor
+        // whatever this is.
+        config.resources.max_gpu_vram_mb = vram.min(1_048_576);
+    }
+    if let Some(max_storage) = body.auto_manage_max_storage_mb {
+        config.auto_manage.max_storage_mb = max_storage.min(MAX_AUTO_MANAGE_STORAGE_MB);
+    }
+    if let Some(batch_size) = body.max_batch_size {
+        config.inference.max_batch_size = batch_size.max(1);
+    }
+    if let Some(timeout) = body.batch_timeout_ms {
+        config.inference.batch_timeout_ms = timeout.min(MAX_BATCH_TIMEOUT_MS);
     }
 }
 
@@ -1621,21 +1662,7 @@ pub async fn update_config(
     if let Some(auto) = body.contribution_auto {
         config.node.contribution_auto = auto;
     }
-    if let Some(max_reqs) = body.max_concurrent_requests {
-        config.inference.max_concurrent_requests = max_reqs.clamp(1, MAX_CONCURRENT_REQUESTS_CAP);
-    }
-    if let Some(bw) = body.max_bandwidth_mbps {
-        config.resources.max_bandwidth_mbps = bw.clamp(1, MAX_BANDWIDTH_MBPS_CAP);
-    }
-    if let Some(disk) = body.max_disk_mb {
-        config.resources.max_disk_mb = disk.clamp(MIN_DISK_MB, MAX_DISK_MB);
-    }
-    if let Some(vram) = body.max_gpu_vram_mb {
-        // 0 = auto (80% of detected VRAM). Cap at 1 TB so a stray UI
-        // value can't disable VRAM accounting entirely on the dashboard
-        // side; the inference path will still honor whatever this is.
-        config.resources.max_gpu_vram_mb = vram.min(1_048_576);
-    }
+    apply_numeric_limits(&mut config, &body);
     if let Some(auto_manage) = body.auto_manage_shards {
         config.auto_manage.enabled = auto_manage;
         // Update the runtime atomic so AutoShardManager picks it up immediately
@@ -1660,9 +1687,6 @@ pub async fn update_config(
             .with_toast("info", 4000),
         );
     }
-    if let Some(max_storage) = body.auto_manage_max_storage_mb {
-        config.auto_manage.max_storage_mb = max_storage.clamp(1, MAX_AUTO_MANAGE_STORAGE_MB);
-    }
     if let Some(shard_size) = body.shard_size_mb {
         if !(crate::config::SHARD_SIZE_MIN_MB..=crate::config::SHARD_SIZE_MAX_MB)
             .contains(&shard_size)
@@ -1675,12 +1699,6 @@ pub async fn update_config(
             ))));
         }
         config.model.shard_size_mb = shard_size;
-    }
-    if let Some(batch_size) = body.max_batch_size {
-        config.inference.max_batch_size = batch_size.max(1);
-    }
-    if let Some(timeout) = body.batch_timeout_ms {
-        config.inference.batch_timeout_ms = timeout.clamp(1, MAX_BATCH_TIMEOUT_MS);
     }
     if let Some(allow) = body.allow_cross_pool_inference {
         // Goes live with the whole config at the end of this handler;
@@ -3189,6 +3207,81 @@ mod tests {
         assert_eq!(update.update_mode.as_deref(), Some("install"));
         // An empty save is legitimate (nickname/providers go elsewhere).
         assert!(parse_config_update(serde_json::json!({}), &live).is_ok());
+    }
+
+    /// #242: a setting whose 0 means "automatic" or "at once" is stored as 0.
+    /// Choosing "Unlimited" for bandwidth stored a 1 Mbps cap on serving model
+    /// parts, and the request still answered ok. Each ceiling still holds.
+    #[test]
+    fn a_setting_whose_zero_means_automatic_keeps_its_zero() {
+        let mut config = crate::config::Config::default();
+        config.resources.max_bandwidth_mbps = 50;
+        config.resources.max_gpu_vram_mb = 4000;
+        config.auto_manage.max_storage_mb = 5000;
+        config.inference.batch_timeout_ms = 50;
+        let zeros = serde_json::json!({
+            "max_bandwidth_mbps": 0,
+            "max_gpu_vram_mb": 0,
+            "auto_manage_max_storage_mb": 0,
+            "batch_timeout_ms": 0,
+        });
+        let update = parse_config_update(zeros, &config).expect("known keys");
+        apply_numeric_limits(&mut config, &update);
+        assert_eq!(
+            config.resources.max_bandwidth_mbps, 0,
+            "bandwidth: 0 is automatic"
+        );
+        assert_eq!(
+            config.resources.max_gpu_vram_mb, 0,
+            "card memory: 0 is automatic"
+        );
+        assert_eq!(
+            config.auto_manage.max_storage_mb, 0,
+            "storage: 0 is a share of the disk"
+        );
+        assert_eq!(
+            config.inference.batch_timeout_ms, 0,
+            "batch wait: 0 is at once"
+        );
+
+        let huge = serde_json::json!({
+            "max_bandwidth_mbps": u64::MAX,
+            "auto_manage_max_storage_mb": u64::MAX,
+            "batch_timeout_ms": u64::MAX,
+            "max_concurrent_requests": 0,
+        });
+        let update = parse_config_update(huge, &config).expect("known keys");
+        apply_numeric_limits(&mut config, &update);
+        assert_eq!(config.resources.max_bandwidth_mbps, MAX_BANDWIDTH_MBPS_CAP);
+        assert_eq!(
+            config.auto_manage.max_storage_mb,
+            MAX_AUTO_MANAGE_STORAGE_MB
+        );
+        assert_eq!(config.inference.batch_timeout_ms, MAX_BATCH_TIMEOUT_MS);
+        assert_eq!(
+            config.inference.max_concurrent_requests, 1,
+            "a setting with no meaning at 0 keeps its floor"
+        );
+    }
+
+    /// A dashboard save re-reads config.toml; a value a past release wrote in
+    /// place of the user's choice must be repaired there too, or every save
+    /// puts it back into the live config (#242).
+    #[test]
+    fn a_save_repairs_a_bandwidth_cap_a_past_release_wrote() {
+        let live = crate::config::Config::default();
+        let base = base_for_partial_update(
+            Some("[resources]\nmax_bandwidth_mbps = 1\n"),
+            &live,
+            std::path::Path::new("config.toml"),
+        );
+        assert_eq!(base.resources.max_bandwidth_mbps, 0);
+        let kept = base_for_partial_update(
+            Some("[resources]\nmax_bandwidth_mbps = 20\n"),
+            &live,
+            std::path::Path::new("config.toml"),
+        );
+        assert_eq!(kept.resources.max_bandwidth_mbps, 20, "a real cap is kept");
     }
 
     /// The spelling that shipped in the docs must be the one the code accepts.
