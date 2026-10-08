@@ -59,6 +59,12 @@
     });
   }
 
+  // "New", "1 message" or "N messages" — the header's count of a conversation.
+  function sessionCountLabel(s) {
+    var n = (s.messages || []).length;
+    return n === 0 ? I18n.t('chat.count_new') : (n === 1 ? I18n.t('chat.count_one') : I18n.t('chat.count_many', { count: n }));
+  }
+
   function clearPendingImages() {
     S.pendingImages = [];
     renderImagePreviews();
@@ -329,9 +335,8 @@
       var isEncrypted = headerModelItem && headerModelItem.encrypted;
       var _hdrIconKey = (headerModelItem && headerModelItem.group && _ICON_MAP[headerModelItem.group]) ? headerModelItem.group : modelIconKey(s.model || '');
       var hdrIconHtml = _hdrIconKey ? providerIconHtml(_hdrIconKey, 12) : '';
-      var msgCount = s.messages.length;
-      var countLabel = msgCount === 0 ? I18n.t('chat.count_new') : (msgCount === 1 ? I18n.t('chat.count_one') : I18n.t('chat.count_many', { count: msgCount }));
-      var countClass = 'chat-session-count' + (msgCount === 0 ? ' is-new' : '');
+      var countLabel = sessionCountLabel(s);
+      var countClass = 'chat-session-count' + (s.messages.length === 0 ? ' is-new' : '');
       var safeModelId = U.escapeHtml(s.model || '');
       // Subscription/API badge for the model
       var authBadge = '';
@@ -527,6 +532,9 @@
 
       input.value = '';
       U.autoResizeInput();
+      // Setting the value from code fires no 'input' event, so the word count
+      // under the box went on showing the sent message's (report #007).
+      U.updateTokenCounter();
       clearPendingImages();
 
       var session = S.sessions[S.currentSessionId];
@@ -1295,6 +1303,17 @@
       } catch (_e) {
         // Outer catch: defensive against malformed Object.keys / Object.assign
         // failure on degraded browsers. No user impact worth logging.
+      }
+      // Every change to a conversation is saved here, so the header's message
+      // count is kept current here. It was written only when the header was
+      // drawn, so an open chat went on showing the count it was opened with
+      // (report #007). Only that one span: redrawing the header would end a
+      // rename in progress.
+      var countEl = document.querySelector('#chat-session-header .chat-session-count');
+      var shown = S.currentSessionId && S.sessions[S.currentSessionId];
+      if (countEl && shown) {
+        countEl.textContent = sessionCountLabel(shown);
+        countEl.classList.toggle('is-new', shown.messages.length === 0);
       }
     },
 

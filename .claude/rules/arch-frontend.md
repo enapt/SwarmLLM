@@ -167,6 +167,12 @@ over it.
 
 → `docs/invariants/frontend.md`
 
+## One choice is shown by every control that shows it, and a model by its id
+
+**`App.models.selectDropdown`** sets BOTH model pickers (`#model-select`, `#mobile-model-select`): the narrow one was set only by a refresher, so after a chat switch it named a model that was not answering (report #007). A local model is named **`formatModelDisplayName(m.id)`** everywhere, never from the file's own `name`. CSS never carries visible words: use `attr(aria-label)`.
+
+→ `docs/invariants/frontend.md` § "One choice is shown by every control that shows it, and a model by its id"
+
 ## Frontend Event Handling
 
 All WS events are handled by `_handleActivityEvent()` in notifications.js. Do NOT:

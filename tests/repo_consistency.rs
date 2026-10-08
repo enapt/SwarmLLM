@@ -1413,6 +1413,46 @@ fn the_geometry_accessor_guard_catches_a_wrapped_read() {
     );
 }
 
+/// Report #007: on a narrow screen the chat's model picker is
+/// `#mobile-model-select`, and only the model-list refresh set it — after
+/// switching to an older chat it named the last model picked while the chat's
+/// own model answered. `selectDropdown` is where every selection passes, so it
+/// sets both pickers.
+#[test]
+fn every_model_selection_sets_both_pickers() {
+    let src = std::fs::read_to_string(repo_root().join("frontend/js/components/models.js"))
+        .expect("models.js");
+    let start = src
+        .find("selectDropdown: function(")
+        .expect("selectDropdown");
+    let body = &src[start..];
+    let body = &body[..body.find("\n    },\n").expect("end of selectDropdown")];
+    for picker in ["'model-select'", "'mobile-model-select'"] {
+        assert!(
+            body.contains(picker),
+            "selectDropdown must set {picker} — every selection passes there"
+        );
+    }
+}
+
+/// Report #007: a model is named from its id on the chat's surfaces. A file's
+/// own `name` is whatever its uploader wrote — four quantisations of one model
+/// shared one, a Q8_0 file called itself "AWQ" — and the header and reply tag
+/// already used the id, so the picker and the badge named one model two ways.
+#[test]
+fn a_local_model_is_named_from_its_id() {
+    for file in [
+        "frontend/js/components/models.js",
+        "frontend/js/components/dashboard.js",
+    ] {
+        let src = std::fs::read_to_string(repo_root().join(file)).expect(file);
+        assert!(
+            !src.contains("formatModelDisplayName(m.name"),
+            "{file}: name a model with formatModelDisplayName(m.id), not the file's own name"
+        );
+    }
+}
+
 /// Statements in `text`'s production code (before the first `#[cfg(test)]`)
 /// that parse a whole `Config` with a bare `toml::from_str`.
 fn bare_config_parses(text: &str) -> Vec<(usize, String)> {

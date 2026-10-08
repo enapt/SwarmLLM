@@ -86,9 +86,15 @@
           var localItems = [];
           var swarmItems = [];
           readyModels.forEach(function(m) {
-            var displayName = U.formatModelDisplayName(m.name || m.id);
+            // Named from the id, like the chat header and the reply tag: the
+            // file's own `name` is whatever its uploader wrote (four Qwen2.5
+            // 0.5B quantisations shared one, a Q8_0 file called itself "AWQ")
+            // and never says which quantisation it is (report #007). The list
+            // clips a long name itself (text-overflow), so the quantisation at
+            // its end is not cut off here.
+            var displayName = U.formatModelDisplayName(m.id);
             var isDistributed = m.shard_count > 0 && (m.hosted_shards || 0) < m.shard_count;
-            var item = { id: m.id, name: displayName.length > 40 ? displayName.substring(0, 40) + '...' : displayName, group: isDistributed ? 'swarm' : 'local', encrypted: !!m.encrypted_pipeline };
+            var item = { id: m.id, name: displayName, group: isDistributed ? 'swarm' : 'local', encrypted: !!m.encrypted_pipeline };
             if (isDistributed) { swarmItems.push(item); } else { localItems.push(item); }
           });
           if (localItems.length > 0) {
@@ -243,6 +249,12 @@
       var prevModel = S.currentModel;
       S.currentModel = modelId;
       document.getElementById('model-select').value = modelId;
+      // The narrow-screen picker is the same choice, so it is set here, where
+      // every selection passes. Only the model-list refresh set it, so after
+      // switching to an older chat it went on naming the last model picked
+      // while the chat's own model answered (report #007).
+      var mobile = document.getElementById('mobile-model-select');
+      if (mobile) mobile.value = modelId;
       try { localStorage.setItem(App.CURRENT_MODEL_KEY, modelId); } catch (e) {}
 
       var item = S._modelDropdownData.find(function(m) { return m.id === modelId; });

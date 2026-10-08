@@ -471,3 +471,45 @@ was repeatedly estimated as smaller than it was:
   cannot see: when two source words map to one target nothing old remains, so
   "is the old word gone?" answers yes while the sentence reads "computers
   computers". Exclude grammatical reduplication ("vous vous").
+
+## One choice is shown by every control that shows it, and a model by its id
+
+**Rule:** `.claude/rules/arch-frontend.md` § "One choice is shown by every
+control that shows it, and a model by its id".
+
+### What happened (report #007, fixed 2026-10-08, FUTURE_WORK #243)
+
+Below 768 px the chat's model control is `#mobile-model-select`. Every
+selection passes through `App.models.selectDropdown`, which set the desktop
+`#model-select` and the dropdown label but not this one. Only the model-list
+refresh (`syncMobile`) set it. So after switching to an older chat
+(`switchSession` → `selectDropdown(s.model, {silent})`) the narrow picker kept
+naming the last model picked, while the header badge, the reply tag and `send`
+(`session.model`) used the chat's own. A tester read the picker as the model
+answering. Reproduced in Chrome emulating 590 px on the v0.3.230 frontend
+(picker TinyLlama, badge and send Llama 3.2 3B) and fixed on the new one.
+
+The picker named a model from the FILE's `name` (GGUF `general.name`), the
+header and the reply tag from its id. The file's name is whatever the uploader
+wrote and never names the quantisation: four Qwen2.5 0.5B quantisations shared
+"Qwen2.5 0.5B Instruct", and a Q8_0 file called itself "…AWQ". The same model
+was named two ways on one screen. Gotcha #208 is the same fact on the daemon
+side: the id carries the quant suffix and the display name lacks it.
+
+### What a change must keep
+
+- **A second control for the same choice is set where the choice is MADE**, in
+  `selectDropdown`, not by a refresher (guard
+  `every_model_selection_sets_both_pickers`).
+- **A local model is named `formatModelDisplayName(m.id)`** on the picker and
+  the dashboard card (guard `a_local_model_is_named_from_its_id`). Cloud models
+  keep the provider's name. The formatter writes a quantisation as llama.cpp
+  does (`Q4_K_M`, `Q8_0`, `IQ4_XS`) and keeps it: the picker's 40-character
+  JS clip, which would have cut it off, is gone, and the list clips with CSS.
+- In the same report: the word count is updated where `send` clears the box,
+  since a value set from code fires no `input`; the header's message count is
+  updated in `saveSessions`, where every change to a conversation passes, and
+  only that span (redrawing the header ends a rename); a touch-screen label is
+  the button's translated `aria-label` (`content: ' ' attr(aria-label)`), never
+  literal CSS text; and below 768 px toasts drop from the top, because the
+  bottom-right corner there is the Send button.

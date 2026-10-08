@@ -1591,7 +1591,8 @@
             '</span>' +
           '</div>';
 
-        var name = U.formatModelDisplayName(m.name || m.id);
+        // From the id, as in the chat's picker and header (report #007).
+        var name = U.formatModelDisplayName(m.id);
         var creatorIconHtml = providerIconHtml(modelIconKey(m.id), 20);
         var chevronHtml = '<span class="model-expand-chevron" title="' + U.escapeHtml(I18n.t('dashboard.expand_collapse')) + '">&#9662;</span>';
 

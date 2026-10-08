@@ -2,6 +2,18 @@
 
 ## [0.3.231-alpha] — 2026-10-08
 
+**Fixed: on a phone or narrow window, the model picker shows the model that
+is answering.** After switching to an older chat, the picker at the top kept
+showing the last model you picked, while the replies came from the chat's own
+model. Models are now also named the same way in the picker as in the chat
+header, so two quantisations of one model no longer look identical:
+"Qwen2.5 0.5B Instruct Q4_K_M" and "… Q8_0". The same report fixed four smaller
+things. The word count under the message box now clears when a message is
+sent. The chat's message count updates while the chat is open. The Settings
+button's touch-screen label is now translated. On a narrow screen,
+notifications appear at the top, so they no longer cover the Send button.
+Reported by a tester.
+
 **Fixed: choosing "Unlimited" for model sharing no longer sets a 1 Mbps
 limit.** Picking "Unlimited" on the bandwidth slider in Settings stored a
 limit of 1 Mbps on how fast this computer sends model parts to others, and

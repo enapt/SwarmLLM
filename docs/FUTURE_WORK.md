@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #243**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #244**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -40,7 +40,7 @@ after v0.3.224 (#160, #215 and #216 closed; #217 and #218 opened from the swarm 
 v0.3.226 (released 2026-10-05), #220 opened from the .225 gate's unrecorded driver resets; #129's fit verdict (idle-model
 reclaim) shipped in v0.3.227 (released 2026-10-05 23:45 UTC); #222 (a node near its storage limit deleting and
 re-fetching parts) and #223 closed in v0.3.228 (released 2026-10-06 09:42 UTC), #224 opened from its gate;
-#225, #226 and #227 opened from a tester's two reports the same day; #117 (Qwen 3.5, dense), #225 and #226 closed in v0.3.229 (released 2026-10-07 00:00 UTC), #228 opened for what Qwen 3.5 leaves out; #129's cold loads (waited for and priced), #228 (2) and (2b), #220 (2), #229, #230 and #231 shipped in v0.3.230 (released 2026-10-07 16:38 UTC), #232 parked from their report; #234, #235, #239 and #240 closed on 2026-10-08 from two tester reports and the card check after them, #236-#238 opened from the second (#236 and #238 closed the same day); #242 opened and closed the same day from report #006 (a 1 Mbps cap stored for "Unlimited").
+#225, #226 and #227 opened from a tester's two reports the same day; #117 (Qwen 3.5, dense), #225 and #226 closed in v0.3.229 (released 2026-10-07 00:00 UTC), #228 opened for what Qwen 3.5 leaves out; #129's cold loads (waited for and priced), #228 (2) and (2b), #220 (2), #229, #230 and #231 shipped in v0.3.230 (released 2026-10-07 16:38 UTC), #232 parked from their report; #234, #235, #239 and #240 closed on 2026-10-08 from two tester reports and the card check after them, #236-#238 opened from the second (#236 and #238 closed the same day); #242 and #243 opened and closed the same day from reports #006 (a 1 Mbps cap stored for "Unlimited") and #007 (the narrow-screen model picker).
 `docs/plans/` holds the multi-step designs; the entries point at them.
 
 **P0 — wrong answers, silently**
@@ -1556,7 +1556,18 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-08, on main (not yet released)** (#233, #234, #235, #236, #238, #239, #240, #242)
+**Closed 2026-10-08, on main (not yet released)** (#233, #234, #235, #236, #238, #239, #240, #242, #243)
+- #243 — on a narrow screen the chat's model picker kept naming the last model picked after a switch
+  to an older chat, while the chat's own model answered (report #007, a tester at 590 px).
+  `selectDropdown` set the desktop picker and not `#mobile-model-select`; only the list refresh did.
+  It sets both now (guard `every_model_selection_sets_both_pickers`). Same report: the picker named
+  models from the file's own `name` (four quantisations shared one, a Q8_0 file called itself AWQ)
+  while the badge used the id — now the id everywhere, with the quantisation written `Q4_K_M`;
+  the word count cleared on send; the header's message count kept current; the touch-screen
+  "Settings"/"Off" text came from CSS literals (now the translated `aria-label`; the redundant
+  "Off" removed); toasts no longer cover Send below 768 px. Checked in Chrome at 590 px against the
+  v0.3.230 frontend as control. `docs/invariants/frontend.md` § "One choice is shown by every
+  control that shows it".
 - #242 — choosing "Unlimited" for model sharing stored a 1 Mbps cap (report #006, a tester). The
   settings API floored `max_bandwidth_mbps` at 1 since April (`4dc09cab`), but 0 means AUTOMATIC
   (10 / 50 Mbps / none by contribution level, since `8853d345`) — and before v0.3.180 every

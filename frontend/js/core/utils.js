@@ -144,6 +144,12 @@
     return 'cloud';
   }
 
+  // What can follow `q4` in a quantisation's name: q4-k-m, q8-0, iq4-xs, iq4-nl.
+  var QUANT_PARTS = /^(k|m|s|l|xs|xxs|xl|nl|0|1)$/i;
+  // Words a model's name spells in capitals that capitalising one letter gets
+  // wrong: Gemma's "it" (instruction-tuned), xLAM's "fc" (function calling).
+  var NAME_WORDS = { it: 'IT', fc: 'FC', xlam: 'xLAM' };
+
   // Format a raw model ID into a friendly display name
   function formatModelDisplayName(id, opts) {
     if (!id) return I18n.t('utils.unknown_model');
@@ -159,14 +165,28 @@
     }
     name = name.replace(/(\d)\.(\d)/g, '$1\x00$2');
     var hideQuant = (opts && opts.hideQuant) || false;
-    return name.split(/[-_.]/).filter(Boolean).map(function(s) {
-      s = s.replace(/\x00/g, '.');
-      if (/^(q\d|iq\d|f16|f32|bf16)/i.test(s)) return hideQuant ? null : s.toUpperCase();
-      if (/^v\d/i.test(s)) return s;
-      if (/^\d+\.?\d*[bBmM]$/.test(s)) return s.toUpperCase();
-      if (hideQuant && /^[kms]$/i.test(s)) return null;
-      return s.charAt(0).toUpperCase() + s.slice(1);
-    }).filter(Boolean).join(' ');
+    var words = name.split(/[-_.]/).filter(Boolean).map(function(s) { return s.replace(/\x00/g, '.'); });
+    var out = [];
+    for (var i = 0; i < words.length; i++) {
+      var s = words[i];
+      if (/^(q\d|iq\d|f16|f32|bf16|fp16|fp32)/i.test(s)) {
+        // A quantisation is written as llama.cpp names it — Q4_K_M, Q8_0,
+        // IQ4_XS — where the id spells it q4-k-m and word by word it read
+        // "Q4 K M" (report #007).
+        var quant = s.toUpperCase();
+        if (/^i?q\d+$/i.test(s)) {
+          while (i + 1 < words.length && QUANT_PARTS.test(words[i + 1])) quant += '_' + words[++i].toUpperCase();
+        }
+        if (!hideQuant) out.push(quant);
+        continue;
+      }
+      if (/^v\d/i.test(s)) { out.push(s); continue; }
+      // A size, or a mixture of experts' ACTIVE size: 2B, 0.5B, A3B.
+      if (/^a?\d+\.?\d*[bBmM]$/i.test(s)) { out.push(s.toUpperCase()); continue; }
+      var known = NAME_WORDS[s.toLowerCase()];
+      out.push(known || s.charAt(0).toUpperCase() + s.slice(1));
+    }
+    return out.join(' ');
   }
 
   function applyMessageGrouping(container) {

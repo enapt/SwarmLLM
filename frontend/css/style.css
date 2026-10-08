@@ -4465,6 +4465,15 @@ textarea.pool-code-input { min-height: 4.5em; }
   display: flex; flex-direction: column-reverse; gap: 0.5rem;
   max-width: 400px; pointer-events: none;
 }
+/* On a narrow screen the bottom-right corner IS the message box and its Send
+   button, which a toast covered for seconds after every model change (report
+   #007). There, toasts come down from the top, across the width. */
+@media (max-width: 768px) {
+  .toast-container {
+    top: calc(env(safe-area-inset-top, 0px) + 0.5rem); bottom: auto;
+    left: 0.5rem; right: 0.5rem; max-width: none; flex-direction: column;
+  }
+}
 .toast {
   display: flex; align-items: center; gap: 8px;
   background: var(--bg-secondary); color: var(--text-primary);
@@ -4536,10 +4545,12 @@ textarea.pool-code-input { min-height: 4.5em; }
 /* #21: Token counter tooltips */
 .token-counter { cursor: help; }
 
-/* #22: Icon button labels on touch */
+/* #22: Icon button labels on touch. The text is the button's own translated
+   aria-label: a literal here was English on every screen (report #007). The
+   Stop button needs none — it has carried a translated label since 2026-09-12,
+   and the old ' Off' made it read "Stop Off". */
 @media (hover: none) {
-  .btn-shutdown::after { content: ' Off'; font-size: var(--fs-xs); }
-  #btn-open-settings::after { content: ' Settings'; font-size: var(--fs-xs); }
+  #btn-open-settings::after { content: ' ' attr(aria-label); font-size: var(--fs-xs); }
 }
 
 /* #23: Chat error with retry */
