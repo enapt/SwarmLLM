@@ -4587,6 +4587,24 @@ impl ModelProcessPool {
         Some(u32::try_from(total).unwrap_or(u32::MAX))
     }
 
+    /// The card's share of this model when THIS node runs it — `(layers on the
+    /// card, layers in the run)` — for pricing: the resident worker's own split,
+    /// else the one a fresh worker would make. `None` when it runs wholly on one
+    /// device. A model too big for the card was priced at the processor's speed
+    /// although the loader puts part of it on the card (FUTURE_WORK #129); the
+    /// planner blends the two speeds by this share
+    /// (`scheduler::split_tokens_per_sec`).
+    pub fn card_share_for_planning(&self, model_id: &ModelId) -> Option<(usize, usize)> {
+        if let Some(worker) = self.live_worker(model_id) {
+            return worker.gpu_layers_on_card;
+        }
+        if !self.planning_on_card(model_id) {
+            return None;
+        }
+        let estimated = self.estimated_gpu_mb(model_id)?;
+        self.partial_gpu_layers(model_id, None, estimated)
+    }
+
     /// Remember what this node's loader just refused a request — the layers the
     /// refused range would have ADDED to what the worker holds, on the device
     /// the planner weighs — when `outcome` is a memory refusal.
@@ -8774,6 +8792,25 @@ mod tests {
         charged_against_ram: bool,
         spawned_at: std::time::Instant,
     ) -> Arc<WorkerHandle> {
+        fake_worker_handle_split(
+            dead_now,
+            placed_on_cpu_because,
+            charged_against_ram,
+            spawned_at,
+            None,
+        )
+        .await
+    }
+
+    /// [`fake_worker_handle_spawned`] for a worker running a card/processor
+    /// split: `(layers on the card, layers in total)`.
+    async fn fake_worker_handle_split(
+        dead_now: bool,
+        placed_on_cpu_because: Option<CpuReason>,
+        charged_against_ram: bool,
+        spawned_at: std::time::Instant,
+        gpu_layers_on_card: Option<(usize, usize)>,
+    ) -> Arc<WorkerHandle> {
         use interprocess::local_socket::{tokio::prelude::*, ListenerOptions};
         let name = format!(
             "/tmp/swarmllm-retire-test-{}.sock",
@@ -8819,8 +8856,32 @@ mod tests {
             placed_on_cpu_because,
             charged_against_ram,
             gpu_estimate_mb: 0,
-            gpu_layers_on_card: None,
+            gpu_layers_on_card,
         })
+    }
+
+    /// The split a RESIDENT worker runs is what the planner prices (#129): such
+    /// a worker holds card memory, so `serves_on_cpu` reads "card" and the
+    /// model was priced at the card's whole speed. A worker wholly on one
+    /// device has no share.
+    #[tokio::test]
+    async fn a_resident_split_worker_reports_its_card_share_to_the_planner() {
+        let p = test_pool();
+        let split = ModelId("split-14b".into());
+        let h = fake_worker_handle_split(
+            false,
+            None,
+            false,
+            std::time::Instant::now(),
+            Some((13, 28)),
+        )
+        .await;
+        p.workers.insert(split.clone(), h);
+        assert_eq!(p.card_share_for_planning(&split), Some((13, 28)));
+        let whole = ModelId("whole-on-card".into());
+        let h = fake_worker_handle_spawned(false, None, false, std::time::Instant::now()).await;
+        p.workers.insert(whole.clone(), h);
+        assert_eq!(p.card_share_for_planning(&whole), None);
     }
 
     /// A spawn charges the shared memory budget and only then waits for the

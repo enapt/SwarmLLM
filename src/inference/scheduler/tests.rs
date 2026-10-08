@@ -34,13 +34,21 @@ fn speed_test_model() -> ModelId {
 /// built. Needed for tensor parallelism, which is opt-in (`inference.
 /// tensor_parallel`, default false) since R146.
 fn make_shared_state_with(tweak: impl FnOnce(&mut Config)) -> Arc<SharedState> {
+    make_shared_state_on(None, tweak)
+}
+
+/// `make_shared_state_with` on a node whose graphics card is `card`.
+fn make_shared_state_on(
+    card: Option<crate::inference::executor::GpuInfo>,
+    tweak: impl FnOnce(&mut Config),
+) -> Arc<SharedState> {
     let mut config = Config::default();
     tweak(&mut config);
     let identity = Identity::generate();
     let temp = tempfile::tempdir().unwrap();
     let db = Database::open(temp.path()).unwrap();
     let executor = Arc::new(Mutex::new(ModelExecutor::new()));
-    let (state, _, _) = SharedState::new(config, identity, db, executor, None);
+    let (state, _, _) = SharedState::new(config, identity, db, executor, card);
     state
 }
 
@@ -6215,9 +6223,16 @@ fn local_candidate_for(
 /// A node whose card is in play (3000 MB), holding all of a 32-layer model too
 /// big for it that the loader SPLITS, with RAM for nothing.
 fn a_card_holder_of_a_model_it_must_split() -> (Arc<SharedState>, NodeId, ModelId) {
+    a_card_holder_of_a_model_it_must_split_on(None)
+}
+
+/// The same node, with its card named to the pricing (`gpu_info`).
+fn a_card_holder_of_a_model_it_must_split_on(
+    card: Option<crate::inference::executor::GpuInfo>,
+) -> (Arc<SharedState>, NodeId, ModelId) {
     use crate::inference::model_arch::ModelArch;
     use crate::inference::split::hybrid::arch_supports_hybrid;
-    let state = make_shared_state_with(|c| c.resources.max_ram_mb = 40);
+    let state = make_shared_state_on(card, |c| c.resources.max_ram_mb = 40);
     let local = state.identity.node_id().clone();
     let mid = ModelId("seven-b-too-big-for-the-card".into());
     state.model_registry.register_manifest(make_manifest(
@@ -6263,6 +6278,121 @@ fn a_card_holder_of_a_model_it_must_split() -> (Arc<SharedState>, NodeId, ModelI
         },
     );
     (state, local, mid)
+}
+
+/// A card/processor split is priced by its layers' devices: a token's time is
+/// the sum over its layers, so the speeds combine harmonically by the card's
+/// share. Unknown stays unknown, and no share leaves the processor's figure.
+#[test]
+fn a_split_is_priced_by_the_share_of_its_layers_on_each_device() {
+    let half = super::split_tokens_per_sec(4.0, Some(40.0), Some((16, 32)));
+    assert!(
+        (half - 1.0 / (0.5 / 40.0 + 0.5 / 4.0)).abs() < 1e-4,
+        "half the layers on a card ten times faster: {half}"
+    );
+    assert!(
+        half > 4.0 && half < 2.0 * 4.0,
+        "the processor's half dominates: {half}"
+    );
+    assert_eq!(
+        super::split_tokens_per_sec(4.0, Some(40.0), Some((32, 32))),
+        40.0
+    );
+    assert_eq!(
+        super::split_tokens_per_sec(4.0, Some(40.0), Some((0, 32))),
+        4.0
+    );
+    assert_eq!(super::split_tokens_per_sec(4.0, Some(40.0), None), 4.0);
+    assert_eq!(super::split_tokens_per_sec(4.0, None, Some((16, 32))), 4.0);
+    assert_eq!(
+        super::split_tokens_per_sec(0.0, Some(40.0), Some((16, 32))),
+        0.0,
+        "an unmeasured processor stays unknown"
+    );
+}
+
+/// **A model too big for the card is priced as the split the loader makes**
+/// (FUTURE_WORK #129's last residual). The planner priced this node's route at
+/// the processor's speed — `node_tokens_per_sec_7b(None)` — for any model that
+/// does not fit the card whole, although the loader puts part of it on the
+/// card. The search's local candidate and the whole-model hand-off gate both
+/// read `local_speed_off_the_card`, so they price it alike.
+#[test]
+fn a_local_model_the_loader_splits_is_priced_with_the_cards_share() {
+    const PROCESSOR_TPS: f32 = 4.0;
+    let card = crate::inference::executor::GpuInfo {
+        name: "NVIDIA GeForce RTX 3070".into(),
+        vram_total_mb: 8192,
+        backend: "cuda".into(),
+    };
+    let (state, local, mid) = a_card_holder_of_a_model_it_must_split_on(Some(card));
+    let (on_card, total) = state
+        .model_process_pool
+        .card_share_for_planning(&mid)
+        .expect("fixture: the loader splits this model");
+    assert!(
+        on_card > 0 && on_card < total,
+        "fixture: a split, got {on_card} of {total}"
+    );
+    let card_tps =
+        crate::model::auto_manage::vram::node_tokens_per_sec_7b(Some("NVIDIA GeForce RTX 3070"))
+            .unwrap();
+
+    let manifest = state.model_registry.get_manifest(&mid).unwrap();
+    let scheduler = PipelineScheduler::with_local_processor_speed(state.clone(), PROCESSOR_TPS);
+    let priced = scheduler
+        .gather_candidates(
+            &manifest,
+            &local,
+            uuid::Uuid::new_v4(),
+            None.into(),
+            super::Purpose::Route,
+            &|| true,
+        )
+        .into_iter()
+        .find(|c| c.node_id == local)
+        .unwrap();
+    let expected =
+        super::split_tokens_per_sec(PROCESSOR_TPS, Some(card_tps), Some((on_card, total)));
+    assert!(
+        priced.est_tokens_per_sec > PROCESSOR_TPS,
+        "a split runs {on_card} of {total} layers on the card: faster than the processor alone ({} vs {PROCESSOR_TPS})",
+        priced.est_tokens_per_sec
+    );
+    assert!((priced.est_tokens_per_sec - expected).abs() < 1e-3);
+    assert!(
+        priced.est_tokens_per_sec < card_tps,
+        "and slower than the card alone"
+    );
+    assert!(
+        !priced.has_gpu,
+        "the prompt pass keeps the processor's prior — conservative for a split"
+    );
+    assert_eq!(
+        scheduler.local_speed_off_the_card(&mid),
+        priced.est_tokens_per_sec,
+        "the hand-off gate's baseline is the same figure"
+    );
+
+    // The speed answer reading "card" — a resident split worker holds card
+    // memory — prices the split as a split all the same, never at the card's
+    // whole speed.
+    let on_card_answer = scheduler
+        .gather_candidates(
+            &manifest,
+            &local,
+            uuid::Uuid::new_v4(),
+            None.into(),
+            super::Purpose::Route,
+            &|| false,
+        )
+        .into_iter()
+        .find(|c| c.node_id == local)
+        .unwrap();
+    assert_eq!(
+        on_card_answer.est_tokens_per_sec, priced.est_tokens_per_sec,
+        "a split is priced as a split, not at the card's {card_tps}"
+    );
 }
 
 /// **A re-plan after this node's loader refused part of a split gives it fewer

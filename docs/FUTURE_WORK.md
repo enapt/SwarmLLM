@@ -529,7 +529,13 @@ driver events** (`~/swarmllm-129b/verify129b.sh`): the cold Coder-7B stayed **lo
 admitted the 7B whole; warm 2.2 s for 120 tokens. Release binary, same shape: Italy, 46.5 s.
 
 **Residual (one part left):** A model that does NOT fit even after the reclaim is still priced
-at processor speed rather than as the loader's card/processor split (above).
+at processor speed rather than as the loader's card/processor split (above). **Fixed 2026-10-08 on
+main (not yet released):** `PipelineScheduler::local_speed_off_the_card` blends the card's share
+of the split in (`split_tokens_per_sec`), for the search and the hand-off gate alike —
+`docs/invariants/scheduling.md` § "A node holding every layer that would run the model on its
+processor…", "A split is priced as a split". What #129 still carries: the prompt pass keeps the
+processor's prior for a split, and a remote hop's network is charged per segment rather than per
+crossing (the regional-pipelines plan).
 
 **(1) — a cold candidate's load was not priced — fixed 2026-10-07, released in v0.3.230.**
 `PeerResidency` bounded a peer's MEMORY, never its time, so a peer that must first load the

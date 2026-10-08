@@ -41,6 +41,15 @@ after five, the log and activity list say which ports were refused and how to
 fix it (run the second node on another port, `swarmllm run -p 8801`), and a
 node that stops cleanly hands its ports back to the router.
 
+**Fixed: a model too big for the graphics card is priced as it actually
+runs.** Such a model runs partly on the card and partly on the processor.
+When choosing where a request goes, this computer priced it as if it all ran
+on the processor before it was loaded, and as if it all ran on the card once
+it was. Both now count the card's share of the layers: a 14B model with 22 of
+its 48 layers on an 8 GB card is predicted at about 4.6 tokens a second and
+delivers about 4.0 (before: 3.0, and 56 once loaded). This is what decides
+whether another computer's card is worth handing the request to.
+
 **Fixed: guessing ahead across a split on a graphics card is fast again.**
 Since 0.3.226, the small model that guesses ahead lost a speed-up after its
 first request: each guess took about 15 ms instead of 6, and the node then

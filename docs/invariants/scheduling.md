@@ -2553,6 +2553,30 @@ for one it cannot**. Greedy never makes this call (nothing to compare), and
 a parallax error falls back to the fast path, not greedy. The decision line
 logs `local_processor_cost_ms` and `pipeline_cost_ms` (`parallax::
 chain_cost_ms`) so the choice can be checked from a log.
+**A split is priced as a split (2026-10-08, FUTURE_WORK #129's last residual).** "The device the
+request would use" was read as one device: a model too big for the card was priced at the
+processor's speed although the loader runs part of it on the card. A token's time is the sum
+of its layers' times, each on its own device (llama.cpp's partial offload, `-ngl`, behaves the
+same), so `split_tokens_per_sec` blends the two speeds harmonically by the card's share of the
+layers — `ModelProcessPool::card_share_for_planning`: the resident worker's own split, else the
+one a fresh worker would make. `PipelineScheduler::local_speed_off_the_card` is the one answer,
+read by the local candidate here AND by the hand-off gate's baseline (`delegation_target`'s
+`local_cpu_tokens_per_sec`), so a peer is not judged against a slower "here" than the search
+uses. The prompt pass keeps the processor's prior (`has_gpu` false) — conservative for the
+card's share of the prompt. Tests `a_split_is_priced_by_the_share_of_its_layers_on_each_device`,
+`a_local_model_the_loader_splits_is_priced_with_the_cards_share` (red with the processor figure).
+**Checked on a `--features cuda` build run as the live node** (`~/swarmllm-129b/verify129{c,d}.sh`,
+safety kit, 0 driver events, Windows up 20 h, 7-8 peers on .230 including an RTX 3060 and an RTX 4050):
+Qwen2.5-14B, whole here, which the loader runs as 22 of its 48 layers on the 8 GB card. The release
+priced this node at the processor's 4.55 tok/s (7B reference; `local_processor_cost_ms=106500`), the
+new build at 6.95 / 6.34 (98650 / 100075). Both stayed local: no peer had room for the 48 layers
+(the 3060 offered 7, then 42). Forced local, warm: 80 tokens in 19.3-19.8 s, ~4.0 tok/s — against
+~3.0 predicted from the processor figure and ~4.6 from the blend. Once the split worker was
+RESIDENT, the release priced it at the card's whole 56 tok/s (`serves_on_cpu` reads "card" for a
+worker holding card memory); `gather_candidates` now treats any split (`card_share_for_planning`)
+as off the card, and the new build priced the warm requests at 6.34 too (test: the `&|| false` arm of
+`a_local_model_the_loader_splits_is_priced_with_the_cards_share`, red with that half off;
+`a_resident_split_worker_reports_its_card_share_to_the_planner`).
 **Why this is not `cbbed678` again**: that pass priced local layers at a
 constant 10,000 — a penalty, not a price — so the search could not see the
 LAN split that was best and sent a request abroad. Here the local figure is

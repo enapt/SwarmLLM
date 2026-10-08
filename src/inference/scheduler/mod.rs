@@ -1030,6 +1030,9 @@ pub(crate) struct DelegationInput<'a> {
     pub layers_to_assign: u32,
     pub local_serves_on_cpu: bool,
     pub model_vram_mb: u64,
+    /// This node's speed when the request runs here off the card — the
+    /// processor's, with the card's share of a card/processor split
+    /// (`PipelineScheduler::local_speed_off_the_card`).
     pub local_cpu_tokens_per_sec: f32,
     /// How long the prompt is, so the peer can be priced on the work it would
     /// actually be given. `None` means unknown and the price gate stands aside.
@@ -1913,6 +1916,29 @@ fn delegated_layer_span(num_layers: u32, encrypted: bool) -> u32 {
 /// in the middle.
 const BOOMERANG_MIN_LAYERS: u32 = 3;
 
+/// What a card/processor split delivers, in 7B-reference tokens a second. A
+/// token's time is the sum of its layers' times, each on the device holding it
+/// (llama.cpp's partial offload, `-ngl`, behaves the same way), so the two
+/// speeds combine harmonically by the card's share of the layers — `share` is
+/// `(on the card, in the run)`. A processor figure of 0.0 (unmeasured) stays
+/// unknown; with no card figure or no share it is the processor's alone.
+/// FUTURE_WORK #129: the local route of a model too big for the card was
+/// priced as if none of it ran on the card.
+pub(crate) fn split_tokens_per_sec(
+    processor: f32,
+    card: Option<f32>,
+    share: Option<(usize, usize)>,
+) -> f32 {
+    let (Some(card), Some((on_card, total))) = (card, share) else {
+        return processor;
+    };
+    if processor <= 0.0 || card <= 0.0 || total == 0 || on_card == 0 {
+        return processor;
+    }
+    let on_card = on_card.min(total) as f32 / total as f32;
+    1.0 / (on_card / card + (1.0 - on_card) / processor)
+}
+
 /// Build the boomerang: embedding here, the middle layers on `peer`, sampling
 /// back here.
 ///
@@ -2300,6 +2326,29 @@ impl PipelineScheduler {
         }
     }
 
+    /// This node's speed for a model its card cannot hold whole: the
+    /// processor's, blended with the card's for the layers the loader puts on
+    /// the card (`ModelProcessPool::card_share_for_planning`,
+    /// [`split_tokens_per_sec`]). The ONE answer for every route that would run
+    /// such a model here — the search's local candidate and the whole-model
+    /// hand-off gate's baseline (#129).
+    fn local_speed_off_the_card(&self, model_id: &ModelId) -> f32 {
+        let processor = self.pinned_local_processor_speed().unwrap_or_else(|| {
+            crate::model::auto_manage::vram::node_tokens_per_sec_7b(None).unwrap_or(0.0)
+        });
+        let card =
+            self.shared_state.gpu_info.as_ref().and_then(|g| {
+                crate::model::auto_manage::vram::node_tokens_per_sec_7b(Some(&g.name))
+            });
+        split_tokens_per_sec(
+            processor,
+            card,
+            self.shared_state
+                .model_process_pool
+                .card_share_for_planning(model_id),
+        )
+    }
+
     /// The pinned processor speed, when a test set one; `None` in production.
     fn pinned_local_processor_speed(&self) -> Option<f32> {
         #[cfg(test)]
@@ -2598,15 +2647,11 @@ impl PipelineScheduler {
                         model_vram_mb: self
                             .pinned_delegation_footprint_mb()
                             .unwrap_or_else(|| pool.estimated_gpu_mb(model_id).unwrap_or(0)),
-                        // OUR processor speed, not our graphics card's: this
-                        // only runs when the model does not fit the card, so
-                        // the processor is what the request would actually get
-                        // here.
-                        local_cpu_tokens_per_sec:
-                            crate::model::auto_manage::vram::estimate_tokens_per_sec_7b(
-                                crate::inference::mem_bandwidth::measured_gbps().unwrap_or(0.0),
-                                false,
-                            ),
+                        // OUR speed off the card, not the card's: this only
+                        // runs when the model does not fit the card whole, so
+                        // the request would get the processor here — with the
+                        // card's share of a card/processor split.
+                        local_cpu_tokens_per_sec: self.local_speed_off_the_card(model_id),
                         prompt_tokens,
                     },
                     purpose,
@@ -3766,7 +3811,18 @@ impl PipelineScheduler {
             // unbeatable to the search (gotcha #444). Asked once, lazily, and
             // only for the local node.
             let is_local = &node_id == local_node_id;
-            let local_on_processor = is_local && local_runs_on_processor();
+            // A card/processor split is priced as one whichever way the speed
+            // answer reads: a RESIDENT split worker holds card memory, so
+            // `serves_on_cpu` reads "card" and the model was priced at the
+            // card's whole speed (#129, seen 2026-10-08: 56 tok/s for a 14B
+            // running 22 of its 48 layers on the card).
+            let local_on_processor = is_local
+                && (local_runs_on_processor()
+                    || self
+                        .shared_state
+                        .model_process_pool
+                        .card_share_for_planning(&manifest.id)
+                        .is_some());
             let local_device_name = if local_on_processor {
                 None
             } else {
@@ -3779,10 +3835,11 @@ impl PipelineScheduler {
                 // a real figure instead of the zero its consumers read as
                 // "unknown". 0.0 is still the answer when the machine's
                 // bandwidth genuinely could not be measured.
-                match (local_on_processor, self.pinned_local_processor_speed()) {
-                    (true, Some(pinned)) => pinned,
-                    _ => crate::model::auto_manage::vram::node_tokens_per_sec_7b(local_device_name)
-                        .unwrap_or(0.0),
+                if local_on_processor {
+                    self.local_speed_off_the_card(&manifest.id)
+                } else {
+                    crate::model::auto_manage::vram::node_tokens_per_sec_7b(local_device_name)
+                        .unwrap_or(0.0)
                 }
             } else {
                 self.shared_state
