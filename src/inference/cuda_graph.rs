@@ -311,7 +311,7 @@ struct Churn {
     share_bits: u64,
     /// Launches counted into `share_bits`, up to the window.
     share_seen: u32,
-    /// Steps of this many positions on the card's timeline ([`StepClock`]):
+    /// Steps of this many positions on the card's timeline (`cuda::StepClock`):
     /// run the ordinary way while resting, launched with every group updated,
     /// launched with a group rebuilt.
     ordinary_ms: RecentMedian,
@@ -455,7 +455,7 @@ pub(crate) struct DecodeGraph {
     /// `defects`: the checks churned while the one-position step updated.
     churn: HashMap<usize, Churn>,
     stats: Stats,
-    /// Times steps on the card ([`StepClock`]); made at the first step, never
+    /// Times steps on the card (`cuda::StepClock`); made at the first step, never
     /// again once the driver would not make its events.
     #[cfg(feature = "candle-cuda")]
     clock: Option<cuda::StepClock>,
