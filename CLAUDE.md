@@ -160,8 +160,8 @@ mmproj). Never edit a count without the run behind it (`completeness.md`).
   on the broken build first. std's `Command` hands a Windows child every inheritable
   handle (#769): an outliving process starts via `spawn_without_inherited_handles`
   (`update_restart`); workers die with the daemon (job object, #153).
-- ⛔ **This PC had five unclean shutdowns under sustained load (2026-09-26 → 10-01),
-  causes undetermined.** Every gate, rig, bench or long run sources the safety kit
+- ⛔ **Six unclean shutdowns under load (09-26 → 10-07); #6 = a driver reset at 156 h uptime
+  wedged the host (#804): after any reset, no more card work that boot.** Every gate/rig/bench sources the safety kit
   (`~/swarmllm-gate-common/safety.sh` — it stops at the first GPU-driver event, #790; no 4
   simultaneous chats: concurrent requests ARE a stress test); ONE cargo build at a time (#684).
   ⛔ **Do NOT ask for a go-ahead or a restart, and never refuse on uptime**
