@@ -1,6 +1,7 @@
 #!/bin/bash
 # Pre-push hook: Cargo.lock in step, cargo fmt --check, the swarmllm-types tests,
-# `cargo lint` (plus a default-feature lint when needed) and the repo-consistency guard.
+# `cargo lint` (plus a default-feature lint when needed), CI's rustdoc step when Rust
+# changed, and the repo-consistency guard.
 #
 # Lints and tests on ONE feature set — the `cargo lint` / `cargo dev-test`
 # aliases in .cargo/config.toml — so this hook reuses what the commit gate and
@@ -95,6 +96,25 @@ if [ -n "$DEFAULT_ONLY" ]; then
     if [ $? -ne 0 ]; then
         echo ""
         echo "ERROR: cargo clippy (default features) failed. Fix warnings before pushing."
+        exit 1
+    fi
+fi
+
+# CI's clippy job also builds the docs with broken links and bad HTML as
+# errors, which `cargo lint` (clippy alone) never runs. Knowing it was not
+# enough: main went red for it on 2026-10-05 (`<tools>` outside backticks,
+# gotcha #794) and again on 2026-10-08 (a doc link to a type only the CUDA
+# build has). ci.yml's command and flags, only when the push touches Rust.
+PUSHED_RS=$(for f in $PUSHED; do case "$f" in *.rs) echo "$f" ;; esac; done)
+if [ -n "$PUSHED_RS" ]; then
+    echo "Pre-push: checking the documentation build (CI's rustdoc step)..."
+    DOC_OUT=$(RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links -D rustdoc::invalid_html_tags -A rustdoc::private_intra_doc_links" \
+        cargo doc --locked --no-deps --document-private-items --no-default-features \
+        --features dev,claude-subscription -p swarmllm -p swarmllm-types 2>&1)
+    if [ $? -ne 0 ]; then
+        printf '%s\n' "$DOC_OUT" | grep -E "^(error|warning)|-->" | head -20
+        echo ""
+        echo "ERROR: cargo doc failed. CI's clippy job builds the docs with these flags."
         exit 1
     fi
 fi
