@@ -259,6 +259,15 @@ impl RecentMedian {
         self.samples.push_back(sample);
     }
 
+    /// Samples held, at most [`Self::WINDOW`].
+    pub fn len(&self) -> usize {
+        self.samples.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.samples.is_empty()
+    }
+
     /// The median (the lower middle of an even count), or `None` before any sample.
     pub fn median(&self) -> Option<f64> {
         if self.samples.is_empty() {

@@ -854,21 +854,6 @@ per chunk and restarts the middle on a miss; `peer_walks_at_tail` no longer appl
 remote-head shape after it. Write the design into `split_speculation.md` § 4b first; measure
 on the TH↔IT link with `~/swarmllm-wan-1001/ab149.sh`'s method (one binary, env switch).
 
-#### #233 — Guess-and-check across a split on one card reads slower than it did at v0.3.222
-`P3` · perf-split · **OPEN** — measured 2026-10-07 · history: none (first measured at the v0.3.230 gate)
-
-The gate's split rig with both halves on one card and an emulated 24 ms link (step 12h, last run
-at v0.3.222) now reads rounds 21-29 tok/s and stream 20-23, against .222's 22-35 and 22-28.
-Replies are unchanged (scored against llama.cpp). It is not v0.3.230: an alternating A/B
-(.229, .230 ×2, Windows up 4 h) read stream identical (140 guesses, 77 accepted, on both) and
-rounds within run-to-run noise. One .230 rounds run stepped aside after a request whose
-acceptance dipped (0.598 → 0.580, γ → 0), which is the controller working as designed. With B
-on the processor, both builds read the stream faster than rounds (13-16 vs 12-13 tok/s), as
-expected. So something between .222 and .229 moved it, or .222's single run was high. Next:
-the same rig on .222, .225 and .227 from their release assets, alternating with .229 on one
-boot (`~/swarmllm-gate-0230/h12_ab.sh` is the harness; under the safety kit). First candidate:
-.226's decode-graph reuse (#221), which changed how the card's checks are submitted.
-
 #### #10 — Conversation prefixes across computers: no routing to the peer holding the cache, no cache in a split chain
 `P2` · perf-split · **PARTIAL** — 2026-09-07 · absorbs #139 and archive § "Speeding up inference BETWEEN nodes" idea 1 (prefix-keyed remote KV); history: archive row #10 and § "A conversation's later turns do not seek out the peer holding its prefix"
 
@@ -1565,7 +1550,16 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-08, on main (not yet released)** (#234, #235, #236, #238, #239, #240)
+**Closed 2026-10-08, on main (not yet released)** (#233, #234, #235, #236, #238, #239, #240)
+- #233 — guess-and-check across a split on one card had read slower since v0.3.226 (bisected: .224
+  fast, .226 slow, one boot). The drafter's decode graph changed shape at every switch between
+  host-fed (i64) and card-fed (u32) token ids — the embedding's cast was inside the capture — and
+  .226's graph REST, tuned on a 7B whose rebuild costs 65-108 ms, then ran the 0.5B drafter without
+  its graph (~6 ms rebuild vs ~9 ms saved a step): drafts 6 → 15 ms, the controller stopped
+  guessing. Ids are made u32 before the capture, and a rest is weighed on the card's own timeline
+  (two CUDA events a step, only for a shape that rebuilds). One-binary rig: old 19.5-21.9 tok/s
+  stream / 24.7-29.2 rounds → 25.3-28.4 / 23.9-34.1, as .224. `docs/invariants/inference.md` § "A
+  rest is weighed on the card's timeline, and a step's ids are one type".
 - #236 — a streamed reply whose machine refused, restarted or went silent mid-reply ended with an
   error after part of it was shown (report #005). It is now CONTINUED on a fresh route from exactly
   what the reader received (Petals' history replay, vLLM's recompute): `StreamingTokenTx` records

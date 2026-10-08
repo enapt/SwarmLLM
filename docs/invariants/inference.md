@@ -2705,6 +2705,68 @@ updated, 43-108 ms), the drafter 554 of 555; 12/12 replies, 0 driver events. Req
 (first) and 31.4-32.7 s, against 50-124 s and 32.6-64.5 s on 10-04 — which also ran with ~9 GB less
 free RAM, so the time difference is not attributed to this alone.
 
+## A rest is weighed on the card's timeline, and a step's ids are one type (2026-10-08, #233)
+
+**What was seen.** Guess-and-check across a split on one card (the gate's step 12h: Qwen2.5-Coder-7B
+shards 0-3 on node A's card, 4-7 on node B's, a 24 ms emulated link, the 0.5B Q8_0 drafter on A,
+greedy) read slower since v0.3.226. Bisected on one boot under the safety kit, A/B/A/B
+(`~/swarmllm-bisect233/h12_*.sh`, Windows up 17-18 h, 0 driver events), tok/s per request:
+
+| arms | rounds | stream |
+|---|---|---|
+| .222 / .230 | 28.4-32.0, 31.1-34.9 / 25.5-26.0, 26.3-27.5 | 26.3-28.1, 25.6-27.4 / 20.2-21.8, 21.1-21.7 |
+| .224 / .226 | 28.6-33.2, 30.3-34.2 / 25.3-27.1, 22.4-26.1 | 25.3-27.2, 26.6-28.0 / 19.7-21.7, 20.2-22.1 |
+| .230, graphs off / on | 22.4-24.5 / 24.0-28.2 | 18.6-20.6 / 20.6-22.2 |
+
+On the slow builds the drafter's FIRST request guessed at 5.4-6.9 ms a guess, as .222 did, and every
+later one at 11-17 ms — graphs-off speed. The controller then priced a guess above what it saves,
+chose γ = 0 and remembered it (§ "Speculation that does not pay steps aside"), so on the stream arm
+requests 3 and 4 did not guess at all. Graph rebuild COST was the first suspect and was wrong:
+graphs off read the same slow drafts with no rebuilds. ⚠ The log said "rebuilt" once per run because
+that line is first-of-KIND (diagnosis rule 2); logging every refusal at debug counted 400-650.
+
+**Why it rebuilt: one more kernel when the ids were i64.** A TOPOLOGY refusal names no node, so each
+refusal now logs the group's node census before and after (`node_census`): group 0 went
+`KERNEL 49, MEM_ALLOC 44` ↔ `KERNEL 50, MEM_ALLOC 45`, twice a round. The drafter feeds its
+catch-up tokens from the host (`token_tensor`, i64) and its own guesses from the card's argmax
+(u32), and `QuantizedRows::forward` casts i64 to u32 — inside the capture, one more kernel and
+allocation. A conversation fed both changed its graph's shape at every switch (rebuilt on 0.75 of
+launches). The .225 rig's drafter updated 403 of 404 because it sampled on the host, all i64.
+Fixed at the choke point every captured step passes: `decode_step_with_graph` makes the ids u32
+BEFORE the capture (`cuda_graph::cast_ids_before_capture`; A/B `SWARMLLM_CUDA_GRAPH_ID_CAST=inside`).
+Not a global change of the id type — the wire format, the vision marker (−1) and the batch stacking
+all carry i64.
+
+**Why it then lost its graph: the rest was tuned on another model.** `REBUILDS_BEFORE_RESTING` (3 of
+8) was justified by a 7B check whose rebuild cost 65-108 ms against ~3 ms saved; the drafter's
+rebuild is ~6 ms against ~9 ms saved EVERY step, so its rests (256 steps, then 512…) were a pure
+loss. A rest is now weighed: every step of a shape that has rebuilt within `SHARE_WINDOW` (64)
+launches, or is resting, is timed on the card — two CUDA events a step from a ring of
+`CLOCK_PAIRS` (8), read once the card has passed them, never waited for (a drafter queues its
+guesses without reading back, so a single pair lost every rebuilt step's time). `Churn::weighed` =
+share × rebuilt + (1 − share) × updated, against the ordinary way's median; a rest it says is a
+loss is declined, and one begun before any ordinary step was timed ends after `SAMPLES_TO_JUDGE`
+(5). The count still decides where a figure is missing, so a 7B check rests as before
+(`a_shape_whose_graph_still_pays_is_not_rested`, red with the weighing off). Steps of a shape that
+never rebuilds are not timed: an event is a driver call, the thing a graph saves. A/B
+`SWARMLLM_CUDA_GRAPH_REST=count`. The old rule's own figures, logged on its rest: `a graph 4.4 ms a
+step with 0.38 of launches rebuilt, the ordinary way 6.8`.
+
+**Verified on a `--features cuda` build** (one binary, A/B/C/A/B/C, same rig, 0 driver events):
+
+| arm | rounds | stream | the mechanism |
+|---|---|---|---|
+| old (`REST=count`, `ID_CAST=inside`) | 25.6-29.2, 24.7-26.4 | 21.5-21.8, 19.5-21.9 | 2 rests a run; γ = 0 from request 2 |
+| weighing only (`ID_CAST=inside`) | 32.1-35.8, 30.2-35.2 | 25.8-27.7, 25.7-27.4 | rebuilt 400-650 group launches; rests ended/declined; all 4 requests guess |
+| both (defaults) | 31.9-34.1, 23.9-31.1 | 26.8-28.4, 25.3-28.3 | group 0 no longer toggles; all 4 requests guess |
+
+The weighing alone gives the speed back even while the drafter rebuilds on most launches; the id
+fix removes those rebuilds. What remains with both is the decode-attention kernel's combine step
+appearing once a cache passes 64 positions (`CUDA_CHUNK`): every group +2 kernels, at each
+crossing and back when the next request starts below it (~10 launches a 4-request run), which the
+weighing keeps from resting. The stream arm accepted the same guesses on every arm (77 of 140, 82
+of 139, 81 of 139), which a changed drafter or target would not; the harness keeps no reply text.
+
 ## A header and its tensor table describe one upload — compared before a tensor is read (2026-10-03, #156)
 
 **The defect.** A node loading from parts has two descriptions of one file: the

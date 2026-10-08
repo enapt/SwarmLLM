@@ -599,19 +599,22 @@ impl SplitModel {
         let follows = graph.follows_previous_step(request_id, index_pos);
         let cache_key = KvCacheStore::cache_key(&self.kv_model_key, request_id);
         let positions = input.dim(1).map_err(SwarmError::internal)?;
+        // Every step is timed on the card, so a shape's rest is weighed against
+        // what its graph measurably costs (`DecodeGraph::note_uncaptured`).
+        let began = graph.begin_step(&self.device, positions);
         // A step that grows a KV buffer frees memory allocated outside the
         // capture and keeps memory allocated inside it — never captured. Nor
         // is a conversation's first decode step: it is the one that may shed a
         // hydrated snapshot's mirror, and it loads the kernel modules.
-        let template = match graph.template(all_positions, positions) {
-            Some(t)
-                if follows
-                    && !graph.declines(positions)
-                    && kv_cache_store.every_cache_holds(&cache_key, index_pos + positions) =>
-            {
-                t.clone()
-            }
-            _ => {
+        let ready = graph
+            .template(all_positions, positions)
+            .filter(|_| {
+                follows && kv_cache_store.every_cache_holds(&cache_key, index_pos + positions)
+            })
+            .cloned();
+        let template = match ready {
+            Some(t) if !graph.declines(positions) => t,
+            ready => {
                 let (out, _) = self.forward_inner_body(
                     input,
                     index_pos,
@@ -624,7 +627,7 @@ impl SplitModel {
                     None,
                     None,
                 )?;
-                graph.note_uncaptured(all_positions, positions, &out);
+                graph.note_uncaptured(all_positions, positions, &out, began, ready.is_some());
                 return Ok(out);
             }
         };
@@ -632,6 +635,21 @@ impl SplitModel {
         // the input (a hidden state from the previous node arrives on the
         // processor) and the tensor the result is copied into.
         let device = self.device.clone();
+        // Token ids arrive as i64 from the host and as u32 from the card's own
+        // argmax — the drafter feeds both into one conversation — and the
+        // embedding casts i64 to u32. Inside the capture that cast is one more
+        // kernel and allocation in the first group, so the graph changed shape
+        // at every switch and was rebuilt (#233: 49 ↔ 50 kernels, three
+        // launches in four). Made u32 here, every step records one graph.
+        let input = if input.dtype() == candle_core::DType::I64
+            && crate::inference::cuda_graph::cast_ids_before_capture()
+        {
+            input
+                .to_dtype(candle_core::DType::U32)
+                .map_err(SwarmError::internal)?
+        } else {
+            input.clone()
+        };
         let input = input.to_device(&device).map_err(SwarmError::internal)?;
         let (shape, dtype) = template;
         let out = Tensor::zeros(shape, dtype, &device).map_err(SwarmError::internal)?;
@@ -645,7 +663,7 @@ impl SplitModel {
         }
         let per_group = crate::inference::cuda_graph::group_layers();
         let num_layers = self.layers.len();
-        let captured = graph.capture(&device, positions, |cutter| {
+        let captured = graph.capture(&device, positions, began, |cutter| {
             // Every `per_group` layers: park the residual stream in memory
             // made outside the capture, launch what is recorded, and carry on
             // recording from the parked copy — so the card runs this group
@@ -690,6 +708,7 @@ impl SplitModel {
         // still moved each layer's cache length on by one on the host. Put it
         // back, then take the step the ordinary way.
         kv_cache_store.truncate_request_to(&self.kv_model_key, request_id, index_pos)?;
+        let began = graph.begin_step(&device, positions);
         let (out, _) = self.forward_inner_body(
             &input,
             index_pos,
@@ -702,7 +721,8 @@ impl SplitModel {
             None,
             None,
         )?;
-        graph.note_uncaptured(all_positions, positions, &out);
+        // Not a step of its own: the refused capture's time is in it.
+        graph.note_uncaptured(all_positions, positions, &out, began, false);
         Ok(out)
     }
 
