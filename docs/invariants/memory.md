@@ -2355,6 +2355,25 @@ only go up. It read `loaded_mb=5124` eighteen seconds after boot with zero
 workers, and nodes delegated models smaller than their free graphics memory.
 Guard: `a_memory_budget_is_charged_by_the_pool_never_by_the_metadata_map`.
 
+## A model process's output reaches the log file through the daemon (2026-10-08)
+
+The node keeps its log in `<data dir>/logs/swarmllm.log` as well as its window (`src/logging.rs`,
+a tester's request; `logging.file` had been accepted and documented "not applied yet"). Model
+processes wrote straight to the window they inherited, so a file inside the daemon alone would
+have missed exactly the lines a memory refusal is explained by. Having each process append to the
+same file would make rotation unsafe: Windows refuses to rename a file another process holds, and
+on Linux the others would keep writing into the renamed file. So while there is a file, a worker
+is spawned with its stdout and stderr PIPED, and `forward_worker_output` copies each line to the
+daemon's window and the file — one writer; a worker's panic lands in the file too. The worker's
+own colour codes go (its stdout is no longer a terminal). Rotation: 50 MB, three older files; a
+rename a viewer refuses (PowerShell's `Get-Content -Wait` shares read and write, not delete) starts
+the file over in place; one that refuses even that keeps appending and retries a quarter-bound
+later — the log never stops. Checked: Linux, a CUDA build as the live node — the file held 102
+daemon and 30 worker lines, no escapes, and the window's output still had both; Windows natively
+(MinGW cross-build, throwaway node, TinyLlama) — 185 lines in both, 24 from the worker, and
+`a_viewer_holding_the_log_open_on_windows_neither_stops_it_nor_unbounds_it` passing there with
+the refused rename asserted.
+
 ## Single-source-of-truth helpers — Worker memory: graphics, RAM and the KV cache
 
 Each names the ONE place a decision is made. A second implementation of any of

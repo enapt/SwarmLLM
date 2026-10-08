@@ -160,5 +160,6 @@ A second implementation of any of these is this codebase's most-repeated defect 
 - **A prompt of known length is RESERVED** — `set_reserved_positions`; `SWARMLLM_KV_RESERVE=0`.
 - **`process_pool::worker_socket_path`** — the ONLY place the IPC socket path is built.
 - **`process_pool::end_with_this_daemon`** — on Windows every worker joins the daemon's kill-on-close job; a new spawn path calls it (#153).
+- **`logging::forward_worker_output`** — while the log has a file (`logging::pipes_worker_output`), a worker's stdout and stderr are piped through the daemon into its window and the file: ONE writer, so the file can rotate (Windows refuses to rename a file another process holds). A new spawn path pipes through it too. → `docs/invariants/memory.md` § "A model process's output reaches the log file through the daemon"
 
 → `docs/invariants/memory.md` § "Single-source-of-truth helpers — Worker memory: graphics, RAM and the KV cache"

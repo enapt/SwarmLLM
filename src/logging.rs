@@ -32,15 +32,18 @@ pub const MAX_FILE_BYTES: u64 = 50 * 1024 * 1024;
 /// Rotated files kept beside the current one: `<name>.1` (newest) … `<name>.3`.
 pub const OLDER_FILES_KEPT: usize = 3;
 
-/// Where the log goes when nothing says otherwise, under the data directory.
-pub const DEFAULT_RELATIVE_PATH: &str = "logs/swarmllm.log";
+/// Where the log goes when nothing says otherwise: this file in this folder of
+/// the data directory, joined as two parts so the path a Windows user is shown
+/// has one kind of separator.
+pub const DEFAULT_DIR: &str = "logs";
+pub const DEFAULT_FILE: &str = "swarmllm.log";
 
 /// The log file `setting` names — the `--log-file` flag, else `logging.file`.
 /// Unset or empty: the default under `data_dir`. `off` / `false` / `none`: no
 /// file. A relative path is under `data_dir`; an absolute one is taken as is.
 pub fn log_file_path(setting: Option<&str>, data_dir: &Path) -> Option<PathBuf> {
     match setting.map(str::trim) {
-        None | Some("") => Some(data_dir.join(DEFAULT_RELATIVE_PATH)),
+        None | Some("") => Some(data_dir.join(DEFAULT_DIR).join(DEFAULT_FILE)),
         Some(s) if matches!(s.to_ascii_lowercase().as_str(), "off" | "false" | "none") => None,
         Some(s) => {
             let p = PathBuf::from(s);
@@ -57,6 +60,9 @@ pub struct RotatingFile {
     written: u64,
     max_bytes: u64,
     keep: usize,
+    /// Set when a rotation could not start the file over: try again only once
+    /// it has grown past this, not on every line.
+    retry_at: Option<u64>,
 }
 
 impl RotatingFile {
@@ -74,6 +80,7 @@ impl RotatingFile {
             written,
             max_bytes,
             keep,
+            retry_at: None,
         })
     }
 
@@ -81,7 +88,8 @@ impl RotatingFile {
     /// Errors are swallowed: a log that cannot be written must not take the
     /// node down with it.
     pub fn write_line(&mut self, bytes: &[u8]) {
-        if self.written > 0 && self.written + bytes.len() as u64 > self.max_bytes {
+        let limit = self.retry_at.unwrap_or(self.max_bytes);
+        if self.written > 0 && self.written + bytes.len() as u64 > limit {
             self.rotate();
         }
         if let Some(file) = self.file.as_mut() {
@@ -105,21 +113,33 @@ impl RotatingFile {
             let _ = std::fs::rename(self.rotated(n), self.rotated(n + 1));
         }
         let renamed = self.keep > 0 && std::fs::rename(&self.path, self.rotated(1)).is_ok();
-        let reopened = if renamed {
-            OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&self.path)
+        let mut options = OpenOptions::new();
+        options.create(true);
+        if renamed {
+            options.append(true);
         } else {
-            // Kept within bounds even when the rename is refused: start over.
-            OpenOptions::new()
-                .create(true)
-                .write(true)
-                .truncate(true)
-                .open(&self.path)
-        };
-        self.file = reopened.ok();
-        self.written = 0;
+            // Kept within bounds when the rename is refused — a viewer holding
+            // the file without sharing deletion (PowerShell's `Get-Content
+            // -Wait` on Windows): start the file over instead.
+            options.write(true).truncate(true);
+        }
+        // A viewer refusing even that must not stop the log: keep appending,
+        // and try again once it has grown by a quarter of the bound.
+        self.file = options
+            .open(&self.path)
+            .or_else(|_| {
+                OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&self.path)
+            })
+            .ok();
+        self.written = self
+            .file
+            .as_ref()
+            .and_then(|f| f.metadata().ok())
+            .map_or(0, |m| m.len());
+        self.retry_at = (self.written >= self.max_bytes).then(|| self.written + self.max_bytes / 4);
     }
 }
 
@@ -303,5 +323,41 @@ mod tests {
             after.len() > before && after.ends_with("after restart\n")
                 || after == "after restart\n"
         );
+    }
+
+    /// On Windows a reader that shares reading and writing but not deletion —
+    /// PowerShell's `Get-Content -Wait` — makes renaming the file fail. The log
+    /// then starts the file over in place, stays within its bound, and never
+    /// stops being written.
+    #[cfg(windows)]
+    #[test]
+    fn a_viewer_holding_the_log_open_on_windows_neither_stops_it_nor_unbounds_it() {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_SHARE_READ: u32 = 1;
+        const FILE_SHARE_WRITE: u32 = 2;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("swarmllm.log");
+        let mut log = RotatingFile::open(&path, 200, 2).unwrap();
+        let viewer = OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .open(&path)
+            .unwrap();
+        for n in 0..20 {
+            log.write_line(format!("line {n:04} {}\n", "x".repeat(40)).as_bytes());
+        }
+        let current = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !path.with_extension("log.1").exists(),
+            "the rename was refused, so the file started over in place"
+        );
+        assert!(current.contains("line 0019"), "the log kept being written");
+        assert!(
+            current.len() as u64 <= 200,
+            "and within its bound: {}",
+            current.len()
+        );
+        drop(viewer);
+        drop(log);
     }
 }
