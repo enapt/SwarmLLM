@@ -73,8 +73,8 @@ re-fetching parts) and #223 closed in v0.3.228 (released 2026-10-06 09:42 UTC), 
     holding the first layers, not only with a peer holding the last.)*
 7. **#10** — conversation prefixes across computers: no routing to the peer holding the
     cache (the split half — a split keeps its prompt between turns — built 2026-10-09).
-8. **#162** — the release gate's step 12e cannot test a takeover deterministically on this box
-    (cloned helpers: done; the 7B's standby room is honestly the machine's free memory).
+8. *(#162 closed 2026-10-09 — cloned gates refuse a missing helper; 12e's failover arms moved to a
+    shape this box holds, and `split_rig.sh failover` keeps no prompt since #10.)*
 9. *(#155 narrowed to P3 on 2026-10-07 — not seen on the swarm, see its entry.)*
 10. *(#194 closed 2026-10-09 — a card keeps its conversation memory as f16, a third of the
     memory, and keeps its memory guard under a context override.)*
@@ -1223,28 +1223,6 @@ Moving: map each call to the vocabulary API keeping the old semantics (read 0.1.
 (a new llama-cpp-sys rebuilds llama.cpp's CUDA kernels — cold, about an hour here) and run the
 gate's llama-path steps on the artifact.
 
-#### #162 — The release gate's step 12e cannot test a takeover deterministically on this box
-`P2` · process · **PARTIAL** — 2026-10-02 · absorbs #140; history: archive rows #162 and #140
-
-(a) is DONE: every gate since .227 refuses to start when a `$G/` helper it names is missing
-(exit 4, at the top of `gate*.sh`), and each clone's retarget script asserts every substitution,
-`safety_start`'s name included. (b), measured 2026-10-09 (`~/swarmllm-162/run{,2,3}.sh`): 12e
-plans a 7B across four nodes on this 16 GB machine, and whether C and D can stand in for B depends
-on the machine's free memory at that moment — they advertised 28 layers on one request and 20-23 on
-the next once A and B had loaded. **That figure is honest**: four nodes really do share 16 GB.
-Since `daemon::machine_memory` (#247) a node reads its cgroup's limit, and `split_rig.sh` can put a
-standby in a scope of its own (`MEM_C/D/E`), but a scope cannot create memory: under 6 GB the
-standbys could offer ~16 layers (no standby planned); under 8 GB with `max_ram_mb = 6000` the
-machine's free memory was again the tighter figure (28 → 20). With Llama-3.2-3B + the 1B as
-drafter the room is constant (28, the whole model, on every plan): `failover_mid` took over 2/2
-with the takeover's reply byte-identical to the A→C→D control, but `failover`'s kill, timed for the
-7B ("at the start of its prompt pass"), forced no takeover 2/2 — B answered its prompt pass 19.5 s
-later and nothing failed over. 12e passed at .232 (both modes, takeover 1 each) by the
-machine having room that day. What is left: time `failover`'s kill on what B is doing (kill once
-B's worker logs the forward received, mid-pass) so the 3B + 1B shape exercises a takeover, then
-move 12e to it; until then 12e on the 7B is advisory, and a FAIL with C/D's room below B's range
-in the plan lines is the machine, not the build.
-
 #### #163 — The .rpm installs a service whose user it never creates
 `P3` · packaging · **OPEN** — 2026-10-02 · history: archive row #163
 
@@ -1585,7 +1563,20 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-09, after the v0.3.232 tag (next release)** (#69, #247)
+**Closed 2026-10-09, after the v0.3.232 tag (next release)** (#69, #247, #162)
+- #162 — the release gate: (a) a cloned gate lost its helpers — every gate since .227 refuses to start
+  when a `$G/` helper it names is missing (exit 4), and each clone's retarget script asserts every
+  substitution. (b) step 12e could not test a takeover deterministically here. Two causes, measured
+  (`~/swarmllm-162/run{,2,3,4}.out`): a 7B across four nodes on this 16 GB box gives C and D only the
+  machine's free memory as standby room (28 layers on one request, 20-23 on the next once A and B had
+  loaded) — an honest figure no setting should hide (`split_rig.sh` can now put a standby in a memory
+  scope of its own, `MEM_C/D/E`, which the node reads since #247 — it cannot create memory); and, since
+  #10 (`5e53baa3`), `failover`'s takeover arm sent the healthy arm's prompt again, RESUMED it from what B
+  had stored, and a failed resumed pass is read again from 0 through the same plan by design — B's
+  respawned worker answered and no stand-in was asked. (That second cause was first misread as the
+  kill's timing in `d412ddbe`.) `split_rig.sh failover` now keeps no prompt on the coordinator, and the
+  gate's 12e failover arms run Llama-3.2-3B with the 1B drafter: constant room (28), `failover` and
+  `failover_mid` each took over 2/2 with replies byte-identical to the A→C→D control.
 - #247 — a node in a memory-limited container planned against the HOST's memory (opened and closed
   2026-10-09, found while making #162 b's rig deterministic). Five places read machine memory through
   `sysinfo`, which is `/proc/meminfo` — the host's figures inside a container too — so a node under

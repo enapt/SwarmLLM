@@ -242,6 +242,14 @@ elif [ "$MODE" = failover ] || [ "$MODE" = context ]; then
   SHARDS_C=$(echo "$SHARDS" | grep -vx 0 | grep -vx "$LAST" | paste -sd,)
   SHARDS_D=$LAST
   GPU_A="${GPU_A:-0}"; GPU_B="${GPU_B:-0}"
+  # The takeover arm sends the healthy arm's prompt again, so with the split
+  # prompt cache (FUTURE_WORK #10) it RESUMES from what B stored — and a failed
+  # resumed pass is read again from position 0 through the same plan, by
+  # design: B's respawned worker answers and no stand-in is ever asked (seen
+  # 2026-10-09, mistaken at first for the kill's timing). This mode tests the
+  # takeover, so the coordinator keeps no prompt; `splitcache MISS=1` tests the
+  # resumed pass's own failure.
+  [ "$MODE" = failover ] && export SWARMLLM_SPLIT_PROMPT_CACHE="${SWARMLLM_SPLIT_PROMPT_CACHE:-0}"
 elif [ "$MODE" = failover_mid ]; then
   # B's range must be neither the first nor the last, and need TWO nodes.
   [ "$N" -ge 4 ] || { echo "failover_mid needs a model with at least 4 shard files here; $MODEL has $N"; exit 2; }
@@ -842,7 +850,7 @@ both_200 = len(turns) == 2 and all(" 200" in t["status"] for t in turns)
 t1, t2 = resumed(a[:from_a]), resumed(a[from_a:])
 b_hits = sum("HIT on a split's stored prompt" in l for l in b[from_b:])
 b_stored = sum("stored a split's prompt" in l for l in b)
-missed = any("no longer held the stored prompt" in l for l in a[from_a:])
+missed = any("a resumed prompt pass did not finish" in l and "Prompt cache miss" in l for l in a[from_a:])
 print(f"splitcache: turn 1 resumed_from={t1}  turn 2 resumed_from={t2}  B hits on turn 2={b_hits}  "
       f"B stores={b_stored}  miss logged={missed}  replies 200={both_200}  "
       f"seconds {[t['seconds'] for t in turns]}")

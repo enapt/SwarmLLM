@@ -258,7 +258,9 @@ impl super::PipelineExecutor {
                     %request_id,
                     resumed_from = resume,
                     error = %e,
-                    "a computer of this split no longer held the stored prompt — reading it again from the start"
+                    // A miss, or any failure of a resumed pass (a stand-in
+                    // could not hold the opening) — the error says which.
+                    "a resumed prompt pass did not finish — reading the prompt again from the start"
                 );
                 for s in &self.assignment.segments {
                     forget(s);
