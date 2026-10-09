@@ -73,8 +73,8 @@ re-fetching parts) and #223 closed in v0.3.228 (released 2026-10-06 09:42 UTC), 
     holding the first layers, not only with a peer holding the last.)*
 7. **#10** — conversation prefixes across computers: no routing to the peer holding the
     cache (the split half — a split keeps its prompt between turns — built 2026-10-09).
-8. **#162** — the release gate: a cloned gate loses its helpers, and step 12e cannot test a
-    takeover on this box (absorbs #140).
+8. **#162** — the release gate's step 12e cannot test a takeover deterministically on this box
+    (cloned helpers: done; the 7B's standby room is honestly the machine's free memory).
 9. *(#155 narrowed to P3 on 2026-10-07 — not seen on the swarm, see its entry.)*
 10. *(#194 closed 2026-10-09 — a card keeps its conversation memory as f16, a third of the
     memory, and keeps its memory guard under a context override.)*
@@ -1223,21 +1223,27 @@ Moving: map each call to the vocabulary API keeping the old semantics (read 0.1.
 (a new llama-cpp-sys rebuilds llama.cpp's CUDA kernels — cold, about an hour here) and run the
 gate's llama-path steps on the artifact.
 
-#### #162 — The release gate: a cloned gate loses its helpers, and step 12e cannot test a takeover on this box
-`P2` · process · **OPEN** — 2026-10-02 · absorbs #140; history: archive rows #162 and #140
+#### #162 — The release gate's step 12e cannot test a takeover deterministically on this box
+`P2` · process · **PARTIAL** — 2026-10-02 · absorbs #140; history: archive rows #162 and #140
 
-(a) `gate220.sh` was made from `gate219.sh` with paths rewritten; its helpers (`kv104.sh`,
-`lora_gate.sh`, `kv121.sh`, `guest.sh`, `repro767.sh`, `probe.py`) were not copied, so five
-steps printed `No such file` and moved on, and the gate exited 0 (they ran later in a
-supplement, all PASS). Write `new_gate.sh <from> <to>` that copies every `$G/*.sh|py` the
-script references and fails if one is missing; make a step that cannot find its helper FAIL;
-`safety_start` must name the new gate. (b) Step 12e (failover + guessing ahead) fails on ANY
-build on this box once B's worker loads: the four rig nodes share one 16 GB machine and read
-their room from its free RAM, so C and D advertise `max_hostable_layers` 28 for the first
-request and 23 for the second, while covering B's range as a pair needs 24 — no standby, a
-retry instead of a takeover (re-observed at the v0.3.219 gate; .218 behaves the same, so it is
-no regression). Give C/D a fixed `ram_model_budget_mb` in `EXTRA_TOML` so 12e tests the
-takeover again. Until then 12e is not a product signal (`memory/open_cautions.md`).
+(a) is DONE: every gate since .227 refuses to start when a `$G/` helper it names is missing
+(exit 4, at the top of `gate*.sh`), and each clone's retarget script asserts every substitution,
+`safety_start`'s name included. (b), measured 2026-10-09 (`~/swarmllm-162/run{,2,3}.sh`): 12e
+plans a 7B across four nodes on this 16 GB machine, and whether C and D can stand in for B depends
+on the machine's free memory at that moment — they advertised 28 layers on one request and 20-23 on
+the next once A and B had loaded. **That figure is honest**: four nodes really do share 16 GB.
+Since `daemon::machine_memory` (#247) a node reads its cgroup's limit, and `split_rig.sh` can put a
+standby in a scope of its own (`MEM_C/D/E`), but a scope cannot create memory: under 6 GB the
+standbys could offer ~16 layers (no standby planned); under 8 GB with `max_ram_mb = 6000` the
+machine's free memory was again the tighter figure (28 → 20). With Llama-3.2-3B + the 1B as
+drafter the room is constant (28, the whole model, on every plan): `failover_mid` took over 2/2
+with the takeover's reply byte-identical to the A→C→D control, but `failover`'s kill, timed for the
+7B ("at the start of its prompt pass"), forced no takeover 2/2 — B answered its prompt pass 19.5 s
+later and nothing failed over. 12e passed at .232 (both modes, takeover 1 each) by the
+machine having room that day. What is left: time `failover`'s kill on what B is doing (kill once
+B's worker logs the forward received, mid-pass) so the 3B + 1B shape exercises a takeover, then
+move 12e to it; until then 12e on the 7B is advisory, and a FAIL with C/D's room below B's range
+in the plan lines is the machine, not the build.
 
 #### #163 — The .rpm installs a service whose user it never creates
 `P3` · packaging · **OPEN** — 2026-10-02 · history: archive row #163

@@ -175,6 +175,10 @@
 #   SHARDS_A   shard indices A holds, comma-separated (default 0; kill: 0,LAST)
 #   SHARDS_B   shard indices B holds (default: every shard A lacks; kill: all)
 #   GPU_A/B    SWARMLLM_INFERENCE_GPU_LAYERS for each node ("" = auto)
+#   MEM_C/D/E  failover modes: a memory limit for that standby (e.g. 6G) — it runs
+#              in a `systemd-run` scope with that MemoryMax (CPUQuota RIG_SCOPE_CPU,
+#              default 400%) and reads it as its machine, so the room it advertises
+#              follows its own use, not the machine's free RAM (#162 b)
 #   EXTRA_TOML appended to EVERY node's config.toml (default: nothing)
 #   MODELS_DIR where the shards come from (default: the live node's)
 #   OUT        where logs and replies go (default: a temp dir, printed)
@@ -361,11 +365,18 @@ CFG
   [ -n "$extra" ] && printf '\n%s\n' "$extra" >> "$d/config.toml"
   return 0
 }
-start() { # dir port bin gpu
+start() { # dir port bin gpu [memory limit]
+  # A memory limit runs the node in a scope of its own, which the node reads as
+  # its machine (`daemon::machine_memory`): its room then follows its own use,
+  # not the free RAM of a machine three other rig nodes share (#162 b). The
+  # scope sits outside a gate's safety scope, so it carries a CPU quota too.
+  local scope=()
+  [ -n "${5:-}" ] && scope=(systemd-run --user --scope --quiet -p "MemoryMax=$5" -p MemorySwapMax=0
+    -p "CPUQuota=${RIG_SCOPE_CPU:-400%}" --)
   if [ -n "$4" ]; then
-    SWARMLLM_INFERENCE_GPU_LAYERS="$4" SWARMLLM_NODE_DATA_DIR="$1" "$3" run -p "$2" > "$1/node.log" 2>&1 &
+    SWARMLLM_INFERENCE_GPU_LAYERS="$4" SWARMLLM_NODE_DATA_DIR="$1" "${scope[@]}" "$3" run -p "$2" > "$1/node.log" 2>&1 &
   else
-    SWARMLLM_NODE_DATA_DIR="$1" "$3" run -p "$2" > "$1/node.log" 2>&1 &
+    SWARMLLM_NODE_DATA_DIR="$1" "${scope[@]}" "$3" run -p "$2" > "$1/node.log" 2>&1 &
   fi
   echo $!
 }
@@ -479,16 +490,16 @@ if [ "$MODE" = failover ] || [ "$MODE" = context ] || [ "$MODE" = failover_mid ]
   # one card is #104's setup, and a KV refusal there would read as a failover
   # result.
   make_node "$BASE/C" "$SHARDS_C" "\"$ADDR\""
-  PC=$(start "$BASE/C" 8940 "$BIN_A" "${GPU_C:-0}")
+  PC=$(start "$BASE/C" 8940 "$BIN_A" "${GPU_C:-0}" "${MEM_C:-}")
   make_node "$BASE/D" "$SHARDS_D" "\"$ADDR\""
-  PD=$(start "$BASE/D" 8960 "$BIN_A" "${GPU_D:-0}")
+  PD=$(start "$BASE/D" 8960 "$BIN_A" "${GPU_D:-0}" "${MEM_D:-}")
   up "$BASE/C" 8940 || exit 1
   up "$BASE/D" 8960 || exit 1
   PEERS_EXPECTED=3
-  echo "rig: C=[$SHARDS_C] D=[$SHARDS_D] gpu=${GPU_C:-0}/${GPU_D:-0}"
+  echo "rig: C=[$SHARDS_C] D=[$SHARDS_D] gpu=${GPU_C:-0}/${GPU_D:-0} memory=${MEM_C:-machine}/${MEM_D:-machine}"
   if [ "$MODE" = failover_mid ]; then
     make_node "$BASE/E" "$SHARDS_E" "\"$ADDR\""
-    PE=$(start "$BASE/E" 8980 "$BIN_A" "${GPU_E:-0}")
+    PE=$(start "$BASE/E" 8980 "$BIN_A" "${GPU_E:-0}" "${MEM_E:-}")
     up "$BASE/E" 8980 || exit 1
     PEERS_EXPECTED=4
     echo "rig: E=[$SHARDS_E] gpu=${GPU_E:-0}"
