@@ -1100,6 +1100,25 @@ impl AutoShardManager {
                             .unwrap_or(false)
                 })
                 .count();
+            if low_latency_remaining < 2 {
+                // What each other holder's last ping read: the one input of
+                // this rule that moves from minute to minute.
+                let pings: Vec<Option<u32>> = holders
+                    .iter()
+                    .filter(|h| *h != local_node_id)
+                    .map(|h| {
+                        self.shared_state
+                            .peer_registry
+                            .get(h)
+                            .and_then(|p| p.latency_ms)
+                    })
+                    .collect();
+                tracing::debug!(
+                    low_latency_remaining,
+                    ?pings,
+                    "DIAG: no region known — fewer than two other holders answered a ping under 200 ms"
+                );
+            }
             return low_latency_remaining < 2;
         }
 
@@ -1232,9 +1251,25 @@ impl AutoShardManager {
         pressure: f64,
         shard_pins: &[crate::types::ShardPin],
     ) -> bool {
+        self.copy_kept_because(shard_id, holders, pressure, shard_pins)
+            .is_none()
+    }
+
+    /// [`Self::would_shed_copy`] with its reason: `None` sheds the copy,
+    /// `Some(rule)` keeps it. The download pass logs the rule when it fetches
+    /// a part (`would_shed_once_fetched`): the .232 gate's step 12t saw a part
+    /// fetched back twice between prunes of it, and nothing said which rule
+    /// had kept it for that one pass.
+    fn copy_kept_because(
+        &self,
+        shard_id: &ShardId,
+        holders: &[NodeId],
+        pressure: f64,
+        shard_pins: &[crate::types::ShardPin],
+    ) -> Option<&'static str> {
         let live = self.shared_state.cfg();
         if !live.auto_manage.prune_enabled {
-            return false;
+            return Some("prune is off");
         }
         if self
             .shared_state
@@ -1243,7 +1278,7 @@ impl AutoShardManager {
             .get(&shard_id.model_id)
             .is_some_and(|policy| !policy.prune_enabled)
         {
-            return false;
+            return Some("the model's policy turns prune off");
         }
         if self
             .shared_state
@@ -1251,7 +1286,7 @@ impl AutoShardManager {
             .locked_shards
             .contains_key(shard_id)
         {
-            return false;
+            return Some("the user locked this part");
         }
         // Pool shard pinning: the caller passes the pins it read. Prune reads
         // them with the BLOCKING variant — see the SEC note where it does.
@@ -1260,7 +1295,7 @@ impl AutoShardManager {
             .iter()
             .any(|p| p.matches(&shard_id.model_id.0, local_node_id, shard_id.index))
         {
-            return false;
+            return Some("a pool pin");
         }
         // Prompt privacy needs BOTH ends of the model on this node, so
         // pruning an end strands the setting: it stays on, nothing can
@@ -1281,7 +1316,7 @@ impl AutoShardManager {
                 .privacy_explicitly_enabled_for(&shard_id.model_id),
             shard_id.index,
         ) {
-            return false;
+            return Some("prompt privacy needs this end");
         }
         // A model the user explicitly pinned/trusted.
         if self
@@ -1291,12 +1326,12 @@ impl AutoShardManager {
             .get(&shard_id.model_id)
             .is_some_and(|t| t.pinned_by_user)
         {
-            return false;
+            return Some("the user pinned the model");
         }
         // The configured `--shards` range.
         if let Some((start, end)) = self.shared_state.config.inference.shard_range {
             if shard_id.index >= start && shard_id.index <= end {
-                return false;
+                return Some("the configured --shards range");
             }
         }
         // A copy that carries a model somebody asked for — its holders could
@@ -1304,7 +1339,7 @@ impl AutoShardManager {
         // Before the replica count, which says nothing about whether any
         // holder can actually run the model.
         if self.copy_carries_model(shard_id, local_node_id) {
-            return false;
+            return Some("this copy carries the model");
         }
         let pool_size = crate::pool::scope::effective_pool_size(&self.shared_state);
         let target =
@@ -1319,10 +1354,11 @@ impl AutoShardManager {
             live.node.contribution_auto,
             live.auto_manage.min_replicas,
         ) {
-            return false;
+            return Some("not more copies than the target");
         }
         // Region-aware: never the last holder in our region.
-        !self.would_eliminate_region(shard_id, local_node_id, holders)
+        self.would_eliminate_region(shard_id, local_node_id, holders)
+            .then_some("the last close holder in this region")
     }
 
     /// Would prune shed `candidate` again once it had landed — counted among
@@ -1354,7 +1390,20 @@ impl AutoShardManager {
                     ),
                 );
         }
-        self.would_shed_copy(&shard_id, &holders, pressure_after, shard_pins)
+        match self.copy_kept_because(&shard_id, &holders, pressure_after, shard_pins) {
+            None => true,
+            Some(rule) => {
+                tracing::debug!(
+                    model = %shard_id.model_id,
+                    shard = shard_id.index,
+                    holders = holders.len(),
+                    pressure_after = %format_args!("{pressure_after:.2}"),
+                    rule,
+                    "DIAG: a part prune would keep once it landed — fetching it"
+                );
+                false
+            }
+        }
     }
 
     /// Check if we can re-acquire this shard if needed later.

@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #246**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #247**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -223,6 +223,31 @@ returned (pending / no checked tags / `heard_hash_with_tag` None — the last is
 before its background verification finished; `could not be checked` once, never `differ from what
 the holders`). Re-run with the live node stopped: all-.230 PASS (262 s), all-.231 PASS (263 s).
 Eight gates have run it (.224 on); it failed at two (.228, .231), on both builds each time.
+
+**Again at the .232 gate (2026-10-09)**: the null arm (B = .231, A and C .232) failed in 600 s while
+both .232 arms passed (proxy 246 s, offline 275 s); at the .231 gate .231 failed its own proxy arm.
+Three binaries have now failed it and all passed it on a re-run — a flicker in the shape, not a
+release.
+
+#### #246 — A node near its storage limit fetched back a part prune had just deleted, once in six runs
+`P3` · heal · **OPEN** — 2026-10-09 · history: the v0.3.232 gate, step 12t
+
+`gate232_resume.sh` 12t (`prune_loop_inner.sh`: A at 87% of its storage budget, B and C holding
+every part, a request a minute): the .232 artifact deleted the middle part, fetched it back
+(14:55:15 and 14:56:12 UTC, 57 s apart) and deleted it again — 3 deletions, 2 fetches in 600 s —
+while .231 in the same run did 1/0. Four alternated re-runs (`r12t_ab.sh`: .231, .232, .231, .232)
+were all 1/0, and every gate since .228 was 1/0 on both binaries: not the release, an input that
+flips. Between the refusals (12, each `pressure_after=0.87`, holders 2) the download pass let the
+part through twice, so one rule of `would_shed_copy` read differently for that pass; prune shed
+it 18-28 s later on the same pressure. Not pressure (both readings logged alike), not a user lock
+(`locked_shards` is user-set) and not the carry check (a processor node advertises its configured
+RAM cap, not live headroom). Candidate: `would_eliminate_region`'s fallback when no region is
+known — "fewer than two other holders answered a ping under 200 ms" — reads `PeerInfo::latency_ms`,
+a single health-ping COST sample measured through the dispatcher, not a distance
+(`arch-network.md`: a reader meaning distance goes through `physical_rtt_ms`). One slow pong keeps
+the copy for one pass. **The log now names the rule** (`copy_kept_because`, "DIAG: a part prune
+would keep once it landed — fetching it", and the fallback's pings): read it on the next
+occurrence before changing the rule.
 
 #### #179 — A greedy reply (`temperature: 0`) is not reproducible run to run on the processor
 `P3` · correctness · **OPEN** — 2026-08-18 · history: archive § "`temperature: 0` with a fixed seed is not reproducible", gotcha #327
