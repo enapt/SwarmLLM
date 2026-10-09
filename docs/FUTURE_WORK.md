@@ -898,6 +898,10 @@ prompts — one report spent 847 s re-reading):
   let each segment store its range under it and answer "held to position k", and send only
   the delta on turn 2+. An additive trailer gated at the sender on a new feature bit, with an
   LRU / byte cap per segment. With a delegated split (#143) the delegate owns the id.
+  **Designed 2026-10-09: `docs/plans/split_prompt_cache.md`** — the coordinator decides
+  (keyed block chain, vLLM's rule; optimistic belief table, a refused hydrate retries from 0),
+  each segment keeps its own entries (vLLM-Ascend KVPP's stage-local caches), the head is sent
+  token ids from the resume point.
 - The Anthropic surface cannot reach the session-id design without a signature change
   through four handlers.
 
