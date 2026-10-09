@@ -70,6 +70,18 @@ pub(super) async fn handle_layer_forward(
             .await
         {
             Ok(turn) => Some(turn),
+            // A turn a restart superseded is the stream's early cancellation
+            // working, not a failure: answered like one, so the coordinator's
+            // wait ends, but not logged as one — on a node serving the middle
+            // of a boomerang it happens dozens of times a reply (38 warnings
+            // in one rig arm, 2026-10-09, #152).
+            Err(crate::daemon::state::forward_streams::TurnRefused::Skipped) => {
+                let reason =
+                    crate::daemon::state::forward_streams::TurnRefused::Skipped.reason(seq);
+                tracing::debug!(%request_id, reason, "streamed check skipped");
+                send_refusal(&network_tx, &reply_to(), request_id, answering, &reason).await;
+                return;
+            }
             Err(refused) => {
                 send_error_result(
                     &network_tx,
@@ -699,6 +711,18 @@ async fn send_error_result(
     error: &str,
 ) {
     tracing::warn!(request_id = %request_id, error, "LayerForward processing failed");
+    send_refusal(network_tx, reply_to, request_id, answering, error).await;
+}
+
+/// [`send_error_result`]'s answer without its warning, for a refusal that is
+/// the design working rather than something failing here.
+async fn send_refusal(
+    network_tx: &mpsc::Sender<NetworkCommand>,
+    reply_to: &ReplyTo,
+    request_id: uuid::Uuid,
+    answering: crate::types::ResultStep,
+    error: &str,
+) {
     let result = crate::types::LayerResult::error(request_id, sanitize_peer_facing_error(error))
         .answering_step(answering);
     send_result_timed(network_tx, reply_to, result).await;

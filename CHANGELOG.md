@@ -22,6 +22,18 @@ slowed to a crawl. On an 8 GB card, a 15,600-token prompt took 5 minutes; it
 now takes 51 seconds. A prompt that truly does not fit is now turned away at
 once, and in a swarm it goes to another computer instead.
 
+**Faster replies when another computer runs the middle of a model.** When your
+computer holds the start and the end of a model and another computer runs the
+middle, which is how "Start and finish on this computer" works, guessing ahead
+now keeps several guesses on their way instead of waiting for each answer.
+Until now that only happened when the other computer held the end of the
+model, which was true of 4 in 78 models people held. Across a long-distance
+link (a 270 ms round trip) replies came 12% faster on prose and 32% faster on
+code. Between nearby computers the speed is about the same. Replies are
+unchanged, checked against llama.cpp. The computer running the middle needs no
+update. It also no longer logs a warning each time a guess it was sent is
+skipped on purpose.
+
 ## [0.3.231-alpha] — 2026-10-08
 
 **Fixed: on a phone or narrow window, the model picker shows the model that

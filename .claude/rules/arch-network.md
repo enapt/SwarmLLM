@@ -139,7 +139,7 @@ A verify's last segment walks the drafts and answers with token ids (`LayerForwa
 
 ## A stream of verifies runs in its order, and its answers are found by number (2026-09-30)
 
-Streamed verify forwards (`LayerForward::stream_seq`, `0x0C`, gated on `features::STREAMED_VERIFY`) run in number order via **`daemon::state::forward_streams`**; `pending_layer_results` is keyed by `WaiterKey` and an answer echoes its number (`0x08`). A stream is ONE piece of its sender's work (`dispatch::StreamWorkSlot`, `MAX_STREAM_CHUNKS_HERE`); every admission refusal goes through `refuse_forward`. Stream only to a peer advertising `features::STREAM_AS_ONE_WORK`.
+Streamed verify forwards (`LayerForward::stream_seq`, `0x0C`, gated on `features::STREAMED_VERIFY`) run in number order via **`daemon::state::forward_streams`**; `pending_layer_results` is keyed by `WaiterKey` and an answer echoes its number (`0x08`). A stream is ONE piece of its sender's work (`dispatch::StreamWorkSlot`, `MAX_STREAM_CHUNKS_HERE`); every admission refusal goes through `refuse_forward`. Stream only to a peer advertising `features::STREAM_AS_ONE_WORK`. **`dsd_stream::stream_shape`** takes any plan with ONE peer segment (the boomerang too, #152): where this node holds the last layers the walk is ours and those segments run as each answer is TAKEN, never as it arrives (#180).
 
 → `docs/invariants/network.md` § "A stream of verifies runs in its order, and each answer names its number"
 

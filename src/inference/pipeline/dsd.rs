@@ -370,23 +370,24 @@ impl PipelineExecutor {
             finish_reason = "stop".to_string();
         }
 
-        // The continuous stream (`dsd_stream`): where every segment but the far
-        // one is this node's own and that peer serves a stream, the next chunk
-        // of guesses goes out while the last is still being checked, instead
-        // of the rounds below waiting a whole round trip between them. On by
-        // default since it was measured over a real link (TH↔IT, 2026-10-01:
-        // +20-57% over rounds); `SWARMLLM_SPEC_STREAM=0` keeps the rounds.
+        // The continuous stream (`dsd_stream`): where every segment but one is
+        // this node's own and that peer serves a stream, the next chunk of
+        // guesses goes out while the last is still being checked, instead of
+        // the rounds below waiting a whole round trip between them — the peer
+        // last, first, or in the middle of a boomerang, where the walk is ours.
+        // On by default since it was measured over a real link (TH↔IT,
+        // 2026-10-01: +20-57% over rounds); `SWARMLLM_SPEC_STREAM=0` keeps the
+        // rounds.
         let mut streamed = false;
         if let Drafter::Engine(engine) = &mut drafter {
-            let tail = super::dsd_stream::stream_requested()
+            let shape = super::dsd_stream::stream_requested()
                 .then(|| {
-                    super::dsd_stream::stream_tail(&self.shared_state, &self.assignment.segments)
-                        .cloned()
+                    super::dsd_stream::stream_shape(&self.shared_state, &self.assignment.segments)
                 })
                 .flatten();
-            if let Some(tail) = tail.filter(|_| finish_reason.is_empty()) {
+            if let Some(shape) = shape.filter(|_| finish_reason.is_empty()) {
                 self.stream_checks(
-                    tail,
+                    shape,
                     engine,
                     current_pos as u32,
                     super::dsd_stream::StreamIo {

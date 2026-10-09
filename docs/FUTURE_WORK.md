@@ -40,7 +40,7 @@ after v0.3.224 (#160, #215 and #216 closed; #217 and #218 opened from the swarm 
 v0.3.226 (released 2026-10-05), #220 opened from the .225 gate's unrecorded driver resets; #129's fit verdict (idle-model
 reclaim) shipped in v0.3.227 (released 2026-10-05 23:45 UTC); #222 (a node near its storage limit deleting and
 re-fetching parts) and #223 closed in v0.3.228 (released 2026-10-06 09:42 UTC), #224 opened from its gate;
-#225, #226 and #227 opened from a tester's two reports the same day; #117 (Qwen 3.5, dense), #225 and #226 closed in v0.3.229 (released 2026-10-07 00:00 UTC), #228 opened for what Qwen 3.5 leaves out; #129's cold loads (waited for and priced), #228 (2) and (2b), #220 (2), #229, #230 and #231 shipped in v0.3.230 (released 2026-10-07 16:38 UTC), #232 parked from their report; #234, #235, #239 and #240 closed on 2026-10-08 from two tester reports and the card check after them, #236-#238 opened from the second (#236 and #238 closed the same day); #242 and #243 opened and closed the same day from reports #006 (a 1 Mbps cap stored for "Unlimited") and #007 (the narrow-screen model picker); #194 closed on 2026-10-09 (a card keeps its conversation memory as f16, and its memory guard under a context override), #237 re-ranked to P3 from what could be measured.
+#225, #226 and #227 opened from a tester's two reports the same day; #117 (Qwen 3.5, dense), #225 and #226 closed in v0.3.229 (released 2026-10-07 00:00 UTC), #228 opened for what Qwen 3.5 leaves out; #129's cold loads (waited for and priced), #228 (2) and (2b), #220 (2), #229, #230 and #231 shipped in v0.3.230 (released 2026-10-07 16:38 UTC), #232 parked from their report; #234, #235, #239 and #240 closed on 2026-10-08 from two tester reports and the card check after them, #236-#238 opened from the second (#236 and #238 closed the same day); #242 and #243 opened and closed the same day from reports #006 (a 1 Mbps cap stored for "Unlimited") and #007 (the narrow-screen model picker); #194 closed on 2026-10-09 (a card keeps its conversation memory as f16, and its memory guard under a context override), #237 re-ranked to P3 from what could be measured; #152 closed the same day (the guess-check stream on the boomerang).
 `docs/plans/` holds the multi-step designs; the entries point at them.
 
 **P0 — wrong answers, silently**
@@ -69,8 +69,8 @@ re-fetching parts) and #223 closed in v0.3.228 (released 2026-10-06 09:42 UTC), 
    to reset; the kernel is unknown until a sanitizer run (needs the owner's administrator rights).
 
 **P2 — speed and completeness**
-6. **#152** — the continuous guess-check stream never runs on the split shapes the swarm
-    actually makes (the boomerang above all).
+6. *(#152 closed 2026-10-09 — the guess-check stream runs on the boomerang and with a peer
+    holding the first layers, not only with a peer holding the last.)*
 7. **#10** — conversation prefixes across computers: no routing to the peer holding the
     cache, and a split chain keeps no KV across turns (absorbs #139).
 8. **#162** — the release gate: a cloned gate loses its helpers, and step 12e cannot test a
@@ -876,20 +876,6 @@ the time per step changed, not the guessing. Next: per-step card timings for req
 (draft and check `_ms` in the DSD line), and the same rig at low uptime, to separate machine state
 from code.
 
-#### #152 — The continuous guess-check stream never runs on the split shapes the swarm actually makes
-`P2` · perf-split · **OPEN** — measured 2026-10-01 · history: archive row #152
-
-`dsd_stream::stream_tail` needs the plan to be [this node's segments…, ONE remote tail]. A node
-holding both ends gets the boomerang (#165) — tail local, far node in the middle; a node
-holding nothing has a remote head. Both fall back to rounds. Census 2026-10-01: 58 of 78
-holdings hold both ends, 11 middle only, 5 last only, **4 first-only** (the only streaming
-shape). Design, not a tweak: in the boomerang the far node returns hidden states per chunk
-and the walk happens HERE, so the stream's chunk numbering and restart (`forward_streams`,
-`truncate_kv_to`) must carry a middle segment's forwards, and the coordinator runs tail + walk
-per chunk and restarts the middle on a miss; `peer_walks_at_tail` no longer applies. Rank the
-remote-head shape after it. Write the design into `split_speculation.md` § 4b first; measure
-on the TH↔IT link with `~/swarmllm-wan-1001/ab149.sh`'s method (one binary, env switch).
-
 #### #10 — Conversation prefixes across computers: no routing to the peer holding the cache, no cache in a split chain
 `P2` · perf-split · **PARTIAL** — 2026-09-07 · absorbs #139 and archive § "Speeding up inference BETWEEN nodes" idea 1 (prefix-keyed remote KV); history: archive row #10 and § "A conversation's later turns do not seek out the peer holding its prefix"
 
@@ -930,7 +916,10 @@ prompt pass) and an item of `wan_parallel.md`.
 
 On by default since v0.3.216 (`SWARMLLM_SPEC_STREAM=0` keeps the rounds): +20-57% over rounds
 on a real link with a processor peer. Open: (a) a window sized from acceptance × round trip
-(W stays 3; W=6 read −7% / +5% / +18%); (b) cancelling a stale chunk the far node has already
+(W stays 3; W=6 read −7% / +5% / +18%) — and, from #152's boomerang rig, whether to stream at
+all: with a slow far node (~250 ms a check) at a 24 ms round trip the stream was only level with
+rounds (+2% prose, −5% code), against +12% / +32% at 270 ms, so the round trip's share of a
+check is the input; (b) cancelling a stale chunk the far node has already
 STARTED — only unstarted ones are skipped, and two forwards of one request at a worker cross
 their replies (gotcha #180), so it needs the worker's cancel path; (c) the drafter's near
 layers as the verify input where the head segment is the coordinator's own; (d) mid-reply
@@ -1572,7 +1561,21 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-09, on main (not yet released)** (#194)
+**Closed 2026-10-09, on main (not yet released)** (#194, #152)
+- #152 — the continuous guess-check stream (on by default since v0.3.216) ran only where the
+  peer held the model's LAST layers: 4 of 78 node-model holdings on 2026-10-01. A node holding
+  both ends of its model runs the boomerang by default ("Start and finish on this computer"),
+  and those requests — 58 of the 78 — fell back to rounds. Now `dsd_stream::stream_shape` takes
+  any plan with ONE peer segment: last, middle or first. Where this node holds the last layers
+  the peer is sent hidden states with no guess, history or sampler, and this node's last
+  segment walks each chunk as its answer is TAKEN, in order (gotcha #180); the peer's side
+  needed nothing new. A turn a restart skips is no longer logged on the serving node as a
+  failure (38 warnings in one rig arm). Rig, Qwen2.5-Coder-7B + 0.5B drafter, this node's ends on
+  the card and the middle on the processor, one binary: +12% prose / +32% code at a 270 ms
+  round trip, level at 24 ms (the stream overlaps the round trip; a slow middle leaves little
+  at a short one); replies scored against llama.cpp like the rounds'. Not measured over a real
+  link: the Italy peer of 10-01 was online for minutes on 10-08 only. `split_speculation.md`
+  § 4b, `docs/invariants/network.md` § "A stream of verifies runs in its order".
 - #194 — an agent-sized prompt filled an 8 GB card with conversation memory: a card kept the KV
   cache as f32 plus an f16 flash mirror, 6 bytes an element against llama.cpp's 2, and a node with
   `inference.max_seq_len_override` set (the README's advice to agent users) kept NO card KV budget

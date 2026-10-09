@@ -2909,8 +2909,36 @@ of 1-4 tokens beat large ones once several are in flight.
   Gated by a feature bit with no wire change (`features::STREAM_AS_ONE_WORK`):
   v0.3.213-v0.3.215 still count each chunk, so a coordinator streams only to a
   node advertising it and gives an older one rounds.
+- **The coordinator streamed only where the peer held the model's LAST layers**
+  (FUTURE_WORK #152, closed 2026-10-09). On 2026-10-01 that was 4 of 78
+  node-model holdings: 58 held both ends of their model, and a node holding both
+  ends runs the boomerang by default ("Start and finish on this computer") —
+  this node, a peer in the middle, this node — so those requests got rounds.
+  Now `dsd_stream::stream_shape` takes any plan with exactly ONE peer segment.
+  Where this node holds the last layers, the peer is sent hidden states with no
+  walk (no guess, history or sampler — what every other step of such a reply
+  sends it) and answers hidden states, and the walk is this node's own. The
+  serving side needed nothing: `forward_streams` is keyed by request, layer
+  range and attempt and never asked which segment a stream is. This node's
+  segments after the peer's run as each answer is TAKEN, in order — run as
+  answers ARRIVE, two would meet at one worker (gotcha #180), and a chunk a
+  restart drops would have to be undone here; taken in order, a dropped chunk is
+  never run here and the next chunk's cut (`Sent::truncate`) is all this side
+  needs. Rig (`~/swarmllm-152/`, A = both ends on the card, B = the middle on the
+  processor): +12% prose / +32% code at a 270 ms round trip, level at 24 ms; every
+  streamed reply logged `shape="boomerang"` (or `"peer-first"`), no error on either node,
+  replies scored against llama.cpp like the rounds' (`split_speculation.md` § 4b). The
+  turns a restart skips are answered unrun as before, but logged at debug: logged as a
+  failure, B wrote 38 warnings in one arm for the stream working as designed.
 
 **What a change must keep:**
+- A plan streams with exactly ONE peer segment (`dsd_stream::stream_shape`); the
+  peer is asked to walk only where it holds the last layers, and in any other
+  shape it is sent no guess, history or sampler. This node's segments after the
+  peer's run in `take_answer`'s order, never in the waits. Pinned by
+  `every_plan_with_one_peer_segment_streams` and
+  `a_peer_is_asked_to_walk_only_where_it_holds_the_last_layers` (both red with
+  the old last-segment-only rule, 2026-10-09).
 - Streamed forwards go only to a peer advertising `features::STREAMED_VERIFY`
   AND `features::STREAM_AS_ONE_WORK`. An older peer would fail the seal on
   `0x0C` and would also run the chunks concurrently; one with the first bit only

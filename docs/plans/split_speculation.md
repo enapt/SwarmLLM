@@ -615,6 +615,59 @@ processor pays a whole check for each such chunk. The GPU↔GPU gain over a real
 link is projected at ~+26% at 24-50 ms from the rig's timeline, not yet measured —
 the far node needs this build.
 
+**The boomerang streams too (2026-10-09, FUTURE_WORK #152).** Until then the stream ran
+only where the peer held the model's LAST layers, and on 2026-10-01 only 4 of 78
+node-model holdings made that plan: 58 held both ends of their model, and a node holding
+both ends runs the boomerang by default ("Start and finish on this computer") — this node
+first, a peer in the middle, this node last. Those requests fell back to rounds (the live
+Qwen2.5-14B request through Italy that day: `225e6fe7 [0,1) → 4a3ac72e [1,44) → 225e6fe7
+[44,48)`, rounds, no stream line). The design, as built (`dsd_stream::stream_shape`):
+
+- **One rule for the shape: exactly ONE segment is a peer's, every other is ours.** The
+  peer last (as before), in the middle (the boomerang), or first (a node holding only the
+  last part — 5 of the 78). Two peers' segments stay on rounds: they would be two streams
+  to keep in step.
+- **The walk happens where the logits are, and in the boomerang that is HERE.** The peer
+  is sent each chunk's hidden states with no guess, no history and no sampler — exactly
+  what it is sent on any other step of a reply that starts and finishes here — and answers
+  hidden states, numbered like any streamed check. Its side needs nothing new:
+  `forward_streams` is keyed by request, layer range and attempt, and never cared which
+  segment a stream is, so every peer from v0.3.216 serves it. `peer_walks_at_tail` is asked
+  only where the peer holds the last layers.
+- **This node's last segment runs as each answer is TAKEN, in order — never as it
+  arrives.** Two forwards of one request at a worker at once would cross their replies
+  (gotcha #180), and a chunk a restart drops is then never run on this side at all, so
+  this side's cache needs only the cut the next chunk already carries (`Sent::truncate`,
+  applied when that chunk's answer is taken). The peer's answer is checked by the same
+  rule as a round's middle segment (`pipeline::check_intermediate_activations`, now one
+  function for both) before anything here runs on it.
+- PipeInfer (arXiv 2407.11798) has this shape natively: its head node samples, and the
+  logits come back to it. The research changed nothing in the design; it confirmed that a
+  head that samples keeps the runs in order and cancels by run id.
+
+**Measured** (`~/swarmllm-152/`, Qwen2.5-Coder-7B + the 0.5B fp16 drafter, greedy, 128-token
+replies, two per arm, rounds `SWARMLLM_SPEC_STREAM=0` and stream alternated in ONE binary,
+`SWARMLLM_TEST_TENSOR_DELAY_MS` one-way on every tensor message). A = shards 0 and 7 (both
+ends) + drafter, B = shards 1-6 (20 of 28 layers), so the plan is A → B → A. Decode tok/s:
+
+| rig | round trip | rounds, prose | stream, prose | rounds, code | stream, code |
+|---|---|---|---|---|---|
+| A on the CARD, B on the processor (release CUDA build) | 24 ms | 5.90-7.02 | 6.07-7.83 | 8.18-9.65 | 7.44-9.63 |
+| same | 270 ms | 4.22-4.28 | 4.47-5.04 | 5.84-6.25 | 7.79-8.05 |
+| both on ONE processor (dev build) | 24 ms | 1.62-1.80 | 1.44-1.50 | 2.04-2.28 | 2.42-2.47 |
+| same | 270 ms | 1.41-1.69 | 1.42-1.62 | 1.95-2.43 | 2.28-2.64 |
+
+On parallel hardware the stream is level at 24 ms (+2% prose, −5% code on the means) and
++12% / +32% at the TH↔IT round trip — its gain is the round trip it overlaps, and here B is
+slow (~250 ms a check on 6 processor threads), so at 24 ms there is little to overlap and a
+restart's stale chunks cost B as much again. Sharing one processor, a restart's stale chunks
+also take the near side's time (gotcha #759). Every streamed reply logged `shape="boomerang"`
+(prose 61 chunks / 28-30 restarts, code 47 / 12), 0 errors on A or B, driver watch 0 events.
+All 40 processor replies scored against llama.cpp like the rounds' (worst rank 2, largest gap
+0.146 — a ROUNDS reply; every streamed reply to a prompt was the same text). The peer-first
+shape (A = shard 7, B = 0-6) streamed too (`shape="peer-first"`), with the same pattern. The
+default stays ON for every shape: a split is across machines because they are far apart.
+
 **KV refresh — measured: large for a small model, small for a 7B.** The tail
 computes the far layers' exact K/V for every confirmed token anyway; sent back
 (~28 KB/token for a 7B), the shadow attends over an EXACT history and

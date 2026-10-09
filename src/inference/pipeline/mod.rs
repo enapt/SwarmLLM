@@ -746,48 +746,51 @@ pub(super) async fn forward_verify_through_segments(
             ));
         }
 
-        // Intermediate: feed hidden state to next segment. SEC: validate
-        // intermediate-to-intermediate shape preservation. The first
-        // segment's input is token IDs (8 bytes/position via
-        // pack_verify_tokens_to_le_bytes) but its OUTPUT is the hidden
-        // state (hidden_dim × bytes_per_elem per position) — those don't
-        // match, so equality only applies for idx >= 1.
-        //
-        // For idx == 0 we instead apply an absolute upper-bound sanity
-        // check. The wire-level MAX_ACTIVATION_SIZE (128 MB at
-        // network/protocol/mod.rs) already caps malicious sends, but
-        // the per-segment hidden-state activation should be
-        // (γ+1) × hidden_dim × bytes/elem — well under 64 MB even for
-        // huge models with γ=64 and hidden_dim=12288 fp32. A larger
-        // response from segment 0 indicates a broken / malicious peer
-        // and would crash the next worker if forwarded.
-        const MAX_INTERMEDIATE_ACTIVATION_BYTES: usize = 64 * 1024 * 1024;
-        if idx == 0 && result.activations.len() > MAX_INTERMEDIATE_ACTIVATION_BYTES {
-            return Err(SwarmError::Inference(format!(
-                "spec verify segment 0 returned oversized activation: {} bytes (max {})",
-                result.activations.len(),
-                MAX_INTERMEDIATE_ACTIVATION_BYTES
-            )));
-        }
-        // By declared SHAPE, never byte length — the same rule and helper as
-        // the standard forward loop: an honest peer on the other
-        // `activation_compression` setting answers f32 where we sent Q8_0 (#98).
-        if idx > 0
-            && !crate::inference::tensor_util::activation_shape_matches(
-                &activation_bytes,
-                &result.activations,
-            )
-        {
-            return Err(SwarmError::Inference(format!(
-                "spec verify segment {idx} returned wrong activation shape: got {} bytes, expected {}",
-                result.activations.len(),
-                activation_bytes.len()
-            )));
-        }
+        // Intermediate: feed hidden state to next segment.
+        check_intermediate_activations(idx, &activation_bytes, &result.activations)
+            .map_err(|e| SwarmError::Inference(format!("spec verify {e}")))?;
         activation_bytes = result.activations;
         idx = run_end + 1;
     }
     unreachable!("loop returns on the last segment")
+}
+
+/// A check's answer from a segment that is not the last, before it is fed to
+/// the next: `Err` names what is wrong with it. Asked by the rounds
+/// (`forward_verify_through_segments`) and the stream's boomerang
+/// (`dsd_stream`) alike — one rule for what a middle segment may hand on.
+///
+/// SEC: segment `idx` was sent `sent`. The first segment's input is token ids
+/// (8 bytes a position, `pack_verify_tokens_to_le_bytes`) but its OUTPUT is
+/// hidden states, so the shapes only have to agree past it. For segment 0 an
+/// absolute bound applies instead: the wire's `MAX_ACTIVATION_SIZE` (128 MB)
+/// already caps a malicious send, but a check's hidden states are
+/// (γ+1) × hidden_dim × bytes/element — well under 64 MB even with γ = 64 and
+/// hidden_dim = 12288 in f32. A larger answer is a broken or malicious peer,
+/// and would crash the next worker if fed on.
+pub(super) fn check_intermediate_activations(
+    idx: usize,
+    sent: &[u8],
+    returned: &[u8],
+) -> Result<(), String> {
+    const MAX_INTERMEDIATE_ACTIVATION_BYTES: usize = 64 * 1024 * 1024;
+    if idx == 0 && returned.len() > MAX_INTERMEDIATE_ACTIVATION_BYTES {
+        return Err(format!(
+            "segment 0 returned oversized activation: {} bytes (max {MAX_INTERMEDIATE_ACTIVATION_BYTES})",
+            returned.len()
+        ));
+    }
+    // By declared SHAPE, never byte length — the same rule and helper as the
+    // standard forward loop: an honest peer on the other
+    // `activation_compression` setting answers f32 where we sent Q8_0 (#98).
+    if idx > 0 && !crate::inference::tensor_util::activation_shape_matches(sent, returned) {
+        return Err(format!(
+            "segment {idx} returned wrong activation shape: got {} bytes, expected {}",
+            returned.len(),
+            sent.len()
+        ));
+    }
+    Ok(())
 }
 
 /// May this peer be asked to walk a verify's drafts itself? It must read the
