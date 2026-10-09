@@ -1194,19 +1194,6 @@ Billing between pools waits on credits, which are dormant (`docs/CREDITS_DESIGN.
 
 ### Packaging, release and operations
 
-#### #245 — CI's `ubuntu-latest` becomes Ubuntu 26 from 2026-10-19
-`P4` · build · **OPEN** — 2026-10-09 · history: GitHub's notice on CI run 37914655701
-
-Every CI job but the release builds (pinned to `ubuntu-22.04` for glibc) runs on `ubuntu-latest`,
-and the feature compile-checks install `cuda-nvcc-12-8` from NVIDIA's `ubuntu2204` repository on
-it — which works on 24.04 and is untested on 26. Pin the runner to `ubuntu-24.04` (what the 14
-required checks pass on today) WITHOUT renaming a job: the matrix jobs' names carry `matrix.os`
-("Test (ubuntu-latest)"), branch protection requires those 14 names, and a renamed job leaves a
-required check that can never report. So add a separate `runner` key to the matrix and keep `os`
-as the name, then read `examples/check_ci_gate.sh` on a COMPLETED run. The single-OS jobs
-(`runs-on: ubuntu-latest`, no OS in the name) can be pinned directly. Before 10-19, or read the
-first run after it by SHA (gotcha #794).
-
 #### #241 — llama-cpp-2 is pinned at 0.1.157; 0.1.158 moved tokenisation onto the vocabulary
 `P4` · build · **OPEN** — 2026-10-08 · history: Dependabot PR #34 (its llama compile-check failed)
 
@@ -1576,7 +1563,15 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-09, on main (not yet released)** (#194, #152)
+**Closed 2026-10-09, on main (not yet released)** (#194, #152, #245)
+- #245 — GitHub moves `ubuntu-latest` to Ubuntu 26 from 2026-10-19 (notice on CI run 37914655701),
+  under the CUDA repository (`ubuntu2204`'s `cuda-nvcc-12-8`) and the system packages CI installs.
+  CI's Linux jobs now run on a pinned `ubuntu-24.04`, the image every required check passes on
+  today. The matrix jobs name themselves by `matrix.os` ("Test (ubuntu-latest)") and branch
+  protection requires those 14 names, so `matrix.os` keeps naming them and `runs-on` maps the
+  runner (`matrix.os == 'ubuntu-latest' && 'ubuntu-24.04' || matrix.os`); renaming a job would
+  leave a required check that never reports. The release builds were already on `ubuntu-22.04`
+  (glibc). Checked with the CI's own pinned actionlint before pushing.
 - #152 — the continuous guess-check stream (on by default since v0.3.216) ran only where the
   peer held the model's LAST layers: 4 of 78 node-model holdings on 2026-10-01. A node holding
   both ends of its model runs the boomerang by default ("Start and finish on this computer"),
