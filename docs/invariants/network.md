@@ -3812,3 +3812,90 @@ a privacy boundary — private mode admits LAN peers) and the coordinate
 (`observe_network_coord`). Never compare a raw sample to a distance constant.
 
 → `docs/invariants/network.md` § "A substream sends with its protocol proposal"
+
+## A split keeps its conversation's prompt between turns (2026-10-09, FUTURE_WORK #10)
+
+`pipeline::split_prompt_cache` is the coordinator's half; the plan is
+`docs/plans/split_prompt_cache.md`. A prompt pass of a split — two or more
+segments, every remote one advertising `features::SPLIT_PROMPT_CACHE` (bit 20),
+no image, nothing pre-embedded, no tensor-parallel group, a tokenizer on the
+coordinator and a prompt of at least two 64-token blocks — carries a
+`PromptCacheHint`: the key of every full block of the prompt, and `resume_at`,
+the longest block-aligned opening short of the whole prompt that EVERY segment
+of this plan is believed to hold. Each segment restores that opening from its
+own store, computes the rest, stores the prompt's blocks and answers how many it
+kept; the coordinator believes that next turn.
+
+**What it replaced.** An agent re-sends the whole conversation every turn, and
+each segment's cache for a request is released when the request ends, so every
+turn re-read the whole prompt through every segment: ~79 MB of hidden states per
+hop and ~50 s of wire per turn at 25 Mbps on a 14B, before any compute; one field
+report spent 847 s re-reading.
+
+**How the systems with more scars do it, and what that changed here.**
+
+- **vLLM's automatic prefix caching** names a block by hashing its tokens AND its
+  parent's key, so a key names the whole opening up to it — `chain_keys`. The
+  hash is KEYED with a secret of this process (`blake3::Hasher::new_keyed`): a
+  segment holds names it cannot turn back into text, so the middle of a
+  boomerang learns nothing it did not already see, and two coordinators' entries
+  never meet. Not persisted: after a restart the old entries are never named
+  again and age out of the segments' caches, and the belief table — in memory
+  too — starts empty.
+- **vLLM-Ascend KVPP**: each pipeline stage keeps its own cache. A segment here
+  holds only its layers' K/V, so its entries are its own, keyed by
+  `SplitModel::kv_model_key` (the layer range included).
+- **Prefix-aware routing in a P2P network** (arXiv 2606.17059): stale cache
+  metadata costs misses, never wrong output. So the coordinator keeps an
+  OPTIMISTIC belief table — (segment node, model, layer range) → the chains that
+  segment said it stored, eight per segment — and sends no probe: a hit costs
+  nothing extra, a miss one prompt pass.
+
+**The wire.** Two additive trailers, both gated at the SENDER: the forward's
+`0x0D` (`block_tokens u32 | resume_at u32 | n u32 | n × 32-byte keys`, at most
+`PromptCacheHint::MAX_KEYS` = 8,192 keys; truncated or oversized input decodes as
+no hint) and the result's `0x09` (`prompt_blocks_stored u32`). The forward
+trailer is bound in `build_layer_forward_aad`, so a relay cannot strip or alter
+the keys of an encrypted forward. A chained forward passes the hint onward only
+to a next hop advertising the bit; while a prompt is being kept the pass is not
+chained, so each segment's answer — and its stored-block count — comes back to
+the coordinator.
+
+**A miss is a retry, never a penalty.** A segment that no longer holds what it
+was believed to (evicted, restarted, never stored) refuses with
+`SwarmError::PromptCacheMiss` before computing anything — the forward carries
+only the positions after `resume_at`, so computing it would be silently wrong.
+The class survives the worker's and the network's string hops through
+`reclassify_flattened_error`; the coordinator forgets every segment's belief and
+sends the prompt again from 0, once. That pass restores nothing, so it cannot
+miss. `failure_is_penalty_worthy` lists the variant as local-only: the peer did
+nothing wrong.
+
+**Failover.** A resumed pass never sent `0..resume_at`, so it marks every
+segment's retained history unrestorable: a mid-reply takeover would replay from
+a hole. `failover_segment` refuses a stand-in for a resumed PROMPT pass (a
+stand-in holds no entries) with the miss, so the retry from 0 runs instead, and
+plans the stand-in there as usual. A failure later in such a reply is continued
+by the router (`continuation_after`, #236). The retry from 0 does not clear the
+mark — a request's retained history is released in one place
+(`per_request_state_is_released_in_one_place`) — so a request that missed gives
+up the replay too.
+
+**What a change must keep.**
+
+- The head is sent the prompt's TOKEN IDS from `resume_at` (packed as a
+  multi-position input), never the text: the keys were made from the
+  coordinator's ids, and text re-tokenized at a resume point can split
+  differently.
+- Every remote segment advertises the bit, or nothing is kept: an older peer
+  would compute a forward that starts mid-prompt as though it started at 0.
+- `SWARMLLM_SPLIT_PROMPT_CACHE=0` sends every prompt pass whole — the A/B arm.
+- Rig: `split_rig.sh splitcache` (two turns through A → B; `MISS=1` restarts B
+  between them; checks `resumed_from` on A and B's `HIT on a split's stored
+  prompt`).
+
+**Measured (2026-10-09, Llama-3.2-3B split A → B on the processor, one binary)**: turn 2
+of an agent conversation (2,306 prompt tokens) took 7.1 s and 8.2 s with the cache on against
+65.2 s off; a miss (B restarted) re-read from 0 and answered in 70.2 s. Replies scored against
+llama.cpp: on moved at one 0.067-logit near-tie, ranks ≤ 2 like off. `docs/plans/split_prompt_cache.md`
+§ Measured.

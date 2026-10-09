@@ -177,7 +177,15 @@ impl KvSnapshot {
 }
 
 struct Entry {
+    /// The prompt's tokens — empty for an entry keyed by a block chain.
     tokens: Vec<u32>,
+    /// A split segment's entry (FUTURE_WORK #10): the coordinator's block
+    /// keys for the prompt it holds, one per `chain_block` tokens — a segment
+    /// past the first is sent hidden states, never the tokens. Empty for a
+    /// token-keyed entry. Every token-path walk passes these by: an empty
+    /// `tokens` matches no prompt and covers none.
+    chain: Vec<[u8; 32]>,
+    chain_block: u32,
     snapshot: Arc<KvSnapshot>,
     /// Logical clock tick of the most recent hit/insert. Used for LRU
     /// eviction (`bucket.sort_by_key`). Atomic so cache hits stay on the
@@ -555,19 +563,41 @@ impl PrefixCache {
         // new entry — `lookup` narrows to serve them — so retaining them
         // would only burn `max_entries` slots and their KV bytes. A growing
         // conversation therefore keeps ONE entry, not one per turn.
-        bucket.retain(|e| !tokens.starts_with(&e.tokens));
+        // A chain-keyed entry has empty `tokens`, which every prompt "starts
+        // with" — it is never covered by a token entry.
+        bucket.retain(|e| !e.chain.is_empty() || !tokens.starts_with(&e.tokens));
         bucket.push(Entry {
             tokens,
+            chain: Vec::new(),
+            chain_block: 0,
             snapshot: snap,
             last_hit: AtomicU64::new(tick),
         });
+        self.evict_over_caps(bucket);
 
-        // Evict LRU until within both caps.
-        //
-        // Count first, because it is cheap and bounds the linear lookup walk.
-        // Then bytes, which is the bound that expresses memory: entries are
-        // sized by their prompt, so staying under sixteen of them says nothing
-        // about how much is being held.
+        let entry_count = bucket.len();
+        // Compute the full post-insert manifest for this model so the caller
+        // can announce our current cache state (not just the delta). Cheap:
+        // BLAKE3 on a few KB of token IDs.
+        let manifest = enumerate_manifest_locked(bucket, self.block_tokens);
+
+        tracing::info!(
+            model_key,
+            entries = entry_count,
+            manifest_len = manifest.len(),
+            "DIAG: prefix-cache inserted snapshot"
+        );
+        manifest
+    }
+
+    /// Evict LRU entries of one model until both caps hold.
+    ///
+    /// Count first, because it is cheap and bounds the linear lookup walk.
+    /// Then bytes, which is the bound that expresses memory: entries are
+    /// sized by their prompt, so staying under sixteen of them says nothing
+    /// about how much is being held. Token-keyed and chain-keyed entries share
+    /// both caps — one budget for one memory (gotcha #440).
+    fn evict_over_caps(&self, bucket: &mut Vec<Entry>) {
         if bucket.len() > self.max_entries {
             bucket.sort_by_key(|e| e.last_hit.load(Ordering::Relaxed));
             let drop_count = bucket.len() - self.max_entries;
@@ -589,20 +619,158 @@ impl PrefixCache {
                 }
             }
         }
+    }
 
-        let entry_count = bucket.len();
-        // Compute the full post-insert manifest for this model so the caller
-        // can announce our current cache state (not just the delta). Cheap:
-        // BLAKE3 on a few KB of token IDs.
-        let manifest = enumerate_manifest_locked(bucket, self.block_tokens);
-
+    /// Positions `0..want` of a split's prompt, as this segment stored them on
+    /// an earlier turn under the coordinator's block chain (FUTURE_WORK #10,
+    /// `docs/plans/split_prompt_cache.md`). `want` is the coordinator's
+    /// `resume_at` — a whole number of blocks — and nothing shorter will do:
+    /// the forward carries only the positions after it. `None` is a miss, which
+    /// the caller refuses so the coordinator re-sends the prompt from 0.
+    pub fn lookup_chain(
+        &self,
+        model_key: &str,
+        block_tokens: u32,
+        keys: &[[u8; 32]],
+        want: usize,
+    ) -> Option<Arc<KvSnapshot>> {
+        let bt = block_tokens as usize;
+        if !self.enabled || bt == 0 || want == 0 || !want.is_multiple_of(bt) {
+            return None;
+        }
+        let blocks = want / bt;
+        let wanted = keys.get(..blocks)?;
+        let inner = self.inner.read().ok()?;
+        let winner = inner.per_model.get(model_key)?.iter().find(|e| {
+            e.chain_block == block_tokens
+                && e.chain.starts_with(wanted)
+                && e.snapshot.token_count >= want
+        })?;
+        winner.last_hit.store(self.next_tick(), Ordering::Relaxed);
+        let full = winner.snapshot.clone();
+        drop(inner);
+        // Narrowed outside the lock, as `lookup` does.
+        let snapshot = if full.token_count == want {
+            full
+        } else {
+            match narrow_snapshot(&full, want) {
+                Ok(s) => Arc::new(s),
+                Err(e) => {
+                    tracing::warn!(model_key, want, error = %e,
+                        "prefix-cache: narrowing a stored split prompt failed — treating as miss");
+                    return None;
+                }
+            }
+        };
         tracing::info!(
             model_key,
-            entries = entry_count,
-            manifest_len = manifest.len(),
-            "DIAG: prefix-cache inserted snapshot"
+            restored_positions = want,
+            "DIAG: prefix-cache HIT on a split's stored prompt"
         );
-        manifest
+        Some(snapshot)
+    }
+
+    /// Store this request's cache under a split prompt's block chain, for the
+    /// next turn's `lookup_chain`: as many WHOLE blocks as the cache holds, the
+    /// device has room beside the live cache for (`max_positions`, from
+    /// `kv_budget::plan_snapshot` — gotcha #440) and the byte ceiling allows.
+    /// Answers how many blocks it stored — what the coordinator may resume
+    /// from here next turn; 0 stores nothing.
+    pub fn insert_chain_from_kv(
+        &self,
+        model_key: &str,
+        request_id: &str,
+        kv_store: &KvCacheStore,
+        block_tokens: u32,
+        keys: &[[u8; 32]],
+        max_positions: usize,
+    ) -> u32 {
+        let bt = block_tokens as usize;
+        if !self.enabled || bt == 0 || keys.is_empty() || max_positions == 0 {
+            return 0;
+        }
+        let key = KvCacheStore::cache_key(model_key, request_id);
+        let Some(entry) = kv_store_get(kv_store, &key) else {
+            return 0;
+        };
+        if entry.ssm_states.iter().any(|s| s.is_some()) {
+            return 0;
+        }
+        let Some(first_kv) = entry.layers.iter().flatten().next() else {
+            return 0;
+        };
+        let dim = first_kv.k_cache().dim();
+        let max_seq_len = first_kv.k_cache().max_seq_len();
+        let ceiling = self.positions_ceiling(bytes_per_position(&entry.layers));
+        let available = first_kv
+            .current_seq_len()
+            .min(keys.len() * bt)
+            .min(max_positions)
+            .min(ceiling);
+        let blocks = available / bt;
+        let positions = blocks * bt;
+        if blocks == 0 || positions < self.min_tokens {
+            return 0;
+        }
+        let chain = &keys[..blocks];
+        // Already held, whole: nothing to copy.
+        {
+            let Ok(inner) = self.inner.read() else {
+                return 0;
+            };
+            if let Some(covering) = inner.per_model.get(model_key).and_then(|b| {
+                b.iter().find(|e| {
+                    e.chain_block == block_tokens
+                        && e.chain.starts_with(chain)
+                        && e.snapshot.token_count >= positions
+                })
+            }) {
+                covering.last_hit.store(self.next_tick(), Ordering::Relaxed);
+                return blocks as u32;
+            }
+        }
+        let snap = match snapshot_at(&entry.layers, positions, dim, max_seq_len) {
+            Ok(s) => Arc::new(s),
+            Err(e) => {
+                tracing::warn!(model_key, positions, error = %e,
+                    "prefix-cache: storing a split prompt failed — the next turn reads it again");
+                return 0;
+            }
+        };
+        drop(entry);
+        let Ok(mut inner) = self.inner.write() else {
+            return 0;
+        };
+        let bucket = inner.per_model.entry(model_key.to_string()).or_default();
+        // An entry of this split whose chain ours extends is covered by ours —
+        // a growing conversation keeps ONE entry, as on the token path.
+        bucket.retain(|e| {
+            e.chain.is_empty() || e.chain_block != block_tokens || !chain.starts_with(&e.chain)
+        });
+        let tick = self.next_tick();
+        bucket.push(Entry {
+            tokens: Vec::new(),
+            chain: chain.to_vec(),
+            chain_block: block_tokens,
+            snapshot: snap,
+            last_hit: AtomicU64::new(tick),
+        });
+        self.evict_over_caps(bucket);
+        // Held only if the eviction kept it.
+        let kept = bucket
+            .iter()
+            .any(|e| e.chain_block == block_tokens && e.chain.as_slice() == chain);
+        tracing::info!(
+            model_key,
+            stored_positions = positions,
+            kept,
+            "DIAG: prefix-cache stored a split's prompt"
+        );
+        if kept {
+            blocks as u32
+        } else {
+            0
+        }
     }
 
     /// Item 8 Phase 2b: look up a cached snapshot whose chained-hash
@@ -1286,6 +1454,118 @@ mod tests {
         let new_tokens: Vec<u32> = (1..=15).collect();
         let snap = pc.lookup("m", &new_tokens).expect("hit");
         assert_eq!(snap.token_count, 10);
+    }
+
+    /// FUTURE_WORK #10: a split segment's prompt, stored under the
+    /// coordinator's block chain, is restored by a later turn whose chain
+    /// begins with it — exactly the positions asked for — and misses on more
+    /// than was stored, a part of a block, another block size or another
+    /// opening. What is kept is whole blocks of the room it is given.
+    #[test]
+    fn a_split_prompt_is_restored_by_its_block_chain() {
+        let pc = PrefixCache::new(true, 8, 0, 4, 0, 0);
+        let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
+        make_fake_kv(&kv_store, "seg", "turn-1", 2, 40);
+        // Six keys of 8 positions; the cache holds 40 positions: five blocks.
+        let keys: Vec<[u8; 32]> = (0..6u8).map(|i| [i; 32]).collect();
+        assert_eq!(
+            pc.insert_chain_from_kv("seg", "turn-1", &kv_store, 8, &keys, usize::MAX),
+            5
+        );
+        assert_eq!(
+            pc.lookup_chain("seg", 8, &keys, 24)
+                .expect("hit")
+                .token_count,
+            24
+        );
+        assert_eq!(
+            pc.lookup_chain("seg", 8, &keys, 40)
+                .expect("all of it")
+                .token_count,
+            40
+        );
+        assert!(
+            pc.lookup_chain("seg", 8, &keys, 48).is_none(),
+            "more than stored"
+        );
+        assert!(
+            pc.lookup_chain("seg", 8, &keys, 20).is_none(),
+            "not whole blocks"
+        );
+        assert!(
+            pc.lookup_chain("seg", 16, &keys, 32).is_none(),
+            "another block size"
+        );
+        let mut other = keys.clone();
+        other[1] = [99; 32];
+        assert!(
+            pc.lookup_chain("seg", 8, &other, 16).is_none(),
+            "another opening"
+        );
+        assert!(
+            pc.lookup_chain("seg", 8, &other, 8).is_some(),
+            "the shared first block"
+        );
+        // The room beside the live cache bounds what is kept, in whole blocks.
+        make_fake_kv(&kv_store, "seg", "turn-2", 2, 40);
+        assert_eq!(
+            pc.insert_chain_from_kv("seg", "turn-2", &kv_store, 8, &other, 20),
+            2
+        );
+        // A request with no cache keeps nothing.
+        assert_eq!(
+            pc.insert_chain_from_kv("seg", "none", &kv_store, 8, &keys, usize::MAX),
+            0
+        );
+    }
+
+    /// Chain entries and token entries share one cache without disturbing
+    /// each other: a token prompt never matches a chain entry, a token insert
+    /// never drops one (every prompt "starts with" its empty token list), and
+    /// a growing split conversation keeps ONE chain entry.
+    #[test]
+    fn chain_entries_and_token_entries_share_the_cache() {
+        let pc = PrefixCache::new(true, 8, 0, 4, 0, 0);
+        let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
+        make_fake_kv(&kv_store, "m", "seg", 2, 16);
+        let keys = vec![[1u8; 32], [2u8; 32]];
+        assert_eq!(
+            pc.insert_chain_from_kv("m", "seg", &kv_store, 8, &keys, usize::MAX),
+            2
+        );
+        make_fake_kv(&kv_store, "m", "tok", 2, 10);
+        let tokens: Vec<u32> = (1..=10).collect();
+        pc.insert_from_kv("m", "tok", &kv_store, &tokens, usize::MAX);
+        assert_eq!(
+            pc.entry_count("m"),
+            2,
+            "the token insert kept the chain entry"
+        );
+        assert!(pc.lookup_chain("m", 8, &keys, 16).is_some());
+        let longer_prompt: Vec<u32> = (1..=15).collect();
+        assert_eq!(
+            pc.lookup("m", &longer_prompt)
+                .expect("token hit")
+                .token_count,
+            10
+        );
+        make_fake_kv(&kv_store, "m", "seg-2", 2, 24);
+        let grown = vec![[1u8; 32], [2u8; 32], [3u8; 32]];
+        assert_eq!(
+            pc.insert_chain_from_kv("m", "seg-2", &kv_store, 8, &grown, usize::MAX),
+            3
+        );
+        assert_eq!(
+            pc.entry_count("m"),
+            2,
+            "the grown chain replaced the one it extends"
+        );
+        assert_eq!(
+            pc.lookup_chain("m", 8, &grown, 24)
+                .expect("hit")
+                .token_count,
+            24
+        );
     }
 
     #[test]

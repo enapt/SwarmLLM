@@ -1508,6 +1508,7 @@ async fn run_fused_batch_forward(
                 has_activations: false,
                 has_spec_logits: false,
                 spec_logits_dims: None,
+                prompt_blocks_stored: None,
             });
             result_lens.push(0);
         } else {
@@ -1533,6 +1534,7 @@ async fn run_fused_batch_forward(
                 has_activations: true,
                 has_spec_logits: false,
                 spec_logits_dims: None,
+                prompt_blocks_stored: None,
             });
             result_lens.push(len);
         }
@@ -1751,7 +1753,11 @@ async fn handle_forward(
     let input_tensor = if pre_embedded {
         split::bytes_to_tensor(&activation_bytes)?
     } else if is_first {
-        if fwd.index_pos == 0 {
+        // A prompt pass carrying a split prompt-cache hint is sent the prompt's
+        // TOKEN IDS from `resume_at` (FUTURE_WORK #10): the coordinator keyed
+        // the stored blocks by those ids, and text re-tokenized here could
+        // split differently. It reads below as a multi-position decode input.
+        if fwd.index_pos == 0 && fwd.prompt_cache.is_none() {
             // Prefill: activations are the prompt text → tokenize
             let prompt = String::from_utf8_lossy(&activation_bytes);
             let token_ids: Vec<i64> = if let Some(tokenizer) = model.tokenizer() {
@@ -1919,6 +1925,34 @@ async fn handle_forward(
     // states. Tensor-parallel phases and speculative verify rounds keep their
     // own shape and are left alone.
     let tp_meta = fwd.tp_meta.clone();
+    // A split's prompt pass that resumes from what this segment stored on an
+    // earlier turn (FUTURE_WORK #10): the stored opening is looked up BEFORE
+    // admission and copied in AFTER it, the generate path's order — the copy is
+    // itself an allocation the admission must have room for. A miss is
+    // refused: the forward carries only the positions after `resume_at`, so
+    // computing it without them would be silently wrong.
+    let prompt_cache = fwd.prompt_cache.clone();
+    let restored = match &prompt_cache {
+        Some(hint) if fwd.sequence_num == 0 && hint.resume_at > 0 => {
+            if fwd.index_pos != hint.resume_at {
+                return Err(SwarmError::Internal(format!(
+                    "a prompt pass resuming at {} was sent from position {}",
+                    hint.resume_at, fwd.index_pos
+                )));
+            }
+            Some(
+                prefix_cache
+                    .lookup_chain(&model_key, hint.block_tokens, &hint.keys, hint.resume_at as usize)
+                    .ok_or_else(|| {
+                        SwarmError::PromptCacheMiss(format!(
+                            "this computer no longer holds the first {} positions of this conversation",
+                            hint.resume_at
+                        ))
+                    })?,
+            )
+        }
+        _ => None,
+    };
     if fwd.sequence_num == 0 && tp_meta.is_none() && !want_spec_output {
         let positions = input_tensor.dims().get(1).copied().unwrap_or(0);
         if positions > 0 {
@@ -1928,15 +1962,38 @@ async fn handle_forward(
                 positions,
             )?;
             // A segment never sees the reply's budget, so it reserves the
-            // whole quantum it always did.
+            // whole quantum it always did. A resumed prompt holds its restored
+            // opening as well as the positions it computes — only a resumed
+            // one: the local-embedder path sends its prompt pass at a nonzero
+            // position too, with nothing before it.
+            let restoring = restored.as_ref().map_or(0, |s| s.token_count);
             ensure_room_for_prompt(
                 model,
                 kv_store,
                 prefix_cache,
                 &req_id_str,
-                positions,
+                restoring + positions,
                 REPLY_RESERVE_POSITIONS,
             )?;
+        }
+    }
+    if let Some(snapshot) = &restored {
+        let held = prefix_cache
+            .hydrate_request_from_snapshot(kv_store, &model_key, &req_id_str, snapshot)
+            .map_err(|e| {
+                // The detail stays here: this message crosses to the
+                // coordinator through `sanitize_peer_facing_error`, which reads
+                // any mention of a shard as missing shards — a retraction, not
+                // the retry a miss gets.
+                tracing::warn!(request_id = %req_id_str, error = %e,
+                    "restoring a split's stored prompt failed — the coordinator reads it again from the start");
+                SwarmError::PromptCacheMiss("restoring the stored opening failed".into())
+            })?;
+        if held != fwd.index_pos as usize {
+            return Err(SwarmError::PromptCacheMiss(format!(
+                "restored {held} positions, not the {} the prompt resumes from",
+                fwd.index_pos
+            )));
         }
     }
 
@@ -2026,6 +2083,7 @@ async fn handle_forward(
                         locally_constructed: false,
                         refusal: None,
                         answers_step: None,
+                        prompt_blocks_stored: None,
                     });
                 }
                 let flat: Vec<f32> = output_t
@@ -2080,6 +2138,7 @@ async fn handle_forward(
                     locally_constructed: false,
                     refusal: None,
                     answers_step: None,
+                    prompt_blocks_stored: None,
                 });
             }
 
@@ -2187,6 +2246,7 @@ async fn handle_forward(
                     locally_constructed: false,
                     refusal: None,
                     answers_step: None,
+                    prompt_blocks_stored: None,
                 })
             } else {
                 let activation_bytes = if activation_compression {
@@ -2206,11 +2266,34 @@ async fn handle_forward(
                     locally_constructed: false,
                     refusal: None,
                     answers_step: None,
+                    prompt_blocks_stored: None,
                 })
             }
         });
 
     let mut result = compute_result.map_err(SwarmError::Internal)?;
+    // Keep this segment's part of a split's prompt for the next turn
+    // (FUTURE_WORK #10): whole blocks of what the prompt pass left in the
+    // cache, sized to the room beside the live cache as the generate path's
+    // snapshot is (gotcha #440), and answer how many were kept — the most the
+    // coordinator may resume from here next turn.
+    if let Some(hint) = prompt_cache.as_ref().filter(|_| fwd.sequence_num == 0) {
+        let held = kv_store.request_positions(&model_key, &req_id_str);
+        let keep = snapshot_positions_that_fit(model, kv_store, prefix_cache, held);
+        let blocks = prefix_cache.insert_chain_from_kv(
+            &model_key,
+            &req_id_str,
+            kv_store,
+            hint.block_tokens,
+            &hint.keys,
+            keep,
+        );
+        // The stored blocks are device memory the head-room guard must see.
+        if prefix_cache_charged() {
+            kv_store.set_external_reserved(prefix_cache.bytes_total() as u64);
+        }
+        result.prompt_blocks_stored = Some(blocks);
+    }
     let computed = std::time::Instant::now();
 
     // Build IPC response. The payload slot is single-use: activations and
@@ -2244,6 +2327,7 @@ async fn handle_forward(
         has_activations,
         has_spec_logits,
         spec_logits_dims,
+        prompt_blocks_stored: result.prompt_blocks_stored,
     };
 
     send_worker(writer, &WorkerMsg::LayerResult(ipc_result), &payload)

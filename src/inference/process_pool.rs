@@ -2379,6 +2379,11 @@ fn forward_is_schedulable(f: &crate::types::LayerForward) -> bool {
     if f.stream_seq.is_some() {
         return false;
     }
+    // A prompt pass that restores a stored prompt (`sequence_num` 0 already
+    // excludes it); stated so the batch path's `prompt_cache: _` stays true.
+    if f.prompt_cache.is_some() {
+        return false;
+    }
     true
 }
 
@@ -6197,6 +6202,7 @@ impl ModelProcessPool {
             coupling_seed,
             stream_seq,
             truncate_kv_to,
+            prompt_cache,
             chunk_meta: _,
             sampling: _,
         } = forward;
@@ -6238,6 +6244,7 @@ impl ModelProcessPool {
             coupling_seed: coupling_seed.filter(|_| walk_with_the_callers_sampler),
             stream_seq,
             truncate_kv_to,
+            prompt_cache,
             for_the_owner: requester == Requester::Owner,
         };
 
@@ -6310,6 +6317,7 @@ impl ModelProcessPool {
                                 locally_constructed: false,
                                 refusal: None,
                                 answers_step: None,
+                                prompt_blocks_stored: r.prompt_blocks_stored,
                             });
                         }
                         WorkerMsg::Error {
@@ -6514,6 +6522,8 @@ impl ModelProcessPool {
                 // Streamed verifies are never batched (`forward_is_schedulable`).
                 stream_seq: _,
                 truncate_kv_to,
+                // A prompt pass is never batched (`forward_is_schedulable`).
+                prompt_cache: _,
                 chunk_meta: _,
                 // Per-item: a batch can carry forwards from different requests,
                 // so the parameters travel with each one rather than being
@@ -6544,6 +6554,7 @@ impl ModelProcessPool {
                 coupling_seed: None,
                 stream_seq: None,
                 truncate_kv_to,
+                prompt_cache: None,
                 // Decode steps only (see `dispatch_scheduler_group`); the
                 // owner's mark, if any, was made at the prompt pass.
                 for_the_owner: false,
@@ -6596,6 +6607,7 @@ impl ModelProcessPool {
                             locally_constructed: false,
                             refusal: None,
                             answers_step: None,
+                            prompt_blocks_stored: None,
                         });
                         break;
                     }
@@ -7565,6 +7577,7 @@ mod tests {
             coupling_seed: None,
             stream_seq: None,
             truncate_kv_to: None,
+            prompt_cache: None,
             chunk_meta: None,
             sampling: None,
         }

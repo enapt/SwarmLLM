@@ -925,6 +925,7 @@ pub fn error_kind(err: &crate::error::SwarmError) -> &'static str {
         E::PeerNotFound(_) => "PeerNotFound",
         E::PeerUnresponsive(_) => "PeerUnresponsive",
         E::PipelineError(_) => "PipelineError",
+        E::PromptCacheMiss(_) => "PromptCacheMiss",
         E::SegmentFailoverExhausted(_) => "SegmentFailoverExhausted",
         E::ReplyTruncated(_) => "ReplyTruncated",
         E::PrivateModeUnavailable { .. } => "PrivateModeUnavailable",

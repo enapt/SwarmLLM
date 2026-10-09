@@ -844,6 +844,45 @@ impl PipelineExecutor {
         pre_embedded: bool,
         generated_ids: &[u32],
     ) -> Result<LayerResult, SwarmError> {
+        // A split's prompt pass that keeps its prompt between turns
+        // (`split_prompt_cache`, FUTURE_WORK #10) — every caller's prompt pass
+        // comes through here, the plain loop's and the guess-checking ones'.
+        if let Some(ids) = self.split_prompt_to_keep(
+            sequence_num,
+            &initial_activations,
+            precomputed_vision.is_some(),
+            pre_embedded,
+        ) {
+            return self
+                .prompt_pass_keeping_the_prompt(request_id, ids, generated_ids)
+                .await;
+        }
+        self.forward_through_segments_checked(
+            request_id,
+            sequence_num,
+            index_pos,
+            initial_activations,
+            precomputed_vision,
+            pre_embedded,
+            generated_ids,
+        )
+        .await
+    }
+
+    /// The forward as it always ran, with the peer-error check — what
+    /// [`Self::forward_through_segments`] runs when no prompt is kept, and what
+    /// a kept prompt pass runs with its hint set.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn forward_through_segments_checked(
+        &mut self,
+        request_id: uuid::Uuid,
+        sequence_num: u32,
+        index_pos: usize,
+        initial_activations: Vec<u8>,
+        precomputed_vision: Option<Vec<u8>>,
+        pre_embedded: bool,
+        generated_ids: &[u32],
+    ) -> Result<LayerResult, SwarmError> {
         let result = self
             .forward_through_segments_inner(
                 request_id,
@@ -1069,6 +1108,7 @@ impl PipelineExecutor {
                         locally_constructed: false,
                         refusal: None,
                         answers_step: None,
+                        prompt_blocks_stored: None,
                     });
                 } else {
                     // Intermediate segment: strip the 0x00 tag and continue
@@ -1105,6 +1145,7 @@ impl PipelineExecutor {
                         generated_ids,
                     )
                     .await?;
+                self.note_prompt_blocks_stored(idx, sequence_num, &result);
                 let segment_ms = segment_start.elapsed().as_millis() as u64;
                 tracing::debug!(
                     request_id = %request_id,
@@ -1212,10 +1253,16 @@ impl PipelineExecutor {
                 let needs_generated_ids = crate::inference::sampling::sampler_reads_history(
                     &self.request.sampling_params,
                 );
+                // A prompt pass keeping the prompt between turns (#10) goes
+                // unchained: every segment's answer says what it stored, and a
+                // chain's answer comes from its tail alone. One round trip per
+                // hop on a pass that runs once per request.
+                let keeping_the_prompt = sequence_num == 0 && self.prompt_cache_hint.is_some();
                 let chain: Vec<crate::types::ChainHop> =
                     if self.shared_state.cfg().inference.pipeline_chaining
                         && !needs_generated_ids
                         && !self.chaining_disabled
+                        && !keeping_the_prompt
                     {
                         let st = &self.shared_state;
                         super::plan_chain(
@@ -1249,6 +1296,7 @@ impl PipelineExecutor {
                 } else {
                     None
                 };
+                let hint_for_wire = self.prompt_cache_hint.clone().filter(|_| sequence_num == 0);
                 // A closure so the SAME forward can be built again if the peer
                 // refuses it unopened (`ResendOnRefusal`), from what this loop
                 // already holds; called once on every other path.
@@ -1313,6 +1361,9 @@ impl PipelineExecutor {
                     truncate_kv_to: rewind
                         .filter(|(first, last, _)| idx >= *first && idx <= *last)
                         .map(|(_, _, pos)| pos),
+                    // Only to a peer advertising `features::SPLIT_PROMPT_CACHE`:
+                    // a hint is set only when every segment does.
+                    prompt_cache: hint_for_wire.clone(),
                     chunk_meta: None,
                     // The caller's temperature, top-p, top-k and penalties, for the
                     // segment that SAMPLES — or for a chain's head, which hands
@@ -1632,6 +1683,19 @@ impl PipelineExecutor {
                         // Check if the remote node returned an error — if so, failover
                         if let Some(NetworkFinishReason::Error(ref err_msg)) = result.finish_reason
                         {
+                            // The segment no longer holds the prompt it was asked
+                            // to restore (#10): not a failure to fail over from —
+                            // a stand-in holds nothing — but the caller's cue to
+                            // send the prompt again from position 0.
+                            if let Some(miss @ SwarmError::PromptCacheMiss(_)) =
+                                crate::error::reclassify_flattened_error(err_msg)
+                            {
+                                super::split_prompt_cache::forget(segment);
+                                self.shared_state
+                                    .pending_layer_results
+                                    .remove(&crate::daemon::state::WaiterKey::request(request_id));
+                                return Err(miss);
+                            }
                             // A refusal that describes the REQUEST is reproduced
                             // by every holder, so there is nothing to fail over
                             // TO. Return it as the caller's own error instead of
@@ -1725,6 +1789,9 @@ impl PipelineExecutor {
                             }
                         } else {
                             let seg_elapsed_ms = segment_start.elapsed().as_millis() as u64;
+                            // Unchained whenever a prompt is being kept, so this
+                            // answer is this segment's own.
+                            self.note_prompt_blocks_stored(idx, sequence_num, &result);
                             // A chained run answered for every segment it
                             // covered, so the loop must not send to them again.
                             //
@@ -2108,6 +2175,22 @@ impl PipelineExecutor {
             original_failure,
             precomputed_vision,
         } = input;
+        // A prompt pass resuming from what the segments stored (FUTURE_WORK
+        // #10) cannot be taken over: a stand-in holds nothing before
+        // `resume_at`, and would compute the rest of the prompt with no opening
+        // — a wrong reply rather than an error. Answered as a miss, so the
+        // caller sends the prompt again from position 0, where this failover
+        // runs as it always has.
+        if let Some(hint) = self
+            .prompt_cache_hint
+            .as_ref()
+            .filter(|h| sequence_num == 0 && h.resume_at > 0)
+        {
+            return Err(SwarmError::PromptCacheMiss(format!(
+                "segment {failed_idx} failed while the prompt resumed from position {} ({original_failure})",
+                hint.resume_at
+            )));
+        }
         let failed_segment = self.assignment.segments[failed_idx].clone();
         // Everyone this segment has been tried on for this request.
         let mut tried: Vec<crate::types::NodeId> = vec![failed_segment.node_id.clone()];
@@ -2584,6 +2667,7 @@ impl PipelineExecutor {
                 coupling_seed: None,
                 stream_seq: None,
                 truncate_kv_to: None,
+                prompt_cache: None,
                 chunk_meta: None,
                 // Same rule as the planned send, asked of the STAND-IN — a
                 // different peer with its own features (gotcha #703).

@@ -1170,6 +1170,9 @@ fn failure_is_penalty_worthy(err: &SwarmError, had_remote_segment: bool) -> bool
         // does reaches us sanitised as missing shards, never as this variant,
         // so it can only ever name our machine.
         | SwarmError::MixedModelCopy(_)
+        // A segment that no longer holds a split's stored prompt: a cache may
+        // forget, and the coordinator re-sends the prompt — nobody's fault.
+        | SwarmError::PromptCacheMiss(_)
         // The model's context window is a property of the MODEL, not of the
         // peer that happened to be computing when the reply reached it. Docking
         // a peer for a reply that ran to its natural length would penalise

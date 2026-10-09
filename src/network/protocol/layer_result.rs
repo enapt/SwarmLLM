@@ -142,6 +142,17 @@ pub fn encode_layer_result(result: &LayerResult) -> Result<Vec<u8>, SwarmError> 
         }
     }
 
+    // Optional: how many blocks of a prompt pass's `PromptCacheHint` the
+    // segment stored for the next turn (marker 0x09 + u32 LE), see
+    // `LayerResult::prompt_blocks_stored`. After 0x07/0x08, where an older
+    // decoder has already stopped; only a forward that carried a hint — sent
+    // only by a coordinator advertising `features::SPLIT_PROMPT_CACHE` — is
+    // answered with one.
+    if let Some(n) = result.prompt_blocks_stored {
+        buf.push(0x09);
+        buf.extend_from_slice(&n.to_le_bytes());
+    }
+
     Ok(buf)
 }
 
@@ -433,6 +444,16 @@ pub fn decode_layer_result(data: &[u8]) -> Result<LayerResult, SwarmError> {
         }
         answers_step = Some(step);
     }
+    // Optional: the prompt blocks the segment stored (marker 0x09 + u32 LE).
+    let mut prompt_blocks_stored = None;
+    if pos < data.len() && data[pos] == 0x09 {
+        pos += 1;
+        let Some(b) = data.get(pos..pos + 4) else {
+            return Err(SwarmError::Network("prompt-cache trailer truncated".into()));
+        };
+        prompt_blocks_stored = Some(u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+        pos += 4;
+    }
     // Suppress unused-assignment warning on the last pos += that has no
     // subsequent reader.
     let _ = pos;
@@ -453,6 +474,7 @@ pub fn decode_layer_result(data: &[u8]) -> Result<LayerResult, SwarmError> {
         locally_constructed: false,
         refusal,
         answers_step,
+        prompt_blocks_stored,
     })
 }
 

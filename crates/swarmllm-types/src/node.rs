@@ -256,6 +256,15 @@ pub mod features {
     /// as before.
     pub const KV_HALF_ON_CARD: u64 = 1 << 19;
 
+    /// Keeps its part of a split's prompt between turns (FUTURE_WORK #10,
+    /// `docs/plans/split_prompt_cache.md`): it reads the `0x0D` trailer on a
+    /// prompt pass — restores `0..resume_at` from what it stored on an earlier
+    /// turn, or refuses — and answers with the blocks it stored (`0x09`). A
+    /// coordinator puts the trailer on a plan only when EVERY segment
+    /// advertises this: a segment without it would compute from `resume_at`
+    /// with nothing before it.
+    pub const SPLIT_PROMPT_CACHE: u64 = 1 << 20;
+
     /// The full feature set THIS build implements. Advertised by every node,
     /// with [`KV_HALF_ON_CARD`] beside it where that applies.
     pub const ALL: u64 = RELAY
@@ -276,7 +285,8 @@ pub mod features {
         | STREAMED_VERIFY
         | STREAM_AS_ONE_WORK
         | DELEGATED_SPLIT
-        | CHAINED_VERIFY;
+        | CHAINED_VERIFY
+        | SPLIT_PROMPT_CACHE;
 
     /// Does `advertised` include every bit in `needed`?
     pub fn supports(advertised: u64, needed: u64) -> bool {

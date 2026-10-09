@@ -203,6 +203,11 @@ pub(super) async fn handle_layer_forward(
     let chain = std::mem::take(&mut forward.chain);
     // The caller's sampling, to hand down a chain to the segment that samples.
     let sampling = forward.sampling.clone();
+    // A chained prompt pass that lets each segment keep the prompt between
+    // turns: every hop restores and stores its own part, so the hint goes on.
+    let prompt_cache_onward = (!chain.is_empty())
+        .then(|| forward.prompt_cache.clone())
+        .flatten();
     let sequence_num = forward.sequence_num;
     // A speculative CHECK travelling a chain (`features::CHAINED_VERIFY`):
     // what the run's TAIL walks with, handed down beside the activations. This
@@ -460,6 +465,13 @@ pub(super) async fn handle_layer_forward(
                         draft_tokens,
                         stream_seq: None,
                         truncate_kv_to,
+                        // Only to a hop that reads the `0x0D` trailer: the
+                        // coordinator puts a hint on a plan only when EVERY
+                        // segment advertises it, so this filter states the rule
+                        // rather than deciding anything.
+                        prompt_cache: prompt_cache_onward.clone().filter(|_| {
+                            next_has(swarmllm_types::node::features::SPLIT_PROMPT_CACHE)
+                        }),
                         chunk_meta: None,
                         // Handed down so the TAIL samples as the caller asked —
                         // only to a hop that reads the `0x0A` trailer. The
@@ -1101,6 +1113,7 @@ mod chaining_tests {
             coupling_seed: None,
             stream_seq: None,
             truncate_kv_to: None,
+            prompt_cache: None,
             chunk_meta: None,
             sampling: None,
         };
@@ -1254,6 +1267,7 @@ mod tests {
             coupling_seed: None,
             stream_seq: None,
             truncate_kv_to: None,
+            prompt_cache: None,
             chunk_meta: None,
             sampling: None,
         };

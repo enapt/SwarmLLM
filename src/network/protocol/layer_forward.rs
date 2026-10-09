@@ -120,6 +120,7 @@ pub fn encode_layer_forward(forward: &LayerForward) -> Result<Vec<u8>, SwarmErro
     append_sampling_trailer(&mut buf, forward);
     append_coupling_trailer(&mut buf, forward);
     append_stream_trailer(&mut buf, forward);
+    append_prompt_cache_trailer(&mut buf, forward);
 
     Ok(buf)
 }
@@ -268,6 +269,55 @@ pub(crate) fn read_stream_trailer(data: &[u8], cursor: &mut usize) -> Option<u32
     let seq = u32::from_le_bytes([data[at], data[at + 1], data[at + 2], data[at + 3]]);
     *cursor += STREAM_TRAILER_LEN;
     Some(seq)
+}
+
+/// Write the prompt-cache trailer: `0x0D | block_tokens u32 | resume_at u32 |
+/// n u32 | n × key(32)` — what a split's prompt pass tells a segment about
+/// keeping the prompt between turns (`LayerForward::prompt_cache`, FUTURE_WORK
+/// #10). After the stream trailer, by the ONE function the plaintext frame, the
+/// encrypted frame and the AAD all call: `resume_at` decides which positions the
+/// receiver restores instead of computing, so a relay must not change it.
+/// Emitted only when the forward carries one, which a coordinator sets only for
+/// a peer advertising `features::SPLIT_PROMPT_CACHE`.
+pub(crate) fn append_prompt_cache_trailer(buf: &mut Vec<u8>, forward: &LayerForward) {
+    let Some(hint) = &forward.prompt_cache else {
+        return;
+    };
+    buf.push(0x0D);
+    buf.extend_from_slice(&hint.block_tokens.to_le_bytes());
+    buf.extend_from_slice(&hint.resume_at.to_le_bytes());
+    buf.extend_from_slice(&(hint.keys.len() as u32).to_le_bytes());
+    for key in &hint.keys {
+        buf.extend_from_slice(key);
+    }
+}
+
+/// Read the prompt-cache trailer (`0x0D`) at `cursor`, if present. A frame
+/// claiming more keys than [`crate::types::PromptCacheHint::MAX_KEYS`], or more than it
+/// holds, carries none: the receiver then computes the whole prompt.
+pub(crate) fn read_prompt_cache_trailer(
+    data: &[u8],
+    cursor: &mut usize,
+) -> Option<crate::types::PromptCacheHint> {
+    const HEAD: usize = 13;
+    if data.len() < *cursor + HEAD || data[*cursor] != 0x0D {
+        return None;
+    }
+    let word = |at: usize| u32::from_le_bytes([data[at], data[at + 1], data[at + 2], data[at + 3]]);
+    let block_tokens = word(*cursor + 1);
+    let resume_at = word(*cursor + 5);
+    let n = word(*cursor + 9) as usize;
+    let end = (*cursor + HEAD).checked_add(n.checked_mul(32)?)?;
+    if n > crate::types::PromptCacheHint::MAX_KEYS || data.len() < end {
+        return None;
+    }
+    let keys = data[*cursor + HEAD..end].as_chunks::<32>().0.to_vec();
+    *cursor = end;
+    Some(crate::types::PromptCacheHint {
+        block_tokens,
+        keys,
+        resume_at,
+    })
 }
 
 /// Write the decoded-so-far trailer: `0x08 | n(2 LE) | n × id(4 LE)`.
@@ -722,6 +772,7 @@ pub fn decode_layer_forward(data: &[u8]) -> Result<LayerForward, SwarmError> {
     });
     let coupling_seed = read_coupling_trailer(data, &mut cursor);
     let stream_seq = read_stream_trailer(data, &mut cursor);
+    let prompt_cache = read_prompt_cache_trailer(data, &mut cursor);
     let _ = cursor;
 
     Ok(LayerForward {
@@ -746,6 +797,7 @@ pub fn decode_layer_forward(data: &[u8]) -> Result<LayerForward, SwarmError> {
         coupling_seed,
         stream_seq,
         truncate_kv_to,
+        prompt_cache,
         chunk_meta,
         sampling,
     })
@@ -787,6 +839,7 @@ mod tests {
             coupling_seed: None,
             stream_seq: None,
             truncate_kv_to: None,
+            prompt_cache: None,
             chunk_meta: None,
             sampling: None,
         }
@@ -1026,6 +1079,58 @@ mod tests {
         let plain = encode_layer_forward(&f).unwrap();
         assert_eq!(plain.len(), alone.len() - 5);
         assert_eq!(decode_layer_forward(&plain).unwrap().stream_seq, None);
+    }
+
+    /// FUTURE_WORK #10: a prompt pass's hint survives the wire behind the
+    /// stream trailer, is absent when unset, and a frame claiming more keys than
+    /// it holds — or than the cap — carries none rather than garbage.
+    #[test]
+    fn a_prompt_cache_hint_survives_the_wire_and_a_short_one_is_dropped() {
+        let hint = crate::types::PromptCacheHint {
+            block_tokens: 64,
+            keys: vec![[1u8; 32], [2u8; 32], [3u8; 32]],
+            resume_at: 128,
+        };
+        let mut f = base_forward();
+        f.stream_seq = Some(5);
+        f.prompt_cache = Some(hint.clone());
+        let bytes = encode_layer_forward(&f).unwrap();
+        let back = decode_layer_forward(&bytes).unwrap();
+        assert_eq!(back.prompt_cache, Some(hint.clone()));
+        assert_eq!(
+            back.stream_seq,
+            Some(5),
+            "the trailer before it still reads"
+        );
+        // Alone.
+        f.stream_seq = None;
+        let alone = encode_layer_forward(&f).unwrap();
+        assert_eq!(
+            decode_layer_forward(&alone).unwrap().prompt_cache,
+            Some(hint)
+        );
+        // Absent.
+        f.prompt_cache = None;
+        let plain = encode_layer_forward(&f).unwrap();
+        assert_eq!(plain.len(), alone.len() - (13 + 3 * 32));
+        assert_eq!(decode_layer_forward(&plain).unwrap().prompt_cache, None);
+        // A frame cut short inside the keys reads as no hint at all.
+        let cut = &alone[..alone.len() - 10];
+        let mut cursor = plain.len();
+        assert_eq!(read_prompt_cache_trailer(cut, &mut cursor), None);
+        assert_eq!(cursor, plain.len(), "nothing consumed");
+        // So does one claiming more keys than the cap.
+        let mut over = plain.clone();
+        over.push(0x0D);
+        over.extend_from_slice(&64u32.to_le_bytes());
+        over.extend_from_slice(&0u32.to_le_bytes());
+        over.extend_from_slice(&(crate::types::PromptCacheHint::MAX_KEYS as u32 + 1).to_le_bytes());
+        over.extend(std::iter::repeat_n(
+            0u8,
+            32 * (crate::types::PromptCacheHint::MAX_KEYS + 1),
+        ));
+        let mut cursor = plain.len();
+        assert_eq!(read_prompt_cache_trailer(&over, &mut cursor), None);
     }
 
     #[test]

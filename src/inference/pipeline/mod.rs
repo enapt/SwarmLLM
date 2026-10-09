@@ -16,6 +16,7 @@ mod ngram_only_spec;
 mod prompt;
 pub(crate) mod remote_generate;
 mod speculative;
+mod split_prompt_cache;
 mod tensor_parallel;
 mod vision;
 
@@ -419,6 +420,8 @@ pub(super) fn build_spec_verify_forward(
         // for a peer advertising `features::STREAMED_VERIFY`.
         stream_seq,
         truncate_kv_to,
+        // A check never carries a prompt pass's hint: it is not a prompt pass.
+        prompt_cache: None,
         chunk_meta: None,
         sampling: walk.map(|w| w.sampling.clone()),
     }
@@ -846,6 +849,7 @@ pub(super) fn build_kv_truncate_forward(
         coupling_seed: None,
         stream_seq: None,
         truncate_kv_to: Some(truncate_to),
+        prompt_cache: None,
         chunk_meta: None,
         sampling: None,
     }
@@ -1169,6 +1173,11 @@ pub struct PipelineExecutor {
     /// delegated split that failed before delivering any is run here instead
     /// (`try_delegated_split`); one that delivered some failed the request.
     pub(super) hand_off_emitted: usize,
+    /// While a split's prompt pass keeps the prompt between turns
+    /// (`split_prompt_cache`, FUTURE_WORK #10): what every segment's forward of
+    /// that pass carries. Set and cleared around the pass by
+    /// `forward_through_segments`; `None` otherwise.
+    pub(super) prompt_cache_hint: Option<crate::types::PromptCacheHint>,
 }
 
 impl PipelineExecutor {
@@ -1188,6 +1197,7 @@ impl PipelineExecutor {
             reply_stops: tokio::sync::OnceCell::new(),
             partial_reply: PartialReply::default(),
             hand_off_emitted: 0,
+            prompt_cache_hint: None,
         }
     }
 
@@ -3653,6 +3663,7 @@ mod peer_error_recovery_tests {
             locally_constructed: false,
             refusal: None,
             answers_step: None,
+            prompt_blocks_stored: None,
         }
     }
 

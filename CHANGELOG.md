@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+**A model split across computers no longer re-reads the whole conversation every turn.**
+Coding agents send the entire conversation again with each message, and when a model was
+split across computers, every computer in the split read all of it again, every turn. Each
+computer now keeps its part of the conversation's opening for the next turn, so the next turn
+sends only what is new. On a 3B model split across two computers, the second turn of an
+agent conversation came back in 7-8 seconds instead of 65. If a computer has forgotten its
+part (it restarted, or needed the room), the turn is simply read from the start, as before.
+Every computer in the split must run this version for it to apply. Replies were checked
+against llama.cpp: they agree as closely as before.
+
 **Fixed: a hiccup reaching your node no longer reads as "you have nothing".**
 When the dashboard briefly could not reach your node, for example during a
 restart or after the API key changed, several panels showed their ordinary

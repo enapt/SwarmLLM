@@ -47,6 +47,8 @@ family by rank-2 near-ties only, or use a BPE model (Llama-3.x, Qwen) where the
 re-tokenization is exact.
   replies.jsonl  one JSON object per line with a "content" field (what
                  `split_rig.sh` writes); labels default to the line number.
+  prompt-file    the user's text, or a request body `{"messages": [...]}` for a
+                 whole conversation (what `split_rig.sh splitcache` sends).
   The prompt is rendered with the GGUF's own chat template, as the node renders
   it (jinja2 standing in for minijinja; `strftime_now` is today's date).
 
@@ -84,6 +86,12 @@ def main():
         sys.exit(__doc__)
     gguf, replies_path, prompt_path = args[:3]
     prompt = open(prompt_path).read()
+    # A whole conversation: a request body (`{"messages": [...]}`, what
+    # `split_rig.sh splitcache` sends) is rendered as the node renders it.
+    try:
+        conversation = json.loads(prompt).get("messages")
+    except (ValueError, AttributeError):
+        conversation = None
     rows = [json.loads(line) for line in open(replies_path) if line.strip()]
     labels = args[3:] or [f"reply {i + 1}" for i in range(len(rows))]
 
@@ -98,7 +106,7 @@ def main():
     env.globals["raise_exception"] = raise_exception
     rendered = env.from_string(llm.metadata["tokenizer.chat_template"]).render(
         messages=([{"role": "system", "content": system}] if system else [])
-        + [{"role": "user", "content": prompt}],
+        + (conversation or [{"role": "user", "content": prompt}]),
         add_generation_prompt=True,
         bos_token=llm.detokenize([llm.token_bos()], special=True).decode(),
         eos_token=llm.detokenize([llm.token_eos()], special=True).decode())

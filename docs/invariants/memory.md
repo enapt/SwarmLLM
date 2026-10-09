@@ -2432,3 +2432,35 @@ Full evidence: `docs/invariants/memory.md`
 - **`inference::split::kv_budget`** — the KV memory budget and the admission check against it.
 - **A prompt of known length is RESERVED, not grown into** — `KvCacheStore::set_reserved_positions` (written by the worker at the top of `ensure_room_for_prompt`, before any budget question) sizes every layer's FIRST allocation via `new_kv_cache(.., reserve_positions)`; growth by `Tensor::cat` is O(n²/quantum) in copies and one device allocation per step, none of it charged (97 GB copied and 2279 allocations for a 20837-token prompt). The guard charges what will be allocated, read off the buffer (`kv_budget::positions_to_allocate`), never derived from `index_pos`. Absent means "grow as before"; `SWARMLLM_KV_RESERVE=0` is the in-binary A/B. → `docs/invariants/memory.md` § "A prompt of known length is reserved"
 - **`inference::process_pool::worker_socket_path`** — the worker IPC socket path, and the ONLY place it is built.
+
+## A split's stored prompt lives in the worker's prefix cache, under its one budget (2026-10-09, FUTURE_WORK #10)
+
+A segment keeps its part of a split's prompt between turns
+(`docs/invariants/network.md` § "A split keeps its conversation's prompt between
+turns") in the worker's `PrefixCache` — chain-keyed entries
+(`Entry::chain`, `chain_block`) beside its token-keyed ones, never in a second
+store. **Why not a store of its own:** gotcha #440 was a cache whose snapshots
+nobody charged — a long prompt's live cache spilled to host memory at 3-5 tok/s
+with nothing refused or logged. In the same cache the entries inherit the
+charge (`set_external_reserved` after storing, as the generate path does), the
+sizing before the copy (`snapshot_positions_that_fit` → `kv_budget::plan_snapshot`),
+the byte and entry caps (`evict_over_caps`, shared by both kinds), and the
+eviction before a refusal (`claim_room`'s evictor).
+
+**The order in `handle_forward`** is the generate path's: look the stored
+opening up (`lookup_chain`) BEFORE admission, admit `restored + computed`
+positions (only a RESUMED pass counts what it restores — the local-embedder path
+also sends its prompt pass at a nonzero position, with nothing before it), then
+copy it in (`hydrate_request_from_snapshot`) AFTER — the copy is itself an
+allocation the admission must have room for. A lookup that misses, a hydrate
+that fails or one that restores a different number of positions than the pass
+resumes from is `PromptCacheMiss`, never a forward computed from the wrong
+opening.
+
+**What is stored.** After the prompt pass, `insert_chain_from_kv` keeps as many
+WHOLE blocks of the request's cache as the cache holds, the card has room for
+beside the live cache, and the byte ceiling allows, and answers how many — what
+the coordinator may resume from next turn. A growing conversation keeps ONE
+entry (a chain the new one extends is dropped), as on the token path. A model
+with a recurrent state (Qwen 3.5's DeltaNet) stores nothing: its state cannot be
+cut at a block boundary.

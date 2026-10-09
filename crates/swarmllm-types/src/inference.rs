@@ -447,6 +447,14 @@ pub struct LayerForward {
     /// draft entries committed in the previous verify round.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub truncate_kv_to: Option<u32>,
+    /// A split's prompt pass that lets each segment keep its part of the
+    /// prompt between turns (FUTURE_WORK #10, `docs/plans/split_prompt_cache.md`):
+    /// the receiver restores positions `0..resume_at` from what it stored on an
+    /// earlier turn — or refuses — and stores this prompt's blocks afterwards.
+    /// Travels in the `0x0D` trailer, only to a peer advertising
+    /// `features::SPLIT_PROMPT_CACHE`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cache: Option<PromptCacheHint>,
     /// Tier 4K — daemon-side STREAM-chunked activation send. Present when this
     /// frame carries one chunk of a multi-chunk activation transfer; absent
     /// when the activation fits in a single frame (the common case for decode
@@ -760,6 +768,36 @@ pub struct LayerResult {
     /// trailer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answers_step: Option<ResultStep>,
+    /// How many leading blocks of a prompt pass's `PromptCacheHint` the
+    /// answering segment stored for the next turn — what its coordinator may
+    /// resume from there. Travels as the `0x09` trailer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_blocks_stored: Option<u32>,
+}
+
+/// What a split's prompt pass tells each segment about keeping the prompt
+/// between turns (`LayerForward::prompt_cache`).
+///
+/// The prompt is cut into blocks of `block_tokens`; `keys[i]` names the
+/// prompt up to the end of block `i` — vLLM's prefix-caching chain, each key
+/// covering its parent's — hashed with a secret of the coordinator's, so a
+/// segment holds names it cannot turn back into text and two coordinators'
+/// entries never meet.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PromptCacheHint {
+    /// Tokens per block.
+    pub block_tokens: u32,
+    /// One key per FULL block of this prompt.
+    pub keys: Vec<[u8; 32]>,
+    /// Positions the receiver restores instead of being sent — a whole
+    /// number of blocks, short of the prompt; 0 = compute it all.
+    pub resume_at: u32,
+}
+
+impl PromptCacheHint {
+    /// The most keys a hint may carry: 8,192 blocks of 64 tokens is a
+    /// 524,288-token prompt, past any context served here, in 256 KB.
+    pub const MAX_KEYS: usize = 8192;
 }
 
 /// How a `LayerForward::stream_seq` is laid out: the attempt's stream in the
@@ -896,6 +934,7 @@ impl LayerResult {
             locally_constructed: true,
             refusal: None,
             answers_step: None,
+            prompt_blocks_stored: None,
         }
     }
 
@@ -1054,6 +1093,7 @@ mod chunk_assembly_tests {
             coupling_seed: None,
             stream_seq: None,
             truncate_kv_to: None,
+            prompt_cache: None,
             chunk_meta: None,
             // In-process only (`serde(skip)`): a decoded forward always has
             // `None`, which is what these round-trip tests assert against.

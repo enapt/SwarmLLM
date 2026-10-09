@@ -419,6 +419,9 @@ impl PipelineExecutor {
             coupling_seed: None,
             stream_seq: None,
             truncate_kv_to: None,
+            // A split's prompt pass keeping the prompt between turns (#10): this
+            // node's own segment restores and stores its part like any other.
+            prompt_cache: self.prompt_cache_hint.clone().filter(|_| sequence_num == 0),
             chunk_meta: None,
             // The segment that samples needs the caller's parameters. Without
             // this the worker fell back to `SamplingParams::default()` —
@@ -1868,6 +1871,7 @@ mod segment_budget_tests {
             coupling_seed: None,
             stream_seq: None,
             truncate_kv_to: None,
+            prompt_cache: None,
             chunk_meta: None,
             sampling: None,
         }

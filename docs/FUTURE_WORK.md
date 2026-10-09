@@ -72,7 +72,7 @@ re-fetching parts) and #223 closed in v0.3.228 (released 2026-10-06 09:42 UTC), 
 6. *(#152 closed 2026-10-09 — the guess-check stream runs on the boomerang and with a peer
     holding the first layers, not only with a peer holding the last.)*
 7. **#10** — conversation prefixes across computers: no routing to the peer holding the
-    cache, and a split chain keeps no KV across turns (absorbs #139).
+    cache (the split half — a split keeps its prompt between turns — built 2026-10-09).
 8. **#162** — the release gate: a cloned gate loses its helpers, and step 12e cannot test a
     takeover on this box (absorbs #140).
 9. *(#155 narrowed to P3 on 2026-10-07 — not seen on the swarm, see its entry.)*
@@ -903,32 +903,28 @@ the time per step changed, not the guessing. Next: per-step card timings for req
 (draft and check `_ms` in the DSD line), and the same rig at low uptime, to separate machine state
 from code.
 
-#### #10 — Conversation prefixes across computers: no routing to the peer holding the cache, no cache in a split chain
+#### #10 — Conversation prefixes across computers: no routing to the peer holding the cache
 `P2` · perf-split · **PARTIAL** — 2026-09-07 · absorbs #139 and archive § "Speeding up inference BETWEEN nodes" idea 1 (prefix-keyed remote KV); history: archive row #10 and § "A conversation's later turns do not seek out the peer holding its prefix"
 
 The LOCAL half shipped in v0.3.208 (`scheduler::cached_prefix`; `split_rig.sh cache` HIT
-2,713 of 2,744 tokens). Three gaps, the largest single win left for agents (long, repeated
-prompts — one report spent 847 s re-reading):
-- **Route to the peer that holds it.** Peers' caches are neither gossiped nor credited.
-  Gossip prefix digests, keep caches longer than the 10-minute KV idle expiry with a RAM/disk
-  tier, and price a CPU requester's long prompt against a GPU peer's rate
+2,713 of 2,744 tokens). **The split half is built (2026-10-09, `pipeline::split_prompt_cache`,
+`docs/plans/split_prompt_cache.md`)**: a split's prompt pass carries a keyed block chain and
+resumes where every segment is believed to hold it; each segment keeps its part in its worker's
+`PrefixCache`; a miss re-sends from 0 once. It keys on the prompt's CONTENT, so the old note that
+the Anthropic surface could not reach a session-id design no longer applies — every surface's
+prompt pass goes through `forward_through_segments`. What is left:
+- **Route to the peer that holds it.** The planner never reads the belief table, and peers'
+  caches are neither gossiped nor credited: turn 2 resumes only when the plan happens to name the
+  same segments. Gossip prefix digests, keep caches longer than the 10-minute KV idle expiry with
+  a RAM/disk tier, and price a CPU requester's long prompt against a GPU peer's rate
   (`faster_than_local.md` § 3.1). Delivery trap: `try_ngram_only_distributed` runs before
-  `try_remote_generate_fastpath` and takes a remote single segment, so a priced credit would
-  not be delivered — make the n-gram path decline a plan priced warm. The credit must require
+  `try_remote_generate_fastpath` and takes a remote single segment, so a priced credit would not
+  be delivered — make the n-gram path decline a plan priced warm. The credit must require
   `cross_node_prefix_trust_min` and `share_prefix_cache_with_peers` (default off).
-- **A split chain keeps no KV across turns of a stateless client.** Every agent turn
-  re-ships and re-reads the whole prompt through every segment (~79 MB per hop and ~50 s of
-  wire per turn at 25 Mbps on a 14B). The coordinator already computes the block-hash chain
-  (`prefix_cache::compute_block_hashes`); ship it as an opaque prefix id with the prompt pass,
-  let each segment store its range under it and answer "held to position k", and send only
-  the delta on turn 2+. An additive trailer gated at the sender on a new feature bit, with an
-  LRU / byte cap per segment. With a delegated split (#143) the delegate owns the id.
-  **Designed 2026-10-09: `docs/plans/split_prompt_cache.md`** — the coordinator decides
-  (keyed block chain, vLLM's rule; optimistic belief table, a refused hydrate retries from 0),
-  each segment keeps its own entries (vLLM-Ascend KVPP's stage-local caches), the head is sent
-  token ids from the resume point.
-- The Anthropic surface cannot reach the session-id design without a signature change
-  through four handlers.
+- **Limits the split half accepts**: a resumed request gives up the mid-reply replay onto a
+  stand-in (the router continues the reply instead, #236); a model with a recurrent state (Qwen
+  3.5) stores nothing; images, pre-embedded input and tensor-parallel groups run whole; the
+  beliefs live in one process and start empty after a restart.
 
 #### #171 — The prompt pass through a split runs one stage at a time
 `P2` · perf-split · **OPEN** — 2026-08-24 · absorbs archive § "Speeding up inference BETWEEN nodes" idea 2 (prefill microbatching); history: archive § "The pipeline is idle (N-1)/N of the time during the phase that dominates a long request"

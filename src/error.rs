@@ -55,6 +55,16 @@ pub enum SwarmError {
     /// culprit).
     #[error("Segment failover exhausted: {0}")]
     SegmentFailoverExhausted(String),
+    /// A split's prompt pass asked a segment to restore the opening of the
+    /// prompt it stored on an earlier turn, and it no longer holds it —
+    /// evicted, restarted, never stored (FUTURE_WORK #10). The coordinator's
+    /// answer is to send the prompt again from position 0, once, so this
+    /// never reaches a caller; it is a variant only so the class survives the
+    /// worker's and the network's string hops (`reclassify_flattened_error`).
+    /// Not the segment's fault: a cache is allowed to forget, so it is in
+    /// `failure_is_penalty_worthy`'s local-only list.
+    #[error("Prompt cache miss: {0}")]
+    PromptCacheMiss(String),
     /// A peer produced the whole answer and part of it was lost on the way
     /// here, so what arrived is not the reply that was generated.
     ///
@@ -438,6 +448,12 @@ pub fn reclassify_flattened_error(message: &str) -> Option<SwarmError> {
         "Mixed model copy: the header beside this model's shard files describes another upload — ",
     ) {
         return Some(SwarmError::MixedModelCopy(d));
+    }
+    // Raised inside a segment's worker and answered over the network: the
+    // coordinator must tell it from a failure to re-send the prompt from 0.
+    // Before the generic markers, which a wrapper around it would carry too.
+    if let Some(d) = detail_after(message, "Prompt cache miss: ") {
+        return Some(SwarmError::PromptCacheMiss(d));
     }
     if let Some(d) = detail_after(message, "Service unavailable: ") {
         return Some(SwarmError::ServiceUnavailable(d));
@@ -867,6 +883,14 @@ pub fn classify_error(err: &SwarmError) -> (StatusCode, String, &'static str) {
         // Same reasoning for a mid-pipeline holder failure with nobody free
         // to take the segment over.
         SwarmError::SegmentFailoverExhausted(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            err.to_string(),
+            "server_error",
+        ),
+        // Answered by the coordinator re-sending the prompt from 0, so it does
+        // not reach a caller; were it ever to, it is "this server could not
+        // serve it just now".
+        SwarmError::PromptCacheMiss(_) => (
             StatusCode::SERVICE_UNAVAILABLE,
             err.to_string(),
             "server_error",

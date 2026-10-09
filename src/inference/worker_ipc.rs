@@ -362,6 +362,10 @@ pub struct IpcForward {
     /// partial-accept fixup.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub truncate_kv_to: Option<u32>,
+    /// A split's prompt pass that lets this segment keep its part of the prompt
+    /// between turns (`LayerForward::prompt_cache`, FUTURE_WORK #10).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cache: Option<crate::types::PromptCacheHint>,
     /// This forward belongs to a request THIS machine's owner sent — the
     /// segment of it this node runs inside a pipeline it coordinates — so its
     /// prompt pass may read on the owner's width (`process_pool::Requester`).
@@ -420,6 +424,12 @@ pub struct IpcLayerResult {
     /// into `Vec<Vec<f32>>` on the receiving side.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spec_logits_dims: Option<(u32, u32)>,
+    /// The prompt blocks this segment stored for the next turn
+    /// (`LayerResult::prompt_blocks_stored`). The ONE result field the worker
+    /// produces that the daemon carries on: the rest of `LayerResult`'s
+    /// network-only fields are stamped by the daemon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_blocks_stored: Option<u32>,
 }
 
 /// Encode `Vec<Vec<f32>>` as a flat little-endian f32 byte buffer,
@@ -1118,6 +1128,7 @@ mod tests {
             coupling_seed: None,
             stream_seq: None,
             truncate_kv_to: None,
+            prompt_cache: None,
             for_the_owner: false,
         };
         let json = serde_json::to_string(&fwd).unwrap();
@@ -1157,6 +1168,7 @@ mod tests {
             coupling_seed: None,
             stream_seq: None,
             truncate_kv_to: None,
+            prompt_cache: None,
             for_the_owner,
         };
         let owners = serde_json::to_string(&fwd(true)).unwrap();
@@ -1198,6 +1210,7 @@ mod tests {
             coupling_seed: None,
             stream_seq: None,
             truncate_kv_to: None,
+            prompt_cache: None,
             for_the_owner: false,
         };
         let json = serde_json::to_string(&fwd).unwrap();

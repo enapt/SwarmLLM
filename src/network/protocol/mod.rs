@@ -1221,6 +1221,7 @@ mod tests {
             coupling_seed: None,
             stream_seq: None,
             truncate_kv_to: None,
+            prompt_cache: None,
             chunk_meta: None,
             sampling: None,
         };
@@ -1265,6 +1266,7 @@ mod tests {
                 coupling_seed: None,
                 stream_seq: None,
                 truncate_kv_to: None,
+                prompt_cache: None,
                 chunk_meta: None,
                 sampling: None,
             };
@@ -1305,6 +1307,7 @@ mod tests {
             coupling_seed: None,
             stream_seq: None,
             truncate_kv_to: None,
+            prompt_cache: None,
             chunk_meta: None,
             sampling: None,
         };
@@ -1339,6 +1342,7 @@ mod tests {
             coupling_seed: None,
             stream_seq: None,
             truncate_kv_to: None,
+            prompt_cache: None,
             chunk_meta: None,
             sampling: None,
         };
@@ -1378,6 +1382,7 @@ mod tests {
             coupling_seed: None,
             stream_seq: None,
             truncate_kv_to: None,
+            prompt_cache: None,
             chunk_meta: None,
             sampling: None,
         };
@@ -1402,6 +1407,7 @@ mod tests {
             locally_constructed: false,
             refusal: None,
             answers_step: None,
+            prompt_blocks_stored: None,
         };
 
         let encoded = encode_layer_result(&result).unwrap();
@@ -1429,6 +1435,7 @@ mod tests {
             locally_constructed: false,
             refusal: None,
             answers_step: None,
+            prompt_blocks_stored: None,
         };
 
         let encoded = encode_layer_result(&result).unwrap();
@@ -1450,6 +1457,7 @@ mod tests {
             locally_constructed: false,
             refusal: None,
             answers_step: None,
+            prompt_blocks_stored: None,
         };
 
         let encoded = encode_layer_result(&result).unwrap();
@@ -1570,6 +1578,7 @@ mod tests {
             coupling_seed: None,
             stream_seq: None,
             truncate_kv_to: None,
+            prompt_cache: None,
             chunk_meta: None,
             sampling: None,
         };
@@ -1617,6 +1626,7 @@ mod tests {
             coupling_seed: None,
             stream_seq: None,
             truncate_kv_to: None,
+            prompt_cache: None,
             chunk_meta: None,
             sampling: None,
         };
@@ -1657,6 +1667,7 @@ mod tests {
             coupling_seed: None,
             stream_seq: None,
             truncate_kv_to: None,
+            prompt_cache: None,
             chunk_meta: None,
             sampling: None,
         };
@@ -1695,6 +1706,7 @@ mod tests {
             coupling_seed: None,
             stream_seq: None,
             truncate_kv_to: None,
+            prompt_cache: None,
             chunk_meta: None,
             sampling: None,
         };
@@ -1722,6 +1734,7 @@ mod tests {
             locally_constructed: false,
             refusal: None,
             answers_step: None,
+            prompt_blocks_stored: None,
         };
         let encoded = encode_layer_result(&result).unwrap();
         let decoded = decode_layer_result(&encoded).unwrap();
@@ -1745,6 +1758,7 @@ mod tests {
             locally_constructed: false,
             refusal: None,
             answers_step: None,
+            prompt_blocks_stored: None,
         };
         let encoded = encode_layer_result(&result).unwrap();
         let decoded = decode_layer_result(&encoded).unwrap();
@@ -1777,6 +1791,7 @@ mod tests {
             locally_constructed: false,
             refusal: None,
             answers_step: None,
+            prompt_blocks_stored: None,
         };
         let encoded = encode_layer_result(&result).unwrap();
         let decoded = decode_layer_result(&encoded).unwrap();
@@ -1912,6 +1927,39 @@ mod tests {
         assert!(decode_layer_result(&with[..with.len() - 1]).is_err());
     }
 
+    /// FUTURE_WORK #10: the blocks a segment stored ride after the step and its
+    /// stream number, where a decoder that predates them has stopped — so it
+    /// reads the step and the number as before.
+    #[test]
+    fn the_prompt_blocks_stored_ride_after_the_step_and_its_number() {
+        let rid = uuid::Uuid::new_v4();
+        let step = crate::types::ResultStep {
+            index_pos: 0,
+            layer_range: (0, 14),
+            stream_seq: Some(7),
+        };
+        let without = LayerResult::error(rid, "x").answering_step(step);
+        let mut with = without.clone();
+        with.prompt_blocks_stored = Some(0x0102_0304);
+        let a = encode_layer_result(&without).unwrap();
+        let b = encode_layer_result(&with).unwrap();
+        assert_eq!(&b[..a.len()], &a[..]);
+        assert_eq!(&b[a.len()..], &[0x09, 0x04, 0x03, 0x02, 0x01]);
+        let back = decode_layer_result(&b).unwrap();
+        assert_eq!(back.prompt_blocks_stored, Some(0x0102_0304));
+        assert_eq!(back.answers_step, Some(step));
+        assert_eq!(decode_layer_result(&a).unwrap().prompt_blocks_stored, None);
+        assert!(decode_layer_result(&b[..b.len() - 1]).is_err());
+        // Without a step in front of it, too.
+        let mut bare = LayerResult::error(rid, "x");
+        bare.prompt_blocks_stored = Some(3);
+        let c = encode_layer_result(&bare).unwrap();
+        assert_eq!(
+            decode_layer_result(&c).unwrap().prompt_blocks_stored,
+            Some(3)
+        );
+    }
+
     /// A reason a newer peer knows and this build does not is read as no
     /// reason — the behaviour before the trailer existed — not as a broken
     /// result that loses the error it carries.
@@ -1950,6 +1998,7 @@ mod tests {
             locally_constructed: false,
             refusal: None,
             answers_step: None,
+            prompt_blocks_stored: None,
         };
         let encoded = encode_layer_result(&result).unwrap();
         let decoded = decode_layer_result(&encoded).unwrap();

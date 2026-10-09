@@ -1,6 +1,6 @@
 # A split keeps its conversation's prompt across turns (FUTURE_WORK #10, the split half)
 
-**Status: designed 2026-10-09, not built.** The local half shipped in v0.3.208 — a whole model on
+**Status: built and measured 2026-10-09 (`pipeline::split_prompt_cache`; turn 2 of a 3B split ~9x faster, below).** The local half shipped in v0.3.208 — a whole model on
 this node prices and reuses its own cached prompt (`scheduler::cached_prefix`, the worker's
 `PrefixCache`). This is the other half: a model SPLIT across computers.
 
@@ -31,10 +31,12 @@ next turn is a new request with a new id, so nothing carries over.
 ## The design
 
 1. **The coordinator decides.** It tokenizes the prompt (`SharedState::standalone_tokenizer` —
-   no tokenizer, no resume) and computes the block chain, vLLM's rule, with a KEYED hash (a
-   per-node secret derived from the identity key): a segment holds keys it cannot invert, so the
-   middle of a boomerang learns nothing new about the text, and two coordinators' entries never
-   meet.
+   no tokenizer, no resume) and computes the block chain, vLLM's rule, with a KEYED hash: a
+   segment holds keys it cannot invert, so the middle of a boomerang learns nothing new about the
+   text, and two coordinators' entries never meet. *As built*, the secret is random per process,
+   not derived from the identity key: the belief table lives in memory and dies with the process
+   anyway, so a key that outlived a restart would only name entries nobody believes in, and
+   nothing is derived from the identity key that does not need to be.
 2. **What a prompt pass carries** (a new forward trailer, gated at the SENDER on a new
    `features` bit): the keys of every full block of this prompt, and `resume_at` — the longest
    block-aligned prefix, short of the whole prompt, that EVERY segment of this plan is believed
@@ -61,7 +63,12 @@ next turn is a new request with a new id, so nothing carries over.
   segment's entries are its own — but `lookup` takes TOKENS; a segment past the first gets hidden
   states, so it needs a lookup by key chain.
 - Snapshotting a segment's cache copies its K/V (the local path's `insert_from_kv` does the same);
-  the byte budget must count it, and `kv_budget::admit_prompt` must be able to release it.
+  the byte budget must count it, and `kv_budget::admit_prompt` must be able to release it. **So
+  the entries go IN the worker's `PrefixCache` — keyed entries beside its token-keyed ones — and
+  never in a second store**: gotcha #440 is a cache whose snapshots nobody charged, and a long
+  prompt's live cache spilled to host memory at 3-5 tok/s with nothing refused or logged. In the
+  same cache they inherit the charge (`KvOccupancy::external_bytes`), the snapshot's sizing
+  before the copy (`plan_snapshot`) and the eviction before a refusal (`claim_room`'s evictor).
 - A prompt pass sent in chunks (`chunk_meta`) and the failover paths: a stand-in segment holds no
   entries — it must be planned with `resume_at = 0`, which the belief table gives for free.
 
@@ -71,3 +78,28 @@ A rig turn pair (`split_rig.sh`, a new mode beside `cache`): two turns of an age
 through A → B; turn 2's prompt pass is timed and its positions counted (expect it to send only
 the new turn's tokens), replies scored against llama.cpp, A/B inside one binary with an env
 switch, and a forced eviction on B (the refusal → one retry from 0).
+
+## Measured (2026-10-09, `split_rig.sh splitcache`, `~/swarmllm-10/run.sh`)
+
+One release CPU build of main (0.3.232 + this change), Llama-3.2-3B Q4_K_M split A → B on the
+processor, live node stopped, under the safety kit. Turn 1: a ~2,240-token system prompt (an
+agent's rules) and a short question; turn 2: the same conversation one exchange longer (2,306
+prompt tokens). Arms in order, the env switch the only difference:
+
+| Arm | Turn 2 resumed from | B restored | Turn 1 | Turn 2 |
+|---|---|---|---|---|
+| on | 2,240 | 1 hit | 69.1 s | **7.1 s** |
+| off (`SWARMLLM_SPLIT_PROMPT_CACHE=0`) | — | — | 69.1 s | 65.2 s |
+| on (again) | 2,240 | 1 hit | 72.6 s | **8.2 s** |
+| miss (B restarted between the turns) | 2,240, then 0 | refused | 67.7 s | 70.2 s |
+
+Turn 2 is ~9x faster when every segment still holds the opening; a miss costs what the old path
+cost plus one refused forward. Replies scored against llama.cpp on the same 2,306-token
+conversation (`score_against_reference.py` now takes a request body as its prompt): off and miss
+are byte-identical, 31/32 rank-1; on picks " of" at a 0.067-logit near-tie ("Here are two of the
+rules" vs "Here are two rules") and scores 29/32 rank-1, worst rank 2, largest gap 0.132 — the
+same as off. The restored opening was computed in turn 1's prompt chunks, not turn 2's, so its
+rounding differs; a correct reply moved at a near-tie, never a broken one (ranks stay ≤ 2).
+
+Not measured here: a real WAN link, where the saving is the wire time as well (~50 s a turn for a
+14B at 25 Mbps), and a GPU segment.

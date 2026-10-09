@@ -101,6 +101,12 @@ Streaming rr sends MUST set `SendDirectMessage.delivery_request_id = Some(uuid)`
 
 → `docs/invariants/network.md` § "A connection the swarm DENIED is forgotten by request-response"
 
+## A split keeps its conversation's prompt between turns (2026-10-09, #10)
+
+**`pipeline::split_prompt_cache`** decides: a prompt pass carries a `PromptCacheHint` (keyed block chain, vLLM's rule; `resume_at` from an optimistic belief table) when EVERY remote segment advertises `features::SPLIT_PROMPT_CACHE`; wire trailers `0x0D` (forward, bound in the AAD) and `0x09` (blocks stored). The head gets TOKEN IDS from `resume_at`, never text. A miss is one retry from 0, never a penalty. A/B `SWARMLLM_SPLIT_PROMPT_CACHE=0`; rig `split_rig.sh splitcache`.
+
+→ `docs/invariants/network.md` § "A split keeps its conversation's prompt between turns"
+
 ## A tensor forward is acknowledged on receipt; a result is always its own request (2026-08-21)
 
 `requests.rs` answers an inbound `LayerForward` with `SwarmResponse::Ack` on decode, BEFORE any work, from the network manager; a result is always its own request (`tensors::handle_send_tensor_result` → `send_tensor_result_as_request`). The fast-fail (`forward_ack_deadline_secs`) is gated ONLY on the peer's `features::FORWARD_ACK` bit and never reaps a slow answer — the compute deadline stays with the pipeline (gotcha #354).

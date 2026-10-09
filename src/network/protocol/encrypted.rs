@@ -153,6 +153,9 @@ pub fn build_layer_forward_aad(forward: &LayerForward) -> Vec<u8> {
     super::layer_forward::append_coupling_trailer(&mut aad, forward);
     // The stream trailer (0x0C): the order the receiver runs this forward in.
     super::layer_forward::append_stream_trailer(&mut aad, forward);
+    // The prompt-cache trailer (0x0D): which positions the receiver restores
+    // instead of computing.
+    super::layer_forward::append_prompt_cache_trailer(&mut aad, forward);
 
     aad
 }
@@ -263,6 +266,7 @@ pub fn encode_layer_forward_encrypted(
     super::layer_forward::append_sampling_trailer(&mut buf, forward);
     super::layer_forward::append_coupling_trailer(&mut buf, forward);
     super::layer_forward::append_stream_trailer(&mut buf, forward);
+    super::layer_forward::append_prompt_cache_trailer(&mut buf, forward);
 
     Ok(buf)
 }
@@ -488,6 +492,7 @@ pub fn decode_layer_forward_encrypted(
     let sampling = super::layer_forward::read_sampling_trailer(data, &mut cursor);
     let coupling_seed = super::layer_forward::read_coupling_trailer(data, &mut cursor);
     let stream_seq = super::layer_forward::read_stream_trailer(data, &mut cursor);
+    let prompt_cache = super::layer_forward::read_prompt_cache_trailer(data, &mut cursor);
     let _ = cursor;
 
     let mut forward = LayerForward {
@@ -512,6 +517,7 @@ pub fn decode_layer_forward_encrypted(
         coupling_seed,
         stream_seq,
         truncate_kv_to,
+        prompt_cache,
         chunk_meta,
         sampling,
     };
@@ -558,6 +564,7 @@ mod tests {
             coupling_seed: None,
             stream_seq: None,
             truncate_kv_to: None,
+            prompt_cache: None,
             chunk_meta: None,
             sampling: None,
         }
@@ -728,6 +735,37 @@ mod tests {
             "a relay must not renumber a chunk"
         );
         other.stream_seq = None;
+        assert_ne!(build_layer_forward_aad(&other), aad);
+    }
+
+    /// FUTURE_WORK #10: the hint rides the encrypted frame and is sealed — a
+    /// relay that moved `resume_at` would make a segment restore positions it
+    /// was also sent, or skip ones it was not.
+    #[test]
+    fn a_prompt_cache_hint_is_sealed_and_survives_the_encrypted_frame() {
+        let mut orig = base_forward();
+        orig.stream_seq = Some(3);
+        orig.prompt_cache = Some(crate::types::PromptCacheHint {
+            block_tokens: 64,
+            keys: vec![[9u8; 32], [8u8; 32]],
+            resume_at: 64,
+        });
+        let bytes = encode_layer_forward_encrypted(&orig, vec![0u8; 32]).unwrap();
+        let (decoded, _sealed, aad) = decode_layer_forward_encrypted(&bytes).unwrap();
+        assert_eq!(decoded.prompt_cache, orig.prompt_cache);
+        assert_eq!(decoded.stream_seq, Some(3));
+        assert_eq!(aad, build_layer_forward_aad(&orig));
+        let mut other = orig.clone();
+        other.prompt_cache.as_mut().unwrap().resume_at = 128;
+        assert_ne!(
+            build_layer_forward_aad(&other),
+            aad,
+            "a relay must not move the resume point"
+        );
+        other.prompt_cache.as_mut().unwrap().resume_at = 64;
+        other.prompt_cache.as_mut().unwrap().keys[1] = [7u8; 32];
+        assert_ne!(build_layer_forward_aad(&other), aad, "nor swap a key");
+        other.prompt_cache = None;
         assert_ne!(build_layer_forward_aad(&other), aad);
     }
 

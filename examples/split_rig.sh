@@ -104,6 +104,17 @@
 #          much. Default model qwen2.5-0.5b (it renders tools natively, like
 #          the reporter's Qwen-based xLAM). Run BIN_A = an older release for
 #          the baseline: no planner line, and the route is decided cold.
+#   splitcache  FUTURE_WORK #10: a SPLIT keeps its conversation's prompt
+#          between turns. A holds shard 0, B every other shard, both on the
+#          processor; two turns of an agent-shaped conversation (a long system
+#          prompt, then the same plus a reply and a new question) go to A. PASS
+#          = turn 1's prompt pass kept its prompt from position 0, turn 2's
+#          RESUMED past it (A's `resumed_from` > 0) and B restored its part
+#          (`HIT on a split's stored prompt`), both 200. MISS=1 restarts B
+#          between the turns: PASS = turn 2 logged the miss and read the prompt
+#          again from 0, 200. SWARMLLM_SPLIT_PROMPT_CACHE=0 is the control arm:
+#          no prompt kept, both 200 — compare the two arms' turn-2 seconds and
+#          replies ($OUT/splitcache.jsonl). Default model llama-3.2-3b.
 #   remote  A holds NONE of the model (the header only) and REMOTE_NODES (2,
 #          default, or 3) other nodes hold it between them in contiguous parts
 #          — B the first, then C (and D) — the shape a user who stores nothing
@@ -158,7 +169,7 @@
 #          during the repair is not answered from the wrong bytes, B's part is
 #          then byte-identical to the upload's, and the ask after answers.
 #
-# usage: split_rig.sh split|kill|failover|failover_mid|context|whole|continue|repeat|fetch|cache|remote|mixed|disputed|spliced <binary> [<binary for B>]
+# usage: split_rig.sh split|kill|failover|failover_mid|context|whole|continue|repeat|fetch|cache|splitcache|remote|mixed|disputed|spliced <binary> [<binary for B>]
 #   MODEL      model id (default: tinyllama for split, llama-3.2-3b for kill
 #              and failover)
 #   SHARDS_A   shard indices A holds, comma-separated (default 0; kill: 0,LAST)
@@ -179,7 +190,7 @@ set -u
 MODE="${1:?usage: split_rig.sh split|kill|failover|context|repeat|fetch|cache|remote|mixed <binary> [<binary for B>]}"
 BIN_A="${2:?binary}"
 BIN_B="${3:-$BIN_A}"
-case "$MODE" in split|kill|failover|failover_mid|context|whole|continue|repeat|fetch|cache|remote|mixed|disputed|spliced) ;; *) echo "mode must be split, kill, failover, failover_mid, context, whole, continue, repeat, fetch, cache, remote, mixed, disputed or spliced"; exit 2 ;; esac
+case "$MODE" in split|kill|failover|failover_mid|context|whole|continue|repeat|fetch|cache|splitcache|remote|mixed|disputed|spliced) ;; *) echo "mode must be split, kill, failover, failover_mid, context, whole, continue, repeat, fetch, cache, splitcache, remote, mixed, disputed or spliced"; exit 2 ;; esac
 if { [ "$MODE" = context ] || [ "$MODE" = whole ]; } && printf '%s' "${EXTRA_TOML:-}" | grep -q '^\[inference\]'; then
   echo "$MODE: EXTRA_TOML may not open [inference] — B's ceiling is written there"; exit 2
 fi
@@ -203,6 +214,10 @@ if [ "$MODE" = split ] || [ "$MODE" = repeat ]; then
   SHARDS_B="${SHARDS_B:-$(echo "$SHARDS" | grep -vxF -f <(echo "$SHARDS_A" | tr ',' '\n') | paste -sd,)}"
   # Processor unless asked otherwise: the reference is scored on the processor.
   [ "$MODE" = repeat ] && { GPU_A="${GPU_A:-0}"; GPU_B="${GPU_B:-0}"; }
+elif [ "$MODE" = splitcache ]; then
+  SHARDS_A="${SHARDS_A:-0}"
+  SHARDS_B="${SHARDS_B:-$(echo "$SHARDS" | grep -vxF -f <(echo "$SHARDS_A" | tr ',' '\n') | paste -sd,)}"
+  GPU_A="${GPU_A:-0}"; GPU_B="${GPU_B:-0}"
 elif [ "$MODE" = cache ]; then
   SHARDS_A=$(echo "$SHARDS" | paste -sd,)
   SHARDS_B=$SHARDS_A
@@ -751,6 +766,85 @@ print(f"cache: planner line: {credit[:220] or '(none)'}")
 print(f"cache: local plan:   {local[:160] or '(none)'}")
 ok = bool(cached) and bool(local) and matched is not None and matched >= cached
 print("cache: PASS" if ok else "cache: FAIL")
+sys.exit(0 if ok else 1)
+PY
+  exit $?
+fi
+
+if [ "$MODE" = splitcache ]; then
+  # Two turns of an agent-shaped conversation through the split A -> B: a long
+  # system prompt sent unchanged every turn, then the history grows.
+  python3 - "$MODEL" "$OUT" <<'PY'
+import json, sys
+model, out = sys.argv[1], sys.argv[2]
+system = "You are a careful coding agent working in a user's repository. " + " ".join(
+    f"Rule {i}: read the file before you change it, keep every change small, run the tests after "
+    f"each change, and report exactly what you did and what you did not do." for i in range(1, 61))
+turn1 = [{"role": "system", "content": system}, {"role": "user", "content": "Say hello in one sentence."}]
+turn2 = turn1 + [{"role": "assistant", "content": "Hello! I am ready to help with your repository."},
+                 {"role": "user", "content": "Name two of the rules above, one sentence each."}]
+for name, msgs in (("turn1", turn1), ("turn2", turn2)):
+    json.dump({"model": model, "max_tokens": 32, "temperature": 0, "messages": msgs},
+              open(f"{out}/{name}.json", "w"))
+PY
+  ask_turn() { # name
+    local t
+    t=$(curl -s -m 900 -o "$OUT/$1.body" -D "$OUT/$1.hdr" -w '%{time_total}' -H "Authorization: Bearer $KA" \
+      -H "Content-Type: application/json" -X POST localhost:8900/v1/chat/completions --data-binary "@$OUT/$1.json")
+    python3 - "$OUT" "$1" "$t" <<'PY' | tee -a "$OUT/splitcache.jsonl"
+import json, sys
+out, name, t = sys.argv[1:4]
+status = (open(f"{out}/{name}.hdr").read().splitlines() or ["no response"])[0].strip()
+try:
+    content = json.load(open(f"{out}/{name}.body"))["choices"][0]["message"]["content"]
+except Exception:
+    content = "NOT A REPLY: " + open(f"{out}/{name}.body").read()[:200]
+print(json.dumps({"turn": name, "status": status, "seconds": float(t or 0), "content": content}))
+PY
+  }
+  ask_turn turn1
+  if [ -n "${MISS:-}" ]; then
+    # B forgets what it stored — restarted between the turns, as a peer's
+    # daemon may be. Turn 2 must miss, read the prompt again from 0, answer.
+    kill "$PB"
+    for _ in $(seq 1 60); do kill -0 "$PB" 2>/dev/null || break; sleep 1; done
+    PB=$(SWARMLLM_TEST_TENSOR_DELAY_MS="${DELAY_B:-0}" start "$BASE/B" 8920 "$BIN_B" "${GPU_B:-}")
+    up "$BASE/B" 8920 || exit 1
+    for _ in $(seq 1 60); do [ "$(peers)" -ge 1 ] && break; sleep 2; done
+    sleep 10
+    echo "splitcache: B restarted between the turns"
+  fi
+  FROM_A=$(wc -l < "$BASE/A/node.log"); FROM_B=$(wc -l < "$BASE/B/node.log")
+  ask_turn turn2
+  sleep 3
+  python3 - "$BASE/A/node.log" "$BASE/B/node.log" "$OUT" "$FROM_A" "$FROM_B" "${MISS:-}" "${SWARMLLM_SPLIT_PROMPT_CACHE:-}" <<'PY'
+import json, re, sys
+a = open(sys.argv[1], errors="replace").read().splitlines()
+b = open(sys.argv[2], errors="replace").read().splitlines()
+out, from_a, from_b, miss, switch = sys.argv[3], int(sys.argv[4]), int(sys.argv[5]), sys.argv[6], sys.argv[7]
+off = switch in ("0", "off", "false")
+def resumed(lines):
+    return [int(m.group(1)) for l in lines if "a split prompt pass keeping its prompt" in l
+            for m in [re.search(r"resumed_from=(\d+)", l)] if m]
+turns = [json.loads(l) for l in open(f"{out}/splitcache.jsonl")]
+both_200 = len(turns) == 2 and all(" 200" in t["status"] for t in turns)
+t1, t2 = resumed(a[:from_a]), resumed(a[from_a:])
+b_hits = sum("HIT on a split's stored prompt" in l for l in b[from_b:])
+b_stored = sum("stored a split's prompt" in l for l in b)
+missed = any("no longer held the stored prompt" in l for l in a[from_a:])
+print(f"splitcache: turn 1 resumed_from={t1}  turn 2 resumed_from={t2}  B hits on turn 2={b_hits}  "
+      f"B stores={b_stored}  miss logged={missed}  replies 200={both_200}  "
+      f"seconds {[t['seconds'] for t in turns]}")
+if off:
+    ok = both_200 and not t1 and not t2
+    arm = "off (SWARMLLM_SPLIT_PROMPT_CACHE=0)"
+elif miss:
+    ok = both_200 and missed and 0 in t2
+    arm = "miss (B restarted between the turns)"
+else:
+    ok = both_200 and t1 == [0] and bool(t2) and max(t2) > 0 and b_hits >= 1
+    arm = "on"
+print(f"splitcache [{arm}]: {'PASS' if ok else 'FAIL'}")
 sys.exit(0 if ok else 1)
 PY
   exit $?
