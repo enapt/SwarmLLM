@@ -2139,6 +2139,23 @@ impl SplitModel {
             );
         }
 
+        // A card's prompt pass accumulates quantized products in f16 (llama.cpp's
+        // default), except where an architecture's numbers need f32 — marked
+        // here, once every layer is built, whatever branch built it (#147).
+        // `SWARMLLM_F32_MARKS=0` leaves them unmarked, for the A/B.
+        if model_arch.accumulates_outputs_in_f32()
+            && std::env::var("SWARMLLM_F32_MARKS").as_deref() != Ok("0")
+        {
+            let (marked, missed) =
+                crate::inference::layers::accumulate_output_projections_in_f32(&mut layers);
+            tracing::info!(
+                arch = %model_arch,
+                marked,
+                missed,
+                "projections that keep an f32 accumulator on a card (llama.cpp's rule for this architecture)"
+            );
+        }
+
         let has_biases = layers
             .first()
             .is_some_and(|l| matches!(l, LayerVariant::Dense(lw) if lw.attention_bq.is_some()));

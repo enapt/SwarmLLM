@@ -29,6 +29,14 @@
 //! them as decode steps, `LOGITS_PROBE_SPLIT` the first layer of the second
 //! segment (default: one segment). Writes `<OUT>.f32` (`[N, vocab]`, little
 //! endian) and `<OUT>.json` (the token ids and the shape).
+//!
+//! A LONG prompt (FUTURE_WORK #147: f16 accumulation at 4-8K tokens):
+//! `LOGITS_PROBE_CHUNK=512` reads the prompt in chunks of that many tokens, as
+//! a card node does (`prefill_pacer::CARD_CHUNK_TOKENS`), and
+//! `LOGITS_PROBE_KEEP_LAST=K` keeps logits for only the prompt's last K
+//! positions (read as the last chunk, every position) plus the decode steps —
+//! every position of a 4K prompt is 2.4 GB at a 152K vocabulary, on the card
+//! as well as on disk. The JSON's `first_position` says where the rows start.
 
 use std::path::PathBuf;
 
@@ -50,6 +58,12 @@ fn expand(p: &str) -> PathBuf {
 }
 
 fn main() -> anyhow::Result<()> {
+    // The loader's own lines (`RUST_LOG=info`), so a run can show which of its
+    // choices fired — a precision mark, a placement — beside the numbers.
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_writer(std::io::stderr)
+        .try_init();
     let gguf = expand(
         &std::env::var("LOGITS_PROBE_GGUF")
             .map_err(|_| anyhow::anyhow!("set LOGITS_PROBE_GGUF to a whole .gguf file"))?,
@@ -118,10 +132,26 @@ fn main() -> anyhow::Result<()> {
         Ok(h)
     };
 
-    let mut rows: Vec<Vec<f32>> = Vec::with_capacity(n);
-    let prompt = Tensor::from_vec(ids[..prefill].to_vec(), &[1, prefill], &Device::Cpu)?;
-    let all = run(prompt, 0, true)?.squeeze(0)?; // [prefill, vocab]
-    for p in 0..prefill {
+    // The prompt before the positions kept is read for its cache only, in
+    // chunks; the positions kept are one forward with logits at every one.
+    let keep = env_usize("LOGITS_PROBE_KEEP_LAST", prefill).clamp(1, prefill);
+    let first_position = prefill - keep;
+    let chunk = env_usize("LOGITS_PROBE_CHUNK", prefill).max(1);
+    let mut pos = 0;
+    while pos < first_position {
+        let end = (pos + chunk).min(first_position);
+        let part = Tensor::from_vec(ids[pos..end].to_vec(), &[1, end - pos], &Device::Cpu)?;
+        run(part, pos, false)?;
+        pos = end;
+    }
+    let mut rows: Vec<Vec<f32>> = Vec::with_capacity(keep + decode);
+    let kept = Tensor::from_vec(
+        ids[first_position..prefill].to_vec(),
+        &[1, keep],
+        &Device::Cpu,
+    )?;
+    let all = run(kept, first_position, true)?.squeeze(0)?; // [keep, vocab]
+    for p in 0..keep {
         rows.push(all.get(p)?.to_dtype(candle_core::DType::F32)?.to_vec1()?);
     }
     for (step, &id) in ids[prefill..].iter().enumerate() {
@@ -132,7 +162,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     let vocab = rows[0].len();
-    let mut bytes = Vec::with_capacity(n * vocab * 4);
+    let mut bytes = Vec::with_capacity(rows.len() * vocab * 4);
     for row in &rows {
         anyhow::ensure!(row.len() == vocab, "position logits differ in length");
         for v in row {
@@ -143,13 +173,15 @@ fn main() -> anyhow::Result<()> {
     std::fs::write(
         out.with_extension("json"),
         serde_json::to_vec(&serde_json::json!({
-            "gguf": gguf, "tokens": ids, "positions": n, "vocab": vocab,
+            "gguf": gguf, "tokens": ids, "positions": rows.len(), "vocab": vocab,
             "prefill": prefill, "decode": decode, "split": split,
+            "first_position": first_position, "chunk": chunk,
         }))?,
     )?;
     println!(
-        "wrote {} ({n} x {vocab})",
-        out.with_extension("f32").display()
+        "wrote {} ({} x {vocab}, from position {first_position})",
+        out.with_extension("f32").display(),
+        rows.len()
     );
     Ok(())
 }

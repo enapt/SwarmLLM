@@ -30,34 +30,40 @@ gguf, prefix = sys.argv[1], sys.argv[2]
 meta = json.load(open(prefix + ".json"))
 ours = np.fromfile(prefix + ".f32", dtype="<f4").reshape(meta["positions"], meta["vocab"])
 tokens = meta["tokens"]
+# The probe may keep only a long prompt's last positions (`LOGITS_PROBE_KEEP_LAST`):
+# its rows are tokens[first:], and the positions are numbered as in the sequence.
+first = meta.get("first_position", 0)
+# N_CTX: llama.cpp's context size. A LongRoPE model (Phi-3.5, Phi-4-mini) picks its
+# rotary factors by it — give it the node's served window, as score_against_reference.py's
+# --n-ctx explains.
+n_ctx = int(os.environ.get("N_CTX", max(64, len(tokens) + 8)))
 
-llm = Llama(model_path=gguf, n_ctx=max(64, len(tokens) + 8), logits_all=True,
+llm = Llama(model_path=gguf, n_ctx=n_ctx, logits_all=True,
             n_gpu_layers=0, n_threads=4, verbose=False)
 llm.eval(tokens)
-ref = np.array(llm.scores[: len(tokens)], dtype=np.float32)
+ref = np.array(llm.scores[first: len(tokens)], dtype=np.float32)
 if ref.shape[1] != ours.shape[1]:
     sys.exit(f"vocab differs: llama.cpp {ref.shape[1]} vs ours {ours.shape[1]}")
+if ref.shape[0] != ours.shape[0]:
+    sys.exit(f"positions differ: llama.cpp {ref.shape[0]} from {first} vs ours {ours.shape[0]}")
 
 cos_min = float(os.environ.get("COS_MIN", "0.999"))
-worst, top1 = 1.0, 0
-for p in range(len(tokens)):
-    a, b = ours[p], ref[p]
+cosines, top1 = [], 0
+for i in range(len(ours)):
+    a, b = ours[i], ref[i]
     cos = float(a @ b / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-30))
-    worst = min(worst, cos)
+    cosines.append(cos)
     same = int(a.argmax()) == int(b.argmax())
     top1 += same
     top5 = len(set(np.argsort(-a)[:5]) & set(np.argsort(-b)[:5]))
+    p = first + i
     phase = "prefill" if p < meta["prefill"] else "decode"
     print(f"pos {p:3d} {phase:7s} cos={cos:.6f} max|d|={np.abs(a - b).max():.4f} "
           f"|ref|max={np.abs(b).max():.3f} top1={'=' if same else 'x'} top5={top5}/5")
-cosines = []
-for p in range(len(tokens)):
-    a, b = ours[p], ref[p]
-    cosines.append(float(a @ b / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-30)))
-outliers = [(p, round(c, 6)) for p, c in enumerate(cosines) if c < cos_min]
+outliers = [(first + i, round(c, 6)) for i, c in enumerate(cosines) if c < cos_min]
 max_outliers = int(os.environ.get("MAX_OUTLIERS", "0"))
-print(f"worst cosine {worst:.6f}, median {float(np.median(cosines)):.6f}, "
-      f"top-1 agreement {top1}/{len(tokens)}, split={meta['split']}, "
+print(f"worst cosine {min(cosines):.6f}, median {float(np.median(cosines)):.6f}, "
+      f"top-1 agreement {top1}/{len(ours)}, split={meta['split']}, "
       f"positions below {cos_min}: {outliers}")
 ok = len(outliers) <= max_outliers
 print("AGREES with llama.cpp" if ok else "DISAGREES with llama.cpp")

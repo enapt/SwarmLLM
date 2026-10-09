@@ -815,6 +815,26 @@ impl QMatMul {
         Self::from_arc(std::sync::Arc::new(qtensor))
     }
 
+    /// Keep this weight's products in f32 where a card's prompt pass would
+    /// accumulate them in f16 (llama.cpp's `GGML_PREC_F32`; SwarmLLM
+    /// FUTURE_WORK #147). Only a quantized weight on a card takes that path, so
+    /// any other is answered `true` unchanged; `false` only for a quantized
+    /// weight someone else also holds, which cannot be changed from here.
+    pub fn accumulate_in_f32(&mut self) -> bool {
+        match self {
+            Self::QTensor(t) => match std::sync::Arc::get_mut(t) {
+                Some(t) => {
+                    if let QStorage::Cuda(s) = &mut t.storage {
+                        s.accumulate_in_f32();
+                    }
+                    true
+                }
+                None => false,
+            },
+            Self::Tensor(_) | Self::TensorF16(_) => true,
+        }
+    }
+
     pub fn dequantize_f16(&self) -> Result<Tensor> {
         match self {
             Self::QTensor(t) => t.dequantize_f16(&t.device()),

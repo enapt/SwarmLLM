@@ -22,6 +22,15 @@ slowed to a crawl. On an 8 GB card, a 15,600-token prompt took 5 minutes; it
 now takes 51 seconds. A prompt that truly does not fit is now turned away at
 once, and in a swarm it goes to another computer instead.
 
+**Long prompts are read faster on graphics cards.** An NVIDIA graphics card
+now adds up the numbers in a prompt in half precision, which is how llama.cpp
+does it, instead of full precision. A 4,000-token prompt is read about 25%
+faster: 1,230 to 1,540 tokens a second for a 7B model on an RTX 3070, and 2,400
+to 2,970 for a 3B. Answers are unchanged: checked against llama.cpp on eight
+model families at 4,000 tokens, the two ways agreed as closely as before. GLM-4
+keeps full precision in the two places llama.cpp keeps it. Writing the reply
+does not go through this step and is not affected.
+
 **Faster replies when another computer runs the middle of a model.** When your
 computer holds the start and the end of a model and another computer runs the
 middle, which is how "Start and finish on this computer" works, guessing ahead

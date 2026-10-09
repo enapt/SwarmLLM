@@ -16,6 +16,8 @@ impl QCudaStorage {
         self.dtype
     }
 
+    pub fn accumulate_in_f32(&mut self) {}
+
     pub fn device(&self) -> &CudaDevice {
         &self.device
     }

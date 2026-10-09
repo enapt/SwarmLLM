@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #245**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #246**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -40,7 +40,7 @@ after v0.3.224 (#160, #215 and #216 closed; #217 and #218 opened from the swarm 
 v0.3.226 (released 2026-10-05), #220 opened from the .225 gate's unrecorded driver resets; #129's fit verdict (idle-model
 reclaim) shipped in v0.3.227 (released 2026-10-05 23:45 UTC); #222 (a node near its storage limit deleting and
 re-fetching parts) and #223 closed in v0.3.228 (released 2026-10-06 09:42 UTC), #224 opened from its gate;
-#225, #226 and #227 opened from a tester's two reports the same day; #117 (Qwen 3.5, dense), #225 and #226 closed in v0.3.229 (released 2026-10-07 00:00 UTC), #228 opened for what Qwen 3.5 leaves out; #129's cold loads (waited for and priced), #228 (2) and (2b), #220 (2), #229, #230 and #231 shipped in v0.3.230 (released 2026-10-07 16:38 UTC), #232 parked from their report; #234, #235, #239 and #240 closed on 2026-10-08 from two tester reports and the card check after them, #236-#238 opened from the second (#236 and #238 closed the same day); #242 and #243 opened and closed the same day from reports #006 (a 1 Mbps cap stored for "Unlimited") and #007 (the narrow-screen model picker); #194 closed on 2026-10-09 (a card keeps its conversation memory as f16, and its memory guard under a context override), #237 re-ranked to P3 from what could be measured; #152 closed the same day (the guess-check stream on the boomerang).
+#225, #226 and #227 opened from a tester's two reports the same day; #117 (Qwen 3.5, dense), #225 and #226 closed in v0.3.229 (released 2026-10-07 00:00 UTC), #228 opened for what Qwen 3.5 leaves out; #129's cold loads (waited for and priced), #228 (2) and (2b), #220 (2), #229, #230 and #231 shipped in v0.3.230 (released 2026-10-07 16:38 UTC), #232 parked from their report; #234, #235, #239 and #240 closed on 2026-10-08 from two tester reports and the card check after them, #236-#238 opened from the second (#236 and #238 closed the same day); #242 and #243 opened and closed the same day from reports #006 (a 1 Mbps cap stored for "Unlimited") and #007 (the narrow-screen model picker); #194 closed on 2026-10-09 (a card keeps its conversation memory as f16, and its memory guard under a context override), #237 re-ranked to P3 from what could be measured; #152 closed the same day (the guess-check stream on the boomerang), and #147 narrowed to P3 (f16 accumulation in a card's prompt pass shipped).
 `docs/plans/` holds the multi-step designs; the entries point at them.
 
 **P0 — wrong answers, silently**
@@ -78,8 +78,9 @@ re-fetching parts) and #223 closed in v0.3.228 (released 2026-10-06 09:42 UTC), 
 9. *(#155 narrowed to P3 on 2026-10-07 — not seen on the swarm, see its entry.)*
 10. *(#194 closed 2026-10-09 — a card keeps its conversation memory as f16, a third of the
     memory, and keeps its memory guard under a context override.)*
-11. **#147**, **#137**, **#138**, **#129** — prompt reading on the card, the processor half of
-    a hybrid, MoE placement, and near-fit models sent across continents
+11. **#137**, **#138**, **#129** — the processor half of a hybrid, MoE placement, and near-fit
+    models sent across continents (#147's f16 accumulation shipped 2026-10-09; its smaller
+    items are P3)
     (`docs/plans/faster_than_local.md`).
 12. **#3**, **#180** — the routing cost model charges a constant where the reply length
     belongs, which keeps partial ranges (load spreading) off.
@@ -804,21 +805,22 @@ Local GPU decode runs at ~97% of llama.cpp (`docs/plans/local_decode_submissions
 is left is prompt reading, the processor half of a hybrid, and MoE placement —
 `docs/plans/faster_than_local.md` § 3 and § 4 carry the order.
 
-#### #147 — Prompt reading on the card leaves ~20% on the table: f16 accumulation is still opt-in
-`P2` · perf-local · **PARTIAL** — 2026-09-29 · history: archive row #147 and § "Prompt reading on the card (#147, 2026-09-29)"
+#### #147 — Prompt reading on the card: the smaller items left after f16 accumulation
+`P3` · perf-local · **PARTIAL** — 2026-10-09 · history: archive row #147 and § "Prompt reading on the card (#147, 2026-09-29)"
 
-Shipped in v0.3.213 (the archive says "not released"): ≥ 64 rows go to f16 dequant + cuBLAS
-(llama.cpp's own rule for a dp4a MMQ) and a prompt alone on the card reads 512 per forward —
-Llama-3.1-8B ~740 → ~1,150 tok/s. `SWARMLLM_QMATMUL_CUBLAS_ACC=16` (f16 accumulation,
-llama.cpp's default) gives ~1,400 and scored the same, but stays opt-in until a card-side
-family check at LONG context (4-8K: Llama, Qwen2.5/3, Gemma-2, Phi, Mistral, GLM, and MoE
-attention) scored with `examples/score_against_reference.py` — the release gate's family
-check runs on the processor and cannot see this path. Read which ops llama.cpp guards with
-`GGML_PREC_F32` first. Smaller items in the archive body: share the f16 activation cast
-across q/k/v and gate/up; remove 8 `ucopy_f32` per layer in the prompt pass; one untraced
-single-row `mul_mat_vec_q4_K` per layer; an int8 tensor-core MMQ port (large). Separately,
-GLM-4-9B disagrees with llama.cpp at a few positions on every path (tokenizer
-re-tokenisation is the lead) — pre-existing.
+Shipped in v0.3.213: ≥ 64 rows go to f16 dequant + cuBLAS (llama.cpp's own rule for a dp4a MMQ)
+and a prompt alone on the card reads 512 per forward — Llama-3.1-8B ~740 → ~1,150 tok/s. On main
+since 2026-10-09: that path ACCUMULATES in f16 (llama.cpp's default; `SWARMLLM_QMATMUL_CUBLAS_ACC=32`
+= all f32), after a card-side check at a 4,096-token context on eight families — median logit
+cosine against llama.cpp moved ≤ 2e-5, every argmax the arms disagreed on a near-tie — with
+llama.cpp's `GGML_PREC_F32` marks copied (`ModelArch::accumulates_outputs_in_f32`: GLM-4's attention
+output and FFN down). `docs/invariants/inference.md` § "A prompt pass on the card multiplies
+quantized weights on the tensor cores". Left, smaller (archive body): share the f16 activation
+cast across q/k/v and gate/up (~1% of a chunk); remove the 8 `ucopy_f32` per layer in the prompt
+pass (~5% by the kernel table); one untraced single-row `mul_mat_vec_q4_K` per layer; an int8
+tensor-core MMQ port (large). Not checked at long context: Qwen 3.5 (reference is llama.cpp master)
+and a MoE model whole on the card (none fits 8 GB). Separately, GLM-4-9B disagrees with llama.cpp
+at a few positions on every path (tokenizer re-tokenisation is the lead) — pre-existing.
 
 #### #137 — A model split between card and processor reads its processor layers at ~17 GB/s, a third of what the memory can do
 `P2` · perf-local · **OPEN** — 2026-09-27 · history: archive row #137; plan: `docs/plans/faster_than_local.md` § 3.3
@@ -1191,6 +1193,19 @@ dashboard control or consent banner exists. Add the toggle with its consent word
 Billing between pools waits on credits, which are dormant (`docs/CREDITS_DESIGN.md`).
 
 ### Packaging, release and operations
+
+#### #245 — CI's `ubuntu-latest` becomes Ubuntu 26 from 2026-10-19
+`P4` · build · **OPEN** — 2026-10-09 · history: GitHub's notice on CI run 37914655701
+
+Every CI job but the release builds (pinned to `ubuntu-22.04` for glibc) runs on `ubuntu-latest`,
+and the feature compile-checks install `cuda-nvcc-12-8` from NVIDIA's `ubuntu2204` repository on
+it — which works on 24.04 and is untested on 26. Pin the runner to `ubuntu-24.04` (what the 14
+required checks pass on today) WITHOUT renaming a job: the matrix jobs' names carry `matrix.os`
+("Test (ubuntu-latest)"), branch protection requires those 14 names, and a renamed job leaves a
+required check that can never report. So add a separate `runner` key to the matrix and keep `os`
+as the name, then read `examples/check_ci_gate.sh` on a COMPLETED run. The single-OS jobs
+(`runs-on: ubuntu-latest`, no OS in the name) can be pinned directly. Before 10-19, or read the
+first run after it by SHA (gotcha #794).
 
 #### #241 — llama-cpp-2 is pinned at 0.1.157; 0.1.158 moved tokenisation onto the vocabulary
 `P4` · build · **OPEN** — 2026-10-08 · history: Dependabot PR #34 (its llama compile-check failed)

@@ -74,7 +74,7 @@ GPU decode is bound by submission COUNT, not bandwidth. Judge a change by launch
 
 ## A prompt pass on the card multiplies quantized weights on the tensor cores (2026-09-29)
 
-Vendored `quantized/cuda.rs::dequantize_matmul` sends ≥ 64 activation rows to `mul_mat_via_f16_cublas` (tensor cores) instead of MMQ; decode never reaches it. `prefill_pacer::CARD_CHUNK_TOKENS` (512) via `prompt_chunk_ceiling`, the ONE answer. Replies may move by a near-tie — judge against llama.cpp, never byte-equality. A/B: `SWARMLLM_QMATMUL_CUBLAS=0`; `SWARMLLM_QMATMUL_CUBLAS_ACC=16` is OPT-IN.
+Vendored `quantized/cuda.rs::dequantize_matmul` sends ≥ 64 activation rows to `mul_mat_via_f16_cublas` (tensor cores) instead of MMQ; decode never reaches it. `prefill_pacer::CARD_CHUNK_TOKENS` (512) via `prompt_chunk_ceiling`, the ONE answer. Replies may move by a near-tie — judge against llama.cpp, never byte-equality. A/B: `SWARMLLM_QMATMUL_CUBLAS=0`. **It accumulates in f16 by default since 2026-10-09** (#147, judged at 4K tokens on eight families), except the weights llama.cpp marks `GGML_PREC_F32`: **`ModelArch::accumulates_outputs_in_f32`** (GLM-4's attention output + FFN down), marked ONCE after load by `layers::accumulate_output_projections_in_f32`. A new arch's marks are read off llama.cpp. `SWARMLLM_QMATMUL_CUBLAS_ACC=32` = all f32; `SWARMLLM_F32_MARKS=0` = no marks.
 
 → `docs/invariants/inference.md` § "A prompt pass on the card multiplies quantized weights on the tensor cores"
 

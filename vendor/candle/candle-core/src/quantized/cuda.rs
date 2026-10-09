@@ -20,6 +20,10 @@ pub struct QCudaStorage {
     data: PaddedCudaSlice,
     dtype: GgmlDType,
     device: CudaDevice,
+    /// This weight's products accumulate in f32 on the f16 cuBLAS path, where
+    /// every other weight's accumulate in f16 — llama.cpp's `GGML_PREC_F32`
+    /// mark, set by [`Self::accumulate_in_f32`] (SwarmLLM FUTURE_WORK #147).
+    accumulate_f32: bool,
 }
 
 static FORCE_DMMV: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -335,6 +339,7 @@ fn mul_mat_via_f16_cublas(
     x_rows: usize,
     x_cols: usize,
     y_cols: usize,
+    f16_accumulate: bool,
     dev: &CudaDevice,
 ) -> Result<CudaStorage> {
     use cudarc::cublas::sys;
@@ -369,10 +374,10 @@ fn mul_mat_via_f16_cublas(
     let blas = dev.cublas_handle();
     let (a, _ga) = w.device_ptr(&stream);
     let (b, _gb) = y16.device_ptr(&stream);
-    if cublas_accumulates_in_f16() {
-        // llama.cpp's own default on NVIDIA (`ggml_cuda_op_mul_mat_cublas`):
-        // f16 accumulate into an f16 result, then widened — twice the tensor
-        // rate of an f32 accumulate on GeForce cards. Opt-in until judged.
+    if f16_accumulate {
+        // llama.cpp's own default on NVIDIA (`ggml_cuda_mul_mat_cublas`): f16
+        // accumulate into an f16 result, then widened — twice the tensor rate
+        // of an f32 accumulate on GeForce cards.
         let mut dst16 = dev.alloc_fully_overwritten::<f16>(x_rows * y_cols)?;
         let alpha = f16::ONE;
         let beta = f16::ZERO;
@@ -443,12 +448,20 @@ fn mul_mat_via_f16_cublas(
     Ok(CudaStorage::wrap_cuda_slice(dst, dev.clone()))
 }
 
-/// `SWARMLLM_QMATMUL_CUBLAS_ACC=16` → [`mul_mat_via_f16_cublas`] accumulates
-/// in f16 as llama.cpp's cuBLAS path does; otherwise in f32. Read once.
+/// [`mul_mat_via_f16_cublas`] accumulates in f16, as llama.cpp's cuBLAS path
+/// does for a quantized weight on any card with fast f16 — except a weight
+/// marked [`QCudaStorage::accumulate_in_f32`]. `SWARMLLM_QMATMUL_CUBLAS_ACC=32`
+/// accumulates every weight in f32 (the A/B arm; the default until
+/// 2026-10-09). Read once.
+///
+/// Judged 2026-10-09 (SwarmLLM FUTURE_WORK #147) on eight families at a
+/// 4,096-token context on an RTX 3070, the prompt's last 128 positions'
+/// logits against llama.cpp's: the median cosine moved by at most 2e-5 and
+/// every argmax the two arms disagreed on was a near-tie (a gap of ≤ 0.29).
 fn cublas_accumulates_in_f16() -> bool {
     static F16: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *F16.get_or_init(|| {
-        std::env::var("SWARMLLM_QMATMUL_CUBLAS_ACC").ok().as_deref() == Some("16")
+        std::env::var("SWARMLLM_QMATMUL_CUBLAS_ACC").ok().as_deref() != Some("32")
     })
 }
 
@@ -918,7 +931,15 @@ impl QCudaStorage {
             },
             device: device.clone(),
             dtype,
+            accumulate_f32: false,
         })
+    }
+
+    /// Keep this weight's products in f32 on the f16 cuBLAS path (llama.cpp's
+    /// `ggml_prec_set_acc(.., GGML_PREC_F32)`), for the weights an
+    /// architecture's numbers do not survive an f16 accumulator in.
+    pub fn accumulate_in_f32(&mut self) {
+        self.accumulate_f32 = true;
     }
 
     pub fn dtype(&self) -> GgmlDType {
@@ -1067,6 +1088,8 @@ impl QCudaStorage {
             },
             dtype: self.dtype,
             device: dev.clone(),
+            // Rows of this weight keep its precision rule.
+            accumulate_f32: self.accumulate_f32,
         })
     }
 
@@ -1293,6 +1316,7 @@ impl QCudaStorage {
                     /* x_rows */ n,
                     /* x_cols */ k,
                     /* y_cols */ b * m,
+                    cublas_accumulates_in_f16() && !self.accumulate_f32,
                     self.device(),
                 )?
             } else {
@@ -1333,6 +1357,7 @@ pub fn load_quantized<T: super::GgmlType + Send + Sync + 'static>(
         },
         device: device.clone(),
         dtype,
+        accumulate_f32: false,
     }))
 }
 

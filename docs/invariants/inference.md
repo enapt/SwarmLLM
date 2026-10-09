@@ -2243,11 +2243,12 @@ tensor-core `mma` — which the vendored kernels do not. llama.cpp's default `n_
 **The rule.**
 - Vendored `quantized/cuda.rs::dequantize_matmul`: ≥ `CUBLAS_MIN_ROWS` (64) rows on a card of
   compute capability ≥ 7.0 → `mul_mat_via_f16_cublas` (`dequantize_f16` kernel → f16 weight;
-  candle's `cast_f32_f16` → f16 activation; `cublasGemmEx`, f32 accumulate, f32 out — MMQ's
+  candle's `cast_f32_f16` → f16 activation; `cublasGemmEx`, f16 accumulate since 2026-10-09 (f32 for a
+  marked weight), f32 out — MMQ's
   layout). The only production caller of `mul_mat_via_q8_1`, so every quantized prompt pass
   passes the check. `SWARMLLM_QMATMUL_CUBLAS=0` = MMQ always; `SWARMLLM_QMATMUL_CUBLAS_MIN_ROWS`
-  moves the threshold for a measurement; `SWARMLLM_QMATMUL_CUBLAS_ACC=16` accumulates in f16
-  (below).
+  moves the threshold for a measurement; `SWARMLLM_QMATMUL_CUBLAS_ACC=32` accumulates every weight
+  in f32 (below).
 - `prefill_pacer::prompt_chunk_ceiling(configured, on_card)` — the configured ceiling, raised to
   `CARD_CHUNK_TOKENS` (512) on a model that runs ENTIRELY on the card. Read by the batched
   table for a prompt with nobody waiting (`PrefillPacer::chunk_size_for`; while chats share the
@@ -2298,12 +2299,36 @@ node stopped, SINGLE requests; unique prompts, `max_tokens` 1, best of 3;
 - ⚠ Llama-3.x replies change across midnight: its template writes today's date. Compare runs on
   the same day, or a family whose template has none (Qwen: byte-identical across runs).
 
-**Why f16 accumulate stays opt-in.** It is llama.cpp's default in that path and 15-23% faster
-again, and it scored the same on the families above — but its failure is an overflow or a lost
-low bit turning into a silently wrong reply on some model or long prompt, three short prompts
-per family cannot rule that out, and the release gate's family check runs on the processor
-(`gpu_layers = 0`), so it cannot see this path at all. Flip it after a card-side family check at
-long context (FUTURE_WORK #147).
+**f16 accumulate is the default since 2026-10-09 (FUTURE_WORK #147), with llama.cpp's f32
+marks.** It stayed opt-in until a card-side check at LONG context, since its failure (an overflow
+or a lost low bit) would be a silently wrong reply that three short prompts could not rule out,
+and the release gate's family check runs on the processor. The check
+(`~/swarmllm-147/acc.sh`, `examples/logits_reference_probe.rs` with `LOGITS_PROBE_CHUNK=512
+LOGITS_PROBE_KEEP_LAST=128`, `compare_logits_reference.py`'s per-arm reading): a 4,096-token
+natural-text prompt read on the card in 512-token chunks, the last 128 prompt positions' logits
+and 8 decode steps against llama.cpp on the processor, f32 and f16 accumulate in ONE binary.
+Median cosine / top-1 of 128, f32 → f16: Qwen3-1.7B 0.999838/126 → 0.999832/124, Llama-3.2-3B
+0.999648/126 → 0.999644/123, Gemma-2-2B 0.999585/124 → 0.999579/124, Qwen2.5-Coder-7B
+0.999782/126 → 0.999773/127, Mistral-7B 0.999902/127 → 0.999901/127, Phi-3.5 0.999992/125 →
+0.999991/124, Phi-4-mini 0.999987/123 → 0.999984/116, GLM-4-9B 0.999516/126 → 0.999496/125;
+decode rows agree in every arm. Wherever the two arms' argmax differ, the f32 arm's own gap
+between the two picks is ≤ 0.29 (Phi-4-mini's seven: 0.018-0.291) — near-ties, the precision
+llama.cpp itself trades on every card. GLM-4's arms differed most from EACH OTHER (worst cosine
+0.99956, against ≥ 0.99985 for every other family), which is llama.cpp's own reason: it marks
+GLM4 / GLM4_MOE / JAIS2's `ffn_down` and attention `wo` `GGML_PREC_F32` ("numerical issues with
+half-precision accumulators", `src/llama-graph.cpp` master 4b1a27f), as it does KQ and flash
+attention (ours accumulate in f32 already and never take this path) and two MoE ops of models
+we do not run. So `ModelArch::accumulates_outputs_in_f32` (GLM-4) has the loader mark those two
+projections once every layer is built (`layers::accumulate_output_projections_in_f32`; the
+storage flag `QCudaStorage::accumulate_in_f32` is read by `dequantize_matmul`). Verified on the
+card (`~/swarmllm-147/glm.sh`, `SWARMLLM_F32_MARKS=0` the unmarked arm): `marked=80 missed=0`
+(40 layers × 2); the marks change the result (marked vs unmarked median cosine 0.999976, one
+argmax), but on this text bring it no closer to all-f32 (median 0.999985 vs 0.999982) — the rest
+of the difference is the other projections'. llama.cpp's guard is against GLM-4 inputs whose
+products leave f16's range, which this text does not reach; the marks are kept as its rule, at
+the cost of two of seven projections per GLM-4 layer at the slower accumulate. Not covered:
+Qwen 3.5 (its reference is llama.cpp master, not llama-cpp-python) and a MoE model whole on the
+card (none fits 8 GB).
 
 **What a change must keep.**
 - The threshold is about the KERNEL, not the model: a future int8-`mma` MMQ would move it, as it
@@ -2311,12 +2336,16 @@ long context (FUTURE_WORK #147).
 - A card without fp16 tensor cores (< 7.0) keeps MMQ.
 - Decode (≤ 8 rows) never takes it; batched decode stays on the vec kernel.
 - Replies are judged against llama.cpp, never byte-equality with MMQ.
+- **A new architecture's f32 marks are read off llama.cpp** (`ggml_prec_set_acc` in
+  `src/llama-graph.cpp`) into `ModelArch::accumulates_outputs_in_f32`, never inferred — and
+  checked with the 4K probe above in both arms, since a mark llama.cpp has and we lack is a
+  silent overflow on that family only.
 
 **From the rules file (moved 2026-10-02):**
 
 **Vendored `quantized/cuda.rs::dequantize_matmul` sends ≥ 64 activation rows to
 `mul_mat_via_f16_cublas`** — weight dequantized to f16, activation cast to f16,
-one `cublasGemmEx` accumulating in f32 — instead of the MMQ kernel, which is
+one `cublasGemmEx` accumulating in f16 (f32 for a weight marked `accumulate_in_f32`) — instead of the MMQ kernel, which is
 llama.cpp's OLD dp4a one with no tensor cores. llama.cpp's own rule for a dp4a
 MMQ on a card with fp16 tensor cores (`MMQ_DP4A_MAX_BATCH_SIZE` = 64). Decode
 never reaches it. **And a prompt alone on an all-card model reads in chunks of
@@ -2324,8 +2353,8 @@ never reaches it. **And a prompt alone on an all-card model reads in chunks of
 answer, for the batched table, a segment's prompt pass and the drafter.
 Replies MAY move by a near-tie against MMQ (8-bit vs f16 activations): judge
 them against llama.cpp, never byte-equality. A/B: `SWARMLLM_QMATMUL_CUBLAS=0`;
-`SWARMLLM_QMATMUL_CUBLAS_ACC=16` (f16 accumulate, llama.cpp's default) is
-faster still and OPT-IN until a card-side family check at long context. The f16
+`SWARMLLM_QMATMUL_CUBLAS_ACC=32` accumulates every weight in f32 (the default
+until 2026-10-09). The f16
 path does not share its activation cast across q/k/v or gate/up (3 extra casts
 per layer, ~1% of a chunk) — the third quantized path the sharing rule above
 would name.

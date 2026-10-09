@@ -86,6 +86,22 @@ impl ModelArch {
         )
     }
 
+    /// Whether a card keeps this architecture's attention output and
+    /// feed-forward down projections accumulating in f32 in a prompt pass,
+    /// where every other quantized product accumulates in f16 (FUTURE_WORK
+    /// #147; `layers::accumulate_output_projections_in_f32`).
+    ///
+    /// **Read off llama.cpp, arch by arch** (`src/llama-graph.cpp`, master
+    /// 4b1a27f, 2026-09-25): `ggml_prec_set_acc(cur, GGML_PREC_F32)` on
+    /// `ffn_down` and on `wo` for `LLM_ARCH_GLM4`, `GLM4_MOE` and `JAIS2` —
+    /// "seem to have numerical issues with half-precision accumulators". Of
+    /// those, GLM-4 is the one that runs here. Its two arms already differed
+    /// more than any other family's in the 4K check (worst cosine between them
+    /// 0.99956 against ≥ 0.99985).
+    pub(crate) fn accumulates_outputs_in_f32(&self) -> bool {
+        matches!(self, ModelArch::Glm4)
+    }
+
     /// Default activation function for this architecture's MLP.
     pub(crate) fn default_activation(&self) -> Activation {
         match self {

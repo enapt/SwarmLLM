@@ -71,6 +71,18 @@ impl QMatMul {
         })
     }
 
+    /// Keep this projection's products in f32 where a card's prompt pass
+    /// accumulates in f16 ([`accumulate_output_projections_in_f32`]). `false`
+    /// when the weight is shared and could not be marked.
+    pub(crate) fn accumulate_in_f32(&mut self) -> bool {
+        match &mut self.inner {
+            QMatMulInner::Standard(q) => q.accumulate_in_f32(),
+            QMatMulInner::FusedSlice { fused, .. } => {
+                std::sync::Arc::get_mut(fused).is_some_and(|q| q.accumulate_in_f32())
+            }
+        }
+    }
+
     /// Over a plain (already dequantized) weight matrix, `[out, in]`.
     #[cfg(test)]
     pub(crate) fn from_dense(weight: Tensor) -> Self {
@@ -1147,6 +1159,32 @@ pub(crate) struct SsmState {
 pub(crate) enum FfnVariant {
     Dense(Mlp),
     MoE(MoeFfn),
+}
+
+/// Mark every dense layer's attention output and feed-forward down
+/// projection to accumulate in f32 on a card, for an architecture that asks
+/// (`ModelArch::accumulates_outputs_in_f32`). Asked ONCE, by the loader, after
+/// every layer is built — the projections are made at ten sites across the
+/// architectures' branches, and a mark at each would be the one a new branch
+/// forgets. Answers (marked, could not be marked).
+pub(crate) fn accumulate_output_projections_in_f32(layers: &mut [LayerVariant]) -> (usize, usize) {
+    let (mut marked, mut missed) = (0, 0);
+    for layer in layers {
+        if let LayerVariant::Dense(w) = layer {
+            let mut projections = vec![&mut w.attention_wo];
+            if let FfnVariant::Dense(mlp) = &mut w.ffn {
+                projections.push(&mut mlp.ffn_down);
+            }
+            for p in projections {
+                if p.accumulate_in_f32() {
+                    marked += 1;
+                } else {
+                    missed += 1;
+                }
+            }
+        }
+    }
+    (marked, missed)
 }
 
 /// Extra metadata for DeepSeek-V2/V3 MoE+MLA models.
@@ -3119,6 +3157,26 @@ mod batched_attention_tests {
             skip_rope: false,
             qk_rms_norm_after_rope: None,
         }
+    }
+
+    /// Both output projections of every dense layer are marked for an f32
+    /// accumulator, and a quantized weight someone else also holds is counted
+    /// as missed — never silently left on f16 (FUTURE_WORK #147).
+    #[test]
+    fn every_dense_layers_output_projections_are_marked_for_an_f32_accumulator() {
+        let dev = Device::Cpu;
+        let mut layers = vec![
+            LayerVariant::Dense(test_layer_weights(2, 1, 32, &dev)),
+            LayerVariant::Dense(test_layer_weights(2, 1, 32, &dev)),
+        ];
+        assert_eq!(accumulate_output_projections_in_f32(&mut layers), (4, 0));
+
+        let w = Tensor::randn(0f32, 0.02, (64, 64), &dev).unwrap();
+        let shared = std::sync::Arc::new(QTensor::quantize(&w, GgmlDType::Q8_0).unwrap());
+        let mut layer = test_layer_weights(2, 1, 32, &dev);
+        layer.attention_wo = QMatMul::from_arc(shared.clone()).unwrap();
+        let mut layers = vec![LayerVariant::Dense(layer)];
+        assert_eq!(accumulate_output_projections_in_f32(&mut layers), (1, 1));
     }
 
     /// A model whose rotary width is narrower than its head dimension must
