@@ -696,12 +696,9 @@ impl PoolManager {
             .map(|g| g.vram_total_mb)
             .unwrap_or(0);
 
-        // RAM: use sysinfo (blocking but lightweight)
-        let ram_mb = tokio::task::block_in_place(|| {
-            let mut sys = sysinfo::System::new();
-            sys.refresh_memory();
-            sys.total_memory() / (1024 * 1024)
-        });
+        // RAM as this node may use it (blocking but lightweight).
+        let ram_mb =
+            tokio::task::block_in_place(|| crate::daemon::machine_memory::machine_memory_mb().0);
 
         // Count hosted shards and collect model names
         let my_node_id = self.shared_state.identity.node_id();

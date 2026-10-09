@@ -2203,12 +2203,13 @@ pub(crate) fn detect_hardware(shared_state: &crate::daemon::SharedState) -> serd
     watched.extend(worker_pids.iter().copied());
 
     let mut sys = System::new();
-    sys.refresh_memory();
     sys.refresh_cpu_list(sysinfo::CpuRefreshKind::nothing());
     sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&watched), true);
 
-    let total_ram_mb = sys.total_memory() / (1024 * 1024);
-    let used_ram_mb = sys.used_memory() / (1024 * 1024);
+    // The machine as this node may use it — a container's limit, not the
+    // host's (`daemon::machine_memory`).
+    let (total_ram_mb, available_ram_mb) = crate::daemon::machine_memory::machine_memory_mb();
+    let used_ram_mb = total_ram_mb.saturating_sub(available_ram_mb);
 
     // Through `process_memory`, because `sysinfo`'s single reading is not the
     // whole answer on every platform: on macOS it reported 13 MB for a worker

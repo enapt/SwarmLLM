@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #247**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #248**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -1579,7 +1579,16 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-09, after the v0.3.232 tag (next release)** (#69)
+**Closed 2026-10-09, after the v0.3.232 tag (next release)** (#69, #247)
+- #247 — a node in a memory-limited container planned against the HOST's memory (opened and closed
+  2026-10-09, found while making #162 b's rig deterministic). Five places read machine memory through
+  `sysinfo`, which is `/proc/meminfo` — the host's figures inside a container too — so a node under
+  `docker run --memory=4g` or a Kubernetes limit planned, advertised and admitted against the whole
+  host and left the fit to the OOM killer. `daemon::machine_memory` is now the one reader: the host's
+  figures under the tightest limit on this process's cgroup or an ancestor, available = limit less the
+  WORKING SET (cAdvisor's figure; `sysinfo`'s cgroup "free" counts page cache). Guard
+  `machine_memory_is_read_in_one_place`. Measured: under the cargo shim's 10 GiB slice a node reads
+  10,240 MB total, the host 15,991. `docs/invariants/memory.md` § "Machine memory is read in one place".
 - #69 — panels read a failed load as "there is nothing here". The `load*` helpers in `data.js`
   now return the cache, so a failed load answers with the last good value (TanStack Query's
   refetch-error result) and `loadReachedDaemon` says it failed; the cache's one writer is

@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+**Fixed: a node in a memory-limited container planned against the whole machine.** When
+SwarmLLM ran in a container with a memory limit (`docker run --memory=…`, or a Kubernetes
+limit), it counted the host computer's memory instead of the container's. It would take on
+models and conversations the container could not hold, and the system would stop the node
+instead of the node saying no. It now reads its container's limit, and the memory it shows,
+offers and admits against stay inside it. Nodes outside a container are not affected.
+
 **A model split across computers no longer re-reads the whole conversation every turn.**
 Coding agents send the entire conversation again with each message, and when a model was
 split across computers, every computer in the split read all of it again, every turn. Each

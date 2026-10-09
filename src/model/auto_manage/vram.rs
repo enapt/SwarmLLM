@@ -1400,15 +1400,11 @@ pub fn compute_ram_budget(shared: &crate::daemon::SharedState) -> Option<(u64, S
     Some((b.cap_mb, b.cap_source()))
 }
 
-/// Machine memory right now: `(total_mb, available_mb)`. Reads `/proc/meminfo`
-/// (or the platform equivalent); cheap enough to call at every admission.
+/// Machine memory right now: `(total_mb, available_mb)`, as this process may
+/// use it — a container's limit included (`daemon::machine_memory`). Cheap
+/// enough to call at every admission.
 pub fn system_memory_mb() -> (u64, u64) {
-    let mut sys = sysinfo::System::new();
-    sys.refresh_memory();
-    (
-        sys.total_memory() / (1024 * 1024),
-        sys.available_memory() / (1024 * 1024),
-    )
+    crate::daemon::machine_memory::machine_memory_mb()
 }
 
 /// The live RAM budget: the cap from the CURRENT config (so a Settings change

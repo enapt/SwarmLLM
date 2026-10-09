@@ -12427,3 +12427,85 @@ fn the_upnp_guard_catches_the_release_without_the_backoff() {
         "libp2p v0.56.0\nlibp2p-upnp v0.5.0\nlibp2p-upnp v0.6.0\nlibp2p-upnp v0.10.1 (*)\n";
     assert_eq!(upnp_versions_without_the_backoff(planted), vec!["0.5.0"]);
 }
+
+/// Machine memory is read in ONE place: `daemon::machine_memory`.
+///
+/// Five places read it — the planner's RAM budget, the worker's admission,
+/// the health monitor's advertisement, the stats API and the pool's device
+/// stats — and each called `sysinfo` itself, so none saw a container's memory
+/// limit: a node in a 4 GB container planned, advertised and admitted against
+/// the whole host. Three readers that disagreed also left the release gate's
+/// failover step at the mercy of the machine's free RAM (FUTURE_WORK #162 b).
+/// A sixth reader calling `sysinfo` directly would bring both back.
+#[test]
+fn machine_memory_is_read_in_one_place() {
+    let root = repo_root();
+    let files: Vec<(String, String)> = rust_files_under(&root.join("src"))
+        .into_iter()
+        .map(|p| {
+            let rel = p
+                .strip_prefix(&root)
+                .unwrap_or(&p)
+                .to_string_lossy()
+                .replace('\\', "/");
+            (rel, std::fs::read_to_string(&p).unwrap_or_default())
+        })
+        .collect();
+    let offenders = machine_memory_reads_outside_the_reader(&files);
+    assert!(
+        offenders.is_empty(),
+        "machine memory read outside `daemon::machine_memory` — call \
+         `machine_memory()` / `machine_memory_mb()` instead, so a container's \
+         limit is honoured everywhere:\n  {}",
+        offenders.join("\n  ")
+    );
+}
+
+/// Every statement outside `src/daemon/machine_memory.rs` reading the
+/// machine's memory through `sysinfo`.
+fn machine_memory_reads_outside_the_reader(files: &[(String, String)]) -> Vec<String> {
+    const READS: [&str; 5] = [
+        ".total_memory()",
+        ".available_memory()",
+        ".used_memory()",
+        ".free_memory()",
+        ".cgroup_limits()",
+    ];
+    let mut out = Vec::new();
+    for (path, src) in files {
+        if path.ends_with("src/daemon/machine_memory.rs") {
+            continue;
+        }
+        for (line, st) in statements(src) {
+            if READS.iter().any(|r| st.contains(r)) {
+                out.push(format!("{path}:{line}: {st}"));
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn the_machine_memory_guard_sees_a_reader_rustfmt_has_wrapped() {
+    let planted = vec![
+        (
+            "src/model/x.rs".to_string(),
+            "fn f() {\n    let t = sys\n        .total_memory() / 1024;\n}\n".to_string(),
+        ),
+        (
+            "src/api/y.rs".to_string(),
+            "fn g() { let a = s.available_memory(); }\n".to_string(),
+        ),
+        (
+            "src/daemon/machine_memory.rs".to_string(),
+            "fn h() { let a = s.available_memory(); }\n".to_string(),
+        ),
+        (
+            "src/api/z.rs".to_string(),
+            "fn k() { let m = p.memory(); }\n".to_string(),
+        ),
+    ];
+    let found = machine_memory_reads_outside_the_reader(&planted);
+    assert_eq!(found.len(), 2, "{found:?}");
+    assert!(found[0].starts_with("src/model/x.rs") && found[1].starts_with("src/api/y.rs"));
+}

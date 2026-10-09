@@ -907,10 +907,8 @@ impl HealthMonitor {
         let data_dir = self.shared_state.config.node.data_dir.clone();
         let (ram_total_mb, ram_available_mb, disk_available_mb) =
             tokio::task::spawn_blocking(move || {
-                let mut sys = sysinfo::System::new();
-                sys.refresh_memory();
-                let ram_total = sys.total_memory() / (1024 * 1024);
-                let ram_avail = sys.available_memory() / (1024 * 1024);
+                let (ram_total, ram_avail) =
+                    crate::daemon::machine_memory::machine_memory_mb();
 
                 let disks = sysinfo::Disks::new_with_refreshed_list();
                 let disk_avail: u64 = disks

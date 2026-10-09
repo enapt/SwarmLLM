@@ -317,7 +317,10 @@ const SYSTEM_MEMORY_TTL: std::time::Duration = std::time::Duration::from_millis(
 /// `(available, total)` bytes of system memory, or `None` if unreadable.
 ///
 /// `available`, not `free`: reclaimable page cache is memory this process can
-/// have, and reading `free` would make a healthy machine look exhausted.
+/// have, and reading `free` would make a healthy machine look exhausted. Read
+/// through `daemon::machine_memory`, so a worker in a container admits against
+/// the container's limit — the one figure the planner and the advertisement
+/// read too.
 fn system_free_and_total_bytes() -> Option<(u64, u64)> {
     use std::sync::Mutex;
     static CACHE: Mutex<Option<(std::time::Instant, u64, u64)>> = Mutex::new(None);
@@ -329,13 +332,8 @@ fn system_free_and_total_bytes() -> Option<(u64, u64)> {
             return Some((free, total));
         }
     }
-    let mut sys = sysinfo::System::new();
-    sys.refresh_memory();
-    let total = sys.total_memory();
-    let free = sys.available_memory();
-    if total == 0 {
-        return None;
-    }
+    let m = crate::daemon::machine_memory::machine_memory()?;
+    let (free, total) = (m.available_bytes, m.total_bytes);
     *guard = Some((std::time::Instant::now(), free, total));
     Some((free, total))
 }

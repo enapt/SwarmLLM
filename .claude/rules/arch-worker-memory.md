@@ -118,6 +118,12 @@ The loader records the card's KV budget with or without `inference.max_seq_len_o
 
 → `docs/invariants/memory.md` § "A card that stalls is given less work (2026-09-28)"
 
+## Machine memory is read in one place, under the cgroup's limit (2026-10-09)
+
+**`daemon::machine_memory::machine_memory()`** is the only reading of how much memory this process may use — host figures under its cgroup's limit (a container's `--memory`, a systemd `MemoryMax`), available = limit less the WORKING SET (`memory.current` − `inactive_file`), never `sysinfo`'s cgroup "free" (page cache would read as full). Guard: `machine_memory_is_read_in_one_place`.
+
+→ `docs/invariants/memory.md` § "Machine memory is read in one place, and a container's limit counts"
+
 ## A card's memory pool keeps what the worker frees, until the worker is idle (2026-09-28)
 
 **`split::loader::load_device` is the one place a worker picks the card** and raises the pool release threshold (`cuda_pool::keep_freed_memory`); `model_worker::run_worker` trims after `cuda_pool::IDLE_TRIM`. Any "free for this process" reading adds `cuda_pool::reusable_bytes`. Guard: `every_split_model_reaches_the_card_through_load_device`; A/B `SWARMLLM_CUDA_POOL_KEEP=0`.

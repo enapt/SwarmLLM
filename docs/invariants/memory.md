@@ -2464,3 +2464,45 @@ the coordinator may resume from next turn. A growing conversation keeps ONE
 entry (a chain the new one extends is dropped), as on the token path. A model
 with a recurrent state (Qwen 3.5's DeltaNet) stores nothing: its state cannot be
 cut at a block boundary.
+
+## Machine memory is read in one place, and a container's limit counts (2026-10-09)
+
+`daemon::machine_memory::machine_memory()` is the one reading of how much memory this process
+may use — the planner's RAM budget (`vram::system_memory_mb`), the worker's admission
+(`kv_budget::system_free_and_total_bytes`), the health monitor's advertisement, the stats API and
+the pool's device stats all read it. Guard: `machine_memory_is_read_in_one_place` (+ its
+planted self-test).
+
+**What it replaced.** Each of the five called `sysinfo` itself, and `sysinfo`'s total and
+available memory are `/proc/meminfo` — the HOST's figures, inside a container too. A node run
+with `docker run --memory=4g`, or under a Kubernetes limit, planned, advertised and admitted
+against the whole host, and the kernel's OOM killer, not the node, decided what did not fit. The
+JVM has read its container's limit since JDK 10 (`-XX:+UseContainerSupport`) for this reason;
+.NET and Node.js do too. Three of the readers disagreeing was also half of why the release
+gate's failover step depended on the machine's free RAM (FUTURE_WORK #162 b).
+
+**How it reads the limit.** Its own cgroup from `/proc/self/cgroup` (v2 `0::/path`, v1 the
+`memory` controller's line), then every ancestor up to the mount's root, keeping the limit that
+leaves the least room — a slice's limit binds the scope inside it. Inside a container with its
+own cgroup namespace the path is `/`, and the mount's root is the container's cgroup. A limit at
+or above the host's total is none (v1's ~2^63, the host's own root, which in v2 has no
+`memory.max`).
+
+**Available under a limit is the limit less the WORKING SET** — `memory.current` less
+`inactive_file` (v1: `usage_in_bytes` less `total_inactive_file`), cAdvisor's figure and the
+kubelet's eviction signal — and then the tighter of that and the host's `MemAvailable`.
+`sysinfo::System::cgroup_limits` was NOT used: its free figure is limit less `memory.current`,
+which counts page cache, so a node that had just read a model file would have looked full and
+refused work — the false-refusal side of gotcha #440.
+
+**Measured on this machine (WSL2, cgroup v2)**: a test under the cargo shim's `build.slice`
+(10 GiB `memory.max` on the slice, none on the scope) read total 10,240 MB, available 7,540 MB,
+while the host read 15,991 / 12,423. The live node's own scope has no limit and reads the host.
+
+**What a change must keep.**
+- A new reader of machine memory calls `machine_memory()`; never `sysinfo`'s memory methods.
+- A node started inside a capped scope now SEES the cap: a gate or rig that restarts the live
+  node uses `systemd-run --user --scope`, or the node plans against the rig's limit
+  (`memory/open_cautions.md` 10-09 17:40Z).
+- Process RSS (`api::process_memory::resident_bytes`) is a different question — what a process
+  holds, not what the machine allows — and stays where it is.
