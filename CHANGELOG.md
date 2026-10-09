@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.3.232-alpha] — 2026-10-09
 
 **Faster, roomier long conversations on graphics cards.** A conversation's
 memory on the graphics card now takes a third of the space it did. It is kept
