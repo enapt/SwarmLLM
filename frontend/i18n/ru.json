@@ -779,6 +779,7 @@
   "netstatus.shard_one": "локальная часть модели",
   "netstatus.shard_other": "локальных частей модели",
   "netstatus.solo": "В одиночку — компьютеров пока нет",
+  "netstatus.unreachable": "Не отвечает",
   "network.connect_desc": "Вставьте адрес другого пользователя для подключения ваших компьютеров",
   "network.map_loading": "Обнаружение сети...",
   "network.my_address_aria": "Ваш адрес в рое",

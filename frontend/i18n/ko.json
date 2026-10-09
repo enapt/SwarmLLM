@@ -779,6 +779,7 @@
   "netstatus.shard_one": "개의 로컬 모델 조각",
   "netstatus.shard_other": "개의 로컬 모델 조각",
   "netstatus.solo": "단독 — 아직 컴퓨터 없음",
+  "netstatus.unreachable": "응답 없음",
   "network.connect_desc": "다른 사용자의 주소를 붙여넣어 컴퓨터를 연결하세요",
   "network.map_loading": "네트워크 검색 중...",
   "network.my_address_aria": "내 스웜 주소",

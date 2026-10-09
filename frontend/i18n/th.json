@@ -779,6 +779,7 @@
   "netstatus.shard_one": "ส่วนของโมเดลในเครื่อง",
   "netstatus.shard_other": "ส่วนของโมเดลในเครื่อง",
   "netstatus.solo": "เดี่ยว — ยังไม่มีคอมพิวเตอร์",
+  "netstatus.unreachable": "ไม่ตอบสนอง",
   "network.connect_desc": "วางที่อยู่จากผู้ใช้อื่นเพื่อเชื่อมต่อคอมพิวเตอร์ของคุณ",
   "network.map_loading": "กำลังค้นหาเครือข่าย...",
   "network.my_address_aria": "ที่อยู่กลุ่มเครือข่ายของคุณ",

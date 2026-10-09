@@ -123,21 +123,17 @@
 
     load: async function () {
       try {
-        // Get our node ID for owner detection
-        if (!this._myNodeId) {
-          var statsResult = await App.data.loadStats();
-          if (statsResult && statsResult.stats) {
-            this._myNodeId = statsResult.stats.node_id || null;
-          }
-        }
-
         var resp = await App.authFetch('/api/pool/state');
         if (!resp.ok) return;
         var data = await resp.json();
         this._poolState = data;
+        // Who we are, and whether the pool is ours, come with the pool state.
+        // Taken from a separate stats load, a failed one left the id `null`
+        // and showed the owner their own pool as a member (#69).
+        this._myNodeId = data.node_id || null;
 
         if (data.in_pool) {
-          this._isOwner = data.pool_id === this._myNodeId;
+          this._isOwner = !!data.is_owner;
           this._privateMode = !!data.private_mode;
           this.renderActivePool(data);
           this.updatePrivateModeUI();
@@ -487,7 +483,7 @@
       var banner = document.getElementById('slave-top-banner');
       if (!banner) return;
 
-      var isSlave = data && data.in_pool && this._myNodeId !== null && data.pool_id !== this._myNodeId;
+      var isSlave = data && data.in_pool && data.is_owner === false;
       if (isSlave) {
         banner.classList.add('visible');
         // Update banner text with owner info

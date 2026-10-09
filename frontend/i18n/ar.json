@@ -779,6 +779,7 @@
   "netstatus.shard_one": "جزء نموذج محلي",
   "netstatus.shard_other": "أجزاء نماذج محلية",
   "netstatus.solo": "منفرد — لا نظراء بعد",
+  "netstatus.unreachable": "لا يستجيب",
   "network.connect_desc": "الصق عنوان مستخدم آخر لتوصيل حواسيبك",
   "network.map_loading": "اكتشاف الشبكة...",
   "network.my_address_aria": "عنوانك في السرب",

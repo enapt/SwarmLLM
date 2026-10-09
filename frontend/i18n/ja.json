@@ -779,6 +779,7 @@
   "netstatus.shard_one": "個のローカルモデル部品",
   "netstatus.shard_other": "個のローカルモデル部品",
   "netstatus.solo": "単独 — コンピューターはまだありません",
+  "netstatus.unreachable": "応答なし",
   "network.connect_desc": "他のユーザーのアドレスを貼り付けてコンピューターを接続",
   "network.map_loading": "ネットワークを探索中...",
   "network.my_address_aria": "あなたのスウォームのアドレス",

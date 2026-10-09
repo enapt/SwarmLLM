@@ -779,6 +779,7 @@
   "netstatus.shard_one": "parte di modello locale",
   "netstatus.shard_other": "parti di modello locali",
   "netstatus.solo": "Da solo — ancora nessun computer",
+  "netstatus.unreachable": "Non risponde",
   "network.connect_desc": "Incolla un indirizzo da un altro utente per connettere i vostri computer",
   "network.map_loading": "Scoperta della rete in corso...",
   "network.my_address_aria": "Il tuo indirizzo dello sciame",

@@ -779,6 +779,7 @@
   "netstatus.shard_one": "lokaal modelonderdeel",
   "netstatus.shard_other": "lokale modelonderdelen",
   "netstatus.solo": "Alleen — nog geen computers",
+  "netstatus.unreachable": "Reageert niet",
   "network.connect_desc": "Plak een adres van een andere gebruiker om je computers te verbinden",
   "network.map_loading": "Netwerk ontdekken...",
   "network.my_address_aria": "Jouw zwermadres",

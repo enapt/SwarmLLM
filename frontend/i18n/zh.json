@@ -779,6 +779,7 @@
   "netstatus.shard_one": "个本地模型分片",
   "netstatus.shard_other": "个本地模型分片",
   "netstatus.solo": "单机 — 暂无电脑",
+  "netstatus.unreachable": "无响应",
   "network.connect_desc": "粘贴来自另一位用户的地址以连接电脑",
   "network.map_loading": "正在发现网络...",
   "network.my_address_aria": "你的集群地址",

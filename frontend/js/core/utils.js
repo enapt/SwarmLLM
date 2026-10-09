@@ -439,7 +439,10 @@
     // two do not, and only the user can act on them.
     var why = document.createElement('div');
     why.className = 'chat-empty-hint text-sm';
-    if (!stats) {
+    if (!stats && App.data && !App.data.loadReachedDaemon('stats')) {
+      // Not "still looking": the page could not ask its own node (#69).
+      why.textContent = I18n.t('errors.server_unreachable');
+    } else if (!stats) {
       why.textContent = I18n.t('reference.cold_start_connecting');
     } else if (peers === 0) {
       why.textContent = I18n.t('reference.cold_start_no_peers');

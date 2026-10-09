@@ -779,6 +779,7 @@
   "netstatus.shard_one": "lokalna część modelu",
   "netstatus.shard_other": "lokalnych części modelu",
   "netstatus.solo": "Samodzielnie — brak komputerów",
+  "netstatus.unreachable": "Nie odpowiada",
   "network.connect_desc": "Wklej adres innego użytkownika, aby połączyć komputery",
   "network.map_loading": "Odkrywanie sieci...",
   "network.my_address_aria": "Twój adres w roju",

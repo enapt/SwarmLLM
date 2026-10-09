@@ -524,11 +524,9 @@
           // this merge, REST-only fields (the /api/admin/stats response
           // body, fetched once by loadStats) were the only thing in
           // the cache and WS-only fields (wishlist, swarm_capacity)
-          // were silently missing.
-          if (App.data) {
-            App.data.cache = App.data.cache || {};
-            App.data.cache.stats = Object.assign(App.data.cache.stats || {}, msg.data);
-          }
+          // were silently missing. Through `acceptPushed`, so a tick also
+          // counts as the daemon answering.
+          if (App.data) App.data.acceptPushed('stats', msg.data, true);
           // Download activity logging is handled by activity_event messages —
           // stats_update only drives UI progress bars and data refreshes.
           App.dashboard.updateStats(msg.data);
@@ -559,7 +557,7 @@
         } else if (msg.type === 'update_available') {
           showUpdateBanner(msg.data);
         } else if (msg.type === 'peer_list') {
-          App.dashboard.renderPeers((msg.data && msg.data.peers) || []);
+          App.dashboard.renderPeers(App.data.acceptPushed('peers', (msg.data && msg.data.peers) || []));
         } else if (msg.type === 'activity_event') {
           _handleActivityEvent(msg.data || {});
         } else if (msg.type === 'models_changed') {
@@ -568,7 +566,6 @@
           _modelsChangedTimer = setTimeout(function() {
             App.data.invalidateDedup('models');
             App.data.invalidateDedup('providers');
-            App.data.cache.cloudModels = [];
             App.models.load();
             App.networkStatus.load();
           }, 1000);
@@ -579,11 +576,12 @@
     S.ws.onclose = function() {
       
       if (typeof NeuralBg !== 'undefined') NeuralBg.setHealth(0.3);
+      // The peer list and count stay as they were: the banner says the page
+      // lost its node, and blanking them claimed instead that the node had lost
+      // its peers — "No other computers connected yet. Share your Swarm
+      // Address…", advice about a swarm the page could no longer see (#69).
       if (S.wsWasConnected) {
         showWsBanner('disconnected', I18n.t('errors.connection_lost'));
-        var peersEl = document.getElementById('stat-peers');
-        if (peersEl) peersEl.textContent = '0';
-        App.dashboard.renderPeers([]);
       }
       startPolling();
       scheduleReconnect();

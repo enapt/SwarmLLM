@@ -67,7 +67,11 @@
         });
 
         if (App.compare.models.length === 0) {
-          container.innerHTML = '<span class="text-muted" style="font-size:0.8rem">' + U.escapeHtml(I18n.t('compare.no_models')) + '</span>';
+          // "Download a model or add a cloud provider" is advice for a node
+          // that answered "none" — not for one the page could not ask (#69).
+          var reached = App.data.loadReachedDaemon('models') && App.data.loadReachedDaemon('cloudModels');
+          var empty = reached ? I18n.t('compare.no_models') : I18n.t('errors.server_unreachable');
+          container.innerHTML = '<span class="text-muted" style="font-size:0.8rem">' + U.escapeHtml(empty) + '</span>';
           return;
         }
 

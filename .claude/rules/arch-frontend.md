@@ -188,6 +188,10 @@ All storage keys are registered as constants on `App` in state.js (e.g., `App.MO
 
 Use `App.data.loadModels()` and `App.data.loadStats()` for model/stats data. Do NOT make independent `authFetch('/api/admin/models')` calls from components — this bypasses the dedup cache.
 
+**A failed load answers with the last good value** (the `load*` helpers return the cache); **`App.data.loadReachedDaemon(key)`** says it failed — ask it for an EMPTY state, and word "could not ask" differently from "none". The cache's one writer is `remember` in `data.js`; a WebSocket value goes through **`App.data.acceptPushed`**. Guard: `a_failed_fetch_never_overwrites_the_frontend_cache` (#69).
+
+→ `docs/invariants/frontend.md` § "A failed load answers with the last good value"
+
 ## Frontend Component IIFE Boilerplate
 
 Every `frontend/js/components/*.js` file opens with the same boilerplate

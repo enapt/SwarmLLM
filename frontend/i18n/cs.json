@@ -779,6 +779,7 @@
   "netstatus.shard_one": "místní část modelu",
   "netstatus.shard_other": "místních částí modelu",
   "netstatus.solo": "Samostatně — zatím žádné počítače",
+  "netstatus.unreachable": "Neodpovídá",
   "network.connect_desc": "Vložte adresu od jiného uživatele pro propojení vašich počítačů",
   "network.map_loading": "Zjišťování sítě...",
   "network.my_address_aria": "Vaše adresa v roji",

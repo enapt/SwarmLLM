@@ -779,6 +779,7 @@
   "netstatus.shard_one": "bagian model lokal",
   "netstatus.shard_other": "bagian model lokal",
   "netstatus.solo": "Sendiri — belum ada komputer",
+  "netstatus.unreachable": "Tidak merespons",
   "network.connect_desc": "Tempelkan alamat dari pengguna lain untuk menghubungkan komputer Anda",
   "network.map_loading": "Menemukan jaringan...",
   "network.my_address_aria": "Alamat swarm Anda",

@@ -779,6 +779,7 @@
   "netstatus.shard_one": "phần mô hình cục bộ",
   "netstatus.shard_other": "phần mô hình cục bộ",
   "netstatus.solo": "Một mình — chưa có máy tính nào",
+  "netstatus.unreachable": "Không phản hồi",
   "network.connect_desc": "Dán địa chỉ từ người dùng khác để kết nối các máy tính",
   "network.map_loading": "Đang khám phá mạng...",
   "network.my_address_aria": "Địa chỉ bầy của bạn",

@@ -53,7 +53,7 @@ Instead of exchanging raw 64-character node IDs, device pools use an **invite co
 ### API Endpoints
 
 #### GET /api/pool/state
-Current pool membership state. Returns `in_pool`, member list with device names, online status, per-device stats, credit split percentage.
+Current pool membership state. Returns `in_pool` and this node's own `node_id`; in a pool, also `is_owner`, the member list with device names, online status, per-device stats, and the credit split percentage.
 
 #### POST /api/pool/create
 Create a new device pool. Body: `{"name": "My Devices"}`

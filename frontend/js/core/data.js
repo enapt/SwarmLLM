@@ -109,19 +109,31 @@
   // the swarm tab, the network map, the encryption toggle, the model-name
   // helpers — as their source of truth between loads. Assigning the result of a
   // failed fetch turned one transient 401 or 500 into "0 peers, no models" for
-  // all of them at once, and `notifications.js` merges the WebSocket tick INTO
-  // `cache.stats`, so a nulled cache also dropped every field that tick does not
-  // carry. The `load*` helpers still RETURN what the fetch produced, so a caller
-  // that wants to distinguish empty from unreachable keeps using
-  // `loadReachedDaemon`; only the cache holds on to what it already knew.
+  // all of them at once, and the WebSocket tick is merged INTO `cache.stats`, so
+  // a nulled cache also dropped every field that tick does not carry.
+  //
+  // `remember` is the cache's ONE writer, and it writes only a value the daemon
+  // delivered (guard `a_failed_fetch_never_overwrites_the_frontend_cache`).
+  function remember(key, value) {
+    if (loadReachedDaemon(key)) cache[key] = value;
+  }
+
+  // And a failed load answers with the last good value, never an empty one.
+  //
+  // The `load*` helpers used to return what the fetch produced and leave every
+  // caller to tell "nothing here" from "could not ask"; the ones that did not
+  // (#69: the compare list, the provider badges, the header strip, a model list
+  // half of which had failed) each told the reader there was nothing. They
+  // return the cache instead — TanStack Query's refetch-error result: the data
+  // stays the last value that resolved, and the failure is reported beside it,
+  // here by `loadReachedDaemon`, which a caller asks when it has nothing to show.
   function loadModels() {
     return dedupe('models', async function() {
-      var models = await fetchRecorded('models', '/api/admin/models') || [];
+      var models = await fetchRecorded('models', '/api/admin/models');
       var d = await fetchRecorded('cloudModels', '/api/admin/provider-models');
-      var cloudModels = (d && d.models) || [];
-      if (loadReachedDaemon('models')) cache.models = models;
-      if (loadReachedDaemon('cloudModels')) cache.cloudModels = cloudModels;
-      return { models: models, cloudModels: cloudModels };
+      remember('models', models || []);
+      remember('cloudModels', (d && d.models) || []);
+      return { models: cache.models, cloudModels: cache.cloudModels };
     });
   }
 
@@ -129,33 +141,41 @@
     return dedupe('stats', async function() {
       var stats = await fetchRecorded('stats', '/api/admin/stats');
       var config = await loadConfig();
-      if (loadReachedDaemon('stats')) cache.stats = stats;
-      return { stats: stats, config: config };
+      remember('stats', stats);
+      return { stats: cache.stats, config: config };
     });
   }
 
   function loadPeers() {
     return dedupe('peers', async function() {
-      var peers = await fetchRecorded('peers', '/api/admin/peers') || [];
-      if (loadReachedDaemon('peers')) cache.peers = peers;
-      return peers;
+      remember('peers', await fetchRecorded('peers', '/api/admin/peers') || []);
+      return cache.peers;
     });
   }
 
   function loadConfig() {
     return dedupe('config', async function() {
-      var config = await fetchRecorded('config', '/api/admin/config');
-      if (loadReachedDaemon('config')) cache.config = config;
-      return config;
+      remember('config', await fetchRecorded('config', '/api/admin/config'));
+      return cache.config;
     });
   }
 
   function loadProviders() {
     return dedupe('providers', async function() {
-      var providers = await fetchRecorded('providers', '/api/admin/providers');
-      if (loadReachedDaemon('providers')) cache.providers = providers;
-      return providers;
+      remember('providers', await fetchRecorded('providers', '/api/admin/providers'));
+      return cache.providers;
     });
+  }
+
+  // The WebSocket is the daemon answering too. A value it pushes is recorded
+  // like a load that reached the daemon, so `loadReachedDaemon` never goes on
+  // reporting a failed load the push has since contradicted: the peer list said
+  // "couldn't reach SwarmLLM" over a list the WebSocket had just delivered
+  // (#69). `merge` folds a partial tick into what is held.
+  function acceptPushed(key, value, merge) {
+    _reached[key] = true;
+    remember(key, merge ? Object.assign({}, cache[key], value) : value);
+    return cache[key];
   }
 
   // Dedup pipeline-plan fetches across the dashboard pipeline overlay and
@@ -197,6 +217,7 @@
     loadClaudeSubStatus: loadClaudeSubStatus,
     invalidateDedup: invalidateDedup,
     loadReachedDaemon: loadReachedDaemon,
+    acceptPushed: acceptPushed,
     cache: cache,
   };
 })();

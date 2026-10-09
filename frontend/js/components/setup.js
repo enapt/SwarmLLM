@@ -172,8 +172,10 @@
         var result = await App.data.loadStats();
         // A request that FAILED is not a machine with nothing in it.
         //
-        // `loadStats` returns `{stats: null}` for a 401, a 500 or a dropped
-        // connection just as it would for a node with nothing to report, and
+        // `loadStats` returned `{stats: null}` for a 401, a 500 or a dropped
+        // connection (it answers with the last stats it holds now, which on
+        // this first screen is usually none), just as it would for a node with
+        // nothing to report, and
         // `data.hardware || {}` then zeroes every field. On the FIRST SCREEN a
         // new user sees, that reported "Processor only", "0 MB RAM", "0 MB
         // disk" and recommended the smallest models — a confident, wrong

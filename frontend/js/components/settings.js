@@ -424,7 +424,9 @@
       try {
         var result = await App.data.loadStats();
         var data = result && result.config;
-        if (!data) {
+        // A failed read answers with the last config held; the form is still
+        // not populated from it, because this read is what Save diffs against.
+        if (!data || !App.data.loadReachedDaemon('config')) {
           // Showing the form's defaults as though they were this node's
           // settings is the part that costs the user their configuration, so
           // say what happened and take Save away until we can read them.
@@ -794,6 +796,12 @@
     loadProviders: async function() {
       try {
         var data = await App.data.loadProviders();
+        if (!data && !App.data.loadReachedDaemon('providers')) {
+          // Nothing read and nothing held: every badge would stay at the
+          // markup's "Not set", a configured provider included. This catch's
+          // own banner, which could never run — `loadProviders` does not throw.
+          throw new Error('providers request did not reach the daemon');
+        }
         data = data || {};
         if (data.providers) {
           var anyConfigured = false;

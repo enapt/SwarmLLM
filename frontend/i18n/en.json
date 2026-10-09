@@ -779,6 +779,7 @@
   "netstatus.shard_one": "local model part",
   "netstatus.shard_other": "local model parts",
   "netstatus.solo": "Solo — no other computers yet",
+  "netstatus.unreachable": "Not answering",
   "network.connect_desc": "Paste an address from another user to connect your computers",
   "network.map_loading": "Discovering network...",
   "network.my_address_aria": "Your swarm address",

@@ -779,6 +779,7 @@
   "netstatus.shard_one": "lokal modelldel",
   "netstatus.shard_other": "lokala modelldelar",
   "netstatus.solo": "Ensam — inga datorer än",
+  "netstatus.unreachable": "Svarar inte",
   "network.connect_desc": "Klistra in en adress från en annan användare för att ansluta era datorer",
   "network.map_loading": "Söker efter nätverk...",
   "network.my_address_aria": "Din svärmadress",

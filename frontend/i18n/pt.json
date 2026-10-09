@@ -779,6 +779,7 @@
   "netstatus.shard_one": "parte de modelo local",
   "netstatus.shard_other": "partes de modelo local",
   "netstatus.solo": "Sozinho — ainda sem computadores",
+  "netstatus.unreachable": "Sem resposta",
   "network.connect_desc": "Cole um endereço de outro usuário para conectar seus computadores",
   "network.map_loading": "Descobrindo rede...",
   "network.my_address_aria": "O seu endereço do enxame",

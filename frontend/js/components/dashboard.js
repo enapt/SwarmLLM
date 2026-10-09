@@ -460,9 +460,10 @@
         return;
       }
 
-      if (statsResult.stats) {
-        App.dashboard.updateFull(statsResult.stats);
-      } else {
+      // `loadStats` answers a failed load with the last stats it had, so the
+      // page keeps them — and says it could not refresh them.
+      if (statsResult.stats) App.dashboard.updateFull(statsResult.stats);
+      if (!App.data.loadReachedDaemon('stats')) {
         App.ui.showBanner('error', I18n.t('errors.server_unreachable'));
       }
 
@@ -885,7 +886,7 @@
       // Capacity facts and connection state are now rendered together
       // by App.networkStatus (replaced the R110 swarm-capacity-banner +
       // the older mode-indicator strip with a single status panel).
-      App.networkStatus.update(data, S._cachedProviderData);
+      App.networkStatus.update(data, App.data.cache.providers);
 
       if (typeof NeuralBg !== 'undefined') NeuralBg.updateState(data);
     },
@@ -2193,8 +2194,10 @@
       // changed. peer_list bursts on swarm churn (multiple per second) —
       // each rebuild destroys ~20 rows and recreates them from a string.
       // The signature covers every field the row template uses; sort
-      // direction is included so toggle clicks still trigger a rerender.
-      var renderSig = (peers || []).map(function(p) {
+      // direction is included so toggle clicks still trigger a rerender, and so
+      // is whether the list came from the daemon: an empty list is worded by it.
+      var reached = App.data.loadReachedDaemon('peers');
+      var renderSig = (reached ? 'reached:' : 'unreached:') + (peers || []).map(function(p) {
         return (p.node_id || '') + '|' + (p.healthy ? 1 : 0) + '|' +
           (p.latency_ms || 0) + '|' + (p.hosted_shards || 0) + '|' +
           (p.trust_score || 0) + '|' + (p.is_lan_peer ? 1 : 0) + '|' +
@@ -2236,7 +2239,6 @@
         // FAILED rather than from a node that answered "none": nothing the
         // reader does about their swarm will help, because the page never
         // reached their own node.
-        var reached = !App.data.loadReachedDaemon || App.data.loadReachedDaemon('peers');
         var msg = reached ? I18n.t('network.no_peers_yet') : I18n.t('network.peers_unreachable');
         list.innerHTML = '<div class="empty-state" style="padding:16px 0"><div class="empty-icon">\u{1F310}</div><p>' + U.escapeHtml(msg) + '</p></div>';
         return;

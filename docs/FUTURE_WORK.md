@@ -1179,15 +1179,6 @@ sees pins and no traffic. Seeding from the swarm's traffic needs a new gossiped 
 (an additive message and a feature bit) AND a privacy decision, since it would publish who
 served whom. Never fake it with sample data.
 
-#### #69 — Some panels still read a failed fetch as "there is nothing here"
-`P3` · ux · **PARTIAL** — 2026-09-14 · history: archive row #69
-
-`App.data.loadReachedDaemon(key)` gates cache writes (guard
-`a_failed_fetch_never_overwrites_the_frontend_cache`), and the three consumers that ACTED on a
-failed fetch are fixed. The other `load*` consumers still show their ordinary empty state when
-the daemon is unreachable or answers 401/500. Each needs its own honest wording through
-`loadReachedDaemon` — new i18n keys in all 21 locales.
-
 #### #176 — Cross-pool inference can only be switched on by editing the config file
 `P3` · ux · **PARTIAL** — 2026-07 (R134) · history: archive § "Inter-pool model sharing policy"
 
@@ -1566,6 +1557,21 @@ archive under the named heading. Reopen one only with the evidence its line name
 Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 19-28 were
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
+
+**Closed 2026-10-09, after the v0.3.232 tag (next release)** (#69)
+- #69 — panels read a failed load as "there is nothing here". The `load*` helpers in `data.js`
+  now return the cache, so a failed load answers with the last good value (TanStack Query's
+  refetch-error result) and `loadReachedDaemon` says it failed; the cache's one writer is
+  `remember`, and a WebSocket value goes through `acceptPushed`. Fixed with it: Compare's "No
+  models available yet" to a node it could not ask, Settings' provider badges left at "Not set",
+  the header panel losing its cloud providers (and reading "Offline") or saying "Looking for other
+  computers" without having reached the node (new state "Not answering", one key in 21 locales),
+  a model picker emptied of cloud models when only that list failed, `models_changed` emptying the
+  cloud list before every reload, the peer list worded by a stale REST load over a WebSocket list
+  and blanked into "share your address" when the WebSocket closed, and the pool owner shown as a
+  member (`/api/pool/state` carries `node_id` and `is_owner`). The guard now scans every frontend
+  file by statement, with a planted-violation self-test. `docs/invariants/frontend.md` § "A failed
+  load answers with the last good value".
 
 **Closed 2026-10-09, on main (not yet released)** (#194, #152, #245)
 - #245 — GitHub moves `ubuntu-latest` to Ubuntu 26 from 2026-10-19 (notice on CI run 37914655701),

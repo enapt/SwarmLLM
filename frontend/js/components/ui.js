@@ -171,8 +171,8 @@
 
   // --- Network Status panel ---
   // Single source of truth for "what state is this node in?". Replaces the
-  // old swarm-capacity-banner + mode-indicator strip. Six named states:
-  //   connecting | global | private | lan | solo | offline
+  // old swarm-capacity-banner + mode-indicator strip. Seven named states:
+  //   unreachable | connecting | global | private | lan | solo | offline
   // Cloud-provider count + capacity facts fold in as supporting detail.
   App.networkStatus = {
     update: function(statsData, providerData) {
@@ -229,7 +229,14 @@
       // because they describe an intentional restriction on outbound
       // inference scope (src/pool/scope.rs).
       var stateKey, stateName, stateDetail;
-      if (!stats) {
+      if (!stats && !App.data.loadReachedDaemon('stats')) {
+        // Nothing to show because the page could not ask, not because the
+        // node is still finding computers: "Looking for other computers" is a
+        // claim about a node the page has not heard from (#69).
+        stateKey = 'unreachable';
+        stateName = I18n.t('netstatus.unreachable');
+        stateDetail = I18n.t('errors.server_unreachable');
+      } else if (!stats) {
         stateKey = 'connecting';
         stateName = I18n.t('netstatus.connecting');
         stateDetail = I18n.t('netstatus.detail_connecting');
@@ -382,10 +389,13 @@
           statsData = result.stats;
         } catch (e) {}
       }
+      // A failed load answers with the providers last read, so a hiccup no
+      // longer drops every cloud provider from the count, and with them the
+      // headline (to "Offline" when they were all this node had) and the
+      // Claude Code badge (#69).
       var providerData = null;
       try {
         providerData = await App.data.loadProviders();
-        S._cachedProviderData = providerData;
       } catch (e) {}
       App.networkStatus.update(statsData, providerData);
       App.networkStatus.updateClaudeCodeBadge(providerData);

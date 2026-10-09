@@ -50,7 +50,6 @@ window.App = {
     pendingImages: [],
     _modelDropdownData: [],
     metadataCache: {},
-    _cachedProviderData: null,
     inputEl: null,
   },
 

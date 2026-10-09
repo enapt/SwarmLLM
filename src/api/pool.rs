@@ -26,11 +26,20 @@ async fn await_pool_reply<T>(
 }
 
 /// GET /api/pool/state — Get current pool state.
+///
+/// Carries this node's own id and whether it owns the pool, so the dashboard
+/// never has to learn them from a second request: it took the id from the
+/// stats, and when that load failed it compared the pool's owner with `null`
+/// and showed the owner their own pool as a member (#69).
 pub async fn pool_state(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let my_id = state.shared_state.identity.node_id().clone();
     let pool_state = state.shared_state.credits.pool_state.read().await;
     match pool_state.as_ref() {
         Some(ps) => Json(serde_json::json!({
             "in_pool": true,
+            "node_id": hex::encode(my_id.0),
+            // The pool's id IS its owner's node id (`pool::manager`).
+            "is_owner": ps.pool_id == my_id,
             "pool_id": hex::encode(ps.pool_id.0),
             "name": ps.name,
             "members": ps.members.iter().map(|m| {
@@ -67,6 +76,7 @@ pub async fn pool_state(State(state): State<AppState>) -> Json<serde_json::Value
         })),
         None => Json(serde_json::json!({
             "in_pool": false,
+            "node_id": hex::encode(my_id.0),
         })),
     }
 }

@@ -779,6 +779,7 @@
   "netstatus.shard_one": "स्थानीय मॉडल भाग",
   "netstatus.shard_other": "स्थानीय मॉडल भाग",
   "netstatus.solo": "अकेला — अभी कोई कंप्यूटर नहीं",
+  "netstatus.unreachable": "जवाब नहीं दे रहा",
   "network.connect_desc": "अपने कंप्यूटर कनेक्ट करने के लिए किसी अन्य उपयोगकर्ता का पता पेस्ट करें",
   "network.map_loading": "नेटवर्क खोज रहे हैं...",
   "network.my_address_aria": "आपका स्वार्म पता",

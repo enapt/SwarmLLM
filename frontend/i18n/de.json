@@ -779,6 +779,7 @@
   "netstatus.shard_one": "lokaler Modellteil",
   "netstatus.shard_other": "lokale Modellteile",
   "netstatus.solo": "Allein — noch keine Computer",
+  "netstatus.unreachable": "Antwortet nicht",
   "network.connect_desc": "Füge eine Adresse eines anderen Nutzers ein, um deine Computer zu verbinden",
   "network.map_loading": "Netzwerk wird erkundet...",
   "network.my_address_aria": "Ihre Schwarm-Adresse",

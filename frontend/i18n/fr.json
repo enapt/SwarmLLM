@@ -779,6 +779,7 @@
   "netstatus.shard_one": "partie de modèle locale",
   "netstatus.shard_other": "parties de modèle locales",
   "netstatus.solo": "Seul — pas encore d'ordinateurs",
+  "netstatus.unreachable": "Ne répond pas",
   "network.connect_desc": "Collez une adresse d'un autre utilisateur pour connecter vos ordinateurs",
   "network.map_loading": "Découverte du réseau...",
   "network.my_address_aria": "Votre adresse d'essaim",

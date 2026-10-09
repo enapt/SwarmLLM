@@ -513,3 +513,67 @@ side: the id carries the quant suffix and the display name lacks it.
   the button's translated `aria-label` (`content: ' ' attr(aria-label)`), never
   literal CSS text; and below 768 px toasts drop from the top, because the
   bottom-right corner there is the Send button.
+
+## A failed load answers with the last good value, and says it failed (2026-10-09, #69)
+
+`App.data`'s `load*` helpers return the CACHE, so a load that failed answers
+with the last value that resolved — never with an empty one — and
+`App.data.loadReachedDaemon(key)` says it failed. A caller asks it when it has
+nothing to show. The cache has ONE writer, `remember(key, value)` in `data.js`,
+which writes only a value the daemon delivered; a value the WebSocket pushes is
+handed to `App.data.acceptPushed(key, value, merge)`, which also records that
+the daemon answered. This is TanStack Query's refetch-error result: its `data`
+stays "the last successfully resolved data for the query" and `isError` reports
+the failure beside it.
+
+### What this replaced
+
+`loadReachedDaemon` (2026-09-14) stopped a failed fetch overwriting the cache,
+and the three consumers that ACTED on one were fixed. The helpers still returned
+what the fetch produced, so every other caller had to remember the difference,
+and seven did not:
+
+- **Compare** said "No models available yet. Download a model or add a cloud
+  provider" to a node it could not ask.
+- **Settings → Providers** left every badge at the markup's "Not set", a
+  configured provider included; the banner written for a failed load sat in a
+  `catch` that could never run, because `loadProviders` does not throw.
+- **The header status panel** wiped the provider data it held on a failed
+  load: the cloud providers dropped out of its count, a node with nothing else
+  read "Offline", and the Claude Code badge disappeared. With no stats yet it
+  said "Looking for other computers" — a claim about a node the page had not
+  heard from.
+- **The model picker**: a guard covered BOTH lists failing; a failed cloud list
+  beside a good local one emptied the picker of cloud models, and disabled chat
+  on a node that had nothing else.
+- **The cloud-model reload** (`models_changed`) emptied `cache.cloudModels`
+  before the fetch — a leftover from when the loader returned a fresh cache
+  without fetching. Now a failure there emptied the list for everyone.
+- **The peer list** read its wording from the last REST load, so an empty list
+  the WebSocket had just delivered was shown as "Couldn't reach SwarmLLM"; and
+  a closed WebSocket blanked the list into "No other computers connected yet.
+  Share your Swarm Address…", advice about a swarm the page could no longer see.
+  The empty list's wording was outside the render signature, so a change in it
+  alone never repainted.
+- **The pool panel** took this node's id from a separate stats load; when that
+  failed it compared the pool's owner with `null` and showed the owner their own
+  pool as a member. `/api/pool/state` now carries `node_id` and `is_owner`.
+
+The guard that was meant to hold the line read `data.js` alone, line by line,
+and matched only lines STARTING with `cache.`: it could not see
+`App.data.cache.cloudModels = []` in `notifications.js`.
+
+### What a change must keep
+
+- **A new consumer of a `load*` helper inherits the last good value** and needs
+  `loadReachedDaemon` only for its empty state. An empty state worded for "the
+  node answered none" is wrong for "the page could not ask" — say which.
+- **Nothing outside `data.js` writes `App.data.cache`.** Guard
+  `a_failed_fetch_never_overwrites_the_frontend_cache` scans every frontend file
+  by STATEMENT (assignment, compound assignment, `delete`, in-place
+  `Object.assign`, a mutating array method); inside `data.js` a write must sit on
+  a statement that asks `loadReachedDaemon` — the inline form, which is
+  `remember`. Its self-test is `the_frontend_cache_guard_sees_every_form_of_a_write`.
+- **The Settings form is still never populated from a held config**: it reads
+  `loadReachedDaemon('config')` too, because that read is the baseline Save
+  diffs against (§ "A panel that could not READ its settings").

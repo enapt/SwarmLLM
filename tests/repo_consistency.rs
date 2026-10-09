@@ -9354,36 +9354,182 @@ fn a_peer_connected_activity_entry_is_emitted_only_on_the_transition() {
 /// has nothing", and assigning that to the cache turned one transient failure
 /// into "0 peers, no models" everywhere at once.
 ///
-/// `notifications.js` also merges the WebSocket tick INTO `cache.stats`, so a
-/// nulled cache additionally dropped every field that tick does not carry.
-///
-/// The fix is not to hide the failure — the `load*` helpers still RETURN what
-/// the fetch produced, and `loadReachedDaemon` still tells a caller which it
-/// was (item 69). It is that the CACHE holds on to the last thing it actually
-/// knew. This scan pins that: every write to `cache.<field>` in a `load*`
-/// helper is guarded by `loadReachedDaemon`.
+/// The `load*` helpers return the cache, so a failed load answers with the last
+/// good value and `loadReachedDaemon` says it failed (#69). That holds only
+/// while nothing else writes the cache: inside `data.js` every write sits on a
+/// statement that asks `loadReachedDaemon` (the one writer, `remember`), and no
+/// other file writes it at all — a value the WebSocket pushes goes through
+/// `App.data.acceptPushed`. The scan this replaced read `data.js` alone, line by
+/// line, and only lines starting with `cache.`; it could not see
+/// `App.data.cache.cloudModels = []` in `notifications.js`, which emptied the
+/// cloud list before every reload.
 #[test]
 fn a_failed_fetch_never_overwrites_the_frontend_cache() {
-    let src = std::fs::read_to_string("frontend/js/core/data.js")
-        .expect("frontend/js/core/data.js must be readable");
-    let mut unguarded = Vec::new();
-    for (n, line) in src.lines().enumerate() {
-        let t = line.trim();
-        if t.starts_with("//") || !t.starts_with("cache.") || !t.contains(" = ") {
+    let offenders = unguarded_frontend_cache_writes(&read_frontend_js());
+    assert!(
+        offenders.is_empty(),
+        "the frontend data cache is written where a failed load could reach it:\n  {}\n\
+         Inside core/data.js, write through `remember(key, value)` (it asks \
+         `loadReachedDaemon`); anywhere else, hand a pushed value to \
+         `App.data.acceptPushed(key, value, merge)`.",
+        offenders.join("\n  ")
+    );
+}
+
+/// Every statement in `files` that writes the frontend data cache unguarded.
+fn unguarded_frontend_cache_writes(files: &[(String, String)]) -> Vec<String> {
+    let mut out = Vec::new();
+    for (path, src) in files {
+        let in_data_js = std::path::Path::new(path).ends_with("core/data.js");
+        // `data.js` holds the cache in a local; everyone else reaches it
+        // through the namespace, and may not write it at all.
+        let root = if in_data_js {
+            "cache"
+        } else {
+            "App.data.cache"
+        };
+        for (line, st) in statements(src) {
+            if !writes_cache(&st, root, !in_data_js) {
+                continue;
+            }
+            if in_data_js && st.contains("loadReachedDaemon(") {
+                continue;
+            }
+            out.push(format!("{path}:{line}: {st}"));
+        }
+    }
+    out
+}
+
+/// Does `st` write `root` or anything under it? A plain or compound
+/// assignment, `delete`, an in-place `Object.assign`, or an array method that
+/// mutates. `bare` admits an assignment to `root` itself
+/// (`App.data.cache = …`); in `data.js` the bare name is the declaration.
+fn writes_cache(st: &str, root: &str, bare: bool) -> bool {
+    const MUTATORS: [&str; 6] = ["push", "pop", "shift", "unshift", "splice", "sort"];
+    let b = st.as_bytes();
+    let mut from = 0;
+    while let Some(rel) = st[from..].find(root) {
+        let at = from + rel;
+        from = at + root.len();
+        let before = st[..at].trim_end();
+        let starts_token = at == 0 || {
+            let c = b[at - 1] as char;
+            !(c.is_ascii_alphanumeric() || c == '_' || c == '$') && (c != '.' || root.contains('.'))
+        };
+        if !starts_token {
             continue;
         }
-        // The guard is written inline on the same statement:
-        //   `if (loadReachedDaemon('stats')) cache.stats = stats;`
-        // so an unguarded write is one whose line does not mention it.
-        unguarded.push(format!("  line {}: {}", n + 1, t));
+        // Walk the accessor chain: `.name` or `[...]`, any number.
+        let mut i = at + root.len();
+        let mut accessors = 0;
+        let mut last = "";
+        loop {
+            if b.get(i) == Some(&b'.') {
+                let s = i + 1;
+                let mut e = s;
+                while e < b.len()
+                    && ((b[e] as char).is_ascii_alphanumeric() || b[e] == b'_' || b[e] == b'$')
+                {
+                    e += 1;
+                }
+                if e == s {
+                    break;
+                }
+                last = &st[s..e];
+                i = e;
+                accessors += 1;
+            } else if b.get(i) == Some(&b'[') {
+                let Some(close) = st[i..].find(']') else {
+                    break;
+                };
+                i += close + 1;
+                last = "";
+                accessors += 1;
+            } else {
+                break;
+            }
+        }
+        if accessors == 0 && !bare {
+            continue;
+        }
+        let rest = st[i..].trim_start();
+        let assigns = (rest.starts_with('=') && !rest.starts_with("=="))
+            || [
+                "||=", "&&=", "??=", "+=", "-=", "*=", "/=", "%=", "|=", "&=", "^=",
+            ]
+            .iter()
+            .any(|op| rest.starts_with(op));
+        let mutates = MUTATORS.contains(&last) && rest.starts_with('(');
+        let deletes = before.ends_with("delete");
+        let merges_in_place = before.ends_with("Object.assign(");
+        if assigns || mutates || deletes || merges_in_place {
+            return true;
+        }
     }
-    assert!(
-        unguarded.is_empty(),
-        "frontend/js/core/data.js writes the cache without checking the daemon was \
-         reached, so one transient 401/503 replaces what a dozen components read \
-         with an empty value:\n{}\nGuard each with `loadReachedDaemon('<key>')`.",
-        unguarded.join("\n")
-    );
+    false
+}
+
+/// The cache guard is a source scan, so it is shown every form of the write it
+/// exists to catch — and the reads and the guarded write it must leave alone.
+#[test]
+fn the_frontend_cache_guard_sees_every_form_of_a_write() {
+    let data_js = "frontend/js/core/data.js".to_string();
+    let component = "frontend/js/components/notifications.js".to_string();
+    let caught = [
+        (&data_js, "cache.stats = stats;"),
+        (&data_js, "cache['peers'] = [];"),
+        (&data_js, "cache\n      .stats = stats;"),
+        (&data_js, "cache.models.push(m);"),
+        (&data_js, "Object.assign(cache.stats, partial);"),
+        (&data_js, "delete cache.config;"),
+        (&data_js, "cache.providers ||= {};"),
+        (&component, "App.data.cache.cloudModels = [];"),
+        (&component, "App.data.cache = App.data.cache || {};"),
+        (
+            &component,
+            "App.data.cache.stats = Object.assign(App.data.cache.stats || {}, msg.data);",
+        ),
+        (
+            &component,
+            "if (App.data.loadReachedDaemon('x')) App.data.cache.x = 1;",
+        ),
+    ];
+    for (path, src) in caught {
+        let found = unguarded_frontend_cache_writes(&[(path.clone(), src.to_string())]);
+        assert_eq!(
+            found.len(),
+            1,
+            "the guard missed a write in {path}: {src:?}"
+        );
+    }
+    let left_alone = [
+        (&data_js, "var cache = { models: [], stats: null };"),
+        (&data_js, "if (loadReachedDaemon(key)) cache[key] = value;"),
+        (
+            &data_js,
+            "return { models: cache.models, cloudModels: cache.cloudModels };",
+        ),
+        (&data_js, "if (cache.stats == null) return null;"),
+        (
+            &data_js,
+            "var merged = Object.assign({}, cache[key], value);",
+        ),
+        (&data_js, "var mycache = {}; mycache.x = 1;"),
+        (&component, "var s = App.data.cache.stats;"),
+        (&component, "if (App.data.cache.stats === null) return;"),
+        (
+            &component,
+            "App.data.acceptPushed('stats', msg.data, true);",
+        ),
+    ];
+    for (path, src) in left_alone {
+        let found = unguarded_frontend_cache_writes(&[(path.clone(), src.to_string())]);
+        assert!(
+            found.is_empty(),
+            "the guard flagged a non-write in {path}: {found:?}"
+        );
+    }
 }
 
 /// The byte span of every `fn` body in `src`. Used to ask "does the function

@@ -61,6 +61,10 @@
         // So when nothing came back AND we could not reach the daemon, leave
         // the page as it is. A model list one refresh out of date is a far
         // smaller lie than "you have no models", and the next tick fixes it.
+        // A list that failed ALONE comes back as the last one held
+        // (`App.data.loadModels`): before, a failed cloud list beside a good
+        // local one emptied the picker of every cloud model, and chat with it
+        // on a node that had nothing else (#69).
         var reachedDaemon = App.data.loadReachedDaemon('models') &&
           App.data.loadReachedDaemon('cloudModels');
         if (!reachedDaemon && adminModels.length === 0 && providerModels.length === 0) {

@@ -779,6 +779,7 @@
   "netstatus.shard_one": "yerel model parçası",
   "netstatus.shard_other": "yerel model parçası",
   "netstatus.solo": "Tek başına — henüz bilgisayar yok",
+  "netstatus.unreachable": "Yanıt vermiyor",
   "network.connect_desc": "Bilgisayarlarınızı bağlamak için başka bir kullanıcının adresini yapıştırın",
   "network.map_loading": "Ağ keşfediliyor...",
   "network.my_address_aria": "Sürü adresiniz",

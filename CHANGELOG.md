@@ -1,5 +1,19 @@
 # Changelog
 
+## [Unreleased]
+
+**Fixed: a hiccup reaching your node no longer reads as "you have nothing".**
+When the dashboard briefly could not reach your node, for example during a
+restart or after the API key changed, several panels showed their ordinary
+empty state as if the node had answered "none". Compare said no models were
+available, Settings showed every cloud provider as "Not set", the status panel
+could drop your cloud providers and read "Offline", the model picker could lose
+its cloud models and turn chat off, and the computers list could tell you to
+share your address. These panels now keep what they last showed. When there is
+nothing to show yet, they say the node is not answering. The status panel has a
+new state for this, "Not answering". In a device pool, the pool's owner is no
+longer shown their own pool as a member after such a hiccup.
+
 ## [0.3.232-alpha] — 2026-10-09
 
 **Faster, roomier long conversations on graphics cards.** A conversation's
