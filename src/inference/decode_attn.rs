@@ -283,6 +283,33 @@ pub(crate) const CUDA_CHUNK: usize = 64;
 const CUDA_MAX_REP: usize = 16;
 const CUDA_MAX_D: usize = 256;
 
+/// Does the card kernel answer every one-position attention of a model with
+/// these head counts? The geometry half of [`gqa_decode_attention_cuda`]'s
+/// scope — the rest (a mask, a cache view whose rows are not dense) is about
+/// one call, never about the model.
+///
+/// **The half cache is only kept where this is true** (`layers::kv_storage`):
+/// a decode step the kernel declines falls to the matmul path, which reads an
+/// f32 cache, so a half cache there would be widened from scratch on every
+/// token — O(history) per step, the cost the f16 mirror was built to remove.
+/// One predicate, so the storage decision and the kernel cannot disagree
+/// about which models the kernel takes.
+pub(crate) fn card_kernel_covers(n_head: usize, n_kv_head: usize, head_dim: usize) -> bool {
+    decode_kernel_enabled() && card_kernel_geometry(n_head, n_kv_head, head_dim)
+}
+
+/// The geometry alone, whatever this process's A/B switch says — what a
+/// coordinator asks of a PEER's model (`layers::kv_storage_as_advertised`),
+/// whose own switch it cannot see.
+pub(crate) fn card_kernel_geometry(n_head: usize, n_kv_head: usize, head_dim: usize) -> bool {
+    n_kv_head > 0
+        && n_head.is_multiple_of(n_kv_head)
+        && n_head / n_kv_head <= CUDA_MAX_REP
+        && head_dim > 0
+        && head_dim.is_multiple_of(32)
+        && head_dim <= CUDA_MAX_D
+}
+
 /// PTX for the card kernel, compiled from `kernels/decode_attn.cu` by
 /// `build.rs` and loaded through candle's `get_or_load_custom_func`.
 #[cfg(feature = "candle-cuda")]
@@ -295,8 +322,9 @@ pub(crate) const DECODE_ATTN_PTX: &str = include_str!(concat!(env!("OUT_DIR"), "
 /// copies around them) — ~0.1 ms per layer at 512 positions, 0.32 at 8K on an
 /// RTX 3070 — with one launch (two past `CUDA_CHUNK` positions).
 ///
-/// Scope: CUDA, f32, `q_len == 1`, no mask (a decode step on a card never has
-/// one), `d` a multiple of 32 up to 256, at most 16 query heads per KV head,
+/// Scope: CUDA, an f32 query over an f32 OR f16 cache (K and V alike — the
+/// half cache a card keeps, `layers::KvStorage::F16`), `q_len == 1`, no mask
+/// (a decode step on a card never has one), a geometry [`card_kernel_covers`],
 /// K/V with dense `[S, d]` rows. Anything else returns `Ok(None)` and the
 /// caller keeps the matmul path. `SWARMLLM_DECODE_ATTN=standard` turns both
 /// kernels off for an A/B inside one binary.
@@ -316,9 +344,13 @@ pub fn gqa_decode_attention_cuda(
     if !decode_kernel_enabled() || !q.device().is_cuda() || mask.is_some() {
         return Ok(None);
     }
+    let cache_dtype = k.dtype();
     if q.dtype() != candle_core::DType::F32
-        || k.dtype() != candle_core::DType::F32
-        || v.dtype() != candle_core::DType::F32
+        || !matches!(
+            cache_dtype,
+            candle_core::DType::F32 | candle_core::DType::F16
+        )
+        || v.dtype() != cache_dtype
     {
         return Ok(None);
     }
@@ -327,13 +359,8 @@ pub fn gqa_decode_attention_cuda(
     if q_len != 1
         || kb != b
         || kd != d
-        || n_kv_head == 0
-        || n_head % n_kv_head != 0
-        || n_head / n_kv_head > CUDA_MAX_REP
+        || !card_kernel_covers(n_head, n_kv_head, d)
         || s_len == 0
-        || d == 0
-        || d % 32 != 0
-        || d > CUDA_MAX_D
         || v.dims4()? != (b, n_kv_head, s_len, d)
     {
         return Ok(None);
@@ -371,6 +398,19 @@ mod cuda {
         pub(super) softcap: f32,
     }
 
+    /// The cache's K and V as the kernel reads them — f32, or the half cache
+    /// a card keeps. One kernel body serves both (`kernels/decode_attn.cu`).
+    enum CacheViews<'a> {
+        F32(
+            candle_core::cuda_backend::cudarc::driver::CudaView<'a, f32>,
+            candle_core::cuda_backend::cudarc::driver::CudaView<'a, f32>,
+        ),
+        F16(
+            candle_core::cuda_backend::cudarc::driver::CudaView<'a, half::f16>,
+            candle_core::cuda_backend::cudarc::driver::CudaView<'a, half::f16>,
+        ),
+    }
+
     impl CustomOp3 for DecodeAttn {
         fn name(&self) -> &'static str {
             "decode-attention"
@@ -399,6 +439,7 @@ mod cuda {
             s3: &candle_core::CudaStorage,
             l3: &Layout,
         ) -> Result<(candle_core::CudaStorage, Shape)> {
+            use candle_core::backend::BackendStorage;
             use candle_core::cuda_backend::cudarc::driver::{LaunchConfig, PushKernelArg};
             use candle_core::cuda_backend::WrapErr;
 
@@ -418,9 +459,20 @@ mod cuda {
             let q = s1.as_cuda_slice::<f32>()?.slice(qo..qe);
             // The cache views start where their layouts say; every read the
             // kernel makes is within `b` batches × `n_kv_head` heads ×
-            // `s_len` rows of `d` from there, by the strides passed.
-            let k = s2.as_cuda_slice::<f32>()?.slice(l2.start_offset()..);
-            let v = s3.as_cuda_slice::<f32>()?.slice(l3.start_offset()..);
+            // `s_len` rows of `d` from there, by the strides passed. The
+            // element type picks the entry point: the half cache a card keeps
+            // (`layers::KvStorage::F16`) or the f32 one.
+            let cache = match (s2.dtype(), s3.dtype()) {
+                (candle_core::DType::F16, candle_core::DType::F16) => CacheViews::F16(
+                    s2.as_cuda_slice::<half::f16>()?.slice(l2.start_offset()..),
+                    s3.as_cuda_slice::<half::f16>()?.slice(l3.start_offset()..),
+                ),
+                (candle_core::DType::F32, candle_core::DType::F32) => CacheViews::F32(
+                    s2.as_cuda_slice::<f32>()?.slice(l2.start_offset()..),
+                    s3.as_cuda_slice::<f32>()?.slice(l3.start_offset()..),
+                ),
+                (kd, vd) => candle_core::bail!("decode-attention: a {kd:?} K beside a {vd:?} V"),
+            };
 
             // Every element of both buffers is assigned: `out` by the one
             // kernel or the combine, `partial` by every (block, head, dim).
@@ -434,7 +486,10 @@ mod cuda {
             };
 
             let func = dev.get_or_load_custom_func(
-                "decode_attn_f32",
+                match cache {
+                    CacheViews::F32(..) => "decode_attn_f32",
+                    CacheViews::F16(..) => "decode_attn_f16kv",
+                },
                 "swarmllm_decode_attn",
                 super::DECODE_ATTN_PTX,
             )?;
@@ -451,8 +506,16 @@ mod cuda {
             {
                 let mut builder = func.builder();
                 builder.arg(&q);
-                builder.arg(&k);
-                builder.arg(&v);
+                match &cache {
+                    CacheViews::F32(k, v) => {
+                        builder.arg(k);
+                        builder.arg(v);
+                    }
+                    CacheViews::F16(k, v) => {
+                        builder.arg(k);
+                        builder.arg(v);
+                    }
+                }
                 match partial.as_mut() {
                     None => {
                         builder.arg(&mut out);
@@ -660,7 +723,7 @@ mod tests {
             }
         };
         let cpu = Device::Cpu;
-        for (b, n_head, n_kv_head, s_len, d, softcap) in [
+        for case in [
             (1usize, 24usize, 8usize, 37usize, 128usize, None),
             (1, 28, 4, 200, 128, None),
             // Several chunks, the last one partial, n_rep = 7 (Qwen2.5-7B).
@@ -673,10 +736,29 @@ mod tests {
             (1, 24, 8, CUDA_CHUNK, 128, None),
             (1, 24, 8, CUDA_CHUNK + 1, 128, None),
             (2, 24, 8, 600, 128, None),
-        ] {
+        ]
+        .into_iter()
+        // Every shape twice: over the f32 cache, and over the half cache a card
+        // keeps (FUTURE_WORK #194) — the reference then computed from the same
+        // rounded values, so the two arms differ in nothing but the read.
+        .flat_map(|case| {
+            [
+                (case, candle_core::DType::F32),
+                (case, candle_core::DType::F16),
+            ]
+        }) {
+            let ((b, n_head, n_kv_head, s_len, d, softcap), cache_dtype) = case;
             let q = Tensor::randn(0f32, 1.0, (b, n_head, 1, d), &cpu).unwrap();
-            let kbuf = Tensor::randn(0f32, 1.0, (b, n_kv_head, s_len + 17, d), &cpu).unwrap();
-            let vbuf = Tensor::randn(0f32, 1.0, (b, n_kv_head, s_len + 17, d), &cpu).unwrap();
+            let as_stored = |t: Tensor| {
+                t.to_dtype(cache_dtype)
+                    .unwrap()
+                    .to_dtype(candle_core::DType::F32)
+                    .unwrap()
+            };
+            let kbuf =
+                as_stored(Tensor::randn(0f32, 1.0, (b, n_kv_head, s_len + 17, d), &cpu).unwrap());
+            let vbuf =
+                as_stored(Tensor::randn(0f32, 1.0, (b, n_kv_head, s_len + 17, d), &cpu).unwrap());
             let scale = 1.0 / (d as f32).sqrt();
 
             let (k, v) = (
@@ -701,11 +783,15 @@ mod tests {
 
             // On the card: the cache as a `narrow` of a larger buffer, the way
             // `KvCache` hands it out.
-            let (qc, kc, vc) = (
-                q.to_device(&card).unwrap(),
-                kbuf.to_device(&card).unwrap().narrow(2, 0, s_len).unwrap(),
-                vbuf.to_device(&card).unwrap().narrow(2, 0, s_len).unwrap(),
-            );
+            let on_card = |t: &Tensor| {
+                t.to_dtype(cache_dtype)
+                    .unwrap()
+                    .to_device(&card)
+                    .unwrap()
+                    .narrow(2, 0, s_len)
+                    .unwrap()
+            };
+            let (qc, kc, vc) = (q.to_device(&card).unwrap(), on_card(&kbuf), on_card(&vbuf));
             let got = gqa_decode_attention_cuda(&qc, &kc, &vc, None, scale, softcap)
                 .unwrap()
                 .expect("the card kernel applies to these inputs")
@@ -726,7 +812,7 @@ mod tests {
                 .fold(0f32, f32::max);
             assert!(
                 worst_abs < 1e-5 && worst_rel < 1e-4,
-                "b={b} heads {n_head}/{n_kv_head} S={s_len} d={d} softcap={softcap:?}: worst abs {worst_abs} rel {worst_rel}"
+                "b={b} heads {n_head}/{n_kv_head} S={s_len} d={d} softcap={softcap:?} cache {cache_dtype:?}: worst abs {worst_abs} rel {worst_rel}"
             );
         }
     }

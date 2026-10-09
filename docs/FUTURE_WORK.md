@@ -40,7 +40,7 @@ after v0.3.224 (#160, #215 and #216 closed; #217 and #218 opened from the swarm 
 v0.3.226 (released 2026-10-05), #220 opened from the .225 gate's unrecorded driver resets; #129's fit verdict (idle-model
 reclaim) shipped in v0.3.227 (released 2026-10-05 23:45 UTC); #222 (a node near its storage limit deleting and
 re-fetching parts) and #223 closed in v0.3.228 (released 2026-10-06 09:42 UTC), #224 opened from its gate;
-#225, #226 and #227 opened from a tester's two reports the same day; #117 (Qwen 3.5, dense), #225 and #226 closed in v0.3.229 (released 2026-10-07 00:00 UTC), #228 opened for what Qwen 3.5 leaves out; #129's cold loads (waited for and priced), #228 (2) and (2b), #220 (2), #229, #230 and #231 shipped in v0.3.230 (released 2026-10-07 16:38 UTC), #232 parked from their report; #234, #235, #239 and #240 closed on 2026-10-08 from two tester reports and the card check after them, #236-#238 opened from the second (#236 and #238 closed the same day); #242 and #243 opened and closed the same day from reports #006 (a 1 Mbps cap stored for "Unlimited") and #007 (the narrow-screen model picker).
+#225, #226 and #227 opened from a tester's two reports the same day; #117 (Qwen 3.5, dense), #225 and #226 closed in v0.3.229 (released 2026-10-07 00:00 UTC), #228 opened for what Qwen 3.5 leaves out; #129's cold loads (waited for and priced), #228 (2) and (2b), #220 (2), #229, #230 and #231 shipped in v0.3.230 (released 2026-10-07 16:38 UTC), #232 parked from their report; #234, #235, #239 and #240 closed on 2026-10-08 from two tester reports and the card check after them, #236-#238 opened from the second (#236 and #238 closed the same day); #242 and #243 opened and closed the same day from reports #006 (a 1 Mbps cap stored for "Unlimited") and #007 (the narrow-screen model picker); #194 closed on 2026-10-09 (a card keeps its conversation memory as f16, and its memory guard under a context override), #237 re-ranked to P3 from what could be measured.
 `docs/plans/` holds the multi-step designs; the entries point at them.
 
 **P0 — wrong answers, silently**
@@ -76,7 +76,8 @@ re-fetching parts) and #223 closed in v0.3.228 (released 2026-10-06 09:42 UTC), 
 8. **#162** — the release gate: a cloned gate loses its helpers, and step 12e cannot test a
     takeover on this box (absorbs #140).
 9. *(#155 narrowed to P3 on 2026-10-07 — not seen on the swarm, see its entry.)*
-10. **#194** — an agent-sized prompt fills an 8 GB card with conversation memory.
+10. *(#194 closed 2026-10-09 — a card keeps its conversation memory as f16, a third of the
+    memory, and keeps its memory guard under a context override.)*
 11. **#147**, **#137**, **#138**, **#129** — prompt reading on the card, the processor half of
     a hybrid, MoE placement, and near-fit models sent across continents
     (`docs/plans/faster_than_local.md`).
@@ -414,7 +415,15 @@ frame, then add a receipt ACK or a per-frame read deadline mirroring request-res
 ### Routing and placement
 
 #### #237 — A peer's room for a conversation is not advertised, and the hand-off counts the prompt only
-`P2` · routing · **OPEN** — 2026-10-08 · history: report #005 (a tester, v0.3.230 code); related #194
+`P3` · routing · **OPEN** — 2026-10-08 · history: report #005 (a tester, v0.3.230 code); related #194
+
+**Re-ranked P2 → P3 on 2026-10-09, from what could be measured.** This node led ONE request in
+the first ~10 h of v0.3.231, so its log cannot count the swarm's refusals; the user-visible failure
+of #005 — a reply cut off mid-stream — is CONTINUED on another computer since v0.3.231 (#236,
+`router::continuation_after` covers a peer's mid-reply refusal); #235 removed the room's most common
+thief; and since #194 a card holds three times the positions in the same memory, and a coordinator
+prices a peer's prompt cache as the peer keeps it (`features::KV_HALF_ON_CARD`). What remains is a
+hand-off that wastes its first attempt. The shape below still stands if refusals are seen again.
 
 The coordinator handed a 30B whole to a peer advertising `free_vram_mb=7598` and priced it at
 48 layers (`max_hostable_layers`: the PROMPT's KV per layer against the advertised free memory)
@@ -1066,20 +1075,6 @@ StarCoder2, inert while refused).
 
 ### Memory and admission
 
-#### #194 — An agent-sized prompt fills an 8 GB card with conversation memory
-`P2` · memory · **PARTIAL** — 2026-09-02 · absorbs the old survey's Tier 2F (KV quantisation); history: archive § "An agent-sized prompt fills an 8 GB card with KV cache, and decode crawls"
-
-The crawl's cause is fixed (gotcha #440: `kv_budget::admit_prompt` + `SplitModel::kv_budget_now`
-reconcile with the live card). But a token of cache costs ~344 KB (f32 plus the f16 mirror,
-`split/kv_budget.rs`), so a 14k-token agent prompt takes ~5 GB beside the weights and ends in
-refusals or a 503 to a peer instead of a warm turn. Options, in order: (1)
-`inference.kv_cache_dtype = "f16"` with f32 the default, measuring divergence with the
-split-model tests (arXiv 2604.15409's caution); (4) a hybrid placement that keeps the cache on
-the processor; (2) depends on `cuda_decode_prefers_standard`. Q8_0 KV (group 32, ~2×) only
-with the dequant fused into `kernels/decode_attn.cu` — outside it is likely a net loss — and it
-breaks prefix-cache binary compatibility; never KIVI. A refusal printing `live_entries=1` with
-a total well above that request's own cache would reopen #11.
-
 #### #187 — Head-room admission prices load and runtime on two different bases
 `P3` · memory · **PARTIAL** — 2026-08-08 · history: archive § "Head-room admission: two things the live test found"
 
@@ -1577,7 +1572,25 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-08, on main (not yet released)** (#233, #234, #235, #236, #238, #239, #240, #242, #243)
+**Closed 2026-10-09, on main (not yet released)** (#194)
+- #194 — an agent-sized prompt filled an 8 GB card with conversation memory: a card kept the KV
+  cache as f32 plus an f16 flash mirror, 6 bytes an element against llama.cpp's 2, and a node with
+  `inference.max_seq_len_override` set (the README's advice to agent users) kept NO card KV budget
+  at all — a condition left from the 07-29 load-time shrink — so a long prompt overflowed the card.
+  Now a card keeps the half cache (f16 BHSD, read in place by flash and the decode kernel) wherever
+  both kernels cover the model, through ONE rule asked by the cache and every estimate of it
+  (`layers::kv_storage`; peers by `features::KV_HALF_ON_CARD`), and the budget is kept whatever the
+  context setting. Qwen2.5-Coder-7B on an 8 GB card at a 32768 context: room for 38,164 tokens
+  (was 12,721); a 15,648-token prompt answered in 51.5 s where v0.3.231 took 307 s with the card
+  full; decode and the prompt pass level; replies scored against llama.cpp equal (two byte-identical).
+  The research that removed the f32 copy's justification: arXiv 2604.15409 compares cache-on with
+  cache-off decoding, both in f16, and llama.cpp stores f16 by default. Not built (no user waiting
+  on them): Q8_0 KV (another ~2x, needs the dequant fused into the decode kernel) and a hybrid
+  placement that keeps the cache on the processor. `docs/invariants/inference.md` § "A card keeps
+  its KV cache as f16"; `docs/invariants/memory.md` § "A card's KV budget is kept whatever the
+  context setting".
+
+**Closed 2026-10-08, released in v0.3.231 (2026-10-08)** (#233, #234, #235, #236, #238, #239, #240, #242, #243)
 - #243 — on a narrow screen the chat's model picker kept naming the last model picked after a switch
   to an older chat, while the chat's own model answered (report #007, a tester at 590 px).
   `selectDropdown` set the desktop picker and not `#mobile-model-select`; only the list refresh did.

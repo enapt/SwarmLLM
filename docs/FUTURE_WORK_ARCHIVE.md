@@ -16523,3 +16523,21 @@ forwarded to, and only when the swarm cannot cover every layer. The fix is the p
 non-streamed reply sends its headers only when it is complete, so the body rule has to tell
 the two apart (or the peer must send keep-alives on both). Measure with a pool rig before
 choosing.
+
+### #194 — closed 2026-10-09 (the entry as it stood when closed, word for word)
+
+#### #194 — An agent-sized prompt fills an 8 GB card with conversation memory
+`P2` · memory · **PARTIAL** — 2026-09-02 · absorbs the old survey's Tier 2F (KV quantisation); history: archive § "An agent-sized prompt fills an 8 GB card with KV cache, and decode crawls"
+
+The crawl's cause is fixed (gotcha #440: `kv_budget::admit_prompt` + `SplitModel::kv_budget_now`
+reconcile with the live card). But a token of cache costs ~344 KB (f32 plus the f16 mirror,
+`split/kv_budget.rs`), so a 14k-token agent prompt takes ~5 GB beside the weights and ends in
+refusals or a 503 to a peer instead of a warm turn. Options, in order: (1)
+`inference.kv_cache_dtype = "f16"` with f32 the default, measuring divergence with the
+split-model tests (arXiv 2604.15409's caution); (4) a hybrid placement that keeps the cache on
+the processor; (2) depends on `cuda_decode_prefers_standard`. Q8_0 KV (group 32, ~2×) only
+with the dequant fused into `kernels/decode_attn.cu` — outside it is likely a net loss — and it
+breaks prefix-cache binary compatibility; never KIVI. A refusal printing `live_entries=1` with
+a total well above that request's own cache would reopen #11.
+
+Closed by the half KV cache on the card and the card's KV budget kept under a context override; the measurements are in `docs/invariants/inference.md` § "A card keeps its KV cache as f16" and `docs/invariants/memory.md` § "A card's KV budget is kept whatever the context setting". The two options left unbuilt are named in `FUTURE_WORK.md` § Closed.

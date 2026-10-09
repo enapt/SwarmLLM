@@ -43,7 +43,7 @@ swarmllm/
 │   │   ├── router/       (mod, types, batch, local_exec, distributed_exec, spot_check, tests)
 │   │   ├── scheduler/    (mod, parallax, parallax_allocator, cached_prefix (how much of a prompt our own worker already holds — a warm prompt is priced warm), tests)
 │   │   ├── pipeline/     (mod, distributed, dsd, dsd_stream (the continuous stream: the next chunk of guesses goes out while the last is being checked, split_speculation.md § 4b), engine_drafter (speculation across computers guessing with a small model this node holds, run by its own worker — `DaemonMsg::Draft`), local, local_generate (a plan that names this node is run as the local generation it is), prompt, remote_generate, speculative, tensor_parallel, vision, ngram_only_spec (R136 L1), tests_sampling)
-│   │   ├── split/        (mod, model, loader, executor, draft (`draft_after`: a small model's guesses for a bigger one's request), kv_cache, kv_budget, entry, gguf_meta, shard_reader, rope, prefix_cache, hybrid (which layers of a segment go on the card — .145, #431), token_embedding, tests/)
+│   │   ├── split/        (mod, model, loader, executor, draft (`draft_after`: a small model's guesses for a bigger one's request), kv_cache, kv_write (a step's K/V written into a cache of another dtype — the half cache, one launch on a card), kv_budget, entry, gguf_meta, shard_reader, rope, prefix_cache, hybrid (which layers of a segment go on the card — .145, #431), token_embedding, tests/)
 │   │   │   └── tests/    (mod, common, core, drafting, gqa, gemma2, moe_mla, llama4_glm4, kv_refresh)
 │   │   ├── chat_template/ (mod, fallbacks, tojson (the `transformers` signature, not minijinja's), tests, fixtures/{llama3_official,qwen3_official,qwen3_gguf_shipped,glm4_gguf_shipped}.jinja — rendering is `minijinja` + `minijinja-contrib` pycompat, the engine HF's TGI and SGLang use; the hand-rolled parser/eval subset was retired 2026-09-10)
 │   │   └── layers/       (mod, qwen35)
@@ -135,8 +135,10 @@ swarmllm/
 │                 `candle-cuda` and loaded via candle's `get_or_load_custom_func`.
 │                 fused_decode.cu — fusions that remove a launch + an alloc + a free
 │                 per layer each, bit-identical to the ops they replace;
-│                 decode_attn.cu — one-position attention over the f32 KV cache
-│                 (flash-decoding), NOT bit-identical. `candle-kernels` is a registry
+│                 decode_attn.cu — one-position attention over the KV cache, f32 or
+│                 the card's half cache (flash-decoding), NOT bit-identical;
+│                 kv_append.cu — a step's f32 K or V written into the half cache in ONE
+│                 launch (cast + copy). `candle-kernels` is a registry
 │                 crate, so this is how a kernel gets added without vendoring a fifth one)
 └── tests/         (integration tests)
 ```
@@ -551,7 +553,10 @@ without ever being able to read them.
   FORWARD_GENERATED_IDS, FORWARD_PRE_EMBEDDED, FORWARD_REFUSAL_REASON,
   FORWARD_SAMPLING, RESULT_STEP, SPEC_WALK_AT_TAIL, COUPLED_SAMPLING,
   STREAMED_VERIFY, STREAM_AS_ONE_WORK, DELEGATED_SPLIT, CHAINED_VERIFY}`, bits
-  0-18 — `features::ALL`); a node only attempts a relayed send when
+  0-18 — `features::ALL`; bit 19, `KV_HALF_ON_CARD`, is a statement about the
+  node rather than a message it reads: it keeps the half KV cache on its card,
+  so a coordinator prices its room for a prompt at a third of the old cost —
+  advertised beside `ALL` only where the build and settings keep it); a node only attempts a relayed send when
   the *recipient* advertises the matching bit, so the protocol evolves additively
   with no flag-day. The relay is chosen only when there is no usable direct
   connection (`has_direct_connection` false — the circuit-only case); a real
@@ -623,9 +628,12 @@ only the transformer layers it owns, forwarding hidden-state activations between
 
 The module is split into focused subfiles: `model.rs` (SplitModel struct + accessors),
 `loader/` (GGUF/shard load), `executor.rs` (forward pass + tensor-parallel),
-`kv_cache.rs` (per-request KV-cache store; `LayerKv` holds each layer's f32 BHSD
-cache plus an optional f16 BSHD mirror for the CUDA flash kernel — GQA only, worth
-1.41x on long-context decode, see `docs/invariants/inference.md`),
+`kv_cache.rs` (per-request KV-cache store; `LayerKv` holds each layer's cache the
+way `layers::kv_storage` says: on a card the f16 BHSD half cache, read in place by
+flash and the decode kernel — a third of the memory of what it replaced (#194);
+otherwise f32 BHSD, plus an f16 BSHD mirror for the CUDA flash kernel on a GQA
+model — see `docs/invariants/inference.md`), `kv_write.rs` (writing a step's K/V
+into a cache of another dtype),
 `entry.rs` (model entry + LRU eviction),
 `gguf_meta.rs` (GGUF header parsing), `shard_reader.rs` (multi-shard virtual reader),
 `rope.rs` (RoPE precomputation), `prefix_cache.rs` (cross-request prefix-KV reuse).

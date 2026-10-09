@@ -39,6 +39,12 @@ use super::SsmState;
 /// request's blocks to its whole prompt before prefill runs (Kwon et al. 2023,
 /// §4.1); here the worker records the admitted length and the executor builds
 /// every layer's cache to it, so the prompt pass is ONE allocation per layer.
+///
+/// **The buffer may hold another dtype than its sources.** A card keeps its
+/// cache as f16 (`KvStorage::F16`) while the projections that produce K and V
+/// answer in f32, so every append converts as it writes
+/// (`split::kv_write::write_into`); `store_dtype` is what a fresh buffer is
+/// allocated as, and `None` means whatever the first source is.
 #[derive(Debug, Clone)]
 pub(crate) struct SeqCache {
     /// `None` until the first append, when the batch/head shape is known.
@@ -47,6 +53,7 @@ pub(crate) struct SeqCache {
     current_seq_len: usize,
     grow_by: usize,
     max_seq_len: usize,
+    store_dtype: Option<DType>,
 }
 
 impl SeqCache {
@@ -60,7 +67,18 @@ impl SeqCache {
             current_seq_len: 0,
             grow_by: grow_by.max(1),
             max_seq_len: initial.max(1),
+            store_dtype: None,
         }
+    }
+
+    /// The dtype the buffer holds — what it was allocated as, or what the next
+    /// allocation will be; `None` before the first append of a cache that
+    /// follows its source.
+    pub(crate) fn dtype(&self) -> Option<DType> {
+        self.all_data
+            .as_ref()
+            .map(Tensor::dtype)
+            .or(self.store_dtype)
     }
 
     pub(crate) fn dim(&self) -> usize {
@@ -101,6 +119,7 @@ impl SeqCache {
             current_seq_len: self.current_seq_len,
             grow_by: self.grow_by,
             max_seq_len: self.max_seq_len,
+            store_dtype: self.store_dtype,
         })
     }
 
@@ -113,10 +132,11 @@ impl SeqCache {
 
     pub(crate) fn append(&mut self, src: &Tensor) -> candle_core::Result<()> {
         let seq_len = src.dim(self.dim)?;
+        let dtype = self.dtype().unwrap_or(src.dtype());
         if self.all_data.is_none() {
             let mut shape = src.dims().to_vec();
             shape[self.dim] = self.max_seq_len;
-            self.all_data = Some(Tensor::zeros(shape, src.dtype(), src.device())?);
+            self.all_data = Some(Tensor::zeros(shape, dtype, src.device())?);
         }
         let ad = self
             .all_data
@@ -125,7 +145,7 @@ impl SeqCache {
         while self.current_seq_len + seq_len > self.max_seq_len {
             let mut shape = src.dims().to_vec();
             shape[self.dim] = self.grow_by;
-            let next_ad = Tensor::zeros(shape, src.dtype(), src.device())?;
+            let next_ad = Tensor::zeros(shape, dtype, src.device())?;
             *ad = Tensor::cat(&[&*ad, &next_ad], self.dim)?;
             self.max_seq_len += self.grow_by;
             KV_GROWTH_STEPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -137,8 +157,11 @@ impl SeqCache {
         // Phi-4-mini request ever made — `layers::rope_over_heads` is where
         // that is prevented now, and this is why a new producer of K or V
         // cannot bring the whole class back.
+        //
+        // Converting as it writes when the buffer keeps another dtype — the
+        // half cache, fed f32 — in one launch on a card (`kv_write`).
         let src = src.contiguous()?;
-        ad.slice_set(&src, self.dim, self.current_seq_len)?;
+        super::kv_write::write_into(ad, &src, self.dim, self.current_seq_len)?;
         self.current_seq_len += seq_len;
         Ok(())
     }
@@ -171,6 +194,15 @@ impl KvPair {
             k: SeqCache::with_capacity(dim, initial, grow_by),
             v: SeqCache::with_capacity(dim, initial, grow_by),
         }
+    }
+
+    /// The same, holding `dtype` whatever its sources are (`None`: the first
+    /// source's) — see [`SeqCache`].
+    fn with_capacity_in(dim: usize, initial: usize, grow_by: usize, dtype: Option<DType>) -> Self {
+        let mut pair = Self::with_capacity(dim, initial, grow_by);
+        pair.k.store_dtype = dtype;
+        pair.v.store_dtype = dtype;
+        pair
     }
 
     /// An INDEPENDENT copy (probe/test use). `Clone` shares the tensors'
@@ -245,8 +277,38 @@ impl KvPair {
     }
 }
 
-/// One layer's KV cache: the f32 BHSD cache every path reads, plus an optional
-/// f16 BSHD mirror kept for the CUDA flash-attention kernel.
+/// How one layer keeps its KV cache — `layers::kv_storage` is the one place
+/// that decides, for the cache as it is built and for every estimate of what it
+/// will cost (FUTURE_WORK #194).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum KvStorage {
+    /// f32 BHSD — the processor; MLA; a card where the half cache does not apply
+    /// and the model is not grouped-query.
+    F32,
+    /// f32 BHSD plus the f16 BSHD flash mirror — a grouped-query model on a card
+    /// where the half cache does not apply (the layout before it).
+    F32Mirrored,
+    /// f16 BHSD and nothing else — a card, read in place by the flash kernel
+    /// and the card's decode kernel. What llama.cpp stores by default.
+    F16,
+}
+
+impl KvStorage {
+    /// Bytes ONE cached element costs, every copy counted: 4 for f32, 6 with the
+    /// f16 mirror beside it, 2 for the half cache.
+    pub(crate) fn bytes_per_element(self) -> u64 {
+        match self {
+            Self::F32 => 4,
+            Self::F32Mirrored => 6,
+            Self::F16 => 2,
+        }
+    }
+}
+
+/// One layer's KV cache: on a card, the f16 BHSD half cache every path reads
+/// in place ([`KvStorage::F16`]); otherwise the f32 BHSD cache every path
+/// reads, plus an optional f16 BSHD mirror kept for the CUDA flash-attention
+/// kernel. Most of what follows is about the second.
 ///
 /// **Why the mirror exists.** `run_attention`'s CUDA arm needs f16 in BSHD while
 /// the cache is f32 in BHSD, so it used to transpose and convert the WHOLE
@@ -256,15 +318,20 @@ impl KvPair {
 /// Measured on an RTX 3070, attention arm vs the mirrored ceiling:
 /// 272 KV 1.6x, 528 KV 1.75x, 912 KV 1.86x.
 ///
-/// **Why it is a mirror and not a replacement.** Rounding f32 to f16 is done at
+/// **Why it was a mirror and not a replacement (2026-08-10), and why on a card
+/// it is now the replacement (2026-10-09).** Rounding f32 to f16 is done at
 /// WRITE time here instead of at read time, and since the f32 source is never
 /// itself overwritten by a rounded value, the kernel receives bitwise the same
 /// numbers it received before — the flash path is numerically unchanged, not
-/// merely close. `standard_attention` still reads the f32 cache, so MHA decode,
-/// prefill-with-prefix and forced-standard spec/SWIFT sessions keep full
-/// precision. Dropping the f32 copy would change those, and published results on
-/// f16 KV divergence (arXiv 2604.15409) say the accumulation is worst under
-/// exactly our conditions — long context and GQA — so the f32 copy stays.
+/// merely close. The f32 copy was kept for `standard_attention`, on a reading
+/// of arXiv 2604.15409 as "f16 KV diverges". That paper compares cache-ON with
+/// cache-OFF decoding, BOTH in f16 — a different accumulation order, not a
+/// different storage width — and the reference every reply here is judged
+/// against, llama.cpp, stores f16 by default. Meanwhile the f32 copy plus the
+/// mirror cost 3x llama.cpp's memory per cached token, which is what filled an
+/// 8 GB card with an agent's prompt (#194). So a card now stores only f16
+/// where its decode kernel and flash read it in place, and keeps this layout
+/// where they do not (`layers::kv_storage`).
 ///
 /// **Keeping the two in step is the whole risk**, because a mirror that has
 /// drifted produces plausible wrong attention rather than an error. Everything
@@ -274,7 +341,8 @@ impl KvPair {
 /// `truncate` is the third such method: it moves both lengths together, in
 /// place, and is what `KvCacheStore::truncate_to` calls on a rejected draft.
 pub(crate) struct LayerKv {
-    /// f32 BHSD, sequence on dim 2. The source of truth.
+    /// BHSD, sequence on dim 2. The source of truth: f32, or f16 for the half
+    /// cache ([`KvStorage::F16`]).
     main: KvPair,
     /// f16 BSHD, sequence on dim 1. `None` on CPU and until the first append,
     /// which is where the device becomes known.
@@ -321,6 +389,28 @@ impl LayerKv {
         }
     }
 
+    /// The same, stored the way `storage` says from the first append
+    /// (`layers::new_kv_cache`).
+    pub(crate) fn with_storage(
+        dim: usize,
+        initial: usize,
+        growth: usize,
+        storage: KvStorage,
+    ) -> Self {
+        let (dtype, mirrorable) = match storage {
+            KvStorage::F16 => (Some(DType::F16), false),
+            KvStorage::F32 => (Some(DType::F32), false),
+            KvStorage::F32Mirrored => (Some(DType::F32), dim == 2),
+        };
+        Self {
+            main: KvPair::with_capacity_in(dim, initial, growth, dtype),
+            shadow: None,
+            growth,
+            initial,
+            mirrorable,
+        }
+    }
+
     /// Whether a mirror is worth maintaining for tensors on this device.
     ///
     /// CUDA only, and only when the flash kernel is actually compiled in —
@@ -342,6 +432,69 @@ impl LayerKv {
         t.transpose(1, 2)?.contiguous()?.to_dtype(DType::F16)
     }
 
+    /// Does this cache hold — or, before its first append, will it hold — the
+    /// half cache?
+    pub(crate) fn holds_half(&self) -> bool {
+        self.main.k_cache().dtype() == Some(DType::F16)
+    }
+
+    /// Make this cache the kind `storage` says, converting what it already
+    /// holds if it is not.
+    ///
+    /// Every forward asks it (`layers::append_to_cache`), because a cache can
+    /// arrive built by something that could not know: prefix-cache hydration
+    /// makes one from a snapshot, which carries `n_kv_head` in its shape but
+    /// not `n_head`, nor the device's choice of storage. Free when the cache is
+    /// already right — the common case, every step after the first. Converting
+    /// a held history is O(history), once: a snapshot taken from an f32 cache
+    /// on another build, read into a half one, or the reverse.
+    ///
+    /// **A mirror is only ever turned OFF here, deliberately.** Turning one ON
+    /// mid-conversation would start it empty against a cache already holding N
+    /// positions; a cache that should mirror is built that way from the start
+    /// (`new_kv_cache`) or filled in one append (prefix-cache hydration, which
+    /// mirrors the whole snapshot correctly because it appends it at once).
+    pub(crate) fn conform_to(&mut self, storage: KvStorage) -> candle_core::Result<()> {
+        match storage {
+            KvStorage::F16 => {
+                self.mirrorable = false;
+                self.shadow = None;
+                self.convert_main(DType::F16)
+            }
+            KvStorage::F32 => {
+                self.mirrorable = false;
+                self.shadow = None;
+                self.convert_main(DType::F32)
+            }
+            KvStorage::F32Mirrored => self.convert_main(DType::F32),
+        }
+    }
+
+    /// Hold `dtype` from now on, converting the positions already held.
+    fn convert_main(&mut self, dtype: DType) -> candle_core::Result<()> {
+        let dim = self.main.k_cache().dim();
+        let capacity = self.main.k_cache().max_seq_len();
+        if self.main.k_cache().all_data().is_none() {
+            // Nothing held: only what the first allocation will be changes.
+            self.main = KvPair::with_capacity_in(dim, capacity, self.growth, Some(dtype));
+            return Ok(());
+        }
+        if self.main.k_cache().dtype() == Some(dtype) {
+            self.main.k.store_dtype = Some(dtype);
+            self.main.v.store_dtype = Some(dtype);
+            return Ok(());
+        }
+        let (k, v) = (self.main.k()?, self.main.v()?);
+        let mut converted = KvPair::with_capacity_in(dim, capacity, self.growth, Some(dtype));
+        if let (Some(k), Some(v)) = (k, v) {
+            if k.dim(dim)? > 0 {
+                converted.append(&k, &v)?;
+            }
+        }
+        self.main = converted;
+        Ok(())
+    }
+
     /// Append new positions, updating the mirror in the same call.
     ///
     /// Returns the full f32 BHSD (K, V) exactly as `KvPair::append` does, so
@@ -353,6 +506,10 @@ impl LayerKv {
     ) -> candle_core::Result<(Tensor, Tensor)> {
         let before = self.main.current_seq_len();
         let out = self.main.append(k, v)?;
+        // The half cache IS what flash reads; there is nothing to keep in step.
+        if self.holds_half() {
+            return Ok(out);
+        }
         // A decode step — ONE position — leaves the mirror behind. Its reader
         // is attention over the f32 cache (`layers::cuda_decode_prefers_standard`
         // and the card's decode kernel), so keeping the mirror in step cost four
@@ -454,24 +611,6 @@ impl LayerKv {
         self.main.truncate(len);
         if let Some(shadow) = self.shadow.as_mut() {
             shadow.truncate(len);
-        }
-    }
-
-    /// Opt this cache out of mirroring — for a model whose decode path reads the
-    /// f32 cache anyway. See `model_wants_kv_mirror`.
-    ///
-    /// **Only the `false` direction does anything, deliberately.** Turning a
-    /// mirror ON mid-conversation would start it empty against a cache already
-    /// holding N positions, and since it only ever appends new ones it could
-    /// never catch up — `flash_operands` would then refuse it forever on the
-    /// length check, leaving the memory and the per-token conversion with no
-    /// reader. A cache that should mirror is built that way from the start
-    /// (`new_kv_cache`) or filled in one append (prefix-cache hydration, which
-    /// mirrors the whole snapshot correctly because it appends it at once).
-    pub(crate) fn set_mirror_wanted(&mut self, wanted: bool) {
-        if !wanted {
-            self.mirrorable = false;
-            self.shadow = None;
         }
     }
 
@@ -960,7 +1099,10 @@ impl KvCacheStore {
     /// their first allocation. Replaces an earlier figure — a retry re-admits
     /// rather than stacking. Zero, or `SWARMLLM_KV_RESERVE=0`, records
     /// nothing, and the caches then grow as they always did.
-    pub(crate) fn set_reserved_positions(&self, request_id: &str, positions: usize) {
+    ///
+    /// Public so `examples/prefill_bench.rs` can hold a prompt the way a worker
+    /// admits one — reserved whole, not grown into a quantum at a time.
+    pub fn set_reserved_positions(&self, request_id: &str, positions: usize) {
         if positions == 0 || !kv_reserve_enabled() {
             self.reserved_positions.remove(request_id);
             return;
@@ -1473,7 +1615,7 @@ mod tests {
         for req in ["req-a", "req-b"] {
             let mut entry = store.get_or_create("m", req, 1);
             let k = Tensor::zeros((1usize, 2, 8, 4), DType::F32, &Device::Cpu).unwrap();
-            let mut kv = new_kv_cache(64, true, 0);
+            let mut kv = new_kv_cache(64, KvStorage::F32Mirrored, 0);
             kv.append(&k, &k.clone()).unwrap();
             entry.layers[0] = Some(kv);
         }
@@ -1517,7 +1659,7 @@ mod tests {
         let prompt = Tensor::zeros((1usize, 2, 2000, 4), DType::F32, &dev).unwrap();
         let more = Tensor::zeros((1usize, 2, 100, 4), DType::F32, &dev).unwrap();
 
-        let mut reserved = new_kv_cache(4096, false, 2048);
+        let mut reserved = new_kv_cache(4096, KvStorage::F32, 2048);
         reserved.append(&prompt, &prompt).unwrap();
         assert_eq!(
             reserved.k_cache().max_seq_len(),
@@ -1532,7 +1674,7 @@ mod tests {
         );
 
         // The control: no reservation, the same prompt, grown into place.
-        let mut plain = new_kv_cache(4096, false, 0);
+        let mut plain = new_kv_cache(4096, KvStorage::F32, 0);
         plain.append(&prompt, &prompt).unwrap();
         assert_eq!(
             plain.k_cache().max_seq_len(),
@@ -1546,19 +1688,28 @@ mod tests {
     #[test]
     fn a_reservation_is_clamped_to_the_context_window() {
         assert_eq!(
-            new_kv_cache(4096, false, 10_000).k_cache().max_seq_len(),
+            new_kv_cache(4096, KvStorage::F32, 10_000)
+                .k_cache()
+                .max_seq_len(),
             4096
         );
         assert_eq!(
-            new_kv_cache(4096, false, 0).k_cache().max_seq_len(),
+            new_kv_cache(4096, KvStorage::F32, 0)
+                .k_cache()
+                .max_seq_len(),
             KV_CACHE_GROWTH_TOKENS
         );
         assert_eq!(
-            new_kv_cache(4096, false, 100).k_cache().max_seq_len(),
+            new_kv_cache(4096, KvStorage::F32, 100)
+                .k_cache()
+                .max_seq_len(),
             KV_CACHE_GROWTH_TOKENS
         );
         // A model whose whole window is under one quantum reserves the window.
-        assert_eq!(new_kv_cache(64, false, 0).k_cache().max_seq_len(), 64);
+        assert_eq!(
+            new_kv_cache(64, KvStorage::F32, 0).k_cache().max_seq_len(),
+            64
+        );
     }
 
     /// Whose request this is lives exactly as long as the request, like the
@@ -1622,7 +1773,7 @@ mod tests {
         assert_eq!(store.allocated_positions(&key), 0, "no entry");
         {
             let mut entry = store.get_or_create_keyed(&key, 2);
-            entry.layers[1] = Some(new_kv_cache(4096, false, 2048));
+            entry.layers[1] = Some(new_kv_cache(4096, KvStorage::F32, 2048));
         }
         assert_eq!(
             store.allocated_positions(&key),
@@ -1656,7 +1807,7 @@ mod tests {
         let fill = |layer: usize| {
             let mut entry = store.get_or_create("m", "r", 2);
             let k = Tensor::zeros((1usize, 2, 5, 4), DType::F32, &Device::Cpu).unwrap();
-            let mut kv = new_kv_cache(4096, false, 0);
+            let mut kv = new_kv_cache(4096, KvStorage::F32, 0);
             kv.append(&k, &k.clone()).unwrap();
             entry.layers[layer] = Some(kv);
         };
@@ -1683,7 +1834,7 @@ mod tests {
     fn append_for(store: &KvCacheStore, request_id: &str, n: usize, max_seq_len: usize) {
         let mut entry = store.get_or_create("m", request_id, 1);
         let k = Tensor::zeros((1usize, 2, n, 4), DType::F32, &Device::Cpu).unwrap();
-        let mut kv = new_kv_cache(max_seq_len, true, 0);
+        let mut kv = new_kv_cache(max_seq_len, KvStorage::F32Mirrored, 0);
         kv.append(&k, &k.clone()).unwrap();
         entry.layers[0] = Some(kv);
     }
@@ -1772,7 +1923,7 @@ mod tests {
     fn append(store: &KvCacheStore, n: usize, max_seq_len: usize) {
         let mut entry = store.get_or_create("m", "r", 1);
         let k = Tensor::zeros((1usize, 2, n, 4), DType::F32, &Device::Cpu).unwrap();
-        let mut kv = new_kv_cache(max_seq_len, true, 0);
+        let mut kv = new_kv_cache(max_seq_len, KvStorage::F32Mirrored, 0);
         kv.append(&k, &k.clone()).unwrap();
         entry.layers[0] = Some(kv);
     }
@@ -1911,7 +2062,7 @@ mod tests {
     fn conversation(store: &KvCacheStore, request: &str, n: usize, idle: std::time::Duration) {
         let mut entry = store.get_or_create("m", request, 1);
         let k = Tensor::zeros((1usize, 2, n, 4), DType::F32, &Device::Cpu).unwrap();
-        let mut kv = new_kv_cache(4096, true, 0);
+        let mut kv = new_kv_cache(4096, KvStorage::F32Mirrored, 0);
         kv.append(&k, &k.clone()).unwrap();
         entry.layers[0] = Some(kv);
         entry.last_accessed = std::time::Instant::now()
@@ -2488,7 +2639,7 @@ mod tests {
         kv.append(&k, &k).unwrap();
         assert_eq!(kv.shadow_len_for_test(), Some(4), "precondition: mirroring");
 
-        kv.set_mirror_wanted(false);
+        kv.conform_to(KvStorage::F32).unwrap();
         assert_eq!(kv.shadow_len_for_test(), None, "the mirror was not dropped");
 
         // And it must stay off — a later append must not resurrect it.
@@ -2507,11 +2658,199 @@ mod tests {
         let mut kv = LayerKv::with_capacity(2, 64, 64);
         let k = t(&dev, 1, 2, 4, 4);
         kv.append(&k, &k).unwrap();
-        kv.set_mirror_wanted(true);
+        kv.conform_to(KvStorage::F32Mirrored).unwrap();
         assert_eq!(
             kv.shadow_len_for_test(),
             None,
             "a mirror enabled mid-conversation could never match the cache"
         );
+    }
+
+    // ── The half cache (FUTURE_WORK #194) ──
+    //
+    // The processor never keeps one in production (`layers::kv_storage`), but
+    // the cache's own bookkeeping is device-independent, so it is pinned here
+    // where every build runs it. The card's two kernels have their own tests
+    // under `--features cuda` (`decode_attn`, `kv_write`).
+
+    /// Values f16 rounding actually changes: `t`'s integers up to 2048 are
+    /// exact in f16, which would hide a missing conversion.
+    fn noisy(b: usize, h: usize, s: usize, d: usize) -> Tensor {
+        Tensor::randn(0f32, 1.0, (b, h, s, d), &candle_core::Device::Cpu).unwrap()
+    }
+
+    fn flat32(t: &Tensor) -> Vec<f32> {
+        t.to_dtype(DType::F32)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap()
+    }
+
+    /// What a half cache must hold for `t`: each value rounded to f16 once.
+    fn rounded(t: &Tensor) -> Vec<f32> {
+        flat32(&t.to_dtype(DType::F16).unwrap())
+    }
+
+    #[test]
+    fn the_half_cache_holds_f16_and_answers_with_it() {
+        let mut kv = LayerKv::with_storage(2, 8, 8, KvStorage::F16);
+        let (k1, v1) = (noisy(1, 2, 5, 4), noisy(1, 2, 5, 4));
+        let (k, v) = kv.append(&k1, &v1).unwrap();
+        assert!(kv.holds_half());
+        assert_eq!((k.dtype(), v.dtype()), (DType::F16, DType::F16));
+        assert_eq!(flat32(&k), rounded(&k1));
+        assert_eq!(flat32(&v), rounded(&v1));
+        assert_ne!(
+            rounded(&k1),
+            flat32(&k1),
+            "precondition: the test values must not be exact in f16"
+        );
+
+        // Past its first allocation (8 positions): it grows, in f16.
+        let (k2, v2) = (noisy(1, 2, 6, 4), noisy(1, 2, 6, 4));
+        let (k, _) = kv.append(&k2, &v2).unwrap();
+        assert_eq!(k.dims4().unwrap(), (1, 2, 11, 4));
+        assert_eq!(k.dtype(), DType::F16);
+        assert_eq!(flat32(&k.narrow(2, 0, 5).unwrap()), rounded(&k1));
+        assert_eq!(flat32(&k.narrow(2, 5, 6).unwrap()), rounded(&k2));
+
+        // No mirror, ever: the half cache is what flash reads.
+        assert!(kv.flash_operands().is_none());
+        assert_eq!(kv.all_caches().len(), 2);
+
+        // A rejected draft is two lengths moving, and the next step writes
+        // over what was dropped.
+        kv.truncate(3);
+        let k3 = noisy(1, 2, 1, 4);
+        let (k, _) = kv.append(&k3, &k3).unwrap();
+        assert_eq!(k.dim(2).unwrap(), 4);
+        assert_eq!(flat32(&k.narrow(2, 3, 1).unwrap()), rounded(&k3));
+    }
+
+    /// The point of it: the same positions cost a third of the f32 cache plus
+    /// its mirror, and half of the f32 cache alone — as the store counts them.
+    #[test]
+    fn the_half_cache_is_counted_at_its_own_width() {
+        let bytes = |kv: &LayerKv| -> u64 {
+            kv.all_caches()
+                .iter()
+                .filter_map(|c| c.all_data().as_ref())
+                .map(|t| t.elem_count() as u64 * t.dtype().size_in_bytes() as u64)
+                .sum()
+        };
+        let k = noisy(1, 2, 16, 4);
+        let mut half = LayerKv::with_storage(2, 16, 16, KvStorage::F16);
+        let mut full = LayerKv::with_storage(2, 16, 16, KvStorage::F32);
+        half.append(&k, &k).unwrap();
+        full.append(&k, &k).unwrap();
+        assert_eq!(bytes(&half) * 2, bytes(&full));
+        assert_eq!(
+            bytes(&half),
+            16 * 2 * 4 * 2 * KvStorage::F16.bytes_per_element(),
+            "two tensors of 16 positions x 2 heads x 4, at 2 bytes"
+        );
+    }
+
+    /// A cache built by something that could not know how its layer keeps it —
+    /// prefix-cache hydration — is converted, history and all, at the next
+    /// forward, and goes on in the new dtype.
+    #[test]
+    fn a_cache_conforms_to_the_storage_its_layer_keeps() {
+        let mut kv = LayerKv::with_capacity(2, 16, 16);
+        let (k1, v1) = (noisy(1, 2, 5, 4), noisy(1, 2, 5, 4));
+        kv.append(&k1, &v1).unwrap();
+        assert!(
+            !kv.holds_half(),
+            "a cache that follows its source holds f32"
+        );
+
+        kv.conform_to(KvStorage::F16).unwrap();
+        assert!(kv.holds_half());
+        assert_eq!(kv.current_seq_len(), 5);
+        assert_eq!(kv.k_cache().max_seq_len(), 16, "the reservation is kept");
+        assert_eq!(flat32(&kv.k().unwrap().unwrap()), rounded(&k1));
+        assert_eq!(flat32(&kv.v().unwrap().unwrap()), rounded(&v1));
+
+        let k2 = noisy(1, 2, 1, 4);
+        let (k, _) = kv.append(&k2, &k2).unwrap();
+        assert_eq!(k.dtype(), DType::F16);
+        assert_eq!(flat32(&k.narrow(2, 5, 1).unwrap()), rounded(&k2));
+
+        // Already right: nothing moves.
+        let before = kv.k_cache().all_data().as_ref().unwrap().id();
+        kv.conform_to(KvStorage::F16).unwrap();
+        assert_eq!(kv.k_cache().all_data().as_ref().unwrap().id(), before);
+
+        // And back, should a layer ever keep f32: what the half cache held,
+        // widened — the rounding cannot be undone, and nothing pretends to.
+        kv.conform_to(KvStorage::F32).unwrap();
+        assert!(!kv.holds_half());
+        let k = kv.k().unwrap().unwrap();
+        assert_eq!(k.dtype(), DType::F32);
+        assert_eq!(flat32(&k.narrow(2, 0, 5).unwrap()), rounded(&k1));
+    }
+
+    #[test]
+    fn an_empty_cache_conforms_without_allocating() {
+        let mut kv = LayerKv::with_capacity(2, 16, 16);
+        kv.conform_to(KvStorage::F16).unwrap();
+        assert!(kv.holds_half(), "the next allocation is the half cache");
+        assert!(kv.k_cache().all_data().is_none());
+        let k = noisy(1, 2, 3, 4);
+        let (k_out, _) = kv.append(&k, &k).unwrap();
+        assert_eq!(k_out.dtype(), DType::F16);
+    }
+
+    /// The forward's one way in: a fresh slot is built the way the layer keeps
+    /// it, a hydrated one is conformed, and position 0 starts over.
+    #[test]
+    fn a_forward_appends_through_one_function_that_conforms_the_cache() {
+        use crate::inference::layers::append_to_cache;
+        let (k1, v1) = (noisy(1, 2, 5, 4), noisy(1, 2, 5, 4));
+
+        let mut fresh: Option<LayerKv> = None;
+        let (k, _) = append_to_cache(&mut fresh, &k1, &v1, 0, KvStorage::F16, 4096, 0).unwrap();
+        assert_eq!(k.dtype(), DType::F16);
+
+        // What hydration leaves: an f32 history in a cache that follows its
+        // source. The next step conforms it and lands in the half cache.
+        let mut hydrated = LayerKv::with_capacity(2, 16, 16);
+        hydrated.append(&k1, &v1).unwrap();
+        let mut slot = Some(hydrated);
+        let k2 = noisy(1, 2, 1, 4);
+        let (k, _) = append_to_cache(&mut slot, &k2, &k2, 5, KvStorage::F16, 4096, 0).unwrap();
+        assert_eq!(k.dtype(), DType::F16);
+        assert_eq!(k.dim(2).unwrap(), 6);
+        assert_eq!(flat32(&k.narrow(2, 0, 5).unwrap()), rounded(&k1));
+
+        // Position 0 is a new conversation in the same slot.
+        let (k, _) = append_to_cache(&mut slot, &k2, &k2, 0, KvStorage::F16, 4096, 0).unwrap();
+        assert_eq!(k.dim(2).unwrap(), 1);
+    }
+
+    /// The matmul path reads f32, and a half cache that reaches it — forced
+    /// standard attention, a decode step the card kernel declines — is widened
+    /// first: the same answer as the f32 cache holding the rounded values.
+    #[test]
+    fn attention_over_a_half_cache_widens_it_where_it_needs_f32() {
+        use crate::inference::layers::standard_attention;
+        let (n_head, n_kv_head, d, s_len) = (8usize, 2usize, 16usize, 37usize);
+        let q = noisy(1, n_head, 1, d);
+        let (k, v) = (noisy(1, n_kv_head, s_len, d), noisy(1, n_kv_head, s_len, d));
+        let (k16, v16) = (
+            k.to_dtype(DType::F16).unwrap(),
+            v.to_dtype(DType::F16).unwrap(),
+        );
+        let (k_wide, v_wide) = (
+            k16.to_dtype(DType::F32).unwrap(),
+            v16.to_dtype(DType::F32).unwrap(),
+        );
+        let got = standard_attention(&q, &k16, &v16, None, d, n_head, n_kv_head, None).unwrap();
+        let want =
+            standard_attention(&q, &k_wide, &v_wide, None, d, n_head, n_kv_head, None).unwrap();
+        assert_eq!(got.dtype(), DType::F32);
+        assert_eq!(flat32(&got), flat32(&want));
     }
 }

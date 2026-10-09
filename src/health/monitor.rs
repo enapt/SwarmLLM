@@ -1108,9 +1108,16 @@ impl HealthMonitor {
                 &self.shared_state,
             ),
             // Advertise the protocol epoch + the optional features this build
-            // implements, so peers negotiate new message types additively.
+            // implements, so peers negotiate new message types additively —
+            // and whether this node keeps the half KV cache on its card, so a
+            // coordinator prices its room for a prompt as it will be held.
             protocol_version: swarmllm_types::PROTOCOL_VERSION,
-            features: swarmllm_types::features::ALL,
+            features: swarmllm_types::features::ALL
+                | if crate::inference::layers::kv_half_on_card_enabled() {
+                    swarmllm_types::features::KV_HALF_ON_CARD
+                } else {
+                    0
+                },
             // NETWORKING_PLAN Phase 3 — advertise the relay-capable peers we are
             // connected to, so a peer that can't reach us directly can pick a
             // relay we share. Bounded to keep the capability gossip small.

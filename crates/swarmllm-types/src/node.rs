@@ -243,7 +243,21 @@ pub mod features {
     /// tail would answer a guess-check as a plain decode step.
     pub const CHAINED_VERIFY: u64 = 1 << 18;
 
-    /// The full feature set THIS build implements. Advertised by every node.
+    /// Keeps its KV cache on a graphics card as f16 alone — the half cache
+    /// (FUTURE_WORK #194) — for the head geometries its card decode kernel
+    /// covers, where an older build kept f32 plus an f16 copy for the flash
+    /// kernel: a third of the memory per cached token.
+    ///
+    /// Not a message, and NOT in [`ALL`]: a node sets it only when its build
+    /// and its settings actually keep the half cache (a build without the
+    /// flash kernel, or `SWARMLLM_KV_F16=0`, does not). It tells a coordinator
+    /// how much of a prompt that peer's card can hold, so the peer is planned
+    /// the conversation its own budget will admit; a peer without it is priced
+    /// as before.
+    pub const KV_HALF_ON_CARD: u64 = 1 << 19;
+
+    /// The full feature set THIS build implements. Advertised by every node,
+    /// with [`KV_HALF_ON_CARD`] beside it where that applies.
     pub const ALL: u64 = RELAY
         | TENSOR_RELAY
         | PIPELINE_CHAIN

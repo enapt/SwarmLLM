@@ -1,5 +1,27 @@
 # Changelog
 
+## [Unreleased]
+
+**Faster, roomier long conversations on graphics cards.** A conversation's
+memory on the graphics card now takes a third of the space it did. It is kept
+in half precision, which is how llama.cpp keeps it, instead of in full precision
+with a second half-precision copy beside it. On an 8 GB card beside a 7B model,
+that is room for about 38,000 tokens of conversation where there was room for
+about 12,700. The long instructions that coding agents send now fit beside the
+model instead of being refused or sent elsewhere. Replies are unchanged:
+checked against llama.cpp on six models, the two arms scored the same, and two
+of the six gave word-for-word identical 400-token replies. Speed is unchanged
+too, for reading a prompt and for writing a reply. Computers that run their
+models on the processor are not affected.
+
+**Fixed: raising the conversation length could let a long prompt crawl.** A
+node with `inference.max_seq_len_override` set, which is how agent users make
+room for a long prompt, kept no limit on how much graphics memory its
+conversations could take. A long prompt could fill the card, and the reply then
+slowed to a crawl. On an 8 GB card, a 15,600-token prompt took 5 minutes; it
+now takes 51 seconds. A prompt that truly does not fit is now turned away at
+once, and in a swarm it goes to another computer instead.
+
 ## [0.3.231-alpha] — 2026-10-08
 
 **Fixed: on a phone or narrow window, the model picker shows the model that

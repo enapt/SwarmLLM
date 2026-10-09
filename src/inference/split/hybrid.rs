@@ -94,14 +94,14 @@ pub(crate) fn plan_gpu_layers(
     total_layers: usize,
     k_elems: usize,
     v_elems: usize,
-    mirrored: bool,
+    storage: super::kv_cache::KvStorage,
     context_tokens: u64,
 ) -> usize {
     if total_layers == 0 {
         return 0;
     }
     let weights_per_layer = segment_weights_bytes / total_layers as u64;
-    let kv_per_layer_per_token = kv_bytes_per_token(1, k_elems, v_elems, mirrored);
+    let kv_per_layer_per_token = kv_bytes_per_token(1, k_elems, v_elems, storage);
     layers_that_fit(
         budget_bytes,
         weights_per_layer,
@@ -303,6 +303,7 @@ impl LayerPlacement {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::inference::split::kv_cache::KvStorage;
 
     const MB: u64 = 1024 * 1024;
     const GB: u64 = 1024 * MB;
@@ -313,12 +314,12 @@ mod tests {
     fn the_reported_case_now_puts_something_on_the_card() {
         let total = 48;
         let weights = 9347 * MB;
-        let n = plan_gpu_layers(4990 * MB, weights, total, 1024, 1024, false, 4096);
+        let n = plan_gpu_layers(4990 * MB, weights, total, 1024, 1024, KvStorage::F32, 4096);
         assert!(n > 0, "still placing nothing on a card with room");
         assert!(n < total, "claimed to fit a segment that does not fit");
         // And what it placed must actually fit inside the budget.
         let per_layer = weights / total as u64;
-        let kv = kv_bytes_per_token(1, 1024, 1024, false) * 4096;
+        let kv = kv_bytes_per_token(1, 1024, 1024, KvStorage::F32) * 4096;
         assert!(
             n as u64 * (per_layer + kv) + FORWARD_BUFFER_RESERVE_BYTES <= 4990 * MB,
             "the plan overcommits the card"
@@ -353,7 +354,7 @@ mod tests {
     #[test]
     fn a_segment_that_fits_entirely_goes_entirely_to_the_card() {
         // 2 GB of weights, 8 GB budget: everything, and never more than exists.
-        let n = plan_gpu_layers(8 * GB, 2 * GB, 28, 512, 512, false, 4096);
+        let n = plan_gpu_layers(8 * GB, 2 * GB, 28, 512, 512, KvStorage::F32, 4096);
         assert_eq!(n, 28);
     }
 
@@ -361,11 +362,14 @@ mod tests {
     fn a_card_with_no_room_still_gets_nothing() {
         // The whole budget is swallowed by the forward-buffer reserve.
         assert_eq!(
-            plan_gpu_layers(256 * MB, 8 * GB, 32, 1024, 1024, false, 4096),
+            plan_gpu_layers(256 * MB, 8 * GB, 32, 1024, 1024, KvStorage::F32, 4096),
             0
         );
         // And a zero budget cannot go negative or wrap.
-        assert_eq!(plan_gpu_layers(0, 8 * GB, 32, 1024, 1024, false, 4096), 0);
+        assert_eq!(
+            plan_gpu_layers(0, 8 * GB, 32, 1024, 1024, KvStorage::F32, 4096),
+            0
+        );
     }
 
     /// KV is charged per layer placed, not as a lump — so asking for a longer
@@ -373,7 +377,7 @@ mod tests {
     /// unchanged. This is the property that replaces llama.cpp's flat reserve.
     #[test]
     fn a_longer_context_costs_layers_on_the_card() {
-        let args = |ctx| plan_gpu_layers(6 * GB, 4 * GB, 32, 1024, 1024, false, ctx);
+        let args = |ctx| plan_gpu_layers(6 * GB, 4 * GB, 32, 1024, 1024, KvStorage::F32, ctx);
         let short = args(2048);
         let long = args(32768);
         assert!(
@@ -387,9 +391,17 @@ mod tests {
     fn the_mirror_is_charged_for() {
         // The f16 flash mirror is real graphics memory (see `LayerKv`), so a
         // model maintaining one must not be planned as though it were free.
-        let plain = plan_gpu_layers(6 * GB, 4 * GB, 32, 1024, 1024, false, 8192);
-        let mirrored = plan_gpu_layers(6 * GB, 4 * GB, 32, 1024, 1024, true, 8192);
+        let plain = plan_gpu_layers(6 * GB, 4 * GB, 32, 1024, 1024, KvStorage::F32, 8192);
+        let mirrored =
+            plan_gpu_layers(6 * GB, 4 * GB, 32, 1024, 1024, KvStorage::F32Mirrored, 8192);
         assert!(mirrored <= plain, "mirroring must not increase the plan");
+        // And the half cache, at a third of the mirrored layout's bytes, leaves
+        // room for more of the model on the card (FUTURE_WORK #194).
+        let half = plan_gpu_layers(6 * GB, 4 * GB, 32, 1024, 1024, KvStorage::F16, 8192);
+        assert!(
+            half > mirrored,
+            "the half cache must place more layers ({half} vs {mirrored})"
+        );
     }
 
     /// The boundary is the whole contract: layers before it on the card,

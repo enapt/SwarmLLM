@@ -1,4 +1,5 @@
-// Single-position (decode) attention on the card, straight over the f32 KV cache.
+// Single-position (decode) attention on the card, straight over the KV cache —
+// f32, or the half cache a card keeps (`decode_attn_f16kv`).
 //
 // WHY THIS FILE EXISTS
 // --------------------
@@ -18,7 +19,7 @@
 // inference", 2023; llama.cpp's `fattn-vec` + `flash_attn_combine_results`):
 // split the cached positions into fixed chunks, compute each chunk's softmax
 // partials in parallel, merge them with the log-sum-exp rescale.
-//   decode_attn_f32          grid (batch * n_kv_head, n_chunks), DA_THREADS
+//   decode_attn_f32 / _f16kv grid (batch * n_kv_head, n_chunks), DA_THREADS
 //   decode_attn_combine_f32  grid (batch * n_head), only when n_chunks > 1
 // One block holds ONE KV head and EVERY query head of its group, so each K and
 // V row of its chunk is read once for the group — the rule the CPU kernel
@@ -34,6 +35,7 @@
 // Built WITHOUT `-use_fast_math`, like every kernel here (`build.rs`).
 
 #include <cuda_runtime.h>
+#include <cuda_fp16.h>
 #include <math.h>
 
 #define DA_CHUNK 64
@@ -66,10 +68,21 @@ static __device__ __forceinline__ float da_warp_max(float x) {
 //          chunk and query head — written only when there are several
 // softcap: Gemma-2's tanh cap on the scaled score, 0 = none.
 // Requires d % 32 == 0, d <= DA_MAX_D, n_rep <= DA_MAX_REP (checked by the caller).
-extern "C" __global__ void decode_attn_f32(
+//
+// `KV` is the cache's element type: `float`, or `__half` for the half cache a
+// card keeps (`layers::KvStorage::F16`, FUTURE_WORK #194). Each element is
+// widened to f32 as it is read and everything after that — the products, the
+// softmax, the sums — is f32 as before, so the half cache changes what is
+// stored and nothing about how it is summed. llama.cpp's vector kernel reads
+// its default f16 cache the same way.
+static __device__ __forceinline__ float da_load(const float *p) { return *p; }
+static __device__ __forceinline__ float da_load(const __half *p) { return __half2float(*p); }
+
+template <typename KV>
+static __device__ __forceinline__ void decode_attn_body(
     const float *__restrict__ q,
-    const float *__restrict__ k,
-    const float *__restrict__ v,
+    const KV *__restrict__ k,
+    const KV *__restrict__ v,
     float *__restrict__ out,
     float *__restrict__ partial,
     const int n_kv_head,
@@ -107,8 +120,8 @@ extern "C" __global__ void decode_attn_f32(
     }
     __syncthreads();
 
-    const float *kb = k + bi * k_sb + h * k_sh + (long long)s0 * d;
-    const float *vb = v + bi * v_sb + h * v_sh + (long long)s0 * d;
+    const KV *kb = k + bi * k_sb + h * k_sh + (long long)s0 * d;
+    const KV *vb = v + bi * v_sb + h * v_sh + (long long)s0 * d;
 
     // Scores: one warp per position; its K row is read once, for every head
     // of the group.
@@ -116,7 +129,7 @@ extern "C" __global__ void decode_attn_f32(
         float kr[DA_MAX_D / 32];
 #pragma unroll
         for (int i = 0; i < DA_MAX_D / 32; i++) {
-            kr[i] = i < per_lane ? kb[(long long)p * d + lane + 32 * i] : 0.0f;
+            kr[i] = i < per_lane ? da_load(&kb[(long long)p * d + lane + 32 * i]) : 0.0f;
         }
         for (int r = 0; r < n_rep; r++) {
             float acc = 0.0f;
@@ -168,7 +181,7 @@ extern "C" __global__ void decode_attn_f32(
             acc[r] = 0.0f;
         }
         for (int p = 0; p < n; p++) {
-            const float vv = vb[(long long)p * d + j];
+            const float vv = da_load(&vb[(long long)p * d + j]);
 #pragma unroll
             for (int r = 0; r < DA_MAX_REP; r++) {
                 if (r < n_rep) {
@@ -193,6 +206,24 @@ extern "C" __global__ void decode_attn_f32(
         }
     }
 }
+
+#define DA_ENTRY(NAME, KV)                                                      \
+    extern "C" __global__ void NAME(                                            \
+        const float *__restrict__ q, const KV *__restrict__ k,                  \
+        const KV *__restrict__ v, float *__restrict__ out,                      \
+        float *__restrict__ partial, const int n_kv_head, const int n_rep,      \
+        const int d, const int s_len, const long long k_sb,                     \
+        const long long k_sh, const long long v_sb, const long long v_sh,       \
+        const float scale, const float softcap) {                               \
+        decode_attn_body<KV>(q, k, v, out, partial, n_kv_head, n_rep, d, s_len, \
+                             k_sb, k_sh, v_sb, v_sh, scale, softcap);           \
+    }
+
+// The f32 cache (the processor's layout, and a card's where the half cache does
+// not apply) and the half cache. Same arguments; only the cache pointers' type
+// differs.
+DA_ENTRY(decode_attn_f32, float)
+DA_ENTRY(decode_attn_f16kv, __half)
 
 // Merge the chunks: out = Σ_c e^(m_c - M) o_c / Σ_c e^(m_c - M) l_c — the CPU
 // kernel's pass 2, in the same order.

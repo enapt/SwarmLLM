@@ -3707,10 +3707,19 @@ fn memory_already_booked_on_a_peer_is_not_offered_twice() {
     );
 }
 
-/// The coordinator prices a position the way the worker charges it, mirror
-/// included on a card and excluded on a processor.
+/// The coordinator prices a position the way the worker charges it: the half
+/// cache on a card that keeps one, f32 plus the mirror on one that does not,
+/// f32 alone on a processor.
 #[test]
 fn a_prompt_position_is_priced_like_the_worker_charges_it() {
+    let card_f32 = super::KvDevice {
+        on_card: true,
+        keeps_half: false,
+    };
+    let card_half = super::KvDevice {
+        on_card: true,
+        keeps_half: true,
+    };
     let meta = crate::inference::split::GgufTensorMeta {
         tensors: Default::default(),
         tensor_data_offset: 0,
@@ -3727,25 +3736,59 @@ fn a_prompt_position_is_priced_like_the_worker_charges_it() {
         architecture: "gemma2".into(),
         context_length: 8192,
     };
-    // GQA on a card: f32 + f16 mirror → 6 bytes per element.
+    // GQA on a card that keeps the half cache: f16 alone → 2 bytes per element.
     assert_eq!(
-        super::kv_bytes_per_position_per_layer(&meta, true),
+        super::kv_bytes_per_position_per_layer(&meta, card_half),
+        2 * 4 * 256 * 2
+    );
+    // GQA on a card that does not (every build before it): f32 + f16 mirror → 6.
+    assert_eq!(
+        super::kv_bytes_per_position_per_layer(&meta, card_f32),
         2 * 4 * 256 * 6
     );
-    // On a processor there is no mirror.
+    // On a processor there is no mirror, whatever the node keeps on a card.
     assert_eq!(
-        super::kv_bytes_per_position_per_layer(&meta, false),
+        super::kv_bytes_per_position_per_layer(&meta, super::KvDevice::PROCESSOR),
         2 * 4 * 256 * 4
     );
-    // An MHA model keeps no mirror even on a card.
+    // An MHA model keeps no mirror on a card without the half cache, and the
+    // half cache on one with it.
     let mha = crate::inference::split::GgufTensorMeta {
         head_count: 8,
         head_count_kv: 8,
         ..meta.clone()
     };
     assert_eq!(
-        super::kv_bytes_per_position_per_layer(&mha, true),
+        super::kv_bytes_per_position_per_layer(&mha, card_f32),
         2 * 8 * 256 * 4
+    );
+    assert_eq!(
+        super::kv_bytes_per_position_per_layer(&mha, card_half),
+        2 * 8 * 256 * 2
+    );
+    // A head the card's decode kernel does not cover keeps the f32 layout
+    // even on a card with the half cache — the peer would, too.
+    let wide = crate::inference::split::GgufTensorMeta {
+        head_dim: 320,
+        ..meta.clone()
+    };
+    assert_eq!(
+        super::kv_bytes_per_position_per_layer(&wide, card_half),
+        2 * 4 * 320 * 6
+    );
+    // DeepSeek-2's MLA keeps f32 wherever it runs, even on a peer advertising
+    // the half cache, though its geometry would pass the decode kernel's — the
+    // header's architecture is what says so (review of #194).
+    let mla = crate::inference::split::GgufTensorMeta {
+        architecture: "deepseek2".into(),
+        head_count: 16,
+        head_count_kv: 16,
+        head_dim: 192,
+        ..meta.clone()
+    };
+    assert_eq!(
+        super::kv_bytes_per_position_per_layer(&mla, card_half),
+        2 * 16 * 192 * 4
     );
     // Qwen 3.5's shape: three in four layers recurrent (`ssm_alpha`), keeping
     // a fixed state rather than a cache — so a layer costs a quarter of an
@@ -3765,7 +3808,7 @@ fn a_prompt_position_is_priced_like_the_worker_charges_it() {
         ..meta.clone()
     };
     assert_eq!(
-        super::kv_bytes_per_position_per_layer(&qwen35, false),
+        super::kv_bytes_per_position_per_layer(&qwen35, super::KvDevice::PROCESSOR),
         2 * 4 * 256 * 4 / 4
     );
 }
@@ -6275,6 +6318,7 @@ fn a_card_holder_of_a_model_it_must_split_on(
             is_first: true,
             embedding_gatherable: true,
             splits_across_devices: arch_supports_hybrid(&ModelArch::Llama),
+            attention: crate::inference::layers::KvAttention::Standard,
         },
     );
     (state, local, mid)
@@ -6511,6 +6555,7 @@ fn a_model_no_holder_could_ever_hold_is_refused_by_the_planner() {
         is_first: true,
         embedding_gatherable: true,
         splits_across_devices: true,
+        attention: crate::inference::layers::KvAttention::Standard,
     };
     state
         .model_process_pool

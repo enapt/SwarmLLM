@@ -551,8 +551,18 @@ impl SplitModel {
         //    daemon's life, a request is refused with 503 at the moment memory
         //    is actually short — which in a swarm routes it to a peer.
         //
-        //    Still skipped when the operator named a value: an explicit
-        //    setting wins, and the load-time OOM fallback to CPU backstops it.
+        //    **Recorded whatever the context setting** (FUTURE_WORK #194). It
+        //    used to be skipped when `inference.max_seq_len_override` was set
+        //    — "an explicit setting wins" — a rule inherited from the
+        //    load-time shrink above it replaced (2907cb7e), where it meant
+        //    "never shorten a context the operator named". The runtime budget
+        //    shortens nothing; it refuses one request that does not fit NOW.
+        //    Skipped, a card holding a model for an agent (the override is
+        //    how the README tells agent users to make room for their prompt)
+        //    admitted every prompt and let the cache spill into host memory —
+        //    the 1-3 tok/s crawl #440 removed for everyone else — and the
+        //    load-time fallback it claimed as a backstop runs before the
+        //    cache grows, so it never saw the overflow.
         let mut kv_budget_bytes: Option<u64> = None;
         let mut kv_bytes_per_token: u64 = 0;
         // How many of this segment's layers `device` holds — every one, unless
@@ -590,15 +600,20 @@ impl SplitModel {
             } else {
                 super::kv_budget::standard_kv_elems(head_count_kv, head_dim)
             };
-            // GQA models on CUDA also carry the f16 flash mirror, which is real
-            // VRAM the head-room check must charge for. MLA never mirrors.
-            let mirrored = device.is_cuda()
-                && !matches!(model_arch, ModelArch::DeepSeek2)
-                && crate::inference::layers::model_wants_kv_mirror(head_count, head_count_kv)
-                && cfg!(feature = "flash-attn");
-            super::kv_budget::kv_bytes_per_token(seg_layers, k_elems, v_elems, mirrored)
+            // How the cache on `device` is kept — the half cache on a card, f32
+            // (plus the flash mirror for a grouped-query model where the half
+            // cache does not apply) otherwise, f32 for MLA — asked of the ONE
+            // rule the cache itself is built by (`layers::kv_storage`).
+            let storage = crate::inference::layers::kv_storage(
+                device.is_cuda(),
+                crate::inference::layers::KvAttention::of(&model_arch),
+                head_count,
+                head_count_kv,
+                head_dim,
+            );
+            super::kv_budget::kv_bytes_per_token(seg_layers, k_elems, v_elems, storage)
         };
-        if device.is_cuda() && super::max_seq_len_override().is_none() {
+        if device.is_cuda() {
             let rows_on_demand = ct
                 .tensor_infos
                 .get("token_embd.weight")

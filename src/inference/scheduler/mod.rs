@@ -492,26 +492,37 @@ fn max_hostable_layers(
 }
 
 /// KV-cache bytes ONE prompt position costs across ONE layer of `meta`'s model
-/// on a peer with (`on_gpu`) or without a graphics card.
+/// on a node with (`device.on_card`) or without a graphics card, kept the way
+/// that node says it keeps it (`device.keeps_half`).
 ///
 /// The same arithmetic the worker charges at admission
 /// (`kv_budget::kv_bytes_per_token` over `standard_kv_elems`), so the
-/// coordinator's bound and the peer's refusal agree about the shape. A CUDA
-/// worker keeps an f16 mirror of a GQA model's cache for the flash kernel
-/// (`layers::model_wants_kv_mirror`), which is the same elements again at half
-/// the width — 295 KB per position over Gemma-2's 24 middle layers, mirror
-/// included, which is the figure the #447 worker ran out of memory against.
+/// coordinator's bound and the peer's refusal agree about the shape. A card
+/// keeps the half cache (FUTURE_WORK #194) where its build says so
+/// (`features::KV_HALF_ON_CARD`); one that does not keeps f32 plus an f16
+/// mirror of a GQA model's cache for the flash kernel, the same elements again
+/// at half the width — 295 KB per position over Gemma-2's 24 middle layers,
+/// mirror included, which is the figure the #447 worker ran out of memory
+/// against. `layers::kv_storage_as_advertised` is the rule.
 /// DeepSeek-style MLA caches wider decompressed heads and is priced LOW here;
 /// the peer's own admission remains the backstop.
 fn kv_bytes_per_position_per_layer(
     meta: &crate::inference::split::GgufTensorMeta,
-    on_gpu: bool,
+    device: KvDevice,
 ) -> u64 {
     let (k, v) =
         crate::inference::split::kv_budget::standard_kv_elems(meta.head_count_kv, meta.head_dim);
-    let mirrored = on_gpu
-        && crate::inference::layers::model_wants_kv_mirror(meta.head_count, meta.head_count_kv);
-    let attention_layer = crate::inference::split::kv_budget::kv_bytes_per_token(1, k, v, mirrored);
+    let storage = crate::inference::layers::kv_storage_as_advertised(
+        device.on_card,
+        device.keeps_half,
+        crate::inference::layers::KvAttention::of(
+            &crate::inference::model_arch::ModelArch::from_gguf_arch(&meta.architecture),
+        ),
+        meta.head_count,
+        meta.head_count_kv,
+        meta.head_dim,
+    );
+    let attention_layer = crate::inference::split::kv_budget::kv_bytes_per_token(1, k, v, storage);
     // An AVERAGE over the model's layers, because the bound it feeds counts
     // layers: only `layers_keeping_kv` of them keep a cache — one in four for
     // Qwen 3.5, whose others carry a fixed state (#228; the same count
@@ -519,6 +530,32 @@ fn kv_bytes_per_position_per_layer(
     let layers = meta.block_count.max(1) as u64;
     let keeping = meta.layers_keeping_kv(0, meta.block_count) as u64;
     attention_layer.saturating_mul(keeping).div_ceil(layers)
+}
+
+/// Where a node keeps a model's KV cache, as far as pricing it goes: on its
+/// card or not, and whether that card keeps the half cache.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct KvDevice {
+    on_card: bool,
+    keeps_half: bool,
+}
+
+impl KvDevice {
+    const PROCESSOR: Self = Self {
+        on_card: false,
+        keeps_half: false,
+    };
+
+    /// What `capability` says — the processor when it says nothing.
+    fn advertised(capability: Option<&swarmllm_types::NodeCapability>) -> Self {
+        capability.map_or(Self::PROCESSOR, |c| Self {
+            on_card: c.models_run_on_card(),
+            keeps_half: swarmllm_types::features::supports(
+                c.features,
+                swarmllm_types::features::KV_HALF_ON_CARD,
+            ),
+        })
+    }
 }
 
 /// How far away a peer may be and still be handed a whole model, in ms.
@@ -3429,18 +3466,16 @@ impl PipelineScheduler {
             if layers == 0 {
                 continue;
             }
-            let has_gpu = self
+            let kv_device = self
                 .shared_state
                 .peer_registry
                 .get(&seg.node_id)
-                .is_some_and(|p| {
-                    p.capability
-                        .as_ref()
-                        .is_some_and(|c| c.models_run_on_card())
+                .map_or(KvDevice::PROCESSOR, |p| {
+                    KvDevice::advertised(p.capability.as_ref())
                 });
             let kv_per_layer = match (prompt_tokens, meta.as_ref()) {
                 (Some(tokens), Some(m)) => {
-                    kv_bytes_per_position_per_layer(m, has_gpu).saturating_mul(u64::from(tokens))
+                    kv_bytes_per_position_per_layer(m, kv_device).saturating_mul(u64::from(tokens))
                 }
                 _ => 0,
             };
@@ -3542,14 +3577,13 @@ impl PipelineScheduler {
         // from the swarm mid-run and this bound was therefore inert on exactly
         // the fresh-distribution case it was written for (gotcha #451).
         // Unknown → 0 → the bound charges weights only, as it always did.
-        let (prompt_kv_per_layer_gpu, prompt_kv_per_layer_cpu) =
-            match (prompt_tokens, self.shared_state.gguf_meta_for(&manifest.id)) {
-                (Some(tokens), Some(meta)) => (
-                    kv_bytes_per_position_per_layer(&meta, true).saturating_mul(u64::from(tokens)),
-                    kv_bytes_per_position_per_layer(&meta, false).saturating_mul(u64::from(tokens)),
-                ),
-                _ => (0, 0),
-            };
+        // Priced per candidate below, by where that node keeps its cache.
+        let prompt_meta = prompt_tokens.zip(self.shared_state.gguf_meta_for(&manifest.id));
+        let prompt_kv_per_layer_on = |device: KvDevice| -> u64 {
+            prompt_meta.as_ref().map_or(0, |(tokens, meta)| {
+                kv_bytes_per_position_per_layer(meta, device).saturating_mul(u64::from(*tokens))
+            })
+        };
 
         // Build set of pool member NodeIds for preferred routing.
         // Pool devices are trusted, free (no credit cost), and usually low latency.
@@ -4056,11 +4090,14 @@ impl PipelineScheduler {
                         }
                         None => PeerResidency::Cold,
                     };
-                    let prompt_kv_per_layer = if has_gpu {
-                        prompt_kv_per_layer_gpu
-                    } else {
-                        prompt_kv_per_layer_cpu
-                    };
+                    let prompt_kv_per_layer = prompt_kv_per_layer_on(
+                        self.shared_state
+                            .peer_registry
+                            .get(&node_id)
+                            .map_or(KvDevice::PROCESSOR, |p| {
+                                KvDevice::advertised(p.capability.as_ref())
+                            }),
+                    );
                     let bound = |residency: PeerResidency, margin: f64| {
                         self.shared_state.peer_registry.get(&node_id).and_then(|p| {
                             max_hostable_layers(

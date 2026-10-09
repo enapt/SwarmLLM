@@ -991,6 +991,37 @@ never sees the budget, passes the full `REPLY_RESERVE_POSITIONS`. And a refusal
 caused by OTHER live conversations says to wait, never to shorten the prompt
 (`other_conversations_hold_the_room`, both refusal sites) (#122).
 
+## A card's KV budget is kept whatever the context setting (2026-10-09)
+
+**What.** The loader records a card worker's KV budget (`kv_headroom_bytes`, reconciled with the
+card at every decision by `SplitModel::kv_budget_now`) whether or not
+`inference.max_seq_len_override` is set.
+
+**What it replaced.** It was recorded only when the override was UNSET. The condition came in with
+2907cb7e (2026-07-29), when this step SHRANK the context to what the card could hold, and "an
+explicit setting wins" meant "never shorten a context the operator named". On 2026-08-08 the
+shrink became a runtime budget — refuse one request that does not fit NOW, never shorten a context
+— and the condition stayed. So a node set up for an agent, which is exactly what the override is
+for (the README's advice to agent users), admitted every prompt and let the cache grow past the
+card. On WSL2 and Windows the driver backs the overflow with host memory instead of failing, and
+every decode step then reads the cache over PCIe: #440's crawl, which `admit_prompt` +
+`kv_budget_now` had removed for every other node. The comment's backstop — "the load-time OOM
+fallback to CPU" — runs at load, before any cache exists, so it never saw the overflow.
+
+**Measured** (the released v0.3.231 against this change, Qwen2.5-Coder-7B on an RTX 3070 Laptop
+8 GB, `max_seq_len_override = 32768`, a 15,648-token prompt of real text, 64 tokens out;
+`~/swarmllm-kv194/run.sh` step 4):
+
+| | outcome |
+|---|---|
+| v0.3.231 | answered in **307 s** (0.2 tok/s overall); the card peaked at 7885 of 8192 MiB; no budget line in the worker's log |
+| this change, f32 + mirror (`SWARMLLM_KV_F16=0`) | refused before the prompt pass in 5.8 s — "short by 516 MB" — which a swarm re-routes to a peer |
+| this change, the half cache | answered in **51.5 s**; budget "comfortably covers" 38,164 tokens |
+
+**What a change must keep.** A setting that names a longer context raises the ceiling a
+conversation may grow to; it never switches the memory guard off. Any new skip of the budget needs
+its own measurement of what the card does without it.
+
 ## `inference::split::kv_budget`
 
 (2026-08-08) — the KV memory budget and the

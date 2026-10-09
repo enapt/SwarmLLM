@@ -61,27 +61,24 @@ pub(crate) const VRAM_HEADROOM_PCT: u64 = 85;
 ///
 /// K and V are cached *before* the GQA repeat (see `LayerWeights::forward`,
 /// which reshapes to `n_kv_head` and appends that), so the per-token cost is
-/// driven by `n_kv_head`, not `n_head`. Both are stored f32.
+/// driven by `n_kv_head`, not `n_head`.
 ///
-/// `mirrored` adds the f16 BSHD mirror `LayerKv` keeps for the CUDA flash
-/// kernel — the same elements again at half the width, so 1.5x in total.
-/// **It has to be counted here.** This figure is what the runtime head-room
-/// check charges a request for, so omitting the mirror would let a GQA model
-/// on a GPU claim 50% more VRAM than the budget believes and then run out for
-/// real — trading a clean 503 that reroutes to a peer for an OOM. See
-/// `layers::model_wants_kv_mirror` for which models carry one.
+/// `storage` is how the cache is kept (`layers::kv_storage`, the one answer):
+/// f32 (4 bytes an element), f32 plus the f16 BSHD flash mirror (6 — **the
+/// mirror has to be counted**: this figure is what the runtime head-room check
+/// charges a request for, so omitting it let a GQA model on a card claim 50%
+/// more memory than the budget believed and then run out for real, trading a
+/// clean 503 that reroutes to a peer for an OOM), or the half cache a card
+/// keeps (2; FUTURE_WORK #194).
 pub(crate) fn kv_bytes_per_token(
     layers: usize,
     k_elems: usize,
     v_elems: usize,
-    mirrored: bool,
+    storage: crate::inference::split::kv_cache::KvStorage,
 ) -> u64 {
-    const F32: u64 = std::mem::size_of::<f32>() as u64;
-    const F16: u64 = std::mem::size_of::<half::f16>() as u64;
-    let per_elem = if mirrored { F32 + F16 } else { F32 };
     (layers as u64)
         .saturating_mul((k_elems as u64).saturating_add(v_elems as u64))
-        .saturating_mul(per_elem)
+        .saturating_mul(storage.bytes_per_element())
 }
 
 /// Per-token K and V element counts for the standard (MHA/GQA) attention path.
@@ -552,6 +549,7 @@ mod promised_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::inference::split::kv_cache::KvStorage;
 
     /// The snapshot is cut to the room beside the live cache, after older
     /// cached prompts have been offered up — and is skipped outright when the
@@ -665,7 +663,8 @@ mod tests {
         let (gk, gv) = standard_kv_elems(8, 128);
         let (mk, mv) = mla_kv_elems(128, 192, 128);
         assert!(
-            kv_bytes_per_token(1, mk, mv, false) > kv_bytes_per_token(1, gk, gv, false),
+            kv_bytes_per_token(1, mk, mv, KvStorage::F32)
+                > kv_bytes_per_token(1, gk, gv, KvStorage::F32),
             "MLA per-token cost must exceed GQA's"
         );
     }
@@ -678,7 +677,7 @@ mod tests {
     #[test]
     fn a_long_context_model_on_a_small_card_gets_a_short_budget() {
         let (k, v) = standard_kv_elems(8, 64);
-        let per_token = kv_bytes_per_token(16, k, v, false);
+        let per_token = kv_bytes_per_token(16, k, v, KvStorage::F32);
         let free = 7_000u64 * 1024 * 1024;
         let weights = 1_300u64 * 1024 * 1024;
         let budget = kv_headroom_bytes(weights, free);
@@ -822,13 +821,16 @@ mod tests {
     #[test]
     fn a_mirrored_cache_is_charged_for_the_mirror() {
         let (k, v) = standard_kv_elems(8, 128);
-        let plain = kv_bytes_per_token(28, k, v, false);
-        let mirrored = kv_bytes_per_token(28, k, v, true);
+        let plain = kv_bytes_per_token(28, k, v, KvStorage::F32);
+        let mirrored = kv_bytes_per_token(28, k, v, KvStorage::F32Mirrored);
         assert_eq!(
             mirrored,
             plain + plain / 2,
             "the mirror is the same elements at half the width, so 1.5x"
         );
+        // And the half cache is the mirror's width alone: a third of what it
+        // replaced (FUTURE_WORK #194).
+        assert_eq!(kv_bytes_per_token(28, k, v, KvStorage::F16), mirrored / 3);
         // Stated as a claim about admission, not just arithmetic: the same
         // headroom must admit fewer positions once a mirror is in play.
         let headroom = plain * 1000;

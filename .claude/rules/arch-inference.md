@@ -90,6 +90,12 @@ Vendored `quantized/cuda.rs::dequantize_matmul` sends ≥ 64 activation rows to 
 
 → `docs/invariants/inference.md` § "A decoded token's attention on a card is one kernel"
 
+## A card keeps its KV cache as f16 — `layers::kv_storage` is the one answer (2026-10-09)
+
+**`layers::kv_storage`** says how a layer keeps its cache (`KvStorage::{F32, F32Mirrored, F16}`; its `KvAttention` argument is REQUIRED — MLA is f32 everywhere, and two estimates priced it as the half cache when the rule was asked without it) for the cache as it is built AND every estimate of its cost: the loader's budget, the split planner, admission (`vram::card_kv_storage`), a peer (`kv_storage_as_advertised` + `features::KV_HALF_ON_CARD`). **F16 alone** on a card where both its kernels read it in place — flash (a transposed BHSD view, no copy) and the decode kernel (`decode_attn::card_kernel_covers`); elsewhere the old layout. Every forward writes through **`layers::append_to_cache`** (`LayerKv::conform_to` corrects a hydrated cache); f32 → f16 is ONE launch (`kv_write::write_into`). A half cache reaching the matmul path is widened per call. A/B `SWARMLLM_KV_F16=0`, `SWARMLLM_KV_WRITE=compose`.
+
+→ `docs/invariants/inference.md` § "A card keeps its KV cache as f16"
+
 ## A speculative check is captured too, and a layout is uploaded once (2026-09-30)
 
 A forward of up to `cuda_graph::MAX_POSITIONS` (8) positions is captured when no causal mask is read (`SplitModel::mask_is_read`). `CudaDevice::layout_params` keeps a layout on the device and **never caches one while the stream is capturing**. Graph state and give-ups are per position count; the drafter reads catch-up via `draft_after`, and the γ choice reads `RecentMedian`.

@@ -62,25 +62,21 @@ impl Qwen35AttnWeights {
         let q = self.apply_rotary_emb(&q, index_pos)?;
         let k = self.apply_rotary_emb(&k, index_pos)?;
 
-        let (k, v) = match kv_cache {
-            None => {
-                let mut cache = super::new_kv_cache(
-                    max_seq_len,
-                    super::model_wants_kv_mirror(self.n_head, self.n_kv_head),
-                    kv_reserve,
-                );
-                let kv = cache.append(&k, &v)?;
-                *kv_cache = Some(cache);
-                kv
-            }
-            Some(cache) => {
-                if index_pos == 0 {
-                    cache.reset();
-                }
-                cache.set_mirror_wanted(super::model_wants_kv_mirror(self.n_head, self.n_kv_head));
-                cache.append(&k, &v)?
-            }
-        };
+        let (k, v) = super::append_to_cache(
+            kv_cache,
+            &k,
+            &v,
+            index_pos,
+            super::kv_storage(
+                x.device().is_cuda(),
+                super::KvAttention::Standard,
+                self.n_head,
+                self.n_kv_head,
+                hd,
+            ),
+            max_seq_len,
+            kv_reserve,
+        )?;
 
         let mirror = kv_cache.as_ref().and_then(|c| c.flash_operands());
         let y = run_attention(

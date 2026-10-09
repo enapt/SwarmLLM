@@ -1974,7 +1974,12 @@ Two things that will otherwise be misread:
   `SWARMLLM_KV_RESERVE=0` (grow the KV cache into a prompt a quantum at a time,
   as before 2026-09-12, instead of reserving its admitted length),
   `SWARMLLM_KV_DEVICE_SYNC=0` (read the card's free memory without synchronizing
-  first, as before 2026-09-26 — the second long prompt is then refused, #121).
+  first, as before 2026-09-26 — the second long prompt is then refused, #121),
+  `SWARMLLM_KV_F16=0` (keep the KV cache on a card as f32 plus the f16 flash
+  mirror, as before 2026-10-09, instead of the half cache — FUTURE_WORK #194; it
+  also stops the node advertising `features::KV_HALF_ON_CARD`),
+  `SWARMLLM_KV_WRITE=compose` (write into the half cache as a candle cast + copy,
+  two launches, instead of the one-launch `kernels/kv_append.cu`).
   Comparing two builds compares two builds.
 - **A switch reaches the WORKER only if the worker inherits it** — prove it from
   `/proc/<worker pid>/environ`, not from the command you typed (gotcha #616).
@@ -1997,6 +2002,22 @@ Two things that will otherwise be misread:
   assert on the log line or counter the change emits.
 - **A short run magnifies a one-time cost** into what looks like a standing
   loss. Vary the length it should amortise against before believing it.
+- **A prompt-pass bench that GROWS its KV cache measures card allocations.**
+  A worker reserves an admitted prompt's whole cache before the prompt pass;
+  a bench that does not grows it a quantum per chunk, each step a fresh card
+  allocation, and on this laptop at ~40 h of uptime that read 244-300 tok/s on a
+  7B's 6000-token prompt in EVERY arm of an A/B, against ~1200 reserved — the
+  "3x slower" first reading of the half KV cache (#194) was this, plus single
+  slow repetitions of either arm at random. `prefill_bench` reserves by default
+  now (`SWARM_BENCH_RESERVE=0` grows); read a disputed prompt pass with
+  `SWARMLLM_PROFILE=1 SWARMLLM_PROFILE_SYNC=1` before believing a total.
+- **A reply score that moves between arms is checked on LOGITS over one token
+  sequence.** Two greedy replies diverge at a near-tie and are then scored on
+  different text; a SentencePiece model's re-tokenization by llama.cpp can put a
+  3.4-logit "gap" on a token neither arm's logits disagree about. Teacher-force
+  both arms on the same ids (`logits_reference_probe`, `LOGITS_PROBE_DEVICE=cuda`
+  for the card) and compare position by position — and give llama.cpp the
+  node's context, or a LongRoPE model runs its short factors.
 - **The benches have no tracing subscriber**, so `tracing::info!` from the code
   under test goes nowhere. If a decision needs to be observed, give it an
   explicit `eprintln!` behind an env var.

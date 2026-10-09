@@ -88,6 +88,12 @@ Whenever code waits for a subprocess, handle it dying instead (`spawn_worker` ra
 
 → `docs/invariants/memory.md` § "A card's free memory is read after a synchronize"
 
+## A card's KV budget is kept whatever the context setting (2026-10-09)
+
+The loader records the card's KV budget with or without `inference.max_seq_len_override`. Skipped (as it was until 2026-10-09), a node set up for an agent admitted every prompt and spilled the cache into host memory — #440's crawl. A budget refuses one request that does not fit NOW; it never shortens a context.
+
+→ `docs/invariants/memory.md` § "A card's KV budget is kept whatever the context setting"
+
 ## The daemon holds no CUDA context — only workers do (2026-10-05)
 
 **`gpu_support::describe_local_gpu`** (driver API: `cuInit`, name, total — no context) is how the daemon learns its card. Never llama.cpp's device list or `Device::cuda_if_available` in the daemon: each leaves a context that held 137 MiB of an 8 GB card for the node's life. Free card memory is read live (`vram::query_gpu_vram_free_mb`), never kept from startup — `GpuInfo` has no free field.

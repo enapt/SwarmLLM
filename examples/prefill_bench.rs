@@ -14,8 +14,12 @@
 //! ```
 //!
 //! Set `SWARMLLM_PROFILE=1` for the per-stage breakdown, `SWARM_BENCH_PROMPT`
-//! for the prompt length in tokens (default 896) and `SWARM_BENCH_DECODE` for
-//! how many tokens to generate afterwards (default 32).
+//! for the prompt length in tokens (default 896), `SWARM_BENCH_DECODE` for
+//! how many tokens to generate afterwards (default 32) and
+//! `SWARM_BENCH_CONTEXT` for the context the model serves (a node's
+//! `inference.max_seq_len_override`; default the shipped 8192). The prompt's
+//! cache is reserved whole, as a worker reserves an admitted prompt;
+//! `SWARM_BENCH_RESERVE=0` grows it a quantum at a time instead.
 //! `SWARM_BENCH_CHUNK=128` reads the prompt in chunks the way a node's prefill
 //! pacer does — compare a node against the bench with it set, since one
 //! forward over the whole prompt is a different attention shape.
@@ -104,6 +108,18 @@ fn main() -> anyhow::Result<()> {
     let prompt_tokens = env_usize("SWARM_BENCH_PROMPT", 896);
     let decode_tokens = env_usize("SWARM_BENCH_DECODE", 32);
     let reps = env_usize("SWARM_BENCH_REPS", 3);
+    // `SWARM_BENCH_CONTEXT=N` serves an N-token context, as
+    // `inference.max_seq_len_override` does on a node — what an agent user sets
+    // to make room for a long prompt. Without it the model gets the shipped
+    // default (8192), and a longer prompt is refused for length, not memory.
+    if let Some(cap) = std::env::var("SWARM_BENCH_CONTEXT")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+    {
+        swarmllm::inference::split::MAX_SEQ_LEN_OVERRIDE
+            .store(cap, std::sync::atomic::Ordering::Relaxed);
+        println!("context override: {cap} tokens");
+    }
 
     println!("loading {}", model_dir.display());
     let t = Instant::now();
@@ -150,6 +166,16 @@ fn main() -> anyhow::Result<()> {
         // the second run and measure a lookup instead of a prefill.
         let store = KvCacheStore::new(std::time::Duration::from_secs(600));
         let req = format!("bench-{rep}");
+        // A worker reserves an admitted prompt's whole cache — prompt plus
+        // reply — before the prompt pass, so it is one allocation per layer
+        // (`KvCacheStore::set_reserved_positions`, FUTURE_WORK #32). Without it
+        // the cache grows a quantum at a time, a fresh card allocation per
+        // step, and on a host whose fresh allocations have slowed with uptime
+        // (#146) that growth, not the forward, is what a long prompt measures.
+        // `SWARM_BENCH_RESERVE=0` measures the growth on purpose.
+        if std::env::var("SWARM_BENCH_RESERVE").as_deref() != Ok("0") {
+            store.set_reserved_positions(&req, prompt_tokens + decode_tokens);
+        }
 
         let t = Instant::now();
         // `SWARM_BENCH_CHUNK=N` reads the prompt N tokens at a time, the way a

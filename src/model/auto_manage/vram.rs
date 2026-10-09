@@ -74,9 +74,9 @@ pub struct VramFootprintInputs {
     pub kv_layers: u64,
     /// `{arch}.attention.head_count_kv`.
     pub head_count_kv: u64,
-    /// `{arch}.attention.head_count` — with `head_count_kv`, whether the cache
-    /// carries the flash-attention f16 mirror on a card
-    /// (`layers::model_wants_kv_mirror`: grouped-query attention).
+    /// `{arch}.attention.head_count` — with `head_count_kv` and `head_dim`, how
+    /// a card keeps the cache (`layers::kv_storage`: the half cache, or f32 with
+    /// the flash mirror for grouped-query attention where it does not apply).
     pub head_count: u64,
     /// `{arch}.attention.key_length`, or `embedding_length / head_count`.
     pub head_dim: u64,
@@ -106,6 +106,10 @@ pub struct VramFootprintInputs {
     /// split offered for one puts a model that does not fit onto the card
     /// anyway.
     pub splits_across_devices: bool,
+    /// The attention the model's layers run — DeepSeek-2's MLA keeps an f32
+    /// cache wherever it runs, which [`card_kv_storage`] must be told
+    /// (`layers::KvAttention`, the storage rule's required argument).
+    pub attention: crate::inference::layers::KvAttention,
 }
 
 /// Bytes a CUDA worker process costs beyond its tensors: driver context, cuBLAS
@@ -198,21 +202,18 @@ pub const ADMISSION_KV_CONTEXT: u64 = 4096;
 /// table at f32.
 pub const EMBEDDING_TABLE_BYTES_PER_ELEMENT: u64 = 2;
 
-/// A worker's tensor footprint: weights, the embedding table, the KV cache and
-/// the RoPE tables. A model's shape costs the same in system RAM as it does in
-/// VRAM, so the two public estimators below are this plus a different
-/// per-process constant.
-///
-/// `rows_on_demand` is the one term that is NOT shape: a CPU worker reads
-/// embedding rows out of the quantized table and never materialises it, and a
-/// CUDA worker cannot. Passed in rather than read off the inputs so each
-/// estimator states its own device's answer at the point of use.
-fn estimate_model_resident_bytes(
-    i: &VramFootprintInputs,
-    rows_on_demand: bool,
-    kv_admission_context: u64,
-) -> u64 {
-    resident_footprint(i, rows_on_demand, kv_admission_context).total_bytes()
+/// How a CARD keeps this model's KV cache — the one rule the cache is built by
+/// (`layers::kv_storage`), so admission charges what the worker will hold: the
+/// half cache's 2 bytes an element where it applies (FUTURE_WORK #194), f32
+/// plus the flash mirror's 6 for a grouped-query model where it does not.
+fn card_kv_storage(i: &VramFootprintInputs) -> crate::inference::split::kv_cache::KvStorage {
+    crate::inference::layers::kv_storage(
+        true,
+        i.attention,
+        i.head_count as usize,
+        i.head_count_kv as usize,
+        i.head_dim as usize,
+    )
 }
 
 /// The terms a worker's resident memory is made of, kept apart so a refusal
@@ -249,11 +250,39 @@ impl ResidentFootprint {
     }
 }
 
-/// Per-term estimate; see [`estimate_model_resident_bytes`] for the rules.
+/// A worker's tensor footprint, term by term: weights, the embedding table,
+/// the KV cache and the RoPE tables. A model's shape costs the same in system
+/// RAM as it does in VRAM apart from the KV cache, which a card keeps as the
+/// half cache where it can ([`card_kv_storage`]) — so the two public
+/// estimators below are this, with the KV term each device's way, plus a
+/// different per-process constant.
+///
+/// `rows_on_demand` is the other term that is NOT shape alone: whether the
+/// embedding table is read row by row out of the quantized tensor rather than
+/// materialised. Passed in rather than read off the inputs so each estimator
+/// states its own device's answer at the point of use.
+///
+/// This form prices the KV cache at f32 — the processor's cache;
+/// [`resident_footprint_on`] for a card's.
 fn resident_footprint(
     i: &VramFootprintInputs,
     rows_on_demand: bool,
     kv_admission_context: u64,
+) -> ResidentFootprint {
+    resident_footprint_on(
+        i,
+        rows_on_demand,
+        kv_admission_context,
+        crate::inference::split::kv_cache::KvStorage::F32,
+    )
+}
+
+/// The same, with the KV cache kept as `kv_storage` says.
+fn resident_footprint_on(
+    i: &VramFootprintInputs,
+    rows_on_demand: bool,
+    kv_admission_context: u64,
+    kv_storage: crate::inference::split::kv_cache::KvStorage,
 ) -> ResidentFootprint {
     const F32: u64 = 4;
     // Weights. A quantized checkpoint stays quantized on the device, so its
@@ -290,8 +319,10 @@ fn resident_footprint(
         0
     };
 
-    // KV cache — [B, H, ctx, D] per layer, for K and V, as f32, at
-    // `kv_admission_context`.
+    // KV cache — [B, H, ctx, D] per layer, for K and V, at
+    // `kv_admission_context`, as `kv_storage` keeps it: f32 on a processor;
+    // on a card the half cache, or f32 with the flash mirror where that does
+    // not apply (`card_kv_storage`).
     //
     // That is the full effective context on a CPU worker and CAPPED on a GPU
     // one; see [`ADMISSION_KV_CONTEXT`] for why the two differ. The cap is
@@ -307,7 +338,7 @@ fn resident_footprint(
         .saturating_mul(i.head_count_kv)
         .saturating_mul(i.head_dim)
         .saturating_mul(kv_admission_context)
-        .saturating_mul(F32);
+        .saturating_mul(kv_storage.bytes_per_element());
 
     // RoPE cos/sin tables. Charged at the FULL context regardless, because
     // unlike the KV cache these really are precomputed in full at load
@@ -342,12 +373,15 @@ pub fn estimate_worker_vram_mb(i: &VramFootprintInputs) -> u64 {
     //
     // The KV cache is charged at a capped context because a GPU worker has a
     // runtime head-room check that refuses gracefully if a conversation
-    // outgrows it — see `ADMISSION_KV_CONTEXT`.
-    estimate_model_resident_bytes(
+    // outgrows it — see `ADMISSION_KV_CONTEXT` — and kept the way the card
+    // will keep it (`card_kv_storage`).
+    resident_footprint_on(
         i,
         i.embedding_gatherable,
         i.effective_context.min(ADMISSION_KV_CONTEXT),
+        card_kv_storage(i),
     )
+    .total_bytes()
     .saturating_add(CUDA_PROCESS_OVERHEAD_BYTES)
         / (1024 * 1024)
 }
@@ -1760,6 +1794,7 @@ mod footprint_tests {
             is_first: true,
             embedding_gatherable: true,
             splits_across_devices: true,
+            attention: crate::inference::layers::KvAttention::Standard,
         }
     }
 
@@ -1781,6 +1816,7 @@ mod footprint_tests {
             is_first: true,
             embedding_gatherable: true,
             splits_across_devices: true,
+            attention: crate::inference::layers::KvAttention::Standard,
         }
     }
 
@@ -1802,6 +1838,7 @@ mod footprint_tests {
             is_first: true,
             embedding_gatherable: true,
             splits_across_devices: true,
+            attention: crate::inference::layers::KvAttention::Standard,
         }
     }
 
@@ -1818,10 +1855,20 @@ mod footprint_tests {
         // same amount the estimate does — the calibration still holds, but it
         // has to be compared against the adjusted figure or it would be
         // validating the estimate against a measurement of different code.
+        //
+        // The same holds for the KV cache, measured as f32 (phi-3.5 is MHA, so
+        // no flash mirror): where a card now keeps the half cache
+        // (`card_kv_storage`, FUTURE_WORK #194) the real steady state falls by
+        // what the cache sheds, and the measurement is adjusted by exactly
+        // that — zero on a build without the half cache.
         const MEASURED_WITH_F32_EMBEDDING: u64 = 6037;
-        let embedding_elems = phi35().vocab_size * phi35().embedding_length;
+        let i = phi35();
+        let embedding_elems = i.vocab_size * i.embedding_length;
         let saved_mb = embedding_elems * (4 - EMBEDDING_TABLE_BYTES_PER_ELEMENT) / (1024 * 1024);
-        let measured = MEASURED_WITH_F32_EMBEDDING - saved_mb;
+        let kv_elems = i.kv_layers * 2 * i.head_count_kv * i.head_dim * ADMISSION_KV_CONTEXT;
+        let kv_saved_mb =
+            kv_elems * (4 - card_kv_storage(&i).bytes_per_element().min(4)) / (1024 * 1024);
+        let measured = MEASURED_WITH_F32_EMBEDDING - saved_mb - kv_saved_mb;
 
         let new = estimate_worker_vram_mb(&phi35());
         let err_pct = 100.0 * (new as f64 - measured as f64) / measured as f64;
@@ -1854,7 +1901,8 @@ mod footprint_tests {
         // 2026-08-18 a gathering worker genuinely does not hold it — the gap
         // narrowing there is the optimisation working, not the estimator
         // regressing.
-        let dense = estimate_model_resident_bytes(&i, false, i.effective_context)
+        let dense = resident_footprint(&i, false, i.effective_context)
+            .total_bytes()
             .saturating_add(CUDA_PROCESS_OVERHEAD_BYTES)
             / (1024 * 1024);
         assert!(
@@ -1869,7 +1917,7 @@ mod footprint_tests {
     fn the_embedding_table_is_charged_to_the_first_segment_only() {
         // The dense path, where there is a table to charge. 128256*2048*2 = 501 MB.
         let deq = |i: &VramFootprintInputs| {
-            estimate_model_resident_bytes(i, false, i.effective_context) / (1024 * 1024)
+            resident_footprint(i, false, i.effective_context).total_bytes() / (1024 * 1024)
         };
         let first = deq(&llama32_1b());
         let mut middle = llama32_1b();
@@ -1885,7 +1933,7 @@ mod footprint_tests {
         // `quantized_weight_bytes`. That the two segments now cost the SAME is
         // the saving, asserted so it cannot silently come back.
         let g = |i: &VramFootprintInputs| {
-            estimate_model_resident_bytes(i, true, i.effective_context) / (1024 * 1024)
+            resident_footprint(i, true, i.effective_context).total_bytes() / (1024 * 1024)
         };
         assert_eq!(
             g(&llama32_1b()),
@@ -1961,11 +2009,13 @@ mod footprint_tests {
         at_cap.effective_context = ADMISSION_KV_CONTEXT;
         let capped = estimate_worker_vram_mb(&at_cap);
 
-        let uncapped_bytes = estimate_model_resident_bytes(
+        let uncapped_bytes = resident_footprint_on(
             &at_cap,
             at_cap.embedding_gatherable,
             at_cap.effective_context,
+            card_kv_storage(&at_cap),
         )
+        .total_bytes()
         .saturating_add(CUDA_PROCESS_OVERHEAD_BYTES)
             / (1024 * 1024);
         assert_eq!(
@@ -1985,7 +2035,8 @@ mod footprint_tests {
         // against 35 MB quantized), so holding it to this constant would be
         // holding it to a figure for different behaviour.
         let i = tinyllama();
-        let est = estimate_model_resident_bytes(&i, false, i.effective_context)
+        let est = resident_footprint(&i, false, i.effective_context)
+            .total_bytes()
             .saturating_add(CUDA_PROCESS_OVERHEAD_BYTES)
             / (1024 * 1024);
         assert!(
@@ -2016,6 +2067,7 @@ mod footprint_tests {
             is_first: true,
             embedding_gatherable: true,
             splits_across_devices: true,
+            attention: crate::inference::layers::KvAttention::Standard,
         }
     }
 
@@ -2071,6 +2123,7 @@ mod footprint_tests {
             effective_context: 0,
             embedding_gatherable: false,
             splits_across_devices: true,
+            attention: crate::inference::layers::KvAttention::Standard,
             is_first: true,
         };
         // Just the process overhead.
@@ -2092,6 +2145,7 @@ mod footprint_tests {
             effective_context: u64::MAX,
             embedding_gatherable: false,
             splits_across_devices: true,
+            attention: crate::inference::layers::KvAttention::Standard,
             is_first: true,
         };
         let _ = estimate_worker_vram_mb(&huge); // must not panic
@@ -2109,6 +2163,11 @@ mod footprint_tests {
     ///    a runtime head-room check that refuses gracefully when a conversation
     ///    outgrows the card; a CPU worker has none, so it prices the whole
     ///    ceiling. See [`ADMISSION_KV_CONTEXT`].
+    ///
+    /// 3. The KV cache's width. A card keeps the half cache where it applies
+    ///    (`card_kv_storage`, FUTURE_WORK #194) — or f32 plus the flash mirror
+    ///    for a grouped-query model where it does not — while a processor keeps
+    ///    f32.
     ///
     /// The embedding table is NOT one of them: both devices now read its rows
     /// on demand. It was briefly device-specific, between the CPU gather
@@ -2133,15 +2192,27 @@ mod footprint_tests {
                 .saturating_sub(i.effective_context.min(ADMISSION_KV_CONTEXT));
             let kv_gap_mb =
                 i.segment_layers * 2 * i.head_count_kv * i.head_dim * uncapped * 4 / (1024 * 1024);
+            // What the card's cache costs beyond (or, as the half cache, short
+            // of) the processor's f32 one over the context both charge.
+            let charged = i.kv_layers
+                * 2
+                * i.head_count_kv
+                * i.head_dim
+                * i.effective_context.min(ADMISSION_KV_CONTEXT);
+            let card_kv_extra_mb = (charged as i64
+                * (card_kv_storage(&i).bytes_per_element() as i64 - 4))
+                / (1024 * 1024);
             // Each estimator truncates its own total to MB, so the difference
             // of two rounded figures can sit 1 MB off the rounded difference.
             // The terms being pinned are tens to hundreds of MB, so a missing
             // one is never mistaken for this.
-            let expected = overhead_mb + kv_gap_mb;
+            let expected = overhead_mb as i64 - kv_gap_mb as i64 + card_kv_extra_mb;
+            let got = vram as i64 - ram as i64;
             assert!(
-                vram.abs_diff(ram).abs_diff(expected) <= 1,
-                "the two may differ only by process overhead and the uncapped \
-                 KV ceiling: vram {vram} - ram {ram} vs expected {expected}"
+                got.abs_diff(expected) <= 1,
+                "the two may differ only by process overhead, the uncapped KV \
+                 ceiling and the card cache's width: vram {vram} - ram {ram} = {got} \
+                 vs expected {expected}"
             );
         }
     }
@@ -2164,6 +2235,7 @@ mod footprint_tests {
             is_first: true,
             embedding_gatherable: false,
             splits_across_devices: true,
+            attention: crate::inference::layers::KvAttention::Standard,
         }
     }
 
@@ -2289,6 +2361,7 @@ mod footprint_tests {
             is_first: true,
             embedding_gatherable: true,
             splits_across_devices: true,
+            attention: crate::inference::layers::KvAttention::Standard,
         };
         let f = cpu_footprint(&i);
         assert_eq!(f.weights_bytes / (1024 * 1024), 2284);

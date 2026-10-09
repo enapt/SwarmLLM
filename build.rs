@@ -30,7 +30,7 @@ fn build_fused_decode_ptx() {
     // `decode_attn.cu` is NOT bit-identical to the ops it replaces (it sums in
     // a different order); its header says so. The no-fast-math rule below
     // still applies to it.
-    const KERNELS: &[&str] = &["fused_decode.cu", "decode_attn.cu"];
+    const KERNELS: &[&str] = &["fused_decode.cu", "decode_attn.cu", "kv_append.cu"];
 
     for k in KERNELS {
         println!("cargo:rerun-if-changed=kernels/{k}");

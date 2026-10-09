@@ -24,6 +24,7 @@
 //! ```
 //!
 //! `LOGITS_PROBE_IDS` (a JSON array of token ids) instead of the synthetic sequence;
+//! `LOGITS_PROBE_DEVICE=cuda` to run on the card instead of the processor;
 //! `LOGITS_PROBE_N` (default 24) tokens, `LOGITS_PROBE_DECODE` (default 4) of
 //! them as decode steps, `LOGITS_PROBE_SPLIT` the first layer of the second
 //! segment (default: one segment). Writes `<OUT>.f32` (`[N, vocab]`, little
@@ -71,6 +72,10 @@ fn main() -> anyhow::Result<()> {
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|&k| k > 0 && k < layers);
+    // `LOGITS_PROBE_DEVICE=cuda` loads onto the card, as a card node would —
+    // the kernels, the KV cache's layout and its precision are the card's, which
+    // the processor run cannot speak for (the half KV cache, FUTURE_WORK #194).
+    let force_cpu = std::env::var("LOGITS_PROBE_DEVICE").as_deref() != Ok("cuda");
 
     // Arbitrary ids well inside any vocabulary and away from the specials,
     // unless a real sequence was given.
@@ -80,11 +85,11 @@ fn main() -> anyhow::Result<()> {
 
     let mut segments: Vec<SplitModel> = match split {
         Some(k) => vec![
-            SplitModel::load_from_gguf(&gguf, 0, k, true, false, true)?,
-            SplitModel::load_from_gguf(&gguf, k, layers, false, true, true)?,
+            SplitModel::load_from_gguf(&gguf, 0, k, true, false, force_cpu)?,
+            SplitModel::load_from_gguf(&gguf, k, layers, false, true, force_cpu)?,
         ],
         None => vec![SplitModel::load_from_gguf(
-            &gguf, 0, layers, true, true, true,
+            &gguf, 0, layers, true, true, force_cpu,
         )?],
     };
     println!(

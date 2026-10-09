@@ -463,7 +463,9 @@ from RSS about this cache were wrong before the counter existed.
 
 ## `inference::split::kv_cache::LayerKv`
 
-(2026-08-10) — one layer's KV cache:
+(2026-08-10; on a card superseded 2026-10-09 by the half cache — § "A card keeps
+its KV cache as f16" — and kept for the processor and the geometries it does not
+cover) — one layer's KV cache:
 the f32 BHSD cache every path reads, plus an optional f16 BSHD mirror for the
 CUDA flash kernel. **Never touch the inner `KvCache` directly.** `append` and
 `reset` are INHERENT methods and so take priority over the `Deref`, which is
@@ -475,12 +477,15 @@ from every-read to once-at-write, and since the f32 source is never itself
 overwritten the flash kernel receives bitwise the same numbers — so the flash
 path is numerically unchanged, not merely close, while `standard_attention`
 keeps full precision. Published results on f16 KV divergence (arXiv 2604.15409)
-are worst under long context and GQA, which is exactly our case, so the f32
-copy stays.
+were read as worst under long context and GQA, so the f32 copy stayed — a
+reading corrected on 2026-10-09 (the paper compares cache-on with cache-off, both
+f16), when a card moved to the half cache (§ "A card keeps its KV cache as f16").
 **Three things a new caller must respect.** (1) The mirror is GQA-only —
-`layers::model_wants_kv_mirror` gates it, because MHA decode reads the f32
+`layers::kv_storage` (was `model_wants_kv_mirror`) gives `F32Mirrored` only to a
+GQA model, because MHA decode reads the f32
 cache and an unread mirror cost 3-8% per token plus 50% more KV memory
-(measured on phi-3.5). (2) `set_mirror_wanted(true)` is deliberately INERT: a
+(measured on phi-3.5). (2) A mirror is only ever turned OFF on a cache that
+holds positions (`LayerKv::conform_to`, was `set_mirror_wanted`): a
 mirror started against a cache that already holds positions can never catch up
 and would be refused forever by the length guard while still costing memory.
 (3) The mirror is real VRAM and `kv_budget::kv_bytes_per_token` must charge for
@@ -2529,6 +2534,88 @@ ALONE take 16.9 ms — llama.cpp's whole token is 17.4, with the same Q4_K kerne
 7B step in ~16 ms of card time but records for 4.5 ms first (`recording_ms_per_launch`).
 
 → `docs/invariants/inference.md` § "A decoded token's attention on a card is one kernel"
+
+## A card keeps its KV cache as f16 (2026-10-09, FUTURE_WORK #194)
+
+**What.** On a card, a layer's KV cache is f16 BHSD and nothing else — `KvStorage::F16`, the "half
+cache" — where both of the card's attention kernels read it in place: flash (a prompt chunk, a
+speculative check) through a `transpose(1, 2)` VIEW of the buffer, no copy, and the decode kernel
+(`kernels/decode_attn.cu`, `decode_attn_f16kv`), which widens each element to f32 as it reads and
+sums in f32 as before. **`layers::kv_storage`** is the one rule (`KvStorage::{F32, F32Mirrored,
+F16}`): the processor keeps f32; a card keeps the half cache when the flash kernel is built in and
+`decode_attn::card_kernel_covers` the head geometry (d a multiple of 32 up to 256, at most 16 query
+heads per KV head); anywhere else the layout before it (f32, plus the f16 flash mirror for a GQA
+model). MLA is always f32.
+
+**What it replaced, and the reasoning that kept it.** Until 2026-10-09 the card kept f32 BHSD plus
+the f16 BSHD mirror — 6 bytes an element, 3x llama.cpp's 2 — and an agent's 14k-token prompt took
+~5 GB beside a 3B's weights. The f32 copy was kept on a reading of arXiv 2604.15409 ("The Illusion
+of Equivalence: Systematic FP16 Divergence in KV-Cached Autoregressive Inference") as "f16 KV
+diverges". **The paper compares cache-ON with cache-OFF decoding, both in f16** — a different
+accumulation order, not a different storage width — and the reference every reply here is judged
+against, llama.cpp, stores f16 by default (`--cache-type-k/-v f16`); vLLM and TensorRT-LLM store
+the compute dtype. So the half cache moves us TOWARDS the reference.
+
+**Every path writes through `layers::append_to_cache`** (all four forward sites: dense, batched,
+MLA, Qwen 3.5's attention layers), which builds a fresh cache the way the layer keeps it
+(`LayerKv::with_storage`) and conforms one that arrived from prefix-cache hydration
+(`LayerKv::conform_to` — a snapshot carries `n_kv_head` but not `n_head`, nor the device's choice;
+a wire snapshot is f32 and is converted once, O(history)). The f32 K/V a step produces is written
+into the half cache in ONE launch (`split::kv_write::write_into` → `kernels/kv_append.cu`), the
+launch count `slice_set` had for the f32 cache; candle's cast + copy would have been one more per
+tensor per layer per token. A half cache reaching the matmul path (forced-standard attention, a
+decode step with a mask) is widened per call — correct, O(history), and never on a default path.
+
+**The rule takes the attention kind as a required argument** (`layers::KvAttention::{Standard,
+Mla}`, from `ModelArch` via `KvAttention::of`): its first version took head geometry only, and the
+review before it shipped found admission and the coordinator's peer bound pricing DeepSeek-2's
+cache as the half cache (a V2-Lite shape — 16 heads, key width 192 — passes the decode kernel's
+geometry) while the loader and `forward_mla` kept it f32. Admission's inputs now carry it
+(`VramFootprintInputs::attention`), the scheduler reads it off the header's architecture.
+
+**Every estimate asks the same rule**: the loader's KV budget, the card/processor split planner
+(`process_pool`), admission (`vram::card_kv_storage` — the GPU estimator's KV term at the storage's
+width), and the coordinator's bound on a PEER (`scheduler::KvDevice` →
+`layers::kv_storage_as_advertised`, which reads `features::KV_HALF_ON_CARD` — bit 19, NOT in
+`features::ALL`, ORed in by the health monitor when `kv_half_on_card_enabled()`; a peer without it
+is priced as f32 + mirror, as before).
+
+**Measured** (RTX 3070 Laptop 8 GB, Windows up ~39-40 h, `examples/prefill_bench.rs` and the real
+daemon, A/B inside ONE binary via `SWARMLLM_KV_F16=0`, `~/swarmllm-kv194/`):
+
+| | f32 + mirror | half cache |
+|---|---|---|
+| Qwen2.5-Coder-7B cache, 896 / 6000 positions | 176 / 1057 MB | 59 / 352 MB |
+| its KV budget at a 32768 context (loader's own line) | 12,721 tokens | 38,164 tokens |
+| bench, context 32768: longest prompt admitted | < 10,000 (refused) | 26,000 |
+| decode ms/token at ~960 / ~6016 cached (7B) | 16.7-16.8 / 23.3-23.5 | 16.8-16.9 / 23.3 |
+| prompt pass, stage profile synchronised, 6000 tokens: attention | 533 ms | 528 ms |
+| greedy 400-token replies scored against llama.cpp (rank-1) | Llama-3.2-3B 399, Coder-7B 396, Phi-4-mini 392, GLM-4 388, Gemma-2 387, Phi-3.5 385 | 399, 396 (both byte-identical), 392, 388, 384, 383 |
+| Phi-3.5 logits, same 202 tokens teacher-forced on the card (62 prompt + 140 decode): median cosine to llama.cpp / top-1 | 0.999821 / 191 of 201 | 0.999828 / 192 of 201 |
+
+Card tests: `cuda_decode_kernel_matches_the_matmul_path` runs every shape over both cache dtypes
+(< 1e-5 abs against the matmul composition over the same rounded values);
+`the_cards_converting_write_matches_cast_then_slice_set` (bit for bit);
+`flash_reads_the_half_cache_in_place_as_it_read_the_mirror` (bit for bit — same values, same
+kernel, other strides). The processor tests of the bookkeeping go red with the conversion disabled.
+
+**Traps met measuring it.** (1) A prompt-pass bench that does NOT reserve the cache grows it by a
+quantum per chunk — a fresh card allocation each — and on this host at ~40 h uptime that growth,
+not the forward, is what it measures: 244-300 tok/s on a first repetition in BOTH arms, ~1200 once
+reserved. `prefill_bench` now reserves the prompt as a worker does (`SWARM_BENCH_RESERVE=0` to
+grow). (2) Even reserved, single repetitions of either arm fell to ~400-800 tok/s at random — host
+state, not the change (the synchronised stage profile is level). (3) A Phi-3.5 reply scored a 3.4
+gap on a `##` token in the half arm only: teacher-forced on the same tokens, BOTH arms and
+llama.cpp rank it second by 3.4-3.8 — a SentencePiece re-tokenization artifact of the scorer, and
+the reason to compare LOGITS on one token sequence when a reply score moves. Give llama.cpp the
+node's context (8192) for a LongRoPE model, or it runs the short factors (the scorer's own note).
+
+**What a change must keep.** One rule for the cache and every estimate of it — a budget that
+charges another width than the cache holds is #104/#447 again. The half cache only where the decode
+kernel takes every one-position call, or each token widens the history. The flash call reads the
+cache in place: a `.contiguous()` there is the O(history)-per-chunk copy the mirror existed to
+remove. A/B: `SWARMLLM_KV_F16=0` (old layout; the node also stops advertising bit 19),
+`SWARMLLM_KV_WRITE=compose`.
 
 ## A decode step's graph is recorded in groups, launched as it is recorded (2026-09-30)
 

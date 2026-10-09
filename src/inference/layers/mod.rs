@@ -10,7 +10,7 @@ use candle_core::quantized::QTensor;
 // That is exactly what happened on 2026-08-07 (gotcha #264). Keep the import;
 // the `cfg` on the attribute is what tells the compiler the truth.
 use crate::inference::residual_norm::RmsNorm;
-use crate::inference::split::kv_cache::LayerKv;
+use crate::inference::split::kv_cache::{KvStorage, LayerKv};
 #[cfg_attr(not(feature = "flash-attn"), allow(unused_imports))]
 use candle_core::DType;
 use candle_core::{Device, Result as CandleResult, Tensor};
@@ -557,26 +557,24 @@ impl MlaWeights {
 
         // ── KV cache ──
         let __kv_t = std::time::Instant::now();
-        let (k, v) = match kv_cache {
-            None => {
-                // MLA reconstructs K per head, so every head has its own key —
-                // MHA-shaped for routing purposes, and decode therefore reads
-                // the f32 cache. No mirror.
-                let mut cache = new_kv_cache(max_seq_len, false, kv_reserve);
-                let kv = cache.append(&k, &v)?;
-                *kv_cache = Some(cache);
-                kv
-            }
-            Some(cache) => {
-                if index_pos == 0 {
-                    cache.reset();
-                }
-                // MLA reconstructs K per head, so decode reads the f32 cache —
-                // shed any mirror a hydrated snapshot left behind.
-                cache.set_mirror_wanted(false);
-                cache.append(&k, &v)?
-            }
-        };
+        // MLA reconstructs K per head, with K and V of different widths, so
+        // its attention is the matmul path over an f32 cache — never the half
+        // cache, never a mirror.
+        let (k, v) = append_to_cache(
+            kv_cache,
+            &k,
+            &v,
+            index_pos,
+            kv_storage(
+                x.device().is_cuda(),
+                KvAttention::Mla,
+                self.n_head,
+                self.n_head,
+                self.key_length,
+            ),
+            max_seq_len,
+            kv_reserve,
+        )?;
         crate::inference::prof::add(P::KvCache, __kv_t.elapsed().as_nanos() as u64);
 
         // ── Attention ──
@@ -1406,20 +1404,181 @@ pub(crate) fn kv_growth_quantum(max_seq_len: usize) -> usize {
 /// clamped to the context window; 0 means one quantum, the ordinary start.
 /// A prompt of known length is held in ONE allocation per layer instead of
 /// being grown into a quantum at a time (FUTURE_WORK #32; see `split::kv_cache::SeqCache`).
+///
+/// `storage` is how the layer keeps it — [`kv_storage`]'s answer for the device
+/// the layer runs on.
 pub(crate) fn new_kv_cache(
     max_seq_len: usize,
-    mirror_for_flash: bool,
+    storage: KvStorage,
     reserve_positions: usize,
 ) -> LayerKv {
     let window = max_seq_len.max(1);
     let growth = kv_growth_quantum(window);
     let initial = reserve_positions.clamp(growth, window);
-    let mut kv = LayerKv::with_capacity(2, initial, growth);
-    kv.set_mirror_wanted(mirror_for_flash);
-    kv
+    LayerKv::with_storage(2, initial, growth, storage)
 }
 
-/// Whether a model with these head counts should maintain the f16 BSHD mirror.
+/// Append a step's K and V to a layer's cache — creating it on the first step,
+/// starting it over at position 0 — and return the whole history as the cache
+/// holds it, in its stored dtype (f16 for [`KvStorage::F16`]).
+///
+/// **The one way a forward writes its KV.** `forward_attn`, the batched path,
+/// MLA and Qwen 3.5's attention layers each carried their own copy of these
+/// lines, and each had to remember to correct a cache that arrived from
+/// prefix-cache hydration — which builds it from a snapshot and cannot know
+/// how this layer stores its cache (the snapshot carries `n_kv_head` but not
+/// `n_head`, nor the device's choice). [`LayerKv::conform_to`] does that here,
+/// once, for all of them.
+pub(crate) fn append_to_cache(
+    slot: &mut Option<LayerKv>,
+    k: &Tensor,
+    v: &Tensor,
+    index_pos: usize,
+    storage: KvStorage,
+    max_seq_len: usize,
+    reserve_positions: usize,
+) -> CandleResult<(Tensor, Tensor)> {
+    match slot {
+        None => {
+            let mut cache = new_kv_cache(max_seq_len, storage, reserve_positions);
+            let kv = cache.append(k, v)?;
+            *slot = Some(cache);
+            Ok(kv)
+        }
+        Some(cache) => {
+            if index_pos == 0 {
+                cache.reset();
+            }
+            cache.conform_to(storage)?;
+            cache.append(k, v)
+        }
+    }
+}
+
+/// Is the half KV cache on for this binary and process — a card build with
+/// the flash kernel, and not turned off by `SWARMLLM_KV_F16=0`?
+///
+/// What a peer is told (`features::KV_HALF_ON_CARD`, advertised from the health
+/// monitor), so a coordinator prices this node's cache as the node will hold it.
+///
+/// The decode kernel's own switch counts too (`SWARMLLM_DECODE_ATTN=standard`):
+/// without the kernel no model keeps the half cache here ([`kv_storage`]), and a
+/// node must not tell its peers it does.
+pub(crate) fn kv_half_on_card_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    cfg!(feature = "flash-attn")
+        && crate::inference::decode_attn::decode_kernel_enabled()
+        && *ENABLED.get_or_init(|| {
+            !matches!(
+                std::env::var("SWARMLLM_KV_F16").as_deref(),
+                Ok("0") | Ok("off") | Ok("false")
+            )
+        })
+}
+
+/// Which attention a layer's KV cache serves — the one fact about a MODEL the
+/// storage rule needs beyond its head counts, and a required argument of it
+/// ([`kv_storage`], [`kv_storage_as_advertised`]) so no estimate can forget it.
+/// Admission and a coordinator's bound on a peer each priced DeepSeek-2's cache
+/// as the half cache while the loader and the layer kept it f32 — the rule was
+/// asked without the architecture (review of #194, 2026-10-09).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KvAttention {
+    /// Multi-head or grouped-query attention: K and V of one width.
+    Standard,
+    /// DeepSeek-2's multi-head latent attention: K and V of different widths,
+    /// read by the matmul path, so its cache is always f32.
+    Mla,
+}
+
+impl KvAttention {
+    /// The attention `arch`'s layers run.
+    pub(crate) fn of(arch: &crate::inference::model_arch::ModelArch) -> Self {
+        if matches!(arch, crate::inference::model_arch::ModelArch::DeepSeek2) {
+            Self::Mla
+        } else {
+            Self::Standard
+        }
+    }
+}
+
+/// How a layer with these head counts keeps its KV cache on a card
+/// (`on_card`) or on the processor — **the single answer**, asked by the cache
+/// as it is built ([`append_to_cache`]) and by every estimate of what it will
+/// cost: the loader's KV budget (`split::loader`), the card/processor split
+/// planner (`process_pool`), admission (`auto_manage::vram`) and the bound a
+/// coordinator holds a peer to (`scheduler`). A second copy of the rule is a
+/// budget that disagrees with the cache it budgets for (FUTURE_WORK #194).
+///
+/// - **Processor: f32**, always. Its kernels read f32 (`decode_attn`,
+///   `prefill_attn`), and its memory is the machine's.
+/// - **Card, the half cache: f16 only** — where the flash kernel is built in
+///   and the card's decode kernel covers the geometry
+///   (`decode_attn::card_kernel_covers`), which together are every attention
+///   a card runs by default: one position goes to the decode kernel, several
+///   to flash, and both read f16 in place. A third of the memory of the f32
+///   cache plus its mirror, and what llama.cpp stores by default.
+/// - **Card, otherwise: f32, plus the f16 flash mirror for a grouped-query
+///   model** — the layout before the half cache, kept where a decode step
+///   would fall to the matmul path (which reads f32) and for the A/B
+///   (`SWARMLLM_KV_F16=0`, inside one binary).
+///
+/// - **MLA (DeepSeek-2): f32**, everywhere — its K and V differ in width and
+///   the decode kernel never takes it ([`KvAttention::Mla`]).
+pub(crate) fn kv_storage(
+    on_card: bool,
+    attention: KvAttention,
+    n_head: usize,
+    n_kv_head: usize,
+    head_dim: usize,
+) -> KvStorage {
+    if !on_card || !cfg!(feature = "flash-attn") || attention == KvAttention::Mla {
+        return KvStorage::F32;
+    }
+    if kv_half_on_card_enabled()
+        && crate::inference::decode_attn::card_kernel_covers(n_head, n_kv_head, head_dim)
+    {
+        return KvStorage::F16;
+    }
+    if f32_cache_wants_mirror(n_head, n_kv_head) {
+        KvStorage::F32Mirrored
+    } else {
+        KvStorage::F32
+    }
+}
+
+/// [`kv_storage`] for ANOTHER node, from what it advertises: whether its
+/// models run on its card (`NodeCapability::models_run_on_card`) and whether
+/// it keeps the half cache there (`features::KV_HALF_ON_CARD`). What a
+/// coordinator charges a peer for a prompt's cache (`scheduler`), so a peer is
+/// planned the conversation its own budget will admit — the half cache's
+/// third where it keeps one, the f32 cache and its mirror where it does not
+/// (every build before the half cache).
+pub(crate) fn kv_storage_as_advertised(
+    on_card: bool,
+    keeps_half: bool,
+    attention: KvAttention,
+    n_head: usize,
+    n_kv_head: usize,
+    head_dim: usize,
+) -> KvStorage {
+    if !on_card || attention == KvAttention::Mla {
+        return KvStorage::F32;
+    }
+    if keeps_half
+        && crate::inference::decode_attn::card_kernel_geometry(n_head, n_kv_head, head_dim)
+    {
+        return KvStorage::F16;
+    }
+    if f32_cache_wants_mirror(n_head, n_kv_head) {
+        KvStorage::F32Mirrored
+    } else {
+        KvStorage::F32
+    }
+}
+
+/// Where the half cache does not apply ([`kv_storage`]): whether an f32 cache
+/// on a card should maintain the f16 BSHD mirror for the flash kernel.
 ///
 /// **GQA only — but no longer for the reason it was written.** The original
 /// rationale was that GQA is where DECODE uses the flash kernel, and MHA decode
@@ -1464,7 +1623,7 @@ pub(crate) fn new_kv_cache(
 /// one-position append leaves the mirror behind and the next chunk catches it
 /// up (`kv_cache::LayerKv::append`), which cut four launches per layer.
 /// `SWARMLLM_KV_MIRROR=0`/`=1` forces it off/on for an A/B inside one binary.
-pub(crate) fn model_wants_kv_mirror(n_head: usize, n_kv_head: usize) -> bool {
+fn f32_cache_wants_mirror(n_head: usize, n_kv_head: usize) -> bool {
     match std::env::var("SWARMLLM_KV_MIRROR").as_deref() {
         Ok("0") => return false,
         Ok("1") => return true,
@@ -1616,6 +1775,8 @@ pub(crate) fn standard_attention(
     // cuBLAS matmuls around a softmax, which cost ~0.1 ms per layer at 512
     // positions on an RTX 3070 — ~3 ms of a 28-layer token for a few MB of
     // cache. Same switch, same fallback.
+    //
+    // The card kernel reads the half cache as it is stored (FUTURE_WORK #194).
     if q.dim(2)? == 1 && q.device().is_cuda() {
         if let Some(out) = crate::inference::decode_attn::gqa_decode_attention_cuda(
             q,
@@ -1628,6 +1789,20 @@ pub(crate) fn standard_attention(
             return Ok(out);
         }
     }
+    // Everything below reads an f32 cache. A half cache reaches it only where
+    // the card's kernels did not take the call — forced-standard attention
+    // (SWIFT, `SWARMLLM_FORCE_STANDARD_ATTN`), a decode step with a mask — and
+    // is widened here: the whole history, on every such call. `kv_storage`
+    // keeps the half cache to geometries the decode kernel covers, so the
+    // default paths never come here with one.
+    let (k_wide, v_wide);
+    let (k, v) = if k.dtype() == DType::F32 && v.dtype() == DType::F32 {
+        (k, v)
+    } else {
+        k_wide = k.to_dtype(DType::F32)?;
+        v_wide = v.to_dtype(DType::F32)?;
+        (&k_wide, &v_wide)
+    };
     if q.dim(2)? == 1 && q.device().is_cpu() {
         if let Some(out) = crate::inference::decode_attn::gqa_decode_attention_cpu(
             q,
@@ -2409,6 +2584,14 @@ pub(crate) fn run_attention(
             let q_f16 = q_bshd.to_dtype(DType::F16)?;
             let (k_f16, v_f16) = match flash_kv {
                 Some((k_mirror, v_mirror)) => (k_mirror.clone(), v_mirror.clone()),
+                // The half cache (FUTURE_WORK #194), read where it lies: a
+                // BHSD buffer seen as BSHD by a transpose, no copy. The kernel
+                // takes any row, head and batch stride as long as each row is
+                // dense (`vendor/candle-flash-attn/src/lib.rs`), and one head's
+                // positions sit together, which is the run it loads a tile of.
+                None if k.dtype() == DType::F16 && v.dtype() == DType::F16 => {
+                    (k.transpose(1, 2)?, v.transpose(1, 2)?)
+                }
                 None => (
                     k.transpose(1, 2)?.contiguous()?.to_dtype(DType::F16)?,
                     v.transpose(1, 2)?.contiguous()?.to_dtype(DType::F16)?,
@@ -2472,6 +2655,19 @@ fn rms_over_last_dim(x: &Tensor, eps: f64) -> CandleResult<Tensor> {
 }
 
 impl LayerWeights {
+    /// How this layer keeps its KV cache on the device `x` is on —
+    /// [`kv_storage`], asked with this layer's head geometry.
+    fn kv_storage(&self, x: &Tensor) -> KvStorage {
+        // Standard attention by construction: MLA layers run `forward_mla`.
+        kv_storage(
+            x.device().is_cuda(),
+            KvAttention::Standard,
+            self.n_head,
+            self.n_kv_head,
+            self.head_dim,
+        )
+    }
+
     pub(crate) fn apply_rotary_emb(&self, x: &Tensor, index_pos: usize) -> CandleResult<Tensor> {
         // Llama 4 NoPE layers: skip RoPE entirely
         if self.skip_rope {
@@ -2591,33 +2787,19 @@ impl LayerWeights {
         crate::inference::prof::add(P::AttnShape, __shape_t.elapsed().as_nanos() as u64);
 
         // KV-cache: use pre-allocated KvCache buffers (avoids Tensor::cat per step)
-        let (k, v) = match kv_cache {
-            None => {
-                let mut cache = new_kv_cache(
-                    max_seq_len,
-                    model_wants_kv_mirror(self.n_head, self.n_kv_head),
-                    kv_reserve,
-                );
-                let kv = cache.append(&k, &v)?;
-                *kv_cache = Some(cache);
-                kv
-            }
-            Some(cache) => {
-                if index_pos == 0 {
-                    cache.reset();
-                }
-                // A cache can arrive from prefix-cache hydration, which builds
-                // it from a snapshot and cannot tell GQA from MHA — the
-                // snapshot carries `n_kv_head` in its shape but not `n_head`.
-                // Correct it here, where both are known: an MHA cache sheds a
-                // mirror nothing will read, a GQA one keeps the one it has.
-                cache.set_mirror_wanted(model_wants_kv_mirror(self.n_head, self.n_kv_head));
-                cache.append(&k, &v)?
-            }
-        };
+        let (k, v) = append_to_cache(
+            kv_cache,
+            &k,
+            &v,
+            index_pos,
+            self.kv_storage(x),
+            max_seq_len,
+            kv_reserve,
+        )?;
 
         // The f16 BSHD mirror, if this cache is maintaining one — lets the CUDA
-        // flash arm skip converting the whole history every token.
+        // flash arm skip converting the whole history every token. A half
+        // cache has none: flash reads it where it lies (`run_attention`).
         let mirror = kv_cache.as_ref().and_then(|c| c.flash_operands());
 
         // Unified attention dispatch: flash (CPU/GPU) or standard matmul fallback.
@@ -2809,27 +2991,15 @@ impl LayerWeights {
                 crate::inference::prof::add(P::AttnShape, __t.elapsed().as_nanos() as u64);
                 r
             };
-            let (ki, vi) = match cache_slot {
-                None => {
-                    let mut cache = new_kv_cache(
-                        max_seq_len,
-                        model_wants_kv_mirror(self.n_head, self.n_kv_head),
-                        kv_reserves.get(i).copied().unwrap_or(0),
-                    );
-                    let kv = cache.append(&ki, &vi)?;
-                    *cache_slot = Some(cache);
-                    kv
-                }
-                Some(cache) => {
-                    if index_pos == 0 {
-                        cache.reset();
-                    }
-                    // Same correction as the single-request path: a hydrated
-                    // cache cannot know whether its model is GQA, and this does.
-                    cache.set_mirror_wanted(model_wants_kv_mirror(self.n_head, self.n_kv_head));
-                    cache.append(&ki, &vi)?
-                }
-            };
+            let (ki, vi) = append_to_cache(
+                cache_slot,
+                &ki,
+                &vi,
+                index_pos,
+                self.kv_storage(x),
+                max_seq_len,
+                kv_reserves.get(i).copied().unwrap_or(0),
+            )?;
             let mirror = cache_slot.as_ref().and_then(|c| c.flash_operands());
             heads.push(crate::inference::prof::timed!(
                 P::AttnCore,
@@ -4367,6 +4537,71 @@ mod cuda_attention_routing {
         assert!(!cuda_decode_prefers_standard(2, 32, 8), "GQA prefill");
         assert!(!cuda_decode_prefers_standard(2, 32, 32), "MHA prefill");
     }
+
+    /// The half cache (FUTURE_WORK #194) is a CARD's, and only where both of
+    /// the card's attention kernels read it: a build with the flash kernel, a
+    /// geometry the decode kernel covers. Everywhere else the layout before it.
+    #[test]
+    fn only_a_card_with_both_kernels_keeps_the_half_cache() {
+        for (n_head, n_kv_head) in [MHA, GQA] {
+            assert_eq!(
+                kv_storage(false, KvAttention::Standard, n_head, n_kv_head, 128),
+                KvStorage::F32,
+                "the processor keeps f32"
+            );
+        }
+        let half = cfg!(feature = "flash-attn")
+            && kv_half_on_card_enabled()
+            && crate::inference::decode_attn::decode_kernel_enabled();
+        assert_eq!(
+            kv_storage(true, KvAttention::Standard, GQA.0, GQA.1, 128) == KvStorage::F16,
+            half
+        );
+        assert_eq!(
+            kv_storage(true, KvAttention::Standard, MHA.0, MHA.1, 96) == KvStorage::F16,
+            half
+        );
+        // Geometries the decode kernel does not cover keep the f32 layout —
+        // a head wider than it holds, more query heads per KV head than a
+        // block takes — or every decode step would widen the whole history.
+        assert_ne!(
+            kv_storage(true, KvAttention::Standard, 16, 8, 320),
+            KvStorage::F16
+        );
+        assert_ne!(
+            kv_storage(true, KvAttention::Standard, 128, 4, 128),
+            KvStorage::F16
+        );
+        assert_ne!(
+            kv_storage(true, KvAttention::Standard, 24, 8, 80),
+            KvStorage::F16
+        );
+        // A peer is priced by what it SAYS, never by this build's own switches.
+        assert_eq!(
+            kv_storage_as_advertised(true, true, KvAttention::Standard, GQA.0, GQA.1, 128),
+            KvStorage::F16
+        );
+        assert_eq!(
+            kv_storage_as_advertised(false, true, KvAttention::Standard, GQA.0, GQA.1, 128),
+            KvStorage::F32
+        );
+        assert_ne!(
+            kv_storage_as_advertised(true, false, KvAttention::Standard, GQA.0, GQA.1, 128),
+            KvStorage::F16,
+            "a peer that does not advertise the half cache keeps the f32 one"
+        );
+        // MLA keeps f32 wherever it runs, whatever the node advertises — a
+        // DeepSeek-V2-Lite-shaped model (16 heads, key width 192) would pass the
+        // decode kernel's geometry, which is exactly why the rule must be told.
+        assert_eq!(
+            kv_storage(true, KvAttention::Mla, 16, 16, 192),
+            KvStorage::F32
+        );
+        assert_eq!(
+            kv_storage_as_advertised(true, true, KvAttention::Mla, 16, 16, 192),
+            KvStorage::F32
+        );
+    }
 }
 
 /// CUDA-only A/B of the two attention kernels, used to price flash-attention-2.
@@ -4396,6 +4631,74 @@ mod flash_vs_standard {
     use super::*;
     use crate::inference::attn_kernel::ForceStandardAttnGuard;
     use candle_core::{Device, Tensor};
+
+    /// Flash over the half cache read where it lies — a BHSD f16 buffer seen as
+    /// BSHD through a transpose, narrowed to the positions held — gives the
+    /// answer it gave over the contiguous f16 mirror, bit for bit: the same
+    /// values (both rounded once from f32) through the same kernel, which
+    /// takes any row and head stride (FUTURE_WORK #194). If a stride were
+    /// misread, rows would come from the wrong head or position and this fails.
+    #[test]
+    fn flash_reads_the_half_cache_in_place_as_it_read_the_mirror() {
+        let Ok(dev) = Device::new_cuda(0) else {
+            eprintln!("no CUDA device — skipping");
+            return;
+        };
+        let (n_head, n_kv_head, head_dim) = (24usize, 8usize, 128usize);
+        // (query block, positions held, positions allocated)
+        for (q_len, held, allocated) in
+            [(128usize, 384usize, 512usize), (4, 912, 1024), (2, 64, 64)]
+        {
+            let q = Tensor::randn(0f32, 1.0, (1, n_head, q_len, head_dim), &dev).unwrap();
+            let kbuf = Tensor::randn(0f32, 1.0, (1, n_kv_head, allocated, head_dim), &dev).unwrap();
+            let vbuf = Tensor::randn(0f32, 1.0, (1, n_kv_head, allocated, head_dim), &dev).unwrap();
+            let (k, v) = (
+                kbuf.narrow(2, 0, held).unwrap(),
+                vbuf.narrow(2, 0, held).unwrap(),
+            );
+            let mirror = |t: &Tensor| {
+                t.transpose(1, 2)
+                    .unwrap()
+                    .contiguous()
+                    .unwrap()
+                    .to_dtype(DType::F16)
+                    .unwrap()
+            };
+            let (km, vm) = (mirror(&k), mirror(&v));
+            let from_mirror = run_attention(
+                &q,
+                &k,
+                &v,
+                None,
+                n_head,
+                n_kv_head,
+                head_dim,
+                None,
+                Some((&km, &vm)),
+            )
+            .unwrap();
+            let (k16, v16) = (
+                kbuf.to_dtype(DType::F16)
+                    .unwrap()
+                    .narrow(2, 0, held)
+                    .unwrap(),
+                vbuf.to_dtype(DType::F16)
+                    .unwrap()
+                    .narrow(2, 0, held)
+                    .unwrap(),
+            );
+            let in_place = run_attention(
+                &q, &k16, &v16, None, n_head, n_kv_head, head_dim, None, None,
+            )
+            .unwrap();
+            let a = from_mirror.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+            let b = in_place.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+            assert!(
+                a.iter().zip(&b).all(|(x, y)| x.to_bits() == y.to_bits()),
+                "q_len={q_len} held={held} allocated={allocated}: flash over the half cache differs from flash over the mirror"
+            );
+        }
+    }
 
     /// A query block landing on a warm prefix must get the same answer from
     /// flash as from standard-with-an-explicit-mask.
@@ -4762,8 +5065,9 @@ mod flash_vs_standard {
                         // would measure the mirror instead.
                         //
                         // **So do not read a production cost off this table.**
-                        // A real GQA decode DOES have the f16 mirror
-                        // (`model_wants_kv_mirror`), so it never pays the
+                        // A real GQA decode reads the half cache in place,
+                        // or the f16 mirror where that does not apply
+                        // (`kv_storage`), so it never pays the
                         // f32->f16 conversion of the whole history that the
                         // flash arm is charged here. The ratios below are
                         // therefore an upper bound on flash's penalty, not an

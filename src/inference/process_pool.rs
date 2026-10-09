@@ -2029,26 +2029,29 @@ fn split_for_card(
     // keep a cache (a recurrent layer holds a fixed state; Qwen 3.5, #228).
     let kv_elems = ((inputs.head_count_kv * inputs.head_dim).saturating_mul(inputs.kv_layers))
         .div_ceil(inputs.segment_layers.max(1)) as usize;
-    // The card also holds the flash-attention f16 mirror of that cache for
-    // a grouped-query model — the loader charges it (`split::loader`, its
-    // KV budget), so the split must, or it leaves the card less room for a
-    // conversation than the model serves: GLM-4-9B split 36/40 on an 8 GB
-    // card covered ~5,300 of its 8,192 tokens (#104's follow-up). Same
-    // predicate the loader asks; a hybrid split is always on a card. The
-    // loader's one other condition — MLA (DeepSeek-2) never mirrors — cannot
-    // arise here: that architecture is refused above.
-    let mirrored = cfg!(feature = "flash-attn")
-        && crate::inference::layers::model_wants_kv_mirror(
-            inputs.head_count as usize,
-            inputs.head_count_kv as usize,
-        );
+    // The card's layers keep their cache the way the loader will build it —
+    // the half cache, or f32 plus the flash mirror for a grouped-query model
+    // where that does not apply — and the split must charge what the loader
+    // charges (`split::loader`, its KV budget), or it leaves the card less
+    // room for a conversation than the model serves: GLM-4-9B split 36/40 on
+    // an 8 GB card covered ~5,300 of its 8,192 tokens (#104's follow-up). The
+    // same rule the loader asks (`layers::kv_storage`); a hybrid split is
+    // always on a card. The loader's one other condition — MLA (DeepSeek-2)
+    // is always f32 — cannot arise here: that architecture is refused above.
+    let storage = crate::inference::layers::kv_storage(
+        true,
+        inputs.attention,
+        inputs.head_count as usize,
+        inputs.head_count_kv as usize,
+        inputs.head_dim as usize,
+    );
     let n = crate::inference::split::hybrid::plan_gpu_layers(
         available_bytes,
         inputs.quantized_weight_bytes,
         layers,
         kv_elems,
         kv_elems,
-        mirrored,
+        storage,
         inputs.effective_context,
     );
     (n > 0).then_some((n, layers))
@@ -3136,6 +3139,9 @@ impl ModelProcessPool {
             effective_context: effective_ctx,
             is_first,
             splits_across_devices: crate::inference::split::hybrid::arch_supports_hybrid(
+                &crate::inference::model_arch::ModelArch::from_gguf_arch(&arch),
+            ),
+            attention: crate::inference::layers::KvAttention::of(
                 &crate::inference::model_arch::ModelArch::from_gguf_arch(&arch),
             ),
         })
@@ -8390,6 +8396,7 @@ mod tests {
                 is_first: true,
                 embedding_gatherable: true,
                 splits_across_devices: arch_supports_hybrid(&ModelArch::Qwen2),
+                attention: crate::inference::layers::KvAttention::Standard,
             },
         );
         let h =
@@ -8444,6 +8451,7 @@ mod tests {
                     is_first: true,
                     embedding_gatherable: true,
                     splits_across_devices: true,
+                    attention: crate::inference::layers::KvAttention::Standard,
                 },
             );
             let estimate = p
@@ -9623,6 +9631,7 @@ mod tests {
             is_first: true,
             embedding_gatherable: true,
             splits_across_devices: true,
+            attention: crate::inference::layers::KvAttention::Standard,
         };
         let segment = |inputs: &VramFootprintInputs, layers: u64| {
             let mut i = *inputs;
@@ -10093,6 +10102,7 @@ mod admission_tests {
             is_first: true,
             embedding_gatherable: true,
             splits_across_devices: arch_supports_hybrid(&ModelArch::Qwen2),
+            attention: crate::inference::layers::KvAttention::Standard,
         };
         let three_gb = 3 * 1024 * 1024 * 1024;
         let (n, total) = split_for_card(&splittable, three_gb).expect("Qwen2 splits");
@@ -10101,6 +10111,7 @@ mod admission_tests {
         for arch in [ModelArch::Qwen35Moe, ModelArch::DeepSeek2] {
             let unsplittable = crate::model::auto_manage::vram::VramFootprintInputs {
                 splits_across_devices: arch_supports_hybrid(&arch),
+                attention: crate::inference::layers::KvAttention::of(&arch),
                 ..splittable
             };
             assert_eq!(split_for_card(&unsplittable, three_gb), None, "{arch}");
@@ -10108,6 +10119,7 @@ mod admission_tests {
         // Dense Qwen 3.5 splits since 2026-10-07, checked on a card (#228).
         let qwen35 = crate::model::auto_manage::vram::VramFootprintInputs {
             splits_across_devices: arch_supports_hybrid(&ModelArch::Qwen35),
+            attention: crate::inference::layers::KvAttention::Standard,
             ..splittable
         };
         assert!(split_for_card(&qwen35, three_gb).is_some());
@@ -10149,6 +10161,7 @@ mod admission_tests {
             is_first: true,
             embedding_gatherable: true,
             splits_across_devices: arch_supports_hybrid(&ModelArch::Qwen2),
+            attention: crate::inference::layers::KvAttention::Standard,
         };
         let pool_with = |inputs| {
             let p = pool();
@@ -10185,6 +10198,7 @@ mod admission_tests {
         // what the card alone takes, as before.
         let (q, m) = pool_with(crate::model::auto_manage::vram::VramFootprintInputs {
             splits_across_devices: false,
+            attention: crate::inference::layers::KvAttention::Standard,
             ..seven_b
         });
         assert_eq!(q.fresh_run_layers_for_planning(&m), None);
@@ -10220,6 +10234,7 @@ mod admission_tests {
                 is_first: true,
                 embedding_gatherable: true,
                 splits_across_devices: arch_supports_hybrid(&ModelArch::Qwen2),
+                attention: crate::inference::layers::KvAttention::Standard,
             },
         );
         let estimated = p.estimate_gpu_footprint_mb(&m, Some((0, 28)));

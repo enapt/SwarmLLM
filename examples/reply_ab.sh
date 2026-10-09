@@ -3,6 +3,8 @@
 #
 # usage: examples/reply_ab.sh <binary> <port> <out.jsonl> [models...]
 #   env PROMPTS="first|second"   prompt list, '|'-separated (default: two)
+#   env MAX_TOKENS=400           reply length (default 96) — long replies are
+#                                where a cache's precision would show, if it does
 #   env EXTRA_TOML='[inference]\ngpu_layers = 0'   appended to the node config
 #
 # Run it for two binaries on the same box and diff the outputs. It found #93 at
@@ -59,7 +61,7 @@ K=$(cat "$D/api_key" 2>/dev/null) || { echo "node did not start"; exit 1; }
 for M in $MODELS; do
   IFS="|" read -r -a PLIST <<< "${PROMPTS:-What is the capital of France? Answer in one sentence.|Write a short Python function that returns the factorial of n.}"
   for P in "${PLIST[@]}"; do
-    body=$(python3 -c 'import json,sys; print(json.dumps({"model":sys.argv[1],"max_tokens":96,"temperature":0,"messages":[{"role":"user","content":sys.argv[2]}]}))' "$M" "$P")
+    body=$(python3 -c 'import json,sys; print(json.dumps({"model":sys.argv[1],"max_tokens":int(sys.argv[3]),"temperature":0,"messages":[{"role":"user","content":sys.argv[2]}]}))' "$M" "$P" "${MAX_TOKENS:-96}")
     curl -s -m 900 -H "Authorization: Bearer $K" -H "Content-Type: application/json" \
          -X POST "http://localhost:$PORT/v1/chat/completions" -d "$body" \
       | python3 -c 'import json,sys
