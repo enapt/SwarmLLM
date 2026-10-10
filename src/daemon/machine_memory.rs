@@ -14,13 +14,22 @@
 //! others about how much there is (guard
 //! `machine_memory_is_read_in_one_place`).
 //!
-//! **Available under a limit is the limit less the cgroup's working set** —
-//! `memory.current` less `inactive_file`, the figure cAdvisor reports and the
-//! kubelet evicts on. `memory.current` alone counts page cache the kernel would
-//! reclaim before an OOM, so a node that had just read a model file would have
-//! looked full and refused work (`sysinfo::System::cgroup_limits` makes exactly
-//! that subtraction, which is why it is not used). On the host `MemAvailable`
-//! already says the same.
+//! **Available under a limit is the limit less what the kernel could not
+//! reclaim** — `memory.current` less the file cache on BOTH LRU lists
+//! (`active_file`, `inactive_file`) and reclaimable slab. That is LXCFS's
+//! `MemAvailable` for a cgroup v2 container, and the same thing the host's
+//! `MemAvailable` counts: the kernel drops clean cache, active or not, before it
+//! OOM-kills anything under the limit. `memory.current` alone counts every page
+//! of a model file the node has read, so it would look full and refuse work
+//! (`sysinfo::System::cgroup_limits` stops there, which is why it is not used).
+//!
+//! ⚠ Not the kubelet's working set (`memory.current` less `inactive_file`
+//! only), which this used first: that is an EVICTION metric, and it counts
+//! active cache as used. A file read twice — a shard hashed, then loaded — is
+//! on the active list, so after a few models the release gate's 13 GB scope
+//! read 11.6 GB "used" with no model loaded, and every node refused a 2.8 GB
+//! segment that .232, reading the host's figure, had served (gate .233 step 12e,
+//! 2026-10-10).
 //!
 //! The cgroup is found the way the JVM finds it: this process's own path from
 //! `/proc/self/cgroup`, and every ancestor up to the mount's root, so a limit
@@ -98,9 +107,12 @@ fn cgroup_limit(read: &dyn Fn(&str) -> Option<String>, host_total: u64) -> Optio
         let found = tightest("/sys/fs/cgroup", path, host_total, |dir| {
             let limit = parse_bytes(read(&format!("{dir}/memory.max"))?.trim())?;
             let current = parse_bytes(read(&format!("{dir}/memory.current"))?.trim())?;
-            let inactive =
-                stat_value(&read(&format!("{dir}/memory.stat"))?, "inactive_file").unwrap_or(0);
-            Some((limit, current.saturating_sub(inactive)))
+            let stat = read(&format!("{dir}/memory.stat"))?;
+            let reclaimable = ["active_file", "inactive_file", "slab_reclaimable"]
+                .iter()
+                .filter_map(|key| stat_value(&stat, key))
+                .sum::<u64>();
+            Some((limit, current.saturating_sub(reclaimable)))
         });
         if found.is_some() {
             return found;
@@ -118,15 +130,19 @@ fn cgroup_limit(read: &dyn Fn(&str) -> Option<String>, host_total: u64) -> Optio
     tightest("/sys/fs/cgroup/memory", path, host_total, |dir| {
         let limit = parse_bytes(read(&format!("{dir}/memory.limit_in_bytes"))?.trim())?;
         let usage = parse_bytes(read(&format!("{dir}/memory.usage_in_bytes"))?.trim())?;
-        let inactive =
-            stat_value(&read(&format!("{dir}/memory.stat"))?, "total_inactive_file").unwrap_or(0);
-        Some((limit, usage.saturating_sub(inactive)))
+        let stat = read(&format!("{dir}/memory.stat"))?;
+        let reclaimable = ["total_active_file", "total_inactive_file"]
+            .iter()
+            .filter_map(|key| stat_value(&stat, key))
+            .sum::<u64>();
+        Some((limit, usage.saturating_sub(reclaimable)))
     })
 }
 
 /// Walk `path` from the cgroup itself up to the mount's root, asking `at` for
-/// `(limit, working set)` in each directory that exists, and keep the limit
-/// leaving the LEAST room — an enclosing slice's limit binds a scope inside it.
+/// `(limit, memory the kernel could not reclaim)` in each directory that
+/// exists, and keep the limit leaving the LEAST room — an enclosing slice's
+/// limit binds a scope inside it.
 fn tightest(
     mount: &str,
     path: &str,
@@ -141,11 +157,11 @@ fn tightest(
         } else {
             format!("{mount}{rel}")
         };
-        if let Some((limit, working_set)) = at(&dir) {
+        if let Some((limit, in_use)) = at(&dir) {
             if limit < host_total {
                 let here = CgroupLimit {
                     limit_bytes: limit,
-                    headroom_bytes: limit.saturating_sub(working_set),
+                    headroom_bytes: limit.saturating_sub(in_use),
                 };
                 best = Some(match best {
                     Some(b) => CgroupLimit {
@@ -210,15 +226,18 @@ mod tests {
         );
     }
 
-    fn stat(inactive: u64) -> String {
-        format!("anon 123\nfile 456\ninactive_file {inactive}\nactive_file 7\n")
+    fn stat(active: u64, inactive: u64) -> String {
+        format!(
+            "anon 123\nfile 456\nactive_file {active}\ninactive_file {inactive}\nslab_reclaimable 0\n"
+        )
     }
 
     #[test]
     fn a_container_limit_caps_the_host_and_page_cache_is_room() {
         // Docker on cgroup v2: a private namespace, so the path is `/` and the
         // limit sits at the mount's root. 4 GiB limit, 1.5 GiB charged of
-        // which 1 GiB is reclaimable cache: 3.5 GiB of room, not 2.5.
+        // which 1 GiB is cache, half of it on the active list: 3.5 GiB of
+        // room, not 2.5 (and not 3.0, the kubelet's working set).
         let read = fs(&[
             ("/proc/self/cgroup", "0::/\n".into()),
             ("/sys/fs/cgroup/memory.max", format!("{}\n", 4 * GIB)),
@@ -226,7 +245,7 @@ mod tests {
                 "/sys/fs/cgroup/memory.current",
                 format!("{}\n", 3 * GIB / 2),
             ),
-            ("/sys/fs/cgroup/memory.stat", stat(GIB)),
+            ("/sys/fs/cgroup/memory.stat", stat(GIB / 2, GIB / 2)),
         ]);
         let limit = cgroup_limit(&read, HOST).expect("a limit is set");
         assert_eq!(limit.limit_bytes, 4 * GIB);
@@ -238,6 +257,40 @@ mod tests {
         let capped = host.capped_by(limit);
         assert_eq!(capped.total_bytes, 4 * GIB);
         assert_eq!(capped.available_bytes, 4 * GIB - GIB / 2);
+    }
+
+    /// The release gate's shape (step 12e, .233): nodes that had read and
+    /// loaded several models' files left most of the scope's charge as cache
+    /// on the ACTIVE list. The kubelet's working set counted it as used and
+    /// every node refused a segment it had room for.
+    #[test]
+    fn active_file_cache_is_room_too() {
+        let read = fs(&[
+            ("/proc/self/cgroup", "0::/gate.scope\n".into()),
+            (
+                "/sys/fs/cgroup/gate.scope/memory.max",
+                format!("{}", 13 * GIB),
+            ),
+            (
+                "/sys/fs/cgroup/gate.scope/memory.current",
+                format!("{}", 12 * GIB),
+            ),
+            (
+                "/sys/fs/cgroup/gate.scope/memory.stat",
+                format!(
+                    "anon {}\nfile {}\nactive_file {}\ninactive_file {}\nslab_reclaimable {}\n",
+                    4 * GIB,
+                    15 * GIB / 2,
+                    7 * GIB,
+                    GIB / 2,
+                    GIB / 2
+                ),
+            ),
+        ]);
+        let limit = cgroup_limit(&read, HOST).expect("the scope's limit");
+        // 12 GiB charged, 8 of it reclaimable: 4 GiB in use, 9 GiB of room
+        // (the working set would have left 1.5).
+        assert_eq!(limit.headroom_bytes, 9 * GIB);
     }
 
     #[test]
@@ -273,7 +326,7 @@ mod tests {
             ),
             (
                 "/sys/fs/cgroup/user.slice/gate.slice/node.scope/memory.stat",
-                stat(0),
+                stat(0, 0),
             ),
             (
                 "/sys/fs/cgroup/user.slice/gate.slice/memory.max",
@@ -285,14 +338,14 @@ mod tests {
             ),
             (
                 "/sys/fs/cgroup/user.slice/gate.slice/memory.stat",
-                stat(GIB),
+                stat(0, GIB),
             ),
             ("/sys/fs/cgroup/user.slice/memory.max", "max\n".into()),
             (
                 "/sys/fs/cgroup/user.slice/memory.current",
                 format!("{}", 9 * GIB),
             ),
-            ("/sys/fs/cgroup/user.slice/memory.stat", stat(0)),
+            ("/sys/fs/cgroup/user.slice/memory.stat", stat(0, 0)),
         ]);
         let limit = cgroup_limit(&read, HOST).expect("the slice's limit");
         assert_eq!(limit.limit_bytes, 6 * GIB);
@@ -312,13 +365,13 @@ mod tests {
                 "/sys/fs/cgroup/outer/inner/memory.current",
                 format!("{GIB}"),
             ),
-            ("/sys/fs/cgroup/outer/inner/memory.stat", stat(0)),
+            ("/sys/fs/cgroup/outer/inner/memory.stat", stat(0, 0)),
             ("/sys/fs/cgroup/outer/memory.max", format!("{}", 8 * GIB)),
             (
                 "/sys/fs/cgroup/outer/memory.current",
                 format!("{}", 7 * GIB),
             ),
-            ("/sys/fs/cgroup/outer/memory.stat", stat(0)),
+            ("/sys/fs/cgroup/outer/memory.stat", stat(0, 0)),
         ]);
         let limit = cgroup_limit(&read, HOST).unwrap();
         assert_eq!(limit.limit_bytes, 3 * GIB);
@@ -334,7 +387,7 @@ mod tests {
             ("/proc/self/cgroup", "0::/init.scope\n".into()),
             ("/sys/fs/cgroup/init.scope/memory.max", "max\n".into()),
             ("/sys/fs/cgroup/init.scope/memory.current", format!("{GIB}")),
-            ("/sys/fs/cgroup/init.scope/memory.stat", stat(0)),
+            ("/sys/fs/cgroup/init.scope/memory.stat", stat(0, 0)),
         ]);
         assert_eq!(cgroup_limit(&read, HOST), None);
         // No /proc/self/cgroup (not Linux): no limit.
@@ -361,7 +414,11 @@ mod tests {
                 ),
                 (
                     "/sys/fs/cgroup/memory/memory.stat",
-                    format!("rss 1\ntotal_inactive_file {}\n", GIB / 2),
+                    format!(
+                        "rss 1\ntotal_active_file {}\ntotal_inactive_file {}\n",
+                        GIB / 4,
+                        GIB / 4
+                    ),
                 ),
             ])
         };

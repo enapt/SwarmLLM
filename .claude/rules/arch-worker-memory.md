@@ -126,7 +126,7 @@ The loader records the card's KV budget with or without `inference.max_seq_len_o
 
 ## Machine memory is read in one place, under the cgroup's limit (2026-10-09)
 
-**`daemon::machine_memory::machine_memory()`** is the only reading of how much memory this process may use — host figures under its cgroup's limit (a container's `--memory`, a systemd `MemoryMax`), available = limit less the WORKING SET (`memory.current` − `inactive_file`), never `sysinfo`'s cgroup "free" (page cache would read as full). Guard: `machine_memory_is_read_in_one_place`.
+**`daemon::machine_memory::machine_memory()`** is the only reading of how much memory this process may use — host figures under its cgroup's limit (a container's `--memory`, a systemd `MemoryMax`), available = limit less what the kernel could not reclaim (`memory.current` − `active_file` − `inactive_file` − `slab_reclaimable`, LXCFS's `MemAvailable`) — never the kubelet's working set (counts ACTIVE cache as used: the .233 gate's nodes refused with nothing loaded) nor `sysinfo`'s cgroup "free" (counts all cache). Guard: `machine_memory_is_read_in_one_place`.
 
 → `docs/invariants/memory.md` § "Machine memory is read in one place, and a container's limit counts"
 

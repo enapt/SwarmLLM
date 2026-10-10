@@ -2503,12 +2503,28 @@ own cgroup namespace the path is `/`, and the mount's root is the container's cg
 or above the host's total is none (v1's ~2^63, the host's own root, which in v2 has no
 `memory.max`).
 
-**Available under a limit is the limit less the WORKING SET** — `memory.current` less
-`inactive_file` (v1: `usage_in_bytes` less `total_inactive_file`), cAdvisor's figure and the
-kubelet's eviction signal — and then the tighter of that and the host's `MemAvailable`.
-`sysinfo::System::cgroup_limits` was NOT used: its free figure is limit less `memory.current`,
-which counts page cache, so a node that had just read a model file would have looked full and
-refused work — the false-refusal side of gotcha #440.
+**Available under a limit is the limit less what the kernel could not reclaim** —
+`memory.current` less `active_file` + `inactive_file` + `slab_reclaimable` (v1:
+`usage_in_bytes` less `total_active_file` + `total_inactive_file`) — and then the tighter of that
+and the host's `MemAvailable`. It is LXCFS's `MemAvailable` for a cgroup v2 container
+(`proc_fuse.c`: `memlimit - memusage + active_file + inactive_file + slab_reclaimable`), and it
+counts what the host's `MemAvailable` counts: clean file cache on either LRU list goes before the
+OOM killer does. `sysinfo::System::cgroup_limits` was NOT used: its free figure is limit less
+`memory.current`, which counts page cache, so a node that had just read a model file would have
+looked full and refused work — the false-refusal side of gotcha #440.
+
+⚠ **The first version subtracted the kubelet's WORKING SET (`inactive_file` only) and the .233
+gate caught it.** The working set is an EVICTION metric and counts ACTIVE cache as used; a file
+read twice — a shard BLAKE3-checked, then loaded — sits on the active list. In the gate's 13 GB
+scope after a few model steps, the live breakdown read 2.48 GB `active_file` beside 321 MB
+`inactive_file`; at step 12e (DSD failover) every holder computed `available_mb=1369` with
+nothing committed and refused a 2,772 MB segment, so even the CONTROL request got a 503 — a step
+.229-.232 passed reading the host's figure. Guard: `active_file_cache_is_room_too`. Reproduced on
+purpose the same day: a fresh `MemoryMax=13G` scope, a 6 GB file written and read twice inside it
+(6,143 MB `active_file`, 0 inactive, 0 anon), then a node started there — the .233 artifact read
+6,505 MB used, the fixed build 187 MB. The
+working set's overstatement for file-heavy workloads is a known complaint about the metric
+(Postgres on Kubernetes, ardentperf 2026-08).
 
 **Measured on this machine (WSL2, cgroup v2)**: a test under the cargo shim's `build.slice`
 (10 GiB `memory.max` on the slice, none on the scope) read total 10,240 MB, available 7,540 MB,
