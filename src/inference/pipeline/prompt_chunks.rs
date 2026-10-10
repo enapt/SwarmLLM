@@ -116,18 +116,22 @@ pub(super) fn pieces(start: u32, end: u32, piece_tokens: u32) -> Vec<(u32, u32)>
 /// Can a plan's prompt pass be read in pieces? Two or more segments, no
 /// machine twice — a worker holding two segments of one request would cross
 /// their replies (gotcha #180), so the boomerang stays whole — every peer reads
-/// pieces (`serves`; this node's own segments always do), and this node is on
-/// every boundary between two segments.
+/// pieces (`serves`; this node's own segments always do), and, unless the
+/// whole pass would come back here between every pair of segments anyway
+/// (`whole_pass_relays`), this node is on every boundary between two segments.
 ///
-/// The last condition because pieces come back HERE: between two peers a whole
-/// pass is chained straight from one to the other, and a coordinator far from
-/// two close peers would relay every piece across the long link twice. The
-/// shapes this leaves are this node's segment beside a peer's — every split it
-/// leads, the delegated head of #143 included.
+/// That last condition because pieces come back HERE: between two peers a
+/// whole pass is chained straight from one to the other, and a coordinator far
+/// from two close peers would relay every piece across the long link twice.
+/// A pass keeping its prompt between turns (#10) is never chained — each
+/// segment's answer says what it stored — so for it the relay is already the
+/// cost of the whole pass, pieces only overlap it, and a split across three or
+/// four peers reads in pieces too.
 fn shape_reads_in_pieces(
     segments: &[PipelineSegment],
     me: &NodeId,
     serves: impl Fn(&NodeId) -> bool,
+    whole_pass_relays: bool,
 ) -> bool {
     if segments.len() < 2 {
         return false;
@@ -136,9 +140,10 @@ fn shape_reads_in_pieces(
     segments
         .iter()
         .all(|s| seen.insert(&s.node_id) && (s.node_id == *me || serves(&s.node_id)))
-        && segments
-            .windows(2)
-            .all(|pair| pair[0].node_id == *me || pair[1].node_id == *me)
+        && (whole_pass_relays
+            || segments
+                .windows(2)
+                .all(|pair| pair[0].node_id == *me || pair[1].node_id == *me))
 }
 
 /// What one segment's driver gives back: the final piece's answer where the
@@ -151,8 +156,10 @@ type PieceWait<'a> =
 
 impl PipelineExecutor {
     /// May this plan's prompt pass be read in pieces — the plan's half of the
-    /// question, before any prompt is tokenized.
-    fn plan_reads_in_pieces(&self) -> bool {
+    /// question, before any prompt is tokenized. `whole_pass_relays`: the pass
+    /// would not be chained if read whole (a kept pass, #10) — see
+    /// [`shape_reads_in_pieces`].
+    fn plan_reads_in_pieces(&self, whole_pass_relays: bool) -> bool {
         use swarmllm_types::node::features::{PROMPT_CHUNKS, STREAMED_VERIFY, STREAM_AS_ONE_WORK};
         switched_on()
             && self.assignment.tp_groups.is_empty()
@@ -165,12 +172,15 @@ impl PipelineExecutor {
                         PROMPT_CHUNKS | STREAMED_VERIFY | STREAM_AS_ONE_WORK,
                     )
                 },
+                whole_pass_relays,
             )
     }
 
     /// Should a pass computing `positions` positions be read in pieces?
-    pub(super) fn reads_in_pieces(&self, positions: u32) -> bool {
-        self.plan_reads_in_pieces() && !pieces(0, positions, piece_tokens()).is_empty()
+    /// `whole_pass_relays` as for [`Self::plan_reads_in_pieces`].
+    pub(super) fn reads_in_pieces(&self, positions: u32, whole_pass_relays: bool) -> bool {
+        self.plan_reads_in_pieces(whole_pass_relays)
+            && !pieces(0, positions, piece_tokens()).is_empty()
     }
 
     /// The prompt's token ids, tokenized as a first segment would tokenize the
@@ -200,7 +210,9 @@ impl PipelineExecutor {
         vision: bool,
         pre_embedded: bool,
     ) -> Option<Vec<u32>> {
-        if sequence_num != 0 || vision || pre_embedded || !self.plan_reads_in_pieces() {
+        // Not a kept pass (that one is `split_prompt_cache`'s), so read whole it
+        // would be chained between peers.
+        if sequence_num != 0 || vision || pre_embedded || !self.plan_reads_in_pieces(false) {
             return None;
         }
         // A token is at least a byte: a prompt shorter in bytes than two pieces
@@ -215,7 +227,7 @@ impl PipelineExecutor {
             return None;
         }
         let ids = self.tokenize_prompt(prompt_bytes)?;
-        self.reads_in_pieces(ids.len() as u32).then_some(ids)
+        self.reads_in_pieces(ids.len() as u32, false).then_some(ids)
     }
 
     /// Run the prompt pass over positions `start..ids.len()` in pieces, every
@@ -766,47 +778,43 @@ mod tests {
 
     /// The boomerang (this node twice) and a single segment stay whole; a peer
     /// that does not read pieces keeps the whole plan whole; and so does a
-    /// boundary between two peers, which a whole pass chains straight across.
+    /// boundary between two peers that a whole pass would chain straight
+    /// across — but not one a kept pass (#10) relays through here anyway.
     #[test]
     fn only_a_plan_of_distinct_machines_that_all_read_pieces_is_cut() {
         let me = NodeId([1; 32]);
         let yes = |_: &NodeId| true;
-        assert!(shape_reads_in_pieces(
-            &[seg(1, (0, 14)), seg(2, (14, 28))],
-            &me,
-            yes
-        ));
-        assert!(shape_reads_in_pieces(
-            &[seg(2, (0, 14)), seg(1, (14, 28))],
-            &me,
-            yes
-        ));
-        assert!(shape_reads_in_pieces(
-            &[seg(2, (0, 10)), seg(1, (10, 20)), seg(3, (20, 28))],
-            &me,
-            yes
-        ));
+        let whole = |s: &[PipelineSegment]| shape_reads_in_pieces(s, &me, yes, false);
+        let kept = |s: &[PipelineSegment]| shape_reads_in_pieces(s, &me, yes, true);
+        assert!(whole(&[seg(1, (0, 14)), seg(2, (14, 28))]));
+        assert!(whole(&[seg(2, (0, 14)), seg(1, (14, 28))]));
+        assert!(whole(&[
+            seg(2, (0, 10)),
+            seg(1, (10, 20)),
+            seg(3, (20, 28))
+        ]));
+        let three = [seg(1, (0, 10)), seg(2, (10, 20)), seg(3, (20, 28))];
+        let two_peers = [seg(2, (0, 14)), seg(3, (14, 28))];
         assert!(
-            !shape_reads_in_pieces(&[seg(2, (0, 14)), seg(3, (14, 28))], &me, yes),
+            !whole(&two_peers),
             "two peers only: pieces would come back here between them"
         );
-        assert!(!shape_reads_in_pieces(
-            &[seg(1, (0, 10)), seg(2, (10, 20)), seg(3, (20, 28))],
-            &me,
-            yes
-        ));
-        assert!(!shape_reads_in_pieces(&[seg(1, (0, 28))], &me, yes));
-        assert!(!shape_reads_in_pieces(
-            &[seg(1, (0, 1)), seg(2, (1, 27)), seg(1, (27, 28))],
-            &me,
-            yes
-        ));
+        assert!(
+            !whole(&three),
+            "a boundary between two peers that a whole pass chains"
+        );
+        assert!(
+            kept(&three) && kept(&two_peers),
+            "a kept pass relays through here whole as well, so it reads in pieces"
+        );
+        assert!(!whole(&[seg(1, (0, 28))]) && !kept(&[seg(1, (0, 28))]));
+        let boomerang = [seg(1, (0, 1)), seg(2, (1, 27)), seg(1, (27, 28))];
+        assert!(
+            !whole(&boomerang) && !kept(&boomerang),
+            "never a machine twice"
+        );
         let not_three = |n: &NodeId| *n != NodeId([3; 32]);
-        assert!(!shape_reads_in_pieces(
-            &[seg(1, (0, 10)), seg(2, (10, 20)), seg(3, (20, 28))],
-            &me,
-            not_three
-        ));
+        assert!(!shape_reads_in_pieces(&three, &me, not_three, true));
     }
 
     /// The cause of a failed pass is kept over the drivers that stopped

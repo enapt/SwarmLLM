@@ -302,7 +302,9 @@ impl super::PipelineExecutor {
         // carries the hint, the first restores, the final stores. A miss is the
         // caller's to answer (a retry from 0); any other failure reads this
         // pass whole, below.
-        if self.reads_in_pieces((ids.len() as u32).saturating_sub(resume)) {
+        // A kept pass is never chained (each segment's answer says what it
+        // stored), so pieces may cross a boundary between two peers here.
+        if self.reads_in_pieces((ids.len() as u32).saturating_sub(resume), true) {
             match self
                 .prompt_pass_in_pieces(request_id, ids, resume, generated_ids)
                 .await

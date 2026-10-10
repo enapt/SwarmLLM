@@ -88,6 +88,15 @@
 #          again (its opening appears once), A logged the continuation, and the
 #          other peer served it. BIN_A = v0.3.230 is the control: the stream
 #          ends with an error after the kill.
+#          NONSTREAM=1 asks the same question WITHOUT streaming and kills the
+#          worker KILL_AFTER_S (default 8) seconds in. Prints the reply's
+#          seconds, finish reason and length, which recovery A took (a re-plan
+#          from the first token, or a continuation from what was generated) and
+#          whether the opening appears once. PASS = 200, a finish other than
+#          "interrupted", the opening once, and A CONTINUED the reply rather
+#          than generating it again — which no build does yet (FUTURE_WORK
+#          #167): v0.3.232 re-plans it from the first token (measured
+#          2026-10-10: 200 in 47.9 s, the reply generated twice over).
 #   fetch  A holds every part, B only part 0; B is asked to download part
 #          FETCH_SHARD (default 1) from A over P2P. Prints whether it landed and
 #          every `network event loop stalled` line B logged meanwhile — the hash
@@ -117,6 +126,8 @@
 #          replies ($OUT/splitcache.jsonl). Default model llama-3.2-3b. SPARE=1
 #          adds C holding exactly B's parts: turn 2 resumes only if the plan
 #          names the peer turn 1 used again, so the same PASS asks that too.
+#          SHARDS_C=… adds C holding those parts instead (set SHARDS_B too): a
+#          three-machine split, A → B → C. B's and C's hits both count.
 #   remote  A holds NONE of the model (the header only) and REMOTE_NODES (2,
 #          default, or 3) other nodes hold it between them in contiguous parts
 #          — B the first, then C (and D) — the shape a user who stores nothing
@@ -514,13 +525,16 @@ if [ "$MODE" = continue ]; then
   up "$BASE/C" 8940 || exit 1
   PEERS_EXPECTED=2
 fi
-if [ "$MODE" = splitcache ] && [ -n "${SPARE:-}" ]; then
-  # A second peer that could run B's segment: what the plan chooses between.
-  make_node "$BASE/C" "$SHARDS_B" "\"$ADDR\""
+if [ "$MODE" = splitcache ] && [ -n "${SPARE:-}${SHARDS_C:-}" ]; then
+  # SPARE: a second peer that could run B's segment — what the plan chooses
+  # between. SHARDS_C: a third machine with parts of its own, so the plan is
+  # A → B → C and B hands C its output (a boundary between two peers, #171).
+  make_node "$BASE/C" "${SHARDS_C:-$SHARDS_B}" "\"$ADDR\""
   PC=$(start "$BASE/C" 8940 "$BIN_A" "${GPU_C:-0}")
   up "$BASE/C" 8940 || exit 1
   PEERS_EXPECTED=2
-  echo "rig: C=[$SHARDS_B] (a spare holding B's parts) gpu=${GPU_C:-0}"
+  if [ -n "${SHARDS_C:-}" ]; then ROLE_C="a third segment"; else ROLE_C="a spare holding the parts B holds"; fi
+  echo "rig: C=[${SHARDS_C:-$SHARDS_B}] ($ROLE_C) gpu=${GPU_C:-0}"
 fi
 if [ "$MODE" = failover ] || [ "$MODE" = context ] || [ "$MODE" = failover_mid ]; then
   # Processor only unless asked otherwise (all four nodes): four daemons on
@@ -1039,6 +1053,52 @@ else:
     print(f"remote: delegated arm — A handed {handed}/{n}, B led {led}/{n}, fell back {fell_back}")
 print("remote: PASS" if ok and mech else "remote: FAIL")
 sys.exit(0 if ok and mech else 1)
+PY
+  exit $?
+fi
+
+if [ "$MODE" = continue ] && [ -n "${NONSTREAM:-}" ]; then
+  id16() { curl -s -m 5 -H "Authorization: Bearer $(cat "$1")" "localhost:$2/api/admin/stats" \
+    | python3 -c 'import sys,json; print(json.load(sys.stdin)["node_id"][:16])'; }
+  IB=$(id16 "$BASE/B/api_key" 8920); IC=$(id16 "$BASE/C/api_key" 8940)
+  Q="Explain in detail how a refrigerator works, step by step, covering the compressor, the condenser, the expansion valve and the evaporator."
+  BODY=$(python3 -c 'import json,sys; print(json.dumps({"model":sys.argv[1],"max_tokens":300,"temperature":0,"messages":[{"role":"user","content":sys.argv[2]}]}))' "$MODEL" "$Q")
+  read -r t0 _ < /proc/uptime
+  curl -s -m 900 -H "Authorization: Bearer $KA" -H "Content-Type: application/json" \
+    -X POST localhost:8900/v1/chat/completions -d "$BODY" -o "$OUT/continue.json" -w '%{http_code}' > "$OUT/continue.code" &
+  CURL=$!
+  for _ in $(seq 1 120); do grep -aq 'remote-generate fast path: request sent' "$BASE/A/node.log" && break; sleep 0.5; done
+  sleep "${KILL_AFTER_S:-8}"
+  SERVER=$(grep -a 'remote-generate fast path: request sent' "$BASE/A/node.log" | tail -1 | grep -oE 'target=[0-9a-f]+' | cut -d= -f2)
+  case "$SERVER" in "$IB"*) VICTIM=$PB ;; "$IC"*) VICTIM=$PC ;; *) VICTIM="" ;; esac
+  WPID=$( [ -n "$VICTIM" ] && pgrep -P "$VICTIM" -f model-worker | head -1 )
+  echo "continue: A handed it to ${SERVER:-?}; killing its worker (pid ${WPID:-none}) ${KILL_AFTER_S:-8} s in"
+  [ -n "$WPID" ] && kill -9 "$WPID"
+  wait $CURL
+  read -r t1 _ < /proc/uptime
+  restarted=$(grep -c "retrying with fresh pipeline" "$BASE/A/node.log")
+  continued=$(grep -c "continuing it on a fresh route\|continuing the reply on a fresh route" "$BASE/A/node.log")
+  salvaged=$(grep -c "returning the partial reply" "$BASE/A/node.log")
+  python3 - "$OUT/continue.json" "$(cat "$OUT/continue.code")" "$t0" "$t1" "$restarted" "$continued" "$salvaged" "${WPID:-}" <<'PY'
+import json, sys
+path, code, t0, t1, restarted, continued, salvaged, wpid = sys.argv[1:9]
+try:
+    body = json.load(open(path))
+    choice = body["choices"][0]
+    text, finish = choice["message"]["content"] or "", choice.get("finish_reason")
+    tokens = body.get("usage", {}).get("completion_tokens")
+except Exception:
+    text, finish, tokens = "", None, None
+opening = text[:40]
+once = bool(opening) and text.count(opening) == 1
+print(f"continue: HTTP {code} in {float(t1) - float(t0):.1f} s, finish={finish}, completion_tokens={tokens}, "
+      f"chars={len(text)}, opening once={once}")
+print(f"continue: A re-planned from the first token {restarted} time(s), continued {continued} time(s), "
+      f"handed back a partial {salvaged} time(s)")
+print("continue: reply: " + text[:300].replace("\n", " "))
+ok = bool(wpid) and code == "200" and finish not in (None, "interrupted") and once and int(continued) >= 1
+print("continue: PASS" if ok else "continue: FAIL" + ("" if wpid else " (no worker was killed)"))
+sys.exit(0 if ok else 1)
 PY
   exit $?
 fi

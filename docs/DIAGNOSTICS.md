@@ -857,8 +857,8 @@ DIAG: a prompt pass in pieces completed pieces=5 pipeline_ms=57049
 a prompt pass in pieces did not finish — reading it whole instead error=…   (WARN; the whole pass follows)
 ```
 
-No first line on a split you expected to be cut: the plan has a boundary between two peers, a
-machine twice (the boomerang), a peer without `features::PROMPT_CHUNKS`, fewer than two pieces'
+No first line on a split you expected to be cut: the plan has a boundary between two peers and
+the pass does not keep its prompt (#10), a machine twice (the boomerang), a peer without `features::PROMPT_CHUNKS`, fewer than two pieces'
 worth of positions (1,024 by default), an image, or `SWARMLLM_PROMPT_CHUNKS=0`. On a serving node
 each piece is its own `DIAG: processing LayerForward locally` line, with `seq=0`. A piece refused with
 "holds N positions … not the M the next piece of its prompt continues from" is a worker that lost

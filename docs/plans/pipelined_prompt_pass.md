@@ -60,7 +60,8 @@ segment kept); this is for the turns it does not cover — the first, and a one-
    would cross their replies, gotcha #180 — the boomerang stays whole), every peer advertising
    the bit, THIS node on every boundary between segments (pieces come back here; between two
    peers a whole pass is chained straight across, and a far coordinator relaying every piece
-   could cost more than it saves), no image or pre-embedded input, a tokenizer here, and at
+   could cost more than it saves) — unless the pass keeps its prompt for #10, which is never
+   chained, so its relay is already the whole pass's cost — no image or pre-embedded input, a tokenizer here, and at
    least two pieces' worth of positions to compute. `SWARMLLM_PROMPT_CHUNKS=0` turns it off (the A/B arm);
    `SWARMLLM_PROMPT_CHUNK_TOKENS` sets the piece size.
 5. **A failure is the old pass, once.** Any piece failing (but the request being cancelled)
@@ -101,4 +102,16 @@ pieces took 13.3, 11.6, 9.3, 7.6 and 4.5 s — falling where later pieces attend
 — as A finished its part. On two machines B would read every piece at the last ones' speed, and
 the pass would approach B's own time (~1.8× here). Not measured: two real machines, a card, a
 real link.
+
+Split three ways (`~/swarmllm-171/ab3.sh`: A shards 0-1, B shard 2, C shard 3 — layers 0-12,
+12-21, 21-28 — on CPUs 0-5, 6-10 and 11-15), a kept pass relayed through A between B and C:
+
+| Arm | Turn 1 pass | Turn 2 |
+|---|---|---|
+| whole | 76.8 s | resumed, hits on B and C |
+| in pieces (5) | 46.5 s | resumed, hits on B and C |
+| whole | 70.1 s | resumed, hits on B and C |
+| in pieces (5) | 47.0 s | resumed, hits on B and C |
+
+1.49-1.65×, replies byte-identical; the gain grows with the stages, as the ceiling does.
 

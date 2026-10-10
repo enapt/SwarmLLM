@@ -3923,10 +3923,12 @@ between pieces.
 
 **Where it applies.** Two or more segments; no machine twice (a worker holding two segments of
 one request would cross their replies, gotcha #180 — the boomerang stays whole); every peer
-advertising the bit; this node on EVERY boundary between segments — pieces come back here, and
-between two peers a whole pass is chained straight across, which a far coordinator relaying
-every piece would undo; no image, nothing pre-embedded, no tensor-parallel group; a tokenizer
-here. #10's kept pass reads in pieces too: every piece carries the hint, the first restores, the
+advertising the bit; and this node on EVERY boundary between segments — pieces come back here,
+and between two peers a whole pass is chained straight across, which a far coordinator relaying
+every piece would undo — UNLESS the pass keeps its prompt for #10, which is never chained (each
+segment's answer says what it stored), so its relay through here is already the whole pass's
+cost and pieces only overlap it; no image, nothing pre-embedded, no tensor-parallel group; a
+tokenizer here. #10's kept pass reads in pieces too: every piece carries the hint, the first restores, the
 final stores (turn 2 still resumed from 2,240 with a hit on B, every arm).
 
 **A failure is the old pass, once.** A piece failing (but the request cancelled, or #10's cache
@@ -3942,7 +3944,10 @@ B shards 2-3 = 12-28, processor only, each node pinned to half of this 8-core ma
 71.3 / 69.6 s whole, 58.2 / 57.0 s in five pieces; replies byte-identical in all four arms, both
 turns. The two nodes still share one memory bus, so the figure is a floor: B's pieces took 13.3,
 11.6, 9.3, 7.6, 4.5 s — falling, where later pieces attend to more positions — as A finished its
-part. Tests: `a_prompt_read_in_pieces_runs_every_piece_through_every_segment_in_order`,
+part. Split three ways (A 0-12 / B 12-21 / C 21-28, `SHARDS_C`, nodes on thirds of the
+machine), a kept pass relayed between B and C: 76.8 / 70.1 s whole, 46.5 / 47.0 s in pieces
+(1.49-1.65×), replies byte-identical, turn 2 resumed with hits on B and C. Tests:
+`a_prompt_read_in_pieces_runs_every_piece_through_every_segment_in_order`,
 `a_piece_that_fails_ends_the_pass_with_its_own_error_and_nothing_left_out`,
 `a_prompt_span_survives_the_wire_after_the_prompt_cache_trailer`,
 `a_prompt_span_is_sealed_and_survives_the_encrypted_frame`.
