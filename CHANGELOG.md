@@ -1,6 +1,11 @@
 # Changelog
 
-## [Unreleased]
+## [0.3.234-alpha] — 2026-10-10
+
+Version 0.3.233 was built but never released: its release checks found that a node in a
+memory-limited container counted the computer's cache of files it had read as memory in use,
+and refused models it had room for. That is fixed here, and everything 0.3.233 was to bring
+is in this version.
 
 **An idle node uses less of your internet connection.** Every node used to tell the
 whole network what it can do (its memory, its parts of models, its speed) every 30
@@ -12,8 +17,6 @@ in upload. A node now sends it when something in it changes, and otherwise every
 change that matters to the others, such as a model loaded, a part gained or lost, or
 memory filling up, still goes out within one round. The saving grows as the nodes
 you are connected to update to this version.
-
-## [0.3.233-alpha] — 2026-10-10
 
 **Fixed: a node in a memory-limited container planned against the whole machine.** When
 SwarmLLM ran in a container with a memory limit (`docker run --memory=…`, or a Kubernetes
