@@ -872,10 +872,14 @@ impl PipelineExecutor {
                 .await
             {
                 Ok(result) => return Ok(result),
-                Err(e) if self.request.is_cancelled() => return Err(e),
-                Err(e) => tracing::warn!(
+                // A piece that may still be live at its peer must not meet the
+                // whole pass there: the router re-plans, the silent peer barred.
+                Err(failed) if self.request.is_cancelled() || !failed.every_piece_answered => {
+                    return Err(failed.error)
+                }
+                Err(failed) => tracing::warn!(
                     %request_id,
-                    error = %e,
+                    error = %failed.error,
                     "a prompt pass in pieces did not finish — reading it whole instead"
                 ),
             }

@@ -1784,7 +1784,11 @@ async fn handle_forward(
         // TOKEN IDS from `resume_at` (FUTURE_WORK #10): the coordinator keyed
         // the stored blocks by those ids, and text re-tokenized here could
         // split differently. It reads below as a multi-position decode input.
-        if fwd.index_pos == 0 && fwd.prompt_cache.is_none() && prompt_span.is_none() {
+        if first_segment_input_is_text(
+            fwd.index_pos,
+            fwd.prompt_cache.is_some(),
+            prompt_span.is_some(),
+        ) {
             // Prefill: activations are the prompt text → tokenize
             let prompt = String::from_utf8_lossy(&activation_bytes);
             let token_ids: Vec<i64> = if let Some(tokenizer) = model.tokenizer() {
@@ -3097,6 +3101,20 @@ fn refuse_a_prompt_past_the_served_context(
 /// the granted budget where the worker knows it, [`REPLY_RESERVE_POSITIONS`]
 /// where it cannot (a segment's prompt pass). A required argument, so no
 /// entry point can fall back to the fixed quantum by omission.
+/// Does a FIRST segment's input carry the prompt as TEXT, to be tokenized here,
+/// rather than token ids? Only a whole prompt pass from position 0 that neither
+/// resumes a kept prompt (#10) nor is a piece of a pass (#171): those, and every
+/// later step, carry ids (8 bytes each). One rule for the worker that reads the
+/// input and the serving node that counts it
+/// (`dispatch::layer_forward::forward_positions`).
+pub(crate) fn first_segment_input_is_text(
+    index_pos: u32,
+    resumes_a_kept_prompt: bool,
+    is_a_piece: bool,
+) -> bool {
+    index_pos == 0 && !resumes_a_kept_prompt && !is_a_piece
+}
+
 fn ensure_room_for_prompt(
     model: &SplitModel,
     kv_store: &KvCacheStore,

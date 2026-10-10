@@ -22,10 +22,12 @@
 //! at most [`PEER_WINDOW`] out at once so the peer never idles a round trip
 //! between pieces. Unchained: every piece comes back here.
 //!
-//! **A failure is the old pass, once** — the caller's decision: any piece
-//! failing stops new pieces, the ones already out are waited for (so none
-//! reaches a worker beside the pass that follows), and the caller runs the
-//! prompt pass whole, from its first position, with its failover.
+//! **A failure is the old pass, once — if every piece was answered** — the
+//! caller's decision: any piece failing stops new pieces and the ones already
+//! out are waited for; only when every piece was ANSWERED by its machine
+//! (`PiecesFailed::every_piece_answered`) may the caller run the prompt pass
+//! whole, from its first position, with its failover. A piece whose wait timed
+//! out may still be live at its peer; that error goes to the router.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -65,8 +67,25 @@ const MAX_PIECES: u32 = 16;
 
 /// Pieces of one pass out to a peer at once. Two keep it busy — the next is
 /// queued behind the one running (`forward_streams`) — without queueing
-/// hidden states there that a failure would leave behind.
+/// hidden states there that a failure would leave behind. Only once the peer
+/// has ANSWERED a piece: the first may load the model, and a piece queued
+/// behind a load could wait longer than the peer holds it (`PIECE_TURN_WAIT`).
 const PEER_WINDOW: usize = 2;
+
+/// Why a prompt pass in pieces did not finish, and whether the caller may read
+/// it whole now.
+#[derive(Debug)]
+pub(super) struct PiecesFailed {
+    pub(super) error: SwarmError,
+    /// Every piece sent was ANSWERED by the machine it went to. Only then is
+    /// nothing of this pass still running or queued anywhere, so a whole pass
+    /// cannot meet a piece at a worker — which routes replies by request id and
+    /// would cross them (gotcha #180). A piece whose wait timed out, was
+    /// dropped or answered by this node's own machinery may still be live at
+    /// its peer: the error goes to the router instead, whose re-plan bars a
+    /// peer that went silent (review of #171, 2026-10-10).
+    pub(super) every_piece_answered: bool,
+}
 
 /// `SWARMLLM_PROMPT_CHUNKS=0` reads every prompt pass whole, as before — the
 /// A/B arm. Read once.
@@ -243,14 +262,20 @@ impl PipelineExecutor {
         ids: &[u32],
         start: u32,
         generated_ids: &[u32],
-    ) -> Result<LayerResult, SwarmError> {
-        let end = u32::try_from(ids.len())
-            .map_err(|_| SwarmError::Validation("a prompt past u32 positions".into()))?;
+    ) -> Result<LayerResult, PiecesFailed> {
+        // Nothing has been sent yet on these two: reading the pass whole is safe.
+        let before_sending = |error| PiecesFailed {
+            error,
+            every_piece_answered: true,
+        };
+        let end = u32::try_from(ids.len()).map_err(|_| {
+            before_sending(SwarmError::Validation("a prompt past u32 positions".into()))
+        })?;
         let cuts = pieces(start, end, piece_tokens());
         if cuts.is_empty() {
-            return Err(SwarmError::Internal(
+            return Err(before_sending(SwarmError::Internal(
                 "a prompt too short for pieces was sent to be read in pieces".into(),
-            ));
+            )));
         }
         let span = PromptSpan { start, end };
         let segments = &self.assignment.segments;
@@ -286,11 +311,16 @@ impl PipelineExecutor {
                     .try_send(super::pack_verify_tokens_to_le_bytes(
                         &ids[from as usize..to as usize],
                     ))
-                    .map_err(|_| SwarmError::Internal("a piece did not fit its channel".into()))?;
+                    .map_err(|_| {
+                        before_sending(SwarmError::Internal(
+                            "a piece did not fit its channel".into(),
+                        ))
+                    })?;
             }
         }
 
         let failed = AtomicBool::new(false);
+        let unanswered = AtomicBool::new(false);
         let mut drivers = Vec::with_capacity(segments.len());
         for (idx, segment) in segments.iter().enumerate() {
             let input = receivers[idx]
@@ -307,6 +337,7 @@ impl PipelineExecutor {
                 output,
                 generated_ids,
                 &failed,
+                &unanswered,
             ));
         }
         // Every driver runs to its end — a failed one's neighbours drain what
@@ -330,11 +361,16 @@ impl PipelineExecutor {
                 }
             }
         }
-        if let Some(e) = first_error {
-            return Err(e);
+        if let Some(error) = first_error {
+            return Err(PiecesFailed {
+                error,
+                every_piece_answered: !unanswered.load(Ordering::Acquire),
+            });
         }
         let result = answer.ok_or_else(|| {
-            SwarmError::Internal("a prompt pass in pieces ended with no answer".into())
+            before_sending(SwarmError::Internal(
+                "a prompt pass in pieces ended with no answer".into(),
+            ))
         })?;
         tracing::info!(
             %request_id,
@@ -360,6 +396,7 @@ impl PipelineExecutor {
         output: Option<mpsc::Sender<Vec<u8>>>,
         generated_ids: &[u32],
         failed: &AtomicBool,
+        unanswered: &AtomicBool,
     ) -> DriverResult {
         let outcome = if segment.node_id == *self.shared_state.identity.node_id() {
             self.drive_local(
@@ -384,6 +421,7 @@ impl PipelineExecutor {
                 &output,
                 generated_ids,
                 failed,
+                unanswered,
             )
             .await
         };
@@ -467,6 +505,7 @@ impl PipelineExecutor {
         output: &Option<mpsc::Sender<Vec<u8>>>,
         generated_ids: &[u32],
         failed: &AtomicBool,
+        unanswered: &AtomicBool,
     ) -> DriverResult {
         let peer = self
             .shared_state
@@ -488,10 +527,13 @@ impl PipelineExecutor {
             if answered == cuts.len() || (error.is_some() && out.is_empty()) {
                 break;
             }
+            // One piece until the peer has answered one: the first may load
+            // the model, and nothing should wait in its queue behind that.
+            let window = if answered == 0 { 1 } else { PEER_WINDOW };
             let may_send = error.is_none()
                 && input_open
                 && sent < cuts.len()
-                && out.len() < PEER_WINDOW
+                && out.len() < window
                 && !failed.load(Ordering::Acquire);
             if !may_send && out.is_empty() {
                 // Nothing out and nothing more to send: the input stopped, or
@@ -503,6 +545,13 @@ impl PipelineExecutor {
                 biased;
                 Some((k, result)) = out.next(), if !out.is_empty() => {
                     out_bytes.pop_front();
+                    // An answer is a result that came FROM the peer. A wait that
+                    // timed out, was dropped, or was ended by this node's own
+                    // machinery (`locally_constructed`) leaves the piece
+                    // possibly live there.
+                    if !matches!(&result, Ok(r) if !r.locally_constructed) {
+                        unanswered.store(true, Ordering::Release);
+                    }
                     if error.is_some() {
                         continue;
                     }

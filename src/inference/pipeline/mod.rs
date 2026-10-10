@@ -119,7 +119,10 @@ const VISION_ENCODE_TIMEOUT_SECS: u64 = 120;
 const PREFILL_SECS_PER_LAYER: u64 = 15;
 const DECODE_SECS_PER_LAYER: u64 = 2;
 const SEGMENT_TIMEOUT_MIN_SECS: u64 = 30;
-const SEGMENT_TIMEOUT_MAX_SECS: u64 = 600;
+/// The most a coordinator waits for one warm forward's answer — also how long a
+/// serving node holds a piece of a prompt pass for the piece before it
+/// (`forward_streams::PIECE_TURN_WAIT`).
+pub(crate) const SEGMENT_TIMEOUT_MAX_SECS: u64 = 600;
 /// Cap pending layer results to prevent OOM under sustained load.
 const MAX_PENDING_LAYER_RESULTS: usize = 1024;
 
@@ -1993,6 +1996,83 @@ mod tests {
         );
     }
 
+    /// The review of #171 (2026-10-10): a piece whose wait TIMES OUT may still be
+    /// running at its peer, or the next one queued there, and the whole pass
+    /// that a fallback sends goes straight to that peer's worker — which routes
+    /// replies by request id (gotcha #180). So a silent peer ends the pass
+    /// with `every_piece_answered: false`, and the caller hands the error to
+    /// the router instead. Also: a peer is sent ONE piece until it answers one
+    /// (the first may load the model), so the silent tail never had two.
+    #[tokio::test(start_paused = true)]
+    async fn a_piece_nobody_answered_forbids_reading_the_pass_whole_beside_it() {
+        let state = make_test_state();
+        let (tx, rx) = mpsc::channel::<NetworkCommand>(64);
+        let request = make_test_request(&state);
+        let request_id = request.id;
+        let (a, d) = (NodeId([0xA1; 32]), NodeId([0xD4; 32]));
+        let mut peers = std::collections::HashMap::new();
+        for (node, byte) in [(&a, 0xA1u8), (&d, 0xD4)] {
+            state.peer_id_map.insert(node.clone(), vec![byte]);
+            peers.insert(vec![byte], node.clone());
+        }
+        let assignment = PipelineAssignment {
+            request_id,
+            segments: vec![remote_segment(&a, (0, 16)), remote_segment(&d, (16, 32))],
+            standbys: vec![],
+            tp_groups: vec![],
+            supports_speculative: false,
+        };
+        let executor = PipelineExecutor::new(state.clone(), tx, request, assignment);
+        let (head, tail) = (a.clone(), d.clone());
+        // The tail never answers anything: a peer that took the work and went quiet.
+        let peers_task = tokio::spawn(async move {
+            let mut rx = rx;
+            let mut sent = Vec::new();
+            while let Some(cmd) = rx.recv().await {
+                let NetworkCommand::SendTensor {
+                    target_peer_bytes,
+                    forward,
+                } = cmd
+                else {
+                    continue;
+                };
+                let node = peers[&target_peer_bytes].clone();
+                if node == head {
+                    let answer = LayerResult {
+                        locally_constructed: false,
+                        finish_reason: None,
+                        activations: vec![1, 2, 3, 4],
+                        answers_step: Some(crate::types::ResultStep {
+                            index_pos: forward.index_pos,
+                            layer_range: forward.layer_range,
+                            stream_seq: forward.stream_seq,
+                        }),
+                        ..LayerResult::error(forward.request_id, "")
+                    };
+                    state.resolve_pending_layer_result(Some(&node), answer);
+                }
+                sent.push((node, forward.index_pos));
+            }
+            sent
+        });
+        let ids: Vec<u32> = (0..1100).collect();
+        let failed = executor
+            .prompt_pass_in_pieces(request_id, &ids, 0, &[])
+            .await
+            .expect_err("the tail never answered");
+        drop(executor);
+        let sent = peers_task.await.unwrap();
+        assert!(
+            !failed.every_piece_answered,
+            "a piece may still be live at the tail: the pass must not be read whole beside it"
+        );
+        assert_eq!(
+            sent.iter().filter(|(n, _)| *n == tail).count(),
+            1,
+            "one piece to a peer until it answers one"
+        );
+    }
+
     /// A piece that fails ends the pass with ITS error — never the knock-on of
     /// the segments that stopped because of it — and only after every piece
     /// already out has been answered, so none reaches a worker beside the
@@ -2027,7 +2107,8 @@ mod tests {
                 PeerReply::Token(1)
             }
         });
-        let ids: Vec<u32> = (0..1100).collect();
+        // Six pieces: 0, 512, ..., 2560.
+        let ids: Vec<u32> = (0..2600).collect();
         let err = executor
             .prompt_pass_in_pieces(request_id, &ids, 0, &[])
             .await
@@ -2035,12 +2116,18 @@ mod tests {
         drop(executor);
         let sent = peers_task.await.unwrap();
         assert!(
-            err.to_string().contains("out of memory"),
-            "the cause, not a knock-on: {err}"
+            err.error.to_string().contains("out of memory"),
+            "the cause, not a knock-on: {err:?}"
         );
         assert!(
-            !sent.iter().any(|(n, f)| *n == d && f.index_pos == 1024),
-            "nothing is sent to the failed segment after its failure"
+            err.every_piece_answered,
+            "a refusal is an answer: nothing is left live, so the pass may be read whole"
+        );
+        // The piece after the failed one may already be out (two to a peer
+        // that has answered one); nothing past that window is sent.
+        assert!(
+            !sent.iter().any(|(n, f)| *n == d && f.index_pos >= 1536),
+            "nothing past the window is sent to the failed segment"
         );
         assert_eq!(
             state.pending_layer_results.len(),

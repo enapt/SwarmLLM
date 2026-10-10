@@ -280,6 +280,19 @@ continue on the ordinary decode loop (the chained-run rewind shape — cheaper).
 `split_rig.sh failover` / `kill` with `SHARDS_A=0,1,2,3 SHARDS_B=4,5,6,7` (the gate's default
 plan never streams).
 
+**What the caller sees now, by kind of request (2026-10-10).** A STREAMED reply that loses its
+machine is continued from what its reader received (#236). A NON-streamed one is not: nothing
+marks its first token (`ttft_ms` is stamped only by the streaming sender), so the router
+re-plans it and generates it again from the first token, and only if that fails too does the
+caller get the partial, as `finish_reason: "interrupted"` (`salvaged_reply_if_lost`). Measured
+with `split_rig.sh continue NONSTREAM=1` (Llama-3.2-3B handed whole to one of two holders, its
+worker killed 8 s in): 200 in 47.9 s, 300 tokens, the reply generated twice over. Continuing it
+instead needs the RAW text of every attempt — the salvaged partial and a successful attempt's
+content are both finalised (leading whitespace trimmed, scratchpad stripped), and joining two
+finalised halves glues the words at the seam — so the trace would have to keep generated text
+for non-streamed requests as it keeps streamed text now. In the live node's log (09-17 →
+10-07, mostly test traffic) this path ran ~10 times in 898 requests.
+
 #### #17 — A long generation whose failed segment no single standby covers cannot fail over mid-reply
 `P3` · reliability · **PARTIAL** — 2026-09-08 · history: archive row #17 (its body § "A long generation with no segment redundancy is lost entirely" is frozen at 09-08 — the row overrides it)
 

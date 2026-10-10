@@ -313,13 +313,17 @@ impl super::PipelineExecutor {
                     self.prompt_cache_hint = None;
                     return Ok(result);
                 }
-                Err(e) if self.request.is_cancelled() || is_cache_miss(&e) => {
+                Err(failed)
+                    if self.request.is_cancelled()
+                        || !failed.every_piece_answered
+                        || is_cache_miss(&failed.error) =>
+                {
                     self.prompt_cache_hint = None;
-                    return Err(e);
+                    return Err(failed.error);
                 }
-                Err(e) => tracing::warn!(
+                Err(failed) => tracing::warn!(
                     %request_id,
-                    error = %e,
+                    error = %failed.error,
                     "a prompt pass in pieces did not finish — reading it whole instead"
                 ),
             }

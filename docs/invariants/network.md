@@ -3931,10 +3931,20 @@ cost and pieces only overlap it; no image, nothing pre-embedded, no tensor-paral
 tokenizer here. #10's kept pass reads in pieces too: every piece carries the hint, the first restores, the
 final stores (turn 2 still resumed from 2,240 with a hit on B, every arm).
 
-**A failure is the old pass, once.** A piece failing (but the request cancelled, or #10's cache
-miss, which keeps its own retry) stops new pieces; the pieces already out are waited for — so
-none of them reaches a worker beside the pass that follows — and the caller reads the pass
-whole from its first position, which starts each segment over and keeps its failover. A piece's
+**A failure is the old pass, once — if every piece was answered.** A piece failing (but the
+request cancelled, or #10's cache miss, which keeps its own retry) stops new pieces and the
+pieces already out are waited for. Only if every piece sent was ANSWERED by its machine
+(`PiecesFailed::every_piece_answered`) does the caller read the pass whole from its first
+position, which starts each segment over and keeps its failover. A wait that timed out or was
+ended by this node's own machinery leaves that piece — or the next, queued behind it — possibly
+live at its peer, and a whole pass to the same worker would share the request's cache with it
+(gotcha #180): the error goes to the router, whose re-plan bars the silent peer. Found by the
+code review of #171 the same day, with a second: the serving node's turn wait (60 s, sized for
+a check's few positions) refused the next piece of a slow peer's pass. A piece now waits
+`forward_streams::PIECE_TURN_WAIT` (= `pipeline::SEGMENT_TIMEOUT_MAX_SECS`, 600 s), and a peer
+is sent one piece until it has answered one, so nothing queues behind a model load. Tests:
+`a_piece_nobody_answered_forbids_reading_the_pass_whole_beside_it` (fails with either fix
+off), `a_piece_waits_its_turn_as_long_as_its_coordinator_would`. A piece's
 input is not retained for a stand-in's replay (the segments are marked unrestorable, as after
 #10's resume): a mid-reply failure is continued by the router (#236).
 

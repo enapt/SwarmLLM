@@ -64,11 +64,17 @@ segment kept); this is for the turns it does not cover — the first, and a one-
    chained, so its relay is already the whole pass's cost — no image or pre-embedded input, a tokenizer here, and at
    least two pieces' worth of positions to compute. `SWARMLLM_PROMPT_CHUNKS=0` turns it off (the A/B arm);
    `SWARMLLM_PROMPT_CHUNK_TOKENS` sets the piece size.
-5. **A failure is the old pass, once.** Any piece failing (but the request being cancelled)
-   stops new pieces, waits for the ones out to settle — so none of them reaches a worker beside
-   the pass that follows — and runs the prompt pass as it always ran, from its first position:
-   that pass clears each segment's cache and keeps its failover. The pieces cost the time they
-   ran; the reply is the old path's.
+5. **A failure is the old pass, once — if every piece was answered.** Any piece failing stops
+   new pieces and waits for the ones out to settle. If every piece sent was ANSWERED by its
+   machine, nothing of the pass is live anywhere, and the prompt pass runs as it always ran,
+   from its first position: it clears each segment's cache and keeps its failover. If a wait
+   timed out or ended without the peer's answer, that piece (or the next, queued behind it) may
+   still be running there, and a whole pass sent to the same worker would share the request's
+   cache with it (gotcha #180's shape) — so the error goes to the router instead, whose re-plan
+   bars the peer that went silent (review, 2026-10-10). A peer is sent ONE piece until it has
+   answered one: the first may load the model, and a piece queued behind a load could outwait
+   the peer's turn limit, which for pieces is the coordinator's own cap on a forward
+   (`forward_streams::PIECE_TURN_WAIT`, 600 s; a check's is 60 s).
 6. **What it gives up, for now.** A piece's input is not kept for a stand-in's replay, so a
    request whose prompt was read in pieces is continued by the router if a segment fails
    mid-reply (#236) rather than replayed onto a standby — the same limit #10's resume accepted.

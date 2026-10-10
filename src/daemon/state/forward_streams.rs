@@ -62,6 +62,17 @@ use crate::types::inference::stream_seq;
 /// coordinator has already failed the stream.
 pub(crate) const STREAM_TURN_WAIT: Duration = Duration::from_secs(60);
 
+/// How long a PIECE of a prompt pass (`LayerForward::prompt_span`, #171) waits
+/// for the piece before it. [`STREAM_TURN_WAIT`] is sized for a check of a few
+/// positions; a piece is hundreds, and on a slow processor the one before it
+/// can run for minutes — refused at 60 s, every such pass failed and was read
+/// again whole (review of #171, 2026-10-10). The coordinator's own cap on one
+/// warm forward (`pipeline::SEGMENT_TIMEOUT_MAX_SECS`) bounds it: a piece is
+/// only queued here behind one the coordinator is still waiting for, and the
+/// first piece — the one that may load the model — is never queued behind.
+pub(crate) const PIECE_TURN_WAIT: Duration =
+    Duration::from_secs(crate::inference::pipeline::SEGMENT_TIMEOUT_MAX_SECS);
+
 /// A stream nobody has touched for this long is forgotten. A conversation's
 /// cache expires after 10 minutes idle, so a stream cannot outlive it usefully.
 pub(crate) const FORWARD_STREAM_IDLE: Duration = Duration::from_secs(600);

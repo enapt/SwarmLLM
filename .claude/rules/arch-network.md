@@ -109,7 +109,7 @@ Streaming rr sends MUST set `SendDirectMessage.delivery_request_id = Some(uuid)`
 
 ## A split reads its prompt in pieces, every machine at once (2026-10-10, #171)
 
-**`pipeline::prompt_chunks`** runs a prompt pass of ≥ 2 pieces with one driver per segment, concurrently; a piece carries `LayerForward::prompt_span` (`0x0E`, AAD-bound, gated at the SENDER on `features::PROMPT_CHUNKS`), a peer's pieces are a stream with their own attempt tag. Never a machine twice; this node on EVERY boundary between segments unless the pass keeps its prompt (#10 — never chained, so it relays here whole anyway). A failure (not a cancel, not #10's miss) waits for the pieces out, then reads the pass whole once. A/B `SWARMLLM_PROMPT_CHUNKS=0`; rig `split_rig.sh splitcache` with `CPUS_A/B`.
+**`pipeline::prompt_chunks`** runs a prompt pass of ≥ 2 pieces with one driver per segment, concurrently; a piece carries `LayerForward::prompt_span` (`0x0E`, AAD-bound, gated at the SENDER on `features::PROMPT_CHUNKS`), a peer's pieces are a stream with their own attempt tag. Never a machine twice; this node on EVERY boundary between segments unless the pass keeps its prompt (#10 — never chained, so it relays here whole anyway). A failure waits for the pieces out, then reads the pass whole once — ONLY if every piece was answered (`PiecesFailed::every_piece_answered`); a piece that may be live at a silent peer sends the error to the router. One piece to a peer until it answers one; a piece waits its turn `PIECE_TURN_WAIT` (600 s). A/B `SWARMLLM_PROMPT_CHUNKS=0`; rig `split_rig.sh splitcache` with `CPUS_A/B`.
 
 → `docs/invariants/network.md` § "A split reads its prompt in pieces"
 
