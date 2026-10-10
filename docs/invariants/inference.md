@@ -2656,6 +2656,20 @@ llama.cpp rank it second by 3.4-3.8 — a SentencePiece re-tokenization artifact
 the reason to compare LOGITS on one token sequence when a reply score moves. Give llama.cpp the
 node's context (8192) for a LongRoPE model, or it runs the short factors (the scorer's own note).
 
+**Qwen 3.5 split across card and processor (gate .233 step 12w, 2026-10-10).** The first gate to run
+12w since the half cache shipped (.232's skipped its card steps) failed the 0.8B Q8_0 at 12 card
+layers on two of three prompts, 0.064 and 0.090 over llama.cpp's first choice, where .230/.231 read
+0.000 / 0.000 / 0.012. One binary pinned it: `SWARMLLM_KV_F16=0` gave back .231's numbers exactly,
+`SWARMLLM_QMATMUL_CUBLAS_ACC=32` (#147) changed nothing, .232 failed and .231 passed alike
+(`~/swarmllm-gate-0233/q35_ab.out`). Not a defect: each failure was ONE position whose two leading
+tokens llama.cpp itself puts 0.06-0.09 apart, and over 8 prompts × 120 tokens the half cache is no
+further from llama.cpp than the f32 one — 0.8B 5 of 497 positions over 0.05 (worst 0.119) vs f32 7
+of 493 (worst 0.335); 4B Q4_K_M 5 of 523 (0.259) vs 3 of 521 (0.211). The reference also stores f16
+(llama.cpp CPU, default KV type); the kernels that read it differ. The DeltaNet recurrent state is
+f32 on both sides (llama.cpp hard-codes a hybrid's `recurrent_type_*` to F32) and never takes the
+half cache. **Three prompts cannot tell a near-tie flip from a drift; judge a precision change on a
+few hundred positions** (`~/swarmllm-gate-0233/q35_wide.py`).
+
 **What a change must keep.** One rule for the cache and every estimate of it — a budget that
 charges another width than the cache holds is #104/#447 again. The half cache only where the decode
 kernel takes every one-position call, or each token widens the history. The flash call reads the
