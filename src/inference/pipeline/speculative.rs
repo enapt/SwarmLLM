@@ -170,6 +170,7 @@ impl PipelineExecutor {
                 prompt_cache: None,
                 chunk_meta: None,
                 sampling: None,
+                prompt_span: None,
             };
             let forward = rebuild_forward();
             if self

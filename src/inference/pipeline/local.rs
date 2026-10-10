@@ -352,6 +352,33 @@ impl PipelineExecutor {
         pre_embedded: bool,
         generated_ids: &[u32],
     ) -> Result<LayerResult, SwarmError> {
+        self.run_local_forward(
+            segment,
+            sequence_num,
+            index_pos,
+            activation_bytes,
+            precomputed_vision_bytes,
+            pre_embedded,
+            generated_ids,
+            None,
+        )
+        .await
+    }
+
+    /// [`Self::process_local_segment`], for a forward that may be one piece of
+    /// a prompt pass read in pieces (`prompt_span`, FUTURE_WORK #171).
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn run_local_forward(
+        &self,
+        segment: &PipelineSegment,
+        sequence_num: u32,
+        index_pos: usize,
+        activation_bytes: Vec<u8>,
+        precomputed_vision_bytes: Option<&[u8]>,
+        pre_embedded: bool,
+        generated_ids: &[u32],
+        prompt_span: Option<crate::types::PromptSpan>,
+    ) -> Result<LayerResult, SwarmError> {
         let model_id = &segment.shard_id.model_id;
         let (layer_start, layer_end) = (
             segment.layer_range.0 as usize,
@@ -429,6 +456,7 @@ impl PipelineExecutor {
             // strings were silently discarded whenever it took the pipeline
             // path, which is every COLD-START request.
             sampling: Some(self.request.sampling_params.clone()),
+            prompt_span,
         };
         // Watched against the request's cancel flag: a client that leaves
         // during a minutes-long prompt pass on this node's processor ends this
@@ -1874,6 +1902,7 @@ mod segment_budget_tests {
             prompt_cache: None,
             chunk_meta: None,
             sampling: None,
+            prompt_span: None,
         }
     }
 

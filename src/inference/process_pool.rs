@@ -2384,6 +2384,11 @@ fn forward_is_schedulable(f: &crate::types::LayerForward) -> bool {
     if f.prompt_cache.is_some() {
         return false;
     }
+    // A piece of a prompt pass (also `sequence_num` 0): continues a cache the
+    // batch path would not know to keep.
+    if f.prompt_span.is_some() {
+        return false;
+    }
     true
 }
 
@@ -6205,6 +6210,7 @@ impl ModelProcessPool {
             prompt_cache,
             chunk_meta: _,
             sampling: _,
+            prompt_span,
         } = forward;
 
         // Split vision embeddings out of the JSON header into the binary
@@ -6245,6 +6251,7 @@ impl ModelProcessPool {
             stream_seq,
             truncate_kv_to,
             prompt_cache,
+            prompt_span,
             for_the_owner: requester == Requester::Owner,
         };
 
@@ -6529,6 +6536,8 @@ impl ModelProcessPool {
                 // so the parameters travel with each one rather than being
                 // taken from the batch head.
                 sampling,
+                // A piece of a prompt pass is never batched either.
+                prompt_span: _,
             } = f;
             let forward_sampling = sampling.unwrap_or_default();
             activation_lens.push(activations.len() as u32);
@@ -6558,6 +6567,7 @@ impl ModelProcessPool {
                 // Decode steps only (see `dispatch_scheduler_group`); the
                 // owner's mark, if any, was made at the prompt pass.
                 for_the_owner: false,
+                prompt_span: None,
             });
         }
 
@@ -7580,6 +7590,7 @@ mod tests {
             prompt_cache: None,
             chunk_meta: None,
             sampling: None,
+            prompt_span: None,
         }
     }
 

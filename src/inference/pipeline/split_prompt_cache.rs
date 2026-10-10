@@ -224,15 +224,7 @@ impl super::PipelineExecutor {
         if !every_segment_keeps {
             return None;
         }
-        let tokenizer = self
-            .shared_state
-            .standalone_tokenizer(&segments[0].shard_id.model_id)?;
-        let text = std::str::from_utf8(prompt_bytes).ok()?;
-        let ids: Vec<u32> = tokenizer
-            .encode(text)
-            .into_iter()
-            .map(|t| t as u32)
-            .collect();
+        let ids = self.tokenize_prompt(prompt_bytes)?;
         (ids.len() >= MIN_BLOCKS * BLOCK_TOKENS as usize).then_some(ids)
     }
 
@@ -306,6 +298,30 @@ impl super::PipelineExecutor {
             keys,
             resume_at: resume,
         });
+        // In pieces where the plan reads them (FUTURE_WORK #171): each piece
+        // carries the hint, the first restores, the final stores. A miss is the
+        // caller's to answer (a retry from 0); any other failure reads this
+        // pass whole, below.
+        if self.reads_in_pieces((ids.len() as u32).saturating_sub(resume)) {
+            match self
+                .prompt_pass_in_pieces(request_id, ids, resume, generated_ids)
+                .await
+            {
+                Ok(result) => {
+                    self.prompt_cache_hint = None;
+                    return Ok(result);
+                }
+                Err(e) if self.request.is_cancelled() || is_cache_miss(&e) => {
+                    self.prompt_cache_hint = None;
+                    return Err(e);
+                }
+                Err(e) => tracing::warn!(
+                    %request_id,
+                    error = %e,
+                    "a prompt pass in pieces did not finish — reading it whole instead"
+                ),
+            }
+        }
         let result = self
             .forward_through_segments_checked(
                 request_id,

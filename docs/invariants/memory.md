@@ -2465,6 +2465,21 @@ entry (a chain the new one extends is dropped), as on the token path. A model
 with a recurrent state (Qwen 3.5's DeltaNet) stores nothing: its state cannot be
 cut at a block boundary.
 
+## A prompt pass read in pieces is admitted once, for its whole span (2026-10-10, FUTURE_WORK #171)
+
+A forward carrying `LayerForward::prompt_span` is one piece of a prompt pass
+(`docs/invariants/network.md` § "A split reads its prompt in pieces"). In `handle_forward` the
+FIRST piece (`index_pos == span.start`) does everything a whole pass does — clears the request's
+cache, restores #10's opening, and is admitted (`ensure_room_for_prompt`) for `span.end -
+index_pos` positions, not its own; a LATER piece clears nothing, restores nothing, is admitted
+nothing, and must continue exactly where the cache ends or it is refused. **Why the whole span at
+the first piece:** gotcha #447 — a segment's prompt pass admitted chunk by chunk filled a 6 GB
+card until attention's transient allocation, not the cache, hit the wall 22 s in, with no
+standby. Admitted once for the span, the reservation (`set_reserved_positions`) sizes the caches
+for the whole prompt at birth, and a later piece appends without growing. #10's store runs at
+the FINAL piece only; a piece outside its span is refused (`PromptSpan::holds`). The batch path
+never takes a piece (`forward_is_schedulable`).
+
 ## Machine memory is read in one place, and a container's limit counts (2026-10-09)
 
 `daemon::machine_memory::machine_memory()` is the one reading of how much memory this process

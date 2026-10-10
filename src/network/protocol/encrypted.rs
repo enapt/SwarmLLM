@@ -156,6 +156,9 @@ pub fn build_layer_forward_aad(forward: &LayerForward) -> Vec<u8> {
     // The prompt-cache trailer (0x0D): which positions the receiver restores
     // instead of computing.
     super::layer_forward::append_prompt_cache_trailer(&mut aad, forward);
+    // The prompt-span trailer (0x0E): whether the receiver starts a prompt
+    // pass or continues one.
+    super::layer_forward::append_prompt_span_trailer(&mut aad, forward);
 
     aad
 }
@@ -267,6 +270,7 @@ pub fn encode_layer_forward_encrypted(
     super::layer_forward::append_coupling_trailer(&mut buf, forward);
     super::layer_forward::append_stream_trailer(&mut buf, forward);
     super::layer_forward::append_prompt_cache_trailer(&mut buf, forward);
+    super::layer_forward::append_prompt_span_trailer(&mut buf, forward);
 
     Ok(buf)
 }
@@ -493,6 +497,7 @@ pub fn decode_layer_forward_encrypted(
     let coupling_seed = super::layer_forward::read_coupling_trailer(data, &mut cursor);
     let stream_seq = super::layer_forward::read_stream_trailer(data, &mut cursor);
     let prompt_cache = super::layer_forward::read_prompt_cache_trailer(data, &mut cursor);
+    let prompt_span = super::layer_forward::read_prompt_span_trailer(data, &mut cursor);
     let _ = cursor;
 
     let mut forward = LayerForward {
@@ -520,6 +525,7 @@ pub fn decode_layer_forward_encrypted(
         prompt_cache,
         chunk_meta,
         sampling,
+        prompt_span,
     };
 
     // Reconstruct AAD from the parsed forward via the helper. This MUST
@@ -567,6 +573,7 @@ mod tests {
             prompt_cache: None,
             chunk_meta: None,
             sampling: None,
+            prompt_span: None,
         }
     }
 
@@ -766,6 +773,39 @@ mod tests {
         other.prompt_cache.as_mut().unwrap().keys[1] = [7u8; 32];
         assert_ne!(build_layer_forward_aad(&other), aad, "nor swap a key");
         other.prompt_cache = None;
+        assert_ne!(build_layer_forward_aad(&other), aad);
+    }
+
+    /// A piece of a prompt pass (#171): the span survives the encrypted frame
+    /// beside the trailers before it, and is sealed — a relay that moved a
+    /// piece's span would make the receiver start a pass it should continue.
+    #[test]
+    fn a_prompt_span_is_sealed_and_survives_the_encrypted_frame() {
+        let mut orig = base_forward();
+        orig.stream_seq = Some(3);
+        orig.prompt_cache = Some(crate::types::PromptCacheHint {
+            block_tokens: 64,
+            keys: vec![[9u8; 32]],
+            resume_at: 0,
+        });
+        orig.prompt_span = Some(crate::types::PromptSpan {
+            start: 0,
+            end: 2048,
+        });
+        let bytes = encode_layer_forward_encrypted(&orig, vec![0u8; 32]).unwrap();
+        let (decoded, _sealed, aad) = decode_layer_forward_encrypted(&bytes).unwrap();
+        assert_eq!(decoded.prompt_span, orig.prompt_span);
+        assert_eq!(decoded.prompt_cache, orig.prompt_cache);
+        assert_eq!(decoded.stream_seq, Some(3));
+        assert_eq!(aad, build_layer_forward_aad(&orig));
+        let mut other = orig.clone();
+        other.prompt_span.as_mut().unwrap().start = 512;
+        assert_ne!(
+            build_layer_forward_aad(&other),
+            aad,
+            "a relay must not move the start"
+        );
+        other.prompt_span = None;
         assert_ne!(build_layer_forward_aad(&other), aad);
     }
 

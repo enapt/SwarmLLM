@@ -919,6 +919,7 @@ mod tests {
             prompt_cache: None,
             chunk_meta: None,
             sampling: None,
+            prompt_span: None,
         }
     }
 

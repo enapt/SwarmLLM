@@ -14,6 +14,7 @@ pub(crate) use local::LoadAllowance;
 mod local_generate;
 mod ngram_only_spec;
 mod prompt;
+mod prompt_chunks;
 pub(crate) mod remote_generate;
 mod speculative;
 mod split_prompt_cache;
@@ -424,6 +425,7 @@ pub(super) fn build_spec_verify_forward(
         prompt_cache: None,
         chunk_meta: None,
         sampling: walk.map(|w| w.sampling.clone()),
+        prompt_span: None,
     }
 }
 
@@ -852,6 +854,7 @@ pub(super) fn build_kv_truncate_forward(
         prompt_cache: None,
         chunk_meta: None,
         sampling: None,
+        prompt_span: None,
     }
 }
 
@@ -1836,6 +1839,214 @@ mod tests {
             },
             layer_range: range,
         }
+    }
+
+    /// Play every peer as a SERVING NODE answers a piece of a prompt pass:
+    /// each answer names the step it answers (`answers_step`, the stream
+    /// number included), which is how a streamed wait is found. Records every
+    /// forward sent, in order.
+    fn spawn_piece_peers(
+        state: Arc<SharedState>,
+        mut rx: mpsc::Receiver<NetworkCommand>,
+        peers: std::collections::HashMap<Vec<u8>, NodeId>,
+        reply: impl Fn(&NodeId, &LayerForward) -> PeerReply + Send + 'static,
+    ) -> tokio::task::JoinHandle<Vec<(NodeId, LayerForward)>> {
+        tokio::spawn(async move {
+            let mut sent = Vec::new();
+            while let Some(cmd) = rx.recv().await {
+                let NetworkCommand::SendTensor {
+                    target_peer_bytes,
+                    forward,
+                } = cmd
+                else {
+                    continue;
+                };
+                let node = peers[&target_peer_bytes].clone();
+                let answers = Some(crate::types::ResultStep {
+                    index_pos: forward.index_pos,
+                    layer_range: forward.layer_range,
+                    stream_seq: forward.stream_seq,
+                });
+                let base = LayerResult {
+                    locally_constructed: false,
+                    answers_step: answers,
+                    ..LayerResult::error(forward.request_id, "")
+                };
+                let result = match reply(&node, &forward) {
+                    PeerReply::Error(m) => LayerResult {
+                        locally_constructed: false,
+                        answers_step: answers,
+                        ..LayerResult::error(forward.request_id, m)
+                    },
+                    PeerReply::Activations(a) => LayerResult {
+                        activations: a,
+                        finish_reason: None,
+                        ..base
+                    },
+                    PeerReply::Token(t) => LayerResult {
+                        token_ids: vec![t],
+                        finish_reason: None,
+                        ..base
+                    },
+                };
+                state.resolve_pending_layer_result(Some(&node), result);
+                sent.push((node, forward));
+            }
+            sent
+        })
+    }
+
+    /// FUTURE_WORK #171: a prompt pass read in pieces sends every segment its
+    /// pieces in order, each naming the whole pass's span, each peer's as a
+    /// stream of its own, hands the head's output for each piece to the tail,
+    /// and answers with the tail's answer to the FINAL piece.
+    #[tokio::test]
+    async fn a_prompt_read_in_pieces_runs_every_piece_through_every_segment_in_order() {
+        use crate::types::inference::stream_seq;
+        let state = make_test_state();
+        let (tx, rx) = mpsc::channel::<NetworkCommand>(64);
+        let request = make_test_request(&state);
+        let request_id = request.id;
+        let (a, d) = (NodeId([0xA1; 32]), NodeId([0xD4; 32]));
+        let mut peers = std::collections::HashMap::new();
+        for (node, byte) in [(&a, 0xA1u8), (&d, 0xD4)] {
+            state.peer_id_map.insert(node.clone(), vec![byte]);
+            peers.insert(vec![byte], node.clone());
+        }
+        let assignment = PipelineAssignment {
+            request_id,
+            segments: vec![remote_segment(&a, (0, 16)), remote_segment(&d, (16, 32))],
+            standbys: vec![],
+            tp_groups: vec![],
+            supports_speculative: false,
+        };
+        let executor = PipelineExecutor::new(state.clone(), tx, request, assignment);
+        let head = a.clone();
+        let peers_task = spawn_piece_peers(state.clone(), rx, peers, move |node, f| {
+            if *node == head {
+                // The head's output names the piece it came from.
+                PeerReply::Activations(f.index_pos.to_le_bytes().to_vec())
+            } else {
+                PeerReply::Token(f.index_pos)
+            }
+        });
+        let ids: Vec<u32> = (0..1100).collect();
+        let result = executor
+            .prompt_pass_in_pieces(request_id, &ids, 0, &[])
+            .await
+            .expect("every piece answered");
+        drop(executor);
+        let sent = peers_task.await.unwrap();
+
+        assert_eq!(
+            result.token_ids,
+            vec![1024],
+            "the tail's answer to the FINAL piece"
+        );
+        let span = crate::types::PromptSpan {
+            start: 0,
+            end: 1100,
+        };
+        assert!(sent
+            .iter()
+            .all(|(_, f)| f.prompt_span == Some(span) && f.sequence_num == 0));
+        for node in [&a, &d] {
+            let mine: Vec<&LayerForward> = sent
+                .iter()
+                .filter(|(n, _)| n == node)
+                .map(|(_, f)| f)
+                .collect();
+            assert_eq!(
+                mine.iter().map(|f| f.index_pos).collect::<Vec<_>>(),
+                vec![0, 512, 1024],
+                "each segment runs every piece, in order"
+            );
+            let seqs: Vec<u32> = mine.iter().map(|f| f.stream_seq.unwrap()).collect();
+            assert_eq!(
+                seqs.iter()
+                    .map(|&s| stream_seq::turn(s))
+                    .collect::<Vec<_>>(),
+                vec![0, 1, 2]
+            );
+            assert!(seqs
+                .iter()
+                .all(|&s| stream_seq::attempt(s) == stream_seq::attempt(seqs[0])));
+        }
+        let attempt_of = |node: &NodeId| {
+            sent.iter()
+                .find(|(n, _)| n == node)
+                .map(|(_, f)| stream_seq::attempt(f.stream_seq.unwrap()))
+        };
+        assert_ne!(
+            attempt_of(&a),
+            attempt_of(&d),
+            "each segment's pieces are a stream of their own"
+        );
+        // The tail was handed the head's output for the same piece.
+        for (_, f) in sent.iter().filter(|(n, _)| *n == d) {
+            assert_eq!(f.activations, f.index_pos.to_le_bytes().to_vec());
+        }
+        assert_eq!(
+            state.pending_layer_results.len(),
+            0,
+            "no wait is left behind"
+        );
+    }
+
+    /// A piece that fails ends the pass with ITS error — never the knock-on of
+    /// the segments that stopped because of it — and only after every piece
+    /// already out has been answered, so none reaches a worker beside the
+    /// whole pass the caller runs next.
+    #[tokio::test]
+    async fn a_piece_that_fails_ends_the_pass_with_its_own_error_and_nothing_left_out() {
+        let state = make_test_state();
+        let (tx, rx) = mpsc::channel::<NetworkCommand>(64);
+        let request = make_test_request(&state);
+        let request_id = request.id;
+        let (a, d) = (NodeId([0xA1; 32]), NodeId([0xD4; 32]));
+        let mut peers = std::collections::HashMap::new();
+        for (node, byte) in [(&a, 0xA1u8), (&d, 0xD4)] {
+            state.peer_id_map.insert(node.clone(), vec![byte]);
+            peers.insert(vec![byte], node.clone());
+        }
+        let assignment = PipelineAssignment {
+            request_id,
+            segments: vec![remote_segment(&a, (0, 16)), remote_segment(&d, (16, 32))],
+            standbys: vec![],
+            tp_groups: vec![],
+            supports_speculative: false,
+        };
+        let executor = PipelineExecutor::new(state.clone(), tx, request, assignment);
+        let head = a.clone();
+        let peers_task = spawn_piece_peers(state.clone(), rx, peers, move |node, f| {
+            if *node == head {
+                PeerReply::Activations(vec![1, 2, 3, 4])
+            } else if f.index_pos == 512 {
+                PeerReply::Error("Worker: Service unavailable: out of memory")
+            } else {
+                PeerReply::Token(1)
+            }
+        });
+        let ids: Vec<u32> = (0..1100).collect();
+        let err = executor
+            .prompt_pass_in_pieces(request_id, &ids, 0, &[])
+            .await
+            .expect_err("the tail failed a piece");
+        drop(executor);
+        let sent = peers_task.await.unwrap();
+        assert!(
+            err.to_string().contains("out of memory"),
+            "the cause, not a knock-on: {err}"
+        );
+        assert!(
+            !sent.iter().any(|(n, f)| *n == d && f.index_pos == 1024),
+            "nothing is sent to the failed segment after its failure"
+        );
+        assert_eq!(
+            state.pending_layer_results.len(),
+            0,
+            "every piece out was waited for"
+        );
     }
 
     /// The standby the scheduler prefers is THIS node, and it was the one

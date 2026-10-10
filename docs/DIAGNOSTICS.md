@@ -838,6 +838,24 @@ was not asked to stop: the line is written by `api::submit_to_router`, so a
 surface that awaits the router some other way is skipping the guard (before
 2026-10-10 the OpenAI path for a split model did, and its replies ran on).
 
+## "Was this prompt read in pieces?" (FUTURE_WORK #171)
+
+On the coordinator, at `info`:
+
+```
+DIAG: a prompt pass in pieces pieces=5 prompt_tokens=2274 from=0 segments=2
+DIAG: a prompt pass in pieces completed pieces=5 pipeline_ms=57049
+a prompt pass in pieces did not finish — reading it whole instead error=…   (WARN; the whole pass follows)
+```
+
+No first line on a split you expected to be cut: the plan has a boundary between two peers, a
+machine twice (the boomerang), a peer without `features::PROMPT_CHUNKS`, fewer than two pieces'
+worth of positions (1,024 by default), an image, or `SWARMLLM_PROMPT_CHUNKS=0`. On a serving node
+each piece is its own `DIAG: processing LayerForward locally` line, with `seq=0`. A piece refused with
+"holds N positions … not the M the next piece of its prompt continues from" is a worker that lost
+the conversation mid-pass (or a piece left from an abandoned pass); the coordinator reads the
+pass whole after it.
+
 ## Measuring cancellation (what NOT to use)
 
 `active_requests` from `/api/admin/stats` reads **0 even mid-stream** on the

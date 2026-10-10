@@ -114,6 +114,7 @@ impl PipelineExecutor {
                     prompt_cache: None,
                     chunk_meta: None,
                     sampling: None,
+                    prompt_span: None,
                 };
                 self.shared_state
                     .model_process_pool
@@ -158,6 +159,7 @@ impl PipelineExecutor {
                         prompt_cache: None,
                         chunk_meta: None,
                         sampling: None,
+                        prompt_span: None,
                     };
                     let _ = self
                         .network_tx
@@ -199,6 +201,7 @@ impl PipelineExecutor {
                     prompt_cache: None,
                     chunk_meta: None,
                     sampling: None,
+                    prompt_span: None,
                 };
                 let attn_partial = self
                     .shared_state
@@ -287,6 +290,7 @@ impl PipelineExecutor {
                         prompt_cache: None,
                         chunk_meta: None,
                         sampling: None,
+                        prompt_span: None,
                     };
                     let _ = self
                         .network_tx
@@ -328,6 +332,7 @@ impl PipelineExecutor {
                     prompt_cache: None,
                     chunk_meta: None,
                     sampling: None,
+                    prompt_span: None,
                 };
                 let ffn_partial = self
                     .shared_state
@@ -422,6 +427,7 @@ impl PipelineExecutor {
                 prompt_cache: None,
                 chunk_meta: None,
                 sampling: None,
+                prompt_span: None,
             };
             let layer_result = self
                 .shared_state

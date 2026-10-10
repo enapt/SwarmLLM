@@ -484,6 +484,7 @@ pub(super) async fn handle_layer_forward(
                                 swarmllm_types::node::features::FORWARD_SAMPLING,
                             )
                         }),
+                        prompt_span: None,
                     };
                     tracing::info!(
                         request_id = %request_id,
@@ -1116,6 +1117,7 @@ mod chaining_tests {
             prompt_cache: None,
             chunk_meta: None,
             sampling: None,
+            prompt_span: None,
         };
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
         super::handle_layer_forward(state, tx, forward).await;
@@ -1270,6 +1272,7 @@ mod tests {
             prompt_cache: None,
             chunk_meta: None,
             sampling: None,
+            prompt_span: None,
         };
         let (tx, mut rx) = mpsc::channel(4);
         refuse_forward(

@@ -1682,8 +1682,15 @@ async fn handle_forward(
         ));
     }
 
+    // A prompt pass read in pieces (FUTURE_WORK #171): only its FIRST piece
+    // starts the pass — clears, restores, is admitted — and every later piece
+    // continues the cache the pieces before it built. Without a span the
+    // forward is the whole pass, as it always was.
+    let prompt_span = fwd.prompt_span.filter(|_| fwd.sequence_num == 0);
+    let first_piece = prompt_span.is_none_or(|s| s.starts_at(fwd.index_pos));
+
     // Clear per-request KV-cache at the start of a new request (prefill)
-    if fwd.sequence_num == 0 {
+    if fwd.sequence_num == 0 && first_piece {
         kv_store.clear_request(&model_key, &req_id_str);
     }
 
@@ -1726,14 +1733,34 @@ async fn handle_forward(
     // positions with nothing failing. The serving daemon runs a stream in
     // order (`daemon::dispatch::forward_stream`); this is the check that it
     // did, refused like the drafter's own (`SplitModel::draft_after`).
-    if fwd.stream_seq.is_some() {
+    //
+    // A later piece of a prompt pass must continue exactly where the cache
+    // ends too, streamed or not (this node's own segment is driven without a
+    // stream): a worker that lost the conversation mid-pass, or a piece left
+    // over from a pass that was abandoned and started again, holds something
+    // else. The FIRST piece is exempt — it has just cleared the cache, and a
+    // resumed one restores its opening below.
+    let continues = if fwd.sequence_num == 0 {
+        !first_piece
+    } else {
+        fwd.stream_seq.is_some()
+    };
+    if continues {
         let held = kv_store.request_positions(&model_key, &req_id_str);
         if held != fwd.index_pos as usize {
-            return Err(SwarmError::ServiceUnavailable(format!(
-                "this computer holds {held} positions of request {request_id}, not the {} \
-                 its next streamed check continues from — the stream arrived out of order",
-                fwd.index_pos
-            )));
+            return Err(SwarmError::ServiceUnavailable(if fwd.sequence_num == 0 {
+                format!(
+                    "this computer holds {held} positions of request {request_id}, not the {} \
+                     the next piece of its prompt continues from",
+                    fwd.index_pos
+                )
+            } else {
+                format!(
+                    "this computer holds {held} positions of request {request_id}, not the {} \
+                     its next streamed check continues from — the stream arrived out of order",
+                    fwd.index_pos
+                )
+            }));
         }
     }
 
@@ -1757,7 +1784,7 @@ async fn handle_forward(
         // TOKEN IDS from `resume_at` (FUTURE_WORK #10): the coordinator keyed
         // the stored blocks by those ids, and text re-tokenized here could
         // split differently. It reads below as a multi-position decode input.
-        if fwd.index_pos == 0 && fwd.prompt_cache.is_none() {
+        if fwd.index_pos == 0 && fwd.prompt_cache.is_none() && prompt_span.is_none() {
             // Prefill: activations are the prompt text → tokenize
             let prompt = String::from_utf8_lossy(&activation_bytes);
             let token_ids: Vec<i64> = if let Some(tokenizer) = model.tokenizer() {
@@ -1933,7 +1960,7 @@ async fn handle_forward(
     // computing it without them would be silently wrong.
     let prompt_cache = fwd.prompt_cache.clone();
     let restored = match &prompt_cache {
-        Some(hint) if fwd.sequence_num == 0 && hint.resume_at > 0 => {
+        Some(hint) if fwd.sequence_num == 0 && first_piece && hint.resume_at > 0 => {
             if fwd.index_pos != hint.resume_at {
                 return Err(SwarmError::Internal(format!(
                     "a prompt pass resuming at {} was sent from position {}",
@@ -1953,8 +1980,26 @@ async fn handle_forward(
         }
         _ => None,
     };
+    let input_positions = input_tensor.dims().get(1).copied().unwrap_or(0);
+    if let Some(span) = prompt_span {
+        if !span.holds(fwd.index_pos, input_positions as u32) {
+            return Err(SwarmError::Validation(format!(
+                "a piece of {input_positions} positions at {} lies outside its prompt pass {}..{}",
+                fwd.index_pos, span.start, span.end
+            )));
+        }
+    }
+    // The positions this pass will hold once every piece has run: the whole
+    // span, admitted at its first piece (gotcha #447 — a pass admitted piece by
+    // piece fills a card until attention's transient allocation fails
+    // mid-pass); a later piece was admitted with it and asks nothing.
+    let pass_positions = match prompt_span {
+        Some(span) if first_piece => span.end.saturating_sub(fwd.index_pos) as usize,
+        Some(_) => 0,
+        None => input_positions,
+    };
     if fwd.sequence_num == 0 && tp_meta.is_none() && !want_spec_output {
-        let positions = input_tensor.dims().get(1).copied().unwrap_or(0);
+        let positions = pass_positions;
         if positions > 0 {
             refuse_a_prompt_past_the_served_context(
                 model.context_window(),
@@ -2277,7 +2322,14 @@ async fn handle_forward(
     // cache, sized to the room beside the live cache as the generate path's
     // snapshot is (gotcha #440), and answer how many were kept — the most the
     // coordinator may resume from here next turn.
-    if let Some(hint) = prompt_cache.as_ref().filter(|_| fwd.sequence_num == 0) {
+    // A pass read in pieces is stored once, at its FINAL piece: earlier ones hold
+    // only part of the prompt.
+    let final_piece =
+        prompt_span.is_none_or(|s| s.ends_with(fwd.index_pos, input_positions as u32));
+    if let Some(hint) = prompt_cache
+        .as_ref()
+        .filter(|_| fwd.sequence_num == 0 && final_piece)
+    {
         let held = kv_store.request_positions(&model_key, &req_id_str);
         let keep = snapshot_positions_that_fit(model, kv_store, prefix_cache, held);
         let blocks = prefix_cache.insert_chain_from_kv(

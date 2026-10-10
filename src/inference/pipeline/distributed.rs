@@ -857,6 +857,29 @@ impl PipelineExecutor {
                 .prompt_pass_keeping_the_prompt(request_id, ids, generated_ids)
                 .await;
         }
+        // Read in pieces, every segment at once, where the plan reads them
+        // (`prompt_chunks`, FUTURE_WORK #171). A failure reads the pass whole
+        // below — it starts each segment over — except a request whose client
+        // has gone.
+        if let Some(ids) = self.prompt_to_read_in_pieces(
+            sequence_num,
+            &initial_activations,
+            precomputed_vision.is_some(),
+            pre_embedded,
+        ) {
+            match self
+                .prompt_pass_in_pieces(request_id, &ids, 0, generated_ids)
+                .await
+            {
+                Ok(result) => return Ok(result),
+                Err(e) if self.request.is_cancelled() => return Err(e),
+                Err(e) => tracing::warn!(
+                    %request_id,
+                    error = %e,
+                    "a prompt pass in pieces did not finish — reading it whole instead"
+                ),
+            }
+        }
         self.forward_through_segments_checked(
             request_id,
             sequence_num,
@@ -1382,6 +1405,7 @@ impl PipelineExecutor {
                     } else {
                         None
                     },
+                    prompt_span: None,
                 };
                 let forward = rebuild_forward();
 
@@ -2680,6 +2704,7 @@ impl PipelineExecutor {
                 } else {
                     None
                 },
+                prompt_span: None,
             };
             let forward = rebuild_forward();
 

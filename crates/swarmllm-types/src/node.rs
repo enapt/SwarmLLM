@@ -265,6 +265,15 @@ pub mod features {
     /// with nothing before it.
     pub const SPLIT_PROMPT_CACHE: u64 = 1 << 20;
 
+    /// Reads a split's prompt in pieces (FUTURE_WORK #171,
+    /// `docs/plans/pipelined_prompt_pass.md`): it reads the `0x0E` trailer on a
+    /// prompt pass — `LayerForward::prompt_span`, the positions of the whole
+    /// pass this forward is a piece of — and continues a pass across pieces
+    /// instead of starting it over at each. A coordinator sends pieces only to a
+    /// peer advertising this; a peer without it would clear its cache at every
+    /// piece and read each as a whole prompt.
+    pub const PROMPT_CHUNKS: u64 = 1 << 21;
+
     /// The full feature set THIS build implements. Advertised by every node,
     /// with [`KV_HALF_ON_CARD`] beside it where that applies.
     pub const ALL: u64 = RELAY
@@ -286,7 +295,8 @@ pub mod features {
         | STREAM_AS_ONE_WORK
         | DELEGATED_SPLIT
         | CHAINED_VERIFY
-        | SPLIT_PROMPT_CACHE;
+        | SPLIT_PROMPT_CACHE
+        | PROMPT_CHUNKS;
 
     /// Does `advertised` include every bit in `needed`?
     pub fn supports(advertised: u64, needed: u64) -> bool {

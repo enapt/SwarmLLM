@@ -121,6 +121,7 @@ pub fn encode_layer_forward(forward: &LayerForward) -> Result<Vec<u8>, SwarmErro
     append_coupling_trailer(&mut buf, forward);
     append_stream_trailer(&mut buf, forward);
     append_prompt_cache_trailer(&mut buf, forward);
+    append_prompt_span_trailer(&mut buf, forward);
 
     Ok(buf)
 }
@@ -318,6 +319,42 @@ pub(crate) fn read_prompt_cache_trailer(
         keys,
         resume_at,
     })
+}
+
+/// Write the prompt-span trailer: `0x0E | start u32 | end u32` — 9 bytes, the
+/// prompt pass this forward is a piece of (`LayerForward::prompt_span`,
+/// FUTURE_WORK #171). After the prompt-cache trailer, by the ONE function the
+/// plaintext frame, the encrypted frame and the AAD all call: the span decides
+/// whether the receiver starts a pass (clears its cache) or continues one, so a
+/// relay must not change it. Emitted only when the forward carries one, which a
+/// coordinator sets only for a peer advertising `features::PROMPT_CHUNKS`.
+pub(crate) fn append_prompt_span_trailer(buf: &mut Vec<u8>, forward: &LayerForward) {
+    let Some(span) = forward.prompt_span else {
+        return;
+    };
+    buf.push(0x0E);
+    buf.extend_from_slice(&span.start.to_le_bytes());
+    buf.extend_from_slice(&span.end.to_le_bytes());
+}
+
+/// Length of the prompt-span trailer, marker included.
+const PROMPT_SPAN_TRAILER_LEN: usize = 9;
+
+/// Read the prompt-span trailer (`0x0E`) at `cursor`, if present.
+pub(crate) fn read_prompt_span_trailer(
+    data: &[u8],
+    cursor: &mut usize,
+) -> Option<crate::types::PromptSpan> {
+    if data.len() < *cursor + PROMPT_SPAN_TRAILER_LEN || data[*cursor] != 0x0E {
+        return None;
+    }
+    let word = |at: usize| u32::from_le_bytes([data[at], data[at + 1], data[at + 2], data[at + 3]]);
+    let span = crate::types::PromptSpan {
+        start: word(*cursor + 1),
+        end: word(*cursor + 5),
+    };
+    *cursor += PROMPT_SPAN_TRAILER_LEN;
+    Some(span)
 }
 
 /// Write the decoded-so-far trailer: `0x08 | n(2 LE) | n × id(4 LE)`.
@@ -773,6 +810,7 @@ pub fn decode_layer_forward(data: &[u8]) -> Result<LayerForward, SwarmError> {
     let coupling_seed = read_coupling_trailer(data, &mut cursor);
     let stream_seq = read_stream_trailer(data, &mut cursor);
     let prompt_cache = read_prompt_cache_trailer(data, &mut cursor);
+    let prompt_span = read_prompt_span_trailer(data, &mut cursor);
     let _ = cursor;
 
     Ok(LayerForward {
@@ -800,6 +838,7 @@ pub fn decode_layer_forward(data: &[u8]) -> Result<LayerForward, SwarmError> {
         prompt_cache,
         chunk_meta,
         sampling,
+        prompt_span,
     })
 }
 
@@ -842,6 +881,7 @@ mod tests {
             prompt_cache: None,
             chunk_meta: None,
             sampling: None,
+            prompt_span: None,
         }
     }
 
@@ -1131,6 +1171,41 @@ mod tests {
         ));
         let mut cursor = plain.len();
         assert_eq!(read_prompt_cache_trailer(&over, &mut cursor), None);
+    }
+
+    /// A piece of a prompt pass (#171): the span travels after the
+    /// prompt-cache trailer and reads back beside it; a frame without one is
+    /// byte-identical to before, and one cut short inside it carries none.
+    #[test]
+    fn a_prompt_span_survives_the_wire_after_the_prompt_cache_trailer() {
+        let span = crate::types::PromptSpan {
+            start: 128,
+            end: 4096,
+        };
+        let mut f = base_forward();
+        f.stream_seq = Some(2);
+        f.prompt_cache = Some(crate::types::PromptCacheHint {
+            block_tokens: 64,
+            keys: vec![[1u8; 32], [2u8; 32]],
+            resume_at: 128,
+        });
+        f.prompt_span = Some(span);
+        let bytes = encode_layer_forward(&f).unwrap();
+        let back = decode_layer_forward(&bytes).unwrap();
+        assert_eq!(back.prompt_span, Some(span));
+        assert_eq!(
+            back.prompt_cache, f.prompt_cache,
+            "the trailer before it still reads"
+        );
+        assert_eq!(back.stream_seq, Some(2));
+        f.prompt_span = None;
+        let plain = encode_layer_forward(&f).unwrap();
+        assert_eq!(plain.len(), bytes.len() - PROMPT_SPAN_TRAILER_LEN);
+        assert_eq!(decode_layer_forward(&plain).unwrap().prompt_span, None);
+        let cut = &bytes[..bytes.len() - 2];
+        let mut cursor = plain.len();
+        assert_eq!(read_prompt_span_trailer(cut, &mut cursor), None);
+        assert_eq!(cursor, plain.len(), "nothing consumed");
     }
 
     #[test]

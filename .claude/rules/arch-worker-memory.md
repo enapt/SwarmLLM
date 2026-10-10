@@ -70,6 +70,12 @@ A segment keeps a split's prompt between turns as chain-keyed entries in the wor
 
 → `docs/invariants/memory.md` § "A split's stored prompt lives in the worker's prefix cache"
 
+## A prompt pass read in pieces is admitted once, for its whole span (2026-10-10, #171)
+
+In `handle_forward` the FIRST piece of a `prompt_span` clears, restores and is admitted for `span.end - index_pos` positions (gotcha #447); a later piece is admitted nothing and must continue exactly where the cache ends. #10's store runs at the FINAL piece only.
+
+→ `docs/invariants/memory.md` § "A prompt pass read in pieces is admitted once"
+
 ## A model loaded for ANOTHER model's request is a guest (2026-09-28)
 
 **`process_pool::Tenancy` is a REQUIRED argument of `get_or_spawn`.** A `Guest` (the drafter, `ModelProcessPool::draft`) takes only memory that stands free: no reclaim, split, promotion, growth or notice. `dsd.rs` reads ahead only once `holds_segment`.

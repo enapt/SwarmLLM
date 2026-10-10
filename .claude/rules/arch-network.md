@@ -107,6 +107,12 @@ Streaming rr sends MUST set `SendDirectMessage.delivery_request_id = Some(uuid)`
 
 → `docs/invariants/network.md` § "A split keeps its conversation's prompt between turns"
 
+## A split reads its prompt in pieces, every machine at once (2026-10-10, #171)
+
+**`pipeline::prompt_chunks`** runs a prompt pass of ≥ 2 pieces with one driver per segment, concurrently; a piece carries `LayerForward::prompt_span` (`0x0E`, AAD-bound, gated at the SENDER on `features::PROMPT_CHUNKS`), a peer's pieces are a stream with their own attempt tag. Only where this node is on EVERY boundary between segments and no machine appears twice. A failure (not a cancel, not #10's miss) waits for the pieces out, then reads the pass whole once. A/B `SWARMLLM_PROMPT_CHUNKS=0`; rig `split_rig.sh splitcache` with `CPUS_A/B`.
+
+→ `docs/invariants/network.md` § "A split reads its prompt in pieces"
+
 ## A tensor forward is acknowledged on receipt; a result is always its own request (2026-08-21)
 
 `requests.rs` answers an inbound `LayerForward` with `SwarmResponse::Ack` on decode, BEFORE any work, from the network manager; a result is always its own request (`tensors::handle_send_tensor_result` → `send_tensor_result_as_request`). The fast-fail (`forward_ack_deadline_secs`) is gated ONLY on the peer's `features::FORWARD_ACK` bit and never reaps a slow answer — the compute deadline stays with the pipeline (gotcha #354).

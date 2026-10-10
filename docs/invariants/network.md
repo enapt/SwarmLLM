@@ -3899,3 +3899,50 @@ of an agent conversation (2,306 prompt tokens) took 7.1 s and 8.2 s with the cac
 65.2 s off; a miss (B restarted) re-read from 0 and answered in 70.2 s. Replies scored against
 llama.cpp: on moved at one 0.067-logit near-tie, ranks ≤ 2 like off. `docs/plans/split_prompt_cache.md`
 § Measured.
+
+## A split reads its prompt in pieces, every machine at once (2026-10-10, FUTURE_WORK #171)
+
+`pipeline::prompt_chunks` is the coordinator's half; the plan is
+`docs/plans/pipelined_prompt_pass.md`. A split's prompt pass ran one machine at a time;
+now a pass of two or more pieces (`SWARMLLM_PROMPT_CHUNK_TOKENS`, 512 by default, at most 16
+pieces) runs one driver per segment, concurrently: each takes its inputs in order from the
+segment before, runs its segment on each piece, and hands each output on the moment it exists.
+Sequence pipeline parallelism (Medha/Mnemosyne, arXiv 2409.17264) and llama.cpp's micro-batched
+prompt across GPUs (#6017) are the same idea; Medha's point that a piece costs little even when
+small (~40 positions with grouped-query attention) is why the size is chosen for overlap.
+
+**The wire.** One additive trailer, gated at the SENDER on `features::PROMPT_CHUNKS` (bit 21):
+the forward's `0x0E` (`start u32 | end u32`), after `0x0D`, written by the one function the
+plaintext frame, the encrypted frame and the AAD all call — the span decides whether the
+receiver starts a pass or continues one, so a relay must not change it. A peer's pieces travel
+as a numbered stream (`stream_seq`) with an attempt tag of their own per segment
+(`dsd_stream::NEXT_ATTEMPT`), so the coordinator's waits (keyed by request and number) never
+meet and each receiver runs its pieces in order from turn 0 (`forward_streams`, keyed by
+request, range and attempt); at most two are out at once, so the peer never idles a round trip
+between pieces.
+
+**Where it applies.** Two or more segments; no machine twice (a worker holding two segments of
+one request would cross their replies, gotcha #180 — the boomerang stays whole); every peer
+advertising the bit; this node on EVERY boundary between segments — pieces come back here, and
+between two peers a whole pass is chained straight across, which a far coordinator relaying
+every piece would undo; no image, nothing pre-embedded, no tensor-parallel group; a tokenizer
+here. #10's kept pass reads in pieces too: every piece carries the hint, the first restores, the
+final stores (turn 2 still resumed from 2,240 with a hit on B, every arm).
+
+**A failure is the old pass, once.** A piece failing (but the request cancelled, or #10's cache
+miss, which keeps its own retry) stops new pieces; the pieces already out are waited for — so
+none of them reaches a worker beside the pass that follows — and the caller reads the pass
+whole from its first position, which starts each segment over and keeps its failover. A piece's
+input is not retained for a stand-in's replay (the segments are marked unrestorable, as after
+#10's resume): a mid-reply failure is continued by the router (#236).
+
+**Measured** (2026-10-10, `split_rig.sh splitcache`, Llama-3.2-3B, A shards 0-1 = layers 0-12,
+B shards 2-3 = 12-28, processor only, each node pinned to half of this 8-core machine with
+`CPUS_A=0-7 CPUS_B=8-15`, `SWARMLLM_PROMPT_CHUNKS=0` vs on in one binary): a 2,274-token pass
+71.3 / 69.6 s whole, 58.2 / 57.0 s in five pieces; replies byte-identical in all four arms, both
+turns. The two nodes still share one memory bus, so the figure is a floor: B's pieces took 13.3,
+11.6, 9.3, 7.6, 4.5 s — falling, where later pieces attend to more positions — as A finished its
+part. Tests: `a_prompt_read_in_pieces_runs_every_piece_through_every_segment_in_order`,
+`a_piece_that_fails_ends_the_pass_with_its_own_error_and_nothing_left_out`,
+`a_prompt_span_survives_the_wire_after_the_prompt_cache_trailer`,
+`a_prompt_span_is_sealed_and_survives_the_encrypted_frame`.

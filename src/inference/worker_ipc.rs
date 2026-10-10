@@ -366,6 +366,10 @@ pub struct IpcForward {
     /// between turns (`LayerForward::prompt_cache`, FUTURE_WORK #10).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_cache: Option<crate::types::PromptCacheHint>,
+    /// This forward is one piece of a prompt pass read in pieces
+    /// (`LayerForward::prompt_span`, FUTURE_WORK #171).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_span: Option<crate::types::PromptSpan>,
     /// This forward belongs to a request THIS machine's owner sent — the
     /// segment of it this node runs inside a pipeline it coordinates — so its
     /// prompt pass may read on the owner's width (`process_pool::Requester`).
@@ -1130,6 +1134,7 @@ mod tests {
             truncate_kv_to: None,
             prompt_cache: None,
             for_the_owner: false,
+            prompt_span: None,
         };
         let json = serde_json::to_string(&fwd).unwrap();
         // When no vision payload, the field is elided to match pre-fix wire
@@ -1170,6 +1175,7 @@ mod tests {
             truncate_kv_to: None,
             prompt_cache: None,
             for_the_owner,
+            prompt_span: None,
         };
         let owners = serde_json::to_string(&fwd(true)).unwrap();
         let back: IpcForward = serde_json::from_str(&owners).unwrap();
@@ -1212,6 +1218,7 @@ mod tests {
             truncate_kv_to: None,
             prompt_cache: None,
             for_the_owner: false,
+            prompt_span: None,
         };
         let json = serde_json::to_string(&fwd).unwrap();
         assert!(json.contains("\"vision_embeddings_len\":12345"));

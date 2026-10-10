@@ -29,10 +29,10 @@ pub use inference::{
     AllReduceOp, ChainHop, ChatMessage, ChunkAssemblyState, ChunkMeta, DelegatedSplit,
     ForwardRefusal, GenerateUsage, ImageData, InferenceError, InferenceRequest, LayerForward,
     LayerResult, NetworkFinishReason, PipelineAssignment, PipelineSegment, PromptCacheHint,
-    RemoteGenerateRequest, ReplyContinuation, ResultStep, Role, SamplingParams, StreamingToken,
-    TensorFormat, TensorParallelGroup, TensorParallelMeta, TokenLogProbEntry, TpAllReduceRequest,
-    TpAllReduceResponse, TpPhase, TpRingChunk, VisionEncodeRequest, VisionEncodeResponse,
-    DEFAULT_REPLY_BUDGET,
+    PromptSpan, RemoteGenerateRequest, ReplyContinuation, ResultStep, Role, SamplingParams,
+    StreamingToken, TensorFormat, TensorParallelGroup, TensorParallelMeta, TokenLogProbEntry,
+    TpAllReduceRequest, TpAllReduceResponse, TpPhase, TpRingChunk, VisionEncodeRequest,
+    VisionEncodeResponse, DEFAULT_REPLY_BUDGET,
 };
 pub use model::{
     MmprojInfo, ModelArchitecture, ModelManifest, ModelTrustInfo, ModelTrustLevel, Quantization,

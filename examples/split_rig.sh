@@ -187,6 +187,9 @@
 #   SHARDS_A   shard indices A holds, comma-separated (default 0; kill: 0,LAST)
 #   SHARDS_B   shard indices B holds (default: every shard A lacks; kill: all)
 #   GPU_A/B    SWARMLLM_INFERENCE_GPU_LAYERS for each node ("" = auto)
+#   CPUS_A/B/… logical CPUs that node runs on (`taskset -c`, e.g. CPUS_A=0-7
+#              CPUS_B=8-15): two nodes on disjoint halves of the machine stand in
+#              for two computers when work across them overlaps (#171)
 #   MEM_C/D/E  failover modes: a memory limit for that standby (e.g. 6G) — it runs
 #              in a `systemd-run` scope with that MemoryMax (CPUQuota RIG_SCOPE_CPU,
 #              default 400%) and reads it as its machine, so the room it advertises
@@ -394,10 +397,15 @@ start() { # dir port bin gpu [memory limit]
   local scope=()
   [ -n "${5:-}" ] && scope=(systemd-run --user --scope --quiet -p "MemoryMax=$5" -p MemorySwapMax=0
     -p "CPUQuota=${RIG_SCOPE_CPU:-400%}" --)
+  # CPUS_A / CPUS_B / …: the logical CPUs that node (and its workers, which
+  # inherit it) may run on — two nodes on disjoint halves of this machine stand
+  # in for two computers, where work that overlaps does not share cores.
+  local cpus_var="CPUS_$(basename "$1")" pin=()
+  [ -n "${!cpus_var:-}" ] && pin=(taskset -c "${!cpus_var}")
   if [ -n "$4" ]; then
-    SWARMLLM_INFERENCE_GPU_LAYERS="$4" SWARMLLM_NODE_DATA_DIR="$1" "${scope[@]}" "$3" run -p "$2" > "$1/node.log" 2>&1 &
+    SWARMLLM_INFERENCE_GPU_LAYERS="$4" SWARMLLM_NODE_DATA_DIR="$1" "${scope[@]}" "${pin[@]}" "$3" run -p "$2" > "$1/node.log" 2>&1 &
   else
-    SWARMLLM_NODE_DATA_DIR="$1" "${scope[@]}" "$3" run -p "$2" > "$1/node.log" 2>&1 &
+    SWARMLLM_NODE_DATA_DIR="$1" "${scope[@]}" "${pin[@]}" "$3" run -p "$2" > "$1/node.log" 2>&1 &
   fi
   echo $!
 }

@@ -84,7 +84,8 @@ re-fetching parts) and #223 closed in v0.3.228 (released 2026-10-06 09:42 UTC), 
     (`docs/plans/faster_than_local.md`).
 12. **#3**, **#180** — the routing cost model charges a constant where the reply length
     belongs, which keeps partial ranges (load spreading) off.
-13. **#171** — the prompt pass through a split runs one stage at a time.
+13. **#171** — the prompt pass through a split runs one stage at a time (built 2026-10-10 for
+    the splits this node leads; left: a boundary between two peers).
 14. **#228** — Qwen 3.5's first version leaves out its MoE models, the card/processor split and
     speculation.
 
@@ -958,7 +959,23 @@ prompt pass goes through `forward_through_segments`. What is left:
   beliefs live in one process and start empty after a restart.
 
 #### #171 — The prompt pass through a split runs one stage at a time
-`P2` · perf-split · **OPEN** — 2026-08-24 · absorbs archive § "Speeding up inference BETWEEN nodes" idea 2 (prefill microbatching); history: archive § "The pipeline is idle (N-1)/N of the time during the phase that dominates a long request"
+`P2` · perf-split · **PARTIAL** — 2026-08-24, built 2026-10-10 for the splits this node leads · absorbs archive § "Speeding up inference BETWEEN nodes" idea 2 (prefill microbatching); history: archive § "The pipeline is idle (N-1)/N of the time during the phase that dominates a long request"
+
+**Built 2026-10-10 (`pipeline::prompt_chunks`, `docs/plans/pipelined_prompt_pass.md`):** a prompt
+pass of two or more 512-position pieces is read in pieces, every segment at once, wherever this
+node is on every boundary between segments and no machine appears twice (its segment beside a
+peer's — every split it leads, #143's delegated head included); `LayerForward::prompt_span`
+(`0x0E`, `features::PROMPT_CHUNKS`, bit 21) tells the worker to start the pass at the first piece
+— admitted for the WHOLE span — and continue it at the rest. Measured on Llama-3.2-3B, A layers
+0-12 / B 12-28, each node pinned to half of this 8-core machine (`split_rig.sh splitcache`,
+`CPUS_A/B`), a 2,274-token pass: 71.3 / 69.6 s whole, 58.2 / 57.0 s in pieces (1.22×), replies
+byte-identical. One box understates it: the two nodes share one memory bus, and B's pieces took
+13.3 → 4.5 s once A had finished its part; on two machines the pass approaches B's own time.
+What is left: (a) pieces across a boundary between two PEERS — each hop handing its piece on
+(the "compute each chunk on arrival" form below; today such a pass is chained whole, since
+relaying every piece through a far coordinator could cost more than it saves); (b) a speed
+sample per piece (none is recorded — a piece's wait includes the one queued before it); (c) a
+measurement on two real machines.
 
 During the prompt pass — 94% of a long request's cost — only one machine of N works at a
 time, so the ceiling is ~2-2.8× on long prompts. The receiver reassembles the whole chunked

@@ -470,6 +470,45 @@ pub struct LayerForward {
     /// `is_final` is derived: `chunk_idx + 1 == total_chunks`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chunk_meta: Option<ChunkMeta>,
+    /// This forward is one PIECE of a prompt pass (`sequence_num` 0) read in
+    /// pieces (FUTURE_WORK #171, `docs/plans/pipelined_prompt_pass.md`): it
+    /// carries positions `index_pos..` of a pass covering the whole span. The
+    /// first piece starts the pass as an unpieced one would — clears, restores,
+    /// is admitted for the whole span — and a later one continues it. Travels in
+    /// the `0x0E` trailer, only to a peer advertising `features::PROMPT_CHUNKS`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_span: Option<PromptSpan>,
+}
+
+/// The positions a prompt pass read in pieces covers — see
+/// [`LayerForward::prompt_span`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PromptSpan {
+    /// The pass's first position: 0, or where a resumed pass starts (#10).
+    pub start: u32,
+    /// One past its last position — the prompt's length.
+    pub end: u32,
+}
+
+impl PromptSpan {
+    /// Is a piece starting at `index_pos` the pass's first?
+    pub fn starts_at(&self, index_pos: u32) -> bool {
+        index_pos == self.start
+    }
+
+    /// Does a piece of `positions` starting at `index_pos` end the pass?
+    pub fn ends_with(&self, index_pos: u32, positions: u32) -> bool {
+        index_pos.saturating_add(positions) == self.end
+    }
+
+    /// Does a piece of `positions` starting at `index_pos` lie inside the span?
+    pub fn holds(&self, index_pos: u32, positions: u32) -> bool {
+        self.start < self.end
+            && index_pos >= self.start
+            && index_pos
+                .checked_add(positions)
+                .is_some_and(|piece_end| piece_end <= self.end)
+    }
 }
 
 /// One segment of a chained pipeline: who computes it, and over which layers.
@@ -1099,6 +1138,7 @@ mod chunk_assembly_tests {
             // In-process only (`serde(skip)`): a decoded forward always has
             // `None`, which is what these round-trip tests assert against.
             sampling: None,
+            prompt_span: None,
         }
     }
 

@@ -200,7 +200,7 @@ fn shape_of(
 /// Each stream's attempt tag: the high bits of its numbers
 /// (`types::inference::stream_seq`). From a counter, not the request id, so a
 /// router retry under the same id is a different stream (gotcha #749).
-static NEXT_ATTEMPT: AtomicU32 = AtomicU32::new(0);
+pub(super) static NEXT_ATTEMPT: AtomicU32 = AtomicU32::new(0);
 
 /// What a request's reply is made of, and what the next request on the same
 /// machines learns from this one (`dsd_controller::remember`).
@@ -255,9 +255,9 @@ type Waiting = Pin<Box<dyn Future<Output = Answer> + Send>>;
 /// A streamed chunk's wait on its answer, withdrawn when dropped — answered,
 /// abandoned by a restart, or the reply ending — so a restart drops every
 /// chunk after the refused one with nothing left behind in the map.
-struct StreamWaiter {
-    state: Arc<SharedState>,
-    key: WaiterKey,
+pub(super) struct StreamWaiter {
+    pub(super) state: Arc<SharedState>,
+    pub(super) key: WaiterKey,
 }
 
 impl Drop for StreamWaiter {

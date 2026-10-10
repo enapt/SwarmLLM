@@ -431,5 +431,6 @@ fn make_bench_forward(activations: Vec<u8>) -> LayerForward {
         prompt_cache: None,
         chunk_meta: None,
         sampling: None,
+        prompt_span: None,
     }
 }
