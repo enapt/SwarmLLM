@@ -173,7 +173,7 @@ mmproj). Never edit a count without the run behind it (`completeness.md`).
   that only read or search; 14 days to 10-10). Give bulky reading to a cheap agent with ONE question, keep the
   answer: `digest` (Haiku: logs, gate/CI output, diffs, run-and-report), `Explore` (code search). Read yourself
   only what you will edit; never poll from here. `/clear` at task boundaries; auto-compact is at 400K.
-- **The cheapest model that holds, named on every call** (`Explore`/`Plan`/bare calls inherit Opus xhigh):
+- **The cheapest model that holds, named on every call** (`Explore`/`Plan` inherit Opus xhigh, bare → sonnet):
   lookup, digest, run-and-report → haiku; search, web research, review, `root-cause`, architect, `Plan` →
   sonnet (`effort: high` where a miss costs a commit); i18n review (#793), cross-cutting design → opus; a
   stuck P0/P1 cause or the release's riskiest diff → fable; crypto, wire protocol, pool/private mode, auth,

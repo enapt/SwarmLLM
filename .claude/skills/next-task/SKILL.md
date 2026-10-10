@@ -7,7 +7,7 @@ allowed-tools: Read, Grep, Glob, Bash, Edit, Write, Agent
 
 # Next Task
 
-1. Read the queue: `~/.claude/projects/-home-user-SwarmLLM/memory/next_up.md` § "Ranked queue", and
+1. Read the queue: `~/.claude/projects/-home-user-SwarmLLM/memory/next_up.md` § "Do next, in order", and
    `docs/FUTURE_WORK.md` § "▶ PRIORITIES". Take the highest item whose preconditions are met; read its
    FUTURE_WORK entry BODY — its scope is a hypothesis (gotcha #654) and its line numbers drift (#645).
 2. Research it before touching code (`.claude/rules/workflow.md` § "Research EVERY task"): how a system with

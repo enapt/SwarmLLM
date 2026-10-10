@@ -66,7 +66,7 @@ re-fetching parts) and #223 closed in v0.3.228 (released 2026-10-06 09:42 UTC), 
    holders on v0.3.222 and older, and DHT-only holders).
 4. **#1** — every Mac runs on the processor; no GPU backend is compiled for Apple Silicon.
 5. **#220** — a worker's card faulted once (illegal memory access) and the driver took 14 minutes
-   to reset; the kernel is unknown until a sanitizer run (needs the owner's administrator rights).
+   to reset; the kernel is still unknown (the sanitizer attaches here since 2026-10-10 — run it under the kit).
 
 **P2 — speed and completeness**
 6. *(#152 closed 2026-10-09 — the guess-check stream runs on the boomerang and with a peer
@@ -1689,7 +1689,7 @@ grep `^| N |`).
   file by statement, with a planted-violation self-test. `docs/invariants/frontend.md` § "A failed
   load answers with the last good value".
 
-**Closed 2026-10-09, on main (not yet released)** (#194, #152, #245)
+**Closed 2026-10-09, released in v0.3.232** (#194, #152, #245)
 - #245 — GitHub moves `ubuntu-latest` to Ubuntu 26 from 2026-10-19 (notice on CI run 37914655701),
   under the CUDA repository (`ubuntu2204`'s `cuda-nvcc-12-8`) and the system packages CI installs.
   CI's Linux jobs now run on a pinned `ubuntu-24.04`, the image every required check passes on
