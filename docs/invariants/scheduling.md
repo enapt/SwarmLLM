@@ -2379,6 +2379,25 @@ loaded). Every price goes through `vertex_cost` — the search's vertices,
 `chain_cost_ms`, the local processor price `local_ms` and the hand-off gate's
 `delegated_shape_cost_ms` — so all of them see it.
 
+**The greedy fallback was the price that did not (2026-10-10, FUTURE_WORK #10).**
+Its `estimated_cost_per_layer` priced latency, compute and load, and nothing for
+reading layers in — and greedy is not a corner case: with
+`parallax_partial_ranges` off the search uses whole ranges only, so every split
+whose holders OVERLAP has no chain and falls back (16 of 16 plans in 8 rig
+runs of A 0-21 / peers 3-28 on Llama-3.2-3B logged "parallax: no reachable
+source→sink path").
+With a spare holding the warm peer's parts (`split_rig.sh splitcache SPARE=1`),
+turn 2 went to the spare in 3 of 3 runs: it advertised 4.92 tok/s (6.35 ms a
+layer) against the warm peer's MEASURED 7.08, and nothing charged it the load.
+The stored prompt was left behind and turn 2 took 58-61 s against ~7. The
+formula is now `NodeCandidate::cold_load_ms(range)` for both routers; greedy's
+figure is per token, so it divides by covered layers and by
+`ASSUMED_FORWARD_PASSES`, the factor the search multiplies compute by — the same
+proportion between the two terms. Test
+`greedy_keeps_a_segment_on_the_warm_holder_over_a_cold_spare` (the rig's figures;
+it picks the spare with the term zeroed). The same rig on the fix: turn 2 stayed
+on the warm peer and resumed from token 2,240 in 3 of 3 runs, 5.6-8.0 s.
+
 **One residency reading.** `gather_candidates` sets the per-layer figure from the
 same `PeerResidency` it bounds memory with: published ranges decide which
 layers are held (`layers_it_would_add` applies the loader's own rule — a range

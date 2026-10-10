@@ -240,7 +240,7 @@ to separate: `standby_covers` asks whether a node HOLDS the range,
 
 ## A candidate that must first load the model is CHARGED for it (2026-10-07)
 
-**`NodeCandidate::cold_load_ms_per_layer` × `layers_it_would_add`** is `parallax::vertex_cost`'s `cold_load_ms` — once per request, never × `expected_attempts` — set in `gather_candidates` from the SAME residency reading as the memory bound (`WarmAmountUnknown` → 0). The rate is the node's own (`process_pool::LoadRate` → `NodeCapability::model_load_ms_per_gib`), else `UNMEASURED_LOAD_MS_PER_GIB`; this node is charged its own too. Rig: `cold_load_test.sh … price`.
+**`NodeCandidate::cold_load_ms(range)`** (`cold_load_ms_per_layer` × `layers_it_would_add`) is the one formula: `parallax::vertex_cost`'s `cold_load_ms` — once per request, never × `expected_attempts` — AND the greedy fallback's `estimated_cost_per_layer` (÷ covered ÷ `ASSUMED_FORWARD_PASSES`; greedy plans every split whose holders overlap, #10). Set in `gather_candidates` from the SAME residency reading as the memory bound (`WarmAmountUnknown` → 0). The rate is the node's own (`process_pool::LoadRate` → `NodeCapability::model_load_ms_per_gib`), else `UNMEASURED_LOAD_MS_PER_GIB`; this node is charged its own too. Rigs: `cold_load_test.sh … price`, `split_rig.sh splitcache` with `SPARE=1`.
 
 → `docs/invariants/scheduling.md` § "A candidate that must first load the model is charged for it"
 

@@ -114,7 +114,9 @@
 #          between the turns: PASS = turn 2 logged the miss and read the prompt
 #          again from 0, 200. SWARMLLM_SPLIT_PROMPT_CACHE=0 is the control arm:
 #          no prompt kept, both 200 — compare the two arms' turn-2 seconds and
-#          replies ($OUT/splitcache.jsonl). Default model llama-3.2-3b.
+#          replies ($OUT/splitcache.jsonl). Default model llama-3.2-3b. SPARE=1
+#          adds C holding exactly B's parts: turn 2 resumes only if the plan
+#          names the peer turn 1 used again, so the same PASS asks that too.
 #   remote  A holds NONE of the model (the header only) and REMOTE_NODES (2,
 #          default, or 3) other nodes hold it between them in contiguous parts
 #          — B the first, then C (and D) — the shape a user who stores nothing
@@ -503,6 +505,14 @@ if [ "$MODE" = continue ]; then
   PC=$(start "$BASE/C" 8940 "$BIN_A" "${GPU_C:-0}")
   up "$BASE/C" 8940 || exit 1
   PEERS_EXPECTED=2
+fi
+if [ "$MODE" = splitcache ] && [ -n "${SPARE:-}" ]; then
+  # A second peer that could run B's segment: what the plan chooses between.
+  make_node "$BASE/C" "$SHARDS_B" "\"$ADDR\""
+  PC=$(start "$BASE/C" 8940 "$BIN_A" "${GPU_C:-0}")
+  up "$BASE/C" 8940 || exit 1
+  PEERS_EXPECTED=2
+  echo "rig: C=[$SHARDS_B] (a spare holding B's parts) gpu=${GPU_C:-0}"
 fi
 if [ "$MODE" = failover ] || [ "$MODE" = context ] || [ "$MODE" = failover_mid ]; then
   # Processor only unless asked otherwise (all four nodes): four daemons on
@@ -899,11 +909,14 @@ PY
   FROM_A=$(wc -l < "$BASE/A/node.log"); FROM_B=$(wc -l < "$BASE/B/node.log")
   ask_turn turn2
   sleep 3
-  python3 - "$BASE/A/node.log" "$BASE/B/node.log" "$OUT" "$FROM_A" "$FROM_B" "${MISS:-}" "${SWARMLLM_SPLIT_PROMPT_CACHE:-}" <<'PY'
-import json, re, sys
+  python3 - "$BASE/A/node.log" "$BASE/B/node.log" "$OUT" "$FROM_A" "$FROM_B" "${MISS:-}" "${SWARMLLM_SPLIT_PROMPT_CACHE:-}" "$BASE/C/node.log" <<'PY'
+import json, os, re, sys
 a = open(sys.argv[1], errors="replace").read().splitlines()
 b = open(sys.argv[2], errors="replace").read().splitlines()
 out, from_a, from_b, miss, switch = sys.argv[3], int(sys.argv[4]), int(sys.argv[5]), sys.argv[6], sys.argv[7]
+# SPARE: C holds B's parts, and its hits count the same — C stored nothing
+# before turn 1, so every hit in its log is turn 2's.
+c = open(sys.argv[8], errors="replace").read().splitlines() if os.path.exists(sys.argv[8]) else []
 off = switch in ("0", "off", "false")
 def resumed(lines):
     return [int(m.group(1)) for l in lines if "a split prompt pass keeping its prompt" in l
@@ -911,8 +924,8 @@ def resumed(lines):
 turns = [json.loads(l) for l in open(f"{out}/splitcache.jsonl")]
 both_200 = len(turns) == 2 and all(" 200" in t["status"] for t in turns)
 t1, t2 = resumed(a[:from_a]), resumed(a[from_a:])
-b_hits = sum("HIT on a split's stored prompt" in l for l in b[from_b:])
-b_stored = sum("stored a split's prompt" in l for l in b)
+b_hits = sum("HIT on a split's stored prompt" in l for l in b[from_b:] + c)
+b_stored = sum("stored a split's prompt" in l for l in b + c)
 missed = any("a resumed prompt pass did not finish" in l and "Prompt cache miss" in l for l in a[from_a:])
 print(f"splitcache: turn 1 resumed_from={t1}  turn 2 resumed_from={t2}  B hits on turn 2={b_hits}  "
       f"B stores={b_stored}  miss logged={missed}  replies 200={both_200}  "

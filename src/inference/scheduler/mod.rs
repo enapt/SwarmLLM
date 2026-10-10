@@ -306,6 +306,15 @@ impl NodeCandidate {
         crate::inference::process_pool::layers_added_by(range, &self.held_ranges)
     }
 
+    /// What reading in `range`'s missing layers costs this candidate before it
+    /// can start, in ms: its own per-layer load figure × the layers it would
+    /// ADD. The ONE formula for the charge — `parallax::vertex_cost` and the
+    /// greedy fallback's [`PipelineScheduler::estimated_cost_per_layer`] both
+    /// ask it, so a cold peer costs the same to both routers.
+    fn cold_load_ms(&self, range: (u32, u32)) -> f32 {
+        self.cold_load_ms_per_layer * self.layers_it_would_add(range) as f32
+    }
+
     /// `figure` — whatever bound a pass holds this candidate to — never past
     /// what it could EVER hold ([`Self::max_hostable_layers_at_ceiling`]).
     /// The routine figures are already clamped where candidates are built;
@@ -4510,7 +4519,24 @@ impl PipelineScheduler {
             });
 
         let load_multiplier = 1.0 + candidate.load.max(0.0);
-        candidate.latency_ms as f32 / covered + compute_per_layer * load_multiplier
+        // A peer that must first read the layers in is charged for it, as the
+        // priced search charges it (`NodeCandidate::cold_load_ms`) — once per
+        // request, so in this per-token figure it is spread over the
+        // `ASSUMED_FORWARD_PASSES` the search multiplies compute by, which
+        // keeps the two terms in the proportion `vertex_cost` gives them.
+        // Without it this fallback, which plans every split whose holders
+        // OVERLAP (the search sees whole ranges only), sent a conversation's
+        // second turn to a cold spare that advertised 6.35 ms a layer over the
+        // warm peer measured at 7.08 that had served the first: a load (priced
+        // ~5.3 s for its 7 layers) and the stored prompt left behind, so turn 2
+        // took 58.5 s against ~7 (FUTURE_WORK #10, `split_rig.sh splitcache`
+        // with SPARE=1, 2026-10-10).
+        let cold_load_per_layer = candidate.cold_load_ms((current_layer, range.1))
+            / covered
+            / parallax::ASSUMED_FORWARD_PASSES;
+        candidate.latency_ms as f32 / covered
+            + compute_per_layer * load_multiplier
+            + cold_load_per_layer
     }
 
     /// Greedy layer assignment: cover all layers 0..num_layers using sorted candidates.

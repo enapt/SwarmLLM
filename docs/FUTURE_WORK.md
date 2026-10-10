@@ -522,7 +522,10 @@ Re-run the A/B (whole vs split, including a prefill-dominated 585-token prompt) 
 `observed_delegated_ms_per_layer` and per-token mid-chain charging exist, on a real
 multi-node swarm (confirm the PID changed and `segments=` in the log), and flip only if the
 split wins. Also feed observed per-layer latency into `compute_segment_timeout` instead of
-the fixed 2 s/layer guess. Depends on #3.
+the fixed 2 s/layer guess. Depends on #3. **With it off, the GREEDY fallback plans every split
+whose holders overlap** (whole ranges A 0-21 / peer 3-28 have no chain: 16 of 16 plans in
+2026-10-10's #10 rigs), so greedy's pricing is the pricing those splits get — it gained the
+cold-load charge that day.
 
 #### #129 — A model a few MB too large for the card is sent on a boomerang across continents
 `P2` · routing · **PARTIAL** — 2026-09-27, narrowed 2026-10-04 and 2026-10-05 (fit verdict fixed in v0.3.227), 2026-10-07 (cold loads waited for and priced, released in v0.3.230) · history: archive row #129
@@ -934,7 +937,16 @@ the Anthropic surface could not reach a session-id design no longer applies — 
 prompt pass goes through `forward_through_segments`. What is left:
 - **Route to the peer that holds it.** The planner never reads the belief table, and peers'
   caches are neither gossiped nor credited: turn 2 resumes only when the plan happens to name the
-  same segments. Gossip prefix digests, keep caches longer than the 10-minute KV idle expiry with
+  same segments. *Measured 2026-10-10* (`split_rig.sh splitcache`, Llama-3.2-3B on the
+  processor, A holding shards 0-2 and the peers 1-3, so the split point is free): with two nodes
+  the plan repeats and turn 2 resumes (6.7 / 7.4 s against 62 / 59 s); with a SPARE holding the
+  peer's parts (`SPARE=1`) turn 2 moved to the spare in 3 of 3 runs and resumed nothing (58-61 s).
+  The cause was not the missing credit but the greedy fallback — which plans every overlapping
+  split (#180) — pricing the never-used spare on its advertised speed with no charge for loading
+  the layers; fixed the same day (`NodeCandidate::cold_load_ms` for both routers): 3 of 3 stay
+  and resume, 5.6-8.0 s. What is left of this item: a peer that is WARM with another
+  conversation's opening is still not told apart from the one holding this one's — that is
+  where the belief table would have to be read. Gossip prefix digests, keep caches longer than the 10-minute KV idle expiry with
   a RAM/disk tier, and price a CPU requester's long prompt against a GPU peer's rate
   (`faster_than_local.md` § 3.1). Delivery trap: `try_ngram_only_distributed` runs before
   `try_remote_generate_fastpath` and takes a remote single segment, so a priced credit would not

@@ -564,7 +564,7 @@ pub(super) fn vertex_cost(
     // range it does not hold, at its own load speed. This node is charged its
     // own figure too — leaving it out would make a cold peer look cheaper than
     // a cold local route, the direction #129 already erred in.
-    let cold_load_ms = c.cold_load_ms_per_layer * c.layers_it_would_add(range) as f32;
+    let cold_load_ms = c.cold_load_ms(range);
     VertexCost {
         network_ms: network_ms * attempts,
         compute_ms: compute_ms * attempts,

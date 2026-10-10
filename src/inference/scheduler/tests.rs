@@ -1801,6 +1801,65 @@ fn a_faster_peer_wins_at_equal_distance_and_load() {
     );
 }
 
+/// FUTURE_WORK #10, 2026-10-10. Greedy plans every split whose holders OVERLAP
+/// (the priced search uses whole ranges only), and it priced a spare it had
+/// never used on the speed the spare ADVERTISED, with nothing for reading the
+/// layers in — so a conversation's second turn left the warm peer that served
+/// the first (and holds its prompt) for a cold spare. The rig's own figures:
+/// the warm peer measured at 7.08 ms a layer, the spare advertising 4.92 tok/s
+/// (6.35 ms a layer), both loading at ~752 ms a layer.
+#[test]
+fn greedy_keeps_a_segment_on_the_warm_holder_over_a_cold_spare() {
+    let state = make_shared_state();
+    let local = state.identity.node_id().clone();
+    let scheduler = PipelineScheduler::new(state);
+    let mut head = simple_candidate(9, vec![(0, 21)]);
+    head.node_id = local;
+    head.can_be_last = false;
+    let mut warm = cost_cand(
+        1,
+        vec![(3, 28)],
+        super::ReachTier::DirectMeasured,
+        1,
+        0.0,
+        Some(7.08),
+    );
+    warm.can_be_first = false;
+    warm.held_ranges = vec![crate::inference::process_pool::HeldRange {
+        range: (21, 28),
+        releasable_layers: 0,
+    }];
+    warm.cold_load_ms_per_layer = 752.0;
+    let mut spare = cost_cand(
+        2,
+        vec![(3, 28)],
+        super::ReachTier::DirectMeasured,
+        2,
+        0.0,
+        None,
+    );
+    spare.can_be_first = false;
+    spare.est_tokens_per_sec = 4.92;
+    spare.cold_load_ms_per_layer = 752.0;
+
+    let segments = scheduler
+        .greedy_assign(
+            28,
+            &[head, warm, spare],
+            false,
+            false,
+            super::Purpose::Route,
+        )
+        .expect("a route exists");
+    let tail = segments.last().unwrap();
+    assert_eq!(tail.layer_range, (21, 28));
+    assert_eq!(
+        tail.node_id,
+        NodeId([1; 32]),
+        "the warm holder keeps the segment; the spare would first load 7 layers"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Whole-model delegation: handing a model to a peer instead of falling back to
 // the local CPU. See `delegation_target` for why this is a two-way choice
