@@ -19,6 +19,32 @@ part (it restarted, or needed the room), the turn is simply read from the start,
 Every computer in the split must run this version for it to apply. Replies were checked
 against llama.cpp: they agree as closely as before.
 
+**Long prompts are read sooner when a model is split across computers.** Each computer
+in a split used to read the whole prompt through its part of the model before the next
+one could start, so only one computer worked at a time during the slowest part of a long
+request. A prompt of 1,024 tokens or more is now read in pieces of 512: the next computer
+reads the first piece while this one reads the second. On a 3B model split across two
+computers, a 2,274-token prompt was read in 57-58 seconds instead of 70-71; split three
+ways, in 47-53 seconds instead of 70-85. Replies were word for word the same. These
+figures were taken with every computer on one machine, sharing its memory, so separate
+computers should gain more. Every computer in the split must run this version; with an
+older one, the prompt is read whole as before. If a computer stops answering partway
+through, the request is planned again without it.
+
+**Fixed: a conversation's next turn could move to a computer that had never seen it.**
+When two computers in the swarm held the same part of a model, the second turn of a
+conversation could go to the one that had not served the first. It then had to load
+the model and read the whole conversation again. On a 3B model, that turn took about a
+minute instead of 6-8 seconds. The next turn now stays on the computer already holding
+the conversation, unless another one is faster even after loading.
+
+**Fixed: hanging up on a reply from a split model now stops the work.** When a client
+asked a model split across computers for a reply without streaming, then gave up (a
+timeout, a closed tab, a stopped script), every computer in the split kept writing the
+reply to its end. Nobody read it, and the next request waited behind it. The work now
+stops within a fraction of a second, whichever kind of request it was: OpenAI,
+Anthropic, the Responses API or MCP.
+
 **Fixed: a hiccup reaching your node no longer reads as "you have nothing".**
 When the dashboard briefly could not reach your node, for example during a
 restart or after the API key changed, several panels showed their ordinary
