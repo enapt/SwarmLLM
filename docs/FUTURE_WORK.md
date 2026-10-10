@@ -230,6 +230,23 @@ both .232 arms passed (proxy 246 s, offline 275 s); at the .231 gate .231 failed
 Three binaries have now failed it and all passed it on a re-run — a flicker in the shape, not a
 release.
 
+**The trigger, caught at debug level after the .234 gate (2026-10-10).** The .234 gate failed both
+proxy arms (B = .234, B = .232; A and C .234). Five re-runs with every node at
+`SWARMLLM_LOGGING_LEVEL=debug`, B = .234 (`~/swarmllm-gate-0234/m12_*`): A and C = .234 three
+times PASS (257-258 s), A and C = .233 once PASS (257 s) and once FAIL (900 s) — so not .234. What
+separates the failure from all four passes is ORDER. In the failure, A and C had finished their heal
+before B joined, so the FIRST manifest B heard already named the agreed hash (`shard_hashes=b299,fcef`,
+`register_manifest` at once). B's disagreement then landed 2.7 s after start, 311 ms BEFORE its
+background shard verification finished. In every pass, B first heard the pre-heal manifest (`b299,be38`,
+the hash its own copy vouches for), and the disagreement came 60-90 s later, long after background
+verification (+3 s). After B's one `could not be checked on HuggingFace`, `settle_by_checked_holders` logged
+nothing, not even its `debug!` "waiting for one". So `heard_hash_with_tag` is not the block. It is one of the
+returns that record nothing: the part in `shards_pending_verification`, `outvoted_by_checked_holders` → `None`
+(our announced tag already reading as theirs), or no size in the manifest. Next: make each of those
+returns write a `heal_verdicts` entry (`canonical::settle` already records every quiet return of its own;
+this function does not), then drive the order deterministically in the rig: start B only once A and C
+have logged `this node's parts are the canonical upload's`.
+
 #### #246 — A node near its storage limit fetched back a part prune had just deleted, once in six runs
 `P3` · heal · **OPEN** — 2026-10-09 · history: the v0.3.232 gate, step 12t
 
