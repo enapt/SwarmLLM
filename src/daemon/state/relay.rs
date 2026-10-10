@@ -535,9 +535,10 @@ impl super::SharedState {
         request_id: uuid::Uuid,
         predicted_ms: u32,
         assumed_forward_passes: u32,
+        terms: crate::inference::trace::PredictedTerms,
     ) {
         if let Some(t) = self.active_traces.get(&request_id) {
-            t.note_predicted_cost(predicted_ms, assumed_forward_passes);
+            t.note_predicted_cost(predicted_ms, assumed_forward_passes, terms);
         }
     }
 

@@ -142,6 +142,7 @@ struct TraceInner {
     /// and the per-request forward-pass count that prediction assumed.
     predicted_ms: Option<u32>,
     assumed_forward_passes: Option<u32>,
+    predicted_terms: Option<PredictedTerms>,
     route: Route,
     segments: Vec<SegmentTrace>,
     prompt_tokens: u32,
@@ -494,10 +495,11 @@ impl RequestTrace {
     /// of it. Wiring it to the chain alone left the shape the calibration
     /// question is actually about — the boomerang of #447(iii) — recording
     /// nothing at all.
-    pub fn note_predicted_cost(&self, ms: u32, assumed_forward_passes: u32) {
+    pub fn note_predicted_cost(&self, ms: u32, assumed_forward_passes: u32, terms: PredictedTerms) {
         let mut g = self.lock();
         g.predicted_ms = Some(ms);
         g.assumed_forward_passes = Some(assumed_forward_passes);
+        g.predicted_terms = Some(terms);
     }
 
     pub fn mark_assembled(&self, route: Route, segments: Vec<SegmentTrace>, sched_ms: u64) {
@@ -596,6 +598,7 @@ impl RequestTrace {
             assemblies: g.assemblies,
             predicted_ms: g.predicted_ms,
             assumed_forward_passes: g.assumed_forward_passes,
+            predicted_terms: g.predicted_terms,
             ttft_ms,
             decode_ms,
             tpot_ms,
@@ -607,6 +610,20 @@ impl RequestTrace {
             segments: g.segments.clone(),
         }
     }
+}
+
+/// The cost model's terms for a priced route, summed over its segments, in ms
+/// — `scheduler::parallax::VertexCost`'s, whole numbers. `queue_ms` is its
+/// `load_ms` (the candidates' other requests), named for what it is beside
+/// `cold_load_ms` (reading the weights in).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub struct PredictedTerms {
+    pub network_ms: u32,
+    pub compute_ms: u32,
+    pub prefill_ms: u32,
+    pub queue_ms: u32,
+    pub transfer_ms: u32,
+    pub cold_load_ms: u32,
 }
 
 /// A rendered, immutable view of a [`RequestTrace`].
@@ -639,6 +656,11 @@ pub struct TraceSnapshot {
     /// self-describing: reading a log a month from now, the constant may have
     /// moved.
     pub assumed_forward_passes: Option<u32>,
+    /// What `predicted_ms` is made of, term by term (`PredictedTerms`), so a
+    /// fit over ordinary logs can tell which term is off — the total alone
+    /// could not say (FUTURE_WORK #3, 2026-10-10: the error grows with the
+    /// plan's hops, not with the reply's length).
+    pub predicted_terms: Option<PredictedTerms>,
     /// Pipeline assemblies performed. >1 means the request was retried, which is
     /// worth seeing next to the timings — a slow request that retried is a
     /// different problem from one that was simply slow.
@@ -737,6 +759,18 @@ impl TraceSnapshot {
             let _ = write!(s, " predicted_ms={p}");
             if let Some(a) = self.assumed_forward_passes {
                 let _ = write!(s, " assumed_forward_passes={a}");
+            }
+            if let Some(t) = self.predicted_terms {
+                let _ = write!(
+                    s,
+                    " predicted_terms=net:{}/compute:{}/prompt:{}/queue:{}/transfer:{}/cold:{}",
+                    t.network_ms,
+                    t.compute_ms,
+                    t.prefill_ms,
+                    t.queue_ms,
+                    t.transfer_ms,
+                    t.cold_load_ms
+                );
             }
         }
         if let Some(t) = self.tok_per_sec {
@@ -1443,10 +1477,25 @@ mod predicted_cost_tests {
     fn a_priced_route_reports_what_it_expected_beside_what_it_cost() {
         let t = RequestTrace::new(uuid::Uuid::nil(), "llama-3.2-3b", "chat");
         t.mark_dequeued();
-        t.note_predicted_cost(4200, 64);
+        t.note_predicted_cost(
+            4200,
+            64,
+            PredictedTerms {
+                network_ms: 1000,
+                compute_ms: 3000,
+                prefill_ms: 200,
+                ..PredictedTerms::default()
+            },
+        );
         let line = t.snapshot().log_line();
         assert!(line.contains("predicted_ms=4200"), "{line}");
         assert!(line.contains("assumed_forward_passes=64"), "{line}");
+        assert!(
+            line.contains(
+                "predicted_terms=net:1000/compute:3000/prompt:200/queue:0/transfer:0/cold:0"
+            ),
+            "the terms ride beside the total: {line}"
+        );
         assert!(
             line.contains("total_ms="),
             "the comparison is only useful beside the actual: {line}"
@@ -1472,7 +1521,7 @@ mod predicted_cost_tests {
     fn the_assumption_is_recorded_not_re_derived_at_read_time() {
         let t = RequestTrace::new(uuid::Uuid::nil(), "m", "chat");
         t.mark_dequeued();
-        t.note_predicted_cost(100, 7);
+        t.note_predicted_cost(100, 7, PredictedTerms::default());
         assert!(t.snapshot().log_line().contains("assumed_forward_passes=7"));
     }
 }

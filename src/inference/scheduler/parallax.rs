@@ -31,7 +31,7 @@ use crate::types::{NodeId, PipelineSegment};
 use super::NodeCandidate;
 
 /// Per-vertex cost components. All in milliseconds.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub(super) struct VertexCost {
     /// `2 * latency_ms` for remote peers, 0 for local — multiplied by
     /// `ASSUMED_FORWARD_PASSES` when the segment is entered mid-chain, since the
@@ -592,18 +592,41 @@ pub(super) fn chain_cost_ms(
     num_layers: u32,
     prompt_tokens: Option<u32>,
 ) -> f32 {
+    chain_cost_terms(
+        segments,
+        candidates,
+        local_node_id,
+        num_layers,
+        prompt_tokens,
+    )
+    .total()
+}
+
+/// [`chain_cost_ms`] term by term: each [`VertexCost`] field summed over the
+/// chain's segments. The total is its `total()`, so the two cannot disagree.
+pub(super) fn chain_cost_terms(
+    segments: &[PipelineSegment],
+    candidates: &[NodeCandidate],
+    local_node_id: &NodeId,
+    num_layers: u32,
+    prompt_tokens: Option<u32>,
+) -> VertexCost {
     segments
         .iter()
         .filter_map(|seg| {
             candidates
                 .iter()
                 .find(|c| c.node_id == seg.node_id)
-                .map(|c| {
-                    vertex_cost(c, seg.layer_range, local_node_id, num_layers, prompt_tokens)
-                        .total()
-                })
+                .map(|c| vertex_cost(c, seg.layer_range, local_node_id, num_layers, prompt_tokens))
         })
-        .sum()
+        .fold(VertexCost::default(), |sum, v| VertexCost {
+            network_ms: sum.network_ms + v.network_ms,
+            compute_ms: sum.compute_ms + v.compute_ms,
+            load_ms: sum.load_ms + v.load_ms,
+            prefill_ms: sum.prefill_ms + v.prefill_ms,
+            transfer_ms: sum.transfer_ms + v.transfer_ms,
+            cold_load_ms: sum.cold_load_ms + v.cold_load_ms,
+        })
 }
 
 /// Route layers [0, num_layers) across candidates using shortest-path DP.

@@ -512,6 +512,21 @@ the tuning this entry rules out; it does not replace the reply-length estimator.
 `max_hostable_layers` read 97-103 cold, 14 008 warm, and `Some(145)` for a 32-layer request —
 unverified here; check whether it is a capacity bound never capped at the model's layer count.
 
+**The collected `predicted_ms` says the error is the SHAPE, not the reply length (2026-10-10).** 333
+distributed requests on the live node's log (2026-09-17 → 10-07, `request complete … predicted_ms=
+… tokens=`, mostly this project's own gate and rig traffic): the error's correlation with
+64 ÷ tokens is 0.00 (log-log, slope 0.00). Replies of 33-64 tokens are priced 1.10× their real
+time, of 65-129 tokens 2.29× — LONGER than the assumed 64 and still over-priced, where a
+reply-length error would under-price them — and rescaling each prediction by tokens ÷ 64 makes the
+fit worse (0.17-3.21×). By shape: one remote segment 1.08×, two 2.00×, three 3.35×. So the
+reply-length estimator would not fix what was collected; the over-charge grows with the HOPS.
+Candidates, unmeasured: every split path here guesses ahead (the n-gram path, the guess-check
+stream), so a reply crosses each hop fewer times than it has tokens and the per-hop term charges
+for crossings that never happen; the per-visit fixed cost may also be counted on top of an
+observation that already carries it. Next: log each chosen plan's cost terms beside its outcome
+(today only the total is kept), then fit per term. Script: re-run the analysis with
+`grep "request complete" node.log | grep predicted_ms` over the fields above.
+
 #### #180 — A node holding the whole model takes every request for it; partial ranges stay off by default
 `P2` · routing · **PARTIAL** — 2026-07-28 · history: archive § "A node holding every shard monopolises the model"
 

@@ -2465,16 +2465,25 @@ impl PipelineScheduler {
         num_layers: u32,
         prompt_tokens: Option<u32>,
     ) {
+        let terms = parallax::chain_cost_terms(
+            segments,
+            candidates,
+            local_node_id,
+            num_layers,
+            prompt_tokens,
+        );
         self.shared_state.note_predicted_route_cost(
             request_id,
-            parallax::chain_cost_ms(
-                segments,
-                candidates,
-                local_node_id,
-                num_layers,
-                prompt_tokens,
-            ) as u32,
+            terms.total() as u32,
             parallax::ASSUMED_FORWARD_PASSES as u32,
+            crate::inference::trace::PredictedTerms {
+                network_ms: terms.network_ms as u32,
+                compute_ms: terms.compute_ms as u32,
+                prefill_ms: terms.prefill_ms as u32,
+                queue_ms: terms.load_ms as u32,
+                transfer_ms: terms.transfer_ms as u32,
+                cold_load_ms: terms.cold_load_ms as u32,
+            },
         );
     }
 

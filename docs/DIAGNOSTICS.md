@@ -32,6 +32,7 @@ DIAG: request complete request_id=1ddd2912-… route=distributed segments=2
   queue_ms=3 sched_ms=1 ttft_ms=180 decode_ms=1420 total_ms=1604
   prompt_tokens=22 tokens=48 tok_per_sec=33.8 tpot_ms=30.2
   predicted_ms=1890 assumed_forward_passes=64
+  predicted_terms=net:640/compute:1180/prompt:70/queue:0/transfer:0/cold:0
   seg0_ms=520 seg1_ms=900 activation_bytes=39188 outcome=ok
 ```
 
@@ -43,6 +44,14 @@ had never been done: the field A/B for the v0.3.164 routing change measured a
 topology the model said should be ~5x apart running at a dead heat, with no way
 to tell whether the error was the assumed forward-pass count or the per-token
 network term.
+
+`predicted_terms` is the same prediction term by term, summed over the route's
+segments (`parallax::chain_cost_terms`, whose total IS `predicted_ms`): the
+per-token network charge, compute, reading the prompt, the candidates' queue,
+moving the prompt's activations, and reading the weights in. Fit those against
+`total_ms` across many lines to find WHICH term is off — the total alone could
+not: over 333 lines (FUTURE_WORK #3, 2026-10-10) its error grew with the plan's
+segments (1.08×, 2.00×, 3.35×) and not at all with the reply's length.
 
 To check the count specifically, compare `tokens` against
 `assumed_forward_passes` on the same line — the assumption is recorded rather
