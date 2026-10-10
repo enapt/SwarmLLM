@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.3.233-alpha] — 2026-10-10
 
 **Fixed: a node in a memory-limited container planned against the whole machine.** When
 SwarmLLM ran in a container with a memory limit (`docker run --memory=…`, or a Kubernetes
