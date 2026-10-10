@@ -168,8 +168,18 @@
 #          once B holds the upload's copy. PASS = B deleted the part, the ask
 #          during the repair is not answered from the wrong bytes, B's part is
 #          then byte-identical to the upload's, and the ask after answers.
+#   disconnect  a client that hangs up on a NON-streamed split reply stops the
+#          work. A holds shard 0, B the rest, both on the processor; one long
+#          greedy ask through A whose client gives up after HANGUP_S (default 8)
+#          seconds, then a short ask. PASS = A logged `client disconnected
+#          before completion` for that request, at most 2 of its decode steps
+#          came back from B more than 3 s after the hang-up, and the short ask
+#          answered 200. Until 2026-10-10 the path a split request takes
+#          (`dispatch_inference`) armed no guard and the reply ran on to its end
+#          (FUTURE_WORK #220's rig): an older release is the control arm, and
+#          should FAIL. Default model tinyllama.
 #
-# usage: split_rig.sh split|kill|failover|failover_mid|context|whole|continue|repeat|fetch|cache|splitcache|remote|mixed|disputed|spliced <binary> [<binary for B>]
+# usage: split_rig.sh split|kill|failover|failover_mid|context|whole|continue|repeat|fetch|cache|splitcache|remote|mixed|disputed|spliced|disconnect <binary> [<binary for B>]
 #   MODEL      model id (default: tinyllama for split, llama-3.2-3b for kill
 #              and failover)
 #   SHARDS_A   shard indices A holds, comma-separated (default 0; kill: 0,LAST)
@@ -194,12 +204,12 @@ set -u
 MODE="${1:?usage: split_rig.sh split|kill|failover|context|repeat|fetch|cache|remote|mixed <binary> [<binary for B>]}"
 BIN_A="${2:?binary}"
 BIN_B="${3:-$BIN_A}"
-case "$MODE" in split|kill|failover|failover_mid|context|whole|continue|repeat|fetch|cache|splitcache|remote|mixed|disputed|spliced) ;; *) echo "mode must be split, kill, failover, failover_mid, context, whole, continue, repeat, fetch, cache, splitcache, remote, mixed, disputed or spliced"; exit 2 ;; esac
+case "$MODE" in split|kill|failover|failover_mid|context|whole|continue|repeat|fetch|cache|splitcache|remote|mixed|disputed|spliced|disconnect) ;; *) echo "mode must be split, kill, failover, failover_mid, context, whole, continue, repeat, fetch, cache, splitcache, remote, mixed, disputed, spliced or disconnect"; exit 2 ;; esac
 if { [ "$MODE" = context ] || [ "$MODE" = whole ]; } && printf '%s' "${EXTRA_TOML:-}" | grep -q '^\[inference\]'; then
   echo "$MODE: EXTRA_TOML may not open [inference] — B's ceiling is written there"; exit 2
 fi
 [ -x "$BIN_A" ] && [ -x "$BIN_B" ] || { echo "binary not executable"; exit 2; }
-if [ "$MODE" = split ] || [ "$MODE" = mixed ] || [ "$MODE" = disputed ] || [ "$MODE" = spliced ]; then
+if [ "$MODE" = split ] || [ "$MODE" = mixed ] || [ "$MODE" = disputed ] || [ "$MODE" = spliced ] || [ "$MODE" = disconnect ]; then
   MODEL="${MODEL:-tinyllama-1.1b-chat-v1.0.q4-k-m}"
 elif [ "$MODE" = cache ]; then
   MODEL="${MODEL:-qwen2.5-0.5b-instruct-fp16}"
@@ -213,11 +223,12 @@ SHARDS=$(ls "$SRC" | sed -n 's/^shard_\([0-9]*\)\.bin$/\1/p' | sed 's/^0*\([0-9]
 LAST=$(echo "$SHARDS" | tail -1)
 N=$(echo "$SHARDS" | wc -l)
 [ "$N" -ge 2 ] || { echo "$MODEL has $N shard file(s) here; a split needs at least 2"; exit 2; }
-if [ "$MODE" = split ] || [ "$MODE" = repeat ]; then
+if [ "$MODE" = split ] || [ "$MODE" = repeat ] || [ "$MODE" = disconnect ]; then
   SHARDS_A="${SHARDS_A:-0}"
   SHARDS_B="${SHARDS_B:-$(echo "$SHARDS" | grep -vxF -f <(echo "$SHARDS_A" | tr ',' '\n') | paste -sd,)}"
   # Processor unless asked otherwise: the reference is scored on the processor.
   [ "$MODE" = repeat ] && { GPU_A="${GPU_A:-0}"; GPU_B="${GPU_B:-0}"; }
+  [ "$MODE" = disconnect ] && { GPU_A="${GPU_A:-0}"; GPU_B="${GPU_B:-0}"; }
 elif [ "$MODE" = splitcache ]; then
   SHARDS_A="${SHARDS_A:-0}"
   SHARDS_B="${SHARDS_B:-$(echo "$SHARDS" | grep -vxF -f <(echo "$SHARDS_A" | tr ',' '\n') | paste -sd,)}"
@@ -580,6 +591,58 @@ if [ "$MODE" = split ]; then
   ask "What is the capital of France? Answer in one sentence." 64 q1 | tee "$OUT/replies.jsonl"
   ask "Write a short Python function that returns the factorial of n." 64 q2 | tee -a "$OUT/replies.jsonl"
   exit 0
+fi
+
+if [ "$MODE" = disconnect ]; then
+  long=$(python3 -c 'import json,sys
+print(json.dumps({"model":sys.argv[1],"max_tokens":600,"temperature":0,"messages":[{"role":"user","content":
+  "Write a long, detailed essay on the history of bridges, from rope bridges to suspension bridges, in many paragraphs."}]}))' "$MODEL")
+  asked=$(date -u +%Y-%m-%dT%H:%M:%S.%6N)
+  curl -s -m "${HANGUP_S:-8}" -H "Authorization: Bearer $KA" -H "Content-Type: application/json" \
+       -X POST localhost:8900/v1/chat/completions -d "$long" -o /dev/null
+  echo "disconnect: the client hung up after ${HANGUP_S:-8} s (curl exit $?)"
+  gone=$(date -u +%Y-%m-%dT%H:%M:%S.%6N)
+  sleep 20
+  # Timed on /proc/uptime: WSL2's wall clock steps (back 1 s mid-request on
+  # 2026-10-10), and a wall-clock difference then reads negative.
+  read -r t1 _ < /proc/uptime
+  ask "What is the capital of France? Answer in one sentence." 16 after > "$OUT/after.json"
+  read -r t2 _ < /proc/uptime
+  after_s=$(python3 -c "print(round($t2 - $t1, 1))")
+  python3 - "$BASE/A/node.log" "$asked" "$gone" "$OUT/after.json" "$after_s" <<'PY'
+import json, re, sys
+from datetime import datetime, timedelta
+log, asked, gone, after, after_s = sys.argv[1:6]
+ts = lambda s: datetime.fromisoformat(s[:26])
+asked, gone = ts(asked), ts(gone)
+rid, guard, steps_before, steps_after = None, False, 0, 0
+for line in open(log, errors="replace"):
+    m = re.match(r"(\S+)Z\s", line)
+    if not m:
+        continue
+    t = ts(m.group(1))
+    if t < asked:
+        continue
+    if rid is None and "Queued inference request" in line:
+        rid = re.search(r"request_id=(\S+)", line).group(1)
+    if rid and rid in line and "client disconnected before completion" in line:
+        guard = True
+    if rid and rid in line and "dispatcher received LayerResult" in line:
+        if t > gone + timedelta(seconds=3):
+            steps_after += 1
+        elif t <= gone:
+            steps_before += 1
+status = json.load(open(after))["status"]
+print(f"disconnect: request {rid}: guard line {'LOGGED' if guard else 'absent'}; decode steps from B "
+      f"{steps_before} before the hang-up, {steps_after} more than 3 s after it")
+print(f"disconnect: the short ask after: {status} in {after_s} s")
+ok = guard and steps_before > 0 and steps_after <= 2 and " 200" in status
+if steps_before == 0:
+    print("disconnect: no decode step came back before the hang-up — raise HANGUP_S; this run tests nothing")
+print("disconnect: PASS" if ok else "disconnect: FAIL")
+sys.exit(0 if ok else 1)
+PY
+  exit $?
 fi
 
 if [ "$MODE" = mixed ]; then

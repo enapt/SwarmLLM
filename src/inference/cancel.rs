@@ -2,8 +2,8 @@
 //! cancel flag while waiting, and stop the moment it flips.
 //!
 //! `InferenceRequest::cancel` is the single cancellation signal. The
-//! non-streaming API flips it when the client's connection drops
-//! (`CancelOnDisconnect`), both streaming surfaces flip it the instant their
+//! non-streaming API flips it when the client's connection drops (the drop
+//! guard inside `api::submit_to_router`), both streaming surfaces flip it the instant their
 //! SSE body's receiver is gone, and `/v1/responses/{id}/cancel` flips it by
 //! hand. Until 2026-09-03 the pipeline read it in exactly one place — the top
 //! of the per-token loop — so a cancel that landed during the PROMPT pass was

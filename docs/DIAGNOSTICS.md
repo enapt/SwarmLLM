@@ -820,7 +820,7 @@ during the prompt pass:
 
 ```
 DIAG: SSE client disconnected (connection closed) — cancelling pipeline     (streaming; flag set here)
-DIAG: client disconnected before completion — cancelling request           (non-streaming; flag set here)
+DIAG: client disconnected before completion — cancelling request           (non-streaming, any surface; flag set here, carries request_id)
 DIAG: request cancelled while a remote segment was computing — telling the peer to stop, not failing over
 model-worker: skipping already-cancelled request                            (DEBUG; a queued forward dropped)
 ...cancelled between layers → GenerateDone finish_reason="cancelled"        (a running multi-layer forward)
@@ -832,6 +832,11 @@ stops at its next chunk boundary (`prefill_chunk_tokens`, 128 positions) or
 layer boundary, whichever comes first; on a processor that is seconds. If a
 worker stays busy longer than that after the lines above, the cancel did not
 reach it: check for `CancelRequest` on the IPC path.
+
+A non-streaming request whose client left and that never logs the second line
+was not asked to stop: the line is written by `api::submit_to_router`, so a
+surface that awaits the router some other way is skipping the guard (before
+2026-10-10 the OpenAI path for a split model did, and its replies ran on).
 
 ## Measuring cancellation (what NOT to use)
 

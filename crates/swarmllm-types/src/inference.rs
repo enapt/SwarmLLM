@@ -41,10 +41,11 @@ pub struct InferenceRequest {
     pub tools: Option<Vec<serde_json::Value>>,
     /// Optional cancellation flag. The router/pipeline checks this between
     /// per-token forward calls; flipping it to `true` causes the loop to
-    /// stop with `finish_reason = "stop"` on the next iteration. Set by the
-    /// `/v1/responses/{id}/cancel` handler (and any other path that needs
-    /// to interrupt an in-flight inference). Skipped over the wire — only
-    /// the originating node observes it.
+    /// stop with `finish_reason = "stop"` on the next iteration. Set by
+    /// `api::submit_to_router` when its caller stops waiting (it makes the
+    /// flag if a request has none), by the streaming surfaces when their
+    /// client leaves, and by the `/v1/responses/{id}/cancel` handler.
+    /// Skipped over the wire — only the originating node observes it.
     #[serde(skip)]
     pub cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// A caller's instruction to plan this request as though the swarm's

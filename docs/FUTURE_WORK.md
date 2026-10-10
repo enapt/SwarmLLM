@@ -357,9 +357,9 @@ ours (13:09:31 the same day, 16 s after a laptop power-source change; 13:25:11 i
 graph updates ignoring a grown allocation (`docs/invariants/inference.md` § "A graph pays only when
 it is updated"). Unknown: which kernel. Next, in order: (1) run that rig shape under
 `compute-sanitizer --tool memcheck --target-processes all` — on WSL2 it first needs the WDDM
-debugger interface, two DWORD 1 registry values set as administrator
-(`HKLM\SYSTEM\CurrentControlSet\Services\nvlddmkm` `EnableDebugInterface`,
-`HKLM\SOFTWARE\NVIDIA Corporation\GPUDebugger` `EnableInterface`), which is the owner's hands;
+debugger interface: `HKLM\SYSTEM\CurrentControlSet\Services\nvlddmkm` `EnableDebugInterface` = 1,
+set as administrator (the forum's second value, `GPUDebugger` `EnableInterface`, proved
+unnecessary here — run 2026-10-10, below);
 (2) the re-plan sat in GPU admission because `nvidia-smi` waits as long as the driver does — FIXED
 2026-10-05: `vram::nvidia_smi` bounds it at 10 s and never runs two at once (while a stuck one
 lives the next reading is unknown at once; `docs/invariants/memory.md` § "nvidia-smi is asked
@@ -387,6 +387,25 @@ their graphs in place — 179 of 182 launches, 3.8-4.0 ms recording each, where 
 would come by chance ~6% of the time, and 10-04 ran with ~3.5 GB free RAM against ~12.8 GB here.
 The constant graph rebuilding — driver work on every launch — is now the leading suspect for the
 FECS events; the illegal access stays unexplained.
+
+**Step (1), 2026-10-10 (released .232, Windows up 61.6 h):** compute-sanitizer 2025.3.1 ATTACHES on
+this WSL2 box with only `nvlddmkm\EnableDebugInterface` = 1 — the `GPUDebugger` key does not exist
+here and is not needed. Checked against a known answer: a planted one-past-the-end write was
+reported at its line and thread (`~/swarmllm-220/attach.sh`). The 10-04 shape with node A and
+every worker it starts under `memcheck --target-processes all` (`~/swarmllm-220/rig.sh`, B plain):
+~15 min of one request's check steps and drafter work, graphs updated in place, reported NO invalid
+access. Under the tool a graph records in 3.6-8 s a launch (~4 ms plain) and `nvidia-smi` stalls
+29-30 s, so `driver_not_answering` would send a NEW worker to the processor — start a sanitizer
+run's workers before the stalls begin. Then eight FECS (nvlddmkm 13), no TDR: five at
+02:44:37-39Z, 2-4 s after the next request's prompt pass began on the card while the first was
+still running there — its client had hung up at 900 s and the reply had not stopped (a defect of
+its own, fixed the same day: `api::submit_to_router` now cancels it) — and three at 02:45:00-01Z
+as the kit killed the workers. So a request boundary on that worker pair again, as on 10-04, and
+memcheck saw no bad access across it. One arm: evidence, not proof. Next, on a fresh boot and
+under the kit: (a) two plain CUDA processes launching long kernels at the same time vs one after
+the other, with nothing of ours — whether FECS follow two processes' work meeting on this driver;
+(b) the shape under memcheck again with several request boundaries (`REPEAT` ≥ 3, `max_tokens`
+small enough to finish inside the client's 900 s), to give the illegal access more chances to show.
 
 #### #193 — A whole-model reply travels as independent messages; only the serving node dying now loses it
 `P3` · reliability · **PARTIAL** — 2026-09-02 · absorbs archive § "The reply stream has no reliability layer…" and § "Intermittent token loss on the remote-generate fast path"; history: archive § "Replies truncated on the remote-generate fast path"

@@ -840,7 +840,8 @@ once, on the health-monitor task rather than the startup path.
 
 (2026-09-03, gotcha #445). The flag
 (`InferenceRequest::cancel`) is the ONE cancellation signal: set by
-`CancelOnDisconnect` (non-streaming), by both SSE surfaces on
+`api::submit_to_router`'s drop guard (every non-streaming caller — the guard
+lives in the helper, not the callers), by both SSE surfaces on
 `sse_tx.closed()` (they used to only drop `token_rx`, which the pipeline
 notices at its next send — after the prompt pass), and by `/cancel`. Read
 by `ModelProcessPool::forward_for_request` around the WAIT for the worker's
@@ -856,6 +857,22 @@ abandoned`). **A new wait longer than a token goes through this helper**, and
 a new surface that learns the client left must set the flag — a tester's
 worker ran 81 CPU-minutes on two one-layer segments after the client had
 gone because the flag was read in one place and set in one other.
+
+**The non-streaming half recurred in the SETTING (2026-10-10).** The guard was
+a drop guard armed by two callers of `submit_to_router` — the OpenAI handler's
+fallback router branch and the Anthropic handler — and not by the OpenAI
+branch for a model split across computers (`dispatch_inference`), which a
+split request takes first. Found in FUTURE_WORK #220's sanitizer rig: the rig's
+client gave up on a 7B split reply at 900 s, A's log never printed `client
+disconnected before completion`, and the reply was still on the card 25 s
+later when the next request's prompt pass began there. Hyper 1.11.1 does drop
+the handler on an EOF mid-request (`proto/h1/conn.rs::mid_message_detect_eof`,
+half-close off), so the signal was there; the path did not listen. The guard
+now lives inside `submit_to_router` (`api::CancelOnDisconnect`) and makes the
+flag when a request has none, so a new non-streaming surface cannot skip it —
+`a_caller_that_stops_waiting_cancels_the_request` drops the helper's future
+with a flagless request, as that path sent. vLLM does the same at one point
+per route (`entrypoints::utils::with_cancellation`).
 
 ## A prompt pass asks between layers whether its request was cancelled
 
@@ -3110,7 +3127,7 @@ Full evidence: `docs/invariants/inference.md`
 - **`inference::layers::cuda_decode_prefers_standard`** — on CUDA, `q_len == 1` takes standard for EVERY head geometry, prefill always flash. The GQA exclusion was retired on 2026-08-23 once `grouped_gqa_decode_attention` deleted the `repeat_kv` cost it existed to route around; `SWARMLLM_GQA_DECODE_FLASH=1` restores the old rule for an A/B inside one binary.
 - **`inference::sampling::sample_among_top_k` — top-k shrinks the candidate set before temperature, top-p or the draw run**, and picks the SAME token as the full-vocabulary path for the same draw (candidates kept in INDEX order, so every sum is bit-identical). ~15x at a 152k vocabulary. Never re-add a vocabulary-wide pass after top-k. → `docs/invariants/inference.md` § "Top-k shrinks the candidate set"
 - **`inference::mem_bandwidth::measured_gbps`** — what this machine's memory actually delivers, measured once and cached.
-- **`inference::cancel::unless_cancelled` — every wait that can run for minutes watches the request's cancel flag** — `InferenceRequest::cancel` is the ONE cancellation signal — set by `CancelOnDisconnect`, by both SSE surfaces on `sse_tx.closed()`, and by `/cancel`; read around every WAIT, never around a send.
+- **`inference::cancel::unless_cancelled` — every wait that can run for minutes watches the request's cancel flag** — `InferenceRequest::cancel` is the ONE cancellation signal — set by `api::submit_to_router`'s drop guard (every non-streaming caller), by both SSE surfaces on `sse_tx.closed()`, and by `/cancel`; read around every WAIT, never around a send.
 - **A prompt pass asks between layers whether its request was cancelled** — `KvCacheStore::set_cancel_oracle` is probed once per layer by `forward_inner_impl`, which returns `CANCELLED_MID_FORWARD`; `forward_was_cancelled` is the one reader of that message.
 - **`inference::split::token_embedding::rows_on_demand_eligible`** — the single answer to "is this model's `token_embd.weight` held quantized with its rows dequantized on lookup, or dequantized whole at load?".
 - **`inference::split::read_gguf_header`** — the single way to parse a GGUF header off a PATH, and the buffering is the entire reason it exists.

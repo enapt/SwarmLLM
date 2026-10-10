@@ -254,31 +254,97 @@ pub(crate) fn attach_route_headers(
     response
 }
 
+/// Cancels the request if dropped before `disarm`: the future holding it was
+/// dropped, so nobody is waiting for the result any more.
+///
+/// A client that simply closes its connection cancels nothing on its own. A
+/// client that sent a long prompt and went away used to leave the request
+/// running, holding the executor for the whole generation and blocking every
+/// later request to that model — reported 2026-07-29, where the next trivial
+/// request stayed blocked and only killing the process recovered it.
+///
+/// Axum drops a handler's future when its client disconnects (hyper ends the
+/// connection on an EOF mid-request unless half-close is on, and it is not
+/// here), so for a non-streaming request this drop guard IS the disconnect
+/// signal. Armed only by [`submit_to_router`], which only a non-streaming
+/// caller awaits: a streaming handler returns as soon as its SSE body is built
+/// and the generation continues afterwards, so a guard there would kill every
+/// stream (the SSE loop watches its own channel instead).
+struct CancelOnDisconnect {
+    flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    request_id: uuid::Uuid,
+}
+
+impl CancelOnDisconnect {
+    /// The request finished — do not cancel on drop.
+    fn disarm(mut self) {
+        self.flag = None;
+    }
+}
+
+impl Drop for CancelOnDisconnect {
+    fn drop(&mut self) {
+        if let Some(flag) = self.flag.take() {
+            flag.store(true, std::sync::atomic::Ordering::Release);
+            tracing::info!(
+                request_id = %self.request_id,
+                "DIAG: client disconnected before completion — cancelling request"
+            );
+        }
+    }
+}
+
 /// Submit a non-streaming inference request to the router and await the result.
+///
+/// **A caller that stops waiting cancels the request**, here and not in the
+/// callers. The work runs in the router's task, so dropping this future alone
+/// stops nothing; the request's cancel flag (`inference::cancel`) is what the
+/// pipeline, the workers and the guess-check stream watch. Until 2026-10-10 the
+/// guard lived in two of the callers, and the OpenAI handler's path for a model
+/// split across computers (`dispatch_inference`) was not one of them: a split
+/// reply ran on after its client had gone, and in FUTURE_WORK #220's rig
+/// (2026-10-10) it was still on the card when the next request's prompt pass
+/// began there. Every non-streaming surface comes through here — OpenAI chat (and
+/// the Responses API through it), Anthropic, MCP — so none can skip it; an MCP
+/// call that hits its own timeout cancels the same way, since nobody will read
+/// that result either. A request arriving with a flag of its own (the
+/// `x-swarmllm-cancel-token` header, a background response) keeps it: the
+/// guard sets that same flag. vLLM ties cancellation to the request's lifetime
+/// at one point for the same reason (`entrypoints::utils::with_cancellation`).
 pub(crate) async fn submit_to_router(
     router_tx: &tokio::sync::mpsc::Sender<crate::inference::router::RouterCommand>,
-    inference_req: crate::types::InferenceRequest,
+    mut inference_req: crate::types::InferenceRequest,
 ) -> Result<crate::inference::router::InferenceOutput, crate::error::ApiError> {
+    let flag = inference_req
+        .cancel
+        .get_or_insert_with(|| std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)))
+        .clone();
+    let disconnect_guard = CancelOnDisconnect {
+        flag: Some(flag),
+        request_id: inference_req.id,
+    };
     let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-    router_tx
+    let sent = router_tx
         .send(crate::inference::router::RouterCommand::Submit {
             request: inference_req,
             result_tx,
         })
-        .await
-        .map_err(|_| {
-            crate::error::ApiError(crate::error::SwarmError::ServiceUnavailable(
-                "Router unavailable".into(),
-            ))
-        })?;
-    result_rx
-        .await
-        .map_err(|_| {
-            crate::error::ApiError(crate::error::SwarmError::ServiceUnavailable(
-                "Router dropped the request".into(),
-            ))
-        })?
-        .map_err(crate::error::ApiError)
+        .await;
+    let result = match sent {
+        Err(_) => Err(crate::error::ApiError(
+            crate::error::SwarmError::ServiceUnavailable("Router unavailable".into()),
+        )),
+        Ok(()) => result_rx
+            .await
+            .map_err(|_| {
+                crate::error::ApiError(crate::error::SwarmError::ServiceUnavailable(
+                    "Router dropped the request".into(),
+                ))
+            })
+            .and_then(|r| r.map_err(crate::error::ApiError)),
+    };
+    disconnect_guard.disarm();
+    result
 }
 
 /// Resolve chat template, BOS token, and EOS token for a model.
@@ -386,6 +452,107 @@ pub fn request_uuid(request_id: &str) -> uuid::Uuid {
     let mut bytes = [0u8; 16];
     bytes.copy_from_slice(&digest.as_bytes()[..16]);
     uuid::Uuid::from_bytes(bytes)
+}
+
+#[cfg(test)]
+mod submit_to_router_tests {
+    use super::{submit_to_router, CancelOnDisconnect};
+    use crate::inference::router::RouterCommand;
+    use crate::types::{InferenceRequest, ModelId, SamplingParams};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    fn request(cancel: Option<Arc<AtomicBool>>) -> InferenceRequest {
+        let mut req = InferenceRequest::local(
+            ModelId("m".into()),
+            vec![],
+            SamplingParams::default(),
+            false,
+            None,
+            None,
+            None,
+        );
+        req.cancel = cancel;
+        req
+    }
+
+    /// Starts `submit_to_router` on its own task and returns it with the
+    /// request the router received.
+    async fn submitted(
+        req: InferenceRequest,
+    ) -> (
+        tokio::task::JoinHandle<()>,
+        InferenceRequest,
+        crate::inference::router::InferenceResultTx,
+    ) {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let task = tokio::spawn(async move {
+            let _ = submit_to_router(&tx, req).await;
+        });
+        match rx.recv().await {
+            Some(RouterCommand::Submit { request, result_tx }) => (task, request, result_tx),
+            _ => panic!("submit_to_router must hand the router a Submit"),
+        }
+    }
+
+    /// The defect of 2026-10-10: the OpenAI handler's path for a model split
+    /// across computers awaited this helper with no guard of its own, so a
+    /// client that hung up left the reply running. The request arrives with NO
+    /// flag, as that path's did.
+    #[tokio::test]
+    async fn a_caller_that_stops_waiting_cancels_the_request() {
+        let (task, routed, _result_tx) = submitted(request(None)).await;
+        let flag = routed
+            .cancel
+            .clone()
+            .expect("every request through the router carries a cancel flag");
+        assert!(
+            !flag.load(Ordering::Acquire),
+            "cancelled before anyone left"
+        );
+        task.abort();
+        let _ = task.await;
+        assert!(
+            flag.load(Ordering::Acquire),
+            "a request nobody waits for must be cancelled, or it runs to its end"
+        );
+    }
+
+    /// A caller's own flag (the cancel-token header, a background response) is
+    /// the one that is set, so `/cancel` and a disconnect stay one signal.
+    #[tokio::test]
+    async fn the_callers_own_flag_is_the_one_cancelled() {
+        let own = Arc::new(AtomicBool::new(false));
+        let (task, routed, _result_tx) = submitted(request(Some(own.clone()))).await;
+        assert!(Arc::ptr_eq(routed.cancel.as_ref().unwrap(), &own));
+        task.abort();
+        let _ = task.await;
+        assert!(own.load(Ordering::Acquire));
+    }
+
+    /// A request that got its answer — a failure is an answer too — is not
+    /// marked cancelled afterwards.
+    #[tokio::test]
+    async fn a_request_that_was_answered_is_not_cancelled() {
+        let (task, routed, result_tx) = submitted(request(None)).await;
+        let flag = routed.cancel.clone().unwrap();
+        let _ = result_tx.send(Err(crate::error::SwarmError::ServiceUnavailable(
+            "refused".into(),
+        )));
+        task.await.unwrap();
+        assert!(!flag.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn disarm_prevents_cancellation() {
+        let flag = Arc::new(AtomicBool::new(false));
+        CancelOnDisconnect {
+            flag: Some(flag.clone()),
+            request_id: uuid::Uuid::nil(),
+        }
+        .disarm();
+        assert!(!flag.load(Ordering::Acquire));
+    }
 }
 
 #[cfg(test)]
