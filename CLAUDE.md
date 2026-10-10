@@ -167,21 +167,22 @@ mmproj). Never edit a count without the run behind it (`completeness.md`).
   ⛔ **Do NOT ask for a go-ahead or a restart, and never refuse on uptime**
   (user, 2026-10-02) — run it and log the uptime (#146).
 
-## Subagents, workflows and usage (Max 5x plan)
+## Subagents, models and usage (Max 5x plan) → evidence: `memory/model_routing.md`
 
-- Reasoning agents (`feature-dev:code-reviewer`, `feature-dev:code-architect`, `Plan`, `root-cause`) →
-  **sonnet, never haiku**; haiku only to run a command and report. **Never
-  delegate production code writing.** `root-cause` returns CAUSED / NOT-CAUSED /
-  UNDETERMINED, never a fix — use it BEFORE blaming a change, especially yours.
-- Every subagent except `Explore`/`Plan` loads this file and the always-on rules
-  (~50 KB) before it starts. Search with `Explore`; fork when the side task needs
-  this conversation (a fork shares its prompt cache); look up a known file yourself.
-- Parallel Opus agents can hit the session limit with no warning (#574) — spawn
-  one and see it return first. Agent teams (~7x tokens) are off for this project
-  (`.claude/settings.json` sets `0` over the user-level `1`); never give a one-shot
-  agent a `name` — named agents run as teammates. Workflows only on explicit opt-in.
-- `/clear` between tasks; `/compact` is itself a large request. `/usage` attributes plan
-  usage; `/doctor prompt-audit` checks these instruction files for stale references.
+- **91% of plan usage is THIS session re-reading its context** (median turn 500K tokens; 61% of it on turns
+  that only read or search; 14 days to 10-10). Give bulky reading to a cheap agent with ONE question, keep the
+  answer: `digest` (Haiku: logs, gate/CI output, diffs, run-and-report), `Explore` (code search). Read yourself
+  only what you will edit; never poll from here. `/clear` at task boundaries; auto-compact is at 400K.
+- **The cheapest model that holds, named on every call** (`Explore`/`Plan`/bare calls inherit Opus xhigh):
+  lookup, digest, run-and-report → haiku; search, web research, review, `root-cause`, architect, `Plan` →
+  sonnet (`effort: high` where a miss costs a commit); i18n review (#793), cross-cutting design → opus; a
+  stuck P0/P1 cause or the release's riskiest diff → fable; crypto, wire protocol, pool/private mode, auth,
+  update signing → `security-reviewer` (user-level, Mythos). A fork re-reads this whole context on Opus.
+- **Never delegate production code writing.** A finding is a hypothesis (#514): check the claim you act on,
+  not the whole search. `root-cause` → CAUSED / NOT-CAUSED / UNDETERMINED — BEFORE blaming a change.
+- ≤ 4 parallel agents, independent sizeable tracks only; Fable/Mythos one at a time (≤ 50% weekly, #574).
+  Teams off (project `0` beats user `1`); never `name` a one-shot agent; workflows on opt-in only. A
+  monitoring or docs-only session can run on sonnet: `/model` right after `/clear`, never mid-task.
 
 ## Reference Documents
 
@@ -190,9 +191,8 @@ mmproj). Never edit a count without the run behind it (`completeness.md`).
 - `docs/FUTURE_WORK.md` — open work, ranked (history: `FUTURE_WORK_ARCHIVE.md`). **A fix moves its item to § "Closed" in the SAME commit.** ⚠ Its SCOPE is a hypothesis (#654), line numbers drift (#645).
 - `docs/DIAGNOSTICS.md` (`DIAG:`, bench traps) · `docs/CREDITS_DESIGN.md` · `docs/book/` ·
   `.claude/sweep-log.jsonl` (every `/sweep` finding — **grep before re-reporting**)
-- `memory/` is `~/.claude/projects/-home-user-SwarmLLM/memory/` (not in the repo).
-  `MEMORY.md` indexes it and holds the live status; **read `open_cautions.md` and
-  `next_up.md` at session start.**
+- `memory/` = `~/.claude/projects/-home-user-SwarmLLM/memory/` (not in the repo); `MEMORY.md` indexes it and
+  holds the live status — **read `open_cautions.md` and `next_up.md` at session start.**
 
 ## Compact instructions
 

@@ -4,6 +4,7 @@ description: Review uncommitted SwarmLLM changes (or a named module/file) agains
 argument-hint: "[module-or-file]"
 allowed-tools: Read, Grep, Glob, Bash
 model: sonnet
+effort: high
 context: fork
 background: false
 ---

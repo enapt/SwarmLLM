@@ -31,7 +31,7 @@ and fields match its `tracing` call, every `file.md § "Heading"` resolves. It i
 (proposals and other projects' names are legitimately absent), fix the real ones, log the rest `wontfix`.
 Agent 4 then spends its budget on prose and numbers, not names.
 
-## Agents (launch all four in one message, `model: sonnet`)
+## Agents (launch all four in one message, `model: sonnet`, `effort: high`)
 
 1. **Dead code + stale references** — pub items with no external caller, unreachable arms, comments naming
    removed code, `#[allow(dead_code)]` hiding a real warning.

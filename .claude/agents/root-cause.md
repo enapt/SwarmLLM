@@ -2,6 +2,7 @@
 name: root-cause
 description: Establishes whether a suspected cause actually causes an observed symptom, before any fix or revert is made. Use when about to attribute a failure to a change, a component, or a peer — particularly when the suspect is your own recent work. Returns a verdict of CAUSED / NOT-CAUSED / UNDETERMINED with the discriminating evidence, never a fix.
 model: sonnet
+effort: high
 tools: Bash, Read, Grep, Glob, WebSearch, WebFetch
 ---
 

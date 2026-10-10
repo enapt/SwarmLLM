@@ -56,7 +56,10 @@
       "Agent(general-purpose)",
       "Agent(feature-dev:code-explorer)",
       "Agent(feature-dev:code-architect)",
-      "Agent(feature-dev:code-reviewer)"
+      "Agent(feature-dev:code-reviewer)",
+      "Agent(claude-code-guide)",
+      "Agent(security-reviewer)",
+      "Agent(digest)"
     ],
     "deny": [
       "Bash(cargo publish *)",
@@ -71,8 +74,10 @@
     ]
   },
   "includeGitInstructions": false,
+  "autoCompactWindow": 400000,
   "env": {
-    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "0"
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "0",
+    "CLAUDE_CODE_SUBAGENT_MODEL": "sonnet"
   },
   "hooks": {
     "PreToolUse": [
