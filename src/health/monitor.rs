@@ -51,6 +51,10 @@ pub struct HealthMonitor {
     /// Counter for the periodic full regional re-announce, the anti-entropy
     /// half of the same scheme.
     region_summary_counter: u64,
+    /// When the capability last went on the wire and what it said, so it is
+    /// published when it says something new or `CAPABILITY_HEARTBEAT` has
+    /// passed, not every tick (`capability_needs_broadcast`).
+    last_published_capability: Option<(std::time::Instant, crate::types::NodeCapability)>,
     /// Per-acquisition liveness tracker: model_id → (last bytes seen, when seen).
     /// If bytes don't advance for STALL_THRESHOLD, the acquisition is reconciled
     /// against disk (mark Complete if shards present, Failed otherwise).
@@ -156,6 +160,152 @@ fn region_summary_digest(summary: &crate::types::RegionShardSummary) -> u64 {
             .try_into()
             .expect("a blake3 digest is 32 bytes, so its first 8 are always there"),
     )
+}
+
+/// How long an UNCHANGED capability may go without being published again.
+///
+/// It used to go out on every broadcast round (30 s on a small swarm) whether
+/// or not anything in it had moved. Once Trickle took manifests from 86% of an
+/// idle node's gossip down to a few hundred bytes a second, the capability was
+/// the largest thing left: measured 2026-10-10 on the release node, 0.2
+/// messages a second at ~4.9 KB, about 60% of the gossip bytes it received as
+/// first copies (FUTURE_WORK #91).
+///
+/// Kubernetes met the same cost and named the fix — KEP-589, "efficient node
+/// heartbeats": liveness on a small frequent beat, the full status only on a
+/// meaningful change or every 5 minutes. The small beat exists here already:
+/// `HealthPing` every tick, any other message, and the network's own liveness
+/// tick all refresh a peer's `last_seen`, and no version ages a capability out
+/// (checked 2026-10-10 — the only readers of how long ago a peer spoke are the
+/// 90 s eviction and the dashboard's healthy flag, both on `last_seen`). So a
+/// slower repeat drops no peer; it only bounds how stale a figure that moved
+/// less than its deadband may get. A peer's displayed uptime lags by up to
+/// this much.
+const CAPABILITY_HEARTBEAT: Duration = Duration::from_secs(5 * 60);
+
+/// How far a memory figure (free card memory, the RAM budget, free RAM where a
+/// peer reads it) must move from what was last PUBLISHED before it is news.
+///
+/// Measured from the last value SENT, not snapped to a grid: a figure sitting
+/// on a grid line would flip across it every tick and republish every tick
+/// (deadband reporting, as data-change filters in industrial telemetry do it).
+/// 256 MB is under two layers of a 7B at Q4 (~157 MB each), and every peer
+/// reading these already discounts them for staleness (`DELEGATE_VRAM_MARGIN`).
+const CAPABILITY_MEMORY_DEADBAND_MB: u64 = 256;
+
+/// The same for free disk, which nothing routes a request on — it sizes the
+/// swarm's storage pool and a peer's coverage plan.
+const CAPABILITY_DISK_DEADBAND_MB: u64 = 1024;
+
+/// The same for the network coordinate, as the distance it predicts between
+/// the old and new position. Nothing routes on coordinates yet; a receiver
+/// folds ours into its own estimate.
+const CAPABILITY_COORD_DEADBAND_MS: f32 = 5.0;
+
+/// Does `now` tell the swarm anything `sent` — the capability as last
+/// PUBLISHED — did not?
+///
+/// Compares the two WHOLE, after carrying over from `sent` only what is not
+/// news: `uptime_seconds` (moves every tick by construction — fold it in and
+/// the gate suppresses nothing while looking right in review, the region
+/// summary's lesson), the observed-latency snapshot (a pre-warm hint that
+/// drifts with every request), and figures that moved less than their
+/// deadband. Every other field, including any added later, is a change the
+/// moment it differs — the safe direction for a field nobody thought about.
+/// Sets are compared as sets.
+///
+/// Returns the names of the fields that are news (empty: nothing is), so the
+/// publish can say WHY it went — the only way to tell a gate that works from
+/// one a wobbling figure keeps open.
+fn capability_news(
+    sent: &crate::types::NodeCapability,
+    now: &crate::types::NodeCapability,
+) -> Vec<String> {
+    fn as_sets(mut cap: crate::types::NodeCapability) -> crate::types::NodeCapability {
+        cap.hosted_shards.sort_by(|a, b| {
+            (a.model_id.0.as_str(), a.index).cmp(&(b.model_id.0.as_str(), b.index))
+        });
+        cap.relay_reservations.sort_by_key(|n| n.0);
+        cap.resident_layers
+            .sort_by(|a, b| a.model_id.cmp(&b.model_id));
+        cap
+    }
+    fn hold(now: &mut u64, sent: u64, deadband: u64) {
+        if now.abs_diff(sent) < deadband {
+            *now = sent;
+        }
+    }
+    let sent = as_sets(sent.clone());
+    let mut now = as_sets(now.clone());
+    now.uptime_seconds = sent.uptime_seconds;
+    now.observed_latencies = sent.observed_latencies.clone();
+    // Free RAM is the host's reading, so it moves with every other program on
+    // the machine; on the two-node rig (2026-10-10) it was the only field that
+    // republished an idle capability before its heartbeat. Its one reader is `memory_for_model_layers_mb`, which takes it
+    // only from a node stating neither a RAM budget nor a card — never this
+    // build. Where that reader would not see it, it is not news at any size.
+    let mut unread = now.clone();
+    unread.ram_available_mb = sent.ram_available_mb;
+    if unread.memory_for_model_layers_mb() == now.memory_for_model_layers_mb() {
+        now.ram_available_mb = sent.ram_available_mb;
+    } else {
+        hold(
+            &mut now.ram_available_mb,
+            sent.ram_available_mb,
+            CAPABILITY_MEMORY_DEADBAND_MB,
+        );
+    }
+    hold(
+        &mut now.disk_available_mb,
+        sent.disk_available_mb,
+        CAPABILITY_DISK_DEADBAND_MB,
+    );
+    if let (Some(n), Some(s)) = (now.ram_model_budget_mb.as_mut(), sent.ram_model_budget_mb) {
+        hold(n, s, CAPABILITY_MEMORY_DEADBAND_MB);
+    }
+    if let (Some(n), Some(s)) = (now.gpu.as_mut(), sent.gpu.as_ref()) {
+        hold(
+            &mut n.vram_available_mb,
+            s.vram_available_mb,
+            CAPABILITY_MEMORY_DEADBAND_MB,
+        );
+    }
+    if let (Some(n), Some(s)) = (now.coord, sent.coord) {
+        let moved = (n.x - s.x).hypot(n.y - s.y) + (n.height - s.height).abs();
+        if moved < CAPABILITY_COORD_DEADBAND_MS {
+            now.coord = sent.coord;
+        }
+    }
+    // A capability that cannot be serialized cannot be compared: say it is
+    // new, so the failure costs a message rather than a stale peer view.
+    match (serde_json::to_value(&now), serde_json::to_value(&sent)) {
+        (Ok(serde_json::Value::Object(now)), Ok(serde_json::Value::Object(sent))) => now
+            .iter()
+            .filter(|(field, value)| sent.get(*field) != Some(*value))
+            .map(|(field, _)| field.clone())
+            .chain(sent.keys().filter(|f| !now.contains_key(*f)).cloned())
+            .collect(),
+        _ => vec!["(not comparable)".to_string()],
+    }
+}
+
+/// Does the capability go on the wire this round, and why? `last` is when it
+/// was last published and what it said; `None` before the first, which always
+/// goes. `None` back means stay quiet.
+fn capability_needs_broadcast(
+    last: Option<&(std::time::Instant, crate::types::NodeCapability)>,
+    now: &crate::types::NodeCapability,
+    at: std::time::Instant,
+) -> Option<String> {
+    let Some((sent_at, sent)) = last else {
+        return Some("first".to_string());
+    };
+    let news = capability_news(sent, now);
+    if !news.is_empty() {
+        return Some(news.join(","));
+    }
+    (at.saturating_duration_since(*sent_at) >= CAPABILITY_HEARTBEAT)
+        .then(|| "heartbeat".to_string())
 }
 
 /// Does this one manifest go on the wire this round?
@@ -319,6 +469,7 @@ impl HealthMonitor {
             peers_told_about_manifests: std::collections::HashSet::new(),
             last_announced_region_summaries: std::collections::HashMap::new(),
             region_summary_counter: 0,
+            last_published_capability: None,
             acq_liveness: std::collections::HashMap::new(),
             peer_dl_liveness: std::collections::HashMap::new(),
             started_at: std::time::Instant::now(),
@@ -891,7 +1042,8 @@ impl HealthMonitor {
                 }
             });
 
-        // Use real uptime so message content changes each broadcast (avoids GossipSub dedup)
+        // Real uptime, for the peer lists that show it. It is not news on its
+        // own: `capability_news` leaves it out of the comparison.
         let uptime_seconds = {
             let stats = self.shared_state.metrics.node_stats.read().await;
             (chrono::Utc::now() - stats.uptime_start)
@@ -1137,14 +1289,30 @@ impl HealthMonitor {
             },
         };
 
-        // Keep a copy before it goes on the wire, so local surfaces can show
-        // this node using exactly what peers are told about it.
+        // Keep a copy every round, published or not: local surfaces show this
+        // node from it, and a newly connected peer is caught up with it
+        // directly (`identify.rs`), so it must be today's figures.
         self.shared_state
             .local_capability
             .store(Some(std::sync::Arc::new(cap.clone())));
-        let msg = NetworkCommand::Broadcast(SwarmMessage::NodeCapabilityUpdate(cap));
-        if let Err(e) = self.network_tx.send(msg).await {
-            tracing::debug!(error = %e, "DIAG: failed to broadcast capability update");
+        let at = std::time::Instant::now();
+        if let Some(why) =
+            capability_needs_broadcast(self.last_published_capability.as_ref(), &cap, at)
+        {
+            let msg = NetworkCommand::Broadcast(SwarmMessage::NodeCapabilityUpdate(cap.clone()));
+            match self.network_tx.send(msg).await {
+                Ok(()) => {
+                    tracing::debug!(
+                        target: "swarmllm::health::monitor",
+                        why = %why,
+                        "DIAG: capability published"
+                    );
+                    self.last_published_capability = Some((at, cap));
+                }
+                Err(e) => {
+                    tracing::debug!(error = %e, "DIAG: failed to broadcast capability update")
+                }
+            }
         }
 
         // Delta-compressed shard announcements: only broadcast when shard set
@@ -2473,6 +2641,242 @@ mod tests {
                 "{label} — this is information the swarm needs"
             );
         }
+    }
+
+    /// An idle card node's capability as one round builds it.
+    fn capability_for_test() -> crate::types::NodeCapability {
+        crate::types::NodeCapability {
+            coord: Some(swarmllm_types::netcoord::NetworkCoord {
+                x: 10.0,
+                y: -4.0,
+                height: 2.0,
+                error: 0.3,
+            }),
+            node_id: crate::types::NodeId([7u8; 32]),
+            gpu: Some(crate::types::GpuInfo {
+                name: "test card".into(),
+                vram_total_mb: 8192,
+                vram_available_mb: 5_000,
+                compute_capability: None,
+                memory_bandwidth_gbps: 448.0,
+            }),
+            cpu: None,
+            ram_total_mb: 16_000,
+            ram_available_mb: 12_000,
+            ram_model_budget_mb: Some(6_000),
+            disk_available_mb: 900_000,
+            bandwidth_mbps: 0.0,
+            hosted_shards: vec![
+                crate::types::ShardId {
+                    model_id: crate::types::ModelId("llama-3.2-3b".into()),
+                    index: 0,
+                },
+                crate::types::ShardId {
+                    model_id: crate::types::ModelId("llama-3.2-3b".into()),
+                    index: 1,
+                },
+            ],
+            max_contribution: crate::types::ContributionLevel::Moderate,
+            uptime_seconds: 600,
+            version: "0.3.233-alpha".into(),
+            region: Some("asia".into()),
+            est_tokens_per_sec_7b: 56.0,
+            os: Some("linux".into()),
+            observed_latencies: vec![crate::types::LatencyObservation {
+                peer: crate::types::NodeId([9u8; 32]),
+                ms_per_layer: 1.5,
+            }],
+            relay_capable: false,
+            protocol_version: 1,
+            features: 7,
+            relay_reservations: vec![
+                crate::types::NodeId([1u8; 32]),
+                crate::types::NodeId([2u8; 32]),
+            ],
+            anchor_mode: false,
+            can_serve_inference: true,
+            resident_layers: Vec::new(),
+            context_ceiling_tokens: Some(8192),
+            model_load_ms_per_gib: Some(900),
+            model_memory_ceiling_mb: Some(24_000),
+        }
+    }
+
+    /// The same capability a few rounds later, on a node where nothing
+    /// happened, is not news. Every line here moves on an idle node by itself
+    /// — `uptime_seconds` by construction — so if any of them is folded into
+    /// the comparison the gate republishes every tick and suppresses nothing,
+    /// which is exactly how it would silently stop working.
+    #[test]
+    fn an_idle_nodes_capability_is_not_news_round_after_round() {
+        let sent = capability_for_test();
+        let mut now = capability_for_test();
+        now.uptime_seconds += 90;
+        now.ram_available_mb -= 200;
+        now.ram_model_budget_mb = Some(6_000 + 150);
+        now.disk_available_mb -= 700;
+        now.gpu.as_mut().unwrap().vram_available_mb -= 40;
+        now.observed_latencies[0].ms_per_layer = 1.7;
+        now.coord.as_mut().unwrap().x += 1.5;
+        now.coord.as_mut().unwrap().error = 0.28;
+        now.hosted_shards.reverse();
+        now.relay_reservations.reverse();
+        assert!(
+            capability_news(&sent, &now).is_empty(),
+            "uptime, small memory/disk/coordinate drift, the latency hint and \
+             set order are not news"
+        );
+        let at = std::time::Instant::now();
+        assert!(
+            capability_needs_broadcast(Some(&(at, sent.clone())), &now, at + PING_INTERVAL)
+                .is_none(),
+            "one round after the last publish, an unchanged capability stays quiet"
+        );
+    }
+
+    /// Free RAM moves with everything else running on the host, and a peer
+    /// reads it only from a node stating neither a RAM budget nor a card. So
+    /// it is never news on a node that states one — the rig found it holding
+    /// the gate open — and is still news, past its deadband, where it is read.
+    #[test]
+    fn free_ram_is_news_only_where_a_peer_reads_it() {
+        let sent = capability_for_test();
+        let mut now = capability_for_test();
+        now.ram_available_mb -= 3_000;
+        assert!(capability_news(&sent, &now).is_empty(), "budget stated");
+        let (mut sent, mut now) = (sent, now);
+        for cap in [&mut sent, &mut now] {
+            cap.ram_model_budget_mb = None;
+        }
+        assert!(capability_news(&sent, &now).is_empty(), "card stated");
+        for cap in [&mut sent, &mut now] {
+            cap.gpu = None;
+        }
+        assert_eq!(capability_news(&sent, &now), ["ram_available_mb"]);
+        now.ram_available_mb = sent.ram_available_mb - 200;
+        assert!(
+            capability_news(&sent, &now).is_empty(),
+            "inside the deadband"
+        );
+    }
+
+    /// Everything that changes what a peer would DECIDE about this node goes
+    /// out on the next round, not at the heartbeat — a withdrawal above all.
+    #[test]
+    fn a_capability_change_that_matters_goes_out_at_once() {
+        type Change = Box<dyn Fn(&mut crate::types::NodeCapability)>;
+        let sent = capability_for_test();
+        let cases: Vec<(&str, Change)> = vec![
+            (
+                "it stopped serving",
+                Box::new(|c| c.can_serve_inference = false),
+            ),
+            (
+                "it lost a part",
+                Box::new(|c| {
+                    c.hosted_shards.pop();
+                }),
+            ),
+            (
+                "a model loaded",
+                Box::new(|c| {
+                    c.resident_layers.push(crate::types::ResidentModelLayers {
+                        model_id: "llama-3.2-3b".into(),
+                        layers: 28,
+                        ranges: Vec::new(),
+                    })
+                }),
+            ),
+            (
+                "the card filled",
+                Box::new(|c| c.gpu.as_mut().unwrap().vram_available_mb -= 300),
+            ),
+            (
+                "the RAM budget shrank",
+                Box::new(|c| c.ram_model_budget_mb = Some(5_600)),
+            ),
+            (
+                "the disk filled",
+                Box::new(|c| c.disk_available_mb -= 2_000),
+            ),
+            (
+                "the coordinate moved",
+                Box::new(|c| c.coord.as_mut().unwrap().y += 8.0),
+            ),
+            (
+                "the contribution level changed",
+                Box::new(|c| c.max_contribution = crate::types::ContributionLevel::Minimal),
+            ),
+            (
+                "a relay was lost",
+                Box::new(|c| {
+                    c.relay_reservations.pop();
+                }),
+            ),
+            (
+                "a load was timed",
+                Box::new(|c| c.model_load_ms_per_gib = Some(1_400)),
+            ),
+            (
+                "it updated",
+                Box::new(|c| c.version = "0.3.234-alpha".into()),
+            ),
+        ];
+        let at = std::time::Instant::now();
+        for (label, change) in cases {
+            let mut now = capability_for_test();
+            change(&mut now);
+            assert!(!capability_news(&sent, &now).is_empty(), "{label} is news");
+            assert!(
+                capability_needs_broadcast(Some(&(at, sent.clone())), &now, at + PING_INTERVAL)
+                    .is_some(),
+                "{label} goes out on the next round"
+            );
+        }
+    }
+
+    /// The first capability always goes, and an unchanged one goes again once
+    /// the heartbeat has passed: the repeat is what heals a lost message and
+    /// moves the figures that stayed inside their deadband.
+    #[test]
+    fn the_capability_goes_out_first_and_then_at_the_heartbeat() {
+        let cap = capability_for_test();
+        let at = std::time::Instant::now();
+        assert_eq!(
+            capability_needs_broadcast(None, &cap, at).as_deref(),
+            Some("first")
+        );
+        let sent = Some((at, cap.clone()));
+        assert_eq!(
+            capability_needs_broadcast(
+                sent.as_ref(),
+                &cap,
+                at + CAPABILITY_HEARTBEAT.saturating_sub(PING_INTERVAL)
+            ),
+            None
+        );
+        assert_eq!(
+            capability_needs_broadcast(sent.as_ref(), &cap, at + CAPABILITY_HEARTBEAT).as_deref(),
+            Some("heartbeat")
+        );
+    }
+
+    /// A publish names what changed, so a gate held open by a wobbling figure
+    /// can be told from one that works by reading the log.
+    #[test]
+    fn a_published_capability_names_the_fields_that_changed() {
+        let sent = capability_for_test();
+        let mut now = capability_for_test();
+        now.can_serve_inference = false;
+        now.gpu.as_mut().unwrap().vram_available_mb -= 1_000;
+        let at = std::time::Instant::now();
+        let mut why: Vec<String> = capability_needs_broadcast(Some(&(at, sent)), &now, at)
+            .expect("both are news")
+            .split(',')
+            .map(str::to_string)
+            .collect();
+        why.sort();
+        assert_eq!(why, ["can_serve_inference", "gpu"]);
     }
 
     /// A newcomer must NOT force a broadcast round any more.

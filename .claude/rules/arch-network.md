@@ -253,7 +253,7 @@ Single sources of truth for invariants that silently break at the wire if duplic
 
 ## Gossip says what CHANGED, to everyone — and what one peer lacks, to that peer
 
-Publish on CHANGE, never per item per tick — gate on a digest of what is ASSERTED, excluding any timestamp. Gossip only what this node MEASURED (`local_region_demand`; guard `the_demand_we_gossip_is_the_demand_we_measured`). Catch a newcomer up POINT TO POINT (`NetworkCommand::SendDirectMessage`), and send our capability at identify time. Don't repeat what the swarm just HEARD (`state.models.manifest_heard`, `MANIFEST_QUIET_WINDOW`; only GOSSIPED arrivals count, keyed by VERSION).
+Publish on CHANGE, never per item per tick — gate on a digest of what is ASSERTED, excluding any timestamp. Gossip only what this node MEASURED (`local_region_demand`; guard `the_demand_we_gossip_is_the_demand_we_measured`). Catch a newcomer up POINT TO POINT (`NetworkCommand::SendDirectMessage`), and send our capability at identify time. Don't repeat what the swarm just HEARD (`state.models.manifest_heard`, `MANIFEST_QUIET_WINDOW`; only GOSSIPED arrivals count, keyed by VERSION). Our capability goes out when it says something new or every `CAPABILITY_HEARTBEAT` (5 min, KEP-589): **`health::monitor::capability_news`** compares whole capabilities, carrying over only uptime, the latency hint, free RAM wherever its one reader (`memory_for_model_layers_mb`) would not see it, and figures inside their deadband (memory 256 MB, disk 1 GB, coordinate 5 ms) — a new field is news by default; guards `an_idle_nodes_capability_is_not_news_round_after_round`, `free_ram_is_news_only_where_a_peer_reads_it`. Liveness is `HealthPing`'s job, never the capability's.
 
 → `docs/invariants/network.md` § "Gossip says what CHANGED, to everyone — and what one peer lacks, to that peer"
 
@@ -265,7 +265,7 @@ GossipSub's `sent` / `sent_bytes` count ATTEMPTS per recipient, so `sum(topic.se
 
 ## A manifest's tensor table is DERIVED data, and the shard count is its OUTPUT
 
-The per-shard tensor table is ~92% of a manifest and is derived, not sent: **`daemon::shard_loader::derive_tensor_entries`** rebuilds it as a FALLBACK. ⚠ `manifest.shard_count` is the layout's OUTPUT, so the count is SEARCHED for with the published `size_bytes` as oracle; return `None` rather than a partial table; do NOT "fix" the underproduction. `a_derived_tensor_table_matches_the_published_one` (ignored; `SWARMLLM_TEST_MODEL_DIR`). `NodeCapabilityUpdate` is not change-gated (FUTURE_WORK #91).
+The per-shard tensor table is ~92% of a manifest and is derived, not sent: **`daemon::shard_loader::derive_tensor_entries`** rebuilds it as a FALLBACK. ⚠ `manifest.shard_count` is the layout's OUTPUT, so the count is SEARCHED for with the published `size_bytes` as oracle; return `None` rather than a partial table; do NOT "fix" the underproduction. `a_derived_tensor_table_matches_the_published_one` (ignored; `SWARMLLM_TEST_MODEL_DIR`).
 
 → `docs/invariants/network.md` § "A manifest's tensor table is DERIVED data, and the shard count is its OUTPUT"
 

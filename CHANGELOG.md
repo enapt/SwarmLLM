@@ -1,5 +1,18 @@
 # Changelog
 
+## [Unreleased]
+
+**An idle node uses less of your internet connection.** Every node used to tell the
+whole network what it can do (its memory, its parts of models, its speed) every 30
+seconds, whether or not anything had changed. Once earlier versions cut the other
+background messages down, this announcement had become the largest part of what an
+idle node receives: just over half, about 1 KB a second, on our node with six peers. And
+every node passes what it receives on to its neighbours, so it cost several times that
+in upload. A node now sends it when something in it changes, and otherwise every 5 minutes. A
+change that matters to the others, such as a model loaded, a part gained or lost, or
+memory filling up, still goes out within one round. The saving grows as the nodes
+you are connected to update to this version.
+
 ## [0.3.233-alpha] — 2026-10-10
 
 **Fixed: a node in a memory-limited container planned against the whole machine.** When

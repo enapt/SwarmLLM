@@ -1924,6 +1924,10 @@ recover all of that because some ticks carry a real change. **The BEP 9 shape
 is the fix worth building; `NodeCapabilityUpdate` gating is not**, and that is
 now a measurement rather than a preference.
 
+⚠ **Superseded 2026-10-10**: after Trickle cut manifests to a few hundred bytes a
+second, the capability broadcast became ~60% of first-copy gossip and was gated
+— § "The capability, once Trickle had worked".
+
 ⚠ **A manifest averages 32 KB, not the 13 KB this entry and the work queue both
 carried.** That figure came from the per-topic average over all six variants,
 which the cheap ones drag down. **An average across a mixed population is not a
@@ -2071,13 +2075,77 @@ verified against the infohash, rather than flooding it.
 
 ### Still open
 
-`NodeCapabilityUpdate` is broadcast every tick with no change gate.
-`uptime_seconds`, `ram_available_mb` and `disk_available_mb` move every tick, so
-it cannot be gated as it stands — the stable fields would have to be separated
-from the volatile ones, or the volatile ones sent rarely. And a manifest at 13 KB
-is still a broadcast payload; the BEP 9 shape (gossip `(model_id,
+A manifest is still a broadcast payload; the BEP 9 shape (gossip `(model_id,
 manifest_hash)`, fetch the tensor table on demand, verify against the hash) is
-the remaining structural fix.
+the remaining structural fix. The capability broadcast this section once listed
+here is change-gated since 2026-10-10 — next section.
+
+## The capability, once Trickle had worked (2026-10-10)
+
+### What was measured
+
+The 2026-09-21 ranking (manifests 86.4%, capability 3.4%) was taken BEFORE
+Trickle. Re-read on the release node (.232, 2.6 h up, 6 peers, idle) it had
+inverted: `ModelManifest` 208-428 B/s, `NodeCapabilityUpdate` 0.2 msg/s × ~4.9 KB
+≈ 976 B/s — **about 60% of first-copy gossip bytes**, the largest kind left.
+**A ranking is a fact about the system at the time it was taken; fixing the top
+item reorders it.**
+
+### What it replaced
+
+Every broadcast round (30 s on a small swarm) published the capability whole,
+changed or not. Now `health::monitor::capability_needs_broadcast` publishes it
+when `capability_news` finds a field that differs from what was last SENT, or
+every `CAPABILITY_HEARTBEAT` (5 min). The shape is Kubernetes KEP-589
+("efficient node heartbeats": a small frequent lease for liveness, NodeStatus on
+a meaningful change or every 5 min). The lease exists here already —
+`HealthPing`, any message and the libp2p liveness tick refresh `last_seen` — and
+**no version ages a capability out** (checked before building: the only readers
+of how long ago a peer spoke are the 90 s eviction and the dashboard's healthy
+flag, both on `last_seen`), so a slower repeat drops no peer. Nor does a
+newcomer learn slower: a capability is installed only for a peer already in
+`peer_registry` (`daemon/dispatch` drops it otherwise), a connection — direct or
+relayed — is what puts a peer there, and identify sends our capability point to
+point on every new connection (`network/manager/identify.rs`, the
+`connected_node_ids` transition). The repeat only ever reached peers that had
+already been sent it.
+
+The comparison is whole-struct (serde, field by field) after carrying over what
+is not news, so **a field added later is news by default**. Carried over:
+`uptime_seconds` (moves every tick by construction), the observed-latency hint,
+figures inside a deadband measured from the last SENT value (memory 256 MB,
+disk 1 GB, coordinate 5 ms — send-on-delta, so a value on a grid line cannot
+flap), and **free RAM wherever its one reader would not see it**.
+
+### The field that held it open
+
+The first gated build only halved the rate on the two-node rig (7 updates in
+420 s vs 14 on .232). Making the publish NAME its changed fields
+(`DIAG: capability published`, debug, field `why`) found one: `ram_available_mb`, the
+host's free-memory reading, which moves with every other program on the
+machine. Its only reader is `NodeCapability::memory_for_model_layers_mb`, which
+falls back to it only from a node stating neither a RAM budget nor a card —
+never this build. So it is carried over whenever that reader's answer would not
+change, and keeps its deadband where it would.
+
+### Verified (2026-10-10, `examples/capability_gate_rig.sh`, two empty nodes in a private network namespace)
+
+| build | host | updates B received in 420 s | reasons A logged |
+|---|---|---|---|
+| .232 | idle | 14 | — (ungated) |
+| gate, free RAM deadbanded | idle | 2 | `ram_available_mb` ×2 |
+| gate, free RAM carried over | 1.5 GB allocated/freed every 15 s (MemAvailable swinging ~1.6 GB) | **1** | `first`, then `heartbeat` |
+
+Null control: with the carry-over disabled,
+`free_ram_is_news_only_where_a_peer_reads_it` fails.
+
+### What a change must keep
+
+- Liveness stays on `HealthPing`/`last_seen`. Anything that starts ageing a
+  capability by its arrival time must first drop the heartbeat below its window.
+- A new figure that moves on an idle node needs a deadband or a carry-over in
+  `capability_news`, or it silently re-opens the gate — the publish's `why=`
+  shows which.
 
 ## The repetition, not the size: holders re-announcing each other (2026-09-23)
 
@@ -3686,10 +3754,8 @@ relays is what it received.
 
 → `docs/invariants/network.md` § "Gossip volume"
 
-⚠ **`NodeCapabilityUpdate` is still broadcast every tick and is NOT
-change-gated** — `ram_available_mb`, `disk_available_mb` and `uptime_seconds`
-move every tick, so it cannot be gated as it stands without separating the
-stable fields from the volatile ones. → `docs/FUTURE_WORK.md` #91.
+`NodeCapabilityUpdate` is change-gated since 2026-10-10 (on a meaningful change
+or every 5 min, KEP-589) — § "The capability, once Trickle had worked".
 
 → `docs/invariants/network.md`
 

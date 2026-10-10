@@ -329,6 +329,10 @@ pub struct NodeCapability {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cpu: Option<CpuInfo>,
     pub ram_total_mb: u64,
+    /// The operating system's free-memory reading. A peer reads it only through
+    /// `memory_for_model_layers_mb`, so a node does not republish a change to it
+    /// that reader would not see (`capability_news` in the node's health
+    /// monitor): a new reader gets it up to five minutes stale.
     pub ram_available_mb: u64,
     /// How much system memory this node will actually let a model take right
     /// now — its own admission ceiling, not the operating system's free-memory

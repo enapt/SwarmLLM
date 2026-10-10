@@ -816,19 +816,22 @@ libp2p-connection-limits has no per-protocol exemption). A dial by bare address 
 does the same.
 
 #### #91 — An idle node still uploads ~20 KB/s of gossip, and a total traffic ceiling does not exist
-`P2` · network · **PARTIAL** — 2026-09-18 · history: archive row #91, `docs/invariants/network.md`
+`P2` · network · **PARTIAL** — 2026-10-10 · history: archive row #91, `docs/invariants/network.md`
 
 Trickle suppression (`MANIFEST_QUIET_WINDOW`), per-(model, hash) `manifest_heard`,
 per-category counters and the region-demand split shipped in .200-.206 and halved it (42 →
 ~20 KB/s each way; it once extrapolated to ~159 GB/month — the complaint that makes people
-uninstall a P2P app). Open: (1) re-measure on a fleet fully on .206+ (target ~0.02 manifest
-messages/s; 0.046 measured with a mixed fleet) before any redesign; (2) a manifest without
+uninstall a P2P app). Re-measured 2026-10-10 on the release node (.232, 2.6 h up, idle):
+11.6 KB/s out, 7.7 KB/s of it gossip; manifests down to 208-428 B/s received, and the
+capability broadcast had become ~60% of first-copy gossip — so it is now change-gated (on a
+meaningful change or every 5 min, KEP-589; 14 → 1 update per 7 min on the two-node rig),
+`docs/invariants/network.md` § "The capability, once Trickle had worked". Open: (1)
+re-measure once the fleet runs the gate, before any redesign; (2) a manifest without
 its tensor table — blocked on an integrity order: `compute_hash` covers the table and
 `acquisition.rs` calls `verify_hash_strict` before fetching a header, so it must become
 fetch header → derive → verify, feature-bit gated, omitted only when every connected peer
 advertises it; (3) a both-direction traffic ceiling at the transport (risky — throttling
-gossip can partition a node); `max_bandwidth_mbps` shapes part serving only. A
-`NodeCapabilityUpdate` change-gate was deliberately skipped (3.4% of bytes).
+gossip can partition a node); `max_bandwidth_mbps` shapes part serving only.
 
 #### #169 — Connection churn on multi-interface hosts: only the LAN dial is deterministic
 `P3` · network · **PARTIAL** — 2026-07-25 · history: archive § "Connection churn on multi-interface hosts — deterministic dialer partial", gotcha #353
