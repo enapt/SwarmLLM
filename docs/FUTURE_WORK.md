@@ -421,6 +421,16 @@ the other, with nothing of ours — whether FECS follow two processes' work meet
 (b) the shape under memcheck again with several request boundaries (`REPEAT` ≥ 3, `max_tokens`
 small enough to finish inside the client's 900 s), to give the illegal access more chances to show.
 
+**Step (a), 2026-10-10 06:12-06:17Z (fresh boot, Windows up 0.1 h):** `~/swarmllm-220/twoproc.sh` —
+two plain CUDA processes (`twoproc.cu`: busy kernels, a small copy back, a 256 MB allocation freed
+every 20 rounds; 200 rounds of 50 ms each), three arms one after the other and three at once,
+alternating, under the kit. **0 driver events in all six arms** (kit: 9 polls, 0 events, 0 failed
+queries; the System log for the window holds no nvlddmkm event). That does NOT clear two processes:
+every FECS so far came at 49-80 h of uptime (10-03 52 h, 10-04 ~80 h, 10-09 49 h, 10-10 61.7 h), and
+card behaviour drifts with uptime (#755). The discriminating run is the same rig, with arms ~10x
+longer, at ~48-60 h — FECS in "at once" and none in "one after the other" there would put the cause in
+the driver with two contexts, with nothing of ours. Not past ~100 h (#804: TDRs came at 150 h+).
+
 #### #193 — A whole-model reply travels as independent messages; only the serving node dying now loses it
 `P3` · reliability · **PARTIAL** — 2026-09-02 · absorbs archive § "The reply stream has no reliability layer…" and § "Intermittent token loss on the remote-generate fast path"; history: archive § "Replies truncated on the remote-generate fast path"
 
