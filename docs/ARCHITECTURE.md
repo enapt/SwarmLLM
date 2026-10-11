@@ -68,7 +68,7 @@ swarmllm/
 ├── docs/plans/    (design notes + benchmarks/, archive/)
 ├── docs/book/     (mdBook documentation site)
 ├── vendor/        (patched upstream crates, all workspace-`exclude`d; every patch marked `SwarmLLM patch:`)
-│   ├── candle/                (k_quants::matmul tiled + row-blocked + `vec_dot_rows` multi-row AVX2 Q4_K/Q6_K kernels, bit-identical, exactness-asserted by qmatmul_bench; cudarc dynamic-linking hardcode removed;
+│   ├── candle/                (k_quants::matmul tiled + row-blocked + `vec_dot_rows` multi-row AVX2 Q4_K/Q6_K/Q2_K/Q3_K kernels (`SWARMLLM_QMATMUL_ROWS=per-row` = the per-row loop), bit-identical, exactness-asserted by qmatmul_bench; cudarc dynamic-linking hardcode removed;
 │   │                          QTensor::gather_rows — read rows out of a quantized tensor
 │   │                          without dequantizing it whole, CPU slice + CUDA index_select
 │   │                          over a byte view; the embedding table is the caller;
@@ -142,7 +142,8 @@ swarmllm/
 │                 decode_attn.cu — one-position attention over the KV cache, f32 or
 │                 the card's half cache (flash-decoding), NOT bit-identical;
 │                 kv_append.cu — a step's f32 K or V written into the half cache in ONE
-│                 launch (cast + copy). A NEW kernel goes here, not into
+│                 launch (cast + copy); delta_rule.cu — Qwen 3.5's gated delta rule,
+│                 every token of a layer in one launch, NOT bit-identical. A NEW kernel goes here, not into
 │                 vendor/candle/candle-kernels — that copy exists for one upstream fix)
 └── tests/         (integration tests)
 ```

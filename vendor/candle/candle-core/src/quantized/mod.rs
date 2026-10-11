@@ -540,7 +540,7 @@ where
             let n = MATMUL_ROW_BLOCK.min(rows - base);
             let block = &lhs[base * k_in_blocks..(base + n) * k_in_blocks];
             for (j, out) in dst.chunks_mut(rows).enumerate() {
-                T::vec_dot_rows(k, col(j), block, n, &mut out[base..base + n]);
+                k_quants::vec_dot_rows_chosen::<T>(k, col(j), block, n, &mut out[base..base + n]);
             }
             base += n;
         }

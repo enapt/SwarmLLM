@@ -38,6 +38,9 @@ stages! {
     // the two cost an order of magnitude apart (FUTURE_WORK #138).
     MoeCard    => "moe ffn on the card  (route + experts + combine)",
     MoeCpu     => "moe ffn on the processor (route + experts + combine)",
+    // Qwen 3.5's gated delta rule — the recurrence of three layers in four,
+    // token by token until 2026-10-11 (FUTURE_WORK #228 (3)).
+    DeltaRule  => "delta rule           (qwen 3.5 recurrent state)",
     // The residual add that precedes each norm is timed here too: on CUDA it is
     // one fused kernel with the norm (`inference::residual_norm`), so there is
     // no separate add left to time. It was its own stage until 2026-09-23.

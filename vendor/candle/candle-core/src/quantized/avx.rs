@@ -574,6 +574,241 @@ pub(crate) fn vec_dot_q3k_q8k(n: usize, xs: &[BlockQ3K], ys: &[BlockQ8K]) -> f32
     }
 }
 
+/// SwarmLLM patch: one Q2_K column against `rows` Q8_K rows at once, as
+/// [`vec_dot_rows_q4k_q8k`] does for Q4_K (FUTURE_WORK #138: a mixture-of-
+/// experts prompt on the processor, whose Q2_K files are this type). Every row
+/// keeps its own accumulators and sees `vec_dot_q2k_q8k`'s FLOAT operations in
+/// the same order; the column-side work — scale and min unpack, the 2-bit
+/// split, the shuffled scales — is done once for all rows. The integer partial
+/// sums are added in another grouping, which is exact (wrapping `i32` addition
+/// is associative), so the result is bit-identical. Rows four at a time; the
+/// tail takes the single-row kernel.
+#[inline(always)]
+pub(crate) fn vec_dot_rows_q2k_q8k(
+    n: usize,
+    xs: &[BlockQ2K],
+    ys: &[BlockQ8K],
+    rows: usize,
+    out: &mut [f32],
+) {
+    let kb = xs.len();
+    debug_assert!(
+        n.is_multiple_of(QK_K),
+        "vec_dot_rows_q2k_q8k: {n} is not divisible by {QK_K}"
+    );
+    debug_assert_eq!(ys.len(), rows * kb, "vec_dot_rows_q2k_q8k: rows × blocks");
+    debug_assert!(out.len() >= rows);
+    const R: usize = 4;
+    let mut r0 = 0;
+    while r0 + R <= rows {
+        unsafe {
+            dot_q2k_q8k_rows::<R>(xs, &ys[r0 * kb..(r0 + R) * kb], kb, &mut out[r0..r0 + R]);
+        }
+        r0 += R;
+    }
+    for r in r0..rows {
+        out[r] = vec_dot_q2k_q8k(n, xs, &ys[r * kb..(r + 1) * kb]);
+    }
+}
+
+/// `R` rows of `vec_dot_q2k_q8k` sharing one pass over the column. Kept in
+/// lock-step with the single-row kernel: change one, change both
+/// (`multi_row_kernels_are_bit_identical_to_the_per_row_ordering`).
+#[inline(always)]
+unsafe fn dot_q2k_q8k_rows<const R: usize>(xs: &[BlockQ2K], ys: &[BlockQ8K], kb: usize, out: &mut [f32]) {
+    let m3 = _mm256_set1_epi8(3);
+    let m4 = _mm_set1_epi8(0xF);
+    let mut acc = [_mm256_setzero_ps(); R];
+
+    for (bi, x) in xs.iter().enumerate() {
+        let xd = x.d.to_f32();
+        let xdmin = x.dmin.to_f32();
+
+        let mins_and_scales = _mm_loadu_si128(x.scales.as_ptr() as *const __m128i);
+        let scales8 = _mm_and_si128(mins_and_scales, m4);
+        let mins8 = _mm_and_si128(_mm_srli_epi16(mins_and_scales, 4), m4);
+        let mins = _mm256_cvtepi8_epi16(mins8);
+        let all_scales = _mm256_cvtepi8_epi16(scales8);
+        let l_scales = _mm256_extracti128_si256(all_scales, 0);
+        let h_scales = _mm256_extracti128_si256(all_scales, 1);
+        let scales = [
+            mm256_set_m128i(l_scales, l_scales),
+            mm256_set_m128i(h_scales, h_scales),
+        ];
+
+        // Row-side: the mins term first, as the single-row kernel adds it.
+        let mut ds = [0f32; R];
+        let mut q8p: [*const i8; R] = [std::ptr::null(); R];
+        for r in 0..R {
+            let y = &ys[r * kb + bi];
+            ds[r] = y.d * xd;
+            let dmin = -y.d * xdmin;
+            let prod =
+                _mm256_madd_epi16(mins, _mm256_loadu_si256(y.bsums.as_ptr() as *const __m256i));
+            acc[r] = _mm256_fmadd_ps(_mm256_broadcast_ss(&dmin), _mm256_cvtepi32_ps(prod), acc[r]);
+            q8p[r] = y.qs.as_ptr();
+        }
+
+        let mut sumi = [_mm256_setzero_si256(); R];
+        let mut q2 = x.qs.as_ptr();
+        for scale in scales {
+            let q2bits = _mm256_loadu_si256(q2 as *const __m256i);
+            q2 = q2.add(32);
+            macro_rules! part {
+                ($i:literal, $shift:literal) => {{
+                    let q2_i = _mm256_and_si256(_mm256_srli_epi16(q2bits, $shift), m3);
+                    let sc_i = _mm256_shuffle_epi8(scale, get_scale_shuffle_q3k($i));
+                    for r in 0..R {
+                        let q8 = _mm256_loadu_si256(q8p[r].add(32 * $i) as *const __m256i);
+                        let p = _mm256_madd_epi16(sc_i, _mm256_maddubs_epi16(q2_i, q8));
+                        sumi[r] = _mm256_add_epi32(sumi[r], p);
+                    }
+                }};
+            }
+            part!(0, 0);
+            part!(1, 2);
+            part!(2, 4);
+            part!(3, 6);
+            for p in q8p.iter_mut() {
+                *p = p.add(128);
+            }
+        }
+        for r in 0..R {
+            acc[r] = _mm256_fmadd_ps(
+                _mm256_broadcast_ss(&ds[r]),
+                _mm256_cvtepi32_ps(sumi[r]),
+                acc[r],
+            );
+        }
+    }
+    for r in 0..R {
+        out[r] = hsum_float_8(acc[r]);
+    }
+}
+
+/// SwarmLLM patch: one Q3_K column against `rows` Q8_K rows at once — the same
+/// contract as [`vec_dot_rows_q2k_q8k`]: the column's 2-bit and high-bit split
+/// and its shuffled scales done once, each row's FLOAT operations in
+/// `vec_dot_q3k_q8k`'s order, the exact integer sums regrouped.
+#[inline(always)]
+pub(crate) fn vec_dot_rows_q3k_q8k(
+    n: usize,
+    xs: &[BlockQ3K],
+    ys: &[BlockQ8K],
+    rows: usize,
+    out: &mut [f32],
+) {
+    let kb = xs.len();
+    debug_assert!(
+        n.is_multiple_of(QK_K),
+        "vec_dot_rows_q3k_q8k: {n} is not divisible by {QK_K}"
+    );
+    debug_assert_eq!(ys.len(), rows * kb, "vec_dot_rows_q3k_q8k: rows × blocks");
+    debug_assert!(out.len() >= rows);
+    const R: usize = 4;
+    let mut r0 = 0;
+    while r0 + R <= rows {
+        unsafe {
+            dot_q3k_q8k_rows::<R>(xs, &ys[r0 * kb..(r0 + R) * kb], kb, &mut out[r0..r0 + R]);
+        }
+        r0 += R;
+    }
+    for r in r0..rows {
+        out[r] = vec_dot_q3k_q8k(n, xs, &ys[r * kb..(r + 1) * kb]);
+    }
+}
+
+/// `R` rows of `vec_dot_q3k_q8k` sharing one pass over the column. Kept in
+/// lock-step with the single-row kernel: change one, change both.
+#[inline(always)]
+unsafe fn dot_q3k_q8k_rows<const R: usize>(xs: &[BlockQ3K], ys: &[BlockQ8K], kb: usize, out: &mut [f32]) {
+    const KMASK1: u32 = 0x03030303;
+    const KMASK2: u32 = 0x0f0f0f0f;
+    let mut aux = [0u32; 3];
+    let m3 = _mm256_set1_epi8(3);
+    let mone = _mm256_set1_epi8(1);
+    let m32 = _mm_set1_epi8(32);
+    let mut acc = [_mm256_setzero_ps(); R];
+
+    for (bi, x) in xs.iter().enumerate() {
+        let xd = x.d.to_f32();
+
+        LittleEndian::read_u32_into(&x.scales, &mut aux);
+        let scales128 = _mm_set_epi32(
+            (((aux[1] >> 4) & KMASK2) | (((aux[2] >> 6) & KMASK1) << 4)) as i32,
+            (((aux[0] >> 4) & KMASK2) | (((aux[2] >> 4) & KMASK1) << 4)) as i32,
+            ((aux[1] & KMASK2) | (((aux[2] >> 2) & KMASK1) << 4)) as i32,
+            ((aux[0] & KMASK2) | (((aux[2]) & KMASK1) << 4)) as i32,
+        );
+        let scales128 = _mm_sub_epi8(scales128, m32);
+        let all_scales = _mm256_cvtepi8_epi16(scales128);
+        let l_scales = _mm256_extracti128_si256(all_scales, 0);
+        let h_scales = _mm256_extracti128_si256(all_scales, 1);
+        let scales = [
+            mm256_set_m128i(l_scales, l_scales),
+            mm256_set_m128i(h_scales, h_scales),
+        ];
+        let hbits = _mm256_loadu_si256(x.hmask.as_ptr() as *const __m256i);
+
+        let mut ds = [0f32; R];
+        let mut q8p: [*const i8; R] = [std::ptr::null(); R];
+        for r in 0..R {
+            let y = &ys[r * kb + bi];
+            ds[r] = y.d * xd;
+            q8p[r] = y.qs.as_ptr();
+        }
+
+        let mut sumi = [_mm256_setzero_si256(); R];
+        let mut q3 = x.qs.as_ptr();
+        for (j, scale) in scales.iter().enumerate() {
+            let q3bits = _mm256_loadu_si256(q3 as *const __m256i);
+            q3 = q3.add(32);
+            // Part `i` of this half: low 2 bits shifted by `$lo`, the high bit
+            // `$h` of the first half's mask or `$h + 4` of the second's.
+            macro_rules! part {
+                ($i:literal, $lo:literal, $h:literal, $h2:literal) => {{
+                    let q3l = _mm256_and_si256(_mm256_srli_epi16(q3bits, $lo), m3);
+                    let q3h = if j == 0 {
+                        _mm256_srli_epi16(_mm256_andnot_si256(hbits, _mm256_slli_epi16(mone, $h)), $h)
+                    } else {
+                        _mm256_srli_epi16(
+                            _mm256_andnot_si256(hbits, _mm256_slli_epi16(mone, $h2)),
+                            $h2,
+                        )
+                    };
+                    let q3h = _mm256_slli_epi16(q3h, 2);
+                    let sc = _mm256_shuffle_epi8(*scale, get_scale_shuffle_q3k($i));
+                    for r in 0..R {
+                        let q8 = _mm256_loadu_si256(q8p[r].add(32 * $i) as *const __m256i);
+                        let q8s = _mm256_maddubs_epi16(q3h, q8);
+                        let p16 = _mm256_maddubs_epi16(q3l, q8);
+                        let p16 = _mm256_sub_epi16(p16, q8s);
+                        let p16 = _mm256_madd_epi16(sc, p16);
+                        sumi[r] = _mm256_add_epi32(sumi[r], p16);
+                    }
+                }};
+            }
+            part!(0, 0, 0, 4);
+            part!(1, 2, 1, 5);
+            part!(2, 4, 2, 6);
+            part!(3, 6, 3, 7);
+            for p in q8p.iter_mut() {
+                *p = p.add(128);
+            }
+        }
+        for r in 0..R {
+            acc[r] = _mm256_fmadd_ps(
+                _mm256_broadcast_ss(&ds[r]),
+                _mm256_cvtepi32_ps(sumi[r]),
+                acc[r],
+            );
+        }
+    }
+    for r in 0..R {
+        out[r] = hsum_float_8(acc[r]);
+    }
+}
+
 #[inline(always)]
 pub(crate) fn vec_dot_q4k_q8k(n: usize, xs: &[BlockQ4K], ys: &[BlockQ8K]) -> f32 {
     debug_assert!(

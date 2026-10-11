@@ -575,7 +575,7 @@ mod cuda {
 
 /// 8-lane dot product (independent accumulators so LLVM vectorises it).
 #[inline(always)]
-fn dot(a: &[f32], b: &[f32]) -> f32 {
+pub(crate) fn dot(a: &[f32], b: &[f32]) -> f32 {
     let mut acc = [0f32; 8];
     let (ca, ra) = a.as_chunks::<8>();
     let (cb, rb) = b.as_chunks::<8>();
@@ -593,7 +593,7 @@ fn dot(a: &[f32], b: &[f32]) -> f32 {
 
 /// `y += a * x` over equal-length slices.
 #[inline(always)]
-fn axpy(a: f32, x: &[f32], y: &mut [f32]) {
+pub(crate) fn axpy(a: f32, x: &[f32], y: &mut [f32]) {
     for (yi, xi) in y.iter_mut().zip(x) {
         *yi += a * xi;
     }

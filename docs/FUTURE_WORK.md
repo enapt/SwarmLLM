@@ -86,9 +86,9 @@ re-fetching parts) and #223 closed in v0.3.228 (released 2026-10-06 09:42 UTC), 
     belongs, which keeps partial ranges (load spreading) off.
 13. **#171** — the prompt pass through a split runs one stage at a time (released in v0.3.234; left:
     pieces chained between two peers for a pass that does not keep its prompt).
-14. **#228** — Qwen 3.5's first version leaves out the chunked delta rule, CUDA-graph capture and
-    speculation (its card/processor split shipped in v0.3.230; its MoE models run since 2026-10-11,
-    unreleased).
+14. **#228** — Qwen 3.5's first version leaves out CUDA-graph capture and speculation (its
+    card/processor split shipped in v0.3.230; its MoE models run and its delta rule is one op per
+    layer since 2026-10-11, unreleased).
 
 Everything else is ranked in its own entry. **P3** is narrow or cosmetic, **P4** is process,
 maintenance or an idea with no user waiting on it.
@@ -946,7 +946,12 @@ copies the RAM-held weights over for it (`ggml_backend_cuda_device_offload_op` �
 why its pp512 is 537-571 tok/s with 20 or all 48 layers' experts in RAM, against our ~52
 (681 tokens in 13 s, 5.5 s of it the processor's experts). Needs a layer's experts in flight on the card
 (~200 MB here, all 128 touched by a 512-token chunk), ~4.4 GB over PCIe per chunk for 22
-layers, and 512-token chunks on a split model (128 makes it six uploads). The card's own
+layers, and 512-token chunks on a split model (128 makes it six uploads) — measured alone
+2026-10-11 (`~/swarmllm-138/rows_chunk.sh` § 2, ABBA, replies identical): 512 against 128 a
+forward takes this 26/22 split 10.0-10.2 → 8.4-8.7 s, but Qwen2.5-14B split 20/28 only
+28.6-28.8 → 27.7-28.1 and the processor alone 3-6% (MoE 14.7-15.1 → 13.8-14.2, Llama-3.2-3B
+10.6 → 10.3), for 4× the wait a second conversation can meet behind one chunk (~20 s on the
+14B). So `prompt_chunk_ceiling` keeps 128 off the card until (1) needs it. The card's own
 share is 1.5 s stacked against 1.2 s per expert (synced) — the tensor-core kernel is the
 slower there, a smaller item. (2) **MoE layers in decode-step capture**: a stacked layer has
 no host copy, so a MoE model whole on a card could be captured (`executor.rs` still excludes
@@ -1153,9 +1158,15 @@ the admission context, the margin by which it missed an 8 GB card. All three, an
 scheduler's bound on a peer (`kv_bytes_per_position_per_layer`, from the manifest's tensor
 table), now ask `split::layers_keeping_kv` (the real 9B header: attention at layers 3, 7, …, 31, llama.cpp's
 rule). Still uncharged: each DeltaNet layer's per-request state (~2 MB a layer for the 9B,
-covered by the forward-buffer reserve); (3) the delta rule runs token by token — correct, slow for a long prompt on a card
-(llama.cpp's `build_delta_net_chunking` is the reference); (4) decode is never captured as a CUDA
-graph ("a layer type the capture has not been checked on"); (5) no speculation of any kind — a
+covered by the forward-buffer reserve); (3) ~~the delta rule runs token by token~~ — **one op per
+layer since 2026-10-11, not yet released.** llama.cpp master no longer chunks it either: its fused
+`GGML_OP_GATED_DELTA_NET` runs every prompt and decode step (`fused_gdn_ar` / `fused_gdn_ch` on by
+default, read at `4b1a27f`), so neither do we — `layers::qwen35::delta_rule_cpu` (a task per sequence
+and value head, each state row decayed, corrected and read in one pass) and on a card
+`kernels/delta_rule.cu` (llama.cpp's `gated_delta_net_cuda`, a warp per state row). A 685-token prompt on the 4B: 55.8 → 19.8-21.1 s on the processor (llama.cpp 14.9 s), 2.6 → 0.49-0.53 s whole on the card; the card kernel agrees with llama.cpp at top-1 200/200.
+`SWARMLLM_DELTA_RULE=steps` is the old composition (`docs/invariants/inference.md` § "Qwen 3.5's
+delta rule is ONE op per layer"); (4) decode is never captured as a CUDA graph ("a layer type the
+capture has not been checked on") — with the delta rule one launch a layer, this is the next step; (5) no speculation of any kind — a
 snapshot of the recurrent state per draft would allow it; (6) ~~the 4B's gap to llama.cpp~~ —
 checked 2026-10-07, not a defect: six prompts scored on the processor against llama.cpp master
 (`score_ids_dump.py`, margin 0.05) — Qwen 3.5 4B Q4_K_M misses on 3 (gaps 0.11-0.21), and
@@ -1711,7 +1722,15 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-11, not yet released** (#224, #137's main half, #228 (1), #138's processor decode, card and prompt steps)
+**Closed 2026-10-11, not yet released** (#224, #137's main half, #228 (1) and (3), #138's processor decode, card and prompt steps and its Q2_K/Q3_K kernels)
+- #228 (3) — **Qwen 3.5 reads a prompt about 2.7 times faster on the processor and 5 times on the card**: three layers in four are DeltaNet layers, whose
+  recurrence ran as ~10 tensor operations per token per layer (a 681-token prompt on the 4B made
+  ~160,000 of them); it is one operation per layer now, on the processor and on the card, as
+  llama.cpp master runs it. A 685-token prompt on the 4B: 55.8 → 19.8-21.1 s on the processor, 2.6-2.7 → 0.49-0.53 s on the card (`~/swarmllm-138/rows_chunk.sh` § 3). Replies agree with llama.cpp as closely as before (not
+  bit-identical: the sums run in another order).
+- #138's Q2_K/Q3_K kernels — **a Q2_K mixture-of-experts file's experts multiply several prompt
+  rows per pass on the processor**, as Q4_K and Q6_K already did (each weight block unpacked once
+  for four rows): on Qwen3-30B-A3B Q2_K the experts' share of a 681-token prompt is 8.0-8.2 s instead of 10.0-10.2 on the processor alone and 4.2-4.4 instead of 4.8-4.9 split 26/22 (`~/swarmllm-138/rows_chunk.sh` § 1). The reply is identical, bit for bit.
 - #138's processor prompt step — **a mixture-of-experts model reads a prompt 3.5-4.7x faster
   when its experts are on the processor**: every expert's products for every token in one
   parallel region per projection, each expert's weights read once per pass for all of its

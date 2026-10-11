@@ -82,6 +82,30 @@ pub(crate) fn vec_dot_rows_generic<T: GgmlType>(
     }
 }
 
+/// SwarmLLM patch: the one call a matmul makes for several activation rows
+/// (`matmul` here, `matmul_rows` in `quantized/mod.rs`).
+/// `SWARMLLM_QMATMUL_ROWS=per-row` sends it through the per-row loop instead
+/// of a type's own several-row kernel — the A/B that prices those kernels
+/// inside one binary; the outputs are the same bits either way. Read once.
+#[inline]
+pub(crate) fn vec_dot_rows_chosen<T: GgmlType>(
+    n: usize,
+    xs: &[T],
+    ys: &[T::VecDotType],
+    rows: usize,
+    out: &mut [f32],
+) {
+    static PER_ROW: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let per_row = *PER_ROW.get_or_init(|| {
+        std::env::var("SWARMLLM_QMATMUL_ROWS").is_ok_and(|v| v == "per-row")
+    });
+    if per_row {
+        vec_dot_rows_generic::<T>(n, xs, ys, rows, out)
+    } else {
+        T::vec_dot_rows(n, xs, ys, rows, out)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 #[repr(C)]
 pub struct BlockQ4_0 {
@@ -792,6 +816,15 @@ impl GgmlType for BlockQ2K {
         Self::vec_dot_unopt(n, xs, ys)
     }
 
+    // SwarmLLM patch: AVX2 multi-row kernel (see `avx::vec_dot_rows_q2k_q8k`).
+    #[allow(unreachable_code)]
+    fn vec_dot_rows(n: usize, xs: &[Self], ys: &[Self::VecDotType], rows: usize, out: &mut [f32]) {
+        #[cfg(target_feature = "avx2")]
+        return super::avx::vec_dot_rows_q2k_q8k(n, xs, ys, rows, out);
+
+        vec_dot_rows_generic::<Self>(n, xs, ys, rows, out)
+    }
+
     fn vec_dot_unopt(n: usize, xs: &[Self], ys: &[Self::VecDotType]) -> f32 {
         debug_assert!(
             n.is_multiple_of(QK_K),
@@ -1020,6 +1053,15 @@ impl GgmlType for BlockQ3K {
         return super::neon::vec_dot_q3k_q8k(n, xs, ys);
 
         Self::vec_dot_unopt(n, xs, ys)
+    }
+
+    // SwarmLLM patch: AVX2 multi-row kernel (see `avx::vec_dot_rows_q3k_q8k`).
+    #[allow(unreachable_code)]
+    fn vec_dot_rows(n: usize, xs: &[Self], ys: &[Self::VecDotType], rows: usize, out: &mut [f32]) {
+        #[cfg(target_feature = "avx2")]
+        return super::avx::vec_dot_rows_q3k_q8k(n, xs, ys, rows, out);
+
+        vec_dot_rows_generic::<Self>(n, xs, ys, rows, out)
     }
 
     fn vec_dot_unopt(n: usize, xs: &[Self], ys: &[Self::VecDotType]) -> f32 {
@@ -2415,9 +2457,10 @@ pub fn matmul<T: GgmlType>(
                     // SWARMLLM PATCH — all rows of this block through one call,
                     // so a SIMD type can unpack the column once for every row
                     // instead of once per (column, row) pair (`vec_dot_rows`;
-                    // the Q4_K AVX2 kernel does 8 rows per pass, Q6_K 4, both
-                    // bit-identical to the per-row loop that is the default).
-                    T::vec_dot_rows(k, rhs_col, lhs_blk, rows, &mut slot[row_base..row_base + rows]);
+                    // the Q4_K AVX2 kernel does 8 rows per pass, Q6_K, Q2_K and
+                    // Q3_K 4, all bit-identical to the per-row loop that is the
+                    // default).
+                    vec_dot_rows_chosen::<T>(k, rhs_col, lhs_blk, rows, &mut slot[row_base..row_base + rows]);
                 }
             });
         row_base += rows;

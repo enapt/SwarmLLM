@@ -1641,6 +1641,15 @@ projection`. One matrix per expert (`SWARMLLM_MOE_CARD=per-expert`) copies the
 router scores to the host, so there the card stage absorbs queued attention
 work instead. The other A/B switches: `SWARMLLM_MOE_CARD_PROMPT=rows` (a prompt
 on the one-row kernel), `SWARMLLM_MOE_CPU=per-expert` (FUTURE_WORK #138).
+Under every quantized product on the processor, `SWARMLLM_QMATMUL_ROWS=per-row`
+sends the several-row kernels (Q4_K, Q6_K, Q2_K, Q3_K) through the per-row loop —
+bit-identical replies, so any difference is the kernels' time.
+
+**Qwen 3.5 shows `delta rule`** — its DeltaNet layers' recurrence, three layers in
+four. One op per layer since 2026-10-11 (processor and card);
+`SWARMLLM_DELTA_RULE=steps` is the token-by-token composition it replaced, ~10
+ops per token per layer — not bit-identical, so judge both against llama.cpp
+(FUTURE_WORK #228 (3)).
 
 **Measure a prompt in the shape a node reads it.** `test-split` reads the whole
 prompt in one forward; a node reads 128 tokens a forward unless the model is

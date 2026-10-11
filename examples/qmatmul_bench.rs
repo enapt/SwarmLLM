@@ -7,7 +7,8 @@
 //! ```bash
 //! cargo run --release --no-default-features --features dev --example qmatmul_bench
 //! ```
-use candle_core::quantized::k_quants::{matmul, BlockQ4K, BlockQ6K, GgmlType};
+use candle_core::quantized::k_quants::{matmul, BlockQ2K, BlockQ3K, BlockQ4K, BlockQ6K, GgmlType};
+use rayon::prelude::*;
 
 /// Reproduces the ORIGINAL upstream algorithm (batch row outer, full weight
 /// sweep per row) so the tiled kernel can be checked against it. Every dst
@@ -36,6 +37,65 @@ fn reference<T: GgmlType>(
     }
 }
 
+/// `matmul`'s tiled loop with every element its own `vec_dot` — the shape
+/// before the several-row kernels (`GgmlType::vec_dot_rows`), so one run
+/// prices them against it: an A/B inside one binary.
+fn matmul_per_row<T: GgmlType>(
+    (m, k, n): (usize, usize, usize),
+    lhs: &[f32],
+    rhs_t: &[T],
+    dst: &mut [f32],
+) {
+    const COL_BLOCK: usize = 64;
+    const ROW_BLOCK: usize = 128;
+    let kb = k / T::BLCK_SIZE;
+    let mut lhs_b = vec![T::VecDotType::zeros(); m * kb];
+    lhs_b
+        .par_chunks_mut(kb)
+        .enumerate()
+        .for_each(|(r, b)| T::VecDotType::from_float(&lhs[r * k..(r + 1) * k], b));
+    let mut dst_t = vec![0f32; n * m];
+    let mut row_base = 0;
+    while row_base < m {
+        let rows = ROW_BLOCK.min(m - row_base);
+        dst_t
+            .par_chunks_mut(m * COL_BLOCK)
+            .enumerate()
+            .for_each(|(blk, chunk)| {
+                for (j, slot) in chunk.chunks_mut(m).enumerate() {
+                    let c = blk * COL_BLOCK + j;
+                    let col = &rhs_t[c * kb..(c + 1) * kb];
+                    for r in row_base..row_base + rows {
+                        slot[r] = T::vec_dot(k, col, &lhs_b[r * kb..(r + 1) * kb]);
+                    }
+                }
+            });
+        row_base += rows;
+    }
+    dst.par_chunks_mut(n).enumerate().for_each(|(r, row)| {
+        for (c, o) in row.iter_mut().enumerate() {
+            *o = dst_t[c * m + r];
+        }
+    });
+}
+
+/// Min-of-trials ms for one call of `f`.
+fn best_ms(m: usize, mut f: impl FnMut()) -> f64 {
+    // Min-of-trials: this box is a WSL2 laptop and the same unchanged code
+    // path measured 0.42ms and 0.97ms across runs. The minimum is the least
+    // contaminated estimate; a mean just averages in the interference.
+    let reps = if m <= 4 { 20 } else { 5 };
+    let mut best = f64::INFINITY;
+    for _ in 0..5 {
+        let t = std::time::Instant::now();
+        for _ in 0..reps {
+            f();
+        }
+        best = best.min(t.elapsed().as_secs_f64() * 1000.0 / reps as f64);
+    }
+    best
+}
+
 fn bench<T: GgmlType>(label: &str, k: usize, n: usize, ms: &[usize]) {
     let k_in_blocks = k / T::BLCK_SIZE;
 
@@ -53,8 +113,8 @@ fn bench<T: GgmlType>(label: &str, k: usize, n: usize, ms: &[usize]) {
 
     println!("\n  {label}  (k={k}, n={n})");
     println!(
-        "      {:>4}  {:>10}  {:>12}  {:>10}",
-        "m", "total ms", "ms per row", "vs m=1"
+        "      {:>4}  {:>10}  {:>12}  {:>10}  {:>14}  {:>10}",
+        "m", "total ms", "ms per row", "vs m=1", "per-row kernel", "rows gain"
     );
     let mut base = 0f64;
     for &m in ms {
@@ -70,26 +130,34 @@ fn bench<T: GgmlType>(label: &str, k: usize, n: usize, ms: &[usize]) {
             "tiled matmul differs from reference at m={m}: {bad}/{} elements",
             m * n
         );
-        // Min-of-trials: this box is a WSL2 laptop and the same unchanged code
-        // path measured 0.42ms and 0.97ms across runs. The minimum is the least
-        // contaminated estimate; a mean just averages in the interference.
-        let reps = if m <= 4 { 20 } else { 5 };
-        let mut best = f64::INFINITY;
-        for _ in 0..5 {
-            let t = std::time::Instant::now();
-            for _ in 0..reps {
-                matmul((m, k, n), &lhs, &rhs, &mut dst).unwrap();
-            }
-            best = best.min(t.elapsed().as_secs_f64() * 1000.0 / reps as f64);
+        let mut per_row_dst = vec![0f32; m * n];
+        matmul_per_row((m, k, n), &lhs, &rhs, &mut per_row_dst);
+        assert!(
+            per_row_dst
+                .iter()
+                .zip(&want)
+                .all(|(a, b)| a.to_bits() == b.to_bits()),
+            "the per-row arm differs from reference at m={m}"
+        );
+        // The arms alternate, so drift on this box lands on both.
+        let (mut total, mut per_row_total) = (f64::INFINITY, f64::INFINITY);
+        for _ in 0..2 {
+            total = total.min(best_ms(m, || {
+                matmul((m, k, n), &lhs, &rhs, &mut dst).unwrap()
+            }));
+            per_row_total = per_row_total.min(best_ms(m, || {
+                matmul_per_row((m, k, n), &lhs, &rhs, &mut per_row_dst)
+            }));
         }
-        let total = best;
         let per_row = total / m as f64;
         if m == 1 {
             base = per_row;
         }
         println!(
-            "      {m:>4}  {total:>10.2}  {per_row:>12.3}  {:>9.2}x",
-            base / per_row
+            "      {m:>4}  {total:>10.2}  {per_row:>12.3}  {:>9.2}x  {:>12.3}ms  {:>9.2}x",
+            base / per_row,
+            per_row_total / m as f64,
+            per_row_total / total
         );
     }
 }
@@ -210,6 +278,13 @@ fn main() {
     // Q4_K_M keeps ffn_down (and some attn_v) in Q6_K; its kernel has its own
     // multi-row path and must be checked and priced separately.
     bench::<BlockQ6K>("ffn down Q6_K", 8192, 3072, &[1, 4, 8, 43, 128, 896]);
+    // A Q2_K mixture-of-experts file (Qwen3-30B-A3B): each expert's gate/up
+    // in Q2_K, its down in Q3_K; a prompt gives each expert ~8-40 rows (#138).
+    bench::<BlockQ2K>("expert gate Q2_K", 2048, 768, &[1, 4, 8, 32, 128]);
+    bench::<BlockQ3K>("expert down Q3_K", 768, 2048, &[1, 4, 8, 32, 128]);
+    if std::env::args().any(|a| a == "--rows-only") {
+        return;
+    }
     pool_sweep();
     dequant_split();
 }

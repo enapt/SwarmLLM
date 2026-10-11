@@ -1057,13 +1057,15 @@ mod finalize_reply_text_tests {
 }
 
 /// The vendored multi-row quantized matmul kernels (`GgmlType::vec_dot_rows`,
-/// Q4_K four rows per pass, Q6_K four) promise bit-identical results to the
+/// Q4_K, Q6_K, Q2_K and Q3_K four rows per pass) promise bit-identical results to the
 /// per-row upstream ordering — each row keeps its own accumulators and sees
 /// the single-row kernel's operations in the same order. `examples/qmatmul_bench`
 /// asserts the same thing, but an example is not run by CI; this is.
 #[cfg(test)]
 mod qmatmul_exactness_tests {
-    use candle_core::quantized::k_quants::{matmul, BlockQ4K, BlockQ6K, GgmlType};
+    use candle_core::quantized::k_quants::{
+        matmul, BlockQ2K, BlockQ3K, BlockQ4K, BlockQ6K, GgmlType,
+    };
 
     /// The upstream algorithm: batch row outer, one `vec_dot` per element.
     fn reference<T: GgmlType>(
@@ -1124,6 +1126,8 @@ mod qmatmul_exactness_tests {
     fn multi_row_kernels_are_bit_identical_to_the_per_row_ordering() {
         check::<BlockQ4K>("Q4_K");
         check::<BlockQ6K>("Q6_K");
+        check::<BlockQ2K>("Q2_K");
+        check::<BlockQ3K>("Q3_K");
     }
 }
 

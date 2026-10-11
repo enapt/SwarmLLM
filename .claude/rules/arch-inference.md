@@ -66,7 +66,7 @@ GPU decode is bound by submission COUNT, not bandwidth. Judge a change by launch
 - **`QMatMul::forward_shared`** — Q/K/V and gate/up share ONE activation; BOTH `mul_mat_vec_via_q8_1` and `mul_mat_via_q8_1` must; LoRA after it.
 - **`layers::value_for_matmul`** — never `.contiguous()` a KV cache view before a matmul (`matmul_reads_rhs_in_place`).
 - ⚠⚠ **ONE CUDA STREAM PER DEVICE** (`SWARMLLM_CUDA_OWN_STREAM`, `=0` legacy); a second needs `SWARMLLM_CUDA_EVENT_TRACKING=1`. A buffer `to_device`'d to ANOTHER card device is ordered on both streams in the vendored `transfer_to_device` (gotcha #828). ⛔ Moving off legacy SHIPPED BROKEN in v0.3.199 — reproduce under `--features cuda` on a real generation. Guard: `the_vendored_attention_kernels_launch_on_the_devices_stream`.
-- **Fused kernels** (`kernels/*.cu`) are bit-identical to the candle ops they replace; a layer-end residual is `Residual::Pending` → `Residual::add_norm`.
+- **Fused kernels** (`kernels/*.cu`) are bit-identical to the candle ops they replace (except `decode_attn.cu` and `delta_rule.cu`, judged against llama.cpp); a layer-end residual is `Residual::Pending` → `Residual::add_norm`.
 
 → technique in `docs/DIAGNOSTICS.md` § "Where a decode token actually goes"
 
@@ -171,6 +171,12 @@ Qwen 3.5's DeltaNet layers keep a recurrent state per request, and a rejected dr
 
 → `docs/invariants/inference.md` § "A model whose state cannot be wound back is never speculated"
 
+## Qwen 3.5's delta rule is ONE op per layer (2026-10-11)
+
+`layers::qwen35::forward_deltanet` runs a layer's whole recurrence in one op: **`delta_rule_cpu`** (a task per sequence and value head, the state updated in place) and, on a card, **`delta_rule_cuda`** → `kernels/delta_rule.cu` (llama.cpp's `gated_delta_net_cuda`; scope `card_delta_rule_covers`). Value head h reads key head h % nk; q and k are normalised as one tensor. NOT bit-identical to the composition `delta_rule`, which stays as the A/B (`SWARMLLM_DELTA_RULE=steps`) and the reference of `one_pass_delta_rule_matches_token_by_token` — judge replies against llama.cpp. Profile stage `delta rule`.
+
+→ `docs/invariants/inference.md` § "Qwen 3.5's delta rule is ONE op per layer"
+
 ## A header and its tensor table describe ONE upload — compared before a tensor is read (2026-10-03)
 
 `split::loader::shards::first_header_disagreement` runs in `load_from_shards_inner`, the one place every load from parts passes: every table entry the parts hold must sit at the header's offset with the header's size (`split::tensor_byte_size`, the size tables are cut by), or the load is refused as `SwarmError::MixedModelCopy`. A mismatch never fails on its own — each read lands shifted inside its entry and the model answers garbage (#156). Compare per entry, never by re-deriving the layout (older tables must load). Rig: `split_rig.sh mixed`; null control `every_real_copy_agrees_with_its_own_header`. Parts whose BYTES are not the table's upload (a splice — header and table both agree) are invisible to it: `auto_manage::canonical`'s byte check deletes and re-fetches them (gotcha #782; rig `split_rig.sh spliced`).
@@ -236,7 +242,7 @@ replaced refused most agent prompts outright.
 
 Each names the ONE place a decision is made (`.claude/rules/architecture.md` § "One invariant, N paths"). **Read the topic file before changing one.**
 
-- **Vendored `GgmlType::vec_dot_rows` + the row-blocked tiled matmul** — `vendor/candle/candle-core/src/quantized/{k_quants,avx}.rs`.
+- **Vendored `GgmlType::vec_dot_rows` + the row-blocked tiled matmul** — `vendor/candle/candle-core/src/quantized/{k_quants,avx}.rs`. Several-row AVX2 kernels for Q4_K, Q6_K, Q2_K, Q3_K, bit-identical to the per-row loop; `k_quants::vec_dot_rows_chosen` is the one call (A/B `SWARMLLM_QMATMUL_ROWS=per-row`).
 - **`inference::decode_attn::gqa_decode_attention_cpu`** — each K/V row read ONCE per group. → § "It read the cache once per QUERY head"
 - **`inference::prefill_attn::gqa_prefill_attention_cpu`** — `q_len >= 2`.
 - **`inference::fast_math`** — `exp_inplace`, `silu_mul`.

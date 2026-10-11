@@ -265,6 +265,55 @@ forward had streamed ~3 MB from L3 per column, which is why a per-row cost measu
 at m=128 never carried to large m. The `examples/prefill_bench` single-forward
 number is only representative of the production 128-token chunks because of this.
 
+### Q2_K and Q3_K have several-row kernels too, and every one is priced in one binary (2026-10-11)
+
+A Q2_K mixture-of-experts file keeps each expert's gate and up in Q2_K and its down
+in Q3_K, and since `matmul_many` (FUTURE_WORK #138) a prompt hands each expert
+~8-40 rows a call — so those two types, which went through the per-row loop, carry
+the processor share of such a prompt. `dot_q2k_q8k_rows::<4>` and
+`dot_q3k_q8k_rows::<4>` (avx.rs) follow the Q6_K kernel's shape: per block the
+column side — scales, mins, the 2-bit (and for Q3_K the high-bit) planes — is
+unpacked once; each row keeps its own `acc` and `sumi`, applies its `dmin`/mins
+term and then its 16-lane products in the single-row kernel's order. The integer
+partial sums are regrouped only where i32 wrapping addition makes that exact.
+
+**A/B inside one binary**: `SWARMLLM_QMATMUL_ROWS=per-row` sends every several-row
+product through `vec_dot_rows_generic` (`k_quants::vec_dot_rows_chosen`, the one
+call both `matmul` and `matmul_rows` make), so the kernels' gain — never written
+down for Q4_K/Q6_K since August — is measured end to end. Tests:
+`multi_row_kernels_are_bit_identical_to_the_per_row_ordering` (Q4_K, Q6_K, Q2_K,
+Q3_K; red when a Q2_K row adds its mins term after its products, 263 of 384, and
+when Q3_K reads the wrong high bit, 384 of 384); `examples/qmatmul_bench` asserts
+exact equality for all four and prices each against the per-row loop
+(`--rows-only` stops after them).
+
+**Measured** (Ryzen 7 5800H, live node stopped, safety kit; `~/swarmllm-138/rows_chunk.sh`):
+
+In process (`examples/qmatmul_bench --rows-only`): the several-row kernel's time per row
+against the per-row loop on the same weights, by rows a call (m):
+
+| weight | m = 4 | 8 | 32-43 | 128 | 896 |
+|---|---|---|---|---|---|
+| attention projection, Q4_K 3072 × 3072 | 1.16× | 1.38× | 1.34× | 1.34× | 1.38× |
+| FFN up, Q4_K 3072 → 8192 | 1.25× | 1.29× | 1.37× | 1.39× | 1.42× |
+| FFN down, Q6_K 8192 → 3072 | 1.17× | 1.20× | 1.35× | 1.39× | 1.36× |
+| expert gate, Q2_K 2048 → 768 | 1.04× | 1.16× | 1.18× | 1.06× | — |
+| expert down, Q3_K 768 → 2048 | 0.95× | 1.11× | 1.19× | 1.25× | — |
+
+At m = 1 both are the single-row kernel (0.8-1.9× is timer noise on a 0.2-0.6 ms call).
+
+End to end, ABBA in one binary (`test-split --prompt-chunk 128`, as a node reads a prompt
+off the card; `SWARMLLM_QMATMUL_ROWS=per-row` turns off ALL FOUR kernels, so only the
+experts' line is the Q2_K/Q3_K change alone):
+
+| shape | default | per-row | stage that moved |
+|---|---|---|---|
+| Qwen3-30B-A3B Q2_K, 681 tokens, split 26/22 | 10.1-10.5 s | 11.4-11.5 s | experts on the processor 4.2-4.4 → 4.8-4.9 s |
+| the same, every layer on the processor | 14.8-15.1 s | 18.0-18.1 s | experts 8.0-8.2 → 10.0-10.2 s |
+| Llama-3.2-3B Q4_K_M, 699 tokens, processor | 10.5 s | 14.2-14.4 s | FFN 6.5 → 9.2 s (Q4_K/Q6_K, first written down) |
+
+Replies identical in every arm.
+
 ## `inference::decode_attn::gqa_decode_attention_cpu`
 
 (2026-08-21 night) — single-
@@ -3301,6 +3350,70 @@ histories, a silently wrong reply.
   how a failover replay rebuilds it on a stand-in.
 
 Allowing speculation would need a snapshot of the recurrent state per draft (#228).
+
+## Qwen 3.5's delta rule is ONE op per layer, on the processor and on a card (2026-10-11, FUTURE_WORK #228 (3))
+
+**What it replaced.** `layers::qwen35::delta_rule` follows llama.cpp's
+`build_delta_net_autoregressive` op for op: per token, per layer, a decay
+multiply, three matmuls, a subtraction, two broadcasts and a stack — ~10 tensor
+ops over a `[heads, 128, 128]` state, each its own pass over 2 MB (the 4B) and
+its own fork and join. Three layers in four are DeltaNet layers, so a 681-token
+prompt on the 4B made ~160,000 of them.
+
+**What llama.cpp master runs instead** (`GGML_OP_GATED_DELTA_NET`, read at
+`4b1a27f`): `fused_gdn_ar` / `fused_gdn_ch` are on by default, so EVERY prompt and
+decode step goes through one op per layer. Its CPU body
+(`ggml_compute_forward_gated_delta_net_one_chunk`) walks one (sequence, head) per
+task, the state in one buffer, the tokens in a plain loop; its CUDA body puts a
+warp on each state row and folds the decay into the update.
+
+**What replaced it here.** `delta_rule_cpu`: one rayon task per (sequence, value
+head), the state copied once into the output buffer and updated in place. A
+token's update of row `S[j, :]` reads only row j, so each row is decayed, read
+against k, corrected and read against q in one pass while it sits in L1 —
+llama.cpp's CPU body makes four passes over the matrix for the same arithmetic.
+Value head h reads key head h % nk (llama.cpp tiles the key heads; the tile copy
+is gone) and the 1/√d scale multiplies the output, as the op applies it.
+**On a card** the same day: `delta_rule_cuda` → `kernels/delta_rule.cu`, llama.cpp's
+`gated_delta_net_cuda` (scalar gate): a warp per state row, each lane `D / 32` of it
+in registers for the whole pass, the decay folded into the update as llama.cpp's
+card op folds it — ONE launch per layer per forward where the composition made ~10
+per token. q and k are L2-normalised as one tensor (`[b, seq, 2·nk, kd]`) for every
+path, which the kernel reads as one input; candle's custom ops take three tensors,
+so the state rides on the op and the kernel writes outputs and new state into one
+buffer. Past `STATE_KEPT_AS_A_VIEW_MAX_TOKENS` (8) the state is copied out of it —
+a view would keep a chunk's outputs alive until the next forward (8 MB a layer for a
+512-token chunk of the 4B); a decode step keeps the view and pays no launch.
+Scope `card_delta_rule_covers`: equal key and value widths of 64 or 128 (every
+Qwen 3.5 size has 128). Against llama.cpp master on the card (0.8B F32, 200 tokens, 8 decoded): worst cosine
+0.999999, median 1.000000, top-1 200/200 — the same as the composition on the card.
+
+**Same numbers, not the same bits.** The sums run in another order.
+`one_pass_delta_rule_matches_token_by_token` bounds it (1e-5 against the
+composition, sequence by sequence: the composition cannot take a batch of two;
+more value than key heads, unequal widths, a carried state) — red when the decay
+is applied after the key read and when value head h reads key head h / (nv/nk).
+Against llama.cpp master on Qwen3.5-0.8B F32, 200 tokens with 8 decode steps
+(`logits_reference_probe` + `~/llama.cpp-ref/dump_logits` +
+`compare_f32_logits.py`): worst cosine 0.999999, top-1 200/200 — identical to the
+composition's own agreement; the two differ by 2.7e-5 at most.
+A/B: `SWARMLLM_DELTA_RULE=steps`. Profile stage: `delta rule`.
+
+**Measured** (Qwen3.5-4B Q4_K_M, Ryzen 7 5800H, every layer on the processor,
+685 tokens read 128 a forward on the processor and 512 on the card, 48 out; live node stopped, safety kit;
+`~/swarmllm-138/rows_chunk.sh` § 3):
+
+| | one op (default) | `steps` | llama.cpp master (`llama-bench pp681`) |
+|---|---|---|---|
+| processor, prompt | 19.8-21.1 s | 55.8-55.9 s | 14.9 s (45.6 tok/s, 8 threads) |
+| — its `delta rule` stage | 0.70-0.76 s | 36.7 s | |
+| processor, a decode step | 95-122 ms | 127 ms | |
+| whole on the card, prompt (512 a forward) | 0.49-0.53 s | 2.56-2.70 s | 0.30 s (2,249 ± 503 tok/s) |
+| — its `delta rule` stage | 13 ms | 2.2 s | |
+| card, a decode step | 17 ms | 20-22 ms | |
+
+The 48 reply tokens identical in all eight runs, processor and card alike. On the processor the rest of the
+prompt is now the projections and the FFN, as for any dense model.
 
 ## Single-source-of-truth helpers — Inference kernels, caches and the tokenizer
 
