@@ -86,9 +86,9 @@ re-fetching parts) and #223 closed in v0.3.228 (released 2026-10-06 09:42 UTC), 
     belongs, which keeps partial ranges (load spreading) off.
 13. **#171** — the prompt pass through a split runs one stage at a time (released in v0.3.234; left:
     pieces chained between two peers for a pass that does not keep its prompt).
-14. **#228** — Qwen 3.5's first version leaves out CUDA-graph capture and speculation (its
-    card/processor split shipped in v0.3.230; its MoE models run and its delta rule is one op per
-    layer since 2026-10-11, unreleased).
+14. **#228** — Qwen 3.5's first version leaves out speculation (its card/processor split shipped
+    in v0.3.230; its MoE models run, its delta rule is one op per layer and its decode steps are
+    captured as CUDA graphs since 2026-10-11, unreleased).
 
 Everything else is ranked in its own entry. **P3** is narrow or cosmetic, **P4** is process,
 maintenance or an idea with no user waiting on it.
@@ -1165,8 +1165,12 @@ default, read at `4b1a27f`), so neither do we — `layers::qwen35::delta_rule_cp
 and value head, each state row decayed, corrected and read in one pass) and on a card
 `kernels/delta_rule.cu` (llama.cpp's `gated_delta_net_cuda`, a warp per state row). A 685-token prompt on the 4B: 55.8 → 19.8-21.1 s on the processor (llama.cpp 14.9 s), 2.6 → 0.49-0.53 s whole on the card; the card kernel agrees with llama.cpp at top-1 200/200.
 `SWARMLLM_DELTA_RULE=steps` is the old composition (`docs/invariants/inference.md` § "Qwen 3.5's
-delta rule is ONE op per layer"); (4) decode is never captured as a CUDA graph ("a layer type the
-capture has not been checked on") — with the delta rule one launch a layer, this is the next step; (5) no speculation of any kind — a
+delta rule is ONE op per layer"); (4) ~~decode is never captured as a CUDA graph~~ —
+**captured since 2026-10-11, not yet released**: on a card each DeltaNet layer keeps its state in
+two buffer pairs and a step writes the pair it did not read (`SsmState`), as llama.cpp keeps fixed
+cache tensors; the 0.8B writes 121-126 tokens a second instead of 50-54 whole on the card, the 4B is unchanged
+(~37, card-bound), ids identical with capture on and off (`docs/invariants/inference.md` § "Qwen 3.5's decode steps are captured
+too"). MoE layers still stay out (#138 (2)); (5) no speculation of any kind — a
 snapshot of the recurrent state per draft would allow it; (6) ~~the 4B's gap to llama.cpp~~ —
 checked 2026-10-07, not a defect: six prompts scored on the processor against llama.cpp master
 (`score_ids_dump.py`, margin 0.05) — Qwen 3.5 4B Q4_K_M misses on 3 (gaps 0.11-0.21), and
@@ -1174,7 +1178,11 @@ Llama-3.2-3B Q4_K_M, a long-verified family, misses on 1 by MORE (0.306, "why th
 Unquantized, the 0.8B matches llama.cpp exactly (worst cos 0.999999), at Q8_0 within 0.012: the
 model's arithmetic is right and 4-bit near-ties fall the other way through our kernels' rounding. Re-check with
 `~/llama.cpp-ref/{dump_logits,ref_generate}` (llama-cpp-python 0.3.16 cannot load `qwen35`), and
-render a new template with jinja2 first (gotcha #798).
+render a new template with jinja2 first (gotcha #798); (7) **the 4B decodes at ~37 tokens a second whole
+on an RTX 3070 Laptop with or without CUDA-graph capture** (2026-10-11): ~26 ms a step reads its 2.5 GB of
+weights at ~96 GB/s against the card's 448, while the 0.8B went 50-54 → 121-126 with capture — so the 4B's step
+is bound by something on the card. Profile it (`SWARMLLM_PROFILE=1` turns capture off, which is fine here)
+and compare llama.cpp's `llama-bench -ngl 99 tg128` on the same file before changing a kernel.
 
 A family in `supported_list` is a claim — check it against a REAL file's header (#715), and
 never flip `ModelArch::is_supported` without a real-file comparison against llama.cpp
@@ -1722,7 +1730,12 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-11, not yet released** (#224, #137's main half, #228 (1) and (3), #138's processor decode, card and prompt steps and its Q2_K/Q3_K kernels)
+**Closed 2026-10-11, not yet released** (#224, #137's main half, #228 (1), (3) and (4), #138's processor decode, card and prompt steps and its Q2_K/Q3_K kernels)
+- #228 (4) — **Qwen 3.5 writes replies faster on a graphics card**: its decode steps are
+  captured as CUDA graphs like every dense family's — refused until now because each DeltaNet
+  layer replaced its state with new memory every step. On an RTX 3070 Laptop the 0.8B writes 121-126 tokens a second
+  instead of 50-54; the 4B, which the card itself limits, is unchanged (~37). The same reply,
+  token for token, with capture on or off.
 - #228 (3) — **Qwen 3.5 reads a prompt about 2.7 times faster on the processor and 5 times on the card**: three layers in four are DeltaNet layers, whose
   recurrence ran as ~10 tensor operations per token per layer (a 681-token prompt on the 4B made
   ~160,000 of them); it is one operation per layer now, on the processor and on the card, as

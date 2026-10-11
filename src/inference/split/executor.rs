@@ -530,19 +530,24 @@ impl SplitModel {
     }
 
     /// Why this model's decode steps may NOT be captured, if they may not. The
-    /// capture has been checked on dense layers held whole on one device;
-    /// MoE routing copies scores to the host every layer, and a recurrent
-    /// state (Qwen 3.5) is replaced inside the forward.
+    /// capture has been checked on dense layers held whole on one device, and
+    /// on Qwen 3.5's: its DeltaNet layers write their state into buffers kept
+    /// for it, never the state they read (`SsmState`, #228 (4)), and on the
+    /// card kernel only. MoE routing still copies scores to the host.
     fn decode_graph_ineligibility(&self) -> Option<&'static str> {
         if !self.layer_devices.is_empty() {
             return Some("the model is split between the card and the processor");
         }
-        let all_dense = self.layers.iter().all(|layer| match layer {
+        let checked = self.layers.iter().all(|layer| match layer {
             LayerVariant::Dense(lw) => matches!(lw.ffn, FfnVariant::Dense(_)),
+            LayerVariant::Qwen35Attn { ffn, .. } => matches!(ffn, FfnVariant::Dense(_)),
+            LayerVariant::Qwen35Ssm { weights, ffn, .. } => {
+                matches!(ffn, FfnVariant::Dense(_)) && weights.delta_rule_runs_on_the_card_kernel()
+            }
             _ => false,
         });
-        if !all_dense {
-            return Some("a layer type the capture has not been checked on (MoE, MLA, Qwen 3.5)");
+        if !checked {
+            return Some("a layer type the capture has not been checked on (MoE, MLA)");
         }
         None
     }
@@ -1196,7 +1201,7 @@ impl SplitModel {
                             .add_norm(attention_norm)
                             .map_err(|e| SwarmError::Internal(format!("q35_ssm_norm: {e}")))?;
                         let ssm_out = weights
-                            .forward_deltanet(&x, &mut layer_ssm_states[layer_idx])
+                            .forward_deltanet(&x, &mut layer_ssm_states[layer_idx], index_pos)
                             .map_err(|e| SwarmError::Internal(format!("q35_deltanet: {e}")))?;
                         let (residual, normed) = Residual::pending(ssm_out, residual)
                             .add_norm(post_attention_norm)
@@ -1244,9 +1249,27 @@ impl SplitModel {
                 // conversation. Dropping them with the error left the store
                 // holding an entry with no layers at all; a refused CUDA
                 // graph capture re-runs its step on what is put back here
-                // (`forward_decode_as_graph`). Recurrent state cannot be
-                // cut back, so a segment holding any drops it all as before.
-                if layer_ssm_states.iter().all(Option::is_none) {
+                // (`forward_decode_as_graph`). A recurrent state is put back
+                // to where the step began when every layer's can be — a card
+                // keeps the state each step read (`SsmState`); otherwise a
+                // segment holding any drops it all as before. Both go back to
+                // ONE position — the caches' own length where the segment
+                // holds any — because `index_pos` and `kv_offset` have
+                // disagreed before (`docs/invariants/inference.md`), and two
+                // targets here would leave the state and the caches apart.
+                let back_to = if layer_kv_caches.iter().any(Option::is_some) {
+                    kv_offset
+                } else {
+                    index_pos
+                };
+                if layer_ssm_states
+                    .iter()
+                    .flatten()
+                    .all(|s| s.can_rewind_to(back_to))
+                {
+                    for state in layer_ssm_states.iter_mut().flatten() {
+                        state.rewind_to(back_to);
+                    }
                     for cache in layer_kv_caches.iter_mut().flatten() {
                         cache.truncate(kv_offset);
                     }
@@ -2007,7 +2030,11 @@ impl SplitModel {
                             .narrow(0, req_idx, 1)
                             .map_err(|e| SwarmError::Internal(format!("narrow: {e}")))?;
                         let ssm_out = weights
-                            .forward_deltanet(&x_i, &mut req_ssm[layer_idx])
+                            .forward_deltanet(
+                                &x_i,
+                                &mut req_ssm[layer_idx],
+                                items[req_idx].index_pos,
+                            )
                             .map_err(|e| SwarmError::Internal(format!("q35b_deltanet: {e}")))?;
                         ssm_outputs.push(ssm_out);
                     }

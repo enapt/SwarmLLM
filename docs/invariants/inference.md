@@ -3343,8 +3343,10 @@ histories, a silently wrong reply.
   `SplitModel::carries_recurrent_state`. ⚠ Slot admission can run before the model has loaded
   (observed 2026-10-06: the first request was admitted to the n-gram path with no model loaded); the
   decode loop's own check, made with the model in hand, is what declines it — keep both.
-- **Backstop**: `KvCacheEntry::truncate_to` refuses while any `ssm_states` entry is held, so a path
-  added later that truncates fails loudly instead of answering from the wrong history.
+- **Backstop**: `KvCacheEntry::truncate_to` refuses unless every `ssm_states` entry can be taken
+  back to the target — at most the one step a card keeps (`SsmState::can_rewind_to`, #228 (4)) —
+  so a path added later that truncates further fails loudly instead of answering from the wrong
+  history.
 - **Prefix cache**: a snapshot is never taken of an entry holding SSM state, so a second turn reads
   its prompt in full. A prompt pass at position 0 clears the entry (state included), which is also
   how a failover replay rebuilds it on a stand-in.
@@ -3380,10 +3382,10 @@ in registers for the whole pass, the decay folded into the update as llama.cpp's
 card op folds it — ONE launch per layer per forward where the composition made ~10
 per token. q and k are L2-normalised as one tensor (`[b, seq, 2·nk, kd]`) for every
 path, which the kernel reads as one input; candle's custom ops take three tensors,
-so the state rides on the op and the kernel writes outputs and new state into one
-buffer. Past `STATE_KEPT_AS_A_VIEW_MAX_TOKENS` (8) the state is copied out of it —
-a view would keep a chunk's outputs alive until the next forward (8 MB a layer for a
-512-token chunk of the 4B); a decode step keeps the view and pays no launch.
+so the state rides on the op. The kernel writes the new state into a second buffer
+it is handed (`state_out` — the pair the step did not read, never the same buffer:
+both are `__restrict__`) and the outputs into their own, so a state is never a view
+of a chunk's outputs (until #228 (4) it was, copied out past 8 tokens).
 Scope `card_delta_rule_covers`: equal key and value widths of 64 or 128 (every
 Qwen 3.5 size has 128). Against llama.cpp master on the card (0.8B F32, 200 tokens, 8 decoded): worst cosine
 0.999999, median 1.000000, top-1 200/200 — the same as the composition on the card.
@@ -3414,6 +3416,70 @@ A/B: `SWARMLLM_DELTA_RULE=steps`. Profile stage: `delta rule`.
 
 The 48 reply tokens identical in all eight runs, processor and card alike. On the processor the rest of the
 prompt is now the projections and the FFN, as for any dense model.
+
+## Qwen 3.5's decode steps are captured too: a DeltaNet state is written into a second pair of buffers (2026-10-11, FUTURE_WORK #228 (4))
+
+**What refused it.** `decode_graph_ineligibility` let only dense layers into a
+capture, and `KvCacheStore::every_cache_holds` asked every layer for a KV cache —
+three Qwen 3.5 layers in four keep none — so no step of the family was ever
+captured. Behind the gate were two real blockers. The DeltaNet state was replaced
+by a NEW tensor every step (the conv window by `cat` + `narrow`, the recurrent
+state by the kernel's output), i.e. memory allocated inside the capture — the
+graph's own, freed or reused on replay, leaving the store holding a dangling view.
+And a refused capture re-runs its step: groups launched before the refusal HAVE
+run (`DecodeGraph::capture`), which a KV append survives (it rewrites the same
+position) and a state updated in place does not — it would take the step twice.
+
+**What llama.cpp does.** Its recurrent memory keeps every layer's states in fixed
+cache tensors and writes the new state back with `ggml_cpy` into a view of them —
+fixed addresses, which is what lets its CUDA graphs cover these models.
+
+**What replaced it.** `SsmState` keeps, on a card, a SECOND pair of buffers — the
+state before the last step. A step reads `current`, writes the new state INTO the
+second pair (the kernel through its `state_out` pointer, the conv window with one
+`slice_set`) and the two swap (`SsmState::advance`). The state a step read
+survives it, so taking the step back is a swap (`SsmState::rewind_to`, one step
+only); the executor's failure path and `KvCacheEntry::truncate_to_with` both ask
+`can_rewind_to` first and refuse — or drop the state, as before — when it cannot.
+The swap is host bookkeeping a refused capture must undo (gotcha #761), and it is.
+A recurrent layer holds a captured step once its second pair exists
+(`every_cache_holds`); the pair is made by the first step on the card, which is
+never captured. On the processor nothing is captured and no second pair is kept.
+A step whose state does not describe its first position is refused, never
+answered from zeros: a conversation the layer has lost (`forward_deltanet` takes
+`index_pos`). Capture admits a Qwen 3.5 DeltaNet layer only on the card kernel
+(`DeltaNetWeights::delta_rule_runs_on_the_card_kernel`) and only with a dense
+feed-forward — MoE routing still copies scores to the host.
+
+**Cost.** One more state pair per DeltaNet layer per conversation on the card:
+2 MB a layer for the 4B and the 9B (48 MB a conversation), inside the
+forward-buffer reserve the single pair already relied on (#228 (2)).
+
+**Tests** (each red with its part undone): `a_deltanet_step_taken_back_and_run_again_lands_where_one_run_does`
+(red when the rewind does not swap, and when a step writes into the state it read),
+`a_recurrent_layer_holds_a_captured_step_only_with_its_next_buffers` (red when the
+SSM arm ignores the second pair), `an_entry_with_recurrent_state_refuses_to_be_truncated`
+(one step back only), `a_deltanet_step_out_of_step_with_its_state_is_refused`.
+
+**Measured** (RTX 3070 Laptop, live node stopped, safety kit; `~/swarmllm-228/graph.sh`):
+
+| whole on the card | capture (default) | `SWARMLLM_CUDA_GRAPH=0` |
+|---|---|---|
+| Qwen3.5-0.8B Q8_0 | **121-126 tok/s** | 50-54 tok/s |
+| Qwen3.5-4B Q4_K_M | 35.5-37.8 tok/s | 37.9-39.3 tok/s |
+
+1,200 tokens, ABBA; the rate is taken from the first flushed piece of the reply to the last
+(`~/swarmllm-228/tok_timing.py` — load, prompt and the one-time rebuilds below left out; the
+capture arm's window still starts a piece earlier, so it carries some of them). Wall clock
+over whole runs could not resolve it: a load varied by seconds (`graph2.sh`, `graph3.sh`).
+The ids are the same with capture on and off — 6 of 6 prompts × 96 tokens (`graph.sh` § 1)
+and these 1,200. The capture fired with no refusal; in a 300-token reply on the 4B, 8 of its
+16 groups were rebuilt once each (`TOPOLOGY_CHANGED`: one more kernel and one more
+allocation in the later step), then updated in place. Against llama.cpp on the card the
+prompt tokens are identical and the kernel probe is unchanged (top-1 200/200, worst cosine
+0.999999). **The 4B is card-bound**, like Llama-3.1-8B in the dense check (2026-09-29): ~26
+ms a step, ~96 GB/s of its 2.5 GB of weights against the card's 448 — where that goes is
+FUTURE_WORK #228 (7).
 
 ## Single-source-of-truth helpers — Inference kernels, caches and the tokenizer
 

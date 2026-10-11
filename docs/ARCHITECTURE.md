@@ -747,10 +747,11 @@ references: `docs/plans/qwen35_support.md`.
   token by token, `ssm_norm` gated by SiLU(z), `ssm_out`.
 - **Attention layer**: `attn_q` projects Q and an output gate interleaved PER HEAD; per-head RMS norm
   on Q and K; IMROPE over 64 of 256 dims; output × sigmoid(gate).
-- **State**: `SsmState` (conv + recurrent) per request beside the attention KV cache. It cannot be
-  wound back, so **every speculative path refuses such a model** (`pipeline::distributed::
+- **State**: `SsmState` (conv + recurrent) per request beside the attention KV cache. It can be
+  wound back one step at most (on a card, which keeps the state the last step read — what a refused
+  CUDA-graph capture needs), so **every speculative path refuses such a model** (`pipeline::distributed::
   speculation_can_roll_back`, `SplitModel::carries_recurrent_state` for the worker's own n-gram and
-  SWIFT), `KvCacheEntry::truncate_to` refuses while it is held, and the prefix cache never
+  SWIFT), `KvCacheEntry::truncate_to` refuses anything further, and the prefix cache never
   snapshots it. A prompt pass at position 0 clears the entry, so a failover replay rebuilds it.
 - **Card/processor split since v0.3.230** (`hybrid::arch_supports_hybrid`): every tensor the loop
   loads goes through the shadowed `device`/`cos`/`sin`, and a DeltaNet layer makes its state on its

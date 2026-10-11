@@ -34,7 +34,12 @@
 // gb    [b, seq, nv, 2]    contiguous: (g, beta) — g the log-decay (≤ 0), beta
 //                          already through its sigmoid.
 // state [b, nv, D, D]      contiguous, row `col` = value dimension.
-// dst   [b, seq, nv, D] outputs, then [b, nv, D, D] the new state.
+// state_out                the new state, same layout — OTHER buffers than
+//                          `state` (`SsmState`'s second pair: the state a step
+//                          reads survives it, and lives at a fixed address for
+//                          a captured step). Never the same buffer: both are
+//                          `__restrict__`.
+// dst   [b, seq, nv, D]    outputs.
 //
 // Grid (nv, b, D / 4), block (32, 4): four warps, four rows, per block.
 //
@@ -56,6 +61,7 @@ __device__ void delta_rule_body(
     const float *__restrict__ v,
     const float *__restrict__ gb,
     const float *__restrict__ state,
+    float *__restrict__ state_out,
     float *__restrict__ dst,
     const int nk,
     const int nv,
@@ -74,7 +80,6 @@ __device__ void delta_rule_body(
         return;
     }
     const int kh = h % nk;
-    const size_t n_out = (size_t)gridDim.y * seq * nv * D;
 
     float s[R];
     const float *s_in = state + (((size_t)bi * nv + h) * D + col) * D;
@@ -119,7 +124,7 @@ __device__ void delta_rule_body(
         }
     }
 
-    float *s_out = dst + n_out + (((size_t)bi * nv + h) * D + col) * D;
+    float *s_out = state_out + (((size_t)bi * nv + h) * D + col) * D;
 #pragma unroll
     for (int r = 0; r < R; r++) {
         s_out[r * 32 + lane] = s[r];
@@ -130,11 +135,12 @@ __device__ void delta_rule_body(
     extern "C" __global__ void __launch_bounds__(128) delta_rule_f32_d##D(         \
         const float *__restrict__ qk, const float *__restrict__ v,                 \
         const float *__restrict__ gb, const float *__restrict__ state,             \
-        float *__restrict__ dst, const int nk, const int nv, const int seq,        \
+        float *__restrict__ state_out, float *__restrict__ dst, const int nk,      \
+        const int nv, const int seq,                                               \
         const long long sv_b, const long long sv_t, const long long sv_h,          \
         const float scale) {                                                       \
-        delta_rule_body<D>(qk, v, gb, state, dst, nk, nv, seq, sv_b, sv_t, sv_h,   \
-                           scale);                                                 \
+        delta_rule_body<D>(qk, v, gb, state, state_out, dst, nk, nv, seq, sv_b,    \
+                           sv_t, sv_h, scale);                                     \
     }
 
 DELTA_RULE_ENTRY(64)

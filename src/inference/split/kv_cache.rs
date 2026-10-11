@@ -953,7 +953,7 @@ impl KvCacheEntry {
         // SSM state is per-layer and fixed-size, so it does not scale with the
         // conversation, but it is real memory and belongs in the total.
         for ssm in self.ssm_states.iter().flatten() {
-            for t in [&ssm.recurrent_state, &ssm.conv_state] {
+            for t in ssm.tensors() {
                 let bytes = t.elem_count() as u64 * t.dtype().size_in_bytes() as u64;
                 allocated += bytes;
                 used += bytes;
@@ -994,18 +994,29 @@ impl KvCacheEntry {
         mode: TruncateMode,
         target_len: usize,
     ) -> Result<(), crate::error::SwarmError> {
-        // A recurrent state (Qwen 3.5's DeltaNet) cannot give tokens back.
-        // Shortening the attention caches beside it would leave the two
-        // describing different histories — a silently wrong reply — so refuse.
-        // Every path that truncates is gated away from such models first
-        // (`SplitModel::carries_recurrent_state`, `speculation_can_roll_back`,
-        // no prefix snapshot of SSM state); this makes a new one loud.
-        if self.ssm_states.iter().any(Option::is_some) {
+        // A recurrent state (Qwen 3.5's DeltaNet) cannot give tokens back —
+        // past the one step a card's state keeps the state before
+        // (`SsmState::rewind_to`), which is what a refused CUDA graph capture
+        // takes back. Shortening the attention caches further would leave the
+        // two describing different histories — a silently wrong reply — so
+        // refuse. Every path that truncates further is gated away from such
+        // models first (`SplitModel::carries_recurrent_state`,
+        // `speculation_can_roll_back`, no prefix snapshot of SSM state); this
+        // makes a new one loud.
+        if !self
+            .ssm_states
+            .iter()
+            .flatten()
+            .all(|s| s.can_rewind_to(target_len))
+        {
             return Err(crate::error::SwarmError::Internal(
                 "cannot take tokens back out of a model with recurrent state \
                  (FUTURE_WORK #117)"
                     .into(),
             ));
+        }
+        for s in self.ssm_states.iter_mut().flatten() {
+            s.rewind_to(target_len);
         }
         match mode {
             TruncateMode::InPlace => {
@@ -1148,16 +1159,27 @@ impl KvCacheStore {
     /// (`inference::cuda_graph`): a buffer that grows inside a capture frees
     /// memory allocated outside it and keeps memory allocated inside it, and
     /// the graph can then neither be replayed nor trusted.
+    ///
+    /// A recurrent layer (Qwen 3.5's DeltaNet) keeps no KV cache: it holds when
+    /// the buffers its next step writes into exist (`SsmState`, #228 (4)).
     pub(crate) fn every_cache_holds(&self, key: &str, positions: usize) -> bool {
         self.caches.get(key).is_some_and(|entry| {
             !entry.layers.is_empty()
-                && entry.layers.iter().all(|layer| {
-                    layer.as_ref().is_some_and(|kv| {
-                        kv.all_caches()
+                && entry
+                    .layers
+                    .iter()
+                    .enumerate()
+                    .all(|(i, layer)| match layer {
+                        Some(kv) => kv
+                            .all_caches()
                             .iter()
-                            .all(|c| c.all_data().is_some() && c.max_seq_len() >= positions)
+                            .all(|c| c.all_data().is_some() && c.max_seq_len() >= positions),
+                        None => entry
+                            .ssm_states
+                            .get(i)
+                            .and_then(Option::as_ref)
+                            .is_some_and(SsmState::holds_the_next_step),
                     })
-                })
         })
     }
 
@@ -2436,22 +2458,66 @@ mod tests {
     /// hand-computed expectation, so the equivalence is between the two
     /// things that actually changed places.
     /// A recurrent state cannot be truncated, so an entry holding one refuses
-    /// to shorten its attention caches rather than let the two disagree.
+    /// to shorten its attention caches rather than let the two disagree —
+    /// except by the one step a card's state keeps the state before
+    /// (`SsmState::rewind_to`), which a refused CUDA graph capture takes back.
     #[test]
     fn an_entry_with_recurrent_state_refuses_to_be_truncated() {
         let dev = candle_core::Device::Cpu;
-        let state = SsmState {
+        let slot = || crate::inference::layers::SsmSlot {
             conv_state: Tensor::zeros((1, 4, 3), candle_core::DType::F32, &dev).unwrap(),
             recurrent_state: Tensor::zeros((1, 2, 4, 4), candle_core::DType::F32, &dev).unwrap(),
         };
         let mut entry = KvCacheEntry {
             layers: vec![Some(filled(&dev, 8)), None],
-            ssm_states: vec![None, Some(state)],
+            ssm_states: vec![None, Some(SsmState::new(slot(), 8))],
             last_accessed: std::time::Instant::now(),
         };
         assert!(entry.truncate_to(5).is_err());
+        assert_eq!(
+            entry.layers[0].as_ref().unwrap().current_seq_len(),
+            8,
+            "refused = untouched"
+        );
+
+        // A card's state after a one-position step from 7: back to 7 only.
+        let mut card = SsmState::new(slot(), 7);
+        card.advance(slot(), 8, true);
+        entry.ssm_states[1] = Some(card);
+        assert!(entry.truncate_to(6).is_err());
+        entry.truncate_to(7).unwrap();
+        assert_eq!(entry.ssm_states[1].as_ref().unwrap().positions(), 7);
+        assert_eq!(entry.layers[0].as_ref().unwrap().current_seq_len(), 7);
+
         entry.ssm_states[1] = None;
         entry.truncate_to(5).unwrap();
+    }
+
+    /// A captured step allocates nothing, so a recurrent layer holds only once
+    /// its next step's buffers exist.
+    #[test]
+    fn a_recurrent_layer_holds_a_captured_step_only_with_its_next_buffers() {
+        let dev = candle_core::Device::Cpu;
+        let slot = || crate::inference::layers::SsmSlot {
+            conv_state: Tensor::zeros((1, 4, 3), candle_core::DType::F32, &dev).unwrap(),
+            recurrent_state: Tensor::zeros((1, 2, 4, 4), candle_core::DType::F32, &dev).unwrap(),
+        };
+        let store = KvCacheStore::new(std::time::Duration::from_secs(600));
+        let key = KvCacheStore::cache_key("m", "r");
+        {
+            let mut entry = store.get_or_create_keyed(&key, 2);
+            entry.layers = vec![Some(filled(&dev, 8)), None];
+            entry.ssm_states = vec![None, Some(SsmState::new(slot(), 8))];
+        }
+        assert!(!store.every_cache_holds(&key, 8));
+        {
+            let mut entry = store.get_or_create_keyed(&key, 2);
+            entry.ssm_states[1]
+                .as_mut()
+                .unwrap()
+                .advance(slot(), 9, true);
+        }
+        assert!(store.every_cache_holds(&key, 8));
     }
 
     #[test]

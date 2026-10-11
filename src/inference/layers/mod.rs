@@ -1696,15 +1696,130 @@ pub(crate) struct DeltaNetWeights {
     pub(crate) eps: f64,
 }
 
-/// Per-request SSM (delta net) recurrent state for Qwen 3.5 hybrid models.
-/// Analogous to KV-cache for attention layers, but stores conv state + recurrent state.
+/// Per-request SSM (delta net) state for Qwen 3.5 hybrid models — the
+/// DeltaNet layer's counterpart of a KV cache: its convolution window and its
+/// recurrent state, after [`Self::positions`] tokens.
+///
+/// **On a card a second pair of buffers is kept** — the one holding the state
+/// before the last step. A step reads `current` and writes the new state INTO
+/// that pair, then the two swap (`layers::qwen35`, FUTURE_WORK #228 (4)), so:
+///
+/// - the state a step read survives it. A refused CUDA graph capture takes the
+///   step back with [`Self::rewind_to`] and runs it again: groups launched
+///   before a refusal HAVE run (`cuda_graph::DecodeGraph::capture`), and a
+///   state updated in place would take that step twice. The swap is host
+///   bookkeeping a refusal must undo (gotcha #761);
+/// - the state lives at two addresses that never change, which a captured
+///   step needs — memory allocated inside a capture belongs to the graph.
+///
+/// llama.cpp keeps its recurrent states in fixed cache tensors written with
+/// `ggml_cpy` for the same second reason. On the processor nothing is captured
+/// and the second pair is not kept.
 #[derive(Debug, Clone)]
 pub(crate) struct SsmState {
+    current: SsmSlot,
+    /// Positions `current` describes.
+    at: usize,
+    /// The buffers the next step writes into — a card's only.
+    previous: Option<SsmSlot>,
+    /// Positions `previous` holds the state for, while it holds one: the
+    /// position the last step started from. `None` once rewound, when its
+    /// contents are a step that may never have run.
+    previous_at: Option<usize>,
+}
+
+/// One copy of a DeltaNet layer's state.
+#[derive(Debug, Clone)]
+pub(crate) struct SsmSlot {
     /// The last `kernel − 1` convolution inputs: `[batch, channels, kernel − 1]`.
     pub conv_state: Tensor,
     /// Per value head `S` `[batch, v_heads, v_dim, k_dim]` — the delta rule's
     /// running memory.
     pub recurrent_state: Tensor,
+}
+
+impl SsmState {
+    /// A state after `positions` tokens, with no second pair yet.
+    pub(crate) fn new(current: SsmSlot, positions: usize) -> Self {
+        Self {
+            current,
+            at: positions,
+            previous: None,
+            previous_at: None,
+        }
+    }
+
+    pub(crate) fn current(&self) -> &SsmSlot {
+        &self.current
+    }
+
+    /// Positions the state describes.
+    pub(crate) fn positions(&self) -> usize {
+        self.at
+    }
+
+    /// Whether the next step's buffers exist — a captured step must allocate
+    /// nothing (`KvCacheStore::every_cache_holds`).
+    pub(crate) fn holds_the_next_step(&self) -> bool {
+        self.previous.is_some()
+    }
+
+    /// Takes the buffers the next step writes into, if kept.
+    pub(crate) fn take_spare(&mut self) -> Option<SsmSlot> {
+        self.previous_at = None;
+        self.previous.take()
+    }
+
+    /// The state after a step from [`Self::positions`] to `positions`, written
+    /// into `next`. With `keep_previous` the state read becomes the next
+    /// step's buffers (a card); without, it is dropped (the processor).
+    pub(crate) fn advance(&mut self, next: SsmSlot, positions: usize, keep_previous: bool) {
+        let read = std::mem::replace(&mut self.current, next);
+        if keep_previous {
+            self.previous = Some(read);
+            self.previous_at = Some(self.at);
+        } else {
+            self.previous = None;
+            self.previous_at = None;
+        }
+        self.at = positions;
+    }
+
+    /// Whether [`Self::rewind_to`] would succeed: the state is there already,
+    /// or the last step started there and the state it read was kept.
+    pub(crate) fn can_rewind_to(&self, positions: usize) -> bool {
+        self.at == positions || self.previous_at == Some(positions)
+    }
+
+    /// Puts the state back to `positions` — see [`Self::can_rewind_to`]; `false`
+    /// (and nothing changed) otherwise. One step only: a recurrent state cannot
+    /// give back tokens it has summarised (#117).
+    pub(crate) fn rewind_to(&mut self, positions: usize) -> bool {
+        if self.at == positions {
+            return true;
+        }
+        if self.previous_at != Some(positions) {
+            return false;
+        }
+        let Some(read) = self.previous.take() else {
+            return false;
+        };
+        // The newer pair becomes the buffers the re-run writes into; what it
+        // holds may never have run, so it describes no position.
+        self.previous = Some(std::mem::replace(&mut self.current, read));
+        self.previous_at = None;
+        self.at = positions;
+        true
+    }
+
+    /// Every buffer the state holds, for the memory it is charged.
+    pub(crate) fn tensors(&self) -> Vec<&Tensor> {
+        let mut out = vec![&self.current.conv_state, &self.current.recurrent_state];
+        if let Some(p) = &self.previous {
+            out.extend([&p.conv_state, &p.recurrent_state]);
+        }
+        out
+    }
 }
 
 /// FFN variant for DeepSeek layers — either dense or MoE.

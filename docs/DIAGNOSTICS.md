@@ -2040,6 +2040,12 @@ Two things that will otherwise be misread:
 
 ### Traps that have cost real time
 
+- **A whole `test-split` run cannot time decode on the card** (2026-10-11). A load
+  varies by seconds, and `t(long) − t(short)` still carries it: the same 400-token
+  run took 12.3 s and 17.7 s, so a graph that made the 0.8B 2.3× faster read as
+  noise. Its stdout is flushed in ~1 KB pieces, not per token — time the pieces
+  (`~/swarmllm-228/tok_timing.py`: first piece after `Generated:` to the last,
+  bytes scaled by ids per byte) or use a daemon's `decode_tok_s`.
 - **The box must be idle.** The same unchanged code path measured 0.42 ms and
   0.97 ms here. A run taken while a build or another bench is going is worthless,
   and it will not look wrong — it will look like a result.

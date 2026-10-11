@@ -8,7 +8,7 @@ use candle_core::{DType, Device, Result as CandleResult, Tensor, D};
 use candle_nn::Module;
 use rayon::prelude::*;
 
-use super::{run_attention, DeltaNetWeights, Qwen35AttnWeights, SsmState};
+use super::{run_attention, DeltaNetWeights, Qwen35AttnWeights, SsmSlot, SsmState};
 
 // ── Qwen 3.5 full-attention layer forward ──
 
@@ -112,12 +112,34 @@ impl DeltaNetWeights {
         self.n_v_heads * self.v_head_dim
     }
 
+    /// Whether this layer's delta rule, on a card, is the card kernel: the
+    /// one-pass rule is on (`SWARMLLM_DELTA_RULE`) and the kernel covers its
+    /// widths. What a CUDA graph capture has been checked on — the
+    /// composition it replaced has not (`SplitModel`'s capture rule).
+    pub(crate) fn delta_rule_runs_on_the_card_kernel(&self) -> bool {
+        delta_rule_in_one_pass() && card_delta_rule_covers(self.k_head_dim, self.v_head_dim)
+    }
+
     /// `build_layer_attn_linear`: projections, causal conv, L2-normalised
-    /// q/k, the gated delta rule, gated RMSNorm, `ssm_out`.
+    /// q/k, the gated delta rule, gated RMSNorm, `ssm_out` — the step from
+    /// `index_pos` to `index_pos + seq_len`. A card keeps the state's second
+    /// pair of buffers ([`SsmState`]); the processor does not.
     pub(crate) fn forward_deltanet(
         &self,
         x: &Tensor,
         ssm_state: &mut Option<SsmState>,
+        index_pos: usize,
+    ) -> CandleResult<Tensor> {
+        self.forward_deltanet_keeping(x, ssm_state, index_pos, !x.device().is_cpu())
+    }
+
+    /// [`Self::forward_deltanet`], with the state's second pair kept or not.
+    fn forward_deltanet_keeping(
+        &self,
+        x: &Tensor,
+        ssm_state: &mut Option<SsmState>,
+        index_pos: usize,
+        keep_previous: bool,
     ) -> CandleResult<Tensor> {
         let (b_sz, seq_len, _hidden) = x.dims3()?;
         let device = x.device();
@@ -135,7 +157,49 @@ impl DeltaNetWeights {
         let alpha = self.w_alpha.forward(x)?.broadcast_add(&self.dt_bias)?;
         let g = softplus(&alpha)?.broadcast_mul(&self.a)?; // [b, seq, nv]
 
-        let (conv, conv_state) = self.causal_conv(&mixed, ssm_state.as_ref(), device)?;
+        // The state must describe the position this step starts from: a step
+        // from 0 starts over, any other on a state out of step — or none — is
+        // a conversation this layer has lost, refused rather than answered
+        // from a summary of some other history.
+        match ssm_state.as_ref().map(SsmState::positions) {
+            Some(at) if at == index_pos => {}
+            _ if index_pos == 0 => {
+                let channels = mixed.dim(2)?;
+                *ssm_state = Some(SsmState::new(
+                    SsmSlot {
+                        conv_state: Tensor::zeros(
+                            (b_sz, channels, self.conv_kernel - 1),
+                            mixed.dtype(),
+                            device,
+                        )?,
+                        recurrent_state: Tensor::zeros((b_sz, nv, vd, kd), DType::F32, device)?,
+                    },
+                    0,
+                ));
+            }
+            at => candle_core::bail!(
+                "a DeltaNet layer's state describes {at:?} positions, the step starts at {index_pos}"
+            ),
+        }
+        let held = ssm_state.as_mut().expect("set above");
+        let read = held.current().clone();
+        // The buffers this step writes into: on a card the previous step's,
+        // so the state read survives the step and lives at two fixed
+        // addresses (`SsmState`). Made here when missing — never inside a
+        // capture, which asks `SsmState::holds_the_next_step` first.
+        let target = if keep_previous {
+            Some(match held.take_spare() {
+                Some(spare) if spare.recurrent_state.dims() == read.recurrent_state.dims() => spare,
+                _ => SsmSlot {
+                    conv_state: read.conv_state.zeros_like()?,
+                    recurrent_state: read.recurrent_state.zeros_like()?,
+                },
+            })
+        } else {
+            None
+        };
+
+        let (conv, new_conv) = self.causal_conv(&mixed, &read.conv_state)?;
         let conv = candle_nn::ops::silu(&conv)?; // [b, seq, C]
 
         // q and k side by side, `[b, seq, 2·nk, kd]` (heads 0..nk are q), so
@@ -149,15 +213,19 @@ impl DeltaNetWeights {
             .reshape((b_sz, seq_len, nv, vd))?;
         let scale = 1.0 / (kd as f64).sqrt();
 
-        let state = match ssm_state.as_ref() {
-            Some(s) => s.recurrent_state.clone(),
-            None => Tensor::zeros((b_sz, nv, vd, kd), DType::F32, device)?,
-        };
+        let state = read.recurrent_state.clone();
         let one_pass = delta_rule_in_one_pass();
-        let (out, state) =
+        // `written`: the card kernel put the new state straight into the
+        // target's buffers.
+        let (out, new_state, written) =
             crate::inference::prof::timed!(crate::inference::prof::Stage::DeltaRule, {
                 let on_card = if one_pass && device.is_cuda() && card_delta_rule_covers(kd, vd) {
-                    delta_rule_cuda(&qk, nk, &v, &g, &beta, &state, scale as f32)?
+                    let into = match &target {
+                        Some(t) => t.recurrent_state.clone(),
+                        None => state.zeros_like()?,
+                    };
+                    delta_rule_cuda(&qk, nk, &v, &g, &beta, &state, &into, scale as f32)?
+                        .map(|out| (out, into, target.is_some()))
                 } else {
                     None
                 };
@@ -165,7 +233,9 @@ impl DeltaNetWeights {
                 match on_card {
                     Some(done) => done,
                     None if one_pass && device.is_cpu() => {
-                        delta_rule_cpu(&q, &k, &v, &g, &beta, &state, scale as f32)?
+                        let (out, new) =
+                            delta_rule_cpu(&q, &k, &v, &g, &beta, &state, scale as f32)?;
+                        (out, new, false)
                     }
                     None => {
                         // More value heads than key heads: llama.cpp TILES the key
@@ -177,7 +247,8 @@ impl DeltaNetWeights {
                         } else {
                             (q, k)
                         };
-                        delta_rule(&(q * scale)?, &k, &v, &g, &beta, state)?
+                        let (out, new) = delta_rule(&(q * scale)?, &k, &v, &g, &beta, state)?;
+                        (out, new, false)
                     }
                 }
             }); // out [b, seq, nv, vd]
@@ -188,32 +259,35 @@ impl DeltaNetWeights {
         let gated = (normed * candle_nn::ops::silu(&z)?)?;
         let gated = gated.reshape((b_sz, seq_len, nv * vd))?;
 
-        *ssm_state = Some(SsmState {
-            conv_state,
-            recurrent_state: state,
-        });
+        let next = match target {
+            Some(t) => {
+                t.conv_state.slice_set(&new_conv, 0, 0)?;
+                if !written {
+                    t.recurrent_state
+                        .slice_set(&new_state.contiguous()?, 0, 0)?;
+                }
+                t
+            }
+            None => SsmSlot {
+                conv_state: new_conv,
+                recurrent_state: new_state,
+            },
+        };
+        held.advance(next, index_pos + seq_len, keep_previous);
         self.ssm_out.forward(&gated)
     }
 
     /// Causal depthwise convolution with the previous `kernel − 1` inputs as
     /// state (`ggml_ssm_conv`): output t reads inputs t−(K−1) … t, tap j
-    /// weighing input t−(K−1)+j. Returns `[b, seq, C]` and the new state
-    /// `[b, C, K−1]` — the last K−1 inputs, carried to the next call.
-    pub(crate) fn causal_conv(
-        &self,
-        x: &Tensor,
-        ssm_state: Option<&SsmState>,
-        device: &Device,
-    ) -> CandleResult<(Tensor, Tensor)> {
-        let (b_sz, seq_len, channels) = x.dims3()?;
+    /// weighing input t−(K−1)+j. `prev` is `[b, C, K−1]`; returns `[b, seq, C]`
+    /// and the new state `[b, C, K−1]` — the last K−1 inputs, carried to the
+    /// next call.
+    pub(crate) fn causal_conv(&self, x: &Tensor, prev: &Tensor) -> CandleResult<(Tensor, Tensor)> {
+        let (_b_sz, seq_len, channels) = x.dims3()?;
         let k = self.conv_kernel;
         let pad = k - 1;
-        let prev = match ssm_state {
-            Some(s) => s.conv_state.clone(),
-            None => Tensor::zeros((b_sz, channels, pad), x.dtype(), device)?,
-        };
         let x_t = x.transpose(1, 2)?.contiguous()?; // [b, C, seq]
-        let padded = Tensor::cat(&[&prev, &x_t], 2)?; // [b, C, seq + K − 1]
+        let padded = Tensor::cat(&[prev, &x_t], 2)?; // [b, C, seq + K − 1]
         let w = self.conv1d.reshape((1, channels, k))?;
         let mut acc: Option<Tensor> = None;
         for j in 0..k {
@@ -349,15 +423,6 @@ fn card_delta_rule_covers(kd: usize, vd: usize) -> bool {
     kd == vd && matches!(kd, 64 | 128)
 }
 
-/// Up to this many tokens the new state stays a view into the card kernel's
-/// output buffer, which then lives until the next forward replaces the state.
-/// Past it the buffer holds megabytes of outputs per layer (a 512-token chunk
-/// of the 4B: 8 MB, ×24 layers), so the state is copied out — one launch over
-/// the whole chunk, where a decode step pays none. 8 is the most positions a
-/// captured speculative check runs (`cuda_graph::MAX_POSITIONS`).
-#[cfg(feature = "candle-cuda")]
-const STATE_KEPT_AS_A_VIEW_MAX_TOKENS: usize = 8;
-
 /// PTX for the card kernel, compiled from `kernels/delta_rule.cu` by
 /// `build.rs` and loaded through candle's `get_or_load_custom_func`.
 #[cfg(feature = "candle-cuda")]
@@ -369,9 +434,12 @@ const DELTA_RULE_PTX: &str = include_str!(concat!(env!("OUT_DIR"), "/delta_rule.
 ///
 /// `qk` `[b, seq, 2·nk, kd]` (q then k, L2-normalised, q unscaled), v
 /// `[b, seq, nv, vd]`, g/beta `[b, seq, nv]`, state `[b, nv, vd, kd]`, all f32
-/// on a card, a width [`card_delta_rule_covers`]. `None` off a card build or
-/// outside that scope — the caller keeps the composition. Not bit-identical to
-/// it; replies are judged against llama.cpp.
+/// on a card, a width [`card_delta_rule_covers`]. The new state is written
+/// INTO `state_out` (contiguous, the state's shape, never the state itself —
+/// `SsmState`'s second pair); the outputs `[b, seq, nv, vd]` are returned.
+/// `None` off a card build or outside that scope — the caller keeps the
+/// composition. Not bit-identical to it; replies are judged against llama.cpp.
+#[allow(clippy::too_many_arguments)]
 fn delta_rule_cuda(
     qk: &Tensor,
     nk: usize,
@@ -379,13 +447,15 @@ fn delta_rule_cuda(
     g: &Tensor,
     beta: &Tensor,
     state: &Tensor,
+    state_out: &Tensor,
     scale: f32,
-) -> CandleResult<Option<(Tensor, Tensor)>> {
+) -> CandleResult<Option<Tensor>> {
     #[cfg(feature = "candle-cuda")]
     {
-        if [qk, v, g, beta, state]
+        if [qk, v, g, beta, state, state_out]
             .iter()
             .any(|t| t.dtype() != DType::F32)
+            || !state_out.is_contiguous()
         {
             return Ok(None);
         }
@@ -393,25 +463,16 @@ fn delta_rule_cuda(
         let gb = Tensor::stack(&[g, beta], 3)?; // [b, seq, nv, 2]
         let op = cuda::DeltaRule {
             state: state.contiguous()?,
+            state_out: state_out.clone(),
             nk,
             scale,
         };
-        let packed = qk.contiguous()?.apply_op3_no_bwd(v, &gb, &op)?;
-        let n_out = b * seq * nv * vd;
-        let out = packed.narrow(0, 0, n_out)?.reshape((b, seq, nv, vd))?;
-        let new_state = packed
-            .narrow(0, n_out, b * nv * vd * vd)?
-            .reshape((b, nv, vd, vd))?;
-        let new_state = if seq > STATE_KEPT_AS_A_VIEW_MAX_TOKENS {
-            new_state.copy()?
-        } else {
-            new_state
-        };
-        Ok(Some((out, new_state)))
+        let out = qk.contiguous()?.apply_op3_no_bwd(v, &gb, &op)?;
+        Ok(Some(out.reshape((b, seq, nv, vd))?))
     }
     #[cfg(not(feature = "candle-cuda"))]
     {
-        let _ = (qk, nk, v, g, beta, state, scale);
+        let _ = (qk, nk, v, g, beta, state, state_out, scale);
         Ok(None)
     }
 }
@@ -424,6 +485,10 @@ mod cuda {
         /// `[b, nv, vd, kd]`, contiguous: the fourth operand, which a
         /// three-operand op carries itself.
         pub(super) state: Tensor,
+        /// Where the new state is written — the same shape, contiguous, other
+        /// buffers than `state` (`SsmState`'s second pair). Written through
+        /// the device pointer: candle has no four-operand in-place op.
+        pub(super) state_out: Tensor,
         pub(super) nk: usize,
         pub(super) scale: f32,
     }
@@ -468,6 +533,7 @@ mod cuda {
                 || vs[3] != 1
                 || l3.shape().dims() != [b, seq, nv, 2]
                 || self.state.dims() != [b, nv, d, d]
+                || self.state_out.dims() != [b, nv, d, d]
             {
                 candle_core::bail!("gated-delta-rule: unexpected shapes");
             }
@@ -483,15 +549,24 @@ mod cuda {
             let Some((so, se)) = st_layout.contiguous_offsets() else {
                 candle_core::bail!("gated-delta-rule: the state must be contiguous");
             };
+            let (out_storage, out_layout) = self.state_out.storage_and_layout();
+            let candle_core::Storage::Cuda(st_out) = &*out_storage else {
+                candle_core::bail!("gated-delta-rule: the new state's buffer is not on the card");
+            };
+            let Some((oo, oe)) = out_layout.contiguous_offsets() else {
+                candle_core::bail!("gated-delta-rule: the new state's buffer must be contiguous");
+            };
 
             let qk = s1.as_cuda_slice::<f32>()?.slice(qo..qe);
             let v = s2.as_cuda_slice::<f32>()?.slice(l2.start_offset()..);
             let gb = s3.as_cuda_slice::<f32>()?.slice(go..ge);
             let state = st.as_cuda_slice::<f32>()?.slice(so..se);
-            let (n_out, n_state) = (b * seq * nv * d, b * nv * d * d);
+            let state_out = st_out.as_cuda_slice::<f32>()?.slice(oo..oe);
+            let n_out = b * seq * nv * d;
             // Every element is assigned: each (sequence, token, head, row)
-            // output by its warp's lane 0, each state element by its lane.
-            let mut dst = dev.alloc_fully_overwritten::<f32>(n_out + n_state)?;
+            // output by its warp's lane 0. Each element of `state_out` is
+            // assigned by its lane too.
+            let mut dst = dev.alloc_fully_overwritten::<f32>(n_out)?;
             let func = dev.get_or_load_custom_func(
                 if d == 64 {
                     "delta_rule_f32_d64"
@@ -513,6 +588,7 @@ mod cuda {
             builder.arg(&v);
             builder.arg(&gb);
             builder.arg(&state);
+            builder.arg(&state_out);
             builder.arg(&mut dst);
             builder.arg(&nk_i);
             builder.arg(&nv_i);
@@ -524,12 +600,14 @@ mod cuda {
             // SAFETY: ffi. Shapes and contiguity are checked above and the
             // width by `card_delta_rule_covers` (d ∈ {64, 128}, the kernel's
             // two entry points); every read is within the views by those
-            // shapes and v's strides, and `dst` is sized for exactly what the
-            // kernel assigns.
+            // shapes and v's strides, `dst` is sized for exactly the outputs
+            // and `state_out` is the state's shape. It is written through a
+            // read view, which only the ONE stream per device orders
+            // (`SWARMLLM_CUDA_OWN_STREAM`; event tracking is off by default).
             unsafe { builder.launch(cfg) }.w()?;
             Ok((
                 candle_core::CudaStorage::wrap_cuda_slice(dst, dev),
-                Shape::from_dims(&[n_out + n_state]),
+                Shape::from_dims(&[n_out]),
             ))
         }
     }
@@ -600,29 +678,140 @@ mod tests {
         let device = Device::Cpu;
         let w = weights(&device);
         let x = Tensor::randn(0f32, 1.0, (1, 7, 8), &device).unwrap();
-        let mut whole_state = None;
-        let whole = w.forward_deltanet(&x, &mut whole_state).unwrap();
+        // Both ways a state is kept: replaced each step (the processor) and
+        // written into the previous step's buffers (a card, `SsmState`).
+        for keep_previous in [false, true] {
+            let mut whole_state = None;
+            let whole = w
+                .forward_deltanet_keeping(&x, &mut whole_state, 0, keep_previous)
+                .unwrap();
 
-        let mut state = None;
-        let mut parts = vec![w
-            .forward_deltanet(&x.narrow(1, 0, 3).unwrap(), &mut state)
-            .unwrap()];
-        for t in 3..7 {
-            parts.push(
-                w.forward_deltanet(&x.narrow(1, t, 1).unwrap(), &mut state)
+            let mut state = None;
+            let mut parts = vec![w
+                .forward_deltanet_keeping(&x.narrow(1, 0, 3).unwrap(), &mut state, 0, keep_previous)
+                .unwrap()];
+            for t in 3..7 {
+                parts.push(
+                    w.forward_deltanet_keeping(
+                        &x.narrow(1, t, 1).unwrap(),
+                        &mut state,
+                        t,
+                        keep_previous,
+                    )
                     .unwrap(),
+                );
+            }
+            let stepped = Tensor::cat(&parts, 1).unwrap();
+            let diff = max_abs_diff(&whole, &stepped);
+            assert!(
+                diff < 1e-5,
+                "keep_previous={keep_previous}: stepped decode drifts from one pass by {diff}"
             );
         }
-        let stepped = Tensor::cat(&parts, 1).unwrap();
-        let diff: f32 = (whole - stepped)
+    }
+
+    fn max_abs_diff(a: &Tensor, b: &Tensor) -> f32 {
+        (a - b)
             .unwrap()
             .abs()
             .unwrap()
-            .max_all()
+            .flatten_all()
+            .unwrap()
+            .max(0)
             .unwrap()
             .to_scalar()
+            .unwrap()
+    }
+
+    /// A refused CUDA graph capture takes a decode step back and runs it again
+    /// (`cuda_graph::DecodeGraph::capture`: groups launched before the refusal
+    /// HAVE run). With the state's second pair kept, the step is taken back to
+    /// the state it read and the re-run lands exactly where an uninterrupted
+    /// run does — red if a step wrote into the state it read, or if rewinding
+    /// left the state's position or buffers behind (gotcha #761). Without the
+    /// pair, taking a step back is refused, never faked.
+    #[test]
+    fn a_deltanet_step_taken_back_and_run_again_lands_where_one_run_does() {
+        let device = Device::Cpu;
+        let w = weights(&device);
+        let x = Tensor::randn(0f32, 1.0, (1, 6, 8), &device).unwrap();
+        let step = |state: &mut Option<SsmState>, t: usize| {
+            w.forward_deltanet_keeping(&x.narrow(1, t, 1).unwrap(), state, t, true)
+                .unwrap()
+        };
+
+        let mut plain = None;
+        w.forward_deltanet_keeping(&x.narrow(1, 0, 3).unwrap(), &mut plain, 0, true)
             .unwrap();
-        assert!(diff < 1e-5, "stepped decode drifts from one pass by {diff}");
+        let plain_outs: Vec<Tensor> = (3..6).map(|t| step(&mut plain, t)).collect();
+
+        let mut redone = None;
+        w.forward_deltanet_keeping(&x.narrow(1, 0, 3).unwrap(), &mut redone, 0, true)
+            .unwrap();
+        // Step 3 runs, is taken back, and runs again; then 4 and 5 as usual.
+        step(&mut redone, 3);
+        let held = redone.as_mut().unwrap();
+        assert!(held.can_rewind_to(3) && held.rewind_to(3));
+        assert_eq!(held.positions(), 3);
+        assert!(
+            held.holds_the_next_step(),
+            "the re-run must find its buffers"
+        );
+        assert!(
+            !held.can_rewind_to(4),
+            "a taken-back step's pair describes nothing"
+        );
+        let redone_outs: Vec<Tensor> = (3..6).map(|t| step(&mut redone, t)).collect();
+        for (t, (a, b)) in plain_outs.iter().zip(&redone_outs).enumerate() {
+            assert_eq!(
+                max_abs_diff(a, b),
+                0.0,
+                "step {} differs after a take-back",
+                t + 3
+            );
+        }
+        let (a, b) = (plain.unwrap(), redone.unwrap());
+        assert_eq!(
+            max_abs_diff(&a.current().recurrent_state, &b.current().recurrent_state),
+            0.0
+        );
+        assert_eq!(
+            max_abs_diff(&a.current().conv_state, &b.current().conv_state),
+            0.0
+        );
+
+        // Two steps back is more than the pair holds; and the processor keeps no pair.
+        let mut b = Some(b);
+        assert!(!b.as_mut().unwrap().rewind_to(4));
+        let mut lean = None;
+        w.forward_deltanet_keeping(&x.narrow(1, 0, 3).unwrap(), &mut lean, 0, false)
+            .unwrap();
+        w.forward_deltanet_keeping(&x.narrow(1, 3, 1).unwrap(), &mut lean, 3, false)
+            .unwrap();
+        assert!(!lean.as_mut().unwrap().rewind_to(3));
+        assert_eq!(lean.as_ref().unwrap().positions(), 4);
+    }
+
+    /// A state that does not describe the step's first position is a lost
+    /// conversation: refused, never answered from zeros or someone's history.
+    #[test]
+    fn a_deltanet_step_out_of_step_with_its_state_is_refused() {
+        let device = Device::Cpu;
+        let w = weights(&device);
+        let x = Tensor::randn(0f32, 1.0, (1, 4, 8), &device).unwrap();
+        let mut state = None;
+        assert!(w
+            .forward_deltanet(&x.narrow(1, 0, 1).unwrap(), &mut state, 2)
+            .is_err());
+        w.forward_deltanet(&x.narrow(1, 0, 2).unwrap(), &mut state, 0)
+            .unwrap();
+        assert!(w
+            .forward_deltanet(&x.narrow(1, 2, 1).unwrap(), &mut state, 3)
+            .is_err());
+        // A step from 0 starts the conversation over.
+        w.forward_deltanet(&x.narrow(1, 0, 1).unwrap(), &mut state, 0)
+            .unwrap();
+        assert_eq!(state.as_ref().unwrap().positions(), 1);
     }
 
     /// The one-pass kernel against the composition it replaces, on shapes
