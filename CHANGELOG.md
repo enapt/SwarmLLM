@@ -1,5 +1,62 @@
 # Changelog
 
+## [0.3.235-alpha] — 2026-10-11
+
+**Faster replies from the processor at the default setting.** A node at its default
+contribution set up a group of processor threads for writing replies, and then wrote each
+word outside it, so every step was handed between threads. On a 14B model split between a
+laptop's graphics card and its processor, replies now come at 6.8-6.9 words a second (tokens,
+strictly) instead of 5.6-5.9, level with llama.cpp on the same split. On a 3B model on the
+processor alone, 14.5-15.3 instead of 11-13. The replies themselves are unchanged.
+
+**Mixture-of-experts models run much faster.** These models (Qwen3-30B-A3B, Mixtral and
+others) send each word through a few of many small "experts". Each expert's work used to be
+sent separately, with bookkeeping between them; it is now sent together, as llama.cpp does it.
+On Qwen3-30B-A3B split between an 8 GB laptop graphics card and the processor:
+- writing a reply: 40-55 ms per word instead of 74-89, level with llama.cpp at the same split;
+- reading a 681-word prompt: about 10 seconds instead of 46, and on the processor alone about
+  15 instead of 94 (its experts, in this file's Q2_K format, now also work on several prompt
+  words per pass, as other formats already did).
+The replies are the same, to the last digit, except on the graphics card, where they were
+checked against llama.cpp and agree as closely as before.
+
+**Qwen 3.5's mixture-of-experts models now run.** Qwen3.5-35B-A3B and its larger siblings were
+refused. They were checked against llama.cpp on a real model file, on the processor, on the
+graphics card, and split between the two.
+
+**Qwen 3.5 reads prompts faster.** Three of its four layers keep a running memory, which was
+updated one word at a time in about ten steps per word; it is now updated for the whole prompt
+in one step, as llama.cpp does it. A 685-word prompt on Qwen3.5-4B now takes 20-21 seconds on
+the processor instead of 56, and half a second instead of 2.6 on a graphics card. Replies agree
+with llama.cpp as closely as before.
+
+**Qwen 3.5 writes replies faster on a graphics card.** The smallest, Qwen3.5-0.8B, now writes
+121-126 words a second instead of 50-54 on a laptop's RTX 3070; the 4B was already limited by
+the card itself and is unchanged. Each reply step now goes to the card as a few prepared batches
+of work instead of hundreds of separate instructions, as other model families already did, and
+the replies are the same, to the last digit.
+
+**Fixed: a node that cannot reach HuggingFace could keep a damaged part of a model.** Such a
+node relies on the computers that checked their copies against HuggingFace to tell whether its
+own copy of a part is right, and replaces it when they disagree. Two timing problems meant it
+sometimes never took their word: a check against an older description of the part cleared the
+disagreement, or the others' answer was held back as already sent. It could then go on offering
+the part as the agreed one. This was seen only in our release checks, which set it up on
+purpose, never reported by a user; nodes that can reach HuggingFace were not affected.
+
+**An idle node uploads less.** A node repeats the description of each model it holds, so a
+computer that missed one can catch up. Once v0.3.234 quieted the other repeated message, these
+repeats were the largest part of an idle node's network chatter: 59% of it, out of 8.7 KB/s
+uploaded in all, measured on our node with the network on v0.3.234. A change is still sent the
+moment it happens and a computer that connects is still told directly; only an unchanged
+description is now repeated every two hours instead of every half hour.
+
+**A conversation's next turn on a split model goes to the computer that has read it.** When two
+computers held the same part of a model and both had it loaded, the next turn of a
+conversation could still go to the one that had never read the conversation, which then read
+all of it again: 196 seconds instead of 55 for that turn in our test. The planner now knows
+which computer holds the conversation, and charges the other for reading it.
+
 ## [0.3.234-alpha] — 2026-10-10
 
 Version 0.3.233 was built but never released: its release checks found that a node in a
