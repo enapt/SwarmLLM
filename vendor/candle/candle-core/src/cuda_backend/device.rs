@@ -578,11 +578,14 @@ impl BackendDevice for CudaDevice {
         //     allocating stream is ordered after work queued before it, which
         //     is the whole point of stream-ordered allocation.
         //   * Several devices ARE built — the daemon's capability probe and the
-        //     shard loader — and candle gives them different `DeviceId`s and
-        //     refuses to mix tensors across devices, so a buffer cannot reach
-        //     another device's stream. **This bullet used to be a hypothetical
-        //     about a constructor nobody called; since the migration it is the
-        //     load-bearing one.**
+        //     shard loader, and one per segment when a process holds two — and
+        //     candle gives them different `DeviceId`s and refuses to mix tensors
+        //     across devices in one op. **`to_device` DOES move a buffer to
+        //     another device's stream** (`CudaStorage::transfer_to_device`), and
+        //     until 2026-10-11 nothing ordered it: two segments of one model in
+        //     the logits probe raced there. That copy now joins both streams.
+        //     **This bullet used to be a hypothetical about a constructor nobody
+        //     called; since the migration it is the load-bearing one.**
         //   * `is_in_multi_stream_mode()` is TRUE since the own stream became
         //     the default (2026-09-30) — `new_stream()` sets it — so cudarc's
         //     `is_managing_stream_synchronization()` —

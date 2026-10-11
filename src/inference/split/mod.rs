@@ -26,6 +26,7 @@ mod token_embedding;
 pub(crate) use super::layers::{
     DeepSeekMeta, DeltaNetWeights, ExpertFfn, FfnVariant, LayerVariant, LayerWeights, MlaWeights,
     Mlp, MoeFfn, MoeGatingFunc, MoeRoutingConfig, QMatMul, Qwen35AttnWeights, SsmState,
+    StackedExperts,
 };
 pub(crate) use super::model_arch::Activation;
 pub use super::model_arch::ModelArch;

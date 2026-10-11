@@ -1633,9 +1633,14 @@ quarter of the cost.
 **A mixture-of-experts model shows two more stages**, `moe ffn on the card` and
 `moe ffn on the processor` (routing to combine, by the device its layer is on).
 Before 2026-10-11 its whole expert feed-forward sat in `unattributed`, ~80% of a
-step. On a card, run it once with `SWARMLLM_PROFILE_SYNC=1` too: unsynced, the
-card stage also absorbs the queued attention work it waits for at its router
-copy (FUTURE_WORK #138).
+step. On a card, run it once with `SWARMLLM_PROFILE_SYNC=1` too. With the experts
+kept stacked (the default since 2026-10-11) nothing in the layer waits for the
+card, so unsynced the card stage is only its launches and its work lands on the
+next stage that waits — over a 681-token prompt that read as 3-5 s of `output
+projection`. One matrix per expert (`SWARMLLM_MOE_CARD=per-expert`) copies the
+router scores to the host, so there the card stage absorbs queued attention
+work instead. The other A/B switches: `SWARMLLM_MOE_CARD_PROMPT=rows` (a prompt
+on the one-row kernel), `SWARMLLM_MOE_CPU=per-expert` (FUTURE_WORK #138).
 
 ## Attention-kernel A/B — `SWARMLLM_FORCE_STANDARD_ATTN=1`
 

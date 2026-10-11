@@ -1297,6 +1297,19 @@ impl CudaStorage {
 
     pub fn transfer_to_device(&self, dst: &CudaDevice) -> Result<Self> {
         let dst_stream = dst.cuda_stream();
+        // SwarmLLM patch: a buffer crossing devices is ordered on BOTH streams.
+        // Every device has its own stream and event tracking is off
+        // (`CudaDevice::new`), so nothing else orders this copy: it ran on the
+        // destination's stream while the source's stream could still be writing
+        // the buffer, and the source could reuse the memory before the copy read
+        // it. Two segments of one model on the card in ONE process (the logits
+        // probe's `LOGITS_PROBE_SPLIT` with `LOGITS_PROBE_DEVICE=cuda`) handed
+        // their hidden state across this way and answered wrong decode rows in
+        // six of eight runs, per-expert and stacked alike, one with NaN
+        // (2026-10-11, FUTURE_WORK #138). The copy waits for the source's queued
+        // work; the source's later work (a free, a reuse) waits for the copy.
+        let src_stream = self.device.cuda_stream();
+        dst_stream.join(&src_stream).w()?;
         let storage_slice = match self.dtype() {
             DType::U8 => {
                 let cuda_slice = self.as_cuda_slice::<u8>()?;
@@ -1369,6 +1382,7 @@ impl CudaStorage {
                 CudaStorageSlice::F8E8M0(result)
             }
         };
+        src_stream.join(&dst_stream).w()?;
 
         Ok(Self {
             slice: storage_slice,

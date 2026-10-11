@@ -911,7 +911,7 @@ between 1755 MHz bursts), and back-to-back runs on this laptop heat it enough to
 step 133 → 185 ms within 40 tokens (gotcha #825). Neither thread count nor placement is the
 lever: calibration already picks the width, and `SWARMLLM_DECODE_THREADS=8` was slower.
 
-#### #138 — A mixture-of-experts model that does not fit the card runs at ~40% of llama.cpp's speed
+#### #138 — A mixture-of-experts model that does not fit the card: decode level with llama.cpp since 2026-10-11, a prompt still slow
 `P2` · perf-local · **PARTIAL** — 2026-09-27 · history: archive row #138; plan: `docs/plans/faster_than_local.md` § 3.2
 
 **Measured 2026-10-11** on the RTX 3070 Laptop 8 GB + Ryzen 7 5800H, Qwen3-30B-A3B-Instruct-2507
@@ -938,15 +938,29 @@ vendored `quantized::matvec_many`, llama.cpp's `mul_mat_id` shape), bit-identica
 per-expert path: processor stage 22.1 / 28.3 / 24.9 → 19.2 / 16.5 / 17.8 ms (−29%, ABBA + a
 synced pair, one binary, `SWARMLLM_MOE_CPU=per-expert` = old).
 
-**Left, in order of what they cost us:** (1) **the card's experts** — routing on the device
-and one launch per projection for all chosen experts (candle's CUDA `indexed_moe_forward`
-reads a STACKED expert tensor; ours are sliced per expert by `split_expert_stack`); (2) **a
-prompt's experts on the processor**: a 31-token prompt spends 1.1-1.3 s in the 22 processor
-layers' experts (~50 ms a layer — ~110 experts each run on ~2 tokens through its own regions);
-generalise `matvec_many` to several rows per job, one region per projection for any token
-count; (3) **per-tensor placement** (experts in RAM, attention on the card) beside
-`split::hybrid::LayerPlacement` — worth 1.37x to llama.cpp, and it moves MORE expert work to
-the processor, so (2) first.
+**Done 2026-10-11 (unreleased), the card:** a card keeps a layer's experts STACKED as the
+file holds them, routes on the card and runs each projection for every chosen pair in ONE
+launch (`MoeFfn::experts_stacked`, candle-nn `moe_gemm_gguf`: one-row kernel ≤ 8 tokens,
+tensor-core kernel for a prompt). Decode step 74-89 → 40-55 ms, ~23 tok/s — level with
+llama.cpp's 21.5-25.4 at the same 26 layers; `moe ffn on the card` 43-52 → 5.5-7.9 ms
+(synced 47.5 → 13.2); logits as close to llama.cpp as the per-expert path. It found two
+races: candle's tensor-core prompt kernel lacked a barrier (replies changed run to run —
+vendored candle-kernels with the one line, gotcha #827), and a card-to-card `to_device` was
+unordered (gotcha #828). A/B `SWARMLLM_MOE_CARD=per-expert`, `SWARMLLM_MOE_CARD_PROMPT=rows`.
+
+**Left, in order of what they cost us:** (1) **a prompt's experts on the processor**: a
+681-token prompt spends ~17 s of ~23 s in the 22 processor layers' experts (a 31-token one
+1.0-1.1 s); generalise `matvec_many` to several rows per job, one region per projection for
+any token count. The card's share of that prompt is 1.5 s stacked against 1.2 s per expert
+(synced) — the tensor-core kernel is the slower of the two there, a smaller second item.
+(2) **MoE layers in decode-step capture**: a stacked layer has no host copy, so a MoE model
+whole on a card could be captured (`executor.rs` still excludes MoE as unchecked; a 26/22
+split stays uncaptured regardless). (3) **per-tensor placement** (experts in RAM, attention
+on the card) beside `split::hybrid::LayerPlacement` — worth 1.37x to llama.cpp, and it moves
+MORE expert work to the processor, so (1) first. Seen, not chased: the first 1-2 decode
+steps after a 681-token single-forward prompt took 2-4x a settled step on both the stacked
+and per-expert paths (not after a one-row prompt) — prompt temporaries pressing card memory
+is the likely reading; a node chunks card prompts at 512 tokens.
 
 #### #174 — CPU decode attention sits ~2× above the memory-bandwidth floor
 `P3` · perf-local · **OPEN** — 2026-08-22 · history: archive § "CPU decode attention: the kernel sits 2x above the DRAM floor"
@@ -1690,13 +1704,19 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-11, not yet released** (#224, #137's main half, #228 (1), #138's processor decode step)
+**Closed 2026-10-11, not yet released** (#224, #137's main half, #228 (1), #138's processor decode and card steps)
+- #138's card step — **a mixture-of-experts model runs its experts on the graphics card as one
+  launch per projection**, picked on the card, instead of three products per expert behind a
+  copy of the router scores to the processor. Qwen3-30B-A3B Q2_K split 26/22 between an 8 GB
+  laptop card and the processor: 74-89 → 40-55 ms per token, level with llama.cpp at the same
+  placement. candle's prompt kernel for these experts could give a different reply each run
+  (a missing barrier, fixed in a vendored copy of candle-kernels).
 - #138's processor decode step — **a mixture-of-experts model decodes its processor layers'
   experts in one parallel region per projection**, as llama.cpp's `mul_mat_id` does, instead
   of each chosen expert's three products as separate parallel calls with tensor plumbing around
   them. Qwen3-30B-A3B Q2_K split 26/22 between the card and the processor: the processor's
   expert time per token 25.1 → 17.8 ms on average (ABBA in one binary), the reply identical.
-  The larger costs remain and are #138's entry: the card's experts, and a prompt's.
+  The card's experts followed the same day (above); a prompt's are #138's entry.
 - #228 (1) — **Qwen 3.5's mixture-of-experts models run** (`qwen35moe`: Qwen3.5-35B-A3B and its
   larger siblings were refused outright). Checked against llama.cpp master on a real file, whole,
   split and on the card; the numbers are in #228's entry.

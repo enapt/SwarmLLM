@@ -75,7 +75,11 @@ swarmllm/
 │   │                          CUDA dequantize_f16 falls back to the host for UNQUANTIZED
 │   │                          F16/BF16/F32 GGUFs like its dequantize sibling already did —
 │   │                          without it a GPU node loaded such a model then failed every
-│   │                          request, gotcha #288)
+│   │                          request, gotcha #288; a card-to-card `transfer_to_device` ordered on
+│   │                          BOTH streams — each device has its own and nothing else orders it, #138)
+│   │   └── candle-kernels/    (ONE patch: the barrier the GGUF MoE prompt kernel `moe_wmma_gguf.cu`
+│   │                          lacked — a mixture-of-experts reply on a card changed run to run, #138;
+│   │                          guard `the_vendored_moe_prompt_kernel_keeps_its_barrier`)
 │   ├── candle-flash-attn/     (cudart linked STATICALLY so the binary needs only the display driver;
 │   │                          18 bf16 kernels + the FP16_SWITCH bf16 branch dropped — unreachable, 37→19;
 │   │                          `run_mha` launches on the CALLER's stream, not stream 0 — .199's garbage, #683)
@@ -138,8 +142,8 @@ swarmllm/
 │                 decode_attn.cu — one-position attention over the KV cache, f32 or
 │                 the card's half cache (flash-decoding), NOT bit-identical;
 │                 kv_append.cu — a step's f32 K or V written into the half cache in ONE
-│                 launch (cast + copy). `candle-kernels` is a registry
-│                 crate, so this is how a kernel gets added without vendoring a fifth one)
+│                 launch (cast + copy). A NEW kernel goes here, not into
+│                 vendor/candle/candle-kernels — that copy exists for one upstream fix)
 └── tests/         (integration tests)
 ```
 
@@ -2742,6 +2746,12 @@ layer on the processor uses it for ≤ 8 tokens (`MoeFfn::experts_in_one_region`
 bit-identical to the per-expert path; −29% on the processor's expert time per
 decoded token on Qwen3-30B-A3B (2026-10-11, FUTURE_WORK #138,
 `docs/invariants/inference.md`).
+
+On a card a layer keeps its experts as the file stacks them (`StackedExperts`),
+routes on the card and runs each projection for every chosen pair in one
+`candle_nn::moe::moe_gemm_gguf` launch (`MoeFfn::experts_stacked`); the prompt
+kernel needs the vendored candle-kernels barrier. A decode step on the same
+model, 26 layers on an 8 GB laptop card: 74-89 → 40-55 ms.
 
 ### The right attention kernel is OPPOSITE for prefill and decode
 

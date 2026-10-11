@@ -788,6 +788,75 @@ fn the_attention_stream_guard_catches_the_pre_fix_source() {
     );
 }
 
+/// What is wrong with a `moe_wmma_gguf.cu`'s k loop, if anything: after the
+/// last `mma_sync` of a k step, before the loop closes, there must be a live
+/// (uncommented) `__syncthreads()` — or the next step refills the input tile
+/// under a warp still reading it.
+fn moe_prompt_kernel_barrier_violation(src: &str) -> Option<String> {
+    let Some(end) = src.find("} // end k_base loop") else {
+        return Some("no `} // end k_base loop` — the kernel's shape changed, re-read it".into());
+    };
+    let Some(last_mma) = src[..end].rfind("mma_sync(") else {
+        return Some("no `mma_sync(` inside the k loop — the kernel's shape changed".into());
+    };
+    let live_barrier = src[last_mma..end]
+        .lines()
+        .map(|l| l.split("//").next().unwrap_or(""))
+        .any(|code| code.contains("__syncthreads()"));
+    (!live_barrier).then(|| {
+        "no `__syncthreads()` between the k step's last `mma_sync` and the end of the k loop"
+            .to_string()
+    })
+}
+
+/// candle-kernels' GGUF mixture-of-experts prompt kernel loaded the next k
+/// step's input tile into shared memory with no barrier after the tensor-core
+/// products of the step before, so a fast warp overwrote the tile a slower one
+/// was still reading. A MoE model's reply on a card differed run to run
+/// (Qwen3-30B-A3B, three runs, three replies, 2026-10-11, FUTURE_WORK #138).
+/// Upstream added this barrier to the non-GGUF copy (`moe_wmma.cu`, "Fix shared
+/// memory mismatch on V100") but not to this one. A CUDA run is needed to SEE
+/// the race and no CI job has a card, so the source is what is checked: a
+/// re-vendor that drops the patch goes red on every push.
+#[test]
+fn the_vendored_moe_prompt_kernel_keeps_its_barrier() {
+    let path = "vendor/candle/candle-kernels/src/moe/moe_wmma_gguf.cu";
+    let src = std::fs::read_to_string(repo_root().join(path))
+        .unwrap_or_else(|e| panic!("read {path}: {e}"));
+    if let Some(why) = moe_prompt_kernel_barrier_violation(&src) {
+        panic!(
+            "{path}: {why}. Without it a MoE model's prompt on a card is a data race \
+             and its reply changes run to run. Keep the SwarmLLM patch."
+        );
+    }
+}
+
+/// The barrier guard catches the pre-fix loop, and a barrier that is only a
+/// comment (gotcha #413: a scan that finds nothing must be shown it CAN).
+#[test]
+fn the_moe_prompt_kernel_guard_catches_the_pre_fix_loop() {
+    let fixed = "for (int k_base = 0; k_base < size_k; k_base += qk) {\n\
+                 for (int k_tile = 0; k_tile < qk; k_tile += WMMA_K) {\n\
+                     mma_sync(c_frag, a_frag, b_frag, c_frag);\n\
+                 }\n\
+                 __syncthreads();\n\
+                 } // end k_base loop";
+    assert_eq!(moe_prompt_kernel_barrier_violation(fixed), None);
+    let upstream = "for (int k_base = 0; k_base < size_k; k_base += qk) {\n\
+                    __syncthreads();\n\
+                    for (int k_tile = 0; k_tile < qk; k_tile += WMMA_K) {\n\
+                        mma_sync(c_frag, a_frag, b_frag, c_frag);\n\
+                    }\n\
+                    } // end k_base loop";
+    assert!(
+        moe_prompt_kernel_barrier_violation(upstream).is_some(),
+        "a barrier BEFORE the products protects nothing the next step's load overwrites"
+    );
+    let commented = fixed.replace("__syncthreads();", "// __syncthreads();");
+    assert!(moe_prompt_kernel_barrier_violation(&commented).is_some());
+    assert!(moe_prompt_kernel_barrier_violation("no loop here").is_some());
+}
+
 /// Every `[[example]]` in the root manifest must declare an explicit `path`.
 ///
 /// Without one, cargo resolves the example by scanning `examples/` and **fails

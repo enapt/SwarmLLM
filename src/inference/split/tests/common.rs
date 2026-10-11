@@ -362,6 +362,7 @@ pub(super) fn make_deepseek_test_model(hidden_dim: usize) -> SplitModel {
             &(Tensor::randn(0f32, 0.02, (n_experts, hidden_dim, intermediate), &device).unwrap()),
         )
         .unwrap(),
+        stacked: None,
         shared_gate: None,
         shared_down: None,
         shared_up: None,

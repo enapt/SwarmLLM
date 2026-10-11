@@ -1888,9 +1888,9 @@ the same logits against shifted tokens DISAGREE (worst 0.877). Tests:
 `an_expert_stack_is_cut_into_quantized_experts_holding_their_own_slice` (dtype
 kept, each expert equals its slice exactly), `a_moe_layer_loads_with_every_expert_quantized`.
 
-**Not verified:** a real-sized MoE model scored against llama.cpp on this box —
-Qwen3-30B-A3B Q2_K has RUN here, split between the card and the processor, and
-writes coherent text (2026-10-11, #138), but was not scored. Qwen 3.5-MoE's shared
+**Scored on a real-sized model 2026-10-11**: Qwen3-30B-A3B Q2_K with 26 layers on
+the card against llama-cpp-python on the processor, median cosine 0.9994-0.9998
+at 40 and 700 tokens (numbers in the stacked-experts section below). Qwen 3.5-MoE's shared
 gate is checked on a small real file (#228 (1)). FUTURE_WORK #114.
 Llama-4 IS verified on tiny models (next section); DeepSeek-2 is refused (#116).
 
@@ -1934,6 +1934,93 @@ ABBA plus a pair synced per stage, `~/swarmllm-138/moe_prof.sh`): the
 `moe ffn on the processor` stage, median per decoded token, 22.1 / 28.3 / 24.9 →
 19.2 / 16.5 / 17.8 ms. The card's 26 layers took 40-42 ms in every arm — the
 larger cost, and FUTURE_WORK #138's next step.
+
+### On a card the experts stay stacked: routed on the card, one launch per projection (2026-10-11)
+
+**What it replaced.** On a card each chosen expert was its own three `QMatMul`s,
+reached through `route`'s `to_vec1` of the router scores — a device→host copy
+that waits for everything queued before it — then per expert an `index_select`,
+host→device copies of its token list and weights, the products and an
+`index_add`. On Qwen3-30B-A3B Q2_K that was ~1.6 ms of host work per layer for
+~12 MB of experts a ~400 GB/s card reads in ~30 µs: the card's 26 MoE layers took
+40-42 ms of a 77-109 ms step.
+
+**What llama.cpp does** (`build_moe_ffn`, `ggml_cuda_mul_mat_id`): routing on the
+device (`argsort_top_k`), the experts kept as the file stacks them, and one
+`mul_mat_id` per projection over every chosen (token, expert) pair.
+
+**What replaced it.** `StackedExperts::fit` keeps a layer's three
+`[n_experts, rows, cols]` stacks whole on a card when `moe_gemm_gguf` reads
+their types (Q8_0, Q2_K-Q6_K), each input width is a multiple of 8 and the
+weight applies to the expert's output (not Llama 4); everything else keeps one
+matrix per expert. `MoeFfn::experts_stacked`: the router product, then
+`topk_on_device` — `arg_sort` and the policy's softmax/sigmoid on the card, the
+host form's policies one for one (`routing_on_the_device_agrees_with_routing_on_the_host`)
+— the pair ids grouped by expert with `sort_last_dim`, gate and up as one launch
+each, `silu_mul`, down as one launch scaled by each pick's weight, and a sum over
+the picks. No host copy anywhere, so the card never waits on the processor
+inside a layer. candle's arg-sort holds a row in 48 KB of shared memory, so a
+prompt runs in chunks of `4096 / k` tokens.
+
+**Two kernels and a race.** `moe_gemm_gguf` has a one-row kernel (a warp per
+output row of each pair, the input quantized to q8_1 once — llama.cpp's MMVQ
+with ids) and a tensor-core kernel (`moe_wmma_gguf.cu`, f16 tiles per expert —
+MMQ's role). The first build sent prompts (> 8 tokens) to the tensor-core
+kernel, and its replies DIFFERED RUN TO RUN: three runs of one arm, three
+replies, while the per-expert arms gave one. The kernel refills its shared
+input tile at the top of each k step with no barrier after the previous step's
+`mma_sync`, so a fast warp overwrites the tile a slower one is still reading.
+Upstream had already added exactly this barrier to the non-GGUF copy
+(`moe_wmma.cu`, "Fix shared memory mismatch on V100"); candle main still lacked
+it in this one on 2026-10-11. With the one-row kernel for every token count,
+three runs gave one reply — the per-expert path's, byte for byte — which located
+the race; the vendored candle-kernels now carries the barrier (one line, guard
+`the_vendored_moe_prompt_kernel_keeps_its_barrier` + a planted self-test), and a
+prompt takes the tensor-core kernel again — three runs, one reply. That reply
+leaves the per-expert one at a near-tie 32 characters in (an f16 prompt against
+q8_1), every time. Why not leave prompts on the one-row kernel: it re-reads an
+expert's weights for every token. The card's experts over a 681-token prompt,
+synced: one-row 5.56 s, tensor-core 1.55 s, per expert 1.18 s.
+
+**The kernel reads storage, not tensors.** `moe_gemm_gguf` passes each operand's
+`CudaSlice` pointer and ignores the layout, so a view part-way into a buffer (a
+later token chunk of the layer's input) would be read from the buffer's start.
+Every operand goes through `layers::own_storage` (a copy only when the view does
+not start at its storage), pinned by
+`an_operand_handed_to_the_grouped_kernel_starts_at_its_own_storage` — which goes
+red when the helper uses candle's `copy()`, which keeps the view's offset.
+
+**A second race the checks found, not ours.** The tiny qwen3moe split into two
+segments ON THE CARD in one process answered wrong decode rows in six of eight
+runs (one NaN) — stacked AND per-expert alike, the whole model clean every time,
+the processor split bit-identical to the whole. Each `Device::new_cuda` has its
+own stream with event tracking off, and candle's `transfer_to_device` copied the
+hidden state on the destination's stream with nothing ordering it after the
+source's writes. Only the logits probe holds two card devices that hand each
+other tensors; production segments get their input from the network or the
+processor. The vendored `transfer_to_device` now joins both streams (gotcha #828).
+**The baseline is what kept this from being blamed on the stacked experts**:
+the per-expert control on the same split diverged too.
+
+**Verified** against llama-cpp-python 0.3.16 (`logits_reference_probe`,
+`LOGITS_PROBE_GPU_LAYERS=26` for the 30B): tiny qwen3moe Q8_0 whole on the card,
+100 positions, median 0.99996, the one known near-tie (position 12) in every arm;
+Qwen3-30B-A3B Q2_K, 26 layers on the card, the committed build — 40 tokens median
+0.99949, worst 0.9753 at position 1, top-1 29/40 (per expert 0.99952, worst 0.9733
+at the same position, 31/40 — synthetic ids, flat distributions); 700 tokens (two
+prompt chunks) median 0.99980, worst 0.99818, top-1 19/20 (per expert 0.99978,
+0.99811, 19/20). The two-segment card split, re-run with the transfer ordered:
+20 of 20 runs agree with the whole model. Tests: the routing agreement above,
+`only_a_card_with_types_the_grouped_kernel_reads_keeps_experts_stacked`.
+
+**Measured** (Qwen3-30B-A3B-Instruct-2507 Q2_K, 26 layers on an RTX 3070 Laptop,
+22 on a Ryzen 7 5800H, one binary, `SWARMLLM_MOE_CARD=per-expert` = old,
+`~/swarmllm-138/{card_check,prompt_check,final_check}.sh`): decode step median
+74-89 → 40-55 ms over five per-expert and twelve stacked runs (unsynced); `moe ffn on the
+card` 39-52 → 5.4-7.9 ms unsynced, 47.5 → 13.2 ms synced. llama.cpp at the same
+26 layers: 21.5-25.4 tok/s, i.e. 39-47 ms. A prompt is the processor's: 681
+tokens took 21.5-24.1 s stacked and 23.2-24.8 s per expert, ~17 s of it in the
+processor layers' experts.
 
 ### Llama 4 routes like llama.cpp hardcodes it, and normalises Q/K after RoPE (2026-09-25)
 

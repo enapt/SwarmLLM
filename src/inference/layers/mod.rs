@@ -729,7 +729,11 @@ impl ExpertFfn {
 pub(crate) struct MoeFfn {
     pub(crate) gate: Tensor, // router weights: [n_experts, hidden] (dequantized)
     /// The routed experts, in router order — `experts[i]` answers router row `i`.
+    /// Empty when the layer holds them [`Self::stacked`] instead.
     pub(crate) experts: Vec<ExpertFfn>,
+    /// The routed experts as the file stacks them, on a card — set instead of
+    /// [`Self::experts`] where [`StackedExperts::fit`] says so.
+    pub(crate) stacked: Option<StackedExperts>,
     // Shared experts (always active, optional)
     pub(crate) shared_gate: Option<QMatMul>,
     pub(crate) shared_down: Option<QMatMul>,
@@ -746,6 +750,117 @@ pub(crate) struct MoeFfn {
     /// default. Differentiates DeepSeek-V2 strict (no renorm) and
     /// DeepSeek-V3 sigmoid gating.
     pub(crate) routing: MoeRoutingConfig,
+}
+
+/// A layer's routed experts kept as the file stacks them — `[n_experts, rows,
+/// cols]` per projection — on a card, so that one launch runs every chosen
+/// expert of a projection for every token (`candle_nn::moe::moe_gemm_gguf`,
+/// llama.cpp's `mul_mat_vec_q` with ids). Routing stays on the card too.
+///
+/// One quantized matrix per expert cost ~1.6 ms of host work per layer on a
+/// card for one decoded token — a copy of the router scores to the host, ~80
+/// launches and ~16 host→device copies — against ~30 µs of reading weights
+/// (Qwen3-30B-A3B, FUTURE_WORK #138).
+#[derive(Debug, Clone)]
+pub(crate) struct StackedExperts {
+    pub(crate) gate: std::sync::Arc<QTensor>, // [n_experts, intermediate, hidden]
+    pub(crate) up: std::sync::Arc<QTensor>,   // [n_experts, intermediate, hidden]
+    pub(crate) down: std::sync::Arc<QTensor>, // [n_experts, hidden, intermediate]
+}
+
+impl StackedExperts {
+    /// May a layer keep its experts stacked? On a card, when the kernel reads
+    /// every stack's type (Q8_0, Q2_K-Q6_K), each product's input width is a
+    /// multiple of 8 (the kernel asserts it), and each expert's weight applies
+    /// to its OUTPUT — the kernel scales outputs; Llama 4 scales inputs
+    /// (`weight_before_ffn`) and keeps one matrix per expert.
+    /// `SWARMLLM_MOE_CARD=per-expert` keeps one matrix per expert everywhere
+    /// (A/B switch).
+    pub(crate) fn fit(
+        on_a_card: bool,
+        dtypes: [candle_core::quantized::GgmlDType; 3],
+        input_widths: [usize; 2],
+        routing: MoeRoutingConfig,
+    ) -> bool {
+        use candle_core::quantized::GgmlDType as G;
+        static PER_EXPERT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let per_expert = *PER_EXPERT
+            .get_or_init(|| std::env::var("SWARMLLM_MOE_CARD").as_deref() == Ok("per-expert"));
+        on_a_card
+            && !per_expert
+            && !routing.weight_before_ffn
+            && dtypes
+                .iter()
+                .all(|t| matches!(t, G::Q8_0 | G::Q2K | G::Q3K | G::Q4K | G::Q5K | G::Q6K))
+            && input_widths.iter().all(|w| w % 8 == 0)
+    }
+}
+
+/// Does a stacked layer send a prompt's experts to `moe_gemm_gguf`'s
+/// tensor-core kernel? Yes, with the vendored candle-kernels patch: that kernel
+/// (`moe_wmma_gguf.cu`, candle-kernels 0.10.2 and candle main on 2026-10-11)
+/// refilled its input tile for the next k step with no barrier while a slower
+/// warp could still be multiplying the previous one. On Qwen3-30B-A3B three
+/// runs of one 31-token prompt gave three different replies; the one-row kernel
+/// gave one reply three times, the per-expert path's. The one-row kernel —
+/// a row per (token, pick) — re-reads an expert's weights for every token, so
+/// on a 681-token prompt it took ~1.5x the card time of a kernel that reads
+/// them once per tile. `SWARMLLM_MOE_CARD_PROMPT=rows` runs every token count
+/// on the one-row kernel (the A/B arm).
+fn prompt_on_tensor_cores() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("SWARMLLM_MOE_CARD_PROMPT").as_deref() != Ok("rows"))
+}
+
+/// `t` as a tensor whose data starts at the first element of its own storage
+/// and runs in order — copied only when it does not. `moe_gemm_gguf` hands the
+/// kernel each operand's STORAGE pointer and never reads the layout, so a view
+/// (a later token chunk of the layer's input, a contiguous narrow) would be
+/// read from the start of the buffer it shares.
+pub(crate) fn own_storage(t: Tensor) -> CandleResult<Tensor> {
+    if t.is_contiguous() && t.layout().start_offset() == 0 {
+        Ok(t)
+    } else {
+        t.force_contiguous() // `copy` keeps the view's offset
+    }
+}
+
+/// Each token's `k` chosen experts and their final weights, on the device the
+/// scores are on: `(ids [tokens, k] u32, weights [tokens, k] f32)`, best
+/// first. The device form of [`topk_host`], policy for policy — the default
+/// softmax over the `k` raw picks, the full softmax at the picks without
+/// renormalising, or the sigmoid at the picks with or without — so nothing
+/// crosses to the host.
+pub(crate) fn topk_on_device(
+    scores: &Tensor,
+    k: usize,
+    config: MoeRoutingConfig,
+) -> CandleResult<(Tensor, Tensor)> {
+    use candle_core::D;
+    let scores = scores.to_dtype(candle_core::DType::F32)?.contiguous()?;
+    let k = k.min(scores.dim(D::Minus1)?);
+    // Both gates are monotonic in the raw score, so the raw order is the pick.
+    let ids = scores
+        .arg_sort_last_dim(false)?
+        .narrow(D::Minus1, 0, k)?
+        .contiguous()?;
+    let weights = match (config.gating_func, config.renormalize_weights) {
+        (MoeGatingFunc::Softmax, true) => {
+            candle_nn::ops::softmax_last_dim(&scores.gather(&ids, D::Minus1)?)?
+        }
+        (MoeGatingFunc::Softmax, false) => {
+            candle_nn::ops::softmax_last_dim(&scores)?.gather(&ids, D::Minus1)?
+        }
+        (MoeGatingFunc::Sigmoid, renorm) => {
+            let w = candle_nn::ops::sigmoid(&scores.gather(&ids, D::Minus1)?)?;
+            if renorm {
+                w.broadcast_div(&w.sum_keepdim(D::Minus1)?)?
+            } else {
+                w
+            }
+        }
+    };
+    Ok((ids, weights))
 }
 
 /// Select top-k indices and weights from a RAW router-logit vector on CPU,
@@ -977,6 +1092,12 @@ impl MoeFfn {
         let (b_sz, seq_len, hidden) = x.dims3()?;
         let num_tokens = b_sz * seq_len;
         let x_flat = x.reshape((num_tokens, hidden))?;
+        if let Some(stacked) = &self.stacked {
+            let routed = self.experts_stacked(&x_flat, stacked)?;
+            return self
+                .add_shared_expert(&x_flat, routed)?
+                .reshape((b_sz, seq_len, hidden));
+        }
         let expert_batches = self.route(&x_flat)?;
         let routed = if self.experts_fit_one_region(x, num_tokens, &expert_batches) {
             self.experts_in_one_region(&x_flat, &expert_batches, num_tokens, hidden)?
@@ -1184,6 +1305,69 @@ impl MoeFfn {
             }
         }
         Tensor::from_vec(out, (num_tokens, hidden), x_flat.device())
+    }
+
+    /// The routed experts of a layer holding them [`StackedExperts`]: routed on
+    /// the device ([`topk_on_device`]) and run as ONE launch per projection for
+    /// every token (`candle_nn::moe::moe_gemm_gguf` — its one-row kernel, a row
+    /// per (token, pick) on the input quantized to q8_1, for up to
+    /// `MOE_ONE_REGION_MAX_TOKENS` tokens; its tensor-core kernel in f16 for a
+    /// prompt, [`prompt_on_tensor_cores`]), the down projection scaled by each
+    /// pick's weight and the picks summed per token. No host copy, so the card
+    /// never waits for the processor between layers.
+    ///
+    /// The ids are grouped by candle's arg-sort, which holds a row in 48 KB of
+    /// shared memory — 8,192 ids — so a long prompt runs in token chunks of
+    /// `STACKED_IDS_PER_CALL / k`.
+    pub(crate) fn experts_stacked(
+        &self,
+        x_flat: &Tensor,
+        stacked: &StackedExperts,
+    ) -> CandleResult<Tensor> {
+        const STACKED_IDS_PER_CALL: usize = 4096;
+        let (num_tokens, hidden) = x_flat.dims2()?;
+        let k = self.n_experts_used.clamp(1, self.gate.dim(0)?);
+        let chunk = (STACKED_IDS_PER_CALL / k).max(1);
+        let mut parts = Vec::with_capacity(num_tokens.div_ceil(chunk));
+        let mut start = 0;
+        while start < num_tokens {
+            let len = chunk.min(num_tokens - start);
+            let x = own_storage(
+                x_flat
+                    .narrow(0, start, len)?
+                    .to_dtype(candle_core::DType::F32)?,
+            )?;
+            let scores = x.matmul(&self.gate.t()?)?;
+            let (ids, weights) = topk_on_device(&scores, k, self.routing)?;
+            let (expert_ids, token_ids) = ids.flatten_all()?.sort_last_dim(true)?;
+            let (expert_ids, token_ids) = (own_storage(expert_ids)?, own_storage(token_ids)?);
+            let prompt = len > MOE_ONE_REGION_MAX_TOKENS && prompt_on_tensor_cores();
+            let gemm = |input: &Tensor, w: &QTensor, scale: Option<Tensor>| {
+                candle_nn::moe::moe_gemm_gguf(
+                    input,
+                    w,
+                    &scale,
+                    &token_ids,
+                    &expert_ids,
+                    k,
+                    prompt,
+                    candle_core::DType::F16,
+                )
+            };
+            let gate = gemm(&x, &stacked.gate, None)?; // [len * k, intermediate]
+            let up = gemm(&x, &stacked.up, None)?;
+            let act = own_storage(crate::inference::fast_math::silu_mul(&gate, &up)?)?;
+            let weights = own_storage(weights.flatten_all()?)?;
+            let down = gemm(&act, &stacked.down, Some(weights))?; // [len * k, hidden]
+            parts.push(down.reshape((len, k, hidden))?.sum(1)?);
+            start += len;
+        }
+        let routed = if parts.len() == 1 {
+            parts.swap_remove(0)
+        } else {
+            Tensor::cat(&parts, 0)?
+        };
+        routed.to_dtype(x_flat.dtype())
     }
 
     /// The routed experts one at a time, each over all of its tokens at once.

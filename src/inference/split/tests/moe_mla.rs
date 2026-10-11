@@ -187,6 +187,7 @@ fn test_moe_forward_single_expert() {
             &(down_exps),
         )
         .unwrap(),
+        stacked: None,
         shared_gate: None,
         shared_down: None,
         shared_up: None,
@@ -223,6 +224,7 @@ fn test_moe_forward_multi_expert() {
             &(down_exps),
         )
         .unwrap(),
+        stacked: None,
         shared_gate: None,
         shared_down: None,
         shared_up: None,
@@ -269,6 +271,7 @@ fn test_shared_expert_integration() {
             &(down_exps.clone()),
         )
         .unwrap(),
+        stacked: None,
         shared_gate: None,
         shared_down: None,
         shared_up: None,
@@ -286,6 +289,7 @@ fn test_shared_expert_integration() {
             &(down_exps),
         )
         .unwrap(),
+        stacked: None,
         shared_gate: Some(make_qmatmul(hidden, intermediate)),
         shared_down: Some(make_qmatmul(intermediate, hidden)),
         shared_up: Some(make_qmatmul(hidden, intermediate)),
@@ -694,6 +698,7 @@ fn the_batched_moe_forward_is_bit_identical_to_routing_token_by_token() {
                         &stack(hidden, intermediate),
                     )
                     .unwrap(),
+                    stacked: None,
                     shared_gate: (shared > 0).then(|| dense(intermediate, hidden)),
                     shared_down: (shared > 0).then(|| dense(hidden, intermediate)),
                     shared_up: (shared > 0).then(|| dense(intermediate, hidden)),
@@ -779,6 +784,7 @@ fn one_region_experts_are_bit_identical_to_one_at_a_time() {
                             down: quantized(hidden, intermediate, down_t),
                         })
                         .collect(),
+                    stacked: None,
                     shared_gate: None,
                     shared_down: None,
                     shared_up: None,
@@ -831,6 +837,108 @@ fn one_region_experts_are_bit_identical_to_one_at_a_time() {
     }
 }
 
+/// Routing on the device (`topk_on_device`, the stacked experts' path on a
+/// card) picks the experts `topk_host` picks and gives them its weights, for
+/// every policy — checked here on the processor, where both run.
+#[test]
+fn routing_on_the_device_agrees_with_routing_on_the_host() {
+    use crate::inference::layers::{topk_host, topk_on_device};
+    let device = Device::Cpu;
+    let (tokens, n_experts) = (5usize, 64usize);
+    let scores = Tensor::randn(0f32, 2.0, (tokens, n_experts), &device).unwrap();
+    let rows: Vec<Vec<f32>> = scores.to_vec2().unwrap();
+    for gating_func in [MoeGatingFunc::Softmax, MoeGatingFunc::Sigmoid] {
+        for renormalize_weights in [true, false] {
+            let routing = MoeRoutingConfig {
+                gating_func,
+                renormalize_weights,
+                weight_before_ffn: false,
+            };
+            for k in [1usize, 8] {
+                let (ids, weights) = topk_on_device(&scores, k, routing).unwrap();
+                let ids: Vec<Vec<u32>> = ids.to_vec2().unwrap();
+                let weights: Vec<Vec<f32>> = weights.to_vec2().unwrap();
+                for (t, row) in rows.iter().enumerate() {
+                    let (want_ids, want_w) = topk_host(row, k, routing);
+                    let got: Vec<usize> = ids[t].iter().map(|&i| i as usize).collect();
+                    assert_eq!(got, want_ids, "{routing:?} k={k} token {t}");
+                    for (g, w) in weights[t].iter().zip(&want_w) {
+                        assert!(
+                            (g - w).abs() <= 1e-6,
+                            "{routing:?} k={k} token {t}: {g} vs {w}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Which layers keep their experts stacked for the grouped card kernel.
+#[test]
+fn only_a_card_with_types_the_grouped_kernel_reads_keeps_experts_stacked() {
+    use crate::inference::layers::StackedExperts;
+    use candle_core::quantized::GgmlDType as G;
+    let default = MoeRoutingConfig::default();
+    let llama4 = MoeRoutingConfig {
+        gating_func: MoeGatingFunc::Sigmoid,
+        renormalize_weights: false,
+        weight_before_ffn: true,
+    };
+    let fits = |card, dtypes, widths, routing| StackedExperts::fit(card, dtypes, widths, routing);
+    assert!(fits(true, [G::Q4K, G::Q4K, G::Q6K], [2048, 768], default));
+    assert!(fits(true, [G::Q2K, G::Q2K, G::Q3K], [2048, 768], default));
+    assert!(fits(
+        true,
+        [G::Q8_0, G::Q8_0, G::Q8_0],
+        [2048, 768],
+        default
+    ));
+    // The processor keeps one matrix per expert (`experts_in_one_region`).
+    assert!(!fits(false, [G::Q4K, G::Q4K, G::Q6K], [2048, 768], default));
+    // A type the kernel does not read, anywhere in the three.
+    assert!(!fits(true, [G::Q4_0, G::Q4K, G::Q6K], [2048, 768], default));
+    assert!(!fits(true, [G::Q4K, G::Q4K, G::F16], [2048, 768], default));
+    // Llama 4 weighs the expert's input; the kernel scales outputs.
+    assert!(!fits(true, [G::Q4K, G::Q4K, G::Q6K], [2048, 768], llama4));
+    // The kernel asserts every input width is a multiple of 8.
+    assert!(!fits(
+        true,
+        [G::Q8_0, G::Q8_0, G::Q8_0],
+        [2048, 772],
+        default
+    ));
+}
+
+/// The grouped kernel reads each operand from the start of its storage, so a
+/// later token chunk of a layer's input — a view part-way into the buffer —
+/// must reach it as its own buffer holding the same values.
+#[test]
+fn an_operand_handed_to_the_grouped_kernel_starts_at_its_own_storage() {
+    use crate::inference::layers::own_storage;
+    let x = Tensor::arange(0f32, 24.0, &Device::Cpu)
+        .unwrap()
+        .reshape((6, 4))
+        .unwrap();
+    // A second chunk: contiguous, but four rows into the buffer.
+    let chunk = x.narrow(0, 2, 3).unwrap();
+    assert!(chunk.is_contiguous() && chunk.layout().start_offset() == 8);
+    let owned = own_storage(chunk.clone()).unwrap();
+    assert_eq!(owned.layout().start_offset(), 0);
+    assert!(owned.is_contiguous());
+    assert_eq!(
+        owned.to_vec2::<f32>().unwrap(),
+        chunk.to_vec2::<f32>().unwrap()
+    );
+    // A transposed view is laid out in order too.
+    let t = own_storage(x.t().unwrap()).unwrap();
+    assert!(t.is_contiguous() && t.layout().start_offset() == 0);
+    assert_eq!(
+        t.to_vec2::<f32>().unwrap(),
+        x.t().unwrap().to_vec2::<f32>().unwrap()
+    );
+}
+
 /// Llama 4 weights each chosen expert's INPUT by `sigmoid(router logit)`
 /// (llama.cpp `build_moe_ffn`'s `weight_before_ffn`), not its output.
 ///
@@ -877,6 +985,7 @@ fn a_llama4_expert_is_weighted_on_its_input() {
         let moe = |routing| MoeFfn {
             gate: gate.clone(),
             experts: ExpertFfn::from_stacked(&g, &u, &d).unwrap(),
+            stacked: None,
             shared_gate: None,
             shared_down: None,
             shared_up: None,

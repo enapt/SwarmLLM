@@ -97,10 +97,13 @@ quantized per expert (`split::loader::load_moe_ffn`).
 8 GB desktop cards. On the RTX 3070 Laptop + Ryzen 7 5800H, Qwen3-30B-A3B Q2_K at
 ~6.5 GB on the card, llama.cpp gets 23.4-23.7 tok/s from whole layers and 32.3 with
 the experts of 20 layers in RAM — 1.37x, not the ~3x the desktop figures implied.
-And at EQUAL placement we run at ~40% of llama.cpp (10-13 vs 21-25 tok/s), mostly
-the card's expert path (~1.6 ms of host overhead a layer). So the order is our
-MoE kernels first (the processor's decode step is done; the card's and a prompt's
-are next), placement after — placement moves more expert work to the processor.
+And at EQUAL placement we ran at ~40% of llama.cpp (10-13 vs 21-25 tok/s), mostly
+the card's expert path (~1.6 ms of host overhead a layer). The processor's decode
+step and then the card's experts (kept stacked, routed on the card, one launch per
+projection) closed that the same day: a 40-45 ms step, ~23 tok/s, level with
+llama.cpp's 21.5-25.4 at the same 26 layers. A PROMPT is now the gap — 681 tokens
+spend ~15.5 s of ~22 s in the processor layers' experts — and placement comes after
+it, because placement moves more expert work to the processor.
 
 ### 3.3 Make our own card + processor path as fast as the memory allows
 

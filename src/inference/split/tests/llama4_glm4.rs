@@ -274,6 +274,7 @@ fn test_ffn_variant_moe_forward() {
             &(down_exps),
         )
         .unwrap(),
+        stacked: None,
         shared_gate: None,
         shared_down: None,
         shared_up: None,
@@ -340,6 +341,7 @@ fn test_llama4_moe_layer_forward() {
                         .unwrap()),
                 )
                 .unwrap(),
+                stacked: None,
                 shared_gate: None,
                 shared_down: None,
                 shared_up: None,

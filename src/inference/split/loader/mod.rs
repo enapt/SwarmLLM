@@ -200,8 +200,10 @@ fn split_expert_stack<R: std::io::Read + std::io::Seek>(
 
 /// A layer's mixture-of-experts feed-forward, loaded the one way every MoE
 /// family here shares: the router dequantized (`[n_experts, hidden]`, small),
-/// each routed expert kept QUANTIZED as its own matrix, and the shared expert —
-/// with its sigmoid gate, where the model has one — when present.
+/// the routed experts kept QUANTIZED — as the file's three stacks on a card the
+/// grouped kernel reads (`load_stacked_experts`), as one matrix per expert
+/// everywhere else — and the shared expert, with its sigmoid gate where the
+/// model has one, when present.
 ///
 /// One function because the three per-family copies it replaces each
 /// dequantized every expert to f32, which made every real-sized MoE model
@@ -220,31 +222,17 @@ fn load_moe_ffn<R: std::io::Read + std::io::Seek>(
         .tensor(reader, &name("ffn_gate_inp"), device)
         .and_then(|t| t.dequantize(device))
         .map_err(|e| SwarmError::Internal(format!("{prefix}.ffn_gate_inp: {e}")))?;
-    let gate = split_expert_stack(ct, reader, &name("ffn_gate_exps"), device)?;
-    let up = split_expert_stack(ct, reader, &name("ffn_up_exps"), device)?;
-    let down = split_expert_stack(ct, reader, &name("ffn_down_exps"), device)?;
     let n_router = router.dim(0).map_err(SwarmError::internal)?;
-    if gate.len() != n_router || up.len() != n_router || down.len() != n_router {
-        return Err(SwarmError::Internal(format!(
-            "{prefix}: the router chooses among {n_router} experts, the stacks hold {}/{}/{}",
-            gate.len(),
-            up.len(),
-            down.len()
-        )));
-    }
-    let experts = gate
-        .into_iter()
-        .zip(up)
-        .zip(down)
-        .map(|((g, u), d)| {
-            Ok(super::ExpertFfn {
-                gate: QMatMul::from_qtensor(g)?,
-                up: QMatMul::from_qtensor(u)?,
-                down: QMatMul::from_qtensor(d)?,
-            })
-        })
-        .collect::<Result<Vec<_>, candle_core::Error>>()
-        .map_err(SwarmError::internal)?;
+    let (experts, stacked) = if let Some(stacked) =
+        load_stacked_experts(ct, reader, prefix, device, n_router, routing)?
+    {
+        (Vec::new(), Some(stacked))
+    } else {
+        (
+            load_experts_one_by_one(ct, reader, prefix, device, n_router)?,
+            None,
+        )
+    };
 
     // Present or absent as a whole in every family; a present tensor that
     // fails to read is an error, not an absence.
@@ -273,6 +261,7 @@ fn load_moe_ffn<R: std::io::Read + std::io::Seek>(
     Ok(MoeFfn {
         gate: router,
         experts,
+        stacked,
         shared_gate,
         shared_down,
         shared_up,
@@ -280,6 +269,88 @@ fn load_moe_ffn<R: std::io::Read + std::io::Seek>(
         n_experts_used,
         routing,
     })
+}
+
+/// A layer's three expert stacks loaded whole onto a card, where
+/// `layers::StackedExperts::fit` says the grouped kernel takes them; `None`
+/// otherwise (one matrix per expert, `load_experts_one_by_one`). Read from the
+/// table before any byte is, so a layer is never loaded twice.
+fn load_stacked_experts<R: std::io::Read + std::io::Seek>(
+    ct: &gguf_file::Content,
+    reader: &mut R,
+    prefix: &str,
+    device: &Device,
+    n_router: usize,
+    routing: MoeRoutingConfig,
+) -> Result<Option<super::StackedExperts>, SwarmError> {
+    let names =
+        ["ffn_gate_exps", "ffn_up_exps", "ffn_down_exps"].map(|t| format!("{prefix}.{t}.weight"));
+    let infos = names
+        .iter()
+        .map(|n| {
+            ct.tensor_infos
+                .get(n)
+                .ok_or_else(|| SwarmError::Internal(format!("{n}: not in the file")))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    // candle's order: [n_experts, rows, cols]; each product's input is `cols`.
+    let dims: Vec<&[usize]> = infos.iter().map(|i| i.shape.dims()).collect();
+    if dims.iter().any(|d| d.len() != 3 || d[0] != n_router) {
+        return Ok(None);
+    }
+    let dtypes = [
+        infos[0].ggml_dtype,
+        infos[1].ggml_dtype,
+        infos[2].ggml_dtype,
+    ];
+    if !super::StackedExperts::fit(device.is_cuda(), dtypes, [dims[0][2], dims[2][2]], routing) {
+        return Ok(None);
+    }
+    let [gate, up, down] = names.map(|n| {
+        ct.tensor(reader, &n, device)
+            .map(std::sync::Arc::new)
+            .map_err(|e| SwarmError::Internal(format!("{n}: {e}")))
+    });
+    Ok(Some(super::StackedExperts {
+        gate: gate?,
+        up: up?,
+        down: down?,
+    }))
+}
+
+/// A layer's routed experts as one QUANTIZED matrix each
+/// (`split_expert_stack`), in router order.
+fn load_experts_one_by_one<R: std::io::Read + std::io::Seek>(
+    ct: &gguf_file::Content,
+    reader: &mut R,
+    prefix: &str,
+    device: &Device,
+    n_router: usize,
+) -> Result<Vec<super::ExpertFfn>, SwarmError> {
+    let name = |t: &str| format!("{prefix}.{t}.weight");
+    let gate = split_expert_stack(ct, reader, &name("ffn_gate_exps"), device)?;
+    let up = split_expert_stack(ct, reader, &name("ffn_up_exps"), device)?;
+    let down = split_expert_stack(ct, reader, &name("ffn_down_exps"), device)?;
+    if gate.len() != n_router || up.len() != n_router || down.len() != n_router {
+        return Err(SwarmError::Internal(format!(
+            "{prefix}: the router chooses among {n_router} experts, the stacks hold {}/{}/{}",
+            gate.len(),
+            up.len(),
+            down.len()
+        )));
+    }
+    gate.into_iter()
+        .zip(up)
+        .zip(down)
+        .map(|((g, u), d)| {
+            Ok(super::ExpertFfn {
+                gate: QMatMul::from_qtensor(g)?,
+                up: QMatMul::from_qtensor(u)?,
+                down: QMatMul::from_qtensor(d)?,
+            })
+        })
+        .collect::<Result<Vec<_>, candle_core::Error>>()
+        .map_err(SwarmError::internal)
 }
 
 /// Whether a family's router renormalizes its top-k weights when the GGUF does

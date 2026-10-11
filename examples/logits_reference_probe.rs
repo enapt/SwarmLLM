@@ -24,7 +24,8 @@
 //! ```
 //!
 //! `LOGITS_PROBE_IDS` (a JSON array of token ids) instead of the synthetic sequence;
-//! `LOGITS_PROBE_DEVICE=cuda` to run on the card instead of the processor;
+//! `LOGITS_PROBE_DEVICE=cuda` to run on the card instead of the processor, and
+//! `LOGITS_PROBE_GPU_LAYERS=n` to keep only the first n layers there;
 //! `LOGITS_PROBE_N` (default 24) tokens, `LOGITS_PROBE_DECODE` (default 4) of
 //! them as decode steps, `LOGITS_PROBE_SPLIT` the first layer of the second
 //! segment (default: one segment). Writes `<OUT>.f32` (`[N, vocab]`, little
@@ -90,6 +91,16 @@ fn main() -> anyhow::Result<()> {
     // the kernels, the KV cache's layout and its precision are the card's, which
     // the processor run cannot speak for (the half KV cache, FUTURE_WORK #194).
     let force_cpu = std::env::var("LOGITS_PROBE_DEVICE").as_deref() != Ok("cuda");
+    // `LOGITS_PROBE_GPU_LAYERS=<n>` with the card: the first n layers on the
+    // card and the rest on the processor, as `test-split --gpu-layers` places
+    // them — a model too big for the card is probed in the placement a node
+    // gives it (llama.cpp's `dump_logits` takes `DUMP_GPU_LAYERS`).
+    if let Some(n) = std::env::var("LOGITS_PROBE_GPU_LAYERS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+    {
+        swarmllm::inference::split::GPU_LAYER_LIMIT.store(n, std::sync::atomic::Ordering::Relaxed);
+    }
 
     // Arbitrary ids well inside any vocabulary and away from the specials,
     // unless a real sequence was given.

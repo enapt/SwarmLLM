@@ -434,6 +434,12 @@ libp2p-request-response = { path = "vendor/libp2p-request-response" }
 # (float8 0.7.0 dropped the cudarc dep entirely upstream, so the earlier
 # vendor/float8/ patch is obsolete and has been removed.)
 candle-core = { path = "vendor/candle/candle-core" }
+# candle-kernels 0.10.2 with ONE `# SwarmLLM patch:` line: the barrier its GGUF
+# mixture-of-experts prompt kernel (`src/moe/moe_wmma_gguf.cu`) lacks — a race
+# that made a MoE model's replies differ run to run on a card (2026-10-11,
+# FUTURE_WORK #138). Unchanged on candle main that day; dropped when upstream
+# carries it. Guard: `the_vendored_moe_prompt_kernel_keeps_its_barrier`.
+candle-kernels = { path = "vendor/candle/candle-kernels" }
 
 [profile.dev]
 # Faster dev builds: reduce debug info, enable incremental
