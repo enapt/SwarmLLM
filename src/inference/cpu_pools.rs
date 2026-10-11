@@ -153,9 +153,10 @@
 //! holding its own — the common case, since most machines have no sub-physical
 //! optimum worth taking.
 //!
-//! Prefill is left on the global pool untouched, so a node on the default
-//! `contribution = "minimal"` takes exactly the code path it did before, with
-//! no pool and no `install`.
+//! Prefill is left on the global pool untouched. Decode always runs INSIDE a
+//! pool, even at the global pool's own width — the default contribution's case;
+//! run from the caller it paid a cross-thread handoff per parallel op (see
+//! [`pool_for`], #137).
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -466,13 +467,45 @@ impl Calibration {
     }
 }
 
-/// One rayon pool per candidate width, built on first use and shared after.
+/// One rayon pool per decode width, built on first use and shared after —
+/// **including the global pool's own width** (2026-10-11, FUTURE_WORK #137).
 ///
-/// `None` means "use the global pool", which is what the widest candidate
-/// always resolves to — so the common path still builds nothing.
+/// That width used to resolve to `None`, "use the global pool", so that the
+/// common case built nothing. It was the slow case, and the common one: at the
+/// default contribution the global pool is exactly decode's width on nearly
+/// every machine, so decode ran as plain `f()` on the worker's tokio thread.
+/// That thread is no rayon worker, and rayon-core (1.13, `Registry::
+/// in_worker_cold`) answers every parallel call made from outside a pool by
+/// injecting a job and blocking the caller on a latch — one cross-thread
+/// handoff per parallel op, a few hundred per token, with the caller doing no
+/// work. `install` pays that handoff once per forward and runs every op inside
+/// it on a pool thread. Same binary, same 4 threads, Ryzen 7 5800H, mean ms of
+/// 95-127 tokens after a 60 s cool-down, two passes in ABBA order
+/// (`~/swarmllm-137/pool.sh`):
+///
+/// | forward | outside the pool | installed |
+/// |---|---|---|
+/// | llama-3.2-3b Q4_K_M, processor only | 110.9, 112.2 | 83.1, 80.5 (1.36x) |
+/// | Qwen2.5-14B Q4_K_M, 18 of 48 layers on the processor | 180.6, 189.5 | 159.8, 160.0 (1.16x) |
+/// | llama-3.2-3b whole on the card (no processor layers, null) | 3.7, 4.2 | 4.2, 4.0 |
+///
+/// Through a real node at the default contribution (`~/swarmllm-137/node_ab.sh`,
+/// one binary, `SWARMLLM_DECODE_INSTALL=0` the other arm, ABBA): the 14B split
+/// 5.64/5.93 → 6.79/6.93 tok/s, llama.cpp's own figure at that placement
+/// (6.8-7.0); the 3B processor-only 10.97/13.04 → 14.53/15.29 — the 13.04 is a
+/// run where calibration fled to 3 threads, an installed pool, which is how the
+/// defect half-hid on some machines.
+///
+/// No benchmark saw it: they run under the default global pool (every logical
+/// core), wider than decode, so decode was always installed there; only a node's
+/// worker, started with `RAYON_NUM_THREADS` at the contribution width, ran
+/// outside. The extra pool's threads sleep whenever decode is not running.
+/// `SWARMLLM_DECODE_INSTALL=0` restores the old path, for A/B in one binary.
+/// Prompt chunks still run from the caller on the global pool: their ops are
+/// hundreds of times larger, so the same handoff is noise there.
 fn pool_for(threads: usize) -> Option<Arc<rayon::ThreadPool>> {
     static POOLS: OnceLock<Mutex<HashMap<usize, Option<Arc<rayon::ThreadPool>>>>> = OnceLock::new();
-    if threads >= rayon::current_num_threads() {
+    if !env_decode_install() && threads >= rayon::current_num_threads() {
         return None;
     }
     let map = POOLS.get_or_init(|| Mutex::new(HashMap::new()));
@@ -572,6 +605,18 @@ fn calibration_for(cpu_layers: usize) -> Option<Arc<Calibration>> {
         .for_depth(cpu_layers)
 }
 
+/// `SWARMLLM_DECODE_INSTALL=0` runs decode at the global pool's width from the
+/// calling thread again (see [`pool_for`]), for A/B inside one binary.
+fn env_decode_install() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(
+            std::env::var("SWARMLLM_DECODE_INSTALL").ok().as_deref(),
+            Some("0")
+        )
+    })
+}
+
 /// `SWARMLLM_DECODE_CALIBRATE=0` pins the previous behaviour, for A/B inside
 /// one binary — the same discipline as `SWARMLLM_FORCE_STANDARD_ATTN`.
 fn env_calibration_enabled() -> bool {
@@ -584,48 +629,31 @@ fn env_calibration_enabled() -> bool {
     })
 }
 
-/// The decode pool, or `None` when decode should just use the global pool.
+/// The decode pool when calibration is not choosing one (a pinned width, or
+/// nothing to choose between), or `None` for `SWARMLLM_DECODE_THREADS=0`.
 ///
-/// `None` is the common case and matters: at the default contribution the
-/// ceiling already equals decode's optimum, so there is no second pool, no
-/// extra threads, and no `install` on the hot path.
-fn decode_pool() -> Option<&'static rayon::ThreadPool> {
-    static POOL: OnceLock<Option<rayon::ThreadPool>> = OnceLock::new();
-    POOL.get_or_init(|| {
+/// Built through [`pool_for`] like every other decode width, so it is a pool
+/// even when its width equals the global pool's — see there for why that is
+/// the case that matters.
+fn decode_pool() -> Option<Arc<rayon::ThreadPool>> {
+    static WANT: OnceLock<Option<usize>> = OnceLock::new();
+    let want = (*WANT.get_or_init(|| {
         let offered = rayon::current_num_threads();
         let want = match env_decode_threads() {
             Some(0) => return None,
             Some(n) => n.min(offered),
             None => decode_threads(offered, num_cpus::get_physical()),
         };
-        if want >= offered {
-            return None;
-        }
-        match rayon::ThreadPoolBuilder::new()
-            .num_threads(want)
-            .thread_name(|i| format!("swarm-decode-{i}"))
-            .build()
-        {
-            Ok(p) => {
-                tracing::info!(
-                    decode_threads = want,
-                    offered,
-                    physical = num_cpus::get_physical(),
-                    "Decode runs on a narrower thread pool than prompt processing — decode is \
-                     bandwidth-bound and slows down with more threads"
-                );
-                Some(p)
-            }
-            Err(e) => {
-                // Not fatal: falling back to the global pool is exactly the
-                // previous behaviour, so a pool that cannot be built costs
-                // performance and nothing else.
-                tracing::warn!(error = %e, "Could not build the decode thread pool — using the global one");
-                None
-            }
-        }
-    })
-    .as_ref()
+        tracing::info!(
+            decode_threads = want,
+            offered,
+            physical = num_cpus::get_physical(),
+            "Decode runs on its own thread pool, no wider than prompt processing's — decode is \
+             bandwidth-bound and slows down with more threads"
+        );
+        Some(want)
+    }))?;
+    pool_for(want)
 }
 
 /// How many threads the machine OWNER's own prompts are read on, in this
@@ -1189,6 +1217,29 @@ mod tests {
             deep.chosen.load(Ordering::Relaxed),
             0,
             "the deep model's width was decided by another shape's tokens"
+        );
+    }
+
+    /// The default contribution's case (#137): decode's width equals the
+    /// global pool's, and that width must still be a POOL — run from the
+    /// calling thread, every parallel op is injected from outside rayon
+    /// (`in_worker_cold`) and a 3B decoded 25% slower. Asserted on where the
+    /// work ran (`current_thread_index` is `None` outside every pool), not on
+    /// a speed.
+    #[test]
+    fn decode_at_the_global_pools_width_still_runs_inside_a_pool() {
+        let global = rayon::current_num_threads();
+        let pool = pool_for(global)
+            .expect("the global pool's own width got no decode pool — decode runs outside rayon");
+        assert_eq!(pool.install(rayon::current_num_threads), global);
+        assert!(
+            rayon::current_thread_index().is_none(),
+            "the test itself must start outside every pool"
+        );
+        // A processor depth no other test uses (calibration state is shared).
+        assert!(
+            in_phase_pool(1, 9_998, false, || rayon::current_thread_index().is_some()),
+            "a decode step with processor layers ran on the calling thread"
         );
     }
 

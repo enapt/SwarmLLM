@@ -240,7 +240,7 @@ Each names the ONE place a decision is made (`.claude/rules/architecture.md` § 
 - **`inference::decode_attn::gqa_decode_attention_cpu`** — each K/V row read ONCE per group. → § "It read the cache once per QUERY head"
 - **`inference::prefill_attn::gqa_prefill_attention_cpu`** — `q_len >= 2`.
 - **`inference::fast_math`** — `exp_inplace`, `silu_mul`.
-- **`inference::cpu_pools::in_phase_pool`** — one choke point.
+- **`inference::cpu_pools::in_phase_pool`** — one choke point. Decode runs INSIDE a pool even at the global pool's width (`pool_for`); from the caller every parallel op is a cross-thread handoff (#137, 3B 111 → 82 ms/token). A bench reproduces a node only at the node's `RAYON_NUM_THREADS`.
 - **`inference::layers::new_kv_cache`** — the only way to construct a KV cache.
 - **`inference::split::kv_cache::LayerKv`** — one layer's KV cache.
 - **`SeqCache` / `KvPair` + `LayerKv::truncate`** — **never re-introduce a copy on the rollback path.**

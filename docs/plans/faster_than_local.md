@@ -50,7 +50,7 @@ still needs NVLink-class links.
 |---|---|---|
 | Model fits their GPU | Run it locally. The swarm speeds up what is NOT per-token: prompts already read elsewhere, independent requests fanned out | Decode = local; agent turns 5-20× faster to first token (§3.1) |
 | Model is an MoE that fits GPU + RAM | Local, experts in system RAM, everything else on the card | Qwen3-30B-A3B class: **30-45 tok/s** on an 8 GB card + 32 GB RAM (measured by others, §3.2) |
-| Dense model a little too big for the card | Local: a quantization that fits the card, or card + processor with the processor part fast | 14B: 3.35 → ~8 tok/s by fixing our CPU half (§3.3) |
+| Dense model a little too big for the card | Local: a quantization that fits the card, or card + processor with the processor part fast | 14B on an 8 GB card: llama.cpp 6.8-7.0 tok/s; a default node 6.8-6.9 once decode ran inside its pool (§3.3) |
 | CPU-only user, long prompt | Hand the prompt to a GPU peer | 30-50× faster to first token (§3.1) |
 | Model fits nowhere, machines close (≤ 25 ms) | Split + verified prediction with a small drafter | ~local speed (`split_speculation.md` projection: 38-50 tok/s at 25 ms) |
 | Model fits nowhere, machines far (~300 ms) | Split + verified prediction with a SHADOW of the far layers | 8-15 tok/s with a small drafter; 25-35 with a shadow (§3.5) |
@@ -95,14 +95,18 @@ quantized per expert (`split::loader::load_moe_ffn`).
 
 ### 3.3 Make our own card + processor path as fast as the memory allows
 
-Our 14B at 3.35 tok/s with 28 of 48 layers on the processor reads ~4.9 GB per
-token from RAM: ~17 GB/s effective, about a third of dual-channel DDR4. The first
-suspects: the decode thread count for the OWNER's request on a hybrid worker (the
-contribution level caps decode at half the cores; `cpu_pools::in_phase_pool`
-widens only prompt reading), then our quantized matvec against llama.cpp's.
-Rule of thumb from the limit above: at ~50 GB/s, one 206 ms round trip reads
-~10 GB of weights, so **local offload beats a far split whenever less than ~10 GB
-sits off the card** — which is every 14B.
+**Measured 2026-10-11 (FUTURE_WORK #137).** The 3.35 tok/s / ~17 GB/s premise was a 09-27
+figure and no longer holds. On the Ryzen 7 5800H + RTX 3070 laptop, Qwen2.5-14B Q4_K_M with 30
+of 48 layers on the card, cooled before each arm: llama.cpp 6.8-7.0 tok/s (`llama-bench -ngl 30
+-t 4`); a default node 6.79-6.93 once decode runs INSIDE its thread pool — which it did not do
+until 2026-10-11 (5.64-5.93 in the same A/B; § Closed in FUTURE_WORK; a 3B on a processor-only
+node 10.97-13.04 → 14.53-15.29). The thread count was not the lever: calibration
+picks 4 on this box and 8 is slower for us, where llama.cpp gains ~10% at 8 — the residual (#137,
+P3) is our Q4_K matvec against llama.cpp's repacked rows. Two machine effects, shared with
+llama.cpp: the card clocks down between split steps, and back-to-back runs heat the laptop
+enough to fake a 30% gap. Rule of thumb from the limit above still holds: at ~50 GB/s one 206 ms
+round trip reads ~10 GB of weights, so **local offload beats a far split whenever less than ~10
+GB sits off the card** — which is every 14B.
 
 ### 3.4 Remove our own overhead from every round trip (exact, no prediction)
 
@@ -139,7 +143,7 @@ at the temperatures clients actually send. Measurement: `~/swarmllm-ref/spec/`
 
 ## 4. The order of work
 
-Status 2026-10-02: items 1, 2 and 6 have shipped; 3-5 and 7 are open (the
+Status 2026-10-11: items 1, 2, 3 and 6 have shipped (3 unreleased); 4, 5 and 7 are open (the
 persistent stream is still off by default). `docs/FUTURE_WORK.md` carries them: item 3 is #137,
 item 4 is #138, item 5 is #10, item 7 is #133 (with V1Lazy, request-response is as fast, so
 there is no speed reason to default the stream on). The shadow of §3.5 is decided against as a
@@ -150,7 +154,9 @@ default (#144, § "Decided"): no design may need a user to hold a whole model, e
    failed on .209 and earlier).
 2. ✅ **V1Lazy for the tensor protocol** (§3.4) — small, exact, every split user.
    Measure on the real link, never loopback (gotcha #739).
-3. **Our processor half** (§3.3) — measure the owner's decode threads first.
+3. ✅ **Our processor half** (§3.3) — measured 2026-10-11: decode ran outside its thread pool on
+   every default node (fixed: a 14B split level with llama.cpp, a 3B processor-only 1.14-1.39x);
+   ~12% behind llama.cpp on the processor alone remains (#137, P3).
 4. **MoE experts on the processor** (§3.2).
 5. **Prefix affinity across peers** (§3.1), then CPU users' prompt hand-off pricing.
 6. ✅ **Split speculation Phase 1** (accept at the tail — shipped; the stream of checks followed in v0.3.216),

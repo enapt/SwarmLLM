@@ -1930,6 +1930,22 @@ identical runs, and read a Qwen2.5-7B kernel A/B as level where the same pair at
 4 threads read 141.6 → 134.1. Pin the width explicitly for an A/B
 (`SWARMLLM_DECODE_THREADS=4` here) and say which one a figure came from.
 
+⚠ **A bench reproduces a node only at the node's `RAYON_NUM_THREADS`** (2026-10-11,
+#137). A worker is started with the global pool at the contribution width; a bench
+(`test-split`, `prefill_bench`) gets every logical core. Until 2026-10-11 that alone
+decided whether decode ran inside a pool — every bench installed it, every default node
+did not — and a cooled node decoded a 14B split at 5.3-5.4 tok/s where `test-split` read
+6.3-6.6. To compare a node's forward with a bench's, read both with `SWARMLLM_PROFILE=1`
+(the worker's lines reach the node log) and run the bench at the node's width:
+`RAYON_NUM_THREADS=4 SWARMLLM_DECODE_THREADS=4`.
+
+⚠ **Two traps when timing a split on this laptop**, both met on #137. Back-to-back runs
+heat it: a split step climbed 133 → 185 ms within 40 tokens, and the same pair read
+"30% behind llama.cpp" hot and 5-7% cooled — `safety_settle; sleep 60` before EVERY arm,
+interleaved. And `64 / (t80 − t16)` across two separate processes swings ±15% with the
+model's load time (8.0 and 6.0 tok/s for one configuration): use the forward totals, or
+two requests to ONE warm worker.
+
 ### Where a split's token goes (2026-09-29)
 
 For "a split is slower than it should be" with the network ruled out. Run both nodes at

@@ -419,11 +419,30 @@ i5-10500T) showed decode climbing monotonically to all six, where that rule
 would have cost 23%. Peak threads is bandwidth divided by per-core draw, which
 core count cannot predict; physical-vs-SMT is the only part both machines and
 the mechanism agree on. Prefill keeps the global pool untouched; decode is
-capped only ever downward, and every contribution level is already at or below
-physical, so the common path builds no pool and pays nothing.
-`SWARMLLM_DECODE_THREADS` overrides, and `=0` restores the single-pool
-behaviour for A/B measurement inside one binary — the same discipline as
-`SWARMLLM_FORCE_STANDARD_ATTN`.
+capped only ever downward. `SWARMLLM_DECODE_THREADS` overrides, and `=0`
+restores the single-pool behaviour for A/B measurement inside one binary — the
+same discipline as `SWARMLLM_FORCE_STANDARD_ATTN`.
+**Decode runs INSIDE a pool even at the global pool's own width** (2026-10-11,
+FUTURE_WORK #137). This text used to say the common path "builds no pool and
+pays nothing", and the common path was the slow one: every contribution level
+is at or below physical, so at the default decode's width IS the global pool's,
+`pool_for` returned `None`, and the forward ran as `f()` on the worker's tokio
+thread. From a thread outside every pool rayon-core injects each parallel call
+as a job and blocks the caller (`Registry::in_worker_cold`) — a few hundred
+handoffs a token. Same binary and 4 threads, the only change the global pool's
+width (4 = the node's case vs 10 = installed), mean ms per token after a 60 s
+cool-down, two passes ABBA (`~/swarmllm-137/pool.sh`): llama-3.2-3b
+processor-only 110.9/112.2 → 83.1/80.5 (1.36x); Qwen2.5-14B with 18/48 layers
+on the processor 180.6/189.5 → 159.8/160.0 (1.16x); the 3B whole on the card
+(null: no processor layers, no pool either way) 3.7/4.2 vs 4.2/4.0.
+**No benchmark could see it**: `prefill_bench` and `test-split` run under the
+default global pool (every logical core), wider than decode, so decode was
+always installed there; only a worker started with `RAYON_NUM_THREADS` at the
+contribution width ran outside — and the cooled node measured 5.3-5.4 tok/s on
+that 14B where `test-split` measured 6.3-6.6. Through a real node, one binary,
+ABBA: the split 5.64/5.93 → 6.79/6.93 tok/s (llama.cpp: 6.8-7.0), the 3B on a
+processor-only node 10.97/13.04 → 14.53/15.29. `SWARMLLM_DECODE_INSTALL=0`
+restores the old path. Guard: `decode_at_the_global_pools_width_still_runs_inside_a_pool`.
 **The calibration is keyed by the forward's PROCESSOR DEPTH, and a forward
 with no processor layers is never timed** (2026-09-01, gotcha #432).
 `in_phase_pool` takes `cpu_layers` — `SplitModel::cpu_layer_count()`, zero for

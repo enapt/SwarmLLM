@@ -79,10 +79,10 @@ re-fetching parts) and #223 closed in v0.3.228 (released 2026-10-06 09:42 UTC), 
 9. *(#155 narrowed to P3 on 2026-10-07 — not seen on the swarm, see its entry.)*
 10. *(#194 closed 2026-10-09 — a card keeps its conversation memory as f16, a third of the
     memory, and keeps its memory guard under a context override.)*
-11. **#137**, **#138**, **#129** — the processor half of a hybrid, MoE placement, and near-fit
-    models sent across continents (#147's f16 accumulation shipped 2026-10-09; its smaller
-    items are P3)
-    (`docs/plans/faster_than_local.md`).
+11. **#138**, **#129** — MoE placement, and near-fit models sent across continents (#147's f16
+    accumulation shipped 2026-10-09; its smaller items are P3). *(#137 narrowed to P3 on
+    2026-10-11: decode ran outside its thread pool on every default node — fixed: a 14B split
+    1.19x, now level with llama.cpp; a 3B processor-only 1.14-1.39x; ~12% behind it remains.)* (`docs/plans/faster_than_local.md`).
 12. **#3**, **#180** — the routing cost model charges a constant where the reply length
     belongs, which keeps partial ranges (load spreading) off.
 13. **#171** — the prompt pass through a split runs one stage at a time (released in v0.3.234; left:
@@ -884,13 +884,27 @@ tensor-core MMQ port (large). Not checked at long context: Qwen 3.5 (reference i
 and a MoE model whole on the card (none fits 8 GB). Separately, GLM-4-9B disagrees with llama.cpp
 at a few positions on every path (tokenizer re-tokenisation is the lead) — pre-existing.
 
-#### #137 — A model split between card and processor reads its processor layers at ~17 GB/s, a third of what the memory can do
-`P2` · perf-local · **OPEN** — 2026-09-27 · history: archive row #137; plan: `docs/plans/faster_than_local.md` § 3.3
+#### #137 — Our processor decode trails llama.cpp's by ~12% at the same width, and loses where llama.cpp gains from 8 threads
+`P3` · perf-local · **OPEN, narrowed 2026-10-11** — 2026-09-27 · history: archive row #137; plan: `docs/plans/faster_than_local.md` § 3.3
 
-Hits anyone whose model is slightly too large for their card (a 14B at 3.35 tok/s). First
-measure the owner's decode on a hybrid worker at the contribution width
-(`cpu_pools::in_phase_pool` widens prompt reading only; half the cores at Minimal), then
-compare our quantized matvec against llama.cpp's.
+The old title — a split's processor layers read at ~17 GB/s, a third of the memory — was a
+09-27 figure (28 processor layers, 3.35 tok/s) and no longer holds. Measured 2026-10-11 on the
+Ryzen 7 5800H, Qwen2.5-14B Q4_K_M, live node stopped, 60 s cool-down before each arm, arms
+interleaved (`~/swarmllm-137/`): the default node placed 30 of 48 layers on the card and decoded
+at 5.3-5.4 tok/s against llama.cpp's 6.8-7.0 (`llama-bench -ngl 30 -t 4`, CUDA build of
+`4b1a27f`). That gap was decode running OUTSIDE its thread pool on every default node — fixed
+(§ Closed 2026-10-11): the same node now decodes the split at 6.79-6.93 tok/s, level with
+llama.cpp. What is left, forward-only (`SWARMLLM_PROFILE=1` totals, installed):
+- **Split step**: ours 151-160 ms vs llama.cpp's 143-147 ms (5-10%).
+- **Processor only, 4 threads**: ours ~312 ms vs llama.cpp's 278 ms (3.60 tok/s), ~12%.
+- **At 8 threads llama.cpp gains** (3.97 tok/s, 252 ms) **where we lose**: calibration keeps 4,
+  and forcing 8 cost the split ~10% (4.9-5.0 tok/s). The per-core draw that saturates this
+  box's memory at 4 threads for us does not for llama.cpp — its CPU path repacks Q4_K into
+  interleaved rows (`CPU_REPACK`, Q4_K_8x8); compare one Q4_K matvec there before anything else.
+Not ours, and llama.cpp's too: the card clocks down between steps of a split (255-600 MHz
+between 1755 MHz bursts), and back-to-back runs on this laptop heat it enough to slow a split
+step 133 → 185 ms within 40 tokens (gotcha #825). Neither thread count nor placement is the
+lever: calibration already picks the width, and `SWARMLLM_DECODE_THREADS=8` was slower.
 
 #### #138 — A mixture-of-experts model that does not fit the card is placed by whole layers
 `P2` · perf-local · **OPEN** — 2026-09-27 · history: archive row #138; plan: `docs/plans/faster_than_local.md` § 3.2
@@ -1628,7 +1642,27 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-11, not yet released** (#224)
+**Closed 2026-10-11, not yet released** (#224, #137's main half)
+- #137's main half — **every node at the default contribution decoded outside its own thread
+  pool.** `cpu_pools::pool_for` returned "use the global pool" for a decode width equal to the
+  global pool's, and at the default that is every machine (each level is at or below the
+  physical cores), so the worker ran each decode forward as `f()` on its tokio thread. rayon-core
+  answers a parallel call from outside every pool by injecting a job and blocking the caller
+  (`Registry::in_worker_cold`): a cross-thread handoff per op, hundreds a token. Now every decode
+  width is a pool and the forward is installed on it once. Same binary, 4 threads, the global
+  pool 4 (a node) vs 10 (installed), mean ms per token, two ABBA passes after 60 s cool-downs
+  (`~/swarmllm-137/pool.sh`): llama-3.2-3b processor-only 110.9/112.2 → 83.1/80.5 (**1.36x**);
+  Qwen2.5-14B with 18 of 48 layers on the processor 180.6/189.5 → 159.8/160.0 (**1.16x**); the
+  3B whole on the card (null — no processor layers) 3.7/4.2 vs 4.2/4.0. No benchmark could see
+  it: they run under the default global pool (every logical core), so decode was always
+  installed there. Found by a cooled node measuring 5.3-5.4 tok/s on the 14B where `test-split`
+  measured 6.3-6.6. **Through a real node** (one binary, `SWARMLLM_DECODE_INSTALL=0` the other
+  arm, ABBA, `~/swarmllm-137/node_ab.sh`; the worker's `swarm-decode4` pool present in every fix
+  arm, absent in every other): the 14B split 5.64/5.93 → 6.79/6.93 tok/s — llama.cpp's own
+  6.8-7.0 at that placement; the 3B on a processor-only node 10.97/13.04 → 14.53/15.29 (the
+  13.04 run's calibration had fled to 3 threads, an installed pool, which is how the defect
+  half-hid on some machines). Guard: `decode_at_the_global_pools_width_still_runs_inside_a_pool`
+  (red with the fix switched off).
 - #224 — a node that cannot reach HuggingFace sometimes never took the checked holders' verdict
   (gate step 12m's proxy arm failed at the .228, .231, .232 and .234 gates, on whichever binary was
   B, and passed every re-run). Two independent causes; the old hypothesis (a race on
