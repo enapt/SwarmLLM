@@ -61,9 +61,8 @@ re-fetching parts) and #223 closed in v0.3.228 (released 2026-10-06 09:42 UTC), 
    § "Closed after 2026-10-02" → "P0-2").
 
 **P1 — silent, or broken for a whole class of users**
-3. **#159** — the remaining way a node can act on another upload's description of a model
-   (#156's other door; #158 closed 2026-10-03; narrowed the same day to hashes gossiped by
-   holders on v0.3.222 and older, and DHT-only holders).
+3. *(#159 decided 2026-10-11 — what is left needs a v0.3.222 holder of a same-layout copy; §
+   "Decided — not doing".)*
 4. **#1** — every Mac runs on the processor; no GPU backend is compiled for Apple Silicon.
 5. **#220** — a worker's card faulted once (illegal memory access) and the driver took 14 minutes
    to reset; the kernel is still unknown (the sanitizer attaches here since 2026-10-10 — run it under the kit).
@@ -186,27 +185,6 @@ come back as the upload's, or not at all, with "came out different on two downlo
 The 02:39-05:39 occurrence (parts announced as an OLD manifest's exact hashes for 3 h, never
 re-fetched) is not explained by this and stays open; its journal (asked of its owner once) or a
 recurrence's `-- copy repair --` decides it.
-
-#### #159 — A coordinator holding none of a model routes on placeholder part hashes
-`P1` · routing · **PARTIAL** — 2026-10-02 · history: archive row #159
-
-`register_for_fetching` registers the canonical manifest built from the header with zero part
-hashes, so `expected_build_tag` is unknown and `shard_holders` cannot exclude holders of
-another upload until a canonical holder's gossip fills the hashes
-(`merge_known_shard_hashes`) — and the first hashes heard win.
-
-**Narrowed 2026-10-03 (after v0.3.222):** a node on v0.3.223 or later withholds a copy of
-another upload (no announcement, no manifest gossip, no serving) and refuses to load parts
-whose bytes are not its table's upload, so neither the holder nor its hashes can be taken for
-the swarm's; a part fetched against a hash that was another upload's is caught at accept by
-the byte check. **Residual:** holders on v0.3.222 and older still gossip such hashes until they
-update; a holder known only from a DHT provider record carries no build and is not judged.
-Options for the rest: exclude holders whose tag is unknown when the canonical upload is known,
-or prefer hashes from holders whose announced tags agree with each other. **Read 2026-10-11 06:50
-UTC:** all 6 peers the live node sees run v0.3.234, so the first half of the residual needs a
-node on v0.3.222 or older that we cannot see; a DHT-only holder on v0.3.223 or later refuses to
-serve another upload's copy, so routing to one fails over rather than answering wrongly. Kept
-at P1 by rank until a fix lands; re-read the peer versions before choosing between the options.
 
 #### #246 — A node near its storage limit fetched back a part prune had just deleted, once in six runs
 `P3` · heal · **OPEN** — 2026-10-09 · history: the v0.3.232 gate, step 12t
@@ -1665,6 +1643,18 @@ archive under the named heading. Reopen one only with the evidence its line name
   building it as specified. Reopen with a peer that fails independently of a directional
   transport quirk (model it on `shard_download_backoff`, and make the cooldown expire). Archive §
   "A repeatedly-failing peer is retried indefinitely with no backoff".
+- **A quorum on the part hashes a coordinator holding none of a model adopts** (#159's residual,
+  decided 2026-10-11) — such a node fills its zero hashes from the first canonical-SHAPED
+  manifest a peer gossips (`register_manifest` → `merge_known_shard_hashes`). Shape is total
+  size, every part's size and each part's first tensor at its ABSOLUTE file offset
+  (`tensor_data_offset + offset`, so a header one byte longer fails it; HuggingFace uploads of
+  one model differ by hundreds of bytes). A node on v0.3.223 or later never gossips a copy of
+  another upload, and a part fetched against a wrong hash fails the byte check at accept. What
+  is left needs, at once, a holder on v0.3.222 or older (6/6 peers on v0.3.234 at 12:20 UTC
+  2026-10-11; auto-update moves a node in minutes) AND an upload of the same layout to the
+  byte with different contents. A quorum would cost a provenance per adopted hash for a case no
+  node can now produce. Reopen with a peer on v0.3.222 or older holding a model, or two uploads
+  of one model whose shapes `CanonicalBuild::describes` cannot tell apart. Archive row #159.
 - **Disk contraction below an operator's `min_replicas`** — idle card unload shipped; shrinking
   below the operator's floor is intentionally not built. Archive § "Demand-driven resource
   management — VRAM done, disk contraction deferred".
