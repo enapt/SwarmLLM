@@ -69,8 +69,9 @@ the branch does. Next-token-prediction blocks are dropped from the layer count
 4. The delta rule runs token by token (~10 small ops per token per DeltaNet
    layer) — correct, slow for long prompts on a card; llama.cpp's chunked form
    (`build_delta_net_chunking`) is the follow-up.
-5. `qwen35moe` stays refused until checked (HF:
-   `Flexan/kshitijthakkar-qwen3.5-moe-0.87B-d0.8B-GGUF`).
+5. ~~`qwen35moe` stays refused until checked~~ — checked and admitted 2026-10-11 on
+   `Flexan/kshitijthakkar-qwen3.5-moe-0.87B-d0.8B-GGUF` (f16 exact against llama.cpp, whole,
+   split and on the card; numbers in FUTURE_WORK #228).
 
 ## The reference is ready
 

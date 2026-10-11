@@ -128,14 +128,11 @@ impl ModelArch {
     /// DeepSeek-Coder-V2-Lite-Instruct. Claiming it let a user, or auto-manage,
     /// fetch gigabytes of a model that then could not load.
     ///
-    /// **Qwen 3.5 likewise** (FUTURE_WORK #117): the loader was written against
-    /// a guessed layout. Every layer of a real file (unsloth Qwen3.5-4B, header
-    /// read 2026-09-25) carries `post_attention_norm` where the loader asks for
-    /// `attn_post_norm`; its DeltaNet layers carry `attn_qkv`, `ssm_a` and
-    /// `ssm_dt.bias` (the loader asks `ssm_dt.weight` and neither of the
-    /// others); its attention layers fold the output gate into `attn_q` (the
-    /// loader asks for a separate `attn_gate`); and it rotates by sections
-    /// (`rope.dimension_sections`). None of it loads.
+    /// **Qwen 3.5 was refused the same way** until its loader was rewritten
+    /// against llama.cpp and a real file (dense #117, 2026-10-06; the MoE
+    /// `qwen35moe` #228 (1), 2026-10-11 — an unquantized real file matched
+    /// llama.cpp's logits at every position, whole and split, and the popular
+    /// 35B-A3B upload's header names the tensors the loader reads).
     ///
     /// **And StarCoder2** (FUTURE_WORK #118): it is a LayerNorm model — its
     /// files carry `attention.layer_norm_epsilon` and a bias on every norm, on
@@ -146,10 +143,7 @@ impl ModelArch {
     pub fn is_supported(&self) -> bool {
         !matches!(
             self,
-            ModelArch::Unknown(_)
-                | ModelArch::DeepSeek2
-                | ModelArch::Qwen35Moe
-                | ModelArch::Starcoder2
+            ModelArch::Unknown(_) | ModelArch::DeepSeek2 | ModelArch::Starcoder2
         )
     }
 
@@ -183,19 +177,40 @@ impl ModelArch {
     /// is here, i.e. after someone had tried it. Follows [`Self::is_supported`],
     /// so admitting an architecture lists its models again with no edit here.
     pub fn manifest_architecture_is_refused(arch: &crate::types::ModelArchitecture) -> bool {
+        Self::refused_by(arch, Self::is_supported)
+    }
+
+    /// [`Self::manifest_architecture_is_refused`] under a given answer to
+    /// "does this family run" — so the test can plant a refusal now that every
+    /// variant with a family of its own runs (Qwen 3.5's MoE since #228 (1)).
+    fn refused_by(
+        arch: &crate::types::ModelArchitecture,
+        supported: impl Fn(&ModelArch) -> bool,
+    ) -> bool {
         let variant = std::mem::discriminant(arch);
         let mut named = Self::NAMED
             .iter()
             .filter(|a| std::mem::discriminant(&a.to_manifest_architecture()) == variant)
             .peekable();
-        named.peek().is_some() && named.all(|a| !a.is_supported())
+        named.peek().is_some() && named.all(|a| !supported(a))
     }
 
     /// List of GGUF architecture strings supported by the split inference engine.
     pub fn supported_list() -> &'static [&'static str] {
         &[
-            "llama", "qwen2", "qwen3", "qwen2moe", "qwen3moe", "gemma", "gemma2", "phi3",
-            "mistral", "glm4", "llama4", "qwen35",
+            "llama",
+            "qwen2",
+            "qwen3",
+            "qwen2moe",
+            "qwen3moe",
+            "gemma",
+            "gemma2",
+            "phi3",
+            "mistral",
+            "glm4",
+            "llama4",
+            "qwen35",
+            "qwen35moe",
         ]
     }
 
@@ -295,16 +310,16 @@ mod tests {
 
     /// A manifest says which family a model is; one that only a refused
     /// family can be is not offered as a model (#117). Dense Qwen 3.5 runs
-    /// since #117; its mixture-of-experts sibling is still refused.
+    /// since #117 and its mixture-of-experts sibling since #228 (1), so every
+    /// variant runs today; the refusal itself is checked with one planted.
     #[test]
     fn a_manifest_only_a_refused_family_can_be_is_refused() {
-        assert!(ModelArch::manifest_architecture_is_refused(
-            &ModelArchitecture::Qwen35Moe {
-                num_experts: 128,
-                experts_per_token: 8,
-            }
-        ));
+        let moe = ModelArchitecture::Qwen35Moe {
+            num_experts: 128,
+            experts_per_token: 8,
+        };
         for runs in [
+            moe.clone(),
             ModelArchitecture::Llama,
             ModelArchitecture::Qwen2,
             ModelArchitecture::Qwen35,
@@ -316,6 +331,19 @@ mod tests {
                 "{runs:?} stands for a family that runs"
             );
         }
+        // Planted: the MoE refused, everything else as this build answers.
+        let refuse_moe = |a: &ModelArch| *a != ModelArch::Qwen35Moe && a.is_supported();
+        assert!(ModelArch::refused_by(&moe, refuse_moe));
+        assert!(!ModelArch::refused_by(
+            &ModelArchitecture::Qwen35,
+            refuse_moe
+        ));
+        // `Llama` also stands for families that run, so refusing one of the
+        // families it covers (DeepSeek-2, StarCoder2 are) never hides it.
+        assert!(!ModelArch::refused_by(
+            &ModelArchitecture::Llama,
+            ModelArch::is_supported
+        ));
         // A variant no named family maps to says nothing either way.
         assert!(!ModelArch::manifest_architecture_is_refused(
             &ModelArchitecture::Glm4

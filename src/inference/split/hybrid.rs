@@ -179,9 +179,10 @@ pub(crate) fn arch_supports_hybrid(arch: &crate::inference::model_arch::ModelArc
         // INPUT's device (`layers::qwen35`), which the executor moves to the
         // layer's device before any layer kind runs. Checked split on a real
         // card against llama.cpp — the numbers are in FUTURE_WORK #228.
-        A::Qwen35 => true,
-        // Refused outright until checked against a real file (#228 (1)).
-        A::Qwen35Moe => false,
+        // The MoE variant runs the same loop; its feed-forward loads through
+        // `load_moe_ffn` with that loop's shadowed `device`, and was checked
+        // split on the card against llama.cpp on 2026-10-11 (#228 (1)).
+        A::Qwen35 | A::Qwen35Moe => true,
         // MLA attention with its own projection set; unverified.
         A::DeepSeek2 => false,
         // An architecture we do not recognise is one whose loop nobody has

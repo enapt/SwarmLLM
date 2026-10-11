@@ -11,8 +11,8 @@ use crate::inference::residual_norm::RmsNorm;
 use candle_core::quantized::QTensor;
 use candle_core::{DType, Device, Tensor};
 
-/// DeepSeek-2 and Qwen 3.5 are RECOGNISED — so a refusal can name them — and not offered:
-/// no file in circulation loads here (FUTURE_WORK #116, #117). The
+/// DeepSeek-2 and StarCoder2 are RECOGNISED — so a refusal can name them — and
+/// not offered: no file in circulation loads here (FUTURE_WORK #116, #118). The
 /// list the refusal quotes must agree with the predicate the loader and the
 /// download paths ask.
 #[test]
@@ -23,11 +23,12 @@ fn a_family_no_real_file_loads_is_recognised_but_not_offered() {
         assert!(ModelArch::from_gguf_arch(arch).is_supported(), "{arch}");
     }
     assert!(!ModelArch::supported_list().contains(&"deepseek2"));
-    // Qwen 3.5 (#117) and StarCoder2 (#118) the same way.
-    for arch in ["qwen35moe", "starcoder2"] {
-        assert!(!ModelArch::from_gguf_arch(arch).is_supported(), "{arch}");
-        assert!(!ModelArch::supported_list().contains(&arch), "{arch}");
-    }
+    // StarCoder2 (#118) the same way.
+    assert!(!ModelArch::from_gguf_arch("starcoder2").is_supported());
+    assert!(!ModelArch::supported_list().contains(&"starcoder2"));
+    // Qwen 3.5's MoE was refused the same way until checked (#228 (1)); the
+    // list must carry it now that the predicate admits it.
+    assert!(ModelArch::supported_list().contains(&"qwen35moe"));
     // llama.cpp: LLAMA_ROPE_TYPE_NORM (interleaved) — see `use_rope_contiguous`.
     assert!(!ModelArch::DeepSeek2.use_rope_contiguous());
     assert_eq!(ModelArch::DeepSeek2.default_activation(), Activation::SiLU);

@@ -1162,7 +1162,7 @@ mod tests {
         };
 
         assert!(wants_s1(&manager), "control: no header, the gap is filled");
-        for refused in ["deepseek2", "qwen35moe", "starcoder2"] {
+        for refused in ["deepseek2", "starcoder2"] {
             header_says(refused);
             assert!(
                 !wants_s1(&manager),

@@ -679,10 +679,10 @@ The SplitModel loader detects the model architecture from GGUF metadata
 | RoPE variant | Interleaved (`rope_i`) | Interleaved (iRoPE) | Contiguous (`rope`) | IMROPE, sections [11,11,10,0] over 64 of 256 dims (text positions only) | Interleaved | Su/YaRN | Interleaved | Contiguous | Interleaved (MLA split; YaRN NOT implemented) | Interleaved (partial) |
 | QKV biases | None | None | Yes | None | None | Yes | None | Yes | None (MLA projections) | Yes |
 | Attention | Standard MHA/GQA | Standard GQA | Standard MHA | Gated: 3 of 4 layers Gated DeltaNet (recurrent state), every 4th softmax attention with a per-head output gate | Standard MHA | Standard MHA | Standard GQA | Standard MHA | MLA (low-rank Q/KV) | Extreme GQA (16:1) |
-| FFN | Dense | Dense + MoE (mixed) | Dense | Dense | Dense | Dense | Dense | Dense | MoE (top-k) + shared | Dense |
+| FFN | Dense | Dense + MoE (mixed) | Dense | Dense, or MoE (top-k) + sigmoid-gated shared expert (`qwen35moe`) | Dense | Dense | Dense | Dense | MoE (top-k) + shared | Dense |
 | Context length | 4096 (default) | 131072 | 32768 | 131072 | 8192 | 4096 | 32768 | 16384 | 163840 | 131072 |
 | Special | — | NoPE every 4th layer; Q/K RMS-normalised after RoPE; sigmoid top-k, expert weighted on its INPUT | — | Hybrid SSM+attention | Embedding scaling (sqrt(d)), Gemma RmsNorm (+1), attn + final logit softcap, EOS 107, Gemma chat template | Fused QKV/FFN | — | — | Per-layer dense/MLA | Partial RoPE (50%) |
-| E2E verified | ✅ | tiny random model vs llama.cpp only (#114) | ✅ | ✅ dense vs llama.cpp (0.8B, 4B); `qwen35moe` ⛔ (#228) | ✅ (Gemma2) | ✅ | — | ⛔ not supported (#118) | ⛔ not supported (#116) | ✅ |
+| E2E verified | ✅ | tiny random model vs llama.cpp only (#114) | ✅ | ✅ dense vs llama.cpp (0.8B, 4B); `qwen35moe` vs llama.cpp on a 0.87B real file (#228) | ✅ (Gemma2) | ✅ | — | ⛔ not supported (#118) | ⛔ not supported (#116) | ✅ |
 
 > **Phi-3 fused tensors**: Phi-3 GGUF models store `attn_qkv.weight` (Q+K+V concatenated) and `ffn_up.weight` (gate+up concatenated, no `ffn_gate.weight`). The loader dequantizes on CPU, splits by head dimensions, and re-quantizes to Q4_0 on the target device.
 
@@ -723,8 +723,10 @@ Llama 4 introduces two novel mechanisms within the standard dense `LayerVariant`
 
 ### Qwen 3.5 Hybrid SSM+Attention Support
 
-**Dense `qwen35` runs since 2026-10-06 (`docs/FUTURE_WORK.md` #117); `qwen35moe` is still refused
-(#228).** Written against llama.cpp master (`src/models/qwen35.cpp`, `delta-net-base.cpp`) and
+**Dense `qwen35` runs since 2026-10-06 (`docs/FUTURE_WORK.md` #117), `qwen35moe` since 2026-10-11
+(#228 (1)): the same layers with `load_moe_ffn`'s feed-forward — softmax top-k with renormalised
+weights, plus a shared expert gated by `sigmoid(x · ffn_gate_inp_shexp)`, llama.cpp's
+`qwen35moe.cpp`.** Written against llama.cpp master (`src/models/qwen35.cpp`, `delta-net-base.cpp`) and
 checked against it on real files: logits for Qwen3.5-0.8B F32 agree to cosine 0.999999, Q8_0 and
 4B Q4_K_M to rounding-level near-ties, whole and split across two segments; replies through
 `test-split` and through a daemon match llama.cpp's greedy reply up to near-ties. Map and
@@ -3026,7 +3028,7 @@ The list is split into **open** (will be addressed) and **won't fix unless a con
 
 - **StarCoder2 — recognised, refused** — `docs/FUTURE_WORK.md` #118: a LayerNorm model with biases the loader does not read, and a metadata key (`layer_norm_epsilon`) the shared parser does not accept.
 
-- **Qwen 3.5 — dense runs (card/processor split since v0.3.230), `qwen35moe` recognised and refused** — `docs/FUTURE_WORK.md` #228: the MoE variant, CUDA-graph capture of its layers, the chunked delta rule, and speculation (a snapshot of the recurrent state per draft would allow it).
+- **Qwen 3.5 — dense and MoE run (card/processor split since v0.3.230; MoE since 2026-10-11)** — `docs/FUTURE_WORK.md` #228: CUDA-graph capture of its layers, the chunked delta rule, and speculation (a snapshot of the recurrent state per draft would allow it).
 
 - **DeepSeek-2 (V2/V2-Lite/V3, Kimi-K2, GLM-4.7-Flash) — recognised, refused, code kept** — see `docs/FUTURE_WORK.md` #116 for the list of what a real file needs. The loader's MLA branch, `MlaWeights` and `LayerVariant::DeepSeek` stay as its starting point and are unreachable until `ModelArch::is_supported` admits the family again.
 

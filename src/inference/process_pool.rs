@@ -10132,21 +10132,27 @@ mod admission_tests {
         let (n, total) = split_for_card(&splittable, three_gb).expect("Qwen2 splits");
         assert!(n > 0 && n < total, "{n} of {total}");
 
-        for arch in [ModelArch::Qwen35Moe, ModelArch::DeepSeek2] {
-            let unsplittable = crate::model::auto_manage::vram::VramFootprintInputs {
+        let unsplittable = crate::model::auto_manage::vram::VramFootprintInputs {
+            splits_across_devices: arch_supports_hybrid(&ModelArch::DeepSeek2),
+            attention: crate::inference::layers::KvAttention::of(&ModelArch::DeepSeek2),
+            ..splittable
+        };
+        assert_eq!(split_for_card(&unsplittable, three_gb), None);
+        // Qwen 3.5 splits, checked on a card: dense since 2026-10-07, the MoE
+        // since 2026-10-11 (#228).
+        for arch in [ModelArch::Qwen35, ModelArch::Qwen35Moe] {
+            let splits = crate::model::auto_manage::vram::VramFootprintInputs {
                 splits_across_devices: arch_supports_hybrid(&arch),
                 attention: crate::inference::layers::KvAttention::of(&arch),
                 ..splittable
             };
-            assert_eq!(split_for_card(&unsplittable, three_gb), None, "{arch}");
+            assert!(split_for_card(&splits, three_gb).is_some(), "{arch}");
         }
-        // Dense Qwen 3.5 splits since 2026-10-07, checked on a card (#228).
         let qwen35 = crate::model::auto_manage::vram::VramFootprintInputs {
             splits_across_devices: arch_supports_hybrid(&ModelArch::Qwen35),
             attention: crate::inference::layers::KvAttention::Standard,
             ..splittable
         };
-        assert!(split_for_card(&qwen35, three_gb).is_some());
         // ...and only the layers that keep a KV cache are charged one: a
         // quarter of them for Qwen 3.5, so more of its layers fit the card.
         let quarter_kv = crate::model::auto_manage::vram::VramFootprintInputs {

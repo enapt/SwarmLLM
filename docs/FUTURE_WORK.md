@@ -87,8 +87,9 @@ re-fetching parts) and #223 closed in v0.3.228 (released 2026-10-06 09:42 UTC), 
     belongs, which keeps partial ranges (load spreading) off.
 13. **#171** — the prompt pass through a split runs one stage at a time (released in v0.3.234; left:
     pieces chained between two peers for a pass that does not keep its prompt).
-14. **#228** — Qwen 3.5's first version leaves out its MoE models, the card/processor split and
-    speculation.
+14. **#228** — Qwen 3.5's first version leaves out the chunked delta rule, CUDA-graph capture and
+    speculation (its card/processor split shipped in v0.3.230; its MoE models run since 2026-10-11,
+    unreleased).
 
 Everything else is ranked in its own entry. **P3** is narrow or cosmetic, **P4** is process,
 maintenance or an idea with no user waiting on it.
@@ -1085,8 +1086,23 @@ deleting.)
 #### #228 — Qwen 3.5: what the first version leaves out
 `P2` · model-support · **OPEN** — 2026-10-06 · history: #117 (closed); plan: `docs/plans/qwen35_support.md`
 
-Dense Qwen 3.5 runs since #117. Still out: (1) `qwen35moe` stays refused until checked against a
-real file (HF: `Flexan/kshitijthakkar-qwen3.5-moe-0.87B-d0.8B-GGUF`); (2) ~~the card/processor
+Dense Qwen 3.5 runs since #117. Still out: (1) ~~`qwen35moe` refused~~ — **runs since 2026-10-11,
+not yet released**: the loader already read its layout (the dense loop with `load_moe_ffn`; the
+popular unsloth Qwen3.5-35B-A3B Q4_K_M header, read by range request, names exactly those tensors —
+separate gate/up/down expert stacks, a sigmoid-gated shared expert, no fused `ffn_gate_up_exps`), so
+the change is `is_supported`, `supported_list` and `arch_supports_hybrid`. Checked against llama.cpp
+master on a real file (`Flexan/kshitijthakkar-qwen3.5-moe-0.87B-d0.8B-GGUF`, 24 layers, 8 experts,
+top-2; `~/swarmllm-228/card{,2}.sh`, live node stopped, safety kit, 0 driver events): the f16 file
+agrees at every position on the processor (worst cos 0.999999, top-1 24/24), split at layer 13 and
+at 4, and on the card whole and split (0.999999 — llama.cpp's own card reads 0.999897 against its
+processor). `test-split`, three prompts × 40 tokens, `score_ids_dump.py`: f16 120/120 tokens llama.cpp's first
+choice both whole on the card and split 12/24 across card and processor; Q4_K_M 119/120 split and
+118/120 whole (near-ties of 0.337 at the same token in both, and 0.278 — Llama-3.2-3B misses that
+0.05 margin by 0.306). The released
+.234 refuses the file (the control). Q4_K_M logits sit 0.997-0.989 from llama.cpp's processor
+(processor / card) and so does llama.cpp's OWN card (0.983) — and dense Qwen3.5-4B Q4_K_M, a shipped
+family, reads 0.998 / 0.994 the same way: 4-bit rounding, amplified in a MoE by a top-k choice it
+flips. Not run here: the 35B itself (22 GB, more than this machine's memory). (2) ~~the card/processor
 split~~ — **released in v0.3.230 (2026-10-07)**: dense Qwen 3.5 is on `arch_supports_hybrid`,
 checked split on the card against llama.cpp (`docs/invariants/inference.md` § "A card/processor
 split is placed in every per-layer loop"). Its sizing followed the same day:
@@ -1642,7 +1658,10 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-11, not yet released** (#224, #137's main half)
+**Closed 2026-10-11, not yet released** (#224, #137's main half, #228 (1))
+- #228 (1) — **Qwen 3.5's mixture-of-experts models run** (`qwen35moe`: Qwen3.5-35B-A3B and its
+  larger siblings were refused outright). Checked against llama.cpp master on a real file, whole,
+  split and on the card; the numbers are in #228's entry.
 - #137's main half — **every node at the default contribution decoded outside its own thread
   pool.** `cpu_pools::pool_for` returned "use the global pool" for a decode width equal to the
   global pool's, and at the default that is every machine (each level is at or below the
