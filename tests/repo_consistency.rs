@@ -9208,21 +9208,7 @@ fn the_holder_count_guard_catches_both_shapes_of_the_defect() {
 /// on computing the policy, which is what distinguishes them.
 #[test]
 fn every_path_that_keeps_disagreeing_bytes_records_the_dispute() {
-    let sites = [
-        (
-            "src/daemon/background.rs",
-            "pub(super) fn spawn_shard_verification(",
-        ),
-        (
-            "src/model/auto_manage/scan.rs",
-            "pub async fn rescan_local_shards(",
-        ),
-        (
-            "src/model/auto_manage/manager.rs",
-            "async fn verify_pending_shards(",
-        ),
-    ];
-    for (path, signature) in sites {
+    for (path, signature) in SITES_THAT_CHECK_HELD_BYTES {
         let src = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{path}: {e}"));
         let body = fn_body(&src, signature)
             .unwrap_or_else(|| panic!("{path}: signature not found: {signature}"));
@@ -9233,6 +9219,86 @@ fn every_path_that_keeps_disagreeing_bytes_records_the_dispute() {
              says zero while it is happening — see docs/invariants/network.md."
         );
     }
+}
+
+/// The three places that hash bytes this node ALREADY holds against its
+/// manifest: the startup sweep, the rescan, and the re-check gossip queues.
+const SITES_THAT_CHECK_HELD_BYTES: [(&str, &str); 3] = [
+    (
+        "src/daemon/background.rs",
+        "pub(super) fn spawn_shard_verification(",
+    ),
+    (
+        "src/model/auto_manage/scan.rs",
+        "pub async fn rescan_local_shards(",
+    ),
+    (
+        "src/model/auto_manage/manager.rs",
+        "async fn verify_pending_shards(",
+    ),
+];
+
+/// **A check that passed ends a dispute only against the hash the manifest
+/// names NOW** (FUTURE_WORK #224).
+///
+/// Each of these checks hashes against the hash it read when it began, and
+/// gossip can replace that hash while it hashes — the startup sweep reads every
+/// manifest once and then hashes for seconds. A bare `clear_shard_dispute` on
+/// its pass wiped the dispute the newer hash had just recorded (the .234 gate,
+/// 310 ms apart): the node went back to announcing the swarm's build for bytes
+/// that were not it, and its heal saw nothing to settle. A pass goes through
+/// `note_shard_verified(shard, hash_checked_against)`, which compares under the
+/// manifest's lock (`ModelRegistry::note_bytes_checked`).
+#[test]
+fn a_passing_check_of_held_bytes_is_judged_against_the_hash_named_now() {
+    for (path, signature) in SITES_THAT_CHECK_HELD_BYTES {
+        let src = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{path}: {e}"));
+        let body = fn_body(&src, signature)
+            .unwrap_or_else(|| panic!("{path}: signature not found: {signature}"));
+        assert!(
+            ends_a_dispute_against_the_hash_named_now(body),
+            "{path}: {signature} checks bytes this node holds and never calls \
+             `note_shard_verified` — a pass that clears the dispute outright undoes \
+             one a newer hash recorded while it hashed (#224)."
+        );
+    }
+}
+
+/// Does a body that verifies held bytes end a dispute through
+/// `note_shard_verified`? `clear_shard_dispute` stays legitimate in the same
+/// bodies — on a quarantine, the bytes are gone — so the scan asks for the
+/// judged call, not the absence of the bare one.
+fn ends_a_dispute_against_the_hash_named_now(body: &str) -> bool {
+    let stmts = statements(body);
+    let verifies = stmts.iter().any(|(_, s)| s.contains("verify_shard("));
+    !verifies
+        || stmts
+            .iter()
+            .any(|(_, s)| s.contains("note_shard_verified("))
+}
+
+#[test]
+fn the_judged_clear_guard_catches_a_bare_clear_on_a_pass() {
+    let fixed = "
+        let result = store.verify_shard(&mid, &si, policy);
+        match result {
+            Ok(Ok(())) => {
+                shared_state
+                    .note_shard_verified(&sid, &shard_info.hash);
+            }
+            Ok(Err(_)) => shared_state.clear_shard_dispute(&sid),
+        }
+    ";
+    assert!(ends_a_dispute_against_the_hash_named_now(fixed));
+    // The .234 shape: the pass clears outright.
+    let bare = "
+        let result = store.verify_shard(&mid, &si, policy);
+        match result {
+            Ok(Ok(())) => shared_state.clear_shard_dispute(&sid),
+            Ok(Err(_)) => shared_state.clear_shard_dispute(&sid),
+        }
+    ";
+    assert!(!ends_a_dispute_against_the_hash_named_now(bare));
 }
 
 /// Does a body that can land on `KeepBytes` also record the dispute?

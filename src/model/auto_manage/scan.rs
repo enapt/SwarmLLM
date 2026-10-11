@@ -225,6 +225,8 @@ pub async fn rescan_local_shards(
             let policy = shared
                 .model_registry
                 .mismatch_policy(&shard_id, &shard_info.hash);
+            // What these bytes hash to, once one of the arms below has said.
+            let mut bytes_hash = shard_info.hash;
             if shard_info.hash == [0u8; 32] {
                 // Nothing to check these bytes against. Computing their own
                 // hash and calling that the answer does not verify anything —
@@ -314,6 +316,7 @@ pub async fn rescan_local_shards(
                     hash = %hex::encode(&new_hash[..8]),
                     "Rescan: auto-computed BLAKE3 hash for zero-hash shard"
                 );
+                bytes_hash = new_hash;
             // Bytes already on this node's disk, so a mismatch only justifies
             // destroying them against an ORIGIN-backed hash — see
             // `ModelRegistry::mismatch_policy`.
@@ -368,11 +371,13 @@ pub async fn rescan_local_shards(
                 continue;
             }
 
-            // These bytes agree with the hash we now hold, so any earlier
+            // These bytes agree with the hash this rescan read, so any earlier
             // disagreement about them is settled — which is how a dispute
             // actually ends: not by expiry, but by a later check against a hash
-            // that has since been corrected.
-            shared.clear_shard_dispute(&shard_id);
+            // that has since been corrected. Judged against the manifest as it
+            // is NOW, which gossip may have changed while the bytes were hashed
+            // (`note_shard_verified`, #224).
+            shared.note_shard_verified(&shard_id, &bytes_hash);
 
             // Register as holder. The early-continue above already ensured we're
             // not yet a holder, and nothing between there and here mutates the

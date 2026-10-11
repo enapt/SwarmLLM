@@ -202,51 +202,6 @@ update; a holder known only from a DHT provider record carries no build and is n
 Options for the rest: exclude holders whose tag is unknown when the canonical upload is known,
 or prefer hashes from holders whose announced tags agree with each other.
 
-#### #224 — A node that cannot reach HuggingFace sometimes never takes the checked holders' verdict
-`P3` · heal · **OPEN** — 2026-10-06 · history: the v0.3.228 gate, step 12m
-
-`examples/outvoted_rig.sh` with `HFLESS=proxy` (B behind a dead proxy, holding a zeroed part; A
-and C checking theirs on HuggingFace) FAILED twice in the .228 gate, 15:35-16:05 local: B with
-.228 and B with .227 (A and C .228 both times) — B logged `An upload of this model could not be
-checked on HuggingFace` once and never `parts on this node differ from what the holders that
-checked theirs … agree on`, in 900 s. The offline arm passed between them (281 s). Re-run at
-16:33 with the live node stopped: all-.227 PASS (231 s), all-.228 PASS (250 s); every earlier
-gate (.224-.227) passed it. So not .228's doing (only `auto_manage` storage/prune code changed,
-none of it on this path), and not deterministic. Both failing runs had A and C announce their
-checked copies 30 s after start, as the passing ones did. One difference seen: B's "Our copy of
-this shard disagrees with the hash the swarm reports … asking the model's origin to settle it"
-landed 14 ms BEFORE its background shard verification finished, where the passing run had it
-after — a candidate race on `shards_pending_verification`, which `settle_by_checked_holders`
-skips. Next: run the proxy arm ~10 times with B at `-v` and log why `settle_by_checked_holders`
-returned (pending / no checked tags / `heard_hash_with_tag` None — the last is `debug!`).
-**Recurred at the v0.3.231 gate (2026-10-08 21:21-21:53 local)**: proxy arm FAIL with B = .231
-(900 s) and with B = .230 (A, C = .231; 600 s), the same signature (B's disagreement 339 ms
-before its background verification finished; `could not be checked` once, never `differ from what
-the holders`). Re-run with the live node stopped: all-.230 PASS (262 s), all-.231 PASS (263 s).
-Eight gates have run it (.224 on); it failed at two (.228, .231), on both builds each time.
-
-**Again at the .232 gate (2026-10-09)**: the null arm (B = .231, A and C .232) failed in 600 s while
-both .232 arms passed (proxy 246 s, offline 275 s); at the .231 gate .231 failed its own proxy arm.
-Three binaries have now failed it and all passed it on a re-run — a flicker in the shape, not a
-release.
-
-**The trigger, caught at debug level after the .234 gate (2026-10-10).** The .234 gate failed both
-proxy arms (B = .234, B = .232; A and C .234). Five re-runs with every node at
-`SWARMLLM_LOGGING_LEVEL=debug`, B = .234 (`~/swarmllm-gate-0234/m12_*`): A and C = .234 three
-times PASS (257-258 s), A and C = .233 once PASS (257 s) and once FAIL (900 s) — so not .234. What
-separates the failure from all four passes is ORDER. In the failure, A and C had finished their heal
-before B joined, so the FIRST manifest B heard already named the agreed hash (`shard_hashes=b299,fcef`,
-`register_manifest` at once). B's disagreement then landed 2.7 s after start, 311 ms BEFORE its
-background shard verification finished. In every pass, B first heard the pre-heal manifest (`b299,be38`,
-the hash its own copy vouches for), and the disagreement came 60-90 s later, long after background
-verification (+3 s). After B's one `could not be checked on HuggingFace`, `settle_by_checked_holders` logged
-nothing, not even its `debug!` "waiting for one". So `heard_hash_with_tag` is not the block. It is one of the
-returns that record nothing: the part in `shards_pending_verification`, `outvoted_by_checked_holders` → `None`
-(our announced tag already reading as theirs), or no size in the manifest. Next: make each of those
-returns write a `heal_verdicts` entry (`canonical::settle` already records every quiet return of its own;
-this function does not), then drive the order deterministically in the rig: start B only once A and C
-have logged `this node's parts are the canonical upload's`.
-
 #### #246 — A node near its storage limit fetched back a part prune had just deleted, once in six runs
 `P3` · heal · **OPEN** — 2026-10-09 · history: the v0.3.232 gate, step 12t
 
@@ -1671,6 +1626,39 @@ archive under the named heading. Reopen one only with the evidence its line name
 Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 19-28 were
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
+
+**Closed 2026-10-11, not yet released** (#224)
+- #224 — a node that cannot reach HuggingFace sometimes never took the checked holders' verdict
+  (gate step 12m's proxy arm failed at the .228, .231, .232 and .234 gates, on whichever binary was
+  B, and passed every re-run). Two independent causes; the old hypothesis (a race on
+  `shards_pending_verification`) was wrong. (1) **A check that passed against a hash the manifest no
+  longer named ended the dispute the newer hash had recorded.** B's startup sweep reads every
+  manifest once, then hashes; gossip replaced shard 1's hash 2.7 s after start, the re-check recorded
+  the dispute (21:33:04.426), and the sweep — still hashing against the hash its own zeroed bytes
+  match — passed and cleared it 310 ms later. B then announced the SWARM's build for those bytes and
+  `outvoted_by_checked_holders` found its own tag among the checked holders'. The one failure of five
+  debug re-runs was the only one with the dispute before the sweep's end; the .228 and .231 failures
+  carry the same signature (14 ms, 339 ms). Fix: a pass reaches the dispute through
+  `SharedState::note_shard_verified(shard, hash_checked_against)`, a failure through
+  `note_shard_disputed`, and both through `ModelRegistry::note_bytes_checked`, which compares the
+  bytes' hash with the hash the manifest names NOW under the manifest's map guard (HDFS's
+  generation-stamp rule); `verify_pending_shards` keeps a re-check queued while its part downloads
+  instead of dropping it. (2) **A holder's return to a manifest version it had broadcast before was
+  suppressed as already heard** for the 30-minute quiet window, so a newcomer caught up while the
+  holder's manifest was off that version never learned the agreed hash ("no manifest of the same
+  layout has named their hash yet", every pass). `manifest_needs_broadcast` now counts a heard record
+  on the "changed" arm only when it postdates the version we are leaving (RFC 6206 §4.2: our own
+  change starts a new interval). Measured with `examples/outvoted_rig.sh` (`~/swarmllm-224/`, B a dev
+  build, live node stopped): `SWEEP_HOLD=150` (`SWARMLLM_FAULT_SWEEP_HOLD_SECS`, holding the sweep's
+  window open so the agreed hash lands inside it every time) — B with a pass that clears outright
+  FAIL in 600 s with "shards kept despite disagreeing (0)" on its zeroed part, B with the fix PASS in
+  254 s, both in the failing order; `ORDER=late` (A and C healed before B joins) — A and C on .234
+  stalled past 800 s with B never sent the agreed hash, A and C on the fix PASS in 371 s (C's return
+  broadcast at 02:01:30, B had `b299,fcef` 2 s later); the gate's plain arm on the fix PASS in 245 s.
+  Tests (each red with its change undone): `a_pass_against_a_hash_the_manifest_has_since_replaced_keeps_the_dispute`,
+  `returning_to_a_version_heard_before_we_left_it_is_announced`; guard
+  `a_passing_check_of_held_bytes_is_judged_against_the_hash_named_now`. `docs/invariants/network.md`
+  § "A node vouches only for bytes…" door 6 and § "The interval starts at our own change".
 
 **Closed 2026-10-09 — released in v0.3.234 (2026-10-11; v0.3.233 was built and never released)** (#69, #247, #162)
 - #162 — the release gate: (a) a cloned gate lost its helpers — every gate since .227 refuses to start

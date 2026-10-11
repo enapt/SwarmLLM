@@ -505,12 +505,12 @@ impl AutoShardManager {
         }
         let data_dir = self.shared_state.config.node.data_dir.clone();
         for sid in pending {
-            self.shared_state
-                .models
-                .shards_pending_verification
-                .remove(&sid);
-            // A download in flight will be verified when it lands; re-hashing a
-            // partially-written file just raises a false alarm.
+            // A download in flight: re-hashing a partially-written file just
+            // raises a false alarm, so the re-check waits for it to land — and
+            // stays queued. The download is verified against the hash it read
+            // when it STARTED; the hash that queued this re-check came later,
+            // and dropping the entry here left the landed bytes never judged
+            // against it (#224).
             if self
                 .shared_state
                 .models
@@ -518,6 +518,10 @@ impl AutoShardManager {
             {
                 continue;
             }
+            self.shared_state
+                .models
+                .shards_pending_verification
+                .remove(&sid);
             let Some(manifest) = self.shared_state.model_registry.get_manifest(&sid.model_id)
             else {
                 continue;
@@ -543,16 +547,19 @@ impl AutoShardManager {
                 .shared_state
                 .model_registry
                 .mismatch_policy(&sid, &info.hash);
+            let checked_against = info.hash;
             let result = tokio::task::spawn_blocking(move || {
                 crate::model::shard::ShardStore::new(&dir).verify_shard(&mid, &info, policy)
             })
             .await;
             if let Ok(Ok(())) = result {
-                // Agrees with the hash we now hold, so any earlier disagreement
-                // about these bytes is over. Cleared on EVERY success rather
+                // Agrees with the hash read above, so any earlier disagreement
+                // about these bytes is over — if the manifest still names that
+                // hash (`note_shard_verified`, #224). On EVERY success rather
                 // than only where a dispute is known — a clear that has to be
                 // predicted is a clear that gets forgotten.
-                self.shared_state.clear_shard_dispute(&sid);
+                self.shared_state
+                    .note_shard_verified(&sid, &checked_against);
             }
             if let Ok(Err(e)) = result {
                 if policy == crate::model::shard::OnMismatch::KeepBytes {

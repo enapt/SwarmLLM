@@ -31,10 +31,13 @@ pub struct HealthMonitor {
     last_withheld_models: std::collections::HashSet<crate::types::ModelId>,
     /// Counter for periodic full re-announce (ensures late-joining peers get data).
     shard_announce_counter: u64,
-    /// `manifest_hash` of each model as this node last put it on the wire, so a
-    /// manifest is re-broadcast when it CHANGES rather than every tick. See
-    /// `broadcast_manifests` for what that was costing.
-    last_announced_manifests: std::collections::HashMap<crate::types::ModelId, [u8; 32]>,
+    /// `manifest_hash` of each model as this node last put it on the wire (or
+    /// let stand as already heard), and since when, so a manifest is
+    /// re-broadcast when it CHANGES rather than every tick. See
+    /// `broadcast_manifests` for what that was costing, and
+    /// [`manifest_needs_broadcast`] for what the time is for.
+    last_announced_manifests:
+        std::collections::HashMap<crate::types::ModelId, ([u8; 32], std::time::Instant)>,
     /// Counter for the periodic full manifest re-announce, the anti-entropy half
     /// of the same scheme.
     manifest_announce_counter: u64,
@@ -120,8 +123,9 @@ const FULL_REANNOUNCE_EVERY_TICKS: u64 = 10;
 /// gossip it received**, none of it news.
 ///
 /// Why 30 minutes is safe: nothing else leans on the periodic round any more.
-/// A change is published the tick it happens (a different hash is never
-/// suppressed); a newcomer is caught up point to point until delivered; the
+/// A change of our own is published the tick it happens (only a version heard
+/// AFTER we left the one before is suppressed — `manifest_needs_broadcast`,
+/// #224); a newcomer is caught up point to point until delivered; the
 /// registry never expires a manifest that stops being repeated. What is left
 /// for the periodic round is repairing a gossip message lost in flight, and
 /// that now takes at most this window plus one round instead of one round.
@@ -315,11 +319,18 @@ fn capability_needs_broadcast(
 /// always sent — "unchanged" is only meaningful against something previously
 /// announced.
 ///
-/// `swarm_heard_it` — the swarm was gossiped exactly this hash within
-/// `MANIFEST_QUIET_WINDOW` — overrides both. That is the Trickle suppression,
-/// and it is safe on the "changed" arm too: a change we LEARNED from gossip is
-/// one the swarm already has, while a change we made ourselves cannot have
-/// been heard by anyone yet and so still goes out.
+/// `swarm_heard_at` — when the swarm was last gossiped exactly this hash,
+/// within `MANIFEST_QUIET_WINDOW` — overrides both. That is the Trickle
+/// suppression, and on the "changed" arm it counts only when heard AFTER we
+/// announced the version we are leaving: a change we LEARNED from gossip was
+/// heard then, and the swarm has it; a change we made ourselves BACK to a
+/// version heard before that is news to every peer that has since taken ours
+/// (#224: a node adopted a stranger's hash, caught a newcomer up with it, then
+/// re-fetched its part and returned to the version it had broadcast minutes
+/// earlier — suppressed for the 30-minute window, so the newcomer never learned
+/// the agreed hash and its heal waited for one). RFC 6206 §4.2 draws the same
+/// line: a node's own change of state starts a new interval, and only
+/// consistent transmissions heard within the current interval suppress.
 /// This node's claim of which HuggingFace upload `model` is — what
 /// `model::canonical` chooses from — as the message that carries it, or `None`
 /// when it knows no source. The ONE builder, for the broadcast round and the
@@ -349,12 +360,16 @@ fn upload_claim(
 }
 
 fn manifest_needs_broadcast(
-    last_announced: Option<&[u8; 32]>,
+    last_announced: Option<&([u8; 32], std::time::Instant)>,
     current_hash: &[u8; 32],
     full_round: bool,
-    swarm_heard_it: bool,
+    swarm_heard_at: Option<std::time::Instant>,
 ) -> bool {
-    !swarm_heard_it && (full_round || last_announced.is_none_or(|prev| prev != current_hash))
+    let swarm_heard_it = swarm_heard_at.is_some_and(|heard| match last_announced {
+        Some((prev, since)) if prev != current_hash => heard > *since,
+        _ => true,
+    });
+    !swarm_heard_it && (full_round || last_announced.is_none_or(|(prev, _)| prev != current_hash))
 }
 
 /// How long a download tracking entry can sit unchanged before being treated
@@ -1365,6 +1380,21 @@ impl HealthMonitor {
         }
     }
 
+    /// `hash` is this node's announced version of `model` — broadcast, or let
+    /// stand as already heard. The time is when it BECAME ours, kept while it
+    /// stays so: [`manifest_needs_broadcast`] asks whether a version we return
+    /// to was heard after we left it.
+    fn note_announced(&mut self, model: &crate::types::ModelId, hash: [u8; 32]) {
+        if self
+            .last_announced_manifests
+            .get(model)
+            .is_none_or(|(prev, _)| *prev != hash)
+        {
+            self.last_announced_manifests
+                .insert(model.clone(), (hash, std::time::Instant::now()));
+        }
+    }
+
     /// Broadcast model manifests and HF sources so peers can discover and acquire models.
     ///
     /// **A manifest goes out when it CHANGES, not on every tick.** It used to go
@@ -1461,7 +1491,7 @@ impl HealthMonitor {
             // `manifest_hash` covers the shard table AND every tensor entry
             // (`ModelManifest::compute_hash`), so it is the right answer to
             // "would a peer see anything new?".
-            let swarm_heard_it = self.shared_state.models.manifest_heard_within(
+            let swarm_heard_at = self.shared_state.models.manifest_heard_at(
                 &manifest.id,
                 &manifest.manifest_hash,
                 MANIFEST_QUIET_WINDOW,
@@ -1470,14 +1500,13 @@ impl HealthMonitor {
                 self.last_announced_manifests.get(&manifest.id),
                 &manifest.manifest_hash,
                 full_round,
-                swarm_heard_it,
+                swarm_heard_at,
             ) {
-                if swarm_heard_it {
+                if swarm_heard_at.is_some() {
                     // The swarm has this hash, so it no longer counts as a
                     // change still owed — otherwise it would go out as one the
                     // moment the window lapsed, on an ordinary round.
-                    self.last_announced_manifests
-                        .insert(manifest.id.clone(), manifest.manifest_hash);
+                    self.note_announced(&manifest.id, manifest.manifest_hash);
                     suppressed += 1;
                 }
                 continue;
@@ -1490,8 +1519,7 @@ impl HealthMonitor {
                 // on the next tick, not suppressed as already done.
                 continue;
             }
-            self.last_announced_manifests
-                .insert(manifest.id.clone(), manifest.manifest_hash);
+            self.note_announced(&manifest.id, manifest.manifest_hash);
             // Our own broadcast is gossip the swarm has now heard — GossipSub
             // never hands a node its own message back, so without this we would
             // re-announce on our next full round what we said a minute ago.
@@ -2518,8 +2546,9 @@ mod tests {
     #[test]
     fn an_unchanged_manifest_is_not_rebroadcast() {
         let hash = [7u8; 32];
+        let since = std::time::Instant::now();
         assert!(
-            !manifest_needs_broadcast(Some(&hash), &hash, false, false),
+            !manifest_needs_broadcast(Some(&(hash, since)), &hash, false, None),
             "a manifest a peer has already been sent, unchanged, on an ordinary \
              round, is the 825 KB this node must stop republishing every 30 s"
         );
@@ -2533,16 +2562,17 @@ mod tests {
     fn a_manifest_still_goes_out_when_anyone_could_be_missing_it() {
         let hash = [7u8; 32];
         let other = [9u8; 32];
+        let since = std::time::Instant::now();
         assert!(
-            manifest_needs_broadcast(None, &hash, false, false),
+            manifest_needs_broadcast(None, &hash, false, None),
             "never announced — nobody has it"
         );
         assert!(
-            manifest_needs_broadcast(Some(&other), &hash, false, false),
+            manifest_needs_broadcast(Some(&(other, since)), &hash, false, None),
             "changed since we announced it — peers hold a stale one"
         );
         assert!(
-            manifest_needs_broadcast(Some(&hash), &hash, true, false),
+            manifest_needs_broadcast(Some(&(hash, since)), &hash, true, None),
             "a full round repairs a lost message, so it sends what nobody has \
              repeated within the quiet window"
         );
@@ -2559,18 +2589,54 @@ mod tests {
     fn a_manifest_the_swarm_just_heard_is_not_repeated() {
         let hash = [7u8; 32];
         let other = [9u8; 32];
+        let since = std::time::Instant::now();
+        let heard = since + std::time::Duration::from_secs(1);
         assert!(
-            !manifest_needs_broadcast(Some(&hash), &hash, true, true),
+            !manifest_needs_broadcast(Some(&(hash, since)), &hash, true, Some(heard)),
             "a full round must not repeat what another holder said minutes ago \
              — that repetition, from every holder, was 87% of received gossip"
         );
         assert!(
-            !manifest_needs_broadcast(Some(&other), &hash, false, true),
+            !manifest_needs_broadcast(Some(&(other, since)), &hash, false, Some(heard)),
             "a change we learned from gossip is one the swarm already has"
         );
         assert!(
-            !manifest_needs_broadcast(None, &hash, true, true),
+            !manifest_needs_broadcast(None, &hash, true, Some(heard)),
             "a model we just picked up, whose manifest the swarm just heard"
+        );
+    }
+
+    /// **A change of our own BACK to a version heard before we left it is
+    /// news** (#224). The rig's shape: a holder broadcast the agreed manifest,
+    /// adopted a stranger's contradicting hash (and caught a newcomer up with
+    /// it), deleted its part and announced that, then re-fetched the part and
+    /// returned to the agreed version — which the swarm had heard minutes
+    /// earlier, so it was suppressed for the 30-minute window and the newcomer
+    /// never learned the agreed hash. Treating any heard record as "the swarm
+    /// has it" makes the first assert fail.
+    #[test]
+    fn returning_to_a_version_heard_before_we_left_it_is_announced() {
+        let agreed = [7u8; 32];
+        let deleted = [9u8; 32];
+        let heard_agreed = std::time::Instant::now();
+        let left_it = heard_agreed + std::time::Duration::from_secs(60);
+        assert!(
+            manifest_needs_broadcast(
+                Some(&(deleted, left_it)),
+                &agreed,
+                false,
+                Some(heard_agreed)
+            ),
+            "peers that took the version we announced since have not heard this one"
+        );
+        assert!(
+            !manifest_needs_broadcast(
+                Some(&(deleted, left_it)),
+                &agreed,
+                false,
+                Some(left_it + std::time::Duration::from_secs(1))
+            ),
+            "heard again after we left it — the swarm has it"
         );
     }
 

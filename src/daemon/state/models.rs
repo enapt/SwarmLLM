@@ -146,8 +146,10 @@ pub struct ModelMgmt {
     ///
     /// Written by `note_manifest_heard`, from the dispatcher for a VERIFIED
     /// manifest and from `HealthMonitor::broadcast_manifests` for our own
-    /// broadcast; read by `manifest_heard_within`. Only a GOSSIPED arrival
-    /// counts — see `MessageTransport`.
+    /// broadcast; read by `manifest_heard_at` (the broadcast round, which also
+    /// asks WHEN — a version heard before this node last changed its own is no
+    /// longer the swarm's, #224) and `manifest_heard_within`. Only a GOSSIPED
+    /// arrival counts — see `MessageTransport`.
     ///
     /// **Keyed by VERSION, not by model.** It held only the LAST hash heard per
     /// model, so where holders disagree about a part (#61 — measured
@@ -633,9 +635,24 @@ impl ModelMgmt {
         manifest_hash: &[u8; 32],
         window: std::time::Duration,
     ) -> bool {
+        self.manifest_heard_at(model, manifest_hash, window)
+            .is_some()
+    }
+
+    /// When the swarm was last handed exactly this manifest, if within
+    /// `window` — for a holder that must tell a version heard before its own
+    /// last announcement from one heard since (`health::monitor::
+    /// manifest_needs_broadcast`, #224).
+    pub fn manifest_heard_at(
+        &self,
+        model: &crate::types::ModelId,
+        manifest_hash: &[u8; 32],
+        window: std::time::Duration,
+    ) -> Option<std::time::Instant> {
         self.manifest_heard
             .get(&(model.clone(), *manifest_hash))
-            .is_some_and(|at| at.elapsed() < window)
+            .map(|at| *at)
+            .filter(|at| at.elapsed() < window)
     }
 
     /// Drop every record older than `window`, which can no longer suppress

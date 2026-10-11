@@ -31,6 +31,25 @@
 #   DAMAGE=tail the first 1 MB kept, the rest zeroed — bytes that PASS the 64 KB
 #               check, the shape `e561df35` held (#217). Only the checked holders'
 #               disagreement can catch it.
+#   ORDER=first (default) B starts first, then A and C dial it: B hears its own
+#               manifest's hash first, the agreed one a minute or so later.
+#   ORDER=late  A and C start, heal and broadcast the agreed manifest BEFORE B
+#               starts (proxy/none only — an offline B dials nobody). Their fresh
+#               databases hold no origin record, so they adopt B's contradicting
+#               hash when it joins, catch B up with THAT, re-fetch their own part
+#               and return to the agreed version — which they broadcast minutes
+#               before B joined. Before #224's second fix that return was
+#               suppressed for the 30-minute quiet window and B, never told the
+#               agreed hash, waited for it ("no manifest of the same layout has
+#               named their hash yet") past the rig's limit.
+#   SWEEP_HOLD=<s>  B's startup sweep reads its manifest, then waits <s> seconds
+#               before hashing (`SWARMLLM_FAULT_SWEEP_HOLD_SECS`). With 150 in the
+#               default order the agreed hash reaches B (~60-90 s) inside the
+#               hold and B's first settle (~240 s, after HuggingFace's retries)
+#               comes after it: the order that failed this step at four gates
+#               (#224) — the sweep, still hashing against the hash it read at
+#               boot, passed and cleared the dispute the agreed hash had
+#               recorded. Without the fix that arm fails every time.
 # PASS = B logs the checked holders' verdict, deletes the part, fetches it from
 # A or C, and holds the upload's bytes again (BLAKE3-identical to the live
 # node's part). The null control is v0.3.223 as B: the part stays zeroed.
@@ -48,6 +67,9 @@ HFLESS="${HFLESS:-proxy}"
 case "$HFLESS" in proxy|offline|none) ;; *) echo "HFLESS must be proxy, offline or none"; exit 2 ;; esac
 DAMAGE="${DAMAGE:-all}"
 case "$DAMAGE" in all|tail) ;; *) echo "DAMAGE must be all or tail"; exit 2 ;; esac
+ORDER="${ORDER:-first}"
+case "$ORDER" in first|late) ;; *) echo "ORDER must be first or late"; exit 2 ;; esac
+[ "$ORDER" = late ] && [ "$HFLESS" = offline ] && { echo "ORDER=late needs a B that dials: HFLESS=proxy or none"; exit 2; }
 [ -x "$BIN_AC" ] && [ -x "$BIN_B" ] || { echo "binary not executable"; exit 2; }
 MODEL="${MODEL:-tinyllama-1.1b-chat-v1.0.q4-k-m}"
 MODELS_DIR="${MODELS_DIR:-$HOME/.local/share/swarmllm/models}"
@@ -138,7 +160,31 @@ if [ "$HFLESS" = offline ]; then
 elif [ "$HFLESS" = proxy ]; then
   B_ENV=(HTTPS_PROXY=http://127.0.0.1:9 HTTP_PROXY=http://127.0.0.1:9 ALL_PROXY=http://127.0.0.1:9 NO_PROXY=)
 fi
-make_node "$BASE/B" "" "$B_EXTRA"
+[ -n "${SWEEP_HOLD:-}" ] && B_ENV+=(SWARMLLM_FAULT_SWEEP_HOLD_SECS="$SWEEP_HOLD")
+B_BOOT=""
+if [ "$ORDER" = late ]; then
+  make_node "$BASE/A" "" ""
+  PA=$(start "$BASE/A" 8900 "$BIN_AC")
+  up "$BASE/A" 8900 || exit 1
+  ADDR_A=$(addr_of "$BASE/A" 8900)
+  [ -n "$ADDR_A" ] || { echo "A published no address to dial"; exit 1; }
+  make_node "$BASE/C" "\"$ADDR_A\"" ""
+  PC=$(start "$BASE/C" 8940 "$BIN_AC")
+  up "$BASE/C" 8940 || exit 1
+  ADDR_C=$(addr_of "$BASE/C" 8940)
+  healed=0
+  for _ in $(seq 1 60); do
+    healed=$(grep -alc "this node's parts are the canonical upload's" "$BASE/A/node.log" "$BASE/C/node.log" | wc -l)
+    [ "$healed" -ge 2 ] && break
+    sleep 5
+  done
+  [ "$healed" -ge 2 ] || { echo "A and C never both logged their copies canonical — see their node.log"; exit 1; }
+  sleep 10 # their checked announcements reach each other
+  echo "rig: A and C healed — starting B"
+  B_BOOT="\"$ADDR_A\""
+  [ -n "$ADDR_C" ] && B_BOOT="$B_BOOT, \"$ADDR_C\""
+fi
+make_node "$BASE/B" "$B_BOOT" "$B_EXTRA"
 M="$BASE/B/models/$MODEL"
 rm -f "$M/$PARTF"
 cp "$SRC/$PARTF" "$M/$PARTF" || exit 2
@@ -162,15 +208,17 @@ print(f"rig: B's part {last} zeroed, its manifest vouches for {h.hex()[:16]}")
 PY
 PB=$(start "$BASE/B" 8920 "$BIN_B" "${B_ENV[@]}")
 up "$BASE/B" 8920 || exit 1
-ADDR_B=$(addr_of "$BASE/B" 8920)
-[ -n "$ADDR_B" ] || { echo "B published no address to dial"; exit 1; }
-make_node "$BASE/A" "\"$ADDR_B\"" ""
-make_node "$BASE/C" "\"$ADDR_B\"" ""
-PA=$(start "$BASE/A" 8900 "$BIN_AC")
-PC=$(start "$BASE/C" 8940 "$BIN_AC")
-up "$BASE/A" 8900 || exit 1
-up "$BASE/C" 8940 || exit 1
-echo "rig: B ($HFLESS, $("$BIN_B" --version 2>/dev/null)) and A, C ($("$BIN_AC" --version 2>/dev/null)) up"
+if [ "$ORDER" = first ]; then
+  ADDR_B=$(addr_of "$BASE/B" 8920)
+  [ -n "$ADDR_B" ] || { echo "B published no address to dial"; exit 1; }
+  make_node "$BASE/A" "\"$ADDR_B\"" ""
+  make_node "$BASE/C" "\"$ADDR_B\"" ""
+  PA=$(start "$BASE/A" 8900 "$BIN_AC")
+  PC=$(start "$BASE/C" 8940 "$BIN_AC")
+  up "$BASE/A" 8900 || exit 1
+  up "$BASE/C" 8940 || exit 1
+fi
+echo "rig: B ($HFLESS, $ORDER, sweep hold ${SWEEP_HOLD:-0} s, $("$BIN_B" --version 2>/dev/null)) and A, C ($("$BIN_AC" --version 2>/dev/null)) up"
 
 WANT=$(python3 -c 'import sys,blake3; print(blake3.blake3(open(sys.argv[1],"rb").read()).hexdigest())' "$SRC/$PARTF")
 T0=$(date +%s); same=0; last_report=""
@@ -186,7 +234,9 @@ while [ $(( $(date +%s) - T0 )) -lt "${WAIT_SECS:-900}" ]; do
   sleep 10
 done
 echo "--- B's heal ---"
-grep -aE "checked theirs|deleted this node's parts|P2P shard download complete|Fetching from the model's origin|Fetching a part queued for repair|could not be checked on HuggingFace|Could not compare parts" "$BASE/B/node.log" | cut -c1-240 | head -20
+# The first two say which order this run got (#224): the dispute before the
+# sweep's end is the order that used to fail.
+grep -aE "disagrees with the hash the swarm reports, and|Background shard verification complete|checked theirs|deleted this node's parts|P2P shard download complete|Fetching from the model's origin|Fetching a part queued for repair|could not be checked on HuggingFace|Could not compare parts" "$BASE/B/node.log" | cut -c1-240 | head -22
 echo "--- A and C ---"
 grep -aE "canonical upload's$|this node's parts are the canonical upload's" "$BASE/A/node.log" "$BASE/C/node.log" | cut -c1-200 | head -4
 if [ "$same" = 1 ]; then

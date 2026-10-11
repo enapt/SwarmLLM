@@ -362,6 +362,24 @@ fn reclaim_failed_downloads_in(
     (quarantined, partials)
 }
 
+/// `SWARMLLM_FAULT_SWEEP_HOLD_SECS=<n>`: the startup sweep reads the manifests,
+/// then waits `n` seconds before hashing the first part — holding open the
+/// window in which gossip replaces a hash under a check that has already read
+/// it. The window is ~1-3 s on its own, and the gate's step 12m fell into it at
+/// four gates (FUTURE_WORK #224); `examples/outvoted_rig.sh SWEEP_HOLD=…` uses
+/// this to land in it every time. Unset in production; read once.
+fn fault_sweep_hold() -> Option<std::time::Duration> {
+    use std::sync::OnceLock;
+    static HOLD: OnceLock<Option<std::time::Duration>> = OnceLock::new();
+    *HOLD.get_or_init(|| {
+        std::env::var("SWARMLLM_FAULT_SWEEP_HOLD_SECS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .filter(|s| *s > 0)
+            .map(std::time::Duration::from_secs)
+    })
+}
+
 /// BLAKE3 hash check runs after API is up so the dashboard is responsive
 /// immediately. Bad shards are quarantined.
 pub(super) fn spawn_shard_verification(
@@ -385,7 +403,18 @@ pub(super) fn spawn_shard_verification(
         // `unchecked` because the check DID run — reporting either would
         // describe work that did not happen.
         let mut disputed = 0u32;
-        for manifest in shared_state.model_registry.models() {
+        // Read once: every part below is hashed against the hash this read
+        // gave it, however long the hashing takes — which is why a pass is
+        // judged against the hash the manifest names by then
+        // (`note_shard_verified`, #224).
+        let manifests = shared_state.model_registry.models();
+        if let Some(hold) = fault_sweep_hold() {
+            tokio::select! {
+                _ = shutdown_rx.changed() => { return "shard_verification_aborted"; }
+                _ = tokio::time::sleep(hold) => {}
+            }
+        }
+        for manifest in manifests {
             for shard_info in &manifest.shards {
                 // Only verify shards we registered (i.e., we are a holder)
                 let sid = crate::types::ShardId {
@@ -440,12 +469,14 @@ pub(super) fn spawn_shard_verification(
                 match result {
                     Ok(Ok(())) => {
                         verified += 1;
-                        // These bytes agree with the hash we now hold, so any
-                        // earlier disagreement about them is over. Cleared on
-                        // EVERY success rather than only where a dispute is
-                        // known — a clear that has to be predicted is a clear
-                        // that gets forgotten.
-                        shared_state.clear_shard_dispute(&sid);
+                        // These bytes agree with the hash this sweep read when
+                        // it began — which gossip may have replaced while it
+                        // hashed, so they are judged against the manifest as it
+                        // is NOW: a dispute the newer hash recorded stays
+                        // (#224). On EVERY success rather than only where a
+                        // dispute is known — a clear that has to be predicted
+                        // is a clear that gets forgotten.
+                        shared_state.note_shard_verified(&sid, &shard_info.hash);
                     }
                     Ok(Err(e)) if policy == crate::model::shard::OnMismatch::KeepBytes => {
                         // Unproven, not corrupt. Keep the bytes AND keep

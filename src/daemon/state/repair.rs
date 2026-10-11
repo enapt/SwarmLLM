@@ -337,11 +337,41 @@ impl SharedState {
     /// ANNOUNCES for the part from now on (`ModelRegistry::announced_build_tag`)
     /// — the manifest carries the hash the swarm reported, which our bytes are
     /// not, and announcing it told peers we held their bytes.
+    ///
+    /// Judged against the manifest as it is NOW (`ModelRegistry::
+    /// note_bytes_checked`): bytes that disagree with the hash the check read
+    /// but agree with the one the manifest has named since are no dispute.
     pub fn note_shard_disputed(&self, shard_id: &ShardId, verdict: &crate::error::SwarmError) {
-        let bytes = crate::model::shard::bytes_hash_in_verdict(verdict);
+        self.note_shard_bytes(
+            shard_id,
+            crate::model::shard::bytes_hash_in_verdict(verdict),
+            false,
+        );
+    }
+
+    /// A check of this shard's bytes PASSED against `checked_against` — so
+    /// that is what they hash to. **The way a passing check ends a dispute**,
+    /// never a bare [`Self::clear_shard_dispute`]: the manifest may name
+    /// another hash by now (the startup sweep reads it once, then hashes for
+    /// seconds), and then these bytes are in dispute, not out of it
+    /// (FUTURE_WORK #224).
+    pub fn note_shard_verified(
+        &self,
+        shard_id: &ShardId,
+        checked_against: &crate::types::Blake3Hash,
+    ) {
+        self.note_shard_bytes(shard_id, Some(*checked_against), true);
+    }
+
+    fn note_shard_bytes(
+        &self,
+        shard_id: &ShardId,
+        bytes: Option<crate::types::Blake3Hash>,
+        check_passed: bool,
+    ) {
         if self
             .model_registry
-            .note_bytes_disputed(shard_id.clone(), bytes)
+            .note_bytes_checked(shard_id.clone(), bytes, check_passed)
         {
             tracing::info!(
                 model = %shard_id.model_id,
@@ -358,15 +388,16 @@ impl SharedState {
         }
     }
 
-    /// The disagreement is over: this shard's bytes verified against the hash
-    /// we now hold for it, or the file is gone.
+    /// The disagreement is over: the bytes it was about are gone or replaced
+    /// — quarantined, deleted by the heal, written afresh from the origin or a
+    /// peer. A check that PASSED is [`Self::note_shard_verified`] instead: it
+    /// is judged against the hash the manifest names now (#224).
     ///
-    /// Called on **every** successful verification and on every quarantine, not
-    /// only where a dispute is known to exist — `DashSet::remove` on an absent
-    /// key is free, and a clear that has to be predicted is a clear that gets
-    /// forgotten. A quarantined shard is not disputed but repaired: the bytes
-    /// were destroyed against origin-backed evidence and a replacement is
-    /// queued.
+    /// Called on every quarantine and replacement, not only where a dispute is
+    /// known to exist — `DashMap::remove` on an absent key is free, and a clear
+    /// that has to be predicted is a clear that gets forgotten. A quarantined
+    /// shard is not disputed but repaired: the bytes were destroyed against
+    /// origin-backed evidence and a replacement is queued.
     pub fn clear_shard_dispute(&self, shard_id: &ShardId) {
         self.model_registry.clear_bytes_dispute(shard_id);
     }
@@ -724,6 +755,60 @@ mod tests {
         assert_eq!(announced_tag(&state, &s), swarm_tag);
     }
 
+    /// **A check that passed against a hash the manifest no longer names does
+    /// not end the dispute the newer hash recorded** (FUTURE_WORK #224).
+    ///
+    /// The .234 gate's failing run, in order: the startup sweep read the
+    /// manifest naming this node's own bytes (`ours`), gossip replaced it with
+    /// the swarm's hash 2.7 s after start, the re-check recorded the dispute —
+    /// and the sweep, still hashing against `ours`, passed and cleared it 310
+    /// ms later. The node then announced the swarm's build for bytes that were
+    /// not it, and its heal saw nothing to settle for 900 s. A bare clear on
+    /// a pass makes this test fail at the first assert after the sweep.
+    #[test]
+    fn a_pass_against_a_hash_the_manifest_has_since_replaced_keeps_the_dispute() {
+        let state = test_state();
+        let s = sid();
+        let (ours, swarms) = ([6u8; 32], [5u8; 32]);
+        register_with_hash(&state, swarms);
+        state.note_shard_disputed(&s, &integrity_failure(ours));
+        let ours_tag = swarmllm_types::build_tag_from_hash(&ours);
+        assert_eq!(announced_tag(&state, &s), ours_tag);
+
+        // The sweep's pass, against the hash it read before gossip arrived.
+        state.note_shard_verified(&s, &ours);
+        assert!(
+            state.shard_is_disputed(&s),
+            "a pass against a hash the manifest no longer names says nothing about the one it does"
+        );
+        assert_eq!(
+            announced_tag(&state, &s),
+            ours_tag,
+            "still announced as the bytes it is, never as the swarm's build"
+        );
+
+        // The same sweep finishing FIRST: its pass lands on no dispute, and a
+        // stale pass records the one it has found — the bytes are `ours`.
+        let fresh = test_state();
+        register_with_hash(&fresh, swarms);
+        fresh.note_shard_verified(&s, &ours);
+        assert!(fresh.shard_is_disputed(&s));
+        assert_eq!(announced_tag(&fresh, &s), ours_tag);
+
+        // A pass against the hash the manifest names now ends it.
+        state.note_shard_verified(&s, &swarms);
+        assert!(!state.shard_is_disputed(&s));
+        assert_eq!(
+            announced_tag(&state, &s),
+            swarmllm_types::build_tag_from_hash(&swarms)
+        );
+
+        // And the converse: a check that FAILED against an old hash, on bytes
+        // that are what the manifest names now, is no dispute.
+        state.note_shard_disputed(&s, &integrity_failure(swarms));
+        assert!(!state.shard_is_disputed(&s));
+    }
+
     /// **A withheld model is not offered**: its parts leave every announcement
     /// while the announcement still says it is complete for the model — which
     /// is what makes the peers that receive it retract the parts they had.
@@ -836,8 +921,9 @@ mod tests {
         assert_eq!(state.model_registry.bytes_disputed_shards().len(), 1);
 
         // A later check that passes is what ends it: the hash was corrected,
-        // or the origin's copy arrived.
-        state.clear_shard_dispute(&s);
+        // or the origin's copy arrived. (No manifest names a hash for it here,
+        // so the check's own verdict stands.)
+        state.note_shard_verified(&s, &[7; 32]);
         assert!(!state.shard_is_disputed(&s));
         assert!(state.model_registry.bytes_disputed_shards().is_empty());
     }

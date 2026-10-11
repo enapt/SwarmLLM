@@ -147,9 +147,11 @@ pub struct ModelRegistry {
     /// `docs/FUTURE_WORK.md` #61 is how often this fires in the field.
     ///
     /// The one store of a dispute: written only through
-    /// `SharedState::note_shard_disputed` / `clear_shard_dispute`, and cleared
-    /// wherever a part's bytes are replaced (an origin download, a peer
-    /// transfer that verified, a canonical swap). It is what
+    /// `SharedState::note_shard_disputed` / `note_shard_verified` (a check's
+    /// verdict, judged against the manifest as it is NOW —
+    /// [`Self::note_bytes_checked`]) and `clear_shard_dispute`, which clears
+    /// it wherever a part's bytes are replaced or gone (an origin download, a
+    /// peer transfer that verified, a canonical swap, a quarantine). It is what
     /// [`Self::announced_build_tag`] reads, so an announcement says what the
     /// bytes are rather than what the manifest was last told.
     bytes_disputed: DashMap<ShardId, Option<crate::types::Blake3Hash>>,
@@ -1046,15 +1048,51 @@ impl ModelRegistry {
         }
     }
 
-    /// Record that our bytes of `shard_id` disagree with our manifest, and
-    /// what they hash to when known. Returns whether the dispute is new. Only
-    /// `SharedState::note_shard_disputed` calls this.
-    pub fn note_bytes_disputed(
+    /// What a check of our bytes of `shard_id` found them to hash to (`None`:
+    /// the check computed no hash — a size mismatch), judged against the hash
+    /// our manifest names for the part NOW. Returns whether a dispute is newly
+    /// recorded. Only `SharedState::note_shard_disputed` and
+    /// `SharedState::note_shard_verified` call this.
+    ///
+    /// A check hashes against the hash it read when it BEGAN, and the manifest
+    /// can change while it hashes: the startup sweep reads every manifest once,
+    /// then spends seconds hashing. A pass against a hash the manifest no
+    /// longer names says nothing about the hash it names now — and used to
+    /// clear the dispute the newer hash had just recorded, so the node went
+    /// back to announcing the swarm's build for bytes that were not it, and
+    /// its heal saw nothing to settle (FUTURE_WORK #224: the dispute recorded
+    /// at 21:33:04.426, the sweep's "all shards OK" 310 ms later). HDFS judges
+    /// a replica report by the block's CURRENT generation stamp for the same
+    /// reason (HDFS-4799 is the race that got it wrong). So the verdict carries
+    /// the bytes' hash, and is compared with the manifest under its lock:
+    /// `register_manifest` cannot change the hash between the read and the
+    /// write, and a hash changed before the read has queued a re-check of its
+    /// own.
+    pub fn note_bytes_checked(
         &self,
         shard_id: ShardId,
         bytes_hash: Option<crate::types::Blake3Hash>,
+        check_passed: bool,
     ) -> bool {
-        self.bytes_disputed.insert(shard_id, bytes_hash).is_none()
+        // Held until the dispute is written — that is the lock.
+        let manifest = self.manifests.get(&shard_id.model_id);
+        let expected = manifest
+            .as_ref()
+            .and_then(|m| m.shards.iter().find(|s| s.index == shard_id.index))
+            .map(|s| s.hash)
+            .filter(|h| *h != [0u8; 32]);
+        let agrees = match (bytes_hash, expected) {
+            (Some(bytes), Some(expected)) => bytes == expected,
+            // No hash named now to judge the bytes by: the check's own
+            // verdict stands.
+            _ => check_passed,
+        };
+        if agrees {
+            self.bytes_disputed.remove(&shard_id);
+            false
+        } else {
+            self.bytes_disputed.insert(shard_id, bytes_hash).is_none()
+        }
     }
 
     /// The dispute is over. Only `SharedState::clear_shard_dispute` calls this.

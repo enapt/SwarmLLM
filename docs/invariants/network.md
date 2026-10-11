@@ -209,7 +209,9 @@ trailer, gated on `features::FORWARD_REFUSAL_REASON`) and the coordinator's
 we disagree, and we are keeping our copy"**, written and cleared only through
 `SharedState::note_shard_disputed` / `clear_shard_dispute`. (Moved 2026-10-03
 to `ModelRegistry::bytes_disputed`, which also keeps the hash the bytes DO have —
-it is what the node announces for them; § "One upload per model id".)
+it is what the node announces for them; § "One upload per model id". Since
+2026-10-11 a check that PASSED goes through `note_shard_verified`, judged against
+the hash the manifest names now, never a bare clear — door 6 there, #224.)
 
 **Why it exists.** `mismatch_policy` (the rule above) stops a node destroying
 its own bytes on a hash the model's origin never backed. It does not settle the
@@ -2209,6 +2211,8 @@ heard this interval. Here *k* = 1 and the interval is `MANIFEST_QUIET_WINDOW`
 - `broadcast_manifests` skips any manifest whose exact hash is in there and
   recent, on a full round or as a "change" it merely learned from that gossip.
 - A DIFFERENT hash is never suppressed: two holders disagreeing is information.
+- A version heard BEFORE this node last changed its own does not count (#224,
+  2026-10-11; § "The interval starts at our own change" below).
 
 Two details decide whether it is safe, and both are enforced by construction:
 
@@ -2288,6 +2292,34 @@ the old last-hash-only behaviour). **Expected after the fleet updates:** about
 one manifest per version per window, ~0.02 msg/s where 0.083 was measured —
 to be re-measured, not assumed. The tensor-table redesign stays deferred: it
 would shrink each copy, while this removes the copies.
+
+### The interval starts at our own change (2026-10-11, #224)
+
+`broadcast_manifests` reasoned that "a change we made ourselves cannot have been
+heard by anyone yet". It can, when the change RETURNS to a version this node
+broadcast before. Caught by `outvoted_rig.sh ORDER=late` (A and C healed before B
+joins): A and C broadcast the agreed manifest, then — their fresh databases
+holding no origin record — adopted the contradicting hash B gossiped on joining
+(#382 adopts one for a held part to queue the re-check), caught B up point to
+point with THAT version, deleted their part (announcing the zeroed hash) and
+re-fetched it, returning to the agreed version. Its record in `manifest_heard`
+was A's own broadcast from minutes before B existed, so the return was
+suppressed for the 30-minute window; B, told only the contradicting version,
+logged "no manifest of the same layout has named their hash yet — waiting for
+one" every pass and its heal never ran (> 800 s, A and C on .234). The field
+shape is any holder whose parts came from peers (no origin record) and a
+newcomer caught up while its manifest is off the agreed version.
+
+RFC 6206 §4.2 resets the interval on an inconsistency, and a node's own change
+of state is one: only consistent transmissions heard in the CURRENT interval
+suppress. So `HealthMonitor::last_announced_manifests` keeps WHEN each version
+became ours (`note_announced`), and `manifest_needs_broadcast` counts a heard
+record on the "changed" arm only when it postdates that. A change learned from
+gossip was heard on arrival — after we last announced the version we are
+leaving — and stays suppressed; an unchanged manifest is judged as before, so
+the per-version keying above is untouched. Test:
+`returning_to_a_version_heard_before_we_left_it_is_announced` (red with any
+heard record counting). Rig: `ORDER=late` with A and C on the fix.
 
 ## A chained hop's refusal goes to the coordinator (2026-09-25)
 
@@ -3261,18 +3293,53 @@ those bytes be vouched for as the swarm's:
    same question before the transfer (`peer_copy_checkable`), so a part pruned for
    not being the upload's comes from HuggingFace unless a holder's gossip has
    supplied its hash.
+6. **A check that passed against a hash the manifest no longer named ended the
+   dispute the newer hash had recorded** (2026-10-11, FUTURE_WORK #224). Each check
+   of held bytes — the startup sweep, the rescan, the re-check gossip queues —
+   hashes against the hash it read when it BEGAN, and the startup sweep reads every
+   manifest once and then hashes for seconds. At the .234 gate, B (no route to
+   HuggingFace, its last part zeroed under a manifest vouching for the zeroes)
+   heard A's and C's already-healed manifest 2.7 s after start; the re-check
+   recorded the dispute at 21:33:04.426; the sweep, still hashing against B's own
+   hash, logged "all shards OK" at 04.736 and cleared it. B then announced the
+   SWARM's build for its zeroed bytes (`announced_build_tag` falls back to the
+   manifest), `outvoted_by_checked_holders` saw its own tag among the checked
+   holders' and settled nothing, and the step failed in 900 s. In all four passing
+   re-runs the sweep had finished 60-90 s before the dispute. The step had failed at
+   four gates (.228, .231, .232, .234) on whichever binary was B, and the .228 and
+   .231 failures carry the same signature (the dispute 14 ms and 339 ms before the
+   sweep finished). Now a pass goes
+   through `SharedState::note_shard_verified(shard, hash_checked_against)` and a
+   failure through `note_shard_disputed`, and both reach
+   `ModelRegistry::note_bytes_checked`, which compares the bytes' hash with the
+   hash the manifest names NOW — under the manifest's map guard, so
+   `register_manifest` cannot change it between the read and the write (a hash
+   changed before the read has queued its own re-check). A pass against a hash
+   since replaced RECORDS the dispute; a failure on bytes the manifest names now
+   records none. `clear_shard_dispute` is left for bytes that are gone or
+   replaced. And `verify_pending_shards` keeps a re-check queued while the part is
+   downloading — it used to drop it, so bytes landing under the hash the download
+   started with were never judged against the one that arrived meanwhile. HDFS
+   judges a replica report by the block's CURRENT generation stamp for the same
+   reason (HDFS-4799 is the race that got it wrong). The same gate step had a
+   second, independent stall — a newcomer never told the agreed hash at all —
+   in the gossip suppression: § "The interval starts at our own change".
 
 Tests that fail with the change undone: `a_part_in_dispute_is_announced_as_the_bytes_it_is`
 (announcing `expected_build_tag`), `a_withheld_model_is_retracted_not_announced`
 (no withheld filter), `a_part_that_arrives_after_the_check_is_checked_too`,
 `a_part_goes_when_it_is_not_the_upload_or_in_dispute`,
 `the_parts_fetched_again_cover_the_layers_the_deleted_ones_held`,
-`pruning_a_copy_removes_every_file_of_its_upload_and_nothing_else`. Rigs:
-`split_rig.sh disputed` (B serves a part whose bytes are not its manifest's) and
+`pruning_a_copy_removes_every_file_of_its_upload_and_nothing_else`,
+`a_pass_against_a_hash_the_manifest_has_since_replaced_keeps_the_dispute` (a pass
+that clears outright; guard `a_passing_check_of_held_bytes_is_judged_against_the_hash_named_now`).
+Rigs: `split_rig.sh disputed` (B serves a part whose bytes are not its manifest's),
 `split_rig.sh spliced` (B's own manifest vouches for spliced bytes; asked directly
-while its heal works).
+while its heal works) and `outvoted_rig.sh` with `ORDER=late` (door 6's order).
 
-**What a change must keep:** an announced tag is the tag of the bytes; a part that
+**What a change must keep:** an announced tag is the tag of the bytes, and a
+check's verdict on them is judged against the hash the manifest names when it is
+written, never the one the check started with; a part that
 is not the canonical upload's bytes is deleted and fetched again, and until then
 offered to nobody; nothing is deleted without HuggingFace having answered in the
 same pass — or, on a node with no origin to ask, without enough checked holders of
