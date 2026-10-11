@@ -30,7 +30,7 @@
 | `remove-model <model-id>` | Delete a model from this computer and tell the network it's gone (`-y` skips the question) |
 | `update` | Check for an update and install it (`--check-only` to only check) |
 | `pool` | Link your own devices into a private group |
-| `test-split` | Developer diagnostic: test split inference locally (`--max-tokens`, default 20; `--prompt`) |
+| `test-split` | Developer diagnostic: test split inference locally (`--max-tokens`, default 20; `--prompt`; `--prompt-chunk N` reads the prompt N tokens per forward, as a node does — default 0, one forward) |
 | `version` | Print version |
 
 ### `chat` Options

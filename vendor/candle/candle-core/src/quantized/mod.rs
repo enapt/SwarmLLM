@@ -412,19 +412,53 @@ pub trait QuantizedType: Send + Sync {
     /// SwarmLLM patch: the block type an activation is quantized to before a
     /// product with this weight (`GgmlType::VecDotType`).
     fn vec_dot_dtype(&self) -> GgmlDType;
-    /// SwarmLLM patch: one activation row quantized for this weight type, as
-    /// `k_quants::matmul` quantizes a one-row input.
-    fn quantize_row(&self, xs: &[f32]) -> Box<dyn std::any::Any + Send + Sync>;
-    /// SwarmLLM patch: `dst[i] = row (first + i) · lhs`, `lhs` from
-    /// `quantize_row` of a weight with the same `vec_dot_dtype`.
-    fn matvec_rows(
+    /// SwarmLLM patch: activation rows (`xs`, rows of `k`) quantized for this
+    /// weight type, as `k_quants::matmul` quantizes its input.
+    fn quantize_rows(&self, xs: &[f32], k: usize) -> Box<dyn QuantizedBlocks>;
+    /// SwarmLLM patch: weight rows `first..` against activation rows
+    /// `lhs_rows` of `lhs` (from `quantize_rows` of a weight with the same
+    /// `vec_dot_dtype`), column-major: weight row `first + j` times activation
+    /// row `lhs_rows.start + r` lands at `dst[j * lhs_rows.len() + r]`.
+    fn matmul_rows(
         &self,
         k: usize,
         lhs: &(dyn std::any::Any + Send + Sync),
+        lhs_rows: std::ops::Range<usize>,
         first: usize,
         dst: &mut [f32],
     ) -> Result<()>;
 }
+
+/// SwarmLLM patch: a type-erased buffer of quantized activation rows (a
+/// `Vec<GgmlType::VecDotType>`), able to copy out some of its rows.
+pub trait QuantizedBlocks: std::any::Any + Send + Sync {
+    fn as_any(&self) -> &(dyn std::any::Any + Send + Sync);
+    /// The rows `rows`, each `row_blocks` blocks long, in that order.
+    fn gather(&self, row_blocks: usize, rows: &[usize]) -> Box<dyn QuantizedBlocks>;
+}
+
+impl<B: Clone + Send + Sync + 'static> QuantizedBlocks for Vec<B> {
+    fn as_any(&self) -> &(dyn std::any::Any + Send + Sync) {
+        self
+    }
+
+    fn gather(&self, row_blocks: usize, rows: &[usize]) -> Box<dyn QuantizedBlocks> {
+        let mut out = Vec::with_capacity(rows.len() * row_blocks);
+        for &r in rows {
+            out.extend_from_slice(&self[r * row_blocks..(r + 1) * row_blocks]);
+        }
+        Box::new(out)
+    }
+}
+
+/// Activation rows per `vec_dot_rows` call of [`QuantizedType::matmul_rows`]
+/// — `k_quants::matmul`'s `ROW_BLOCK`, which keeps them in L2.
+const MATMUL_ROW_BLOCK: usize = 128;
+
+/// Fewest rows [`QuantizedType::quantize_rows`] quantizes in parallel: a
+/// decoded token's few rows are not worth a fork. Either way each row is the
+/// same `from_float`, so the bits do not depend on it.
+const QUANTIZE_ROWS_IN_PARALLEL: usize = 16;
 
 impl<T: k_quants::GgmlType + Send + Sync> QuantizedType for Vec<T>
 where
@@ -438,45 +472,77 @@ where
         T::VecDotType::DTYPE
     }
 
-    // The m == 1 arm of `k_quants::matmul`, kept apart so that one quantized
-    // row can serve several weights: same zeroed blocks, same direct copy or
-    // `from_float`.
-    fn quantize_row(&self, xs: &[f32]) -> Box<dyn std::any::Any + Send + Sync> {
-        let mut blocks = vec![T::VecDotType::zeros(); xs.len().div_ceil(T::BLCK_SIZE)];
+    // The quantization of `k_quants::matmul`, kept apart so that one quantized
+    // input can serve several weights: same zeroed blocks, same direct copy or
+    // one `from_float` per row.
+    fn quantize_rows(&self, xs: &[f32], k: usize) -> Box<dyn QuantizedBlocks> {
+        let k_in_blocks = k.div_ceil(T::BLCK_SIZE);
+        let rows = xs.len() / k;
+        let mut blocks = vec![T::VecDotType::zeros(); rows * k_in_blocks];
         if T::DIRECT_COPY {
             T::VecDotType::direct_copy(xs, &mut blocks);
+        } else if rows < QUANTIZE_ROWS_IN_PARALLEL {
+            for (b, x) in blocks.chunks_mut(k_in_blocks).zip(xs.chunks(k)) {
+                T::VecDotType::from_float(x, b);
+            }
         } else {
-            T::VecDotType::from_float(xs, &mut blocks);
+            use rayon::prelude::*;
+            blocks
+                .par_chunks_mut(k_in_blocks)
+                .zip(xs.par_chunks(k))
+                .for_each(|(b, x)| T::VecDotType::from_float(x, b));
         }
         Box::new(blocks)
     }
 
-    // The m == 1 loop of `k_quants::matmul` over a range of its columns: one
-    // `T::vec_dot` per output over the same operands, so the same bits.
-    fn matvec_rows(
+    // The loops of `k_quants::matmul` over a range of its columns: one
+    // `T::vec_dot` per output for one row, `T::vec_dot_rows` over blocks of
+    // `MATMUL_ROW_BLOCK` rows for more — the same operands, so the same bits.
+    fn matmul_rows(
         &self,
         k: usize,
         lhs: &(dyn std::any::Any + Send + Sync),
+        lhs_rows: std::ops::Range<usize>,
         first: usize,
         dst: &mut [f32],
     ) -> Result<()> {
         let Some(lhs) = lhs.downcast_ref::<Vec<T::VecDotType>>() else {
             crate::bail!(
-                "matvec_rows: the activation was not quantized for {:?}",
+                "matmul_rows: the activation was not quantized for {:?}",
                 T::DTYPE
             )
         };
         let k_in_blocks = k.div_ceil(T::BLCK_SIZE);
-        if lhs.len() != k_in_blocks || (first + dst.len()) * k_in_blocks > self.len() {
+        let rows = lhs_rows.len();
+        if rows == 0
+            || lhs_rows.end * k_in_blocks > lhs.len()
+            || !dst.len().is_multiple_of(rows)
+            || (first + dst.len() / rows) * k_in_blocks > self.len()
+        {
             crate::bail!(
-                "matvec_rows: rows {first}..{} of {k} wide do not fit {} blocks",
-                first + dst.len(),
+                "matmul_rows: rows {lhs_rows:?} of {} blocks against weight rows {first}..{} \
+                 of {k} wide in {} blocks",
+                lhs.len(),
+                first + dst.len() / rows.max(1),
                 self.len()
             )
         }
-        for (i, out) in dst.iter_mut().enumerate() {
-            let col = first + i;
-            *out = T::vec_dot(k, &self[col * k_in_blocks..(col + 1) * k_in_blocks], lhs);
+        let lhs = &lhs[lhs_rows.start * k_in_blocks..lhs_rows.end * k_in_blocks];
+        let col = |j: usize| &self[(first + j) * k_in_blocks..(first + j + 1) * k_in_blocks];
+        if rows == 1 {
+            for (j, out) in dst.iter_mut().enumerate() {
+                *out = T::vec_dot(k, col(j), lhs);
+            }
+            return Ok(());
+        }
+        let mut base = 0;
+        while base < rows {
+            let n = MATMUL_ROW_BLOCK.min(rows - base);
+            let block = &lhs[base * k_in_blocks..(base + n) * k_in_blocks];
+            for (j, out) in dst.chunks_mut(rows).enumerate() {
+                T::vec_dot_rows(k, col(j), block, n, &mut out[base..base + n]);
+            }
+            base += n;
         }
         Ok(())
     }
@@ -519,93 +585,132 @@ where
     }
 }
 
-/// SwarmLLM patch: one activation row, quantized ONCE for a weight type
-/// (`QTensor::quantize_row`) and usable against any processor weight with the
-/// same `vec_dot_dtype` — gate and up of every expert, usually.
-pub struct QuantizedRow {
-    blocks: Box<dyn std::any::Any + Send + Sync>,
+/// SwarmLLM patch: activation rows, quantized ONCE for a weight type
+/// (`QTensor::quantize_rows`) and usable against any processor weight with
+/// the same `vec_dot_dtype` — gate and up of every expert, usually.
+pub struct QuantizedRows {
+    blocks: Box<dyn QuantizedBlocks>,
     vec_dot_dtype: GgmlDType,
     k: usize,
+    rows: usize,
 }
 
-impl QuantizedRow {
-    /// Can this row be multiplied by `weight` as it is?
+impl QuantizedRows {
+    /// Can these rows be multiplied by `weight` as they are?
     pub fn fits(&self, weight: &QTensor) -> bool {
         match (&weight.storage, weight.shape.dims2()) {
             (QStorage::Cpu(w), Ok((_, k))) => w.vec_dot_dtype() == self.vec_dot_dtype && k == self.k,
             _ => false,
         }
     }
-}
 
-/// SwarmLLM patch: one job of [`matvec_many`] — `dst = weight · lhs`.
-pub struct MatVec<'a> {
-    pub weight: &'a QTensor,
-    pub lhs: &'a QuantizedRow,
-    pub dst: &'a mut [f32],
-}
+    pub fn rows(&self) -> usize {
+        self.rows
+    }
 
-impl QTensor {
-    /// SwarmLLM patch: `xs` (one row, as wide as this weight) quantized as
-    /// `forward` would quantize a one-row input. Processor weights only.
-    pub fn quantize_row(&self, xs: &[f32]) -> Result<QuantizedRow> {
-        let QStorage::Cpu(w) = &self.storage else {
-            crate::bail!("quantize_row: processor weights only")
-        };
-        let (_, k) = self.shape.dims2()?;
-        if xs.len() != k {
-            crate::bail!("quantize_row: a row of {} for a weight {k} wide", xs.len())
+    /// The rows `rows`, in that order, as rows of their own — an expert's
+    /// tokens out of a prompt quantized once. A copy of blocks, so each row
+    /// keeps its exact bits.
+    pub fn gather(&self, rows: &[usize]) -> Result<Self> {
+        if rows.is_empty() || rows.iter().any(|&r| r >= self.rows) {
+            crate::bail!("gather: rows {rows:?} of {}", self.rows)
         }
-        Ok(QuantizedRow {
-            blocks: w.quantize_row(xs),
-            vec_dot_dtype: w.vec_dot_dtype(),
-            k,
+        let row_blocks = self.k.div_ceil(self.vec_dot_dtype.block_size());
+        Ok(Self {
+            blocks: self.blocks.gather(row_blocks, rows),
+            vec_dot_dtype: self.vec_dot_dtype,
+            k: self.k,
+            rows: rows.len(),
         })
     }
 }
 
-/// Output rows per task of [`matvec_many`] — llama.cpp's chunk for a product
-/// with one activation row (`ggml_compute_forward_mul_mat_id`, `chunk_size =
-/// 64` when `nr1 == 1`). Fixed, so no result depends on the thread count.
-const MATVEC_ROWS_PER_TASK: usize = 64;
+/// SwarmLLM patch: one job of [`matmul_many`] — `weight` times the rows
+/// `lhs_rows` of `lhs`, COLUMN-major: output `j` of row `r` at
+/// `dst[j * lhs_rows.len() + r]` (one row: the plain output vector).
+pub struct MatMulJob<'a> {
+    pub weight: &'a QTensor,
+    pub lhs: &'a QuantizedRows,
+    pub lhs_rows: std::ops::Range<usize>,
+    pub dst: &'a mut [f32],
+}
 
-/// SwarmLLM patch: many one-row products against processor weights in ONE
-/// parallel region over row chunks of every job.
+impl QTensor {
+    /// SwarmLLM patch: `xs` (rows as wide as this weight) quantized as
+    /// `forward` would quantize them. Processor weights only.
+    pub fn quantize_rows(&self, xs: &[f32]) -> Result<QuantizedRows> {
+        let QStorage::Cpu(w) = &self.storage else {
+            crate::bail!("quantize_rows: processor weights only")
+        };
+        let (_, k) = self.shape.dims2()?;
+        if k == 0 || xs.is_empty() || !xs.len().is_multiple_of(k) {
+            crate::bail!("quantize_rows: {} values for a weight {k} wide", xs.len())
+        }
+        Ok(QuantizedRows {
+            blocks: w.quantize_rows(xs, k),
+            vec_dot_dtype: w.vec_dot_dtype(),
+            k,
+            rows: xs.len() / k,
+        })
+    }
+}
+
+/// Weight rows per task of [`matmul_many`] — llama.cpp's chunk for a product
+/// with one activation row (`ggml_compute_forward_mul_mat_id`, `chunk_size =
+/// 64` when `nr1 == 1`) and `k_quants::matmul`'s `COL_BLOCK`. Fixed, so no
+/// result depends on the thread count.
+const MATMUL_COLS_PER_TASK: usize = 64;
+
+/// SwarmLLM patch: many products against processor weights in ONE parallel
+/// region over 64-row chunks of every job's weight.
 ///
-/// A mixture-of-experts layer decoding one token multiplies it by the
-/// chosen experts' small matrices — 8 of 128 on Qwen3-30B-A3B, three each.
-/// Each as its own `QMatMul::forward` is a parallel region of a few hundred
-/// rows with tensor plumbing around it; llama.cpp's `mul_mat_id` instead runs
-/// every chosen expert of one projection in ONE thread region, its threads
-/// walking the experts' row chunks with no barrier between experts. This is
-/// that shape (FUTURE_WORK #138).
+/// A mixture-of-experts layer multiplies each token by its chosen experts'
+/// small matrices — 8 of 128 on Qwen3-30B-A3B, three each. Each expert as its
+/// own `QMatMul::forward` is a parallel region of a few hundred rows with
+/// tensor plumbing around it — for a 681-token prompt, 384 regions a layer of
+/// ~12 tasks each; llama.cpp's `mul_mat_id` instead runs every chosen expert
+/// of one projection in ONE thread region, its threads walking the experts'
+/// row chunks with no barrier between experts. This is that shape (FUTURE_WORK
+/// #138), each task applying its 64 weight rows to all of its job's
+/// activation rows, as `k_quants::matmul` does.
 ///
-/// Each output is one `T::vec_dot` over the operands `forward` uses for a
-/// one-row input, so the result is bit-identical to calling it per job.
-pub fn matvec_many(jobs: Vec<MatVec<'_>>) -> Result<()> {
+/// Each output is the `T::vec_dot` (one row) or `T::vec_dot_rows` (several)
+/// over the operands `forward` uses, so the result is bit-identical to
+/// calling it per job.
+pub fn matmul_many(jobs: Vec<MatMulJob<'_>>) -> Result<()> {
     use rayon::prelude::*;
     let mut tasks = Vec::new();
-    for MatVec { weight, lhs, dst } in jobs {
+    for MatMulJob {
+        weight,
+        lhs,
+        lhs_rows,
+        dst,
+    } in jobs
+    {
         let QStorage::Cpu(w) = &weight.storage else {
-            crate::bail!("matvec_many: processor weights only")
+            crate::bail!("matmul_many: processor weights only")
         };
         let (n, k) = weight.shape.dims2()?;
-        if dst.len() != n || !lhs.fits(weight) {
+        let rows = lhs_rows.len();
+        if rows == 0 || lhs_rows.end > lhs.rows || dst.len() != n * rows || !lhs.fits(weight) {
             crate::bail!(
-                "matvec_many: {n} x {k} weight ({:?}), {} outputs, a row of {} for {:?}",
+                "matmul_many: {n} x {k} weight ({:?}), {} outputs, rows {lhs_rows:?} of {} \
+                 {} wide for {:?}",
                 weight.dtype(),
                 dst.len(),
+                lhs.rows,
                 lhs.k,
                 lhs.vec_dot_dtype
             )
         }
-        for (chunk, out) in dst.chunks_mut(MATVEC_ROWS_PER_TASK).enumerate() {
-            tasks.push((w.as_ref(), &*lhs.blocks, k, chunk * MATVEC_ROWS_PER_TASK, out));
+        for (chunk, out) in dst.chunks_mut(MATMUL_COLS_PER_TASK * rows).enumerate() {
+            let first = chunk * MATMUL_COLS_PER_TASK;
+            tasks.push((w.as_ref(), lhs.blocks.as_any(), k, lhs_rows.clone(), first, out));
         }
     }
     tasks
         .into_par_iter()
-        .try_for_each(|(w, lhs, k, first, out)| w.matvec_rows(k, lhs, first, out))
+        .try_for_each(|(w, lhs, k, rows, first, out)| w.matmul_rows(k, lhs, rows, first, out))
 }
 
 impl std::fmt::Debug for QTensor {

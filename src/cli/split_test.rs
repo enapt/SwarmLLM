@@ -6,6 +6,7 @@ pub async fn test_split_inference(
     model_path: Option<PathBuf>,
     max_tokens: u32,
     prompt: &str,
+    prompt_chunk: usize,
     gpu_layers: Option<i32>,
 ) -> anyhow::Result<()> {
     use swarmllm::inference::split::{sample_token, SplitModel};
@@ -73,15 +74,26 @@ pub async fn test_split_inference(
         swarmllm::inference::split::KvCacheStore::new(std::time::Duration::from_secs(600));
     let test_request_id = "test-generate";
 
-    let input = candle_core::Tensor::from_vec(
-        token_ids.clone(),
-        &[1, token_ids.len()],
-        &candle_core::Device::Cpu,
-    )?;
-
-    let logits =
-        tokio::task::block_in_place(|| model.forward(&input, 0, &kv_store, test_request_id))
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+    // In one forward, or `--prompt-chunk` tokens at a time as a node reads it.
+    let chunk = match prompt_chunk {
+        0 => token_ids.len().max(1),
+        n => n,
+    };
+    let mut logits = None;
+    for (i, piece) in token_ids.chunks(chunk).enumerate() {
+        let input = candle_core::Tensor::from_vec(
+            piece.to_vec(),
+            &[1, piece.len()],
+            &candle_core::Device::Cpu,
+        )?;
+        logits = Some(
+            tokio::task::block_in_place(|| {
+                model.forward(&input, i * chunk, &kv_store, test_request_id)
+            })
+            .map_err(|e| anyhow::anyhow!("{e}"))?,
+        );
+    }
+    let logits = logits.ok_or_else(|| anyhow::anyhow!("the prompt has no tokens"))?;
     let first_token = sample_token(&logits, 0.0, 1.0).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let mut generated = vec![first_token];

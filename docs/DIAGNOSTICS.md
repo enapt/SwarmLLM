@@ -1642,6 +1642,13 @@ router scores to the host, so there the card stage absorbs queued attention
 work instead. The other A/B switches: `SWARMLLM_MOE_CARD_PROMPT=rows` (a prompt
 on the one-row kernel), `SWARMLLM_MOE_CPU=per-expert` (FUTURE_WORK #138).
 
+**Measure a prompt in the shape a node reads it.** `test-split` reads the whole
+prompt in one forward; a node reads 128 tokens a forward unless the model is
+wholly on the card (`prefill_pacer::prompt_chunk_ceiling`). Pass `--prompt-chunk
+128` — the old per-expert MoE path took 46 s for a 681-token prompt that way
+against 20 s in one forward, so a one-forward figure understated what users met
+by more than half (#138, 2026-10-11).
+
 ## Attention-kernel A/B — `SWARMLLM_FORCE_STANDARD_ATTN=1`
 
 Forces every attention call in the process onto `standard_attention`, so the

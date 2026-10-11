@@ -911,7 +911,7 @@ between 1755 MHz bursts), and back-to-back runs on this laptop heat it enough to
 step 133 → 185 ms within 40 tokens (gotcha #825). Neither thread count nor placement is the
 lever: calibration already picks the width, and `SWARMLLM_DECODE_THREADS=8` was slower.
 
-#### #138 — A mixture-of-experts model that does not fit the card: decode level with llama.cpp since 2026-10-11, a prompt still slow
+#### #138 — A mixture-of-experts model that does not fit the card: decode level with llama.cpp since 2026-10-11, a prompt 3.5x faster but llama.cpp reads one on the card
 `P2` · perf-local · **PARTIAL** — 2026-09-27 · history: archive row #138; plan: `docs/plans/faster_than_local.md` § 3.2
 
 **Measured 2026-10-11** on the RTX 3070 Laptop 8 GB + Ryzen 7 5800H, Qwen3-30B-A3B-Instruct-2507
@@ -948,16 +948,29 @@ races: candle's tensor-core prompt kernel lacked a barrier (replies changed run 
 vendored candle-kernels with the one line, gotcha #827), and a card-to-card `to_device` was
 unordered (gotcha #828). A/B `SWARMLLM_MOE_CARD=per-expert`, `SWARMLLM_MOE_CARD_PROMPT=rows`.
 
-**Left, in order of what they cost us:** (1) **a prompt's experts on the processor**: a
-681-token prompt spends ~17 s of ~23 s in the 22 processor layers' experts (a 31-token one
-1.0-1.1 s); generalise `matvec_many` to several rows per job, one region per projection for
-any token count. The card's share of that prompt is 1.5 s stacked against 1.2 s per expert
-(synced) — the tensor-core kernel is the slower of the two there, a smaller second item.
-(2) **MoE layers in decode-step capture**: a stacked layer has no host copy, so a MoE model
-whole on a card could be captured (`executor.rs` still excludes MoE as unchecked; a 26/22
-split stays uncaptured regardless). (3) **per-tensor placement** (experts in RAM, attention
-on the card) beside `split::hybrid::LayerPlacement` — worth 1.37x to llama.cpp, and it moves
-MORE expert work to the processor, so (1) first. Seen, not chased: the first 1-2 decode
+**Done 2026-10-11 (unreleased), a prompt on the processor:** the one-region path takes every
+token count — vendored `quantized::matmul_many` with several activation rows per job, each
+64-row task applying one expert's weight rows to ALL of that expert's tokens (`vec_dot_rows`,
+`k_quants::matmul`'s tiling), `MOE_PAIRS_PER_REGION` pairs a region; still bit-identical.
+A 681-token prompt read 128 tokens a forward, as a node reads it (`test-split --prompt-chunk
+128`): 46.2-46.6 → 12.9-13.3 s split 26/22, 93.5-94.9 → 19.9-20.0 s with every layer on the
+processor (its experts 84-85 → 11 s); in one forward 19.5-19.9 → 9.9-10.3 s. ABBA, one
+binary, replies identical (`docs/invariants/inference.md`).
+
+**Left, in order of what they cost us:** (1) **a prompt's processor experts run ON THE CARD,
+as llama.cpp runs them**: llama.cpp hands any `MUL_MAT_ID` of ≥ 32 tokens to the card and
+copies the RAM-held weights over for it (`ggml_backend_cuda_device_offload_op` →
+`get_op_batch_size` = tokens ≥ `GGML_OP_OFFLOAD_MIN_BATCH`, default 32; read at `4b1a27f`) —
+why its pp512 is 537-571 tok/s with 20 or all 48 layers' experts in RAM, against our ~52
+(681 tokens in 13 s, 5.5 s of it the processor's experts). Needs a layer's experts in flight on the card
+(~200 MB here, all 128 touched by a 512-token chunk), ~4.4 GB over PCIe per chunk for 22
+layers, and 512-token chunks on a split model (128 makes it six uploads). The card's own
+share is 1.5 s stacked against 1.2 s per expert (synced) — the tensor-core kernel is the
+slower there, a smaller item. (2) **MoE layers in decode-step capture**: a stacked layer has
+no host copy, so a MoE model whole on a card could be captured (`executor.rs` still excludes
+MoE as unchecked; a 26/22 split stays uncaptured regardless). (3) **per-tensor placement**
+(experts in RAM, attention on the card) beside `split::hybrid::LayerPlacement` — worth 1.37x
+to llama.cpp's decode, and it moves MORE expert work to the processor. Seen, not chased: the first 1-2 decode
 steps after a 681-token single-forward prompt took 2-4x a settled step on both the stacked
 and per-expert paths (not after a one-row prompt) — prompt temporaries pressing card memory
 is the likely reading; a node chunks card prompts at 512 tokens.
@@ -1704,7 +1717,13 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-11, not yet released** (#224, #137's main half, #228 (1), #138's processor decode and card steps)
+**Closed 2026-10-11, not yet released** (#224, #137's main half, #228 (1), #138's processor decode, card and prompt steps)
+- #138's processor prompt step — **a mixture-of-experts model reads a prompt 3.5-4.7x faster
+  when its experts are on the processor**: every expert's products for every token in one
+  parallel region per projection, each expert's weights read once per pass for all of its
+  tokens. Qwen3-30B-A3B Q2_K, a 681-token prompt read as a node reads it: 46 → 13 s split
+  between an 8 GB laptop card and the processor, 94 → 20 s on the processor alone; the reply
+  identical, bit for bit.
 - #138's card step — **a mixture-of-experts model runs its experts on the graphics card as one
   launch per projection**, picked on the card, instead of three products per expert behind a
   copy of the router scores to the processor. Qwen3-30B-A3B Q2_K split 26/22 between an 8 GB
@@ -1716,7 +1735,7 @@ grep `^| N |`).
   of each chosen expert's three products as separate parallel calls with tensor plumbing around
   them. Qwen3-30B-A3B Q2_K split 26/22 between the card and the processor: the processor's
   expert time per token 25.1 → 17.8 ms on average (ABBA in one binary), the reply identical.
-  The card's experts followed the same day (above); a prompt's are #138's entry.
+  The card's experts and a prompt's followed the same day (above).
 - #228 (1) — **Qwen 3.5's mixture-of-experts models run** (`qwen35moe`: Qwen3.5-35B-A3B and its
   larger siblings were refused outright). Checked against llama.cpp master on a real file, whole,
   split and on the card; the numbers are in #228's entry.

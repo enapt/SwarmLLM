@@ -2737,15 +2737,17 @@ operands either way, so there is no reduction reordering.
 This is why `vendor/candle` exists as a patched copy; the pre-existing reason was
 a `cudarc` linking hardcode (see `Cargo.toml` `[patch.crates-io]`).
 
-### A few tokens' experts run in one region per projection
+### A layer's experts run in one region per projection
 
-`vendor/candle/candle-core/src/quantized/mod.rs` adds `QTensor::quantize_row` and
-`matvec_many`: many one-row products against processor weights in ONE rayon
-region of 64-row tasks — llama.cpp's `mul_mat_id` shape. A mixture-of-experts
-layer on the processor uses it for ≤ 8 tokens (`MoeFfn::experts_in_one_region`),
-bit-identical to the per-expert path; −29% on the processor's expert time per
-decoded token on Qwen3-30B-A3B (2026-10-11, FUTURE_WORK #138,
-`docs/invariants/inference.md`).
+`vendor/candle/candle-core/src/quantized/mod.rs` adds `QTensor::quantize_rows`,
+`QuantizedRows::gather` and `matmul_many`: many products against processor
+weights in ONE rayon region of 64-weight-row tasks, each applying its rows to all
+of its job's activation rows — llama.cpp's `mul_mat_id` shape. A mixture-of-experts
+layer on the processor uses it for every token count
+(`MoeFfn::experts_in_one_region`), bit-identical to the per-expert path: −29% on
+the processor's expert time per decoded token on Qwen3-30B-A3B, and a 681-token
+prompt read 128 tokens a forward 46 → 13 s split with the card, 94 → 20 s on the
+processor alone (2026-10-11, FUTURE_WORK #138, `docs/invariants/inference.md`).
 
 On a card a layer keeps its experts as the file stacks them (`StackedExperts`),
 routes on the card and runs each projection for every chosen pair in one

@@ -169,6 +169,11 @@ enum Commands {
         /// Prompt text
         #[arg(long, default_value = "Hello, how are you?")]
         prompt: String,
+        /// Read the prompt this many tokens per forward, as a node does
+        /// (`inference.prefill_chunk_tokens`: 128 unless the model is wholly
+        /// on the card); 0 reads it in one forward
+        #[arg(long, default_value = "0")]
+        prompt_chunk: usize,
         // `--gpu-layers` is the GLOBAL option above, not one of this
         // command's own: a same-named arg of another type panics clap on
         // access (the `model` comment above; `the_split_test_reads_the_global_gpu_layers`).
@@ -576,11 +581,16 @@ async fn async_main(mut cli: Cli) -> anyhow::Result<()> {
             cli::pool::run_pool_command(port, &data_dir, action).await
         }
         Commands::Update { check_only } => cli::update::run_update_command(check_only).await,
-        Commands::TestSplit { max_tokens, prompt } => {
+        Commands::TestSplit {
+            max_tokens,
+            prompt,
+            prompt_chunk,
+        } => {
             cli::split_test::test_split_inference(
                 cli.model.clone().map(PathBuf::from),
                 max_tokens,
                 &prompt,
+                prompt_chunk,
                 cli.gpu_layers,
             )
             .await

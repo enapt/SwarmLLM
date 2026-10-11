@@ -283,12 +283,20 @@ const MLP_INTERMEDIATE_BUDGET_ELEMS: usize = 16 * 1024 * 1024;
 /// a short prefill already fits — both take exactly the path they always did.
 const MLP_MIN_TOKENS_TO_BLOCK: usize = 512;
 
-/// Most tokens a MoE layer on the processor runs as (token, expert) pairs in
-/// one region (`MoeFfn::experts_in_one_region`): a decoded token or a
-/// speculative check. Each pair re-reads its expert's weights, which costs
-/// nothing while the tokens' experts barely overlap; a prompt chunk's do, and
-/// it keeps the per-expert path, which reads each chosen expert once.
-const MOE_ONE_REGION_MAX_TOKENS: usize = 8;
+/// Most tokens a card's stacked experts run through `moe_gemm_gguf`'s one-row
+/// kernel (`MoeFfn::experts_stacked`): a decoded token or a speculative check.
+/// A prompt chunk takes its tensor-core kernel.
+const MOE_CARD_ONE_ROW_MAX_TOKENS: usize = 8;
+
+/// (token, expert) pairs the processor's experts run per region
+/// (`MoeFfn::experts_in_one_region`), in whole tokens: 512 tokens of a top-8
+/// model. It bounds the region's temporaries — ~120 MB on Qwen3-30B-A3B —
+/// while every chosen expert still meets ~32 tokens per weight read.
+const MOE_PAIRS_PER_REGION: usize = 4096;
+
+/// Fewest (token, expert) pairs whose host-side work (activation, transposes,
+/// the sum) is split across threads; a decoded token's 8 are not worth a fork.
+const MOE_PAIRS_TO_SPLIT_HOST_WORK: usize = 64;
 
 impl Mlp {
     /// Feed-forward block.
@@ -1099,7 +1107,7 @@ impl MoeFfn {
                 .reshape((b_sz, seq_len, hidden));
         }
         let expert_batches = self.route(&x_flat)?;
-        let routed = if self.experts_fit_one_region(x, num_tokens, &expert_batches) {
+        let routed = if self.experts_fit_one_region(x, &expert_batches) {
             self.experts_in_one_region(&x_flat, &expert_batches, num_tokens, hidden)?
         } else {
             self.experts_one_at_a_time(&x_flat, &expert_batches, num_tokens, hidden)?
@@ -1135,22 +1143,16 @@ impl MoeFfn {
         Ok(expert_batches)
     }
 
-    /// May [`Self::experts_in_one_region`] answer this call? A few tokens of
-    /// f32 on the processor against quantized experts, unless
-    /// `SWARMLLM_MOE_CPU=per-expert` asks for the old path (A/B switch).
-    pub(crate) fn experts_fit_one_region(
-        &self,
-        x: &Tensor,
-        num_tokens: usize,
-        batches: &[Vec<(usize, f32)>],
-    ) -> bool {
+    /// May [`Self::experts_in_one_region`] answer this call? f32 on the
+    /// processor against quantized experts, unless `SWARMLLM_MOE_CPU=per-expert`
+    /// asks for the old path (A/B switch).
+    pub(crate) fn experts_fit_one_region(&self, x: &Tensor, batches: &[Vec<(usize, f32)>]) -> bool {
         static PER_EXPERT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         let per_expert = *PER_EXPERT
             .get_or_init(|| std::env::var("SWARMLLM_MOE_CPU").as_deref() == Ok("per-expert"));
         !per_expert
             && x.device().is_cpu()
             && x.dtype() == candle_core::DType::F32
-            && num_tokens <= MOE_ONE_REGION_MAX_TOKENS
             && batches.iter().zip(&self.experts).all(|(batch, e)| {
                 batch.is_empty()
                     || [&e.gate, &e.up, &e.down]
@@ -1159,19 +1161,24 @@ impl MoeFfn {
             })
     }
 
-    /// The routed experts of a few tokens on the processor, as llama.cpp's
-    /// `mul_mat_id` runs them: every (token, expert) pair's gate and up in ONE
-    /// parallel region, then every down in another (`candle_core::quantized::
-    /// matvec_many`), the activation quantized once per token. The per-expert
-    /// path ran ~24 parallel regions and ~80 tensor ops per layer for one
-    /// decoded token (FUTURE_WORK #138).
+    /// The routed experts on the processor, as llama.cpp's `mul_mat_id` runs
+    /// them: every chosen expert's gate and up in ONE parallel region, then
+    /// every down in another (`candle_core::quantized::matmul_many`), each
+    /// task applying 64 rows of one expert's weight to all of that expert's
+    /// tokens. The input is quantized once per activation type. The
+    /// per-expert path ran ~24 parallel regions and ~80 tensor ops per layer
+    /// for one decoded token, and for a 681-token prompt 384 regions of ~12
+    /// tasks each (FUTURE_WORK #138). A long prompt runs
+    /// [`MOE_PAIRS_PER_REGION`] pairs at a time.
     ///
     /// Bit-identical to [`Self::experts_one_at_a_time`]: each output is the
-    /// same `vec_dot` over the same quantized operands, `silu_mul_into` is the
-    /// kernel `silu_mul` runs (every element on its vector lanes while the
-    /// intermediate width is a multiple of 8, as every real model's is), and
-    /// the pairs are summed in the order `index_add` sums them — expert order,
-    /// from zero. Pinned by `one_region_experts_are_bit_identical_to_one_at_a_time`.
+    /// same `vec_dot` over the same quantized operands (`vec_dot_rows`, which
+    /// `k_quants::matmul` also uses, is bit-identical to it by contract),
+    /// `silu_mul_into` is the kernel `silu_mul` runs (every element on its
+    /// vector lanes while the intermediate width is a multiple of 8, as every
+    /// real model's is), and the pairs are summed in the order `index_add`
+    /// sums them — expert order, from zero. Pinned by
+    /// `one_region_experts_are_bit_identical_to_one_at_a_time`.
     pub(crate) fn experts_in_one_region(
         &self,
         x_flat: &Tensor,
@@ -1179,139 +1186,279 @@ impl MoeFfn {
         num_tokens: usize,
         hidden: usize,
     ) -> CandleResult<Tensor> {
-        use candle_core::quantized::{matvec_many, MatVec, QuantizedRow};
+        self.experts_in_regions_of(x_flat, batches, num_tokens, hidden, MOE_PAIRS_PER_REGION)
+    }
+
+    /// [`Self::experts_in_one_region`], `pairs` (token, expert) pairs per
+    /// region, in whole tokens.
+    pub(crate) fn experts_in_regions_of(
+        &self,
+        x_flat: &Tensor,
+        batches: &[Vec<(usize, f32)>],
+        num_tokens: usize,
+        hidden: usize,
+        pairs: usize,
+    ) -> CandleResult<Tensor> {
+        let mut out = vec![0f32; num_tokens * hidden];
+        if !out.is_empty() {
+            let xs: Vec<f32> = x_flat.flatten_all()?.to_vec1()?;
+            let tokens_per_region = (pairs / self.n_experts_used.max(1)).max(1);
+            for (i, rows) in out.chunks_mut(tokens_per_region * hidden).enumerate() {
+                let start = i * tokens_per_region;
+                let tokens = start..start + rows.len() / hidden;
+                let xs = &xs[tokens.start * hidden..tokens.end * hidden];
+                self.experts_for_tokens(xs, batches, tokens, hidden, rows)?;
+            }
+        }
+        Tensor::from_vec(out, (num_tokens, hidden), x_flat.device())
+    }
+
+    /// One region of [`Self::experts_in_regions_of`]: `xs` holds the rows of
+    /// `tokens` (indices among the call's), `out` receives theirs, zeroed.
+    fn experts_for_tokens(
+        &self,
+        xs: &[f32],
+        batches: &[Vec<(usize, f32)>],
+        tokens: std::ops::Range<usize>,
+        hidden: usize,
+        out: &mut [f32],
+    ) -> CandleResult<()> {
+        use candle_core::quantized::{matmul_many, MatMulJob, QuantizedRows};
+        use rayon::prelude::*;
         let qtensor = |w: &QMatMul| -> CandleResult<std::sync::Arc<QTensor>> {
             match w.quantized_weight() {
                 Some(t) => Ok(t.clone()),
                 None => candle_core::bail!("experts_in_one_region: a dequantized expert"),
             }
         };
-        let xs: Vec<f32> = x_flat.flatten_all()?.to_vec1()?;
-        // (expert, token, weight), in the order `index_add` sums them.
-        let pairs: Vec<(usize, usize, f32)> = batches
-            .iter()
-            .enumerate()
-            .flat_map(|(e, batch)| batch.iter().map(move |&(pos, w)| (e, pos, w)))
-            .collect();
-        let mut weights = Vec::with_capacity(pairs.len());
-        for &(e, _, _) in &pairs {
+        // `xs` quantized for `w`'s activation type — once per type, not per weight.
+        let quantized_for = |cache: &mut Vec<QuantizedRows>, w: &QTensor, xs: &[f32]| {
+            if let Some(at) = cache.iter().position(|q| q.fits(w)) {
+                return CandleResult::Ok(at);
+            }
+            cache.push(w.quantize_rows(xs)?);
+            Ok(cache.len() - 1)
+        };
+        // Every chosen expert, in expert order — the order `index_add` sums
+        // them — with its pairs: (token row in this region, weight).
+        type Chosen = ([std::sync::Arc<QTensor>; 3], Vec<(usize, f32)>);
+        let mut chosen: Vec<Chosen> = Vec::new();
+        for (e, batch) in batches.iter().enumerate() {
+            let pairs: Vec<(usize, f32)> = batch
+                .iter()
+                .filter(|(pos, _)| tokens.contains(pos))
+                .map(|&(pos, w)| (pos - tokens.start, w))
+                .collect();
+            if pairs.is_empty() {
+                continue;
+            }
             let expert = self.experts.get(e).ok_or_else(|| {
                 candle_core::Error::Msg(format!(
                     "router chose expert {e} of a layer holding {}",
                     self.experts.len()
                 ))
             })?;
-            weights.push([
+            let weights = [
                 qtensor(&expert.gate)?,
                 qtensor(&expert.up)?,
                 qtensor(&expert.down)?,
-            ]);
+            ];
+            chosen.push((weights, pairs));
         }
-        let intermediate = match weights.first() {
-            Some([gate, ..]) => gate.shape().dims2()?.0,
-            None => return Tensor::zeros((num_tokens, hidden), x_flat.dtype(), x_flat.device()),
+        let intermediate = match chosen.first() {
+            Some(([gate, ..], _)) => gate.shape().dims2()?.0,
+            None => return Ok(()),
         };
+        let n_pairs: usize = chosen.iter().map(|(_, pairs)| pairs.len()).sum();
+        let split = n_pairs >= MOE_PAIRS_TO_SPLIT_HOST_WORK;
 
-        // Each pair's input: its token's row — scaled by its weight first on
-        // Llama 4 (`weight_before_ffn`), as `broadcast_mul` scales it.
-        let inputs: Vec<std::borrow::Cow<[f32]>> = pairs
-            .iter()
-            .map(|&(_, pos, w)| {
-                let row = &xs[pos * hidden..(pos + 1) * hidden];
-                if self.routing.weight_before_ffn {
-                    std::borrow::Cow::Owned(row.iter().map(|v| v * w).collect())
-                } else {
-                    std::borrow::Cow::Borrowed(row)
-                }
-            })
-            .collect();
-        // One quantized row per distinct input and weight type: per token when
-        // the inputs are shared, per pair when they are scaled.
-        let mut quantized: Vec<(usize, QuantizedRow)> = Vec::new();
-        let mut gate_rows = Vec::with_capacity(pairs.len());
-        let mut up_rows = Vec::with_capacity(pairs.len());
-        for (i, (&(_, pos, _), [gate, up, _])) in pairs.iter().zip(&weights).enumerate() {
-            let key = if self.routing.weight_before_ffn {
-                i
+        // Gate and up read each pair's token row: the region's rows quantized
+        // once per activation type, each expert's copied out of them. On
+        // Llama 4 (`weight_before_ffn`) a pair reads its row scaled by its
+        // weight first, as `broadcast_mul` scales it.
+        let scaled: Vec<f32>;
+        let (source, source_rows): (&[f32], Vec<Vec<usize>>) = if self.routing.weight_before_ffn {
+            scaled = chosen
+                .iter()
+                .flat_map(|(_, pairs)| pairs)
+                .flat_map(|&(t, w)| xs[t * hidden..(t + 1) * hidden].iter().map(move |v| v * w))
+                .collect();
+            let mut next = 0;
+            let rows = chosen
+                .iter()
+                .map(|(_, pairs)| {
+                    next += pairs.len();
+                    (next - pairs.len()..next).collect()
+                })
+                .collect();
+            (&scaled, rows)
+        } else {
+            let rows = chosen
+                .iter()
+                .map(|(_, pairs)| pairs.iter().map(|&(t, _)| t).collect())
+                .collect();
+            (xs, rows)
+        };
+        let mut whole: Vec<QuantizedRows> = Vec::new();
+        let mut inputs: Vec<QuantizedRows> = Vec::new();
+        let mut gate_up_input: Vec<[usize; 2]> = Vec::with_capacity(chosen.len());
+        for ((weights, _), rows) in chosen.iter().zip(&source_rows) {
+            let g = quantized_for(&mut whole, &weights[0], source)?;
+            let u = quantized_for(&mut whole, &weights[1], source)?;
+            inputs.push(whole[g].gather(rows)?);
+            let gi = inputs.len() - 1;
+            let ui = if u == g {
+                gi
             } else {
-                pos
+                inputs.push(whole[u].gather(rows)?);
+                inputs.len() - 1
             };
-            for (w, rows) in [(gate, &mut gate_rows), (up, &mut up_rows)] {
-                let at = match quantized.iter().position(|(k, q)| *k == key && q.fits(w)) {
-                    Some(at) => at,
-                    None => {
-                        quantized.push((key, w.quantize_row(&inputs[i])?));
-                        quantized.len() - 1
+            gate_up_input.push([gi, ui]);
+        }
+        drop(whole);
+
+        // Every output column-major per expert: weight row j of its token r
+        // at `j * tokens + r`.
+        let mut gate_out = vec![0f32; n_pairs * intermediate];
+        let mut up_out = vec![0f32; n_pairs * intermediate];
+        let mut jobs = Vec::with_capacity(2 * chosen.len());
+        let (mut gate_rest, mut up_rest) = (&mut gate_out[..], &mut up_out[..]);
+        for ((weights, pairs), [gi, ui]) in chosen.iter().zip(&gate_up_input) {
+            let len = pairs.len() * intermediate;
+            let (g, rest) = std::mem::take(&mut gate_rest).split_at_mut(len);
+            gate_rest = rest;
+            let (u, rest) = std::mem::take(&mut up_rest).split_at_mut(len);
+            up_rest = rest;
+            for (weight, lhs, dst) in [(&weights[0], gi, g), (&weights[1], ui, u)] {
+                jobs.push(MatMulJob {
+                    weight,
+                    lhs: &inputs[*lhs],
+                    lhs_rows: 0..pairs.len(),
+                    dst,
+                });
+            }
+        }
+        matmul_many(jobs)?;
+        drop(inputs);
+
+        // silu(gate) * up elementwise, then each expert's rows made row-major
+        // for the down projection's quantization.
+        let mut act_cols = vec![0f32; n_pairs * intermediate];
+        const SILU_CHUNK: usize = 8 * 1024; // a multiple of the 8 vector lanes
+        let silu = |((a, g), u): ((&mut [f32], &[f32]), &[f32])| {
+            crate::inference::fast_math::silu_mul_into(g, u, a)
+        };
+        if split {
+            act_cols
+                .par_chunks_mut(SILU_CHUNK)
+                .zip(gate_out.par_chunks(SILU_CHUNK))
+                .zip(up_out.par_chunks(SILU_CHUNK))
+                .for_each(silu);
+        } else {
+            silu(((&mut act_cols[..], &gate_out[..]), &up_out[..]));
+        }
+        drop((gate_out, up_out));
+        let mut act = vec![0f32; n_pairs * intermediate];
+        let mut blocks = Vec::with_capacity(chosen.len());
+        let (mut cols_rest, mut act_rest) = (&act_cols[..], &mut act[..]);
+        for (_, pairs) in &chosen {
+            let len = pairs.len() * intermediate;
+            let (c, rest) = cols_rest.split_at(len);
+            cols_rest = rest;
+            let (a, rest) = std::mem::take(&mut act_rest).split_at_mut(len);
+            act_rest = rest;
+            blocks.push((c, a, pairs.len()));
+        }
+        let transpose = |(cols, rows, m): (&[f32], &mut [f32], usize)| {
+            for (j, col) in cols.chunks_exact(m).enumerate() {
+                for (r, &v) in col.iter().enumerate() {
+                    rows[r * intermediate + j] = v;
+                }
+            }
+        };
+        if split {
+            blocks.into_par_iter().for_each(transpose);
+        } else {
+            blocks.into_iter().for_each(transpose);
+        }
+        drop(act_cols);
+
+        let mut whole_act: Vec<QuantizedRows> = Vec::new();
+        let mut down_input = Vec::with_capacity(chosen.len());
+        for (weights, _) in &chosen {
+            down_input.push(quantized_for(&mut whole_act, &weights[2], &act)?);
+        }
+        let mut down_out = vec![0f32; n_pairs * hidden];
+        let mut jobs = Vec::with_capacity(chosen.len());
+        let (mut down_rest, mut first) = (&mut down_out[..], 0);
+        for ((weights, pairs), &at) in chosen.iter().zip(&down_input) {
+            let (dst, rest) = std::mem::take(&mut down_rest).split_at_mut(pairs.len() * hidden);
+            down_rest = rest;
+            jobs.push(MatMulJob {
+                weight: &weights[2],
+                lhs: &whole_act[at],
+                lhs_rows: first..first + pairs.len(),
+                dst,
+            });
+            first += pairs.len();
+        }
+        matmul_many(jobs)?;
+        drop(whole_act);
+
+        // Each token's pairs summed in expert order from zero, as `index_add`
+        // sums them — column by column, so columns split across threads; the
+        // sum is built column-major and turned into rows at the end.
+        let n_tok = tokens.len();
+        const SUM_COLUMNS: usize = 64;
+        let before = self.routing.weight_before_ffn;
+        let sum = |(block, cols): (usize, &mut [f32])| {
+            let mut first = 0;
+            for (_, pairs) in &chosen {
+                let m = pairs.len();
+                let y = &down_out[first * hidden..(first + m) * hidden];
+                for (j, col) in cols.chunks_mut(n_tok).enumerate() {
+                    let c = block * SUM_COLUMNS + j;
+                    for (&(t, w), &v) in pairs.iter().zip(&y[c * m..(c + 1) * m]) {
+                        col[t] += if before { v } else { v * w };
                     }
-                };
-                rows.push(at);
+                }
+                first += m;
             }
+        };
+        if n_tok == 1 {
+            sum((0, &mut out[..hidden]));
+            return Ok(());
         }
-        let mut gate_out = vec![0f32; pairs.len() * intermediate];
-        let mut up_out = vec![0f32; pairs.len() * intermediate];
-        let mut jobs = Vec::with_capacity(2 * pairs.len());
-        for (i, ((g, u), [gate, up, _])) in gate_out
-            .chunks_mut(intermediate)
-            .zip(up_out.chunks_mut(intermediate))
-            .zip(&weights)
-            .enumerate()
-        {
-            jobs.push(MatVec {
-                weight: gate,
-                lhs: &quantized[gate_rows[i]].1,
-                dst: g,
-            });
-            jobs.push(MatVec {
-                weight: up,
-                lhs: &quantized[up_rows[i]].1,
-                dst: u,
-            });
+        let mut out_cols = vec![0f32; hidden * n_tok];
+        if split {
+            out_cols
+                .par_chunks_mut(SUM_COLUMNS * n_tok)
+                .enumerate()
+                .for_each(sum);
+        } else {
+            out_cols
+                .chunks_mut(SUM_COLUMNS * n_tok)
+                .enumerate()
+                .for_each(sum);
         }
-        matvec_many(jobs)?;
-
-        let mut act = vec![0f32; pairs.len() * intermediate];
-        for ((a, g), u) in act
-            .chunks_mut(intermediate)
-            .zip(gate_out.chunks(intermediate))
-            .zip(up_out.chunks(intermediate))
-        {
-            crate::inference::fast_math::silu_mul_into(g, u, a);
-        }
-        let act_rows = act
-            .chunks(intermediate)
-            .zip(&weights)
-            .map(|(a, [_, _, down])| down.quantize_row(a))
-            .collect::<CandleResult<Vec<_>>>()?;
-        let mut down_out = vec![0f32; pairs.len() * hidden];
-        let jobs = down_out
-            .chunks_mut(hidden)
-            .zip(&weights)
-            .zip(&act_rows)
-            .map(|((d, [_, _, down]), lhs)| MatVec {
-                weight: down,
-                lhs,
-                dst: d,
-            })
-            .collect();
-        matvec_many(jobs)?;
-
-        let mut out = vec![0f32; num_tokens * hidden];
-        for (&(_, pos, w), y) in pairs.iter().zip(down_out.chunks(hidden)) {
-            let row = &mut out[pos * hidden..(pos + 1) * hidden];
-            if self.routing.weight_before_ffn {
-                row.iter_mut().zip(y).for_each(|(o, &v)| *o += v);
-            } else {
-                row.iter_mut().zip(y).for_each(|(o, &v)| *o += v * w);
+        let row = |(t, row): (usize, &mut [f32])| {
+            for (c, o) in row.iter_mut().enumerate() {
+                *o = out_cols[c * n_tok + t];
             }
+        };
+        if split {
+            out.par_chunks_mut(hidden).enumerate().for_each(row);
+        } else {
+            out.chunks_mut(hidden).enumerate().for_each(row);
         }
-        Tensor::from_vec(out, (num_tokens, hidden), x_flat.device())
+        Ok(())
     }
 
     /// The routed experts of a layer holding them [`StackedExperts`]: routed on
     /// the device ([`topk_on_device`]) and run as ONE launch per projection for
     /// every token (`candle_nn::moe::moe_gemm_gguf` — its one-row kernel, a row
     /// per (token, pick) on the input quantized to q8_1, for up to
-    /// `MOE_ONE_REGION_MAX_TOKENS` tokens; its tensor-core kernel in f16 for a
+    /// `MOE_CARD_ONE_ROW_MAX_TOKENS` tokens; its tensor-core kernel in f16 for a
     /// prompt, [`prompt_on_tensor_cores`]), the down projection scaled by each
     /// pick's weight and the picks summed per token. No host copy, so the card
     /// never waits for the processor between layers.
@@ -1341,7 +1488,7 @@ impl MoeFfn {
             let (ids, weights) = topk_on_device(&scores, k, self.routing)?;
             let (expert_ids, token_ids) = ids.flatten_all()?.sort_last_dim(true)?;
             let (expert_ids, token_ids) = (own_storage(expert_ids)?, own_storage(token_ids)?);
-            let prompt = len > MOE_ONE_REGION_MAX_TOKENS && prompt_on_tensor_cores();
+            let prompt = len > MOE_CARD_ONE_ROW_MAX_TOKENS && prompt_on_tensor_cores();
             let gemm = |input: &Tensor, w: &QTensor, scale: Option<Tensor>| {
                 candle_nn::moe::moe_gemm_gguf(
                     input,

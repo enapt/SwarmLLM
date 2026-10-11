@@ -744,7 +744,8 @@ fn the_batched_moe_forward_is_bit_identical_to_routing_token_by_token() {
 /// in one parallel region per projection (`experts_in_one_region`, #138),
 /// compute the SAME bits as the per-expert path — for quantized experts of
 /// one activation type and of mixed ones, weighting before or after the
-/// expert, one to eight tokens. And a decoded token on the processor takes it.
+/// expert, a decoded token to a prompt, in one region or cut into several
+/// (down to one token each). And the processor takes it for every count.
 #[test]
 fn one_region_experts_are_bit_identical_to_one_at_a_time() {
     use crate::inference::layers::ExpertFfn;
@@ -792,47 +793,131 @@ fn one_region_experts_are_bit_identical_to_one_at_a_time() {
                     n_experts_used: k,
                     routing,
                 };
-                for tokens in [1usize, 3, 8] {
+                for tokens in [1usize, 3, 8, 37, 100] {
                     let x = Tensor::randn(0f32, 1.0, (1, tokens, hidden), &device).unwrap();
                     let x_flat = x.reshape((tokens, hidden)).unwrap();
                     let batches = moe.route(&x_flat).unwrap();
                     assert!(
-                        moe.experts_fit_one_region(&x, tokens, &batches),
+                        moe.experts_fit_one_region(&x, &batches),
                         "{tokens} tokens of quantized experts on the processor must take one region"
                     );
                     let flat =
                         |t: Tensor| -> Vec<f32> { t.flatten_all().unwrap().to_vec1().unwrap() };
-                    let got = flat(
-                        moe.experts_in_one_region(&x_flat, &batches, tokens, hidden)
-                            .unwrap(),
-                    );
                     let want = flat(
                         moe.experts_one_at_a_time(&x_flat, &batches, tokens, hidden)
                             .unwrap(),
                     );
-                    let differing = got
-                        .iter()
-                        .zip(&want)
-                        .filter(|(a, b)| a.to_bits() != b.to_bits())
-                        .count();
-                    assert_eq!(
-                        differing,
-                        0,
-                        "{gate_t:?}/{up_t:?}/{down_t:?} {routing:?} k={k} tokens={tokens}: \
-                         {differing} of {} values differ",
-                        got.len()
+                    let got = flat(
+                        moe.experts_in_one_region(&x_flat, &batches, tokens, hidden)
+                            .unwrap(),
                     );
+                    // The same tokens a few pairs per region, and one token each.
+                    let cut = |pairs: usize| {
+                        flat(
+                            moe.experts_in_regions_of(&x_flat, &batches, tokens, hidden, pairs)
+                                .unwrap(),
+                        )
+                    };
+                    for (how, got) in [
+                        ("one region", &got),
+                        ("24 pairs", &cut(24)),
+                        ("1 token", &cut(1)),
+                    ] {
+                        let differing = got
+                            .iter()
+                            .zip(&want)
+                            .filter(|(a, b)| a.to_bits() != b.to_bits())
+                            .count();
+                        assert_eq!(
+                            differing,
+                            0,
+                            "{gate_t:?}/{up_t:?}/{down_t:?} {routing:?} k={k} tokens={tokens} \
+                             {how}: {differing} of {} values differ",
+                            got.len()
+                        );
+                    }
                     assert_eq!(
                         flat(moe.forward(&x).unwrap()),
                         got,
                         "forward took another path"
                     );
                 }
-                // A prompt chunk keeps the per-expert path.
-                let x = Tensor::randn(0f32, 1.0, (1, 9, hidden), &device).unwrap();
-                let batches = moe.route(&x.reshape((9, hidden)).unwrap()).unwrap();
-                assert!(!moe.experts_fit_one_region(&x, 9, &batches));
             }
+        }
+    }
+}
+
+/// The vendored `quantized::matmul_many` (#138) answers what `forward` answers
+/// for the same rows, bit for bit — one row or many, across the 128-row block
+/// `vec_dot_rows` is called on, a range of a quantized input and rows copied
+/// out of one (`gather`), for types with their own several-row kernel (Q4_K,
+/// Q6_K) and without (Q2_K, Q8_0), and a weight whose rows end mid-task.
+#[test]
+fn many_row_products_in_one_region_match_forward() {
+    use candle_core::quantized::{matmul_many, GgmlDType as G, MatMulJob, QMatMul};
+    use candle_core::Module;
+    let device = Device::Cpu;
+    let (n, k, total) = (96usize, 256usize, 300usize);
+    let xs = Tensor::randn(0f32, 1.0, (total, k), &device).unwrap();
+    let rows_of = |r: &[usize]| -> Vec<f32> {
+        let ids: Vec<u32> = r.iter().map(|&i| i as u32).collect();
+        let ids = Tensor::from_vec(ids, r.len(), &device).unwrap();
+        let picked = xs.index_select(&ids, 0).unwrap();
+        picked.flatten_all().unwrap().to_vec1().unwrap()
+    };
+    for dtype in [G::Q4K, G::Q6K, G::Q2K, G::Q8_0] {
+        let w = Tensor::randn(0f32, 0.05, (n, k), &device).unwrap();
+        let w = std::sync::Arc::new(QTensor::quantize(&w, dtype).unwrap());
+        let qmm = QMatMul::from_arc(w.clone()).unwrap();
+        let all = w
+            .quantize_rows(&xs.flatten_all().unwrap().to_vec1::<f32>().unwrap())
+            .unwrap();
+        let gathered_rows: Vec<usize> = (0..total).rev().step_by(2).collect();
+        let gathered = all.gather(&gathered_rows).unwrap();
+        // (input, its rows the job reads, which rows of `xs` those are)
+        let cases: Vec<(&_, std::ops::Range<usize>, Vec<usize>)> = vec![
+            (&all, 0..1, vec![0]),
+            (&all, 41..42, vec![41]),
+            (&all, 3..10, (3..10).collect()),
+            (&all, 7..137, (7..137).collect()),
+            (&all, 0..total, (0..total).collect()),
+            (&gathered, 5..140, gathered_rows[5..140].to_vec()),
+        ];
+        let mut outs: Vec<Vec<f32>> = cases
+            .iter()
+            .map(|(_, r, _)| vec![0f32; n * r.len()])
+            .collect();
+        let jobs = cases
+            .iter()
+            .zip(outs.iter_mut())
+            .map(|((lhs, rows, _), dst)| MatMulJob {
+                weight: &w,
+                lhs,
+                lhs_rows: rows.clone(),
+                dst,
+            })
+            .collect();
+        matmul_many(jobs).unwrap();
+        for ((_, rows, picked), got) in cases.iter().zip(&outs) {
+            let m = picked.len();
+            let input = Tensor::from_vec(rows_of(picked), (m, k), &device).unwrap();
+            let want: Vec<f32> = qmm
+                .forward(&input)
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .to_vec1()
+                .unwrap();
+            let differing = (0..m)
+                .flat_map(|r| (0..n).map(move |j| (r, j)))
+                .filter(|&(r, j)| got[j * m + r].to_bits() != want[r * n + j].to_bits())
+                .count();
+            assert_eq!(
+                differing,
+                0,
+                "{dtype:?} rows {rows:?}: {differing} of {} differ",
+                m * n
+            );
         }
     }
 }
