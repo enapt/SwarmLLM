@@ -126,6 +126,10 @@
 #          replies ($OUT/splitcache.jsonl). Default model llama-3.2-3b. SPARE=1
 #          adds C holding exactly B's parts: turn 2 resumes only if the plan
 #          names the peer turn 1 used again, so the same PASS asks that too.
+#          WARM_SPARE=1 (with SPARE=1) first has the peer turn 1 did NOT use
+#          lead a conversation of its own through the same split: both peers
+#          warm, only one holding this conversation — PASS still needs turn 2
+#          to resume, so the plan must pick the peer holding it.
 #          SHARDS_C=… adds C holding those parts instead (set SHARDS_B too): a
 #          three-machine split, A → B → C. B's and C's hits both count.
 #   remote  A holds NONE of the model (the header only) and REMOTE_NODES (2,
@@ -917,6 +921,27 @@ print(json.dumps({"turn": name, "status": status, "seconds": float(t or 0), "con
 PY
   }
   ask_turn turn1
+  if [ -n "${WARM_SPARE:-}" ]; then
+    # Both peers WARM, only one with this conversation (FUTURE_WORK #10's
+    # residual): the peer that did not store turn 1 leads a conversation of its
+    # own through the same split, so it loads the same layers and stores ITS
+    # opening. A can then tell the two apart only by what it believes each holds.
+    if grep -q "stored a split's prompt" "$BASE/B/node.log"; then KEPT=B OTHER=C OPORT=8940; else KEPT=C OTHER=B OPORT=8920; fi
+    python3 - "$MODEL" "$OUT" <<'PY'
+import json, sys
+model, out = sys.argv[1], sys.argv[2]
+system = "You are a patient tutor for a student learning chemistry. " + " ".join(
+    f"Point {i}: explain one idea at a time, check the student understood it, and give a short example." for i in range(1, 21))
+json.dump({"model": model, "max_tokens": 8, "temperature": 0,
+           "messages": [{"role": "system", "content": system}, {"role": "user", "content": "What is an atom?"}]},
+          open(f"{out}/warm.json", "w"))
+PY
+    curl -s -m 900 -o "$OUT/warm.body" -H "Authorization: Bearer $(cat "$BASE/$OTHER/api_key")" \
+      -H "Content-Type: application/json" -X POST "localhost:$OPORT/v1/chat/completions" --data-binary "@$OUT/warm.json"
+    # Its resident layers reach A with its next capability (published on change, ~30 s ticks).
+    sleep 60
+    echo "splitcache: turn 1 kept on $KEPT; $OTHER warmed with its own conversation (its stores: $(grep -c "stored a split's prompt" "$BASE/$OTHER/node.log"), reply: $(head -c 120 "$OUT/warm.body"))"
+  fi
   if [ -n "${MISS:-}" ]; then
     # B forgets what it stored — restarted between the turns, as a peer's
     # daemon may be. Turn 2 must miss, read the prompt again from 0, answer.
@@ -947,9 +972,11 @@ turns = [json.loads(l) for l in open(f"{out}/splitcache.jsonl")]
 both_200 = len(turns) == 2 and all(" 200" in t["status"] for t in turns)
 t1, t2 = resumed(a[:from_a]), resumed(a[from_a:])
 b_hits = sum("HIT on a split's stored prompt" in l for l in b[from_b:] + c)
+c_hits = sum("HIT on a split's stored prompt" in l for l in c)
 b_stored = sum("stored a split's prompt" in l for l in b + c)
 missed = any("a resumed prompt pass did not finish" in l and "Prompt cache miss" in l for l in a[from_a:])
-print(f"splitcache: turn 1 resumed_from={t1}  turn 2 resumed_from={t2}  B hits on turn 2={b_hits}  "
+print(f"splitcache: turn 1 resumed_from={t1}  turn 2 resumed_from={t2}  B hits on turn 2={b_hits}"
+      f"{f' (of them on C: {c_hits})' if c else ''}  "
       f"B stores={b_stored}  miss logged={missed}  replies 200={both_200}  "
       f"seconds {[t['seconds'] for t in turns]}")
 if off:
@@ -959,7 +986,10 @@ elif miss:
     ok = both_200 and missed and 0 in t2
     arm = "miss (B restarted between the turns)"
 else:
-    ok = both_200 and t1 == [0] and bool(t2) and max(t2) > 0 and b_hits >= 1
+    # Every pass before turn 2 started from 0: turn 1's, and with WARM_SPARE the
+    # other conversation's too when its peer hands the lead to A (a plan
+    # naming none of its own segments is led by its head).
+    ok = both_200 and bool(t1) and not any(t1) and bool(t2) and max(t2) > 0 and b_hits >= 1
     arm = "on"
 print(f"splitcache [{arm}]: {'PASS' if ok else 'FAIL'}")
 sys.exit(0 if ok else 1)

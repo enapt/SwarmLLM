@@ -71,8 +71,9 @@ re-fetching parts) and #223 closed in v0.3.228 (released 2026-10-06 09:42 UTC), 
 **P2 — speed and completeness**
 6. *(#152 closed 2026-10-09 — the guess-check stream runs on the boomerang and with a peer
     holding the first layers, not only with a peer holding the last.)*
-7. **#10** — conversation prefixes across computers: no routing to the peer holding the
-    cache (the split half — a split keeps its prompt between turns — released in v0.3.234).
+7. **#10** — conversation prefixes across computers: a peer's cache this node did not fill is
+    invisible (no digests gossiped) and caches end at the 10-minute idle expiry (the split half
+    released in v0.3.234; routing to the holder this node knows of built 2026-10-11, unreleased).
 8. *(#162 closed 2026-10-09 — cloned gates refuse a missing helper; 12e's failover arms moved to a
     shape this box holds, and `split_rig.sh failover` keeps no prompt since #10.)*
 9. *(#155 narrowed to P3 on 2026-10-07 — not seen on the swarm, see its entry.)*
@@ -939,7 +940,7 @@ the time per step changed, not the guessing. Next: per-step card timings for req
 (draft and check `_ms` in the DSD line), and the same rig at low uptime, to separate machine state
 from code.
 
-#### #10 — Conversation prefixes across computers: no routing to the peer holding the cache
+#### #10 — Conversation prefixes across computers: a cache this node did not fill is invisible
 `P2` · perf-split · **PARTIAL** — 2026-09-07 · absorbs #139 and archive § "Speeding up inference BETWEEN nodes" idea 1 (prefix-keyed remote KV); history: archive row #10 and § "A conversation's later turns do not seek out the peer holding its prefix"
 
 The LOCAL half shipped in v0.3.208 (`scheduler::cached_prefix`; `split_rig.sh cache` HIT
@@ -949,23 +950,23 @@ resumes where every segment is believed to hold it; each segment keeps its part 
 `PrefixCache`; a miss re-sends from 0 once. It keys on the prompt's CONTENT, so the old note that
 the Anthropic surface could not reach a session-id design no longer applies — every surface's
 prompt pass goes through `forward_through_segments`. What is left:
-- **Route to the peer that holds it.** The planner never reads the belief table, and peers'
-  caches are neither gossiped nor credited: turn 2 resumes only when the plan happens to name the
-  same segments. *Measured 2026-10-10* (`split_rig.sh splitcache`, Llama-3.2-3B on the
-  processor, A holding shards 0-2 and the peers 1-3, so the split point is free): with two nodes
-  the plan repeats and turn 2 resumes (6.7 / 7.4 s against 62 / 59 s); with a SPARE holding the
-  peer's parts (`SPARE=1`) turn 2 moved to the spare in 3 of 3 runs and resumed nothing (58-61 s).
-  The cause was not the missing credit but the greedy fallback — which plans every overlapping
-  split (#180) — pricing the never-used spare on its advertised speed with no charge for loading
-  the layers; fixed the same day (`NodeCandidate::cold_load_ms` for both routers): 3 of 3 stay
-  and resume, 5.6-8.0 s. What is left of this item: a peer that is WARM with another
-  conversation's opening is still not told apart from the one holding this one's — that is
-  where the belief table would have to be read. Gossip prefix digests, keep caches longer than the 10-minute KV idle expiry with
-  a RAM/disk tier, and price a CPU requester's long prompt against a GPU peer's rate
-  (`faster_than_local.md` § 3.1). Delivery trap: `try_ngram_only_distributed` runs before
+- **Route to the peer that holds it — built 2026-10-11 for what THIS node knows, not yet
+  released.** The planner reads the belief table: each (node, exact layer range) believed to
+  hold the prompt's opening is credited what it would not read again
+  (`NodeCandidate::prompt_tokens_held`, both routers; greedy now prices the unread prompt —
+  `docs/invariants/scheduling.md` § "A split segment is credited what this node believes it
+  holds"). *Measured* (`split_rig.sh splitcache SPARE=1 WARM_SPARE=1`, both peers warm, only one
+  holding the conversation): before, turn 2 went to the other peer and read 2,306 tokens again in
+  2 of 2 runs (196 / 195 s); after, it went to the holder and resumed from 2,240 in 2 of 2
+  (55.8 / 53.6 s, debug builds); the overlapping shape greedy plans, 142.8 s → 52.3 s. The cold spare of 2026-10-10 (`SPARE=1`, fixed by
+  `NodeCandidate::cold_load_ms`) is the other half of the same choice. What is left: a peer's
+  cache THIS node did not fill is invisible — gossip prefix digests (the credit must then require
+  `cross_node_prefix_trust_min` and `share_prefix_cache_with_peers`, default off); keep caches
+  longer than the 10-minute KV idle expiry with a RAM/disk tier; price a CPU requester's long
+  prompt against a GPU peer's rate (`faster_than_local.md` § 3.1). Delivery trap for a WHOLE
+  model on a peer (no split credit reaches it): `try_ngram_only_distributed` runs before
   `try_remote_generate_fastpath` and takes a remote single segment, so a priced credit would not
-  be delivered — make the n-gram path decline a plan priced warm. The credit must require
-  `cross_node_prefix_trust_min` and `share_prefix_cache_with_peers` (default off).
+  be delivered — make the n-gram path decline a plan priced warm.
 - **Limits the split half accepts**: a resumed request gives up the mid-reply replay onto a
   stand-in (the router continues the reply instead, #236); a model with a recurrent state (Qwen
   3.5) stores nothing; images, pre-embedded input and tensor-parallel groups run whole; the

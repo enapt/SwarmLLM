@@ -220,6 +220,12 @@ struct NodeCandidate {
     /// split never does. **Never set it for a peer** — `cached_prefix`'s module
     /// doc says why a peer's cache would be priced and not delivered.
     cached_prefix_tokens: u32,
+    /// Leading tokens of THIS request's prompt this candidate is believed to
+    /// hold as one SEGMENT of a split, by the exact layer range it held them
+    /// for — this node's own belief table, filled by the segments' answers
+    /// after earlier prompt passes (`pipeline::split_prompt_cache`, #10).
+    /// Read only through [`Self::prompt_tokens_held`].
+    split_openings: Vec<((u32, u32), u32)>,
     /// What reading ONE layer of this model into memory costs this candidate
     /// before it can run it, in ms — [`cold_load_ms_per_layer`] of its own
     /// rate. `parallax::vertex_cost` charges it, once per request, on the
@@ -313,6 +319,30 @@ impl NodeCandidate {
     /// ask it, so a cold peer costs the same to both routers.
     fn cold_load_ms(&self, range: (u32, u32)) -> f32 {
         self.cold_load_ms_per_layer * self.layers_it_would_add(range) as f32
+    }
+
+    /// Leading tokens of this request's prompt that running `range` here would
+    /// not read again — the ONE answer both routers credit, as they share
+    /// [`Self::cold_load_ms`]. A whole model: what this node's own worker holds
+    /// ([`Self::cached_prefix_tokens`]). A segment of a split: what this
+    /// candidate is believed to hold for exactly that range
+    /// ([`Self::split_openings`]) — a worker keys its stored prompts by its
+    /// layer range, so any other range holds none of them.
+    ///
+    /// Per vertex, while a split resumes only as far as EVERY segment holds
+    /// (`split_prompt_cache::resume_at`): a plan pairing a credited segment
+    /// with one that holds nothing is priced as if it resumed. That errs only
+    /// where the holder is not the faster machine, by at most its credit, and
+    /// the pass it then runs stores the prompt on every segment of the plan.
+    fn prompt_tokens_held(&self, range: (u32, u32), num_layers: u32) -> u32 {
+        if range.0 == 0 && range.1 == num_layers {
+            self.cached_prefix_tokens
+        } else {
+            self.split_openings
+                .iter()
+                .find(|(held, _)| *held == range)
+                .map_or(0, |(_, tokens)| *tokens)
+        }
     }
 
     /// `figure` — whatever bound a pass holds this candidate to — never past
@@ -3318,11 +3348,25 @@ impl PipelineScheduler {
                         err = %e,
                         "DIAG: parallax routing unavailable — falling back to greedy"
                     );
-                    self.greedy_assign(num_layers, &candidates, encrypted, lead_here, purpose)?
+                    self.greedy_assign(
+                        num_layers,
+                        &candidates,
+                        prompt_tokens,
+                        encrypted,
+                        lead_here,
+                        purpose,
+                    )?
                 }
             }
         } else {
-            self.greedy_assign(num_layers, &candidates, encrypted, lead_here, purpose)?
+            self.greedy_assign(
+                num_layers,
+                &candidates,
+                prompt_tokens,
+                encrypted,
+                lead_here,
+                purpose,
+            )?
         };
 
         // Merge contiguous segments on the same node into a single segment.
@@ -4230,6 +4274,14 @@ impl PipelineScheduler {
                         })
                 })
             };
+            // This node or a peer, as a SEGMENT of a split: the openings of
+            // this prompt it is believed to hold, by layer range (#10).
+            let split_openings = prompt
+                .split_openings
+                .iter()
+                .filter(|held| held.node == node_id)
+                .map(|held| (held.range, held.tokens))
+                .collect();
             candidates.push(NodeCandidate {
                 // Measured on real forwards to this peer, like `ack_srtt_ms`
                 // one line below — and `None` for the local node, which sends
@@ -4268,6 +4320,7 @@ impl PipelineScheduler {
                 published_room,
                 // Ours only — see the field.
                 cached_prefix_tokens: if is_local { prompt.cached_locally } else { 0 },
+                split_openings,
                 cold_load_ms_per_layer: cold_load_per_layer,
                 fresh_run_layers,
             });
@@ -4510,6 +4563,8 @@ impl PipelineScheduler {
         candidate: &NodeCandidate,
         range: (u32, u32),
         current_layer: u32,
+        num_layers: u32,
+        prompt_tokens: Option<u32>,
     ) -> f32 {
         let covered = range.1.saturating_sub(current_layer).max(1) as f32;
 
@@ -4543,9 +4598,28 @@ impl PipelineScheduler {
         let cold_load_per_layer = candidate.cold_load_ms((current_layer, range.1))
             / covered
             / parallax::ASSUMED_FORWARD_PASSES;
+        // Reading the prompt, at the search's rate (`parallax::prefill_ms_per_layer`)
+        // and once per request, spread like the load: what this candidate does
+        // NOT already hold of it (`NodeCandidate::prompt_tokens_held`). This
+        // fallback priced no prompt at all, so a split's next turn could not
+        // tell the warm peer holding the conversation's opening from a warm one
+        // holding another's (#10) — and a credit alone, against a model that
+        // charges nobody for the prompt, would hand a slow holder a turn a card
+        // reads whole in a fraction of the time.
+        let prompt_per_layer = match prompt_tokens.map(|tokens| {
+            tokens
+                .saturating_sub(candidate.prompt_tokens_held((current_layer, range.1), num_layers))
+        }) {
+            None | Some(0) => 0.0,
+            Some(tokens) => {
+                parallax::prefill_ms_per_layer(candidate, tokens, compute_per_layer)
+                    / parallax::ASSUMED_FORWARD_PASSES
+            }
+        };
         candidate.latency_ms as f32 / covered
             + compute_per_layer * load_multiplier
             + cold_load_per_layer
+            + prompt_per_layer
     }
 
     /// Greedy layer assignment: cover all layers 0..num_layers using sorted candidates.
@@ -4577,12 +4651,19 @@ impl PipelineScheduler {
         &self,
         num_layers: u32,
         candidates: &[NodeCandidate],
+        prompt_tokens: Option<u32>,
         encrypted_pipeline: bool,
         lead_here: bool,
         purpose: Purpose,
     ) -> Result<Vec<PipelineSegment>, SwarmError> {
-        match self.greedy_assign_inner(num_layers, candidates, encrypted_pipeline, lead_here, true)
-        {
+        match self.greedy_assign_inner(
+            num_layers,
+            candidates,
+            prompt_tokens,
+            encrypted_pipeline,
+            lead_here,
+            true,
+        ) {
             Ok(segments) => Ok(segments),
             Err(capped_err) => {
                 // Only worth a second pass if a cap could have been what
@@ -4603,6 +4684,7 @@ impl PipelineScheduler {
                 self.greedy_assign_inner(
                     num_layers,
                     candidates,
+                    prompt_tokens,
                     encrypted_pipeline,
                     lead_here,
                     false,
@@ -4615,6 +4697,7 @@ impl PipelineScheduler {
         &self,
         num_layers: u32,
         candidates: &[NodeCandidate],
+        prompt_tokens: Option<u32>,
         encrypted_pipeline: bool,
         lead_here: bool,
         respect_capacity: bool,
@@ -4882,7 +4965,13 @@ impl PipelineScheduler {
                         // there is no network hop to price.
                         c.node_id != *local_node_id,
                         c.reach,
-                        Self::estimated_cost_per_layer(c, r, current_layer),
+                        Self::estimated_cost_per_layer(
+                            c,
+                            r,
+                            current_layer,
+                            num_layers,
+                            prompt_tokens,
+                        ),
                         // Only reached on a genuine tie (e.g. two local ranges,
                         // which have identical zero-network cost). Wider is
                         // better, so negate for a min-comparison.

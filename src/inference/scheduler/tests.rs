@@ -369,6 +369,7 @@ fn simple_candidate(byte: u8, ranges: Vec<(u32, u32)>) -> NodeCandidate {
         held_ranges: Vec::new(),
         published_room: None,
         cached_prefix_tokens: 0,
+        split_openings: Vec::new(),
         cold_load_ms_per_layer: 0.0,
         fresh_run_layers: None,
         goodput_bytes_per_sec: None,
@@ -395,7 +396,7 @@ fn greedy_never_hands_a_node_more_layers_than_it_can_hold() {
     rest.max_hostable_layers = Some(48);
 
     let segments = scheduler
-        .greedy_assign(48, &[big, rest], false, false, super::Purpose::Route)
+        .greedy_assign(48, &[big, rest], None, false, false, super::Purpose::Route)
         .expect("a valid assignment exists");
 
     let first = &segments[0];
@@ -426,7 +427,7 @@ fn a_model_that_fits_nobody_is_still_assigned_rather_than_refused() {
     only.max_hostable_layers = Some(8);
 
     let segments = scheduler
-        .greedy_assign(48, &[only], false, false, super::Purpose::Route)
+        .greedy_assign(48, &[only], None, false, false, super::Purpose::Route)
         .expect("must fall back to an unbounded route rather than refuse");
     assert_eq!(
         segments.last().unwrap().layer_range.1,
@@ -450,7 +451,14 @@ fn a_model_past_every_holders_ceiling_is_refused_before_anyone_is_asked() {
     only.max_hostable_layers_at_ceiling = Some(30);
 
     let err = scheduler
-        .greedy_assign(48, &[only.clone()], false, false, super::Purpose::Route)
+        .greedy_assign(
+            48,
+            &[only.clone()],
+            None,
+            false,
+            false,
+            super::Purpose::Route,
+        )
         .expect_err("no holder could ever take layers 30-47");
     assert!(
         matches!(err, crate::error::SwarmError::SwarmShortOfMemory { .. }),
@@ -468,7 +476,14 @@ fn a_model_past_every_holders_ceiling_is_refused_before_anyone_is_asked() {
     let mut ceiling_only = only.clone();
     ceiling_only.max_hostable_layers = None;
     let err = scheduler
-        .greedy_assign(48, &[ceiling_only], false, false, super::Purpose::Route)
+        .greedy_assign(
+            48,
+            &[ceiling_only],
+            None,
+            false,
+            false,
+            super::Purpose::Route,
+        )
         .expect_err("past the ceiling either way");
     assert!(
         matches!(err, crate::error::SwarmError::SwarmShortOfMemory { .. }),
@@ -479,7 +494,7 @@ fn a_model_past_every_holders_ceiling_is_refused_before_anyone_is_asked() {
     // figure, up to its ceiling (report #025's rescue).
     only.max_hostable_layers_at_ceiling = Some(48);
     let segments = scheduler
-        .greedy_assign(48, &[only], false, false, super::Purpose::Route)
+        .greedy_assign(48, &[only], None, false, false, super::Purpose::Route)
         .expect("a holder whose ceiling holds the model is still the route");
     assert_eq!(segments.last().unwrap().layer_range.1, 48);
 }
@@ -576,7 +591,7 @@ fn an_unknown_capacity_still_takes_the_whole_range() {
     let mut only = simple_candidate(1, vec![(0, 48)]);
     only.max_hostable_layers = None;
     let segments = scheduler
-        .greedy_assign(48, &[only], false, false, super::Purpose::Route)
+        .greedy_assign(48, &[only], None, false, false, super::Purpose::Route)
         .unwrap();
     assert_eq!(segments.len(), 1, "unknown capacity must not fragment");
     assert_eq!(segments[0].layer_range, (0, 48));
@@ -621,6 +636,7 @@ fn greedy_assign_multi_range_candidate() {
             held_ranges: Vec::new(),
             published_room: None,
             cached_prefix_tokens: 0,
+            split_openings: Vec::new(),
             cold_load_ms_per_layer: 0.0,
             fresh_run_layers: None,
             goodput_bytes_per_sec: None,
@@ -654,6 +670,7 @@ fn greedy_assign_multi_range_candidate() {
             held_ranges: Vec::new(),
             published_room: None,
             cached_prefix_tokens: 0,
+            split_openings: Vec::new(),
             cold_load_ms_per_layer: 0.0,
             fresh_run_layers: None,
             goodput_bytes_per_sec: None,
@@ -661,7 +678,7 @@ fn greedy_assign_multi_range_candidate() {
     ];
 
     let segments = scheduler
-        .greedy_assign(14, &candidates, false, false, super::Purpose::Route)
+        .greedy_assign(14, &candidates, None, false, false, super::Purpose::Route)
         .unwrap();
     // Should produce 3 segments: [0,2) on A, [2,10) on B, [10,14) on A
     assert_eq!(segments.len(), 3);
@@ -1625,6 +1642,7 @@ fn cost_cand(
         held_ranges: Vec::new(),
         published_room: None,
         cached_prefix_tokens: 0,
+        split_openings: Vec::new(),
         cold_load_ms_per_layer: 0.0,
         fresh_run_layers: None,
         goodput_bytes_per_sec: None,
@@ -1712,8 +1730,8 @@ fn one_busy_request_does_not_divert_a_segment_to_a_far_peer() {
         Some(20.0),
     );
 
-    let lan = PipelineScheduler::estimated_cost_per_layer(&lan_busy, (0, 8), 0);
-    let far = PipelineScheduler::estimated_cost_per_layer(&far_idle, (0, 8), 0);
+    let lan = PipelineScheduler::estimated_cost_per_layer(&lan_busy, (0, 8), 0, 32, None);
+    let far = PipelineScheduler::estimated_cost_per_layer(&far_idle, (0, 8), 0, 32, None);
     assert!(
         lan < far,
         "a busy 4ms peer should still beat an idle 411ms one (lan={lan}, far={far})"
@@ -1741,8 +1759,8 @@ fn load_still_penalises_a_peer_when_distance_is_equal() {
         Some(20.0),
     );
     assert!(
-        PipelineScheduler::estimated_cost_per_layer(&idle, (0, 8), 0)
-            < PipelineScheduler::estimated_cost_per_layer(&busy, (0, 8), 0),
+        PipelineScheduler::estimated_cost_per_layer(&idle, (0, 8), 0, 32, None)
+            < PipelineScheduler::estimated_cost_per_layer(&busy, (0, 8), 0, 32, None),
         "at equal distance the idle peer must win"
     );
 }
@@ -1767,8 +1785,8 @@ fn wider_coverage_amortises_a_distant_peers_round_trip() {
         0.0,
         Some(5.0),
     );
-    let wide = PipelineScheduler::estimated_cost_per_layer(&far_wide, (0, 32), 0);
-    let narrow = PipelineScheduler::estimated_cost_per_layer(&far_narrow, (0, 2), 0);
+    let wide = PipelineScheduler::estimated_cost_per_layer(&far_wide, (0, 32), 0, 32, None);
+    let narrow = PipelineScheduler::estimated_cost_per_layer(&far_narrow, (0, 2), 0, 32, None);
     assert!(
         wide < narrow,
         "32 layers should amortise the RTT better than 2 (wide={wide}, narrow={narrow})"
@@ -1796,8 +1814,8 @@ fn a_faster_peer_wins_at_equal_distance_and_load() {
         Some(200.0),
     );
     assert!(
-        PipelineScheduler::estimated_cost_per_layer(&fast, (0, 8), 0)
-            < PipelineScheduler::estimated_cost_per_layer(&slow, (0, 8), 0)
+        PipelineScheduler::estimated_cost_per_layer(&fast, (0, 8), 0, 32, None)
+            < PipelineScheduler::estimated_cost_per_layer(&slow, (0, 8), 0, 32, None)
     );
 }
 
@@ -1846,6 +1864,7 @@ fn greedy_keeps_a_segment_on_the_warm_holder_over_a_cold_spare() {
         .greedy_assign(
             28,
             &[head, warm, spare],
+            None,
             false,
             false,
             super::Purpose::Route,
@@ -1858,6 +1877,71 @@ fn greedy_keeps_a_segment_on_the_warm_holder_over_a_cold_spare() {
         NodeId([1; 32]),
         "the warm holder keeps the segment; the spare would first load 7 layers"
     );
+}
+
+/// Head and two WARM peers that could take layers 21-28: what greedy plans for
+/// the conversation's next turn. `holder` stored its opening last turn;
+/// `other` advertises more speed and holds another conversation's. Listed
+/// first so a tie goes to it.
+fn greedy_next_turn(other_ms_per_layer: f32, other_has_gpu: bool) -> NodeId {
+    let state = make_shared_state();
+    let local = state.identity.node_id().clone();
+    let scheduler = PipelineScheduler::new(state);
+    let mut head = simple_candidate(9, vec![(0, 21)]);
+    head.node_id = local;
+    head.can_be_last = false;
+    let warm = |byte: u8, ms: f32| {
+        let mut c = cost_cand(
+            byte,
+            vec![(3, 28)],
+            super::ReachTier::DirectMeasured,
+            1,
+            0.0,
+            Some(ms),
+        );
+        c.can_be_first = false;
+        c.held_ranges = vec![crate::inference::process_pool::HeldRange {
+            range: (21, 28),
+            releasable_layers: 0,
+        }];
+        c.cold_load_ms_per_layer = 752.0;
+        c
+    };
+    let mut other = warm(2, other_ms_per_layer);
+    other.has_gpu = other_has_gpu;
+    let mut holder = warm(1, 7.08);
+    holder.split_openings = vec![((21, 28), 2_240)];
+    let segments = scheduler
+        .greedy_assign(
+            28,
+            &[head, other, holder],
+            Some(2_306),
+            false,
+            false,
+            super::Purpose::Route,
+        )
+        .expect("a route exists");
+    let tail = segments.last().unwrap();
+    assert_eq!(tail.layer_range, (21, 28));
+    tail.node_id.clone()
+}
+
+/// FUTURE_WORK #10's residual, on the fallback that plans every split whose
+/// holders overlap: two warm peers of the same class, and the one holding the
+/// conversation's opening gets its next turn — the other, advertising 6.35 ms
+/// a layer against the holder's measured 7.08, would read 2,306 tokens again.
+#[test]
+fn greedy_sends_the_next_turn_to_the_warm_peer_holding_its_opening() {
+    assert_eq!(greedy_next_turn(6.35, false), NodeId([1; 32]));
+}
+
+/// A held opening is a price, never a pin: a card eight times faster reads the
+/// whole prompt in less than the processor holder takes for what it still has
+/// to do. A credit priced against a model that charges nobody for the prompt
+/// would have kept the turn on the holder.
+#[test]
+fn greedy_does_not_keep_a_turn_on_a_holder_a_card_outpaces() {
+    assert_eq!(greedy_next_turn(0.8, true), NodeId([2; 32]));
 }
 
 // ---------------------------------------------------------------------------
@@ -2956,6 +3040,7 @@ fn one_node_is_not_made_standby_for_more_layers_than_it_can_run() {
         held_ranges: Vec::new(),
         published_room: None,
         cached_prefix_tokens: 0,
+        split_openings: Vec::new(),
         cold_load_ms_per_layer: 0.0,
         fresh_run_layers: None,
         goodput_bytes_per_sec: None,
@@ -3052,6 +3137,7 @@ fn a_node_with_room_still_stands_in_for_every_segment() {
         held_ranges: Vec::new(),
         published_room: None,
         cached_prefix_tokens: 0,
+        split_openings: Vec::new(),
         cold_load_ms_per_layer: 0.0,
         fresh_run_layers: None,
         goodput_bytes_per_sec: None,
@@ -3148,6 +3234,7 @@ fn a_standby_is_chosen_by_cost_not_by_ping() {
         held_ranges: Vec::new(),
         published_room: None,
         cached_prefix_tokens: 0,
+        split_openings: Vec::new(),
         cold_load_ms_per_layer: 0.0,
         fresh_run_layers: None,
         goodput_bytes_per_sec: None,
@@ -4211,6 +4298,7 @@ fn a_processor_holder_keeps_a_prompt_its_worker_already_holds() {
             super::cached_prefix::PromptPlan {
                 tokens: Some(14_000),
                 cached_locally: 13_952,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -4244,6 +4332,7 @@ fn a_small_cached_prefix_does_not_keep_a_long_prompt_off_faster_cards() {
             super::cached_prefix::PromptPlan {
                 tokens: Some(14_000),
                 cached_locally: 1_024,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -4281,6 +4370,107 @@ fn a_cached_prefix_is_credited_only_to_a_whole_model_run() {
         price(&cold, (0, 16)),
         "a segment of a split reads the whole prompt whatever the worker holds"
     );
+}
+
+/// A SPLIT segment is credited the opening this node believes it holds — for
+/// exactly the range it held it for, never another (a worker keys its stored
+/// prompts by its layer range), and never for a whole model, where the n-gram
+/// path would take the request and deliver nothing (`cached_prefix`'s doc).
+#[test]
+fn a_split_segment_is_credited_only_for_the_range_it_holds() {
+    let mut holder = local_full_coverage();
+    let local = NodeId([0x5A; 32]);
+    let cold = holder.clone();
+    holder.split_openings = vec![((16, 32), 2_240)];
+    let price = |c: &NodeCandidate, range: (u32, u32)| {
+        super::parallax::vertex_cost(c, range, &local, 32, Some(2_306)).prefill_ms
+    };
+    let held = price(&holder, (16, 32));
+    let whole = price(&cold, (16, 32));
+    assert!(
+        (held - whole * 66.0 / 2_306.0).abs() < 1e-3 * whole,
+        "the segment reads only the 66 tokens it does not hold: {held} of {whole}"
+    );
+    assert_eq!(
+        price(&holder, (15, 32)),
+        price(&cold, (15, 32)),
+        "a wider range holds none of it"
+    );
+    assert_eq!(
+        price(&holder, (0, 32)),
+        price(&cold, (0, 32)),
+        "a whole model is not a segment"
+    );
+}
+
+/// FUTURE_WORK #10's residual, through the planner. This node holds the first
+/// half; B and C both hold the second, C advertising more speed. B served the
+/// conversation's last turn and stored its opening; C holds nothing of it. The
+/// next turn must go to B and resume — priced on speed alone it went to C and
+/// read the whole prompt again.
+#[test]
+fn the_next_turn_of_a_split_goes_to_the_peer_holding_its_opening() {
+    let state = make_shared_state();
+    let local = state.identity.node_id().clone();
+    let (b, c) = (NodeId([0xB2; 32]), NodeId([0xC2; 32]));
+    let model = "split-held-opening";
+    let shard = |index: u32, layer_range: (u32, u32)| ShardInfo {
+        index,
+        layer_range,
+        size_bytes: 2_000_000_000,
+        hash: [index as u8; 32],
+        tensors: vec![],
+    };
+    state.model_registry.register_manifest(make_manifest(
+        model,
+        32,
+        vec![shard(0, (0, 16)), shard(1, (16, 32))],
+    ));
+    let sid = |index: u32| ShardId {
+        model_id: ModelId(model.into()),
+        index,
+    };
+    state
+        .model_registry
+        .record_shard_holder(sid(0), local.clone());
+    for (n, tps) in [(&b, 20.0), (&c, 25.0)] {
+        state.model_registry.record_shard_holder(sid(1), n.clone());
+        state
+            .peer_registry
+            .insert(n.clone(), gpu_holder_info(n, 5, tps));
+        state.connected_node_ids.insert(n.clone());
+    }
+    let scheduler = PipelineScheduler::new(state);
+    let plan = |split_openings| {
+        scheduler
+            .assemble_pipeline_for(
+                &ModelId(model.into()),
+                &local,
+                uuid::Uuid::new_v4(),
+                super::Purpose::Route,
+                super::cached_prefix::PromptPlan {
+                    tokens: Some(2_306),
+                    cached_locally: 0,
+                    split_openings,
+                },
+            )
+            .unwrap()
+            .segments
+            .last()
+            .map(|s| (s.node_id.clone(), s.layer_range))
+            .unwrap()
+    };
+    assert_eq!(
+        plan(vec![]),
+        (c.clone(), (16, 32)),
+        "the control: the faster peer, on speed alone"
+    );
+    let held = vec![crate::inference::pipeline::HeldOpening {
+        node: b.clone(),
+        range: (16, 32),
+        tokens: 2_240,
+    }];
+    assert_eq!(plan(held), (b, (16, 32)));
 }
 
 /// A peer that owns a card but runs its models on its processor
@@ -4944,6 +5134,7 @@ fn the_greedy_fallback_does_not_hand_one_node_more_than_it_can_hold() {
         .greedy_assign(
             48,
             &[wide, middle, tail],
+            None,
             false,
             false,
             super::Purpose::Route,
@@ -4979,7 +5170,7 @@ fn an_impossible_bound_falls_through_to_the_relaxed_pass() {
     let mut only = simple_candidate(1, vec![(0, 48)]);
     only.max_hostable_layers = Some(16);
 
-    let constrained = scheduler.greedy_assign_inner(48, &[only.clone()], false, false, true);
+    let constrained = scheduler.greedy_assign_inner(48, &[only.clone()], None, false, false, true);
     assert!(
         constrained.is_err(),
         "no plan fits, so the constrained pass must say so: {constrained:?}"
@@ -4988,7 +5179,7 @@ fn an_impossible_bound_falls_through_to_the_relaxed_pass() {
     // …and the public entry point recovers, because a served request beats a
     // refused one and the holder's own admission is the backstop.
     let segments = scheduler
-        .greedy_assign(48, &[only], false, false, super::Purpose::Route)
+        .greedy_assign(48, &[only], None, false, false, super::Purpose::Route)
         .expect("the relaxed pass routes it");
     assert_eq!(segments.last().map(|s| s.layer_range.1), Some(48));
 }
@@ -5240,6 +5431,7 @@ fn the_greedy_fallback_applies_the_prompt_trust_bar() {
         .greedy_assign(
             28,
             &[cheap_but_docked, trusted],
+            None,
             false,
             false,
             super::Purpose::Route,
@@ -5264,6 +5456,7 @@ fn greedy_still_answers_when_every_layer_zero_holder_is_docked() {
         .greedy_assign(
             28,
             &[docked(0xD3, vec![(0, 28)])],
+            None,
             false,
             false,
             super::Purpose::Route,
@@ -6182,15 +6375,21 @@ fn greedy_never_hands_layer_zero_to_a_peer_for_a_request_led_here() {
     let mut peer = simple_candidate(0xE1, vec![(0, 28)]);
     // As `gather_candidates` leaves every peer of a request delegated to us.
     peer.can_be_first = false;
-    let ordinary =
-        scheduler.greedy_assign(28, &[peer.clone()], false, false, super::Purpose::Route);
+    let ordinary = scheduler.greedy_assign(
+        28,
+        &[peer.clone()],
+        None,
+        false,
+        false,
+        super::Purpose::Route,
+    );
     assert_eq!(
         ordinary.expect("fixture: an ordinary request falls through to the peer")[0].node_id,
         NodeId([0xE1; 32])
     );
     assert!(
         scheduler
-            .greedy_assign(28, &[peer], false, true, super::Purpose::Route)
+            .greedy_assign(28, &[peer], None, false, true, super::Purpose::Route)
             .is_err(),
         "a request led here must not fall through to a peer for layer 0"
     );

@@ -103,3 +103,43 @@ rounding differs; a correct reply moved at a near-tie, never a broken one (ranks
 
 Not measured here: a real WAN link, where the saving is the wire time as well (~50 s a turn for a
 14B at 25 Mbps), and a GPU segment.
+
+## Routing to the segment that holds it (2026-10-11)
+
+What the release above left: the planner never read the belief table, so turn 2 resumed only
+when the plan named the same segments again. With two WARM peers able to run the same layers —
+only one holding this conversation — the choice was speed alone, and the other could win: a peer
+measured a moment ago on a short request reads cheaper than one measured on a long one.
+
+**The rule** is the one a prompt pass resumes by. `cached_prefix::plan_prompt` asks
+`pipeline::held_openings` for every (node, layer range) this node believes holds the opening of
+THIS prompt, in the same whole blocks `resume_at` would use (`resume_at` is now the least of
+them, so the two cannot drift), and each candidate is handed its own
+(`NodeCandidate::split_openings`). Both routers read `NodeCandidate::prompt_tokens_held`: the
+search takes it off the prompt a segment reads and moves (`vertex_cost`'s prefill and transfer),
+and the greedy fallback — which plans every split whose holders overlap and priced no prompt at
+all — now prices the UNREAD prompt at the search's rate (`parallax::prefill_ms_per_layer`). A
+bare credit there would have kept a long prompt on a slow holder that a card reads whole in a
+fraction of the time (test `greedy_does_not_keep_a_turn_on_a_holder_a_card_outpaces`). A hit is
+a price, never a pin — SGLang's lesson, as `cached_prefix` already keeps it.
+
+**Only for the exact range.** A worker keys its stored prompts by its layer range, so a segment
+one layer wider holds none of them. **Per vertex**, while a split resumes only as far as EVERY
+segment holds: a plan pairing a credited segment with one holding nothing is priced as if it
+resumed. That errs only where the holder is not the faster machine, by at most its credit, and
+the pass it then runs stores the prompt on every segment.
+
+**Measured** (`split_rig.sh splitcache SPARE=1 WARM_SPARE=1`, Llama-3.2-3B on the processor, A
+holding shard 0, B and C shards 1-3, debug builds of one tree with and without the change, live
+node stopped, safety kit):
+
+| Arm | Planned by | Turn 2 went to | Resumed from | Turn 1 | Turn 2 | `predicted_ms` (turn 2) |
+|---|---|---|---|---|---|---|
+| before ×2 | search | B (the other conversation) | 0 | 184 / 180 s | 196 / 195 s | 421,272 |
+| after ×2 | search | C (this conversation) | 2,240 | 185 / 184 s | **55.8 / 53.6 s** | 113,587 |
+| before, A shards 0-2 (overlap) | greedy | B | 0 | 132.0 s | 142.8 s | 825,870 |
+| after, A shards 0-2 (overlap) | greedy | C | 2,240 | 134.0 s | **52.3 s** | 124,308 |
+
+In every run B was asked a conversation of its own after turn 1, so both peers were warm; in
+the default shape B's plan named A and C, none of them B, and it handed the lead to A
+(`delegated split`), which is why A's log shows two prompt passes before turn 2.

@@ -465,44 +465,26 @@ pub(super) fn vertex_cost(
     // Kept as a separate term rather than folded into `compute_ms` so the two
     // can be reported and reasoned about apart — they scale with different
     // things and a future measurement will want to check them separately.
-    // A whole-model run reads only what its worker's prefix cache does not
-    // already hold — the one shape that goes through `Generate`, the path that
-    // looks the cache up. Every other vertex reads the whole prompt. Without
-    // this a warm processor node was priced as a cold one, and an agent's
-    // second turn left a 9,200-token cache hit for an 847 s chain (field report
-    // 2026-09-26, `cached_prefix`). Only the local candidate ever carries a
-    // credit, so a delegated whole model is unaffected.
-    let prompt_tokens = prompt_tokens.map(|tokens| {
-        if covers_whole_model {
-            tokens.saturating_sub(c.cached_prefix_tokens)
-        } else {
-            tokens
-        }
-    });
+    // A vertex reads only what is not already held where it runs
+    // (`NodeCandidate::prompt_tokens_held`). A whole-model run: what its
+    // worker's prefix cache holds — the one shape that goes through
+    // `Generate`, the path that looks the cache up; without it a warm
+    // processor node was priced as a cold one, and an agent's second turn left
+    // a 9,200-token cache hit for an 847 s chain (field report 2026-09-26,
+    // `cached_prefix`). Only the local candidate carries that credit, so a
+    // delegated whole model is unaffected. A segment of a split: the opening
+    // this node believes it holds for exactly this range, which the split's
+    // prompt pass resumes past (#10); without it two WARM peers were told
+    // apart by speed alone, and the conversation's next turn could go to the
+    // one holding another conversation and read its whole prompt again. The
+    // same figure shortens the transfer below: the held positions are never
+    // sent.
+    let prompt_tokens =
+        prompt_tokens.map(|tokens| tokens.saturating_sub(c.prompt_tokens_held(range, num_layers)));
     let prefill_ms = match prompt_tokens {
         None => 0.0,
         Some(0) => 0.0,
-        Some(tokens) => {
-            let per_layer_prefill_ms = match c.observed_prefill_ms_per_layer_byte {
-                // Measured on this peer, for exactly this work. The coefficient
-                // is normalised by layers x activation bytes, so it carries
-                // across models.
-                Some(coeff) => coeff * tokens as f32 * ACTIVATION_BYTES_PER_TOKEN as f32,
-                // Never measured: derive from whatever prices its decode, using
-                // the device-class prior. `per_layer_ms` is a per-TOKEN decode
-                // cost, so a prompt of N tokens costs N of them, divided by how
-                // much faster this class of machine reads than writes.
-                None => {
-                    let speedup = if c.has_gpu {
-                        PREFILL_SPEEDUP_GPU
-                    } else {
-                        PREFILL_SPEEDUP_CPU
-                    };
-                    per_layer_ms * tokens as f32 / speedup
-                }
-            };
-            per_layer_prefill_ms * layers
-        }
+        Some(tokens) => prefill_ms_per_layer(c, tokens, per_layer_ms) * layers,
     };
 
     // Scale the whole vertex by how many attempts it takes to get one intact
@@ -573,6 +555,35 @@ pub(super) fn vertex_cost(
         // Scaled like the rest: a lost reply wastes the bytes already moved.
         transfer_ms: transfer_ms * attempts,
         cold_load_ms,
+    }
+}
+
+/// What reading `tokens` of a prompt costs `c`, in ms per layer — the ONE
+/// prefill rate, which the search's [`vertex_cost`] and the greedy fallback
+/// both charge. `decode_ms_per_layer` is whatever prices the candidate's decode
+/// in the caller's model, the stand-in until a prefill is measured.
+pub(super) fn prefill_ms_per_layer(
+    c: &NodeCandidate,
+    tokens: u32,
+    decode_ms_per_layer: f32,
+) -> f32 {
+    match c.observed_prefill_ms_per_layer_byte {
+        // Measured on this peer, for exactly this work. The coefficient
+        // is normalised by layers x activation bytes, so it carries
+        // across models.
+        Some(coeff) => coeff * tokens as f32 * ACTIVATION_BYTES_PER_TOKEN as f32,
+        // Never measured: derive from whatever prices its decode, using
+        // the device-class prior. `decode_ms_per_layer` is a per-TOKEN decode
+        // cost, so a prompt of N tokens costs N of them, divided by how
+        // much faster this class of machine reads than writes.
+        None => {
+            let speedup = if c.has_gpu {
+                PREFILL_SPEEDUP_GPU
+            } else {
+                PREFILL_SPEEDUP_CPU
+            };
+            decode_ms_per_layer * tokens as f32 / speedup
+        }
     }
 }
 
@@ -1452,6 +1463,7 @@ mod tests {
             held_ranges: Vec::new(),
             published_room: None,
             cached_prefix_tokens: 0,
+            split_openings: Vec::new(),
             cold_load_ms_per_layer: 0.0,
             fresh_run_layers: None,
             goodput_bytes_per_sec: None,
@@ -3695,6 +3707,7 @@ mod transfer_cost_tests {
             held_ranges: Vec::new(),
             published_room: None,
             cached_prefix_tokens: 0,
+            split_openings: Vec::new(),
             cold_load_ms_per_layer: 0.0,
             fresh_run_layers: None,
         }

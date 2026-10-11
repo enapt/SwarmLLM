@@ -55,7 +55,7 @@ Admission runs at load time, too late to reshape a plan (#452). **`ModelProcessP
 
 ## A warm prompt is priced warm (2026-09-26)
 
-**`scheduler::cached_prefix::plan_prompt`** prices the prompt warm for a LOCAL whole-model vertex only (`NodeCandidate::cached_prefix_tokens`), tokenized via `pipeline::render_prompt_from_header`. **`NodeCapability::models_run_on_card`**, never `gpu.is_some()`.
+**`scheduler::cached_prefix::plan_prompt`** prices the prompt warm for a LOCAL whole-model vertex (`NodeCandidate::cached_prefix_tokens`) and for a split SEGMENT this node believes holds its opening for exactly that range (`PromptPlan::split_openings` ← `pipeline::held_openings`, the beliefs a prompt pass resumes from; #10), tokenized via `pipeline::render_prompt_from_header`. Both routers read **`NodeCandidate::prompt_tokens_held`**; greedy prices the UNREAD prompt at `parallax::prefill_ms_per_layer`, never a bare credit. **`NodeCapability::models_run_on_card`**, never `gpu.is_some()`.
 
 → `docs/invariants/scheduling.md` § "A warm prompt is priced warm (2026-09-26)"
 

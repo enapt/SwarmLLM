@@ -444,7 +444,7 @@ async fn assemble_awaiting_dht(
         local_node_id,
         request_id,
         Purpose::Route,
-        prompt,
+        prompt.clone(),
     );
     let Err(err) = first else {
         if let Ok(ref a) = first {
@@ -468,7 +468,7 @@ async fn assemble_awaiting_dht(
             local_node_id,
             request_id,
             Purpose::Route,
-            prompt,
+            prompt.clone(),
         ) {
             scheduler.record_peer_commitments(&assignment, local_node_id, prompt_tokens);
             tracing::info!(

@@ -3076,6 +3076,64 @@ not a pin), `a_cached_prefix_is_credited_only_to_a_whole_model_run`.
 agent sends dozens and they were priced at zero, in prefill and in the KV a peer
 is asked to hold.
 
+### A split segment is credited what this node believes it holds (2026-10-11, #10)
+
+**The shape.** v0.3.234 made a split's prompt pass resume where every segment is
+believed to hold it (`pipeline::split_prompt_cache`), but the planner never read
+those beliefs. With two WARM peers able to run the same layers, only one holding
+the conversation, the next turn went to whichever priced faster. Rig
+(`split_rig.sh splitcache SPARE=1 WARM_SPARE=1`, Llama-3.2-3B on the processor,
+A shard 0, B and C shards 1-3, debug builds): turn 1 was kept on C; B was then
+asked a conversation of its own (its plan named A + C, so it handed the lead to
+A, which put it on B); turn 2 went to B — measured a moment before on a short
+request — and read all 2,306 tokens again, 196 / 195 s against turn 1's 184 /
+180, in 2 of 2 runs.
+
+**The mechanism.** `cached_prefix::plan_prompt` also tokenizes when the belief
+table names the model (`pipeline::believes_any_of`), and asks
+`pipeline::held_openings` for every (node, layer range) believed to hold this
+prompt's opening, judged by `believed_tokens` — the rule a prompt pass resumes
+by; `resume_at` is now the least of it over a plan's segments, so the two cannot
+disagree. `gather_candidates` hands each candidate its own entries
+(`NodeCandidate::split_openings`, this node's included), and
+**`NodeCandidate::prompt_tokens_held(range, num_layers)` is the one accessor**:
+`cached_prefix_tokens` for a whole model, the exact-range entry for a segment.
+`vertex_cost` takes it off the prompt (the prefill and the transfer — held
+positions are never sent), so the search, `chain_cost_ms`, the hand-off gate and
+`predicted_ms` all see it.
+
+**Greedy prices the UNREAD prompt, not a credit.** The fallback plans every split
+whose holders overlap (#180) and priced no prompt at all. A credit alone, against
+a model that charges nobody for the prompt, hands a slow holder a long turn a card
+reads whole in a fraction of the time: holder at 7.08 ms a layer, card at 0.8,
+2,306 tokens — the credit-only figure for the holder goes NEGATIVE. So greedy now
+charges `parallax::prefill_ms_per_layer` (the rate `vertex_cost` uses, factored
+out) for the tokens a candidate does not hold, once per request, spread over
+`ASSUMED_FORWARD_PASSES` as the cold load is. Tests
+`greedy_sends_the_next_turn_to_the_warm_peer_holding_its_opening`,
+`greedy_does_not_keep_a_turn_on_a_holder_a_card_outpaces`.
+
+**Exact range only, per vertex.** A worker keys stored prompts by its layer range
+(`SplitModel::kv_model_key`), so a range one layer wider holds none. A split
+resumes only as far as EVERY segment holds, while the credit is per vertex: a
+plan pairing a credited segment with an empty one is priced as if it resumed —
+wrong only where the holder is not the faster machine, by at most its credit, and
+that pass stores the prompt on every segment. A delegated split (no segment of
+ours) is led by its head with the head's beliefs, so a credit from ours resumes
+nothing there: a bounded miss, the cost of the request before this change.
+
+**Measured on the change** (same rig, same tree): turn 2 went to C and resumed
+from token 2,240 (C's `HIT on a split's stored prompt`), 55.8 / 53.6 s against
+turn 1's 184.8 / 183.8, in 2 of 2 runs; the chosen chain's `predicted_ms` for
+turn 2 was 113,587 against the control's 421,272 — the credit, in the number the
+router acted on. The overlapping shape (`SHARDS_A=0,1,2 SHARDS_B=1,2,3`, so greedy
+plans: "falling back to greedy" on both turns of both arms): control turn 2 read
+from 0, 142.8 s after turn 1's 132.0 (`predicted_ms` 825,870); the change resumed
+from 2,240 on C, 52.3 s after 134.0 (`predicted_ms` 124,308). Tests: `a_split_segment_is_credited_only_for_the_range_it_holds`,
+`the_next_turn_of_a_split_goes_to_the_peer_holding_its_opening` (through
+`assemble_pipeline_for`; picks the faster C without the credit),
+`the_planner_is_told_each_segment_holding_the_opening`.
+
 **From the rules file (moved 2026-10-02):**
 
 **`scheduler::cached_prefix::plan_prompt`** tokenizes the prompt the way the

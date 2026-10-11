@@ -29,13 +29,23 @@
 //! genuinely faster route still win (their `cache_threshold` +
 //! `balance_*_threshold`). See `docs/FUTURE_WORK.md` #10.
 //!
-//! **Only this node's own cache is credited.** A whole-model run here goes
-//! through `Generate`, the one path that consults the cache
+//! **A whole model is credited only for this node's own cache.** A whole-model
+//! run here goes through `Generate`, the one path that consults the cache
 //! (`PipelineExecutor::try_local_generate_fastpath`; the three speculative paths
 //! before it all decline a plan that is entirely local). A PEER's announced
 //! cache would be priced and not delivered whenever the n-gram path takes the
 //! request — it runs before `remote_generate` for a remote single segment, and
 //! sends forwards, which never look the cache up.
+//!
+//! **A segment of a split is credited for what this node believes it holds**
+//! (`PromptPlan::split_openings`, FUTURE_WORK #10): the segments' own answers
+//! after earlier prompt passes this node led, the beliefs a split's prompt pass
+//! resumes from (`pipeline::split_prompt_cache`). That credit IS delivered: a
+//! split's prompt pass goes through `forward_through_segments` on every path,
+//! and a whole model — where the n-gram trap above lies — is never credited by
+//! it. Without it, two warm peers were told apart by speed alone, and a
+//! conversation's next turn could go to the one holding ANOTHER conversation's
+//! opening and read its whole prompt again.
 //!
 //! **Errs toward pricing cold.** Blocks are whole-block matches, so the credit
 //! never exceeds what `PrefixCache::lookup` will hydrate. A self-entry the worker
@@ -51,7 +61,7 @@ use crate::types::{InferenceRequest, ModelId, NodeId};
 /// Converts from the bare `Option<u32>` estimate, so a caller with no rendered
 /// prompt in hand — the admin plan preview, the tests — passes exactly what it
 /// passed before and gets no cache credit.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PromptPlan {
     /// Prompt length in tokens: exact when the prompt was tokenized, else the
     /// router's estimate. `None` when the caller does not know.
@@ -59,13 +69,17 @@ pub struct PromptPlan {
     /// Leading tokens of this prompt that THIS node's worker already holds in
     /// its prefix cache. Zero unless tokenized and matched.
     pub cached_locally: u32,
+    /// The nodes — peers or this one — believed to hold the opening of this
+    /// prompt as a SEGMENT of a split, with the layer range and how many
+    /// tokens (`pipeline::held_openings`). Empty unless tokenized and believed.
+    pub(crate) split_openings: Vec<crate::inference::pipeline::HeldOpening>,
 }
 
 impl From<Option<u32>> for PromptPlan {
     fn from(tokens: Option<u32>) -> Self {
         Self {
             tokens,
-            cached_locally: 0,
+            ..Self::default()
         }
     }
 }
@@ -92,44 +106,64 @@ pub(crate) async fn plan_prompt_off_thread(
 }
 
 /// Could this request be credited at all? The cheap half of [`plan_prompt`]:
-/// no images, and our worker has reported a cache for this model.
+/// no images, and our worker has reported a cache for this model or this node
+/// believes a split's segments hold something of it.
 fn worth_planning(state: &SharedState, request: &InferenceRequest) -> bool {
-    // An image becomes embeddings the text tokenizer never sees, and the
-    // worker's vision path is not the one this hash chain describes.
+    // An image becomes embeddings the text tokenizer never sees, and neither
+    // the worker's vision path nor a split's (which keeps no prompt) is the
+    // one these hash chains describe.
     !request.messages.iter().any(|m| !m.images.is_empty())
-        && state.model_process_pool.prefix_cache_block_tokens() > 0
+        && (local_cache_worth_asking(state, request)
+            || crate::inference::pipeline::believes_any_of(&request.model_id))
+}
+
+/// Has our own worker reported a prefix cache for this model?
+fn local_cache_worth_asking(state: &SharedState, request: &InferenceRequest) -> bool {
+    state.model_process_pool.prefix_cache_block_tokens() > 0
         && worker_reported_a_cache(state, state.identity.node_id(), &request.model_id)
 }
 
-/// The prompt plan for `request`: its exact length and how much of it this
-/// node's worker holds, when that can be known; `None` otherwise, and the
-/// caller falls back to its estimate.
+/// The prompt plan for `request`: its exact length, how much of it this
+/// node's worker holds, and which split segments are believed to hold its
+/// opening, when that can be known; `None` otherwise, and the caller falls
+/// back to its estimate.
 ///
-/// Tokenizes ONLY when the worker has reported a cache for this model — the
-/// common request pays one map lookup and nothing else. Blocking: call it
-/// through [`plan_prompt_off_thread`] from async code.
+/// Tokenizes ONLY when there is something to match — the common request pays
+/// a map lookup and a pass over the belief table, and nothing else. Blocking:
+/// call it through [`plan_prompt_off_thread`] from async code.
 pub(crate) fn plan_prompt(state: &SharedState, request: &InferenceRequest) -> Option<PromptPlan> {
     if !worth_planning(state, request) {
         return None;
     }
     let our_id = state.identity.node_id();
-    let block_tokens = state.model_process_pool.prefix_cache_block_tokens();
     let tokenizer = state.standalone_tokenizer(&request.model_id)?;
     let header_path = state
         .model_dir(&request.model_id.0)
         .join(crate::model::shard::HEADER_FILENAME);
     let header = crate::inference::pipeline::template_from_header(&header_path)?;
-    let prompt = crate::inference::pipeline::render_prompt_from_header(request, &header);
+    // As every path's prompt is built (`PipelineExecutor::build_prompt_with_header`):
+    // a reply continued after a failure carries what its reader already has.
+    let mut prompt = crate::inference::pipeline::render_prompt_from_header(request, &header);
+    if let Some(c) = &request.continuation {
+        prompt.push_str(&c.text);
+    }
     let ids: Vec<u32> = tokenizer
         .encode(&prompt)
         .into_iter()
         .map(|t| t as u32)
         .collect();
-    let blocks = crate::inference::split::compute_block_hashes(&ids, block_tokens);
-    let held_blocks = leading_blocks_held(state, our_id, &request.model_id, &blocks);
+    let cached_locally = if local_cache_worth_asking(state, request) {
+        let block_tokens = state.model_process_pool.prefix_cache_block_tokens();
+        let blocks = crate::inference::split::compute_block_hashes(&ids, block_tokens);
+        let held_blocks = leading_blocks_held(state, our_id, &request.model_id, &blocks);
+        cached_tokens(held_blocks, block_tokens, ids.len())
+    } else {
+        0
+    };
     Some(PromptPlan {
         tokens: Some(u32::try_from(ids.len()).unwrap_or(u32::MAX)),
-        cached_locally: cached_tokens(held_blocks, block_tokens, ids.len()),
+        cached_locally,
+        split_openings: crate::inference::pipeline::held_openings(&request.model_id, &ids),
     })
 }
 
@@ -183,6 +217,7 @@ mod tests {
         let plan: PromptPlan = Some(9_280).into();
         assert_eq!(plan.tokens, Some(9_280));
         assert_eq!(plan.cached_locally, 0);
+        assert!(plan.split_openings.is_empty());
         assert_eq!(PromptPlan::from(None), PromptPlan::default());
     }
 

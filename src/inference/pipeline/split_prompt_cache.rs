@@ -93,14 +93,18 @@ fn beliefs() -> &'static DashMap<BeliefKey, Vec<Vec<[u8; 32]>>> {
     B.get_or_init(DashMap::new)
 }
 
-/// How many leading blocks of `keys` a segment is believed to hold.
-fn believed_blocks(segment: &PipelineSegment, keys: &[[u8; 32]]) -> usize {
-    let key = (
+fn belief_key(segment: &PipelineSegment) -> BeliefKey {
+    (
         segment.node_id.clone(),
         segment.shard_id.model_id.clone(),
         segment.layer_range,
-    );
-    beliefs().get(&key).map_or(0, |chains| {
+    )
+}
+
+/// How many leading blocks of `keys` the segment `key` names is believed to
+/// hold.
+fn believed_blocks(key: &BeliefKey, keys: &[[u8; 32]]) -> usize {
+    beliefs().get(key).map_or(0, |chains| {
         chains
             .iter()
             .map(|c| c.iter().zip(keys).take_while(|(a, b)| a == b).count())
@@ -109,11 +113,12 @@ fn believed_blocks(segment: &PipelineSegment, keys: &[[u8; 32]]) -> usize {
     })
 }
 
-/// Where a prompt pass may resume: the longest opening EVERY segment of the
-/// plan is believed to hold, in whole blocks, short of the prompt — the last
-/// position must be computed for its logits.
-pub(super) fn resume_at(
-    segments: &[PipelineSegment],
+/// The opening the segment `key` names is believed to hold, in tokens: whole
+/// blocks, short of the prompt — the last position must be computed for its
+/// logits — and nothing below [`MIN_BLOCKS`]. What a prompt pass through that
+/// segment would not read again, if every other segment holds as much.
+fn believed_tokens(
+    key: &BeliefKey,
     keys: &[[u8; 32]],
     prompt_len: usize,
     block_tokens: u32,
@@ -122,12 +127,7 @@ pub(super) fn resume_at(
     if bt == 0 || prompt_len == 0 {
         return 0;
     }
-    let held = segments
-        .iter()
-        .map(|s| believed_blocks(s, keys))
-        .min()
-        .unwrap_or(0)
-        .min((prompt_len - 1) / bt);
+    let held = believed_blocks(key, keys).min((prompt_len - 1) / bt);
     if held < MIN_BLOCKS {
         0
     } else {
@@ -135,13 +135,73 @@ pub(super) fn resume_at(
     }
 }
 
+/// Where a prompt pass may resume: the longest opening EVERY segment of the
+/// plan is believed to hold ([`believed_tokens`] is monotone in what a segment
+/// holds, so the least of theirs is theirs at the least).
+pub(super) fn resume_at(
+    segments: &[PipelineSegment],
+    keys: &[[u8; 32]],
+    prompt_len: usize,
+    block_tokens: u32,
+) -> u32 {
+    segments
+        .iter()
+        .map(|s| believed_tokens(&belief_key(s), keys, prompt_len, block_tokens))
+        .min()
+        .unwrap_or(0)
+}
+
+/// A peer (or this node) believed to hold the opening of a prompt as one
+/// segment of a split: which layers, and how many of the prompt's tokens.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HeldOpening {
+    pub(crate) node: NodeId,
+    pub(crate) range: (u32, u32),
+    pub(crate) tokens: u32,
+}
+
+/// Does this node believe anything of `model`'s segments? The cheap question
+/// the planner asks before it tokenizes a prompt to ask [`held_openings`].
+pub(crate) fn believes_any_of(model: &ModelId) -> bool {
+    switched_on() && beliefs().iter().any(|e| e.key().1 == *model)
+}
+
+/// Every segment of `model` believed to hold at least [`MIN_BLOCKS`] of the
+/// opening of the prompt `ids` — what the planner credits a vertex with
+/// (FUTURE_WORK #10's routing half). The beliefs are the ones a prompt pass
+/// resumes from, judged by the same rule ([`believed_tokens`]), so the planner
+/// never credits an opening the pass would not restore. Only for a range the
+/// segment held EXACTLY: a worker keys its stored prompts by its layer range,
+/// so a range one layer wider holds none of them.
+pub(crate) fn held_openings(model: &ModelId, ids: &[u32]) -> Vec<HeldOpening> {
+    if !switched_on() || ids.len() < MIN_BLOCKS * BLOCK_TOKENS as usize {
+        return Vec::new();
+    }
+    let segments: Vec<BeliefKey> = beliefs()
+        .iter()
+        .filter(|e| e.key().1 == *model)
+        .map(|e| e.key().clone())
+        .collect();
+    if segments.is_empty() {
+        return Vec::new();
+    }
+    let keys = chain_keys(ids, BLOCK_TOKENS);
+    segments
+        .into_iter()
+        .filter_map(|key| {
+            let tokens = believed_tokens(&key, &keys, ids.len(), BLOCK_TOKENS);
+            (tokens > 0).then_some(HeldOpening {
+                node: key.0,
+                range: key.2,
+                tokens,
+            })
+        })
+        .collect()
+}
+
 /// What a segment said it stored: the first `blocks` keys of `hint`.
 pub(super) fn note_stored(segment: &PipelineSegment, hint: &PromptCacheHint, blocks: u32) {
-    let key = (
-        segment.node_id.clone(),
-        segment.shard_id.model_id.clone(),
-        segment.layer_range,
-    );
+    let key = belief_key(segment);
     let blocks = (blocks as usize).min(hint.keys.len());
     let map = beliefs();
     if blocks == 0 {
@@ -166,11 +226,7 @@ pub(super) fn note_stored(segment: &PipelineSegment, hint: &PromptCacheHint, blo
 /// A segment refused to restore what it was believed to hold: believe nothing
 /// of it for this model and range until it says otherwise.
 pub(super) fn forget(segment: &PipelineSegment) {
-    beliefs().remove(&(
-        segment.node_id.clone(),
-        segment.shard_id.model_id.clone(),
-        segment.layer_range,
-    ));
+    beliefs().remove(&belief_key(segment));
 }
 
 /// The ids, packed as a first segment reads a multi-position input (i64 LE).
@@ -466,6 +522,56 @@ mod tests {
             resume_at(&plan, &chain_keys(&other, 64), other.len(), 64),
             0
         );
+    }
+
+    /// What the planner is told: each segment believed to hold this prompt's
+    /// opening, by the exact range it holds it for and in the same whole
+    /// blocks a prompt pass would resume from — and nothing for another model,
+    /// another conversation, or a prompt too short to keep.
+    #[test]
+    fn the_planner_is_told_each_segment_holding_the_opening() {
+        let model = ModelId("split-prompt-cache-planner-test".into());
+        let at = |node: u8, range| PipelineSegment {
+            shard_id: ShardId {
+                model_id: model.clone(),
+                index: 0,
+            },
+            ..seg(node, range)
+        };
+        let turn1: Vec<u32> = (0..700).map(|i| i + 9).collect();
+        let hint = PromptCacheHint {
+            block_tokens: 64,
+            keys: chain_keys(&turn1, 64),
+            resume_at: 0,
+        };
+        note_stored(&at(41, (0, 12)), &hint, 10);
+        note_stored(&at(42, (12, 28)), &hint, 9);
+        note_stored(&at(43, (12, 28)), &hint, 1);
+        note_stored(&seg(44, (12, 28)), &hint, 10);
+        assert!(believes_any_of(&model));
+        let mut turn2 = turn1.clone();
+        turn2.extend(5000..5100);
+        let mut got = held_openings(&model, &turn2);
+        got.sort_by_key(|h| h.node.0[0]);
+        assert_eq!(
+            got,
+            vec![
+                HeldOpening {
+                    node: NodeId([41; 32]),
+                    range: (0, 12),
+                    tokens: 640,
+                },
+                HeldOpening {
+                    node: NodeId([42; 32]),
+                    range: (12, 28),
+                    tokens: 576,
+                },
+            ],
+            "node 43 holds one block (below the least worth keeping); node 44 holds another model's"
+        );
+        let other: Vec<u32> = (0..700).map(|i| i + 70_000).collect();
+        assert!(held_openings(&model, &other).is_empty());
+        assert!(held_openings(&model, &turn2[..100]).is_empty());
     }
 
     #[test]

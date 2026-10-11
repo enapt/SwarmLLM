@@ -228,7 +228,9 @@ DIAG: pipeline candidate  node= est_tokens_per_sec= has_gpu= cost_prefill_ms= co
         (every holder priced over the whole model — the LOCAL line's
          est_tokens_per_sec and has_gpu describe the device the request
          would USE: on a node whose card is too small they are the
-         processor's figures, gotcha #444)
+         processor's figures, gotcha #444. Priced as a WHOLE model, so a
+         split segment's credit for the prompt opening it holds (#10)
+         never shows here — read the chosen chain's `predicted_ms` instead)
 This node holds the whole model but would run it on its processor; a pipeline across
   peers' cards is priced faster, so the request goes there
         local_processor_cost_ms= pipeline_cost_ms= segments= prompt_tokens=
