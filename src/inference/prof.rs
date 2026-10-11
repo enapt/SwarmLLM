@@ -33,6 +33,11 @@ stages! {
     FfnAct     => "activation * gate    (elementwise)",
     FfnDown    => "ffn down             (quantized matmul)",
     FfnProbe   => "ffn width probe      (per-call, m=1)",
+    // A mixture-of-experts feed-forward, routing to combine, by the device its
+    // layer sits on: a card/processor split runs both kinds in one token, and
+    // the two cost an order of magnitude apart (FUTURE_WORK #138).
+    MoeCard    => "moe ffn on the card  (route + experts + combine)",
+    MoeCpu     => "moe ffn on the processor (route + experts + combine)",
     // The residual add that precedes each norm is timed here too: on CUDA it is
     // one fused kernel with the norm (`inference::residual_norm`), so there is
     // no separate add left to time. It was its own stage until 2026-09-23.

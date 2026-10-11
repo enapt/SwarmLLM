@@ -735,6 +735,102 @@ fn the_batched_moe_forward_is_bit_identical_to_routing_token_by_token() {
     }
 }
 
+/// A few tokens' routed experts on the processor, run as (token, expert) pairs
+/// in one parallel region per projection (`experts_in_one_region`, #138),
+/// compute the SAME bits as the per-expert path — for quantized experts of
+/// one activation type and of mixed ones, weighting before or after the
+/// expert, one to eight tokens. And a decoded token on the processor takes it.
+#[test]
+fn one_region_experts_are_bit_identical_to_one_at_a_time() {
+    use crate::inference::layers::ExpertFfn;
+    use candle_core::quantized::GgmlDType as G;
+
+    let device = Device::Cpu;
+    let (hidden, intermediate, n_experts) = (256usize, 512usize, 16usize);
+    let quantized = |o: usize, i: usize, dtype: G| {
+        let w = Tensor::randn(0f32, 0.05, (o, i), &device).unwrap();
+        QMatMul::from_qtensor(QTensor::quantize(&w, dtype).unwrap()).unwrap()
+    };
+    // One activation type throughout; gate and up quantized for different
+    // ones (Q8_0 vs Q8_K), so a token's row is quantized twice; and the mix a
+    // Q2_K file carries.
+    let mixes = [
+        (G::Q4K, G::Q4K, G::Q6K),
+        (G::Q4_0, G::Q4K, G::Q8_0),
+        (G::Q2K, G::Q2K, G::Q3K),
+    ];
+    let policies = [
+        MoeRoutingConfig::default(),
+        MoeRoutingConfig {
+            gating_func: MoeGatingFunc::Sigmoid,
+            renormalize_weights: false,
+            weight_before_ffn: true,
+        },
+    ];
+    for (gate_t, up_t, down_t) in mixes {
+        for routing in policies {
+            for k in [2usize, 8] {
+                let moe = MoeFfn {
+                    gate: Tensor::randn(0f32, 0.3, (n_experts, hidden), &device).unwrap(),
+                    experts: (0..n_experts)
+                        .map(|_| ExpertFfn {
+                            gate: quantized(intermediate, hidden, gate_t),
+                            up: quantized(intermediate, hidden, up_t),
+                            down: quantized(hidden, intermediate, down_t),
+                        })
+                        .collect(),
+                    shared_gate: None,
+                    shared_down: None,
+                    shared_up: None,
+                    shared_gate_inp: None,
+                    n_experts_used: k,
+                    routing,
+                };
+                for tokens in [1usize, 3, 8] {
+                    let x = Tensor::randn(0f32, 1.0, (1, tokens, hidden), &device).unwrap();
+                    let x_flat = x.reshape((tokens, hidden)).unwrap();
+                    let batches = moe.route(&x_flat).unwrap();
+                    assert!(
+                        moe.experts_fit_one_region(&x, tokens, &batches),
+                        "{tokens} tokens of quantized experts on the processor must take one region"
+                    );
+                    let flat =
+                        |t: Tensor| -> Vec<f32> { t.flatten_all().unwrap().to_vec1().unwrap() };
+                    let got = flat(
+                        moe.experts_in_one_region(&x_flat, &batches, tokens, hidden)
+                            .unwrap(),
+                    );
+                    let want = flat(
+                        moe.experts_one_at_a_time(&x_flat, &batches, tokens, hidden)
+                            .unwrap(),
+                    );
+                    let differing = got
+                        .iter()
+                        .zip(&want)
+                        .filter(|(a, b)| a.to_bits() != b.to_bits())
+                        .count();
+                    assert_eq!(
+                        differing,
+                        0,
+                        "{gate_t:?}/{up_t:?}/{down_t:?} {routing:?} k={k} tokens={tokens}: \
+                         {differing} of {} values differ",
+                        got.len()
+                    );
+                    assert_eq!(
+                        flat(moe.forward(&x).unwrap()),
+                        got,
+                        "forward took another path"
+                    );
+                }
+                // A prompt chunk keeps the per-expert path.
+                let x = Tensor::randn(0f32, 1.0, (1, 9, hidden), &device).unwrap();
+                let batches = moe.route(&x.reshape((9, hidden)).unwrap()).unwrap();
+                assert!(!moe.experts_fit_one_region(&x, 9, &batches));
+            }
+        }
+    }
+}
+
 /// Llama 4 weights each chosen expert's INPUT by `sigmoid(router logit)`
 /// (llama.cpp `build_moe_ffn`'s `weight_before_ffn`), not its output.
 ///

@@ -212,7 +212,7 @@ single-character early return and the output walk — and **both were
 
 ## A mixture-of-experts layer keeps its experts QUANTIZED (2026-09-25)
 
-**`split::loader::load_moe_ffn` is the one way a MoE feed-forward is loaded** — experts stay QUANTIZED (`split_expert_stack`); a new MoE family calls it. Routing defaults are per family (`moe_renormalizes_by_default`): read the family's llama.cpp file. Verify with `examples/logits_reference_probe.rs` + `compare_logits_reference.py`; one isolated outlier is a near-tie, a shift everywhere is a bug. Routing is one host copy (`topk_host`) and one `index_add` per expert.
+**`split::loader::load_moe_ffn` is the one way a MoE feed-forward is loaded** — experts stay QUANTIZED (`split_expert_stack`); a new MoE family calls it. Routing defaults are per family (`moe_renormalizes_by_default`): read the family's llama.cpp file. Verify with `examples/logits_reference_probe.rs` + `compare_logits_reference.py`; one isolated outlier is a near-tie, a shift everywhere is a bug. Routing is one host copy (`topk_host`) and ONE `index_add` for the layer. **On the processor, ≤ 8 tokens run as (token, expert) pairs in one parallel region per projection** (`MoeFfn::experts_in_one_region` → vendored `quantized::matvec_many`, llama.cpp's `mul_mat_id` shape) — bit-identical to `experts_one_at_a_time`, pinned by `one_region_experts_are_bit_identical_to_one_at_a_time`; A/B `SWARMLLM_MOE_CPU=per-expert`. Time it with the `moe ffn on the card / on the processor` profile stages.
 
 → `docs/invariants/inference.md` § "A mixture-of-experts layer keeps its experts quantized"
 

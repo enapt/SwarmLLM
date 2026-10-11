@@ -202,7 +202,11 @@ the swarm's; a part fetched against a hash that was another upload's is caught a
 the byte check. **Residual:** holders on v0.3.222 and older still gossip such hashes until they
 update; a holder known only from a DHT provider record carries no build and is not judged.
 Options for the rest: exclude holders whose tag is unknown when the canonical upload is known,
-or prefer hashes from holders whose announced tags agree with each other.
+or prefer hashes from holders whose announced tags agree with each other. **Read 2026-10-11 06:50
+UTC:** all 6 peers the live node sees run v0.3.234, so the first half of the residual needs a
+node on v0.3.222 or older that we cannot see; a DHT-only holder on v0.3.223 or later refuses to
+serve another upload's copy, so routing to one fails over rather than answering wrongly. Kept
+at P1 by rank until a fix lands; re-read the peer versions before choosing between the options.
 
 #### #246 — A node near its storage limit fetched back a part prune had just deleted, once in six runs
 `P3` · heal · **OPEN** — 2026-10-09 · history: the v0.3.232 gate, step 12t
@@ -907,14 +911,42 @@ between 1755 MHz bursts), and back-to-back runs on this laptop heat it enough to
 step 133 → 185 ms within 40 tokens (gotcha #825). Neither thread count nor placement is the
 lever: calibration already picks the width, and `SWARMLLM_DECODE_THREADS=8` was slower.
 
-#### #138 — A mixture-of-experts model that does not fit the card is placed by whole layers
-`P2` · perf-local · **OPEN** — 2026-09-27 · history: archive row #138; plan: `docs/plans/faster_than_local.md` § 3.2
+#### #138 — A mixture-of-experts model that does not fit the card runs at ~40% of llama.cpp's speed
+`P2` · perf-local · **PARTIAL** — 2026-09-27 · history: archive row #138; plan: `docs/plans/faster_than_local.md` § 3.2
 
-llama.cpp keeps attention and the router on the card and the experts in RAM, and reaches
-32-44 tok/s on Qwen3-30B-A3B-class models on consumer cards; we place whole layers, so most
-of the model runs on the processor. Per-tensor placement for MoE layers beside
-`split::hybrid::LayerPlacement`; experts already load quantized one by one
-(`load_moe_ffn`). Depends on a real MoE model having run at all (#114).
+**Measured 2026-10-11** on the RTX 3070 Laptop 8 GB + Ryzen 7 5800H, Qwen3-30B-A3B-Instruct-2507
+Q2_K (11.3 GB: 48 layers, 128 experts, top-8 — the shape of Qwen3.5-35B-A3B), llama.cpp
+`4b1a27f` `llama-bench -t 4 -lm none -p 512 -n 64`, live node stopped, safety kit, cooled
+between arms (`~/swarmllm-138/{llama_moe2,ours_moe,moe_prof}.sh`):
+
+- **What placement buys llama.cpp**: ~6.5 GB on the card either way — 29 whole layers 23.4-23.7
+  tok/s; every layer's attention on the card and the experts of 20 layers in RAM
+  (`-ngl 99 -ncmoe 20`) 32.3 (1.37x); every expert in RAM 13.9. Prompt speed about equal (537 vs 571).
+  The 32-44 tok/s figures quoted from others were 8 GB DESKTOP cards.
+- **Where we stand, same 26 whole layers** (`-ngl 27`; 29 does not fit ours — `test-split`
+  reserves the 8,192-token cache): llama.cpp tg64 25.4 ± 9.2 and 21.5 ± 2.1, pp512 496-499; ours
+  a median decode step of 77-100 ms (10-13 tok/s), the reply identical in every arm.
+- **Our step, by the new profile stages** (`SWARMLLM_PROFILE=1`, `moe ffn on the card` /
+  `on the processor`, also with `SWARMLLM_PROFILE_SYNC=1`): the card's 26 MoE layers take
+  40-42 ms (~1.6 ms a layer, for ~12 MB of experts a ~400 GB/s card reads in ~30 µs — host
+  overhead: a device→host copy of the router scores, ~80 launches and ~16 host→device copies
+  per layer); the processor's 22 took 22-28 ms; attention, norms and RoPE ~15 ms.
+
+**Done 2026-10-11 (unreleased):** the processor's experts for ≤ 8 tokens run as (token,
+expert) pairs in ONE parallel region per projection (`MoeFfn::experts_in_one_region` →
+vendored `quantized::matvec_many`, llama.cpp's `mul_mat_id` shape), bit-identical to the
+per-expert path: processor stage 22.1 / 28.3 / 24.9 → 19.2 / 16.5 / 17.8 ms (−29%, ABBA + a
+synced pair, one binary, `SWARMLLM_MOE_CPU=per-expert` = old).
+
+**Left, in order of what they cost us:** (1) **the card's experts** — routing on the device
+and one launch per projection for all chosen experts (candle's CUDA `indexed_moe_forward`
+reads a STACKED expert tensor; ours are sliced per expert by `split_expert_stack`); (2) **a
+prompt's experts on the processor**: a 31-token prompt spends 1.1-1.3 s in the 22 processor
+layers' experts (~50 ms a layer — ~110 experts each run on ~2 tokens through its own regions);
+generalise `matvec_many` to several rows per job, one region per projection for any token
+count; (3) **per-tensor placement** (experts in RAM, attention on the card) beside
+`split::hybrid::LayerPlacement` — worth 1.37x to llama.cpp, and it moves MORE expert work to
+the processor, so (2) first.
 
 #### #174 — CPU decode attention sits ~2× above the memory-bandwidth floor
 `P3` · perf-local · **OPEN** — 2026-08-22 · history: archive § "CPU decode attention: the kernel sits 2x above the DRAM floor"
@@ -1658,7 +1690,13 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-11, not yet released** (#224, #137's main half, #228 (1))
+**Closed 2026-10-11, not yet released** (#224, #137's main half, #228 (1), #138's processor decode step)
+- #138's processor decode step — **a mixture-of-experts model decodes its processor layers'
+  experts in one parallel region per projection**, as llama.cpp's `mul_mat_id` does, instead
+  of each chosen expert's three products as separate parallel calls with tensor plumbing around
+  them. Qwen3-30B-A3B Q2_K split 26/22 between the card and the processor: the processor's
+  expert time per token 25.1 → 17.8 ms on average (ABBA in one binary), the reply identical.
+  The larger costs remain and are #138's entry: the card's experts, and a prompt's.
 - #228 (1) — **Qwen 3.5's mixture-of-experts models run** (`qwen35moe`: Qwen3.5-35B-A3B and its
   larger siblings were refused outright). Checked against llama.cpp master on a real file, whole,
   split and on the card; the numbers are in #228's entry.

@@ -2733,6 +2733,16 @@ operands either way, so there is no reduction reordering.
 This is why `vendor/candle` exists as a patched copy; the pre-existing reason was
 a `cudarc` linking hardcode (see `Cargo.toml` `[patch.crates-io]`).
 
+### A few tokens' experts run in one region per projection
+
+`vendor/candle/candle-core/src/quantized/mod.rs` adds `QTensor::quantize_row` and
+`matvec_many`: many one-row products against processor weights in ONE rayon
+region of 64-row tasks — llama.cpp's `mul_mat_id` shape. A mixture-of-experts
+layer on the processor uses it for ≤ 8 tokens (`MoeFfn::experts_in_one_region`),
+bit-identical to the per-expert path; −29% on the processor's expert time per
+decoded token on Qwen3-30B-A3B (2026-10-11, FUTURE_WORK #138,
+`docs/invariants/inference.md`).
+
 ### The right attention kernel is OPPOSITE for prefill and decode
 
 `run_attention` (`src/inference/layers/mod.rs`) picks between a fused/flash CPU

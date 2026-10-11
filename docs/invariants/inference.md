@@ -1888,9 +1888,52 @@ the same logits against shifted tokens DISAGREE (worst 0.877). Tests:
 `an_expert_stack_is_cut_into_quantized_experts_holding_their_own_slice` (dtype
 kept, each expert equals its slice exactly), `a_moe_layer_loads_with_every_expert_quantized`.
 
-**Not verified:** a real-sized MoE model on this box; Qwen 3.5-MoE's shared
-gate (now applied when the GGUF carries it, as Qwen3-Next does). FUTURE_WORK #114.
+**Not verified:** a real-sized MoE model scored against llama.cpp on this box —
+Qwen3-30B-A3B Q2_K has RUN here, split between the card and the processor, and
+writes coherent text (2026-10-11, #138), but was not scored. Qwen 3.5-MoE's shared
+gate is checked on a small real file (#228 (1)). FUTURE_WORK #114.
 Llama-4 IS verified on tiny models (next section); DeepSeek-2 is refused (#116).
+
+### A few tokens' experts on the processor run in one region per projection (2026-10-11)
+
+**What it replaced.** `experts_one_at_a_time` runs each chosen expert over its
+tokens: an `index_select`, two host→tensor copies, `forward_shared` (gate + up),
+`silu_mul`, `down`, a `broadcast_mul` — each product its own rayon region. For one
+decoded token on Qwen3-30B-A3B that is 8 experts × ~3 regions and ~80 tensor ops
+per layer, around matrices of 768 × 2048.
+
+**What llama.cpp does** (`ggml_compute_forward_mul_mat_id`, read at `4b1a27f`):
+the activation is quantized once; ONE thread region per projection walks every
+chosen expert's rows in chunks of 64 (`chunk_size = 64` when one activation row),
+with a per-expert atomic chunk counter and NO barrier between experts.
+
+**What replaced it.** For ≤ 8 tokens (`MOE_ONE_REGION_MAX_TOKENS`) of f32 on the
+processor against quantized experts, `MoeFfn::experts_in_one_region` builds
+(token, expert) pairs in expert order, quantizes each distinct input once per
+activation type (`QTensor::quantize_row`), runs every gate and up in ONE
+`quantized::matvec_many` region and every down in another, and sums the pairs on
+the host. `matvec_many` cuts each job into 64-row tasks; each output is one
+`T::vec_dot` over the same operands `k_quants::matmul` uses for a one-row input.
+More tokens keep the per-expert path: a pair re-reads its expert's weights, which
+is free while tokens barely share experts and wasteful for a prompt chunk.
+
+**Why it is the same bits.** The same quantized activation and the same `vec_dot`
+per output; `silu_mul_into` is the kernel `silu_mul` runs, and with the
+intermediate width a multiple of 8 every element goes through its vector lanes
+either way; `index_add` on the processor adds rows in listed order from a zeroed
+copy, which the host sum reproduces (pairs in expert order, from 0.0). Test
+`one_region_experts_are_bit_identical_to_one_at_a_time`: Q4_K/Q4_K/Q6_K,
+Q4_0/Q4_K/Q8_0 (two activation types) and Q2_K/Q2_K/Q3_K; weights after or before
+the expert (Llama 4); 1, 3 and 8 tokens. It goes red (143 of 256 values) when the
+pairs are summed in reverse order. On the real model, the 40-token reply was
+identical in all six arms below.
+
+**Measured** (Qwen3-30B-A3B-Instruct-2507 Q2_K, 26 layers on an RTX 3070 Laptop
+and 22 on a Ryzen 7 5800H, one binary, `SWARMLLM_MOE_CPU=per-expert` = old,
+ABBA plus a pair synced per stage, `~/swarmllm-138/moe_prof.sh`): the
+`moe ffn on the processor` stage, median per decoded token, 22.1 / 28.3 / 24.9 →
+19.2 / 16.5 / 17.8 ms. The card's 26 layers took 40-42 ms in every arm — the
+larger cost, and FUTURE_WORK #138's next step.
 
 ### Llama 4 routes like llama.cpp hardcodes it, and normalises Q/K after RoPE (2026-09-25)
 

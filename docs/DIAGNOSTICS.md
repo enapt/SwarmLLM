@@ -1630,6 +1630,13 @@ MAC than the quantized matmul beside it. Reach for it before optimising anything
 in the forward path — the previous round tuned a matmul that turned out to be a
 quarter of the cost.
 
+**A mixture-of-experts model shows two more stages**, `moe ffn on the card` and
+`moe ffn on the processor` (routing to combine, by the device its layer is on).
+Before 2026-10-11 its whole expert feed-forward sat in `unattributed`, ~80% of a
+step. On a card, run it once with `SWARMLLM_PROFILE_SYNC=1` too: unsynced, the
+card stage also absorbs the queued attention work it waits for at its router
+copy (FUTURE_WORK #138).
+
 ## Attention-kernel A/B — `SWARMLLM_FORCE_STANDARD_ATTN=1`
 
 Forces every attention call in the process onto `standard_attention`, so the
