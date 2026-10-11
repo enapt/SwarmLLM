@@ -2149,6 +2149,57 @@ Null control: with the carry-over disabled,
   `capability_news`, or it silently re-opens the gate — the publish's `why=`
   shows which.
 
+## The manifests again, once the capability was gated (2026-10-11)
+
+### What was measured
+
+The release node on .234 (the capability gate's release), 3.0 → 4.1 h up, 7
+peers, idle, two `/api/admin/stats` readings 1.08 h apart:
+
+| | B/s |
+|---|---|
+| total out | 8,745 (5,803 gossip, 2,942 other) |
+| `NodeCapabilityUpdate`, first copies | 167 (976 on .232: the gate holds on the live fleet, −83%) |
+| `swarm/models` sent | 3,438 — **59% of the gossip it sent** |
+| `ModelManifest`, first copies | 442 — 0.0123 a second × 36 KB, 40% of first-copy bytes |
+
+44 manifests an hour is ~22 versions once per 30-35 min — exactly the quiet
+window plus one round, so every one was a repeat. Each arrived ~4.2 times
+(`recv_msgs_unfiltered / recv_msgs`), so most of the topic's bytes were copies
+of a message the node already had. Nothing was being repaired: 0 messages
+dropped, 0 send failures in the window.
+
+### What changed
+
+`MANIFEST_QUIET_WINDOW` 30 min → 2 h. Nothing reads the repeat: a change is
+published the tick it happens, a newcomer — and a peer that dropped and came
+back, since `peers_told_about_manifests` keeps only connected peers — is caught
+up point to point until delivered, and the registry never expires a manifest
+that stops being repeated. The window bounds only the repair of a gossip message
+lost in flight. Two hours sits under RPL's default Trickle ceiling for the same
+job, "repeat consistent state rarely" (RFC 6550 § 17: Imin 2^3 ms doubled 20
+times, ~2.3 h). Expected: a quarter of the repeats; check on the next reading
+once the fleet runs it (`ModelManifest` first copies ≤ ~0.004 a second).
+
+### What was set aside, and why
+
+FUTURE_WORK #91 (2) planned a manifest without its tensor table. The reading
+says the cost is now the COPIES, not the size, and a smaller message flooded
+4.2 times still floods. The standard answer to "large, rarely changing, already
+held" is announce-then-pull — Bitcoin's `inv`/`getdata`, Plumtree's lazy push,
+GossipSub's own IHAVE/IWANT one level up: gossip `(model, hash)` and fetch the
+manifest point to point only for a version one lacks. It also keeps
+`compute_hash` and the verify-before-header order as they are, which the
+table-less manifest had to reorder. #91 now carries that instead.
+
+### What a change must keep
+
+- Anything that starts relying on the periodic repeat — a registry that ages
+  out an unrepeated manifest, a heal that waits for a re-announce — must shorten
+  the window first.
+- The direct catch-up is the delivery guarantee; a change to who counts as
+  "told" changes what the window may be.
+
 ## The repetition, not the size: holders re-announcing each other (2026-09-23)
 
 ### What was measured
@@ -2230,7 +2281,8 @@ It also closed a latent gap: a full round used to mark every connected peer as
 full round may broadcast nothing, so "told" now means only what the direct
 catch-up actually delivered, retried each tick until it lands.
 
-What the periodic round is still for, and why 30 minutes is enough: changes go
+What the periodic round is still for, and why 30 minutes was enough (2 h since
+2026-10-11 — § "The manifests again, once the capability was gated"): changes go
 out the tick they happen; newcomers are caught up point to point; the registry
 never expires a manifest that stops being repeated (`registry.rs` has no
 manifest `last_seen` — its only staleness sweep is for shard-holder claims).

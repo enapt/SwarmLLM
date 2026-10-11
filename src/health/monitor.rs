@@ -122,14 +122,20 @@ const FULL_REANNOUNCE_EVERY_TICKS: u64 = 10;
 /// 2026-09-23 at 0.22 manifests a second, ~35 KB each, **87% of all the
 /// gossip it received**, none of it news.
 ///
-/// Why 30 minutes is safe: nothing else leans on the periodic round any more.
+/// Why two hours is safe: nothing else leans on the periodic round any more.
 /// A change of our own is published the tick it happens (only a version heard
 /// AFTER we left the one before is suppressed — `manifest_needs_broadcast`,
-/// #224); a newcomer is caught up point to point until delivered; the
-/// registry never expires a manifest that stops being repeated. What is left
-/// for the periodic round is repairing a gossip message lost in flight, and
-/// that now takes at most this window plus one round instead of one round.
-const MANIFEST_QUIET_WINDOW: Duration = Duration::from_secs(30 * 60);
+/// #224); a newcomer, or a peer that dropped and came back, is caught up point
+/// to point until delivered; the registry never expires a manifest that stops
+/// being repeated. What is left for the periodic round is repairing a gossip
+/// message lost in flight, and that now takes at most this window plus one
+/// round. It was 30 minutes until the capability broadcast was change-gated
+/// (#91): measured 2026-10-11 on the release node (.234, 4.1 h up, 7 peers,
+/// idle, 0 messages dropped), the ~22 versions in the swarm went out 44 times
+/// an hour, each received ~4.2 times — 59% of the gossip it sent, all of it
+/// repeats. Two hours sits under RPL's default Trickle ceiling for the same job
+/// (RFC 6550 § 17: Imin 2^3 ms doubled 20 times, ~2.3 h).
+const MANIFEST_QUIET_WINDOW: Duration = Duration::from_secs(2 * 60 * 60);
 
 /// Is this a round where every manifest is BROADCAST, changed or not?
 ///
@@ -327,7 +333,7 @@ fn capability_needs_broadcast(
 /// version heard before that is news to every peer that has since taken ours
 /// (#224: a node adopted a stranger's hash, caught a newcomer up with it, then
 /// re-fetched its part and returned to the version it had broadcast minutes
-/// earlier — suppressed for the 30-minute window, so the newcomer never learned
+/// earlier — suppressed for the quiet window (then 30 minutes), so the newcomer never learned
 /// the agreed hash and its heal waited for one). RFC 6206 §4.2 draws the same
 /// line: a node's own change of state starts a new interval, and only
 /// consistent transmissions heard within the current interval suppress.
@@ -2611,7 +2617,7 @@ mod tests {
     /// adopted a stranger's contradicting hash (and caught a newcomer up with
     /// it), deleted its part and announced that, then re-fetched the part and
     /// returned to the agreed version — which the swarm had heard minutes
-    /// earlier, so it was suppressed for the 30-minute window and the newcomer
+    /// earlier, so it was suppressed for the quiet window (then 30 minutes) and the newcomer
     /// never learned the agreed hash. Treating any heard record as "the swarm
     /// has it" makes the first assert fail.
     #[test]

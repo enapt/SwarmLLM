@@ -772,22 +772,26 @@ libp2p-connection-limits has no per-protocol exemption). A dial by bare address 
 does the same.
 
 #### #91 — An idle node still uploads ~20 KB/s of gossip, and a total traffic ceiling does not exist
-`P2` · network · **PARTIAL** — 2026-10-10 · history: archive row #91, `docs/invariants/network.md`
+`P2` · network · **PARTIAL** — 2026-10-11 · history: archive row #91, `docs/invariants/network.md`
 
 Trickle suppression (`MANIFEST_QUIET_WINDOW`), per-(model, hash) `manifest_heard`,
 per-category counters and the region-demand split shipped in .200-.206 and halved it (42 →
 ~20 KB/s each way; it once extrapolated to ~159 GB/month — the complaint that makes people
-uninstall a P2P app). Re-measured 2026-10-10 on the release node (.232, 2.6 h up, idle):
-11.6 KB/s out, 7.7 KB/s of it gossip; manifests down to 208-428 B/s received, and the
-capability broadcast had become ~60% of first-copy gossip — so it is now change-gated (on a
-meaningful change or every 5 min, KEP-589; 14 → 1 update per 7 min on the two-node rig),
-`docs/invariants/network.md` § "The capability, once Trickle had worked". Open: (1)
-re-measure once the fleet runs the gate (released in v0.3.234, 2026-10-11), before any redesign; (2) a manifest without
-its tensor table — blocked on an integrity order: `compute_hash` covers the table and
-`acquisition.rs` calls `verify_hash_strict` before fetching a header, so it must become
-fetch header → derive → verify, feature-bit gated, omitted only when every connected peer
-advertises it; (3) a both-direction traffic ceiling at the transport (risky — throttling
-gossip can partition a node); `max_bandwidth_mbps` shapes part serving only.
+uninstall a P2P app). The capability broadcast is change-gated since v0.3.234 (KEP-589).
+Re-measured 2026-10-11 on the release node with the fleet on .234 (4.1 h up, 7 peers, idle):
+8.7 KB/s out, 5.8 of it gossip; the capability's first copies 976 → 167 B/s; manifests
+59% of the gossip sent, every one a repeat, each arriving ~4.2 times. So the manifest
+quiet window went 30 min → 2 h (not yet released; RFC 6550's Trickle ceiling is ~2.3 h),
+`docs/invariants/network.md` § "The manifests again, once the capability was gated". Open:
+(1) re-measure once the fleet runs the 2 h window (`ModelManifest` first copies ≤ ~0.004 a
+second expected, from 0.0123); (2) announce-then-pull for manifests — gossip `(model, hash)`
+and fetch the manifest point to point only for a version one lacks (Bitcoin
+`inv`/`getdata`, Plumtree lazy push), since the copies, not the size, are now the cost; it
+replaces the table-less manifest, which needed `compute_hash`'s verify-before-header order
+reversed. A new `SwarmMessage` variant plus a pull request, feature-bit gated at the sender —
+a broadcast, so digest-only when every connected peer advertises the bit; (3) a
+both-direction traffic ceiling at the transport (risky — throttling gossip can partition a
+node); `max_bandwidth_mbps` shapes part serving only.
 
 #### #169 — Connection churn on multi-interface hosts: only the LAN dial is deterministic
 `P3` · network · **PARTIAL** — 2026-07-25 · history: archive § "Connection churn on multi-interface hosts — deterministic dialer partial", gotcha #353
