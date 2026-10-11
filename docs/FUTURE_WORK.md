@@ -40,7 +40,7 @@ after v0.3.224 (#160, #215 and #216 closed; #217 and #218 opened from the swarm 
 v0.3.226 (released 2026-10-05), #220 opened from the .225 gate's unrecorded driver resets; #129's fit verdict (idle-model
 reclaim) shipped in v0.3.227 (released 2026-10-05 23:45 UTC); #222 (a node near its storage limit deleting and
 re-fetching parts) and #223 closed in v0.3.228 (released 2026-10-06 09:42 UTC), #224 opened from its gate;
-#225, #226 and #227 opened from a tester's two reports the same day; #117 (Qwen 3.5, dense), #225 and #226 closed in v0.3.229 (released 2026-10-07 00:00 UTC), #228 opened for what Qwen 3.5 leaves out; #129's cold loads (waited for and priced), #228 (2) and (2b), #220 (2), #229, #230 and #231 shipped in v0.3.230 (released 2026-10-07 16:38 UTC), #232 parked from their report; #234, #235, #239 and #240 closed on 2026-10-08 from two tester reports and the card check after them, #236-#238 opened from the second (#236 and #238 closed the same day); #242 and #243 opened and closed the same day from reports #006 (a 1 Mbps cap stored for "Unlimited") and #007 (the narrow-screen model picker); #194 closed on 2026-10-09 (a card keeps its conversation memory as f16, and its memory guard under a context override), #237 re-ranked to P3 from what could be measured; #152 closed the same day (the guess-check stream on the boomerang), and #147 narrowed to P3 (f16 accumulation in a card's prompt pass shipped).
+#225, #226 and #227 opened from a tester's two reports the same day; #117 (Qwen 3.5, dense), #225 and #226 closed in v0.3.229 (released 2026-10-07 00:00 UTC), #228 opened for what Qwen 3.5 leaves out; #129's cold loads (waited for and priced), #228 (2) and (2b), #220 (2), #229, #230 and #231 shipped in v0.3.230 (released 2026-10-07 16:38 UTC), #232 parked from their report; #234, #235, #239 and #240 closed on 2026-10-08 from two tester reports and the card check after them, #236-#238 opened from the second (#236 and #238 closed the same day); #242 and #243 opened and closed the same day from reports #006 (a 1 Mbps cap stored for "Unlimited") and #007 (the narrow-screen model picker); #194 closed on 2026-10-09 (a card keeps its conversation memory as f16, and its memory guard under a context override), #237 re-ranked to P3 from what could be measured; #152 closed the same day (the guess-check stream on the boomerang), and #147 narrowed to P3 (f16 accumulation in a card's prompt pass shipped). v0.3.233 was built and never released (its gate found #247 counting active file cache as used); v0.3.234 (released 2026-10-11 00:37 UTC) carries #69, #247 and its fix, #162, #10's split half, #171's pieces, #91's capability change-gate and #3's terms DIAG; #224's trigger was caught at its gate.
 `docs/plans/` holds the multi-step designs; the entries point at them.
 
 **P0 — wrong answers, silently**
@@ -72,7 +72,7 @@ re-fetching parts) and #223 closed in v0.3.228 (released 2026-10-06 09:42 UTC), 
 6. *(#152 closed 2026-10-09 — the guess-check stream runs on the boomerang and with a peer
     holding the first layers, not only with a peer holding the last.)*
 7. **#10** — conversation prefixes across computers: no routing to the peer holding the
-    cache (the split half — a split keeps its prompt between turns — built 2026-10-09).
+    cache (the split half — a split keeps its prompt between turns — released in v0.3.234).
 8. *(#162 closed 2026-10-09 — cloned gates refuse a missing helper; 12e's failover arms moved to a
     shape this box holds, and `split_rig.sh failover` keeps no prompt since #10.)*
 9. *(#155 narrowed to P3 on 2026-10-07 — not seen on the swarm, see its entry.)*
@@ -84,7 +84,7 @@ re-fetching parts) and #223 closed in v0.3.228 (released 2026-10-06 09:42 UTC), 
     (`docs/plans/faster_than_local.md`).
 12. **#3**, **#180** — the routing cost model charges a constant where the reply length
     belongs, which keeps partial ranges (load spreading) off.
-13. **#171** — the prompt pass through a split runs one stage at a time (built 2026-10-10; left:
+13. **#171** — the prompt pass through a split runs one stage at a time (released in v0.3.234; left:
     pieces chained between two peers for a pass that does not keep its prompt).
 14. **#228** — Qwen 3.5's first version leaves out its MoE models, the card/processor split and
     speculation.
@@ -647,8 +647,8 @@ driver events** (`~/swarmllm-129b/verify129b.sh`): the cold Coder-7B stayed **lo
 admitted the 7B whole; warm 2.2 s for 120 tokens. Release binary, same shape: Italy, 46.5 s.
 
 **Residual (one part left):** A model that does NOT fit even after the reclaim is still priced
-at processor speed rather than as the loader's card/processor split (above). **Fixed 2026-10-08 on
-main (not yet released):** `PipelineScheduler::local_speed_off_the_card` blends the card's share
+at processor speed rather than as the loader's card/processor split (above). **Fixed 2026-10-08,
+released in v0.3.231:** `PipelineScheduler::local_speed_off_the_card` blends the card's share
 of the split in (`split_tokens_per_sec`), for the search and the hand-off gate alike —
 `docs/invariants/scheduling.md` § "A node holding every layer that would run the model on its
 processor…", "A split is priced as a split". What #129 still carries: the prompt pass keeps the
@@ -843,7 +843,7 @@ uninstall a P2P app). Re-measured 2026-10-10 on the release node (.232, 2.6 h up
 capability broadcast had become ~60% of first-copy gossip — so it is now change-gated (on a
 meaningful change or every 5 min, KEP-589; 14 → 1 update per 7 min on the two-node rig),
 `docs/invariants/network.md` § "The capability, once Trickle had worked". Open: (1)
-re-measure once the fleet runs the gate, before any redesign; (2) a manifest without
+re-measure once the fleet runs the gate (released in v0.3.234, 2026-10-11), before any redesign; (2) a manifest without
 its tensor table — blocked on an integrity order: `compute_hash` covers the table and
 `acquisition.rs` calls `verify_hash_strict` before fetching a header, so it must become
 fetch header → derive → verify, feature-bit gated, omitted only when every connected peer
@@ -988,7 +988,7 @@ from code.
 `P2` · perf-split · **PARTIAL** — 2026-09-07 · absorbs #139 and archive § "Speeding up inference BETWEEN nodes" idea 1 (prefix-keyed remote KV); history: archive row #10 and § "A conversation's later turns do not seek out the peer holding its prefix"
 
 The LOCAL half shipped in v0.3.208 (`scheduler::cached_prefix`; `split_rig.sh cache` HIT
-2,713 of 2,744 tokens). **The split half is built (2026-10-09, `pipeline::split_prompt_cache`,
+2,713 of 2,744 tokens). **The split half is built (2026-10-09, released in v0.3.234, `pipeline::split_prompt_cache`,
 `docs/plans/split_prompt_cache.md`)**: a split's prompt pass carries a keyed block chain and
 resumes where every segment is believed to hold it; each segment keeps its part in its worker's
 `PrefixCache`; a miss re-sends from 0 once. It keys on the prompt's CONTENT, so the old note that
@@ -1019,7 +1019,7 @@ prompt pass goes through `forward_through_segments`. What is left:
 #### #171 — The prompt pass through a split runs one stage at a time
 `P2` · perf-split · **PARTIAL** — 2026-08-24, built 2026-10-10 for the splits this node leads · absorbs archive § "Speeding up inference BETWEEN nodes" idea 2 (prefill microbatching); history: archive § "The pipeline is idle (N-1)/N of the time during the phase that dominates a long request"
 
-**Built 2026-10-10 (`pipeline::prompt_chunks`, `docs/plans/pipelined_prompt_pass.md`):** a prompt
+**Built 2026-10-10, released in v0.3.234 (`pipeline::prompt_chunks`, `docs/plans/pipelined_prompt_pass.md`):** a prompt
 pass of two or more 512-position pieces is read in pieces, every segment at once, where no
 machine appears twice and either the pass keeps its prompt for #10 (it is never chained, so the
 relay through this node is already its cost — three- and four-peer splits included) or this node
@@ -1672,7 +1672,7 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-09, after the v0.3.232 tag (next release)** (#69, #247, #162)
+**Closed 2026-10-09 — released in v0.3.234 (2026-10-11; v0.3.233 was built and never released)** (#69, #247, #162)
 - #162 — the release gate: (a) a cloned gate lost its helpers — every gate since .227 refuses to start
   when a `$G/` helper it names is missing (exit 4), and each clone's retarget script asserts every
   substitution. (b) step 12e could not test a takeover deterministically here. Two causes, measured
