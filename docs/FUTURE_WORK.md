@@ -40,7 +40,7 @@ after v0.3.224 (#160, #215 and #216 closed; #217 and #218 opened from the swarm 
 v0.3.226 (released 2026-10-05), #220 opened from the .225 gate's unrecorded driver resets; #129's fit verdict (idle-model
 reclaim) shipped in v0.3.227 (released 2026-10-05 23:45 UTC); #222 (a node near its storage limit deleting and
 re-fetching parts) and #223 closed in v0.3.228 (released 2026-10-06 09:42 UTC), #224 opened from its gate;
-#225, #226 and #227 opened from a tester's two reports the same day; #117 (Qwen 3.5, dense), #225 and #226 closed in v0.3.229 (released 2026-10-07 00:00 UTC), #228 opened for what Qwen 3.5 leaves out; #129's cold loads (waited for and priced), #228 (2) and (2b), #220 (2), #229, #230 and #231 shipped in v0.3.230 (released 2026-10-07 16:38 UTC), #232 parked from their report; #234, #235, #239 and #240 closed on 2026-10-08 from two tester reports and the card check after them, #236-#238 opened from the second (#236 and #238 closed the same day); #242 and #243 opened and closed the same day from reports #006 (a 1 Mbps cap stored for "Unlimited") and #007 (the narrow-screen model picker); #194 closed on 2026-10-09 (a card keeps its conversation memory as f16, and its memory guard under a context override), #237 re-ranked to P3 from what could be measured; #152 closed the same day (the guess-check stream on the boomerang), and #147 narrowed to P3 (f16 accumulation in a card's prompt pass shipped). v0.3.233 was built and never released (its gate found #247 counting active file cache as used); v0.3.234 (released 2026-10-11 00:37 UTC) carries #69, #247 and its fix, #162, #10's split half, #171's pieces, #91's capability change-gate and #3's terms DIAG; #224's trigger was caught at its gate.
+#225, #226 and #227 opened from a tester's two reports the same day; #117 (Qwen 3.5, dense), #225 and #226 closed in v0.3.229 (released 2026-10-07 00:00 UTC), #228 opened for what Qwen 3.5 leaves out; #129's cold loads (waited for and priced), #228 (2) and (2b), #220 (2), #229, #230 and #231 shipped in v0.3.230 (released 2026-10-07 16:38 UTC), #232 parked from their report; #234, #235, #239 and #240 closed on 2026-10-08 from two tester reports and the card check after them, #236-#238 opened from the second (#236 and #238 closed the same day); #242 and #243 opened and closed the same day from reports #006 (a 1 Mbps cap stored for "Unlimited") and #007 (the narrow-screen model picker); #194 closed on 2026-10-09 (a card keeps its conversation memory as f16, and its memory guard under a context override), #237 re-ranked to P3 from what could be measured; #152 closed the same day (the guess-check stream on the boomerang), and #147 narrowed to P3 (f16 accumulation in a card's prompt pass shipped). v0.3.233 was built and never released (its gate found #247 counting active file cache as used); v0.3.234 (released 2026-10-11 00:37 UTC) carries #69, #247 and its fix, #162, #10's split half, #171's pieces, #91's capability change-gate and #3's terms DIAG; #224's trigger was caught at its gate. v0.3.235 (released 2026-10-12 01:58 UTC) carries #224, #137's main half, #138's decode, card and prompt steps and #228 (1), (3) and (4); v0.3.236 (released 2026-10-12 14:31 UTC) carries #244, #248, #249, #250's two halves, #251 (1), (2) and (4), #252 (2), #253 and #254, and #257 opened from its gate.
 `docs/plans/` holds the multi-step designs; the entries point at them.
 
 **P0 — wrong answers, silently**
@@ -69,7 +69,9 @@ re-fetching parts) and #223 closed in v0.3.228 (released 2026-10-06 09:42 UTC), 
 5a. **#250** — a model held whole here, which the card holds only part of, was routed through two
    peers at 0.1 tok/s where the same machine answers locally in ~5 s (report #035). Its
    window-narrowing contributor closed as #248, the idle model holding the card as #249, and a layer
-   is now priced as its own model's, a measured peer's figure per model too; left: the rigs.
+   is priced as its own model's, a measured peer's figure per model too (all released in v0.3.236).
+   The report is NOT reproduced: in every shape this box can build, both prices keep the model
+   local; a far split needs a peer that can hold the middle (see the entry).
 
 **P2 — speed and completeness**
 6. *(#152 closed 2026-10-09 — the guess-check stream runs on the boomerang and with a peer
@@ -93,6 +95,8 @@ re-fetching parts) and #223 closed in v0.3.228 (released 2026-10-06 09:42 UTC), 
 14. **#228** — Qwen 3.5's first version leaves out speculation (its card/processor split shipped
     in v0.3.230; its MoE models run, its delta rule is one op per layer and its decode steps are
     captured as CUDA graphs since v0.3.235).
+15. **#257** — with the prefix cache on, a long prompt after a node's first waits 3.5-5.6 s on
+    the card before it is read (found at the v0.3.236 gate; v0.3.235 does the same).
 
 Everything else is ranked in its own entry. **P3** is narrow or cosmetic, **P4** is process,
 maintenance or an idea with no user waiting on it.
@@ -522,8 +526,11 @@ the mechanism fires, but the OLD price did not detour it either: this shape does
 report. Qwen2.5-14B in the same shape (`layer_work=1.29`, the dense model priced dearer): here
 alone under both prices, the same reply — no route moved. A far split of the 14B on the processor
 could not be built on this machine (the peer holds 30 of its 48 layers: `SwarmShortOfMemory` in
-both arms). Left: the report's own shape (a 12 GB card, peers abroad, a 2,728-token prompt) has
-not been reproduced; the prompt-pricing bullet above is untouched.
+both arms). The v0.3.236 gate repeated both shapes on the released build (steps 12ax and 12bb),
+with the same plans and the same `layer_work`. Left: the report's own shape (a 12 GB card, peers
+abroad, a 2,728-token prompt) has not been reproduced, and the prompt-pricing bullet above is
+untouched. The next evidence is a `DIAG: pipeline candidate … layer_work=` line from a node that
+detours, or a second machine able to hold the middle.
 
 #### #237 — A peer's room for a conversation is not advertised, and the hand-off counts the prompt only
 `P3` · routing · **OPEN** — 2026-10-08 · history: report #005 (a tester, v0.3.230 code); related #194
@@ -957,21 +964,30 @@ tensor-core MMQ port (large). Not checked at long context: Qwen 3.5 (reference i
 and a MoE model whole on the card (none fits 8 GB). Separately, GLM-4-9B disagrees with llama.cpp
 at a few positions on every path (tokenizer re-tokenisation is the lead) — pre-existing.
 
-#### #257 — On the card, every long prompt after a node's first reads ~3x slower
+#### #257 — With the prefix cache on, a long prompt after a node's first waits seconds on the card before it is read
 `P2` · perf-local · **OPEN** — 2026-10-12 · history: none (found at the v0.3.236 gate)
 
-Measured 2026-10-12 on the RTX 3070 Laptop: an isolated node, Qwen2.5-Coder-7B whole on the card,
-a short warm-up, then three unique ~4,000-token prompts one after another, `max_tokens` 1. The
-first reads at 1,300-1,600 tok/s, the second and third at 500-600. v0.3.235 and v0.3.236 do the
-same (six nodes, alternated). So did gate235's own runs: 1,538 → 616 / 814 here, and the 8B's
-1,312 → 637 / 844. The gate printed only the best prompt, which hid it. The lead is not
-established. The card reads 512 tokens per forward only when the prompt is ALONE in the slot
-table (`PrefillPacer::chunk_size_for`, where `sharing` = more than one active slot gives the
-pacer's width, ≤ 128 by default). A finished request whose slot stays in `slot_table.active()`
-would pace every later prompt as shared. Nothing logs the chosen width, so the next step is to
-run the same shape at `-v` and read `chunk_tokens` on `DIAG: BatchGenerate prefill chunk ran`
-for each of the three prompts. Then rule out the card's clocks (idle at 210 MHz between runs;
-heat, gotcha #825).
+Measured 2026-10-12 on the RTX 3070 Laptop, Windows up 56 h (`~/swarmllm-257/run1.sh`, the
+deployed v0.3.236 at `-v`): an isolated node, Qwen2.5-Coder-7B whole on the card, a short
+warm-up, then three unique ~4,000-token prompts one after another, `max_tokens` 1. With the
+default prefix cache the first prompt reads at 1,365-1,573 tok/s and the second and third at
+474-640. With `[inference] prefix_cache_enabled = false` all three read at 1,355-1,580 (two
+pairs, alternated). v0.3.235 does the same, and so did gate235 (1,538 → 616 / 814, and the 8B's
+1,312 → 637 / 844); the gate's best-of line hid it.
+
+Where the time goes (debug logs `~/swarmllm-257/speed-{def,nocache}{1,2}.node.log`): every
+prompt reads 512 tokens per forward in both arms (`chunk_tokens=512`, `prefix_matched=0`). So the
+chunk width is NOT the cause; the lead first written here, in `51274672`, was wrong. What differs
+is the FIRST 512-token forward of each later prompt. With the cache on it took 5,584 and 5,549 ms,
+then 3,543 and 4,664 ms. With it off it took 99-100 ms. The rest of the pass is ~2.1 s in both arms,
+and free card memory is the same in both (1,986 vs 2,018 MB). Each request with the cache on ends
+by storing its KV as a snapshot (`DIAG: prefix-cache inserted snapshot … manifest_len` 60 → 118 →
+180 blocks of 64 tokens), logged ~0.1 s after its last chunk. The likely shape is that the
+snapshot's copies are still queued on the card's one stream when the next request's first forward
+waits on them. That is not yet shown. Next: count and time the snapshot's copies (how many,
+which direction, pageable or pinned host memory) and show the first forward waits on them. Then
+toggle the fix off and watch a test go red. In this shape every long prompt that matches no
+stored one pays the wait.
 
 #### #137 — Our processor decode trails llama.cpp's by ~12% at the same width, and loses where llama.cpp gains from 8 threads
 `P3` · perf-local · **OPEN, narrowed 2026-10-11** — 2026-09-27 · history: archive row #137; plan: `docs/plans/faster_than_local.md` § 3.3
