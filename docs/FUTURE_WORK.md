@@ -1516,7 +1516,15 @@ the book's OpenAI page says what `owned_by` means, what a peer sees, how to keep
 where the route is reported. Next: (2) a "keep on this computer"
 choice per model in the dashboard and per request (`swarm_route`), answered by the local route or
 a policy refusal (`PrivateModeUnavailable` shape, 503, never "retry") — never silently abroad;
-(3) the route header on the Responses API and MCP too.
+(3) the route on the surfaces that lack it. A NON-streamed `/v1/responses` already carries
+`x-swarm-route`, `-segments`, `-peers`, `-nodes` and `server-timing`, copied from the chat
+handler's response (`create_response`; checked on v0.3.235, 2026-10-12). A STREAMED one carries
+none: `stream::run_streaming` returns the SSE before it awaits the chat call, so its headers
+flush before a route exists. That is deliberate, so the lifecycle events go out before inference
+setup blocks. The choice is between waiting for planning before `response.created` (as
+`/v1/chat/completions` streaming already does) and naming the route in an event. MCP answers
+JSON-RPC, and one call may fan out to several models, so its route belongs per result (`_meta`),
+not in a header. `attach_route_headers`' doc claims all four surfaces; correct it with the fix.
 
 #### #30 — The plaintext-prompt trust bar sits exactly at the score an unknown peer starts on
 `P2` · security · **OPEN** — 2026-09-10 · history: archive row #30 and § "The plaintext-prompt trust bar sits exactly at the score an unknown peer starts on"
