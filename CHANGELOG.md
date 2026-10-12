@@ -1,5 +1,64 @@
 # Changelog
 
+## [0.3.236-alpha] — 2026-10-12
+
+**A model can now be kept on this computer.** A new setting on each model's ⚙ panel, "Keep on
+this computer", runs that model's requests only here. No other computer, in the swarm or at a
+cloud provider, is handed the question, the work in progress, a picture or the reply. If this
+computer cannot run a request alone (it holds only part of the model), the request is refused
+with a reason that names the setting and how to fix it; it is never sent out. A tester asked
+for this after reading "local" next to a model as "my data stays here", which it did not mean.
+
+**Private mode keeps more of your requests in your pool.** Making every path a request can leave
+by ask the same question found three places where private mode did not hold:
+- a picture sent to a vision model could go to the nearest computer able to read images, even
+  outside your pool; it now goes only to computers in your pool, or in other pools you allowed;
+- a computer outside your pool could be asked whether it had already worked through the opening
+  of your prompt (asked by a fingerprint of that opening, not its text);
+- a model in the swarm whose name matches a cloud provider's (`deepseek…`, `mistral…`,
+  `gemma…`) could be sent to that provider when your pool lacked a part of it and you had saved
+  that provider's key. It is now refused, naming the missing parts. Asking a provider for one
+  of its own models still works.
+Separately, a failed request is no longer announced to the whole swarm. Every failure used to
+be broadcast with its error text and model name; the computers that received it only wrote it
+to their log.
+
+**A model that fills its own graphics card keeps its place there.** The memory check counted a
+model's own use of the card as pressure from other programs, priced a model split between card
+and processor at its whole file, and could take a model off the card in the middle of a reply.
+The model then sent part of every request to other computers. On a 14B model in our test, the
+next reply took 23.2 seconds instead of 9.6. The check now acts only when other programs take
+the card's room, and never on a model that is in use.
+
+**An idle model gives its graphics memory back after the idle time** (5 minutes by default),
+not up to an hour later. Your own recent requests no longer count as demand that keeps an idle
+model loaded. A model you pin or lock still stays loaded for up to an hour.
+
+**Split replies no longer pause for seconds.** The node read the graphics card's memory with
+`nvidia-smi`, which takes 2-6 seconds on Windows' Linux layer while the card is busy, on a thread
+that also handles the network. Answers from other computers sat unread meanwhile. In our test the
+old way stalled 3 runs out of 3 (11.5-13.6 words a second) and the new way none (23.4-27.6). One
+slow check also no longer stops the node guessing ahead for the next ten minutes.
+
+**The route planner prices each model's layers by the work they take.** It priced every
+model's layers as a 7B model's. A mixture-of-experts model such as Qwen3-30B-A3B reads about a
+fifth of that for each word, and a 14B about 1.3 times as much, so a slow route through other
+computers could look cheap next to running the model here, or the reverse. A computer's measured
+speed on one model also no longer prices a model it has never run for you. A tester saw a
+30B-A3B sent through two computers abroad at 0.1 words a second when their own machine could run
+it. In the shapes we could build (a 30B-A3B or a 14B held whole here, another computer holding
+the middle) both the old and new prices keep the model here, so that report is not yet
+reproduced and stays open.
+
+**A Linux download missing NVIDIA's CUDA libraries now says so and runs on the processor.**
+Before, every request failed with "worker closed connection mid-generate". The node names the
+missing libraries at startup with the command that installs them, and the dashboard and
+`swarmllm status` show the reason.
+
+**Smaller fixes.** `--gpu-layers -1` (automatic) is accepted on the command line; it was read as
+an unknown option. When a prompt is too long for the memory this computer has left, the refusal
+now says how long a prompt would fit (in tokens).
+
 ## [0.3.235-alpha] — 2026-10-11
 
 **Faster replies from the processor at the default setting.** A node at its default

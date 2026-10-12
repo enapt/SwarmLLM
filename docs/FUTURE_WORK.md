@@ -514,12 +514,16 @@ reproduce the detour: v0.3.235 narrowed the window, then the next request reload
 locally and answered here (23.2 s vs 9.6 s on main). By the 7B prior the local hybrid route prices
 at ~84 s against the reported pipeline's 278 s, so in the report the local route was most likely
 unavailable (narrowed) rather than out-priced. Priced by the design above, the report's plan
-changes little: compute scales down on both routes, and the local route then wins by more. Next:
-the shape on this box (Qwen3-30B-A3B Q2_K whole, split
-26/22 card/processor, `~/swarmllm-138/`) with a peer holding the middle, reading the planner's
-local price (`DIAG: pipeline candidate … layer_work=`) against the measured local time. Dense
-models above 7B now cost more compute, so before release a WAN split rig
-(`regional_pipelines.md`) must show this adds no route slower than the one it replaced.
+changes little: compute scales down on both routes, and the local route then wins by more.
+**Pre-tag rigs (2026-10-12, main `76d765d6`, `split_rig.sh layerprice`, ~/swarmllm-250/pretag*.out):**
+Qwen3-30B-A3B Q2_K whole here (card + processor), a peer holding the middle on the processor —
+both prices plan it here alone and answer 200; `layer_work=0.199` with the fix (1.0 without), so
+the mechanism fires, but the OLD price did not detour it either: this shape does not reproduce the
+report. Qwen2.5-14B in the same shape (`layer_work=1.29`, the dense model priced dearer): here
+alone under both prices, the same reply — no route moved. A far split of the 14B on the processor
+could not be built on this machine (the peer holds 30 of its 48 layers: `SwarmShortOfMemory` in
+both arms). Left: the report's own shape (a 12 GB card, peers abroad, a 2,728-token prompt) has
+not been reproduced; the prompt-pricing bullet above is untouched.
 
 #### #237 — A peer's room for a conversation is not advertised, and the hand-off counts the prompt only
 `P3` · routing · **OPEN** — 2026-10-08 · history: report #005 (a tester, v0.3.230 code); related #194
