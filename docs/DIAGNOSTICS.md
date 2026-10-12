@@ -1699,8 +1699,8 @@ Nothing at `info` says. On the card the width is 512 only when the prompt is
 ALONE in the slot table (`PrefillPacer::chunk_size_for`); with another active
 slot it is the pacer's width (≤ 128 by default). Run the node at `-v`:
 `chunk_tokens` on `DIAG: BatchGenerate prefill chunk ran` gives each chunk's
-width, and `forward_ms` on `DIAG: SplitModel forward pass complete … index_pos=0`
-gives the time of a request's first forward. Judge every prompt of a run, not
+width, and `forward_ms` on `DIAG: SplitModel forward pass complete` (the line
+with `index_pos=0`) gives the time of a request's first forward. Judge every prompt of a run, not
 the fastest. In one node the first unique ~4K prompt read at ~1,500 tok/s and
 the next two at ~550, all at width 512. The whole difference was the later
 prompts' first forward, which took 3.5-5.6 s with the prefix cache on and 0.1 s
