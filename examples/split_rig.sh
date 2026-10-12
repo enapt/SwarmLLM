@@ -58,6 +58,23 @@
 #          question went A → B → A instead of staying on A. PASS = no
 #          "narrowing shard window" in A's log and q2's route is A alone.
 #          Default model qwen2.5-14b-instruct-q4-k-m (48 layers; ~22 fit an 8 GB card).
+#   layerprice  softunload's topology for FUTURE_WORK #250 (report #035): a
+#          mixture-of-experts model whole on A, larger than its card, B holding
+#          the middle on the processor. The planner priced every model's layer
+#          as a dense 7B's, so a 30B-A3B layer (~3B of it active) cost ten times
+#          what it does and the middle went to B. Reads the plan A would make
+#          (the preview, nothing runs), then asks one question ONLY when that
+#          plan is A alone — a plan through B gives A two workers on the card,
+#          a shape this rig must not make on its own. Run it twice in one
+#          binary: `SWARMLLM_LAYER_PRICE=reference` is the old price. PASS (the
+#          default arm) = the plan is A alone, the reply is 200, and A logged
+#          `layer_work=` below 1. Default model qwen3-30b-a3b-instruct-2507-q2-k.
+#   keep   FUTURE_WORK #251 (report #035): "Keep on this computer". A holds
+#          shard 0 and B the rest, both on the processor, so every answer needs
+#          B. Three asks through A: the setting off (200 through B), on (A
+#          refuses: 503 `kept_on_this_computer_error`, and its preview plan is
+#          not routable), off again (200 through B). PASS = all three, and B
+#          was handed nothing while the setting was on. Default model tinyllama.
 #   context  the FAILOVER topology, but B serves a SHORTER conversation than the
 #          long prompt (CEIL_B, default 512, as B's own max_seq_len_override) —
 #          the field report of 2026-09-25, where an 8192-token peer refused an
@@ -204,7 +221,7 @@
 #          (FUTURE_WORK #220's rig): an older release is the control arm, and
 #          should FAIL. Default model tinyllama.
 #
-# usage: split_rig.sh split|kill|failover|failover_mid|context|whole|continue|repeat|fetch|cache|splitcache|remote|mixed|disputed|spliced|disconnect <binary> [<binary for B>]
+# usage: split_rig.sh split|kill|failover|failover_mid|context|whole|continue|repeat|fetch|cache|splitcache|remote|mixed|disputed|spliced|disconnect|softunload|layerprice|keep <binary> [<binary for B>]
 #   MODEL      model id (default: tinyllama for split, llama-3.2-3b for kill
 #              and failover)
 #   SHARDS_A   shard indices A holds, comma-separated (default 0; kill: 0,LAST)
@@ -232,17 +249,19 @@ set -u
 MODE="${1:?usage: split_rig.sh split|kill|failover|context|repeat|fetch|cache|remote|mixed|softunload <binary> [<binary for B>]}"
 BIN_A="${2:?binary}"
 BIN_B="${3:-$BIN_A}"
-case "$MODE" in split|kill|failover|failover_mid|context|whole|continue|repeat|fetch|cache|splitcache|remote|mixed|disputed|spliced|disconnect|softunload) ;; *) echo "mode must be split, kill, failover, failover_mid, context, whole, continue, repeat, fetch, cache, splitcache, remote, mixed, disputed, spliced, disconnect or softunload"; exit 2 ;; esac
+case "$MODE" in split|kill|failover|failover_mid|context|whole|continue|repeat|fetch|cache|splitcache|remote|mixed|disputed|spliced|disconnect|softunload|layerprice|keep) ;; *) echo "mode must be split, kill, failover, failover_mid, context, whole, continue, repeat, fetch, cache, splitcache, remote, mixed, disputed, spliced, disconnect, softunload, layerprice or keep"; exit 2 ;; esac
 if { [ "$MODE" = context ] || [ "$MODE" = whole ]; } && printf '%s' "${EXTRA_TOML:-}" | grep -q '^\[inference\]'; then
   echo "$MODE: EXTRA_TOML may not open [inference] — B's ceiling is written there"; exit 2
 fi
 [ -x "$BIN_A" ] && [ -x "$BIN_B" ] || { echo "binary not executable"; exit 2; }
-if [ "$MODE" = split ] || [ "$MODE" = mixed ] || [ "$MODE" = disputed ] || [ "$MODE" = spliced ] || [ "$MODE" = disconnect ]; then
+if [ "$MODE" = split ] || [ "$MODE" = mixed ] || [ "$MODE" = disputed ] || [ "$MODE" = spliced ] || [ "$MODE" = disconnect ] || [ "$MODE" = keep ]; then
   MODEL="${MODEL:-tinyllama-1.1b-chat-v1.0.q4-k-m}"
 elif [ "$MODE" = cache ]; then
   MODEL="${MODEL:-qwen2.5-0.5b-instruct-fp16}"
 elif [ "$MODE" = softunload ]; then
   MODEL="${MODEL:-qwen2.5-14b-instruct-q4-k-m}"
+elif [ "$MODE" = layerprice ]; then
+  MODEL="${MODEL:-qwen3-30b-a3b-instruct-2507-q2-k}"
 else
   MODEL="${MODEL:-llama-3.2-3b-instruct-q4-k-m}"
 fi
@@ -253,18 +272,19 @@ SHARDS=$(ls "$SRC" | sed -n 's/^shard_\([0-9]*\)\.bin$/\1/p' | sed 's/^0*\([0-9]
 LAST=$(echo "$SHARDS" | tail -1)
 N=$(echo "$SHARDS" | wc -l)
 [ "$N" -ge 2 ] || { echo "$MODEL has $N shard file(s) here; a split needs at least 2"; exit 2; }
-if [ "$MODE" = split ] || [ "$MODE" = repeat ] || [ "$MODE" = disconnect ]; then
+if [ "$MODE" = split ] || [ "$MODE" = repeat ] || [ "$MODE" = disconnect ] || [ "$MODE" = keep ]; then
   SHARDS_A="${SHARDS_A:-0}"
   SHARDS_B="${SHARDS_B:-$(echo "$SHARDS" | grep -vxF -f <(echo "$SHARDS_A" | tr ',' '\n') | paste -sd,)}"
   # Processor unless asked otherwise: the reference is scored on the processor.
   [ "$MODE" = repeat ] && { GPU_A="${GPU_A:-0}"; GPU_B="${GPU_B:-0}"; }
   [ "$MODE" = disconnect ] && { GPU_A="${GPU_A:-0}"; GPU_B="${GPU_B:-0}"; }
+  [ "$MODE" = keep ] && { GPU_A="${GPU_A:-0}"; GPU_B="${GPU_B:-0}"; }
 elif [ "$MODE" = splitcache ]; then
   SHARDS_A="${SHARDS_A:-0}"
   SHARDS_B="${SHARDS_B:-$(echo "$SHARDS" | grep -vxF -f <(echo "$SHARDS_A" | tr ',' '\n') | paste -sd,)}"
   GPU_A="${GPU_A:-0}"; GPU_B="${GPU_B:-0}"
-elif [ "$MODE" = softunload ]; then
-  [ "$N" -ge 3 ] || { echo "softunload needs a model with at least 3 shard files here; $MODEL has $N"; exit 2; }
+elif [ "$MODE" = softunload ] || [ "$MODE" = layerprice ]; then
+  [ "$N" -ge 3 ] || { echo "$MODE needs a model with at least 3 shard files here; $MODEL has $N"; exit 2; }
   SHARDS_A=$(echo "$SHARDS" | paste -sd,)
   SHARDS_B=$(echo "$SHARDS" | grep -vx 0 | grep -vx "$LAST" | paste -sd,)
   GPU_B="${GPU_B:-0}"
@@ -641,6 +661,72 @@ try:
 except Exception: c="ERR "+raw[:300]
 print(json.dumps({"status":status,"route":hdr("x-swarm-route"),"segments":hdr("x-swarm-segments"),"content":c}))' "$OUT/$3.hdr" "$OUT/$3.body"
 }
+
+if [ "$MODE" = keep ]; then
+  keep() { curl -s -m 30 -X PUT -H "Authorization: Bearer $KA" -H 'Content-Type: application/json' \
+             -d "{\"enabled\": $1}" "localhost:8900/api/admin/models/$MODEL/keep-on-this-computer"; }
+  # B's results as A receives them — the count must MOVE on the open ask, or a
+  # zero while kept would prove nothing.
+  forwards() { grep -a -c 'dispatcher received LayerResult' "$BASE/A/node.log"; }
+  Q="What is the capital of France? Answer in one sentence."
+  FO=$(forwards)
+  ask "$Q" 24 open | tee "$OUT/keep.jsonl" | cut -c1-200
+  echo "keep: on  -> $(keep true | cut -c1-160)"
+  F0=$(forwards)
+  ask "$Q" 24 kept | tee -a "$OUT/keep.jsonl" | cut -c1-200
+  F1=$(forwards)
+  PREVIEW=$(curl -s -m 30 -H "Authorization: Bearer $KA" "localhost:8900/api/admin/models/$MODEL/pipeline-plan" \
+    | python3 -c 'import sys,json; p=json.load(sys.stdin); print(p.get("routable"), (p.get("reason") or {}).get("type"))')
+  echo "keep: off -> $(keep false | cut -c1-160)"
+  ask "$Q" 24 reopened | tee -a "$OUT/keep.jsonl" | cut -c1-200
+  python3 - "$OUT" "$F0" "$F1" "$PREVIEW" "$FO" <<'PY'
+import json, sys
+out, f0, f1, preview, fo = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), sys.argv[4], int(sys.argv[5])
+status = lambda l: (open(f"{out}/{l}.hdr").read().splitlines() or ["none"])[0].strip()
+route = lambda l: [x.split(":", 1)[1].strip() for x in open(f"{out}/{l}.hdr").read().lower().splitlines() if x.startswith("x-swarm-route")]
+try:
+    kept_type = json.load(open(f"{out}/kept.body"))["error"]["type"]
+except Exception:
+    kept_type = "none"
+print(f"keep: open {status('open')} {route('open')} | kept {status('kept')} type={kept_type} preview={preview} "
+      f"B results during it={f1 - f0} (open: {f0 - fo}) | reopened {status('reopened')} {route('reopened')}")
+ok = (" 200" in status("open") and f0 > fo and " 503" in status("kept") and kept_type == "kept_on_this_computer_error"
+      and preview.startswith("False") and f1 == f0 and " 200" in status("reopened"))
+print("keep:", "PASS" if ok else "FAIL")
+sys.exit(0 if ok else 1)
+PY
+  exit $?
+fi
+
+if [ "$MODE" = layerprice ]; then
+  # A plans from what it has HEARD: give B's holdings time to arrive, and read
+  # the plan until it stops changing.
+  plan() {
+    curl -s -m 30 -H "Authorization: Bearer $KA" "localhost:8900/api/admin/models/$MODEL/pipeline-plan" \
+      | python3 -c 'import sys,json
+p=json.load(sys.stdin); me=p.get("local_node_id","")
+seg=p.get("segments",[])
+print(" ".join("%s%s" % ("A" if s["node_id"]==me else "B", tuple(s["layer_range"])) for s in seg) or "none: %s" % p.get("reason"))'
+  }
+  LAST_PLAN=""
+  for _ in $(seq 1 20); do
+    sleep 6; P=$(plan)
+    [ -n "$P" ] && [ "$P" = "$LAST_PLAN" ] && break
+    LAST_PLAN=$P
+  done
+  echo "layerprice: plan $P  (SWARMLLM_LAYER_PRICE=${SWARMLLM_LAYER_PRICE:-<unset: priced as its own model>})"
+  case "$P" in
+    *B*) echo "layerprice: the plan sends part of the model to B — not asked (it would put two workers on A's card)"; exit 1 ;;
+    "A("*) ;;
+    *) echo "layerprice: no plan"; exit 1 ;;
+  esac
+  T0=$(date +%s.%N)
+  ask "Explain in three sentences why the sky is blue." 64 q1 | tee "$OUT/replies.jsonl" | cut -c1-200
+  echo "layerprice: q1 took $(python3 -c "print(round($(date +%s.%N) - $T0, 1))") s"
+  grep -a -o 'layer_work=[0-9.]*' "$BASE/A/node.log" | sort | uniq -c | head -3
+  grep -a -E "Model will run|card/processor|layers on the GPU" "$BASE/A/node.log" | tail -2 | cut -c1-220
+  exit 0
+fi
 
 if [ "$MODE" = softunload ]; then
   ask "What is the capital of France? Answer in one sentence." 32 q1 | tee "$OUT/replies.jsonl"
