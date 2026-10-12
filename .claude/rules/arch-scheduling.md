@@ -151,7 +151,7 @@ State scoped to one attempt (e.g. `engine_drafter::draft_key`) is keyed by the a
 
 ## Speculation that does not pay steps aside — γ = 0 is an answer (2026-09-29)
 
-**`dsd_controller::best_gamma_for_check` may choose zero guesses** (SmartSpec); `recall` / `remember` carry it to the next request. A new speculating path needs a way to stop guessing; the continuous stream remembers `best_gamma_overall`.
+**`dsd_controller::best_gamma_for_check` may choose zero guesses** (SmartSpec); `recall` / `remember` carry it to the next request. A new speculating path needs a way to stop guessing; the continuous stream remembers `best_gamma_overall`. A remembered zero must not come from ONE stalled check: every check cost goes through `CheckCost::record`, which holds an outlier back a round (#244).
 
 → `docs/invariants/scheduling.md` § "Speculation that does not pay steps aside — γ = 0 is an answer (2026-09-29)"
 

@@ -157,6 +157,7 @@ impl PipelineExecutor {
                 initial_gamma,
             ),
         };
+        let held_back_before = check.held_back();
 
         // Resolve peer IDs upfront. Local segments push None and dispatch to
         // the worker subprocess in `forward_verify_through_segments`; remote
@@ -735,6 +736,7 @@ impl PipelineExecutor {
             alpha = format_args!("{:.3}", acceptance.alpha()),
             check_fixed_ms = format_args!("{:.1}", check.fit().map_or(0.0, |f| f.0)),
             check_ms_per_position = format_args!("{:.1}", check.fit().map_or(0.0, |f| f.1)),
+            checks_held_back = check.held_back().saturating_sub(held_back_before),
             draft_ms_each = format_args!("{:.1}", draft_cost.median().unwrap_or(0.0)),
             "DSD: request complete"
         );

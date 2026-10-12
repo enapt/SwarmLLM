@@ -44,6 +44,21 @@ pub fn expected_tokens_per_round(alpha: f64, gamma: u32) -> f64 {
 /// until the positions have spread, [`CheckCost::predict`] answers the mean
 /// cost — the constant model — and [`best_gamma_for_check`] moves γ at most
 /// [`GAMMA_STEP`] per round, which is what produces the spread.
+///
+/// **One stalled check is held back, not fitted** (FUTURE_WORK #244). On the
+/// 12h split rig (2026-10-12) one streamed check of 3 positions took 4.5 s
+/// among ~40 ms ones — the forward waited ~4.4 s before it was even sent — and
+/// the fit became 0 ms fixed + 468 ms a position: guessing never pays on a line
+/// through the origin, so γ went to 0 for the rest of the reply and, remembered,
+/// for the next request. A point at a position count the fit has seen little
+/// of has the leverage to do that, so capping its value is not enough. A check
+/// over [`Self::OUTLIER_FACTOR`] times what it should cost waits for the next
+/// round: a normal one drops it as a stall, a second slow one records both — a
+/// lasting change is learned one round late. The drafter's cost had the same
+/// fault and went to a median ([`RecentMedian`]); robust filters bound one
+/// sample's influence the same way (Ruckdeschel's clipped RLS, arXiv 1204.3358),
+/// and servers that time their checks take medians over repeats (D-cut, arXiv
+/// 2607.14647). `SWARMLLM_DSD_CHECK_OUTLIERS=keep` fits every check as it came.
 #[derive(Debug, Clone, Default)]
 pub struct CheckCost {
     w: f64,
@@ -51,6 +66,12 @@ pub struct CheckCost {
     y: f64,
     xx: f64,
     xy: f64,
+    /// Rounds fitted — nothing is held back before [`Self::HOLD_AFTER`].
+    rounds: u32,
+    /// A check held back as a possible stall: `(positions, ms)`.
+    held: Option<(u32, f64)>,
+    /// Checks ever held back — see [`Self::held_back`].
+    held_back: u32,
 }
 
 /// The most [`best_gamma_for_check`] moves γ in one round: far enough to
@@ -60,8 +81,46 @@ pub const GAMMA_STEP: u32 = 2;
 
 impl CheckCost {
     const DECAY: f64 = 0.8;
+    /// How many times its expected cost a check must take to be held back.
+    pub const OUTLIER_FACTOR: f64 = 3.0;
+    /// Rounds the fit needs before it can call a check an outlier.
+    const HOLD_AFTER: u32 = 3;
 
     pub fn record(&mut self, positions: u32, ms: f64) {
+        self.record_with(positions, ms, hold_outlying_checks());
+    }
+
+    fn record_with(&mut self, positions: u32, ms: f64, hold: bool) {
+        if hold && self.rounds >= Self::HOLD_AFTER && self.is_outlier(positions, ms) {
+            match self.held.take() {
+                None => {
+                    self.held = Some((positions, ms));
+                    self.held_back = self.held_back.saturating_add(1);
+                    return;
+                }
+                // Two slow rounds running: the cost changed. Fit both.
+                Some((p, held_ms)) => self.fit_round(p, held_ms),
+            }
+        } else {
+            self.held = None;
+        }
+        self.fit_round(positions, ms);
+    }
+
+    /// Slower than [`Self::OUTLIER_FACTOR`] times its expected cost — the
+    /// line's prediction, or the mean cost scaled by positions, whichever is
+    /// higher: a check the line has not seen this long yet may cost
+    /// proportionally more without being a stall (a processor check of 25 ms +
+    /// 95 ms a position costs 3.4× more at 4 positions than at 1).
+    fn is_outlier(&self, positions: u32, ms: f64) -> bool {
+        let Some(line) = self.predict(positions) else {
+            return false;
+        };
+        let proportional = (self.y / self.w) * f64::from(positions) / (self.x / self.w).max(1.0);
+        ms > Self::OUTLIER_FACTOR * line.max(proportional)
+    }
+
+    fn fit_round(&mut self, positions: u32, ms: f64) {
         let d = Self::DECAY;
         let x = f64::from(positions);
         self.w = self.w * d + 1.0;
@@ -69,6 +128,7 @@ impl CheckCost {
         self.y = self.y * d + ms;
         self.xx = self.xx * d + x * x;
         self.xy = self.xy * d + x * ms;
+        self.rounds = self.rounds.saturating_add(1);
     }
 
     /// The fitted `(fixed, per_position)`, or `None` before any round. The
@@ -94,6 +154,25 @@ impl CheckCost {
         self.fit()
             .map(|(fixed, slope)| fixed + slope * f64::from(positions))
     }
+
+    /// Checks held back as possible stalls since this fit began — it is
+    /// carried from request to request ([`Learned::check`]), so a request
+    /// reports the difference across itself.
+    pub fn held_back(&self) -> u32 {
+        self.held_back
+    }
+}
+
+/// `SWARMLLM_DSD_CHECK_OUTLIERS=keep` fits every check as it came, the rule
+/// before [`CheckCost::OUTLIER_FACTOR`], for A/B inside one binary.
+fn hold_outlying_checks() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(
+            std::env::var("SWARMLLM_DSD_CHECK_OUTLIERS").ok().as_deref(),
+            Some("keep")
+        )
+    })
 }
 
 /// The guess-run length that maximizes tokens per SECOND (Leviathan et al.
@@ -559,5 +638,78 @@ mod tests {
         }
         assert_eq!(cost.median(), Some(30.0));
         assert_eq!(RecentMedian::default().median(), None);
+    }
+
+    /// The streamed check of the 12h rig (2026-10-12): 1-2 rows a check at
+    /// ~35 ms + 10 ms a row, then ONE of 3 rows that waited 4.5 s to be sent.
+    /// Fitted, it made the line 0 + ~2 s a position and the stream's verdict
+    /// zero guesses — remembered for the next request too.
+    #[test]
+    fn one_stalled_check_does_not_end_the_guessing() {
+        let rows = [1, 2, 1, 1, 2, 1, 2, 1, 1, 2, 1, 1];
+        let run = |hold: bool| {
+            let mut check = CheckCost::default();
+            for p in rows {
+                check.record_with(p, 35.0 + 10.0 * f64::from(p), hold);
+            }
+            check.record_with(3, 4524.0, hold);
+            check
+        };
+        let kept = run(false);
+        assert_eq!(
+            best_gamma_overall(0.622, &kept, 7.2, 3, BEST_GAMMA_MAX),
+            0,
+            "fitting the stall is what the rig saw"
+        );
+        assert_eq!(kept.held_back(), 0);
+        let held = run(true);
+        assert_eq!(held.held_back(), 1);
+        let (fixed, slope) = held.fit().unwrap();
+        assert!(fixed > 30.0 && slope < 20.0, "{fixed} + {slope}x");
+        assert!(best_gamma_overall(0.622, &held, 7.2, 3, BEST_GAMMA_MAX) > 0);
+        // The next normal round drops it.
+        let mut after = held.clone();
+        after.record_with(2, 55.0, true);
+        assert!(after.held.is_none());
+        assert!(best_gamma_overall(0.622, &after, 7.2, 3, BEST_GAMMA_MAX) > 0);
+    }
+
+    /// A cost that really changed is learned one round late, not never.
+    #[test]
+    fn a_lasting_slowdown_is_learned_one_round_late() {
+        let mut check = CheckCost::default();
+        for p in [4, 3, 4, 2, 4, 3, 4, 4] {
+            check.record_with(p, 35.0 + 10.0 * f64::from(p), true);
+        }
+        let slow = |p: u32| 10.0 * (35.0 + 10.0 * f64::from(p));
+        check.record_with(4, slow(4), true);
+        assert!(check.held.is_some(), "one slow round could be a stall");
+        let before = check.predict(4).unwrap();
+        check.record_with(3, slow(3), true);
+        assert!(check.held.is_none());
+        assert!(
+            check.predict(4).unwrap() > 4.0 * before,
+            "both slow rounds fitted: {before} -> {}",
+            check.predict(4).unwrap()
+        );
+    }
+
+    /// A long check on a processor costs several times a short one — never a
+    /// stall. 25 ms + 95 ms a position: 3.4× more at 4 positions than at 1,
+    /// met first by a line that has only seen 1-position checks (no slope yet),
+    /// then alternating.
+    #[test]
+    fn a_check_that_costs_more_for_more_positions_is_never_held() {
+        let mut check = CheckCost::default();
+        for i in 0..20 {
+            let p = if i < 6 || i % 2 == 0 { 1 } else { 4 };
+            check.record_with(p, 25.0 + 95.0 * f64::from(p), true);
+            assert!(check.held.is_none(), "round {i} held");
+        }
+        let (fixed, slope) = check.fit().unwrap();
+        assert!(
+            (fixed - 25.0).abs() < 1.0 && (slope - 95.0).abs() < 1.0,
+            "{fixed} + {slope}x"
+        );
     }
 }

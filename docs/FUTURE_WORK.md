@@ -986,7 +986,7 @@ Designs: `docs/plans/split_speculation.md` (guess-and-check across a split),
 (placement by distance, #192), `docs/plans/faster_than_local.md` (the ranked list).
 
 #### #244 — A third streamed guess-check request in a row runs at the old speed
-`P3` · perf-split · **OPEN** — 2026-10-08 · history: the v0.3.231 release check after #233
+`P3` · perf-split · **PARTIAL** — 2026-10-08 · history: the v0.3.231 release check after #233
 
 After #233 the drafter keeps guessing on every request (final_gamma 1, not 0). But in the 12h
 shape (7B split A/B on one card, 24 ms emulated link, 0.5B q8 drafter on A, streamed checks), the
@@ -1013,6 +1013,30 @@ averages 25.5, v0.3.234 28.8, and v0.3.235 with `SWARMLLM_DECODE_INSTALL=0` 25.7
 inside this shape's own spread of 17-33. Next: log each check's `_ms` at debug to find what makes
 one slow, and keep one slow check from taking over the fit (a median or trimmed fit, as the
 drafter's own cost already uses the median).
+
+**Done 2026-10-12 (unreleased): one slow check no longer decides γ.** `CheckCost::record` holds a
+check over 3× its expected cost back a round — dropped if the next is normal, fitted with it if
+not (`docs/invariants/scheduling.md` § "Speculation that does not pay steps aside"). 12h rig, ONE
+binary, `SWARMLLM_DSD_CHECK_OUTLIERS=keep` the old fit, ABBA (`~/swarmllm-gate-0235/ab244.sh`,
+Windows up 44 h, 0 driver events): the old fit was poisoned in 3 of 4 streamed runs — this time
+316-770 ms FIXED, γ 6-8, the other direction from the release check's γ 0 — and the held-back fit
+in none; `checks_held_back=1` on every stalled request. **Left: the stall itself**, which still
+costs its request ~5 s (13.5-14.8 vs ~25 tok/s, both arms). Found so far: it lands ~29 s after the
+coordinator starts, when the HuggingFace watcher's first refresh and the canonical-upload probe
+run (`HF_WATCHER_STARTUP_DELAY_SECS`, `canonical::FIRST_PASS_AFTER`, both 30 s) — hence always the
+rig's second or third request. In `ab244_logs/fix_stream_1a_A.log` the coordinator's network
+manager handled NOTHING — no swarm event, no command — from 23.456 to 26.736 (3.28 s) right after
+sending the forward, then the forward's ACK and result together; the only lines in between are
+`HfWatcher: snapshot refreshed` (+0.8 s), `Probed remote GGUF file` and the `canonical upload`
+verdict (+2.3 s), then 1 s of silence. The 100 ms per-arm "event loop stalled" warning never fired,
+so the loop was not polled rather than slow in an arm — the shape of synchronous work on a Tokio
+worker. Static candidates on those paths, none in `spawn_blocking`: the redb commits in
+`adopt_canonical_build` and `persist_manifest` (durable, fsync), the 5.9 MB header parses in
+`probe` and `canonical_manifest`, and the header write/read/hash round trips in `verify_upload`.
+Turning off one path at a time did not stop the stall (watcher off: probe still ran; the gate's
+`SWARMLLM_CANONICAL_UPLOADS=0`: watcher still ran). Next: per-thread syscall sampling of the
+coordinator across the window (`~/swarmllm-gate-0235/thread_sample2.py --spawn`, which must be the
+rig's ancestor to read `/proc/<tid>/syscall`), then move the blocking call off the runtime.
 
 #### #10 — Conversation prefixes across computers: a cache this node did not fill is invisible
 `P2` · perf-split · **PARTIAL** — 2026-09-07 · absorbs #139 and archive § "Speeding up inference BETWEEN nodes" idea 1 (prefix-keyed remote KV); history: archive row #10 and § "A conversation's later turns do not seek out the peer holding its prefix"

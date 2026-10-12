@@ -3480,6 +3480,21 @@ stop guessing, or it is only safe over long links. **The continuous stream (on b
 v0.3.216) walks no γ**: it remembers `best_gamma_overall` over the costs it measured, so a zero
 still steps the next request aside — it remembered its starting 4 until the flip (2026-10-01).
 
+**Because a zero is remembered, one stalled check must not be able to decide it** (#244,
+2026-10-12). The check-cost line (`CheckCost`, weighted least squares, decay 0.8) was taken over
+by ONE check that waited ~3-4 s among ~40 ms ones: at the v0.3.235 release check it became
+0 ms + 209-468 ms a position — γ 0, and the next request stepped aside for `REPROBE_AFTER`
+(3 of 4 streamed runs, 28 → 21 tok/s on the request after); on the same rig later the same stall
+landed at the mean position count and read as 316-770 ms FIXED (γ 6-8). `CheckCost::record` now
+holds back a check over `OUTLIER_FACTOR` (3×) its expected cost — the line, or the mean scaled by
+positions for a length the line has not seen — until the next round: a normal one drops it, a
+second slow one fits both, so a lasting change is learned one round late. Measured on the 12h rig,
+ONE binary, `SWARMLLM_DSD_CHECK_OUTLIERS=keep` the old fit, ABBA ×2 stream + ×2 rounds: the old fit
+was poisoned in 3 of 4 streamed runs, the held-back fit in none, `checks_held_back=1` on every
+stalled request (`DSD: request complete`). The drafter's cost already used a median for the same
+reason (`RecentMedian`); robust RLS bounds one sample's influence the same way (Ruckdeschel,
+arXiv 1204.3358). The stalled request itself stays slow — that is the stall, not the controller.
+
 → `docs/plans/split_speculation.md` § "Guessing steps aside where it does not pay"
 
 ## What a peer HOLDS on disk and what it has LOADED are different facts

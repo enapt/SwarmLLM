@@ -1074,6 +1074,12 @@ stream reads ~15% SLOWER there than rounds (25-27 vs 28-33 tok/s at an emulated 
 while with the far half on other hardware it is ~15-20% faster. Put B on the processor
 (`NODE_B_TOML='gpu_layers = 0\n[resources]\nmax_cpu_threads = 8'` in `split_speed.sh`) or on
 another machine to see the stream work.
+`DIAG:` **speculation stopped (or swung to many guesses) after one slow request** — the coordinator's INFO
+`DSD: request complete` carries the check-cost fit (`check_fixed_ms`, `check_ms_per_position`), `final_gamma` and
+`checks_held_back`. A fit far off the ~30-50 ms fixed / 0-15 ms a position of a near split, with `final_gamma=0`
+and the next request logging `guessing did not pay on these machines last time` (DEBUG), is one stalled check
+fitted (#244); since 2026-10-12 such a check is held back a round and counted in `checks_held_back`.
+`SWARMLLM_DSD_CHECK_OUTLIERS=keep` fits every check as it came, for an A/B.
 `DIAG:` **a stream that stalls ~52-60 s and then re-plans** (or, on a two-node split, returns a few tokens marked
 `error`): on the SERVING node grep `LayerForward rejected` and `waited 60s for the check before it`. Both together
 are the v0.3.213-215 shape (#767 — the per-peer cap refused a chunk, the rest waited for its turn); from v0.3.216 a
