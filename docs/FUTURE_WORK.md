@@ -72,7 +72,7 @@ re-fetching parts) and #223 closed in v0.3.228 (released 2026-10-06 09:42 UTC), 
     holding the first layers, not only with a peer holding the last.)*
 7. **#10** — conversation prefixes across computers: a peer's cache this node did not fill is
     invisible (no digests gossiped) and caches end at the 10-minute idle expiry (the split half
-    released in v0.3.234; routing to the holder this node knows of built 2026-10-11, unreleased).
+    released in v0.3.234; routing to the holder this node knows of released in v0.3.235).
 8. *(#162 closed 2026-10-09 — cloned gates refuse a missing helper; 12e's failover arms moved to a
     shape this box holds, and `split_rig.sh failover` keeps no prompt since #10.)*
 9. *(#155 narrowed to P3 on 2026-10-07 — not seen on the swarm, see its entry.)*
@@ -88,7 +88,7 @@ re-fetching parts) and #223 closed in v0.3.228 (released 2026-10-06 09:42 UTC), 
     pieces chained between two peers for a pass that does not keep its prompt).
 14. **#228** — Qwen 3.5's first version leaves out speculation (its card/processor split shipped
     in v0.3.230; its MoE models run, its delta rule is one op per layer and its decode steps are
-    captured as CUDA graphs since 2026-10-11, unreleased).
+    captured as CUDA graphs since v0.3.235).
 
 Everything else is ranked in its own entry. **P3** is narrow or cosmetic, **P4** is process,
 maintenance or an idea with no user waiting on it.
@@ -781,7 +781,7 @@ uninstall a P2P app). The capability broadcast is change-gated since v0.3.234 (K
 Re-measured 2026-10-11 on the release node with the fleet on .234 (4.1 h up, 7 peers, idle):
 8.7 KB/s out, 5.8 of it gossip; the capability's first copies 976 → 167 B/s; manifests
 59% of the gossip sent, every one a repeat, each arriving ~4.2 times. So the manifest
-quiet window went 30 min → 2 h (not yet released; RFC 6550's Trickle ceiling is ~2.3 h),
+quiet window went 30 min → 2 h (released in v0.3.235, 2026-10-12; RFC 6550's Trickle ceiling is ~2.3 h),
 `docs/invariants/network.md` § "The manifests again, once the capability was gated". Open:
 (1) re-measure once the fleet runs the 2 h window (`ModelManifest` first copies ≤ ~0.004 a
 second expected, from 0.0123); (2) announce-then-pull for manifests — gossip `(model, hash)`
@@ -914,13 +914,13 @@ between arms (`~/swarmllm-138/{llama_moe2,ours_moe,moe_prof}.sh`):
   overhead: a device→host copy of the router scores, ~80 launches and ~16 host→device copies
   per layer); the processor's 22 took 22-28 ms; attention, norms and RoPE ~15 ms.
 
-**Done 2026-10-11 (unreleased):** the processor's experts for ≤ 8 tokens run as (token,
+**Done 2026-10-11 (released in v0.3.235):** the processor's experts for ≤ 8 tokens run as (token,
 expert) pairs in ONE parallel region per projection (`MoeFfn::experts_in_one_region` →
 vendored `quantized::matvec_many`, llama.cpp's `mul_mat_id` shape), bit-identical to the
 per-expert path: processor stage 22.1 / 28.3 / 24.9 → 19.2 / 16.5 / 17.8 ms (−29%, ABBA + a
 synced pair, one binary, `SWARMLLM_MOE_CPU=per-expert` = old).
 
-**Done 2026-10-11 (unreleased), the card:** a card keeps a layer's experts STACKED as the
+**Done 2026-10-11 (released in v0.3.235), the card:** a card keeps a layer's experts STACKED as the
 file holds them, routes on the card and runs each projection for every chosen pair in ONE
 launch (`MoeFfn::experts_stacked`, candle-nn `moe_gemm_gguf`: one-row kernel ≤ 8 tokens,
 tensor-core kernel for a prompt). Decode step 74-89 → 40-55 ms, ~23 tok/s — level with
@@ -930,7 +930,7 @@ races: candle's tensor-core prompt kernel lacked a barrier (replies changed run 
 vendored candle-kernels with the one line, gotcha #827), and a card-to-card `to_device` was
 unordered (gotcha #828). A/B `SWARMLLM_MOE_CARD=per-expert`, `SWARMLLM_MOE_CARD_PROMPT=rows`.
 
-**Done 2026-10-11 (unreleased), a prompt on the processor:** the one-region path takes every
+**Done 2026-10-11 (released in v0.3.235), a prompt on the processor:** the one-region path takes every
 token count — vendored `quantized::matmul_many` with several activation rows per job, each
 64-row task applying one expert's weight rows to ALL of that expert's tokens (`vec_dot_rows`,
 `k_quants::matmul`'s tiling), `MOE_PAIRS_PER_REGION` pairs a region; still bit-identical.
@@ -1001,6 +1001,19 @@ the time per step changed, not the guessing. Next: per-step card timings for req
 (draft and check `_ms` in the DSD line), and the same rig at low uptime, to separate machine state
 from code.
 
+**2026-10-12, the v0.3.235 release check and a re-run** (`~/swarmllm-gate-0235/rerun_12h.sh`, the
+12h card shape, Windows up 43 h, 0 driver events): **not a regression** — the deployed v0.3.234,
+run alternately with v0.3.235 on the same shape, does the same. The slow request ends
+`final_gamma=0` with `check_fixed_ms=0.0` and `check_ms_per_position` 209-468 ms, where every
+other request fits 33-50 ms fixed and 0-11 ms a position: the check-cost fit reads as taken over
+by slow checks, and the controller then stops guessing (`dsd_controller::best_gamma_for_check`
+→ γ = 0). Streamed, v0.3.235 vs v0.3.234 (tok/s per request): 26.0/14.4/28.0 and 25.7/12.8/21.0
+vs 26.2/13.2/21.2 and 26.1/13.9/21.1. Rounds (`SWARMLLM_SPEC_STREAM=0`), three runs each: v0.3.235
+averages 25.5, v0.3.234 28.8, and v0.3.235 with `SWARMLLM_DECODE_INSTALL=0` 25.7 (so not #137),
+inside this shape's own spread of 17-33. Next: log each check's `_ms` at debug to find what makes
+one slow, and keep one slow check from taking over the fit (a median or trimmed fit, as the
+drafter's own cost already uses the median).
+
 #### #10 — Conversation prefixes across computers: a cache this node did not fill is invisible
 `P2` · perf-split · **PARTIAL** — 2026-09-07 · absorbs #139 and archive § "Speeding up inference BETWEEN nodes" idea 1 (prefix-keyed remote KV); history: archive row #10 and § "A conversation's later turns do not seek out the peer holding its prefix"
 
@@ -1011,8 +1024,8 @@ resumes where every segment is believed to hold it; each segment keeps its part 
 `PrefixCache`; a miss re-sends from 0 once. It keys on the prompt's CONTENT, so the old note that
 the Anthropic surface could not reach a session-id design no longer applies — every surface's
 prompt pass goes through `forward_through_segments`. What is left:
-- **Route to the peer that holds it — built 2026-10-11 for what THIS node knows, not yet
-  released.** The planner reads the belief table: each (node, exact layer range) believed to
+- **Route to the peer that holds it — built 2026-10-11 for what THIS node knows, released in
+  v0.3.235.** The planner reads the belief table: each (node, exact layer range) believed to
   hold the prompt's opening is credited what it would not read again
   (`NodeCandidate::prompt_tokens_held`, both routers; greedy now prices the unread prompt —
   `docs/invariants/scheduling.md` § "A split segment is credited what this node believes it
@@ -1034,7 +1047,7 @@ prompt pass goes through `forward_through_segments`. What is left:
   beliefs live in one process and start empty after a restart.
 
 #### #171 — The prompt pass through a split runs one stage at a time
-`P2` · perf-split · **PARTIAL** — 2026-08-24, built 2026-10-10 for the splits this node leads · absorbs archive § "Speeding up inference BETWEEN nodes" idea 2 (prefill microbatching); history: archive § "The pipeline is idle (N-1)/N of the time during the phase that dominates a long request"
+`P2` · perf-split · **PARTIAL** — 2026-08-24, released in v0.3.234 for the splits this node leads · absorbs archive § "Speeding up inference BETWEEN nodes" idea 2 (prefill microbatching); history: archive § "The pipeline is idle (N-1)/N of the time during the phase that dominates a long request"
 
 **Built 2026-10-10, released in v0.3.234 (`pipeline::prompt_chunks`, `docs/plans/pipelined_prompt_pass.md`):** a prompt
 pass of two or more 512-position pieces is read in pieces, every segment at once, where no
@@ -1133,7 +1146,7 @@ deleting.)
 `P2` · model-support · **OPEN** — 2026-10-06 · history: #117 (closed); plan: `docs/plans/qwen35_support.md`
 
 Dense Qwen 3.5 runs since #117. Still out: (1) ~~`qwen35moe` refused~~ — **runs since 2026-10-11,
-not yet released**: the loader already read its layout (the dense loop with `load_moe_ffn`; the
+released in v0.3.235**: the loader already read its layout (the dense loop with `load_moe_ffn`; the
 popular unsloth Qwen3.5-35B-A3B Q4_K_M header, read by range request, names exactly those tensors —
 separate gate/up/down expert stacks, a sigmoid-gated shared expert, no fused `ffn_gate_up_exps`), so
 the change is `is_supported`, `supported_list` and `arch_supports_hybrid`. Checked against llama.cpp
@@ -1159,14 +1172,14 @@ scheduler's bound on a peer (`kv_bytes_per_position_per_layer`, from the manifes
 table), now ask `split::layers_keeping_kv` (the real 9B header: attention at layers 3, 7, …, 31, llama.cpp's
 rule). Still uncharged: each DeltaNet layer's per-request state (~2 MB a layer for the 9B,
 covered by the forward-buffer reserve); (3) ~~the delta rule runs token by token~~ — **one op per
-layer since 2026-10-11, not yet released.** llama.cpp master no longer chunks it either: its fused
+layer since 2026-10-11, released in v0.3.235.** llama.cpp master no longer chunks it either: its fused
 `GGML_OP_GATED_DELTA_NET` runs every prompt and decode step (`fused_gdn_ar` / `fused_gdn_ch` on by
 default, read at `4b1a27f`), so neither do we — `layers::qwen35::delta_rule_cpu` (a task per sequence
 and value head, each state row decayed, corrected and read in one pass) and on a card
 `kernels/delta_rule.cu` (llama.cpp's `gated_delta_net_cuda`, a warp per state row). A 685-token prompt on the 4B: 55.8 → 19.8-21.1 s on the processor (llama.cpp 14.9 s), 2.6 → 0.49-0.53 s whole on the card; the card kernel agrees with llama.cpp at top-1 200/200.
 `SWARMLLM_DELTA_RULE=steps` is the old composition (`docs/invariants/inference.md` § "Qwen 3.5's
 delta rule is ONE op per layer"); (4) ~~decode is never captured as a CUDA graph~~ —
-**captured since 2026-10-11, not yet released**: on a card each DeltaNet layer keeps its state in
+**captured since 2026-10-11, released in v0.3.235**: on a card each DeltaNet layer keeps its state in
 two buffer pairs and a step writes the pair it did not read (`SsmState`), as llama.cpp keeps fixed
 cache tensors; the 0.8B writes 121-126 tokens a second instead of 50-54 whole on the card, the 4B is unchanged
 (~37, card-bound), ids identical with capture on and off (`docs/invariants/inference.md` § "Qwen 3.5's decode steps are captured
@@ -1730,7 +1743,7 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-11, not yet released** (#224, #137's main half, #228 (1), (3) and (4), #138's processor decode, card and prompt steps and its Q2_K/Q3_K kernels)
+**Closed 2026-10-11, released in v0.3.235 (2026-10-12)** (#224, #137's main half, #228 (1), (3) and (4), #138's processor decode, card and prompt steps and its Q2_K/Q3_K kernels)
 - #228 (4) — **Qwen 3.5 writes replies faster on a graphics card**: its decode steps are
   captured as CUDA graphs like every dense family's — refused until now because each DeltaNet
   layer replaced its state with new memory every step. On an RTX 3070 Laptop the 0.8B writes 121-126 tokens a second
