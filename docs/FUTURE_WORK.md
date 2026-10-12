@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #248**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #257**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -66,6 +66,9 @@ re-fetching parts) and #223 closed in v0.3.228 (released 2026-10-06 09:42 UTC), 
 4. **#1** — every Mac runs on the processor; no GPU backend is compiled for Apple Silicon.
 5. **#220** — a worker's card faulted once (illegal memory access) and the driver took 14 minutes
    to reset; the kernel is still unknown (the sanitizer attaches here since 2026-10-10 — run it under the kit).
+5a. **#250** — a model held whole here, which the card holds only part of, was routed through two
+   peers at 0.1 tok/s where the same machine answers locally in ~5 s (report #035). Its
+   window-narrowing contributor closed as #248; the dense pricing of a mixture-of-experts model is left.
 
 **P2 — speed and completeness**
 6. *(#152 closed 2026-10-09 — the guess-check stream runs on the boomerang and with a peer
@@ -438,6 +441,26 @@ frame, then add a receipt ACK or a per-frame read deadline mirroring request-res
 § 4 item 7); with V1Lazy (#136) request-response is as fast, so there is no speed reason to.
 
 ### Routing and placement
+
+#### #250 — A model held whole here, which the card holds only part of, can be routed through peers at a fraction of local speed
+`P1` · routing · **OPEN** — 2026-10-12 · history: report #035 (a tester, RTX 3060 12 GB, v0.3.232-.234)
+
+Qwen3-30B-A3B Q4_K_M, every part held here, 18 of 48 layers on the card: a 2,728-token prompt
+was planned through two peers in Italy and Belgium (`predicted_ms=278167`, `cold:100339`,
+`net:94208`) and ran at **0.1 tok/s**, where Ollama on the same machine, card plus processor,
+answers in ~5 s. Several contributors (diagnosis rule 6). Each is a hypothesis until a rig runs the shape:
+- **The soft-unload** (#248, closed): a card more than 70% full of this model narrowed its
+  window to the first and last parts plus a few middles, so this node could no longer run it alone
+  and the middle had to go abroad. The route `aa3d1e66 → 99aafc41 → 7c10ea04 → aa3d1e66` is that
+  shape.
+- **The local card/processor split is priced as a dense model.** `local_speed_off_the_card` and the
+  hybrid prior price per-token work from the whole file's bytes. A 30B-A3B reads about a tenth of
+  its expert bytes per token (8 of 128 experts), so the local price is several times too slow.
+- **The prompt is priced on the processor prior** for a hybrid local route even with layers on the
+  card, while #138 made a mixture-of-experts prompt 3.5-4.7× faster on both.
+Next: the shape on this box (Qwen3-30B-A3B Q2_K whole, split 26/22 card/processor, `~/swarmllm-138/`)
+with a peer holding the middle. Read the planner's local price against the measured local time,
+then price experts by their ACTIVE share (`expert_used_count / expert_count` from the header).
 
 #### #237 — A peer's room for a conversation is not advertised, and the hand-off counts the prompt only
 `P3` · routing · **OPEN** — 2026-10-08 · history: report #005 (a tester, v0.3.230 code); related #194
@@ -985,59 +1008,6 @@ Designs: `docs/plans/split_speculation.md` (guess-and-check across a split),
 `docs/plans/wan_parallel.md` (parallelise the reply, not the token), `docs/plans/regional_pipelines.md`
 (placement by distance, #192), `docs/plans/faster_than_local.md` (the ranked list).
 
-#### #244 — A third streamed guess-check request in a row runs at the old speed
-`P3` · perf-split · **PARTIAL** — 2026-10-08 · history: the v0.3.231 release check after #233
-
-After #233 the drafter keeps guessing on every request (final_gamma 1, not 0). But in the 12h
-shape (7B split A/B on one card, 24 ms emulated link, 0.5B q8 drafter on A, streamed checks), the
-third request of each run reads 17.8-21.5 tok/s, while the first two read 24.5-27.6. The old-rule
-arm reads 18.4-21.7 for all three. Measured on the downloaded v0.3.231 build, one binary, arms
-old / weigh / fixed ×2 (`~/swarmllm-gate-0231/h12_post.sh`, Windows up 27 h, 0 driver events).
-The same rig on a main build at 18 h uptime that morning (`~/swarmllm-bisect233/h12_three.sh`) had
-all three fast (25.3-28.4). Not the graph rest: in run 12 the rest began 0.8 s into request 3 on
-the count rule ("no ordinary step timed yet") and was ended 0.19 s later by the weighing (graph
-4.1 ms vs ordinary 13.1 ms). Accepted guesses are identical across the three requests (139/81), so
-the time per step changed, not the guessing. Next: per-step card timings for request 3 vs 2
-(draft and check `_ms` in the DSD line), and the same rig at low uptime, to separate machine state
-from code.
-
-**2026-10-12, the v0.3.235 release check and a re-run** (`~/swarmllm-gate-0235/rerun_12h.sh`, the
-12h card shape, Windows up 43 h, 0 driver events): **not a regression** — the deployed v0.3.234,
-run alternately with v0.3.235 on the same shape, does the same. The slow request ends
-`final_gamma=0` with `check_fixed_ms=0.0` and `check_ms_per_position` 209-468 ms, where every
-other request fits 33-50 ms fixed and 0-11 ms a position: the check-cost fit reads as taken over
-by slow checks, and the controller then stops guessing (`dsd_controller::best_gamma_for_check`
-→ γ = 0). Streamed, v0.3.235 vs v0.3.234 (tok/s per request): 26.0/14.4/28.0 and 25.7/12.8/21.0
-vs 26.2/13.2/21.2 and 26.1/13.9/21.1. Rounds (`SWARMLLM_SPEC_STREAM=0`), three runs each: v0.3.235
-averages 25.5, v0.3.234 28.8, and v0.3.235 with `SWARMLLM_DECODE_INSTALL=0` 25.7 (so not #137),
-inside this shape's own spread of 17-33. Next: log each check's `_ms` at debug to find what makes
-one slow, and keep one slow check from taking over the fit (a median or trimmed fit, as the
-drafter's own cost already uses the median).
-
-**Done 2026-10-12 (unreleased): one slow check no longer decides γ.** `CheckCost::record` holds a
-check over 3× its expected cost back a round — dropped if the next is normal, fitted with it if
-not (`docs/invariants/scheduling.md` § "Speculation that does not pay steps aside"). 12h rig, ONE
-binary, `SWARMLLM_DSD_CHECK_OUTLIERS=keep` the old fit, ABBA (`~/swarmllm-gate-0235/ab244.sh`,
-Windows up 44 h, 0 driver events): the old fit was poisoned in 3 of 4 streamed runs — this time
-316-770 ms FIXED, γ 6-8, the other direction from the release check's γ 0 — and the held-back fit
-in none; `checks_held_back=1` on every stalled request. **Left: the stall itself**, which still
-costs its request ~5 s (13.5-14.8 vs ~25 tok/s, both arms). Found so far: it lands ~29 s after the
-coordinator starts, when the HuggingFace watcher's first refresh and the canonical-upload probe
-run (`HF_WATCHER_STARTUP_DELAY_SECS`, `canonical::FIRST_PASS_AFTER`, both 30 s) — hence always the
-rig's second or third request. In `ab244_logs/fix_stream_1a_A.log` the coordinator's network
-manager handled NOTHING — no swarm event, no command — from 23.456 to 26.736 (3.28 s) right after
-sending the forward, then the forward's ACK and result together; the only lines in between are
-`HfWatcher: snapshot refreshed` (+0.8 s), `Probed remote GGUF file` and the `canonical upload`
-verdict (+2.3 s), then 1 s of silence. The 100 ms per-arm "event loop stalled" warning never fired,
-so the loop was not polled rather than slow in an arm — the shape of synchronous work on a Tokio
-worker. Static candidates on those paths, none in `spawn_blocking`: the redb commits in
-`adopt_canonical_build` and `persist_manifest` (durable, fsync), the 5.9 MB header parses in
-`probe` and `canonical_manifest`, and the header write/read/hash round trips in `verify_upload`.
-Turning off one path at a time did not stop the stall (watcher off: probe still ran; the gate's
-`SWARMLLM_CANONICAL_UPLOADS=0`: watcher still ran). Next: per-thread syscall sampling of the
-coordinator across the window (`~/swarmllm-gate-0235/thread_sample2.py --spawn`, which must be the
-rig's ancestor to read `/proc/<tid>/syscall`), then move the blocking call off the runtime.
-
 #### #10 — Conversation prefixes across computers: a cache this node did not fill is invisible
 `P2` · perf-split · **PARTIAL** — 2026-09-07 · absorbs #139 and archive § "Speeding up inference BETWEEN nodes" idea 1 (prefix-keyed remote KV); history: archive row #10 and § "A conversation's later turns do not seek out the peer holding its prefix"
 
@@ -1283,6 +1253,34 @@ StarCoder2, inert while refused).
 
 ### Memory and admission
 
+#### #256 — On WSL, `nvidia-smi` waits for a busy card, so a reading taken mid-reply is "unknown"
+`P3` · memory · **OPEN** — 2026-10-12 · history: #244's fix (archive § "Closed after 2026-10-02" → #244)
+
+On WSL2 with the card busy, `nvidia-smi` waits in the graphics driver. Thread samples show it in
+`dxgvmb_send_sync_msg` and `dxgprocess_close_adapter`. In the 12h rig shape (two nodes and their
+model processes on one card) a call made mid-reply lived 20.9 s, and the 10 s bound returned
+"unknown". Before #244's fix the same call lived 2.4 s, because the wait stalled the node's network
+task, the split's work stopped, and the card went idle. Over a week of ordinary use the live node
+hit the bound once (2026-10-05, 13 s). What it costs: a capability broadcast advertises no room for a cycle, and admission
+charges no other program. If one call is held 60 s, `graphics_driver_not_answering` sends NEW
+workers to the processor until it answers. Not seen outside the rig. Next: read memory through
+NVML in-process with one handle held open (what `nvidia-smi` does inside, without a process start
+and adapter close per reading — the closing is where it waited longest). Then the 12h shape with
+the thread sampler (`examples/thread_sample.py`).
+
+#### #252 — `/v1/models` advertises a context the card cannot hold, and the refusal names no token figure
+`P2` · memory · **OPEN** — 2026-10-12 · history: report #035 (a tester, RTX 3060 12 GB, v0.3.234)
+
+Qwen3-14B on a 12 GB card: `/v1/models` says `max_model_len: 8192` (the declared limit under
+`DEFAULT_MAX_SEQ_LEN`), but with the weights loaded the KV budget is 860 MB, and a 6,228-token
+prompt was refused (`short_by_mb=259`; usable ≈ 5k). A client (Open WebUI, Home Assistant) learns this only from failed
+requests. The refusal (`LocalMemoryUnavailable`, 503) speaks in MB, not tokens. Next:
+(1) while a worker is loaded, report the positions its KV budget admits as the effective limit
+(`max_model_len_for`, both `/v1/models` and the MCP model list). (2) Put the token figure in the
+refusal ("this computer has room for about N tokens of conversation with this model now").
+Never shorten the context itself (`arch-worker-memory.md` § "A card's KV budget is kept whatever the
+context setting").
+
 #### #187 — Head-room admission prices load and runtime on two different bases
 `P3` · memory · **PARTIAL** — 2026-08-08 · history: archive § "Head-room admission: two things the live test found"
 
@@ -1402,6 +1400,25 @@ Billing between pools waits on credits, which are dormant (`docs/CREDITS_DESIGN.
 
 ### Packaging, release and operations
 
+#### #253 — The CUDA build finds a missing CUDA library only mid-request, as "worker closed connection"
+`P2` · build · **OPEN** — 2026-10-12 · history: report #035 (a tester, Kubuntu 26.04, the 2026-10-06 install)
+
+cudarc (dynamic loading) opens cuBLAS, cuBLASLt, cuRAND and NVRTC the first time a kernel needs one;
+a missing library panics in the model process, and the owner sees `503 worker closed connection
+mid-generate` with nothing naming the library. The `.deb` depends on `$auto, openssl` only, and
+startup checks only the driver (`is_culib_present`). Next: at startup, open each library the
+build will need. A missing one names itself in the log and the dashboard, and the node runs on
+the processor (the `CpuReason` path) rather than failing each request. The `.deb` should
+`Recommends:` the CUDA 12 runtime packages.
+
+#### #255 — `swarmllm status` reads the default data directory, not the running daemon's
+`P3` · cli · **OPEN** — 2026-10-12 · history: report #035 (a tester)
+
+Without `-d`, the CLI reads `~/.local/share/swarmllm/api_key` and fails against a daemon started
+with `/opt/swarmllm/data` (the error explains it). Next: the CLI asks the daemon on the port for
+its data directory, or the daemon leaves its data directory where the CLI looks first (a runtime
+file), before falling back to the default.
+
 #### #241 — llama-cpp-2 is pinned at 0.1.157; 0.1.158 moved tokenisation onto the vocabulary
 `P4` · build · **OPEN** — 2026-10-08 · history: Dependabot PR #34 (its llama compile-check failed)
 
@@ -1460,6 +1477,20 @@ endpoints. `candle-*` stays on 0.10 deliberately (§ "Decided").
 Credits are DORMANT — they gate nothing, and `credits_stay_dormant` fails the build if one
 starts. Read `docs/CREDITS_DESIGN.md` before touching them; the credit items below are
 preconditions for ever switching enforcement on, not work for now.
+
+#### #251 — `owned_by: "local"` reads as "my data stays here"; it means "every part is held here"
+`P2` · privacy · **OPEN** — 2026-10-12 · history: report #035 (a tester, v0.3.232-.234)
+
+`api::model_source_for` answers `local` when this node holds every part, which says nothing about
+where a request runs. A model the card cannot hold whole may be split with peers (#250). The default boomerang starts and
+ends that route here, so peers never see the prompt TEXT. They do see hidden states, ~81% invertible
+to text (`docs/ARCHITECTURE.md` § Pipeline Privacy Model). Today a user can keep requests on their own
+computer only node-wide (a pool with `private_mode = true` and `private_mode_allow_lan = false`).
+`x-swarm-route` reports the route on the OpenAI and Anthropic surfaces. Next: (1) say what
+`owned_by` means where it is listed (book API page, `/v1/models` doc); (2) a "keep on this computer"
+choice per model in the dashboard and per request (`swarm_route`), answered by the local route or
+a policy refusal (`PrivateModeUnavailable` shape, 503, never "retry") — never silently abroad;
+(3) the route header on the Responses API and MCP too.
 
 #### #30 — The plaintext-prompt trust bar sits exactly at the score an unknown peer starts on
 `P2` · security · **OPEN** — 2026-09-10 · history: archive row #30 and § "The plaintext-prompt trust bar sits exactly at the score an unknown peer starts on"
@@ -1766,6 +1797,30 @@ archive under the named heading. Reopen one only with the evidence its line name
 Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 19-28 were
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
+
+**Closed 2026-10-12, unreleased** (#244, #248, #249, #254)
+- #244 — **a split's reply no longer pauses for seconds while the node reads the graphics
+  card's memory.** `nvidia-smi` (2-6 s on WSL with the card busy) was waited for on a thread
+  that also runs the node's network task, so a peer's answers sat unread. The 12h release-check
+  shape read one request in three at 11.5-16 tok/s instead of 24-27. Same binary, old wait
+  restored by `SWARMLLM_NVIDIA_SMI_ON_RUNTIME=1`: the old wait stalled 3 rounds of 3 (13.6, 11.5,
+  13.0 tok/s), the fix 0 of 3 (23.4-27.6). The guess-check controller also no longer lets one slow
+  check decide how many guesses to make (shipped first, 2026-10-12). Leaves #256.
+  ⚠ The stall was first put down to the HuggingFace watcher and the canonical-upload check, which
+  run at the same moment. That was a coincidence: sampling every thread found the runtime thread
+  waiting on `nvidia-smi`.
+- #248 — **a model no longer loses part of its place on the graphics card just because it fills
+  the card.** The memory check that narrows a loaded model counted the model's own memory as
+  pressure, priced a card/processor split model at its whole file, and could retire a worker
+  mid-reply ("stranded_requests=1"). A model that had been running locally then sent part of
+  every request to peers. It now acts only when other programs take the card's room, and never on
+  a model that is in use (report #035).
+- #249 — **an idle model gives its graphics memory back after the idle time (5 minutes by
+  default)**, not up to an hour later. Regional demand, which includes this computer's own
+  recent requests, no longer keeps an idle model loaded; a model the owner pins or locks still
+  stays up to an hour (report #035: a 14B "idle 20m" still holding 9.2 GB).
+- #254 — **`--gpu-layers -1` (auto) is accepted on the command line**; it was read as an
+  unknown flag `-1` (report #035).
 
 **Closed 2026-10-11, released in v0.3.235 (2026-10-12)** (#224, #137's main half, #228 (1), (3) and (4), #138's processor decode, card and prompt steps and its Q2_K/Q3_K kernels)
 - #228 (4) — **Qwen 3.5 writes replies faster on a graphics card**: its decode steps are

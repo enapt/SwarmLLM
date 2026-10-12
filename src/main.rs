@@ -53,8 +53,13 @@ struct Cli {
     #[arg(short, long, global = true, value_name = "PATH")]
     model: Option<String>,
 
-    /// Number of layers to offload to GPU (0 = CPU only)
-    #[arg(long, global = true)]
+    /// Device placement: -1 = auto (the graphics card when it can run the
+    /// model), 0 = processor only. `inference.gpu_layers` in config.toml.
+    //
+    // `allow_negative_numbers`: without it clap read `--gpu-layers -1` — the
+    // default, and the value this help names — as an unknown flag `-1`
+    // (field report #035). The hidden `model-worker` argument already had it.
+    #[arg(long, global = true, allow_negative_numbers = true)]
     gpu_layers: Option<i32>,
 
     /// Bootstrap peer multiaddr (e.g. /ip4/127.0.0.1/udp/8800/quic-v1)
@@ -701,5 +706,13 @@ mod tests {
             Cli::try_parse_from(["swarmllm", "test-split", "--gpu-layers", "14"]).expect("parses");
         assert_eq!(cli.gpu_layers, Some(14));
         assert!(matches!(cli.command, Some(Commands::TestSplit { .. })));
+    }
+
+    /// `--gpu-layers -1` is the documented "auto", and was refused as an
+    /// unknown flag `-1` (field report #035).
+    #[test]
+    fn gpu_layers_takes_minus_one_for_auto() {
+        let cli = Cli::try_parse_from(["swarmllm", "run", "--gpu-layers", "-1"]).expect("parses");
+        assert_eq!(cli.gpu_layers, Some(-1));
     }
 }

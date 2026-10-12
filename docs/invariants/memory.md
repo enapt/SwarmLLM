@@ -250,9 +250,10 @@ admission is still short, every time. Measured live: eviction freed 1202 MB, the
 admission refused against a 2449 MB shortfall and the model loaded on the CPU at
 ~7 tok/s with the card at 12%.
 **Neither timer can do this job.** `try_idle_vram_unload` runs on the auto-manage
-tick, so it cannot act on the request arriving *now*, and its regional-demand
-clause deliberately keeps a model the SWARM wants resident for up to
-`idle_hard_unload_secs` (1 hour) — precisely a popular 8B.
+tick, so it cannot act on the request arriving *now*, and a deliberate hold
+(pin, lock, privacy setting) keeps a model resident for up to
+`idle_hard_unload_secs` (1 hour). (Until field report #035, 2026-10-12, regional
+demand bought the same reprieve — precisely a popular 8B.)
 Three properties a change here must keep. **Plan before destroying**: the whole
 plan is costed first and abandoned whole if it cannot succeed, because unloading
 models and still not fitting costs a cold start and buys nothing. The RAM sibling
@@ -642,7 +643,7 @@ test pins that so no unload pays for a race that is not happening.
 (2026-09-03, gotcha #448). `storage_budget_now(&state)`
 gives both for this node, live. Consumers: the download pass
 (`scoring::remaining_budget`, whose refusal logs every figure and the rule
-that produced it), prune's disk pressure (`prune::compute_resource_pressure`),
+that produced it), prune's disk pressure (`AutoShardManager::disk_pressure`),
 the settings storage bar (`api::admin::storage_breakdown`), the pool page
 (`api::pool`) and the diagnostics report's `storage:` line.
 `the_storage_budget_has_one_accountant` in `tests/repo_consistency.rs`
@@ -760,8 +761,8 @@ What the shared method covers, and what it deliberately does not:
   `max(disk, vram)`: deleting a part frees no graphics memory (prune even
   prefers parts that are not loaded), and a card fills whenever a model is
   resident, so a GPU node shed parts the download pass fetched back as soon as
-  its card emptied. `max(disk, vram)` now gates only phase 0's soft-unload,
-  unchanged.
+  its card emptied. Phase 0's soft-unload reads no pressure figure at all
+  since field report #035 (§ "A card full of our own model is not pressure").
 - **The reserve is a FLOOR on free space, not a share of it.** "Held + 80% of
   free" kept offering room while a part fit in 80% of what was left: 550 MB
   parts filled a 30 GB container (3 GB of system) to 148 MB free, 99.5% —
@@ -790,6 +791,17 @@ execution path passes) is now a fourth input, and residency clamps the answer.
 A new "how long has X been idle" judgement must be bounded by "how long has
 X existed", and must read a signal the COMMON path actually writes — grep for
 the writer before trusting a doc comment that names one.
+
+**Regional demand buys no idle reprieve (2026-10-12, field report #035).** The
+loop asks `prune::stays_loaded_while_idle(idle, deliberately_held, window)`, the
+one gate, and the tests call it rather than a copy. Regional demand once kept an
+idle model loaded for up to an hour: it stood in for "is anyone asking US", from
+before `effective_idle_secs` read the served clock. Once it did, what the demand
+figure still measured was the region in the abstract plus this node's OWN
+recent requests, an average that decays over tens of minutes — so a 14B the
+owner had stopped using sat on 9.2 GB at "graphics card idle 20m" and the owner
+unloaded it by a timer. Ollama unloads after `keep_alive` (5 min) whatever the
+demand. A deliberate hold still keeps a model under the 12× ceiling.
 
 ## An admitted prompt is RECORDED, not just decided
 
@@ -1267,7 +1279,7 @@ the budget cannot see at all.
 
 ### Why the accounting fix alone would have been a REGRESSION
 
-Prune deletes `shard_NNN.bin` and nothing else. `compute_resource_pressure`
+Prune deletes `shard_NNN.bin` and nothing else. Disk pressure
 divides `held_bytes` by the budget, so counting bytes prune cannot free gives a
 node near its limit a floor it can never get under: it sheds two shards per
 model per cycle, forever, and the redundancy check is the only brake. That is
@@ -2229,6 +2241,49 @@ a hung card after `TdrDelay` (2 s) and gives threads `TdrDdiDelay` (5 s) to leav
 the rule exists for (2026-10-04) held it 14 minutes — so the threshold separates them, like a
 health probe's failure threshold. Tests: `a_driver_that_has_not_answered_is_reported_without_waiting_for_it`,
 `a_driver_that_answers_late_is_not_reported_as_not_answering` (red with the threshold ignored).
+
+**Never on a runtime worker (2026-10-12, FUTURE_WORK #244).** `BoundedCommand::run` waited by
+polling the child with a 5 ms `std::thread::sleep` — on whatever thread called it, and the
+capability broadcast, admission and the dashboard call it from async tasks. On WSL with the card
+busy `nvidia-smi` takes 2-6 s, and for that long the Tokio worker running it ran nothing else. The
+network manager was the task stuck behind it: tokio 1.53 puts a task woken by another task in the
+waking worker's LIFO slot, and "this LIFO slot is not currently stealable" (`runtime/scheduler/
+multi_thread/worker.rs`), so idle workers could not take it. A split's segment replies sat
+unread for 2.5-4 s, and the release gate's 12h row read 13-15 tok/s where it reads 24-27. Found by
+sampling every thread of the stalled node (`examples/` has no copy; the method is
+`docs/DIAGNOSTICS.md` § "Which thread is a stalled node sitting in") — the node's runtime worker
+was in `clock_nanosleep` with an `nvidia-smi` child alive, not in the HF watcher that the stall's
+timing first pointed at (a coincidence). `run` now waits through
+`executor::without_starving_the_runtime` (`block_in_place` on a multi-thread runtime, so the
+worker's other tasks — its LIFO slot among them — move to a fresh thread). A/B inside one binary:
+`SWARMLLM_NVIDIA_SMI_ON_RUNTIME=1` restores the old wait. Test:
+`a_slow_bounded_command_does_not_hold_the_runtime_worker` (a 10 ms ticker on a one-worker runtime;
+largest gap 506 ms without the fix).
+
+## A card full of our own model is not pressure (2026-10-12, field report #035)
+
+Prune's phase 0 narrowed a loaded model's shard window — "VRAM soft-unload" — whenever
+`max(disk, used ÷ total card memory)` passed 0.7, pricing the model at its whole file ×1.15. Both
+halves were wrong. A card is FULL of our own model whenever one is loaded — that is the point of
+loading it — so the figure crossed 0.7 on every node with a model bigger than 70% of its card. And
+a card/processor split model is charged only its card share, so priced at its whole file it was
+always "too big" and always narrowed. The narrowed window keeps the first and last parts and some
+middles, so this node could no longer run the model alone and its next request routed the middle
+through peers — the report's 14B, on a 24 GB-class card, went from local to a pipeline through two
+peers while the owner watched. It also retired workers that were serving.
+
+**The rule.** `AutoShardManager::try_vram_soft_unload` narrows only when the graphics memory our
+models are CHARGED (`ModelProcessPool::vram_committed_mb`, the one owner of that figure) exceeds
+`compute_vram_budget` — what the card has room for NOW, which shrinks when another program takes
+some. Then it narrows the LARGEST model with no request in flight
+(`models_with_inflight_requests`, which asks `WorkerHandle::in_use`), to what the budget leaves
+after the others, priced at that model's own charge per part (`vram_committed_by`). Never an
+in-use model: reclaiming from a model mid-reply strands the reply (#93's rule for growth, the same
+here). The choice is the pure `prune::card_room_to_give_back`; tests
+`a_card_full_of_our_own_model_is_not_pressure`,
+`room_taken_by_other_programs_is_given_back_by_the_largest_idle_model`. Ollama's equivalent never
+narrows a loaded model for its own footprint either: it unloads idle runners when a NEW load needs
+the room, and otherwise only after `keep_alive`.
 
 ## The owner is told when the card has become slow to hand out memory (2026-10-01)
 

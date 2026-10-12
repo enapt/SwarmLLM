@@ -620,6 +620,25 @@ read calls" both fit the symptom, look identical in the source, and no amount of
 reading distinguishes them. It is also why the optimised release binary was no
 faster than a debug build on that path — optimisation cannot remove a syscall.
 
+## "Which thread is a stalled node sitting in" — when it stalls without using the CPU (#244)
+
+A node that goes quiet for seconds while its CPU idles is waiting on something — and in an async
+process the log line around the gap names the task that WAITED, not the one that blocked it. Sample
+every thread instead: `examples/thread_sample.py --spawn 'run -p 8900' 600 <rig or node command>`
+prints, every 50 ms, each thread that used CPU or sits in a non-idle syscall, with its syscall
+number and kernel wait channel. Start the node FROM the sampler (`--spawn`): reading another
+process's `/proc/<pid>/task/<tid>/syscall` needs ptrace permission, which yama `ptrace_scope` 1
+gives only to an ancestor (without it the column reads `?`; `wchan` still works).
+
+Read it against the log's gap: a `tokio-rt-worker` in `230` (clock_nanosleep) for the gap's whole
+length, with an `nvidia-smi` or other child alive, is synchronous waiting ON THE RUNTIME — every
+task queued on that worker waits too, and in tokio 1.53 the task it woke last sits in its LIFO
+slot, which idle workers cannot steal. That was #244: `nvidia-smi` (2-6 s on WSL with the card
+busy) polled with `std::thread::sleep`, holding the network manager's replies 2.5-4 s.
+Blocking-pool threads carry the same name, so a sleeping `tokio-rt-worker` is a runtime worker
+only if its tid is among the first `worker_threads` the node started. A/B for that fix:
+`SWARMLLM_NVIDIA_SMI_ON_RUNTIME=1` restores the old wait.
+
 ## "Did the graphics card fault?" — read the driver's events by their data (WSL2 / Windows)
 
 `DIAG:` A worker that dies with `CUDA_ERROR_ILLEGAL_ADDRESS` (or any card error) reports it
@@ -1325,7 +1344,9 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
 
 | Level | What | Fields |
 |-------|------|--------|
-| INFO  | `DIAG: evaluate_and_prune` | `disk_pressure` (decides every file), `resource_pressure` (max with VRAM — gates soft-unload only), `pressure_urgent` (disk) |
+| INFO  | `DIAG: evaluate_and_prune` | `disk_pressure` (decides every file), `pressure_urgent` (disk) |
+| INFO  | `VRAM soft-unload: other programs took graphics memory` | `model`, `total_shards`, `window_shards`, `committed_mb`, `budget_mb` — fires only when our charged card memory exceeds what the card has room for now (#248) |
+| DEBUG | `VRAM soft-unload: other programs took room, but nothing loaded can give it back now` | `committed_mb`, `budget_mb`, `in_use` |
 | DEBUG | `Not fetching a part prune would delete again once it landed` | `model`, `shard`, `holders`, `pressure_after` (gotcha #795) |
 | DEBUG | `DIAG: register_local_shard` | `model`, `shard` |
 | INFO  | `DIAG: check_and_load_model` | `model`, `available_shards`, `missing_shards`, `total_shards`, `ranges`, `ready`, `local_shard_indices` |

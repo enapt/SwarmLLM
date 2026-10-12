@@ -16541,3 +16541,66 @@ breaks prefix-cache binary compatibility; never KIVI. A refusal printing `live_e
 a total well above that request's own cache would reopen #11.
 
 Closed by the half KV cache on the card and the card's KV budget kept under a context override; the measurements are in `docs/invariants/inference.md` § "A card keeps its KV cache as f16" and `docs/invariants/memory.md` § "A card's KV budget is kept whatever the context setting". The two options left unbuilt are named in `FUTURE_WORK.md` § Closed.
+
+### #244 — closed 2026-10-12 (the entry as it stood when closed, word for word)
+
+⚠ Its last paragraph names HuggingFace-watcher and canonical-upload work as the likely cause. That
+is WRONG: per-thread sampling (`examples/thread_sample.py`) found the runtime worker in
+`clock_nanosleep`, polling an `nvidia-smi` child, for the length of the stall. The timing matched
+because the first capability broadcast's reading also lands ~30 s after start. The fix and its A/B
+are in `docs/invariants/memory.md` § "nvidia-smi is asked through one bounded helper" → "Never on a
+runtime worker". With the fix, the same call lived 20.9 s and returned "unknown" (→ #256), against
+2.4 s when the stall idled the card.
+
+#### #244 — A third streamed guess-check request in a row runs at the old speed
+`P3` · perf-split · **PARTIAL** — 2026-10-08 · history: the v0.3.231 release check after #233
+
+After #233 the drafter keeps guessing on every request (final_gamma 1, not 0). But in the 12h
+shape (7B split A/B on one card, 24 ms emulated link, 0.5B q8 drafter on A, streamed checks), the
+third request of each run reads 17.8-21.5 tok/s, while the first two read 24.5-27.6. The old-rule
+arm reads 18.4-21.7 for all three. Measured on the downloaded v0.3.231 build, one binary, arms
+old / weigh / fixed ×2 (`~/swarmllm-gate-0231/h12_post.sh`, Windows up 27 h, 0 driver events).
+The same rig on a main build at 18 h uptime that morning (`~/swarmllm-bisect233/h12_three.sh`) had
+all three fast (25.3-28.4). Not the graph rest: in run 12 the rest began 0.8 s into request 3 on
+the count rule ("no ordinary step timed yet") and was ended 0.19 s later by the weighing (graph
+4.1 ms vs ordinary 13.1 ms). Accepted guesses are identical across the three requests (139/81), so
+the time per step changed, not the guessing. Next: per-step card timings for request 3 vs 2
+(draft and check `_ms` in the DSD line), and the same rig at low uptime, to separate machine state
+from code.
+
+**2026-10-12, the v0.3.235 release check and a re-run** (`~/swarmllm-gate-0235/rerun_12h.sh`, the
+12h card shape, Windows up 43 h, 0 driver events): **not a regression** — the deployed v0.3.234,
+run alternately with v0.3.235 on the same shape, does the same. The slow request ends
+`final_gamma=0` with `check_fixed_ms=0.0` and `check_ms_per_position` 209-468 ms, where every
+other request fits 33-50 ms fixed and 0-11 ms a position: the check-cost fit reads as taken over
+by slow checks, and the controller then stops guessing (`dsd_controller::best_gamma_for_check`
+→ γ = 0). Streamed, v0.3.235 vs v0.3.234 (tok/s per request): 26.0/14.4/28.0 and 25.7/12.8/21.0
+vs 26.2/13.2/21.2 and 26.1/13.9/21.1. Rounds (`SWARMLLM_SPEC_STREAM=0`), three runs each: v0.3.235
+averages 25.5, v0.3.234 28.8, and v0.3.235 with `SWARMLLM_DECODE_INSTALL=0` 25.7 (so not #137),
+inside this shape's own spread of 17-33. Next: log each check's `_ms` at debug to find what makes
+one slow, and keep one slow check from taking over the fit (a median or trimmed fit, as the
+drafter's own cost already uses the median).
+
+**Done 2026-10-12 (unreleased): one slow check no longer decides γ.** `CheckCost::record` holds a
+check over 3× its expected cost back a round — dropped if the next is normal, fitted with it if
+not (`docs/invariants/scheduling.md` § "Speculation that does not pay steps aside"). 12h rig, ONE
+binary, `SWARMLLM_DSD_CHECK_OUTLIERS=keep` the old fit, ABBA (`~/swarmllm-gate-0235/ab244.sh`,
+Windows up 44 h, 0 driver events): the old fit was poisoned in 3 of 4 streamed runs — this time
+316-770 ms FIXED, γ 6-8, the other direction from the release check's γ 0 — and the held-back fit
+in none; `checks_held_back=1` on every stalled request. **Left: the stall itself**, which still
+costs its request ~5 s (13.5-14.8 vs ~25 tok/s, both arms). Found so far: it lands ~29 s after the
+coordinator starts, when the HuggingFace watcher's first refresh and the canonical-upload probe
+run (`HF_WATCHER_STARTUP_DELAY_SECS`, `canonical::FIRST_PASS_AFTER`, both 30 s) — hence always the
+rig's second or third request. In `ab244_logs/fix_stream_1a_A.log` the coordinator's network
+manager handled NOTHING — no swarm event, no command — from 23.456 to 26.736 (3.28 s) right after
+sending the forward, then the forward's ACK and result together; the only lines in between are
+`HfWatcher: snapshot refreshed` (+0.8 s), `Probed remote GGUF file` and the `canonical upload`
+verdict (+2.3 s), then 1 s of silence. The 100 ms per-arm "event loop stalled" warning never fired,
+so the loop was not polled rather than slow in an arm — the shape of synchronous work on a Tokio
+worker. Static candidates on those paths, none in `spawn_blocking`: the redb commits in
+`adopt_canonical_build` and `persist_manifest` (durable, fsync), the 5.9 MB header parses in
+`probe` and `canonical_manifest`, and the header write/read/hash round trips in `verify_upload`.
+Turning off one path at a time did not stop the stall (watcher off: probe still ran; the gate's
+`SWARMLLM_CANONICAL_UPLOADS=0`: watcher still ran). Next: per-thread syscall sampling of the
+coordinator across the window (`~/swarmllm-gate-0235/thread_sample2.py --spawn`, which must be the
+rig's ancestor to read `/proc/<tid>/syscall`), then move the blocking call off the runtime.

@@ -114,9 +114,15 @@ The loader records the card's KV budget with or without `inference.max_seq_len_o
 
 ## nvidia-smi is asked through one bounded helper (2026-10-05)
 
-**`vram::nvidia_smi`** (a `BoundedCommand`: 10 s, never two copies at once — while a stuck one lives, the next reading is `None` at once) is the only way the daemon and workers run `nvidia-smi`; a bare `Command::new("nvidia-smi")` waits as long as the driver does — 14 min during one card reset. Guard: `nvidia_smi_is_asked_only_through_the_bounded_helper`. Once a copy has been stuck for 60 s (`DRIVER_NOT_ANSWERING_AFTER` — one slow answer is not a reset, #802), `vram::graphics_driver_not_answering` is true and new workers go to the processor (`CpuReason::DriverNotAnswering`, transient — promotion brings them back); a shorter stall is waited out on the card.
+**`vram::nvidia_smi`** (a `BoundedCommand`: 10 s, never two copies at once — while a stuck one lives, the next reading is `None` at once) is the only way the daemon and workers run `nvidia-smi`; a bare `Command::new("nvidia-smi")` waits as long as the driver does — 14 min during one card reset. Guard: `nvidia_smi_is_asked_only_through_the_bounded_helper`. Once a copy has been stuck for 60 s (`DRIVER_NOT_ANSWERING_AFTER` — one slow answer is not a reset, #802), `vram::graphics_driver_not_answering` is true and new workers go to the processor (`CpuReason::DriverNotAnswering`, transient — promotion brings them back); a shorter stall is waited out on the card. **Its wait never holds a Tokio runtime worker** (`executor::without_starving_the_runtime`, #244): 2-6 s of `nvidia-smi` parked the network manager in that worker's unstealable LIFO slot. Test: `a_slow_bounded_command_does_not_hold_the_runtime_worker`.
 
 → `docs/invariants/memory.md` § "nvidia-smi is asked through one bounded helper (2026-10-05)"
+
+## A card full of our own model is not pressure (2026-10-12, field report #035)
+
+Prune's soft-unload narrows a loaded model only when our CHARGED graphics memory (`vram_committed_mb`) exceeds `compute_vram_budget` — other programs took room — and only the largest model NOT in use (`models_with_inflight_requests`), priced by its own charge (`vram_committed_by`). Never a fraction of the card's total (a loaded model fills it) nor the whole file (a split model is charged its card share). Choice: `prune::card_room_to_give_back`. Idle unload asks `prune::stays_loaded_while_idle`; regional demand buys no reprieve.
+
+→ `docs/invariants/memory.md` § "A card full of our own model is not pressure"
 
 ## A card that stalls is given less work, not more (2026-09-28)
 

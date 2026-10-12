@@ -187,7 +187,7 @@ impl StorageBudget {
 /// **The one answer to "how much shard storage may this node hold?"**
 ///
 /// Consulted by the download scheduler (`scoring::remaining_budget`), by the
-/// prune pass's disk pressure (`prune::compute_resource_pressure`), by the
+/// prune pass's disk pressure (`AutoShardManager::disk_pressure`), by the
 /// settings storage bar (`api::admin::storage_breakdown`), by the pool page
 /// (`api::pool`) and by the diagnostics report. Until 2026-09-03 the first
 /// two disagreed: the download side quartered the figure for Minimal and the

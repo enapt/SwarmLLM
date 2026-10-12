@@ -1153,8 +1153,9 @@ impl AutoShardManager {
 
     /// **The region this node's demand is filed under in `region_demand`** —
     /// its region, or `"??"` when it has none. The one key for the writer
-    /// (`decay_request_counts`) and every reader (the replica target, prune's
-    /// demand penalty, the idle-VRAM unload).
+    /// (`decay_request_counts`) and every reader (the replica target and
+    /// prune's demand penalty; the idle-VRAM unload read it too until field
+    /// report #035 removed its demand reprieve).
     ///
     /// The writer used `"??"` and the three readers `""`, so a node whose
     /// region could not be found (no configured region, geolocation failed)
@@ -1282,7 +1283,7 @@ mod tests {
             0,
             "over budget: the download pass must refuse"
         );
-        let pressure = manager.compute_resource_pressure(None);
+        let pressure = manager.disk_pressure();
         assert!(
             pressure > 0.95,
             "over budget: the prune pass must be under URGENT pressure, got {pressure}"
@@ -1307,7 +1308,7 @@ mod tests {
         let report = manager.remaining_budget(&live.auto_manage, &local);
         assert_eq!(report.held_bytes, 4 * GIB);
         assert!(report.remaining_bytes() > 0, "{}", report.budget.limited_by);
-        assert!(manager.compute_resource_pressure(None) < 0.95);
+        assert!(manager.disk_pressure() < 0.95);
     }
 
     #[test]

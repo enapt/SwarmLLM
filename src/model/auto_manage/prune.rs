@@ -5,7 +5,6 @@ use chrono::Timelike;
 use crate::types::{ModelId, NodeId, ShardId};
 
 use super::manager::{AutoShardManager, PruneCandidate};
-use super::vram::query_gpu_vram_used;
 
 /// Protection window — a shard acquired within the last `SHARD_RECENTLY_ACQUIRED_SECS`
 /// gets a scoring penalty so it's not pruned immediately after download.
@@ -44,8 +43,6 @@ fn recently_acquired_from(modified: std::io::Result<std::time::SystemTime>) -> b
 const PRESSURE_RELAXED: f64 = 0.5;
 const PRESSURE_NORMAL: f64 = 0.8;
 const PRESSURE_URGENT: f64 = 0.95;
-/// VRAM soft-unload trigger — try narrowing shard windows before deleting files.
-const PRESSURE_SOFT_UNLOAD: f64 = 0.7;
 
 /// Saturation factor for `contribution_auto`. When `holder_count >=
 /// SATURATION_FACTOR_AUTO * target_replicas`, the shard is over-replicated
@@ -87,24 +84,42 @@ fn privacy_holds_shard(
     required_ends.is_some_and(|(first, last)| index == first || index == last)
 }
 
-/// Region-demand EMA (requests/10min, decayed) below which a model counts as
-/// "the network isn't asking for this either" for idle VRAM unload. Matches the
-/// `ema_rate < 0.1` "no demand" boundary in `geo_target_replicas`.
-const IDLE_DEMAND_EMA_THRESHOLD: f64 = 0.1;
-
-/// Multiple of `idle_unload_secs` after which VRAM is reclaimed even for a model
-/// the region still wants.
-///
-/// The demand check is a proxy for "someone may ask us shortly", and it is a
-/// weak one — regional demand says nothing about whether requests are reaching
-/// THIS node. Without a ceiling it means "keep forever", which is not what any
-/// operator reads `idle_unload_secs` to mean. Twelve times the configured idle
-/// window (one hour at the 5-minute default) is long enough that a genuinely
-/// useful model is never evicted mid-use, and short enough that an unused one
-/// cannot hold a card all day.
+/// Multiple of `idle_unload_secs` after which memory is reclaimed even for a
+/// model the owner deliberately holds (a pin, a privacy setting, locked parts,
+/// a pool pin). Those choices are about keeping the model's PARTS; without a
+/// ceiling they would hold its memory forever, which is not what any operator
+/// reads `idle_unload_secs` to mean. Twelve times the configured idle window
+/// (one hour at the 5-minute default).
 const IDLE_HARD_UNLOAD_MULTIPLIER: i64 = 12;
 
-/// Idle seconds after which the region-demand reprieve no longer applies.
+/// Does an idle model keep its memory? Only one the owner deliberately holds,
+/// and only until [`idle_hard_unload_secs`]; everything else goes once it has
+/// been idle for `idle_unload_secs`. `idle_secs` is
+/// [`effective_idle_secs`] — a request this node made OR served for a peer, or
+/// the worker's own `last_used` — and `None` (never used) is idle.
+///
+/// **Regional demand no longer buys a reprieve** (field report #035,
+/// 2026-10-12: a 14B "graphics card idle 20m" still holding 9.2 GB, the owner
+/// unloading it by a timer). It stood in for "is anyone asking US for this"
+/// while serving a peer left no trace (archive § "Idle VRAM unload: the
+/// region-demand reprieve had no ceiling", whose "better fix, not done" was
+/// exactly this); `effective_idle_secs` has read the served clock since
+/// 2026-09-02 (gotcha #437), so a model this node serves is never idle. What
+/// the demand figure still measured was the region in the abstract — and this
+/// node's OWN past requests, an average that decays over tens of minutes, so
+/// the owner's own burst kept a model loaded long after they stopped. Ollama
+/// unloads after its `keep_alive` (5 minutes) whatever the demand.
+fn stays_loaded_while_idle(idle_secs: Option<i64>, deliberately_held: bool, window: u64) -> bool {
+    let Some(idle) = idle_secs else {
+        return false;
+    };
+    if idle < i64::try_from(window).unwrap_or(i64::MAX) {
+        return true;
+    }
+    deliberately_held && idle < idle_hard_unload_secs(window)
+}
+
+/// Idle seconds after which a deliberate hold no longer keeps a model loaded.
 fn idle_hard_unload_secs(idle_unload_secs: u64) -> i64 {
     // `as i64` would wrap a very large configured window to a negative number,
     // which inverts the check and unloads immediately instead of never.
@@ -167,6 +182,34 @@ const RECENT_REQUEST_PENALTY: f64 = 1.5;
 /// barely-saturated shards in selection.
 const SATURATION_FACTOR_SEVERE: f64 = 2.0;
 
+/// Phase 0's decision ([`AutoShardManager::try_vram_soft_unload`]), apart from
+/// the pool: `None` while our models fit the budget as it stands — a card full
+/// of OUR model is not pressure, admission put it there — and when every model
+/// that could give memory back is in use ([`WorkerHandle::in_use`], the one
+/// answer). Otherwise the largest idle model, which frees the most in one
+/// restart, and the card memory it may keep: the budget less what the others
+/// hold. `narrowable` pairs each candidate with what it is charged on the card.
+///
+/// [`WorkerHandle::in_use`]: crate::inference::process_pool::ModelProcessPool::models_with_inflight_requests
+pub(super) fn card_room_to_give_back(
+    narrowable: &[(ModelId, u64)],
+    in_use: &[ModelId],
+    committed_mb: u64,
+    budget_mb: u64,
+) -> Option<(ModelId, u64)> {
+    if committed_mb <= budget_mb {
+        return None;
+    }
+    narrowable
+        .iter()
+        .filter(|(m, held)| *held > 0 && !in_use.contains(m))
+        .max_by_key(|(_, held)| *held)
+        .map(|(m, held)| {
+            let others = committed_mb.saturating_sub(*held);
+            (m.clone(), budget_mb.saturating_sub(others))
+        })
+}
+
 impl AutoShardManager {
     /// Evaluate and prune over-replicated shards. Called after downloads in each cycle.
     pub(super) async fn evaluate_and_prune(&self) {
@@ -181,12 +224,6 @@ impl AutoShardManager {
         let local_node_id = self.shared_state.identity.node_id().clone();
         let registry = &self.shared_state.model_registry;
         let shard_store = self.shared_state.shard_store();
-
-        // Pre-fetch VRAM usage off the Tokio thread (nvidia-smi is blocking I/O)
-        let live_vram_used = tokio::task::spawn_blocking(query_gpu_vram_used)
-            .await
-            .ok()
-            .flatten();
 
         // Compute resource pressure
         // How recently each loaded model was actually used, by the same signals
@@ -217,23 +254,18 @@ impl AutoShardManager {
         // loaded — and judging deletion by a card that fills whenever a model
         // is resident shed parts the download pass fetched straight back
         // (gotcha #795).
-        let resource_pressure = self.compute_resource_pressure(live_vram_used);
         let disk_pressure = self.disk_pressure();
         let pressure_urgent = disk_pressure > PRESSURE_URGENT;
         tracing::info!(
             disk_pressure = %format_args!("{:.2}", disk_pressure),
-            resource_pressure = %format_args!("{:.2}", resource_pressure),
             pressure_urgent,
             "DIAG: evaluate_and_prune starting"
         );
 
-        // ── Phase 0: VRAM soft-unload ──
-        // When VRAM pressure is moderate (SOFT_UNLOAD..URGENT), try narrowing the shard
-        // window for loaded models instead of deleting files. This frees VRAM while
-        // keeping shards on disk for the network.
-        if resource_pressure > PRESSURE_SOFT_UNLOAD && resource_pressure <= PRESSURE_URGENT {
-            self.try_vram_soft_unload(resource_pressure).await;
-        }
+        // ── Phase 0: give graphics memory back to other programs ──
+        // Narrows what a loaded model keeps on the card — files stay on disk —
+        // when OTHER programs have taken room our models were admitted into.
+        self.try_vram_soft_unload().await;
 
         // Check if we're in reduced hours
         let schedule_pressure = self.schedule_pressure_bonus().await;
@@ -1014,43 +1046,6 @@ impl AutoShardManager {
         pressure_adjusted_target(target, pressure, min_replicas)
     }
 
-    /// Combined resource pressure (0.0-1.0): the larger of disk and graphics
-    /// memory. Gates the graphics-memory action (phase 0's soft-unload) only —
-    /// whether a FILE is deleted or fetched is judged by [`Self::disk_pressure`]
-    /// alone (gotcha #795).
-    pub(super) fn compute_resource_pressure(&self, live_vram_used: Option<u64>) -> f64 {
-        // Disk pressure, measured against THE storage budget — the same
-        // figure the download pass refuses against. This used to be its own
-        // arithmetic (`max_storage_mb` or half of `max_disk_mb`, never
-        // scaled by contribution), while the download side quartered the
-        // figure for Minimal: a node holding 18 GB was over budget for
-        // downloading and at 36% for pruning, so it refused every download
-        // and pruned nothing, indefinitely (gotcha #448). One figure, or the
-        // two passes wedge exactly where they disagree.
-        let disk_pressure = self.disk_pressure();
-
-        // VRAM pressure -- prefer live nvidia-smi data over internal model tracking
-        let vram_pressure = if let Some(ref gpu) = self.shared_state.gpu_info {
-            if gpu.vram_total_mb > 0 {
-                let used_mb = live_vram_used.unwrap_or_else(|| {
-                    // Fallback when the card cannot be read: ask the one thing
-                    // that tracks what is actually ON it. Summing `split_models`
-                    // answered a different question — what has been REGISTERED,
-                    // on either device — and so reported pressure from models
-                    // sitting in system memory (gotcha #402).
-                    self.shared_state.model_process_pool.vram_committed_mb()
-                });
-                used_mb as f64 / gpu.vram_total_mb as f64
-            } else {
-                0.0
-            }
-        } else {
-            0.0
-        };
-
-        disk_pressure.max(vram_pressure).min(1.0)
-    }
-
     /// Compute schedule-based pressure bonus during reduced hours.
     async fn schedule_pressure_bonus(&self) -> f64 {
         let schedule = self.shared_state.models.resource_schedule.read().await;
@@ -1432,14 +1427,13 @@ impl AutoShardManager {
         peer_holders
     }
 
-    /// Try to free VRAM by narrowing shard windows on loaded models.
-    /// Keeps shards on disk (advertised to the network) but reduces what's in GPU memory.
-    /// VRAM efficiency (2026-07) — free the GPU memory of any loaded model that
-    /// has had no local requests for `idle_unload_secs` AND shows negligible
-    /// network demand. Shards stay on disk (the worker re-spawns on the next
-    /// request) and our holder status is unchanged, so this only reclaims VRAM
-    /// pinned for a model nobody is currently using. Runs every cycle,
-    /// independent of memory pressure. `0` disables it.
+    /// VRAM efficiency (2026-07) — free the GPU memory of any loaded model
+    /// nobody has used for `idle_unload_secs` (a deliberate hold buys up to
+    /// [`idle_hard_unload_secs`]; [`stays_loaded_while_idle`] is the gate).
+    /// Shards stay on disk (the worker re-spawns on the next request) and our
+    /// holder status is unchanged, so this only reclaims VRAM pinned for a
+    /// model nobody is currently using. Runs every cycle, independent of
+    /// memory pressure. `0` disables it.
     pub(super) async fn try_idle_vram_unload(&self, idle_unload_secs: u64) {
         if idle_unload_secs == 0 {
             return;
@@ -1484,7 +1478,6 @@ impl AutoShardManager {
             active_models.insert(model_id);
         }
 
-        let our_region = self.demand_region();
         let now = chrono::Utc::now();
         let local_id = self.shared_state.identity.node_id().clone();
         let residency: std::collections::HashMap<ModelId, u64> =
@@ -1535,9 +1528,8 @@ impl AutoShardManager {
             //
             // Memory must always come back eventually and stay inside the
             // configured limits, whatever the model is for. So these delay the
-            // unload exactly as regional demand does below, and the same hard
-            // ceiling (`idle_hard_unload_secs`, 12x the idle window) overrides
-            // them. A pinned model stays warm while the machine is quiet and is
+            // unload, and the hard ceiling (`idle_hard_unload_secs`, 12x the
+            // idle window) overrides them. A pinned model stays warm while the machine is quiet and is
             // still released before it can hold a card all day; the shards are
             // untouched either way, so the pin keeps doing its actual job.
             let deliberately_held = self
@@ -1567,8 +1559,9 @@ impl AutoShardManager {
                 .and_then(|t| t.last_request_at);
             // Most recent activity of ANY kind — a request this node made, or
             // one it served for a peer. Serving was invisible here until
-            // 2026-07-28, which is why "regional demand" below had to stand in
-            // for it: a pure-server node otherwise looks permanently idle.
+            // 2026-07-28, which is why "regional demand" had to stand in for it
+            // (until field report #035): a pure-server node otherwise looked
+            // permanently idle.
             let since_local = last_req.map(|t| (now - t).num_seconds());
             let since_served = self
                 .shared_state
@@ -1581,32 +1574,7 @@ impl AutoShardManager {
                 worker_idle.get(&model_id).copied(),
                 residency.get(&model_id).copied(),
             );
-            let idle = since_any.is_none_or(|s| s >= idle_unload_secs as i64);
-            if !idle {
-                continue;
-            }
-            // Past a much longer idle period, keep the VRAM rather than the
-            // model. The demand check below keeps a wanted model warm while this
-            // node is momentarily quiet, which is right — but it measures what
-            // the REGION wants in the abstract, not whether anyone is asking US
-            // (nothing in the current code writes `last_request_at` at all; the
-            // worker's own `last_used` is what says so). So a model nobody ever asks us for stays
-            // resident indefinitely whenever regional demand sits above the
-            // threshold, and on a small card that starves the owner's own work.
-            // Reported externally 2026-07-27: two models resident 2h16 past their
-            // last request, both with regional demand barely over the line
-            // (0.107 and 0.126 against a 0.1 threshold), on a node that then hit
-            // GPU-OOM.
-            let hard_idle = since_any.is_none_or(|s| s >= idle_hard_unload_secs(idle_unload_secs));
-            // Low network demand: the region isn't asking for it either. Keep a
-            // wanted model warm even when THIS node is momentarily quiet.
-            let ema = self
-                .shared_state
-                .region_demand
-                .get(&(model_id.clone(), our_region.clone()))
-                .map(|v| *v)
-                .unwrap_or(0.0);
-            if (ema >= IDLE_DEMAND_EMA_THRESHOLD || deliberately_held) && !hard_idle {
+            if stays_loaded_while_idle(since_any, deliberately_held, idle_unload_secs) {
                 continue;
             }
 
@@ -1648,84 +1616,108 @@ impl AutoShardManager {
         }
     }
 
-    async fn try_vram_soft_unload(&self, pressure: f64) {
-        let vram_budget_mb = super::vram::compute_vram_budget(&self.shared_state);
-        let Some(budget) = vram_budget_mb else {
-            return; // No GPU or no budget configured
+    /// Phase 0: when OTHER programs have taken graphics memory our models were
+    /// admitted into, narrow one loaded model's shard window — the parts stay
+    /// on disk and on offer — to fit what the card leaves us now
+    /// ([`card_room_to_give_back`] decides which, and to how much).
+    ///
+    /// It used to fire on `max(disk, card used ÷ card total)` over 0.7, which
+    /// counts our OWN model: a 14B whose first load filled a 12 GB card to
+    /// 0.71 narrowed itself at once and retired the worker with the request
+    /// that had loaded it still in flight (field report, 2026-10-12: "the
+    /// first 1-2 requests take 10-20 s and one fails"). And it priced the
+    /// model at its whole file, so a model the loader had split between card
+    /// and processor never fitted and was always narrowed — to the first and
+    /// last parts, which leaves this node unable to run the model it holds
+    /// and sends every request through peers for the middle. Ollama sizes a
+    /// model at load and unloads only idle ones (`keep_alive`); nothing here
+    /// narrows a worker that is in use, the rule [`ModelProcessPool::grow_worker`]
+    /// keeps (#93).
+    ///
+    /// [`ModelProcessPool::grow_worker`]: crate::inference::process_pool::ModelProcessPool
+    async fn try_vram_soft_unload(&self) {
+        let Some(budget_mb) = super::vram::compute_vram_budget(&self.shared_state) else {
+            return; // No card, or no budget configured
         };
-
-        // Scale budget by pressure: at SOFT_UNLOAD use 90% of budget, at URGENT use 60%
-        let scale = 1.0 - (pressure - PRESSURE_RELAXED).clamp(0.0, 0.5);
-        let effective_budget = (budget as f64 * scale) as u64;
-
         let registry = &self.shared_state.model_registry;
         let pool = &self.shared_state.model_process_pool;
-
-        for model_id in pool.loaded_model_ids() {
-            // Skip if already has a window (don't narrow twice per cycle)
-            if pool.get_shard_window(&model_id).is_some() {
-                continue;
-            }
-
-            let Some(manifest) = registry.get_manifest(&model_id) else {
-                continue;
-            };
-
-            if manifest.shard_count <= 2 {
-                continue; // Can't narrow below 2 shards
-            }
-
-            let model_vram = super::vram::estimate_model_vram_mb(manifest.total_size_bytes);
-            let shard_vram_each = model_vram / manifest.shard_count as u64;
-
-            if shard_vram_each == 0 {
-                continue;
-            }
-
-            let window = super::vram::compute_optimal_shard_window(
-                manifest.shard_count,
-                shard_vram_each,
-                effective_budget,
-            );
-
-            if let Some(ref w) = window {
-                if w.len() < manifest.shard_count as usize {
-                    tracing::info!(
-                        model = %model_id,
-                        total_shards = manifest.shard_count,
-                        window_shards = w.len(),
-                        pressure = %format_args!("{:.2}", pressure),
-                        "VRAM soft-unload: narrowing shard window (shards stay on disk)"
-                    );
-                    let mname = self
-                        .shared_state
-                        .model_registry
-                        .get_manifest(&model_id)
-                        .map(|m| m.name.clone())
-                        .unwrap_or_else(|| model_id.0.clone());
-                    self.shared_state.emit_activity(
-                        crate::daemon::state::ActivityEvent::new(
-                            "auto_manage",
-                            "vram_soft_unload",
-                            format!(
-                                "VRAM pressure: narrowed {} to {} of {} part{}",
-                                mname,
-                                w.len(),
-                                manifest.shard_count,
-                                if manifest.shard_count == 1 { "" } else { "s" }
-                            ),
-                        )
-                        .with_model(&model_id.0)
-                        .with_model_name(&mname)
-                        .with_detail_num(w.len() as i64)
-                        .with_toast("warning", 5000),
-                    );
-                    pool.restart_with_window(&model_id, w.clone()).await;
-                    // Only do one model per cycle to avoid thundering restart
-                    break;
-                }
-            }
+        let committed_mb = pool.vram_committed_mb();
+        if committed_mb <= budget_mb {
+            return;
         }
+        let in_use = pool.models_with_inflight_requests();
+        let narrowable: Vec<(ModelId, u64)> = pool
+            .loaded_model_ids()
+            .into_iter()
+            // One narrowing per model: a window already set stays until the
+            // idle unload clears it.
+            .filter(|m| pool.get_shard_window(m).is_none())
+            .filter(|m| {
+                registry
+                    .get_manifest(m)
+                    .is_some_and(|mf| mf.shard_count > 2)
+            })
+            .map(|m| {
+                let held = pool.vram_committed_by(&m);
+                (m, held)
+            })
+            .collect();
+        let Some((model_id, may_keep_mb)) =
+            card_room_to_give_back(&narrowable, &in_use, committed_mb, budget_mb)
+        else {
+            tracing::debug!(
+                committed_mb,
+                budget_mb,
+                in_use = in_use.len(),
+                "VRAM soft-unload: other programs took room, but nothing loaded can give it back now"
+            );
+            return;
+        };
+        let Some(manifest) = registry.get_manifest(&model_id) else {
+            return;
+        };
+        // What one part costs on the card is what the pool CHARGED this model
+        // there, spread over its parts — never its whole file, which a model
+        // split between card and processor does not put on the card.
+        let held_mb = pool.vram_committed_by(&model_id);
+        let shard_card_mb = held_mb.div_ceil(u64::from(manifest.shard_count));
+        let Some(window) = super::vram::compute_optimal_shard_window(
+            manifest.shard_count,
+            shard_card_mb,
+            may_keep_mb,
+        ) else {
+            return;
+        };
+        if window.len() >= manifest.shard_count as usize {
+            return;
+        }
+        tracing::info!(
+            model = %model_id,
+            total_shards = manifest.shard_count,
+            window_shards = window.len(),
+            committed_mb,
+            budget_mb,
+            "VRAM soft-unload: other programs took graphics memory — narrowing shard window (shards stay on disk)"
+        );
+        let mname = manifest.name.clone();
+        self.shared_state.emit_activity(
+            crate::daemon::state::ActivityEvent::new(
+                "auto_manage",
+                "vram_soft_unload",
+                format!(
+                    "VRAM pressure: narrowed {} to {} of {} part{}",
+                    mname,
+                    window.len(),
+                    manifest.shard_count,
+                    if manifest.shard_count == 1 { "" } else { "s" }
+                ),
+            )
+            .with_model(&model_id.0)
+            .with_model_name(&mname)
+            .with_detail_num(window.len() as i64)
+            .with_toast("warning", 5000),
+        );
+        pool.restart_with_window(&model_id, window).await;
     }
 
     /// Get last prune time for a model from prune history.
@@ -1820,7 +1812,44 @@ pub(crate) fn mmproj_sheds_at(pressure: f64, holder_count: usize, floor: u32) ->
 #[cfg(test)]
 mod tests {
 
-    use super::{effective_idle_secs, privacy_holds_shard};
+    use super::{card_room_to_give_back, effective_idle_secs, privacy_holds_shard};
+    use crate::types::ModelId;
+
+    /// The field report (2026-10-12, RTX 3060 12 GB): a 14B's first load put
+    /// ~8.5 GB on the card — 0.71 of it — and the old trigger narrowed that
+    /// very model, retiring its worker with the request still in flight. Our
+    /// own model filling the card is not pressure.
+    #[test]
+    fn a_card_full_of_our_own_model_is_not_pressure() {
+        let q14 = ModelId("qwen3-14b-q4-k-m".into());
+        assert_eq!(
+            card_room_to_give_back(&[(q14, 8_500)], &[], 8_500, 11_000),
+            None
+        );
+    }
+
+    /// Other programs took room: the largest idle model gives it back, and
+    /// keeps what the budget leaves after the others' share.
+    #[test]
+    fn room_taken_by_other_programs_is_given_back_by_the_largest_idle_model() {
+        let big = ModelId("big".into());
+        let small = ModelId("small".into());
+        let held = [(small.clone(), 1_000), (big.clone(), 7_000)];
+        assert_eq!(
+            card_room_to_give_back(&held, &[], 8_000, 6_000),
+            Some((big.clone(), 5_000))
+        );
+        // A model in use is never the one narrowed (#93's rule): its worker
+        // would be retired under the request.
+        assert_eq!(
+            card_room_to_give_back(&held, std::slice::from_ref(&big), 8_000, 6_000),
+            Some((small.clone(), 0))
+        );
+        assert_eq!(
+            card_room_to_give_back(&held, &[big, small], 8_000, 6_000),
+            None
+        );
+    }
 
     /// The defect this was written for. Prompt privacy is ON BY DEFAULT wherever
     /// a node holds both ends of a model (`encrypted_pipeline_auto`, 2026-07-27),
@@ -2325,14 +2354,7 @@ mod tests {
 
 #[cfg(test)]
 mod idle_hard_unload_tests {
-    use super::{idle_hard_unload_secs, IDLE_DEMAND_EMA_THRESHOLD, IDLE_HARD_UNLOAD_MULTIPLIER};
-
-    /// The gate as the loop now evaluates it: demand OR a deliberate hold buys
-    /// a reprieve, and the hard ceiling overrides both.
-    fn keeps_reprieve(ema: f64, deliberately_held: bool, idle_secs: i64, window: u64) -> bool {
-        let hard_idle = idle_secs >= idle_hard_unload_secs(window);
-        (ema >= IDLE_DEMAND_EMA_THRESHOLD || deliberately_held) && !hard_idle
-    }
+    use super::{idle_hard_unload_secs, stays_loaded_while_idle, IDLE_HARD_UNLOAD_MULTIPLIER};
 
     /// **Memory always comes back.** A pinned, locked, pool-pinned or
     /// encrypted-pipeline model used to `continue` unconditionally, so a single
@@ -2344,62 +2366,75 @@ mod idle_hard_unload_tests {
         let window = 300;
         let past_ceiling = idle_hard_unload_secs(window) + 1;
         assert!(
-            !keeps_reprieve(0.0, true, past_ceiling, window),
+            !stays_loaded_while_idle(Some(past_ceiling), true, window),
             "a held model must still be released once past the hard ceiling — \
              memory has to come back whatever the model is for"
         );
-        assert!(
-            !keeps_reprieve(9.9, true, past_ceiling, window),
-            "not even demand AND a pin may hold memory past the ceiling"
-        );
     }
 
-    /// The reprieve must still do its job while the machine is merely quiet,
-    /// or pinning a model would stop meaning anything at all.
+    /// The hold must still do its job while the machine is merely quiet, or
+    /// pinning a model would stop meaning anything at all.
     #[test]
     fn a_deliberate_hold_still_keeps_a_briefly_idle_model_warm() {
         let window = 300;
         let briefly_idle = 600; // past the idle window, far under the ceiling
         assert!(
-            keeps_reprieve(0.0, true, briefly_idle, window),
+            stays_loaded_while_idle(Some(briefly_idle), true, window),
             "a pinned model should stay warm while the node is quiet"
         );
+    }
+
+    /// Field report #035 (2026-10-12): a 14B the owner had stopped using,
+    /// "graphics card idle 20m", still held 9.2 GB — the region's demand
+    /// figure (this node's own recent requests among it) kept buying it a
+    /// reprieve. Nothing deliberately holds it, so at 20 minutes against the
+    /// 5-minute default it goes, whatever the region wants.
+    #[test]
+    fn an_idle_model_nobody_holds_goes_after_the_window() {
+        let window = 300;
         assert!(
-            !keeps_reprieve(0.0, false, briefly_idle, window),
-            "an unpinned, unwanted model has nothing holding it and goes"
+            !stays_loaded_while_idle(Some(20 * 60), false, window),
+            "20 minutes idle, not held: the memory comes back"
         );
+        assert!(
+            !stays_loaded_while_idle(Some(window as i64), false, window),
+            "the window is inclusive: idle for exactly the window is idle"
+        );
+    }
+
+    /// Inside the window nothing is unloaded — held or not.
+    #[test]
+    fn a_model_used_inside_the_window_stays() {
+        let window = 300;
+        assert!(stays_loaded_while_idle(Some(0), false, window));
+        assert!(stays_loaded_while_idle(Some(299), false, window));
+    }
+
+    /// No use recorded at all is idle — the old `is_none_or` — and a hold
+    /// cannot keep a model that has no idle clock to measure against.
+    #[test]
+    fn a_model_never_used_is_idle() {
+        assert!(!stays_loaded_while_idle(None, false, 300));
+        assert!(!stays_loaded_while_idle(None, true, 300));
     }
 
     /// The reported case: two models resident 2h16 past their last request,
     /// regional demand barely over the line, on a node that then hit GPU-OOM.
-    /// At the 5-minute default the reprieve must have expired well before then.
     #[test]
     fn the_reported_two_hour_case_would_now_unload() {
         let ceiling = idle_hard_unload_secs(300);
         assert_eq!(ceiling, 3600, "12x the 5-minute default is one hour");
         let observed_idle_secs = 2 * 3600 + 16 * 60;
-        assert!(
-            observed_idle_secs >= ceiling,
-            "2h16 idle must be past the ceiling, got {ceiling}s"
-        );
-    }
-
-    /// The demand reprieve must still work for its intended case — a model this
-    /// node is quiet on but the region wants, shortly after last use.
-    #[test]
-    fn a_briefly_idle_wanted_model_keeps_its_reprieve() {
-        let ceiling = idle_hard_unload_secs(300);
-        let idle_secs = 600; // 10 minutes: past idle_unload_secs, far under the ceiling
-        assert!(idle_secs > 300, "past the plain idle window");
-        assert!(
-            idle_secs < ceiling,
-            "but still inside the reprieve, so demand can protect it"
-        );
-        // And the demand figure from the report would indeed protect it there —
-        // read from a variable so this stays a real comparison, not a constant
-        // the compiler folds away.
-        let reported_regional_demand = 0.107_f64;
-        assert!(reported_regional_demand >= IDLE_DEMAND_EMA_THRESHOLD);
+        assert!(!stays_loaded_while_idle(
+            Some(observed_idle_secs),
+            true,
+            300
+        ));
+        assert!(!stays_loaded_while_idle(
+            Some(observed_idle_secs),
+            false,
+            300
+        ));
     }
 
     #[test]

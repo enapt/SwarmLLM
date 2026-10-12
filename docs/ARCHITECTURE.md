@@ -95,6 +95,8 @@ swarmllm/
 │                 longer exist, wrong module paths, DIAG rows whose level/fields differ
 │                 from the tracing call, § pointers to missing headings (the sweep runs it);
 │                 decode_bound_by.py — is decode bound by the GPU or by one CPU thread;
+│                 thread_sample.py — what every thread of a node is doing, every 50 ms
+│                 (a runtime worker parked in a syscall reads as a stall with no CPU);
 │                 decode_submissions.sh — GPU submissions per decoded token, via nsys;
 │                 kernel_count_ab.sh — A/B two arms of ONE binary by per-kernel launch
 │                 count, and diff the replies (a fusion here is bit-identical, so a
@@ -1773,7 +1775,7 @@ postpone a prune, so they stay in the prune loop:
 
 **Resource Pressure** — two figures for two kinds of action:
 - **Disk pressure** (held ÷ storage budget) decides every file: which parts prune deletes, which the download pass fetches, the urgent tier, the score. Deleting a part frees no graphics memory, and a card fills whenever a model is resident, so judging deletion by it shed parts the download pass fetched straight back (gotcha #795).
-- **`max(disk_pressure, vram_pressure)`** gates only phase 0's VRAM soft-unload (narrowing what is loaded, files kept). VRAM pressure uses live `nvidia-smi` query (every 5 min tick) for actual GPU memory usage, with fallback to internal loaded-model tracking when nvidia-smi is unavailable
+- **Phase 0's soft-unload** (narrowing what is loaded, files kept) reads no pressure figure: it fires only when the graphics memory our models are charged (`vram_committed_mb`) exceeds what the card has room for now (`compute_vram_budget` — other programs took some), and narrows the largest model with no request in flight, never one in use (field report #035, 2026-10-12: a fraction of a full card counted our own model and narrowed a card/processor split model that was serving).
 
 The replica-target tiers, by disk pressure:
 - < 0.5: relaxed (+1 to target, keep extras)
@@ -3117,7 +3119,7 @@ Workers load only a subset of on-disk shards into GPU memory. Shards stay on dis
 
 - `ModelProcessPool.active_shard_windows`: per-model `Vec<u32>` of allowed shard indices
 - `--shard-window 0,1,7` CLI arg passed to `model-worker` subprocess
-- Auto-triggered by prune at VRAM pressure 0.7–0.95 (before hard-delete at 0.95+)
+- Auto-triggered by prune's phase 0 only when other programs took the card's room (committed > `compute_vram_budget`), on the largest model not in use
 - `compute_optimal_shard_window()` always prefers shard 0 (embeddings) and last shard (output head) for boomerang inference
 - API: `in_vram` field per shard in model detail; frontend shows V/D badges
 

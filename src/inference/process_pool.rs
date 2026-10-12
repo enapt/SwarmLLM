@@ -3218,6 +3218,12 @@ impl ModelProcessPool {
         self.vram_reserved_mb.iter().map(|e| *e.value()).sum()
     }
 
+    /// GPU memory committed to one model's worker, in MB — its part of
+    /// [`Self::vram_committed_mb`]; for a card/processor split, the card's share.
+    pub(crate) fn vram_committed_by(&self, model_id: &ModelId) -> u64 {
+        self.vram_reserved_mb.get(model_id).map_or(0, |v| *v)
+    }
+
     /// Does a model of this size fit, given the budget and what is already
     /// committed?
     ///

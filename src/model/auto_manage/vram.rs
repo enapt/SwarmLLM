@@ -1045,7 +1045,28 @@ impl BoundedCommand {
     /// What the program printed — `None` when it is not installed, fails, does
     /// not answer within the bound, or a previous copy still has not. Meant for
     /// queries that print a line or two, so the pipe never fills before it exits.
+    ///
+    /// **The wait never holds a runtime worker** (FUTURE_WORK #244): it runs
+    /// under [`crate::inference::executor::without_starving_the_runtime`], which
+    /// hands the worker's queue to another thread for the duration. Run on the
+    /// worker itself, a 2-6 s `nvidia-smi` — common on WSL while the card is
+    /// busy — parked every task queued behind it, and Tokio's slot for the task
+    /// woken last cannot be stolen by another worker (tokio 1.53
+    /// `runtime/config.rs`, "this LIFO slot is not currently stealable"). On the
+    /// 12h split rig the network task sat there: no swarm event and no command
+    /// for 2.4-4.1 s, matched to the millisecond by an `nvidia-smi` child's life
+    /// and one worker thread's `clock_nanosleep` (2026-10-12,
+    /// `thread_sample2.py`). The lock is inside it too: a second caller waits
+    /// for the first's whole run. `SWARMLLM_NVIDIA_SMI_ON_RUNTIME=1` = the old
+    /// behaviour, for an A/B.
     pub(crate) fn run(&self, args: &[&str]) -> Option<String> {
+        if waits_on_the_runtime_worker() {
+            return self.run_here(args);
+        }
+        crate::inference::executor::without_starving_the_runtime(|| self.run_here(args))
+    }
+
+    fn run_here(&self, args: &[&str]) -> Option<String> {
         use std::io::Read as _;
         let mut unanswered = self.unanswered.lock().unwrap_or_else(|e| e.into_inner());
         if let Some((child, since)) = unanswered.as_mut() {
@@ -1094,6 +1115,13 @@ impl BoundedCommand {
             }
         }
     }
+}
+
+/// `SWARMLLM_NVIDIA_SMI_ON_RUNTIME=1`: [`BoundedCommand::run`] waits on the
+/// calling runtime worker, as before #244, for an A/B inside one binary.
+fn waits_on_the_runtime_worker() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("SWARMLLM_NVIDIA_SMI_ON_RUNTIME").as_deref() == Ok("1"))
 }
 
 static NVIDIA_SMI: BoundedCommand = BoundedCommand::new("nvidia-smi", NVIDIA_SMI_TIMEOUT);
@@ -1440,6 +1468,60 @@ pub fn ram_budget_now(shared: &crate::daemon::SharedState) -> Option<RamBudget> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #244: an `nvidia-smi` that took seconds parked the task queued behind it
+    /// on the same runtime worker — the network manager, unpolled for 2.4-4.1 s.
+    /// One worker, so nothing else could pick the ticker up: it keeps ticking
+    /// only if the wait hands the worker over.
+    #[cfg(unix)]
+    #[test]
+    fn a_slow_bounded_command_does_not_hold_the_runtime_worker() {
+        use std::sync::{Arc, Mutex};
+        use std::time::{Duration, Instant};
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_time()
+            .build()
+            .unwrap();
+        let ticks: Arc<Mutex<Vec<Instant>>> = Arc::default();
+        let largest_gap = rt.block_on(async {
+            let recorded = ticks.clone();
+            let ticker = tokio::spawn(async move {
+                loop {
+                    recorded.lock().unwrap().push(Instant::now());
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            });
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let sleeper = Arc::new(BoundedCommand::new("sleep", Duration::from_secs(5)));
+            let asked = Instant::now();
+            let answer = tokio::spawn(async move { sleeper.run(&["0.5"]) })
+                .await
+                .unwrap();
+            let done = Instant::now();
+            ticker.abort();
+            assert_eq!(answer.as_deref(), Some(""), "`sleep 0.5` succeeded");
+            let during: Vec<Instant> = ticks
+                .lock()
+                .unwrap()
+                .iter()
+                .copied()
+                .filter(|t| *t >= asked && *t <= done)
+                .collect();
+            std::iter::once(asked)
+                .chain(during)
+                .chain(std::iter::once(done))
+                .collect::<Vec<_>>()
+                .windows(2)
+                .map(|w| w[1] - w[0])
+                .max()
+                .unwrap()
+        });
+        assert!(
+            largest_gap < Duration::from_millis(250),
+            "the ticker waited {largest_gap:?} behind a 0.5 s command"
+        );
+    }
 
     /// "Is the driver still not answering?" is true exactly while a copy that
     /// outlived its bound still runs — what puts new workers on the processor
