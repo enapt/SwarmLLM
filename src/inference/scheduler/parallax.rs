@@ -421,19 +421,8 @@ pub(super) fn vertex_cost(
         } else {
             2.0 * c.latency_ms as f32
         };
-        let per_layer = if c.est_tokens_per_sec > 0.0 {
-            // Very rough: layer_compute_ms ≈ layers / (est_tokens_per_sec * some_constant).
-            // est_tokens_per_sec is a whole-model throughput estimate for a 7B Q4 model;
-            // per-layer contribution is 1/num_layers of that. We conservatively use
-            // `1000.0 / est_tokens_per_sec` as the per-token-whole-model compute cost,
-            // then scale by the fraction of layers this segment owns. Assumes 32 layers
-            // as the baseline; adjust here if we want arch-aware scaling later.
-            let whole_model_ms = 1000.0 / c.est_tokens_per_sec;
-            whole_model_ms / BASELINE_LAYER_COUNT
-        } else {
-            UNKNOWN_COMPUTE_MS
-        };
-        (network, per_layer)
+        // The static prior, priced as one of THIS model's layers (#250).
+        (network, c.prior_ms_per_layer())
     };
 
     // Compute is per forward pass, and a request is many passes. Scaling every
@@ -1449,6 +1438,7 @@ mod tests {
             can_be_last,
             region_score: 1.0,
             est_tokens_per_sec,
+            layer_work: 1.0,
             observed_latency_ms_per_layer: None,
             observed_fixed_ms_per_visit: None,
             observed_delegated_ms_per_layer: None,
@@ -1468,6 +1458,71 @@ mod tests {
             fresh_run_layers: None,
             goodput_bytes_per_sec: None,
         }
+    }
+
+    /// FUTURE_WORK #250 (report #035): a layer is priced as the model it
+    /// belongs to. This node holds a 48-layer model on its processor (5 tok/s
+    /// for the 7B reference); a peer 50 ms away holds the second half on a card
+    /// (40). Priced as reference layers, the card's half is cheaper — 1,200 ms
+    /// of compute plus 6,400 ms of round trips against 9,600 ms here — so the
+    /// half goes abroad. A 30B-A3B layer reads ~0.28 of a reference layer, and
+    /// its compute shrinks while the round trips do not: 336 + 6,400 against
+    /// 2,688, so it stays here.
+    #[test]
+    fn a_light_layer_is_not_sent_a_round_trip_away_for_a_faster_card() {
+        let local = NodeId([1; 32]);
+        let route = |layer_work: f32| {
+            let mut here = cand(1, vec![(0, 24), (24, 48)], 0, 0.0, true, true, 5.0);
+            let mut card = cand(2, vec![(24, 48)], 50, 0.0, false, true, 40.0);
+            here.layer_work = layer_work;
+            card.layer_work = layer_work;
+            route_shortest_path(
+                48,
+                &[here, card],
+                &local,
+                false,
+                false,
+                CapacityBound::Everyone,
+                None,
+            )
+            .expect("a route exists")
+        };
+        let goes_abroad = |segs: &[PipelineSegment]| segs.iter().any(|s| s.node_id != local);
+        assert!(
+            goes_abroad(&route(1.0)),
+            "control: priced as reference layers the card's half must win, got {:?}",
+            route(1.0)
+        );
+        assert!(
+            !goes_abroad(&route(0.28)),
+            "a 30B-A3B layer must stay on this processor, got {:?}",
+            route(0.28)
+        );
+    }
+
+    /// The price follows the bytes: a 30B-A3B Q4_K_M layer (~35 MB read per
+    /// token) weighs less than the 7B reference's (~137 MB), a dense 32B
+    /// Q4_K_M's (~310 MB) more, and the prior scales with it.
+    #[test]
+    fn a_layer_weighs_what_it_reads() {
+        use crate::inference::scheduler::layer_work_from_bytes;
+        let moe = layer_work_from_bytes(35e6);
+        let reference = layer_work_from_bytes(4.4e9 / 32.0);
+        let dense_32b = layer_work_from_bytes(310e6);
+        assert!(
+            (reference - 1.0).abs() < 1e-3,
+            "the reference is one layer: {reference}"
+        );
+        assert!(
+            moe < 0.3 && dense_32b > 2.0,
+            "moe {moe}, dense 32B {dense_32b}"
+        );
+        let mut c = cand(2, vec![(0, 32)], 0, 0.0, true, true, 10.0);
+        let one = c.prior_ms_per_layer();
+        c.layer_work = dense_32b;
+        assert!((c.prior_ms_per_layer() - one * dense_32b).abs() < 1e-3);
+        c.est_tokens_per_sec = 0.0;
+        assert!((c.prior_ms_per_layer() - UNKNOWN_COMPUTE_MS * dense_32b).abs() < 1e-3);
     }
 
     /// The whole point of pricing prefill: a loaded GPU node against an idle
@@ -3692,6 +3747,7 @@ mod transfer_cost_tests {
             can_be_last: true,
             region_score: 1.0,
             est_tokens_per_sec: 20.0,
+            layer_work: 1.0,
             observed_latency_ms_per_layer: None,
             observed_fixed_ms_per_visit: None,
             observed_delegated_ms_per_layer: None,

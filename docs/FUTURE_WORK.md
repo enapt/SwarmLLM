@@ -68,7 +68,8 @@ re-fetching parts) and #223 closed in v0.3.228 (released 2026-10-06 09:42 UTC), 
    to reset; the kernel is still unknown (the sanitizer attaches here since 2026-10-10 — run it under the kit).
 5a. **#250** — a model held whole here, which the card holds only part of, was routed through two
    peers at 0.1 tok/s where the same machine answers locally in ~5 s (report #035). Its
-   window-narrowing contributor closed as #248; the dense pricing of a mixture-of-experts model is left.
+   window-narrowing contributor closed as #248, the idle model holding the card as #249, and a layer
+   is now priced as its own model's (prior half); pricing a MEASURED peer across models is left.
 
 **P2 — speed and completeness**
 6. *(#152 closed 2026-10-09 — the guess-check stream runs on the boomerang and with a peer
@@ -443,7 +444,7 @@ frame, then add a receipt ACK or a per-frame read deadline mirroring request-res
 ### Routing and placement
 
 #### #250 — A model held whole here, which the card holds only part of, can be routed through peers at a fraction of local speed
-`P1` · routing · **OPEN** — 2026-10-12 · history: report #035 (a tester, RTX 3060 12 GB, v0.3.232-.234)
+`P1` · routing · **PARTIAL** — 2026-10-12 · history: report #035 (a tester, RTX 3060 12 GB, v0.3.232-.234)
 
 Qwen3-30B-A3B Q4_K_M, every part held here, 18 of 48 layers on the card: a 2,728-token prompt
 was planned through two peers in Italy and Belgium (`predicted_ms=278167`, `cold:100339`,
@@ -474,7 +475,12 @@ answers in ~5 s. Several contributors (diagnosis rule 6). Each is a hypothesis u
   table (sizes and names) and the header (`GgufTensorMeta` needs `expert_used_count`, serde
   default). Store a measured peer's coefficient per REFERENCE layer (divide by the sampled model's
   factor when observed, multiply by the priced model's), so a sample on one model prices another.
-  A test pins a 30B-A3B layer below a 7B layer and a dense 32B layer above it.
+  **Done, the prior half (2026-10-12, unreleased):** `NodeCandidate::layer_work` from
+  `GgufTensorMeta::active_bytes_per_layer` (the header's own tensor sizes; the manifest's table is
+  not needed), read through `NodeCandidate::prior_ms_per_layer` by both routers;
+  `a_light_layer_is_not_sent_a_round_trip_away_for_a_faster_card` flips the route on the factor
+  alone and is red without it. A/B `SWARMLLM_LAYER_PRICE=reference`. Left: the measured half
+  (`PeerSpeed` per reference layer).
 - **The prompt is priced on the processor prior** for a hybrid local route even with layers on the
   card, while #138 made a mixture-of-experts prompt 3.5-4.7× faster on both.
 - **An idle model held the card** (#249, closed): a 14B "idle 20m" still had 9.2 GB, which is what
@@ -485,11 +491,11 @@ locally and answered here (23.2 s vs 9.6 s on main). By the 7B prior the local h
 at ~84 s against the reported pipeline's 278 s, so in the report the local route was most likely
 unavailable (narrowed) rather than out-priced. Priced by the design above, the report's plan
 changes little: compute scales down on both routes, and the local route then wins by more. Next:
-the design above, behind an env switch for an A/B inside one binary; then the shape on this box
-(Qwen3-30B-A3B Q2_K whole, split 26/22 card/processor, `~/swarmllm-138/`) with a peer holding the
-middle, reading the planner's local price against the measured local time. Dense models above 7B
-get dearer compute, so a WAN split rig (`regional_pipelines.md`) must show no new detours before
-it ships.
+the measured half of the design; then the shape on this box (Qwen3-30B-A3B Q2_K whole, split
+26/22 card/processor, `~/swarmllm-138/`) with a peer holding the middle, reading the planner's
+local price (`DIAG: pipeline candidate … layer_work=`) against the measured local time. Dense
+models above 7B now cost more compute, so before release a WAN split rig
+(`regional_pipelines.md`) must show this adds no route slower than the one it replaced.
 
 #### #237 — A peer's room for a conversation is not advertised, and the hand-off counts the prompt only
 `P3` · routing · **OPEN** — 2026-10-08 · history: report #005 (a tester, v0.3.230 code); related #194

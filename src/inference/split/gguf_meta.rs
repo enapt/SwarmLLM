@@ -185,6 +185,11 @@ pub struct GgufTensorMeta {
     /// DeepSeek-V2/V3 expert count (0 for non-MoE models).
     #[serde(default)]
     pub expert_count: usize,
+    /// Experts each token is routed to (`<arch>.expert_used_count`), 0 for a
+    /// dense model or a header that does not say. What a token READS of a
+    /// mixture-of-experts layer: [`Self::active_bytes_per_layer`].
+    #[serde(default)]
+    pub expert_used_count: usize,
     /// Raw GGUF architecture string (e.g. "llama", "qwen2", "qwen35").
     #[serde(default)]
     pub architecture: String,
@@ -393,6 +398,11 @@ impl GgufTensorMeta {
             .get(&format!("{arch}.expert_count"))
             .and_then(|v| v.to_u32().ok())
             .unwrap_or(0) as usize;
+        let expert_used_count = ct
+            .metadata
+            .get(&format!("{arch}.expert_used_count"))
+            .and_then(|v| v.to_u32().ok())
+            .unwrap_or(0) as usize;
         let context_length = ct
             .metadata
             .get(&format!("{arch}.context_length"))
@@ -412,9 +422,48 @@ impl GgufTensorMeta {
             rope_freq_base,
             rms_norm_eps,
             expert_count,
+            expert_used_count,
             architecture: arch,
             context_length,
         })
+    }
+
+    /// The weight bytes ONE token reads per layer, on average over the model:
+    /// every `blk.*` tensor, a mixture-of-experts layer's expert stacks
+    /// (`_exps`) only for the share a token is routed to (`expert_used_count /
+    /// expert_count`), and the output projection, which every token reads whole
+    /// (the token embedding is one row, so it counts only where it IS the
+    /// output projection — a tied model). Decode reads these bytes once per token,
+    /// so time per layer scales with them — the quantity the route planner's
+    /// per-layer prior is a fraction of (FUTURE_WORK #250; Petals measures each
+    /// model's own blocks for the same reason).
+    ///
+    /// `None` when the header lists no layers, or lists expert stacks but not
+    /// how many experts a token uses: a guess at the active share could be off
+    /// by the whole expert count.
+    pub fn active_bytes_per_layer(&self) -> Option<f64> {
+        if self.block_count == 0 {
+            return None;
+        }
+        let tied = !self.tensors.contains_key("output.weight");
+        let mut bytes = 0.0_f64;
+        for (name, loc) in &self.tensors {
+            let size = loc.size as f64;
+            if name.starts_with("blk.") {
+                if name.contains("_exps") {
+                    if self.expert_count == 0 || self.expert_used_count == 0 {
+                        return None;
+                    }
+                    bytes += size * self.expert_used_count.min(self.expert_count) as f64
+                        / self.expert_count as f64;
+                } else {
+                    bytes += size;
+                }
+            } else if name != "token_embd.weight" || tied {
+                bytes += size;
+            }
+        }
+        Some(bytes / self.block_count as f64)
     }
 }
 
@@ -1243,5 +1292,86 @@ mod kv_layer_tests {
         let names: Vec<String> = (0..6).map(|il| format!("blk.{il}.attn_k.weight")).collect();
         assert_eq!(layers_keeping_kv(&header(&names), 0, 6), 6);
         assert_eq!(layers_keeping_kv(&header(&names), 2, 5), 3);
+    }
+}
+
+#[cfg(test)]
+mod active_bytes_tests {
+    use super::*;
+
+    /// A header of `layers` layers whose tensors have the given sizes.
+    fn meta(layers: usize, experts: (usize, usize), tensors: &[(&str, u64)]) -> GgufTensorMeta {
+        GgufTensorMeta {
+            tensors: tensors
+                .iter()
+                .map(|(n, size)| {
+                    (
+                        n.to_string(),
+                        TensorLocation {
+                            offset: 0,
+                            size: *size,
+                        },
+                    )
+                })
+                .collect(),
+            tensor_data_offset: 0,
+            model_name: None,
+            head_count: 1,
+            head_count_kv: 1,
+            block_count: layers,
+            embedding_length: 1,
+            head_dim: 1,
+            rope_dim: 1,
+            rope_freq_base: 1.0,
+            rms_norm_eps: 1e-6,
+            expert_count: experts.0,
+            expert_used_count: experts.1,
+            architecture: "qwen3moe".into(),
+            context_length: 0,
+        }
+    }
+
+    /// FUTURE_WORK #250: a token reads 8 of a layer's 128 experts, so the
+    /// expert stacks count for 1/16 of their bytes; attention counts whole; the
+    /// output projection is read every token and the embedding is one row.
+    #[test]
+    fn a_token_reads_the_experts_it_is_routed_to_and_the_layers_whole() {
+        let m = meta(
+            2,
+            (128, 8),
+            &[
+                ("token_embd.weight", 1_000),
+                ("output.weight", 200),
+                ("blk.0.attn_q.weight", 100),
+                ("blk.0.ffn_up_exps.weight", 1_600),
+                ("blk.1.attn_q.weight", 100),
+                ("blk.1.ffn_up_exps.weight", 1_600),
+            ],
+        );
+        // (100 + 1600/16) × 2 layers + 200 output = 600, over 2 layers.
+        assert_eq!(m.active_bytes_per_layer(), Some(300.0));
+    }
+
+    /// A tied model reads its embedding as the output projection every token.
+    #[test]
+    fn a_tied_embedding_is_read_whole_as_the_output() {
+        let m = meta(
+            1,
+            (0, 0),
+            &[("token_embd.weight", 500), ("blk.0.attn_q.weight", 100)],
+        );
+        assert_eq!(m.active_bytes_per_layer(), Some(600.0));
+    }
+
+    /// Experts listed with no count of how many a token uses: unknown, never a
+    /// guess that could be off by the whole expert count.
+    #[test]
+    fn experts_without_a_used_count_are_unknown() {
+        let m = meta(
+            1,
+            (128, 0),
+            &[("output.weight", 1), ("blk.0.ffn_up_exps.weight", 1_600)],
+        );
+        assert_eq!(m.active_bytes_per_layer(), None);
     }
 }

@@ -4267,6 +4267,7 @@ mod manifest_persist_tests {
                 rope_freq_base: 10_000.0,
                 rms_norm_eps: 1e-5,
                 expert_count: 0,
+                expert_used_count: 0,
                 architecture: "llama".into(),
                 context_length: 2048,
             },

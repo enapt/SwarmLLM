@@ -29,6 +29,12 @@ Admission runs at load time, too late to reshape a plan (#452). **`ModelProcessP
 
 → `docs/invariants/scheduling.md` § "The component that will refuse must be asked while the plan can still change"
 
+## A layer is priced as the model it belongs to (2026-10-12, #250)
+
+**`NodeCandidate::prior_ms_per_layer`** is the one prior from a stated speed (`vertex_cost`, greedy): the 7B-reference layer time × `layer_work`, the model's active bytes per layer over the reference's (`scheduler::layer_work_for` ← `GgufTensorMeta::active_bytes_per_layer`, experts at `expert_used_count / expert_count`). `est_tokens_per_sec` stays in 7B units for ratios and sorts. Measured `PeerSpeed` is not yet normalised across models. A/B `SWARMLLM_LAYER_PRICE=reference`.
+
+→ `docs/invariants/scheduling.md` § "A layer is priced as the model it belongs to"
+
 ## A whole model on one peer is handed over, never driven token by token (2026-09-27)
 
 **`remote_generate::eligible` is the single answer to "does the hand-off take this plan"**; the n-gram loop stands aside for every plan it accepts. Ask privacy with `encrypted_pipeline_for_request`.

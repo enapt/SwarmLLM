@@ -3555,6 +3555,48 @@ read the pair as a contradiction and lost an hour to it. The plan now names
 `standbys_covering_this_segment` next to the total. When a summary count cannot
 answer the question a reader will ask of it, print the answer, not the count.
 
+## A layer is priced as the model it belongs to (2026-10-12, FUTURE_WORK #250)
+
+**What it replaced.** Every node states one speed: tokens a second for a 7B Q4_K_M, from its
+memory bandwidth (`vram::estimate_tokens_per_sec_7b`: bandwidth ÷ `MODEL_SIZE_7B_Q4_GB` ×
+efficiency). Both routers turned it into a layer's price as `1000 / speed / 32` for EVERY model,
+so a 0.5B's layer, a 30B-A3B's and a 70B's all cost one 7B layer. Between two plans that only
+trade compute the error cancels. Against the network term (round trips, real milliseconds) and
+the cold-load term it does not: a 30B-A3B Q4_K_M layer reads ~35 MB a token (attention plus 8 of
+128 experts) against the reference's ~137 MB, so its compute was ~4× too dear, and a remote
+card's advantage over this processor looked ~4× bigger than it is. That is report #035's
+shape: a mixture-of-experts model this node held whole was planned through two peers. A dense
+32B layer (~310 MB) was ~2.3× too cheap, the other way.
+
+**The rule.** `scheduler::layer_work_for` gives every candidate of a model one `layer_work`:
+the bytes one token reads per layer (`GgufTensorMeta::active_bytes_per_layer` — every `blk.*`
+tensor, expert stacks `_exps` at `expert_used_count / expert_count`, the output projection, the
+embedding only where it IS the output) over the reference's bytes per layer.
+`NodeCandidate::prior_ms_per_layer` is the one prior from a stated speed, read by
+`parallax::vertex_cost` and greedy's `estimated_cost_per_layer`. `est_tokens_per_sec` itself
+stays in 7B units, so the ratio and sort comparisons (the hand-off gate's
+`DELEGATE_MIN_CPU_SPEEDUP`, greedy's ordering) are untouched. Unknown (no header, experts without
+a used count) prices as before: 1.0. Petals does the same thing by measurement: a server times
+one real block of the model it serves and caches the figure per model
+(`petals/server/throughput.py`, key `model_{name}_device_…_dtype_…`), so a mixture-of-experts
+block counts only the experts it routes to.
+
+**Evidence.** `a_light_layer_is_not_sent_a_round_trip_away_for_a_faster_card` (parallax): 48
+layers, this node's processor at 5 tok/s against a card at 40 tok/s 50 ms away holding the
+second half. At `layer_work` 1 the half goes abroad (1,200 + 6,400 ms against 9,600); at 0.28
+it stays (336 + 6,400 against 2,688). Red with the factor removed from the prior, while its
+control arm still chose the split. `a_layer_weighs_what_it_reads`,
+`a_token_reads_the_experts_it_is_routed_to_and_the_layers_whole`. A/B inside one binary:
+`SWARMLLM_LAYER_PRICE=reference`. The plan logs it (`DIAG: pipeline candidate … layer_work=`).
+
+**What a change must keep, and what is open.** A measured peer is still priced by its own ms per
+layer (`PeerSpeed`, keyed by NODE), which reflects whichever model it served. That is right
+when it served this one, and wrong across models, as before. Normalising a sample by its
+model's `layer_work` is the second half of #250. Dense models above 7B now cost more compute
+against the network, so a split onto a faster card is priced more attractive. Before release, a
+WAN split rig must show that this adds no route slower than the one it replaced
+(`docs/plans/regional_pipelines.md`).
+
 ## Inference Router Queue
 
 `drain_queue` only fires on `RouterCommand::Submit` / `StreamSubmit` or

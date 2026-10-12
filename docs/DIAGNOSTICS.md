@@ -235,7 +235,11 @@ DIAG: pipeline candidate  node= est_tokens_per_sec= has_gpu= cost_prefill_ms= co
          would USE: on a node whose card is too small they are the
          processor's figures, gotcha #444. Priced as a WHOLE model, so a
          split segment's credit for the prompt opening it holds (#10)
-         never shows here — read the chosen chain's `predicted_ms` instead)
+         never shows here — read the chosen chain's `predicted_ms` instead.
+         `layer_work=` is what one of this model's layers weighs in 7B-reference
+         layers, the same on every line of one plan: ~0.28 for a 30B-A3B
+         Q4_K_M, ~2.3 for a dense 32B; 1 = unknown (no header here, or no
+         `expert_used_count`) or `SWARMLLM_LAYER_PRICE=reference`, #250)
 This node holds the whole model but would run it on its processor; a pipeline across
   peers' cards is priced faster, so the request goes there
         local_processor_cost_ms= pipeline_cost_ms= segments= prompt_tokens=

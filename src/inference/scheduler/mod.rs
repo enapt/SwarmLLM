@@ -108,7 +108,15 @@ struct NodeCandidate {
     /// Region proximity score: 1.0 same region, 0.5 adjacent, 0.2 distant, 0.7 unknown.
     region_score: f32,
     /// Estimated tokens/s for a 7B Q4 model (from NodeCapability). 0 = unknown.
+    /// Stays in those units — ratios and sorts compare it as it is; only a
+    /// per-layer PRICE turns it into this model's milliseconds, through
+    /// [`NodeCandidate::prior_ms_per_layer`].
     est_tokens_per_sec: f32,
+    /// What one of THIS model's layers costs a token, in reference layers (a
+    /// 7B Q4's): the model's active bytes per layer over the reference's
+    /// ([`layer_work_for`]). The same for every candidate of one model; 1.0 when
+    /// unknown, which prices as before #250.
+    layer_work: f32,
     /// Observed per-layer latency EMA (ms/layer) for remote segments this peer
     /// served for us. None = no samples yet, use `est_tokens_per_sec` as proxy.
     /// Populated by `state.record_peer_segment_latency` after successful
@@ -303,7 +311,59 @@ struct PublishedRoom {
     reused_share: f64,
 }
 
+/// What one of `model_id`'s layers costs a token, in reference layers — the
+/// `layer_work` of every candidate for it (#250). Before this, every model's
+/// layer was priced as a 7B Q4's: a 30B-A3B's ~4× too dear and a dense 32B's
+/// ~2.3× too cheap against the network term, which is in real milliseconds.
+/// 1.0, the old price, when this node holds no header for the model, when the
+/// header does not say how many experts a token uses, or under
+/// `SWARMLLM_LAYER_PRICE=reference` (the A/B switch, read once).
+fn layer_work_for(state: &SharedState, model_id: &ModelId) -> f32 {
+    static REFERENCE_ONLY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *REFERENCE_ONLY
+        .get_or_init(|| std::env::var("SWARMLLM_LAYER_PRICE").is_ok_and(|v| v == "reference"))
+    {
+        return 1.0;
+    }
+    let active = state
+        .gguf_meta_for(model_id)
+        .and_then(|meta| meta.active_bytes_per_layer());
+    active.map_or(1.0, layer_work_from_bytes)
+}
+
+/// A layer that reads `active_bytes_per_layer` per token, in reference layers:
+/// over the 7B Q4 reference's bytes per layer
+/// (`vram::MODEL_SIZE_7B_Q4_GB / parallax::BASELINE_LAYER_COUNT`, ~137 MB).
+/// Decode is bound by the bytes it reads, which is what every node's stated
+/// speed measures, so the price scales with them. Clamped to a range no real
+/// model leaves (a 0.5B's layer is ~0.1, a 405B's ~13), so a garbled header
+/// cannot price a model as free or as unrunnable.
+pub(super) fn layer_work_from_bytes(active_bytes_per_layer: f64) -> f32 {
+    let reference = f64::from(crate::model::auto_manage::vram::MODEL_SIZE_7B_Q4_GB) * 1e9
+        / f64::from(parallax::BASELINE_LAYER_COUNT);
+    ((active_bytes_per_layer / reference) as f32).clamp(0.02, 50.0)
+}
+
 impl NodeCandidate {
+    /// The static price of one of THIS model's layers on this candidate, in ms
+    /// per token: its 7B-reference token time spread over the reference's
+    /// `BASELINE_LAYER_COUNT` layers, times what one of this model's layers
+    /// weighs in reference layers (`layer_work`). `UNKNOWN_COMPUTE_MS` — itself a
+    /// reference-layer figure — scaled the same way when the candidate states no
+    /// speed. The ONE prior from a stated speed: `parallax::vertex_cost` and the
+    /// greedy fallback's [`PipelineScheduler::estimated_cost_per_layer`] both ask
+    /// it, so a model's size reaches both routers or neither (#250). (Greedy keeps
+    /// its own unknown-speed figure, `DEFAULT_COMPUTE_MS_PER_LAYER`, weighed by
+    /// `layer_work` too.)
+    fn prior_ms_per_layer(&self) -> f32 {
+        let reference_layer_ms = if self.est_tokens_per_sec > 0.0 {
+            1000.0 / self.est_tokens_per_sec / parallax::BASELINE_LAYER_COUNT
+        } else {
+            parallax::UNKNOWN_COMPUTE_MS
+        };
+        reference_layer_ms * self.layer_work
+    }
+
     /// Layers of NEW memory this candidate needs to run `range` — its width,
     /// less what its live worker already holds, by the worker's own rules
     /// (`process_pool::layers_added_by`). The width for any candidate holding
@@ -3810,6 +3870,8 @@ impl PipelineScheduler {
         // header, which a coordinator holding none of the model fetched before
         // planning — `ensure_model_geometry`).
         let ceiling_curve = std::cell::OnceCell::new();
+        // One model, one weight per layer, for every candidate (#250).
+        let layer_work = layer_work_for(&self.shared_state, &manifest.id);
 
         for (node_id, mut shard_indices) in node_shards {
             shard_indices.sort();
@@ -4305,6 +4367,7 @@ impl PipelineScheduler {
                 can_be_last,
                 region_score,
                 est_tokens_per_sec,
+                layer_work,
                 observed_latency_ms_per_layer,
                 observed_fixed_ms_per_visit,
                 observed_delegated_ms_per_layer,
@@ -4363,6 +4426,9 @@ impl PipelineScheduler {
                 region_score = c.region_score,
                 latency_ms = c.latency_ms,
                 est_tokens_per_sec = c.est_tokens_per_sec,
+                // What one of this model's layers weighs in 7B-reference
+                // layers (#250); 1.0 = priced as before, or unknown.
+                layer_work = c.layer_work,
                 observed_ms_per_layer = ?c.observed_latency_ms_per_layer,
                 // Present only where the samples could separate a per-visit
                 // cost from a per-layer one. Its absence is the ordinary case
@@ -4572,13 +4638,14 @@ impl PipelineScheduler {
             .observed_latency_ms_per_layer
             .filter(|v| v.is_finite() && *v > 0.0)
             .unwrap_or_else(|| {
-                // No measurement. Fall back to the advertised capability, which
-                // is quoted for a ~32-layer 7B model, then to a neutral figure
-                // so an unrated peer is neither favoured nor disqualified.
+                // No measurement. Fall back to the advertised capability, priced
+                // as one of THIS model's layers (#250), then to a neutral figure
+                // so an unrated peer is neither favoured nor disqualified —
+                // weighed by the model the same way.
                 if candidate.est_tokens_per_sec > 0.0 {
-                    1000.0 / (candidate.est_tokens_per_sec * 32.0)
+                    candidate.prior_ms_per_layer()
                 } else {
-                    DEFAULT_COMPUTE_MS_PER_LAYER
+                    DEFAULT_COMPUTE_MS_PER_LAYER * candidate.layer_work
                 }
             });
 

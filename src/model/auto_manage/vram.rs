@@ -860,14 +860,19 @@ pub fn gpu_memory_bandwidth_gbps(name: &str) -> f32 {
 /// own loop (gotcha #427) — and the CUDA arm needs `--features flash-attn`,
 /// which the harness enforces rather than silently reporting processor timings.
 pub fn estimate_tokens_per_sec_7b(bandwidth_gbps: f32, is_gpu: bool) -> f32 {
-    const MODEL_SIZE_7B_Q4: f32 = 4.4; // ~4.4 GB for 7B Q4_K_M
-                                       // Fraction of the memory roofline decode actually achieves. A card is
-                                       // *less* efficient per byte than a processor at batch 1, because one query
-                                       // row cannot fill it and the per-layer kernel launches dominate — which is
-                                       // the opposite of what the old pair of constants asserted.
+    // Fraction of the memory roofline decode actually achieves. A card is
+    // *less* efficient per byte than a processor at batch 1, because one query
+    // row cannot fill it and the per-layer kernel launches dominate — which is
+    // the opposite of what the old pair of constants asserted.
     let efficiency = if is_gpu { 0.55 } else { 0.75 };
-    bandwidth_gbps / MODEL_SIZE_7B_Q4 * efficiency
+    bandwidth_gbps / MODEL_SIZE_7B_Q4_GB * efficiency
 }
+
+/// The reference model every node's speed is stated for (~4.4 GB, a 7B
+/// Q4_K_M), in decimal GB like the bandwidth it divides. The route planner
+/// prices another model's layer against this one's
+/// (`scheduler::layer_work_from_bytes`, #250), so the two stay one number.
+pub const MODEL_SIZE_7B_Q4_GB: f32 = 4.4;
 
 /// What THIS node would manage on a 7B Q4 — the same figure every peer gossips
 /// about itself in `NodeCapability.est_tokens_per_sec_7b`, derived the same way.
