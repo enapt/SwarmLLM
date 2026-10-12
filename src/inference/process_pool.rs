@@ -2080,9 +2080,25 @@ pub enum CpuReason {
     /// ordinary promotion (`reason_still_holds`). Distinct from
     /// [`Self::GpuUnavailable`], whose advice is a restart a reset does not need.
     DriverNotAnswering,
+    /// NVIDIA's CUDA libraries that this build opens are not installed
+    /// (`gpu_support::missing_cuda_libraries`, #253). Distinct from
+    /// [`Self::GpuTooOld`]: the card is fine, and the remedy is an install and
+    /// a restart, not a newer card.
+    CudaLibrariesMissing,
 }
 
 impl CpuReason {
+    /// Every reason, so whatever puts a reason into words can be checked
+    /// against all of them.
+    pub const ALL: [CpuReason; 6] = [
+        CpuReason::Configured,
+        CpuReason::GpuTooOld,
+        CpuReason::GpuUnavailable,
+        CpuReason::NotEnoughVram,
+        CpuReason::DriverNotAnswering,
+        CpuReason::CudaLibrariesMissing,
+    ];
+
     /// Stable machine-readable tag. Used in logs and in the admin API, so keep
     /// these values stable — something will grep for them.
     pub fn as_str(self) -> &'static str {
@@ -2092,6 +2108,7 @@ impl CpuReason {
             CpuReason::GpuUnavailable => "gpu_stopped_responding",
             CpuReason::NotEnoughVram => "not_enough_vram",
             CpuReason::DriverNotAnswering => "driver_not_answering",
+            CpuReason::CudaLibrariesMissing => "cuda_libraries_missing",
         }
     }
 }
@@ -2883,8 +2900,15 @@ impl ModelProcessPool {
             return Some(CpuReason::DriverNotAnswering);
         }
         #[cfg(feature = "candle-cuda")]
-        if !crate::daemon::gpu_support::local_gpu_is_supported() {
-            return Some(CpuReason::GpuTooOld);
+        {
+            use crate::daemon::gpu_support::{local_card_refusal, CardRefusal};
+            match local_card_refusal() {
+                Some(CardRefusal::LibrariesMissing) => {
+                    return Some(CpuReason::CudaLibrariesMissing)
+                }
+                Some(CardRefusal::TooOld) => return Some(CpuReason::GpuTooOld),
+                None => {}
+            }
         }
         if self.gpu_layers.load(std::sync::atomic::Ordering::Relaxed) == 0 {
             return Some(CpuReason::Configured);

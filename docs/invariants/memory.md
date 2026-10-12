@@ -2285,6 +2285,13 @@ here). The choice is the pure `prune::card_room_to_give_back`; tests
 narrows a loaded model for its own footprint either: it unloads idle runners when a NEW load needs
 the room, and otherwise only after `keep_alive`.
 
+**Measured end to end** with `examples/split_rig.sh softunload` (Qwen2.5-14B Q4_K_M whole on node
+A, which runs auto-manage every 30 s; node B holds the middle parts, processor only). v0.3.235:
+"narrowing shard window … window_shards=8 pressure=0.80" 4 s after the first reply's load, and the
+second request took 23.2 s (it reloaded). Main: no narrowing in two passes, second request 9.6 s.
+The rig prints both counts and the time; it did not reproduce the report's detour through peers
+(FUTURE_WORK #250 keeps that).
+
 ## The owner is told when the card has become slow to hand out memory (2026-10-01)
 
 **Why.** The pool above and `card_pace` defend the node against a host whose fresh card

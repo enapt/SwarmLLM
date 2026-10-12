@@ -818,6 +818,7 @@
   "perf.th_samples": "Sampel",
   "perf.ttft_label": "token pertama {value}",
   "placement.configured": "Anda menyetel komputer ini untuk hanya memakai prosesor.",
+  "placement.cuda_libraries_missing": "Pustaka CUDA dari NVIDIA untuk kartu grafis belum terpasang, jadi prosesor yang dipakai. Pasang pustakanya lalu mulai ulang SwarmLLM — log menyebutkan mana yang tidak ada.",
   "placement.driver_not_answering": "Driver grafis tidak merespons — mungkin sedang mengatur ulang kartu. Sementara itu model ini memakai prosesor dan akan kembali ke kartu grafis dengan sendirinya.",
   "placement.gpu_too_old": "Kartu grafis ini lebih lama daripada yang didukung versi ini, jadi prosesor yang dipakai.",
   "placement.gpu_unavailable": "SwarmLLM kehilangan akses ke kartu grafis, biasanya karena drivernya diperbarui saat sedang berjalan. Mulai ulang SwarmLLM untuk memperbaikinya.",

@@ -18,6 +18,10 @@ MAC (Apple chip, M1 or newer)
 
 LINUX
   In a terminal, in this folder:   ./swarmllm run
+  The NVIDIA (-cuda) download uses the graphics card once NVIDIA's CUDA 12
+  libraries are installed (Ubuntu or Debian:
+    sudo apt install libcublas12 libcublaslt12 libcurand10 libnvrtc12
+  ). Without them it runs on the processor and its log says what is missing.
 
 THEN
   SwarmLLM opens in your web browser by itself. If it doesn't, go to

@@ -818,6 +818,7 @@
   "perf.th_samples": "Messwerte",
   "perf.ttft_label": "erstes Token {value}",
   "placement.configured": "Sie haben diesen Computer so eingestellt, dass nur der Prozessor verwendet wird.",
+  "placement.cuda_libraries_missing": "Die CUDA-Bibliotheken von NVIDIA für die Grafikkarte sind nicht installiert, daher wird der Prozessor verwendet. Installieren Sie sie und starten Sie SwarmLLM neu – das Protokoll nennt die fehlenden.",
   "placement.driver_not_answering": "Der Grafiktreiber antwortet nicht – möglicherweise setzt er die Karte gerade zurück. So lange nutzt dieses Modell den Prozessor und wechselt danach von selbst zurück auf die Grafikkarte.",
   "placement.gpu_too_old": "Diese Grafikkarte ist älter als von dieser Version unterstützt, daher wird der Prozessor verwendet.",
   "placement.gpu_unavailable": "SwarmLLM hat den Zugriff auf die Grafikkarte verloren – meist wurde der Treiber während des Betriebs aktualisiert. Starten Sie SwarmLLM neu, um das zu beheben.",

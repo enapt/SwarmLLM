@@ -307,6 +307,10 @@ fn cpu_reason_in_words(tag: &str) -> String {
             "the graphics driver is not answering (it may be resetting the card) — back on the card once it does"
                 .to_string()
         }
+        "cuda_libraries_missing" => {
+            "NVIDIA's CUDA libraries are not installed — install them and restart SwarmLLM (the log names them)"
+                .to_string()
+        }
         other => other.to_string(),
     }
 }
@@ -454,11 +458,7 @@ mod tests {
     #[test]
     fn every_processor_reason_has_words() {
         use swarmllm::inference::process_pool::CpuReason;
-        for r in [
-            CpuReason::Configured,
-            CpuReason::GpuTooOld,
-            CpuReason::NotEnoughVram,
-        ] {
+        for r in CpuReason::ALL {
             let tag = r.as_str();
             assert_ne!(cpu_reason_in_words(tag), tag, "no words for {tag}");
         }

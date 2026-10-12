@@ -50,6 +50,14 @@
 #          `speculative_decoding` and `decentralized_spec_decoding` on; A picks it
 #          itself (or name it with `draft_model`). MODEL must share its vocabulary,
 #          e.g. MODEL=qwen2.5-coder-7b-instruct-q4-k-m DRAFTER=qwen2.5-0.5b-instruct-fp16.
+#   softunload  A holds the WHOLE model, larger than its card, with auto-manage at
+#          its defaults (a 30 s cycle); B holds every part but the first and last,
+#          on the processor. One question, two of A's prune passes, a second
+#          question. Field report #035 (FUTURE_WORK #248): the soft-unload counted
+#          a card full of A's OWN model as pressure and narrowed it, so the second
+#          question went A → B → A instead of staying on A. PASS = no
+#          "narrowing shard window" in A's log and q2's route is A alone.
+#          Default model qwen2.5-14b-instruct-q4-k-m (48 layers; ~22 fit an 8 GB card).
 #   context  the FAILOVER topology, but B serves a SHORTER conversation than the
 #          long prompt (CEIL_B, default 512, as B's own max_seq_len_override) —
 #          the field report of 2026-09-25, where an 8192-token peer refused an
@@ -221,10 +229,10 @@
 # isolation (#352).
 set -u
 
-MODE="${1:?usage: split_rig.sh split|kill|failover|context|repeat|fetch|cache|remote|mixed <binary> [<binary for B>]}"
+MODE="${1:?usage: split_rig.sh split|kill|failover|context|repeat|fetch|cache|remote|mixed|softunload <binary> [<binary for B>]}"
 BIN_A="${2:?binary}"
 BIN_B="${3:-$BIN_A}"
-case "$MODE" in split|kill|failover|failover_mid|context|whole|continue|repeat|fetch|cache|splitcache|remote|mixed|disputed|spliced|disconnect) ;; *) echo "mode must be split, kill, failover, failover_mid, context, whole, continue, repeat, fetch, cache, splitcache, remote, mixed, disputed, spliced or disconnect"; exit 2 ;; esac
+case "$MODE" in split|kill|failover|failover_mid|context|whole|continue|repeat|fetch|cache|splitcache|remote|mixed|disputed|spliced|disconnect|softunload) ;; *) echo "mode must be split, kill, failover, failover_mid, context, whole, continue, repeat, fetch, cache, splitcache, remote, mixed, disputed, spliced, disconnect or softunload"; exit 2 ;; esac
 if { [ "$MODE" = context ] || [ "$MODE" = whole ]; } && printf '%s' "${EXTRA_TOML:-}" | grep -q '^\[inference\]'; then
   echo "$MODE: EXTRA_TOML may not open [inference] — B's ceiling is written there"; exit 2
 fi
@@ -233,6 +241,8 @@ if [ "$MODE" = split ] || [ "$MODE" = mixed ] || [ "$MODE" = disputed ] || [ "$M
   MODEL="${MODEL:-tinyllama-1.1b-chat-v1.0.q4-k-m}"
 elif [ "$MODE" = cache ]; then
   MODEL="${MODEL:-qwen2.5-0.5b-instruct-fp16}"
+elif [ "$MODE" = softunload ]; then
+  MODEL="${MODEL:-qwen2.5-14b-instruct-q4-k-m}"
 else
   MODEL="${MODEL:-llama-3.2-3b-instruct-q4-k-m}"
 fi
@@ -253,6 +263,11 @@ elif [ "$MODE" = splitcache ]; then
   SHARDS_A="${SHARDS_A:-0}"
   SHARDS_B="${SHARDS_B:-$(echo "$SHARDS" | grep -vxF -f <(echo "$SHARDS_A" | tr ',' '\n') | paste -sd,)}"
   GPU_A="${GPU_A:-0}"; GPU_B="${GPU_B:-0}"
+elif [ "$MODE" = softunload ]; then
+  [ "$N" -ge 3 ] || { echo "softunload needs a model with at least 3 shard files here; $MODEL has $N"; exit 2; }
+  SHARDS_A=$(echo "$SHARDS" | paste -sd,)
+  SHARDS_B=$(echo "$SHARDS" | grep -vx 0 | grep -vx "$LAST" | paste -sd,)
+  GPU_B="${GPU_B:-0}"
 elif [ "$MODE" = cache ]; then
   SHARDS_A=$(echo "$SHARDS" | paste -sd,)
   SHARDS_B=$SHARDS_A
@@ -359,6 +374,11 @@ export LD_LIBRARY_PATH=/usr/local/cuda/lib64:/usr/lib/wsl/lib
 make_node() { # dir shards bootstrap
   local d="$1" m="$1/models/$MODEL"
   mkdir -p "$m"
+  # softunload: A runs auto-manage as a default install does, on a short cycle
+  # and without the HuggingFace watcher (the rig must not fetch anything).
+  local am=$'enabled = false\nprune_enabled = false'
+  [ "$MODE" = softunload ] && [ "$(basename "$d")" = A ] \
+    && am=$'enabled = true\nprune_enabled = true\ninterval_seconds = 30\nhf_watcher_enabled = false'
   # The shard-0 sidecars travel with the header, as on a real node that fetched
   # any shard from HuggingFace: a later-layer node needs rope_freqs.bin on a
   # Llama 3 model (#124) and tied_output_weight.bin on a weight-tied one.
@@ -378,8 +398,7 @@ enable_upnp = false
 relay_forwarding_auto = false
 
 [auto_manage]
-enabled = false
-prune_enabled = false
+$am
 
 [updates]
 mode = "off"
@@ -623,6 +642,22 @@ except Exception: c="ERR "+raw[:300]
 print(json.dumps({"status":status,"route":hdr("x-swarm-route"),"segments":hdr("x-swarm-segments"),"content":c}))' "$OUT/$3.hdr" "$OUT/$3.body"
 }
 
+if [ "$MODE" = softunload ]; then
+  ask "What is the capital of France? Answer in one sentence." 32 q1 | tee "$OUT/replies.jsonl"
+  grep -a -E "Model will run|on the card|card/processor|layers on the GPU" "$BASE/A/node.log" | tail -3 | cut -c1-220
+  passes() { grep -a -c 'DIAG: evaluate_and_prune starting' "$BASE/A/node.log"; }
+  P0=$(passes)
+  for _ in $(seq 1 75); do [ "$(passes)" -ge $((P0 + 2)) ] && break; sleep 2; done
+  sleep 15
+  NARROWED=$(grep -a -c 'narrowing shard window' "$BASE/A/node.log")
+  STRANDED=$(grep -a -c 'Retiring a worker with requests still in flight' "$BASE/A/node.log")
+  echo "softunload: prune passes after q1: $(( $(passes) - P0 ))  narrowed: $NARROWED  stranded: $STRANDED"
+  grep -a 'narrowing shard window' "$BASE/A/node.log" | head -2 | cut -c1-260
+  T0=$(date +%s.%N)
+  ask "Explain in three sentences why the sky is blue." 64 q2 | tee -a "$OUT/replies.jsonl"
+  echo "softunload: q2 took $(python3 -c "print(round($(date +%s.%N) - $T0, 1))") s"
+  exit 0
+fi
 if [ "$MODE" = split ]; then
   ask "What is the capital of France? Answer in one sentence." 64 q1 | tee "$OUT/replies.jsonl"
   ask "Write a short Python function that returns the factorial of n." 64 q2 | tee -a "$OUT/replies.jsonl"

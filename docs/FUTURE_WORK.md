@@ -458,9 +458,16 @@ answers in ~5 s. Several contributors (diagnosis rule 6). Each is a hypothesis u
   its expert bytes per token (8 of 128 experts), so the local price is several times too slow.
 - **The prompt is priced on the processor prior** for a hybrid local route even with layers on the
   card, while #138 made a mixture-of-experts prompt 3.5-4.7× faster on both.
-Next: the shape on this box (Qwen3-30B-A3B Q2_K whole, split 26/22 card/processor, `~/swarmllm-138/`)
-with a peer holding the middle. Read the planner's local price against the measured local time,
-then price experts by their ACTIVE share (`expert_used_count / expert_count` from the header).
+- **An idle model held the card** (#249, closed): a 14B "idle 20m" still had 9.2 GB, which is what
+  left the 30B 18 layers.
+`split_rig.sh softunload` (2026-10-12; Qwen2.5-14B whole here, a peer holding its middle) did NOT
+reproduce the detour: v0.3.235 narrowed the window, then the next request reloaded the model
+locally and answered here (23.2 s vs 9.6 s on main). By the 7B prior the local hybrid route prices
+at ~84 s against the reported pipeline's 278 s, so in the report the local route was most likely
+unavailable (narrowed) rather than out-priced. Next: the shape on this box (Qwen3-30B-A3B Q2_K
+whole, split 26/22 card/processor, `~/swarmllm-138/`) with a peer holding the middle. Read the
+planner's local price against the measured local time, then price experts by their ACTIVE share
+(`expert_used_count / expert_count` from the header).
 
 #### #237 — A peer's room for a conversation is not advertised, and the hand-off counts the prompt only
 `P3` · routing · **OPEN** — 2026-10-08 · history: report #005 (a tester, v0.3.230 code); related #194
@@ -1268,18 +1275,19 @@ NVML in-process with one handle held open (what `nvidia-smi` does inside, withou
 and adapter close per reading — the closing is where it waited longest). Then the 12h shape with
 the thread sampler (`examples/thread_sample.py`).
 
-#### #252 — `/v1/models` advertises a context the card cannot hold, and the refusal names no token figure
-`P2` · memory · **OPEN** — 2026-10-12 · history: report #035 (a tester, RTX 3060 12 GB, v0.3.234)
+#### #252 — `/v1/models` advertises a context the card cannot hold
+`P2` · memory · **PARTIAL** — 2026-10-12 · history: report #035 (a tester, RTX 3060 12 GB, v0.3.234)
 
 Qwen3-14B on a 12 GB card: `/v1/models` says `max_model_len: 8192` (the declared limit under
 `DEFAULT_MAX_SEQ_LEN`), but with the weights loaded the KV budget is 860 MB, and a 6,228-token
 prompt was refused (`short_by_mb=259`; usable ≈ 5k). A client (Open WebUI, Home Assistant) learns this only from failed
-requests. The refusal (`LocalMemoryUnavailable`, 503) speaks in MB, not tokens. Next:
-(1) while a worker is loaded, report the positions its KV budget admits as the effective limit
-(`max_model_len_for`, both `/v1/models` and the MCP model list). (2) Put the token figure in the
-refusal ("this computer has room for about N tokens of conversation with this model now").
-Never shorten the context itself (`arch-worker-memory.md` § "A card's KV budget is kept whatever the
-context setting").
+requests. **Done (2), 2026-10-12, unreleased:** the refusal now names the longest prompt that fits
+("up to about 4608 tokens with this model here", `model_worker::longest_prompt_that_fits`, rounded
+down to the cache's growth step and less the reply reserve). Next: (1) while a worker is loaded,
+report the positions its KV budget admits as the effective limit (`max_model_len_for`, both
+`/v1/models` and the MCP model list) — the daemon does not know the worker's card KV budget, so the
+worker has to report it first. Never shorten the context itself (`arch-worker-memory.md` § "A
+card's KV budget is kept whatever the context setting").
 
 #### #187 — Head-room admission prices load and runtime on two different bases
 `P3` · memory · **PARTIAL** — 2026-08-08 · history: archive § "Head-room admission: two things the live test found"
@@ -1400,17 +1408,6 @@ Billing between pools waits on credits, which are dormant (`docs/CREDITS_DESIGN.
 
 ### Packaging, release and operations
 
-#### #253 — The CUDA build finds a missing CUDA library only mid-request, as "worker closed connection"
-`P2` · build · **OPEN** — 2026-10-12 · history: report #035 (a tester, Kubuntu 26.04, the 2026-10-06 install)
-
-cudarc (dynamic loading) opens cuBLAS, cuBLASLt, cuRAND and NVRTC the first time a kernel needs one;
-a missing library panics in the model process, and the owner sees `503 worker closed connection
-mid-generate` with nothing naming the library. The `.deb` depends on `$auto, openssl` only, and
-startup checks only the driver (`is_culib_present`). Next: at startup, open each library the
-build will need. A missing one names itself in the log and the dashboard, and the node runs on
-the processor (the `CpuReason` path) rather than failing each request. The `.deb` should
-`Recommends:` the CUDA 12 runtime packages.
-
 #### #255 — `swarmllm status` reads the default data directory, not the running daemon's
 `P3` · cli · **OPEN** — 2026-10-12 · history: report #035 (a tester)
 
@@ -1479,15 +1476,16 @@ starts. Read `docs/CREDITS_DESIGN.md` before touching them; the credit items bel
 preconditions for ever switching enforcement on, not work for now.
 
 #### #251 — `owned_by: "local"` reads as "my data stays here"; it means "every part is held here"
-`P2` · privacy · **OPEN** — 2026-10-12 · history: report #035 (a tester, v0.3.232-.234)
+`P2` · privacy · **PARTIAL** — 2026-10-12 · history: report #035 (a tester, v0.3.232-.234)
 
 `api::model_source_for` answers `local` when this node holds every part, which says nothing about
 where a request runs. A model the card cannot hold whole may be split with peers (#250). The default boomerang starts and
 ends that route here, so peers never see the prompt TEXT. They do see hidden states, ~81% invertible
 to text (`docs/ARCHITECTURE.md` § Pipeline Privacy Model). Today a user can keep requests on their own
 computer only node-wide (a pool with `private_mode = true` and `private_mode_allow_lan = false`).
-`x-swarm-route` reports the route on the OpenAI and Anthropic surfaces. Next: (1) say what
-`owned_by` means where it is listed (book API page, `/v1/models` doc); (2) a "keep on this computer"
+`x-swarm-route` reports the route on the OpenAI and Anthropic surfaces. **Done (1), 2026-10-12:**
+the book's OpenAI page says what `owned_by` means, what a peer sees, how to keep requests here and
+where the route is reported. Next: (2) a "keep on this computer"
 choice per model in the dashboard and per request (`swarm_route`), answered by the local route or
 a policy refusal (`PrivateModeUnavailable` shape, 503, never "retry") — never silently abroad;
 (3) the route header on the Responses API and MCP too.
@@ -1798,7 +1796,7 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-12, unreleased** (#244, #248, #249, #254)
+**Closed 2026-10-12, unreleased** (#244, #248, #249, #253, #254; #251 (1) and #252 (2) of open entries)
 - #244 — **a split's reply no longer pauses for seconds while the node reads the graphics
   card's memory.** `nvidia-smi` (2-6 s on WSL with the card busy) was waited for on a thread
   that also runs the node's network task, so a peer's answers sat unread. The 12h release-check
@@ -1814,7 +1812,21 @@ grep `^| N |`).
   pressure, priced a card/processor split model at its whole file, and could retire a worker
   mid-reply ("stranded_requests=1"). A model that had been running locally then sent part of
   every request to peers. It now acts only when other programs take the card's room, and never on
-  a model that is in use (report #035).
+  a model that is in use (report #035). `split_rig.sh softunload` (Qwen2.5-14B whole here, a peer
+  holding its middle, the memory check every 30 s): v0.3.235 narrowed the loaded model to 8 of 16
+  parts at "pressure 0.80" 4 s after it loaded, and the next request took 23.2 s; main narrowed
+  nothing and answered it in 9.6 s.
+- #253 — **a Linux NVIDIA download missing NVIDIA's CUDA libraries now says so at startup and
+  runs on the processor**, instead of failing every request with "worker closed connection
+  mid-generate". cuBLAS, cuBLASLt, cuRAND and NVRTC are looked up once, the same way the loader
+  would (`gpu_support::missing_cuda_libraries`); the log names the missing ones and the
+  `apt install` line that brings the card back, and the dashboard and `swarmllm status` give it
+  its own reason (`cuda_libraries_missing`), not "card too old". Checked with the libraries hidden from one run
+  (an empty file mounted over each, in a private mount namespace): the warning named cuBLAS,
+  cuBLASLt and cuRAND, Gemma-2-2B was listed `cuda_libraries_missing` and answered on the
+  processor (3.4 s); the control run answered on the card (2.4 s). The install page and
+  `INSTALL.txt` list the packages. The `.deb` gets no `Recommends:` — it is the processor build,
+  and updates never switch a build's kind (report #035).
 - #249 — **an idle model gives its graphics memory back after the idle time (5 minutes by
   default)**, not up to an hour later. Regional demand, which includes this computer's own
   recent requests, no longer keeps an idle model loaded; a model the owner pins or locks still

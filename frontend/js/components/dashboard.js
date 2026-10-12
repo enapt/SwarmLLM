@@ -1443,15 +1443,17 @@
         if (cpuReason && hostedShards > 0) {
           // `not_enough_vram` is the recoverable one and reads as amber; the
           // settled facts about this machine read plain or amber.
-          // `gpu_stopped_responding` is the only one the owner can fix right
-          // now, so it is the only one that reads as red.
+          // `gpu_stopped_responding` (a restart) and `cuda_libraries_missing`
+          // (an install, then a restart) are the ones the owner can fix right
+          // now, so they are the ones that read as red.
           var reasonKeys = {
             not_enough_vram:            { key: 'placement.not_enough_vram',  mod: 'mce-section-state-amber', badge: 'cb-fragile' },
             configured_cpu_only:        { key: 'placement.configured',       mod: '',                        badge: 'cb-ready' },
             gpu_too_old_for_this_build: { key: 'placement.gpu_too_old',      mod: 'mce-section-state-amber', badge: 'cb-fragile' },
             // A card reset in progress: clears by itself, so amber, not red.
             driver_not_answering:       { key: 'placement.driver_not_answering', mod: 'mce-section-state-amber', badge: 'cb-fragile' },
-            gpu_stopped_responding:     { key: 'placement.gpu_unavailable',  mod: 'mce-section-state-red',   badge: 'cb-unusable' }
+            gpu_stopped_responding:     { key: 'placement.gpu_unavailable',  mod: 'mce-section-state-red',   badge: 'cb-unusable' },
+            cuda_libraries_missing:     { key: 'placement.cuda_libraries_missing', mod: 'mce-section-state-red', badge: 'cb-unusable' }
           };
           var r = reasonKeys[cpuReason];
           if (r) {

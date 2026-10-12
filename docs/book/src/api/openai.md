@@ -155,8 +155,18 @@ curl http://localhost:8800/v1/models \
 }
 ```
 
-`owned_by` says where the model's parts sit: `local`, `hybrid` (some parts
-here, some on peers) or `network`. `max_model_len` and `context_length` are
+`owned_by` says where the model's parts sit: `local` (every part is on this
+computer), `hybrid` (some parts here, some on peers) or `network`. It does
+**not** say where a request runs. A `local` model that this computer's
+graphics card cannot hold whole may still be run with peers' help, and peers
+then compute on the model's working data for the layers they run. They are not
+handed the prompt as text, but that data can be turned back into much of it
+([Security > Start and finish on this computer](../architecture/security.md#start-and-finish-on-this-computer-boomerang)).
+To keep every request on your own computers, use a private pool with
+`private_mode = true` and `private_mode_allow_lan = false`
+([Joining the network > Private Networks](../getting-started/joining-network.md#private-networks)). The
+`x-swarm-route` response header names the computers that answered.
+`max_model_len` and `context_length` are
 the same number — the longest conversation this node will serve, after the
 shipped 8192-token default and any `inference.max_seq_len_override`. The
 first is the name vLLM clients read, the second the name OpenClaw's model

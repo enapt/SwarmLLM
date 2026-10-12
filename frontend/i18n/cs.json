@@ -818,6 +818,7 @@
   "perf.th_samples": "Vzorky",
   "perf.ttft_label": "první token {value}",
   "placement.configured": "Nastavili jste tento počítač tak, aby používal jen procesor.",
+  "placement.cuda_libraries_missing": "Knihovny CUDA od NVIDIA pro grafickou kartu nejsou nainstalované, takže se používá procesor. Nainstalujte je a restartujte SwarmLLM – v protokolu najdete, které chybějí.",
   "placement.driver_not_answering": "Grafický ovladač neodpovídá — možná právě resetuje kartu. Mezitím tento model používá procesor a sám se vrátí na grafickou kartu.",
   "placement.gpu_too_old": "Tato grafická karta je starší, než tato verze podporuje, takže se používá procesor.",
   "placement.gpu_unavailable": "SwarmLLM ztratil přístup ke grafické kartě – obvykle proto, že se ovladač aktualizoval za jeho běhu. Opravíte to restartem SwarmLLM.",

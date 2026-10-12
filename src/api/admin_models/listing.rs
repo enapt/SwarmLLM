@@ -418,9 +418,9 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
             // every request for it will fail until the first+last shards are
             // present or the setting is turned off.
             "encrypted_pipeline_blocked": enc_info.3,
-            // Why this model is not on the GPU, when it is not: one of
-            // `configured_cpu_only` / `gpu_too_old_for_this_build` /
-            // `not_enough_vram`, or null when it runs on the GPU. All three
+            // Why this model is not on the GPU, when it is not: one of the
+            // `CpuReason::as_str` tags (`configured_cpu_only`,
+            // `not_enough_vram`, …), or null when it runs on the GPU. The first three
             // used to look identical from outside the daemon (`--gpu-layers 0`),
             // so "is this my setting or your override?" was unanswerable
             // without catching the one log line written at decision time.

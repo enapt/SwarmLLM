@@ -159,13 +159,38 @@ pub fn gpu_became_unavailable_message() -> String {
 /// process runs", which was true of the only half it then asked about.
 #[cfg(feature = "candle-cuda")]
 pub fn local_gpu_is_supported() -> bool {
+    !gpu_runtime_has_failed() && local_card_refusal().is_none()
+}
+
+/// Why this build will never use the local card, as decided once at the first
+/// ask — the cached half of `local_gpu_is_supported` (CUDA builds only).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CardRefusal {
+    /// NVIDIA's CUDA libraries that the kernels open are not installed (#253).
+    /// The card is fine; the remedy is an install and a restart.
+    LibrariesMissing,
+    /// The card is older than this build's kernels; no install helps.
+    TooOld,
+}
+
+/// The cached answer behind [`local_gpu_is_supported`], with its reason, so a
+/// placement can tell its owner WHICH remedy applies: a missing library read as
+/// "too old" would send someone shopping for a card they already have.
+#[cfg(feature = "candle-cuda")]
+pub fn local_card_refusal() -> Option<CardRefusal> {
     use std::sync::OnceLock;
-    if gpu_runtime_has_failed() {
-        return false;
-    }
-    static SUPPORTED: OnceLock<bool> = OnceLock::new();
-    *SUPPORTED.get_or_init(
-        || match crate::model::auto_manage::vram::detect_gpu_compute_cap() {
+    static REFUSAL: OnceLock<Option<CardRefusal>> = OnceLock::new();
+    *REFUSAL.get_or_init(|| {
+        let missing = missing_cuda_libraries();
+        if !missing.is_empty() {
+            tracing::warn!(
+                missing = %missing.join(", "),
+                "{}",
+                missing_cuda_libraries_message(&missing)
+            );
+            return Some(CardRefusal::LibrariesMissing);
+        }
+        match crate::model::auto_manage::vram::detect_gpu_compute_cap() {
             Some(cap) if !compute_cap_supported(cap) => {
                 let (name, _) = crate::model::auto_manage::vram::detect_gpu_nvidia_smi();
                 let name = name.unwrap_or_else(|| "This NVIDIA GPU".to_string());
@@ -176,10 +201,57 @@ pub fn local_gpu_is_supported() -> bool {
                     "{}",
                     unsupported_gpu_message(&name, cap)
                 );
-                false
+                Some(CardRefusal::TooOld)
             }
-            _ => true,
-        },
+            _ => None,
+        }
+    })
+}
+
+/// The CUDA libraries this build's kernels open that this machine lacks — by
+/// cudarc's own presence check, the same search its loader makes — or none
+/// when there is no NVIDIA driver at all (no card to use, nothing to say).
+///
+/// cudarc (`dynamic-loading`) opens cuBLAS, cuBLASLt, cuRAND and NVRTC the
+/// first time a kernel needs one, and a missing one PANICS in the model process:
+/// the owner saw `503 worker closed connection mid-generate`, naming nothing
+/// (field report #035, FUTURE_WORK #253). The Windows download bundles these
+/// libraries; the Linux one needs them installed. Asked once, at the support
+/// question every placement already asks, so a missing library is a card this
+/// node does not use — the processor serves — rather than a failure per request.
+#[cfg(feature = "candle-cuda")]
+pub fn missing_cuda_libraries() -> Vec<&'static str> {
+    use candle_core::cuda_backend::cudarc::{cublas, cublaslt, curand, driver, nvrtc};
+    // SAFETY: each only tries to open its library, and closes it again.
+    if !unsafe { driver::sys::is_culib_present() } {
+        return Vec::new();
+    }
+    let present: [(&'static str, unsafe fn() -> bool); 4] = [
+        ("cuBLAS", cublas::sys::is_culib_present),
+        ("cuBLASLt", cublaslt::sys::is_culib_present),
+        ("cuRAND", curand::sys::is_culib_present),
+        ("NVRTC", nvrtc::sys::is_culib_present),
+    ];
+    present
+        .into_iter()
+        // SAFETY: as above.
+        .filter(|(_, is_present)| !unsafe { is_present() })
+        .map(|(name, _)| name)
+        .collect()
+}
+
+/// What to tell the owner whose card cannot be used because CUDA libraries
+/// are missing: what happens now (the processor serves) and the one action
+/// that brings the card back. The package names are Ubuntu's and Debian's
+/// (`nvidia-cuda-toolkit`'s runtime packages, multiverse / non-free).
+pub fn missing_cuda_libraries_message(missing: &[&str]) -> String {
+    format!(
+        "Your NVIDIA graphics card cannot be used yet: this download needs NVIDIA's CUDA 12 \
+         libraries, and {} could not be found. Running on the processor instead — everything \
+         still works, just slower. To use the card, install them (Ubuntu or Debian: \
+         `sudo apt install libcublas12 libcublaslt12 libcurand10 libnvrtc12`, or NVIDIA's CUDA \
+         Toolkit 12) and restart SwarmLLM.",
+        missing.join(", ")
     )
 }
 
@@ -458,5 +530,29 @@ mod tests {
                 "must not promise a build that does not exist ({absent:?}): {msg}"
             );
         }
+    }
+    /// Field report #035 (FUTURE_WORK #253): a missing library surfaced as
+    /// "worker closed connection mid-generate". The message names what is
+    /// missing, says the node still works, and gives the one fix.
+    #[test]
+    fn a_missing_library_is_named_with_what_happens_and_the_fix() {
+        let msg = missing_cuda_libraries_message(&["cuBLAS", "NVRTC"]);
+        assert!(
+            msg.contains("cuBLAS, NVRTC"),
+            "must name what is missing: {msg}"
+        );
+        assert!(
+            msg.contains("processor"),
+            "must say the node keeps working: {msg}"
+        );
+        assert!(msg.contains("apt install"), "must give the fix: {msg}");
+        assert!(
+            msg.contains("restart"),
+            "the check runs once, at startup: {msg}"
+        );
+        assert!(
+            !msg.contains("  "),
+            "a wrapped source line must not carry its indentation into the text: {msg}"
+        );
     }
 }

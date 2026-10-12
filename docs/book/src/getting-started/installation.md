@@ -114,6 +114,18 @@ cd ~/swarmllm
 ./swarmllm run
 ```
 
+> **The NVIDIA download needs NVIDIA's CUDA 12 libraries** (cuBLAS, cuRAND
+> and NVRTC); unlike the Windows download it does not carry them. On Ubuntu
+> or Debian (multiverse / non-free):
+>
+> ```bash
+> sudo apt install libcublas12 libcublaslt12 libcurand10 libnvrtc12
+> ```
+>
+> or install NVIDIA's CUDA Toolkit 12. Without them SwarmLLM still works: it
+> runs on the processor and its log says which library it could not find.
+> Restart it after installing them to use the card.
+
 ### Linux packages (.deb / .rpm)
 
 Debian / Ubuntu:

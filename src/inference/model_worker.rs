@@ -3264,7 +3264,23 @@ fn ensure_room_for_prompt(
         mb(budget),
         mb(short_by),
         other_conversations_hold_the_room(live, budget, positions as u64 * per_token),
+        longest_prompt_that_fits(budget, per_token, reply_positions),
     )))
+}
+
+/// The longest prompt this worker admits with no other conversation held: the
+/// whole reservation quanta `budget` covers, less the reply's reserve —
+/// admission charges `kv_cache_reservation(prompt + reply_positions)`, a
+/// multiple of the quantum. A figure the owner can act on: told only "short by
+/// 259 MB", nobody learns that this card takes about 4,600 tokens of this model
+/// while `/v1/models` says 8,192 (field report #035, FUTURE_WORK #252).
+fn longest_prompt_that_fits(budget: u64, per_token: u64, reply_positions: usize) -> usize {
+    use crate::inference::layers::KV_CACHE_GROWTH_TOKENS;
+    if per_token == 0 {
+        return 0;
+    }
+    let positions = usize::try_from(budget / per_token).unwrap_or(usize::MAX);
+    (positions / KV_CACHE_GROWTH_TOKENS * KV_CACHE_GROWTH_TOKENS).saturating_sub(reply_positions)
 }
 
 /// Is this refusal only because OTHER requests hold the memory — would the
@@ -3355,17 +3371,41 @@ mod reply_reserve_tests {
         assert!(!other_conversations_hold_the_room(0, 683, 1000));
         assert!(!other_conversations_hold_the_room(500, 1336, 2000));
 
-        let busy = prompt_refusal_message(45, 1152, 1336, 8, true);
+        let busy = prompt_refusal_message(45, 1152, 1336, 8, true, 2048);
         assert!(busy.starts_with("Not enough free memory on this node for a 45-token prompt"));
         assert!(busy.contains("try again in a moment"), "{busy}");
         assert!(!busy.contains("Shorter conversations still work"), "{busy}");
 
-        let too_long = prompt_refusal_message(4035, 0, 1336, 400, false);
+        let too_long = prompt_refusal_message(4035, 0, 1336, 400, false, 2944);
         assert!(too_long.starts_with("Not enough free memory on this node for a 4035-token prompt"));
         assert!(
             too_long.contains("Shorter conversations still work"),
             "{too_long}"
         );
+        assert!(too_long.contains("up to about 2944 tokens"), "{too_long}");
+        let none_fit = prompt_refusal_message(4035, 0, 100, 1300, false, 0);
+        assert!(!none_fit.contains("up to about"), "{none_fit}");
+    }
+
+    /// Field report #035's figures: an 860 MB budget, a Qwen3-14B's 160 KiB a
+    /// position (40 layers x 8 KV heads x 128 x K and V x f16), the default
+    /// reply reserve — 4,608 tokens, where `/v1/models` said 8,192 and a
+    /// 6,228-token prompt was refused.
+    #[test]
+    fn a_refusal_says_how_long_a_prompt_fits() {
+        let per_token = 40 * 8 * 128 * 2 * 2;
+        let budget = 860 * 1024 * 1024;
+        let reserve = REPLY_RESERVE_POSITIONS;
+        let fits = longest_prompt_that_fits(budget, per_token, reserve);
+        assert_eq!(fits, 5120 - reserve);
+        // A prompt that long is admitted: its reservation is within budget.
+        let charged = kv_cache_reservation(fits + reserve) as u64 * per_token;
+        assert!(charged <= budget, "{charged} > {budget}");
+        // One token more is not.
+        let over = kv_cache_reservation(fits + 1 + reserve) as u64 * per_token;
+        assert!(over > budget, "{over} <= {budget}");
+        assert_eq!(longest_prompt_that_fits(budget, 0, reserve), 0);
+        assert_eq!(longest_prompt_that_fits(100, per_token, reserve), 0);
     }
 }
 
@@ -3379,6 +3419,7 @@ fn prompt_refusal_message(
     budget_mb: u64,
     short_by_mb: u64,
     busy: bool,
+    fits_tokens: usize,
 ) -> String {
     if busy {
         format!(
@@ -3393,8 +3434,13 @@ fn prompt_refusal_message(
             "Not enough free memory on this node for a {prompt_tokens}-token prompt ({live_mb} MB \
              of conversation memory in use, {budget_mb} MB available for conversations once this \
              model's weights are accounted for, short by {short_by_mb} MB). Shorter conversations \
-             still work; free memory on this node (close other programs, or raise its memory \
-             budget) to raise this."
+             still work{fits}; free memory on this node (close other programs, or raise its memory \
+             budget) to raise this.",
+            fits = if fits_tokens > 0 {
+                format!(" — up to about {fits_tokens} tokens with this model here")
+            } else {
+                String::new()
+            }
         )
     }
 }
