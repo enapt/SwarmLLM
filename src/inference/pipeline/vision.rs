@@ -68,6 +68,21 @@ impl PipelineExecutor {
         if mmproj_holders.is_empty() {
             return Err(SwarmError::VisionEncoderUnavailable(model_id.clone()));
         }
+        // The image goes only where private mode lets this request go
+        // (`pool::scope::allowed_node_set`, the gate the plan was built
+        // under). Until 2026-10-12 this picked ANY holder when the plan's
+        // first node had no encoder, so a private-mode node could hand the
+        // user's image to a computer outside its pool.
+        let mmproj_holders = in_request_scope(
+            mmproj_holders,
+            crate::pool::scope::allowed_node_set(&self.shared_state).as_ref(),
+        );
+        if mmproj_holders.is_empty() {
+            return Err(SwarmError::PrivateModeUnavailable {
+                model_id: model_id.0.clone(),
+                missing_shards: vec![crate::types::MMPROJ_SHARD_INDEX],
+            });
+        }
 
         // Pick the best remote node: prefer first-segment node, then any
         let first_seg_node = self.assignment.segments.first().map(|s| &s.node_id);
@@ -260,5 +275,50 @@ impl PipelineExecutor {
             )
             .map_err(|e| SwarmError::Inference(format!("JPEG encode: {e}")))?;
         Ok(buf)
+    }
+}
+
+/// The holders a request's image may be sent to: every one when nothing
+/// restricts the request (`allowed` is `None`), else those inside the scope.
+fn in_request_scope(
+    holders: Vec<crate::types::NodeId>,
+    allowed: Option<&std::collections::HashSet<crate::types::NodeId>>,
+) -> Vec<crate::types::NodeId> {
+    match allowed {
+        None => holders,
+        Some(scope) => holders.into_iter().filter(|n| scope.contains(n)).collect(),
+    }
+}
+
+#[cfg(test)]
+mod scope_tests {
+    use super::*;
+    use crate::types::NodeId;
+
+    /// Private mode: a holder outside the pool never receives the image, and
+    /// with no holder inside it the request is refused as private mode's,
+    /// naming the encoder rather than a shard number.
+    #[test]
+    fn an_image_is_never_sent_outside_private_modes_scope() {
+        let pool_member = NodeId([1u8; 32]);
+        let stranger = NodeId([2u8; 32]);
+        let scope: std::collections::HashSet<NodeId> = [pool_member.clone()].into();
+        assert_eq!(
+            in_request_scope(vec![stranger.clone(), pool_member.clone()], Some(&scope)),
+            vec![pool_member]
+        );
+        assert!(in_request_scope(vec![stranger.clone()], Some(&scope)).is_empty());
+        assert_eq!(
+            in_request_scope(vec![stranger.clone()], None),
+            vec![stranger]
+        );
+
+        let refusal = SwarmError::PrivateModeUnavailable {
+            model_id: "llava".into(),
+            missing_shards: vec![crate::types::MMPROJ_SHARD_INDEX],
+        }
+        .to_string();
+        assert!(refusal.contains("its image encoder"), "{refusal}");
+        assert!(!refusal.contains(&u32::MAX.to_string()), "{refusal}");
     }
 }

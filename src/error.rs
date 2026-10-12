@@ -197,7 +197,10 @@ pub enum SwarmError {
     ProviderError { status: u16, body: String },
 
     // Private mode
-    #[error("Private mode: model {model_id} not fully available in your device pool (missing shards: {missing_shards:?})")]
+    /// `missing_shards` may hold `MMPROJ_SHARD_INDEX`: no pool device holds
+    /// the model's image encoder, and a request carrying an image may not send
+    /// it to one outside the pool (`pipeline::vision`).
+    #[error("Private mode: model {model_id} not fully available in your device pool (missing {})", missing_parts(.missing_shards))]
     PrivateModeUnavailable {
         model_id: String,
         missing_shards: Vec<u32>,
@@ -476,6 +479,23 @@ pub fn reclassify_flattened_error(message: &str) -> Option<SwarmError> {
         }
     }
     None
+}
+
+/// What `PrivateModeUnavailable` is missing: its shards by number, and the image
+/// encoder by name — `MMPROJ_SHARD_INDEX` is a sentinel, not a shard anyone
+/// could look for. "shards: [..]" keeps the wording the message always had.
+fn missing_parts(missing: &[u32]) -> String {
+    let encoder = missing.contains(&crate::types::MMPROJ_SHARD_INDEX);
+    let shards: Vec<u32> = missing
+        .iter()
+        .copied()
+        .filter(|i| *i != crate::types::MMPROJ_SHARD_INDEX)
+        .collect();
+    match (shards.is_empty(), encoder) {
+        (true, true) => "its image encoder".to_string(),
+        (false, true) => format!("shards: {shards:?}, and its image encoder"),
+        (_, false) => format!("shards: {shards:?}"),
+    }
 }
 
 /// Describe a missing layer range the way an operator needs to read it.
