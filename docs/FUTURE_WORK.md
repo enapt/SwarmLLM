@@ -453,9 +453,28 @@ answers in ~5 s. Several contributors (diagnosis rule 6). Each is a hypothesis u
   window to the first and last parts plus a few middles, so this node could no longer run it alone
   and the middle had to go abroad. The route `aa3d1e66 → 99aafc41 → 7c10ea04 → aa3d1e66` is that
   shape.
-- **The local card/processor split is priced as a dense model.** `local_speed_off_the_card` and the
-  hybrid prior price per-token work from the whole file's bytes. A 30B-A3B reads about a tenth of
-  its expert bytes per token (8 of 128 experts), so the local price is several times too slow.
+- **No layer is priced as the model it belongs to.** (Corrected 2026-10-12: this bullet first said
+  the hybrid price came from the whole file's bytes; it never sees the model.) Every candidate's
+  per-layer compute is `1000 / est_tokens_per_sec_7b / BASELINE_LAYER_COUNT` (`parallax.rs`
+  `vertex_cost`), where `node_tokens_per_sec_7b` = memory bandwidth ÷ `MODEL_SIZE_7B_Q4` (4.4 GB) ×
+  efficiency. That holds for this node, for a gossiped peer, and for a measured peer, whose
+  `PeerSpeed` ms per layer is keyed by node only. Its samples from a 2B therefore price that peer's
+  30B layers too. Nothing in the scheduler, `parallax` or the planning half of the process pool
+  reads `expert_count` or `expert_used_count`. Between two compute plans the error cancels; against
+  the network and cold-load terms, which are real milliseconds, it does not. A 30B-A3B Q4_K_M
+  layer reads ~35 MB per token (~19M attention parameters plus 8 of 128 experts at 4.7M each)
+  against the reference layer's ~137 MB, so its compute is priced ~4× too dear and a remote card's
+  advantage over the local processor is overstated by as much. A dense 32B Q4_K_M layer (~310 MB)
+  is priced ~2.3× too cheap, the other way.
+  **Design** (Petals measures throughput per MODEL, running one real block of it — `throughput.py`,
+  cache key `model_{name}_device_…_dtype_…`; a mixture-of-experts block then counts only the experts
+  it routes to): scale each layer's prior by the model's ACTIVE bytes per layer over the reference
+  layer's (`MODEL_SIZE_7B_Q4 / BASELINE_LAYER_COUNT`). Active bytes are the layer's non-expert
+  tensors plus its `_exps` tensors × `expert_used_count / expert_count`, from the manifest's tensor
+  table (sizes and names) and the header (`GgufTensorMeta` needs `expert_used_count`, serde
+  default). Store a measured peer's coefficient per REFERENCE layer (divide by the sampled model's
+  factor when observed, multiply by the priced model's), so a sample on one model prices another.
+  A test pins a 30B-A3B layer below a 7B layer and a dense 32B layer above it.
 - **The prompt is priced on the processor prior** for a hybrid local route even with layers on the
   card, while #138 made a mixture-of-experts prompt 3.5-4.7× faster on both.
 - **An idle model held the card** (#249, closed): a 14B "idle 20m" still had 9.2 GB, which is what
@@ -464,10 +483,13 @@ answers in ~5 s. Several contributors (diagnosis rule 6). Each is a hypothesis u
 reproduce the detour: v0.3.235 narrowed the window, then the next request reloaded the model
 locally and answered here (23.2 s vs 9.6 s on main). By the 7B prior the local hybrid route prices
 at ~84 s against the reported pipeline's 278 s, so in the report the local route was most likely
-unavailable (narrowed) rather than out-priced. Next: the shape on this box (Qwen3-30B-A3B Q2_K
-whole, split 26/22 card/processor, `~/swarmllm-138/`) with a peer holding the middle. Read the
-planner's local price against the measured local time, then price experts by their ACTIVE share
-(`expert_used_count / expert_count` from the header).
+unavailable (narrowed) rather than out-priced. Priced by the design above, the report's plan
+changes little: compute scales down on both routes, and the local route then wins by more. Next:
+the design above, behind an env switch for an A/B inside one binary; then the shape on this box
+(Qwen3-30B-A3B Q2_K whole, split 26/22 card/processor, `~/swarmllm-138/`) with a peer holding the
+middle, reading the planner's local price against the measured local time. Dense models above 7B
+get dearer compute, so a WAN split rig (`regional_pipelines.md`) must show no new detours before
+it ships.
 
 #### #237 — A peer's room for a conversation is not advertised, and the hand-off counts the prompt only
 `P3` · routing · **OPEN** — 2026-10-08 · history: report #005 (a tester, v0.3.230 code); related #194
